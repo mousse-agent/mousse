@@ -1,3 +1,4 @@
+import { thoughtHeading } from "./format-tool";
 import { normalizeAssistantToolParts } from "./tool-part-normalizer";
 
 export type ToolPartBase = {
@@ -38,41 +39,8 @@ export function isV5ToolPart(part: unknown): part is ToolPartBase {
   );
 }
 
-/** Tool rows with their own distinct rendering that never join a group. */
-const STANDALONE_TOOL_TYPES = new Set(["tool-Thinking", "tool-Question"]);
-
-/**
- * File-writing tool names (normalized: lowercase, non-letters stripped).
- * Mirrors normalizeToolName in adapters/mousseToUI.ts: Pi `write`/`edit`,
- * legacy `write_file` (which normalizes to type `tool-Write_file`), and
- * `apply_patch` all stay expanded so file changes are never buried in a
- * collapsed "Tool calls N" group.
- */
-const FILE_WRITE_TOOL_NAMES = new Set([
-  "write",
-  "writefile",
-  "edit",
-  "notebookedit",
-  "applypatch",
-]);
-
-/**
- * True for file-writing tool parts (`tool-Write`, `tool-Edit`, legacy
- * `tool-Write_file`, `tool-Apply_patch`, or same-named MCP tools).
- * Matches on the trailing tool-name segment so `tool-mcp__server__edit`
- * is also treated as a write.
- */
-export function isFileWriteToolType(partType: string): boolean {
-  const withoutPrefix = partType.startsWith("tool-")
-    ? partType.slice("tool-".length)
-    : partType;
-  const toolName = withoutPrefix.includes("__")
-    ? withoutPrefix.split("__").pop()!
-    : withoutPrefix;
-  return FILE_WRITE_TOOL_NAMES.has(
-    toolName.toLowerCase().replace(/[^a-z]/g, ""),
-  );
-}
+/** Rows that need their own surface and never join an activity group. */
+const STANDALONE_TOOL_TYPES = new Set(["tool-Question"]);
 
 export type AssistantToolItem = {
   part: ToolPartBase;
@@ -81,10 +49,9 @@ export type AssistantToolItem = {
 
 export type AssistantMessageAnalysis = {
   /**
-   * True when the message renders only groupable tool rows (no text, error,
-   * thought, question, or file-write rows), so it can merge into a
-   * "Tool calls N" group. File writes (write/edit/apply_patch) always
-   * render solo so changed files stay visible in the transcript.
+   * True when the message renders only groupable activity rows (tools,
+   * thoughts, and file edits; no text, error, or question rows), so it can
+   * merge into one activity group.
    */
   toolsOnly: boolean;
   toolItems: AssistantToolItem[];
@@ -92,7 +59,8 @@ export type AssistantMessageAnalysis = {
 
 /**
  * Pure per-message analysis mirroring AssistantParts rendering rules:
- * text/error/thought/question/file-write rows disqualify grouping; TaskOutput,
+ * text/error/question rows disqualify grouping; thoughts and file edits join it.
+ * TaskOutput,
  * nested, and suppressed-question parts are invisible and ignored.
  */
 export function analyzeAssistantMessage(
@@ -140,10 +108,6 @@ export function analyzeAssistantMessage(
     if (STANDALONE_TOOL_TYPES.has(part.type)) {
       return { toolsOnly: false, toolItems: [] };
     }
-    // File writes stay expanded — never buried in a "Tool calls N" group.
-    if (isFileWriteToolType(part.type)) {
-      return { toolsOnly: false, toolItems: [] };
-    }
     const toolCallId = part.toolCallId;
     const nestedTools =
       (part.type === "tool-Task" || part.type === "tool-Agent") &&
@@ -161,10 +125,36 @@ export type TurnSegment =
   | { kind: "message"; msgIndex: number }
   | { kind: "tools"; msgIndices: number[] };
 
+/** First non-empty line of a thinking part, or "" when it has no message. */
+export function thoughtMessageFromPart(part: ToolPartBase): string {
+  if (part.type !== "tool-Thinking") return "";
+  const input = isRecord(part.input) ? part.input.thought : undefined;
+  const output = part.output ?? part.result;
+  const raw =
+    typeof input === "string" && input.trim()
+      ? input
+      : typeof output === "string"
+        ? output
+        : "";
+  return thoughtHeading(raw);
+}
+
+/**
+ * Title for a grouped run of thoughts and tool calls: the latest thought
+ * that actually has text. Empty when the run should fall back to "Tool calls".
+ */
+export function activityGroupLabel(items: AssistantToolItem[]): string {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const heading = thoughtMessageFromPart(items[index]!.part);
+    if (heading) return heading;
+  }
+  return "";
+}
+
 /**
  * Partition a turn's assistant messages into render segments: runs of
- * consecutive tools-only messages (length >= 2) collapse into one
- * "Tool calls N" group; everything else renders message by message.
+ * consecutive activity messages (tools and thoughts, length >= 2) collapse
+ * into one group; everything else renders message by message.
  */
 export function partitionTurnSegments(
   toolsOnlyFlags: boolean[],

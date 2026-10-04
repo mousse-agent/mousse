@@ -5,6 +5,8 @@ import { AgentsTasksView } from './components/AgentsTasksView'
 import { useTheme } from './hooks/useTheme'
 import './styles/global.css'
 import './styles/app.css'
+import './styles/polish.css'
+import './styles/geist-fonts.css'
 
 function Root() {
   useTheme({ windowMaterial: false })

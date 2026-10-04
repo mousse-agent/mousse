@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, session, shell, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, nativeTheme, session, shell, type WebContents } from 'electron'
 import { homedir } from 'os'
 import { join } from 'path'
 
@@ -15,8 +15,11 @@ import {
   attachWindowListeners,
   registerGuiIpc
 } from './ipc/registerGuiIpc'
-import { normalizeAppearance } from '../shared/settings'
-import { buildAccentCssVars, surfaceToWindowBackground } from '../shared/accentPalette'
+import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
+import { surfaceToWindowBackground } from '../shared/accentPalette'
+import { appearanceSurfaceBase } from '../shared/themeSurfaces'
+import { startupAppearanceArgument } from '../shared/startupAppearance'
+import { readStartupAppearance } from './startupAppearance'
 import { refreshWindowChrome } from './windowsChrome'
 import { BrowserViewManager } from './browser/BrowserViewManager'
 import { AttachedBrowserHost } from './browser/AttachedBrowserHost'
@@ -106,7 +109,6 @@ if (isCliMode) {
 function startGuiApp(): void {
   if (configureLinuxWindowing(app, process.platform, process.env)) return
   let mainWindow: BrowserWindow | null = null
-  let startupWindow: BrowserWindow | null = null
   let guiMms: GuiMmsController | null = null
   let attachedBrowserHost: AttachedBrowserHost | undefined
   let settings: SettingsStore | null = null
@@ -138,29 +140,6 @@ function startGuiApp(): void {
     }
   })
 
-  function createStartupWindow(): void {
-    if (startupWindow && !startupWindow.isDestroyed()) return
-    startupWindow = new BrowserWindow({
-      width: 420,
-      height: 180,
-      resizable: false,
-      frame: false,
-      show: true,
-      icon: getAppIconPath(),
-      backgroundColor: '#17111f',
-      webPreferences: { sandbox: true }
-    })
-    const html = encodeURIComponent(
-      '<!doctype html><meta charset="utf-8"><style>' +
-      'html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#17111f;' +
-      'color:#eee;font:14px system-ui}.box{text-align:center}.title{font-size:24px;font-weight:650;' +
-      'margin-bottom:12px}.status{color:#b9afc4}</style>' +
-      '<div class="box"><div class="title">Mousse</div><div class="status">Starting workspace service...</div></div>'
-    )
-    void startupWindow.loadURL(`data:text/html;charset=utf-8,${html}`)
-    startupWindow.on('closed', () => { startupWindow = null })
-  }
-
   async function createWindow(): Promise<void> {
     if (!settings) return
     // Do not create a second main window if one exists.
@@ -173,12 +152,11 @@ function startGuiApp(): void {
     const isWindows = process.platform === 'win32'
     const isMac = process.platform === 'darwin'
     const appearance = normalizeAppearance(settings.get().appearance)
-    // Native acrylic forces a permanent full-window compositor surface. Mousse
-    // previously stacked dozens of CSS-filter layers on top of it, making GPU
-    // memory scale badly with agent/chat DOM size. Use opaque themed surfaces.
-    const useAcrylic = false
+    // Native acrylic supplies the blur; renderer surfaces only tint the glass.
+    const useAcrylic = appearanceUsesAcrylic(appearance)
 
     mainWindow = new BrowserWindow({
+      show: false,
       width: 1400,
       height: 900,
       minWidth: 900,
@@ -197,7 +175,7 @@ function startGuiApp(): void {
             frame: false
           }),
       backgroundColor: surfaceToWindowBackground(
-        buildAccentCssVars(appearance.accentColor)['--surface-base'] ?? '#1a1228',
+        appearanceSurfaceBase(appearance, nativeTheme?.shouldUseDarkColors ?? true),
         useAcrylic || process.platform === 'linux' ? 0 : 1
       ),
       ...(isWindows
@@ -214,13 +192,13 @@ function startGuiApp(): void {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: false,
-        webviewTag: true
+        webviewTag: true,
+        additionalArguments: [startupAppearanceArgument(appearance)]
       }
     })
 
     mainWindow.on('ready-to-show', () => {
       mainWindow?.show()
-      startupWindow?.close()
       if (settings) refreshWindowChrome(mainWindow, settings)
     })
 
@@ -256,13 +234,13 @@ function startGuiApp(): void {
     // Dev-only: buffer the renderer console so Mousse tools can read it.
     if (isDevGuiMainEnabled()) attachDevGuiConsoleCapture(mainWindow.webContents)
 
-    if (!guiMms) throw new Error('GUI MMS controller is unavailable')
-    await guiMms.prepareWindow(browserOwner.webContents)
-
+    // Paint the actual shell before daemon discovery or profile binding. The
+    // trusted IPC wrapper opens this window's session on its initial profile
+    // requests; profileReady keeps domain panels and guest creation gated.
     if (process.env.ELECTRON_RENDERER_URL) {
-      mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+      await browserOwner.loadURL(process.env.ELECTRON_RENDERER_URL)
     } else {
-      mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+      await browserOwner.loadFile(join(__dirname, '../renderer/index.html'))
     }
 
     const mainTarget = mainWindowLoadTarget()
@@ -292,30 +270,18 @@ function startGuiApp(): void {
       // stale; a whole-file write from here would stomp daemon-owned changes.
       const config = MousseConfigStore.load(homeDir, { persist: false })
       settings = new SettingsStore(config)
-
-      // Give Start Menu launches immediate visual feedback while a cold daemon
-      // starts. Unsigned packaged binaries may be delayed by antivirus scanning.
-      createStartupWindow()
+      settings.set({ appearance: readStartupAppearance(homeDir, settings.get().appearance) })
 
       guiMms = new GuiMmsController({ homeDir })
       const browserMms = guiMms
+      browserMms.on('error', (error: Error) => {
+        console.error('MMS connection failed:', error.message)
+      })
       attachedBrowserHost = new AttachedBrowserHost({
         binding: (senderId) => browserMms.getWindowBindingForSender(senderId),
         request: (sender, method, params) => browserMms.requestAttachedBrowser(sender, method, params)
       })
       browserMms.setAttachedBrowserHost(attachedBrowserHost)
-      try {
-        await guiMms.start()
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        console.error('Failed to connect to MMS daemon:', message)
-        // Prefer a clear startup error over split-brain embedded MMS.
-        throw new Error(
-          `Mousse GUI requires the MMS daemon.\n${message}\n` +
-            'Start it with `mousse-cli service start` or fix ownership conflicts.'
-        )
-      }
-
       const fileService = new FileService()
       const gitService = new GitService()
 
@@ -337,21 +303,6 @@ function startGuiApp(): void {
         ipcRegistered = true
       }
 
-      // Restore the exact window's chats only after its renderer subscribes.
-      // The local chrome settings already let us paint the app shell now.
-      await createWindow()
-      const chromeSettings = settings
-      void guiMms.request<{ settings: import('../shared/settings').MousseSettings }>('settings.get')
-        .then((snap) => {
-          chromeSettings.set(snap.settings)
-          if (mainWindow && !mainWindow.isDestroyed()) refreshWindowChrome(mainWindow, chromeSettings)
-        })
-        .catch(() => { /* chrome defaults until protocol settings available */ })
-      // Dev-only: serve self-inspection tool requests from the daemon
-      // (screenshot / console / reload / devtools / evaluate).
-      if (isDevGuiMainEnabled() && !devGuiPollerStop) {
-        devGuiPollerStop = startDevGuiPoller(guiMms, () => mainWindow)
-      }
       if (!windowListenersAttached && settings) {
         attachWindowListeners(() => mainWindow, settings)
         windowListenersAttached = true
@@ -361,6 +312,24 @@ function startGuiApp(): void {
         resumeRecoveryAttached = true
       }
 
+      // All chrome/IPC handlers must exist before the renderer's first frame.
+      // Start the service concurrently; failures reach the profile bootstrap
+      // requests and their in-window Retry action rather than a splash/modal.
+      // Restore the exact window's chats only after its renderer subscribes.
+      await createWindow()
+      const chromeSettings = settings
+      void browserMms.start().then(async () => {
+        if (isQuitting) return
+        if (isDevGuiMainEnabled() && !devGuiPollerStop) {
+          devGuiPollerStop = startDevGuiPoller(browserMms, () => mainWindow)
+        }
+        const snap = await browserMms.request<{ settings: import('../shared/settings').MousseSettings }>('settings.get')
+        if (isQuitting) return
+        chromeSettings.set(snap.settings)
+        if (mainWindow && !mainWindow.isDestroyed()) refreshWindowChrome(mainWindow, chromeSettings)
+      }).catch((error: unknown) => {
+        console.error('Workspace service startup failed:', error instanceof Error ? error.message : String(error))
+      })
       bootstrapComplete = true
     })()
 

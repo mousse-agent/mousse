@@ -1,4 +1,4 @@
-import { Bot, File, Folder, Globe, MessageSquare, TerminalSquare, X } from 'lucide-react'
+import { Bot, File, Folder, Globe, MessageSquare, TerminalSquare, X } from '../lib/icons'
 import type { ChatReference } from '../../shared/chatReferences'
 import { formatMousseFileLink, parseChatReference } from '../../shared/chatReferences'
 import { openProjectReference, routeLink } from '../utils/chatLinks'
@@ -37,8 +37,7 @@ export function ChatReferencePill({ reference: candidate, onRemove }: { referenc
         store.switchToThread(reference.threadId)
         void window.mousse.threads.select(reference.threadId)
       }
-      store.setMainAreaOpen(true)
-      store.setMainView('terminal')
+      store.openSurfaceKind('terminal')
       store.setActiveProjectTerminalTab(reference.threadId ?? store.activeThreadId, reference.tabId)
       return
     }

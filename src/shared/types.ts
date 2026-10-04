@@ -376,6 +376,8 @@ export interface Agent {
   exitCode?: number | null
   exitSignal?: string | null
   exitedAt?: string
+  /** When this agent last left starting or running. Cleared if work resumes. */
+  idleAt?: string
   status: AgentStatus
   /** More precise startup stage while status is `starting`. */
   startupPhase?: 'discovery' | 'worktree' | 'launching'

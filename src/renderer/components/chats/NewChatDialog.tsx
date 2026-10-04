@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { X } from 'lucide-react'
+import { X } from '../../lib/icons'
 import { useChatsStore } from '../../stores/chatsStore'
 import { useAppStore } from '../../stores/appStore'
 import { ChatAvatar } from './ChatsSidebar'
@@ -34,7 +34,7 @@ export function NewChatDialog() {
         else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
       }
     }}>
-      <div className="chat-dialog-heading"><h2 id={titleId}>New chat</h2><button aria-label="Close new chat" disabled={loading} onClick={close}><X size={18} /></button></div>
+      <div className="chat-dialog-heading"><h2 id={titleId}>New chat</h2><button aria-label="Close new chat" disabled={loading} onClick={close}><X size={16} /></button></div>
       <form onSubmit={(event) => { event.preventDefault(); void create({ kind, agentIds: selected, ...(kind === 'group' ? { name: name.trim() } : {}), ...(kind === 'group' && projectId ? { projectId } : {}) }) }}>
         <div className="chat-kind-switch"><button type="button" aria-pressed={kind === 'direct'} onClick={() => { setKind('direct'); setSelected(selected.slice(0, 1)) }}>Agent DM</button><button type="button" aria-pressed={kind === 'group'} onClick={() => setKind('group')}>Group</button></div>
         {kind === 'group' && <label>Group name<input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="billing-launch" /></label>}

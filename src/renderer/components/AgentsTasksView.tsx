@@ -1,9 +1,14 @@
 import { useEffect, useState } from 'react'
-import { CheckSquare, Loader2, Square, SquareX, X } from 'lucide-react'
+import { CheckSquare, Loader2, Square, SquareX, X } from '../lib/icons'
 import { IconButton } from './IconButton'
-import { EnvironmentSection } from './EnvironmentSection'
 import { confirmStopAgent } from '../lib/confirmStopAgent'
-import type { Agent, Task, TaskStatus } from '../../shared/types'
+import { isTerminalAgentStatus, type Agent, type MousseAgentAssignment, type Task, type TaskStatus } from '../../shared/types'
+import { buildAgentTypesFromCatalogs, type AgentTypeId, type LlmProviderOption, type MousseSettings } from '../../shared/settings'
+import { formatWorkedFor } from '../utils/responseTimeline'
+import { resolveMousseAgentModelSelection } from '../utils/agentChatMessages'
+import { getGroupedModelButtonParts } from './ModelFamilyMenu'
+import { ProviderIcon } from '../lib/providerIcons'
+import { useAppStore } from '../stores/appStore'
 
 function StatusBadge({ status, startupPhase }: { status: string; startupPhase?: Agent['startupPhase'] }) {
   const label = status === 'starting' && startupPhase ? startupPhase : status
@@ -27,6 +32,79 @@ function TaskStatusIcon({ status }: { status: TaskStatus }) {
   }
 }
 
+function agentWorkedLabel(agent: Agent, now: number, rememberedEnd?: string): string {
+  const started = Date.parse(agent.createdAt)
+  if (!Number.isFinite(started)) return ''
+  const working = agent.status === 'starting' || agent.status === 'running'
+  const endSource = working ? undefined : agent.idleAt ?? agent.exitedAt ?? rememberedEnd
+  const ended = endSource ? Date.parse(endSource) : working ? now : Number.NaN
+  if (!Number.isFinite(ended)) return ''
+  return formatWorkedFor(Math.max(0, ended - started))
+}
+
+interface AgentModelMark {
+  providerId: string
+  providerLabel: string
+  modelLabel: string
+}
+
+function cliProviderId(cliType: string, modelId: string): string {
+  if (cliType === 'claude-code') return 'anthropic'
+  if (cliType === 'codex') return 'openai'
+  if (cliType === 'cursor-agents-cli') return 'cursor'
+  if (cliType === 'opencode') return modelId.startsWith('opencode-go/') ? 'opencode-go' : 'opencode'
+  return cliType
+}
+
+function modelMark(
+  providerId: string,
+  modelId: string,
+  providers: LlmProviderOption[]
+): AgentModelMark {
+  const provider = providers.find((entry) => entry.id === providerId)
+  const parts = getGroupedModelButtonParts(providerId, modelId, providers)
+    .filter((part) => part && part !== 'Select model')
+  return {
+    providerId: providerId || 'mousse',
+    providerLabel: provider?.label || providerId,
+    modelLabel: parts.join(' · ') || modelId || provider?.label || 'Model'
+  }
+}
+
+function describeSubagentModel(
+  agent: Agent,
+  assignment: MousseAgentAssignment | undefined,
+  settings: MousseSettings,
+  providers: LlmProviderOption[]
+): AgentModelMark {
+  if (agent.cliType === 'mousse') {
+    const selected = resolveMousseAgentModelSelection(assignment, {
+      provider: settings.agents.llmProvider.mousse || settings.provider.llmProvider,
+      model: settings.agents.model.mousse || settings.provider.model
+    })
+    return modelMark(selected.provider, selected.model, providers)
+  }
+  const cliType = agent.cliType as AgentTypeId
+  const modelId = settings.agents.model[cliType] || ''
+  const providerId = cliProviderId(agent.cliType, modelId)
+  const catalogModel = buildAgentTypesFromCatalogs(providers)
+    .find((entry) => entry.id === cliType)
+    ?.models.find((entry) => entry.id === modelId)
+  const mark = modelMark(providerId, catalogModel?.id || modelId, providers)
+  if (catalogModel?.label) mark.modelLabel = catalogModel.label
+  return mark
+}
+
+function AgentModelBadge({ mark }: { mark: AgentModelMark }) {
+  return (
+    <span className="agents-tasks-model" title={`${mark.providerLabel} · ${mark.modelLabel}`}>
+      <ProviderIcon providerId={mark.providerId} size={16} />
+      <span className="agents-tasks-model-name">{mark.modelLabel}</span>
+      <span className="agents-tasks-model-provider">{mark.providerLabel}</span>
+    </span>
+  )
+}
+
 function taskStatusLabel(status: TaskStatus): string {
   switch (status) {
     case 'completed':
@@ -44,10 +122,28 @@ function taskStatusLabel(status: TaskStatus): string {
   }
 }
 
-export function AgentsTasksView() {
+export function AgentsTasksView({ variant = 'window' }: { variant?: 'window' | 'panel' }) {
   const [agents, setAgents] = useState<Agent[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [stoppingAgentIds, setStoppingAgentIds] = useState<Set<string>>(() => new Set())
+  const [now, setNow] = useState(() => Date.now())
+  const [rememberedEnds, setRememberedEnds] = useState<Record<string, string>>({})
+  const [providers, setProviders] = useState<LlmProviderOption[]>([])
+  const [settings, setSettings] = useState<MousseSettings | null>(null)
+  const [assignments, setAssignments] = useState<Record<string, MousseAgentAssignment | undefined>>({})
+  const assignmentKey = agents.map((agent) => `${agent.id}:${agent.cliType}`).join('\n')
+  const centerAgentId = useAppStore((state) => state.centerAgentId)
+  const setCenterAgentId = useAppStore((state) => state.setCenterAgentId)
+  const setThreadsSidebarOpen = useAppStore((state) => state.setThreadsSidebarOpen)
+  const mainAgentName = useAppStore((state) => state.threads.find((thread) => thread.id === state.activeThreadId)?.name)
+  const mainModelOverride = useAppStore((state) => state.threads.find((thread) => thread.id === state.activeThreadId)?.modelOverride)
+  const mainMark = settings
+    ? modelMark(
+      mainModelOverride?.llmProvider || settings.provider.llmProvider,
+      mainModelOverride?.model || settings.provider.model,
+      providers
+    )
+    : null
 
   useEffect(() => {
     let agentRevision = 0
@@ -84,9 +180,71 @@ export function AgentsTasksView() {
     return () => unsubs.forEach((u) => u())
   }, [])
 
-  const runningAgents = agents.filter(
-    (a) => ['running', 'starting', 'ready', 'merging', 'conflict'].includes(a.status)
-  )
+  useEffect(() => {
+    let cancelled = false
+    void Promise.all([window.mousse.settings.getOptions(), window.mousse.settings.get()]).then(([options, nextSettings]) => {
+      if (cancelled) return
+      setProviders(options.llmProviders)
+      setSettings(nextSettings)
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    const listed = agents
+    let cancelled = false
+    void Promise.all(listed.map(async (agent) => {
+      if (agent.cliType !== 'mousse') return [agent.id, undefined] as const
+      const assignment = await window.mousse.mousseAgent.getAssignment(agent.id).catch(() => undefined)
+      return [agent.id, assignment] as const
+    })).then((pairs) => {
+      if (cancelled) return
+      setAssignments(Object.fromEntries(pairs))
+    })
+    return () => { cancelled = true }
+  }, [assignmentKey])
+
+  useEffect(() => {
+    const settledWithoutEnd = agents.filter((agent) =>
+      agent.status !== 'starting' && agent.status !== 'running' && !agent.idleAt && !agent.exitedAt
+    )
+    if (settledWithoutEnd.length === 0) return
+    let cancelled = false
+    void Promise.all(settledWithoutEnd.map(async (agent) => {
+      const messages = await window.mousse.mousseAgent.getMessages(agent.id).catch(() => [])
+      const timestamp = messages.at(-1)?.timestamp
+      return timestamp ? [agent.id, timestamp] as const : null
+    })).then((pairs) => {
+      if (cancelled) return
+      setRememberedEnds((current) => {
+        const next = { ...current }
+        for (const pair of pairs) {
+          if (pair) next[pair[0]] = pair[1]
+        }
+        return next
+      })
+    })
+    return () => { cancelled = true }
+  }, [agents])
+
+  const hasLiveAgent = agents.some((agent) => agent.status === 'starting' || agent.status === 'running')
+  useEffect(() => {
+    if (!hasLiveAgent) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [hasLiveAgent])
+
+  const listedAgents = [...agents].sort((left, right) => {
+    const leftDone = isTerminalAgentStatus(left.status)
+    const rightDone = isTerminalAgentStatus(right.status)
+    if (leftDone !== rightDone) return leftDone ? 1 : -1
+    return Date.parse(right.createdAt) - Date.parse(left.createdAt)
+  })
+
+  const openAgentSession = (agentId: string) => {
+    setCenterAgentId(agentId)
+    setThreadsSidebarOpen(true)
+  }
 
   const stopAgent = async (agentId: string) => {
     setStoppingAgentIds((current) => new Set(current).add(agentId))
@@ -101,56 +259,84 @@ export function AgentsTasksView() {
     }
   }
 
-  const handleClose = () => {
-    window.close()
-  }
+  const embedded = variant === 'panel'
 
   return (
-    <div className="agents-tasks-window">
-      <header className="agents-tasks-header">
-        <h2>Agents &amp; Tasks</h2>
-        <div className="agents-tasks-header-actions">
-          <IconButton icon={X} label="Close" onClick={handleClose} />
-        </div>
-      </header>
+    <div className={embedded ? 'agents-tasks-window agents-tasks-panel' : 'agents-tasks-window'}>
+      {!embedded && (
+        <header className="agents-tasks-header">
+          <h2>Agents &amp; Tasks</h2>
+          <div className="agents-tasks-header-actions">
+            <IconButton icon={X} label="Close" onClick={() => window.close()} />
+          </div>
+        </header>
+      )}
 
       <div className="agents-tasks-body">
-        <EnvironmentSection agents={agents} />
-
         <section className="agents-tasks-section">
           <h3 className="agents-tasks-section-title">
-            Running Agents
-            <span className="agents-tasks-count">{runningAgents.length}</span>
+            Agents
+            <span className="agents-tasks-count">{listedAgents.length}</span>
           </h3>
-          {runningAgents.length === 0 ? (
-            <div className="agents-tasks-empty">No agents currently running</div>
-          ) : (
+          {listedAgents.length === 0 && !centerAgentId ? null : (
             <ul className="agents-tasks-list">
-              {runningAgents.map((agent) => (
-                <li key={agent.id} className="agents-tasks-row agents-tasks-agent-row">
-                  <div className="agents-tasks-row-main">
-                    <span className="agents-tasks-row-title">{agent.cliType}</span>
-                    <span className="agents-tasks-row-subtitle" title={agent.task}>
-                      {agent.task}
-                    </span>
-                  </div>
-                  <div className="agents-tasks-row-aside">
-                    <StatusBadge status={agent.status} startupPhase={agent.startupPhase} />
-                    <span className="agents-tasks-row-meta" title={agent.worktreePath}>
-                      {agent.worktreePath.split(/[/\\]/).pop()}
-                    </span>
-                    <IconButton
-                      icon={SquareX}
-                      size={14}
-                      label="Stop agent (worktree retained)"
-                      disabled={stoppingAgentIds.has(agent.id)}
-                      onClick={() => {
-                        if (confirmStopAgent(agent)) void stopAgent(agent.id)
-                      }}
-                    />
-                  </div>
+              {centerAgentId && (
+                <li className="agents-tasks-row agents-tasks-agent-row">
+                  <button
+                    type="button"
+                    className="agents-tasks-agent-open"
+                    onClick={() => setCenterAgentId(null)}
+                  >
+                    <div className="agents-tasks-row-main">
+                      <span className="agents-tasks-row-title">Main agent</span>
+                      {mainMark && <AgentModelBadge mark={mainMark} />}
+                      <span className="agents-tasks-row-subtitle">{mainAgentName || 'This chat'}</span>
+                    </div>
+                  </button>
                 </li>
-              ))}
+              )}
+              {listedAgents.map((agent) => {
+                const inactive = isTerminalAgentStatus(agent.status)
+                const worked = agentWorkedLabel(agent, now, rememberedEnds[agent.id])
+                const mark = settings
+                  ? describeSubagentModel(agent, assignments[agent.id], settings, providers)
+                  : null
+                return (
+                  <li
+                    key={agent.id}
+                    className={`agents-tasks-row agents-tasks-agent-row${inactive ? ' is-inactive' : ''}${centerAgentId === agent.id ? ' is-open' : ''}`}
+                  >
+                    <button
+                      type="button"
+                      className="agents-tasks-agent-open"
+                      onClick={() => openAgentSession(agent.id)}
+                    >
+                      <div className="agents-tasks-row-main">
+                        <span className="agents-tasks-row-title">{agent.task || agent.cliType}</span>
+                        {mark && <AgentModelBadge mark={mark} />}
+                        <span className="agents-tasks-row-subtitle">
+                          {inactive ? 'Inactive agent' : agent.cliType}
+                          {worked ? ` · ${worked}` : ''}
+                        </span>
+                      </div>
+                    </button>
+                    <div className="agents-tasks-row-aside">
+                      {!inactive && <StatusBadge status={agent.status} startupPhase={agent.startupPhase} />}
+                      {!inactive && (
+                        <IconButton
+                          icon={SquareX}
+                          size={14}
+                          label="Stop agent (worktree retained)"
+                          disabled={stoppingAgentIds.has(agent.id)}
+                          onClick={() => {
+                            if (confirmStopAgent(agent)) void stopAgent(agent.id)
+                          }}
+                        />
+                      )}
+                    </div>
+                  </li>
+                )
+              })}
             </ul>
           )}
         </section>

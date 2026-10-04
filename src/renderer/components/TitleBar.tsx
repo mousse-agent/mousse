@@ -1,60 +1,31 @@
 import { useEffect, useState } from 'react'
-import { Minus, Square, X, Copy, PanelLeft, RefreshCw } from 'lucide-react'
-import type { ProvidersUsageResponse } from '../../shared/providerAuth'
+import { PanelLeft, PanelRightClose, PanelRightOpen } from '../lib/icons'
 import { IconButton } from './IconButton'
+import { QuickActionsButton } from './QuickActionsButton'
 import { useAppStore } from '../stores/appStore'
 import logoIcon from '../assets/mousse_logo_icon.svg'
 
-function formatUsageReset(resetsAt?: string): string {
-  if (!resetsAt) return 'Reset unknown'
-  const date = new Date(resetsAt)
-  if (Number.isNaN(date.getTime())) return 'Reset unknown'
-  const now = Date.now()
-  const deltaMs = date.getTime() - now
-  if (deltaMs <= 0) return 'Resets soon'
-
-  const totalMinutes = Math.floor(deltaMs / 60_000)
-  if (totalMinutes < 1) return 'Resets soon'
-  if (totalMinutes < 60) return `Resets in ${totalMinutes}m`
-  const days = Math.floor(totalMinutes / 1440)
-  const hours = Math.floor((totalMinutes % 1440) / 60)
-  const mins = totalMinutes % 60
-  if (days === 0) return `Resets in ${hours}h ${mins}m`
-  return `Resets in ${days}d ${hours}h ${mins}m`
+function CaptionIcon({ children }: { children: React.ReactNode }) {
+  return (
+    <svg className="titlebar-caption-icon" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+      {children}
+    </svg>
+  )
 }
 
 export function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false)
-  const [usageOpen, setUsageOpen] = useState(false)
-  const [usage, setUsage] = useState<ProvidersUsageResponse | null>(null)
-  const [usageLoading, setUsageLoading] = useState(false)
   const appInfo = useAppStore((s) => s.appInfo)
   const threadsSidebarOpen = useAppStore((s) => s.threadsSidebarOpen)
   const setThreadsSidebarOpen = useAppStore((s) => s.setThreadsSidebarOpen)
+  const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
+  const setMainAreaOpen = useAppStore((s) => s.setMainAreaOpen)
   const isMac = appInfo?.platform === 'darwin' || window.mousse.platform === 'darwin'
 
   useEffect(() => {
     window.mousse.window.isMaximized().then(setIsMaximized)
     return window.mousse.window.onMaximizedChange(setIsMaximized)
   }, [])
-
-  useEffect(() => {
-    const openUsage = () => setUsageOpen(true)
-    window.addEventListener('mousse:open-usage', openUsage)
-    return () => window.removeEventListener('mousse:open-usage', openUsage)
-  }, [])
-
-  const loadUsage = async () => {
-    setUsageLoading(true)
-    try { setUsage(await window.mousse.providers.getUsage()) } finally { setUsageLoading(false) }
-  }
-  useEffect(() => {
-    if (!usageOpen) return
-    void loadUsage()
-    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') setUsageOpen(false) }
-    window.addEventListener('keydown', close)
-    return () => window.removeEventListener('keydown', close)
-  }, [usageOpen])
 
   return (
     <>
@@ -71,7 +42,7 @@ export function TitleBar() {
               title={threadsSidebarOpen ? 'Close threads sidebar' : 'Open threads sidebar'}
               onClick={() => setThreadsSidebarOpen(!threadsSidebarOpen)}
             >
-              <PanelLeft size={22} strokeWidth={2} />
+              <PanelLeft size={16} strokeWidth={2} />
             </button>
             <img
               className="titlebar-logo-icon"
@@ -89,63 +60,35 @@ export function TitleBar() {
         </div>
       </div>
       <div className="titlebar-controls">
+        <div className="titlebar-app-actions">
+          <QuickActionsButton variant="titlebar" />
+          <IconButton
+            icon={mainAreaOpen ? PanelRightClose : PanelRightOpen}
+            label={mainAreaOpen ? 'Hide app panel' : 'Show app panel'}
+            variant="titlebar"
+            className={mainAreaOpen ? 'titlebar-panel-open' : undefined}
+            onClick={() => setMainAreaOpen(!mainAreaOpen)}
+          />
+        </div>
         {!isMac && (
           <>
-            <IconButton
-              icon={Minus}
-              label="Minimize"
-              variant="titlebar"
-              onClick={() => window.mousse.window.minimize()}
-            />
-            <IconButton
-              icon={isMaximized ? Copy : Square}
-              label={isMaximized ? 'Restore' : 'Maximize'}
-              variant="titlebar"
-              onClick={() => window.mousse.window.maximize()}
-            />
-            <IconButton
-              icon={X}
-              label="Close"
-              variant="titlebar"
-              className="titlebar-close"
-              onClick={() => window.mousse.window.close()}
-            />
+            <button type="button" className="icon-btn icon-btn-titlebar" title="Minimize" aria-label="Minimize" onClick={() => window.mousse.window.minimize()}>
+              <CaptionIcon><path d="M2 6h8" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" /></CaptionIcon>
+            </button>
+            <button type="button" className="icon-btn icon-btn-titlebar" title={isMaximized ? 'Restore' : 'Maximize'} aria-label={isMaximized ? 'Restore' : 'Maximize'} onClick={() => window.mousse.window.maximize()}>
+              <CaptionIcon>
+                {isMaximized
+                  ? <path d="M4 2.25h5.75V8M2.25 4.25h5.75V10" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+                  : <rect x="2.15" y="2.15" width="7.7" height="7.7" stroke="currentColor" strokeWidth="1.25" />}
+              </CaptionIcon>
+            </button>
+            <button type="button" className="icon-btn icon-btn-titlebar titlebar-close" title="Close" aria-label="Close" onClick={() => window.mousse.window.close()}>
+              <CaptionIcon><path d="M3.1 3.1l5.8 5.8M8.9 3.1L3.1 8.9" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" /></CaptionIcon>
+            </button>
           </>
         )}
       </div>
     </header>
-    {usageOpen && <div className="usage-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) setUsageOpen(false) }}>
-      <section className="usage-dialog" role="dialog" aria-modal="true" aria-labelledby="usage-title">
-        <div className="usage-heading"><h2 id="usage-title">Subscription usage</h2><button type="button" onClick={() => void loadUsage()} disabled={usageLoading} aria-label="Refresh usage"><RefreshCw className={usageLoading ? 'icon-spin' : ''} size={18} /></button></div>
-        {usageLoading && !usage ? <p>Loading usage…</p> : usage?.providers.length === 0 ? <p>No supported subscription providers are connected.</p> : usage?.providers.map(provider => <div className="usage-provider" key={provider.id}>
-          <strong>{provider.label}</strong>
-          {provider.windows.map(window => {
-            const remaining = Math.max(0, Math.min(100, Math.round(window.remainingPercent)))
-            const tone = remaining >= 50 ? 'healthy' : remaining >= 20 ? 'warn' : 'low'
-            return (
-              <div className="usage-window" key={window.id}>
-                <div className="usage-window-top">
-                  <span className="usage-window-label">{window.label}</span>
-                  <span className={`usage-window-remaining usage-tone-${tone}`}>{remaining}% left</span>
-                </div>
-                <div
-                  className="usage-bar"
-                  role="progressbar"
-                  aria-valuenow={remaining}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-label={`${provider.label} ${window.label} usage`}
-                >
-                  <div className={`usage-bar-fill usage-tone-${tone}`} style={{ width: `${remaining}%` }} />
-                </div>
-                <span className="usage-window-reset">{formatUsageReset(window.resetsAt)}</span>
-              </div>
-            )
-          })}
-          {provider.message && <p className="usage-message">{provider.message}</p>}
-        </div>)}
-      </section>
-    </div>}
     </>
   )
 }

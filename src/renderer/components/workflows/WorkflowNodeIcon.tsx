@@ -1,4 +1,4 @@
-import { Bot, BookOpen, Braces, Clock, FileOutput, GitBranch, GitFork, Globe, Layers, MessageSquare, Play, Repeat, ShieldCheck, Sparkles, Square, StickyNote, Terminal, Workflow, Wrench } from 'lucide-react'
+import { Bot, BookOpen, Braces, Clock, FileOutput, GitBranch, GitFork, Globe, Layers, MessageSquare, Play, Repeat, ShieldCheck, Sparkles, Square, StickyNote, Terminal, Workflow, Wrench } from '../../lib/icons'
 import { getNodeCatalogEntry } from '../../../shared/workflows'
 
 const categoryIcons = {

@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useRef } from 'react'
-import { Pencil, X } from 'lucide-react'
+import { Pencil, X } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'

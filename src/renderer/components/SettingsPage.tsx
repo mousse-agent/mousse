@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
-import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Palette, Plug, Plus, Radio, RefreshCw, Server, Sparkles, Trash2, User, Wrench } from 'lucide-react'
+import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Palette, Plug, Plus, Radio, RefreshCw, Server, Sparkles, Trash2, User, Wrench } from '../lib/icons'
 import type {
   AgentTypeId,
   MousseSettings,
@@ -75,13 +75,11 @@ function SectionHeading({
   icon: Icon,
   title,
   description,
-  trailing,
   className
 }: {
   icon: IconType
   title: string
   description?: string
-  trailing?: ReactNode
   className?: string
 }) {
   return (
@@ -93,7 +91,6 @@ function SectionHeading({
         <h2>{title}</h2>
         {description && <p className="settings-section-desc">{description}</p>}
       </div>
-      {trailing}
     </div>
   )
 }
@@ -276,7 +273,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   )
 
   const previewAcrylicIntensity = useCallback((acrylicIntensity: number) => {
-    if (window.mousse.platform === 'linux') applyAcrylicIntensity(acrylicIntensity)
+    applyAcrylicIntensity(acrylicIntensity)
     setSettings((prev) =>
       prev
         ? {
@@ -303,7 +300,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
           void window.mousse.window.syncBackground()
         })
     }, 120)
-  }, [])
+  }, [settings])
 
   const ensureValidProviderSelection = useCallback(
     async (nextSettings: MousseSettings, providers = options?.llmProviders ?? []) => {
@@ -558,14 +555,14 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   }, [setSettingsOpen])
 
   const settingsHeader = (
-    <header className="settings-header overlay-page-drag-header">
+    <header className="settings-header overlay-titlebar overlay-page-drag-header">
       <button
         type="button"
-        className="settings-back-btn"
+        className="overlay-titlebar-back"
         onClick={closeSettings}
         aria-label="Back"
       >
-        <ArrowLeft size={16} />
+        <ArrowLeft size={14} strokeWidth={2} />
       </button>
       <h1>Settings</h1>
     </header>
@@ -645,7 +642,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
                 aria-current={active ? 'page' : undefined}
               >
                 <span className="settings-nav-item-icon">
-                  <Icon size={15} />
+                  <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
                 </span>
                 {section.label}
               </button>
@@ -658,7 +655,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
           {activeSection === 'context' && (() => {
             const context = normalizeContextSettings(settings.context)
             return <section id="context" className="settings-section">
-              <SectionHeading icon={Cpu} title="Context compaction" description="Control automatic compaction during long agent tasks." />
               <div className="settings-row">
                 <div>
                   <label htmlFor="context-compaction-enabled">Use context compaction</label>
@@ -694,26 +690,16 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
                 {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
               </select>
             </label>
-            <IntegrationsWorkspace client={integrationClient} profileId={profileId} projectId={integrationProject || undefined} projects={projects} />
+            <IntegrationsWorkspace client={integrationClient} profileId={profileId} projectId={integrationProject || undefined} projects={projects} showHeading={false} />
           </section>}
           {activeSection === 'profile' && (
           <section id="profile" className="settings-section">
-            <SectionHeading
-              icon={User}
-              title="Profile"
-              description="Your display name and editing activity in Mousse."
-            />
             <ProfileSection settings={settings} onUpdate={updateSettings} />
           </section>
           )}
 
           {activeSection === 'appearance' && (
           <section id="appearance" className="settings-section">
-            <SectionHeading
-              icon={Palette}
-              title="Appearance"
-              description="Pick a color theme, then optionally enable acrylic glass over any of them."
-            />
 
           <p className="settings-section-desc" style={{ marginBottom: 10 }}>
             Color theme
@@ -835,11 +821,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
           {activeSection === 'notifications' && (
         <section id="notifications" className="settings-section">
-          <SectionHeading
-            icon={Bell}
-            title="Notifications"
-            description="Choose how Mousse alerts you when background work needs your attention."
-          />
 
           <div className="registry-controls">
             <div className="registry-control-row">
@@ -870,17 +851,12 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
           {activeSection === 'providers' && (
         <section id="providers" className="settings-section">
-          <SectionHeading
-            icon={Plug}
-            title="Providers"
-            description="Connect model APIs and vendor agent sessions. Connected providers appear in model pickers across the app."
-            trailing={
-              <button type="button" className="settings-add-btn" onClick={() => void openAddProvider()}>
-                <Plus size={14} />
-                Add provider
-              </button>
-            }
-          />
+          <div className="settings-provider-actions">
+            <button type="button" className="settings-add-btn" onClick={() => void openAddProvider()}>
+              <Plus size={14} />
+              Add provider
+            </button>
+          </div>
 
           {configuredProviders.length === 0 ? (
             <div className="provider-empty-state">
@@ -1091,18 +1067,13 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
           {activeSection === 'orchestrator' && (
         <section id="orchestrator" className="settings-section">
-          <SectionHeading
-            icon={Cpu}
-            title="Orchestrator model"
-            description="Choose which connected provider and model power the orchestrator chat."
-          />
 
           {!hasConfiguredProviders ? (
             <p className="provider-empty-hint">Add a provider under Providers to select a model.</p>
           ) : (
             <>
               <div className="settings-row">
-                <label htmlFor="llm-provider">Provider</label>
+                <label htmlFor="llm-provider">Orchestrator provider</label>
                 <select
                   id="llm-provider"
                   className="settings-select"
@@ -1241,11 +1212,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
           {activeSection === 'tools' && (
         <section id="tools" className="settings-section">
-          <SectionHeading
-            icon={Wrench}
-            title="Tools"
-            description="Built-in Mousse tools and standard MCP servers. Selected tools are exposed to the orchestrator or spawned CLIs."
-          />
 
           <div className="integration-list">
             <div className="integration-card integration-group-card">
@@ -1585,11 +1551,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
           {activeSection === 'skills' && (
         <section id="skills" className="settings-section">
-          <SectionHeading
-            icon={Sparkles}
-            title="Skills"
-            description="Discovered Skills stay as standard folders. Selected Skills can be listed or loaded by the orchestrator and materialized for spawned CLIs."
-          />
 
           <div className="registry-controls">
             <div className="registry-control-row">
@@ -1761,11 +1722,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
           {activeSection === 'agents' && (
         <section id="agents" className="settings-section">
-          <SectionHeading
-            icon={Bot}
-            title="Agents"
-            description="Enable agent types and choose which model each CLI uses when spawned."
-          />
 
           <div className="agent-config-list">
             {options.agentTypes.map((agent) => {
@@ -2001,11 +1957,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
           {activeSection === 'connections' && (
           <section id="connections" className="settings-section">
-            <SectionHeading
-              icon={Radio}
-              title="Devices and connections"
-              description="Connect your devices, protect your network identity, and manage connection add-ons."
-            />
             <NetDevicesSection />
           </section>
           )}

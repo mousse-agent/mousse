@@ -48,8 +48,7 @@ export function routeLink(href: string, context?: { threadId?: string; projectId
     const tabId = store.addBrowserTab(store.activeThreadId)
     store.updateBrowserTab(tabId, { url: route.url, title: route.url })
     store.setActiveBrowserTab(store.activeThreadId, tabId)
-    store.setMainAreaOpen(true)
-    store.setMainView('browser')
+    store.openSurfaceKind('browser')
     return true
   }
   window.dispatchEvent(new CustomEvent('mousse:open-file', {
@@ -125,6 +124,5 @@ export async function openProjectReference(projectId: string): Promise<void> {
     if (!stillCurrent()) return
   }
   const current = useAppStore.getState()
-  current.setMainAreaOpen(true)
-  current.setMainView('files')
+  current.openSurfaceKind('files')
 }

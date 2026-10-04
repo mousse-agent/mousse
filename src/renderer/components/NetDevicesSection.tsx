@@ -1,6 +1,6 @@
 import type { PlusStatus, PlusConfiguration } from '../../mms/net/plus/contracts'
 import { useEffect, useRef, useState } from 'react'
-import { Monitor, RefreshCw } from 'lucide-react'
+import { Monitor, RefreshCw } from '../lib/icons'
 import { RemoteDeviceThreads } from './RemoteDeviceThreads'
 import type { NetDoctor, NetStatus, NodeCapability, NodeId } from '../../shared/net'
 import type { PlatformRequestMethod } from '../../shared/platform'

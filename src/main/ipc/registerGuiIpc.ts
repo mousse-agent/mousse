@@ -13,7 +13,7 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
  * Does not take a MousseMainService / owner lease.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, Notification, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell } from 'electron'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
@@ -46,7 +46,8 @@ import {
   type MousseSettings,
   type MousseSettingsUpdate
 } from '../../shared/settings'
-import { buildAccentCssVars, surfaceToWindowBackground } from '../../shared/accentPalette'
+import { surfaceToWindowBackground } from '../../shared/accentPalette'
+import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
 import { showCopyMenu } from '../contextMenu'
 import { openExternalSafely } from '../safeExternalUrl'
 import {
@@ -179,8 +180,7 @@ function applyWindowAccentBackground(
   if (!win || win.isDestroyed()) return
   setWindowProfileSettings(win, settings)
   const appearance = normalizeAppearance(settings.appearance)
-  const surfaceBase = buildAccentCssVars(appearance.accentColor)['--surface-base']
-  if (!surfaceBase) return
+  const surfaceBase = appearanceSurfaceBase(appearance, nativeTheme?.shouldUseDarkColors ?? true)
   win.setBackgroundColor(
     surfaceToWindowBackground(surfaceBase, process.platform === 'linux' || appearanceUsesAcrylic(appearance) ? 0 : 1)
   )
@@ -1055,13 +1055,6 @@ export function registerGuiIpc(
     // (potentially large) thread.snapshot round-trip completes.
     broadcast('thread:selected', { id: threadId })
 
-    // A completed state is an unread-style notification. Viewing the thread
-    // acknowledges it, while processing and awaiting-input states remain visible.
-    // Clear it before the snapshot round-trip so the glow vanishes immediately.
-    if (activityTrackerFor().getState(threadId) === 'completed') {
-      setThreadActivity(threadId, 'idle')
-    }
-
     const snap = await guiMms.snapshotThread(threadId)
     // A newer select won the race — discard this snapshot.
     if (gen !== selectGeneration || currentPresentation().getActiveThreadId() !== threadId) {
@@ -1089,21 +1082,12 @@ export function registerGuiIpc(
         snap.activeTurn.running ||
         snap.queue.length > 0 ||
         snap.claimed.length > 0
-      let activity: import('../../shared/types').ThreadActivityState =
+      const activity: import('../../shared/types').ThreadActivityState =
         full.activity && full.activity !== 'idle'
           ? full.activity
           : hasPendingWork
             ? 'processing'
             : 'idle'
-      // The daemon keeps reporting completed until the next turn starts, so a
-      // snapshot fill must never light the completion glow: a live completion
-      // was already acknowledged (and cleared) above, and any older label is
-      // consumed history. Fresh completions arrive as activity events, which
-      // the tracker observes directly — the fill only covers threads this GUI
-      // never saw finish.
-      if (activity === 'completed') {
-        activity = 'idle'
-      }
       setThreadActivity(threadId, activity)
     }
     broadcastThreadSnapshot(

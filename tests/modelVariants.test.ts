@@ -19,6 +19,16 @@ import {
 import type { LlmModelOption } from '../src/shared/settings'
 
 describe('modelVariants', () => {
+  it('offers standard speed and resolves it explicitly alongside fast variants', () => {
+    const [family] = groupModelsByFamily('openai', [
+      { id: 'gpt-5:fast', label: 'GPT-5 (fast)' },
+      { id: 'gpt-5', label: 'GPT-5' }
+    ])
+    expect(family.speeds).toEqual(['fast', 'standard'])
+    expect(resolveModelVariant(family, { speed: 'standard' })?.id).toBe('gpt-5')
+    expect(resolveModelVariant(family, { speed: 'fast' })?.id).toBe('gpt-5:fast')
+  })
+
   it('extracts family labels from cursor-style names', () => {
     expect(extractFamilyLabel('Fable 5 @ 300k')).toBe('Fable 5')
     expect(extractFamilyLabel('Fable 5 (fable-5) @ 1m')).toBe('Fable 5')

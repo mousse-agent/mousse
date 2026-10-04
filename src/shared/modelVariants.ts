@@ -124,7 +124,7 @@ export function parseModelVariant(model: LlmModelOption): ParsedModelVariant {
   const alias = parseAliasFromLabel(model.label)
   const speed =
     model.speed ?? parsedId.speed ??
-    (/\(fast\)/i.test(model.label) ? 'fast' : /\((slow)\)/i.test(model.label) ? 'slow' : undefined)
+    (/\(fast\)/i.test(model.label) ? 'fast' : /\((slow)\)/i.test(model.label) ? 'slow' : 'standard')
 
   return {
     id: model.id,

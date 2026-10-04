@@ -66,6 +66,24 @@ describe('GuiMmsController lifecycle', () => {
     expect(server.endpoint).toBeTruthy()
   })
 
+  it('shares a cold base handshake across concurrent startup and window bootstrap requests', async () => {
+    const gui = new GuiMmsController({ homeDir: home, disableAutoStart: true, endpointOverride: endpoint, ownerTokenOverride: ownerToken })
+    const connect = vi.spyOn(gui as unknown as { connectOnce: () => Promise<unknown> }, 'connectOnce')
+    const sender = Object.assign(new EventEmitter(), { id: 321, isDestroyed: () => false }) as unknown as WebContents
+    try {
+      const [hello, binding, status] = await Promise.all([
+        gui.start(),
+        gui.prepareWindow(sender),
+        gui.runWithSender(sender, () => gui.request<{ binding: { profileId: string } }>('profiles.status'))
+      ])
+      expect(hello.instanceId).toBeTruthy()
+      expect(connect).toHaveBeenCalledTimes(1)
+      expect(binding.profileId).toBeTruthy()
+      expect(status.binding.profileId).toBe(binding.profileId)
+      expect(gui.getWindowBindingForSender(sender.id)).toEqual(binding)
+    } finally { await gui.stop() }
+  })
+
   it.each(['missing', 'malformed', 'failed'])('rejects %s capabilities from an old same-version daemon before feature calls without stopping it', async mode => {
     await server.stop()
     const requests: string[] = []

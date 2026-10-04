@@ -142,6 +142,7 @@ export class GuiMmsController extends EventEmitter {
   private disconnectTimer: ReturnType<typeof setInterval> | null = null
   private lastHello: ProtocolHelloOk | null = null
   private startedDaemon: ChildProcess | null = null
+  private startPromise: Promise<ProtocolHelloOk> | null = null
   private readonly maxReconnect: number
   private readonly reconnectBaseMs: number
   private readonly disableAutoStart: boolean
@@ -213,12 +214,21 @@ export class GuiMmsController extends EventEmitter {
   async start(): Promise<ProtocolHelloOk> {
     if (this.quitting) throw new Error('GuiMmsController is stopped')
     if (this.connected && this.lastHello) return this.lastHello
-
-    // Tests may inject endpoint+token without a full runtime publication.
-    if (!(this.endpointOverride && this.ownerTokenOverride)) {
-      await this.ensureDaemonReady()
+    if (this.startPromise) return this.startPromise
+    // Renderer bootstrap requests and main's eager start share one discovery,
+    // daemon spawn and base handshake. Window sessions keep their own fences.
+    const operation = (async () => {
+      // Tests may inject endpoint+token without a full runtime publication.
+      if (!(this.endpointOverride && this.ownerTokenOverride)) await this.ensureDaemonReady()
+      if (this.quitting) throw new Error('GuiMmsController is stopped')
+      return this.connectOnce()
+    })()
+    this.startPromise = operation
+    try {
+      return await operation
+    } finally {
+      if (this.startPromise === operation) this.startPromise = null
     }
-    return this.connectOnce()
   }
 
   /**
@@ -226,6 +236,7 @@ export class GuiMmsController extends EventEmitter {
    */
   async stop(): Promise<void> {
     this.quitting = true
+    await this.startPromise?.catch(() => undefined)
     await Promise.allSettled([...this.windowSessionOpenings.values()])
     await this.attachedBrowserHost?.shutdown()
     this.clearAllTimersAndListeners()

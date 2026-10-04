@@ -677,8 +677,7 @@ export class OrchestratorService extends EventEmitter {
   private phaseToActivity(phase: TurnPhase): ThreadActivityState {
     if (phase === 'awaiting_input') return 'awaiting_input'
     if (phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing') return 'processing'
-    // A finished turn rests at completed (not idle) so background threads keep
-    // their unread glow until visited. selectThread acknowledges it to idle.
+    // Keep a finished turn completed until its runtime activity changes.
     if (phase === 'completed') return 'completed'
     return 'idle'
   }
@@ -3134,11 +3133,15 @@ export class OrchestratorService extends EventEmitter {
       const partial =
         stripActionBlocks(assistantText).trim() ||
         streamedPartial?.trim() ||
-        '(Stopped)'
+        ''
       if (this.activeAssistantMessageId) {
-        this.updateStreamingAssistantMessage(this.activeAssistantMessageId, partial, false, undefined, true)
+        if (partial) {
+          this.updateStreamingAssistantMessage(this.activeAssistantMessageId, partial, false, undefined, true)
+        } else {
+          this.removeMessage(this.activeAssistantMessageId)
+        }
         this.activeAssistantMessageId = null
-      } else {
+      } else if (partial) {
         const stopped = this.addMessage('assistant', partial)
         const index = this.messages.findIndex((message) => message.id === stopped.id)
         if (index !== -1) {

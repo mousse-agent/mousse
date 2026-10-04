@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronDown, ChevronUp } from 'lucide-react'
+import { ChevronDown, ChevronUp } from '../lib/icons'
 import type { LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
@@ -37,6 +37,7 @@ import { isThreadStarted } from '../../shared/threadTitle'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
 import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
+import '../styles/compact-composer.css'
 
 const EMPTY_CONTEXT_USAGE: ContextUsageSnapshot = {
   percent: 0,
@@ -838,6 +839,7 @@ export function OrchestratorChat() {
         className={`chat-input-area${showQuestions ? ' has-questions' : ''}`}
       >
         {emptyThread && <MousseLogoOutline className="chat-empty-logo" />}
+        {emptyThread && <h1 className="chat-empty-title">What should we build?</h1>}
         {sendError && <div className="connection-failed-pill" role="alert">{sendError}</div>}
         {connectionFailed && (
           <div className="connection-failed-pill" role="alert">

@@ -16,7 +16,7 @@ import { Markdown } from "./markdown";
 import { ErrorMessage } from "./error-message";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX } from "@tabler/icons-react";
+import { Brain, IconArrowDown, IconCopy, IconCheck, IconInfoCircle, IconX, Wrench } from "../../../lib/icons";
 import {
   formatResponseTime,
   formatTokens,
@@ -26,6 +26,7 @@ import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { ToolCallsGroup } from "./tools/tool-calls-group";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer";
 import {
+  activityGroupLabel,
   analyzeAssistantMessage,
   isErrorPart,
   isRecord,
@@ -35,12 +36,17 @@ import {
   type ToolPartBase,
 } from "./utils/assistant-blocks";
 import { PromptUndoButton } from "../../../components/PromptUndoControls";
+import { TurnEditSummary } from "./turn-edit-summary";
 import { SpiralLoader } from "./spiral-loader";
+import { useVisiblePromptIds } from "./use-visible-prompt-ids";
+import "../../../styles/prompt-visibility.css";
 
 export type MessageListProps = {
   messages: UIMessage[];
   status: ChatStatus;
   className?: string;
+  onAtBottomChange?: (atBottom: boolean) => void;
+  lastTurnNotice?: React.ReactNode;
   showCopyToolbar?: boolean;
   suppressQuestionTool?: boolean;
   /**
@@ -121,6 +127,115 @@ function getLastUserMessageId(messages: UIMessage[]) {
     if (msg?.role === "user") return msg.id;
   }
   return null;
+}
+
+function readCreatedAt(message: UIMessage | undefined): number | null {
+  const raw = (message as { createdAt?: Date | string } | undefined)?.createdAt;
+  if (!raw) return null;
+  const ms = raw instanceof Date ? raw.getTime() : Date.parse(String(raw));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function durationParts(milliseconds: number): {
+  hours: number;
+  minutes: number;
+  seconds: number;
+} {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  return {
+    hours: Math.floor(totalSeconds / 3600),
+    minutes: Math.floor((totalSeconds % 3600) / 60),
+    seconds: totalSeconds % 60,
+  };
+}
+
+function countLabel(count: number, singular: string): string {
+  return `${count} ${singular}${count === 1 ? "" : "s"}`;
+}
+
+/** Live label while a turn is still running. Seconds tick every second. */
+function formatWorkingFor(milliseconds: number): string {
+  const { hours, minutes, seconds } = durationParts(milliseconds);
+  if (hours > 0) {
+    return `Working for ${countLabel(hours, "hour")}, ${countLabel(minutes, "minute")}, and ${countLabel(seconds, "second")}`;
+  }
+  if (minutes > 0) {
+    return `Working for ${countLabel(minutes, "minute")} and ${countLabel(seconds, "second")}`;
+  }
+  return `Working for ${countLabel(seconds, "second")}`;
+}
+
+/** Compact "Worked for 2m 6s" from a finished turn. Under a minute stays in seconds. */
+function formatWorkedFor(milliseconds: number): string {
+  const { hours, minutes, seconds } = durationParts(milliseconds);
+  if (hours > 0) {
+    const parts = [`${hours}h`];
+    if (minutes) parts.push(`${minutes}m`);
+    if (seconds) parts.push(`${seconds}s`);
+    return `Worked for ${parts.join(" ")}`;
+  }
+  if (minutes > 0) {
+    return seconds
+      ? `Worked for ${minutes}m ${seconds}s`
+      : `Worked for ${minutes}m`;
+  }
+  return `Worked for ${seconds}s`;
+}
+
+function turnDurationMs(
+  user: UIMessage | undefined,
+  assistants: UIMessage[],
+): number | null {
+  const start = readCreatedAt(user);
+  if (start == null) return null;
+  let end = start;
+  for (const message of assistants) {
+    const at = readCreatedAt(message);
+    if (at != null && at > end) end = at;
+  }
+  return Math.max(0, end - start);
+}
+
+function TurnWorkStatus({
+  active,
+  startedAt,
+  durationMs,
+}: {
+  active: boolean;
+  startedAt?: number | null;
+  durationMs: number | null;
+}) {
+  const fallbackStartRef = useRef<number | null>(null);
+  if (!active) fallbackStartRef.current = null;
+  else if (startedAt == null && fallbackStartRef.current == null) {
+    fallbackStartRef.current = Date.now();
+  }
+  const origin = startedAt ?? fallbackStartRef.current;
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!active) return;
+    const tick = () => setNow(Date.now());
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+
+  const elapsedMs =
+    active && origin != null ? Math.max(0, now - origin) : durationMs;
+  const label =
+    elapsedMs == null
+      ? null
+      : active
+        ? formatWorkingFor(elapsedMs)
+        : formatWorkedFor(elapsedMs);
+  if (!label) return null;
+  return (
+    <div className="turn-work">
+      <div className="turn-work-label">{label}</div>
+      <div className="turn-work-rule" aria-hidden="true" />
+    </div>
+  );
 }
 
 function getTextFromParts(parts: unknown[], joiner: string): string {
@@ -407,15 +522,20 @@ function groupMessagesIntoTurns(messages: UIMessage[]) {  const turns: { userMsg
   return turns;
 }
 
-type PromptMarker = { id: string; topRatio: number; preview: string };
+type PromptMarker = { id: string; offset: number; preview: string; responsePreview: string };
+
+function cappedWords(text: string, limit: number): string {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  return words.slice(0, limit).join(" ") + (words.length > limit ? "…" : "");
+}
 
 /**
- * Scrollbar prompt dots. Deliberately isolated with its own state: position
+ * Conversation ticks. Deliberately isolated with its own state: position
  * recomputes (ResizeObserver + streaming + expand/collapse) must never
  * re-render the message list — that was the expand/collapse stutter whenever
- * the dots were visible. Marker updates now only re-render this tiny overlay.
+ * the markers were visible. Marker updates only re-render this tiny overlay.
  */
-const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
+export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   messages,
   containerRef,
   contentRef,
@@ -435,17 +555,29 @@ const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   scrollAnimRef: React.MutableRefObject<number>;
 }) {
   const [markers, setMarkers] = useState<PromptMarker[]>([]);
+  const [activeId, setActiveId] = useState<string>();
+  const [previewId, setPreviewId] = useState<string>();
+  const markerPositionsRef = useRef<PromptMarker[]>([]);
   const rafRef = useRef(0);
-  const visibleRef = useRef(visible);
   const loggedCountRef = useRef(-1);
+
+  const updateActiveMarker = useCallback(() => {
+    const container = containerRef.current;
+    const positions = markerPositionsRef.current.filter((marker) => Number.isFinite(marker.offset));
+    if (!container || !positions.length) return;
+    const atBottom = container.scrollHeight > container.clientHeight &&
+      container.scrollTop + container.clientHeight >= container.scrollHeight - 2;
+    let current = positions[0];
+    for (const marker of positions) {
+      if (atBottom || marker.offset <= container.scrollTop + 24) current = marker;
+      else break;
+    }
+    setActiveId(current?.id);
+  }, [containerRef]);
 
   const updateMarkers = useCallback(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = requestAnimationFrame(() => {
-      // Skip while hidden (opacity-0 at rest): an expand/collapse resize
-      // must not do layout reads for invisible dots. Positions refresh when
-      // the overlay becomes visible (effect below).
-      if (!visibleRef.current) return;
       const container = containerRef.current;
       const content = contentRef.current;
       if (!container || !content) return;
@@ -463,21 +595,20 @@ const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         const target: Element | null = content.querySelector(
           `[data-prompt-id="${escapeId(userMsg.id)}"]`,
         );
-        if (!(target instanceof HTMLElement)) continue;
         // Rect-based so nested `relative` wrappers / transforms can't skew it.
-        const y =
-          target.getBoundingClientRect().top -
-          containerRect.top +
-          container.scrollTop;
-        const ratio = Math.min(0.995, Math.max(0, y / scrollHeight));
-        const preview = getTextFromParts(userMsg.parts ?? [], " ")
-          .replace(/\s+/g, " ")
-          .trim()
-          .slice(0, 120);
+        const y = target instanceof HTMLElement
+          ? target.getBoundingClientRect().top - containerRect.top + container.scrollTop
+          : markerPositionsRef.current.find((marker) => marker.id === userMsg.id)?.offset ?? Infinity;
+        const preview = cappedWords(getTextFromParts(userMsg.parts ?? [], " "), 10);
+        const responsePreview = cappedWords(
+          turn.assistantMsgs.map((message) => getTextFromParts(message.parts ?? [], " ")).join(" "),
+          24,
+        );
         next.push({
           id: userMsg.id,
-          topRatio: ratio,
+          offset: y,
           preview: preview || "Your prompt",
+          responsePreview: responsePreview || "No response yet",
         });
       }
       if (loggedCountRef.current !== next.length) {
@@ -485,13 +616,16 @@ const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         // eslint-disable-next-line no-console
         console.debug(`[prompt-markers] tracking ${next.length} prompts`);
       }
+      markerPositionsRef.current = next;
+      updateActiveMarker();
       setMarkers((prev) => {
         if (
           prev.length === next.length &&
           prev.every(
             (m, i) =>
               m.id === next[i]!.id &&
-              Math.abs(m.topRatio - next[i]!.topRatio) < 0.002,
+              m.preview === next[i]!.preview &&
+              m.responsePreview === next[i]!.responsePreview,
           )
         ) {
           return prev;
@@ -499,14 +633,16 @@ const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
         return next;
       });
     });
-  }, [messages, containerRef, contentRef]);
+  }, [messages, containerRef, contentRef, updateActiveMarker]);
+  const visiblePromptIds = useVisiblePromptIds(containerRef, contentRef, updateMarkers);
 
   useEffect(() => {
-    visibleRef.current = visible;
-    if (visible) updateMarkers();
-  }, [visible, updateMarkers]);
+    const container = containerRef.current;
+    container?.addEventListener("scroll", updateActiveMarker, { passive: true });
+    return () => container?.removeEventListener("scroll", updateActiveMarker);
+  }, [containerRef, updateActiveMarker]);
 
-  // Keep dots in sync with layout (streaming text, images, expanding tool
+  // Keep ticks in sync with layout (streaming text, images, expanding tool
   // cards all change offsets after first paint).
   useLayoutEffect(() => {
     updateMarkers();
@@ -544,11 +680,10 @@ const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
           ? CSS.escape(id)
           : id;
       const el = content.querySelector(`[data-prompt-id="${escapeId}"]`);
-      if (!(el instanceof HTMLElement)) return;
-      const y =
-        el.getBoundingClientRect().top -
-        container.getBoundingClientRect().top +
-        container.scrollTop;
+      const y = el instanceof HTMLElement
+        ? el.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
+        : markerPositionsRef.current.find((marker) => marker.id === id)?.offset;
+      if (y === undefined || !Number.isFinite(y)) return;
       onUserNavigate();
       onActive();
       const targetTop = Math.max(0, y - 16);
@@ -597,39 +732,50 @@ const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
   );
 
   if (markers.length === 0) return null;
+  const previewMarker = markers.find((marker) => marker.id === previewId);
+  const highlightedIndex = markers.findIndex((marker) => marker.id === previewId);
 
   return (
     <div
-      aria-hidden={!visible}
       data-testid="prompt-markers"
-      className={cn(
-        "pointer-events-none absolute top-2 bottom-2 right-[14px] z-10 w-5",
-        "transition-opacity duration-200 ease-out",
-        visible ? "opacity-100" : "opacity-0",
-      )}
+      className={cn("chat-prompt-rail", visible && "is-active", previewId && "is-previewing")}
+      onMouseLeave={(event) => {
+        const focused = document.activeElement;
+        setPreviewId(focused instanceof HTMLButtonElement && event.currentTarget.contains(focused)
+          ? focused.dataset.promptMarkerId
+          : undefined);
+      }}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setPreviewId(undefined);
+      }}
     >
+      <nav className="chat-prompt-ticks" aria-label="Conversation turns">
       {markers.map((marker, index) => (
         <button
           key={marker.id}
           type="button"
-          tabIndex={-1}
-          title={`${index + 1}. ${marker.preview}`}
           aria-label={`Jump to prompt ${index + 1}: ${marker.preview}`}
+          aria-current={marker.id === activeId ? "location" : undefined}
+          data-visible={visiblePromptIds.has(marker.id) ? "true" : undefined}
+          data-prompt-marker-id={marker.id}
           onClick={() => scrollToPrompt(marker.id)}
-          onMouseEnter={onActive}
-          style={{
-            top: `${marker.topRatio * 100}%`,
-            backgroundColor: "var(--an-primary-color, #60a5fa)",
-            boxShadow: "0 0 8px rgba(96,165,250,0.8)",
+          onMouseEnter={() => { onActive(); setPreviewId(marker.id); }}
+          onFocus={() => { onActive(); setPreviewId(marker.id); }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") setPreviewId(undefined);
           }}
-          className={cn(
-            "pointer-events-auto absolute right-[3px] -translate-y-1/2 rounded-full",
-            "h-[14px] w-[5px] opacity-55",
-            "transition-[transform,filter,opacity] duration-150 ease-out",
-            "hover:w-[7px] hover:opacity-100 hover:brightness-125 active:scale-95",
-          )}
-        />
+          className="chat-prompt-tick"
+        >
+          <span style={{ width: `${highlightedIndex < 0 ? 12 : Math.max(12, 36 - Math.abs(index - highlightedIndex) * 8)}px` }} />
+        </button>
       ))}
+      </nav>
+      {previewMarker && (
+        <div className="chat-prompt-preview" aria-hidden="true">
+          <strong>{previewMarker.preview}</strong>
+          <p>{previewMarker.responsePreview}</p>
+        </div>
+      )}
     </div>
   );
 });
@@ -639,6 +785,8 @@ export const MessageList = memo(function MessageList({
   status,
   className,
   showCopyToolbar = true,
+  lastTurnNotice,
+  onAtBottomChange,
   suppressQuestionTool = false,
   initialScrollBehavior = "bottom",
   enableImagePreview = true,
@@ -658,6 +806,8 @@ export const MessageList = memo(function MessageList({
   const [activeCopyId, setActiveCopyId] = useState<string | null>(null);
   const [isMounted, setIsMounted] = useState(false);
   const [isPinned, setIsPinned] = useState(initialScrollBehavior !== "top");
+  useEffect(() => { onAtBottomChange?.(isPinned) }, [isPinned, onAtBottomChange]);
+
   const [scrollbarActive, setScrollbarActive] = useState(false);
   const scrollActiveTimerRef = useRef<number | null>(null);
   // Shared with PromptMarkersOverlay: the parent cancels an in-flight
@@ -665,6 +815,17 @@ export const MessageList = memo(function MessageList({
   // it. Marker position state itself lives in the overlay so recomputes
   // never re-render the message list.
   const promptScrollAnimRef = useRef(0);
+  const workClockRef = useRef<{
+    turnId: string;
+    startedAt: number;
+    endedAt: number | null;
+  } | null>(null);
+  const [settledWork, setSettledWork] = useState<Record<string, number>>({});
+  // The optimistic send id is replaced by the saved id a moment later. Keep
+  // one React key so the bubble does not unmount and land again.
+  const turnKeyAliasRef = useRef<Map<string, string>>(new Map());
+  const replyHoldRef = useRef<{ sawStreaming: boolean } | null>(null);
+  const liveOptimisticKeyRef = useRef<string | null>(null);
 
   const CustomUserMessage = slots?.UserMessage || UserMessage;
   const CustomToolRenderer = slots?.ToolRenderer || DefaultToolRenderer;
@@ -908,8 +1069,34 @@ export const MessageList = memo(function MessageList({
     [normalizedMessages],
   );
 
+  useEffect(() => {
+    const turnId = lastUserMessageId;
+    if (!turnId) return;
+    if (isStreaming) {
+      if (workClockRef.current?.turnId !== turnId) {
+        const user = normalizedMessages.find((message) => message.id === turnId);
+        workClockRef.current = {
+          turnId,
+          startedAt: readCreatedAt(user) ?? Date.now(),
+          endedAt: null,
+        };
+      }
+      return;
+    }
+    const clock = workClockRef.current;
+    if (clock && clock.turnId === turnId && clock.endedAt == null) {
+      const endedAt = Date.now();
+      clock.endedAt = endedAt;
+      const durationMs = Math.max(0, endedAt - clock.startedAt);
+      setSettledWork((current) =>
+        current[turnId] === durationMs
+          ? current
+          : { ...current, [turnId]: durationMs },
+      );
+    }
+  }, [isStreaming, lastUserMessageId, normalizedMessages]);
+
   const lastUserMessageIdRef = useRef(lastUserMessageId);
-  const pendingPlanningScrollUserIdRef = useRef<string | null>(null);
   useLayoutEffect(() => {
     if (
       lastUserMessageId &&
@@ -917,18 +1104,56 @@ export const MessageList = memo(function MessageList({
     ) {
       shouldAutoScrollRef.current = true;
       setIsPinned(true);
-      pendingPlanningScrollUserIdRef.current = lastUserMessageId;
       const cancel = scrollToBottomSettled();
       lastUserMessageIdRef.current = lastUserMessageId;
       return cancel;
     }
   }, [lastUserMessageId, scrollToBottomSettled]);
 
-  const planningLabel = "Processing...";
   const turns = useMemo(
     () => groupMessagesIntoTurns(normalizedMessages),
     [normalizedMessages],
   );
+  const lastTurn = turns[turns.length - 1];
+  const trailingUser = lastTurn?.userMsg;
+  const trailingHasAssistant = (lastTurn?.assistantMsgs.length ?? 0) > 0;
+  const trailingOptimistic = Boolean(
+    trailingUser?.id.startsWith("optimistic:"),
+  );
+  if (!trailingUser || trailingHasAssistant) {
+    replyHoldRef.current = null;
+  } else if (
+    trailingOptimistic ||
+    isStreaming ||
+    replyHoldRef.current
+  ) {
+    const sawStreaming = Boolean(
+      replyHoldRef.current?.sawStreaming || isStreaming,
+    );
+    const settledWithoutReply =
+      (status === "error" || (status === "ready" && sawStreaming)) &&
+      !trailingOptimistic &&
+      !isStreaming;
+    replyHoldRef.current = settledWithoutReply ? null : { sawStreaming };
+  }
+  const showAwaitingReply = Boolean(
+    trailingUser && !trailingHasAssistant && replyHoldRef.current,
+  );
+  if (trailingOptimistic && trailingUser) {
+    liveOptimisticKeyRef.current = trailingUser.id;
+    turnKeyAliasRef.current.set(trailingUser.id, trailingUser.id);
+  } else if (
+    trailingUser &&
+    showAwaitingReply &&
+    liveOptimisticKeyRef.current &&
+    !turnKeyAliasRef.current.has(trailingUser.id)
+  ) {
+    turnKeyAliasRef.current.set(
+      trailingUser.id,
+      liveOptimisticKeyRef.current,
+    );
+    liveOptimisticKeyRef.current = null;
+  }
   const showPlanning = useMemo(() => {
     if (!isStreaming) return false;
     const lastMessage = normalizedMessages[normalizedMessages.length - 1];
@@ -943,7 +1168,10 @@ export const MessageList = memo(function MessageList({
     Boolean(lastMessageId) &&
     lastMessageId !== lastMessageIdRef.current;
   const showAssistantBreathingSpace =
-    showPlanning || assistantSpaceActiveRef.current || isNewAssistantMessage;
+    showAwaitingReply ||
+    showPlanning ||
+    assistantSpaceActiveRef.current ||
+    isNewAssistantMessage;
 
   useEffect(() => {
     if (lastMessageRole === "assistant") {
@@ -951,19 +1179,8 @@ export const MessageList = memo(function MessageList({
         assistantSpaceActiveRef.current = true;
       }
     }
-    if (lastMessageRole === "user") {
-      assistantSpaceActiveRef.current = false;
-    }
     lastMessageIdRef.current = lastMessageId;
   }, [lastMessageId, lastMessageRole]);
-
-  useLayoutEffect(() => {
-    if (!showPlanning || !lastUserMessageId) return;
-    if (pendingPlanningScrollUserIdRef.current !== lastUserMessageId) return;
-    const cancel = scrollToBottomSettled();
-    pendingPlanningScrollUserIdRef.current = null;
-    return cancel;
-  }, [lastUserMessageId, showPlanning, scrollToBottomSettled]);
 
   // Follow live output while pinned: every streamed token / tool update
   // produces new `messages`, so snap to the bottom. Instant (not smooth)
@@ -986,9 +1203,8 @@ export const MessageList = memo(function MessageList({
   }, [scrollToBottomSettled]);
 
   const showJumpButton = !isPinned && normalizedMessages.length > 0;
-  // Marker dots show only while the scrollbar is actively used (scrolling,
-  // dragging, or hovering its edge) — nothing at rest. Position state lives
-  // in PromptMarkersOverlay, so its updates never re-render this list.
+  // Tick position and active-turn state live in PromptMarkersOverlay so
+  // scrolling never re-renders the conversation to update the rail.
 
   return (
     <div
@@ -1010,7 +1226,10 @@ export const MessageList = memo(function MessageList({
         <div className="space-y-6">
           {turns.map((turn, turnIndex) => {
             const isLastTurn = turnIndex === turns.length - 1;
-            const turnKey = turn.userMsg?.id ?? `turn-${turnIndex}`;
+            const turnKey = turn.userMsg
+              ? (turnKeyAliasRef.current.get(turn.userMsg.id) ??
+                turn.userMsg.id)
+              : `turn-${turnIndex}`;
 
             return (
               <div key={turnKey} className="relative space-y-2">
@@ -1059,6 +1278,8 @@ export const MessageList = memo(function MessageList({
                     );
                   })()}
 
+                {isLastTurn && turn.userMsg && lastTurnNotice}
+
                 {turn.assistantMsgs.length > 0 &&
                   !(isLastTurn && showPlanning) &&
                   (() => {
@@ -1088,12 +1309,30 @@ export const MessageList = memo(function MessageList({
                     const copyKey = `assistant-${turnKey}-all`;
                     const toolbarText = showCopyToolbar ? assistantText : "";
 
+                    const promptId = turn.userMsg?.id;
+                    const workedMs = isTurnStreaming
+                      ? null
+                      : promptId != null && settledWork[promptId] != null
+                        ? settledWork[promptId]
+                        : turnDurationMs(turn.userMsg, turn.assistantMsgs);
+                    const liveStart =
+                      promptId != null &&
+                      workClockRef.current?.turnId === promptId
+                        ? workClockRef.current.startedAt
+                        : readCreatedAt(turn.userMsg);
+
                     return (
                       <div className="group/assistant-turn">
-                        <div className="flex flex-col gap-3">
+                        <TurnWorkStatus
+                          active={isTurnStreaming}
+                          startedAt={isTurnStreaming ? liveStart : null}
+                          durationMs={workedMs}
+                        />
+                        <div className="turn-answer flex flex-col gap-3">
                           {(() => {
-                            // Consecutive tools-only messages collapse into one
-                            // "Tool calls N" group; everything else renders as-is.
+                            // Consecutive thoughts and tool calls collapse into one
+                            // group titled with the latest thought. A run with
+                            // no thought falls back to "Tool calls N".
                             const analyses = turn.assistantMsgs.map((msg) =>
                               analyzeAssistantMessage(
                                 msg.parts ?? [],
@@ -1127,6 +1366,7 @@ export const MessageList = memo(function MessageList({
                                 (msgIndex) =>
                                   analyses[msgIndex]!.toolItems,
                               );
+                              const groupLabel = activityGroupLabel(items);
                               const firstId =
                                 turn.assistantMsgs[
                                   segment.msgIndices[0]!
@@ -1148,6 +1388,14 @@ export const MessageList = memo(function MessageList({
                                 <ToolCallsGroup
                                   key={`${firstId}-toolcalls`}
                                   count={items.length}
+                                  icon={
+                                    groupLabel ? (
+                                      <Brain size={18} />
+                                    ) : (
+                                      <Wrench size={18} />
+                                    )
+                                  }
+                                  label={groupLabel}
                                   autoOpen={anyToolPending}
                                 >
                                   {items.map((item, k) => (
@@ -1167,6 +1415,9 @@ export const MessageList = memo(function MessageList({
                             });
                           })()}
                         </div>
+                        {!isTurnStreaming && (
+                          <TurnEditSummary messages={turn.assistantMsgs} />
+                        )}
                         {showToolbar ? (
                           <MessageToolbar
                             text={toolbarText}
@@ -1192,12 +1443,17 @@ export const MessageList = memo(function MessageList({
                     );
                   })()}
 
-                {isLastTurn && showPlanning && (
-                  <ToolRowBase
-                    icon={<SpiralLoader size={12} />}
-                    shimmerLabel={planningLabel}
-                    completeLabel="Done"
-                    isAnimating={true}
+                {isLastTurn &&
+                  (showAwaitingReply || (showPlanning && turn.assistantMsgs.length === 0)) && (
+                  <TurnWorkStatus
+                    active
+                    startedAt={
+                      turn.userMsg &&
+                      workClockRef.current?.turnId === turn.userMsg.id
+                        ? workClockRef.current.startedAt
+                        : readCreatedAt(turn.userMsg)
+                    }
+                    durationMs={null}
                   />
                 )}
               </div>
@@ -1226,23 +1482,16 @@ export const MessageList = memo(function MessageList({
       <button
         type="button"
         onClick={handleJumpToLatest}
-        aria-label={isStreaming ? "Streaming — jump to latest" : "Jump to latest"}
+        aria-label="Go to latest"
         className={cn(
-          "absolute bottom-4 left-1/2 -translate-x-1/2 z-10",
-          "flex items-center gap-1.5 rounded-full pl-3 pr-3.5 py-1.5 text-xs font-medium",
-          "bg-an-foreground text-an-background shadow-lg",
-          "hover:brightness-110 active:scale-[0.97]",
+          "chat-jump absolute left-1/2 z-10 -translate-x-1/2",
+          "inline-flex items-center justify-center",
           "transition-[opacity,transform] duration-150 ease-out",
+          "hover:brightness-110 active:scale-[0.97]",
         )}
       >
-        {isStreaming && (
-          <span
-            aria-hidden="true"
-            className="size-1.5 rounded-full bg-current animate-pulse"
-          />
-        )}
-        <IconArrowDown className="size-3.5" aria-hidden="true" />
-        {isStreaming ? "Streaming — latest" : "Latest"}
+        {isStreaming && <span aria-hidden="true" className="chat-jump-live" />}
+        <IconArrowDown className="size-4" aria-hidden="true" />
       </button>
     )}
     </div>

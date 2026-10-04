@@ -1,10 +1,9 @@
-import { useEffect, useRef, useCallback, useState, startTransition, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
-
-import { Server, PanelRightClose, PanelRightOpen } from 'lucide-react'
+import { useEffect, useRef, useCallback, useState, startTransition, type PointerEvent as ReactPointerEvent } from 'react'
 
 import { ChatWorkspace } from './components/chats/ChatWorkspace'
 import { useChatsStore } from './stores/chatsStore'
 import { OrchestratorChat } from './components/OrchestratorChat'
+import { MousseAgentChat } from './components/MousseAgentChat'
 
 import { MainViewTabs } from './components/MainViewTabs'
 
@@ -12,15 +11,15 @@ import { MainViewPanel } from './components/MainViewPanel'
 import { KeepMounted } from './components/KeepMounted'
 
 import { ThreadsSidebar } from './components/ThreadsSidebar'
+import { SlidingThreadsPane } from './components/SlidingThreadsPane'
 import { NavigationRail } from './components/NavigationRail'
+import { WorkspaceLoading } from './components/WorkspaceLoading'
 
 import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { TitleBar } from './components/TitleBar'
+import { SubscriptionUsagePage } from './components/SubscriptionUsagePage'
 
-import { IconButton } from './components/IconButton'
-
-import { QuickActionsButton } from './components/QuickActionsButton'
-
+import { openSurface } from './lib/surfaces'
 import { useAppStore } from './stores/appStore'
 
 import './styles/app.css'
@@ -42,9 +41,18 @@ const THREAD_LIST_RECONCILE_MS = 2_000
 
 export default function App() {
 
+  const usageOpen = useAppStore((s) => s.usageOpen)
+  const setUsageOpen = useAppStore((s) => s.setUsageOpen)
+  useEffect(() => {
+    const openUsage = () => setUsageOpen(true)
+    window.addEventListener('mousse:open-usage', openUsage)
+    return () => window.removeEventListener('mousse:open-usage', openUsage)
+  }, [setUsageOpen])
   const sidebarWidth = useAppStore((s) => s.sidebarWidth)
   const profileId = useAppStore((s) => s.profileId)
   const profileReady = useAppStore((s) => s.profileReady)
+  const overlayOpen = useAppStore((s) => s.settingsOpen || s.scheduledOpen || s.channelsOpen)
+  const workspaceReady = useAppStore((s) => s.workspaceReady)
   const sidebarMode = useAppStore((s) => s.sidebarMode)
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
   useEffect(() => {
@@ -71,14 +79,13 @@ export default function App() {
   const addMessage = useAppStore((s) => s.addMessage)
   const updateMessage = useAppStore((s) => s.updateMessage)
 
-  const agents = useAppStore((s) => s.agents)
-
   const setMainView = useAppStore((s) => s.setMainView)
   const openDocument = useAppStore((s) => s.openDocument)
 
   const mainView = useAppStore((s) => s.mainView)
 
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
+  const centerAgentId = useAppStore((s) => s.centerAgentId)
 
   const setMainAreaOpen = useAppStore((s) => s.setMainAreaOpen)
 
@@ -103,11 +110,8 @@ export default function App() {
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0)
   const [threadsPeek, setThreadsPeek] = useState(false)
   const [threadsPeekClosing, setThreadsPeekClosing] = useState(false)
-  const [threadsVisible, setThreadsVisible] = useState(threadsSidebarOpen)
-  const [threadsClosing, setThreadsClosing] = useState(false)
   const threadsPeekCloseTimer = useRef<number | null>(null)
   const threadsPeekUnmountTimer = useRef<number | null>(null)
-  const threadsCloseTimer = useRef<number | null>(null)
   const resizeRef = useRef<{
     kind: 'main' | 'threads' | null
     pointerId: number | null
@@ -117,7 +121,25 @@ export default function App() {
   const appContentRef = useRef<HTMLDivElement>(null)
   const sidebarRef = useRef<HTMLElement>(null)
   const threadsPaneRef = useRef<HTMLDivElement>(null)
-  const agentsTasksToggleRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    if (profileReady) return
+    let disposed = false
+    setBootstrapError(null)
+    // These bootstrap methods establish the exact window's trusted binding.
+    // No profile-scoped content request may use the initial placeholder ID.
+    void Promise.all([window.mousse.profiles.list(), window.mousse.profiles.status()])
+      .then(([listed, status]) => {
+        if (disposed) return
+        const bound = status.binding?.profileId
+        if (!bound || !listed.profiles.some((profile) => profile.id === bound)) {
+          throw new Error('Workspace profile binding is unavailable')
+        }
+        useAppStore.getState().activateProfile(bound)
+      }).catch((error: unknown) => {
+        if (!disposed) setBootstrapError(error instanceof Error ? error.message : String(error))
+      })
+    return () => { disposed = true }
+  }, [profileReady, bootstrapAttempt])
 
   const cancelThreadsPeekClose = () => {
     if (threadsPeekCloseTimer.current !== null) {
@@ -153,38 +175,16 @@ export default function App() {
 
   useEffect(() => {
     if (threadsSidebarOpen) {
-      if (threadsCloseTimer.current !== null) {
-        window.clearTimeout(threadsCloseTimer.current)
-        threadsCloseTimer.current = null
-      }
-      setThreadsVisible(true)
-      setThreadsClosing(false)
+      cancelThreadsPeekClose()
       setThreadsPeek(false)
+      setThreadsPeekClosing(false)
       return
     }
-    // Keep the docked sidebar mounted for the slide-out before unmounting.
-    if (!threadsVisible) return
-    setThreadsClosing(true)
-    threadsCloseTimer.current = window.setTimeout(() => {
-      threadsCloseTimer.current = null
-      setThreadsVisible(false)
-      setThreadsClosing(false)
-    }, 200)
-  }, [threadsSidebarOpen, threadsVisible])
+  }, [threadsSidebarOpen])
 
   useEffect(() => () => {
     if (threadsPeekCloseTimer.current !== null) window.clearTimeout(threadsPeekCloseTimer.current)
     if (threadsPeekUnmountTimer.current !== null) window.clearTimeout(threadsPeekUnmountTimer.current)
-    if (threadsCloseTimer.current !== null) window.clearTimeout(threadsCloseTimer.current)
-  }, [])
-
-  useEffect(() => {
-    const onMouseDown = (event: MouseEvent) => {
-      if (agentsTasksToggleRef.current?.contains(event.target as Node)) return
-      void window.mousse.window.closeAgentsTasks()
-    }
-    window.addEventListener('mousedown', onMouseDown)
-    return () => window.removeEventListener('mousedown', onMouseDown)
   }, [])
 
   useEffect(() => {
@@ -316,7 +316,14 @@ export default function App() {
       window.mousse.threads.onActivity(applyIfCurrent(setThreadActivity)),
       window.mousse.turn.onTurnState(applyIfCurrent(setTurnState)),
       window.mousse.turn.onTurnSnapshot(applyIfCurrent(setTurnSnapshot)),
-      window.mousse.app.onNavigateMainView(setMainView),
+      window.mousse.app.onNavigateMainView((view) => {
+        if (view === 'terminal' || view === 'browser' || view === 'files' || view === 'git') {
+          openSurface(view)
+          return
+        }
+        setMainView(view)
+        setMainAreaOpen(true)
+      }),
       window.mousse.documents.onOpened(({ title, markdown }) => {
         openDocument(title, markdown)
       }),
@@ -462,33 +469,14 @@ export default function App() {
 
 
 
-  const openAgentsTasks = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect()
-    const viewportScreenX = event.screenX - event.clientX
-    const viewportScreenY = event.screenY - event.clientY
-    const anchor = {
-      x: Math.round(rect.left + viewportScreenX),
-      y: Math.round(rect.bottom + viewportScreenY)
-    }
-    void window.mousse.window.openAgentsTasks(anchor)
-  }, [])
-
-  const runningCount = agents.filter(
-
-    (a) => ['running', 'starting', 'ready', 'merging', 'conflict'].includes(a.status)
-
-  ).length
-
-
-
   return (
 
-    <div className="app">
+    <div className="app" data-overlay-active={overlayOpen} inert={overlayOpen} aria-hidden={overlayOpen}>
 
       <TitleBar />
       <LinuxWindowResizeHandles />
 
-      {bootstrapError && <div role="alert" style={{ padding: '8px 16px' }}>
+      {profileReady && bootstrapError && <div role="alert" style={{ padding: '8px 16px' }}>
         Could not load workspace: {bootstrapError}{' '}
         <button type="button" onClick={() => setBootstrapAttempt((attempt) => attempt + 1)}>Retry</button>
       </div>}
@@ -496,25 +484,34 @@ export default function App() {
       <div className="app-content" ref={appContentRef}>
 
         <NavigationRail
-          key={profileId}
+          key={`${profileId}:${bootstrapAttempt}`}
           onMouseEnter={!threadsSidebarOpen ? openThreadsPeek : undefined}
           onMouseLeave={!threadsSidebarOpen ? scheduleThreadsPeekClose : undefined}
         />
 
+        {!profileReady && <WorkspaceLoading
+          error={bootstrapError}
+          onRetry={() => setBootstrapAttempt((attempt) => attempt + 1)}
+          sidebarWidth={threadsSidebarOpen ? threadsSidebarWidth : undefined}
+        />}
+
         {/* Profile-scoped panels need the trusted binding before their mount effects run. */}
         {profileReady && <>
-        {threadsVisible && (
-          <div className="threads-sidebar-pane" ref={threadsPaneRef}>
-            <ThreadsSidebar className={threadsClosing ? 'threads-sidebar-closing' : ''} />
-            <div
-              className={`resizer resizer-threads${threadsClosing ? ' resizer-threads-closing' : ''}`}
+          <SlidingThreadsPane
+            open={threadsSidebarOpen}
+            width={threadsSidebarWidth}
+            paneRef={threadsPaneRef}
+            resizing={resizing === 'threads'}
+            resizer={<div
+              className="resizer resizer-threads"
               onPointerDown={(event) => startResize('threads', event)}
               role="separator"
               aria-orientation="vertical"
               aria-label="Resize threads sidebar"
-            />
-          </div>
-        )}
+            />}
+          >
+            <ThreadsSidebar />
+          </SlidingThreadsPane>
 
         {!threadsSidebarOpen && (
           <>
@@ -523,15 +520,15 @@ export default function App() {
               aria-hidden="true"
               onMouseEnter={openThreadsPeek}
             />
-            {threadsPeek && (
-              <div
-                className={`threads-sidebar-peek${threadsPeekClosing ? ' threads-sidebar-peek-closing' : ''}`}
+              <SlidingThreadsPane
+                open={threadsPeek && !threadsPeekClosing}
+                width={threadsSidebarWidth}
+                overlay
                 onMouseEnter={openThreadsPeek}
                 onMouseLeave={scheduleThreadsPeekClose}
               >
                 <ThreadsSidebar />
-              </div>
-            )}
+              </SlidingThreadsPane>
           </>
         )}
 
@@ -540,49 +537,22 @@ export default function App() {
         <aside
           ref={sidebarRef}
           className={`sidebar${!mainAreaOpen ? ' sidebar-full' : ''}`}
-          style={sidebarMode === 'chats' ? { display: 'none' } : mainAreaOpen ? { width: `${sidebarWidth}%` } : undefined}
+          style={sidebarMode === 'chats' && !usageOpen ? { display: 'none' } : mainAreaOpen ? { width: `${sidebarWidth}%` } : undefined}
         >
-          <div className="header">
-
-            <div className="header-actions">
-
-              <QuickActionsButton />
-
-              <IconButton
-
-                ref={agentsTasksToggleRef}
-
-                icon={Server}
-
-                label={`Agents${runningCount > 0 ? ` (${runningCount})` : ''}`}
-
-                onClick={openAgentsTasks}
-
-              />
-
-              <IconButton
-
-                icon={mainAreaOpen ? PanelRightClose : PanelRightOpen}
-
-                label={mainAreaOpen ? 'Hide app panel' : 'Show app panel'}
-
-                className={mainAreaOpen ? 'header-toggle-active' : undefined}
-
-                onClick={() => setMainAreaOpen(!mainAreaOpen)}
-
-              />
-
+          {usageOpen && <SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} />}
+          <KeepMounted active={!usageOpen} className="keep-mounted-pane">
+          {centerAgentId ? (
+            <div className="center-agent-session">
+              <MousseAgentChat key={centerAgentId} agentId={centerAgentId} active />
             </div>
+          ) : workspaceReady ? <OrchestratorChat key={profileId} /> : <WorkspaceLoading conversationOnly />}
 
-          </div>
-
-          <OrchestratorChat key={profileId} />
-
+          </KeepMounted>
         </aside>
 
 
 
-        {sidebarMode === 'chats' && <ChatWorkspace key={profileId} />}
+        {sidebarMode === 'chats' && <KeepMounted active={!usageOpen} className="keep-mounted-pane"><ChatWorkspace key={profileId} /></KeepMounted>}
 
         {mainAreaOpen && sidebarMode === 'projects' && (
           <div
@@ -593,9 +563,7 @@ export default function App() {
 
         {/* Keep terminal PTYs and browser guests mounted when the pane is collapsed. */}
         <KeepMounted as="main" active={mainAreaOpen && sidebarMode === 'projects'} preserveLayout className="main-area">
-          <div className="header">
-            <MainViewTabs />
-          </div>
+          <MainViewTabs />
           <MainViewPanel />
         </KeepMounted>
         </>}

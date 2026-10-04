@@ -54,7 +54,6 @@
 .chat-mention-menu button { display: flex; align-items: center; gap: 8px; padding: 7px; width: 100%; color: var(--text-primary); }
 .chat-mention-menu button span:last-child { margin-left: auto; color: var(--text-secondary); font-size: 10px; }
 .chat-workspace-empty { display: flex; flex-direction: column; align-items: center; margin: auto; padding: 32px 24px; width: min(100%, 420px); color: var(--text-secondary); text-align: center; font-size: 13px; line-height: 1.7; }
-.chat-workspace-empty-icon { display: grid; place-items: center; flex-shrink: 0; width: 56px; height: 56px; margin-bottom: 20px; border: 1px solid rgba(var(--accent-pale-rgb), .12); border-radius: 16px; background: rgba(var(--accent-rgb), .08); color: var(--accent); }
 .chat-workspace-empty h1 { margin: 0; color: var(--text-primary); font-size: 21px; line-height: 1.3; font-weight: 500; }
 .chat-workspace-empty > p { margin: 10px 0 0; max-width: 320px; }
 .chat-workspace-empty > .chat-primary-button { margin-top: 22px; min-height: 38px; }

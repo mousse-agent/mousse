@@ -2,8 +2,9 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, Laptop, Loader2, MessagesSquare, MessageSquarePlus, Pin, Search } from 'lucide-react'
+import { Archive, CircleAlert, CircleCheck, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, ListTree, Loader2, MessagesSquare, MessageSquarePlus, Pin, Search } from '../lib/icons'
 
+import type { Thread, ThreadActivityState } from '../../shared/types'
 import { findUnstartedThread, isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { sortSidebarThreads } from '../../shared/threadSidebarSort'
 import { setReferenceDragData } from '../../shared/chatReferences'
@@ -11,6 +12,7 @@ import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
 import { ChatsSidebar } from './chats/ChatsSidebar'
+import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 
 import {
   ThreadsContextMenu,
@@ -43,6 +45,25 @@ interface DraggedSidebarItem {
 }
 
 const PROJECT_THREAD_PREVIEW_LIMIT = 5
+const SIDEBAR_VIEWS = ['projects', 'threads', 'chats'] as const
+type SidebarView = (typeof SIDEBAR_VIEWS)[number]
+
+function threadAge(iso?: string): string {
+  if (!iso) return ''
+  const delta = Date.now() - new Date(iso).getTime()
+  if (!Number.isFinite(delta) || delta < 45_000) return 'now'
+  const minutes = Math.round(delta / 60_000)
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.round(minutes / 60)
+  if (hours < 36) return `${hours}h`
+  return `${Math.round(hours / 24)}d`
+}
+
+function projectInitials(name: string): string {
+  const parts = name.split(/[\s/._-]+/).filter(Boolean)
+  const letters = `${parts[0]?.[0] ?? ''}${parts[1]?.[0] ?? parts[0]?.[1] ?? ''}`
+  return letters.toUpperCase() || '•'
+}
 
 function ScrollingThreadTitle({ name }: { name: string }) {
   const containerRef = useRef<HTMLSpanElement>(null)
@@ -191,9 +212,89 @@ function SidebarRenameInput({
 
 
 
+function ThreadCardBody({
+  thread,
+  projectName,
+  activity,
+  startedAt,
+  isRenaming,
+  renamingName,
+  isGeneratingTitle,
+  onRename,
+  onCancelRename
+}: {
+  thread: Thread
+  projectName?: string
+  activity?: ThreadActivityState
+  startedAt?: string
+  isRenaming: boolean
+  renamingName: string
+  isGeneratingTitle: boolean
+  onRename: (name: string) => void
+  onCancelRename: () => void
+}) {
+  const hue = thread.projectId ? (Math.abs(hashText(thread.projectId)) % 6) + 1 : 0
+  const age = threadAge(activity === 'processing' ? startedAt ?? thread.updatedAt : thread.updatedAt)
+  return (
+    <>
+      {projectName ? (
+        <span className="threads-sidebar-card-mark" style={{ color: `var(--hue-${hue})` }} aria-hidden="true">{projectInitials(projectName)}</span>
+      ) : (
+        <span className="threads-sidebar-card-mark threads-sidebar-card-mark-empty" aria-hidden="true">
+          <Folder size={13} strokeWidth={1.8} />
+        </span>
+      )}
+      <span className="threads-sidebar-card-body">
+        <span className="threads-sidebar-card-meta">
+          <span className="threads-sidebar-card-project">{projectName ?? 'No project'}</span>
+          {activity === 'processing' ? (
+            <span className="threads-sidebar-card-status threads-sidebar-card-status-working">
+              <Loader2 size={12} strokeWidth={2} className="icon-spin" aria-hidden="true" />
+              Working{age && age !== 'now' ? ` ${age}` : ''}
+            </span>
+          ) : activity === 'awaiting_input' ? (
+            <span className="threads-sidebar-card-status threads-sidebar-card-status-waiting">
+              <CircleAlert size={12} strokeWidth={2} aria-hidden="true" />
+              Waiting
+            </span>
+          ) : activity === 'completed' ? (
+            <span className="threads-sidebar-card-status threads-sidebar-card-status-done">
+              <CircleCheck size={12} strokeWidth={2} aria-hidden="true" />
+              Done
+            </span>
+          ) : (
+            <span className="threads-sidebar-card-age">{age}</span>
+          )}
+        </span>
+        {isRenaming ? (
+          <SidebarRenameInput initialName={renamingName} onSubmit={onRename} onCancel={onCancelRename} />
+        ) : isGeneratingTitle ? (
+          <span className="threads-sidebar-skeleton" aria-label="Generating title" />
+        ) : (
+          <span className="threads-sidebar-card-title">
+            {thread.pinnedAt && <Pin size={11} strokeWidth={2} aria-label="Pinned" />}
+            {thread.name}
+          </span>
+        )}
+        {thread.worktreeEnabled && (
+          <span className="threads-sidebar-card-sub">
+            <GitBranch size={11} strokeWidth={2} aria-hidden="true" />
+            Worktree
+          </span>
+        )}
+      </span>
+    </>
+  )
+}
+
+function hashText(value: string): number {
+  let hash = 0
+  for (let index = 0; index < value.length; index += 1) hash = (hash * 31 + value.charCodeAt(index)) | 0
+  return hash
+}
+
 export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
-  const appInfo = useAppStore((s) => s.appInfo)
   const tabsId = useId()
   const projects = useAppStore((s) => s.projects)
 
@@ -202,8 +303,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const agentThreadIds = useMemo(() => new Set(agentChats.map((chat) => chat.threadId)), [agentChats])
 
   const activeThreadId = useAppStore((s) => s.activeThreadId)
+  const centerAgentId = useAppStore((s) => s.centerAgentId)
+  const setCenterAgentId = useAppStore((s) => s.setCenterAgentId)
 
   const threadActivity = useAppStore((s) => s.threadActivity)
+  const turnStates = useAppStore((s) => s.turnStates)
 
   const switchToThread = useAppStore((s) => s.switchToThread)
 
@@ -216,14 +320,16 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const [expandedProjectThreadLists, setExpandedProjectThreadLists] = useState<Set<string>>(new Set())
 
   const [settledExpanded, setSettledExpanded] = useState(false)
+  const [recentExpanded, setRecentExpanded] = useState(false)
 
   const sidebarView = useAppStore((s) => s.threadsSidebarView)
   const workspaceMode = useAppStore((s) => s.sidebarMode)
-  const setSidebarView = async (view: 'projects' | 'chats') => {
+  const setSidebarView = async (view: SidebarView) => {
     const state = useAppStore.getState()
-    if (state.sidebarMode !== view && !await confirmNavigation()) return
+    const nextMode = view === 'chats' ? 'chats' : 'projects'
+    if (state.sidebarMode !== nextMode && !await confirmNavigation()) return
     state.setThreadsSidebarView(view)
-    state.setSidebarMode(view)
+    if (state.sidebarMode !== nextMode) state.setSidebarMode(nextMode)
   }
 
   const [contextMenu, setContextMenu] = useState<{
@@ -299,11 +405,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     if (!await confirmNavigation()) return
     useAppStore.getState().setSidebarMode('projects')
     if (threadId === activeThreadId) {
-      // A completion can arrive while this thread is already selected. Let main
-      // acknowledge it when the user clicks the green dot/thread again.
-      if (threadActivity[threadId] === 'completed') {
-        await window.mousse.threads.select(threadId)
-      }
       return
     }
     // One store update: highlight + restore cached transcript (if any) while
@@ -336,7 +437,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
   const createThread = async () => {
-    useAppStore.getState().setThreadsSidebarView('chats')
+    useAppStore.getState().setThreadsSidebarView('threads')
     const thread = findUnstartedThread(threads) ?? await window.mousse.threads.create()
     upsertThread(thread)
     await selectThread(thread.id)
@@ -364,10 +465,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
     event.preventDefault()
-    const nextView = event.key === 'Home' ? 'projects' : event.key === 'End' ? 'chats' : sidebarView === 'projects' ? 'chats' : 'projects'
+    const index = SIDEBAR_VIEWS.indexOf(sidebarView)
+    const nextView = event.key === 'Home'
+      ? SIDEBAR_VIEWS[0]
+      : event.key === 'End'
+        ? SIDEBAR_VIEWS[2]
+        : event.key === 'ArrowRight'
+          ? SIDEBAR_VIEWS[(index + 1) % SIDEBAR_VIEWS.length]
+          : SIDEBAR_VIEWS[(index + SIDEBAR_VIEWS.length - 1) % SIDEBAR_VIEWS.length]
     setSidebarView(nextView)
     const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')
-    buttons[nextView === 'projects' ? 0 : 1]?.focus()
+    buttons[SIDEBAR_VIEWS.indexOf(nextView)]?.focus()
   }
 
   const startDrag = (event: React.DragEvent, item: DraggedSidebarItem) => {
@@ -582,8 +690,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
     if (state === 'completed') {
       return (
-        <span
-          className="threads-sidebar-status-dot threads-sidebar-status-dot--completed"
+        <CircleCheck
+          size={14}
+          strokeWidth={2}
+          className="threads-sidebar-status-icon threads-sidebar-status-icon--completed"
           aria-label="Agent finished"
         />
       )
@@ -591,8 +701,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
     if (state === 'awaiting_input') {
       return (
-        <span
-          className="threads-sidebar-status-dot threads-sidebar-status-dot--question"
+        <CircleAlert
+          size={14}
+          strokeWidth={2}
+          className="threads-sidebar-status-icon threads-sidebar-status-icon--question"
           aria-label="Agent has a question"
         />
       )
@@ -652,7 +764,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     }
   }, [])
 
-  const renderThreadRow = (thread: (typeof threads)[number], root = false, view: 'projects' | 'chats' = 'projects') => {
+  const renderThreadRow = (thread: (typeof threads)[number], root = false, view: SidebarView = 'projects', layout: 'row' | 'card' = 'row') => {
 
     const isSettled = Boolean(thread.settledAt)
     const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id
@@ -688,7 +800,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         type="button"
 
-        className={`threads-sidebar-thread${root ? ' threads-sidebar-thread-root' : ''}${
+        className={`threads-sidebar-thread${layout === 'card' ? ' threads-sidebar-card' : ''}${root ? ' threads-sidebar-thread-root' : ''}${
 
           activeThreadId === thread.id ? ' active' : ''
 
@@ -741,8 +853,22 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
       >
 
-        {activeThreadId === thread.id && <span className="threads-sidebar-selected-dot" aria-hidden="true" />}
+        {layout === 'row' && activeThreadId === thread.id && <span className="threads-sidebar-selected-dot" aria-hidden="true" />}
 
+        {layout === 'card' ? (
+          <ThreadCardBody
+            thread={thread}
+            projectName={thread.projectId ? projects.find((project) => project.id === thread.projectId)?.name : undefined}
+            activity={threadActivity[thread.id]}
+            startedAt={turnStates[thread.id]?.startedAt}
+            isRenaming={isRenaming}
+            renamingName={renaming?.name ?? ''}
+            isGeneratingTitle={isGeneratingTitle}
+            onRename={submitRename}
+            onCancelRename={() => setRenaming(null)}
+          />
+        ) : (
+          <>
         {thread.pinnedAt && (
 
           <Pin size={12} strokeWidth={2} className="threads-sidebar-pin-icon" aria-hidden="true" />
@@ -783,6 +909,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
               />
             )}
           </span>
+        )}
+          </>
         )}
 
       </button>
@@ -832,23 +960,49 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
       <div className="threads-sidebar-toolbar">
         <button type="button" className="threads-sidebar-toolbar-button" onClick={openSearch} title={workspaceMode === 'chats' ? 'Search chats' : 'Search threads'} aria-label={workspaceMode === 'chats' ? 'Search chats' : 'Search threads'}>
-          <Search size={18} strokeWidth={1.8} aria-hidden="true" />
+          <Search size={16} strokeWidth={1.8} aria-hidden="true" />
         </button>
         <button type="button" className="threads-sidebar-toolbar-button" onClick={() => { if (workspaceMode === 'chats') useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' }); else void createThread() }} title="New chat" aria-label="New chat">
-          <Edit size={18} strokeWidth={1.8} aria-hidden="true" />
+          <Edit size={16} strokeWidth={1.8} aria-hidden="true" />
         </button>
       </div>
 
-      <div className="threads-sidebar-tabs" role="tablist" aria-label="Thread organization" onKeyDown={onTabKeyDown}>
-        <button type="button" role="tab" id={`${tabsId}-projects-tab`} tabIndex={sidebarView === 'projects' ? 0 : -1} aria-selected={sidebarView === 'projects'} aria-controls={`${tabsId}-projects-panel`}
-          className={`threads-sidebar-tab${sidebarView === 'projects' ? ' active' : ''}`} onClick={() => setSidebarView('projects')}>
-          <FolderKanban size={17} strokeWidth={1.8} aria-hidden="true" />Projects
-        </button>
-        <button type="button" role="tab" id={`${tabsId}-chats-tab`} tabIndex={sidebarView === 'chats' ? 0 : -1} aria-selected={sidebarView === 'chats'} aria-controls={`${tabsId}-chats-panel`}
-          className={`threads-sidebar-tab${sidebarView === 'chats' ? ' active' : ''}`} onClick={() => setSidebarView('chats')}>
-          <MessagesSquare size={17} strokeWidth={1.8} aria-hidden="true" />Chats
-        </button>
+      <div className="threads-sidebar-tabs" role="tablist" aria-label="Sidebar" onKeyDown={onTabKeyDown}>
+        {([
+          ['projects', 'Projects', FolderKanban],
+          ['threads', 'Threads', ListTree],
+          ['chats', 'Chats', MessagesSquare]
+        ] as const).map(([view, label, Icon]) => (
+          <button
+            key={view}
+            type="button"
+            role="tab"
+            id={`${tabsId}-${view}-tab`}
+            tabIndex={sidebarView === view ? 0 : -1}
+            aria-selected={sidebarView === view}
+            aria-controls={`${tabsId}-${view}-panel`}
+            title={label}
+            aria-label={label}
+            className={`threads-sidebar-tab${sidebarView === view ? ' active' : ''}`}
+            onClick={() => setSidebarView(view)}
+          >
+            <Icon size={16} strokeWidth={1.8} aria-hidden="true" />
+          </button>
+        ))}
       </div>
+
+      {centerAgentId && (
+        <button
+          type="button"
+          className="threads-sidebar-main-agent"
+          onClick={() => setCenterAgentId(null)}
+        >
+          <span className="threads-sidebar-main-agent-kicker">Main agent</span>
+          <span className="threads-sidebar-main-agent-name">
+            {threads.find((thread) => thread.id === activeThreadId)?.name || 'This chat'}
+          </span>
+        </button>
+      )}
 
       <div className="threads-sidebar-scroll">
 
@@ -930,9 +1084,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
                     >
 
                       {expanded ? (
-                        <FolderOpen size={18} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
+                        <FolderOpen size={16} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
                       ) : (
-                        <Folder size={18} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
+                        <Folder size={16} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
                       )}
 
                       {project.pinnedAt && (
@@ -1053,36 +1207,49 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         </div>
 
         <button type="button" className="threads-sidebar-open-project" onClick={() => void openProject()}>
-          <FolderPlus size={17} strokeWidth={1.8} aria-hidden="true" />Open project
+          <FolderPlus size={16} strokeWidth={1.8} aria-hidden="true" />Open project
         </button>
 
-        <section className="threads-sidebar-recent" aria-label="Recent threads">
-          <h2 className="threads-sidebar-recent-heading">RECENTS</h2>
-          <div className="threads-sidebar-tree">
-            {orphanThreads.length === 0 ? <div className="threads-sidebar-empty">No recent chats</div> : orphanThreads.map((thread) => renderThreadRow(thread, true))}
-          </div>
-        </section>
+
       </div>
 
 
 
-      <div className="threads-sidebar-section threads-sidebar-section-threads" role="tabpanel" id={`${tabsId}-chats-panel`} aria-labelledby={`${tabsId}-chats-tab`} hidden={sidebarView !== 'chats'}>
-        {sidebarView === 'chats' && <ChatsSidebar />}
-        <h2 className="threads-sidebar-recent-heading">THREADS</h2>
-        <div className="threads-sidebar-tree">
+      <div className="threads-sidebar-section threads-sidebar-section-feed" role="tabpanel" id={`${tabsId}-threads-panel`} aria-labelledby={`${tabsId}-threads-tab`} hidden={sidebarView !== 'threads'}>
+        <div className="threads-sidebar-tree threads-sidebar-thread-feed">
           {availableThreads.length === 0 ? (
-            <div className="threads-sidebar-empty">No chats yet</div>
+            <div className="threads-sidebar-empty">No threads</div>
           ) : (
-            availableThreads.map((thread) => renderThreadRow(thread, true, 'chats'))
+            availableThreads.map((thread) => renderThreadRow(thread, true, 'threads', 'card'))
           )}
         </div>
       </div>
+
+      <div className="threads-sidebar-section threads-sidebar-section-chats" role="tabpanel" id={`${tabsId}-chats-panel`} aria-labelledby={`${tabsId}-chats-tab`} hidden={sidebarView !== 'chats'}>
+        {sidebarView === 'chats' && <ChatsSidebar />}
+      </div>
+
+      </div>
+
+        <section className="threads-sidebar-section threads-sidebar-bottom-recent" aria-label="Recent chats" hidden={sidebarView !== 'projects'}>
+          <div className="threads-sidebar-heading">
+          <button type="button" className="threads-sidebar-heading-toggle"
+            onClick={() => setRecentExpanded((expanded) => !expanded)} aria-expanded={recentExpanded}>
+            <MessagesSquare size={14} strokeWidth={2} aria-hidden="true" />
+            <span>Recent chats</span>
+            <span className="threads-sidebar-settled-count">{orphanThreads.length}</span>
+          </button>
+          </div>
+          {recentExpanded && <div className="threads-sidebar-tree">
+            {orphanThreads.length === 0 ? <div className="threads-sidebar-empty">No recent chats</div> : orphanThreads.map((thread) => renderThreadRow(thread, true))}
+          </div>}
+        </section>
 
       <div
 
         className={`threads-sidebar-section threads-sidebar-section-settled${settledExpanded ? '' : ' collapsed'}`}
 
-        hidden={sidebarView !== 'chats'}
+        hidden={sidebarView !== 'threads'}
 
       >
 
@@ -1096,7 +1263,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             aria-label={settledExpanded ? 'Collapse archived threads' : 'Expand archived threads'}
           >
             <Archive size={14} strokeWidth={2} className="threads-sidebar-settled-icon" aria-hidden="true" />
-            <span>Archived</span>
+            <span>Settled</span>
             <span className="threads-sidebar-settled-count">{settledThreads.length}</span>
           </button>
 
@@ -1107,24 +1274,14 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           {settledThreads.length === 0 ? (
             <div className="threads-sidebar-empty">No settled threads</div>
           ) : (
-            settledThreads.map((thread) => renderThreadRow(thread, true, 'chats'))
+            settledThreads.map((thread) => renderThreadRow(thread, true, 'threads', 'card'))
           )}
         </div>
         )}
 
       </div>
 
-      </div>
-
-      <div className="threads-sidebar-device" aria-label="Current computer">
-        <Laptop size={18} strokeWidth={1.8} aria-hidden="true" />
-        <div className="threads-sidebar-device-text">
-          <span className="threads-sidebar-device-name" title={appInfo?.deviceName}>{appInfo?.deviceName || 'This computer'}</span>
-          <span className="threads-sidebar-device-detail">This device</span>
-        </div>
-      </div>
-
-
+      <ProfileSwitcher variant="sidebar" onSwitched={(profile) => useAppStore.getState().activateProfile(profile.id)} />
 
       {contextMenu && (
 

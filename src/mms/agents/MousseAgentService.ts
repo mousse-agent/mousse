@@ -727,24 +727,34 @@ export class MousseAgentService extends EventEmitter {
     this.persist(true, session.agentId)
   }
 
-  private finishAbortedSession(session: SessionState, partial = '(Stopped)'): void {
+  private finishAbortedSession(session: SessionState, partial = ''): void {
+    const content = partial.trim()
     if (session.activeAssistantMessageId) {
       const existing = session.messages.find(
         (entry) => entry.id === session.activeAssistantMessageId
       )
       if (existing) {
-        this.updateMessage(session, {
-          ...existing,
-          content: existing.content.trim() || partial,
-          streaming: false,
-          incomplete: true
-        })
+        const kept = existing.content.trim() || content
+        if (kept) {
+          this.updateMessage(session, {
+            ...existing,
+            content: kept,
+            streaming: false,
+            incomplete: true
+          })
+        } else {
+          session.messages = session.messages.filter((entry) => entry.id !== existing.id)
+          this.emit('messages-sync', {
+            agentId: session.agentId,
+            messages: [...session.messages]
+          })
+        }
       }
-    } else {
+    } else if (content) {
       this.pushMessage(session, {
         id: uuidv4(),
         role: 'assistant',
-        content: partial,
+        content,
         timestamp: new Date().toISOString(),
         incomplete: true
       })
@@ -1182,7 +1192,7 @@ export class MousseAgentService extends EventEmitter {
       this.touch(session)
 
       if (result.aborted || abort.signal.aborted) {
-        this.finishAbortedSession(session, displayText.trim() || '(Stopped)')
+        this.finishAbortedSession(session, displayText.trim())
         return { accepted: true }
       }
 

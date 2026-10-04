@@ -31,23 +31,44 @@ html[data-acrylic='true'] {
 }
 
 html[data-acrylic='true'] body,
-html[data-acrylic='true'] .app,
 html[data-acrylic='true'] .app-content {
   background: transparent;
 }
 
-/* Theme and chrome backgrounds must consume the dial, including fixed VS Code
-   palettes. Keep text opacity independent from the translucent surfaces. */
-html.platform-linux[data-acrylic='true'] .sidebar,
-html.platform-linux[data-acrylic='true'] .threads-sidebar,
-html.platform-linux[data-acrylic='true'] .titlebar,
-html.platform-linux[data-acrylic='true'] .main-area .header {
-  background: var(--gradient-surface);
+/* Paint the window tint once. Pane and page chrome inherit the same material
+   instead of multiplying its alpha with another full glass background. */
+html[data-acrylic='true'] .app,
+html[data-acrylic='true'] .overlay-page {
+  background: var(--glass-bg);
 }
 
-html.platform-linux[data-acrylic='true'] .main-area,
-html.platform-linux[data-acrylic='true'] .settings-page {
-  background: var(--glass-bg);
+html[data-acrylic='true'] .terminal-panel,
+html[data-acrylic='true'] .terminal-container,
+html[data-acrylic='true'] .terminal-tab.active,
+html[data-acrylic='true'] .app .sidebar,
+html[data-acrylic='true'] .app .threads-sidebar,
+html[data-acrylic='true'] .app .titlebar,
+html[data-acrylic='true'] .overlay-titlebar,
+html[data-acrylic='true'] .app .main-area,
+html[data-acrylic='true'] .app .main-area .header,
+html[data-acrylic='true'] .app .navigation-rail,
+html[data-acrylic='true'] .app .chat-workspace {
+  background: transparent;
+}
+
+html[data-acrylic='true'] .terminal-container .xterm-viewport {
+  background-color: transparent !important;
+}
+
+/* The root tint also covers the one-pixel gap, so the divider cannot expose
+   a brighter strip of desktop between the panes. */
+html[data-acrylic='true'] .app .resizer {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+}
+
+html[data-acrylic='true'] .app .resizer:hover,
+html[data-acrylic='true'] .app .resizer.active {
+  background: rgba(var(--accent-rgb), 0.35);
 }
 
 /* Re-enable glass blur on chrome when acrylic is on (themes disable it for solid mode) */

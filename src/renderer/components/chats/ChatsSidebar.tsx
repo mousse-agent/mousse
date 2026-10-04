@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Plus, X } from 'lucide-react'
+import { Plus, X } from '../../lib/icons'
 import type { ChatAgent, ChatSummary } from '../../../shared/chats'
 import { useAppStore } from '../../stores/appStore'
 import { useChatsStore } from '../../stores/chatsStore'
@@ -35,12 +35,12 @@ export function ChatsSidebar() {
   const directs = snapshot.chats.filter((chat) => chat.kind === 'direct' && matches(chat.name))
   return <div className="chats-sidebar-content">
     {searchOpen && <div className="chat-search"><input ref={input} aria-label="Search chats" placeholder="Search chats" value={search} onChange={(event) => useChatsStore.setState({ search: event.target.value })} /><button aria-label="Close chat search" onClick={() => useChatsStore.setState({ searchOpen: false, search: '' })}><X size={14} /></button></div>}
-    <section aria-label="Agent roster"><div className="chat-section-heading"><h2>ROSTER</h2><button aria-label="Manage agents" title="Manage agents" onClick={() => { useAppStore.getState().setScheduledOpen(true) }}><Plus size={15} /></button></div>
+    <section aria-label="Agent roster"><div className="chat-section-heading"><h2>Roster</h2><button aria-label="Manage agents" title="Manage agents" onClick={() => { useAppStore.getState().setScheduledOpen(true) }}><Plus size={15} /></button></div>
       <div className="chat-roster">{snapshot.agents.filter((agent) => matches(agent.name)).map((agent) => <button key={agent.id} type="button" title={agent.unavailableReason || `Message @${agent.slug} · ${snapshot.devices.find((d) => d.id === agent.deviceId)?.name || 'This device'}`} aria-label={`Message ${agent.name}`} disabled={!agent.available} onClick={() => openAgent(agent)}><ChatAvatar name={agent.name} /><span>{agent.name}</span></button>)}</div>
       {!snapshot.agents.length && <p className="chat-empty-hint">Create and publish an agent in Automations to start a chat.</p>}
     </section>
-    <section aria-label="Groups"><div className="chat-section-heading"><h2>GROUPS</h2><button aria-label="New group" onClick={() => useChatsStore.setState({ newChatOpen: true, newChatKind: 'group' })}><Plus size={15} /></button></div><button type="button" className="chat-network-open" onClick={() => setNetworkOpen(true)}>Open a Space conversation</button>{groups.map(row)}{!groups.length && <p className="chat-empty-hint">No groups yet</p>}</section>
-    <section className="chat-recent-section" aria-label="Recent agent chats"><div className="chat-section-heading"><h2>RECENTS</h2></div>{directs.map(row)}{!directs.length && <p className="chat-empty-hint">Message an agent from the roster.</p>}</section>
+    <section aria-label="Groups"><div className="chat-section-heading"><h2>Groups</h2><button aria-label="New group" onClick={() => useChatsStore.setState({ newChatOpen: true, newChatKind: 'group' })}><Plus size={15} /></button></div><button type="button" className="chat-network-open" onClick={() => setNetworkOpen(true)}>Open a Space conversation</button>{groups.map(row)}{!groups.length && <p className="chat-empty-hint">No groups yet</p>}</section>
+    <section className="chat-recent-section" aria-label="Recent agent chats"><div className="chat-section-heading"><h2>Recent</h2></div>{directs.map(row)}{!directs.length && <p className="chat-empty-hint">Message an agent from the roster.</p>}</section>
     {networkOpen && <OpenNetworkChatDialog onClose={() => setNetworkOpen(false)} />}
   </div>
 }

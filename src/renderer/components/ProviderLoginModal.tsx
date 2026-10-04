@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, Copy, ExternalLink, Loader2, X } from 'lucide-react'
+import { Check, Copy, ExternalLink, Loader2, X } from '../lib/icons'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
 
 interface ProviderLoginModalProps {
@@ -139,14 +139,14 @@ export function ProviderLoginModal({ active, onClose }: ProviderLoginModalProps)
         <div className="provider-login-body">
           {!step && !link && (
             <div className="provider-login-loading">
-              <Loader2 size={20} className="icon-spin" />
+              <Loader2 size={16} className="icon-spin" />
               <span>Starting authentication…</span>
             </div>
           )}
 
           {step?.type === 'progress' && (
             <div className="provider-login-loading">
-              <Loader2 size={20} className="icon-spin" />
+              <Loader2 size={16} className="icon-spin" />
               <span>{step.message}</span>
             </div>
           )}

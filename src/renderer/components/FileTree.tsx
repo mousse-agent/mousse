@@ -6,7 +6,7 @@ import {
   Folder,
   FolderOpen,
   RefreshCw
-} from 'lucide-react'
+} from '../lib/icons'
 import type { FileEntry } from '../../shared/types'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'

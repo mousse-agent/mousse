@@ -1,5 +1,7 @@
 import type { BrowserWindow } from 'electron'
-import { buildAccentCssVars, surfaceToWindowBackground } from '../shared/accentPalette'
+import { nativeTheme } from 'electron'
+import { surfaceToWindowBackground } from '../shared/accentPalette'
+import { appearanceSurfaceBase } from '../shared/themeSurfaces'
 import { appearanceUsesAcrylic, normalizeAppearance } from '../shared/settings'
 import type { SettingsStore } from '../mms/settings/SettingsStore'
 import type { MousseSettings } from '../shared/settings'
@@ -27,8 +29,7 @@ export function applyWindowMaterial(
   const appearance = normalizeAppearance((windowProfileSettings.get(win) ?? settings.get()).appearance)
   const usesAcrylic = appearanceUsesAcrylic(appearance)
   const material = usesAcrylic ? 'acrylic' : 'none'
-  const surface =
-    buildAccentCssVars(appearance.accentColor)['--surface-base'] ?? '#1a1228'
+  const surface = appearanceSurfaceBase(appearance, nativeTheme?.shouldUseDarkColors ?? true)
   const alpha = usesAcrylic || process.platform === 'linux' ? 0 : 1
   const background = surfaceToWindowBackground(surface, alpha)
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Lock } from 'lucide-react'
+import { Lock } from '../../lib/icons'
 import type { ChatAsideCreateInput, ChatAsideCreation, ChatNetworkProjection } from '../../../shared/chatsNetwork'
 import type { NetStatus, StreamId, UserId } from '../../../shared/net'
 import { useChatsStore } from '../../stores/chatsStore'

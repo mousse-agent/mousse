@@ -41,6 +41,8 @@
     "test:profile-production": "node scripts/run-profile-production-isolation-check.mjs"
   },
   "dependencies": {
+    "@hugeicons/core-free-icons": "^4.3.5",
+    "@hugeicons/react": "^1.1.10",
     "@anthropic-ai/sdk": "^0.123.0",
     "@base-ui/react": "^1.7.0",
     "@cursor/sdk": "^1.0.22",

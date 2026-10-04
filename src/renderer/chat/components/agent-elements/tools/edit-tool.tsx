@@ -3,8 +3,9 @@ import { MultiFileDiff, type FileContents } from "@pierre/diffs/react";
 import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
-import { IconChevronDown, IconChevronRight } from "@tabler/icons-react";
+import { IconChevronDown, IconChevronRight } from "../../../../lib/icons";
 import { FileExtIcon } from "../icons/file-ext-icon";
+import { CODE_FONT } from "../../../../lib/typography";
 import {
   extractFilePathArg,
   mapPartStateToInvocationState,
@@ -185,7 +186,7 @@ export function EditToolDiffCard({
         "--diffs-bg-context-override": "var(--an-tool-background)",
         "--diffs-bg-hover-override": "var(--an-background-secondary)",
         "--diffs-bg-separator-override": "var(--an-background-secondary)",
-        "--diffs-font-family": "inherit",
+        "--diffs-font-family": CODE_FONT,
         colorScheme: themeType,
       }) as React.CSSProperties,
     [themeType],
@@ -203,7 +204,7 @@ export function EditToolDiffCard({
   --diffs-bg-context-override: var(--an-tool-background);
   --diffs-bg-hover-override: var(--an-background-secondary);
   --diffs-bg-separator-override: var(--an-background-secondary);
-  --diffs-font-family: inherit;
+  --diffs-font-family: ${CODE_FONT};
   color-scheme: ${themeType};
 }
 `,
@@ -246,7 +247,7 @@ export function EditToolDiffCard({
       >
         <span className="flex items-center gap-1.5 min-w-0 flex-1">
           {hasFileName && (
-            <FileExtIcon filename={fileName} className="w-3 h-3 shrink-0" />
+            <FileExtIcon filename={fileName} className="w-[18px] h-[18px] shrink-0" />
           )}
           {isPending && !diffFiles ? (
             <TextShimmer as="span" duration={1.2} className="text-xs">
@@ -283,7 +284,7 @@ export function EditToolDiffCard({
         {diffFiles && isCollapsible && (
           <IconChevronRight
             className={
-              "w-3 h-3 shrink-0 text-an-tool-color-muted transition-transform duration-150 ease-out ml-1 " +
+              "w-4 h-4 shrink-0 text-an-tool-color-muted transition-transform duration-150 ease-out ml-1 " +
               (isExpanded ? "rotate-90" : "rotate-0")
             }
           />

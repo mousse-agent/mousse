@@ -109,11 +109,11 @@ try {
         await click('.threads-sidebar-tabs button:last-child');await pause(150)
         assert.deepEqual(await evaluate('Array.from(document.querySelectorAll(".chats-sidebar-content h2")).map(e=>e.textContent)'),['ROSTER','GROUPS','RECENTS'])
         const checkEmpty=async()=>{
-          const empty=await rect('.chat-workspace-empty'),icon=await rect('.chat-workspace-empty-icon'),title=await rect('.chat-workspace-empty h1'),description=await rect('.chat-workspace-empty > p'),button=await rect('.chat-workspace-empty > button')
-          for(const child of [icon,title,description,button])assert(Math.abs((child.left+child.right)/2-(empty.left+empty.right)/2)<1,'Empty Chats content is centered')
-          assert(title.top-icon.bottom>=19,'Icon and title have space')
+          const empty=await rect('.chat-workspace-empty'),title=await rect('.chat-workspace-empty h1'),description=await rect('.chat-workspace-empty > p'),button=await rect('.chat-workspace-empty > button')
+          for(const child of [title,description,button])assert(Math.abs((child.left+child.right)/2-(empty.left+empty.right)/2)<1,'Empty Chats content is centered')
+          assert.equal(await exists('.chat-workspace-empty-icon'),false,'Empty Chats has no icon card')
           assert(button.top-description.bottom>=21,'Description and action have space')
-          assert(icon.top>=empty.top && button.bottom<=empty.bottom,'Empty content fits its container')
+          assert(title.top>=empty.top && button.bottom<=empty.bottom,'Empty content fits its container')
           assert.equal(await evaluate('document.querySelector(".chat-workspace").scrollWidth<=document.querySelector(".chat-workspace").clientWidth'),true)
         }
         await checkEmpty()

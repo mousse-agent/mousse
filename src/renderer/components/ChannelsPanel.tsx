@@ -18,7 +18,7 @@ import {
   Send,
   Webhook,
   X
-} from 'lucide-react'
+} from '../lib/icons'
 import type {
   ChannelActivityEvent,
   ChannelConfig,
@@ -313,7 +313,7 @@ export function ChannelsPanel() {
           </>
         ) : (
           <>
-            <Loader2 size={24} className="channels-spinner" />
+            <Loader2 size={16} className="channels-spinner" />
             <p>Loading</p>
           </>
         )}

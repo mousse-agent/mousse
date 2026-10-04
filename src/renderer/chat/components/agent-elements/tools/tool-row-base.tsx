@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Collapsible } from "@base-ui/react/collapsible";
 import { TextShimmer } from "../text-shimmer";
-import { IconChevronRight } from "@tabler/icons-react";
+import { IconChevronRight } from "../../../../lib/icons";
 import { cn } from "../utils/cn";
 
 export type ToolRowBaseProps = {
@@ -44,7 +44,7 @@ export function ToolRowBase({
     >
       <div className="flex items-center gap-2 min-w-0 text-base text-muted-foreground">
         {icon && (
-          <span className="flex items-center justify-center size-3 shrink-0">
+          <span className="flex items-center justify-center size-[18px] shrink-0">
             {icon}
           </span>
         )}
@@ -73,7 +73,7 @@ export function ToolRowBase({
           <IconChevronRight
             className={cn(
               "shrink-0 text-muted-foreground transition-transform duration-150 ease-out",
-              "size-3",
+              "size-[18px]",
               "rotate-0 group-data-panel-open:rotate-90",
             )}
           />

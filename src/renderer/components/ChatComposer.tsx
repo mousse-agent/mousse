@@ -1,7 +1,7 @@
 import { normalizeVoiceError } from '../utils/voiceErrors'
 import type { AppErrorShape } from '../../shared/errors'
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Mic, X } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Mic, X } from '../lib/icons'
 import type { LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
@@ -116,7 +116,7 @@ export function ChatComposer({
   onContextOpenChange,
   loading = false,
   disabled = false,
-  placeholder = 'What do you to want to build?',
+  placeholder = 'Describe a task or ask a question',
   onSend,
   onStop,
   hideModePicker = false,
@@ -128,6 +128,29 @@ export function ChatComposer({
   const recordingTimerRef = useRef<number | null>(null)
   const recordingStartRef = useRef<number>(0)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
+  const resizeDraft = useCallback(() => {
+    const inputElement = composerInputRef.current
+    if (!inputElement) return
+    inputElement.style.height = '0px'
+    const height = Math.max(64, Math.min(200, inputElement.scrollHeight))
+    inputElement.style.removeProperty('height')
+    inputElement.style.setProperty('--draft-input-height', `${height}px`)
+  }, [])
+  useLayoutEffect(() => { resizeDraft() }, [input, resizeDraft])
+  useEffect(() => {
+    const inputElement = composerInputRef.current
+    if (!inputElement) return
+    let width = inputElement.clientWidth
+    const observer = new ResizeObserver(() => {
+      if (inputElement.clientWidth !== width) {
+        width = inputElement.clientWidth
+        resizeDraft()
+      }
+    })
+    observer.observe(inputElement)
+    return () => observer.disconnect()
+  }, [resizeDraft])
+
   const suggestionRefs = useRef(new Map<number, HTMLButtonElement>())
   const [isRecording, setIsRecording] = useState(false)
   const [recordingPending, setRecordingPending] = useState(false)
@@ -233,10 +256,28 @@ export function ChatComposer({
     event.target.value = ''
   }
 
+  const imagePasteKey = useRef({ held: false, consumed: false })
+  useEffect(() => {
+    const reset = () => { imagePasteKey.current = { held: false, consumed: false } }
+    const release = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() === 'v' || event.key === 'Control' || event.key === 'Meta') reset()
+    }
+    window.addEventListener('keyup', release)
+    window.addEventListener('blur', reset)
+    return () => {
+      window.removeEventListener('keyup', release)
+      window.removeEventListener('blur', reset)
+    }
+  }, [])
+
   const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const images = collectImageFilesFromDataTransfer(event.clipboardData)
     if (images.length === 0) return
     event.preventDefault()
+    if (imagePasteKey.current.held) {
+      if (imagePasteKey.current.consumed) return
+      imagePasteKey.current.consumed = true
+    }
     addFiles(images)
   }
 
@@ -403,6 +444,14 @@ export function ChatComposer({
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+      if (!e.repeat) imagePasteKey.current = { held: true, consumed: false }
+      if (e.repeat && imagePasteKey.current.consumed) {
+        e.preventDefault()
+        return
+      }
+    }
+
     if (showSkillsPicker) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
@@ -571,6 +620,7 @@ export function ChatComposer({
           onKeyDown={handleKeyDown}
           onScroll={handleInputScroll}
           onPaste={handlePaste}
+          onFocus={resizeDraft}
           placeholder={
             loading
               ? 'Running… send queues next'

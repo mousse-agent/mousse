@@ -11,6 +11,8 @@ it('preserves each window profile appearance through focus/resume refreshes', ()
   vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
   const shared = getDefaultSettings()
   const personal = getDefaultSettings()
+  shared.appearance.theme = 'dark'
+  personal.appearance.theme = 'dark'
   shared.appearance.accentColor = '#a855f7'
   personal.appearance.accentColor = '#3b82f6'
   const store = { get: () => shared } as SettingsStore

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { DiffEditor, type BeforeMount, type DiffOnMount } from '@monaco-editor/react'
 import type { Monaco } from '@monaco-editor/react'
-import { Cloud, Download, FolderOpen, GitBranch, Milestone, RefreshCw } from 'lucide-react'
+import { Cloud, Download, FolderOpen, GitBranch, Milestone, RefreshCw } from '../lib/icons'
 import type { GitCommit, GitFileChange, GitStatusSnapshot } from '../../shared/types'
 import type { GitHubAvailability, GitHubRepositoryVisibility } from '../../shared/github'
 import { useActiveProjectPath } from '../hooks/useActiveProjectPath'
 import { useAppStore } from '../stores/appStore'
+import { CODE_FONT } from '../lib/typography'
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../utils/monacoTheme'
 import { languageForPath } from '../utils/fileEditor'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
@@ -365,7 +366,7 @@ export function GitPanel() {
     if (loading) return <div className="git-empty">Loading…</div>
     if (!status?.isRepo) return (
       <div className="github-setup">
-        <div className="github-setup-heading"><Cloud size={18} /> Not a Git repository</div>
+        <div className="github-setup-heading"><Cloud size={16} /> Not a Git repository</div>
         <p>Create a GitHub repository for this project, or clone into a separate empty folder.</p>
         <div className={`github-status github-status-${githubStatus?.state ?? 'busy'}`}>
           {githubStatus?.message ?? 'Checking GitHub CLI…'}
@@ -543,7 +544,7 @@ export function GitPanel() {
                 folding: true,
                 renderWhitespace: 'selection',
                 wordWrap: 'off',
-                fontFamily: "Outfit, 'Segoe UI', sans-serif",
+                fontFamily: CODE_FONT,
                 fontSize: 12
               }}
             />

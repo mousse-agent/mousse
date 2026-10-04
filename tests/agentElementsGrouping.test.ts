@@ -6,6 +6,7 @@ import {
 } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
 import { mapPartStateToInvocationState } from '../src/renderer/chat/components/agent-elements/utils/tool-adapters'
 import {
+  activityGroupLabel,
   analyzeAssistantMessage,
   partitionTurnSegments,
 } from '../src/renderer/chat/components/agent-elements/utils/assistant-blocks'
@@ -106,19 +107,31 @@ describe('analyzeAssistantMessage', () => {
     expect(result.toolsOnly).toBe(false)
   })
 
-  it('rejects messages with thought or question rows', () => {
-    expect(
-      analyzeAssistantMessage(
-        [tool('tool-Thinking', 't'), tool('tool-Bash', 'a')],
-        false
-      ).toolsOnly
-    ).toBe(false)
+  it('lets thoughts join a group and keeps questions out', () => {
+    const thought = analyzeAssistantMessage(
+      [tool('tool-Thinking', 't', { input: { thought: 'Inspect the catalog' } }), tool('tool-Bash', 'a')],
+      false
+    )
+    expect(thought.toolsOnly).toBe(true)
+    expect(thought.toolItems).toHaveLength(2)
     expect(
       analyzeAssistantMessage(
         [tool('tool-Question', 'q'), tool('tool-Bash', 'a')],
         false
       ).toolsOnly
     ).toBe(false)
+  })
+
+  it('titles a run with the latest non-empty thought', () => {
+    const items = [
+      { part: tool('tool-Thinking', 't1', { input: { thought: 'First pass' } }) },
+      { part: tool('tool-Bash', 'a') },
+      { part: tool('tool-Thinking', 't2', { input: { thought: '   ' } }) },
+      { part: tool('tool-Thinking', 't3', { input: { thought: 'Check the model list' } }) },
+      { part: tool('tool-Read', 'r') },
+    ]
+    expect(activityGroupLabel(items)).toBe('Check the model list')
+    expect(activityGroupLabel([{ part: tool('tool-Grep', 'g') }, { part: tool('tool-Read', 'r') }])).toBe('')
   })
 
   it('ignores suppressed questions and task output so runs stay joined', () => {
@@ -144,26 +157,21 @@ describe('analyzeAssistantMessage', () => {
     ).toBe(false)
   })
 
-  it('keeps file-write tools out of groups so edits stay visible', () => {
-    // Current Pi tool names.
-    expect(analyzeAssistantMessage([tool('tool-Write', 'w')], false).toolsOnly).toBe(false)
-    expect(analyzeAssistantMessage([tool('tool-Edit', 'e')], false).toolsOnly).toBe(false)
-    // Legacy / variant names: write_file normalizes to tool-Write_file.
-    expect(analyzeAssistantMessage([tool('tool-Write_file', 'w')], false).toolsOnly).toBe(false)
-    expect(analyzeAssistantMessage([tool('tool-Apply_patch', 'p')], false).toolsOnly).toBe(false)
-    // Same-named MCP tools also stay expanded.
+  it('lets file edits join a group and still keeps questions out', () => {
+    expect(analyzeAssistantMessage([tool('tool-Write', 'w')], false).toolsOnly).toBe(true)
+    expect(analyzeAssistantMessage([tool('tool-Edit', 'e')], false).toolsOnly).toBe(true)
+    expect(analyzeAssistantMessage([tool('tool-Write_file', 'w')], false).toolsOnly).toBe(true)
+    expect(analyzeAssistantMessage([tool('tool-Apply_patch', 'p')], false).toolsOnly).toBe(true)
     expect(
       analyzeAssistantMessage([tool('tool-mcp__custom__write', 'w')], false).toolsOnly
-    ).toBe(false)
-    // A write breaks an otherwise groupable run; reads still group.
-    expect(partitionTurnSegments([true, false, true])).toEqual([
-      { kind: 'message', msgIndex: 0 },
-      { kind: 'message', msgIndex: 1 },
-      { kind: 'message', msgIndex: 2 },
-    ])
-    expect(
-      analyzeAssistantMessage([tool('tool-Read', 'r')], false).toolsOnly
     ).toBe(true)
+    expect(
+      analyzeAssistantMessage(
+        [tool('tool-Thinking', 't', { input: { thought: 'Update the file' } }), tool('tool-Edit', 'e')],
+        false
+      ).toolsOnly
+    ).toBe(true)
+    expect(analyzeAssistantMessage([tool('tool-Question', 'q')], false).toolsOnly).toBe(false)
   })
 })
 

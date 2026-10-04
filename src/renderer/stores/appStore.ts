@@ -106,16 +106,21 @@ interface AppState {
   tasks: Task[]
   activePtyId: string | null
   activeAgentId: string | null
+  /** Spawned-agent session shown in the center chat. Null is the main agent. */
+  centerAgentId: string | null
+  setCenterAgentId: (centerAgentId: string | null) => void
   sidebarWidth: number
   threadsSidebarWidth: number
+  usageOpen: boolean
+  setUsageOpen: (open: boolean) => void
   settingsOpen: boolean
   scheduledOpen: boolean
   channelsOpen: boolean
   /** @deprecated use turnStates[threadId]?.phase instead â€” kept for compat */
   loading: boolean
   appInfo: { platform: string; repoRoot: string; llmProvider: string; deviceName?: string } | null
-  threadsSidebarView: 'projects' | 'chats'
-  setThreadsSidebarView: (view: 'projects' | 'chats') => void
+  threadsSidebarView: 'projects' | 'threads' | 'chats'
+  setThreadsSidebarView: (view: 'projects' | 'threads' | 'chats') => void
   sidebarMode: 'projects' | 'chats'
   setSidebarMode: (sidebarMode: 'projects' | 'chats') => void
   threadsSidebarOpen: boolean
@@ -126,6 +131,10 @@ interface AppState {
   threadActivity: ThreadActivitySnapshot
   turnStates: TurnStateSnapshot
   mainView: MainView
+  /** Surfaces the user opened in the side panel. Agents is added on its own. */
+  openedSurfaceKinds: MainView[]
+  openSurfaceKind: (kind: MainView) => void
+  closeSurfaceKind: (kind: MainView) => void
   projectTerminalTabs: ProjectTerminalTab[]
   activeProjectTerminalTabByThread: Record<string, string>
   documentTabs: DocumentTab[]
@@ -281,6 +290,7 @@ const personalWorkspaceKeys = [
   'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
   'sidebarMode', 'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
+  'openedSurfaceKinds',
   'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView'
 ] as const
 let profileActivated = false
@@ -304,8 +314,12 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   tasks: [],
   activePtyId: null,
   activeAgentId: null,
+  centerAgentId: null,
+  setCenterAgentId: (centerAgentId) => set({ centerAgentId }),
   sidebarWidth: 30,
   threadsSidebarWidth: 260,
+  usageOpen: false,
+  setUsageOpen: (usageOpen) => set(usageOpen ? { usageOpen, settingsOpen: false, scheduledOpen: false, channelsOpen: false } : { usageOpen }),
   settingsOpen: false,
   scheduledOpen: false,
   channelsOpen: false,
@@ -319,6 +333,22 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   threadActivity: {},
   turnStates: {},
   mainView: 'agents',
+  openedSurfaceKinds: [],
+  openSurfaceKind: (kind) => set((state) => ({
+    openedSurfaceKinds: state.openedSurfaceKinds.includes(kind)
+      ? state.openedSurfaceKinds
+      : [...state.openedSurfaceKinds, kind],
+    mainView: kind,
+    mainAreaOpen: true,
+    sidebarMode: 'projects'
+  })),
+  closeSurfaceKind: (kind) => set((state) => {
+    const openedSurfaceKinds = state.openedSurfaceKinds.filter((entry) => entry !== kind)
+    const mainView = state.mainView === kind
+      ? (state.agents.length > 0 ? 'agents' : openedSurfaceKinds[0] ?? state.mainView)
+      : state.mainView
+    return { openedSurfaceKinds, mainView }
+  }),
   projectTerminalTabs: [],
   activeProjectTerminalTabByThread: {},
   documentTabs: [],
@@ -368,15 +398,20 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
       return { messages }
     }),
-  setAgents: (agents) => set({ agents }),
+  setAgents: (agents) => set((state) => ({
+    agents,
+    centerAgentId: state.centerAgentId && agents.some((agent) => agent.id === state.centerAgentId)
+      ? state.centerAgentId
+      : null
+  })),
   setTasks: (tasks) => set({ tasks }),
   setActivePtyId: (activePtyId) => set({ activePtyId }),
   setActiveAgentId: (activeAgentId) => set({ activeAgentId }),
   setSidebarWidth: (sidebarWidth) => set({ sidebarWidth }),
   setThreadsSidebarWidth: (threadsSidebarWidth) => set({ threadsSidebarWidth }),
-  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
-  setScheduledOpen: (scheduledOpen) => set({ scheduledOpen }),
-  setChannelsOpen: (channelsOpen) => set({ channelsOpen }),
+  setSettingsOpen: (settingsOpen) => set(settingsOpen ? { settingsOpen, scheduledOpen: false, channelsOpen: false } : { settingsOpen }),
+  setScheduledOpen: (scheduledOpen) => set(scheduledOpen ? { scheduledOpen, settingsOpen: false, channelsOpen: false } : { scheduledOpen }),
+  setChannelsOpen: (channelsOpen) => set(channelsOpen ? { channelsOpen, settingsOpen: false, scheduledOpen: false } : { channelsOpen }),
   setLoading: (loading) => set({ loading }),
   setAppInfo: (appInfo) => set({ appInfo }),
   setThreadsSidebarOpen: (threadsSidebarOpen) => set({ threadsSidebarOpen }),
@@ -386,7 +421,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setActiveThreadId: (activeThreadId) => set({ activeThreadId }),
   switchToThread: (id) =>
     set((s) => {
-      if (s.activeThreadId === id) return { sidebarMode: 'projects' }
+      if (s.activeThreadId === id) return { sidebarMode: 'projects', centerAgentId: null }
       if (s.activeThreadId && s.messages.length > 0) {
         rememberMessages(s.activeThreadId, s.messages)
       }
@@ -398,6 +433,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
         // Agents/tasks are always re-fetched with the snapshot (small, thread-scoped).
         agents: [],
         tasks: [],
+        centerAgentId: null,
         loading: false
       }
     }),
@@ -409,11 +445,15 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       const messagesUnchanged = sameMessageSnapshot(s.messages, reconciled)
       const agents = view.agents ?? s.agents
       const tasks = view.tasks ?? s.tasks
-      if (messagesUnchanged && agents === s.agents && tasks === s.tasks) return s
+      const centerAgentId = s.centerAgentId && agents.some((agent) => agent.id === s.centerAgentId)
+        ? s.centerAgentId
+        : null
+      if (messagesUnchanged && agents === s.agents && tasks === s.tasks && centerAgentId === s.centerAgentId) return s
       return {
         messages: messagesUnchanged ? s.messages : reconciled,
         agents,
-        tasks
+        tasks,
+        centerAgentId
       }
     }),
   setProjects: (projects) => set({ projects }),
@@ -513,12 +553,13 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       browserTabs: [],
       browserActiveTabByThread: {},
       browserElementAttachmentsByThread: {},
-      threadsSidebarView: 'projects' as 'projects' | 'chats',
+      threadsSidebarView: 'projects' as 'projects' | 'threads' | 'chats',
       composerWorkspaceDrafts: {},
       composerDrafts: {},
       composerReferences: {},
       sidebarMode: 'projects' as 'projects' | 'chats',
       mainView: 'agents' as MainView,
+      openedSurfaceKinds: [] as MainView[],
       sidebarWidth: 30,
       threadsSidebarWidth: 260,
       threadsSidebarOpen: true,
@@ -536,6 +577,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
     return {
       ...state,
       profileId,
+      usageOpen: false,
       profileReady: true,
       workspaceReady: false,
       ...next,
@@ -544,6 +586,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       tasks: [],
       activePtyId: null,
       activeAgentId: null,
+      centerAgentId: null,
       activeThreadId: null,
       projects: [],
       threads: [],

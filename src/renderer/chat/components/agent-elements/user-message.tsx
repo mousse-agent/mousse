@@ -141,8 +141,9 @@ export const UserMessage = memo(function UserMessage({
 
   return (
     <div className={cn("flex flex-col items-end gap-1", className)}>
-      {images.length > 0 &&
-        images.map((url, i) => (
+      <div className="chat-user-bubble max-w-[calc(95%-40px)] ms-[70px] px-3.5 py-1.5 text-base rounded-an-message bg-an-user-message-bg text-an-user-message-text">
+      {images.length > 0 && <div className="chat-user-image-carousel" role="region" aria-label="Attached images" tabIndex={0}>
+        {images.map((url, i) => (
           <div
             key={i}
             className={cn(
@@ -160,6 +161,7 @@ export const UserMessage = memo(function UserMessage({
             />
           </div>
         ))}
+      </div>}
       {enableImagePreview && lightboxImages.length > 0 && (
         <ImageLightbox
           open={lightboxIndex !== null}
@@ -187,14 +189,9 @@ export const UserMessage = memo(function UserMessage({
         </div>
       )}
       {text && (
-        <div className="max-w-[calc(95%-40px)] ms-[70px]">
-          <div className="px-3.5 py-1.5 text-base transition-colors rounded-an-message bg-an-user-message-bg text-an-user-message-text">
-            <p className="leading-6 whitespace-pre-wrap wrap-break-word">
-              {text}
-            </p>
-          </div>
-        </div>
+        <p className="leading-6 whitespace-pre-wrap wrap-break-word">{text}</p>
       )}
+      </div>
     </div>
   );
 });

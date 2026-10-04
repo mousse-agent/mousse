@@ -3,6 +3,7 @@ import type { Monaco } from '@monaco-editor/react'
 import type { editor, IDisposable, languages } from 'monaco-editor'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../../utils/monacoTheme'
+import { CODE_FONT } from '../../lib/typography'
 import { MarkdownPreview } from './MarkdownPreview'
 import { MarkdownViewTabs } from './MarkdownViewTabs'
 import {
@@ -267,7 +268,7 @@ export function MarkdownDocumentEditor({
               minimap: { enabled: true },
               lineNumbers: 'on',
               scrollBeyondLastLine: false,
-              fontFamily: "Outfit, 'Segoe UI', sans-serif",
+              fontFamily: CODE_FONT,
               fontSize: 13,
               tabSize: 2,
               detectIndentation: true,

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { FileText, Globe, MousePointer2, Plus, TerminalSquare } from 'lucide-react'
+import { FileText, Globe, MousePointer2, Plus, TerminalSquare } from '../../lib/icons'
 import Editor, { type OnMount } from '@monaco-editor/react'
 import type * as Monaco from 'monaco-editor'
 import { Terminal } from '@xterm/xterm'
@@ -10,7 +10,7 @@ import type { BrowserArtifactReadResult } from '../../../shared/browser/host'
 import type { BrowserViewerSnapshot } from '../../../shared/browser/viewer'
 import { viewerPointToCss } from '../../../shared/browser/viewer'
 import { registerNavigationGuard } from '../../services/navigationGuards'
-import { XTERM_FONT, getXtermTheme } from '../../lib/xtermTheme'
+import { XTERM_FONT, getXtermTheme, followXtermAppearance } from '../../lib/xtermTheme'
 import '@xterm/xterm/css/xterm.css'
 
 type Request = <T>(method: ChatResourceMethod, params?: Record<string, unknown>) => Promise<T>
@@ -120,7 +120,8 @@ function SharedTerminal({ terminal, snapshot, request, presence, operate }: Comm
   const [error, setError] = useState('')
   useEffect(() => {
     if (!container.current) return
-    const term = new Terminal({ fontFamily: XTERM_FONT, fontSize: 12, theme: getXtermTheme(), cursorBlink: true })
+    const term = new Terminal({ allowTransparency: true, fontFamily: XTERM_FONT, fontSize: 12, theme: getXtermTheme(), cursorBlink: true })
+    followXtermAppearance(term)
     const fit = new FitAddon()
     term.loadAddon(fit); term.open(container.current); fit.fit()
     let active = true, busy = false, sequence = 0

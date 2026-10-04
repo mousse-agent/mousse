@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { Check, Clipboard, GitBranch, Info, RotateCcw, Undo2, X } from 'lucide-react'
+import { Check, Clipboard, GitBranch, Info, RotateCcw, Undo2, X } from '../lib/icons'
 import type { ChatMessage } from '../../shared/types'
 import type { ThreadAction } from '../../shared/threadActions'
 import type { UndoRetentionEligibility } from '../../shared/undoRetention'

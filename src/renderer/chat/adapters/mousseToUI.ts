@@ -296,7 +296,7 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
     // raw — images already render as previews via msg.images, other files
     // become file pills below.
     const text = msg.content ?? ''
-    let displayText = text
+    let displayText = msg.role === 'assistant' ? text.replace(/(?:[ \t]*\r?\n)*[ \t]*\(Stopped\)\s*$/u, '') : text
     let extraFileNames: string[] = []
     let references: ReturnType<typeof parseUserMessageContent>['references'] = []
     if (msg.role === 'user' && text.includes('[')) {

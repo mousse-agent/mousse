@@ -1,4 +1,4 @@
-import { Eye, Pencil } from 'lucide-react'
+import { Eye, Pencil } from '../../lib/icons'
 import type { KeyboardEvent } from 'react'
 import type { MarkdownEditorViewMode } from './markdownEditorState'
 

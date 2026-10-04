@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import type { BridgeDisplayPart } from '../shared/bridge'
 import type { WindowResizeEdge } from '../shared/windowResize'
 import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity, NamedAgentRequest, NamedAgentRecallRequest, NamedAgentIntegrationRequest, NamedAgentIntegrationReview } from '../shared/agentEpisodes'
@@ -113,6 +114,7 @@ async function storageInvoke<T>(channel: string, ...args: unknown[]): Promise<T>
 
 const api = {
   platform: process.platform,
+  startupAppearance: readStartupAppearanceArgument(process.argv),
   /** Bounded profile-aware bridge for new platform feature clients. */
   platformRequest: {
     request: platformRequest
