@@ -4,6 +4,30 @@ Updated 2026-10-04. Tracking: [issue #44](https://github.com/mousse-agent/mousse
 
 I recovered the interrupted Claude thread and continued its existing isolated worktree. I preserved the primary checkout's unrelated edits. The published recovery starts at `d3f9433`. Bridge and public Spaces now have profile-bound daemon/CLI composition in this draft branch; the remaining gates below still prevent a release claim.
 
+## Baseline fixture corrections, 2026-10-04
+
+I merged [PR #62](https://github.com/mousse-agent/mousse/pull/62) as
+`02a648b4` after reproducing and correcting 12 inherited failures at stale Git,
+unknown-error and hidden-Undo assertions. The six affected files qualify 23
+focused cases. I fast-forwarded the primary checkout while preserving its four
+local changes, then integrated the new master into this existing stack.
+The foundation integration passes all 23 cases. Chats already carries typed
+profile/purge errors and stronger prompt admission assertions; I retained those
+branch-specific expectations during conflict resolution, and its 23 cases pass.
+The UI merge carries those verified changes without changing its source tree.
+
+The two built-Electron baseline failures remain unqualified. Their drivers
+search the removed composer strip, and the Git seed lacks prompt turn provenance.
+A separate production-RPC probe reproduces missing workspace Redo exposure on
+master; the existing combined draft #61 contains the earlier correction and still
+needs independent verification. I have not called the application suite green.
+
+I also reviewed optional Plus #60 against its actual companion server. Its
+one-hour GUI device invitation exceeds the hosted ten-minute limit and leaves a
+rejected rendezvous pending, blocking renewal even after restart. I recorded the
+controlled reproduction on that existing PR and preserved its owner's branch.
+Other-human sensitive review remains pending for the substantive stack.
+
 ## Renewal CI follow-up, 2026-10-04
 
 I diagnosed and reproduced the additional renewal failure in PR #45's CI at
