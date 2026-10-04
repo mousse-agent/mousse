@@ -1,7 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'fs'
 import { symlink } from 'fs/promises'
 import { spawn } from 'child_process'
-import { devNull } from 'node:os'
+import { GIT_NULL_DEVICE } from '../git/gitNullDevice'
 import { basename, dirname, join, relative, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
 import simpleGit, { SimpleGit } from 'simple-git'
@@ -455,7 +455,7 @@ async function safeWorktreeGit(repositoryRoot: string): Promise<{ git: SimpleGit
       allowUnsafeFilter: true
     }
   })
-  const safety = ['-c', `core.hooksPath=${devNull}`, '-c', 'core.fsmonitor=false']
+  const safety = ['-c', `core.hooksPath=${GIT_NULL_DEVICE}`, '-c', 'core.fsmonitor=false']
   // Git LFS and other inherited drivers must never execute on dispatched content,
   // including Git's dirty-file check before worktree removal.
   const configuration = await git.raw([...safety, 'config', '--null', '--show-scope', '--list'])

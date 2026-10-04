@@ -46,7 +46,11 @@ async function linked(){
 it('rediscovers a SIGKILL-committed prepared task without input and never queries or dispatches it from read APIs',async()=>{
   const f=await linked();writeFileSync(join(f.caller.home,'chats-crash-task.json'),JSON.stringify(f.selection));await f.caller.services.stop()
   const killed=spawnSync(process.execPath,[executable,f.caller.home,f.caller.profileId,f.group.id,'chats.task.afterCommit'],{encoding:'utf8',timeout:20000,env:{...process.env,MOUSSE_HOME:f.caller.home}})
-  expect(killed.signal,killed.stderr).toBe('SIGKILL')
+  if(process.platform==='win32'){
+    expect(killed.signal,killed.stderr).toBeNull()
+    expect(killed.status,killed.stderr).toEqual(expect.any(Number))
+    expect(killed.status,killed.stderr).not.toBe(0)
+  }else expect(killed.signal,killed.stderr).toBe('SIGKILL')
   const reopened=await profile({home:f.caller.home,profileId:f.caller.profileId}),rt=reopened.services.net.runtime()
   const before=rt.db.database.prepare('SELECT record FROM net_bridge_hub_requests WHERE id=?').get(f.selection.taskId)!.record
   const query=vi.spyOn(reopened.services.bridge.hub,'query'),submit=vi.spyOn(reopened.services.bridge.hub,'submit'),prepare=vi.spyOn(reopened.services.bridge.hub,'prepare')
@@ -123,13 +127,17 @@ it('queries the exact original after a lost actual TLS result and restart withou
   // Recover the original without the prepared input in an actual independent
   // process, then SIGKILL between verified Hub result and Chat validation commit.
   const child=spawn(process.execPath,[readExecutable,f.caller.home,f.caller.profileId,f.group.id,f.selection.taskId],{stdio:['ignore','ignore','pipe'],env:{...process.env,MOUSSE_HOME:f.caller.home}})
-  const killed=await new Promise<{signal:NodeJS.Signals|null;stderr:string}>((done,reject)=>{
+  const killed=await new Promise<{code:number|null;signal:NodeJS.Signals|null;stderr:string}>((done,reject)=>{
     let stderr='';child.stderr.on('data',chunk=>{stderr+=String(chunk)})
     const timer=setTimeout(()=>child.kill('SIGTERM'),25000)
     child.once('error',error=>{clearTimeout(timer);reject(error)})
-    child.once('close',(_code,signal)=>{clearTimeout(timer);done({signal,stderr})})
+    child.once('close',(code,signal)=>{clearTimeout(timer);done({code,signal,stderr})})
   })
-  expect(killed.signal,killed.stderr).toBe('SIGKILL')
+  if(process.platform==='win32'){
+    expect(killed.signal,killed.stderr).toBeNull()
+    expect(killed.code,killed.stderr).toEqual(expect.any(Number))
+    expect(killed.code,killed.stderr).not.toBe(0)
+  }else expect(killed.signal,killed.stderr).toBe('SIGKILL')
   expect(JSON.parse(readFileSync(join(f.caller.home,'chats-task-read-crash.json'),'utf8'))).toEqual({chatId:f.group.id,taskId:f.selection.taskId,original:f.selection.taskId,state:'completed'})
   const reopened=await profile({home:f.caller.home,profileId:f.caller.profileId})
   await vi.waitFor(()=>expect(reopened.services.net.session(f.selection.deviceId).state()).toBe('open'),{timeout:15000})

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { devNull } from 'node:os'
+import { GIT_NULL_DEVICE } from '../../git/gitNullDevice'
 import { NetError } from '../../../shared/net'
 
 const remoteConfiguration = new Set([
@@ -18,12 +18,12 @@ function environment(trustRemoteConfiguration: boolean): NodeJS.ProcessEnv {
   }
   if (!trustRemoteConfiguration) {
     env.GIT_CONFIG_NOSYSTEM = '1'
-    env.GIT_CONFIG_GLOBAL = devNull
+    env.GIT_CONFIG_GLOBAL = GIT_NULL_DEVICE
   }
   Object.assign(env, {
     GIT_TERMINAL_PROMPT: '0',
-    GIT_ASKPASS: devNull,
-    SSH_ASKPASS: devNull,
+    GIT_ASKPASS: GIT_NULL_DEVICE,
+    SSH_ASKPASS: GIT_NULL_DEVICE,
     SSH_ASKPASS_REQUIRE: 'never',
     GCM_INTERACTIVE: 'never',
     GIT_LFS_SKIP_SMUDGE: '1'
@@ -40,7 +40,7 @@ function runGit(
 ): Promise<string> {
   const safety = [
     '-c',
-    `core.hooksPath=${devNull}`,
+    `core.hooksPath=${GIT_NULL_DEVICE}`,
     '-c',
     'core.fsmonitor=false',
     '-c',

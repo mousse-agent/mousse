@@ -400,7 +400,12 @@ describe('P2 real exporter-bound atomic node enrollment', () => {
       killed = await child('kill'),
       first = await joinAt(killed.port)
     await expect(first.completed).rejects.toMatchObject({ code: 'route_unreachable' })
-    expect((await killed.exit)[1]).toBe('SIGKILL')
+    const [exitCode, signal] = await killed.exit
+    if (process.platform === 'win32') {
+      expect(signal).toBeNull()
+      expect(exitCode).toEqual(expect.any(Number))
+      expect(exitCode).not.toBe(0)
+    } else expect(signal).toBe('SIGKILL')
     expect(a.identity.roster()).toEqual(before)
     expect(
       a.db.database
