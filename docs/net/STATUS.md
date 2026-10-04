@@ -4,6 +4,83 @@ Updated 2026-10-03. Tracking: [issue #44](https://github.com/mousse-agent/mousse
 
 I recovered the interrupted Claude thread and continued its existing isolated worktree. I preserved the primary checkout's unrelated edits. The published recovery starts at `d3f9433`. Bridge and public Spaces now have profile-bound daemon/CLI composition in this draft branch; the remaining gates below still prevent a release claim.
 
+## Merge preparation, 2026-10-03
+
+I resumed the interrupted merge-preparation work without touching the primary
+checkout's unrelated edits. The Net branch contains the current fetched default,
+`7c973adf`. The older references to `8729d0c4` below describe historical checkpoints.
+The active stack is #45 (Net), #50 (Chats binding), and #52 (renderer/Control
+cutover); helper PRs are being reconciled into those existing branches.
+
+I compared the hosted default run `37135616520` with Net run `37139655133`.
+The default has 14 failing tests in eight files: Git Foundation full shell,
+GitService missing cwd, platform profile stats, Prompt Undo UI, Resource Lifecycle
+rename/full shell, Resource Purge, and Resource Purge qualification. The older
+published Net head has the same failures plus 18 Net failures. I retain the
+baseline failures as unresolved; passing focused Net checks cannot establish that
+the application suite is green.
+
+The local Net branch already carries both security-review rounds' fixes:
+position-bound private-message authorization, current minimum-version admission,
+60-second heartbeat freshness, shared preauthentication slot limits, and Bridge
+feature enforcement on auxiliary RPC paths. The interrupted gate-fixture and
+per-test CLI-build fixes were committed locally but had not reached GitHub.
+
+I reproduced the authority-transfer fixture's `peer_offline`/`keystore_locked`
+race on the unchanged local source. `bridge.join` awaits the joining node's
+session; the authority can still be processing the final hello acknowledgment.
+The transfer fixture now waits for the authority's open peer before testing the
+unprotected target. Its original protection and receipt assertions are unchanged;
+all three service checks pass in five consecutive runs on Node 24.20.
+The 5 MiB TLS snapshot assertion retains its exact payload and delivery checks,
+with a 30-second delivery budget and 60-second outer bound for slower runners.
+
+I reproduced the CI filter failure in both safe checkout and actual Dispatch
+using a harmless required global filter. I also reproduced inherited clean-filter
+execution during Dispatch cleanup after invalidating a tracked file's stat cache.
+Safe checkout and explicit Dispatch cleanup now disable configured drivers and
+their required flags per invocation. Normal and recovery cleanup use the same
+guard; ordinary local worktrees keep their configured filters. Repository-local
+filter refusal remains in place. The focused Dispatch/composed run passed 25
+checks with one opt-in tunnel skip; the final service/safe-checkout and directly
+affected WorktreeManager run passed 26 checks. The code is integrated at
+`428f0aca`.
+
+The integrated Net run at that source passed 763 checks and skipped one opt-in
+tunnel case, but exposed three original local-filter denial regressions in
+`bridge/safeCheckout.test.ts`. I corrected the helper to distinguish Git scopes:
+repository-local and worktree-specific executable filters still refuse before
+the journal/branch effect; inherited global/system filters are disabled per
+command. I kept the three original assertions and added a worktree-config case.
+All 31 directly affected safe-checkout, Dispatch and composed execution checks
+now pass, with the same one tunnel skip. I reuse the unchanged Net cases' passing
+evidence rather than claim a subsequent whole-application or whole-Net run.
+
+The nine focused emitted-reader, protected archive and 5 MiB snapshot checks pass
+on Node 24.20 after the already-committed gate-fixture corrections. Both source
+typechecks and Net formatting pass. The source lint check has no errors; it retains
+the existing `NetService` floating-promise warning, and ESLint does not configure
+the QA script. I do not report that script as linted.
+
+At the read-only soak observation `2026-10-03T17:47:26.985Z`, the frozen public
+run reports 1,106 sent originals, equal cursors, zero pending/failed, and fault
+counts 24/24/24/24. It is still running and unqualified; I did not restart or
+modify it. Its earliest 24-hour completion remains
+`2026-10-04T09:15:13.345Z` plus final checks. It cannot qualify the current head.
+
+Merge preparation does not enable a release. Profile networking stays opt-in,
+production bot adapters remain inactive, and unsupported recovery paths deny.
+Paid-provider, complete packaged GUI/visual, full platform and completed-soak
+qualification remain open. The repository's sensitive-change policy also requires
+the other human teammate's review before merge; model security reviews do not
+replace it. No default-branch merge is authorized or performed.
+
+I rechecked GitHub after the partner's update. The remote default and #45/#50/#52
+heads were unchanged. The partner's new #60 (`codex/plus-native-client`) is a
+separate draft targeting #52, paired with draft `bvsr365/mousse-plus#2`; neither
+was merged. I preserve that independent scope and branch while reconciling this
+stack. Their hosted-feature reports do not qualify the updated foundation.
+
 ## Phase gates
 
 | Phase | Current evidence / next gate |
@@ -145,9 +222,11 @@ full application transport gates are not established by a link test.
 Dispatch tests exercise actual Git/worktrees, durable result publication, actual
 SIGKILL recovery in child processes, and the MMS native definition/resolver/tool
 lifecycle with a deterministic provider response. I reproduced repository checkout
-hook execution and configured filter execution, then added a trusted safe checkout
-which disables hooks/fsmonitor and rejects external clean/smudge/process filters
-before admitting a model effect. Local repository/worktree paths remain local
+hook execution and configured filter execution, then added a trusted safe checkout.
+The later merge-preparation correction disables hooks/fsmonitor and inherited
+external filter drivers for each safe checkout and cleanup command. Dispatch
+still rejects repository-local clean/smudge/process filters before admitting a
+model effect. Local repository/worktree paths remain local
 recovery metadata; root must choose the external Dispatch query DTO.
 
 The isolated native bot runtime and compiled macOS reader backend are implemented,

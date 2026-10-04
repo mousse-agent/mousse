@@ -1,5 +1,12 @@
 # Mousse Net security review R2
 
+> Follow-up, 2026-10-03: I preserve this static review at its original revision.
+> The subsequent Dispatch fix disables inherited external filters per command
+> during safe checkout and cleanup, while retaining the pre-effect refusal of
+> repository-local filters. The unchanged claims below describe the reviewed
+> revision, not that later implementation. Current red/green evidence is recorded
+> in `docs/net/STATUS.md`.
+
 ## Scope and method
 
 I read `/private/tmp/mnfix-briefs/security-review-2.md` in full and reviewed the specified gaps in `/Volumes/xt1/code/RYSPA/mousse-net`, branch `codex/issue-44-mousse-net`, draft PR #45. I used the Bridge, Dispatch, transport, local IPC and archive contracts in `docs/net/PLAN.md`, `protocol.md`, `state-machines.md` and `threat-model.md`, together with the first review's exclusions, to trace admission, authorization, asynchronous boundaries, persistence and teardown in source.
