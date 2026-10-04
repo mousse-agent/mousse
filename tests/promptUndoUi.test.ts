@@ -60,11 +60,11 @@ it('clicks the actual latest-prompt Undo with its exact turn and generation, wit
   expect(list).toHaveBeenCalledTimes(3)
 })
 
-it('keeps historical and active prompts unavailable and rejects a changed target before dispatch', async () => {
+it('hides historical Undo, disables it during an active turn and rejects a changed target before dispatch', async () => {
   const list = vi.fn().mockResolvedValueOnce(history).mockResolvedValue({ ...history, undoTarget: { ...target, turnId: 'new-turn', journalGeneration: 8 } })
   const { undoLatest } = await mount(list)
   const older = PromptUndoButton({ messageId: 'prompt-older' })
-  expect(older.props.disabled).toBe(true); older.props.onClick()
+  expect(older).toBeNull()
   render(true)
   const active = PromptUndoButton({ messageId: target.messageId })
   expect(active.props.disabled).toBe(true); active.props.onClick()
@@ -111,12 +111,14 @@ it('does not let a completion from an unmounted profile alter the new binding', 
   expect(PromptUndoButton({ messageId: target.messageId }).props.disabled).toBe(false)
 })
 
-it('explains unavailable history instead of leaving a checking tooltip after failure', async () => {
+it('hides Undo and explains unavailable history through the provider alert', async () => {
   vi.stubGlobal('window', { setInterval: () => 1, clearInterval: () => undefined, mousse: { actions: { list: vi.fn().mockRejectedValue(new Error('History offline')) } } })
   render()
   await vi.waitFor(() => expect(hooks.states[2]).toBe('History offline'))
-  render()
-  const button = PromptUndoButton({ messageId: target.messageId })
-  expect(button.props.disabled).toBe(true)
-  expect(button.props.title).toBe('Undo unavailable: History offline')
+  const tree = render()
+  expect(PromptUndoButton({ messageId: target.messageId })).toBeNull()
+  expect(tree.props.value.unavailableReason).toBe('Undo unavailable: History offline')
+  expect(tree.props.children).toContainEqual(expect.objectContaining({
+    props: expect.objectContaining({ role: 'alert', children: 'History offline' })
+  }))
 })
