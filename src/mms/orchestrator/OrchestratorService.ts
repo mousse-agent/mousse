@@ -12,7 +12,7 @@ import type { AgentWorkspacePolicy, AgentEpisode } from '../../shared/agentEpiso
 import { AsyncLocalStorage } from 'async_hooks'
 import { join } from 'node:path'
 import { readFileSync } from 'node:fs'
-import { normalizeContextSettings, resolveContextCompactionTokens } from '../../shared/settings'
+import { normalizeContextSettings, resolveContextCompactionTokens, resolveModelForMode } from '../../shared/settings'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type { WorkflowChatExecutor } from '../platform/MmsWorkflowChatBridge'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
@@ -30,6 +30,8 @@ import { AgentExecutionService } from '../agentDefinitions/AgentExecutionService
 import { createNativeAgentRuntime } from '../agentDefinitions/nativeRuntime'
 import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
 import { EventEmitter } from 'events'
+import { antigravityAssistantMessage, antigravityHistory } from '../providers/antigravity/history'
+import type { AntigravityProviderService } from '../providers/antigravity/AntigravityProviderService'
 import { v4 as uuidv4 } from 'uuid'
 import {
   isDelegationSettledStatus,
@@ -503,6 +505,8 @@ export async function retryContextOverflowOnce<T>(
 }
 
 export class OrchestratorService extends EventEmitter {
+  private antigravity?: AntigravityProviderService
+  setAntigravityProvider(provider: AntigravityProviderService): void { this.antigravity = provider }
   private readonly lifecycle = new OwnedWorkBarrier()
 
   getOwnedActivity(): Record<string, number> {
@@ -573,7 +577,7 @@ export class OrchestratorService extends EventEmitter {
         // newly admitted thread, so reusing the GUI client's instance would let
         // the run observe or mutate the constructor's original task queue.
         const runId = request.runId ?? uuidv4()
-        const browserRuntime = this.browserRuntime ?? readHostBrowserRuntime(request.host)
+        const browserRuntime = readHostBrowserRuntime(request.host) ?? this.browserRuntime
         const llm = new LlmClient(
           this.settingsStore,
           this.providerAuth,
@@ -1611,6 +1615,15 @@ export class OrchestratorService extends EventEmitter {
     const run = async (): Promise<ContextUsageSnapshot> => {
       const request = normalizeContextUsageRequest(input)
       const modelOverride = this.session.modelOverride
+      const selectedModel = modelOverride ?? resolveModelForMode(this.settingsStore.get(), request.mode, [
+        ...(this.providerAuth.credentials?.listProviderIds() ?? []),
+        ...(this.antigravity?.configured() ? ['antigravity'] : [])
+      ])
+      if (selectedModel.llmProvider === 'antigravity') {
+        // ACP owns its context and does not publish a token window in its model
+        // selector. Do not display a fabricated Mousse context measurement.
+        return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model, source: 'estimated', categories: [] }
+      }
       const { limit, modelName } = this.llm.getSelectedModelContextLimit(request.mode, modelOverride)
       const contextInputs = await this.llm.getContextInputs(
         request.mode,
@@ -2851,6 +2864,11 @@ export class OrchestratorService extends EventEmitter {
     let providerError: AppErrorShape | undefined
     let failureDiagnostic: Record<string, unknown> | undefined
     let compactionNote: ChatMessage | undefined
+    const selectedModel = opts?.modelOverride ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
+      ...(this.providerAuth.credentials?.listProviderIds() ?? []),
+      ...(this.antigravity?.configured() ? ['antigravity'] : [])
+    ])
+    const antigravityTurn = selectedModel.llmProvider === 'antigravity'
     const onCompaction = (phase: 'start' | 'complete' | 'unchanged'): void => {
       if (phase === 'start') {
         compactionNote = { id: uuidv4(), role: 'assistant', kind: 'context_compaction',
@@ -2866,6 +2884,46 @@ export class OrchestratorService extends EventEmitter {
       this.persist(true)
     }
     try {
+      if (antigravityTurn) {
+        if (mode === 'plan') throw new Error('Use Antigravity’s /plan command in a chat turn')
+        const model = selectedModel.model
+        if (!this.antigravity || !session.projectCwd) throw new Error('Antigravity requires a project workspace')
+        let started = false
+        assistantText = await this.antigravity.chat({
+          threadId: session.threadId, cwd: session.projectCwd, model,
+          prompt: userContent, images, signal: turn.abort.signal,
+          history: antigravityHistory(this.nativeContext, turnNativeStartBoundary.messageIndex),
+          drainSteer: () => {
+            const parts = [opts?.externalDrainSteer?.()?.trim(), this.drainSteerForSession(session, turn)?.trim()]
+              .filter((part): part is string => Boolean(part))
+            return parts.length ? parts.join('\n') : undefined
+          },
+          onSteer: (content) => {
+            this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(content))
+            this.nativeContext.acceptedSteerItemIds = Array.from(new Set([
+              ...(this.nativeContext.acceptedSteerItemIds ?? []), ...session.drainedExternalSteerIds
+            ]))
+            this.persist(true)
+            this.acknowledgeDrainedSteers(session)
+          },
+          onText: (content) => {
+            if (!started) { this.handleStreamingTextEvent({ phase: 'start', content: '', contentIndex: 0 }); started = true }
+            this.handleStreamingTextEvent({ phase: 'delta', content, contentIndex: 0 })
+          },
+          onTool: (event) => {
+            conversationToolsUsed = true
+            this.handleStreamingToolEvent({
+              kind: 'mcp_tool_call', phase: event.phase, callId: event.callId,
+              title: event.title, summary: event.toolName ?? event.title, details: []
+            })
+          }
+        })
+        this.nativeContext = appendNativeMessage(this.nativeContext, antigravityAssistantMessage(assistantText, model))
+        this.persist(true)
+        this.antigravity.commitConversation(session.threadId, antigravityHistory(this.nativeContext))
+        if (started) this.handleStreamingTextEvent({ phase: 'complete', content: assistantText, contentIndex: 0 })
+        responseMetadata = { modelName: model }
+      } else {
       const browserExecution = this.mainBrowserFactory
         ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
         : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined
@@ -3005,6 +3063,7 @@ export class OrchestratorService extends EventEmitter {
         contextRevision: this.nativeContext.revision ?? 0,
         modelKey: result.contextInputs.modelKey
       })
+      }
     } catch (err) {
       const normalized = normalizeAppError(err, 'orchestrator_turn_failed')
       const isAbort = turn.abort.signal.aborted || normalized.errorInfo.category === 'cancelled'
@@ -3128,7 +3187,7 @@ export class OrchestratorService extends EventEmitter {
       return response
     }
 
-    const parsedActions = parseActions(assistantText)
+    const parsedActions = antigravityTurn ? [] : parseActions(assistantText)
     const actions = filterActionsForChatMode(parsedActions, mode)
     const displayText = stripActionBlocks(assistantText)
 

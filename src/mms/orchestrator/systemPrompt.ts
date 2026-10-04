@@ -1,5 +1,6 @@
 import { readFileSync } from 'fs'
 import { join } from 'path'
+import { appendProjectAgentInstructions } from './projectInstructions'
 import type { SkillDescriptor } from '../../shared/integrations'
 import type { ChatMode } from '../../shared/types'
 import { getSkillIdFromMode, normalizeChatMode } from '../../shared/chatMode'
@@ -247,6 +248,9 @@ Complete the assigned work and report its actual result. Retained context is mem
     sections.push(TASK_CONTROL_PROMPT)
   }
 
+  sections.push(`## File links
+When linking to a workspace file, use the canonical Markdown target \`mousse-file://open?path=<URL-encoded-path>&line=<1-based-line>&column=<1-based-column>\`. The line and column are optional; prefer workspace-relative paths when possible. Do not emit file:// URLs.`)
+
   const invokableSkills = (options.skills ?? []).filter(
     (skill) => skill.isActive !== false && !skill['disable-model-invocation']
   )
@@ -278,9 +282,10 @@ Skill id: ${mode.skillId}`)
   }
 
   const projectInstructions = readProjectMousseInstructions(options.projectPath)
-  return projectInstructions
+  const systemPrompt = projectInstructions
     ? `${projectInstructions}\n\n${sections.join('\n\n')}`
     : sections.join('\n\n')
+  return appendProjectAgentInstructions(systemPrompt, options.projectPath)
 }
 
 export const ORCHESTRATOR_SYSTEM_PROMPT = buildOrchestratorSystemPrompt()

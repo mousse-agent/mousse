@@ -6,7 +6,11 @@ import { Archive, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch,
 
 import { findUnstartedThread, isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { sortSidebarThreads } from '../../shared/threadSidebarSort'
+import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
+import { confirmNavigation } from '../services/navigationGuards'
+import { useChatsStore } from '../stores/chatsStore'
+import { ChatsSidebar } from './chats/ChatsSidebar'
 
 import {
   ThreadsContextMenu,
@@ -194,6 +198,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const projects = useAppStore((s) => s.projects)
 
   const threads = useAppStore((s) => s.threads)
+  const agentChats = useChatsStore((s) => s.snapshot.chats)
+  const agentThreadIds = useMemo(() => new Set(agentChats.map((chat) => chat.threadId)), [agentChats])
 
   const activeThreadId = useAppStore((s) => s.activeThreadId)
 
@@ -212,7 +218,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const [settledExpanded, setSettledExpanded] = useState(false)
 
   const sidebarView = useAppStore((s) => s.threadsSidebarView)
-  const setSidebarView = useAppStore((s) => s.setThreadsSidebarView)
+  const workspaceMode = useAppStore((s) => s.sidebarMode)
+  const setSidebarView = async (view: 'projects' | 'chats') => {
+    const state = useAppStore.getState()
+    if (state.sidebarMode !== view && !await confirmNavigation()) return
+    state.setThreadsSidebarView(view)
+    state.setSidebarMode(view)
+  }
 
   const [contextMenu, setContextMenu] = useState<{
 
@@ -239,12 +251,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // Empty drafts are composer state, not conversations. They become visible
   // only when the first message is committed.
   const availableThreads = useMemo(
-    () => sortSidebarThreads(threads.filter((thread) => !thread.settledAt && isThreadStarted(thread))),
-    [threads]
+    () => sortSidebarThreads(threads.filter((thread) => !thread.settledAt && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
+    [threads, agentThreadIds]
   )
   const settledThreads = useMemo(
-    () => sortSidebarThreads(threads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread))),
-    [threads]
+    () => sortSidebarThreads(threads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
+    [threads, agentThreadIds]
   )
   const orphanThreads = availableThreads.filter((thread) => !thread.projectId)
 
@@ -284,6 +296,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
   const selectThread = async (threadId: string) => {
+    if (!await confirmNavigation()) return
+    useAppStore.getState().setSidebarMode('projects')
     if (threadId === activeThreadId) {
       // A completion can arrive while this thread is already selected. Let main
       // acknowledge it when the user clicks the green dot/thread again.
@@ -322,7 +336,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
   const createThread = async () => {
-    setSidebarView('chats')
+    useAppStore.getState().setThreadsSidebarView('chats')
     const thread = findUnstartedThread(threads) ?? await window.mousse.threads.create()
     upsertThread(thread)
     await selectThread(thread.id)
@@ -342,7 +356,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   }
 
-  const openSearch = () => setSearchOpen(true)
+  const openSearch = () => {
+    if (workspaceMode === 'chats') useChatsStore.setState({ searchOpen: true })
+    else setSearchOpen(true)
+  }
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
@@ -360,8 +377,20 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     }
     draggedItem.current = item
     setIsDragging(true)
-    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.effectAllowed = 'copyMove'
     event.dataTransfer.setData('text/plain', item.id)
+    if (item.type === 'project') {
+      const project = projects.find((entry) => entry.id === item.id)
+      if (project) setReferenceDragData(event.dataTransfer, {
+        kind: 'project', title: project.name, projectId: project.id
+      })
+    } else {
+      const thread = threads.find((entry) => entry.id === item.id)
+      if (thread) setReferenceDragData(event.dataTransfer, {
+        kind: 'thread', title: thread.name, threadId: thread.id,
+        projectId: thread.projectId
+      })
+    }
   }
 
   const canDropOn = (target: DraggedSidebarItem) => {
@@ -802,10 +831,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     <aside className={`threads-sidebar${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
 
       <div className="threads-sidebar-toolbar">
-        <button type="button" className="threads-sidebar-toolbar-button" onClick={openSearch} title="Search threads" aria-label="Search threads">
+        <button type="button" className="threads-sidebar-toolbar-button" onClick={openSearch} title={workspaceMode === 'chats' ? 'Search chats' : 'Search threads'} aria-label={workspaceMode === 'chats' ? 'Search chats' : 'Search threads'}>
           <Search size={18} strokeWidth={1.8} aria-hidden="true" />
         </button>
-        <button type="button" className="threads-sidebar-toolbar-button" onClick={() => void createThread()} title="New chat" aria-label="New chat">
+        <button type="button" className="threads-sidebar-toolbar-button" onClick={() => { if (workspaceMode === 'chats') useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' }); else void createThread() }} title="New chat" aria-label="New chat">
           <Edit size={18} strokeWidth={1.8} aria-hidden="true" />
         </button>
       </div>
@@ -1038,6 +1067,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
       <div className="threads-sidebar-section threads-sidebar-section-threads" role="tabpanel" id={`${tabsId}-chats-panel`} aria-labelledby={`${tabsId}-chats-tab`} hidden={sidebarView !== 'chats'}>
+        {sidebarView === 'chats' && <ChatsSidebar />}
+        <h2 className="threads-sidebar-recent-heading">THREADS</h2>
         <div className="threads-sidebar-tree">
           {availableThreads.length === 0 ? (
             <div className="threads-sidebar-empty">No chats yet</div>

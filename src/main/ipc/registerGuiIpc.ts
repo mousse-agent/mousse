@@ -1,4 +1,7 @@
 import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
+import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
+import { CHAT_METHODS } from '../../shared/chats'
+import { CHAT_RESOURCE_METHODS } from '../../shared/chatResources'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
  * Does not take a MousseMainService / owner lease.
@@ -51,7 +54,7 @@ import {
   type WindowDragPoint
 } from '../windowState'
 import { applyWindowMaterial, attachWindowFocusListeners, setWindowProfileSettings } from '../windowMaterial'
-import { closeAgentsTasksWindow, openAgentsTasksWindow } from '../agentsTasksWindow'
+import { closeAgentsTasksWindow, getAgentsTasksWindow, openAgentsTasksWindow } from '../agentsTasksWindow'
 import {
   getThreadNotificationPresentation,
   type ThreadNotificationKind
@@ -76,6 +79,10 @@ import type {
 } from '../../shared/types'
 import type { RemoteScope } from '../../shared/controlTypes'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
+import type {
+  GitHubCloneRepositoryInput,
+  GitHubCreateRepositoryInput
+} from '../../shared/github'
 
 
 export interface GuiIpcServices {
@@ -102,6 +109,8 @@ let activeGuiMms: GuiMmsController | null = null
  * owned by the platform domain layer through this list.
  */
 export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new Set([
+  ...CHAT_METHODS,
+  ...CHAT_RESOURCE_METHODS,
   ...BROWSER_ACCESS_METHODS,
   ...BROWSER_GUI_METHODS,
   ...BROWSER_SETUP_METHODS,
@@ -115,6 +124,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   'agentDefinitions.duplicate', 'agentDefinitions.importBundle',
   'agentDefinitions.exportBundle', 'agentDefinitions.validate', 'agentDefinitions.tryRun',
   'integrations.snapshot',
+  'chatReferences.resolve',
   'skills.create', 'skills.update', 'skills.editor', 'skills.enable', 'skills.archive',
   'skills.importPackage', 'skills.exportPackage',
   'mcp.create', 'mcp.update', 'mcp.read', 'mcp.enable', 'mcp.delete',
@@ -162,7 +172,7 @@ function applyWindowAccentBackground(
   const surfaceBase = buildAccentCssVars(appearance.accentColor)['--surface-base']
   if (!surfaceBase) return
   win.setBackgroundColor(
-    surfaceToWindowBackground(surfaceBase, appearanceUsesAcrylic(appearance) ? 0 : 1)
+    surfaceToWindowBackground(surfaceBase, process.platform === 'linux' || appearanceUsesAcrylic(appearance) ? 0 : 1)
   )
 }
 
@@ -195,6 +205,7 @@ export function registerGuiIpc(
     repoRoot
   } = services
   activeGuiMms = guiMms
+  registerLinuxWindowResizeIpc(getWindow, getAgentsTasksWindow)
 
   const browserHost = (event: Electron.IpcMainInvokeEvent): AttachedBrowserHost => {
     if (event.senderFrame !== event.sender.mainFrame || !services.attachedBrowserHost) throw new Error('In-app browser automation is unavailable')
@@ -232,7 +243,13 @@ export function registerGuiIpc(
       if (Buffer.byteLength(encoded, 'utf8') > 512 * 1024) {
         throw new PlatformRequestError('platform_params_too_large', 'Platform parameters exceed the size limit')
       }
-      return { ok: true, value: await guiMms.request(method, params) }
+      const value = await guiMms.request(method, params)
+      return {
+        ok: true,
+        value: method === 'chatReferences.resolve'
+          ? (value as { reference: unknown }).reference
+          : value
+      }
     } catch (error) {
       const descriptor = error instanceof MmsProtocolError
         ? knownAppError({ code: error.code, message: error.message, details: error.details, errorInfo: error.errorInfo })
@@ -1665,13 +1682,27 @@ export function registerGuiIpc(
 
   registerHandler('app:getFilesRoot', async (_e, threadId?: string | null) => {
     const id = threadId ?? currentPresentation().getActiveThreadId()
-    return (await resolveProjectPath(undefined, id)) ?? homedir()
+    return resolveFilesRoot(undefined, id)
   })
 
-  // Standalone threads intentionally browse the user's home directory. Always resolve
-  // project-backed operations from the supplied thread instead of reusing GUI selection.
-  const resolveFilesRoot = async (projectId?: string, threadId?: string | null): Promise<string> =>
-    (await resolveProjectPath(projectId, threadId)) ?? homedir()
+  // Standalone threads intentionally browse the user's home directory. A ready
+  // per-thread workspace is authoritative over the project's primary checkout;
+  // FileService still applies its existing root guard to the selected root.
+  const resolveFilesRoot = async (projectId?: string, threadId?: string | null): Promise<string> => {
+    if (threadId) {
+      try {
+        const status = await guiMms.request<{
+          execution?: { projectPath?: string; lifecycle?: string }
+        }>('workspace.getStatus', { threadId })
+        if (status.execution?.lifecycle === 'ready' && status.execution.projectPath) {
+          return status.execution.projectPath
+        }
+      } catch {
+        // Missing/unready workspace falls back to the daemon-authoritative project.
+      }
+    }
+    return (await resolveProjectPath(projectId, threadId)) ?? homedir()
+  }
 
   registerHandler(
     'fs:listDir',
@@ -1742,6 +1773,33 @@ export function registerGuiIpc(
   )
   registerHandler('git:push', async (_e, projectId?: string, cwd?: string) => {
     await gitService.push(await resolveGitCwd(projectId, cwd))
+  })
+
+  registerHandler('github:status', async () => {
+    const response = await guiMms.request<{ availability: unknown }>('github.status')
+    return response.availability
+  })
+  registerHandler('github:createRepository', async (_e, input: GitHubCreateRepositoryInput) => {
+    const response = await guiMms.request<{ result: unknown }>('github.createRepository', input)
+    return response.result
+  })
+  registerHandler('github:chooseCloneDestination', async () => {
+    const win = getWindow()
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose an empty folder for the cloned repository',
+      buttonLabel: 'Use this folder',
+      properties: ['openDirectory', 'createDirectory']
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
+  registerHandler('github:cloneRepository', async (_e, input: GitHubCloneRepositoryInput) => {
+    const response = await guiMms.request<{ project: unknown; projects: unknown[] }>(
+      'github.cloneRepository',
+      input
+    )
+    broadcast('projects:updated', response.projects)
+    return { project: response.project }
   })
 
   const boundBrowserProfile = (): string => {
@@ -1851,6 +1909,12 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ options: unknown[] }>('providers.getLoginOptions', {
       authType
     })
+    return res.options
+  })
+  registerHandler('providers:refreshModels', async (_e, providerId: string) => {
+    const res = await guiMms.request<{ options: unknown[] }>('providers.refreshModels', { providerId })
+    const configured = await guiMms.request<{ providers: unknown[] }>('providers.listConfigured')
+    broadcast('providers:changed', configured.providers)
     return res.options
   })
   registerHandler('providers:getAmbientInfo', async (_e, providerId: string) => {

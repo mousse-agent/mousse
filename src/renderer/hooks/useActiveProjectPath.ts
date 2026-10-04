@@ -16,31 +16,45 @@ async function resolveWorkspaceProjectPath(threadId: string | null): Promise<str
   return window.mousse.app.getActiveProjectPath(threadId)
 }
 
-export function useActiveProjectPath(): string | null {
+/** Keep unresolved lookups distinct from a confirmed standalone thread. */
+export function useActiveProjectLocation(): { path: string | null; loading: boolean } {
   const activeThreadId = useAppStore((s) => s.activeThreadId)
-  const [projectPath, setProjectPath] = useState<string | null>(null)
+  const profileId = useAppStore((s) => s.profileId)
+  const scope = `${profileId}:${activeThreadId ?? '__blank__'}`
+  const [resolved, setResolved] = useState<{ scope: string; path: string | null } | null>(null)
 
   useEffect(() => {
-    void resolveWorkspaceProjectPath(activeThreadId).then(setProjectPath)
-  }, [activeThreadId])
+    let cancelled = false
+    void resolveWorkspaceProjectPath(activeThreadId).then((path) => {
+      if (!cancelled) setResolved({ scope, path })
+    }).catch(() => { if (!cancelled) setResolved({ scope, path: null }) })
+    return () => { cancelled = true }
+  }, [activeThreadId, profileId, scope])
 
-  return projectPath
+  return resolved?.scope === scope ? { path: resolved.path, loading: false } : { path: null, loading: true }
+}
+
+export function useActiveProjectPath(): string | null {
+  return useActiveProjectLocation().path
 }
 
 export function useFilesRoot(): { root: string; label: string } {
   const activeThreadId = useAppStore((s) => s.activeThreadId)
+  const profileId = useAppStore((s) => s.profileId)
   const [root, setRoot] = useState('')
   const [label, setLabel] = useState('~')
 
   useEffect(() => {
-    void Promise.all([
-      resolveWorkspaceProjectPath(activeThreadId),
-      window.mousse.app.getFilesRoot(activeThreadId)
-    ]).then(([workspaceProject, legacyFilesRoot]) => {
-      setRoot(workspaceProject ?? legacyFilesRoot)
-      setLabel(workspaceProject ?? '~')
-    })
-  }, [activeThreadId])
+    let cancelled = false
+    setRoot('')
+    setLabel('~')
+    void window.mousse.app.getFilesRoot(activeThreadId).then((filesRoot) => {
+      if (cancelled) return
+      setRoot(filesRoot)
+      setLabel(filesRoot || '~')
+    }).catch(() => { if (!cancelled) setRoot('') })
+    return () => { cancelled = true }
+  }, [activeThreadId, profileId])
 
   return { root, label }
 }

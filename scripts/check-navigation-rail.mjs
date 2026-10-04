@@ -28,6 +28,7 @@ try {
         ]
         window.mousse = {
           platform: 'linux',
+          platformRequest: { request: async () => ({ agents: [], chats: [], devices: [] }) },
           window: { closeAgentsTasks: async () => {}, openAgentsTasks: async () => {},
             isMaximized: async () => false, onMaximizedChange: subscription },
           providers: { getUsage: async () => { window.fixture.usageLoads++; return { providers: [
@@ -70,7 +71,7 @@ try {
     loader: { '.svg': 'dataurl', '.webp': 'dataurl' },
     define: { 'process.env.NODE_ENV': '"production"' }, minify: true,
     plugins: [{ name: 'unrelated-panels', setup(builder) {
-      builder.onResolve({ filter: /\/components\/(OrchestratorChat|MainViewPanel|MainViewTabs|QuickActionsButton)$/ }, args => ({
+      builder.onResolve({ filter: /\/components\/(?:chats\/)?(ChatWorkspace|OrchestratorChat|MainViewPanel|MainViewTabs|QuickActionsButton)$/ }, args => ({
         path: args.path.split('/').at(-1), namespace: 'fixture-panel'
       }))
       builder.onLoad({ filter: /.*/, namespace: 'fixture-panel' }, args => ({ resolveDir: fileURLToPath(new URL('..', import.meta.url)), loader: 'tsx', contents:

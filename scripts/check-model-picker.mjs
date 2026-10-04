@@ -24,25 +24,36 @@ try {
           { id: 'plain', label: 'Plain Model' },
           { id: 'context@200k', label: 'Context Model @ 200k', efforts: ['low', 'high'] },
           { id: 'context@1m', label: 'Context Model @ 1m', efforts: ['low', 'high'] },
-          { id: 'quick-model', label: 'Quick Model (fast) @ 1m', efforts: ['low', 'high'] }
+          { id: 'quick-model', label: 'Quick Model (fast) @ 1m', efforts: ['low', 'high'] },
+          { id: 'speed@1m', label: 'Speed Model @ 1m', efforts: ['low', 'high'] },
+          { id: 'speed@1m:fast', label: 'Speed Model (fast) @ 1m', efforts: ['low', 'high'] },
+          { id: 'speed@1m:slow', label: 'Speed Model (slow) @ 1m', efforts: ['low', 'high'] }
+        ] }, { id: 'openai-codex', label: 'OpenAI Subscription', models: [
+          { id: 'gpt-subscription', label: 'GPT Subscription', efforts: ['low', 'high'] },
+          { id: 'gpt-subscription:fast', label: 'GPT Subscription (fast)', efforts: ['low', 'high'] },
+          { id: 'subscription-standard-only', label: 'Subscription Standard Only' }
+        ] }, { id: 'antigravity', label: 'Google Antigravity', models: [
+          { id: 'account-model', label: 'Account Model' }
         ] }]
         localStorage.clear()
         window.fixture = { selections: [], modes: [] }
         function Fixture() {
           const [modelId, setModelId] = useState('gpt-test:high')
+          const [providerId, setProviderId] = useState('openai')
           const [mode, setMode] = useState('agent')
           const [open, setOpen] = useState(false)
           const [readOnly, setReadOnly] = useState(false)
           const [recordingPending, setRecordingPending] = useState(false)
           window.fixture.setModelId = setModelId
+          window.fixture.setProviderId = setProviderId
           window.fixture.setReadOnly = setReadOnly
           window.fixture.setRecordingPending = setRecordingPending
           return <ComposerFooter chatMode={mode} onChatModeChange={value => {
             window.fixture.modes.push(value); setMode(value)
-          }} enabledSkills={[]} providers={providers} selectedProviderId="openai"
+          }} enabledSkills={[]} providers={providers} selectedProviderId={providerId}
             selectedModelId={modelId} modelReadOnly={readOnly} recordingPending={recordingPending} modelMenuOpen={open} onModelMenuOpenChange={setOpen}
             onModelSelect={(provider, model) => {
-              window.fixture.selections.push([provider, model]); setModelId(model); setOpen(false)
+              window.fixture.selections.push([provider, model]); setProviderId(provider); setModelId(model); setOpen(false)
             }} onOpenSettings={() => {}} onAttachClick={() => {}} contextOpen={false}
             onContextOpenChange={() => {}} contextUsage={{ percent: 0, used: 0, limit: 1,
               modelName: null, source: 'estimated', categories: [] }} />
@@ -145,7 +156,7 @@ try {
           assert.deepEqual(await evaluate('window.fixture.selections.at(-1)'), ['openai', 'context@1m:high'])
           await evaluate('window.fixture.setModelId("quick-model:high")')
           await pause(40)
-          assert.equal(await evaluate('document.querySelector(".composer-model-btn-label").textContent'), 'Quick Model · 1m · High · Fast')
+          assert.equal(await evaluate('document.querySelector(".composer-model-btn-label").textContent'), 'Quick Model · 1m · High')
           assert.equal(await evaluate('!!document.querySelector(".composer-fast-toggle")'), false)
           await click('.composer-model-btn')
           await evaluate('Array.from(document.querySelectorAll(".model-picker-row")).find(row => row.querySelector(".model-picker-row-title").textContent === "GPT Other").querySelector(".model-picker-row-main").focus(); if (!document.hasFocus()) document.activeElement.dispatchEvent(new FocusEvent("focusin", { bubbles: true }))')
@@ -169,7 +180,41 @@ try {
           await pause(40)
           assert.equal(await evaluate('document.querySelector(\'[aria-label=\"Voice input\"]\').disabled'), true)
           assert.equal(await evaluate('document.querySelector(\'[aria-label=\"Voice input\"]\').getAttribute("aria-busy")'), 'true')
-          console.log('PASS: ' + platform + ' effort click/keyboard choices, focused row and favorite activation, context/speed labels, separate mode menu, read-only and recording protection')
+          console.log('PASS: ' + platform + ' effort click/keyboard choices, focused row and favorite activation, context/effort labels, separate mode menu, read-only and recording protection')
+          await evaluate('window.fixture.setReadOnly(false); window.fixture.setRecordingPending(false); window.fixture.setModelId("speed@1m:high")')
+          await pause(40)
+          assert.equal(await evaluate('document.querySelector(".composer-fast-toggle").getAttribute("aria-pressed")'), 'false')
+          assert(await evaluate('document.querySelector(".composer-fast-toggle").nextElementSibling.matches(".composer-model-picker")'))
+          await click('.composer-fast-toggle')
+          assert.deepEqual(await evaluate('window.fixture.selections.at(-1)'), ['openai', 'speed@1m:fast:high'])
+          assert.equal(await evaluate('document.querySelector(".composer-fast-toggle").getAttribute("aria-pressed")'), 'true')
+          assert.equal(await evaluate('document.querySelector(".composer-model-btn-label").textContent'), 'Speed Model · 1m · High')
+          await click('.composer-fast-toggle')
+          assert.deepEqual(await evaluate('window.fixture.selections.at(-1)'), ['openai', 'speed@1m:slow:high'])
+          await evaluate('window.fixture.setReadOnly(true)')
+          await pause(40)
+          assert.equal(await evaluate('document.querySelector(".composer-fast-toggle").disabled'), true)
+          const fastSelectionCount = await evaluate('window.fixture.selections.length')
+          await click('.composer-fast-toggle')
+          assert.equal(await evaluate('window.fixture.selections.length'), fastSelectionCount)
+          await evaluate('window.fixture.setReadOnly(false); window.fixture.setProviderId("openai-codex"); window.fixture.setModelId("gpt-subscription:high")')
+          await pause(40)
+          await click('.composer-fast-toggle')
+          assert.deepEqual(await evaluate('window.fixture.selections.at(-1)'), ['openai-codex', 'gpt-subscription:fast:high'])
+          assert.equal(await evaluate('document.querySelector(".composer-fast-toggle").getAttribute("aria-pressed")'), 'true')
+          assert.equal(await evaluate('document.querySelector(".composer-model-btn-label").textContent'), 'GPT Subscription · High')
+          await click('.composer-fast-toggle')
+          assert.deepEqual(await evaluate('window.fixture.selections.at(-1)'), ['openai-codex', 'gpt-subscription:high'])
+          await evaluate('window.fixture.setModelId("subscription-standard-only")')
+          await pause(40)
+          assert.equal(await evaluate('!!document.querySelector(".composer-fast-toggle")'), false)
+          await evaluate('window.fixture.setProviderId("antigravity"); window.fixture.setModelId("account-model")')
+          await pause(40)
+          assert.equal(await evaluate('!!document.querySelector(".composer-context-anchor")'), false)
+          await click('.composer-pill-btn')
+          assert.deepEqual(await evaluate('Array.from(document.querySelectorAll(".composer-mode-menu [role=option]")).map(button => button.firstElementChild.textContent)'), ['Agent', 'Build'])
+          console.log('PASS: ' + platform + ' Fast toggle state, endpoint/effort round trip, read-only protection, and Antigravity mode/context affordances')
+
         }
       } finally { window.destroy() }
       app.quit()

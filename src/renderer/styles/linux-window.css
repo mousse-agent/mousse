@@ -1,0 +1,31 @@
+/* Clip the complete Linux surface, including overlays portaled to body. The
+   native backing stays clear; solid mode is painted by the renderer inside it. */
+html.platform-linux {
+  --linux-window-radius: 12px;
+  background: transparent;
+}
+
+html.platform-linux[data-window-maximized='true'] {
+  --linux-window-radius: 0px;
+}
+
+html.platform-linux body {
+  background: transparent;
+  border-radius: var(--linux-window-radius);
+  clip-path: inset(0 round var(--linux-window-radius));
+}
+
+.linux-window-resize-handles { position: fixed; inset: 0; z-index: 2147483647; pointer-events: none; }
+.linux-window-resize-handle { position: absolute; pointer-events: auto; touch-action: none; user-select: none; -webkit-app-region: no-drag; }
+.linux-window-resize-handle.resize-n, .linux-window-resize-handle.resize-s { left: var(--window-resize-corner); right: var(--window-resize-corner); height: var(--window-resize-border); cursor: ns-resize; }
+.linux-window-resize-handle.resize-n { top: 0; }
+.linux-window-resize-handle.resize-s { bottom: 0; }
+.linux-window-resize-handle.resize-e, .linux-window-resize-handle.resize-w { top: var(--window-resize-corner); bottom: var(--window-resize-corner); width: var(--window-resize-border); cursor: ew-resize; }
+.linux-window-resize-handle.resize-e { right: 0; }
+.linux-window-resize-handle.resize-w { left: 0; }
+.linux-window-resize-handle.resize-ne, .linux-window-resize-handle.resize-se, .linux-window-resize-handle.resize-sw, .linux-window-resize-handle.resize-nw { width: var(--window-resize-corner); height: var(--window-resize-corner); }
+.linux-window-resize-handle.resize-ne { top: 0; right: 0; cursor: nesw-resize; }
+.linux-window-resize-handle.resize-se { bottom: 0; right: 0; cursor: nwse-resize; }
+.linux-window-resize-handle.resize-sw { bottom: 0; left: 0; cursor: nesw-resize; }
+.linux-window-resize-handle.resize-nw { top: 0; left: 0; cursor: nwse-resize; }
+html[data-window-maximized='true'] .linux-window-resize-handles { display: none; }

@@ -16,6 +16,7 @@ interface NavigationRailProps {
 
 export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailProps) {
   const mainView = useAppStore((s) => s.mainView)
+  const sidebarMode = useAppStore((s) => s.sidebarMode)
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
   const scheduledOpen = useAppStore((s) => s.scheduledOpen)
   const channelsOpen = useAppStore((s) => s.channelsOpen)
@@ -74,10 +75,16 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
   }, [moreOpen])
 
   const openView = async (view: MainView) => {
-    if (view !== mainView && !await confirmNavigation()) return
+    if ((view !== mainView || sidebarMode !== 'projects') && !await confirmNavigation()) return
     setMainView(view)
     setMainAreaOpen(true)
     setMoreOpen(false)
+  }
+  const showHome = async () => {
+    if (sidebarMode !== 'projects' && !await confirmNavigation()) return
+    useAppStore.getState().setSidebarMode('projects')
+    setThreadsSidebarOpen(true)
+    setMainAreaOpen(false)
   }
   const overlayOpen = scheduledOpen || channelsOpen || searchOpen
   const shortcut = (label: string, Icon: LucideIcon, active: boolean, onClick: () => void, disabled = false) => (
@@ -92,10 +99,7 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
   return (
     <>
       <nav className="navigation-rail" aria-label="Mousse navigation" onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave}>
-        {shortcut('Home', House, !overlayOpen && !mainAreaOpen, () => {
-          setThreadsSidebarOpen(true)
-          setMainAreaOpen(false)
-        })}
+        {shortcut('Home', House, !overlayOpen && !mainAreaOpen && sidebarMode === 'projects', () => void showHome())}
         {shortcut('Automations', Workflow, scheduledOpen, () => setScheduledOpen(true))}
         {shortcut('Channels', Radio, channelsOpen, () => setChannelsOpen(true))}
         <button ref={moreRef} type="button" className={`navigation-rail-button${moreOpen ? ' active' : ''}`}
@@ -123,9 +127,12 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
         </div>
       </FloatingPortal>}
       <ThreadSearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} onSelect={(threadId) => {
-        switchToThread(threadId)
-        void window.mousse.threads.select(threadId)
-        setThreadsSidebarOpen(true)
+        void confirmNavigation().then((allowed) => {
+          if (!allowed) return
+          switchToThread(threadId)
+          void window.mousse.threads.select(threadId)
+          setThreadsSidebarOpen(true)
+        })
       }} />
     </>
   )

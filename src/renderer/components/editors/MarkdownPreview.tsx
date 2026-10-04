@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import rehypeHighlight from 'rehype-highlight'
 import remarkGfm from 'remark-gfm'
 import { isSafePreviewHref, resolvePreviewImageSrc } from './markdownPreviewPolicy'
+import { routeLink } from '../../utils/chatLinks'
 
 export interface MarkdownPreviewProps {
   value: string
@@ -23,7 +24,9 @@ function PreviewLink({
     return <span>{children}</span>
   }
   return (
-    <a href={href} target="_blank" rel="noopener noreferrer">
+    <a href={href} target="_blank" rel="noopener noreferrer" onClick={(event) => {
+      if (href && /^https?:\/\//i.test(href)) { event.preventDefault(); routeLink(href) }
+    }}>
       {children}
     </a>
   )

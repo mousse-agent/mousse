@@ -150,7 +150,6 @@ export async function fetchOpenAiCompatibleModelList(options: {
  */
 export function enhanceProvidersWithOpenAiCompatibleFetch(providers: readonly Provider[]): void {
   for (const provider of providers) {
-    if (!OPENAI_COMPAT_PROVIDER_IDS.has(provider.id)) continue
     if (provider.refreshModels) continue
 
     const baseline = (): Model<Api>[] => {
@@ -160,6 +159,15 @@ export function enhanceProvidersWithOpenAiCompatibleFetch(providers: readonly Pr
         return []
       }
     }
+
+    // Cover newly added OpenAI-compatible providers without updating a provider
+    // allowlist. Their configured base URL is probed only when auth is available;
+    // providers without a /models route retain their bundled catalog.
+    const models = baseline()
+    const supportsOpenAiApi = models.some((model) =>
+      model.api === 'openai-completions' || model.api === 'openai-responses'
+    )
+    if (!OPENAI_COMPAT_PROVIDER_IDS.has(provider.id) && !supportsOpenAiApi) continue
 
     let dynamic: Model<Api>[] | undefined
 

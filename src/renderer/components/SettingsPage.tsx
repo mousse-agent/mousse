@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Palette, Plug, Plus, Radio, Server, Sparkles, Trash2, User, Wrench } from 'lucide-react'
+import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
+import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Palette, Plug, Plus, Radio, RefreshCw, Server, Sparkles, Trash2, User, Wrench } from 'lucide-react'
 import type {
   AgentTypeId,
   MousseSettings,
@@ -150,6 +151,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const [ambientInstructions, setAmbientInstructions] = useState<string[]>([])
   const [connecting, setConnecting] = useState(false)
   const [connectError, setConnectError] = useState<string | null>(null)
+  const [providerRefreshError, setProviderRefreshError] = useState<string | null>(null)
+  const [refreshingAntigravity, setRefreshingAntigravity] = useState(false)
   const [loginActive, setLoginActive] = useState(false)
   const [restartRequired, setRestartRequired] = useState(false)
   const [webToolCredentials, setWebToolCredentials] = useState({ exa: false, parallel: false })
@@ -275,6 +278,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   )
 
   const previewAcrylicIntensity = useCallback((acrylicIntensity: number) => {
+    if (window.mousse.platform === 'linux') applyAcrylicIntensity(acrylicIntensity)
     setSettings((prev) =>
       prev
         ? {
@@ -290,8 +294,10 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     const gen = ++intensityCommitGen.current
     intensityCommitTimer.current = setTimeout(() => {
       intensityCommitTimer.current = null
-      void window.mousse.settings
-        .set({ appearance: { ...settings!.appearance, acrylicIntensity } })
+      const save = window.mousse.platform === 'linux'
+        ? persistLinuxAcrylicIntensity(acrylicIntensity)
+        : window.mousse.settings.set({ appearance: { ...settings!.appearance, acrylicIntensity } })
+      void save
         .then((updated) => {
           // Drop stale responses if the user kept dragging.
           if (gen !== intensityCommitGen.current) return
@@ -869,7 +875,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
           <SectionHeading
             icon={Plug}
             title="Providers"
-            description="Authenticate LLM providers. Connected providers appear in model pickers across the app."
+            description="Connect model APIs and vendor agent sessions. Connected providers appear in model pickers across the app."
             trailing={
               <button type="button" className="settings-add-btn" onClick={() => void openAddProvider()}>
                 <Plus size={14} />
@@ -888,15 +894,32 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
             </div>
           ) : (
             <div className="provider-list">
+              {providerRefreshError && <p className="settings-error">{providerRefreshError}</p>}
               {configuredProviders.map((provider) => (
                 <div key={provider.id} className="provider-list-item">
                   <div>
                     <strong>{provider.label}</strong>
                     <span className="provider-list-meta">
-                      {provider.authType === 'oauth' ? 'Subscription' : 'API key'}
+                      {provider.source?.startsWith('unsupported')
+                        ? 'Unsupported credential'
+                        : provider.authType === 'oauth' ? 'Subscription' : 'API key'}
                       {provider.source ? ` · ${provider.source}` : ''}
                     </span>
                   </div>
+                  {provider.id === 'antigravity' && (
+                    <button type="button" className="provider-remove-btn" title="Refresh Google account models"
+                      aria-label="Refresh Antigravity models" disabled={refreshingAntigravity}
+                      onClick={() => {
+                        setRefreshingAntigravity(true)
+                        setProviderRefreshError(null)
+                        void window.mousse.providers.refreshModels('antigravity')
+                          .then(() => refreshProviderData())
+                          .catch((error: unknown) => setProviderRefreshError(error instanceof Error ? error.message : String(error)))
+                          .finally(() => setRefreshingAntigravity(false))
+                      }}>
+                      <RefreshCw size={14} className={refreshingAntigravity ? 'icon-spin' : undefined} />
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="provider-remove-btn"
@@ -915,8 +938,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
               {addStep === 'provider' && (
                 <>
                   <p className="settings-section-desc">
-                    Choose a provider. All pi-ai built-in providers are listed — API keys and
-                    subscription logins where supported.
+                    Choose a provider. API keys, supported subscription logins, and Google’s
+                    Antigravity agent are available here.
                   </p>
                   <div className="provider-filter-row">
                     <input

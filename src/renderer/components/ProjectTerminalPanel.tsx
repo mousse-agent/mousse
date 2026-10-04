@@ -8,6 +8,7 @@ import { PROJECT_SHELL_AGENT_ID } from '../../shared/types'
 import { useFilesRoot } from '../hooks/useActiveProjectPath'
 import { XTERM_FONT, getXtermTheme } from '../lib/xtermTheme'
 import { useAppStore } from '../stores/appStore'
+import { setReferenceDragData } from '../../shared/chatReferences'
 import {
   clearStalePtyBinding,
   resolveTerminalShellAction
@@ -374,6 +375,12 @@ export function ProjectTerminalPanel() {
             className={`terminal-tab${tab.id === activeTabId ? ' active' : ''}`}
             role="tab"
             aria-selected={tab.id === activeTabId}
+            draggable
+            onDragStart={(event) => setReferenceDragData(event.dataTransfer, {
+              kind: 'terminal', title: tab.title, tabId: tab.id,
+              sessionId: tab.ptyId ?? undefined, cwd: tab.cwd ?? terminalCwd,
+              threadId: tab.ownerThreadId ?? undefined
+            })}
             onContextMenu={(event) => openTabMenu(tab.id, event)}
           >
             <button

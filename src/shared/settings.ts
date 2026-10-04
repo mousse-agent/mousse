@@ -129,6 +129,8 @@ export interface LlmModelOption {
   label: string
   /** Supported reasoning/effort levels from the provider (excludes "off"). */
   efforts?: string[]
+  /** Effective endpoint speed, including provider defaults. */
+  speed?: 'fast' | 'slow'
 }
 
 export interface LlmProviderOption {

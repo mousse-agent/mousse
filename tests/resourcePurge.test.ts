@@ -47,7 +47,7 @@ test('crash at irreversible boundary forbids restore and resumes from external l
   let crash = true
   const f = fixture({ boundary: () => { if (crash) { crash = false; throw new Error('injected crash') } } })
   await f.coordinator.trash({ taskId: 'task', operationId: 'trash' }); const preview = await f.coordinator.cleanup.preview('task')
-  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toThrow('injected')
+  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toMatchObject({ code: 'resource_purge_failed', cause: expect.objectContaining({ message: 'injected crash' }), errorInfo: { category: 'internal', retryable: false } })
   await expect(f.coordinator.restore({ taskId: 'task', operationId: 'restore' })).rejects.toThrow(/purge-started/)
   expect((await f.coordinator.recover('task')).state).toBe('purged')
 })
@@ -56,7 +56,7 @@ test('dirty sole copy needs a human exact preview discard; automatic request pre
   await f.coordinator.trash({ taskId: 'task', operationId: 'trash' }); const preview = await f.coordinator.cleanup.preview('task')
   expect(preview.blockers).toEqual([]); expect(preview.items.some((item) => item.discardRequired)).toBe(true)
   const request = { taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest }
-  await expect(f.coordinator.purge(request)).rejects.toThrow(/human-reviewed/)
+  await expect(f.coordinator.purge(request)).rejects.toMatchObject({ code: 'resource_purge_discard_required', message: expect.stringContaining('human-reviewed'), errorInfo: { category: 'denied', retryable: false } })
   expect(readFileSync(join(f.worktree, 'secret.txt'), 'utf8')).toBe('only copy')
   expect((await f.coordinator.purge({ ...request, discard: true, human: true })).state).toBe('purged')
 })
@@ -80,7 +80,7 @@ test('registered workflow scratch sole-copy output requires an exact human disca
   const preview = await f.coordinator.cleanup.preview('task')
   expect(preview.blockers).toEqual([]); expect(preview.items.find((item) => item.identity === scratch)?.discardRequired).toBe(true)
   const request = { taskId: 'task', operationId: 'scratch-purge', expectedGeneration: preview.generation, previewDigest: preview.digest }
-  await expect(f.coordinator.purge(request)).rejects.toThrow(/human-reviewed/)
+  await expect(f.coordinator.purge(request)).rejects.toMatchObject({ code: 'resource_purge_discard_required', message: expect.stringContaining('human-reviewed'), errorInfo: { category: 'denied', retryable: false } })
   expect(readFileSync(join(scratch, 'result.txt'), 'utf8')).toBe('sole copy')
   expect((await f.coordinator.purge({ ...request, discard: true, human: true })).state).toBe('purged')
   expect(existsSync(scratch)).toBe(false)
@@ -101,7 +101,7 @@ test.each(['try-agent', 'terminal'])('nested %s scratch propagates sole-copy dis
   expect(preview.blockers).toEqual([])
   expect(preview.items.find((item) => item.identity === movedContainer)).toMatchObject({ discardRequired: true })
   const request = { taskId: 'task', operationId: 'nested-purge', expectedGeneration: preview.generation, previewDigest: preview.digest }
-  await expect(f.coordinator.purge(request)).rejects.toThrow(/human-reviewed/)
+  await expect(f.coordinator.purge(request)).rejects.toMatchObject({ code: 'resource_purge_discard_required', message: expect.stringContaining('human-reviewed'), errorInfo: { category: 'denied', retryable: false } })
   expect(readFileSync(join(movedContainer, kind === 'terminal' ? 'terminal-workspace' : 'workspace', 'sole-copy.txt'), 'utf8')).toBe('retained output')
   await f.coordinator.purge({ ...request, human: true, discard: true })
   expect(existsSync(movedContainer)).toBe(false)

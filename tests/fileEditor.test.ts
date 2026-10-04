@@ -17,7 +17,12 @@ describe('file editor helpers', () => {
     expect(languageForPath('src/view.tsx')).toBe('typescript')
     expect(languageForPath('styles/APP.CSS')).toBe('css')
     expect(languageForPath('Dockerfile')).toBe('dockerfile')
+    expect(languageForPath('page.htm')).toBe('html')
+    expect(languageForPath('scripts/task.mjs')).toBe('javascript')
+    expect(languageForPath('config.JSONC')).toBe('json')
     expect(languageForPath('unknown.custom')).toBe('plaintext')
+    expect(languageForPath('src/view.tsx', new Set(['plaintext', 'typescript']))).toBe('typescript')
+    expect(languageForPath('scripts/tool.rb', new Set(['plaintext', 'javascript']))).toBe('plaintext')
   })
 
   it('recognizes binary content without rejecting ordinary unicode text', () => {

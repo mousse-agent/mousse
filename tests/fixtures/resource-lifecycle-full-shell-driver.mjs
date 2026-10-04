@@ -33,8 +33,11 @@ async function check() {
   const proof = { actualMain: config.mainEntry }
   await until(() => evaluate('Boolean(window.mousse && document.querySelector("#root")?.children.length)'), Boolean, 'Production preload')
   await evaluate(`window.mousse.threads.select(${JSON.stringify(config.threadId)})`)
-  await until(text, (value) => value.includes('Undo expired'), 'Expired Undo state')
-  proof.expiredUndoVisible = true; await screenshot('01-expired-undo')
+  await until(text, value => value.includes('Task value changed to full application bytes.'), 'Expired task transcript')
+  const expiredHistory = await evaluate(`window.mousse.actions.list(${JSON.stringify(config.threadId)})`)
+  if (expiredHistory.undoTarget || expiredHistory.actions.at(-1)?.retention?.state !== 'expired') throw Error('Seeded task does not have expired Undo history')
+  if (await evaluate(`document.querySelectorAll('button[aria-label="Undo"]').length`)) throw Error('Expired prompt incorrectly exposes Undo')
+  proof.expiredUndoUnavailable = true; await screenshot('01-expired-undo')
   await evaluate(`(() => {const show=document.querySelector('button[aria-label="Show app panel"]');if(show) {if(!show.checkVisibility()) throw Error('Show app panel hidden');show.click()}})()`)
   await evaluate(`(() => {const button=document.querySelector('nav[aria-label="Main area view"] button[aria-label="Agents"]');if(!button.checkVisibility()) throw Error('Agents navigation hidden');button.click()})()`)
   await until(text, (value) => value.includes('Named agents'), 'Named agents surface')
