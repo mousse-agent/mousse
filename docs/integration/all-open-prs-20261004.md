@@ -9,9 +9,9 @@ I combined all 15 open PR heads captured below on the current remote default bra
 | [#45](https://github.com/mousse-agent/mousse/pull/45) | `1a971a5056eeaf752792eae4e43e87da892c9915` | feat(net): Mousse Net foundation for Bridge and Spaces |
 | [#48](https://github.com/mousse-agent/mousse/pull/48) | `1320236cb0571d31f4508c35ec170c6a3bf5496e` | feat(net): P2 profile-scoped network and enrollment CLI |
 | [#49](https://github.com/mousse-agent/mousse/pull/49) | `4247903bd52cfeafd1348eb797524c2e08deb9a5` | feat(net): P2 exporter-bound node enrollment |
-| [#50](https://github.com/mousse-agent/mousse/pull/50) | `37a6e5785bf560bb81e18d7427177a70f883256c` | feat(chats): prepare gated Space publication and network binding |
+| [#50](https://github.com/mousse-agent/mousse/pull/50) | `649670087988682a5e7ca46ac4e6fdb6d0ebba66` | feat(chats): prepare gated Space publication and network binding |
 | [#51](https://github.com/mousse-agent/mousse/pull/51) | `eac2322228288702647fbf36f6fcf37ee8657aac` | Prepare Control backend cutover while preserving legacy credential migration |
-| [#52](https://github.com/mousse-agent/mousse/pull/52) | `7eac510be50622447ec8731b4d3e822921faba75` | feat(gui): integrate network Chats and Devices with the current shell |
+| [#52](https://github.com/mousse-agent/mousse/pull/52) | `cbec43fb959f7b99ae2335550936b20330f4361b` | feat(gui): integrate network Chats and Devices with the current shell |
 | [#53](https://github.com/mousse-agent/mousse/pull/53) | `e36e4f49e64d8a636ca33a13a152ff37e9d2d6a8` | Preserve unchanged Tunnel routes and await Electron foreground shutdown |
 | [#54](https://github.com/mousse-agent/mousse/pull/54) | `dfabc2cb03209845407b9149c0f62b9096f4916c` | feat(net): add profile rollback and default-off domain admission |
 | [#55](https://github.com/mousse-agent/mousse/pull/55) | `97a55700e9285d1f324a67d64b1aacf4b20847d9` | Drain Darwin owned descendants using kernel birth identities |

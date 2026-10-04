@@ -27,10 +27,7 @@ import { FileService } from './files/FileService'
 import { GitService } from './git/GitService'
 import { LineEditStatsStore } from './stats/LineEditStatsStore'
 import type { TerminalSendSink } from './terminals/PtyManager'
-import {
-  type MmsOwnerHandle,
-  type MmsOwnerRecord
-} from './ownership/MmsOwnerLease'
+import { type MmsOwnerHandle, type MmsOwnerRecord } from './ownership/MmsOwnerLease'
 import { ThreadRuntimeManager } from './runtime/ThreadRuntimeManager'
 import { UserQuestionService } from './orchestrator/UserQuestionService'
 import { ModeRegistry } from './modes/ModeRegistry'
@@ -56,14 +53,20 @@ import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
 
-const STORAGE_LIFECYCLE_METHODS = new Set(['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge'])
+const STORAGE_LIFECYCLE_METHODS = new Set([
+  'threads.delete',
+  'threads.trash',
+  'threads.restore',
+  'threads.purge'
+])
 
 function containsProfileBusy(error: unknown): boolean {
   if (
     error instanceof Error &&
     'code' in error &&
     (error.code === 'profile_busy' || error.code === 'shutdown_timeout')
-  ) return true
+  )
+    return true
   return error instanceof AggregateError && error.errors.some(containsProfileBusy)
 }
 
@@ -169,7 +172,11 @@ export class MmsProfileServices {
     this.events = new MmsEventBus()
     this.settings = new SettingsStore(config)
     this.providerAuth = shared.providerAuth
-    this.antigravity = new AntigravityProviderService(homeDir, shared.installationHome, this.questions)
+    this.antigravity = new AntigravityProviderService(
+      homeDir,
+      shared.installationHome,
+      this.questions
+    )
     this.integrationContext = shared.personal
       ? {
           profileId: this.profileId,
@@ -182,12 +189,9 @@ export class MmsProfileServices {
       : createLegacySingleProfileContext({ profileId: this.profileId, profileRoot: homeDir })
     this.mcpRegistry = new McpRegistry(this.integrationContext)
     this.skillsRegistry = new SkillsRegistry(this.integrationContext)
-    this.mcpManager = new McpManager(
-      this.mcpRegistry,
-      this.settings,
-      opts?.openExternal,
-      { context: this.integrationContext }
-    )
+    this.mcpManager = new McpManager(this.mcpRegistry, this.settings, opts?.openExternal, {
+      context: this.integrationContext
+    })
     this.agentConfigManager = new AgentConfigManager(
       this.mcpRegistry,
       this.skillsRegistry,
@@ -296,29 +300,57 @@ export class MmsProfileServices {
 
     this.net = new NetService({
       profileDir: this.homeDir,
-      onChanged: status => this.events.emit({ channel: 'net:updated', data: status }),
-      composeRuntime: runtime => {
-        this.bridgeService = new BridgeProfileService({ services: this, runtime, net: this.net,
-          nativeAdapters: opts?.nativeBotAdapters?.({ services: this, runtime, net: this.net }) })
+      onChanged: (status) => this.events.emit({ channel: 'net:updated', data: status }),
+      composeRuntime: (runtime) => {
+        this.bridgeService = new BridgeProfileService({
+          services: this,
+          runtime,
+          net: this.net,
+          nativeAdapters: opts?.nativeBotAdapters?.({ services: this, runtime, net: this.net })
+        })
         const composition = this.bridgeService.composition()
-        return { ...composition,
-          beginDisable: () => { this.chatNetwork?.beginShutdown(); composition.beginDisable?.() },
-          close: () => Promise.all([this.chatNetwork?.close(), composition.close?.()]).then(() => undefined),
-          activeCount: () => (composition.activeCount?.() ?? 0) + (this.chatNetwork?.activeCount() ?? 0) }
-      } })
-    this.chatNetwork = new ChatNetworkBindingService({ profileId: this.profileId, profileHome: this.homeDir, chats: this.platform.chats,
-      runtime: () => this.net.runtime(), assertNetwork: () => this.net.assertFeature('netSpaces'), spaces: () => this.spaces,hub:()=>this.bridge.hub,
-      preparePrivateAudience:(...args)=>this.bridge.currentIdentity.preparePrivateAudience(...args) })
+        return {
+          ...composition,
+          beginDisable: () => {
+            this.chatNetwork?.beginShutdown()
+            composition.beginDisable?.()
+          },
+          close: () =>
+            Promise.all([this.chatNetwork?.close(), composition.close?.()]).then(() => undefined),
+          activeCount: () =>
+            (composition.activeCount?.() ?? 0) + (this.chatNetwork?.activeCount() ?? 0)
+        }
+      }
+    })
+    this.chatNetwork = new ChatNetworkBindingService({
+      profileId: this.profileId,
+      profileHome: this.homeDir,
+      chats: this.platform.chats,
+      runtime: () => this.net.runtime(),
+      assertNetwork: () => this.net.assertFeature('netSpaces'),
+      spaces: () => this.spaces,
+      hub: () => this.bridge.hub,
+      preparePrivateAudience: (...args) =>
+        this.bridge.currentIdentity.preparePrivateAudience(...args)
+    })
     this.platform.onDispose(() => this.chatNetwork.close())
-
     this.lifecycle = new ResourceLifecycleCoordinator(this.threads.lifecycleStore, {
       assertCanTrash: (record) => this.assertLifecycleIdle(record.taskId),
       drain: async (record) => {
         const owned = this.lifecycleOwnedTasks(record.taskId)
         for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
         const runs = await this.platform.workflowRuns.runtime.list({ profileId: this.profileId })
-        if (runs.some((run) => owned.some((task) => task.taskId === run.threadId) && !['succeeded', 'failed', 'cancelled'].includes(run.state))) {
-          throw new ResourceLifecycleError('busy', 'Cannot trash thread: an owned workflow is still active or waiting')
+        if (
+          runs.some(
+            (run) =>
+              owned.some((task) => task.taskId === run.threadId) &&
+              !['succeeded', 'failed', 'cancelled'].includes(run.state)
+          )
+        ) {
+          throw new ResourceLifecycleError(
+            'busy',
+            'Cannot trash thread: an owned workflow is still active or waiting'
+          )
         }
         for (const task of owned) settleThreadMutationOwnership(task.location)
       },
@@ -331,7 +363,8 @@ export class MmsProfileServices {
         for (const task of this.lifecycleOwnedTasks(record.taskId)) {
           this.threads.cancelLifecycleQueue(task, record.operations.at(-1)!.id)
           this.threadRuntimes.disposeRuntime(task.taskId)
-          if (record.location === record.originalLocation) this.orchestrator.markThreadRestored(task.taskId)
+          if (record.location === record.originalLocation)
+            this.orchestrator.markThreadRestored(task.taskId)
           else this.orchestrator.markThreadDeleted(task.taskId)
         }
       },
@@ -340,7 +373,9 @@ export class MmsProfileServices {
         this.threadRuntimes.disposeRuntime(record.taskId)
         this.orchestrator.markThreadDeleted(record.taskId)
       },
-      configurationChanged: () => { this.config.reloadFromDisk() }
+      configurationChanged: () => {
+        this.config.reloadFromDisk()
+      }
     })
     this.undoRetention = new UndoRetentionSweeper(this.threads.lifecycleStore)
     this.wireServiceEvents()
@@ -352,19 +387,44 @@ export class MmsProfileServices {
     for (const task of owned) this.threadRuntimes.assertDeletable(task.taskId)
     this.platform.chats.assertLifecycleIdle(new Set(owned.map((task) => task.taskId)))
     this.platform.workflowRuns.assertLifecycleIdle(new Set(owned.map((task) => task.taskId)))
-    const activity = { ...this.orchestrator.getOwnedActivity(), platform: this.platform.getActiveCount(),
-      scheduled: this.scheduled.getActiveCount(), channels: this.channels.getActiveCount(),
-      headless: this.headlessRunner.getActiveCount(), mcp: this.mcpManager.getActiveCount() }
+    const activity = {
+      ...this.orchestrator.getOwnedActivity(),
+      platform: this.platform.getActiveCount(),
+      scheduled: this.scheduled.getActiveCount(),
+      channels: this.channels.getActiveCount(),
+      headless: this.headlessRunner.getActiveCount(),
+      mcp: this.mcpManager.getActiveCount()
+    }
     const activeExecution = Object.entries(activity).filter(([, count]) => count > 0)
-    if (activeExecution.length) throw new ResourceLifecycleError('busy', 'Cannot trash thread: profile execution is still active')
+    if (activeExecution.length)
+      throw new ResourceLifecycleError(
+        'busy',
+        'Cannot trash thread: profile execution is still active'
+      )
     const requests = this.requests.snapshot()
-    const activeRequests = Object.entries(requests).filter(([key, count]) => count > 0 && !['rpc:threads.delete', 'rpc:threads.trash', 'rpc:threads.restore', 'rpc:threads.purge'].includes(key))
+    const activeRequests = Object.entries(requests).filter(
+      ([key, count]) =>
+        count > 0 &&
+        ![
+          'rpc:threads.delete',
+          'rpc:threads.trash',
+          'rpc:threads.restore',
+          'rpc:threads.purge'
+        ].includes(key)
+    )
     if (activeRequests.length) {
-      throw new ResourceLifecycleError('busy', 'Cannot trash thread: profile requests are still active')
+      throw new ResourceLifecycleError(
+        'busy',
+        'Cannot trash thread: profile requests are still active'
+      )
     }
     const root = this.threads.lifecycleStore.require(taskId)
-    const settle = () => { for (const task of owned) if (existsSync(task.location)) settleThreadMutationOwnership(task.location) }
-    if (['trashed', 'purge-started'].includes(root.state)) this.threads.lifecycleStore.withCleanupSettlement(taskId, settle)
+    const settle = () => {
+      for (const task of owned)
+        if (existsSync(task.location)) settleThreadMutationOwnership(task.location)
+    }
+    if (['trashed', 'purge-started'].includes(root.state))
+      this.threads.lifecycleStore.withCleanupSettlement(taskId, settle)
     else settle()
   }
 
@@ -374,9 +434,11 @@ export class MmsProfileServices {
     let changed = true
     while (changed) {
       changed = false
-      for (const record of records) if (record.parentTaskId && ids.has(record.parentTaskId) && !ids.has(record.taskId)) {
-        ids.add(record.taskId); changed = true
-      }
+      for (const record of records)
+        if (record.parentTaskId && ids.has(record.parentTaskId) && !ids.has(record.taskId)) {
+          ids.add(record.taskId)
+          changed = true
+        }
     }
     const byId = new Map(records.map((record) => [record.taskId, record]))
     return records.filter((record) => {
@@ -385,7 +447,10 @@ export class MmsProfileServices {
       while (child.taskId !== taskId) {
         // Independently trashed children retain their own fence and restore choice.
         if (child.state === 'trashed') return false
-        if (child.state !== 'active') throw new Error('Owned child lifecycle operation requires recovery before moving its parent')
+        if (child.state !== 'active')
+          throw new Error(
+            'Owned child lifecycle operation requires recovery before moving its parent'
+          )
         const parent = child.parentTaskId ? byId.get(child.parentTaskId) : undefined
         if (!parent) throw new Error('Owned child lifecycle parent is missing')
         child = parent
@@ -394,26 +459,53 @@ export class MmsProfileServices {
     })
   }
 
-  resolveLifecycleOperationId(taskId: string, kind: 'trash' | 'restore', operationId?: string): string {
+  resolveLifecycleOperationId(
+    taskId: string,
+    kind: 'trash' | 'restore',
+    operationId?: string
+  ): string {
     if (operationId !== undefined) return operationId
     const pending = this.threads.lifecycleStore.get(taskId)?.operations.at(-1)
-    return pending?.kind === kind && !['completed', 'rejected'].includes(pending.phase) ? pending.id : randomUUID()
+    return pending?.kind === kind && !['completed', 'rejected'].includes(pending.phase)
+      ? pending.id
+      : randomUUID()
   }
 
-  async trashThread(taskId: string, operationId?: string, expectedGeneration?: number): Promise<TaskLifecycleRecord> {
+  async trashThread(
+    taskId: string,
+    operationId?: string,
+    expectedGeneration?: number
+  ): Promise<TaskLifecycleRecord> {
     this.threads.assertLifecycleMutationAvailable()
     if (!this.threads.lifecycleStore.get(taskId)) this.threads.getThreadDir(taskId)
-    const record = await this.lifecycle.trash({ taskId, operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId), expectedGeneration })
+    const record = await this.lifecycle.trash({
+      taskId,
+      operationId: this.resolveLifecycleOperationId(taskId, 'trash', operationId),
+      expectedGeneration
+    })
     if (record.state === 'trashed') {
-      try { await this.lifecycle.cleanup.retireTrashed(taskId) }
-      catch (error) { this.threads.lifecycleStore.update(taskId, (current) => { current.blockedReason = `Checkout retirement retained resources: ${(error as Error).message}` }) }
+      try {
+        await this.lifecycle.cleanup.retireTrashed(taskId)
+      } catch (error) {
+        this.threads.lifecycleStore.update(taskId, (current) => {
+          current.blockedReason = `Checkout retirement retained resources: ${(error as Error).message}`
+        })
+      }
     }
     return this.threads.lifecycleStore.require(taskId)
   }
 
-  async restoreThread(taskId: string, operationId?: string, expectedGeneration?: number): Promise<TaskLifecycleRecord> {
+  async restoreThread(
+    taskId: string,
+    operationId?: string,
+    expectedGeneration?: number
+  ): Promise<TaskLifecycleRecord> {
     this.threads.assertLifecycleMutationAvailable()
-    return this.lifecycle.restore({ taskId, operationId: this.resolveLifecycleOperationId(taskId, 'restore', operationId), expectedGeneration })
+    return this.lifecycle.restore({
+      taskId,
+      operationId: this.resolveLifecycleOperationId(taskId, 'restore', operationId),
+      expectedGeneration
+    })
   }
 
   getOwnerLease(): MmsOwnerHandle | null {
@@ -428,32 +520,51 @@ export class MmsProfileServices {
     return this.installationHome
   }
 
-  getProfileHomeDir(): string { return this.homeDir }
+  getProfileHomeDir(): string {
+    return this.homeDir
+  }
 
-  getProfileId(): string { return this.profileId }
+  getProfileId(): string {
+    return this.profileId
+  }
 
   async runOwnedRequest<T>(method: string, work: () => T | Promise<T>): Promise<T> {
     const label = `rpc:${method}`
-    try { return await this.requests.run(label, async () => {
-      if (!STORAGE_LIFECYCLE_METHODS.has(method)) return work()
-      // Let short GUI polls and writes settle without exempting their ownership.
-      // Completion RPCs must remain available to the work being drained. The
-      // unchanged synchronous idle check and durable task fence below authorize
-      // the move; this wait alone never does. Exclude lifecycle calls consistently
-      // with that idle check, avoiding a pair of lifecycle calls waiting on itself.
-      const include = (active: string) => !STORAGE_LIFECYCLE_METHODS.has(active.replace(/^rpc:/, ''))
-      try { await this.requests.waitForIdle(2_000, include) }
-      catch (error) {
-        if (!(error instanceof Error) || !('code' in error) || error.code !== 'profile_busy') throw error
-        const remaining = Object.entries(this.requests.snapshot()).filter(([key]) => include(key))
-        throw new DomainRpcError('profile_busy', `Cannot change task storage: profile requests are still active (${remaining.map(([key, count]) => `${key}=${count}`).join(', ')})`)
-      }
-      this.requests.assertAccepting()
-      return await work()
-    }) }
-    catch (error) {
-      if (error instanceof Error && 'code' in error && (error.code === 'profile_draining' || error.code === 'profile_busy')) {
-        throw new DomainRpcError(error.code, error.message, 'details' in error ? error.details : undefined)
+    try {
+      return await this.requests.run(label, async () => {
+        if (!STORAGE_LIFECYCLE_METHODS.has(method)) return work()
+        // Let short GUI polls and writes settle without exempting their ownership.
+        // Completion RPCs must remain available to the work being drained. The
+        // unchanged synchronous idle check and durable task fence below authorize
+        // the move; this wait alone never does. Exclude lifecycle calls consistently
+        // with that idle check, avoiding a pair of lifecycle calls waiting on itself.
+        const include = (active: string) =>
+          !STORAGE_LIFECYCLE_METHODS.has(active.replace(/^rpc:/, ''))
+        try {
+          await this.requests.waitForIdle(2_000, include)
+        } catch (error) {
+          if (!(error instanceof Error) || !('code' in error) || error.code !== 'profile_busy')
+            throw error
+          const remaining = Object.entries(this.requests.snapshot()).filter(([key]) => include(key))
+          throw new DomainRpcError(
+            'profile_busy',
+            `Cannot change task storage: profile requests are still active (${remaining.map(([key, count]) => `${key}=${count}`).join(', ')})`
+          )
+        }
+        this.requests.assertAccepting()
+        return await work()
+      })
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        (error.code === 'profile_draining' || error.code === 'profile_busy')
+      ) {
+        throw new DomainRpcError(
+          error.code,
+          error.message,
+          'details' in error ? error.details : undefined
+        )
       }
       throw error
     }
@@ -594,28 +705,47 @@ export class MmsProfileServices {
 
   /** Stop personal services only. Installation retains shared providers and owner lease. */
   stop({ timeoutMs = 30_000 }: { timeoutMs?: number } = {}): Promise<void> {
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) return Promise.reject(new Error('Invalid shutdown timeout'))
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1)
+      return Promise.reject(new Error('Invalid shutdown timeout'))
     this.beginShutdown()
     if (this.stopped) return Promise.resolve()
     if (!this.stopOperation) {
       const operation = this.finishStop()
       this.stopOperation = operation
-      void operation.catch(() => { if (this.stopOperation === operation) this.stopOperation = undefined })
+      void operation.catch(() => {
+        if (this.stopOperation === operation) this.stopOperation = undefined
+      })
     }
     // Deadline only limits this caller's wait. The underlying operation retains
     // ownership and is reused by later attempts until it has actually settled.
     return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new DomainRpcError('profile_busy', 'Profile work is still draining', {
-        profileId: this.profileId, activity: this.getOwnedActivity()
-      })), timeoutMs)
-      this.stopOperation!.then(() => { clearTimeout(timer); resolve() }, (error) => {
-        clearTimeout(timer)
-        reject(containsProfileBusy(error)
-          ? new DomainRpcError('profile_busy', 'Profile work is still draining', {
-              profileId: this.profileId, activity: this.getOwnedActivity()
+      const timer = setTimeout(
+        () =>
+          reject(
+            new DomainRpcError('profile_busy', 'Profile work is still draining', {
+              profileId: this.profileId,
+              activity: this.getOwnedActivity()
             })
-          : error)
-      })
+          ),
+        timeoutMs
+      )
+      this.stopOperation!.then(
+        () => {
+          clearTimeout(timer)
+          resolve()
+        },
+        (error) => {
+          clearTimeout(timer)
+          reject(
+            containsProfileBusy(error)
+              ? new DomainRpcError('profile_busy', 'Profile work is still draining', {
+                  profileId: this.profileId,
+                  activity: this.getOwnedActivity()
+                })
+              : error
+          )
+        }
+      )
     })
   }
 
@@ -626,18 +756,31 @@ export class MmsProfileServices {
     const cleanups = [
       () => this.undoRetention.stop(),
       () => this.lifecycle.cleanup.stop(),
-      () => this.platform.dispose(), () => this.scheduled.shutdown(), () => this.channels.shutdown(),
-      () => this.orchestrator.shutdown(), () => this.net.shutdown(), () => this.requests.waitForIdle(),
+      () => this.platform.dispose(),
+      () => this.scheduled.shutdown(),
+      () => this.channels.shutdown(),
+      () => this.orchestrator.shutdown(),
+      () => this.net.shutdown(),
+      () => this.requests.waitForIdle(),
       () => this.antigravity.stop(),
-      () => this.ptyManager.shutdown(), () => this.headlessRunner.shutdown(), () => this.mcpManager.shutdown()
+      () => this.ptyManager.shutdown(),
+      () => this.headlessRunner.shutdown(),
+      () => this.mcpManager.shutdown()
     ]
-    const results = await Promise.allSettled(cleanups.map((cleanup) => Promise.resolve().then(cleanup)))
-    const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
+    const results = await Promise.allSettled(
+      cleanups.map((cleanup) => Promise.resolve().then(cleanup))
+    )
+    const errors = results
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map((result) => result.reason)
     if (errors.length) throw new AggregateError(errors, 'Failed to drain profile services')
-    // Every remaining owner must be drained before profile storage is released.
+    // Every remaining owner must drain before profile storage is released.
     const activity = this.getOwnedActivity()
     if (Object.values(activity).some((count) => count > 0)) {
-      throw new DomainRpcError('profile_busy', 'Profile work is still draining', { profileId: this.profileId, activity })
+      throw new DomainRpcError('profile_busy', 'Profile work is still draining', {
+        profileId: this.profileId,
+        activity
+      })
     }
     this.config.stopWatching()
     this.started = false

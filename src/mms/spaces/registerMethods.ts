@@ -109,14 +109,18 @@ export function validateSpacesLocal<K extends SpacesLocalMethod>(
         !row.states.length ||
         row.states.length > 4 ||
         new Set(row.states).size !== row.states.length ||
-        row.states.some((state) =>
-          typeof state !== 'string' || !['pending', 'unknown', 'sent', 'failed'].includes(state)
+        row.states.some(
+          (state) =>
+            typeof state !== 'string' || !['pending', 'unknown', 'sent', 'failed'].includes(state)
         ))
     )
       invalid()
     if (
       row.id !== undefined &&
-      (!isId('event', row.id) || row.after !== undefined || row.limit !== undefined || row.states !== undefined)
+      (!isId('event', row.id) ||
+        row.after !== undefined ||
+        row.limit !== undefined ||
+        row.states !== undefined)
     )
       invalid()
     if (row.after !== undefined && (!Number.isSafeInteger(row.after) || Number(row.after) < 0))

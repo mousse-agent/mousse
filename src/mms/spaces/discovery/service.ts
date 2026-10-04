@@ -372,7 +372,11 @@ export class SpaceStreamDiscoveryService implements SessionDiscoveryPort {
       if (!same(existing, descriptor)) {
         if (descriptor.kind !== 'space.private' || !proof.controllerEvents[0])
           throw new NetError('conflict')
-        priv.reconcileReceiptedDescriptor(descriptor, proof.parentOpenEvent, proof.controllerEvents[0])
+        priv.reconcileReceiptedDescriptor(
+          descriptor,
+          proof.parentOpenEvent,
+          proof.controllerEvents[0]
+        )
       }
       return
     }

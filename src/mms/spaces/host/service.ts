@@ -1125,8 +1125,8 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
     )
       return fail('forbidden')
     this.options.identity.verifyAuthor(envelope.author, bytes, sig, this.clock.now(), 'newWork')
-    const receivedAt = this.clock.now()
-    const descriptor: StreamDescriptor = prepared ?? {
+    const receivedAt = this.clock.now(),
+      descriptor: StreamDescriptor = prepared ?? {
         id: stream,
         kind: 'space.private',
         authority: host.hostNode,
