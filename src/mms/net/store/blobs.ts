@@ -27,6 +27,7 @@ import {
 import type { BlobId, EventId, StreamId } from '../../../shared/net'
 import { decodeEnvelope } from '../sync/codec'
 import { NetDatabase, fail, integer } from './database'
+import { syncDirectory } from './directorySync'
 
 export class FileBlobStore implements BlobStore {
   readonly root: string
@@ -154,7 +155,7 @@ export class FileBlobStore implements BlobStore {
             fail('conflict', 'Existing content-addressed blob is inconsistent.')
           unlinkSync(temp)
         } else renameSync(temp, destination)
-        this.syncDirectory(join(this.root, blob.slice(4, 6), blob.slice(6, 8)))
+        syncDirectory(join(this.root, blob.slice(4, 6), blob.slice(6, 8)))
         this.db.checkpoint('blobs.commit.afterRename')
         this.db.transaction(() => {
           const previous = this.db.database
@@ -376,13 +377,5 @@ export class FileBlobStore implements BlobStore {
     if (!stat.isFile() || stat.isSymbolicLink())
       fail('forbidden', 'Blob is not an owned regular file.')
     return stat
-  }
-  private syncDirectory(path: string): void {
-    const fd = openSync(path, 'r')
-    try {
-      fsyncSync(fd)
-    } finally {
-      closeSync(fd)
-    }
   }
 }

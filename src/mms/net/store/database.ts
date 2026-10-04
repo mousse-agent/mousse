@@ -17,6 +17,7 @@ import { NetError, STORE_TXN_MAX_BYTES, STORE_TXN_MAX_ROWS } from '../../../shar
 import type { Clock } from '../contracts'
 import { systemClock } from '../clock'
 import { canonicalJson } from '../sync/codec'
+import { syncDirectory } from './directorySync'
 
 export type StoreFault = (point: string) => void
 export interface DatabaseOptions {
@@ -132,12 +133,7 @@ export class NetDatabase {
         } finally {
           closeSync(fd)
         }
-        const directoryFd = openSync(this.directory, 'r')
-        try {
-          fsyncSync(directoryFd)
-        } finally {
-          closeSync(directoryFd)
-        }
+        syncDirectory(this.directory)
       }
     } catch (error) {
       this.database.close()
@@ -283,12 +279,7 @@ export class NetDatabase {
       } finally {
         closeSync(fd)
       }
-      const directoryFd = openSync(this.directory, 'r')
-      try {
-        fsyncSync(directoryFd)
-      } finally {
-        closeSync(directoryFd)
-      }
+      syncDirectory(this.directory)
     } catch (cause) {
       // Keep the running process fenced even when the filesystem cannot record it.
       throw new NetError(

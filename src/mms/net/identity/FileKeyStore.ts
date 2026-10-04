@@ -33,6 +33,7 @@ import { NetError } from '../../../shared/net/errors'
 import type { KeyStore, TlsCredentials } from '../contracts'
 import { createSecretCodec, type SecretCodec } from '../../providers/secretCodec'
 import { generateSelfSignedCert } from '../link/selfSignedCert'
+import { syncDirectory } from '../store/directorySync'
 import {
   decodeBase64,
   generateSigningKey,
@@ -582,12 +583,7 @@ export class FileKeyStore implements KeyStore {
       fd = undefined
       this.fault?.('keys.beforeRename')
       renameSync(temp, this.file)
-      const parentFd = openSync(dirname(this.file), constants.O_RDONLY)
-      try {
-        fsyncSync(parentFd)
-      } finally {
-        closeSync(parentFd)
-      }
+      syncDirectory(dirname(this.file))
       this.stored = stored
       this.keys = keys
     } catch (cause) {

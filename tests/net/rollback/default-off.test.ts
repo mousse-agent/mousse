@@ -31,17 +31,23 @@ it('rejects every non-opt-in Net method without composing runtime or creating an
     composeRuntime,
     clock: { ...systemClock, setTimeout }
   })
+  const runtime = vi.spyOn(net, 'runtime')
   cleanup.push(() => net.shutdown())
   await net.start()
   expect(net.request('net.status', {})).toMatchObject({ enabled: false, routes: [], peers: [] })
+  expect(net.request('net.plus.status', {})).toEqual({ configured: false, connected: false })
+  expect(existsSync(join(path, 'net'))).toBe(false)
+  expect(runtime).not.toHaveBeenCalled()
+  expect(composeRuntime).not.toHaveBeenCalled()
   for (const method of NET_LOCAL_METHODS) {
-    if (['net.status', 'net.init', 'bridge.join'].includes(method)) continue
+    if (['net.status', 'net.plus.status', 'net.init', 'bridge.join'].includes(method)) continue
     await expect(Promise.resolve().then(() => net.request(method, {}))).rejects.toMatchObject({
       code: 'disabled',
       message: 'Mousse Net is disabled for this profile. Opt in with net init or bridge join.'
     })
     expect(existsSync(join(path, 'net'))).toBe(false)
   }
+  expect(runtime).not.toHaveBeenCalled()
   expect(composeRuntime).not.toHaveBeenCalled()
   expect(setTimeout).not.toHaveBeenCalled()
   expect(net.getActiveCount()).toBe(0)
@@ -86,6 +92,10 @@ it('rejects read-only and mutating composed IPC domains without creating profile
     enabled: false,
     routes: [],
     peers: []
+  })
+  expect(await client.request('net.plus.status', {})).toEqual({
+    configured: false,
+    connected: false
   })
   expect(existsSync(path)).toBe(false)
   const calls = [

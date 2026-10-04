@@ -552,20 +552,39 @@ describe('hosted Plus CLI custody', () => {
         params: { id: 'transaction' }
       })
       expect(
-        prepareNetCommand(args('net', 'plus', ['connect'], [['account-token-file', token]]))
-      ).toEqual({ method: 'net.plus.connect', params: { accountToken: 'one-shot-secret' } })
+        prepareNetCommand(args('net', 'plus', ['configure'], [['configuration-file', config]]))
+      ).toEqual({ method: 'net.plus.configure', params: { configuration } })
       expect(prepareNetCommand(args('net', 'plus', ['allow', nodeId], [['revoke', true]]))).toEqual(
         { method: 'net.plus.allow', params: { node: nodeId, ttlMs: 3600000, revoke: true } }
       )
-      chmodSync(token, 0o644)
-      expect(() =>
-        prepareNetCommand(args('net', 'plus', ['connect'], [['account-token-file', token]]))
-      ).toThrow()
-      chmodSync(token, 0o600)
-      symlinkSync(token, link)
-      expect(() =>
-        prepareNetCommand(args('net', 'plus', ['connect'], [['account-token-file', link]]))
-      ).toThrow()
+      if (process.platform === 'win32') {
+        // Windows cannot establish the POSIX private-file mode required by this
+        // one-shot bootstrap path. I verify its fail-closed custody policy.
+        expect(() =>
+          prepareNetCommand(args('net', 'plus', ['connect'], [['account-token-file', token]]))
+        ).toThrow(/private regular file/)
+        expect(() =>
+          prepareNetCommand(
+            args('net', 'plus', ['bind'], [
+              ['configuration-file', config],
+              ['account-token-file', token]
+            ])
+          )
+        ).toThrow(/private regular file/)
+      } else {
+        expect(
+          prepareNetCommand(args('net', 'plus', ['connect'], [['account-token-file', token]]))
+        ).toEqual({ method: 'net.plus.connect', params: { accountToken: 'one-shot-secret' } })
+        chmodSync(token, 0o644)
+        expect(() =>
+          prepareNetCommand(args('net', 'plus', ['connect'], [['account-token-file', token]]))
+        ).toThrow()
+        chmodSync(token, 0o600)
+        symlinkSync(token, link)
+        expect(() =>
+          prepareNetCommand(args('net', 'plus', ['connect'], [['account-token-file', link]]))
+        ).toThrow()
+      }
       expect(() =>
         prepareNetCommand(args('net', 'plus', ['connect'], [['token', 'one-shot-secret']]))
       ).toThrow()
