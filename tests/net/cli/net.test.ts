@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync, chmodSync, symlinkSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
 import {
@@ -511,6 +514,65 @@ it('validates authority selectors and recovery command arity without accepting c
     args('net', 'authority', ['unknown'])
   ])
     expect(() => prepareNetCommand(value)).toThrow()
+})
+
+describe('hosted Plus CLI custody', () => {
+  it('parses safe browser login and bounds private one-shot bootstrap input', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mousse-plus-cli-'))
+    const configuration = {
+      apiOrigin: 'https://api.example',
+      audience: 'wss://relay.example/v1/net/relay',
+      installationId: 'install',
+      gatewayId: 'gateway'
+    }
+    const config = join(dir, 'configuration.json'),
+      token = join(dir, 'credential'),
+      link = join(dir, 'link')
+    try {
+      writeFileSync(config, JSON.stringify(configuration))
+      writeFileSync(token, 'one-shot-secret', { mode: 0o600 })
+      expect(
+        prepareNetCommand(
+          args(
+            'net',
+            'plus',
+            ['login'],
+            [
+              ['configuration-file', config],
+              ['bind-root', true]
+            ]
+          )
+        )
+      ).toEqual({
+        method: 'net.plus.login.begin',
+        params: { configuration, deviceName: 'My device', bindRoot: true }
+      })
+      expect(prepareNetCommand(args('net', 'plus', ['login', 'finish', 'transaction']))).toEqual({
+        method: 'net.plus.login.finish',
+        params: { id: 'transaction' }
+      })
+      expect(
+        prepareNetCommand(args('net', 'plus', ['connect'], [['account-token-file', token]]))
+      ).toEqual({ method: 'net.plus.connect', params: { accountToken: 'one-shot-secret' } })
+      expect(prepareNetCommand(args('net', 'plus', ['allow', nodeId], [['revoke', true]]))).toEqual(
+        { method: 'net.plus.allow', params: { node: nodeId, ttlMs: 3600000, revoke: true } }
+      )
+      chmodSync(token, 0o644)
+      expect(() =>
+        prepareNetCommand(args('net', 'plus', ['connect'], [['account-token-file', token]]))
+      ).toThrow()
+      chmodSync(token, 0o600)
+      symlinkSync(token, link)
+      expect(() =>
+        prepareNetCommand(args('net', 'plus', ['connect'], [['account-token-file', link]]))
+      ).toThrow()
+      expect(() =>
+        prepareNetCommand(args('net', 'plus', ['connect'], [['token', 'one-shot-secret']]))
+      ).toThrow()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 it('admits explicit rollback and hidden passphrase re-enrollment without secret argv', () => {

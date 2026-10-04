@@ -116,7 +116,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...CHAT_METHODS,
   ...CHAT_RESOURCE_METHODS,
   ...CHAT_NETWORK_METHODS,
-  ...NET_LOCAL_METHODS,
+  ...NET_LOCAL_METHODS.filter(method => !['net.plus.bind','net.plus.connect'].includes(method)),
   ...BRIDGE_HUB_LOCAL_METHODS,
   ...SPACES_LOCAL_METHODS,
   ...BOTS_LOCAL_METHODS,

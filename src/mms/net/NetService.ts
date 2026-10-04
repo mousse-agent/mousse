@@ -1,3 +1,7 @@
+import { createHash } from 'node:crypto'
+import type { RelayRendezvous } from './relay/protocol'
+import { HostedProfileService } from './plus/HostedProfileService'
+import type { PlusConfiguration } from './plus/contracts'
 import { DEFAULT_NET_FEATURE_FLAGS, type NetFeatureFlags } from '../../shared/featureFlags'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
@@ -66,11 +70,7 @@ interface NetConfiguration {
   v: 1
   enabled: boolean
   features?: NetFeatureFlags
-  direct: {
-    enabled: boolean
-    host: string
-    port: number
-  }
+  direct: { enabled: boolean; host: string; port: number }
   routesVersion: number
   transports?: TransportConfiguration[]
   preparedForJoin?: boolean
@@ -102,6 +102,7 @@ export interface NetDomainComposition {
     | 'discovery'
     | 'spaceIdentity'
   >
+  hostedSpacePeerAuthorized?(user: UserId, node: NodeId): boolean
   spaceJoin?: SpaceJoinAdmissionPort
   onSessionOpened?(session: SyncSession): void
   /** Starts bounded domain recovery after routes and unlocked identity are ready. */
@@ -309,7 +310,17 @@ export class NetService {
     if (!existsSync(join(this.options.profileDir, 'net', 'net.db'))) return
     try {
       this.runtime()
-      if (this.config.enabled) await this.activate()
+      if (this.config.enabled) {
+        if (
+          this.config.transports?.some((row) => row.id === 'plus-relay' && row.enabled) &&
+          this.state?.keys.state() === 'unlocked' &&
+          this.state.keys.encryptedAtRest()
+        )
+          await this.recoverHostedLease()
+        await this.activate()
+        if (this.config.transports?.some((row) => row.id === 'plus-relay' && row.enabled))
+          this.armPlusRenewal()
+      }
     } catch (error) {
       this.lastError = error instanceof NetError ? error.code : 'internal'
       this.emit()
@@ -318,6 +329,14 @@ export class NetService {
   request(method: NetLocalMethod, params: Record<string, unknown>): unknown | Promise<unknown> {
     if (this.stopped) throw new NetError('cancelled')
     if (method === 'net.status') return this.status()
+    if (method === 'net.plus.status')
+      return !this.shutdownSignal.signal.aborted &&
+        this.state &&
+        this.state.identity.self() &&
+        this.state.keys.state() === 'unlocked' &&
+        this.state.keys.encryptedAtRest()
+        ? this.hostedService().status()
+        : { configured: false, connected: false }
     if (method === 'net.disable') return this.disable()
     if (this.disabled) throw new NetError('disabled')
     if (!['net.init', 'bridge.join'].includes(method)) this.assertEnabled()
@@ -337,6 +356,88 @@ export class NetService {
     }
     return this.serial(async () => {
       switch (method) {
+        case 'net.plus.discover':
+          return this.hostedService().discover(String(params.apiOrigin))
+        case 'net.plus.login.begin':
+          return this.hostedService().beginLogin(
+            params.configuration as Omit<PlusConfiguration, 'accountId'>,
+            String(params.deviceName),
+            params.bindRoot === true
+          )
+        case 'net.plus.configure':
+          return this.hostedService().configure(params.configuration as PlusConfiguration)
+        case 'net.plus.login.finish': {
+          this.assertPlusTransportCapacity()
+          const status = await this.hostedService().finishLogin(String(params.id))
+          const configuration = this.createTransports().validate({
+            id: 'plus-relay',
+            enabled: true,
+            settings: { address: this.hostedService().configuration()!.audience }
+          })
+          this.config.transports = [
+            ...(this.config.transports ?? []).filter((row) => row.id !== 'plus-relay'),
+            configuration
+          ]
+          this.saveConfig()
+          await this.transport?.teardown()
+          this.transport = undefined
+          await this.activate()
+          this.armPlusRenewal()
+          return status
+        }
+        case 'net.plus.renew': {
+          await this.fenceUnauthorizedHostedSpaceRoutes()
+          const status = await this.hostedService().renew()
+          await this.reconcileHostedSpaceRoutes()
+          await this.transport?.teardown()
+          this.transport = undefined
+          await this.activate()
+          this.armPlusRenewal()
+          return status
+        }
+        case 'net.plus.allow':
+          await this.hostedService().allow(
+            params.node as NodeId,
+            Number(params.ttlMs),
+            params.revoke === true
+          )
+          return { approved: params.revoke !== true }
+        case 'net.plus.bind':
+          return this.hostedService().bind(
+            params.configuration as PlusConfiguration,
+            String(params.accountToken)
+          )
+        case 'net.plus.connect': {
+          this.assertPlusTransportCapacity()
+          const status = await this.hostedService().connect(String(params.accountToken))
+          const configuration = this.createTransports().validate({
+            id: 'plus-relay',
+            enabled: true,
+            settings: { address: this.hostedService().configuration()!.audience }
+          })
+          this.config.transports = [
+            ...(this.config.transports ?? []).filter((row) => row.id !== 'plus-relay'),
+            configuration
+          ]
+          this.saveConfig()
+          await this.transport?.teardown()
+          this.transport = undefined
+          await this.activate()
+          this.armPlusRenewal()
+          return status
+        }
+        case 'net.plus.disconnect': {
+          this.config.transports = (this.config.transports ?? []).filter(
+            (row) => row.id !== 'plus-relay'
+          )
+          this.saveConfig()
+          await this.activate()
+          if (this.plusRenewal) clearTimeout(this.plusRenewal)
+          this.plusRenewal = undefined
+          await this.hostedService().revoke()
+          this.hostedService().clear()
+          return { configured: false, connected: false }
+        }
         case 'net.transport.configure': {
           const rt = this.requireEnrolled(),
             checked = this.createTransports().validate({
@@ -354,7 +455,17 @@ export class NetService {
               port: (checked.settings as { port?: number }).port ?? 0
             }
           this.saveConfig()
-          if (this.config.enabled) await this.activate()
+          if (this.config.enabled) {
+            if (
+              this.config.transports?.some((row) => row.id === 'plus-relay' && row.enabled) &&
+              this.state?.keys.state() === 'unlocked' &&
+              this.state.keys.encryptedAtRest()
+            )
+              await this.recoverHostedLease()
+            await this.activate()
+            if (this.config.transports?.some((row) => row.id === 'plus-relay' && row.enabled))
+              this.armPlusRenewal()
+          }
           this.emit()
           return { transports: this.status().transports ?? [], node: rt.identity.self()!.node }
         }
@@ -367,7 +478,17 @@ export class NetService {
         case 'net.unlock': {
           const rt = this.runtime()
           await rt.keys.unlock(String(params.passphrase))
-          if (this.config.enabled) await this.activate()
+          if (this.config.enabled) {
+            if (
+              this.config.transports?.some((row) => row.id === 'plus-relay' && row.enabled) &&
+              this.state?.keys.state() === 'unlocked' &&
+              this.state.keys.encryptedAtRest()
+            )
+              await this.recoverHostedLease()
+            await this.activate()
+            if (this.config.transports?.some((row) => row.id === 'plus-relay' && row.enabled))
+              this.armPlusRenewal()
+          }
           this.emit()
           return this.status()
         }
@@ -504,10 +625,129 @@ export class NetService {
       roster: hello.roster
     }
   }
+  private assertPlusTransportCapacity(): void {
+    if ((this.config.transports ?? []).filter((row) => row.id !== 'plus-relay').length >= 8)
+      throw new NetError('too_large')
+  }
+  private async recoverHostedLease(): Promise<void> {
+    try {
+      await this.fenceUnauthorizedHostedSpaceRoutes()
+      await this.hostedService().renew()
+      await this.reconcileHostedSpaceRoutes()
+    } catch (error) {
+      this.lastError = error instanceof NetError ? error.code : 'internal'
+      this.emit()
+    }
+  }
+  private hostedConsentFenced = false
+  private async fenceUnauthorizedHostedSpaceRoutes(): Promise<void> {
+    if (
+      this.hostedService()
+        .managedSpaceRoutes()
+        .some(
+          (row) =>
+            !this.featureEnabled('netSpaces') ||
+            this.domain?.hostedSpacePeerAuthorized?.(row.user, row.node) !== true
+        )
+    ) {
+      this.hostedConsentFenced = true
+      await this.transport?.suspendHosted()
+    }
+  }
+  private async reconcileHostedSpaceRoutes(): Promise<void> {
+    const hosted = this.hostedService(),
+      authorized = (user: UserId, node: NodeId) =>
+        this.featureEnabled('netSpaces') &&
+        this.domain?.hostedSpacePeerAuthorized?.(user, node) === true
+    await this.fenceUnauthorizedHostedSpaceRoutes()
+    await hosted.reconcileSpaceRoutes(authorized)
+    if (this.hostedConsentFenced) {
+      this.hostedConsentFenced = false
+      if (this.transport) await this.activate()
+    }
+  }
+  hostedSpaceMembershipChanged(): void {
+    if (
+      this.shutdownSignal.signal.aborted ||
+      !this.config.enabled ||
+      !this.state?.identity.self() ||
+      this.state.keys.state() !== 'unlocked' ||
+      !this.state.keys.encryptedAtRest()
+    )
+      return
+    void this.serial(async () => {
+      if (!this.hostedService().status().connected) return
+      await this.reconcileHostedSpaceRoutes()
+    }).catch((error) => {
+      this.lastError = error instanceof NetError ? error.code : 'internal'
+      this.armPlusRenewal()
+      this.emit()
+    })
+  }
+  private plusAbortBound = false
+  private plusRenewal?: ReturnType<typeof setTimeout>
+  private armPlusRenewal(): void {
+    if (this.plusRenewal || this.shutdownSignal.signal.aborted) return
+    const status = this.hostedService().status()
+    if (!status.configured || !status.registrationId) return
+    this.plusRenewal = setTimeout(
+      () => {
+        this.plusRenewal = undefined
+        if (this.shutdownSignal.signal.aborted) return
+        void this.serial(async () => {
+          try {
+            await this.fenceUnauthorizedHostedSpaceRoutes()
+            await this.hostedService().renew()
+            await this.reconcileHostedSpaceRoutes()
+          } finally {
+            this.armPlusRenewal()
+          }
+        }).catch((error) => {
+          this.lastError = error instanceof NetError ? error.code : 'internal'
+          this.emit()
+        })
+      },
+      status.connected
+        ? Math.min(20000, Math.max(1000, (status.expiresAt! - this.clock.now()) / 3))
+        : 20000
+    )
+    this.plusRenewal.unref?.()
+    if (!this.plusAbortBound) {
+      this.plusAbortBound = true
+      this.shutdownSignal.signal.addEventListener(
+        'abort',
+        () => {
+          if (this.plusRenewal) clearTimeout(this.plusRenewal)
+          this.plusRenewal = undefined
+        },
+        { once: true }
+      )
+    }
+  }
+  private hostedProfile?: HostedProfileService
+  private hostedService(): HostedProfileService {
+    const rt = this.requireEnrolled()
+    return (this.hostedProfile ??= new HostedProfileService({
+      keys: rt.keys,
+      now: () => this.clock.now(),
+      signal: this.shutdownSignal.signal,
+      identity: () => {
+        const self = rt.identity.self()!,
+          hello = rt.enrollment.localHello()
+        return {
+          ...self,
+          rootKey: rt.identity.pinnedRootKey(self.user)!,
+          roster: hello.roster!,
+          delegation: hello.delegation!
+        }
+      }
+    }))
+  }
   private createTransports(): ProfileTransports {
     return new ProfileTransports({
       clock: this.clock,
       profileDir: this.options.profileDir,
+      hosted: () => this.hostedService(),
       identity: () => this.relayIdentity()
     })
   }
@@ -523,6 +763,12 @@ export class NetService {
     const transport = (this.transport ??= new ProfileTransports({
       clock: this.clock,
       profileDir: this.options.profileDir,
+      hosted: () => this.hostedService(),
+      relayRendezvous:
+        rt.enrollment.preparedNodeJoin()?.rendezvous?.transport === 'plus-relay' &&
+        !this.hostedService().status().connected
+          ? rt.enrollment.preparedNodeJoin()!.rendezvous
+          : undefined,
       identity: () => this.relayIdentity(),
       onChanged: () => {
         if (this.stopped || this.disabled || !this.config.enabled || !this.routes) return
@@ -536,16 +782,21 @@ export class NetService {
         }
       }
     }))
-    await transport.start(this.transportConfigurations(), (raw, _info, deadline) => {
-      if (this.stopped || this.disabled || !this.config.enabled) {
-        raw.destroy()
-        return
+    await transport.start(
+      this.transportConfigurations().map((row) =>
+        row.id === 'plus-relay' && this.hostedConsentFenced ? { ...row, enabled: false } : row
+      ),
+      (raw, _info, deadline) => {
+        if (this.stopped || this.disabled || !this.config.enabled) {
+          raw.destroy()
+          return
+        }
+        this.track(this.accept(raw, deadline)).catch((error) => {
+          this.lastError = error instanceof NetError ? error.code : 'internal'
+          this.emit()
+        })
       }
-      this.track(this.accept(raw, deadline)).catch((error) => {
-        this.lastError = error instanceof NetError ? error.code : 'internal'
-        this.emit()
-      })
-    })
+    )
     if (this.stopped || this.disabled || !this.config.enabled) {
       await transport.teardown()
       this.assertEnabled()
@@ -612,9 +863,15 @@ export class NetService {
           preauthDeadlineMs: remaining(),
           spaceJoin: this.domain?.spaceJoin
             ? {
-                redeem: (request, channel) => {
+                redeem: async (request, channel) => {
                   this.assertFeature('netSpaces')
-                  return this.domain!.spaceJoin!.redeem(request, channel)
+                  const response = await this.domain!.spaceJoin!.redeem(request, channel)
+                  if (this.transport?.hasPlusRelayListener())
+                    await this.serial(async () => {
+                      this.hostedService().rememberSpaceRoute(request.node, request.user)
+                      await this.reconcileHostedSpaceRoutes()
+                    })
+                  return response
                 }
               }
             : undefined,
@@ -729,6 +986,60 @@ export class NetService {
     return session
   }
   /** Root domain owners validate signed peer placement/routes before invoking this carrier dial. */
+  async prepareSpaceRendezvous(
+    expiresAt: number,
+    uses: number
+  ): Promise<RelayRendezvous | undefined> {
+    this.assertFeature('netSpaces')
+    if (!this.transport?.hasPlusRelayListener()) return
+    if (uses !== 1)
+      throw new NetError(
+        'bad_request',
+        'Hosted Space invitations admit one exact source device; create separate invitations for each participant.'
+      )
+    return this.serial(() =>
+      this.hostedService().rendezvous(Math.min(expiresAt, Date.now() + 599000), 'space')
+    )
+  }
+  async connectSpaceInvitation(
+    peer: PeerRef,
+    signal: AbortSignal,
+    rendezvous?: RelayRendezvous
+  ): Promise<SecureChannel> {
+    if (!rendezvous) return this.connectChannel(peer, signal)
+    this.assertFeature('netSpaces')
+    if (!this.hostedService().status().connected || rendezvous.expiresAt <= Date.now())
+      throw new NetError('forbidden', 'Sign in to Mousse ID before joining this hosted Space.')
+    const transport = new ProfileTransports({
+      clock: this.clock,
+      profileDir: this.options.profileDir,
+      hosted: () => this.hostedService(),
+      identity: () => this.relayIdentity(),
+      relayRendezvous: rendezvous
+    })
+    const hostedSignal = AbortSignal.any([signal, this.shutdownSignal.signal])
+    try {
+      const raw = await transport.dial(
+        { transport: 'plus-relay', address: rendezvous.relay + '?node=' + peer.node, priority: 0 },
+        hostedSignal
+      )
+      raw.once('close', () => {
+        void transport.teardown().catch(() => {})
+      })
+      return await openSecureChannel(raw, {
+        role: 'client',
+        credentials: this.requireEnrolled().keys.tlsCredentials(),
+        expectedPeerFingerprint: createHash('sha256')
+          .update(Buffer.from(peer.transportKey, 'base64url'))
+          .digest('base64url'),
+        deadlineMs: DIAL_TLS_DEADLINE_MS,
+        signal: hostedSignal
+      })
+    } catch (error) {
+      await transport.teardown()
+      throw error
+    }
+  }
   async connectChannel(peer: PeerRef, signal: AbortSignal): Promise<SecureChannel> {
     this.assertEnabled()
     this.requireEnrolled()

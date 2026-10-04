@@ -12,6 +12,16 @@ export interface NetLocalService {
   request(method: NetLocalMethod, params: Record<string, unknown>): unknown | Promise<unknown>
 }
 const keys: Record<NetLocalMethod, readonly string[]> = {
+  'net.plus.discover': ['apiOrigin'],
+  'net.plus.login.begin': ['configuration', 'deviceName', 'bindRoot'],
+  'net.plus.login.finish': ['id'],
+  'net.plus.configure': ['configuration'],
+  'net.plus.renew': [],
+  'net.plus.allow': ['node', 'ttlMs', 'revoke'],
+  'net.plus.status': [],
+  'net.plus.bind': ['configuration', 'accountToken'],
+  'net.plus.connect': ['accountToken'],
+  'net.plus.disconnect': [],
   'net.transport.list': [],
   'net.transport.configure': ['id', 'enabled', 'settings'],
   'net.init': ['name', 'listen', 'host', 'port', 'passphrase'],
@@ -32,6 +42,58 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
 }
 function validate(method: NetLocalMethod, value: unknown): Record<string, unknown> {
   const params = domainObject(value ?? {}, ['profileId', ...keys[method]])
+  if (
+    method === 'net.plus.discover' &&
+    (typeof params.apiOrigin !== 'string' || params.apiOrigin.length > 4096)
+  )
+    throw new DomainRpcError('invalid_params', 'A bounded hosted account origin is required')
+  if (
+    method === 'net.plus.login.begin' &&
+    (typeof params.deviceName !== 'string' ||
+      !params.deviceName.length ||
+      params.deviceName.length > 64 ||
+      typeof params.bindRoot !== 'boolean')
+  )
+    throw new DomainRpcError(
+      'invalid_params',
+      'A device name and explicit binding selection are required'
+    )
+  if (
+    method === 'net.plus.login.finish' &&
+    (typeof params.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(params.id))
+  )
+    throw new DomainRpcError('invalid_params', 'A pending login identity is required')
+  if (
+    ['net.plus.login.begin', 'net.plus.configure'].includes(method) &&
+    (!params.configuration ||
+      typeof params.configuration !== 'object' ||
+      Array.isArray(params.configuration))
+  )
+    throw new DomainRpcError('invalid_params', 'A hosted configuration is required')
+  if (
+    method === 'net.plus.allow' &&
+    (!isId('node', params.node) ||
+      !Number.isSafeInteger(params.ttlMs) ||
+      Number(params.ttlMs) < 1 ||
+      Number(params.ttlMs) > 86400000 ||
+      (params.revoke !== undefined && typeof params.revoke !== 'boolean'))
+  )
+    throw new DomainRpcError('invalid_params', 'A node and bounded route permission are required')
+  if (
+    ['net.plus.bind', 'net.plus.connect'].includes(method) &&
+    (typeof params.accountToken !== 'string' ||
+      !params.accountToken.length ||
+      params.accountToken.length > 16384 ||
+      /[\r\n]/.test(params.accountToken))
+  )
+    throw new DomainRpcError('invalid_params', 'A bounded account credential is required')
+  if (
+    method === 'net.plus.bind' &&
+    (!params.configuration ||
+      typeof params.configuration !== 'object' ||
+      Array.isArray(params.configuration))
+  )
+    throw new DomainRpcError('invalid_params', 'A hosted configuration is required')
   if (
     ['net.unlock', 'net.recovery.export', 'net.recovery.import'].includes(method) &&
     params.passphrase === undefined

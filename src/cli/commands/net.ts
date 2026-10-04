@@ -20,6 +20,14 @@ import { isId } from '../../shared/net/ids'
 
 export const NET_HELP = `Usage:
   mousse-cli net init [--unlock] [--name <name>] [--listen [--host <IP>] [--port <port>]]
+  mousse-cli net plus login --configuration-file <path> [--bind-root] [--name <name>]
+  mousse-cli net plus login finish <transaction-id>
+  mousse-cli net plus configure --configuration-file <path>
+  mousse-cli net plus bind --configuration-file <path> --account-token-file <private-path>
+  mousse-cli net plus connect --account-token-file <private-path>
+  mousse-cli net plus allow <source-node> [--ttl 1h] [--revoke]
+  mousse-cli net plus status
+  mousse-cli net plus disconnect
   mousse-cli net status
   mousse-cli net disable
   mousse-cli net doctor
@@ -31,6 +39,16 @@ export const NET_HELP = `Usage:
   mousse-cli net recovery import --file <private-file> --become-authority
   mousse-cli net transports
   mousse-cli net transport configure <id> --settings-file <path> [--disable]
+
+Plus bind explicitly signs an account/service-bound challenge with this
+profile's protected unlocked root. Connect uses a recent one-shot account
+credential, then stores only its connector in the encrypted profile keystore.
+The account-token file must be private (0600), regular and owned by this user.
+Tokens never enter arguments, command output, or renderer APIs. Browser sign-in uses PKCE and explicit approval. Login prints only the
+approval URL, code and transaction id; after approval, use login finish.
+--bind-root explicitly authorizes binding this profile’s existing root to
+the approved Mousse ID account; member profiles omit it and connect only
+to an existing matching account binding.
 
 Commands use the selected profile's daemon-owned network identity.
 init explicitly opts in, creating an authority identity only on a fresh profile.
@@ -80,6 +98,15 @@ Use --profile <profile> to choose the daemon profile.
 `
 
 type NetMethod =
+  | 'net.plus.login.begin'
+  | 'net.plus.login.finish'
+  | 'net.plus.configure'
+  | 'net.plus.renew'
+  | 'net.plus.allow'
+  | 'net.plus.status'
+  | 'net.plus.bind'
+  | 'net.plus.connect'
+  | 'net.plus.disconnect'
   | 'net.authority.status'
   | 'net.authority.transfer'
   | 'net.recovery.export'
@@ -227,15 +254,26 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
   )
     invalid('Network commands do not accept chat, provider or API-key overrides.')
   const method = (
-    args.command === 'net' && ['authority', 'recovery'].includes(args.subcommand ?? '')
-      ? `net.${args.subcommand}.${args.positional[0]}`
-      : args.command === 'net' && args.subcommand === 'transports'
-        ? 'net.transport.list'
-        : args.command === 'net' && args.subcommand === 'transport'
-          ? 'net.transport.configure'
-          : `${args.command}.${args.subcommand}`
+    args.command === 'net' && args.subcommand === 'plus' && args.positional[0] === 'login'
+      ? `net.plus.login.${args.positional[1] ?? 'begin'}`
+      : args.command === 'net' && ['authority', 'recovery', 'plus'].includes(args.subcommand ?? '')
+        ? `net.${args.subcommand}.${args.positional[0]}`
+        : args.command === 'net' && args.subcommand === 'transports'
+          ? 'net.transport.list'
+          : args.command === 'net' && args.subcommand === 'transport'
+            ? 'net.transport.configure'
+            : `${args.command}.${args.subcommand}`
   ) as NetMethod
   const options: Partial<Record<NetMethod, string[]>> = {
+    'net.plus.login.begin': ['configuration-file', 'name', 'bind-root'],
+    'net.plus.login.finish': [],
+    'net.plus.configure': ['configuration-file'],
+    'net.plus.renew': [],
+    'net.plus.allow': ['ttl', 'revoke'],
+    'net.plus.status': [],
+    'net.plus.bind': ['configuration-file', 'account-token-file'],
+    'net.plus.connect': ['account-token-file'],
+    'net.plus.disconnect': [],
     'net.authority.status': [],
     'net.authority.transfer': [],
     'net.recovery.export': ['output'],
@@ -259,29 +297,100 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
   const allowed = new Set(['profile', 'mode', ...permitted])
   for (const key of args.flags.keys()) {
     if (!allowed.has(key)) invalid('Unsupported flag for this network command.')
-    if (['listen', 'protect', 'disable', 'unlock', 'become-authority'].includes(key)) {
+    if (
+      [
+        'listen',
+        'protect',
+        'disable',
+        'unlock',
+        'become-authority',
+        'revoke',
+        'bind-root'
+      ].includes(key)
+    ) {
       if (args.flags.get(key) !== true) invalid('This option is a switch; do not supply a value.')
     } else stringFlag(args, key)
   }
   const count =
+    (method.startsWith('net.plus.') &&
+      !['net.plus.allow', 'net.plus.login.finish'].includes(method)) ||
     method === 'net.authority.status' ||
     method === 'net.recovery.export' ||
     method === 'net.recovery.import'
       ? 1
-      : method === 'net.authority.transfer' || method === 'net.transport.configure'
-        ? 2
-        : method === 'bridge.rename'
+      : method === 'net.plus.login.finish'
+        ? 3
+        : method === 'net.plus.allow' ||
+            method === 'net.authority.transfer' ||
+            method === 'net.transport.configure'
           ? 2
-          : method === 'bridge.revoke'
-            ? 1
-            : method === 'bridge.join'
-              ? undefined
-              : 0
+          : method === 'bridge.rename'
+            ? 2
+            : method === 'bridge.revoke'
+              ? 1
+              : method === 'bridge.join'
+                ? undefined
+                : 0
   if (count !== undefined && args.positional.length !== count)
     invalid(
       `${method.replace('.', ' ')} requires ${count} positional argument${count === 1 ? '' : 's'}.`
     )
   const params: Record<string, unknown> = {}
+  if (method.startsWith('net.plus.')) {
+    if (method === 'net.plus.login.finish') return { method, params: { id: args.positional[2] } }
+    if (method === 'net.plus.login.begin' || method === 'net.plus.configure') {
+      const file = stringFlag(args, 'configuration-file')
+      if (!file) invalid('--configuration-file is required.')
+      let configuration: unknown
+      try {
+        configuration = JSON.parse(readBoundedFile(file, 16384, false))
+      } catch {
+        invalid('The hosted configuration must contain bounded JSON.')
+      }
+      return {
+        method,
+        params: {
+          configuration,
+          ...(method === 'net.plus.login.begin'
+            ? {
+                deviceName: stringFlag(args, 'name') ?? 'My device',
+                bindRoot: args.flags.has('bind-root')
+              }
+            : {})
+        }
+      }
+    }
+    if (method === 'net.plus.allow') {
+      if (!isId('node', args.positional[1]))
+        invalid('A destination-approved source node is required.')
+      return {
+        method,
+        params: {
+          node: args.positional[1],
+          ttlMs: parseInviteTtl(stringFlag(args, 'ttl') ?? '1h'),
+          revoke: args.flags.has('revoke')
+        }
+      }
+    }
+    if (args.positional.length !== 1) invalid('Use net plus status, bind, connect or disconnect.')
+    if (['net.plus.bind', 'net.plus.connect'].includes(method)) {
+      const file = stringFlag(args, 'account-token-file')
+      if (!file) invalid('--account-token-file requires a private account credential file.')
+      params.accountToken = readBoundedFile(file, 16384, true).trim()
+      if (!params.accountToken || /[\r\n]/.test(String(params.accountToken)))
+        invalid('The account credential file must hold one bounded credential.')
+    }
+    if (method === 'net.plus.bind') {
+      const file = stringFlag(args, 'configuration-file')
+      if (!file) invalid('--configuration-file is required.')
+      try {
+        params.configuration = JSON.parse(readBoundedFile(file, 16384, false))
+      } catch {
+        invalid('The hosted configuration must be a bounded JSON object.')
+      }
+    }
+    return { method, params }
+  }
   if (method === 'net.authority.transfer') {
     if (!isId('node', args.positional[1]))
       invalid('Authority transfer requires a valid nod_ node identifier from bridge nodes.')
@@ -327,7 +436,11 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
       invalid('The settings file must contain a JSON object.')
     return {
       method,
-      params: { id: args.positional[1], enabled: !args.flags.has('disable'), settings }
+      params: {
+        id: args.positional[1],
+        enabled: !args.flags.has('disable'),
+        settings
+      }
     }
   }
   if (method === 'net.protect' || method === 'net.unlock')
@@ -467,7 +580,11 @@ export async function executeNetCommand(
     }
     io.emit({ file: request.recoveryOutput }, `Encrypted recovery file: ${request.recoveryOutput}`)
   } else if (request.method === 'bridge.invite') {
-    const response = result as { invite?: unknown; inviteId?: unknown; expiresAt?: unknown }
+    const response = result as {
+      invite?: unknown
+      inviteId?: unknown
+      expiresAt?: unknown
+    }
     if (
       !response ||
       typeof response.invite !== 'string' ||
@@ -579,9 +696,10 @@ export function readSecret(
       if (error) reject(error)
       else {
         try {
-          const value = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
-            bytes.subarray(0, length)
-          )
+          const value = new TextDecoder('utf-8', {
+            fatal: true,
+            ignoreBOM: true
+          }).decode(bytes.subarray(0, length))
           resolve(options.trim ? value.trim() : value)
         } catch {
           reject(new NetCliArgumentError('Secret input must contain valid UTF-8.'))
@@ -682,7 +800,9 @@ export async function runNet(args: ParsedArgs): Promise<void> {
       await client.request('profiles.bind', { profile: args.globals.profile })
     else {
       const status = await client.request<{ defaultProfileId: string }>('profiles.status')
-      await client.request('profiles.bind', { profile: status.defaultProfileId })
+      await client.request('profiles.bind', {
+        profile: status.defaultProfileId
+      })
     }
     process.exitCode = await executeNetCommand(request, client, {
       emit: (value, text) => writeOutput(args.globals.mode, value, () => text)

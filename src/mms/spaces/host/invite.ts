@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto'
+import type { RelayRendezvous } from '../../net/relay/protocol'
+import { canonicalAudience } from '../../net/plus/wire/protocol'
 import type { IdentityService, SecureChannel } from '../../net/contracts'
 import { decodeBase64, verifyDocument } from '../../net/identity/crypto'
 import { canonicalJson, parseProtocolJson, encodeMessage } from '../../net/sync/codec'
@@ -22,6 +25,7 @@ export interface SpaceInviteContainer {
   issuerRootKey: string
   issuerRoster: Signed
   token: string
+  rendezvous?: Signed
 }
 export interface ParsedSpaceInvite {
   container: SpaceInviteContainer
@@ -41,7 +45,10 @@ export function parseSpaceInvite(text: string): ParsedSpaceInvite {
     const container = parseProtocolJson(decodeBase64(text.slice(4))) as SpaceInviteContainer
     if (
       container.v !== 1 ||
-      Object.keys(container).sort().join(',') !==
+      Object.keys(container)
+        .filter((key) => key !== 'rendezvous')
+        .sort()
+        .join(',') !==
         'authorization,descriptor,issuerRootKey,issuerRoster,ownerRootKey,ownerRoster,token,v'
     )
       throw new NetError('invite_invalid')
@@ -101,6 +108,38 @@ export function parseSpaceInvite(text: string): ParsedSpaceInvite {
       )
     )
       throw new NetError('invite_invalid')
+    if (container.rendezvous) {
+      const discovery = verifyDocument<SpaceRelayDiscovery>(
+        container.rendezvous,
+        delegation.keys.sign
+      )
+      const rv = discovery.rendezvous
+      if (
+        Object.keys(discovery).sort().join(',') !==
+          'authorizationHash,descriptorHash,kind,node,rendezvous,v' ||
+        discovery.v !== 1 ||
+        discovery.kind !== 'spaceRelayDiscovery' ||
+        discovery.node !== descriptor.hostNode ||
+        authorization.issuer.node !== descriptor.hostNode ||
+        discovery.authorizationHash !== spaceInviteDigest(container.authorization) ||
+        discovery.descriptorHash !== spaceInviteDigest(container.descriptor) ||
+        !rv ||
+        Object.keys(rv).sort().join(',') !== 'expiresAt,relay,ticket,transport' ||
+        rv.transport !== 'plus-relay' ||
+        canonicalAudience(rv.relay) !== rv.relay ||
+        !/^[A-Za-z0-9_-]{43}$/.test(rv.ticket) ||
+        !Number.isSafeInteger(rv.expiresAt) ||
+        rv.expiresAt > authorization.expiresAt ||
+        rv.expiresAt <= authorization.issuedAt ||
+        rv.expiresAt - authorization.issuedAt > 600000 ||
+        !routes.routes.some(
+          (route: { transport: string; address: string }) =>
+            route.transport === 'plus-relay' &&
+            new URL(route.address).origin + new URL(route.address).pathname === rv.relay
+        )
+      )
+        throw new NetError('invite_invalid')
+    }
     return { container, descriptor, authorization, token: decodeBase64(container.token, 32) }
   } catch (error) {
     if (error instanceof NetError && error.code === 'too_large') throw error
@@ -152,4 +191,23 @@ export function spaceJoinRequest(
   }
   if (encodeMessage(request).length > 16 * 1024) throw new NetError('too_large')
   return request
+}
+
+export interface SpaceRelayDiscovery {
+  v: 1
+  kind: 'spaceRelayDiscovery'
+  node: SpaceDescriptor['hostNode']
+  authorizationHash: string
+  descriptorHash: string
+  rendezvous: RelayRendezvous
+}
+export function spaceInviteDigest(value: Signed): string {
+  return createHash('sha256').update(canonicalJson(value)).digest('base64url')
+}
+export function spaceInviteRendezvous(
+  container: SpaceInviteContainer
+): RelayRendezvous | undefined {
+  if (!container.rendezvous) return
+  return (parseProtocolJson(decodeBase64(container.rendezvous.payload)) as SpaceRelayDiscovery)
+    .rendezvous
 }

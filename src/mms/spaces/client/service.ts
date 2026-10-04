@@ -1,3 +1,5 @@
+import type { RelayRendezvous } from '../../net/relay/protocol'
+import { spaceInviteRendezvous } from '../host/invite'
 import type {
   Clock,
   IdentityService,
@@ -89,7 +91,7 @@ export interface SpaceClientOptions {
   connectJoin(
     descriptor: SpaceDescriptor,
     signal: AbortSignal,
-    evidence: { ownerRootKey: string; ownerRoster: Signed }
+    evidence: { ownerRootKey: string; ownerRoster: Signed; rendezvous?: RelayRendezvous }
   ): Promise<SecureChannel>
   connectSpace(descriptor: SpaceDescriptor, signal: AbortSignal): Promise<SyncSession>
   /** Root-owned deterministic/verified bootstrap mapping. */
@@ -177,10 +179,19 @@ export class SpaceClientService {
       .prepare('SELECT journal FROM net_space_client_join WHERE invite=?')
       .get(invite)
     if (!row) return fail('invite_invalid')
-    return JSON.parse(row.journal as string)
+    const journal = JSON.parse(row.journal as string) as JoinJournal
+    const rendezvous = this.options.keys.getSecret(`spaces/join/${invite}/rendezvous`)
+    if (rendezvous) journal.container.rendezvous = parseProtocolJson(rendezvous) as Signed
+    return journal
   }
   private saveJournal(journal: JoinJournal): void {
-    const text = json(journal)
+    const { rendezvous, ...container } = journal.container
+    if (rendezvous)
+      this.options.keys.putSecret(
+        `spaces/join/${journal.invite}/rendezvous`,
+        canonicalJson(rendezvous)
+      )
+    const text = json({ ...journal, container })
     this.options.db.charge(1, Buffer.byteLength(text))
     this.options.db.database
       .prepare(
@@ -303,7 +314,8 @@ export class SpaceClientService {
       return fail('roster_conflict')
     const channel = await this.options.connectJoin(descriptor, controller.signal, {
         ownerRootKey: journal.container.ownerRootKey,
-        ownerRoster: journal.container.ownerRoster
+        ownerRoster: journal.container.ownerRoster,
+        rendezvous: spaceInviteRendezvous({ ...journal.container, token: '' })
       }),
       request = this.joinRequest(invite, channel)
     let preauthBytes = 0,

@@ -5,7 +5,7 @@ import { canonicalJson } from '../sync/codec'
 import { decodeBase64 } from '../identity/crypto'
 
 export interface RelayRendezvous {
-  transport: 'relay'
+  transport: 'relay' | 'plus-relay'
   relay: string
   ticket: string
   expiresAt: number

@@ -1,3 +1,4 @@
+import { canonicalAudience } from '../plus/wire/protocol'
 import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import type {
@@ -253,21 +254,32 @@ function validateRendezvous(
     !value ||
     typeof value !== 'object' ||
     Object.keys(value).sort().join(',') !== 'expiresAt,relay,ticket,transport' ||
-    value.transport !== 'relay' ||
+    !['relay', 'plus-relay'].includes(value.transport) ||
     value.expiresAt !== expiresAt ||
     typeof value.ticket !== 'string' ||
     !/^[A-Za-z0-9_-]{43}$/.test(value.ticket)
   )
     return invalid()
   decodeBase64(value.ticket, 32)
-  const address = relayUrl(value.relay)
+  const address =
+    value.transport === 'plus-relay'
+      ? new URL(canonicalAudience(value.relay))
+      : relayUrl(value.relay)
   if (address.search || address.toString() !== value.relay) return invalid()
   if (
     !routes.routes.some((route) => {
-      if (route.transport !== 'relay') return false
-      const endpoint = relayUrl(route.address),
+      if (route.transport !== value.transport) return false
+      const endpoint =
+          value.transport === 'plus-relay' ? new URL(route.address) : relayUrl(route.address),
         target = endpoint.searchParams.get('node')
+      if (
+        value.transport === 'plus-relay' &&
+        ([...endpoint.searchParams.keys()].some((key) => key !== 'node') ||
+          endpoint.searchParams.getAll('node').length !== 1)
+      )
+        return false
       endpoint.search = ''
+      if (value.transport === 'plus-relay') canonicalAudience(endpoint.toString())
       return target === node && endpoint.toString() === value.relay
     })
   )

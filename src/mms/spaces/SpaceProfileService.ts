@@ -47,6 +47,9 @@ export interface SpaceProfileOptions {
     | 'assertFeature'
     | 'featureEnabled'
   > & {
+    hostedSpaceMembershipChanged?: NetService['hostedSpaceMembershipChanged']
+    prepareSpaceRendezvous?: NetService['prepareSpaceRendezvous']
+    connectSpaceInvitation?: NetService['connectSpaceInvitation']
     quiesceSpaceStreams?(
       space: SpaceId,
       streams: readonly StreamId[],
@@ -196,7 +199,13 @@ export class SpaceProfileService {
       localRoutes: () => options.net.signedRoutes(),
       metaStream: (d) => spaceMetaStream(d.space),
       connectJoin: (descriptor, signal, evidence) =>
-        options.net.connectChannel(this.peer(descriptor, evidence), signal),
+        options.net.connectSpaceInvitation
+          ? options.net.connectSpaceInvitation(
+              this.peer(descriptor, evidence),
+              signal,
+              evidence.rendezvous
+            )
+          : options.net.connectChannel(this.peer(descriptor, evidence), signal),
       connectSpace: (descriptor, signal) => this.connect(descriptor, signal),
       threadBinding: (stream) => this.host.threadBinding(stream),
       verifyBotRecord: options.verifyBotRecord,
@@ -205,6 +214,8 @@ export class SpaceProfileService {
     this.local = new SpaceLocalService(this)
     this.dispose.push(
       this.host.onAppend((stream, record) => {
+        if (this.store.getStream(stream)?.kind === 'space.meta')
+          options.net.hostedSpaceMembershipChanged?.()
         options.onStored?.(record, this.store.getStream(stream)!)
         this.track(options.net.publish(stream, record), this.store.getStream(stream)?.space)
       }),
@@ -500,6 +511,26 @@ export class SpaceProfileService {
     }
     return {
       store: this.store,
+      hostedSpacePeerAuthorized: (user, node) => {
+        try {
+          const root = this.options.runtime.identity.pinnedRootKey(user),
+            signed = this.options.runtime.identity.roster(user)
+          if (!root || !signed) return false
+          const roster = verifyDocument<Roster>(signed, root, 'roster')
+          const delegation = roster.nodes
+            .map((row) => verifyDocument<NodeDelegation>(row, root, 'nodeDelegation'))
+            .filter((row) => row.subject === node)
+            .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)[0]
+          if (!delegation) return false
+          return this.store
+            .listStreams({ kind: 'space.meta' })
+            .some(
+              (stream) => stream.space && this.host.canRead(stream.id, { user, node, delegation })
+            )
+        } catch {
+          return false
+        }
+      },
       spaceJoin: this.host,
       authority: {
         canRead: (...args) => owner(args[0]).canRead(...args),

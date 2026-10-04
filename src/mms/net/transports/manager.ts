@@ -1,3 +1,5 @@
+import { HostedRelayTransport } from '../plus/wire/client'
+import { ticketHash } from '../relay/protocol'
 import type { Duplex } from 'node:stream'
 import { isIP } from 'node:net'
 import type {
@@ -9,6 +11,9 @@ import type {
   InboundInfo
 } from '../contracts'
 import { NetError, type Route } from '../../../shared/net'
+import { canonicalAudience } from '../plus/wire/protocol'
+import { createPlusRelayAddon } from './plusRelay'
+import type { HostedProfileService } from '../plus/HostedProfileService'
 import { DirectTransport } from './direct'
 import { PreauthAdmission, inboundPrincipal } from './admission'
 import { TransportRegistry, type TransportConfiguration } from './registry'
@@ -74,6 +79,7 @@ export class ProfileTransports {
       onChanged?(): void
       relayRendezvous?: RelayRendezvous
       addons?: TransportAddon[]
+      hosted?(): HostedProfileService
     }
   ) {
     this.admission = new PreauthAdmission(options.clock)
@@ -83,6 +89,7 @@ export class ProfileTransports {
       tailscaleAddon,
       cloudflaredAddon,
       createRelayAddon(options.identity, this.admission),
+      ...(options.hosted ? [createPlusRelayAddon(options.identity, options.hosted)] : []),
       ...(options.addons ?? [])
     ])
       this.registry.register(addon)
@@ -105,6 +112,8 @@ export class ProfileTransports {
       if (settings.advertiseHost !== undefined && !isIP(settings.advertiseHost))
         throw new NetError('bad_request')
     }
+    if (checked.id === 'plus-relay')
+      canonicalAudience((checked.settings as { address: string }).address)
     if (checked.id === 'relay') {
       const address = relayUrl((checked.settings as { address: string }).address)
       if (address.search) throw new NetError('bad_request')
@@ -187,7 +196,14 @@ export class ProfileTransports {
   }
   /** RouteManager requires one transport per advertised family, including dial-only defaults. */
   transports(): Transport[] {
-    return ['direct', 'cloudflared', 'relay'].map(
+    return [
+      'direct',
+      'cloudflared',
+      'relay',
+      ...(this.options.hosted || this.options.relayRendezvous?.transport === 'plus-relay'
+        ? ['plus-relay']
+        : [])
+    ].map(
       (id) =>
         ({
           id,
@@ -195,14 +211,14 @@ export class ProfileTransports {
             canListen: false,
             canDial: true,
             readsPlaintext: id !== 'direct',
-            needsAccount: false
+            needsAccount: id === 'plus-relay'
           },
           provision: async () => undefined,
           listen: async () => {
             throw new NetError('forbidden')
           },
           resolve: async (route: Route, signal: AbortSignal) => {
-            if (route.transport !== 'relay')
+            if (!['relay', 'plus-relay'].includes(route.transport))
               await this.direct.resolve({ ...route, transport: 'direct' }, signal)
           },
           dial: (route: Route, signal: AbortSignal) => this.dial(route, signal),
@@ -221,14 +237,47 @@ export class ProfileTransports {
   async dial(route: Route, signal: AbortSignal): Promise<Duplex> {
     if (this.stopping) throw new NetError('cancelled')
     let raw: Duplex
-    if (route.transport === 'relay') {
+    if (route.transport === 'plus-relay') {
+      if (!this.options.hosted && this.options.relayRendezvous?.transport !== 'plus-relay')
+        throw new NetError('forbidden')
+      const url = new URL(route.address)
+      url.search = ''
+      const rv = this.options.relayRendezvous
+      const transport: Transport =
+        rv?.transport === 'plus-relay'
+          ? new HostedRelayTransport({
+              id: 'plus-relay',
+              audience: url.toString(),
+              identity: this.options.identity,
+              enrollment: rv,
+              registration: () => ({
+                ...(this.options.hosted?.().status().connected
+                  ? this.options.hosted().registration(url.toString())
+                  : { registrationId: 'rendezvous_' + ticketHash(rv.ticket), generation: 1 })
+              })
+            })
+          : createPlusRelayAddon(this.options.identity, this.options.hosted!).create(
+              { address: url.toString() },
+              { clock: this.options.clock, profileDir: this.options.profileDir }
+            )
+      try {
+        await transport.provision()
+        raw = await transport.dial(route, signal)
+      } catch (error) {
+        await transport.teardown()
+        throw error
+      }
+      raw.once('close', () => void transport.teardown().catch(() => {}))
+    } else if (route.transport === 'relay') {
       const address = relayUrl(route.address)
       address.search = ''
       const relay = new RelayTransport({
         settings: { address: address.toString() },
         clock: this.options.clock,
         identity: this.options.identity,
-        ...(this.options.relayRendezvous ? { enrollment: this.options.relayRendezvous } : {})
+        ...(this.options.relayRendezvous?.transport === 'relay'
+          ? { enrollment: this.options.relayRendezvous }
+          : {})
       })
       this.dialRelays.add(relay)
       try {
@@ -264,13 +313,35 @@ export class ProfileTransports {
   }
   async prepareEnrollmentRendezvous(expiresAt: number): Promise<RelayRendezvous | undefined> {
     const relay = this.registry.transports().find((transport) => transport.id === 'relay')
+    if (
+      (!relay || !relay.status().routes.length) &&
+      this.registry
+        .transports()
+        .some((transport) => transport.id === 'plus-relay' && transport.status().routes.length)
+    )
+      return this.options.hosted!().rendezvous(expiresAt, 'enrollment')
     if (!relay || !relay.status().routes.length) return undefined
     return (relay as RelayTransport).prepareEnrollmentRendezvous({ expiresAt })
+  }
+  async suspendHosted(): Promise<void> {
+    const cfg = this.registry.configuration().find((row) => row.id === 'plus-relay')
+    if (cfg) {
+      await this.registry.configure({ ...cfg, enabled: false })
+      this.changed()
+    }
+  }
+  hasPlusRelayListener(): boolean {
+    return this.registry
+      .transports()
+      .some((transport) => transport.id === 'plus-relay' && transport.status().routes.length > 0)
   }
   hasRelayListener(): boolean {
     return this.registry
       .transports()
-      .some((transport) => transport.id === 'relay' && transport.status().routes.length > 0)
+      .some(
+        (transport) =>
+          ['relay', 'plus-relay'].includes(transport.id) && transport.status().routes.length > 0
+      )
   }
   markAuthenticated(raw: Duplex): void {
     this.admission.release(raw)

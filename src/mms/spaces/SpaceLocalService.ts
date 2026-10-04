@@ -23,7 +23,7 @@ import type {
 } from '../../shared/spaces/local'
 import type { SpaceProfileService } from './SpaceProfileService'
 import { validateSpacesLocal } from './registerMethods'
-import { parseSpaceInvite } from './host'
+import { parseSpaceInvite, encodeSpaceInvite, spaceInviteDigest } from './host/invite'
 import { settleArchiveWork } from './archive/lifecycle'
 
 const MAX_SPACES = 128,
@@ -105,6 +105,29 @@ export class SpaceLocalService {
       case 'spaces.invite':
         this.guardWrite(p.space)
         result = this.profile.host.invite(p.space, p)
+        if (this.profile.options.net.prepareSpaceRendezvous) {
+          const original = result as { text: string; expiresAt: number }
+          const rendezvous = await this.profile.options.net.prepareSpaceRendezvous(
+            original.expiresAt,
+            p.uses ?? 1
+          )
+          if (rendezvous) {
+            const parsed = parseSpaceInvite(original.text)
+            try {
+              const signed = rt.identity.signAsNode({
+                v: 1,
+                kind: 'spaceRelayDiscovery',
+                node: parsed.descriptor.hostNode,
+                authorizationHash: spaceInviteDigest(parsed.container.authorization),
+                descriptorHash: spaceInviteDigest(parsed.container.descriptor),
+                rendezvous
+              })
+              original.text = encodeSpaceInvite({ ...parsed.container, rendezvous: signed })
+            } finally {
+              parsed.token.fill(0)
+            }
+          }
+        }
         result = {
           invite: (result as { text: string }).text,
           inviteId: (result as { invite: string }).invite,

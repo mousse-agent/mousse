@@ -6,6 +6,16 @@ import type { NetErrorCode } from './errors'
 
 export const NET_LOCAL_CAPABILITY = 'net.v1'
 export const NET_LOCAL_METHODS = [
+  'net.plus.discover',
+  'net.plus.login.begin',
+  'net.plus.login.finish',
+  'net.plus.configure',
+  'net.plus.renew',
+  'net.plus.allow',
+  'net.plus.status',
+  'net.plus.bind',
+  'net.plus.connect',
+  'net.plus.disconnect',
   'net.transport.list',
   'net.transport.configure',
   'net.init',
