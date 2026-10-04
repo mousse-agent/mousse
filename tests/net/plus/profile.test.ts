@@ -23,6 +23,7 @@ async function fixture(
     tamper?: boolean
     now?: () => number
     routeOffline?: boolean
+    rendezvousReply?: () => Response | Promise<Response>
   } = {}
 ) {
   const p = await profile({ protect: !options.plain }),
@@ -80,9 +81,10 @@ async function fixture(
     if (path.endsWith('/renew'))
       return Response.json({ ...registration, expiresAt: (options.now?.() ?? Date.now()) + 60000 })
     if (path === '/v1/net/routes' && options.routeOffline) return Response.json({}, { status: 503 })
+    if (path === '/v1/net/rendezvous' && options.rendezvousReply) return options.rendezvousReply()
     return Response.json({})
   }
-  const service = new HostedProfileService({
+  const hostedOptions = {
     keys: rt.keys,
     now: options.now,
     signal: signal.signal,
@@ -94,8 +96,9 @@ async function fixture(
       roster: hello.roster!,
       delegation: hello.delegation!
     })
-  })
-  return { ...p, rt, service, signal, bodies, accountToken, connectorToken }
+  }
+  const service = new HostedProfileService(hostedOptions)
+  return { ...p, rt, service, hostedOptions, signal, bodies, accountToken, connectorToken }
 }
 it('binds exact account root proof, keeps account bearer one-shot, and renews/revokes through profile connector only', async () => {
   const p = await fixture()
@@ -157,4 +160,114 @@ it('drops an expired uncertain route after lease recovery and signs fresh curren
   expect(routes[1].body.operationId).not.toBe(original)
   expect(routes[1].body.expiresAt).toBe(now + 120000)
   expect(p.service.managedSpaceRoutes()[0].expiresAt).toBe(now + 120000)
+})
+
+it('releases a definitively rejected rendezvous so renewal and a corrected invitation can proceed', async () => {
+  const options = {
+      rendezvousReply: () => Response.json({ error: { code: 'bad_request' } }, { status: 400 })
+    },
+    p = await fixture(options)
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  await expect(p.service.rendezvous(Date.now() + 3600000, 'enrollment')).rejects.toMatchObject({
+    code: 'bad_request'
+  })
+  expect(
+    JSON.parse(Buffer.from(p.rt.keys.getSecret('plus/connector')!).toString()).pending
+  ).toBeUndefined()
+  await p.service.renew()
+  options.rendezvousReply = () => Response.json({})
+  await p.service.rendezvous(Date.now() + 600000, 'enrollment')
+  const requests = p.bodies.filter((row) => row.path === '/v1/net/rendezvous')
+  expect(requests).toHaveLength(2)
+  expect(requests[1].body.operationId).not.toBe(requests[0].body.operationId)
+  expect(requests[1].body.ticketHash).not.toBe(requests[0].body.ticketHash)
+})
+
+it.each(['unavailable', 'malformed', 'other-rejection', 'lost-response'] as const)(
+  'retains the exact original across restart for an ambiguous rendezvous outcome (%s)',
+  async (mode) => {
+    let recover = false
+    const p = await fixture({
+      rendezvousReply: () => {
+        if (recover) return Response.json({})
+        if (mode === 'lost-response') throw new Error('Response lost after possible commit')
+        if (mode === 'malformed') return new Response('not a hosted error', { status: 400 })
+        return Response.json(
+          { error: { code: mode === 'unavailable' ? 'unavailable' : 'forbidden' } },
+          { status: mode === 'unavailable' ? 503 : 400 }
+        )
+      }
+    })
+    await p.service.bind(configuration, p.accountToken)
+    await p.service.connect(p.accountToken)
+    const expiresAt = Date.now() + 60000
+    await expect(p.service.rendezvous(expiresAt, 'enrollment')).rejects.toMatchObject({
+      code: mode === 'lost-response' ? 'outcome_uncertain' : 'route_unreachable'
+    })
+    const original = JSON.parse(
+      Buffer.from(p.rt.keys.getSecret('plus/connector')!).toString()
+    ).pending
+    const reopened = new HostedProfileService(p.hostedOptions)
+    await expect(reopened.renew()).rejects.toMatchObject({ code: 'outcome_uncertain' })
+    expect(
+      JSON.parse(Buffer.from(p.rt.keys.getSecret('plus/connector')!).toString()).pending
+    ).toEqual(original)
+    recover = true
+    const retry = await reopened.rendezvous(Date.now() + 600000, 'enrollment')
+    expect(retry).toMatchObject({ ticket: original.ticket, expiresAt })
+    const requests = p.bodies.filter((row) => row.path === '/v1/net/rendezvous')
+    expect(requests).toHaveLength(2)
+    expect(requests[1]).toEqual(requests[0])
+    await reopened.renew()
+  }
+)
+
+it('releases an older pending rendezvous only after its exact retry is definitively rejected', async () => {
+  let rejected = false
+  const p = await fixture({
+    rendezvousReply: () => {
+      if (!rejected) throw new Error('Original response was lost')
+      return Response.json({ error: { code: 'bad_request' } }, { status: 400 })
+    }
+  })
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  await expect(p.service.rendezvous(Date.now() + 3600000, 'enrollment')).rejects.toMatchObject({
+    code: 'outcome_uncertain'
+  })
+  const reopened = new HostedProfileService(p.hostedOptions)
+  await expect(reopened.renew()).rejects.toMatchObject({ code: 'outcome_uncertain' })
+  rejected = true
+  await expect(reopened.rendezvous(Date.now() + 600000, 'enrollment')).rejects.toMatchObject({
+    code: 'bad_request'
+  })
+  const requests = p.bodies.filter((row) => row.path === '/v1/net/rendezvous')
+  expect(requests[1]).toEqual(requests[0])
+  expect(
+    JSON.parse(Buffer.from(p.rt.keys.getSecret('plus/connector')!).toString()).pending
+  ).toBeUndefined()
+  await reopened.renew()
+})
+
+it('does not erase newer custody when an older rendezvous receives a rejection', async () => {
+  const options: { rendezvousReply?: () => Response } = {},
+    p = await fixture(options)
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  let replacement: unknown
+  options.rendezvousReply = () => {
+    const stored = JSON.parse(Buffer.from(p.rt.keys.getSecret('plus/connector')!).toString())
+    stored.pending.body.operationId = 'newer-owned-operation'
+    replacement = stored.pending
+    p.rt.keys.putSecret('plus/connector', canonicalJson(stored))
+    return Response.json({ error: { code: 'bad_request' } }, { status: 400 })
+  }
+  await expect(p.service.rendezvous(Date.now() + 60000, 'enrollment')).rejects.toMatchObject({
+    code: 'bad_request'
+  })
+  expect(
+    JSON.parse(Buffer.from(p.rt.keys.getSecret('plus/connector')!).toString()).pending
+  ).toEqual(replacement)
+  await expect(p.service.renew()).rejects.toMatchObject({ code: 'outcome_uncertain' })
 })

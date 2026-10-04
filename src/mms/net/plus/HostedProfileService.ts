@@ -10,6 +10,12 @@ import type {
   RegistrationResult
 } from './contracts'
 const SECRET = 'plus/connector'
+/** Only the hosted endpoint's transactional rejection releases a durable original. */
+class RejectedRendezvous extends NetError {
+  constructor() {
+    super('bad_request')
+  }
+}
 interface Stored {
   configuration: PlusConfiguration
   registration?: RegistrationResult['registration']
@@ -393,6 +399,15 @@ export class HostedProfileService {
       }
     this.guard()
     const text = Buffer.concat(parts).toString('utf8')
+    if (path === '/v1/net/rendezvous' && response.status === 400) {
+      let rejected = false
+      try {
+        rejected = JSON.parse(text)?.error?.code === 'bad_request'
+      } catch {
+        // A malformed response does not establish whether the mutation committed.
+      }
+      if (rejected) throw new RejectedRendezvous()
+    }
     if (!response.ok)
       throw new NetError(
         response.status === 401 || response.status === 403
@@ -652,10 +667,24 @@ export class HostedProfileService {
       (await this.signed(stored.configuration, 'rendezvous', intent, stored.connectorToken))
     stored.pending = { purpose: 'rendezvous', intent, body, ticket }
     this.save(stored)
-    await this.post(stored.configuration, '/v1/net/rendezvous', stored.connectorToken, {
-      ...body,
-      connectorToken: stored.connectorToken
-    })
+    try {
+      await this.post(stored.configuration, '/v1/net/rendezvous', stored.connectorToken, {
+        ...body,
+        connectorToken: stored.connectorToken
+      })
+    } catch (error) {
+      if (error instanceof RejectedRendezvous) {
+        const current = this.read()
+        if (
+          current?.pending?.purpose === 'rendezvous' &&
+          Buffer.from(canonicalJson(current.pending)).equals(canonicalJson(stored.pending))
+        ) {
+          delete current.pending
+          this.save(current)
+        }
+      }
+      throw error
+    }
     delete stored.pending
     this.save(stored)
     return {
