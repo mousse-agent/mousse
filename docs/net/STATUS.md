@@ -1,8 +1,18 @@
 # Mousse Net recovery status
 
-Updated 2026-10-03. Tracking: [issue #44](https://github.com/mousse-agent/mousse/issues/44), [draft PR #45](https://github.com/mousse-agent/mousse/pull/45). Integration branch: `codex/issue-44-mousse-net`.
+Updated 2026-10-04. Tracking: [issue #44](https://github.com/mousse-agent/mousse/issues/44), [draft PR #45](https://github.com/mousse-agent/mousse/pull/45). Integration branch: `codex/issue-44-mousse-net`.
 
 I recovered the interrupted Claude thread and continued its existing isolated worktree. I preserved the primary checkout's unrelated edits. The published recovery starts at `d3f9433`. Bridge and public Spaces now have profile-bound daemon/CLI composition in this draft branch; the remaining gates below still prevent a release claim.
+
+## Renewal CI follow-up, 2026-10-04
+
+I diagnosed and reproduced the additional renewal failure in PR #45's CI at
+`1a971a50`, fixed its two-sample authority-clock race, and passed 13 focused
+renewal/service/history/revocation checks plus both source typechecks. The 14
+failures shared with exact master remain unresolved. I recorded the red/green
+production-timer evidence and verification limits in
+[the renewal clock report](qa/renewal-clock.md). Other-human sensitive review
+remains required before merging the draft stack.
 
 ## Merge preparation, 2026-10-03
 
