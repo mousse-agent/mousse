@@ -147,6 +147,12 @@ export interface NamedAgentToolRequest {
 }
 export interface NamedAgentRecallRequest extends Omit<NamedAgentToolRequest, 'name'> { agent: string; expectedAgentGeneration: number; contextMode?: 'continue' | 'fresh'; resumeResult?: boolean }
 export interface LlmChatOptions {
+  /** Host-owned isolated inventory. Never accepted from a protocol DTO. */
+  runtimeContext?: {
+    systemPrompt: string
+    tools: Tool[]
+    executeTool(call: ToolCall, signal?: AbortSignal): Promise<ToolResultMessage>
+  }
   delegation?: {
     create(input: NamedAgentToolRequest): Promise<unknown>
     recall(input: NamedAgentRecallRequest): Promise<unknown>
@@ -796,6 +802,29 @@ export class LlmClient {
     onThinkingEvent?: LlmThinkingEventHandler,
     onTextEvent?: LlmTextEventHandler
   ): Promise<LlmChatResult> {
+    const isolated = options.runtimeContext
+    if (
+      isolated &&
+      (options.delegation ||
+        options.browser ||
+        this.browserBinding ||
+        options.subagentDiscovery ||
+        options.contextSummary ||
+        options.toolLoopSafety ||
+        options.trustedAgent ||
+        options.toolAccess ||
+        options.projectPath ||
+        this.getProjectPath?.())
+    ) {
+      throw new Error('Isolated runtime context cannot share local tools, browser, project or memory context.')
+    }
+    const runtimeContext = isolated
+      ? {
+          systemPrompt: isolated.systemPrompt,
+          tools: structuredClone(isolated.tools),
+          executeTool: isolated.executeTool.bind(isolated)
+        }
+      : undefined
     const discovery = options.subagentDiscovery
     const subagent = options.subagent === true || Boolean(discovery)
     const trustedAgent = options.trustedAgent
@@ -883,7 +912,20 @@ export class LlmClient {
     )
 
     const actor = options.actor ?? defaultIntegrationActor(subagent)
-    const requestContext = await this.prepareRequestContext(
+    const requestContext: Awaited<ReturnType<LlmClient['prepareRequestContext']>> = runtimeContext ? {
+      enabledSkills: [],
+      loadedSkills: [],
+      mcpTools: [],
+      tools: runtimeContext.tools,
+      systemPrompt: runtimeContext.systemPrompt,
+      contextInputs: {
+        systemPromptText: runtimeContext.systemPrompt,
+        mcpToolsText: '',
+        otherToolsText: serializeToolDefinitions(runtimeContext.tools),
+        signature: '',
+        modelKey: ''
+      }
+    } : await this.prepareRequestContext(
       mode,
       userContent,
       projectPath,
@@ -1239,6 +1281,7 @@ export class LlmClient {
         recordAttempt()
 
         const dispatch = async (): Promise<ToolResultMessage> => {
+          if (runtimeContext) return runtimeContext.executeTool(toolCall, requestSignal)
           if (options.delegation && toolCall.name === 'list_subagents') return toolResult(toolCall, JSON.stringify(options.delegation.list()), false)
           if (options.delegation && toolCall.name === 'create_subagent') {
             const input = toolCall.arguments as unknown as NamedAgentToolRequest
@@ -2892,4 +2935,3 @@ function isValidAction(a: unknown): a is OrchestratorAction {
   return false
 
 }
-

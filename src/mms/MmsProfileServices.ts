@@ -40,6 +40,10 @@ import {
   createLegacySingleProfileContext,
   type IntegrationRuntimeContext
 } from './integrations/profileContext'
+import { NetService } from './net/NetService'
+import { BridgeProfileService } from './bridge/BridgeProfileService'
+import type { SpaceProfileService } from './spaces/SpaceProfileService'
+import type { BotProfileService } from './bots/BotProfileService'
 import { MmsControlService } from './control/MmsControlService'
 import { dispatchMethod } from './protocol/handlers'
 import { randomUUID } from 'crypto'
@@ -81,6 +85,30 @@ export class MmsProfileServices {
   readonly tasks: TaskQueue
   readonly events: MmsEventBus
   readonly control: MmsControlService
+  readonly net: NetService
+  private bridgeService?: BridgeProfileService
+
+  private domainService(): BridgeProfileService {
+    this.net.runtime()
+    if (!this.bridgeService) throw new Error('Bridge profile composition is unavailable')
+    return this.bridgeService
+  }
+  get bridge(): BridgeProfileService {
+    this.net.assertFeature('netBridge')
+    return this.domainService()
+  }
+  get spaces(): SpaceProfileService {
+    this.net.assertFeature('netSpaces')
+    return this.domainService().spaces
+  }
+  get bots(): BotProfileService {
+    this.net.assertFeature('netSpaces')
+    return this.domainService().bots
+  }
+  get archives(): BridgeProfileService['archives'] {
+    this.net.assertFeature('netSpaces')
+    return this.domainService().archives
+  }
 
   readonly worktrees: WorktreeManager
   readonly ptyManager: PtyManager
@@ -267,6 +295,19 @@ export class MmsProfileServices {
       this.agents
     )
 
+    this.net = new NetService({
+      profileDir: this.homeDir,
+      onChanged: status => this.events.emit({ channel: 'net:updated', data: status }),
+      composeRuntime: runtime => {
+        this.bridgeService = new BridgeProfileService({
+          services: this,
+          runtime,
+          net: this.net,
+          nativeAdapters: opts?.nativeBotAdapters?.({ services: this, runtime, net: this.net })
+        })
+        return this.bridgeService.composition()
+      }
+    })
     this.control = new MmsControlService({
       homeDir: this.homeDir,
       instanceId: this.ownerHandle?.owner.processInstanceId || randomUUID(),
@@ -445,7 +486,8 @@ export class MmsProfileServices {
       agentRuns: this.platform.getActiveCount(),
       mcpWork: this.mcpManager.getActiveCount(),
       channelWork: this.channels.getActiveCount(),
-      controlWork: this.control.getActiveCount()
+      controlWork: this.control.getActiveCount(),
+      netWork: this.net.getActiveCount()
     }
   }
 
@@ -457,6 +499,7 @@ export class MmsProfileServices {
     this.mcpManager.beginShutdown()
     this.channels.beginShutdown()
     this.control.beginShutdown()
+    this.net.beginShutdown()
     this.platform.beginShutdown()
     this.orchestrator.beginShutdown()
     this.scheduled.beginShutdown()
@@ -518,6 +561,7 @@ export class MmsProfileServices {
     }
     await this.channels.startEnabled()
     await this.control.start()
+    await this.net.start()
 
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
     this.threadRuntimes.restoreOnStartup()
@@ -608,7 +652,8 @@ export class MmsProfileServices {
       () => this.undoRetention.stop(),
       () => this.lifecycle.cleanup.stop(),
       () => this.platform.dispose(), () => this.scheduled.shutdown(), () => this.channels.shutdown(),
-      () => this.orchestrator.shutdown(), () => this.control.shutdown(), () => this.requests.waitForIdle(),
+      () => this.orchestrator.shutdown(), () => this.control.shutdown(),
+      () => this.net.shutdown(), () => this.requests.waitForIdle(),
       () => this.antigravity.stop(),
       () => this.ptyManager.shutdown(), () => this.headlessRunner.shutdown(), () => this.mcpManager.shutdown()
     ]

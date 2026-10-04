@@ -1,0 +1,20 @@
+{
+  "description": "Public deterministic proof vector; empty HKDF salt and TLS exporter context. No production bearer secret.",
+  "token": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "exporter": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+  "requestWithoutProof": {
+    "t": "enroll.request",
+    "invite": "inv_00000000000000000000000000",
+    "node": "nod_00000000000000000000000000",
+    "keys": {
+      "sign": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "agree": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "transport": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    "name": "new node"
+  },
+  "canonicalRequest": "{\"invite\":\"inv_00000000000000000000000000\",\"keys\":{\"agree\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"sign\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"transport\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"name\":\"new node\",\"node\":\"nod_00000000000000000000000000\",\"t\":\"enroll.request\"}",
+  "proofKey": "_7KX2HhxsuyyjlKXUsfbZtfiI4YrDyoJliRMoay43SY",
+  "requestHash": "iNvuC1Ma3EQFiMjHjsso55tHCOxAYe9yAwwUum21laM",
+  "proof": "E4Yv6fGP834Vben6TGFzuvF8REYEHvfPqZiOQz9AvBY"
+}

@@ -1,0 +1,19 @@
+{
+  "platform": "linux",
+  "arch": "arm64",
+  "node": "24.18.0",
+  "electron": "43.2.0",
+  "billingQualified": false,
+  "productionReaderQualified": false,
+  "vaultBackend": "gnome_libsecret",
+  "asarEntry": "file:///work/.mousse-dev/net-packaging/linux/package-final/linux-arm64-unpacked/resources/app.asar/out/main/linuxProbe.js",
+  "napi": "10",
+  "moduleAbi": "148",
+  "sdkVersion": "0.85.1",
+  "read": true,
+  "symlinkDenied": true,
+  "deniedRoot": true,
+  "vaultRequired": true,
+  "vaultAvailable": true,
+  "vaultRoundtrip": true
+}

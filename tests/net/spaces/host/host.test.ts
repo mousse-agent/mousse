@@ -1,0 +1,288 @@
+import { afterEach, describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
+import { MetaProjection, parseSpaceInvite, spaceJoinRequest } from '../../../../src/mms/spaces/host'
+import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
+import { NetError, newId } from '../../../../src/shared/net'
+import { profile, peer, channels, cleanup, trust, signed } from './helpers'
+afterEach(cleanup)
+describe('P5 host real identity/TLS and atomic storage', () => {
+  it('cannot create an owner descriptor after this delegated node relinquishes its root key', async () => {
+    const a = await profile()
+    a.keys.dropRootKey()
+    expect(a.identity.self()?.isAuthority).toBe(false)
+    expect(() => a.host.create({ name: 'Forged authority' })).toThrow(
+      expect.objectContaining({ code: 'forbidden' })
+    )
+    expect(a.store.listStreams()).toHaveLength(0)
+  })
+  it('creates root-signed descriptor, channel and exporter-bound ordered receipt; rejects altered claims and TLS replay', async () => {
+    const a = await profile(),
+      b = await profile(a.clock, 'Member'),
+      space = a.host.create({ name: 'Shared' }),
+      channel = a.host.createChannel(space.space, 'general')
+    const invite = a.host.invite(space.space, { uses: 2 }),
+      parsed = parseSpaceInvite(invite.text),
+      tls = await channels(a, b),
+      request = spaceJoinRequest(parsed, b.identity, tls.client, 'Member')
+    expect(() => a.host.redeemOrThrow({ ...request, name: 'tampered' }, tls.server)).toThrow(
+      expect.objectContaining({ code: 'invite_invalid' })
+    )
+    const result = a.host.redeem(request, tls.server)
+    expect(result.header).toMatchObject({ t: 'space.join.result', member: { epoch: 1, seq: 3 } })
+    const event = decodeEnvelope(result.parts[0]).envelope
+    expect(event.body).toMatchObject({
+      member: { user: peer(b).user, role: 'member' },
+      inviteUse: 1
+    })
+    expect(JSON.stringify(event)).not.toContain(parsed.container.token)
+    expect(a.host.canRead(channel, peer(b))).toBe(true)
+    expect(a.host.canRead(channel, peer(a))).toBe(true)
+    const next = await channels(a, b),
+      retry = spaceJoinRequest(parsed, b.identity, next.client, 'Member')
+    expect(() => a.host.redeemOrThrow(request, next.server)).toThrow(
+      expect.objectContaining({ code: 'invite_invalid' })
+    )
+    expect(a.host.redeem(retry, next.server)).toEqual(result)
+    expect(a.store.head(space.meta).seq).toBe(3)
+    a.host.post(channel, 'hello')
+    a.host.postMeta(space.space, 'member.removed', { user: peer(b).user })
+    expect(a.host.canRead(channel, peer(b))).toBe(false)
+    expect(a.host.canRead(space.meta, peer(b))).toBe(false)
+  })
+  it('serializes limited uses and denies unrelated node certificate despite valid token', async () => {
+    const a = await profile(),
+      b = await profile(a.clock, 'One'),
+      c = await profile(a.clock, 'Two'),
+      space = a.host.create({ name: 'Shared' }),
+      invite = parseSpaceInvite(a.host.invite(space.space).text),
+      left = await channels(a, b),
+      right = await channels(a, c)
+    const first = spaceJoinRequest(invite, b.identity, left.client, 'One'),
+      second = spaceJoinRequest(invite, c.identity, right.client, 'Two')
+    a.host.redeem(first, left.server)
+    expect(() => a.host.redeemOrThrow(second, right.server)).toThrow(
+      expect.objectContaining({ code: 'invite_invalid' })
+    )
+    const other = parseSpaceInvite(a.host.invite(space.space).text),
+      substitute = spaceJoinRequest(other, b.identity, right.client, 'One')
+    expect(() => a.host.redeemOrThrow(substitute, right.server)).toThrow(
+      expect.objectContaining({ code: 'peer_key_mismatch' })
+    )
+    expect(a.projection.entities(space.space, 'member')).toHaveLength(2)
+  })
+  it('blocks all authority operations after a signed unknown meta type with crit:false, durably', async () => {
+    let a = await profile()
+    const space = a.host.create({ name: 'Shared' }),
+      channel = a.host.createChannel(space.space, 'general'),
+      input = signed(a, space.meta, 'member.futureRule', {}, { metaEpoch: 1, metaSeq: 2 })
+    expect(() => a.host.append(space.meta, input.id, input.envelope, input.sig, peer(a))).toThrow(
+      expect.objectContaining({ code: 'upgrade_required' })
+    )
+    const out = a.store.appendAsAuthority(space.meta, input)
+    a.projection.apply(space.space, { ...input, ...out })
+    expect(a.projection.position(space.space)).toMatchObject({ status: 'upgradeRequired', seq: 2 })
+    expect(a.host.canRead(channel, peer(a))).toBe(false)
+    expect(() => a.host.post(channel, 'blocked')).toThrow(
+      expect.objectContaining({ code: 'upgrade_required' })
+    )
+    expect(() => a.host.invite(space.space)).toThrow(
+      expect.objectContaining({ code: 'upgrade_required' })
+    )
+    a.store.close()
+    a.db.close()
+    a = await profile(a.clock, 'Owner', a.path)
+    expect(a.host.canRead(channel, peer(a))).toBe(false)
+  })
+  it('rechecks blob scope and current membership; preserves quota/rate denial and read history after archive', async () => {
+    const a = await profile(),
+      b = await profile(a.clock, 'Member'),
+      space = a.host.create({ name: 'Shared' }),
+      one = a.host.createChannel(space.space, 'one'),
+      two = a.host.createChannel(space.space, 'two')
+    trust(a, b)
+    a.host.postMeta(space.space, 'member.joined', {
+      member: {
+        user: peer(b).user,
+        rootKey: b.keys.rootKey()!,
+        role: 'member',
+        displayName: 'Member'
+      }
+    })
+    const data = Buffer.from('attachment'),
+      blob = `blb_${createHash('sha256').update(data).digest('hex')}` as const
+    a.host.acceptBlob(one, blob, data.length, false, peer(b))
+    const upload = a.blobs.begin(blob, data.length, false)
+    upload.write(0, data)
+    upload.commit()
+    a.host.blobCommitted(one, blob, data.length, false, peer(b))
+    const input = signed(
+      b,
+      one,
+      'message.posted',
+      { text: 'file' },
+      { metaEpoch: 1, metaSeq: 4 },
+      { blobs: [{ id: blob, bytes: data.length, mime: 'text/plain' }] }
+    )
+    a.host.append(one, input.id, input.envelope, input.sig, peer(b))
+    expect(a.host.canFetchBlob(one, blob, peer(b))).toBe(true)
+    expect(a.host.canFetchBlob(two, blob, peer(b))).toBe(false)
+    const guessed = signed(
+      b,
+      two,
+      'message.posted',
+      { text: 'borrowed hash' },
+      { metaEpoch: 1, metaSeq: 4 },
+      { blobs: [{ id: blob, bytes: data.length, mime: 'text/plain' }] }
+    )
+    expect(() => a.host.append(two, guessed.id, guessed.envelope, guessed.sig, peer(b))).toThrow(
+      expect.objectContaining({ code: 'forbidden' })
+    )
+    expect(a.host.canFetchBlob(two, blob, peer(b))).toBe(false)
+    a.host.postMeta(space.space, 'channel.archived', { stream: one })
+    expect(a.host.canRead(one, peer(b))).toBe(true)
+    expect(() => a.host.acceptBlob(one, blob, data.length, false, peer(b))).toThrow(
+      expect.objectContaining({ code: 'forbidden' })
+    )
+    a.host.postMeta(space.space, 'member.removed', { user: peer(b).user })
+    expect(a.host.canFetchBlob(one, blob, peer(b))).toBe(false)
+    const scope = { kind: 'space' as const, space: space.space },
+      used = 5 * 1024 * 1024 * 1024 - a.limits.remainingQuota(scope),
+      before = a.store.head(two)
+    a.limits.configureQuota(scope, used)
+    expect(() => a.host.post(two, 'quota')).toThrow(
+      expect.objectContaining({ code: 'quota_exceeded' })
+    )
+    expect(a.store.head(two)).toEqual(before)
+  })
+  it('rolls back member/root pin/use/receipt/cursor on concrete admission precommit failure then retries after reopen', async () => {
+    const a = await profile(),
+      b = await profile(a.clock, 'Member'),
+      space = a.host.create({ name: 'Shared' }),
+      invite = parseSpaceInvite(a.host.invite(space.space).text),
+      tls = await channels(a, b),
+      request = spaceJoinRequest(invite, b.identity, tls.client, 'Member'),
+      head = a.store.head(space.meta)
+    a.store.close()
+    a.db.close()
+    const failed = await profile(a.clock, 'Owner', a.path, (point) => {
+      if (point === 'spaces.join.beforeCommit') throw new NetError('cancelled')
+    })
+    expect(() => failed.host.redeemOrThrow(request, tls.server)).toThrow(
+      expect.objectContaining({ code: 'cancelled' })
+    )
+    expect(failed.store.head(space.meta)).toEqual(head)
+    expect(failed.projection.member(space.space, peer(b).user)).toBeUndefined()
+    expect(failed.identity.pinnedRootKey(peer(b).user)).toBeUndefined()
+    expect(
+      failed.db.database.prepare('SELECT count(*) AS n FROM net_space_host_receipts').get()!.n
+    ).toBe(0)
+    failed.store.close()
+    failed.db.close()
+    const healthy = await profile(a.clock, 'Owner', a.path)
+    expect(healthy.host.redeem(request, tls.server).header).toMatchObject({
+      t: 'space.join.result'
+    })
+  })
+  it('retains exact consumed receipt across restart and expiry, and fails closed without private/bot ports', async () => {
+    let a = await profile()
+    const b = await profile(a.clock, 'Member'),
+      space = a.host.create({ name: 'Shared' }),
+      invite = parseSpaceInvite(a.host.invite(space.space, { ttlMs: 10 }).text),
+      tls = await channels(a, b),
+      request = spaceJoinRequest(invite, b.identity, tls.client, 'Member'),
+      result = a.host.redeem(request, tls.server)
+    a.clock.advance(11)
+    a.store.close()
+    a.db.close()
+    a = await profile(a.clock, 'Owner', a.path)
+    const next = await channels(a, b)
+    expect(
+      a.host.redeem(spaceJoinRequest(invite, b.identity, next.client, 'Member'), next.server)
+    ).toEqual(result)
+    const privateId = newId('stream')
+    a.store.createStream(
+      {
+        id: privateId,
+        kind: 'space.private',
+        authority: peer(a).node,
+        space: space.space,
+        parent: newId('stream'),
+        participants: [peer(a).user, peer(b).user],
+        createdAt: a.clock.now()
+      },
+      1
+    )
+    expect(a.host.canRead(privateId, peer(a))).toBe(false)
+  })
+  it('persists the exact event rate boundary and stores future noncritical content without granting interpretation', async () => {
+    let a = await profile()
+    const space = a.host.create({ name: 'Rate' }),
+      channel = a.host.createChannel(space.space, 'general')
+    const opaque = signed(
+      a,
+      channel,
+      'reaction.added',
+      { emoji: 'x' },
+      { metaEpoch: 1, metaSeq: 2 },
+      { minor: 1, crit: false }
+    )
+    expect(a.host.append(channel, opaque.id, opaque.envelope, opaque.sig, peer(a)).kind).toBe(
+      'stored'
+    )
+    for (let i = 0; i < 17; i++) a.host.post(channel, String(i))
+    const head = a.store.head(channel)
+    expect(() => a.host.post(channel, 'exhausted')).toThrow(
+      expect.objectContaining({ code: 'rate_limited' })
+    )
+    expect(a.store.head(channel)).toEqual(head)
+    a.store.close()
+    a.db.close()
+    a = await profile(a.clock, 'Owner', a.path)
+    expect(() => a.host.post(channel, 'still exhausted')).toThrow(
+      expect.objectContaining({ code: 'rate_limited' })
+    )
+    a.clock.advance(10000)
+    expect(a.host.post(channel, 'exact boundary').kind).toBe('stored')
+    expect(() => a.host.retain(space.meta, 1)).toThrow(
+      expect.objectContaining({ code: 'forbidden' })
+    )
+  })
+  it('removing and rejoining a member does not resurrect their prior bot registrations', async () => {
+    const a = await profile(),
+      b = await profile(a.clock, 'Member'),
+      space = a.host.create({ name: 'Bots' })
+    trust(a, b)
+    const member = {
+      user: peer(b).user,
+      rootKey: b.keys.rootKey()!,
+      role: 'member' as const,
+      displayName: 'Member'
+    }
+    a.host.postMeta(space.space, 'member.joined', { member })
+    const bot = newId('bot'),
+      key = b.keys.createBotKey(bot),
+      delegation = b.identity.issueBotDelegation({ bot, key, name: 'Bot', hostNode: peer(b).node })
+    trust(a, b)
+    const input = signed(
+      b,
+      space.meta,
+      'bot.added',
+      {
+        record: {
+          bot,
+          owner: member.user,
+          delegation,
+          displayName: 'Bot',
+          profile: 'chat',
+          policy: { visibility: 'public', steer: { kind: 'everyone' } }
+        }
+      },
+      { metaEpoch: 1, metaSeq: 2 }
+    )
+    a.host.append(space.meta, input.id, input.envelope, input.sig, peer(b))
+    expect(a.projection.bot(space.space, bot)).toBeDefined()
+    a.host.postMeta(space.space, 'member.removed', { user: member.user })
+    a.host.postMeta(space.space, 'member.joined', { member })
+    expect(a.projection.bot(space.space, bot)).toBeUndefined()
+  })
+})

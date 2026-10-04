@@ -52,6 +52,7 @@ export type EnvelopeKind =
   | 'server_req'
   | 'client_res'
   | 'server_cancel'
+  | 'connection_event'
 
 export interface ProtocolHello {
   kind: 'hello'
@@ -105,6 +106,16 @@ export interface ProtocolEvent {
   data: unknown
   ts: string
 }
+
+/** One authenticated socket's live display lane. Never sequenced or replayed. */
+export interface ProtocolConnectionEvent {
+  kind: 'connection_event'
+  type: 'bridge.hub.thread'
+  profileId: string
+  profileEpoch: number
+  data: unknown
+}
+export const MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES = 64 * 1024
 
 export interface ProtocolTransportError {
   kind: 'error'
@@ -161,6 +172,7 @@ export type ProtocolEnvelope =
   | ProtocolServerCommandRequest
   | ProtocolClientCommandResponse
   | ProtocolServerCommandCancel
+  | ProtocolConnectionEvent
 
 /**
  * Allowlisted methods Phase 2–5 (full GUI/CLI local protocol).
@@ -389,6 +401,7 @@ export const PROTOCOL_CAPABILITIES = [
 ] as const
 
 export type ProtocolEventType =
+  | 'net.updated'
   | 'projects.updated'
   | 'threads.updated'
   | 'thread.title-generation-failed'
