@@ -1501,9 +1501,18 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const matches = latest && prompt && messages.indexOf(prompt) >= latest.presentationMessageStart && messages.indexOf(prompt) < latest.presentationMessageEnd && prompt.turnId === latest.turnId
       const undoTarget = eligible && matches && latest.state === 'completed'
         ? { actionId: latest.id, turnId: latest.turnId, messageId: prompt.id, journalGeneration: operation.currentGeneration } : undefined
-      const redoTarget = eligible && latest.scope === 'conversation' && latest.state === 'undone'
+      const receipts = new ChangeReceiptService(operation.threadDirectory).list()
+      // Workspace Undo appends a completed compensation; its original becomes undone.
+      // Only an Undo receipt offers Redo, not another completed forward/Redo action.
+      const undoneOriginal = latest && actions.find(action => action.conversationBranchId === activeBranchId
+        && action.compensationActionId === latest.id && action.state === 'undone')
+      const workspaceRedo = latest?.scope !== 'conversation' && latest?.state === 'completed'
+        && receipts.some(receipt => receipt.id === latest.receiptId && receipt.kind === 'undo')
+        && undoneOriginal?.reversible && undoneOriginal.nativeContextStartBoundary
+        && (undoneOriginal.retention?.state === 'available' || undoneOriginal.retention?.state === 'pinned')
+      const redoTarget = eligible && ((latest.scope === 'conversation' && latest.state === 'undone') || workspaceRedo)
         ? { actionId: latest.id, turnId: latest.turnId, journalGeneration: operation.currentGeneration } : undefined
-      return { actions, retentionPolicy: retention.policy(), receipts: new ChangeReceiptService(operation.threadDirectory).list(), activeBranchId, journalGeneration: operation.currentGeneration, undoTarget, redoTarget,
+      return { actions, retentionPolicy: retention.policy(), receipts, activeBranchId, journalGeneration: operation.currentGeneration, undoTarget, redoTarget,
         undoUnavailableReason: undoTarget ? undefined : busy ? 'Wait for active or queued work to finish.' : latest?.retention?.state === 'expired' || latest?.retention?.state === 'blocked' ? latest.retention.reason : 'This prompt has no eligible recorded Undo boundary. Tool effects or older unrecorded turns cannot be undone safely.' }
     }
     case 'actions.sweepRetention':
