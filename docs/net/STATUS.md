@@ -4,6 +4,28 @@ Updated 2026-10-04. Tracking: [issue #44](https://github.com/mousse-agent/mousse
 
 I recovered the interrupted Claude thread and continued its existing isolated worktree. I preserved the primary checkout's unrelated edits. The published recovery starts at `d3f9433`. Bridge and public Spaces now have profile-bound daemon/CLI composition in this draft branch; the remaining gates below still prevent a release claim.
 
+## Desktop CI correction, 2026-10-04
+
+I inspected Application run `37183271518` at exact Net head `f5f36378`
+(the tested GitHub merge has the same tree). It has two failed desktop cases,
+2902 passing cases and eight skips; the prior renewal and twelve fixture failures
+pass. Static checks, Workflow tools and all 36 Windows focused cases pass.
+
+I reproduced both desktop failures in actual built Electron on macOS. The
+drivers wait for removed controls, and the seed lacks prompt turn provenance.
+Fixture-only corrections make lifecycle pass; the Git flow then reproduces
+missing workspace Redo. The new production-RPC assertion also fails before the
+small history-projection correction already present in Chats/UI/combined drafts.
+I merged that independent fix and fixture corrections as
+[PR #63](https://github.com/mousse-agent/mousse/pull/63), master `d233868d`.
+All 21 focused backend/UI cases and both built-Electron flows pass there.
+I also passed the two reported actual Electron scenarios on the updated Net
+integration, and both newly affected protocol cases on Chats and UI.
+I inspected lifecycle screenshots, retained mutation fences, and preserved the
+primary checkout's four local changes. I did not run a full suite locally or
+claim corrected Linux/Windows CI, resolve the separate startup profile diagnostics,
+or replace the sensitive teammate review. The optional Plus blocker remains.
+
 ## Baseline fixture corrections, 2026-10-04
 
 I merged [PR #62](https://github.com/mousse-agent/mousse/pull/62) as
@@ -16,11 +38,12 @@ profile/purge errors and stronger prompt admission assertions; I retained those
 branch-specific expectations during conflict resolution, and its 23 cases pass.
 The UI merge carries those verified changes without changing its source tree.
 
-The two built-Electron baseline failures remain unqualified. Their drivers
+At the #62 checkpoint, the two built-Electron failures were unqualified. Their drivers
 search the removed composer strip, and the Git seed lacks prompt turn provenance.
 A separate production-RPC probe reproduces missing workspace Redo exposure on
-master; the existing combined draft #61 contains the earlier correction and still
-needs independent verification. I have not called the application suite green.
+master; the combined draft #61 contained the earlier correction. The subsequent
+independent verification and correction are recorded above. I have not called
+the current complete application suite green.
 
 I also reviewed optional Plus #60 against its actual companion server. Its
 one-hour GUI device invitation exceeds the hosted ten-minute limit and leaves a
@@ -33,7 +56,8 @@ Other-human sensitive review remains pending for the substantive stack.
 I diagnosed and reproduced the additional renewal failure in PR #45's CI at
 `1a971a50`, fixed its two-sample authority-clock race, and passed 13 focused
 renewal/service/history/revocation checks plus both source typechecks. The 14
-failures shared with exact master remain unresolved. I recorded the red/green
+failures shared with exact master were unresolved at that checkpoint, before
+the #62/#63 corrections above. I recorded the red/green
 production-timer evidence and verification limits in
 [the renewal clock report](qa/renewal-clock.md). Other-human sensitive review
 remains required before merging the draft stack.
