@@ -9,7 +9,7 @@ describe('GitService stale cwd handling', () => {
     const service = new GitService()
 
     await expect(service.getStatus(missing)).resolves.toEqual({
-      isRepo: false, branch: null, ahead: 0, behind: 0, changes: []
+      isRepo: false, branch: null, upstream: null, tracking: 'none', ahead: 0, behind: 0, changes: []
     })
     await expect(service.getDiffStats(missing)).resolves.toEqual({
       additions: 0, deletions: 0, filesChanged: 0

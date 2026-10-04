@@ -62,7 +62,7 @@ it('restarts cleanup at every external irreversible ledger boundary without offe
       if (boundary === 0) boundaryCount = preview.items.length + 1
       else expect(preview.items.length + 1).toBe(boundaryCount)
       await expect(coordinator.purge({ taskId: 'task', operationId: 'boundary-purge', expectedGeneration: preview.generation, previewDigest: preview.digest }))
-        .rejects.toThrow(`qualification boundary ${boundary}`)
+        .rejects.toMatchObject({ code: 'resource_purge_failed', details: { supportId: expect.any(String) }, cause: expect.objectContaining({ message: `qualification boundary ${boundary}` }) })
       expect(injected).toBe(true)
       expect(store.require('task').state).toBe('purge-started')
       await expect(coordinator.restore({ taskId: 'task', operationId: 'restore-partial' })).rejects.toThrow(/purge-started/)
@@ -97,10 +97,10 @@ it('keeps an interrupted purge pending while its repository is offline and resum
     await coordinator.trash({ taskId: 'task', operationId: 'offline-trash' })
     const preview = await coordinator.cleanup.preview('task')
     expect(preview.blockers).toEqual([])
-    await expect(coordinator.purge({ taskId: 'task', operationId: 'offline-purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toThrow('offline fixture boundary')
+    await expect(coordinator.purge({ taskId: 'task', operationId: 'offline-purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toMatchObject({ code: 'resource_purge_failed', details: { supportId: expect.any(String) }, cause: expect.objectContaining({ message: 'offline fixture boundary' }) })
     // Both fixed paths are inside this disposable fixture repository.
     renameSync(online, offline)
-    await expect(coordinator.recover('task')).rejects.toThrow(/repository.*unavailable|unavailable.*repository/i)
+    await expect(coordinator.recover('task')).rejects.toMatchObject({ code: 'resource_purge_failed', details: { supportId: expect.any(String) }, cause: expect.objectContaining({ message: expect.stringMatching(/repository.*unavailable|unavailable.*repository/i) }) })
     const pending = store.require('task')
     expect(pending.state).toBe('purge-started')
     expect(pending.purge!.completedAt).toBeUndefined()
