@@ -613,8 +613,9 @@ export class NetIdentityService implements IdentityService {
       else roster.revoked.push({ subject, throughKeyEpoch: epoch, revokedAt: this.clock.now() })
     })
   }
-  renewExpiring(now: number): Signed | undefined {
-    if (!Number.isSafeInteger(now) || now < 0 || now !== this.clock.now())
+  renewExpiring(): Signed | undefined {
+    const now = this.clock.now()
+    if (!Number.isSafeInteger(now) || now < 0)
       throw new NetError('bad_request', 'Renewal must use the authority clock.')
     const current = this.roster()
     if (!current) throw new NetError('not_enrolled')

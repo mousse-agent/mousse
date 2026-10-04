@@ -275,7 +275,7 @@ export class SyncSupervisor implements SyncSession {
       () => {
         if (this.stopped) return
         try {
-          this.options.identity.renewExpiring(this.clock.now())
+          this.options.identity.renewExpiring()
         } catch {
           /* A locked/follower/conflicted identity cannot renew itself. */
         }
