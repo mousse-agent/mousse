@@ -54,12 +54,62 @@ Local evidence: `/tmp/mousse-plus-rendezvous-recovery-red.log`,
 `/tmp/mousse-pr61-plus-recovery-interop.log`. The controlled probe source is
 `/private/tmp/mousse-pr61-plus-recovery-probe/probe.ts`.
 
+## Explicit disconnect recovery and its response-loss limit
+
+At native checkpoint `be44e377` and companion `36bee27e`, I subsequently
+reproduced an expired original using the supported two-second challenge
+lifetime. The unchanged retry returned
+HTTP 410 `expired`, retained protected custody and still blocked renewal. With
+native/control/gateway clock hooks advanced by 610,000 milliseconds, I also
+verified the challenge was pruned and the registration lease expired. Retry
+returned HTTP 403 `revoked`, and custody remained retained. The lease check
+rejects before challenge lookup, so pruning is not the established cause of
+that rejection. This accelerated test is not elapsed wall-clock or
+production-clock qualification.
+
+For both states I verified the existing explicit `net.plus.disconnect` flow:
+a transport failure before revocation preserved custody; an acknowledged retry
+confirmed hosted revocation before clearing custody. Fresh account-authorized
+binding/registration then permitted an invitation and renewal. The Devices
+control invokes the same owner-local method. I did not qualify its browser
+sign-in UI as part of these probes.
+
+I also discarded the disconnect response **after** the actual server committed
+revocation. Native custody correctly remained retained, but retry failed:
+`resolveConnectorActor` calls `registration(..., allowExpired = true)` before
+checking bearer hash; that registration check rejects a revoked record.
+Although `revokeRegistration` itself accepts an already-revoked matching record,
+that method is never reached on the connector retry. Native maps the resulting
+HTTP 403 to `forbidden` and cannot clear its pending original.
+
+Consequently an acknowledged explicit disconnect is a verified recovery path,
+but lost revocation acknowledgement is a separate reproduced merge blocker.
+A general 403 does not prove successful revocation: the same registration gate
+covers generation, connector expiry and binding/identity state. I retained
+custody and left the active companion/source owner branch untouched. Recovery
+needs an endpoint-specific authenticated replay for the exact registration and
+generation, or another separately verified account-authorized reconciliation
+path. A revoke replay must verify bearer possession, acknowledge confirmed
+revocation and keep revoked connectors denied elsewhere. Wrong bearer and
+wrong registration/generation must remain denied. Credential-expiry and
+pruned-record recovery need separate contracts. These changes require the
+companion owner's work and human sensitive review.
+
+Evidence: `/tmp/mousse-pr61-expired-recovery-interop.log`,
+`/tmp/mousse-pr61-pruned-recovery-interop.log`, and
+`/tmp/mousse-pr61-revoke-loss-interop.log`, with corresponding controlled probe
+sources under `/private/tmp/mousse-pr61-*-recovery-probe` and
+`/private/tmp/mousse-pr61-revoke-loss-probe`. These probes use actual control
+service and gateway with ephemeral profile/account custody and clean up their
+owned resources.
+
 ## Remaining gates
 
-This is not complete historical pending-operation recovery. Once an old
-challenge expires, the companion can return HTTP 410 `expired`; after pruning
-it can return HTTP 403 `forbidden`. I retain those originals. Profiles already
-stuck in those states still need a separately verified recovery mechanism.
+This is not complete historical pending-operation recovery. I verified HTTP
+410 `expired` for an old challenge and HTTP 403 `revoked` for an expired
+registration lease. I retain those originals. Acknowledged
+explicit disconnect recovers the tested states; lost revocation acknowledgement
+remains blocked as described above.
 I also do not claim complete outer-enrollment response-loss retry, production
 account login, production TLS, database, paid-provider, or platform rollout
 qualification. The optional Plus feature and combined candidate remain draft
