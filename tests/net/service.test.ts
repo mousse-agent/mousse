@@ -3,19 +3,52 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { NetService } from '../../src/mms/net/NetService'
+import type { Clock } from '../../src/mms/net/contracts'
+import { NODE_DELEGATION_TTL_MS } from '../../src/shared/net/limits'
+import type { Roster } from '../../src/shared/net'
+import { FakeClock } from './harness/FakeClock'
 const cleanups: Array<() => Promise<void> | void> = []
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
 })
-function service(): { net: NetService; path: string } {
+function service(clock?: Clock): { net: NetService; path: string } {
   const path = mkdtempSync(join(tmpdir(), 'net-service-')),
-    net = new NetService({ profileDir: path })
+    net = new NetService({ profileDir: path, clock })
   cleanups.push(
     () => rmSync(path, { recursive: true, force: true }),
     () => net.shutdown()
   )
   return { net, path }
 }
+it('renews through the owner timer when the authority clock ticks between reads', async () => {
+  const clock = new FakeClock(Date.now()),
+    { net } = service(clock)
+  await net.request('net.init', { name: 'authority' })
+  const rt = net.runtime(),
+    original = rt.identity.verifySigned<Roster>(rt.identity.roster()!, rt.keys.rootKey()!)
+  clock.setWallTime(clock.now() + NODE_DELEGATION_TTL_MS - 12 * 3600000)
+  const readNow = clock.now.bind(clock),
+    tick = vi.spyOn(clock, 'now').mockImplementation(() => {
+      const now = readNow()
+      clock.setWallTime(now + 1)
+      return now
+    })
+  try {
+    clock.advance(3600000)
+    expect(net.status().error).toBeUndefined()
+    const renewed = rt.identity.verifySigned<Roster>(rt.identity.roster()!, rt.keys.rootKey()!)
+    expect(renewed.version).toBe(original.version + 1)
+    expect(renewed.authorityNode).toBe(original.authorityNode)
+    const delegation = rt.identity.verifySigned<{ issuedAt: number; expiresAt: number }>(
+      renewed.nodes[0],
+      rt.keys.rootKey()!
+    )
+    expect(delegation.issuedAt).toBeGreaterThan(original.issuedAt)
+    expect(delegation.expiresAt - delegation.issuedAt).toBe(NODE_DELEGATION_TTL_MS)
+  } finally {
+    tick.mockRestore()
+  }
+})
 it('keeps networking disabled until explicit init and listening off unless requested', async () => {
   const { net } = service()
   await net.start()

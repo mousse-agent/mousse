@@ -56,7 +56,7 @@ describe('signed materialization of frozen meta oracles', () => {
       space = source.host.create({ name: 'Original history' })
     trust(replica, source)
     source.clock.advance(6 * 86400000 + 1)
-    source.identity.renewExpiring(source.clock.now())
+    source.identity.renewExpiring()
     trust(replica, source)
     const descriptor = source.store.getStream(space.meta)!,
       reader = source.store.openSnapshot(space.meta),

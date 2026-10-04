@@ -34,7 +34,7 @@ The final focused area command was:
 npx vitest run tests/net/spaces/private/service.test.ts tests/net/spaces/private/tls.test.ts tests/net/spaces/private/botBindings.test.ts tests/net/spaces/private/profile.test.ts tests/net/spaces/client/service.test.ts tests/net/spaces/client/join-timeout.test.ts tests/net/spaces/discovery/bootstrap-author.test.ts tests/net/spaces/discovery/codec.test.ts tests/net/spaces/discovery/renewal.test.ts tests/net/spaces/discovery/current-after-snapshot.test.ts tests/net/spaces/discovery/profile.test.ts tests/net/sync/integration.test.ts --maxWorkers=4
 ```
 
-That command passed **85/85 tests in 12 files**. Its earlier run passed 84 and failed the existing renewal test at `NetIdentityService.renewExpiring`'s exact equality of two live-clock samples, before private verification. I reran only `npx vitest run tests/net/spaces/discovery/renewal.test.ts`, which passed 1/1; the later focused-area run also passed that test. I did not change or establish the cause of the intermittent renewal failure.
+That command passed **85/85 tests in 12 files**. Its earlier run passed 84 and failed the existing renewal test at `NetIdentityService.renewExpiring`'s exact equality of two live-clock samples, before private verification. I reran only `npx vitest run tests/net/spaces/discovery/renewal.test.ts`, which passed 1/1; the later focused-area run also passed that test. I did not change or establish the cause of the intermittent renewal failure. My later [renewal clock report](renewal-clock.md) records its deterministic production-timer reproduction and focused fix.
 
 | Command | Results |
 |---|---|

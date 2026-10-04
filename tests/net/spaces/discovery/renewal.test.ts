@@ -45,8 +45,7 @@ it('verifies a same-key renewed bot lease at the original control time without r
   )
   await member.spaces.client.connect(space.space)
   elapsed = 6 * 86400000
-  for (const p of [host, member])
-    expect(p.net.runtime().identity.renewExpiring(clock.now())).toBeDefined()
+  for (const p of [host, member]) expect(p.net.runtime().identity.renewExpiring()).toBeDefined()
   const recipient = member.net.runtime().identity.self()!.user
   await vi.waitFor(() => {
     for (const [p, user] of [

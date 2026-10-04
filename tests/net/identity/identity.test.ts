@@ -439,7 +439,7 @@ describe('NetIdentityService durable security foundation', () => {
     const sizes: number[] = []
     for (let renewal = 1; renewal <= 18; renewal++) {
       a.timer.advance(6 * 86400000)
-      const signed = a.identity.renewExpiring(a.timer.clock.now())!,
+      const signed = a.identity.renewExpiring()!,
         roster = a.identity.verifySigned<Roster>(signed, root)
       const delegation = roster.nodes.at(-1)!
       sizes.push(
@@ -675,9 +675,9 @@ describe('NetIdentityService durable security foundation', () => {
       self = a.identity.self()!,
       originalAt = a.timer.clock.now(),
       signature = a.keys.signAsNode(bytes)
-    expect(a.identity.renewExpiring(originalAt)).toBeUndefined()
+    expect(a.identity.renewExpiring()).toBeUndefined()
     a.timer.advance(NODE_DELEGATION_TTL_MS - 12 * 3600000)
-    const renewed = a.identity.renewExpiring(a.timer.clock.now())!
+    const renewed = a.identity.renewExpiring()!
     expect(a.identity.verifySigned<Roster>(renewed, a.keys.rootKey()!).version).toBe(2)
     expect(
       a.identity.verifyAuthor(
