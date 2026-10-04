@@ -14,17 +14,37 @@ export interface DispatchRequest {
   fetch?: boolean
   push?: boolean
 }
-export interface RepositoryBindingOptions { allowFetch?: boolean; allowPush?: boolean; remote?: string; projectId?: string }
+export interface RepositoryBindingOptions {
+  allowFetch?: boolean
+  allowPush?: boolean
+  remote?: string
+  projectId?: string
+}
 export interface DispatchRuntime {
   resolveAgent(agent: string): Promise<ResolvedAgentDefinition>
-  run(request: { definition: ResolvedAgentDefinition; threadId: string; worktreePath: string; prompt: string; executionId: string; limits: AgentExecutionBudget; signal: AbortSignal }): Promise<AgentExecutionResult>
+  run(request: {
+    definition: ResolvedAgentDefinition
+    threadId: string
+    worktreePath: string
+    prompt: string
+    executionId: string
+    limits: AgentExecutionBudget
+    signal: AbortSignal
+  }): Promise<AgentExecutionResult>
 }
 export interface DispatchArtifacts {
   /** The root gateway enforces exact committed caller/user/RPC/method/capability scope. */
-  readInput(ref: RpcArtifactRef, context: RpcContext): Promise<Uint8Array | AsyncIterable<Uint8Array>>
-  prepareResult(bytes: Uint8Array, context: RpcContext): Promise<{ ref: RpcArtifactRef; commit(): void }>
+  readInput(
+    ref: RpcArtifactRef,
+    context: RpcContext
+  ): Promise<Uint8Array | AsyncIterable<Uint8Array>>
+  prepareResult(
+    bytes: Uint8Array,
+    context: RpcContext
+  ): Promise<{ ref: RpcArtifactRef; commit(): void }>
 }
-export type DispatchPhase = 'preparing' | 'transferring' | 'verifying' | 'running' | 'publishing' | 'cleanup' | 'complete'
+export type DispatchPhase =
+  'preparing' | 'transferring' | 'verifying' | 'running' | 'publishing' | 'cleanup' | 'complete'
 export type DispatchState = 'accepted' | 'running' | 'completed' | 'failed' | 'uncertain'
 export interface DispatchResultBody {
   v: 1

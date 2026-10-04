@@ -28,6 +28,42 @@ already bound repository's objects. Strict object checks and root ancestry
 precede importing that one ref. Git never imports configuration, hooks or other
 refs from an input bundle.
 
+Git has two deliberate configuration boundaries in `git.ts`:
+
+- `git` is the isolated wrapper for bundles, all quarantine operations, local
+  object/ref inspection, staging and commits. It ignores system/global Git
+  configuration and all inherited `GIT_*` variables. Repository-local configuration
+  remains visible; Dispatch refuses external clean/smudge/process filters before
+  checkout or staging. Bundle import does not copy configuration or hooks.
+- `remoteGit` is used only for the missing-base fetch and result-ref push in the
+  owner's bound repository, against the locally selected remote name. It reads
+  the owner's normal system/global/local configuration, including credential
+  helpers, `url.*.insteadOf`, `core.sshCommand`, proxy settings and `safe.directory`.
+  It retains inherited `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`,
+  `GIT_CONFIG_NOSYSTEM`, `GIT_SSH*`, `GIT_SSL*`, `GIT_HTTP*` and `GIT_PROXY_COMMAND`
+  transport settings. Other inherited `GIT_*` variables, including directory,
+  object, index and inline configuration overrides, are removed so they cannot
+  redirect the bound repository. The fetch still enables object integrity checks.
+
+Both wrappers disable hooks, fsmonitor, the `ext` protocol, Git/SSH askpass and
+terminal prompts; supported credential managers also receive noninteractive
+settings. Local file transport remains enabled for bound local remotes and
+verified quarantine imports. The wrapper null paths use Node's platform-specific
+`devNull` (`/dev/null` or `\\.\NUL`), rather than assuming a Unix host. The
+separate WorktreeManager safe-checkout path still uses `/dev/null` for hooks;
+Windows checkout qualification is not established by these wrapper tests.
+
+The remote wrapper trusts executable credential helpers and SSH/remote transport
+programs configured by the local owner. A hostile owner-global configuration can
+execute a program as that owner, redirect a remote through URL rewrites or proxy
+settings, disclose credentials/content, or weaken TLS verification. Arbitrary
+helper programs can also ignore noninteractive settings. This is the same local
+configuration trust needed for the owner's ordinary fetch/push; compromise of
+that configuration is outside the incoming-bundle threat boundary. Remote callers
+cannot supply configuration or choose a URL. Do not use `remoteGit` for bundle
+verification/import, quarantine, checkout or staging: those operations must keep
+the isolated configuration boundary and existing safe-checkout filter checks.
+
 `mmsDispatchRuntime` calls the existing `runAgentDefinition` lifecycle with its
 resolved immutable definition, stable execution thread, exact isolated worktree,
 local approval callback, reduced budget and cancellation signal. Prompt and

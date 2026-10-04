@@ -1,9 +1,10 @@
-import { build, context } from 'esbuild'
+import { context } from 'esbuild'
 import { existsSync, mkdirSync } from 'fs'
 import { dirname, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { buildPackagedNativeReader } from './build-net-native-reader.mjs'
 import { buildBrowserWorker, getBrowserWorkerBuildOptions } from './build-browser-worker.mjs'
+import { cachedBuild } from './cached-build.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const entry = resolve(root, 'src/cli/index.ts')
@@ -45,19 +46,19 @@ export function getCliBuildOptions(projectRoot = root) {
 
 /**
  * One-shot CLI build, or watch mode for development.
- * @param {{ watch?: boolean, onRebuild?: (error: Error | null) => void, log?: boolean }} [opts]
+ * @param {{ watch?: boolean, onRebuild?: (error: Error | null) => void, log?: boolean, reuse?: boolean }} [opts]
  */
 export async function buildCli(opts = {}) {
-  const { watch = false, onRebuild, log = true } = opts
+  const { watch = false, onRebuild, log = true, reuse = false } = opts
   buildPackagedNativeReader()
   mkdirSync(dirname(outfile), { recursive: true })
   const options = getCliBuildOptions(root)
 
   if (!watch) {
-    await buildBrowserWorker(root)
-    await build(options)
-    if (log) console.log(`Built ${outfile}`)
-    return null
+    const worker = await buildBrowserWorker(root, { reuse })
+    const cli = await cachedBuild(options, { projectRoot: root, name: 'cli', reuse })
+    if (log) console.log(`${cli.reused ? 'Reused' : 'Built'} ${outfile}`)
+    return { cliReused: cli.reused, workerReused: worker.reused }
   }
 
   const ctx = await context({

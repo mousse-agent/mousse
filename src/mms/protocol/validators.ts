@@ -59,9 +59,31 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
   if (!isObject(raw) || typeof raw.kind !== 'string') return null
   switch (raw.kind) {
     case 'connection_event': {
-      if (Object.keys(raw).some(key => !['kind','type','profileId','profileEpoch','data'].includes(key)) || raw.type !== 'bridge.hub.thread' || !isBoundedString(raw.profileId,128,{nonEmpty:true}) || !Number.isSafeInteger(raw.profileEpoch) || (raw.profileEpoch as number) < 1) return null
-      try { if (Buffer.byteLength(JSON.stringify(raw),'utf8') > MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES) return null } catch { return null }
-      return {kind:'connection_event',type:'bridge.hub.thread',profileId:raw.profileId,profileEpoch:raw.profileEpoch as number,data:raw.data}
+      if (
+        Object.keys(raw).some(
+          key => !['kind', 'type', 'profileId', 'profileEpoch', 'data'].includes(key)
+        ) ||
+        raw.type !== 'bridge.hub.thread' ||
+        !isBoundedString(raw.profileId, 128, { nonEmpty: true }) ||
+        !Number.isSafeInteger(raw.profileEpoch) ||
+        (raw.profileEpoch as number) < 1
+      ) {
+        return null
+      }
+      try {
+        if (Buffer.byteLength(JSON.stringify(raw), 'utf8') > MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES) {
+          return null
+        }
+      } catch {
+        return null
+      }
+      return {
+        kind: 'connection_event',
+        type: 'bridge.hub.thread',
+        profileId: raw.profileId,
+        profileEpoch: raw.profileEpoch as number,
+        data: raw.data
+      }
     }
     case 'hello': {
       if (

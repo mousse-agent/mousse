@@ -6,7 +6,8 @@ import {
   type MutableModels,
   type ThinkingLevelMap
 } from '@earendil-works/pi-ai'
-import { discoverModels } from 'pi-cursor-sdk/src/model-discovery'
+import { __testUtils as cursorModelDiscovery } from 'pi-cursor-sdk/src/model-discovery'
+import { fingerprintApiKey, loadAnyCachedModelCatalog, loadFreshCachedModels, saveModelListCache } from 'pi-cursor-sdk/src/model-list-cache'
 import {
   CURSOR_API_KEY_ENV_VAR,
   resolveCursorApiKey
@@ -122,24 +123,40 @@ async function readCursorApiKey(credentials: CredentialStore): Promise<string | 
 
 async function discoverCursorModels(
   credentials: CredentialStore,
-  forceRefresh?: boolean
+  forceRefresh?: boolean,
+  signal?: AbortSignal
 ): Promise<CursorModelConfig[]> {
   const apiKey = await readCursorApiKey(credentials)
-  const previous = process.env[CURSOR_API_KEY_ENV_VAR]
+  signal?.throwIfAborted()
+  if (!apiKey) return restoreCursorModels(undefined, signal)
+  const fingerprint = fingerprintApiKey(apiKey)
+  const fresh = !forceRefresh ? loadFreshCachedModels(fingerprint) : undefined
+  if (fresh?.length) return cursorModelDiscovery.registerModelItems(fresh)
 
-  if (apiKey) {
-    process.env[CURSOR_API_KEY_ENV_VAR] = apiKey
-  }
-
+  let items: import('@cursor/sdk').ModelListItem[]
   try {
-    return await discoverModels({ forceRefresh })
-  } finally {
-    if (previous === undefined) {
-      delete process.env[CURSOR_API_KEY_ENV_VAR]
-    } else {
-      process.env[CURSOR_API_KEY_ENV_VAR] = previous
-    }
+    const { Cursor } = await import('@cursor/sdk')
+    signal?.throwIfAborted()
+    items = await Cursor.models.list({ apiKey })
+  } catch {
+    signal?.throwIfAborted()
+    return restoreCursorModels(apiKey, signal)
   }
+  // The SDK transport cannot be cancelled. Fence both its raw cache and the
+  // process-wide selection metadata before accepting a late network response.
+  signal?.throwIfAborted()
+  if (items.length === 0) return restoreCursorModels(apiKey, signal)
+  saveModelListCache(fingerprint, items)
+  return cursorModelDiscovery.registerModelItems(items)
+}
+
+async function restoreCursorModels(apiKey?: string, signal?: AbortSignal): Promise<CursorModelConfig[]> {
+  const cached = apiKey ? loadAnyCachedModelCatalog(fingerprintApiKey(apiKey)) : undefined
+  const items = cached?.models.length
+    ? cached.models
+    : (await import('pi-cursor-sdk/src/cursor-fallback-models.generated')).FALLBACK_MODEL_ITEMS
+  signal?.throwIfAborted()
+  return cursorModelDiscovery.registerModelItems(items)
 }
 
 export function createCursorPiProvider(
@@ -154,7 +171,7 @@ export function createCursorPiProvider(
       apiKey: envApiKeyAuth('Cursor SDK API key', [CURSOR_API_KEY_ENV_VAR])
     },
     models: toCursorPiModels(initialModels),
-    fetchModels: async () => toCursorPiModels(await discoverCursorModels(credentials, true)),
+    fetchModels: async (context) => toCursorPiModels(await discoverCursorModels(credentials, true, context.signal)),
     api: {
       stream: streamCursorLazy,
       streamSimple: streamCursorLazy
@@ -164,9 +181,19 @@ export function createCursorPiProvider(
 
 export async function registerCursorPiProvider(
   models: MutableModels,
-  credentials: CredentialStore
+  credentials: CredentialStore,
+  options: { allowNetwork?: boolean } = {}
 ): Promise<void> {
   await ensureCursorSdkConfigured()
+  if (options.allowNetwork === false) {
+    // Startup: Models.refresh({ allowNetwork: false }) restores the persisted
+    // catalog. Restore raw SDK selection metadata for cached aliases/variants,
+    // using only a cache that matches the current key; no discovery is needed.
+    const apiKey = await readCursorApiKey(credentials)
+    const configs = await restoreCursorModels(apiKey)
+    models.setProvider(createCursorPiProvider(credentials, configs))
+    return
+  }
   // Always force-refresh on register so newly published models (e.g. Opus 5)
   // are not hidden behind a stale 24h local model-list cache / old fallback snapshot.
   const configs = await discoverCursorModels(credentials, true)

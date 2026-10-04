@@ -47,7 +47,9 @@ export function newId<K extends IdKind>(kind: K): Prefixed<K> {
 }
 
 export function isId<K extends IdKind>(kind: K, value: unknown): value is Prefixed<K> {
-  return typeof value === 'string' && ID_PATTERN.test(value) && value.startsWith(`${ID_PREFIXES[kind]}_`)
+  return (
+    typeof value === 'string' && ID_PATTERN.test(value) && value.startsWith(`${ID_PREFIXES[kind]}_`)
+  )
 }
 
 export function isBlobId(value: unknown): value is BlobId {

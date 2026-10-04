@@ -92,7 +92,13 @@ export async function connectDaemonClient(
     ownerToken: owner.token,
     endpoint,
     clientType: 'cli',
-    requestedCapabilities: [NET_LOCAL_CAPABILITY, PROFILES_V1_CAPABILITY, WORKFLOW_RUN_CAPABILITY, WORKFLOW_DEFINITIONS_CAPABILITY, BROWSER_SETUP_CAPABILITY],
+    requestedCapabilities: [
+      NET_LOCAL_CAPABILITY,
+      PROFILES_V1_CAPABILITY,
+      WORKFLOW_RUN_CAPABILITY,
+      WORKFLOW_DEFINITIONS_CAPABILITY,
+      BROWSER_SETUP_CAPABILITY
+    ],
     requestTimeoutMs: opts.requestTimeoutMs
   })
   await client.connect()

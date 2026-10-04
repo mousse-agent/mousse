@@ -126,6 +126,34 @@ async function main(): Promise<void> {
   activeWindow = bobWindow
   const bobThread = await execute<{ id: string }>(bobWindow, `window.mousse.threads.createAndSelect('Bob fixture')`)
 
+  // Exercise startup through the real Electron preload/IPC after subscription.
+  // Concurrent effects must restore once and keep each window's existing choice.
+  const originalSnapshot = gui.snapshotThread.bind(gui)
+  let startupSnapshots = 0
+  gui.snapshotThread = async (threadId) => {
+    startupSnapshots += 1
+    return originalSnapshot(threadId)
+  }
+  const initialize = (win: BrowserWindow): Promise<boolean> => execute(win, `
+    window.__startupEvents=[];
+    const selected=window.mousse.threads.onSelected(({id})=>window.__startupEvents.push(['selected',id]));
+    const view=window.mousse.threads.onView(({threadId})=>window.__startupEvents.push(['view',threadId]));
+    window.__stopStartup=()=>{selected();view()};
+    Promise.all([window.mousse.threads.initialize(),window.mousse.threads.initialize()])
+      .then(()=>true)`)
+  await Promise.all([initialize(alice), initialize(bobWindow)])
+  // IPC replies and event callbacks can arrive in different renderer tasks.
+  const [aliceStartup, bobStartup] = await Promise.all([
+    waitFor(() => execute<Array<[string, string]>>(alice, 'window.__startupEvents'), (events) => events.length >= 2, 'Alice startup view'),
+    waitFor(() => execute<Array<[string, string]>>(bobWindow, 'window.__startupEvents'), (events) => events.length >= 2, 'Bob startup view')
+  ])
+  await Promise.all([execute(alice, 'window.__stopStartup();true'), execute(bobWindow, 'window.__stopStartup();true')])
+  gui.snapshotThread = originalSnapshot
+  if (startupSnapshots !== 2 || JSON.stringify(aliceStartup) !== JSON.stringify([['selected', aliceThread.id], ['view', aliceThread.id]]) || JSON.stringify(bobStartup) !== JSON.stringify([['selected', bobThread.id], ['view', bobThread.id]])) {
+    throw new Error(`Startup hydration duplicated, raced selection, or crossed windows: ${startupSnapshots} / ${JSON.stringify(aliceStartup)} / ${JSON.stringify(bobStartup)}`)
+  }
+  pass('subscribed startup restores once per bound window with selection before view')
+
   const forged = await execute<{ code?: string }>(alice, `window.mousse.platformRequest.request('agentDefinitions.list',{profileId:${JSON.stringify(bob.id)}}).then(()=>({}),error=>error)`)
   if (forged.code !== 'profile_mismatch') throw new Error(`Forged profile was not rejected: ${JSON.stringify(forged)}`)
   pass('forged renderer profile rejected')

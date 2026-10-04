@@ -1,5 +1,5 @@
-import { join } from 'path'
-import type { ApiKeyCredential, MutableModels } from '@earendil-works/pi-ai'
+import { dirname, join } from 'path'
+import type { ApiKeyCredential, Credential, MutableModels } from '@earendil-works/pi-ai'
 import { getEnvApiKey, getSupportedThinkingLevels } from '@earendil-works/pi-ai/compat'
 import { getModelEffortLevels } from '../../shared/modelEfforts'
 import { getCursorModelMetadata } from 'pi-cursor-sdk/src/model-discovery'
@@ -16,18 +16,19 @@ import type {
 import { getMousseHomeDir } from '../data/paths'
 import {
   isClaudeSubscriptionToken,
-  refreshClaudeSdkProvider,
+  CLAUDE_PROVIDER_ID,
   registerClaudeSdkProvider
 } from './claudeSdkProvider'
 import {
   CURSOR_PROVIDER_ID,
-  refreshCursorPiProvider,
   registerCursorPiProvider
 } from './cursorPiProvider'
 import { FileCredentialStore } from './FileCredentialStore'
+import { FileModelsStore } from './FileModelsStore'
 import { LoginSession } from './LoginSession'
 import { enhanceProvidersWithOpenAiCompatibleFetch } from './openAiCompatibleModelFetch'
 import { enhanceOpenAiCodexProvider } from './openAiCodexModelFetch'
+import { PiCatalogOverlay } from './piCatalogOverlay'
 import { getProviderDisplayName as getProductProviderDisplayName } from './providerMetadata'
 import { fetchGrokCreditsViaGrpc, grokCliBillingHeaders } from './xaiBilling'
 
@@ -62,45 +63,78 @@ type ProviderAuthTypeFilter = 'api_key' | 'oauth'
 
 /** How often to re-fetch dynamic provider model catalogs (Cursor, OpenAI-compatible, Radius, …). */
 const DYNAMIC_MODELS_REFRESH_MS = 5 * 60_000
+/** Upper bounds so a hung endpoint cannot stall later refreshes forever. */
+const CATALOG_REFRESH_TIMEOUT_MS = 60_000
 
 export class ProviderAuthService {
   readonly credentials: FileCredentialStore
   readonly models: MutableModels
+  private readonly modelsStore: FileModelsStore
+  private readonly catalogOverlay: PiCatalogOverlay
+  private readonly catalogListeners = new Set<() => void>()
+  private catalogSignature = ''
   private activeSessions = new Map<string, LoginSession>()
   private initPromise: Promise<void> | null = null
   private refreshTimer: ReturnType<typeof setInterval> | null = null
   private refreshInFlight: Promise<void> | null = null
+  private refreshQueued: Promise<void> | null = null
+  private refreshController: AbortController | null = null
   private stopped = false
 
   constructor(authPath = join(getMousseHomeDir(), 'auth.json')) {
+    const home = dirname(authPath)
     this.credentials = new FileCredentialStore(authPath)
-    this.models = builtinModels({ credentials: this.credentials })
+    this.modelsStore = new FileModelsStore(join(home, 'models-cache.json'))
+    this.models = builtinModels({ credentials: this.credentials, modelsStore: this.modelsStore })
     enhanceProvidersWithOpenAiCompatibleFetch(this.models.getProviders())
     enhanceOpenAiCodexProvider(this.models.getProvider('openai-codex'))
+    this.catalogOverlay = new PiCatalogOverlay(join(home, 'pi-catalog-cache.json'))
+    for (const provider of this.models.getProviders()) {
+      // Anthropic is replaced by the Claude SDK provider, whose catalog is live.
+      if (provider.id !== CLAUDE_PROVIDER_ID) this.catalogOverlay.attach(provider)
+    }
   }
 
+  /**
+   * Ready the catalog without network access: register SDK-backed providers and
+   * restore persisted dynamic catalogs. Network refreshes run in the background
+   * and announce changes through `onCatalogChanged`.
+   */
   init(): Promise<void> {
     this.initPromise ??= (async () => {
-      await registerClaudeSdkProvider(this.models, this.credentials)
-      await registerCursorPiProvider(this.models, this.credentials)
-      // Live catalogs (Claude SDK, Radius, Cursor, OpenAI-compatible /models, Codex).
+      const cachedClaude = await this.modelsStore.read(CLAUDE_PROVIDER_ID).catch(() => undefined)
+      await registerClaudeSdkProvider(this.models, this.credentials, {
+        allowNetwork: false,
+        cached: cachedClaude?.models
+      })
+      await registerCursorPiProvider(this.models, this.credentials, { allowNetwork: false })
       try {
-        await this.models.refresh({ allowNetwork: true })
+        await this.models.refresh({ allowNetwork: false })
       } catch {
-        // Best-effort; static catalogs remain available offline.
+        // Best-effort; static catalogs remain available.
       }
+      this.catalogSignature = this.computeCatalogSignature()
       this.startPeriodicRefresh()
+      if (!this.refreshInFlight) void this.refreshDynamicModels().catch(() => undefined)
     })()
     return this.initPromise
+  }
+
+  /** Subscribe to catalog changes found by background refreshes. */
+  onCatalogChanged(listener: () => void): () => void {
+    this.catalogListeners.add(listener)
+    return () => this.catalogListeners.delete(listener)
   }
 
   /** Stop background catalog polling (called when MMS shuts down). */
   stop(): void {
     this.stopped = true
+    this.refreshController?.abort()
     if (this.refreshTimer) {
       clearInterval(this.refreshTimer)
       this.refreshTimer = null
     }
+    this.catalogListeners.clear()
   }
 
   private startPeriodicRefresh(): void {
@@ -112,27 +146,62 @@ export class ProviderAuthService {
     this.refreshTimer.unref?.()
   }
 
-  /** Force a network refresh of every provider that supports dynamic model lists. */
-  async refreshDynamicModels(): Promise<void> {
-    if (this.refreshInFlight) return this.refreshInFlight
+  /**
+   * Network refresh of every provider with a dynamic model list, plus the
+   * published pi-ai catalog overlay. A call made while a refresh is running
+   * queues one follow-up so new credentials are never skipped.
+   */
+  refreshDynamicModels(): Promise<void> {
+    if (this.stopped) return Promise.resolve()
+    if (this.refreshInFlight) {
+      this.refreshQueued ??= this.refreshInFlight.catch(() => undefined).then(() => {
+        this.refreshQueued = null
+        return this.refreshDynamicModels()
+      })
+      return this.refreshQueued
+    }
     this.refreshInFlight = (async () => {
       await this.init()
       if (this.stopped) return
-      await this.refreshClaudeProvider()
-      await this.refreshCursorProvider(true)
-      await this.models.refresh({ allowNetwork: true })
+      const controller = new AbortController()
+      this.refreshController = controller
+      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(CATALOG_REFRESH_TIMEOUT_MS)])
+      try {
+        // pi-ai fences catalog/cache publication after abort, including SDKs
+        // whose underlying request cannot be cancelled. Register providers only
+        // once at startup so late discovery cannot replace a newer provider.
+        await Promise.all([
+          this.models.refresh({ allowNetwork: true, signal }),
+          this.catalogOverlay.refresh({ signal }).catch(() => false)
+        ])
+        if (!this.stopped) this.notifyIfCatalogChanged()
+      } finally {
+        this.refreshController = null
+      }
     })().finally(() => {
       this.refreshInFlight = null
     })
     return this.refreshInFlight
   }
 
-  private async refreshClaudeProvider(): Promise<void> {
-    await refreshClaudeSdkProvider(this.models, this.credentials)
+  private computeCatalogSignature(): string {
+    return JSON.stringify(this.models.getProviders().map((provider) => ({
+      id: provider.id,
+      models: this.models.getModels(provider.id)
+    })))
   }
 
-  private async refreshCursorProvider(forceRefresh = true): Promise<void> {
-    await refreshCursorPiProvider(this.models, this.credentials, forceRefresh)
+  private notifyIfCatalogChanged(): void {
+    const signature = this.computeCatalogSignature()
+    if (signature === this.catalogSignature) return
+    this.catalogSignature = signature
+    for (const listener of this.catalogListeners) {
+      try {
+        listener()
+      } catch {
+        // A failing subscriber must not break catalog refresh.
+      }
+    }
   }
 
   createSession(): LoginSession {
@@ -184,8 +253,13 @@ export class ProviderAuthService {
       .sort((a, b) => a.label.localeCompare(b.label))
   }
 
-  private kickCatalogRefresh(): void {
-    void this.init().then(() => this.models.refresh({ allowNetwork: true })).catch(() => undefined)
+  /**
+   * Reads never trigger network work: a refresh would supersede (abort) one
+   * already in flight. Startup, the periodic timer and credential changes
+   * refresh instead; this only ensures offline init has run.
+   */
+  private ensureCatalogInitialized(): void {
+    void this.init().catch(() => undefined)
   }
 
   private toLlmProviderOption(id: string): LlmProviderOption | null {
@@ -222,7 +296,7 @@ export class ProviderAuthService {
 
   /** Live catalogs for every registered provider, including ones without stored credentials. */
   getCatalogLlmProviders(): LlmProviderOption[] {
-    this.kickCatalogRefresh()
+    this.ensureCatalogInitialized()
     return this.models
       .getProviders()
       .map((provider) => this.toLlmProviderOption(provider.id))
@@ -234,7 +308,7 @@ export class ProviderAuthService {
     const configuredIds = this.credentials.listProviderIds().filter((id) => this.has(id))
     if (configuredIds.length === 0) return []
 
-    this.kickCatalogRefresh()
+    this.ensureCatalogInitialized()
 
     return configuredIds
       .map((id) => this.toLlmProviderOption(id))
@@ -351,9 +425,6 @@ export class ProviderAuthService {
         throw new Error('Claude subscription credentials cannot be used as an Anthropic API key.')
       }
       await this.credentials.modify(providerId, async () => credential)
-      if (providerId === CURSOR_PROVIDER_ID) {
-        await this.refreshCursorProvider()
-      }
       return { success: true, sessionId: session.sessionId }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -384,9 +455,6 @@ export class ProviderAuthService {
       key: trimmed,
       ...(env && Object.keys(env).length > 0 ? { env } : {})
     }))
-    if (providerId === CURSOR_PROVIDER_ID) {
-      await this.refreshCursorProvider()
-    }
   }
 
   async verifyAmbientProvider(providerId: string): Promise<ProviderLoginResult> {

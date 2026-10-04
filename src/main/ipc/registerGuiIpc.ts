@@ -18,6 +18,8 @@ import { homedir, hostname } from 'os'
 import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
 import { PresentationState } from '../mms/PresentationState'
+import { bootstrapPresentation } from '../mms/bootstrapPresentation'
+export { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { MmsProtocolError } from '../../mms/protocol/client'
 import type { ProtocolEvent } from '../../mms/protocol'
 import {
@@ -1018,6 +1020,30 @@ export function registerGuiIpc(
   })
   registerHandler('threads:active', () => currentPresentation().getActiveThreadId())
   registerHandler('threads:activity', () => activityTrackerFor().getSnapshot())
+
+  // The renderer calls this after it knows its trusted profile and subscribes.
+  // Coalesce Strict Mode's concurrent effects without caching across reloads.
+  const presentationBootstraps = new Map<string, Promise<void>>()
+  registerHandler('threads:initialize', (event) => {
+    const binding = guiMms.getWindowBindingForSender(event.sender.id)
+    if (!binding) throw new Error('Window MMS profile binding is unavailable')
+    const key = `${event.sender.id}:${binding.profileId}:${binding.epoch}`
+    const pending = presentationBootstraps.get(key)
+    if (pending) return pending
+    const isCurrent = (): boolean => {
+      const current = guiMms.getWindowBindingForSender(event.sender.id)
+      return !event.sender.isDestroyed() && current?.profileId === binding.profileId && current.epoch === binding.epoch
+    }
+    const target = (channel: string, data: unknown): void => {
+      if (isCurrent()) event.sender.send(channel, data)
+    }
+    const promise = bootstrapPresentation(guiMms, currentPresentation(), target, {
+      isCurrent,
+      onTurnSnapshot: syncDaemonTurnSnapshot
+    }).finally(() => presentationBootstraps.delete(key))
+    presentationBootstraps.set(key, promise)
+    return promise
+  })
 
   /** Monotonic generation so rapid switches drop stale snapshot replies. */
   let selectGeneration = 0
@@ -2080,66 +2106,4 @@ export function attachWindowListeners(
 ): void {
   attachWindowStateListeners(getWindow, settings)
   attachWindowFocusListeners(getWindow, settings)
-}
-
-/**
- * Ensure the GUI has an active presentation thread after connect/reload.
- */
-export async function bootstrapPresentation(
-  guiMms: GuiMmsController,
-  presentation: PresentationState,
-  broadcast: (channel: string, data: unknown) => void,
-  opts?: { onTurnSnapshot?: (snap: unknown) => void }
-): Promise<void> {
-  const threadsRes = await guiMms.request<{
-    threads: { id: string; settledAt?: string; name?: string }[]
-  }>('threads.list')
-  const projectsRes = await guiMms.request<{ projects: unknown[] }>('projects.list')
-  broadcast('projects:updated', projectsRes.projects)
-  broadcast('threads:updated', threadsRes.threads)
-
-  let activeId = presentation.getActiveThreadId()
-  const usable = threadsRes.threads.filter((t) => !t.settledAt)
-  if (activeId && !usable.some((t) => t.id === activeId)) {
-    activeId = null
-  }
-  if (!activeId) {
-    if (usable.length > 0) {
-      activeId = usable[0].id
-    } else {
-      const created = await guiMms.request<{ thread: { id: string } }>('threads.create', {
-        name: 'New Chat'
-      })
-      activeId = created.thread.id
-      const refreshed = await guiMms.request<{ threads: unknown[] }>('threads.list')
-      broadcast('threads:updated', refreshed.threads)
-    }
-  }
-  presentation.setActiveThreadId(activeId)
-  const snap = await guiMms.snapshotThread(activeId)
-  const bootFull = snap as {
-    agents?: unknown[]
-    tasks?: unknown[]
-    pendingQuestions?: Array<{ requestId: string; questions: unknown }>
-  }
-  opts?.onTurnSnapshot?.(snap)
-  broadcastThreadSnapshot(
-    activeId,
-    {
-      messages: snap.messages,
-      queue: snap.queue,
-      connectionFailed: snap.connectionFailed,
-      agents: bootFull.agents,
-      tasks: bootFull.tasks
-    },
-    broadcast,
-    presentation
-  )
-  for (const q of bootFull.pendingQuestions ?? []) {
-    broadcast('orchestrator:questionsPending', {
-      requestId: q.requestId,
-      questions: q.questions
-    })
-  }
-  broadcast('thread:selected', { id: activeId })
 }

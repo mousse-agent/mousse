@@ -12,7 +12,11 @@ export default defineConfig({
       outDir: resolve('.mousse-dev/net-packaging/main'),
       rollupOptions: {
         ...production.main?.build?.rollupOptions,
-        input: { index: resolve('src/main/index.ts'), cli: resolve('src/main/cli.ts'), probe: resolve('scripts/net-qa/packaging/probe.ts') }
+        input: {
+          index: resolve('src/main/index.ts'),
+          cli: resolve('src/main/cli.ts'),
+          probe: resolve('scripts/net-qa/packaging/probe.ts')
+        }
       }
     }
   }
