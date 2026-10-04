@@ -46,7 +46,7 @@ it('renders real named integration, expired Undo, trash restore and permanent de
       child.once('error', reject); child.once('exit', (code) => done({ code, output: readFileSync(log, 'utf8').slice(-16000) }))
     })
     expect(result.code, result.output).toBe(0)
-    expect(JSON.parse(readFileSync(evidence, 'utf8'))).toMatchObject({ expiredUndoVisible: true, namedRecallVisible: true, integrationDiffVisible: true, integrationApplied: true, restoreIdle: true, purged: true, primaryPreserved: true })
+    expect(JSON.parse(readFileSync(evidence, 'utf8'))).toMatchObject({ expiredUndoUnavailable: true, namedRecallVisible: true, integrationDiffVisible: true, integrationApplied: true, restoreIdle: true, purged: true, primaryPreserved: true })
     expect(git(fixture.repo, 'rev-parse', 'HEAD')).toBe(fixture.baseSha)
     expect(git(fixture.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/', 'refs/heads/mousse/')).toBe('')
   } finally {
