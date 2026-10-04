@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { BridgeDisplayPart } from '../shared/bridge'
 import type { WindowResizeEdge } from '../shared/windowResize'
 import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity, NamedAgentRequest, NamedAgentRecallRequest, NamedAgentIntegrationRequest, NamedAgentIntegrationReview } from '../shared/agentEpisodes'
 import type {
@@ -60,12 +61,6 @@ import type {
   ProviderLoginResponse,
   ProviderLoginResult
 } from '../shared/providerAuth'
-import type {
-  ControlStatus,
-  CreatePairingResult,
-  PairingGrant,
-  RemoteScope
-} from '../shared/controlTypes'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
 import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
@@ -121,6 +116,14 @@ const api = {
   /** Bounded profile-aware bridge for new platform feature clients. */
   platformRequest: {
     request: platformRequest
+  },
+  bridge: {
+    /** Parts belong to this window's authenticated profile connection. */
+    onThreadPart: (callback: (part: BridgeDisplayPart) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, part: BridgeDisplayPart) => callback(part)
+      ipcRenderer.on('bridge:thread-part', handler)
+      return () => { ipcRenderer.removeListener('bridge:thread-part', handler) }
+    }
   },
   chatReferences: {
     resolve: (reference: ChatReference): Promise<ChatReference | null> =>
@@ -847,48 +850,6 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, focused: boolean) => cb(focused)
       ipcRenderer.on('window:focus-changed', handler)
       return () => ipcRenderer.removeListener('window:focus-changed', handler)
-    }
-  },
-  control: {
-    getStatus: (): Promise<ControlStatus> => ipcRenderer.invoke('control:status'),
-    login: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('control:login'),
-    logout: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('control:logout'),
-    enroll: (serverUrl: string, pairingCode: string): Promise<{ ok: boolean; error?: string }> =>
-      ipcRenderer.invoke('control:enroll', serverUrl, pairingCode),
-    disconnect: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('control:disconnect'),
-    setMode: (mode: 'hosted' | 'self-hosted'): Promise<{ ok: boolean }> =>
-      ipcRenderer.invoke('control:setMode', mode),
-    createPairing: (options?: { scopes?: RemoteScope[]; ttlMs?: number }): Promise<CreatePairingResult> =>
-      ipcRenderer.invoke('control:pairing:create', options),
-    listPairings: (): Promise<{ pairings: PairingGrant[] }> => ipcRenderer.invoke('control:pairing:list'),
-    approvePairing: (
-      pairingId: string,
-      scopes?: RemoteScope[]
-    ): Promise<{ grant: PairingGrant; receipt: string; receiptSignature: string }> =>
-      ipcRenderer.invoke('control:pairing:approve', pairingId, scopes),
-    rejectPairing: (pairingId: string): Promise<{ ok: boolean }> =>
-      ipcRenderer.invoke('control:pairing:reject', pairingId),
-    revokePairing: (pairingIdOrDeviceId: string): Promise<{ ok: boolean; revoked?: PairingGrant }> =>
-      ipcRenderer.invoke('control:pairing:revoke', pairingIdOrDeviceId),
-    openDashboard: (url?: string): Promise<{ ok: boolean }> =>
-      ipcRenderer.invoke('control:openDashboard', url),
-    onStatusChanged: (cb: (status: ControlStatus) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, status: ControlStatus) => cb(status)
-      ipcRenderer.on('control:status-changed', handler)
-      return () => ipcRenderer.removeListener('control:status-changed', handler)
-    },
-    onPairingRequest: (
-      cb: (req: {
-        pairingId: string
-        mobileDeviceId: string
-        mobileDeviceName?: string
-        fingerprint: string
-        requestedScopes: RemoteScope[]
-      }) => void
-    ): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, req: any) => cb(req)
-      ipcRenderer.on('control:pairing-request', handler)
-      return () => ipcRenderer.removeListener('control:pairing-request', handler)
     }
   }
 }

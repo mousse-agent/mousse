@@ -120,6 +120,8 @@ it('fences owner-local domains, retains exact pending outbox originals, and leav
       enabled: true,
       features: { netBridge: true, netSpaces: true }
     })
+    expect(services.platform.chats.snapshot()).toBeDefined()
+    expect(() => services.chatNetwork.publish({ chatId: 'invalid', publicationId: 'fixture' } as any)).toThrow(NetError)
     expect(
       Number(rt.db.database.prepare('SELECT count(*) AS n FROM net_bot_registry').get()!.n)
     ).toBe(0)

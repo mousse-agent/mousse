@@ -364,12 +364,16 @@ export class SpaceStreamDiscoveryService implements SessionDiscoveryPort {
       throw new NetError('forbidden')
     const existing = store.getStream(descriptor.id)
     if (existing) {
-      if (!same(existing, descriptor)) throw new NetError('conflict')
       if (
         descriptor.kind === 'space.private' &&
-        (!priv.state(descriptor.id) || !priv.canRead(descriptor, this.selfPeer()))
+        (!priv.state(descriptor.id) || !priv.canRead(existing, this.selfPeer()))
       )
         throw new NetError('forbidden')
+      if (!same(existing, descriptor)) {
+        if (descriptor.kind !== 'space.private' || !proof.controllerEvents[0])
+          throw new NetError('conflict')
+        priv.reconcileReceiptedDescriptor(descriptor, proof.parentOpenEvent, proof.controllerEvents[0])
+      }
       return
     }
     if (descriptor.kind === 'space.private') {

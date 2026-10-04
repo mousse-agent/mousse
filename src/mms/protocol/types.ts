@@ -358,19 +358,7 @@ export const PROTOCOL_METHODS = [
   'daemon.shutdown',
   'events.subscribe',
   'gui.devtoolsPoll',
-  'gui.devtoolsRespond',
-
-  'control.status',
-  'control.login',
-  'control.logout',
-  'control.enroll',
-  'control.disconnect',
-  'control.setMode',
-  'pairing.create',
-  'pairing.list',
-  'pairing.approve',
-  'pairing.reject',
-  'pairing.revoke'
+  'gui.devtoolsRespond'
 ] as const
 
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number]
@@ -392,11 +380,8 @@ export const PROTOCOL_CAPABILITIES = [
   'skills',
   'settings',
   'providers',
-  'connections',
   'events',
   'devgui',
-  'control.v2',
-  'pairing.v2',
   'profiles-v1'
 ] as const
 
@@ -441,8 +426,6 @@ export type ProtocolEventType =
   | 'providers.changed'
   | 'providers.login-event'
   | 'mcp.changed'
-  | 'control.status-changed'
-  | 'control.pairing-request'
   | 'turn.interrupted'
   | 'turn.aborted'
   | 'turn.steered'

@@ -12,4 +12,4 @@ Before opt-in, valid network requests other than status and init/join return the
 
 A failed or five-second-bounded drain returns `outcome_uncertain`. I retain the open database and actual unresolved ownership instead of claiming external effects settled or replaying originals. The tests in `tests/net/rollback/` cover fresh-profile admission and filesystem state, independent flags, real TLS session closure, late RPC ownership, profile isolation, retained originals, and emitted CLI disable/restart/re-enrollment.
 
-The integration branch retains its existing control subsystem and unchanged-tunnel reuse. I omit the rollback commit's Chats/GUI dependencies. Rebasing the stack will need to reconcile these deliberate changes from that commit: pre-runtime fresh-profile checks, the new disabled error, doctor/unlock admission, init passphrase input, Spaces-only archive admission, and formatting of changed code.
+I integrated the network Chats/GUI dependencies and retired Control on the combined testing branch. I retain the latest Net admission behavior above, including the disabled error, pre-runtime checks and init passphrase input.

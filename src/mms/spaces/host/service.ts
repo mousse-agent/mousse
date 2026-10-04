@@ -1125,6 +1125,7 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
     )
       return fail('forbidden')
     this.options.identity.verifyAuthor(envelope.author, bytes, sig, this.clock.now(), 'newWork')
+    const receivedAt = this.clock.now()
     const descriptor: StreamDescriptor = prepared ?? {
         id: stream,
         kind: 'space.private',
@@ -1132,9 +1133,9 @@ export class SpaceHostService implements StreamAuthority, SpaceJoinAdmissionPort
         space,
         parent: parent.id,
         participants: envelope.body.participants,
-        createdAt: this.clock.now()
+        createdAt: receivedAt
       },
-      record: StoredRecord = { epoch: 1, seq: 1, recvTs: this.clock.now(), envelope: bytes, sig }
+      record: StoredRecord = { epoch: 1, seq: 1, recvTs: receivedAt, envelope: bytes, sig }
     return this.options.db.transaction(() => {
       if (prepared) {
         if (

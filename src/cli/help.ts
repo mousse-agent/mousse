@@ -24,10 +24,10 @@ Usage:
   mousse-cli bridge <subcommand>            Link and control my devices
   mousse-cli spaces <subcommand>            Shared channels, membership and durable posts
   mousse-cli bots <subcommand>              Owner-local bot configuration and controls
-  mousse-cli control <subcommand>            Control Protocol 2.0 (status, enroll, disconnect)
-  mousse-cli connections <subcommand>        Mobile pairing (list, qr, approve, reject, revoke)
-  mousse-cli login                           Authenticate device with Mousse Plus
-  mousse-cli logout                          Sign out of Mousse Plus
+  mousse-cli control <subcommand>            Retired Control Protocol 2.0 command
+  mousse-cli connections <subcommand>        Retired mobile pairing command
+  mousse-cli login                           Retired Control Protocol 2.0 login
+  mousse-cli logout                          Retired Plus sign-out command
   mousse-cli workspace --session <id>        Show authoritative thread workspace status
   mousse-cli publish --session <id> --target <branch>
   mousse-cli undo|redo --session <id>         Compensate the latest thread action
@@ -183,29 +183,16 @@ export const SERVICE_HELP = `Usage:
   mousse-cli service uninstall        Remove launch-on-startup entry
 `
 
-export const CONTROL_HELP = `Usage:
-  mousse-cli control status
-  mousse-cli control enroll --server <url> [--code <code>]
-  mousse-cli control disconnect
-  mousse-cli control set-mode <hosted|self-hosted>
+export const CONTROL_HELP = `Retired Control Protocol 2.0 command. Use net init and bridge invite/join. Legacy credentials and pairings are preserved migration data, not Net enrollment.
 `
 
-export const CONNECTIONS_HELP = `Usage:
-  mousse-cli connections list
-  mousse-cli connections qr [--scopes <s1,s2,...>] [--ttl <seconds>]
-  mousse-cli connections approve <pairingId> [--scopes <s1,s2,...>]
-  mousse-cli connections reject <pairingId>
-  mousse-cli connections revoke <pairingIdOrDeviceId>
+export const CONNECTIONS_HELP = `Retired Control Protocol 2.0 command. Use net init and bridge invite/join. Legacy credentials and pairings are preserved migration data, not Net enrollment.
 `
 
-export const LOGIN_HELP = `Usage:
-  mousse-cli login
-Authenticate this machine with Mousse Plus using headless browser approval.
+export const LOGIN_HELP = `Retired Control Protocol 2.0 command. Use net init and bridge invite/join. Legacy credentials and pairings are preserved migration data, not Net enrollment.
 `
 
-export const LOGOUT_HELP = `Usage:
-  mousse-cli logout
-Sign out of Mousse Plus and clear local credentials.
+export const LOGOUT_HELP = `Retired Control Protocol 2.0 command. Use net init and bridge invite/join. Legacy credentials and pairings are preserved migration data, not Net enrollment.
 `
 
 export function commandHelp(command: string): string | null {

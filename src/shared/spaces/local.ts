@@ -40,7 +40,7 @@ export interface SpacesLocalParams {
   'spaces.tail': { stream: StreamId; after?: StreamHead; limit?: number }
   'spaces.members': { space: SpaceId }
   'spaces.leave': { space: SpaceId }
-  'spaces.outbox': { stream: StreamId; id?: EventId; after?: number; limit?: number }
+  'spaces.outbox': { stream: StreamId; id?: EventId; after?: number; limit?: number; states?: Array<SpaceLocalDelivery['state']> }
 }
 export interface SpaceLocalDelivery {
   id: EventId

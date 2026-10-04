@@ -1,6 +1,6 @@
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
-import type { ChatConversation } from '../../shared/chats'
+import type { LocalChatConversation as ChatConversation } from '../../shared/chats'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { assertOwnedPath } from '../profiles/pathSafety'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'

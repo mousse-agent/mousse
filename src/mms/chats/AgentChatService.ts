@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, realpathSync } from 'no
 import { hostname } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import type { ChatAgent, ChatAssignDeviceInput, ChatCancelInput, ChatConversation, ChatCreateInput, ChatDevice, ChatMessage, ChatParticipant, ChatSendInput, ChatsSnapshot, ChatSummary } from '../../shared/chats'
+import type { ChatAgent, LocalChatAssignDeviceInput as ChatAssignDeviceInput, ChatCancelInput, LocalChatConversation as ChatConversation, ChatCreateInput, ChatDevice, ChatMessage, ChatParticipant, ChatSendInput, ChatsSnapshot, LocalChatSummary as ChatSummary } from '../../shared/chats'
 import type { AgentExecutionHistoryEntry, AgentExecutionResult, AgentRuntimeToolApprovalRequest } from '../../shared/agents/execution'
 import type { AgentRuntimeKind, ResolvedAgentDefinition } from '../../shared/agents/types'
 import type { BrowserRuntimePort } from '../../shared/browser/runtime'
@@ -60,6 +60,7 @@ export class AgentChatService {
   private readonly creations = new Map<string, Promise<ChatConversation>>()
   private readonly device: ChatDevice
   private browserRuntime?: BrowserRuntimePort
+  private networkBindingGuard?: (chatId: string) => boolean
   constructor(private readonly options: AgentChatServiceOptions) {
     this.profileId = options.services.profileId
     if (options.registry.profileId !== this.profileId) throw new DomainRpcError('profile_mismatch', 'Chat agents do not belong to this profile')
@@ -69,6 +70,17 @@ export class AgentChatService {
     this.recoverInterrupted()
   }
   setBrowserRuntime(port: BrowserRuntimePort | undefined): void { this.browserRuntime = port }
+  setNetworkBindingGuard(guard: (chatId: string) => boolean): void { this.networkBindingGuard = guard }
+  assertPublishable(chatId: string): ChatConversation {
+    this.lifecycle.assertAccepting()
+    const conversation = this.get(chatId)
+    if (conversation.kind !== 'group') throw new DomainRpcError('invalid_params', 'Only a Group can be published')
+    if (this.active.has(chatId) || conversation.run?.state === 'running') throw new DomainRpcError('chat_busy', 'Wait for the local run to settle before publishing')
+    return conversation
+  }
+  private assertLocalDispatch(chatId: string): void {
+    if (this.networkBindingGuard?.(chatId)) throw new DomainRpcError('chat_published', 'This Group sends through its published Space')
+  }
   getActiveCount(): number { return this.lifecycle.count }
   beginShutdown(): void {
     this.lifecycle.beginShutdown()
@@ -189,6 +201,7 @@ export class AgentChatService {
   }
   send(input: ChatSendInput): ChatConversation {
     this.lifecycle.assertAccepting()
+    this.assertLocalDispatch(input.chatId)
     if (typeof input.text !== 'string' || !input.text.trim() || Buffer.byteLength(input.text, 'utf8') > MESSAGE_LIMIT) throw new DomainRpcError('invalid_params', 'A nonempty message of up to 256 KiB is required')
     if (input.clientMessageId !== undefined && (typeof input.clientMessageId !== 'string' || (!/^[A-Za-z0-9_-]{1,128}$/.test(input.clientMessageId) || ['__proto__', 'constructor', 'prototype'].includes(input.clientMessageId)))) throw new DomainRpcError('invalid_params', 'Invalid message idempotency key')
     const record = this.store.read(input.chatId)
@@ -403,6 +416,7 @@ export class AgentChatService {
     if (resolved.settings.memory.scope !== 'thread' && resolved.settings.memory.scope !== 'off') throw new DomainRpcError('settings_unsupported', 'Chats currently support thread or disabled memory')
   }
   private assertRun(record: ChatRecord, owned: ActiveChatRun): void {
+    this.assertLocalDispatch(record.conversation.id)
     if (this.active.get(record.conversation.id) !== owned || record.conversation.run?.id !== owned.id || record.conversation.run.state !== 'running') throw new DomainRpcError('run_conflict', 'Chat response ownership changed')
   }
   private async approve(chatId: string, owned: ActiveChatRun, executionId: string, request: AgentRuntimeToolApprovalRequest, signal: AbortSignal) {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
@@ -34,7 +34,7 @@ afterEach(async () => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 function fixture(outputs: Array<string | AssistantMessage> = ['done'], override?: (request: AgentExecutionRequest) => Promise<any>) {
-  const root = mkdtempSync(join(tmpdir(), 'mousse-chats-')); roots.push(root)
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-chats-')); roots.push(root)
   const profileId = randomUUID()
   const registry = new AgentDefinitionRegistry({ profileId, profileRoot: root })
   const lookup = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write'] })

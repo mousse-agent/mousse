@@ -2,6 +2,12 @@ import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeA
 import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
 import { CHAT_METHODS } from '../../shared/chats'
 import { CHAT_RESOURCE_METHODS } from '../../shared/chatResources'
+import { CHAT_NETWORK_METHODS } from '../../shared/chatsNetwork'
+import { NET_LOCAL_METHODS } from '../../shared/net/local'
+import { BRIDGE_HUB_LOCAL_METHODS } from '../../shared/bridge/types'
+import { SPACES_LOCAL_METHODS } from '../../shared/spaces/local'
+import { BOTS_LOCAL_METHODS } from '../../shared/bots/local'
+import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
  * Does not take a MousseMainService / owner lease.
@@ -43,7 +49,6 @@ import {
 import { buildAccentCssVars, surfaceToWindowBackground } from '../../shared/accentPalette'
 import { showCopyMenu } from '../contextMenu'
 import { openExternalSafely } from '../safeExternalUrl'
-import { approvePairingWithConfirmation } from '../pairingApproval'
 import {
   attachWindowStateListeners,
   beginWindowDrag,
@@ -77,7 +82,6 @@ import type {
   TurnStateSnapshot,
   UserQuestionAnswers
 } from '../../shared/types'
-import type { RemoteScope } from '../../shared/controlTypes'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import type {
   GitHubCloneRepositoryInput,
@@ -111,6 +115,12 @@ let activeGuiMms: GuiMmsController | null = null
 export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new Set([
   ...CHAT_METHODS,
   ...CHAT_RESOURCE_METHODS,
+  ...CHAT_NETWORK_METHODS,
+  ...NET_LOCAL_METHODS,
+  ...BRIDGE_HUB_LOCAL_METHODS,
+  ...SPACES_LOCAL_METHODS,
+  ...BOTS_LOCAL_METHODS,
+  ...SPACE_ARCHIVE_METHODS,
   ...BROWSER_ACCESS_METHODS,
   ...BROWSER_GUI_METHODS,
   ...BROWSER_SETUP_METHODS,
@@ -565,12 +575,6 @@ export function registerGuiIpc(
         }
       }
     }
-    if (event.type === 'control.status-changed') {
-      broadcast('control:status-changed', event.data)
-    }
-    if (event.type === 'control.pairing-request') {
-      broadcast('control:pairing-request', event.data)
-    }
     if (event.type === 'ui.focus-intent') {
       const win = getWindow()
       if (win && !win.isDestroyed()) {
@@ -601,6 +605,13 @@ export function registerGuiIpc(
   // directly to the trusted sender instead of the installation-wide broadcast
   // bus; this is what prevents a B window from seeing A's questions, PTY or
   // transcript updates.
+  guiMms.on('window-connection-event', ({ senderId, event }: { senderId: number; event: import('../../mms/protocol/types').ProtocolConnectionEvent }) => {
+    const win = BrowserWindow.getAllWindows().find(candidate => candidate.webContents.id === senderId)
+    const binding = guiMms.getWindowBindingForSender(senderId)
+    if (!win || win.isDestroyed() || !binding || event.type !== 'bridge.hub.thread' ||
+      event.profileId !== binding.profileId || event.profileEpoch !== binding.epoch) return
+    win.webContents.send('bridge:thread-part', event.data)
+  })
   guiMms.on('window-event', ({ senderId, event, replay }: { senderId: number; event: ProtocolEvent; replay?: boolean }) => {
     const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
     if (!win || win.isDestroyed()) return
@@ -660,8 +671,6 @@ export function registerGuiIpc(
         applyWindowAccentBackground(win, next)
       }
     }
-    if (event.type === 'control.status-changed') target('control:status-changed', event.data)
-    if (event.type === 'control.pairing-request') target('control:pairing-request', event.data)
     if (event.type === 'ui.focus-intent') {
       if (win.isMinimized()) win.restore()
       win.show()
@@ -2086,59 +2095,6 @@ export function registerGuiIpc(
   })
   registerHandler('clipboard:showCopyMenu', (_e, x: number, y: number, text: string) => {
     showCopyMenu(getWindow, x, y, text)
-  })
-
-  // --- Control Protocol 2.0 / Remote & Mobile IPC handlers ---
-  registerHandler('control:status', async () => {
-    return guiMms.controlStatus()
-  })
-  registerHandler('control:login', async () => {
-    return guiMms.controlLogin()
-  })
-  registerHandler('control:logout', async () => {
-    return guiMms.controlLogout()
-  })
-  registerHandler('control:enroll', async (_e, serverUrl: string, pairingCode: string) => {
-    return guiMms.controlEnroll(serverUrl, pairingCode)
-  })
-  registerHandler('control:disconnect', async () => {
-    return guiMms.controlDisconnect()
-  })
-  registerHandler('control:setMode', async (_e, mode: 'hosted' | 'self-hosted') => {
-    return guiMms.controlSetMode(mode)
-  })
-  registerHandler('control:pairing:create', async (_e, options?: { scopes?: RemoteScope[]; ttlMs?: number }) => {
-    return guiMms.pairingCreate(options)
-  })
-  registerHandler('control:pairing:list', async () => {
-    return guiMms.pairingList()
-  })
-  registerHandler('control:pairing:approve', async (_e, pairingId: string, scopes?: RemoteScope[]) => {
-    return approvePairingWithConfirmation(
-      {
-        controlStatus: () => guiMms.controlStatus(),
-        pairingApprove: (id, approvedScopes) => guiMms.pairingApprove(id, approvedScopes),
-        showMessageBox: (win, options) =>
-          win && !win.isDestroyed() ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options),
-        window: getWindow()
-      },
-      pairingId,
-      scopes
-    )
-  })
-  registerHandler('control:pairing:reject', async (_e, pairingId: string) => {
-    return guiMms.pairingReject(pairingId)
-  })
-  registerHandler('control:pairing:revoke', async (_e, pairingIdOrDeviceId: string) => {
-    return guiMms.pairingRevoke(pairingIdOrDeviceId)
-  })
-  registerHandler('control:openDashboard', async (_e, url?: string) => {
-    const ok = await openExternalSafely(
-      (target) => shell.openExternal(target),
-      url || 'https://mousse.plus',
-      'control:openDashboard'
-    )
-    return { ok }
   })
 
   return { syncDaemonTurnSnapshot }

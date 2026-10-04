@@ -24,7 +24,7 @@ const fields: Record<SpacesLocalMethod, readonly string[]> = {
   'spaces.tail': ['stream', 'after', 'limit'],
   'spaces.members': ['space'],
   'spaces.leave': ['space'],
-  'spaces.outbox': ['stream', 'id', 'after', 'limit']
+  'spaces.outbox': ['stream', 'id', 'after', 'limit', 'states']
 }
 const invalid = (): never => {
   throw new NetError('bad_request')
@@ -104,8 +104,19 @@ export function validateSpacesLocal<K extends SpacesLocalMethod>(
     invalid()
   if (method === 'spaces.outbox') {
     if (
+      row.states !== undefined &&
+      (!Array.isArray(row.states) ||
+        !row.states.length ||
+        row.states.length > 4 ||
+        new Set(row.states).size !== row.states.length ||
+        row.states.some((state) =>
+          typeof state !== 'string' || !['pending', 'unknown', 'sent', 'failed'].includes(state)
+        ))
+    )
+      invalid()
+    if (
       row.id !== undefined &&
-      (!isId('event', row.id) || row.after !== undefined || row.limit !== undefined)
+      (!isId('event', row.id) || row.after !== undefined || row.limit !== undefined || row.states !== undefined)
     )
       invalid()
     if (row.after !== undefined && (!Number.isSafeInteger(row.after) || Number(row.after) < 0))

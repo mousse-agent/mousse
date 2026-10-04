@@ -536,6 +536,33 @@ export class PrivateSpaceService implements PrivateSpaceAuthorization {
       this.options.db.checkpoint('spaces.private.bootstrap.beforeCommit')
     })
   }
+
+    /** The creator's preparation clock is not the foreign authority receipt clock.
+     * Reconcile only that metadata after both exact originals have durable ACKs.
+     * The discovery caller independently checks the current Host/session/meta ACL. */
+    reconcileReceiptedDescriptor(descriptor:StreamDescriptor,parent:StoredRecord,control:StoredRecord):void {
+        const {db,store,outbox,identity,meta}=this.options;
+        if(db.inTransaction)return fail('bad_request');
+        db.transaction(()=>{
+            const existing=store.getStream(descriptor.id),self=this.self(),state=this.state(descriptor.id);
+            if(!existing||existing.kind!=='space.private'||descriptor.kind!=='space.private'||!descriptor.space||!descriptor.parent||!same({...existing,createdAt:descriptor.createdAt},descriptor)||!state||state.blocked||state.controller!==self.user||!this.canRead(existing,self))return fail('conflict');
+            const current=meta.assertUsable(descriptor.space,true),host=JSON.parse(decodeBase64(current.descriptor!.payload).toString()).hostNode;
+            if(descriptor.authority!==host||descriptor.authority===self.node||control.epoch!==1||control.seq!==1||descriptor.createdAt!==control.recvTs||store.head(descriptor.id).epoch!==1)return fail('conflict');
+            const opening=decodeEnvelope(parent.envelope).envelope,initial=decodeEnvelope(control.envelope).envelope,body=initial.body as Control,openBody=opening.body as Envelope<'thread.opened'>['body'];
+            if(opening.type!=='thread.opened'||opening.stream!==descriptor.parent||opening.author.bot||opening.author.user!==self.user||opening.author.node!==self.node||openBody?.stream!==descriptor.id||openBody.private!==true||openBody.title!=='Private aside'||initial.type!=='participants.changed'||initial.stream!==descriptor.id||initial.author.bot||initial.author.user!==self.user||initial.author.node!==self.node||!validateEventBody('participants.changed',body)||body.controller!==self.user||body.keyEpoch!==1||body.visibilityEpoch!==1||!same(body.participants,descriptor.participants)||!opening.auth||!initial.auth||opening.auth.metaEpoch!==1||initial.auth.metaEpoch!==1||this.member(descriptor.space,self.user,opening.auth)?.rootKey!==identity.pinnedRootKey(self.user)||this.member(descriptor.space,self.user,initial.auth)?.rootKey!==identity.pinnedRootKey(self.user))return fail('forbidden');
+            const parentDescriptor=store.getStream(descriptor.parent);
+            if(parentDescriptor?.kind!=='space.channel'||parentDescriptor.space!==descriptor.space||parentDescriptor.authority!==descriptor.authority||!meta.canRead(descriptor.space,parentDescriptor,self.user))return fail('forbidden');
+            for(const [record,envelope,stream] of [[parent,opening,descriptor.parent],[control,initial,descriptor.id]] as const){
+                const indexed=store.getById(stream,envelope.id),original=outbox.get(envelope.id);
+                if(!indexed||!original||original.stream!==stream||original.state!=='sent'||!original.position||!same(original.position,{epoch:record.epoch,seq:record.seq})||indexed.epoch!==record.epoch||indexed.seq!==record.seq||indexed.recvTs!==record.recvTs||!Buffer.from(indexed.envelope).equals(record.envelope)||!Buffer.from(indexed.sig).equals(record.sig)||!Buffer.from(original.envelope).equals(record.envelope)||!Buffer.from(original.sig).equals(record.sig))return fail('conflict');
+                const verified=identity.verifyAuthor(envelope.author,record.envelope,record.sig,envelope.ts,'history');
+                if(verified.kind!=='node'||verified.user!==self.user||verified.node!==self.node)return fail('forbidden');
+            }
+            db.charge(1,Buffer.byteLength(json(descriptor)));
+            db.database.prepare('UPDATE net_streams SET descriptor=? WHERE id=? AND descriptor=?').run(json(descriptor),descriptor.id,json(existing));
+            db.checkpoint('spaces.private.descriptor.reconcile.beforeCommit');
+        });
+    }
   private historical(stream: StreamId, keyEpoch: number): PrivateState | undefined {
     const row = this.options.db.database
       .prepare('SELECT state FROM net_space_private_history WHERE stream=? AND key_epoch=?')

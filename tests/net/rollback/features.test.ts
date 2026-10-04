@@ -74,6 +74,9 @@ it.each(['netBridge', 'netSpaces'] as const)(
         expect(() => main.spaces).toThrow(expect.objectContaining({ code: 'disabled' }))
         expect(() => main.bots).toThrow(expect.objectContaining({ code: 'disabled' }))
         expect(() => main.archives).toThrow(expect.objectContaining({ code: 'disabled' }))
+        expect(() => main.chatNetwork.publish({ chatId: 'invalid', publicationId: 'test' } as any)).toThrow(
+          expect.objectContaining({ code: 'disabled' })
+        )
       }
       expect(main.config.get().features).toEqual(originalFlags)
     } finally {
