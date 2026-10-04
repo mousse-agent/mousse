@@ -32,6 +32,8 @@ I incorporated the renewal-clock checkpoint published to #45, #50 and #52 during
 
 I fixed two concrete Windows runtime blockers: unsupported directory open/fsync errors and Git's rejection of Node's Windows null-device path. Directory handling tolerates only Windows EPERM/EINVAL at directory open/fsync, retaining file flushes, atomic renames and SQLite FULL durability. Git uses its supported `/dev/null` path while preserving hook, fsmonitor, filter and protocol protections. I adapted real process-crash and tunnel fixtures to Windows process invocation/exit reporting without weakening production process or credential policy.
 
+I deferred eager workspace views, hidden overlays, theme reads and Chat refresh until the real profile selector resolves the trusted binding. This removes requests made with the initial `default` placeholder and avoids the redundant initial startup batch. Navigation and chrome remain available during bootstrap, and the protocol request limit remains 64.
+
 ## Local testing
 
 I selected `codex/all-open-prs-20261004` in `E:\avarnic\mousse` for `npm start`. The existing conversation-navigation edits and two untracked documents remain local and are excluded from this PR. The pre-integration commit and file copies are retained locally for recovery.
@@ -39,5 +41,7 @@ I selected `codex/all-open-prs-20261004` in `E:\avarnic\mousse` for `npm start`.
 I passed both TypeScript checks and the production desktop/main/preload/CLI build with the private renderer edits present. After the final backend changes I passed the Node TypeScript check and launched `npm start`, rebuilding the CLI, browser worker, Electron main and preload successfully.
 
 I ran focused provider/catalog, mounted renderer, CLI/default-off, directory-error, TLS enrollment, transport, Chat publication/task recovery, private authorization, rollback, Control cutover, Plus profile/login and Git isolation checks. I corrected the concrete Windows failures and passed each affected rerun, including all 7 Chat task tests, 19 enrollment/transport tests, 33 CLI/default-off tests, 14 directory-error tests, 5 safe-checkout tests, the malicious Git configuration isolation case, 26 provider/catalog tests and 62 renewal/identity/Spaces/sync tests. Platform-specific daemon fixtures remain skipped on Windows. I did not run the full suite.
+
+After observing startup request-limit/profile errors, I passed all 15 GUI controller checks and added a passing hidden Electron regression mounting the real StrictMode root, profile selector, browser permission view and Channels panel against a controlled UI API. It holds bootstrap responses, verifies no profile reads occur before binding, and verifies browser, channels, theme and Chat reads resume afterward without renderer errors. I passed the final renderer TypeScript check with the private edits and rebuilt production assets after this change.
 
 Windows Plus credential-file bootstrap remains fail closed because POSIX-private file permissions cannot be verified there; browser login remains the supported path. Windows directory power-loss durability, paid providers, hosted production interoperability, every packaged platform, completed soak and release approval remain unqualified.
