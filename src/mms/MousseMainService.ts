@@ -22,7 +22,7 @@ import type { ProfileId } from '../shared/profiles/ids'
 import { registerNetMethods } from './net/registerMethods'
 import { registerBridgeMethods } from './bridge/registerMethods'
 import { registerSpaceMethods } from './spaces/registerMethods'
-import {registerSpaceArchiveMethods} from './spaces/archive/registerMethods'
+import { registerSpaceArchiveMethods } from './spaces/archive/registerMethods'
 import { registerBotMethods } from './bots/registerMethods'
 import { BotLocalService } from './bots/BotLocalService'
 import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
@@ -212,12 +212,15 @@ export class MousseMainService extends MmsProfileServices {
     registerNetMethods(this.domains, async profileId => (await profile(profileId)).net)
     registerBridgeMethods(this.domains, async profileId => (await profile(profileId)).bridge)
     registerSpaceMethods(this.domains, async profileId => (await profile(profileId)).spaces.local)
-    registerSpaceArchiveMethods(this.domains,async profileId=>(await profile(profileId)).bridge.archives)
+    registerSpaceArchiveMethods(this.domains, async profileId => (await profile(profileId)).archives)
     const botLocals = new WeakMap<import('./bots/BotProfileService').BotProfileService, BotLocalService>()
     registerBotMethods(this.domains, async profileId => {
       const bots = (await profile(profileId)).bots
       let local = botLocals.get(bots)
-      if (!local) { local = new BotLocalService(bots); botLocals.set(bots, local) }
+      if (!local) {
+        local = new BotLocalService(bots)
+        botLocals.set(bots, local)
+      }
       return local
     })
     registerChatMethods(this.domains, async (profileId) => (await profile(profileId)).platform.chats, async profileId => (await profile(profileId)).chatNetwork)

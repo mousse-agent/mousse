@@ -803,10 +803,28 @@ export class LlmClient {
     onTextEvent?: LlmTextEventHandler
   ): Promise<LlmChatResult> {
     const isolated = options.runtimeContext
-    if (isolated && (options.delegation || options.browser || this.browserBinding || options.subagentDiscovery || options.contextSummary || options.toolLoopSafety || options.trustedAgent || options.toolAccess || options.projectPath || this.getProjectPath?.())) {
+    if (
+      isolated &&
+      (options.delegation ||
+        options.browser ||
+        this.browserBinding ||
+        options.subagentDiscovery ||
+        options.contextSummary ||
+        options.toolLoopSafety ||
+        options.trustedAgent ||
+        options.toolAccess ||
+        options.projectPath ||
+        this.getProjectPath?.())
+    ) {
       throw new Error('Isolated runtime context cannot share local tools, browser, project or memory context.')
     }
-    const runtimeContext = isolated ? { systemPrompt: isolated.systemPrompt, tools: structuredClone(isolated.tools), executeTool: isolated.executeTool.bind(isolated) } : undefined
+    const runtimeContext = isolated
+      ? {
+          systemPrompt: isolated.systemPrompt,
+          tools: structuredClone(isolated.tools),
+          executeTool: isolated.executeTool.bind(isolated)
+        }
+      : undefined
     const discovery = options.subagentDiscovery
     const subagent = options.subagent === true || Boolean(discovery)
     const trustedAgent = options.trustedAgent
@@ -895,8 +913,18 @@ export class LlmClient {
 
     const actor = options.actor ?? defaultIntegrationActor(subagent)
     const requestContext: Awaited<ReturnType<LlmClient['prepareRequestContext']>> = runtimeContext ? {
-      enabledSkills: [], loadedSkills: [], mcpTools: [], tools: runtimeContext.tools, systemPrompt: runtimeContext.systemPrompt,
-      contextInputs: { systemPromptText: runtimeContext.systemPrompt, mcpToolsText: '', otherToolsText: serializeToolDefinitions(runtimeContext.tools), signature: '', modelKey: '' }
+      enabledSkills: [],
+      loadedSkills: [],
+      mcpTools: [],
+      tools: runtimeContext.tools,
+      systemPrompt: runtimeContext.systemPrompt,
+      contextInputs: {
+        systemPromptText: runtimeContext.systemPrompt,
+        mcpToolsText: '',
+        otherToolsText: serializeToolDefinitions(runtimeContext.tools),
+        signature: '',
+        modelKey: ''
+      }
     } : await this.prepareRequestContext(
       mode,
       userContent,

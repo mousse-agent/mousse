@@ -39,7 +39,11 @@ try {
   const rows = db
     .prepare('select seq, bytes from events where stream=? and seq>? order by seq limit 3')
     .all('s', 49_998)
-  console.log('range read', rows.map((row) => row.seq), rows[0].bytes instanceof Uint8Array)
+  console.log(
+    'range read',
+    rows.map((row) => row.seq),
+    rows[0].bytes instanceof Uint8Array
+  )
   copy.close()
   db.close()
 } finally {

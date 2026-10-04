@@ -592,6 +592,7 @@ const api = {
     }
   },
   threads: {
+    initialize: (): Promise<void> => ipcRenderer.invoke('threads:initialize'),
     list: (): Promise<Thread[]> => ipcRenderer.invoke('threads:list'),
     listAll: (): Promise<Thread[]> => ipcRenderer.invoke('threads:listAll'),
     active: (): Promise<string | null> => ipcRenderer.invoke('threads:active'),

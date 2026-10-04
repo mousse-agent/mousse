@@ -1,70 +1,530 @@
 import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BotRecordAuthorization } from '../../../../src/mms/bots/admission'
+import { SpaceCurrentIdentity } from '../../../../src/mms/spaces/SpaceCurrentIdentity'
 import { BotPermissionService } from '../../../../src/mms/bots/permissions'
 import { PrivateSpaceService } from '../../../../src/mms/spaces/private'
 import { SqlPrivateStreamKeys } from '../../../../src/mms/net/identity'
 import { canonicalJson, decodeEnvelope } from '../../../../src/mms/net/sync/codec'
-import { cleanup, peer } from '../../spaces/host/helpers'
+import { cleanup, peer, disposers } from '../../spaces/host/helpers'
 import { setup } from '../admission/helpers'
 import { newId as importId } from '../../../../src/shared/net'
 import type { BotPermissionGrant, Envelope } from '../../../../src/shared/net'
 afterEach(cleanup)
-const digest=(value:unknown)=>createHash('sha256').update(canonicalJson(value)).digest('base64url')
-async function permissionFixture(acknowledged=true){const f=await setup(),self=peer(f.p),privateKeys=new SqlPrivateStreamKeys({database:f.p.db.database,keys:f.p.keys,node:self.node,user:self.user,spaceForStream:stream=>f.p.store.getStream(stream)!.space!,transaction:work=>f.p.db.transaction(work)}),privateService=new PrivateSpaceService({db:f.p.db,keys:f.p.keys,identity:f.p.identity,store:f.p.store,meta:f.p.projection,outbox:f.outbox,privateKeys,clock:f.p.clock}),created=privateService.prepareCreation(f.space.space,f.parent,[self.user,f.bot]),control=f.p.store.appendAsAuthority(created.descriptor.id,{...created.event,recvTs:f.p.clock.now()});privateService.applyStored(created.descriptor,{...created.event,...control},'live');const record=f.service.admit(f.message()).record;f.executions.transition(record.id,'running',f.p.clock.now());if(acknowledged){const accepted=f.outbox.list(record.binding!.stream).find(event=>decodeEnvelope(event.envelope).envelope.type==='bot.run.accepted')!,position=f.p.store.appendAsAuthority(accepted.stream,{...accepted,recvTs:f.p.clock.now()});f.outbox.markSent(accepted.id,position)}const service=new BotPermissionService({db:f.p.db,identity:f.p.identity,keys:f.p.keys,privateKeys,private:privateService,store:f.p.store,outbox:f.outbox,executions:f.executions,admission:f.service,stream:()=>created.descriptor.id,hostNow:()=>f.p.clock.now()}),binding={stream:record.binding!.stream,compartment:record.binding!.compartment},argumentDigest=digest({path:'approved.txt'}),input={tool:'safe_read',argumentDigest,actionHash:digest({execution:record.id,tool:'safe_read',argumentDigest,profileDigest:record.binding!.profileDigest,binding})},controller=new AbortController(),port=service.port(record.id,controller.signal);function deliver(id:string){const event=f.outbox.list(created.descriptor.id).find(e=>e.id===id)!,position=f.p.store.appendAsAuthority(created.descriptor.id,{...event,recvTs:f.p.clock.now()});return{...event,...position}}return{...f,self,record,service,privateService,created,port,input,controller,deliver}}
-describe('actual private owner signature, request hash and single-use action approval chain',()=>{
- it('observes a genuine owner grant committed by an afterCommit subscriber before installing the action waiter',async()=>{
-  const f=await permissionFixture(),stop=f.outbox.onChanged(entry=>{if(decodeEnvelope(entry.envelope).envelope.type!=='bot.permission.requested')return;f.deliver(entry.id);const granted=f.service.grant(entry.stream,entry.id,true);f.service.receive(entry.stream,f.deliver(granted))}),pending=f.port.requestAction(f.input)
-  try{expect(await Promise.race([pending,new Promise(resolve=>setTimeout(()=>resolve('lost committed grant'),25))])).toMatchObject({decision:'approved'})}finally{stop();f.controller.abort();await pending.catch(()=>{})}
- })
- it('publishes on a separate permission stream only after accepted ACK and refuses terminal rejection',async()=>{
-  const f=await permissionFixture(false),accepted=f.outbox.list(f.record.binding!.stream).find(e=>decodeEnvelope(e.envelope).envelope.type==='bot.run.accepted')!,pending=f.port.requestAction(f.input)
-  expect(f.outbox.list(f.created.descriptor.id).filter(e=>decodeEnvelope(e.envelope).envelope.type==='bot.permission.requested')).toEqual([])
-  expect(f.executions.get(f.record.id)!.state).toBe('running')
-  f.outbox.markAttempt(accepted.id);expect(f.p.db.database.prepare('SELECT count(*) AS n FROM net_bot_permissions').get()!.n).toBe(0)
-  const position=f.p.store.appendAsAuthority(accepted.stream,{...accepted,recvTs:f.p.clock.now()});f.outbox.markSent(accepted.id,position)
-  await vi.waitFor(()=>expect(f.executions.get(f.record.id)!.state).toBe('waitingApproval'))
-  const request=f.outbox.list(f.created.descriptor.id).find(e=>decodeEnvelope(e.envelope).envelope.type==='bot.permission.requested')!;f.deliver(request.id);const denial=f.service.grant(request.stream,request.id,false);f.service.receive(request.stream,f.deliver(denial));expect(await pending).toEqual({decision:'denied',request:request.id})
-  const g=await permissionFixture(false),blocked=g.port.requestAction(g.input),receipt=g.outbox.list(g.record.binding!.stream).find(e=>decodeEnvelope(e.envelope).envelope.type==='bot.run.accepted')!
-  g.outbox.markFailed(receipt.id,'forbidden');await expect(blocked).rejects.toMatchObject({code:'forbidden'});expect(g.p.db.database.prepare('SELECT count(*) AS n FROM net_bot_permissions').get()!.n).toBe(0)
- })
- it('rejects publishing a permission request as plaintext on the public output',async()=>{
-  const f=await permissionFixture(),pending=f.port.requestAction(f.input);pending.catch(()=>{})
-  const request=f.outbox.list(f.created.descriptor.id).find(e=>decodeEnvelope(e.envelope).envelope.type==='bot.permission.requested')!,env=decodeEnvelope(request.envelope).envelope,descriptor=f.p.store.getStream(f.record.binding!.stream)!
-  const binding={space:f.space.space,stream:descriptor.id,parent:f.parent,bot:f.bot,trigger:f.record.trigger as import('../../../../src/shared/net').EventId,execution:f.record.id},gate=new BotRecordAuthorization({identity:f.p.identity,meta:f.p.projection,store:f.p.store,private:f.privateService,binding:()=>binding})
-  const exposed={...env,stream:descriptor.id,sealed:undefined,body:f.privateService.open(f.created.descriptor.id,{...request,epoch:1,seq:2,recvTs:f.p.clock.now()}),refs:{...env.refs,thread:descriptor.id}}
-  expect(gate.canWrite(descriptor,exposed,f.self)).toBe(false)
-  f.controller.abort();await expect(pending).rejects.toMatchObject({code:'cancelled'})
- })
- it('accepts only the real owner-signed exact encrypted grant and commits single-use before returning to the effect',async()=>{const f=await permissionFixture(),pending=f.port.requestAction(f.input),request=f.outbox.list(f.created.descriptor.id).find(e=>decodeEnvelope(e.envelope).envelope.type==='bot.permission.requested')!;expect(f.executions.get(f.record.id)!.state).toBe('waitingApproval');const requestRecord=f.deliver(request.id),requestEnv=decodeEnvelope(request.envelope).envelope;const binding={space:f.space.space,stream:f.record.binding!.stream,parent:f.parent,bot:f.bot,trigger:f.record.trigger as import('../../../../src/shared/net').EventId,execution:f.record.id},authorization=new BotRecordAuthorization({identity:f.p.identity,meta:f.p.projection,store:f.p.store,private:f.privateService,binding:()=>binding});f.privateService.options.canBotWrite=(descriptor,envelope,caller)=>authorization.canWrite(descriptor,envelope,caller);expect(f.privateService.canWrite(f.created.descriptor,requestEnv,f.self)).toBe(true);expect(requestEnv.body).toBeUndefined();expect(f.p.identity.verifyAuthor(requestEnv.author,request.envelope,request.sig,requestEnv.ts,'newWork').kind).toBe('bot');const grant=f.service.grant(f.created.descriptor.id,request.id,true);expect(f.service.grant(f.created.descriptor.id,request.id,true)).toBe(grant);expect(()=>f.service.grant(f.created.descriptor.id,request.id,false)).toThrow(expect.objectContaining({code:'conflict'}));const grantRecord=f.deliver(grant);expect(f.privateService.canWrite(f.created.descriptor,decodeEnvelope(grantRecord.envelope).envelope,f.self)).toBe(true);f.service.receive(f.created.descriptor.id,grantRecord);const decision=await pending;expect(decision.decision).toBe('approved');if(decision.decision!=='approved')throw Error('No grant');expect(()=>f.p.db.transaction(()=>f.service.consume(f.record.id,decision.approval,f.input.actionHash))).toThrow(expect.objectContaining({code:'bad_request'}));await f.port.consume(decision.approval,f.input.actionHash);expect(f.executions.get(f.record.id)!.state).toBe('running');await expect(f.port.consume(decision.approval,f.input.actionHash)).rejects.toMatchObject({code:'forbidden'});const row=JSON.parse(f.p.db.database.prepare('SELECT row FROM net_bot_permissions').get()!.row as string);expect(row.phase).toBe('consumed');expect(row.hash).toBe(createHash('sha256').update(requestRecord.envelope).digest('base64url'))})
- it('rejects altered request hash/action/binding before waking the runtime, and exact expiry before consume',async()=>{const f=await permissionFixture(),pending=f.port.requestAction(f.input),request=f.outbox.list(f.created.descriptor.id).find(e=>decodeEnvelope(e.envelope).envelope.type==='bot.permission.requested')!;f.deliver(request.id);const originalGrant=f.service.grant(f.created.descriptor.id,request.id,true),original=f.outbox.list(f.created.descriptor.id).find(e=>e.id===originalGrant)!,body=f.privateService.open(f.created.descriptor.id,{...original,epoch:1,seq:3,recvTs:f.p.clock.now()})as BotPermissionGrant;if(body.kind!=='runtimeAction')throw Error('Wrong grant');for(const mutate of [(b:BotPermissionGrant)=>{b.requestHash=Buffer.alloc(32,7).toString('base64url')},(b:BotPermissionGrant)=>{if(b.kind==='runtimeAction')b.actionHash=Buffer.alloc(32,8).toString('base64url')},(b:BotPermissionGrant)=>{if(b.kind==='runtimeAction')b.binding.compartment+='-changed'}]){const changed=structuredClone(body);mutate(changed);const event=f.privateService.seal(f.created.descriptor.id,'bot.permission.granted',changed,{subject:request.id,thread:f.created.descriptor.id}),record=f.deliver(event.id);expect(()=>f.service.receive(f.created.descriptor.id,record)).toThrow(expect.objectContaining({code:'forbidden'}))}f.service.receive(f.created.descriptor.id,f.deliver(original.id));const decision=await pending;if(decision.decision!=='approved')throw Error('No grant');f.p.clock.setWallTime(decision.expiresAt);await expect(f.port.consume(decision.approval,f.input.actionHash)).rejects.toMatchObject({code:'forbidden'});expect(JSON.parse(f.p.db.database.prepare('SELECT row FROM net_bot_permissions').get()!.row as string).phase).toBe('granted')})
- it('denies aborted pending actions and never treats an owner denial as approval',async()=>{const f=await permissionFixture(),pending=f.port.requestAction(f.input),request=f.outbox.list(f.created.descriptor.id).find(e=>decodeEnvelope(e.envelope).envelope.type==='bot.permission.requested')!;f.deliver(request.id);const denial=f.service.grant(f.created.descriptor.id,request.id,false);f.service.receive(f.created.descriptor.id,f.deliver(denial));expect(await pending).toEqual({decision:'denied',request:request.id});const g=await permissionFixture(),aborted=g.port.requestAction(g.input);g.controller.abort();await expect(aborted).rejects.toMatchObject({code:'cancelled'});expect(g.executions.get(g.record.id)!.state).toBe('waitingApproval')})
- it('refuses a bot-signed forged grant and emergency stop immediately before consuming a genuine owner grant',async()=>{
-  const f=await permissionFixture(),pending=f.port.requestAction(f.input),request=f.outbox.list(f.created.descriptor.id).find(e=>decodeEnvelope(e.envelope).envelope.type==='bot.permission.requested')!;f.deliver(request.id)
-  const requestBody=f.privateService.open(f.created.descriptor.id,{...request,epoch:1,seq:2,recvTs:f.p.clock.now()})as import('../../../../src/shared/net').BotPermissionRequest
-  if(requestBody.kind!=='runtimeAction')throw Error('Wrong request')
-  const env:Envelope={v:1,minor:0,id:importId('event'),stream:f.created.descriptor.id,type:'bot.permission.granted',crit:false,author:{bot:f.bot,node:f.self.node,keyEpoch:1},ts:f.p.clock.now(),auth:decodeEnvelope(request.envelope).envelope.auth,refs:{subject:request.id,thread:f.created.descriptor.id}},body:BotPermissionGrant={kind:'runtimeAction',request:request.id,requestHash:createHash('sha256').update(request.envelope).digest('base64url'),expiresAt:requestBody.expiresAt,execution:f.record.id,actionHash:f.input.actionHash,profileDigest:f.record.binding!.profileDigest,binding:requestBody.binding}
-  const privateContentAAD=(value:Envelope)=>{const{body:_body,sealed:_sealed,...metadata}=value;return Buffer.concat([Buffer.from('mousse-net/private-content/v1\0'),canonicalJson(metadata)])}
-  env.sealed=f.privateService.options.privateKeys.seal(env.stream,canonicalJson(body),privateContentAAD(env));const bytes=canonicalJson(env),sig=f.p.keys.signAsBot(f.bot,bytes);f.outbox.enqueue({id:env.id,stream:env.stream,envelope:bytes,sig})
-  expect(()=>f.service.receive(env.stream,f.deliver(env.id))).toThrow(expect.objectContaining({code:'forbidden'}))
-  const real=f.service.grant(env.stream,request.id,true);f.service.receive(env.stream,f.deliver(real));const decision=await pending;if(decision.decision!=='approved')throw Error('No grant')
-  f.registry.stop(f.space.space,f.bot);await expect(f.port.consume(decision.approval,f.input.actionHash)).rejects.toMatchObject({code:'cancelled'})
-  expect(JSON.parse(f.p.db.database.prepare('SELECT row FROM net_bot_permissions').get()!.row as string).phase).toBe('granted')
- })
+const digest = (value: unknown) =>
+  createHash('sha256').update(canonicalJson(value)).digest('base64url')
+async function permissionFixture(acknowledged = true) {
+  const f = await setup(),
+    self = peer(f.p),
+    privateKeys = new SqlPrivateStreamKeys({
+      database: f.p.db.database,
+      keys: f.p.keys,
+      node: self.node,
+      user: self.user,
+      spaceForStream: (stream) => f.p.store.getStream(stream)!.space!,
+      transaction: (work) => f.p.db.transaction(work)
+    }),
+    privateService = new PrivateSpaceService({
+      db: f.p.db,
+      keys: f.p.keys,
+      identity: f.p.identity,
+      store: f.p.store,
+      meta: f.p.projection,
+      outbox: f.outbox,
+      privateKeys,
+      clock: f.p.clock
+    }),
+    created = privateService.prepareCreation(f.space.space, f.parent, [self.user, f.bot]),
+    control = f.p.store.appendAsAuthority(created.descriptor.id, {
+      ...created.event,
+      recvTs: f.p.clock.now()
+    })
+  privateService.applyStored(created.descriptor, { ...created.event, ...control }, 'live')
+  const record = f.service.admit(f.message()).record
+  f.executions.transition(record.id, 'running', f.p.clock.now())
+  if (acknowledged) {
+    const accepted = f.outbox
+        .list(record.binding!.stream)
+        .find((event) => decodeEnvelope(event.envelope).envelope.type === 'bot.run.accepted')!,
+      position = f.p.store.appendAsAuthority(accepted.stream, {
+        ...accepted,
+        recvTs: f.p.clock.now()
+      })
+    f.outbox.markSent(accepted.id, position)
+  }
+  const service = new BotPermissionService({
+      db: f.p.db,
+      identity: f.p.identity,
+      keys: f.p.keys,
+      privateKeys,
+      private: privateService,
+      store: f.p.store,
+      outbox: f.outbox,
+      executions: f.executions,
+      admission: f.service,
+      stream: () => created.descriptor.id,
+      hostNow: () => f.p.clock.now()
+    }),
+    binding = { stream: record.binding!.stream, compartment: record.binding!.compartment },
+    argumentDigest = digest({ path: 'approved.txt' }),
+    input = {
+      tool: 'safe_read',
+      argumentDigest,
+      actionHash: digest({
+        execution: record.id,
+        tool: 'safe_read',
+        argumentDigest,
+        profileDigest: record.binding!.profileDigest,
+        binding
+      })
+    },
+    controller = new AbortController(),
+    port = service.port(record.id, controller.signal)
+  function deliver(id: string) {
+    const event = f.outbox.list(created.descriptor.id).find((e) => e.id === id)!,
+      position = f.p.store.appendAsAuthority(created.descriptor.id, {
+        ...event,
+        recvTs: f.p.clock.now()
+      })
+    return { ...event, ...position }
+  }
+  return { ...f, self, record, service, privateService, created, port, input, controller, deliver }
+}
+describe('actual private owner signature, request hash and single-use action approval chain', () => {
+  it('observes a genuine owner grant committed by an afterCommit subscriber before installing the action waiter', async () => {
+    const f = await permissionFixture(),
+      stop = f.outbox.onChanged((entry) => {
+        if (decodeEnvelope(entry.envelope).envelope.type !== 'bot.permission.requested') return
+        f.deliver(entry.id)
+        const granted = f.service.grant(entry.stream, entry.id, true)
+        f.service.receive(entry.stream, f.deliver(granted))
+      }),
+      pending = f.port.requestAction(f.input)
+    try {
+      expect(
+        await Promise.race([
+          pending,
+          new Promise((resolve) => setTimeout(() => resolve('lost committed grant'), 25))
+        ])
+      ).toMatchObject({ decision: 'approved' })
+    } finally {
+      stop()
+      f.controller.abort()
+      await pending.catch(() => {})
+    }
+  })
+  it('publishes on a separate permission stream only after accepted ACK and refuses terminal rejection', async () => {
+    const f = await permissionFixture(false),
+      accepted = f.outbox
+        .list(f.record.binding!.stream)
+        .find((e) => decodeEnvelope(e.envelope).envelope.type === 'bot.run.accepted')!,
+      pending = f.port.requestAction(f.input)
+    expect(
+      f.outbox
+        .list(f.created.descriptor.id)
+        .filter((e) => decodeEnvelope(e.envelope).envelope.type === 'bot.permission.requested')
+    ).toEqual([])
+    expect(f.executions.get(f.record.id)!.state).toBe('running')
+    f.outbox.markAttempt(accepted.id)
+    expect(f.p.db.database.prepare('SELECT count(*) AS n FROM net_bot_permissions').get()!.n).toBe(
+      0
+    )
+    const position = f.p.store.appendAsAuthority(accepted.stream, {
+      ...accepted,
+      recvTs: f.p.clock.now()
+    })
+    f.outbox.markSent(accepted.id, position)
+    await vi.waitFor(() => expect(f.executions.get(f.record.id)!.state).toBe('waitingApproval'))
+    const request = f.outbox
+      .list(f.created.descriptor.id)
+      .find((e) => decodeEnvelope(e.envelope).envelope.type === 'bot.permission.requested')!
+    f.deliver(request.id)
+    const denial = f.service.grant(request.stream, request.id, false)
+    f.service.receive(request.stream, f.deliver(denial))
+    expect(await pending).toEqual({ decision: 'denied', request: request.id })
+    const g = await permissionFixture(false),
+      blocked = g.port.requestAction(g.input),
+      receipt = g.outbox
+        .list(g.record.binding!.stream)
+        .find((e) => decodeEnvelope(e.envelope).envelope.type === 'bot.run.accepted')!
+    g.outbox.markFailed(receipt.id, 'forbidden')
+    await expect(blocked).rejects.toMatchObject({ code: 'forbidden' })
+    expect(g.p.db.database.prepare('SELECT count(*) AS n FROM net_bot_permissions').get()!.n).toBe(
+      0
+    )
+  })
+  it('rejects publishing a permission request as plaintext on the public output', async () => {
+    const f = await permissionFixture(),
+      pending = f.port.requestAction(f.input)
+    pending.catch(() => {})
+    const request = f.outbox
+        .list(f.created.descriptor.id)
+        .find((e) => decodeEnvelope(e.envelope).envelope.type === 'bot.permission.requested')!,
+      env = decodeEnvelope(request.envelope).envelope,
+      descriptor = f.p.store.getStream(f.record.binding!.stream)!
+    const binding = {
+        space: f.space.space,
+        stream: descriptor.id,
+        parent: f.parent,
+        bot: f.bot,
+        trigger: f.record.trigger as import('../../../../src/shared/net').EventId,
+        execution: f.record.id
+      },
+      gate = new BotRecordAuthorization({
+        identity: f.p.identity,
+        meta: f.p.projection,
+        store: f.p.store,
+        private: f.privateService,
+        binding: () => binding
+      })
+    const exposed = {
+      ...env,
+      stream: descriptor.id,
+      sealed: undefined,
+      body: f.privateService.open(f.created.descriptor.id, {
+        ...request,
+        epoch: 1,
+        seq: 2,
+        recvTs: f.p.clock.now()
+      }),
+      refs: { ...env.refs, thread: descriptor.id }
+    }
+    expect(gate.canWrite(descriptor, exposed, f.self)).toBe(false)
+    f.controller.abort()
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' })
+  })
+  it('accepts only the real owner-signed exact encrypted grant and commits single-use before returning to the effect', async () => {
+    const f = await permissionFixture(),
+      pending = f.port.requestAction(f.input),
+      request = f.outbox
+        .list(f.created.descriptor.id)
+        .find((e) => decodeEnvelope(e.envelope).envelope.type === 'bot.permission.requested')!
+    expect(f.executions.get(f.record.id)!.state).toBe('waitingApproval')
+    const requestRecord = f.deliver(request.id),
+      requestEnv = decodeEnvelope(request.envelope).envelope
+    const binding = {
+        space: f.space.space,
+        stream: f.record.binding!.stream,
+        parent: f.parent,
+        bot: f.bot,
+        trigger: f.record.trigger as import('../../../../src/shared/net').EventId,
+        execution: f.record.id
+      },
+      authorization = new BotRecordAuthorization({
+        identity: f.p.identity,
+        meta: f.p.projection,
+        store: f.p.store,
+        private: f.privateService,
+        binding: () => binding
+      })
+    f.privateService.options.canBotWrite = (descriptor, envelope, caller) =>
+      authorization.canWrite(descriptor, envelope, caller)
+    expect(f.privateService.canWrite(f.created.descriptor, requestEnv, f.self)).toBe(true)
+    expect(requestEnv.body).toBeUndefined()
+    expect(
+      f.p.identity.verifyAuthor(
+        requestEnv.author,
+        request.envelope,
+        request.sig,
+        requestEnv.ts,
+        'newWork'
+      ).kind
+    ).toBe('bot')
+    const grant = f.service.grant(f.created.descriptor.id, request.id, true)
+    expect(f.service.grant(f.created.descriptor.id, request.id, true)).toBe(grant)
+    expect(() => f.service.grant(f.created.descriptor.id, request.id, false)).toThrow(
+      expect.objectContaining({ code: 'conflict' })
+    )
+    const grantRecord = f.deliver(grant)
+    expect(
+      f.privateService.canWrite(
+        f.created.descriptor,
+        decodeEnvelope(grantRecord.envelope).envelope,
+        f.self
+      )
+    ).toBe(true)
+    f.service.receive(f.created.descriptor.id, grantRecord)
+    const decision = await pending
+    expect(decision.decision).toBe('approved')
+    if (decision.decision !== 'approved') throw Error('No grant')
+    expect(() =>
+      f.p.db.transaction(() =>
+        f.service.consume(f.record.id, decision.approval, f.input.actionHash)
+      )
+    ).toThrow(expect.objectContaining({ code: 'bad_request' }))
+    await f.port.consume(decision.approval, f.input.actionHash)
+    expect(f.executions.get(f.record.id)!.state).toBe('running')
+    await expect(f.port.consume(decision.approval, f.input.actionHash)).rejects.toMatchObject({
+      code: 'forbidden'
+    })
+    const row = JSON.parse(
+      f.p.db.database.prepare('SELECT row FROM net_bot_permissions').get()!.row as string
+    )
+    expect(row.phase).toBe('consumed')
+    expect(row.hash).toBe(createHash('sha256').update(requestRecord.envelope).digest('base64url'))
+  })
+  it('rejects altered request hash/action/binding before waking the runtime, and exact expiry before consume', async () => {
+    const f = await permissionFixture(),
+      pending = f.port.requestAction(f.input),
+      request = f.outbox
+        .list(f.created.descriptor.id)
+        .find((e) => decodeEnvelope(e.envelope).envelope.type === 'bot.permission.requested')!
+    f.deliver(request.id)
+    const originalGrant = f.service.grant(f.created.descriptor.id, request.id, true),
+      original = f.outbox.list(f.created.descriptor.id).find((e) => e.id === originalGrant)!,
+      body = f.privateService.open(f.created.descriptor.id, {
+        ...original,
+        epoch: 1,
+        seq: 3,
+        recvTs: f.p.clock.now()
+      }) as BotPermissionGrant
+    if (body.kind !== 'runtimeAction') throw Error('Wrong grant')
+    for (const mutate of [
+      (b: BotPermissionGrant) => {
+        b.requestHash = Buffer.alloc(32, 7).toString('base64url')
+      },
+      (b: BotPermissionGrant) => {
+        if (b.kind === 'runtimeAction') b.actionHash = Buffer.alloc(32, 8).toString('base64url')
+      },
+      (b: BotPermissionGrant) => {
+        if (b.kind === 'runtimeAction') b.binding.compartment += '-changed'
+      }
+    ]) {
+      const changed = structuredClone(body)
+      mutate(changed)
+      const event = f.privateService.seal(
+          f.created.descriptor.id,
+          'bot.permission.granted',
+          changed,
+          { subject: request.id, thread: f.created.descriptor.id }
+        ),
+        record = f.deliver(event.id)
+      expect(() => f.service.receive(f.created.descriptor.id, record)).toThrow(
+        expect.objectContaining({ code: 'forbidden' })
+      )
+    }
+    f.service.receive(f.created.descriptor.id, f.deliver(original.id))
+    const decision = await pending
+    if (decision.decision !== 'approved') throw Error('No grant')
+    f.p.clock.setWallTime(decision.expiresAt)
+    await expect(f.port.consume(decision.approval, f.input.actionHash)).rejects.toMatchObject({
+      code: 'forbidden'
+    })
+    expect(
+      JSON.parse(
+        f.p.db.database.prepare('SELECT row FROM net_bot_permissions').get()!.row as string
+      ).phase
+    ).toBe('granted')
+  })
+  it('denies aborted pending actions and never treats an owner denial as approval', async () => {
+    const f = await permissionFixture(),
+      pending = f.port.requestAction(f.input),
+      request = f.outbox
+        .list(f.created.descriptor.id)
+        .find((e) => decodeEnvelope(e.envelope).envelope.type === 'bot.permission.requested')!
+    f.deliver(request.id)
+    const denial = f.service.grant(f.created.descriptor.id, request.id, false)
+    f.service.receive(f.created.descriptor.id, f.deliver(denial))
+    expect(await pending).toEqual({ decision: 'denied', request: request.id })
+    const g = await permissionFixture(),
+      aborted = g.port.requestAction(g.input)
+    g.controller.abort()
+    await expect(aborted).rejects.toMatchObject({ code: 'cancelled' })
+    expect(g.executions.get(g.record.id)!.state).toBe('waitingApproval')
+  })
+  it('refuses a bot-signed forged grant and emergency stop immediately before consuming a genuine owner grant', async () => {
+    const f = await permissionFixture(),
+      pending = f.port.requestAction(f.input),
+      request = f.outbox
+        .list(f.created.descriptor.id)
+        .find((e) => decodeEnvelope(e.envelope).envelope.type === 'bot.permission.requested')!
+    f.deliver(request.id)
+    const requestBody = f.privateService.open(f.created.descriptor.id, {
+      ...request,
+      epoch: 1,
+      seq: 2,
+      recvTs: f.p.clock.now()
+    }) as import('../../../../src/shared/net').BotPermissionRequest
+    if (requestBody.kind !== 'runtimeAction') throw Error('Wrong request')
+    const env: Envelope = {
+        v: 1,
+        minor: 0,
+        id: importId('event'),
+        stream: f.created.descriptor.id,
+        type: 'bot.permission.granted',
+        crit: false,
+        author: { bot: f.bot, node: f.self.node, keyEpoch: 1 },
+        ts: f.p.clock.now(),
+        auth: decodeEnvelope(request.envelope).envelope.auth,
+        refs: { subject: request.id, thread: f.created.descriptor.id }
+      },
+      body: BotPermissionGrant = {
+        kind: 'runtimeAction',
+        request: request.id,
+        requestHash: createHash('sha256').update(request.envelope).digest('base64url'),
+        expiresAt: requestBody.expiresAt,
+        execution: f.record.id,
+        actionHash: f.input.actionHash,
+        profileDigest: f.record.binding!.profileDigest,
+        binding: requestBody.binding
+      }
+    const privateContentAAD = (value: Envelope) => {
+      const { body: _body, sealed: _sealed, ...metadata } = value
+      return Buffer.concat([
+        Buffer.from('mousse-net/private-content/v1\0'),
+        canonicalJson(metadata)
+      ])
+    }
+    env.sealed = f.privateService.options.privateKeys.seal(
+      env.stream,
+      canonicalJson(body),
+      privateContentAAD(env)
+    )
+    const bytes = canonicalJson(env),
+      sig = f.p.keys.signAsBot(f.bot, bytes)
+    f.outbox.enqueue({ id: env.id, stream: env.stream, envelope: bytes, sig })
+    expect(() => f.service.receive(env.stream, f.deliver(env.id))).toThrow(
+      expect.objectContaining({ code: 'forbidden' })
+    )
+    const real = f.service.grant(env.stream, request.id, true)
+    f.service.receive(env.stream, f.deliver(real))
+    const decision = await pending
+    if (decision.decision !== 'approved') throw Error('No grant')
+    f.registry.stop(f.space.space, f.bot)
+    await expect(f.port.consume(decision.approval, f.input.actionHash)).rejects.toMatchObject({
+      code: 'cancelled'
+    })
+    expect(
+      JSON.parse(
+        f.p.db.database.prepare('SELECT row FROM net_bot_permissions').get()!.row as string
+      ).phase
+    ).toBe('granted')
+  })
+})
+it('never falls back to global current identity after an explicit scoped trigger denial', async () => {
+  const f = await permissionFixture(),
+    pending = f.port.requestAction(f.input)
+  pending.catch(() => {})
+  const request = f.outbox
+    .list(f.created.descriptor.id)
+    .find((entry) => decodeEnvelope(entry.envelope).envelope.type === 'bot.permission.requested')!
+  f.deliver(request.id)
+  const preview = f.service.previewGrant(request.stream, request.id),
+    envelope = decodeEnvelope(preview.input.record.envelope).envelope
+  expect(
+    f.p.identity.verifyAuthor(
+      envelope.author,
+      preview.input.record.envelope,
+      preview.input.record.sig,
+      envelope.ts,
+      'newWork'
+    ).kind
+  ).toBe('node')
+  const nonces = f.p.db.database
+    .prepare('SELECT * FROM net_private_nonce WHERE stream=?')
+    .all(request.stream)
+  f.service.options.verifyTrigger = () => {
+    throw Object.assign(Error('Scoped proof is stale'), { code: 'meta_stale' })
+  }
+  expect(() => f.service.grant(request.stream, request.id, true)).toThrowError(
+    expect.objectContaining({ code: 'meta_stale' })
+  )
+  expect(
+    f.p.db.database.prepare('SELECT * FROM net_private_nonce WHERE stream=?').all(request.stream)
+  ).toEqual(nonces)
+  expect(
+    f.p.db.database.prepare('SELECT count(*) AS n FROM net_bot_permission_issued').get()!.n
+  ).toBe(0)
+  f.controller.abort()
+  await expect(pending).rejects.toMatchObject({ code: 'cancelled' })
+})
+it('repeats the exact scoped trigger proof inside the grant journal and rolls back a commit-time denial', async () => {
+  const f = await permissionFixture(),
+    pending = f.port.requestAction(f.input)
+  pending.catch(() => {})
+  const request = f.outbox
+    .list(f.created.descriptor.id)
+    .find((entry) => decodeEnvelope(entry.envelope).envelope.type === 'bot.permission.requested')!
+  f.deliver(request.id)
+  const transactions: boolean[] = []
+  f.service.options.verifyTrigger = (input, descriptor, envelope) => {
+    transactions.push(f.p.db.inTransaction)
+    expect(descriptor.id).toBe(input.stream)
+    if (f.p.db.inTransaction)
+      throw Object.assign(Error('Current scope changed before commit'), { code: 'not_member' })
+    return {
+      author: f.p.identity.verifyAuthor(
+        envelope.author,
+        input.record.envelope,
+        input.record.sig,
+        envelope.ts,
+        'newWork'
+      ),
+      rootKey: f.p.keys.rootKey()!
+    }
+  }
+  expect(() => f.service.grant(request.stream, request.id, true)).toThrowError(
+    expect.objectContaining({ code: 'not_member' })
+  )
+  expect(transactions).toEqual([false, true])
+  expect(
+    f.p.db.database.prepare('SELECT count(*) AS n FROM net_bot_permission_issued').get()!.n
+  ).toBe(0)
+  expect(
+    f.outbox
+      .list(request.stream)
+      .some((entry) => decodeEnvelope(entry.envelope).envelope.type === 'bot.permission.granted')
+  ).toBe(false)
+  expect(f.executions.get(f.record.id)?.state).toBe('waitingApproval')
+  f.controller.abort()
+  await expect(pending).rejects.toMatchObject({ code: 'cancelled' })
+})
 
-})
-it('never falls back to global current identity after an explicit scoped trigger denial',async()=>{
- const f=await permissionFixture(),pending=f.port.requestAction(f.input);pending.catch(()=>{});const request=f.outbox.list(f.created.descriptor.id).find(entry=>decodeEnvelope(entry.envelope).envelope.type==='bot.permission.requested')!;f.deliver(request.id)
- const preview=f.service.previewGrant(request.stream,request.id),envelope=decodeEnvelope(preview.input.record.envelope).envelope
- expect(f.p.identity.verifyAuthor(envelope.author,preview.input.record.envelope,preview.input.record.sig,envelope.ts,'newWork').kind).toBe('node')
- const nonces=f.p.db.database.prepare('SELECT * FROM net_private_nonce WHERE stream=?').all(request.stream)
- f.service.options.verifyTrigger=()=>{throw Object.assign(Error('Scoped proof is stale'),{code:'meta_stale'})}
- expect(()=>f.service.grant(request.stream,request.id,true)).toThrowError(expect.objectContaining({code:'meta_stale'}));expect(f.p.db.database.prepare('SELECT * FROM net_private_nonce WHERE stream=?').all(request.stream)).toEqual(nonces)
- expect(f.p.db.database.prepare('SELECT count(*) AS n FROM net_bot_permission_issued').get()!.n).toBe(0);f.controller.abort();await expect(pending).rejects.toMatchObject({code:'cancelled'})
-})
-it('repeats the exact scoped trigger proof inside the grant journal and rolls back a commit-time denial',async()=>{
- const f=await permissionFixture(),pending=f.port.requestAction(f.input);pending.catch(()=>{});const request=f.outbox.list(f.created.descriptor.id).find(entry=>decodeEnvelope(entry.envelope).envelope.type==='bot.permission.requested')!;f.deliver(request.id);const transactions:boolean[]=[]
- f.service.options.verifyTrigger=(input,descriptor,envelope)=>{transactions.push(f.p.db.inTransaction);expect(descriptor.id).toBe(input.stream);if(f.p.db.inTransaction)throw Object.assign(Error('Current scope changed before commit'),{code:'not_member'});return{author:f.p.identity.verifyAuthor(envelope.author,input.record.envelope,input.record.sig,envelope.ts,'newWork'),rootKey:f.p.keys.rootKey()!}}
- expect(()=>f.service.grant(request.stream,request.id,true)).toThrowError(expect.objectContaining({code:'not_member'}));expect(transactions).toEqual([false,true]);expect(f.p.db.database.prepare('SELECT count(*) AS n FROM net_bot_permission_issued').get()!.n).toBe(0)
- expect(f.outbox.list(request.stream).some(entry=>decodeEnvelope(entry.envelope).envelope.type==='bot.permission.granted')).toBe(false);expect(f.executions.get(f.record.id)?.state).toBe('waitingApproval');f.controller.abort();await expect(pending).rejects.toMatchObject({code:'cancelled'})
+it('refuses approval consumption under an incompatible minimum with otherwise fresh authority', async () => {
+  const f = await permissionFixture(),
+    pending = f.port.requestAction(f.input),
+    request = f.outbox
+      .list(f.created.descriptor.id)
+      .find((entry) => decodeEnvelope(entry.envelope).envelope.type === 'bot.permission.requested')!
+  f.deliver(request.id)
+  const grant = f.service.grant(request.stream, request.id, true)
+  f.service.receive(request.stream, f.deliver(grant))
+  const decision = await pending
+  expect(decision.decision).toBe('approved')
+  f.p.host.postMeta(f.space.space, 'settings.changed', { settings: { minProtoMinor: 1 } })
+  const current = new SpaceCurrentIdentity({
+      runtime: { db: f.p.db, identity: f.p.identity, keys: f.p.keys },
+      store: f.p.store,
+      meta: f.p.projection,
+      host: f.p.host,
+      session: () => undefined
+    }),
+    input = {
+      stream: f.parent,
+      bot: f.bot,
+      record: f.p.store.getById(
+        f.parent,
+        f.record.trigger as import('../../../../src/shared/net').EventId
+      )!,
+      source: 'delivery' as const
+    }
+  disposers.push(() => current.close())
+  await current.prepareAdmission(input)
+  const verify = (...args: Parameters<typeof current.verifyMentionAuthor>) =>
+    current.verifyMentionAuthor(...args)
+  f.service.options.verifyMentionAuthor = verify
+  expect(() =>
+    verify(input, f.p.store.getStream(f.parent)!, decodeEnvelope(input.record.envelope).envelope)
+  ).not.toThrow()
+  await expect(f.port.consume(grant, f.input.actionHash)).rejects.toMatchObject({
+    code: 'upgrade_required'
+  })
+  expect(f.executions.get(f.record.id)?.state).toBe('waitingApproval')
+  expect(
+    JSON.parse(
+      f.p.db.database
+        .prepare('SELECT row FROM net_bot_permissions WHERE request=?')
+        .get(request.id)!.row as string
+    ).phase
+  ).toBe('granted')
 })

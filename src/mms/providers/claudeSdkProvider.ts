@@ -7,6 +7,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import {
   createProvider,
   type AnthropicOptions,
+  type Api,
   type Credential,
   type CredentialStore,
   type Model,
@@ -154,19 +155,32 @@ export function createClaudeSdkProvider(
   })
 }
 
+/**
+ * Replace pi-ai's static Anthropic provider with the SDK-backed one. Offline
+ * registration (daemon startup) uses the last cached listing instead of calling
+ * `models.list()`; the network listing happens during background refresh.
+ */
 export async function registerClaudeSdkProvider(
   models: MutableModels,
-  credentials: CredentialStore
+  credentials: CredentialStore,
+  options: { allowNetwork?: boolean; cached?: readonly Model<Api>[] } = {}
 ): Promise<void> {
   const existing = models.getProvider(CLAUDE_PROVIDER_ID)
   if (!existing) return
   const baseline = existing.getModels() as readonly Model<'anthropic-messages'>[]
-  const credential = await credentials.read(CLAUDE_PROVIDER_ID)
   let listed: Model<'anthropic-messages'>[] = []
-  try {
-    listed = await fetchClaudeSdkModels(credential, baseline[0] ?? DEFAULT_CLAUDE_MODEL)
-  } catch {
-    listed = []
+  if (options.allowNetwork === false) {
+    listed = (options.cached ?? []).filter(
+      (model): model is Model<'anthropic-messages'> =>
+        model.provider === CLAUDE_PROVIDER_ID && model.api === 'anthropic-messages'
+    )
+  } else {
+    try {
+      const credential = await credentials.read(CLAUDE_PROVIDER_ID)
+      listed = await fetchClaudeSdkModels(credential, baseline[0] ?? DEFAULT_CLAUDE_MODEL)
+    } catch {
+      listed = []
+    }
   }
   models.setProvider(
     createClaudeSdkProvider(listed.length > 0 ? listed : baseline, existing.auth)

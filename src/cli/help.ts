@@ -1,3 +1,4 @@
+import { RELAY_HELP } from './commands/relay'
 import { NET_HELP, BRIDGE_HELP } from './commands/net'
 import { BRIDGE_HUB_HELP } from './commands/bridge'
 import { SPACES_HELP } from './commands/spaces'
@@ -18,6 +19,7 @@ Usage:
   mousse-cli channels <subcommand>           Channel setup (Telegram, Discord, Webhook)
   mousse-cli config <subcommand>             Read/write ~/.mousse/mousse.conf
   mousse-cli service <subcommand>            MMS daemon control and startup install
+  mousse-cli relay serve                    Run a self-hosted relay in the foreground
   mousse-cli net <subcommand>               Network identity, transports and recovery
   mousse-cli bridge <subcommand>            Link and control my devices
   mousse-cli spaces <subcommand>            Shared channels, membership and durable posts
@@ -223,6 +225,8 @@ export function commandHelp(command: string): string | null {
       return CONFIG_HELP
     case 'service':
       return SERVICE_HELP
+    case 'relay':
+      return RELAY_HELP
     case 'net':
       return NET_HELP
     case 'bridge':

@@ -33,6 +33,7 @@ import {
   resolveOwnerStatus
 } from '../../mms/ownership/MmsOwnerLease'
 import { installDaemonDiagnostics } from '../daemonDiagnostics'
+import { installElectronDaemonQuit } from '../electronDaemonLifetime'
 import { resolveDaemonHostInvocation } from '../daemonHost'
 import { MmsProtocolServer } from '../../mms/protocol'
 import {
@@ -89,6 +90,7 @@ export interface DaemonForegroundOptions {
 export async function runDaemonForeground(opts: DaemonForegroundOptions): Promise<DaemonLifecycleState> {
   const homeDir = canonicalizeHome(opts.homeDir)
   const startedAt = new Date().toISOString()
+  const startedAtMs = performance.now()
   const log = opts.onLog ?? ((msg: string) => process.stderr.write(`${msg}\n`))
 
   let resolveLifetime!: () => void
@@ -115,6 +117,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     process.exitCode = exitCode
     resolveLifetime()
   }
+  let releaseElectronQuit: (() => void) | undefined
 
   // Production daemon only (tests pass skipSignals): persist diagnostics and
   // register crash handlers. Handlers are never installed by library modules.
@@ -138,6 +141,13 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
       { start: true }
     )
     state.mms = opened.mms
+    if (!opts.skipSignals) {
+      releaseElectronQuit = await installElectronDaemonQuit(shutdown, error => {
+        log(
+          `Electron daemon shutdown failed: ${error instanceof Error ? error.message : String(error)}`
+        )
+      })
+    }
     state.ownerToken = opened.mms.getOwnerLease()?.owner.token ?? null
     if (!state.ownerToken) {
       throw new Error('Daemon started without owner lease')
@@ -184,7 +194,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     }
 
     log(
-      `Mousse MMS running (headless) — home: ${homeDir} pid: ${process.pid} owner=daemon endpoint=${endpoint}`
+      `Mousse MMS running (headless) — home: ${homeDir} pid: ${process.pid} owner=daemon endpoint=${endpoint} startup=${Math.round(performance.now() - startedAtMs)}ms`
     )
 
     state.pollStop = setInterval(() => {
@@ -209,6 +219,8 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     // CRITICAL: any failure after owner/MMS creation must tear down fully.
     await shutdown('startup-failed', 1)
     return state
+  } finally {
+    releaseElectronQuit?.()
   }
 }
 

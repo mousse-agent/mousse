@@ -13,7 +13,6 @@ import { GuiMmsController } from './mms/GuiMmsController'
 import { PresentationState } from './mms/PresentationState'
 import {
   attachWindowListeners,
-  bootstrapPresentation,
   registerGuiIpc
 } from './ipc/registerGuiIpc'
 import { normalizeAppearance } from '../shared/settings'
@@ -117,7 +116,6 @@ function startGuiApp(): void {
   let shutdownPromise: Promise<void> | null = null
   let shutdownComplete = false
   let ipcRegistered = false
-  let guiIpc: { syncDaemonTurnSnapshot: (snap: unknown) => void } | null = null
   let windowListenersAttached = false
   let resumeRecoveryAttached = false
   let devGuiPollerStop: (() => void) | null = null
@@ -139,14 +137,6 @@ function startGuiApp(): void {
       mainWindow.focus()
     }
   })
-
-  function broadcastToWindows(channel: string, data: unknown): void {
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) {
-        win.webContents.send(channel, data)
-      }
-    }
-  }
 
   function createStartupWindow(): void {
     if (startupWindow && !startupWindow.isDestroyed()) return
@@ -326,21 +316,11 @@ function startGuiApp(): void {
         )
       }
 
-      // SettingsStore is a chrome presentation mirror only — execution settings are daemon-owned.
-      try {
-        const snap = await guiMms.request<{ settings: import('../shared/settings').MousseSettings }>(
-          'settings.get'
-        )
-        settings.set(snap.settings)
-      } catch {
-        /* chrome defaults until protocol settings available */
-      }
-
       const fileService = new FileService()
       const gitService = new GitService()
 
       if (!ipcRegistered) {
-        guiIpc = registerGuiIpc(
+        registerGuiIpc(
           {
             guiMms,
             presentation,
@@ -357,11 +337,16 @@ function startGuiApp(): void {
         ipcRegistered = true
       }
 
-      await bootstrapPresentation(guiMms, presentation, broadcastToWindows, {
-        onTurnSnapshot: (snap) => guiIpc?.syncDaemonTurnSnapshot(snap)
-      })
-
+      // Restore the exact window's chats only after its renderer subscribes.
+      // The local chrome settings already let us paint the app shell now.
       await createWindow()
+      const chromeSettings = settings
+      void guiMms.request<{ settings: import('../shared/settings').MousseSettings }>('settings.get')
+        .then((snap) => {
+          chromeSettings.set(snap.settings)
+          if (mainWindow && !mainWindow.isDestroyed()) refreshWindowChrome(mainWindow, chromeSettings)
+        })
+        .catch(() => { /* chrome defaults until protocol settings available */ })
       // Dev-only: serve self-inspection tool requests from the daemon
       // (screenshot / console / reload / devtools / evaluate).
       if (isDevGuiMainEnabled() && !devGuiPollerStop) {

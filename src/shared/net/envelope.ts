@@ -107,7 +107,12 @@ export type BotPermissionRequest = {
   binding: PermissionBinding
 } & (
   | { kind: 'steerPolicyChange'; proposedPolicy: BotAudiencePolicy }
-  | { kind: 'runtimeAction'; execution: ExecutionId; actionHash: Base64Url; profileDigest: Base64Url }
+  | {
+      kind: 'runtimeAction'
+      execution: ExecutionId
+      actionHash: Base64Url
+      profileDigest: Base64Url
+    }
 )
 
 export type BotPermissionGrant = {
@@ -117,15 +122,31 @@ export type BotPermissionGrant = {
   expiresAt: number
 } & (
   | { kind: 'steerPolicyChange' }
-  | { kind: 'runtimeAction'; execution: ExecutionId; actionHash: Base64Url; profileDigest: Base64Url; binding: PermissionBinding }
+  | {
+      kind: 'runtimeAction'
+      execution: ExecutionId
+      actionHash: Base64Url
+      profileDigest: Base64Url
+      binding: PermissionBinding
+    }
 )
 
 /** Body shapes per event type. Types absent here carry no body. */
 export interface EventBodies {
-  'thread.snapshot.begin': { threadId: string; snapshot: string; totalBytes: number; chunks: number; sha256: Base64Url }
+  'thread.snapshot.begin': {
+    threadId: string
+    snapshot: string
+    totalBytes: number
+    chunks: number
+    sha256: Base64Url
+  }
   'thread.snapshot.chunk': { threadId: string; snapshot: string; index: number; data: Base64Url }
   'thread.snapshot.end': { threadId: string; snapshot: string; sha256: Base64Url }
-  'thread.event': { threadId: string; type: typeof BRIDGE_THREAD_EVENT_TYPES[number]; data: unknown }
+  'thread.event': {
+    threadId: string
+    type: (typeof BRIDGE_THREAD_EVENT_TYPES)[number]
+    data: unknown
+  }
   'artifact.published': { rpc: RpcId; purpose: 'input' | 'result' }
   'space.created': { descriptor: Signed; settings: SpaceSettings; owner: MemberRecord }
   'space.descriptor': { descriptor: Signed }
@@ -155,7 +176,13 @@ export interface EventBodies {
     /** Unique 4-byte nonce namespace per writer in this key epoch. */
     writers: Array<{ node: NodeId; noncePrefix: Base64Url }>
     /** Content key wrapped to each participant node's agreement key. */
-    wrapped: Array<{ node: NodeId; recipientAgreementKey: Base64Url; ephemeral: Base64Url; nonce: Base64Url; ct: Base64Url }>
+    wrapped: Array<{
+      node: NodeId
+      recipientAgreementKey: Base64Url
+      ephemeral: Base64Url
+      nonce: Base64Url
+      ct: Base64Url
+    }>
   }
   'bot.run.accepted': { title: string }
   'bot.run.progress': { text: string }
@@ -191,7 +218,10 @@ export const META_EVENT_TYPES = [
 export type MetaEventType = (typeof META_EVENT_TYPES)[number]
 
 export const CONTENT_EVENT_TYPES = [
-  'thread.snapshot.begin', 'thread.snapshot.chunk', 'thread.snapshot.end', 'thread.event',
+  'thread.snapshot.begin',
+  'thread.snapshot.chunk',
+  'thread.snapshot.end',
+  'thread.event',
   'artifact.published',
   'message.posted',
   'message.edited',
@@ -214,7 +244,20 @@ export const CONTENT_EVENT_TYPES = [
 ] as const
 
 /** Display source event names; never remote execution commands. */
-export const BRIDGE_THREAD_EVENT_TYPES = ['thread.message','thread.message-updated','thread.messages','queue.updated','turn.started','turn.completed','turn.interrupted','turn.aborted','turn.state','turn.steered','connection.failed','thread.metadata'] as const
+export const BRIDGE_THREAD_EVENT_TYPES = [
+  'thread.message',
+  'thread.message-updated',
+  'thread.messages',
+  'queue.updated',
+  'turn.started',
+  'turn.completed',
+  'turn.interrupted',
+  'turn.aborted',
+  'turn.state',
+  'turn.steered',
+  'connection.failed',
+  'thread.metadata'
+] as const
 export type ContentEventType = (typeof CONTENT_EVENT_TYPES)[number]
 
 export type KnownEventType = MetaEventType | ContentEventType
@@ -235,11 +278,19 @@ export function isKnownEventType(type: string): type is KnownEventType {
  * is critical if the sender says so. A sender may also mark a known event
  * critical when future-minor semantics must be understood.
  */
-export function isCritical(envelope: Pick<Envelope, 'type' | 'crit'>, inMetaStream: boolean): boolean {
+export function isCritical(
+  envelope: Pick<Envelope, 'type' | 'crit'>,
+  inMetaStream: boolean
+): boolean {
   if (inMetaStream || CRITICAL.has(envelope.type)) return true
   return envelope.crit === true
 }
 
 /** Ephemeral messages are relayed and never stored. */
-export const EPHEMERAL_TYPES = ['presence.heartbeat', 'presence.activity', 'typing', 'delta'] as const
+export const EPHEMERAL_TYPES = [
+  'presence.heartbeat',
+  'presence.activity',
+  'typing',
+  'delta'
+] as const
 export type EphemeralType = (typeof EPHEMERAL_TYPES)[number]

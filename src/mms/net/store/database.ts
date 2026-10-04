@@ -1,4 +1,15 @@
-import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, realpathSync, renameSync, writeSync } from 'node:fs'
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  realpathSync,
+  renameSync,
+  writeSync
+} from 'node:fs'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
@@ -8,16 +19,29 @@ import { systemClock } from '../clock'
 import { canonicalJson } from '../sync/codec'
 
 export type StoreFault = (point: string) => void
-export interface DatabaseOptions { profileDir: string; clock?: Clock; fault?: StoreFault }
+export interface DatabaseOptions {
+  profileDir: string
+  clock?: Clock
+  fault?: StoreFault
+}
 
 export function integer(value: number, minimum = 0): number {
-  if (!Number.isSafeInteger(value) || value < minimum) throw new NetError('bad_request', 'Expected a bounded nonnegative integer.')
+  if (!Number.isSafeInteger(value) || value < minimum)
+    throw new NetError('bad_request', 'Expected a bounded nonnegative integer.')
   return value
 }
-export function digest(bytes: Uint8Array): string { return createHash('sha256').update(bytes).digest('hex') }
-export function json(value: unknown): string { return Buffer.from(canonicalJson(value)).toString('utf8') }
-export function same(a: unknown, b: unknown): boolean { return json(a) === json(b) }
-export function fail(code: ConstructorParameters<typeof NetError>[0], message: string): never { throw new NetError(code, message) }
+export function digest(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+export function json(value: unknown): string {
+  return Buffer.from(canonicalJson(value)).toString('utf8')
+}
+export function same(a: unknown, b: unknown): boolean {
+  return json(a) === json(b)
+}
+export function fail(code: ConstructorParameters<typeof NetError>[0], message: string): never {
+  throw new NetError(code, message)
+}
 
 /** One connection and one transaction boundary for every participating ledger. */
 export class NetDatabase {
@@ -39,57 +63,104 @@ export class NetDatabase {
     this.fault = options.fault
     const profile = realpathSync(resolve(options.profileDir))
     this.directory = join(profile, 'net')
-    if (existsSync(this.directory) && lstatSync(this.directory).isSymbolicLink()) fail('forbidden', 'Net storage cannot be a symlink.')
+    if (existsSync(this.directory) && lstatSync(this.directory).isSymbolicLink())
+      fail('forbidden', 'Net storage cannot be a symlink.')
     mkdirSync(this.directory, { recursive: true, mode: 0o700 })
-    if (realpathSync(this.directory) !== this.directory) fail('forbidden', 'Net storage escaped the profile.')
+    if (realpathSync(this.directory) !== this.directory)
+      fail('forbidden', 'Net storage escaped the profile.')
     this.path = join(this.directory, 'net.db')
-    if (existsSync(join(this.directory, 'storage-corrupt-fence'))) fail('storage_corrupt', 'Net storage encountered corruption; explicit ledger recovery is required.')
+    if (existsSync(join(this.directory, 'storage-corrupt-fence')))
+      fail(
+        'storage_corrupt',
+        'Net storage encountered corruption; explicit ledger recovery is required.'
+      )
     const established = join(this.directory, 'ledger-established')
-    if (!existsSync(this.path) && existsSync(established)) fail('storage_corrupt', 'An established net ledger is missing or quarantined; explicit recovery is required.')
-    if (existsSync(this.path) && (!lstatSync(this.path).isFile() || lstatSync(this.path).isSymbolicLink())) fail('forbidden', 'Net database is not an owned regular file.')
+    if (!existsSync(this.path) && existsSync(established))
+      fail(
+        'storage_corrupt',
+        'An established net ledger is missing or quarantined; explicit recovery is required.'
+      )
+    if (
+      existsSync(this.path) &&
+      (!lstatSync(this.path).isFile() || lstatSync(this.path).isSymbolicLink())
+    )
+      fail('forbidden', 'Net database is not an owned regular file.')
     this.database = new DatabaseSync(this.path)
     try {
       chmodSync(this.path, 0o600)
-      this.database.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;')
+      this.database.exec(
+        'PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;'
+      )
       const integrity = this.database.prepare('PRAGMA quick_check').all()
-      if (integrity.length !== 1 || Object.values(integrity[0])[0] !== 'ok') fail('storage_corrupt', 'Net database failed its integrity check; recovery is required.')
+      if (integrity.length !== 1 || Object.values(integrity[0])[0] !== 'ok')
+        fail('storage_corrupt', 'Net database failed its integrity check; recovery is required.')
       const version = Number(this.database.prepare('PRAGMA user_version').get()!.user_version)
       if (version > 1) fail('downgrade_unsupported', 'Net database has a newer schema.')
       this.database.exec('BEGIN IMMEDIATE')
       try {
         this.database.exec(SCHEMA)
-        this.database.prepare('INSERT OR IGNORE INTO net_schema_migrations VALUES(1,?)').run(integer(this.clock.now()))
+        this.database
+          .prepare('INSERT OR IGNORE INTO net_schema_migrations VALUES(1,?)')
+          .run(integer(this.clock.now()))
         this.checkpoint('database.migration.beforeCommit')
         this.database.exec('PRAGMA user_version=1; COMMIT')
-      } catch (error) { this.database.exec('ROLLBACK'); throw error }
+      } catch (error) {
+        this.database.exec('ROLLBACK')
+        throw error
+      }
       // A stage is never authority after a restart. Delete in bounded batches.
       for (;;) {
-        const rows = this.database.prepare("SELECT rowid FROM net_records WHERE generation IN (SELECT id FROM net_generations WHERE state='staging') LIMIT 500").all()
+        const rows = this.database
+          .prepare(
+            "SELECT rowid FROM net_records WHERE generation IN (SELECT id FROM net_generations WHERE state='staging') LIMIT 500"
+          )
+          .all()
         if (!rows.length) break
-        this.transaction(() => { for (const row of rows) this.database.prepare('DELETE FROM net_records WHERE rowid=?').run(row.rowid!) })
+        this.transaction(() => {
+          for (const row of rows)
+            this.database.prepare('DELETE FROM net_records WHERE rowid=?').run(row.rowid!)
+        })
       }
       this.database.exec("DELETE FROM net_generations WHERE state='staging'")
       // Deleting/quarantining net.db must never silently create a fresh dedup
       // ledger on the next start. Recovery must deliberately reconcile this fence.
       if (!existsSync(established)) {
         const fd = openSync(established, 'wx', 0o600)
-        try { writeSync(fd, 'Net ledger established; replacement requires explicit recovery.\n'); fsyncSync(fd) } finally { closeSync(fd) }
+        try {
+          writeSync(fd, 'Net ledger established; replacement requires explicit recovery.\n')
+          fsyncSync(fd)
+        } finally {
+          closeSync(fd)
+        }
         const directoryFd = openSync(this.directory, 'r')
-        try { fsyncSync(directoryFd) } finally { closeSync(directoryFd) }
+        try {
+          fsyncSync(directoryFd)
+        } finally {
+          closeSync(directoryFd)
+        }
       }
     } catch (error) {
-      this.database.close(); this.closed = true
+      this.database.close()
+      this.closed = true
       const translated = this.translate(error)
       if (translated instanceof NetError && translated.code === 'storage_corrupt') {
         const quarantine = `${this.path}.quarantine-${randomUUID()}`
-        for (const suffix of ['', '-wal', '-shm']) if (existsSync(`${this.path}${suffix}`)) renameSync(`${this.path}${suffix}`, `${quarantine}${suffix}`)
-        throw new NetError('storage_corrupt', 'Net database was quarantined; ledger recovery is required before execution.', { cause: translated, details: { quarantine } })
+        for (const suffix of ['', '-wal', '-shm'])
+          if (existsSync(`${this.path}${suffix}`))
+            renameSync(`${this.path}${suffix}`, `${quarantine}${suffix}`)
+        throw new NetError(
+          'storage_corrupt',
+          'Net database was quarantined; ledger recovery is required before execution.',
+          { cause: translated, details: { quarantine } }
+        )
       }
       throw translated
     }
   }
 
-  get inTransaction(): boolean { return this.depth > 0 }
+  get inTransaction(): boolean {
+    return this.depth > 0
+  }
   /** Trusted domain coordinators may enforce a prepared callback's declared
    * resource budget against the same counters that enforce the outer commit. */
   get transactionUsage(): Readonly<{ rows: number; bytes: number }> {
@@ -105,10 +176,18 @@ export class NetDatabase {
         const result = work()
         this.assertSynchronous(result)
         return result
-      } catch (error) { this.doomed = error; throw this.translate(error) }
-      finally { this.depth-- }
+      } catch (error) {
+        this.doomed = error
+        throw this.translate(error)
+      } finally {
+        this.depth--
+      }
     }
-    this.depth = 1; this.rows = 0; this.bytes = 0; this.doomed = undefined; this.deferred = []
+    this.depth = 1
+    this.rows = 0
+    this.bytes = 0
+    this.doomed = undefined
+    this.deferred = []
     let result: T
     try {
       this.database.exec('BEGIN IMMEDIATE')
@@ -118,39 +197,73 @@ export class NetDatabase {
       this.checkpoint('transaction.beforeCommit')
       this.database.exec('COMMIT')
     } catch (error) {
-      try { this.database.exec('ROLLBACK') } catch { /* BEGIN may have failed. */ }
+      try {
+        this.database.exec('ROLLBACK')
+      } catch {
+        /* BEGIN may have failed. */
+      }
       this.deferred = []
       throw this.translate(error)
-    } finally { this.depth = 0 }
-    const deferred = this.deferred; this.deferred = []
-    for (const notify of deferred) { try { notify() } catch { /* An observer cannot undo durable commit. */ } }
+    } finally {
+      this.depth = 0
+    }
+    const deferred = this.deferred
+    this.deferred = []
+    for (const notify of deferred) {
+      try {
+        notify()
+      } catch {
+        /* An observer cannot undo durable commit. */
+      }
+    }
     return result
   }
   charge(rows: number, bytes = 0): void {
-    this.rows += rows; this.bytes += bytes
-    if (this.rows > STORE_TXN_MAX_ROWS || this.bytes > STORE_TXN_MAX_BYTES) fail('too_large', 'Net transaction exceeded its row or byte limit.')
+    this.rows += rows
+    this.bytes += bytes
+    if (this.rows > STORE_TXN_MAX_ROWS || this.bytes > STORE_TXN_MAX_BYTES)
+      fail('too_large', 'Net transaction exceeded its row or byte limit.')
   }
-  afterCommit(callback: () => void): void { if (this.depth) this.deferred.push(callback); else callback() }
-  checkpoint(point: string): void { this.fault?.(point) }
+  afterCommit(callback: () => void): void {
+    if (this.depth) this.deferred.push(callback)
+    else callback()
+  }
+  checkpoint(point: string): void {
+    this.fault?.(point)
+  }
   close(): void {
     if (this.closed) return
     if (this.depth) fail('internal', 'Cannot close a database during a transaction.')
-    this.database.close(); this.closed = true
+    this.database.close()
+    this.closed = true
   }
   private assertSynchronous(result: unknown): void {
-    if (result && typeof (result as { then?: unknown }).then === 'function') fail('bad_request', 'Net transactions cannot await asynchronous work.')
+    if (result && typeof (result as { then?: unknown }).then === 'function')
+      fail('bad_request', 'Net transactions cannot await asynchronous work.')
   }
   private translate(error: unknown): Error {
     if (error instanceof NetError) {
-      if (error.code === 'storage_full' && this.writeFault !== 'storage_corrupt') this.writeFault = 'storage_full'
+      if (error.code === 'storage_full' && this.writeFault !== 'storage_corrupt')
+        this.writeFault = 'storage_full'
       if (error.code === 'storage_corrupt') this.fenceCorruption()
       return error
     }
     const code = (error as { errcode?: number })?.errcode
-    if (code === 13) { if (this.writeFault !== 'storage_corrupt') this.writeFault = 'storage_full'; return new NetError('storage_full', undefined, { cause: error }) }
-    if (code === 11 || code === 26) { this.fenceCorruption(); return new NetError('storage_corrupt', undefined, { cause: error }) }
-    if (code === 19 || (code !== undefined && (code & 255) === 19)) return new NetError('conflict', 'Stored uniqueness or integrity constraint failed.', { cause: error })
-    return error instanceof Error ? error : new NetError('internal', 'Net storage operation failed.', { cause: error })
+    if (code === 13) {
+      if (this.writeFault !== 'storage_corrupt') this.writeFault = 'storage_full'
+      return new NetError('storage_full', undefined, { cause: error })
+    }
+    if (code === 11 || code === 26) {
+      this.fenceCorruption()
+      return new NetError('storage_corrupt', undefined, { cause: error })
+    }
+    if (code === 19 || (code !== undefined && (code & 255) === 19))
+      return new NetError('conflict', 'Stored uniqueness or integrity constraint failed.', {
+        cause: error
+      })
+    return error instanceof Error
+      ? error
+      : new NetError('internal', 'Net storage operation failed.', { cause: error })
   }
   private fenceCorruption(): void {
     this.writeFault = 'storage_corrupt'
@@ -161,12 +274,28 @@ export class NetDatabase {
     if (existsSync(fence)) return
     try {
       const fd = openSync(fence, 'wx', 0o600)
-      try { writeSync(fd, 'Net storage corruption detected; reconcile the ledger before removing this fence.\n'); fsyncSync(fd) } finally { closeSync(fd) }
+      try {
+        writeSync(
+          fd,
+          'Net storage corruption detected; reconcile the ledger before removing this fence.\n'
+        )
+        fsyncSync(fd)
+      } finally {
+        closeSync(fd)
+      }
       const directoryFd = openSync(this.directory, 'r')
-      try { fsyncSync(directoryFd) } finally { closeSync(directoryFd) }
+      try {
+        fsyncSync(directoryFd)
+      } finally {
+        closeSync(directoryFd)
+      }
     } catch (cause) {
       // Keep the running process fenced even when the filesystem cannot record it.
-      throw new NetError('storage_corrupt', 'Net writes are suspended; the corruption fence could not be persisted.', { cause })
+      throw new NetError(
+        'storage_corrupt',
+        'Net writes are suspended; the corruption fence could not be persisted.',
+        { cause }
+      )
     }
   }
 }

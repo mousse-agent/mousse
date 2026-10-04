@@ -1,4 +1,4 @@
-import { build } from 'esbuild'
+import { cachedBuild } from './cached-build.mjs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -16,7 +16,7 @@ export function getBrowserWorkerBuildOptions(projectRoot = root) {
     }]
   }
 }
-export async function buildBrowserWorker(projectRoot = root) {
-  await build(getBrowserWorkerBuildOptions(projectRoot))
+export async function buildBrowserWorker(projectRoot = root, { reuse = false } = {}) {
+  return cachedBuild(getBrowserWorkerBuildOptions(projectRoot), { projectRoot, name: 'browser-worker', reuse })
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await buildBrowserWorker()

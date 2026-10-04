@@ -25,5 +25,9 @@ export interface MmsOptions {
   build?: string
   /** Trusted local code supplies immutable definitions and measured runtime
    * evidence for this exact profile. Never populated from received DTOs. */
-  nativeBotAdapters?(context: { services: MmsProfileServices; runtime: NetRuntime; net: NetService }): ReadonlyMap<string, NativeBotComposition>
+  nativeBotAdapters?(context: {
+    services: MmsProfileServices
+    runtime: NetRuntime
+    net: NetService
+  }): ReadonlyMap<string, NativeBotComposition>
 }

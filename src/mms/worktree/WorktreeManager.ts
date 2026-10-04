@@ -1,6 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'fs'
 import { symlink } from 'fs/promises'
 import { spawn } from 'child_process'
+import { devNull } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
 import simpleGit, { SimpleGit } from 'simple-git'
@@ -103,7 +104,13 @@ export class WorktreeManager {
     this.repository = undefined
   }
 
-  async createWorktree(agentId: string, repositoryPath = this.repoRoot, baseSha?: string, beforeCreate?: (info: WorktreeInfo) => void, options?: { safeCheckout?: boolean }): Promise<WorktreeInfo> {
+  async createWorktree(
+    agentId: string,
+    repositoryPath = this.repoRoot,
+    baseSha?: string,
+    beforeCreate?: (info: WorktreeInfo) => void,
+    options?: { safeCheckout?: boolean }
+  ): Promise<WorktreeInfo> {
     const repository = await RepositoryContext.open(repositoryPath)
     const repositoryId = resolveRepositoryIdentity(repository.root, { requireMutationCapability: true }).key
     const worktreesBase = join(this.installationHome, 'repositories', repositoryId, 'worktrees', 'agents')
@@ -117,13 +124,9 @@ export class WorktreeManager {
     if (branchExists) throw new Error(`Refusing to reuse existing agent branch: ${identity.branch}`)
 
     try {
-      // Only fixed hook-disable and fsmonitor-disable overrides use these library options.
-      const checkoutGit = options?.safeCheckout ? simpleGit({ baseDir: repository.root, unsafe: { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true } }) : repository.git
-      const safety = options?.safeCheckout ? ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'] : []
-      if (options?.safeCheckout) {
-        const configuration = await checkoutGit.raw([...safety, 'config', '--null', '--list'])
-        if (configuration.split('\0').some(entry => /^filter\..*\.(smudge|process|clean)\n/i.test(entry))) throw new Error('Safe checkout refuses configured external clean, smudge or process filters.')
-      }
+      const { git: checkoutGit, safety } = options?.safeCheckout
+        ? await safeWorktreeGit(repository.root)
+        : { git: repository.git, safety: [] }
       baseSha ??= (await repository.git.revparse(['HEAD'])).trim()
       beforeCreate?.({ path: identity.path, branch: identity.branch, repositoryRoot: repository.root, baseSha })
       await checkoutGit.raw([...safety, 'worktree', 'add', '-b', identity.branch, identity.path, baseSha])
@@ -322,7 +325,7 @@ export class WorktreeManager {
   /** Explicit cleanup only: Git refuses dirty worktrees and does not alter other metadata. */
   async cleanupValidatedAgentWorktree(
     worktreeInfo: WorktreeInfo,
-    options: { deleteBranch?: boolean } = {}
+    options: { deleteBranch?: boolean; safeCheckout?: boolean } = {}
   ): Promise<{ success: boolean; error?: string }> {
     try {
       const repository = await this.repositoryFor(worktreeInfo)
@@ -336,7 +339,12 @@ export class WorktreeManager {
       if (!valid) {
         return { success: false, error: `Refusing to remove path that is not a validated agent worktree: ${worktreeInfo.path}` }
       }
-      if (existsSync(worktreeInfo.path)) await repository.git.raw(['worktree', 'remove', worktreeInfo.path])
+      if (existsSync(worktreeInfo.path)) {
+        const { git: cleanupGit, safety } = options.safeCheckout
+          ? await safeWorktreeGit(repository.root)
+          : { git: repository.git, safety: [] }
+        await cleanupGit.raw([...safety, 'worktree', 'remove', worktreeInfo.path])
+      }
       if (options.deleteBranch === true) await repository.git.branch(['-d', worktreeInfo.branch])
       return { success: true }
     } catch (err) {
@@ -434,4 +442,36 @@ async function linkSharedDependencies(repositoryRoot: string, worktreePath: stri
     // A missing link permission must not prevent the isolated sparse checkout itself.
   }
   return linked
+}
+
+/** Disable external content drivers only for explicitly isolated worktree operations. */
+async function safeWorktreeGit(repositoryRoot: string): Promise<{ git: SimpleGit; safety: string[] }> {
+  // The unsafe library flags only permit these fixed disabling overrides.
+  const git = simpleGit({
+    baseDir: repositoryRoot,
+    unsafe: {
+      allowUnsafeHooksPath: true,
+      allowUnsafeFsMonitor: true,
+      allowUnsafeFilter: true
+    }
+  })
+  const safety = ['-c', `core.hooksPath=${devNull}`, '-c', 'core.fsmonitor=false']
+  // Git LFS and other inherited drivers must never execute on dispatched content,
+  // including Git's dirty-file check before worktree removal.
+  const configuration = await git.raw([...safety, 'config', '--null', '--list'])
+  const drivers = new Set<string>()
+  for (const entry of configuration.split('\0')) {
+    const match = /^filter\.(.+)\.(?:smudge|process|clean|required)\n/i.exec(entry)
+    if (match) drivers.add(match[1])
+  }
+  for (const driver of drivers) {
+    if (/[=\n\r]/.test(driver)) {
+      throw new Error('Safe checkout refuses a filter driver name it cannot override.')
+    }
+    for (const command of ['smudge', 'clean', 'process']) {
+      safety.push('-c', `filter.${driver}.${command}=`)
+    }
+    safety.push('-c', `filter.${driver}.required=false`)
+  }
+  return { git, safety }
 }

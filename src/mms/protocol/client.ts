@@ -290,13 +290,13 @@ export class LocalMmsClient implements MmsClient {
   }
 
   async close(): Promise<void> {
-    const wasConnected=this._connected
+    const wasConnected = this._connected
     this.closing = true
     this.commands.unbindWriter()
     this.rejectAllPending(new Error('Client closed'))
     this.teardownSocket()
     this._connected = false
-    if(wasConnected)this.notifyConnectionClosed(new Error('Client closed'))
+    if (wasConnected) this.notifyConnectionClosed(new Error('Client closed'))
     // Keep priorConnection / lastSequence for reconnect identity checks.
   }
 
@@ -336,7 +336,13 @@ export class LocalMmsClient implements MmsClient {
   }
 
   private notifyConnectionClosed(error: Error): void {
-    for(const handler of this.connectionClosedHandlers){try{handler(error)}catch{/* isolate lifecycle consumers */}}
+    for (const handler of this.connectionClosedHandlers) {
+      try {
+        handler(error)
+      } catch {
+        /* isolate lifecycle consumers */
+      }
+    }
   }
 
   async request<T = unknown>(
@@ -464,7 +470,11 @@ export class LocalMmsClient implements MmsClient {
     if (env.kind === 'connection_event') {
       if (!this._hello?.capabilities.includes('net.v1')) return
       for (const handler of this.connectionEventHandlers) {
-        try { handler(env) } catch { /* isolate display consumers */ }
+        try {
+          handler(env)
+        } catch {
+          /* isolate display consumers */
+        }
       }
       return
     }
@@ -547,7 +557,7 @@ export class LocalMmsClient implements MmsClient {
   }
 
   private onDisconnect(err: Error): void {
-    const wasConnected=this._connected
+    const wasConnected = this._connected
     this.commands.unbindWriter()
     if (this.closing) {
       this.rejectAllPending(new Error('Client closed'))
@@ -560,7 +570,7 @@ export class LocalMmsClient implements MmsClient {
       return
     }
     this._connected = false
-    if(wasConnected)this.notifyConnectionClosed(err)
+    if (wasConnected) this.notifyConnectionClosed(err)
     this.rejectAllPending(err)
     this.teardownSocket()
     // Keep priorConnection / lastSequence / needsResnapshot for reconnect decisions.

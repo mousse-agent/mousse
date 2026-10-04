@@ -20,7 +20,9 @@ const homeDir = join(homedir(), '.mousse')
 
 ensureElectron()
 ensureNodePtyHelperExecutable()
-await buildCli({ watch: false, log: false })
+const buildStartedAt = performance.now()
+const builds = await buildCli({ watch: false, log: false, reuse: true })
+console.log(`[start] CLI ${builds.cliReused ? 'reused' : 'built'}; browser worker ${builds.workerReused ? 'reused' : 'built'} (${Math.round(performance.now() - buildStartedAt)}ms)`)
 
 const env = { ...process.env }
 
