@@ -103,6 +103,30 @@ sources under `/private/tmp/mousse-pr61-*-recovery-probe` and
 service and gateway with ephemeral profile/account custody and clean up their
 owned resources.
 
+## Outer enrollment retry after committed response loss
+
+At native `39f74fe8` and companion `36bee27e`, I also discarded the hosted
+rendezvous response during the actual `bridge.invite` operation. I verified
+one committed server rendezvous, no persisted native invitation, retained
+pending custody and blocked renewal. Shutdown/restart/unlock retained that
+original.
+
+The next identical `bridge.invite` call replayed the exact hosted request once,
+but returned `invite_invalid`. I captured the expiry passed to transport and
+the replayed expiry: `createInvite` constructs a new authorization using current
+time; hosted recovery returns the original rendezvous expiry.
+`validateRendezvous` correctly rejects their unequal expiry values. The hosted
+replay cleared pending custody before that validation; no native invitation
+was persisted. Renewal then passed, and a subsequent attempt created a fresh
+invitation and a second hosted rendezvous. This failure is not a permanent
+pending-operation deadlock, and is distinct from lost revocation acknowledgement.
+
+I have not changed invitation authorization or loosened expiry equality. The
+owner needs to reconcile outer invitation preparation with hosted replay, while
+preserving current authority/roster/route checks, expiry and protected token
+custody. Evidence is `/tmp/mousse-pr61-enrollment-loss-interop.log`; the controlled
+probe is `/private/tmp/mousse-pr61-enrollment-loss-probe/probe.ts`.
+
 ## Remaining gates
 
 This is not complete historical pending-operation recovery. I verified HTTP
@@ -110,8 +134,8 @@ This is not complete historical pending-operation recovery. I verified HTTP
 registration lease. I retain those originals. Acknowledged
 explicit disconnect recovers the tested states; lost revocation acknowledgement
 remains blocked as described above.
-I also do not claim complete outer-enrollment response-loss retry, production
-account login, production TLS, database, paid-provider, or platform rollout
-qualification. The optional Plus feature and combined candidate remain draft
+The outer-enrollment retry failure above also remains unresolved. I do not
+claim production account login, production TLS, database, paid-provider, or
+platform rollout qualification. The optional Plus feature and combined candidate remain draft
 pending the other human teammate's sensitive review. I left the other
 teammate's source PR #60 untouched.
