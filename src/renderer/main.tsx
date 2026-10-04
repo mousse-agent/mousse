@@ -5,16 +5,26 @@ import { SettingsPage } from './components/SettingsPage'
 import { ScheduledPage } from './components/ScheduledPage'
 import { ChannelsPage } from './components/ChannelsPage'
 import { useTheme } from './hooks/useTheme'
+import { useAppStore } from './stores/appStore'
 import './styles/global.css'
 
-function Root() {
+function ProfilePages() {
   useTheme()
   return (
     <>
-      <App />
       <SettingsPage />
       <ScheduledPage />
       <ChannelsPage />
+    </>
+  )
+}
+
+function Root() {
+  const profileReady = useAppStore((state) => state.profileReady)
+  return (
+    <>
+      <App />
+      {profileReady && <ProfilePages />}
     </>
   )
 }

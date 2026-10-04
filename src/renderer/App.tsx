@@ -48,12 +48,13 @@ export default function App() {
   const sidebarMode = useAppStore((s) => s.sidebarMode)
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
   useEffect(() => {
+    if (!profileReady) return
     useChatsStore.getState().activate(profileId)
     void useChatsStore.getState().refresh()
     if (sidebarMode !== 'chats' && threadsSidebarView !== 'chats') return
     const timer = setInterval(() => { void useChatsStore.getState().refresh() }, 1000)
     return () => clearInterval(timer)
-  }, [profileId, sidebarMode, threadsSidebarView])
+  }, [profileId, profileReady, sidebarMode, threadsSidebarView])
 
   const setSidebarWidth = useAppStore((s) => s.setSidebarWidth)
 
@@ -500,6 +501,8 @@ export default function App() {
           onMouseLeave={!threadsSidebarOpen ? scheduleThreadsPeekClose : undefined}
         />
 
+        {/* Profile-scoped panels need the trusted binding before their mount effects run. */}
+        {profileReady && <>
         {threadsVisible && (
           <div className="threads-sidebar-pane" ref={threadsPaneRef}>
             <ThreadsSidebar className={threadsClosing ? 'threads-sidebar-closing' : ''} />
@@ -595,6 +598,7 @@ export default function App() {
           </div>
           <MainViewPanel />
         </KeepMounted>
+        </>}
 
       </div>
 
