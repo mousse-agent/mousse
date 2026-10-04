@@ -458,10 +458,16 @@ async function safeWorktreeGit(repositoryRoot: string): Promise<{ git: SimpleGit
   const safety = ['-c', `core.hooksPath=${devNull}`, '-c', 'core.fsmonitor=false']
   // Git LFS and other inherited drivers must never execute on dispatched content,
   // including Git's dirty-file check before worktree removal.
-  const configuration = await git.raw([...safety, 'config', '--null', '--list'])
+  const configuration = await git.raw([...safety, 'config', '--null', '--show-scope', '--list'])
   const drivers = new Set<string>()
-  for (const entry of configuration.split('\0')) {
-    const match = /^filter\.(.+)\.(?:smudge|process|clean|required)\n/i.exec(entry)
+  const entries = configuration.split('\0')
+  // With --null --show-scope, Git emits scope NUL key LF value NUL pairs.
+  for (let index = 0; index < entries.length - 1; index += 2) {
+    const scope = entries[index]
+    const match = /^filter\.(.+)\.(smudge|process|clean|required)\n/i.exec(entries[index + 1])
+    if (match && ['local', 'worktree'].includes(scope) && match[2].toLowerCase() !== 'required') {
+      throw new Error('Safe checkout refuses configured external clean, smudge or process filters.')
+    }
     if (match) drivers.add(match[1])
   }
   for (const driver of drivers) {
