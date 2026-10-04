@@ -61,3 +61,23 @@ it.each(['smudge', 'process', 'clean'])(
     await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' })
   }
 )
+it('refuses worktree-specific filters before calling the effect journal or creating a branch', async () => {
+  const { root, git, manager, marker } = await fixture()
+  git('config', 'extensions.worktreeConfig', 'true')
+  git('config', '--worktree', 'filter.fixture.smudge', `touch '${marker}'`)
+  const before = vi.fn()
+  await expect(
+    manager.createWorktree('worktree-filter-denied-test', root, undefined, before, {
+      safeCheckout: true
+    })
+  ).rejects.toThrow(/external clean, smudge or process filters/)
+  expect(before).not.toHaveBeenCalled()
+  expect(
+    git(
+      'for-each-ref',
+      '--format=%(refname)',
+      'refs/heads/mousse/agent/worktree-filter-denied-test'
+    )
+  ).toBe('')
+  await expect(access(marker)).rejects.toMatchObject({ code: 'ENOENT' })
+})
