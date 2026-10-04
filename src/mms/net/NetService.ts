@@ -1523,7 +1523,7 @@ export class NetService {
       () => {
         if (this.stopped || this.disabled || !this.config.enabled) return
         try {
-          this.state?.identity.renewExpiring(this.clock.now())
+          this.state?.identity.renewExpiring()
         } catch (error) {
           this.lastError = error instanceof NetError ? error.code : 'internal'
           this.emit()

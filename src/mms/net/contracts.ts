@@ -161,7 +161,7 @@ export interface IdentityService {
   }): Signed
   issueBotDelegation(input: { bot: BotId; key: Base64Url; name: string; hostNode: NodeId }): Signed
   revoke(subject: NodeId | BotId): Signed
-  renewExpiring(now: number): Signed | undefined
+  renewExpiring(): Signed | undefined
   transferAuthority(to: NodeId): Signed
   becomeAuthorityFromRecovery(): Signed
   onRosterChanged(listener: (user: UserId) => void): () => void

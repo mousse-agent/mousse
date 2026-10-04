@@ -566,7 +566,7 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     })
     for (let i = 0; i < 3; i++) {
       clock.advance(6 * 24 * 60 * 60 * 1_000)
-      p.aIdentity.renewExpiring(clock.now())
+      p.aIdentity.renewExpiring()
     }
     const path = makeTempDir('fresh-history-').path,
       db = new NetDatabase({ profileDir: path }),
@@ -739,7 +739,7 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
       p = await profiles(clock)
     const prior = p.bIdentity.roster()!.payload
     clock.advance(6 * 24 * 60 * 60 * 1_000)
-    expect(p.aIdentity.renewExpiring(clock.now())).toBeDefined()
+    expect(p.aIdentity.renewExpiring()).toBeDefined()
     expect(p.bIdentity.roster()!.payload).toBe(prior)
     const connection = await sessions(p, { clock })
     await Promise.all([connection.a.opened, connection.b.opened])
