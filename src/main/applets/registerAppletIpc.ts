@@ -34,6 +34,7 @@ export function registerAppletIpc(register:Register, gui:GuiMmsController, allow
       if(!entry||win.isDestroyed())return
       if(gui.getWindowBindingForSender(win.webContents.id)?.profileId!==profileId||gui.getWindowBindingForSender(win.webContents.id)?.epoch!==epoch){value.manager.destroy();value.entries.clear();owners.delete(win.webContents.id);return}
       if(eventData.type==='state') {
+        win.webContents.send('applets:event',{runtimeId:eventData.runtimeId,type:'state-changed'} satisfies AppletUiEvent)
         void gui.runWithSender(win.webContents,()=>gui.request('applets.state.save',{...entry,profileId:ownProfile(value),state:eventData.payload})).catch(()=>{})
         return
       }

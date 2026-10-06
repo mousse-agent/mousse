@@ -48,8 +48,14 @@ try {
       contents: `
     import {app,BrowserWindow,ipcMain,webContents,nativeImage} from 'electron';
     import {execFileSync} from 'node:child_process';import {writeFileSync} from 'node:fs';import assert from 'node:assert/strict';
+    import {AppletRuntimeManager} from './src/main/applets/AppletRuntimeManager';
     import {registerAppletIpc} from './src/main/applets/registerAppletIpc';
     const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+    let snapshotCalls=0;
+    if (${scrollOnly}) {
+      const snapshot=AppletRuntimeManager.prototype.snapshot;
+      AppletRuntimeManager.prototype.snapshot=async function(id){snapshotCalls++;await pause(600);return snapshot.call(this,id)};
+    }
     app.whenReady().then(async()=>{
       const owner=new BrowserWindow({width:800,height:600,frame:false,webPreferences:{preload:${JSON.stringify(join(directory, 'preload.cjs'))},sandbox:true,contextIsolation:true,nodeIntegration:false}});
       let saved={count:0};
@@ -81,12 +87,17 @@ try {
           owner.destroy();app.quit();return;
         }
         if (${scrollOnly}) {
+          await wait(()=>owner.webContents.executeJavaScript('!!document.querySelector(".mousse-applet-scroll-frame")'),'cached frame prepared before scrolling');
+          await pause(800);
+          const capturesBefore=snapshotCalls;
           const firstId = first.id;
           const before = await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop');
           const header = await owner.webContents.executeJavaScript('(()=>{const r=document.querySelector(".mousse-applet-header").getBoundingClientRect();return{x:Math.round(r.x+100),y:Math.round(r.y+r.height/2)}})()');
           owner.webContents.sendInputEvent({type:'mouseMove',...header});
+          const wheelAt=Date.now();
           owner.webContents.sendInputEvent({type:'mouseWheel',...header,deltaX:0,deltaY:-24,canScroll:true});
           await wait(()=>owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop>'+before),'header wheel scrolls transcript');
+          assert(Date.now()-wheelAt<400,'Header scroll responds without waiting for the 600ms snapshot');
           await wait(()=>owner.webContents.executeJavaScript('!!document.querySelector(".mousse-applet-scroll-frame")'),'host DOM snapshot replaces native guest during scroll');
           assert.equal(guests()[0].id,firstId,'Scrolling preserves the guest renderer');
           assert.equal(owner.contentView.children[0].getVisible(),false,'Native surface is hidden while host scrolls');
@@ -95,6 +106,7 @@ try {
             await pause(16);
             assert.equal(owner.contentView.children[0].getVisible(),false,'Native guest cannot overlap scrolling header');
           }
+          assert.equal(snapshotCalls,capturesBefore,'Scrolling never starts an expensive snapshot capture');
           await wait(()=>owner.contentView.children[0].getVisible(),'live guest resumes after gesture');
           assert.equal(guests()[0].id,firstId,'Resume does not reload guest');
           assert.equal(await first.executeJavaScript('document.querySelector("output").textContent'),'1','Interaction survives header scrolling');
@@ -112,7 +124,7 @@ try {
           assert.equal(guests().length,0,'Newly visible preview waits for scroll to settle');
           await wait(()=>guests().length===1,'newly visible preview mounts after gesture');
           await wait(()=>guests()[0].executeJavaScript('document.querySelector("output").textContent==="1"'),'offscreen return restores saved state');
-          console.log('Header wheel regression passed: DOM snapshot during scroll, no native header overlap, same guest/state after resume, composer clipping.');
+          console.log('Header wheel regression passed: passive scrolling with 600ms snapshot latency, no captures during gesture, cached DOM frame, no native header overlap, same guest/state after resume, composer clipping.');
           owner.destroy();app.quit();return;
         }
         await pause(100);const image=nativeImage.createFromBuffer(execFileSync('import',['-window',String(owner.getNativeWindowHandle().readUInt32LE()),'png:-']));writeFileSync(${JSON.stringify(screenshot)},image.toPNG());

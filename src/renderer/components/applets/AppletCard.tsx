@@ -64,31 +64,52 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
       if (id) void api.unmount({ runtimeId: id }).catch(() => {})
       setReady(false)
     }
+    let snapshotTimer: ReturnType<typeof setTimeout> | undefined
+    let capturing = false
+    let snapshotVersion = 0
+    // Prepare the DOM frame while stationary, never on the wheel's critical path.
+    const refreshSnapshot = () => {
+      clearTimeout(snapshotTimer)
+      if (disposed || scrollPaused || !runtime.current) return
+      const captureSnapshot = async () => {
+        if (disposed || scrollPaused || !runtime.current) return
+        if (capturing) { refreshSnapshot(); return }
+        const id = runtime.current, version = snapshotVersion
+        capturing = true
+        try {
+          const result = await api.snapshot({ runtimeId: id })
+          if (!result.image) return
+          const image = new Image()
+          image.src = result.image
+          await image.decode()
+          if (!disposed && !scrollPaused && runtime.current === id && version === snapshotVersion)
+            setScrollImage(result.image)
+        } catch {
+          /* A missing cached frame must never prevent native scrolling. */
+        } finally {
+          capturing = false
+        }
+      }
+      snapshotTimer = setTimeout(() => { void captureSnapshot() }, 100)
+    }
     const suspend = async () => {
       scrollPaused = true
+      snapshotVersion++
+      clearTimeout(snapshotTimer)
+      cancelAnimationFrame(frame)
+      frame = 0
       const id = runtime.current
-      if (!id) return
-      try {
-        const result = await api.snapshot({ runtimeId: id })
-        if (!disposed && scrollPaused && runtime.current === id) {
-          if (result.image) {
-            const image = new Image()
-            image.src = result.image
-            await image.decode().catch(() => {})
-          }
-          if (disposed || !scrollPaused || runtime.current !== id) return
-          setScrollImage(result.image)
-          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-          if (!disposed && scrollPaused && runtime.current === id)
-            await api.suspend({ runtimeId: id })
-        }
-      } catch {
-        /* Profile/thread teardown owns the guest lifecycle. */
-      }
+      if (id) await api.suspend({ runtimeId: id }).catch(() => {})
     }
     const measure = async () => {
       frame = 0
       if (disposed || failed) return
+      if (document.visibilityState === 'hidden' || appletHostBlocked()) {
+        remove()
+        return
+      }
+      // Hidden native guests need no per-frame geometry or teardown while scrolling.
+      if (scrollPaused) return
       const rect = node.getBoundingClientRect()
       const viewport = scroller?.getBoundingClientRect()
       const composer =
@@ -108,9 +129,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
       const visible =
         rect.bottom > clip.y &&
         rect.top < clip.y + clip.height &&
-        rect.width > 0 &&
-        document.visibilityState !== 'hidden' &&
-        !appletHostBlocked()
+        rect.width > 0
       if (!visible) {
         remove()
         return
@@ -139,6 +158,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
           lastGeometry = ''
           setReady(true)
           if (scrollPaused) await suspend()
+          else refreshSnapshot()
           schedule()
         } catch (cause) {
           if (!disposed) {
@@ -154,6 +174,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
         lastGeometry = geometry
         void api
           .update({ runtimeId: runtime.current, bounds, clip, visible: true })
+          .then(refreshSnapshot)
           .catch((cause) => {
             if (!disposed) {
               failed = true
@@ -164,6 +185,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
       }
     }
     const schedule = () => {
+      if (scrollPaused && document.visibilityState !== 'hidden' && !appletHostBlocked()) return
       if (!intersecting && !runtime.current) return
       if (!frame)
         frame = requestAnimationFrame(() => {
@@ -184,7 +206,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
     const unsubscribeAppearance = subscribeAppletAppearance((value) => {
       appearance = value
       const id = runtime.current
-      if (id) void api.appearance({ runtimeId: id, appearance: value }).catch(() => {})
+      if (id) void api.appearance({ runtimeId: id, appearance: value }).then(refreshSnapshot).catch(() => {})
     })
     const unsubscribeHost = subscribeAppletHostVisibility(schedule)
     const observer = new ResizeObserver(schedule)
@@ -217,7 +239,8 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
           if (!disposed) setHeight(Math.max(180, Math.min(540, event.height!)))
         }, 80)
       }
-      if (event.type === 'ready') setReady(true)
+      if (event.type === 'ready') { setReady(true); refreshSnapshot() }
+      if (event.type === 'state-changed') refreshSnapshot()
       if (event.type === 'conversation-input' && typeof event.text === 'string')
         setConversationInput(event.text.slice(0, 8000))
     })
@@ -232,6 +255,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
       unsubscribeAppearance()
       unsubscribeScroll()
       clearTimeout(resizeTimer)
+      clearTimeout(snapshotTimer)
       window.removeEventListener('scroll', schedule, true)
       window.removeEventListener('resize', schedule)
       document.removeEventListener('visibilitychange', schedule)

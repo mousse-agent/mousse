@@ -4,7 +4,7 @@ export interface AppletBounds { x: number; y: number; width: number; height: num
 export interface AppletIdentity { threadId: string; appletId: string; revisionId: string }
 export interface AppletMountRequest extends AppletIdentity { sourceHash: string; title?: string; description?: string; bounds: AppletBounds; clip: AppletBounds; appearance?:AppletAppearance }
 export interface AppletLayoutRequest { runtimeId: string; bounds: AppletBounds; clip: AppletBounds; visible?: boolean }
-export interface AppletUiEvent { runtimeId: string; type: 'ready' | 'resize' | 'error' | 'conversation-input'; height?: number; message?: string; text?: string }
+export interface AppletUiEvent { runtimeId: string; type: 'ready' | 'resize' | 'error' | 'conversation-input' | 'state-changed'; height?: number; message?: string; text?: string }
 export interface AppletApi {
   get(input: AppletIdentity): Promise<AppletBundle>
   mount(input: AppletMountRequest): Promise<{runtimeId: string}>
