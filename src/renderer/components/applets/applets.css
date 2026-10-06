@@ -8,28 +8,34 @@
 }
 .mousse-applet-header {
   display: flex;
-  gap: 12px;
-  justify-content: space-between;
-  padding: 14px 16px 8px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border, #383840);
 }
-.mousse-applet-header strong {
-  font-size: 14px;
-}
-.mousse-applet-header p {
-  font-size: 12px;
-  opacity: 0.72;
-  margin: 4px 0 0;
-}
-.mousse-applet-revision {
-  font-size: 10px;
-  opacity: 0.6;
+.mousse-applet-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 12px;
 }
 .mousse-applet-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 16px 12px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+.mousse-applet-actions .mousse-applet-icon-button {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .mousse-applet-actions button:focus-visible {
   outline: 2px solid var(--accent, #ac86ce);

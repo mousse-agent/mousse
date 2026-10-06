@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react'
+import { Code2, Eye, FileCode2, FileJson, Image as ImageIcon, Maximize2, Minimize2, RotateCcw } from 'lucide-react'
 import type { AppletBundle, AppletReference } from '../../../shared/applets'
 import { useAppStore } from '../../stores/appStore'
 import './applets.css'
@@ -330,51 +331,30 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
   return (
     <section className="mousse-applet" aria-label={`Interactive applet: ${reference.title}`}>
       <header className="mousse-applet-header">
-        <div>
-          <strong>{reference.title}</strong>
-          <p>{reference.description}</p>
+        <strong className="mousse-applet-title" title={`${reference.title}\n${reference.description}\nRevision ${reference.revisionId}`}>
+          {reference.title}
+        </strong>
+        <div className="mousse-applet-actions">
+          <Button size="sm" className="mousse-applet-icon-button" title={expanded ? 'Collapse' : 'Expand'} aria-label={expanded ? 'Collapse' : 'Expand'} aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
+            {expanded ? <Minimize2 size={16} aria-hidden="true" /> : <Maximize2 size={16} aria-hidden="true" />}
+          </Button>
+          <Button size="sm" className="mousse-applet-icon-button" title="Restart" aria-label="Restart" onClick={() => { setError(null); setRestart((value) => value + 1) }}>
+            <RotateCcw size={16} aria-hidden="true" />
+          </Button>
+          <Button size="sm" className="mousse-applet-icon-button" title={sourceOpen ? 'Preview' : 'Source'} aria-label={sourceOpen ? 'Preview' : 'Source'} aria-expanded={sourceOpen} onClick={() => void showSource()}>
+            {sourceOpen ? <Eye size={16} aria-hidden="true" /> : <Code2 size={16} aria-hidden="true" />}
+          </Button>
+          <Button size="sm" className="mousse-applet-icon-button" title="Export HTML" aria-label="Export HTML" onClick={() => void exportApplet('html')}>
+            <FileCode2 size={16} aria-hidden="true" />
+          </Button>
+          <Button size="sm" className="mousse-applet-icon-button" title="Export source" aria-label="Export source" onClick={() => void exportApplet('source')}>
+            <FileJson size={16} aria-hidden="true" />
+          </Button>
+          <Button size="sm" className="mousse-applet-icon-button" title="Export PNG" aria-label="Export PNG" disabled={!ready} onClick={() => void exportApplet('png')}>
+            <ImageIcon size={16} aria-hidden="true" />
+          </Button>
         </div>
-        <span className="mousse-applet-revision" title={reference.revisionId}>
-          Revision {reference.revisionId.slice(0, 8)}
-        </span>
       </header>
-      <div className="mousse-applet-actions">
-        <Button
-          size="sm"
-          type="button"
-          onClick={() => setExpanded((value) => !value)}
-          aria-expanded={expanded}
-        >
-          {expanded ? 'Collapse' : 'Expand'}
-        </Button>
-        <Button
-          size="sm"
-          type="button"
-          onClick={() => {
-            setError(null)
-            setRestart((value) => value + 1)
-          }}
-        >
-          Restart
-        </Button>
-        <Button
-          size="sm"
-          type="button"
-          onClick={() => void showSource()}
-          aria-expanded={sourceOpen}
-        >
-          {sourceOpen ? 'Preview' : 'Source'}
-        </Button>
-        <Button size="sm" type="button" onClick={() => void exportApplet('html')}>
-          Export HTML
-        </Button>
-        <Button size="sm" type="button" onClick={() => void exportApplet('source')}>
-          Export source
-        </Button>
-        <Button size="sm" type="button" disabled={!ready} onClick={() => void exportApplet('png')}>
-          Export PNG
-        </Button>
-      </div>
       {error && (
         <p className="mousse-applet-error" role="alert">
           {error}
