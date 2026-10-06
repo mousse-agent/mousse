@@ -36,7 +36,7 @@ export interface AppletRuntimeEvent {
   runtimeId: string
   threadId: string
   revisionId: string
-  type: 'ready' | 'resize' | 'state' | 'error' | 'conversation-input' | 'visual-changed'
+  type: 'ready' | 'resize' | 'state' | 'error' | 'conversation-input' | 'visual-changed' | 'released'
   payload: unknown
 }
 interface Runtime {
@@ -49,6 +49,7 @@ interface Runtime {
   documentUrl: string
   heartbeat: number
   visible: boolean
+  parkedAt?: number
 }
 
 /** All callers must authenticate the owner renderer and retrieve source from durable storage. */
@@ -94,7 +95,13 @@ export class AppletRuntimeManager {
     if (this.destroyed) throw new Error('Applet manager is closed')
     this.unmount(input.runtimeId)
     if (this.owner.isDestroyed()) throw new Error('Applet owner is closed')
-    if (this.runtimes.size >= 3) throw new Error('Only three applets may run at once')
+    if (this.runtimes.size >= 3) {
+      const oldest = [...this.runtimes.values()].filter((item) => item.parkedAt !== undefined)
+        .sort((a, b) => a.parkedAt! - b.parkedAt!)[0]
+      if (!oldest) throw new Error('Only three applets may run at once')
+      this.notify(oldest, 'released', null)
+      this.unmount(oldest.mount.runtimeId)
+    }
     const slot = [0, 1, 2].find(
       (index) => ![...this.runtimes.values()].some((runtime) => runtime.slot === index)
     )!
@@ -233,6 +240,7 @@ export class AppletRuntimeManager {
         nativeBounds.y + nativeBounds.height,
         nativeClip.y + nativeClip.height
       )
+    runtime.parkedAt = undefined
     runtime.visible = right > left && bottom > top
     runtime.container.setBounds({
       x: Math.round(left),
@@ -300,6 +308,13 @@ export class AppletRuntimeManager {
           for (const value of values.slice(0, 64)) this.rememberScroll(runtime, value)
         })
         .catch(() => {})
+  }
+
+  park(runtimeId: string): void {
+    const runtime = this.runtimes.get(runtimeId)
+    if (!runtime) return
+    this.suspend(runtimeId)
+    runtime.parkedAt ??= Date.now()
   }
 
   unmount(runtimeId: string): void {
@@ -380,7 +395,10 @@ export class AppletRuntimeManager {
       if (event.type === 'heartbeat') runtime.heartbeat = Date.now()
       else if (event.type === 'ready') this.notify(runtime, 'ready', null)
       else if (event.type === 'visual-changed') this.notify(runtime, 'visual-changed', null)
-      else if (event.type === 'scroll-position') {
+      else if (event.type === 'scroll-changed' && Array.isArray(event.payload)) {
+        for (const position of event.payload.slice(0, 64)) this.rememberScroll(runtime, position)
+        this.notify(runtime, 'visual-changed', null)
+      } else if (event.type === 'scroll-position') {
         this.rememberScroll(runtime, event.payload)
       } else if (
         event.type === 'resize' &&

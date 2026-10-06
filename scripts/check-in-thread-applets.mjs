@@ -8,6 +8,7 @@ import electron from 'electron'
 const directory = await mkdtemp(join(tmpdir(), 'mousse-in-thread-applets-'))
 const screenshot = '/tmp/mousse-in-thread-applets-native.png'
 const scrollOnly = process.argv.includes('--scroll-only')
+const documentScrollOnly = process.argv.includes('--document-scroll-only')
 const appearanceOnly = process.argv.includes('--appearance-only')
 try {
   await build({
@@ -60,6 +61,7 @@ try {
       const owner=new BrowserWindow({width:800,height:600,frame:false,webPreferences:{preload:${JSON.stringify(join(directory, 'preload.cjs'))},sandbox:true,contextIsolation:true,nodeIntegration:false}});
       let saved={count:0};
       const bundle={schemaVersion:1,appletId:'applet',revisionId:'revision',sourceHash:'hash',title:'Interactive costs',description:'Saved counter illustration',threadId:'thread',messageId:'message',turnId:'turn',createdAt:new Date().toISOString(),runtimePolicyVersion:1,source:{schemaVersion:1,title:'Interactive costs',description:'Saved counter illustration',stateVersion:1,html:'<main class="applet-canvas"><button id="increment">Add one</button><output id="count"></output><div id="nested" style="height:80px;overflow:auto"><div style="height:200px;background:rgb(255,0,0)">Top</div><div style="height:400px;background:rgb(0,255,255)">Scrolled content</div></div></main>',css:'.applet-canvas{background:rgb(255,0,0);min-height:100vh}button{margin:20px;padding:15px}',js:'let count=mousseApplet.state?.count??0;document.querySelector("output").textContent=count;document.querySelector("button").onclick=()=>{count++;document.querySelector("output").textContent=count;mousseApplet.saveState({count})}'} };
+      if (${documentScrollOnly}) bundle.source.css += '.applet-canvas{min-height:1400px;background:linear-gradient(to bottom,rgb(255,0,0) 0 400px,rgb(255,255,0) 400px 1400px)}';
       const gui={on:()=>{},getWindowBindingForSender:()=>({profileId:'profile',epoch:1}),runWithSender:(_sender,callback)=>callback(),request:async(method,input)=>{assert.equal(input.threadId,'thread');if(method==='applets.get')return bundle;if(method==='applets.state.get')return{state:saved};if(method==='applets.state.save'){saved=input.state;return{ok:true}}throw new Error('Unexpected request '+method)}};
       registerAppletIpc((channel,handler)=>ipcMain.handle(channel,handler),gui,()=>[owner]);
       const guests=()=>webContents.getAllWebContents().filter(value=>value.id!==owner.webContents.id&&value.getURL().startsWith('mousse-applet:'));
@@ -87,6 +89,26 @@ try {
           await pause(150);execFileSync('import',['-window',String(owner.getNativeWindowHandle().readUInt32LE()),'/tmp/mousse-applet-appearance-card.png']);
           console.log('Production card appearance passed: live light-theme/accent/font/radius update, same guest/state, opaque surfaces without acrylic, real Mousse icon geometry.');
           owner.destroy();app.quit();return;
+        }
+        if (${documentScrollOnly}) {
+          await first.executeJavaScript('window.unsavedMarker="preserve";new Promise(resolve=>{let n=0;const step=()=>{window.scrollTo(0,200+n*6);if(++n<40)requestAnimationFrame(step);else resolve()};step()})');
+          await wait(()=>owner.webContents.executeJavaScript('!!document.querySelector(".mousse-applet-scroll-frame")'),'root scroll final snapshot');
+          const currentFrame=nativeImage.createFromDataURL(await owner.webContents.executeJavaScript('document.querySelector(".mousse-applet-scroll-frame").src'));
+          const frameSize=currentFrame.getSize(),framePixels=currentFrame.toBitmap(),frameScale=frameSize.width/(await first.executeJavaScript('innerWidth'));
+          const sample=(Math.round(20*frameScale)*frameSize.width+Math.round(600*frameScale))*4;
+          assert.deepEqual(Array.from(framePixels.subarray(sample,sample+3)),[0,255,255],'Final root scroll refresh is not dropped during sustained scrolling');
+          assert.equal(Math.round(await first.executeJavaScript('scrollY')),434);
+          await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=250');
+          await pause(800);
+          assert.equal(Math.round(await first.executeJavaScript('scrollY')),434,'Document scroll remains fixed after partial clipping');
+          await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=700');
+          await pause(800);
+          await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=0');
+          await wait(()=>guests().length===1,'document applet returns');await pause(500);
+          assert.equal(guests()[0].id,first.id,'Offscreen thread scrolling retains guest DOM and scroll state');
+          assert.equal(Math.round(await guests()[0].executeJavaScript('scrollY')),434,'Document scroll survives return');
+          assert.equal(await guests()[0].executeJavaScript('window.unsavedMarker'),'preserve','Unserialized applet state survives thread scroll');
+          console.log('Document scrolling check passed');owner.destroy();app.quit();return;
         }
         if (${scrollOnly}) {
           await wait(()=>owner.webContents.executeJavaScript('!!document.querySelector(".mousse-applet-scroll-frame")'),'cached frame prepared before scrolling');
@@ -141,14 +163,14 @@ try {
           assert.equal(await first.executeJavaScript('document.querySelector("#nested").scrollTop'),250,'Immediate gesture resume preserves inner scroll state');
           for(const payload of [{path:Array(17).fill(0),top:0,left:0},{path:[-1],top:0,left:0},{path:[2049],top:0,left:0},{path:[],top:Infinity,left:0},{path:[],top:'250',left:0}])first.emit('console-message',{message:'__MOUSSE_APPLET_EVENT__'+JSON.stringify({type:'scroll-position',payload})});
           await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=700');
-          await wait(()=>guests().length===0,'offscreen guest tears down during gesture');
+          await wait(()=>guests().length===1&&!owner.contentView.children[0].getVisible(),'offscreen guest is parked during gesture');
           await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=0');
           await pause(50);
-          assert.equal(guests().length,0,'Newly visible preview waits for scroll to settle');
+          assert.equal(owner.contentView.children[0].getVisible(),false,'Parked preview stays hidden until scroll settles');
           await wait(()=>guests().length===1,'newly visible preview mounts after gesture');
           await wait(()=>guests()[0].executeJavaScript('document.querySelector("output").textContent==="1"'),'offscreen return restores saved state');
           assert.equal(await guests()[0].executeJavaScript('document.querySelector("#nested").scrollTop'),250,'Offscreen return restores nested scroll position');
-          console.log('Header wheel regression passed: passive scrolling with 600ms snapshot latency, no captures during gesture, cached DOM frame, no native header overlap, same guest/state after resume, current nested-scroll snapshot, immediate-gesture fallback, bounded validated offscreen scroll restoration, composer clipping.');
+          console.log('Header wheel regression passed: passive scrolling with 600ms snapshot latency, no captures during gesture, cached DOM frame, no native header overlap, same guest/state after resume, current nested-scroll snapshot, immediate-gesture fallback, bounded validated offscreen scroll preservation, composer clipping.');
           owner.destroy();app.quit();return;
         }
         await pause(100);const image=nativeImage.createFromBuffer(execFileSync('import',['-window',String(owner.getNativeWindowHandle().readUInt32LE()),'png:-']));writeFileSync(${JSON.stringify(screenshot)},image.toPNG());
@@ -160,8 +182,8 @@ try {
         assert(await owner.webContents.executeJavaScript('document.querySelector(".mousse-applet-source pre").textContent.includes("increment")'));
         await click('Preview');await wait(()=>guests().length===1,'source returns to preview');await click('Restart');await wait(()=>guests().length===1,'restart remounts guest');
         await wait(()=>guests()[0].executeJavaScript('document.querySelector("output").textContent==="1"'),'restart restores persisted state');
-        await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=700');await wait(()=>guests().length===0,'offscreen guest unmount');
-        console.log('Production applet card passed: Electron mouse input controls, source/restart, menu suspension, saved state, composer clipping, offscreen teardown. Screenshot: '+${JSON.stringify(screenshot)});
+        await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=700');await wait(()=>guests().length===1&&!owner.contentView.children[0].getVisible(),'offscreen guest is parked');
+        console.log('Production applet card passed: Electron mouse input controls, source/restart, menu suspension, saved state, composer clipping, bounded offscreen parking. Screenshot: '+${JSON.stringify(screenshot)});
         owner.destroy();app.quit();
       }catch(error){console.error(error);owner.destroy();app.exit(1)}
     });

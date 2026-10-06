@@ -51,6 +51,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
     let disposed = false
     let scrollPaused = false
     setScrollImage(null)
+    let parked = false
     let mounting = false
     let intersecting = false
     let failed = false
@@ -71,9 +72,9 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
     // Prepare the DOM frame while stationary, never on the wheel's critical path.
     const refreshSnapshot = () => {
       clearTimeout(snapshotTimer)
-      if (disposed || scrollPaused || !runtime.current) return
+      if (disposed || scrollPaused || parked || !runtime.current) return
       const captureSnapshot = async () => {
-        if (disposed || scrollPaused || !runtime.current) return
+        if (disposed || scrollPaused || parked || !runtime.current) return
         if (capturing) { refreshSnapshot(); return }
         const id = runtime.current, version = snapshotVersion
         capturing = true
@@ -83,7 +84,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
           const image = new Image()
           image.src = result.image
           await image.decode()
-          if (!disposed && !scrollPaused && runtime.current === id && version === snapshotVersion)
+          if (!disposed && !scrollPaused && !parked && runtime.current === id && version === snapshotVersion)
             setScrollImage(result.image)
         } catch {
           /* A missing cached frame must never prevent native scrolling. */
@@ -132,9 +133,15 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
         rect.top < clip.y + clip.height &&
         rect.width > 0
       if (!visible) {
-        remove()
+        const id = runtime.current
+        if (id && !parked) {
+          parked = true
+          clearTimeout(snapshotTimer)
+          void api.update({ runtimeId: id, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, clip, visible: false }).catch(() => {})
+        }
         return
       }
+      if (parked) { parked = false; lastGeometry = '' }
       if (scrollPaused && !runtime.current) return
       const bounds = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
       if (!runtime.current && !mounting) {
@@ -229,6 +236,16 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
     document.addEventListener('visibilitychange', schedule)
     const unsubscribe = api.onEvent((event) => {
       if (event.runtimeId !== runtime.current) return
+      if (event.type === 'released') {
+        runtime.current = null
+        parked = false
+        lastGeometry = ''
+        snapshotVersion++
+        setScrollImage(null)
+        setReady(false)
+        if (intersecting) schedule()
+        return
+      }
       if (event.type === 'error') {
         failed = true
         setError(event.message || 'Applet stopped.')

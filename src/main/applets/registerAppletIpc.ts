@@ -33,6 +33,7 @@ export function registerAppletIpc(register:Register, gui:GuiMmsController, allow
       const entry=value.entries.get(eventData.runtimeId)
       if(!entry||win.isDestroyed())return
       if(gui.getWindowBindingForSender(win.webContents.id)?.profileId!==profileId||gui.getWindowBindingForSender(win.webContents.id)?.epoch!==epoch){value.manager.destroy();value.entries.clear();owners.delete(win.webContents.id);return}
+      if(eventData.type==='released')value.entries.delete(eventData.runtimeId)
       if(eventData.type==='state') {
         win.webContents.send('applets:event',{runtimeId:eventData.runtimeId,type:'state-changed'} satisfies AppletUiEvent)
         void gui.runWithSender(win.webContents,()=>gui.request('applets.state.save',{...entry,profileId:ownProfile(value),state:eventData.payload})).catch(()=>{})
@@ -84,7 +85,7 @@ export function registerAppletIpc(register:Register, gui:GuiMmsController, allow
   register('applets:update',(event,input)=>{
     const own=owner(event),raw=object(input),runtimeId=string(raw.runtimeId)
     if(!own.entries.has(runtimeId))throw new Error('Applet runtime is not owned by this window.')
-    if(raw.visible===false){own.manager.unmount(runtimeId);own.entries.delete(runtimeId);return}
+    if(raw.visible===false){own.manager.park(runtimeId);return}
     own.manager.layout(runtimeId,rect(raw.bounds),rect(raw.clip))
   })
   register('applets:unmount',(event,input)=>{
