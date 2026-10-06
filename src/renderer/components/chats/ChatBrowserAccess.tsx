@@ -20,7 +20,9 @@ function BrowserPermission({ threadId, profileId, requireSelectedThread }: { thr
     return alive.current && state.profileId === profileId && (!requireSelectedThread || state.activeThreadId === threadId)
   }
   const openBrowser = () => {
-    if (requireSelectedThread && current()) useAppStore.getState().openSurfaceKind('browser')
+    if (!requireSelectedThread || !current()) return
+    const state = useAppStore.getState()
+    if (state.mainView !== 'browser' || !state.mainAreaOpen) state.openSurfaceKind('browser')
   }
   useEffect(() => {
     alive.current = true
@@ -32,10 +34,11 @@ function BrowserPermission({ threadId, profileId, requireSelectedThread }: { thr
       try {
         const state = await window.mousse.platformRequest.request<BrowserAccessState>('browser.access.status', { profileId })
         if (!current() || expectedRevision !== revision.current) return
-        setRequestId(state.allowed ? undefined : state.pending?.find((item) => item.threadId === threadId)?.requestId)
+        const pendingRequest = state.pending?.find((item) => item.threadId === threadId)
+        setRequestId(state.allowed ? undefined : pendingRequest?.requestId)
         setError('')
         // Mount the browser provisioner even when this fresh thread has no surfaces.
-        if (state.allowed && state.tabRequests?.some((item) => item.threadId === threadId)) openBrowser()
+        if ((!state.allowed && pendingRequest) || (state.allowed && state.tabRequests?.some((item) => item.threadId === threadId))) openBrowser()
       } catch (cause) {
         if (current() && expectedRevision === revision.current) setError(String((cause as { message?: string })?.message || cause))
       } finally { pending = false }
