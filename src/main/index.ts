@@ -197,6 +197,7 @@ function startGuiApp(): void {
       }
     })
 
+    mainWindow.on('close', () => console.info('[window] Main window close event'))
     mainWindow.on('ready-to-show', () => {
       mainWindow?.show()
       if (settings) refreshWindowChrome(mainWindow, settings)

@@ -2071,6 +2071,7 @@ export function registerGuiIpc(
     endWindowDrag(win, settings)
   })
   registerHandler('window:close', () => {
+    console.info('[window] Close requested by caption control')
     getWindow()?.close()
   })
   registerHandler('window:isMaximized', () => {
