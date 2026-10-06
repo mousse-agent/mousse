@@ -17,6 +17,7 @@ import { dispatchMethod } from './handlers'
 import { parseEnvelope, validateHello, validateRequest, asAfterSequence, isObject } from './validators'
 import {
   MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS,
+  MMS_PROTOCOL_MAX_FRAME_BYTES,
   MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES,
   MMS_PROTOCOL_MAX_PENDING_REQUESTS,
   MMS_PROTOCOL_VERSION,
@@ -1066,8 +1067,24 @@ export class MmsProtocolServer {
       result: {
         sequence: currentSeq,
         gap: replay.gap,
-        replay: replay.events
+        replay: [] as ProtocolEvent[]
       }
+    }
+    // The ring is bounded by event count, but a valid event can contain a large
+    // thread update. Keep replay below both wire limits and reserve half the
+    // outbound budget for live events around this boundary. Oversized history
+    // requires a snapshot, rather than disconnecting every newly opened GUI.
+    const result = res.result as { sequence: number; gap: boolean; replay: ProtocolEvent[] }
+    const replayBudget = Math.min(MMS_PROTOCOL_MAX_FRAME_BYTES, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES / 2)
+    let replayBytes = 4 + Buffer.byteLength(JSON.stringify(res), 'utf8')
+    for (const event of replay.events) {
+      replayBytes += Buffer.byteLength(JSON.stringify(event), 'utf8') + (result.replay.length ? 1 : 0)
+      if (replayBytes > replayBudget) {
+        result.gap = true
+        result.replay = []
+        break
+      }
+      result.replay.push(event)
     }
     this.sendRaw(session, res)
 

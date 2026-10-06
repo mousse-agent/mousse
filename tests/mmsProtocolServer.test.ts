@@ -625,6 +625,36 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     await client.close()
   })
 
+  it('oversized subscribe replay requests a snapshot without closing the connection', async () => {
+    const client = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'test' })
+    await client.connect()
+    try {
+      // Each event fits the wire limits, but their combined UTF-8 history does
+      // not. Seed only this temporary service's profile audience.
+      const internal = server as unknown as {
+        ringFor(profileId: string): EventSequenceRing
+        emitToSubscribers(event: ReturnType<EventSequenceRing['push']>, profileId: string): void
+      }
+      const ring = internal.ringFor(mms.profileId)
+      ring.push('large.update', { text: '界'.repeat(240_000) })
+      ring.push('large.update', { text: '界'.repeat(240_000) })
+      const boundary = ring.currentSequence
+      const received: number[] = []
+      client.onEvent(event => received.push(event.sequence))
+      const sub = await client.subscribe(0)
+      expect(sub).toEqual({ sequence: boundary, gap: true, replay: [] })
+      expect(client.requiresResnapshot).toBe(true)
+      expect(client.connected).toBe(true)
+      await expect(client.request('health')).resolves.toBeDefined()
+      const next = ring.push('small.update', { complete: true })
+      internal.emitToSubscribers(next, mms.profileId)
+      await vi.waitFor(() => expect(received).toHaveLength(1))
+      expect(received[0]).toBeGreaterThan(sub.sequence)
+    } finally {
+      await client.close()
+    }
+  })
+
   it('new instance forces resnapshot (sequence regression)', async () => {
     const client = new LocalMmsClient({
       homeDir: home,
