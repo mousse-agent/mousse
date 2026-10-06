@@ -69,6 +69,7 @@ export function ContextUsagePopover({
 
   if (!open) return null
 
+  const capacityKnown = Number.isFinite(usage.limit) && usage.limit > 0
   const segmentTotal = usage.categories.reduce((sum, category) => sum + category.tokens, 0)
 
   return (
@@ -92,10 +93,10 @@ export function ContextUsagePopover({
         )}
 
         <div className="context-usage-summary">
-          <span className="context-usage-percent">{usage.percent}% of model context</span>
+          <span className="context-usage-percent">{capacityKnown ? `${usage.percent}% of model context` : 'Model capacity not reported yet'}</span>
           <span className="context-usage-total">
             {usage.source === 'measured' ? '' : '~'}
-            {formatTotalTokens(usage.used)} / {formatTokenCount(usage.limit)}
+            {formatTotalTokens(usage.used)} / {capacityKnown ? formatTokenCount(usage.limit) : 'Unknown'}
             <button
               type="button"
               className="context-usage-close"
@@ -150,12 +151,13 @@ export function ContextUsagePopover({
 
 interface ContextUsageRingProps {
   percent: number
+  capacityKnown?: boolean
   onClick: () => void
   active: boolean
 }
 
 export const ContextUsageRing = forwardRef<HTMLButtonElement, ContextUsageRingProps>(
-  function ContextUsageRing({ percent, onClick, active }, ref) {
+  function ContextUsageRing({ percent, capacityKnown = true, onClick, active }, ref) {
     const radius = 9
     const circumference = 2 * Math.PI * radius
     const strokeOffset = circumference - (percent / 100) * circumference
@@ -166,8 +168,8 @@ export const ContextUsageRing = forwardRef<HTMLButtonElement, ContextUsageRingPr
         type="button"
         className={`composer-icon-btn context-usage-btn${active ? ' active' : ''}`}
         onClick={onClick}
-        title="Context usage"
-        aria-label={`Context usage ${percent}% full`}
+        title={capacityKnown ? 'Context usage' : 'Context usage: model capacity not reported yet'}
+        aria-label={capacityKnown ? `Context usage ${percent}% full` : 'Context usage, model capacity not reported yet'}
         aria-expanded={active}
       >
         <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
@@ -179,18 +181,20 @@ export const ContextUsageRing = forwardRef<HTMLButtonElement, ContextUsageRingPr
             stroke="rgba(var(--accent-rgb), 0.2)"
             strokeWidth="2"
           />
-          <circle
-            cx="10"
-            cy="10"
-            r={radius}
-            fill="none"
-            stroke="var(--accent-hover)"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeDasharray={circumference}
-            strokeDashoffset={strokeOffset}
-            transform="rotate(-90 10 10)"
-          />
+          {capacityKnown && (
+            <circle
+              cx="10"
+              cy="10"
+              r={radius}
+              fill="none"
+              stroke="var(--accent-hover)"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeDasharray={circumference}
+              strokeDashoffset={strokeOffset}
+              transform="rotate(-90 10 10)"
+            />
+          )}
         </svg>
       </button>
     )

@@ -16,9 +16,20 @@ import { AppError } from '../../../shared/errors'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import type { LoginSession } from '../LoginSession'
+import {
+  ClaudeMetricsCollector,
+  ClaudeNativeEditCounter,
+  type ClaudeSubscriptionMetrics,
+  type ClaudeUsageBaseline
+} from './metrics'
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
-type SavedSession = { sessionId: string; cwd: string; historyKey?: string }
+type SavedSession = {
+  sessionId: string
+  cwd: string
+  historyKey?: string
+  usageBaseline?: ClaudeUsageBaseline
+}
 type Settings = {
   signedIn?: boolean
   binaryPath?: string
@@ -37,6 +48,8 @@ export type ClaudeSubscriptionChatInput = {
   mode?: 'plan' | 'default'
   onText: (text: string) => void
   onThinking?: (text: string) => void
+  onMetrics?: (report: ClaudeSubscriptionMetrics) => void
+  onLineEdits?: (lines: number) => void
   drainSteer?: () => string | undefined
   onSteer?: (text: string) => void
   onTool?: (event: {
@@ -409,6 +422,8 @@ export class ClaudeSubscriptionProviderService {
       saved?.cwd === resolve(input.cwd) && saved.historyKey === historyKey(input.history ?? '')
         ? saved.sessionId
         : undefined
+    const metrics = new ClaudeMetricsCollector(resume, saved?.usageBaseline)
+    const editCounter = new ClaudeNativeEditCounter(input.cwd, input.onLineEdits)
     if (saved) {
       delete saved.historyKey
       this.save()
@@ -479,9 +494,35 @@ export class ClaudeSubscriptionProviderService {
           PreToolUse: [
             {
               hooks: [
-                async () => ({
-                  hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' }
-                })
+                async (event) => {
+                  if (event.hook_event_name === 'PreToolUse')
+                    await editCounter.start(event.tool_use_id, event.tool_name, event.tool_input)
+                  return {
+                    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' }
+                  }
+                }
+              ]
+            }
+          ],
+          PostToolUse: [
+            {
+              hooks: [
+                async (event) => {
+                  if (event.hook_event_name === 'PostToolUse')
+                    await editCounter.success(event.tool_use_id, event.tool_response)
+                  return {}
+                }
+              ]
+            }
+          ],
+          PostToolUseFailure: [
+            {
+              hooks: [
+                async (event) => {
+                  if (event.hook_event_name === 'PostToolUseFailure')
+                    editCounter.failure(event.tool_use_id)
+                  return {}
+                }
               ]
             }
           ]
@@ -582,6 +623,7 @@ export class ClaudeSubscriptionProviderService {
         query = await this.createQuery(nextPrompt, options)
         this.queries.set(input.threadId, query)
         for await (const message of query) {
+          metrics.observe(message)
           controller.signal.throwIfAborted()
           sessionId = message.session_id || sessionId
           if (message.type === 'stream_event') {
@@ -640,6 +682,7 @@ export class ClaudeSubscriptionProviderService {
         controller.signal.throwIfAborted()
         if (!sessionId) throw new Error('Claude steering could not identify the active session')
         options.resume = sessionId
+        metrics.beginQuery(sessionId)
         const guidance = steers.splice(0).join('\n')
         nextPrompt = (async function* (): AsyncGenerator<SDKUserMessage> {
           yield {
@@ -658,7 +701,7 @@ export class ClaudeSubscriptionProviderService {
       if (!success || !sessionId) throw new Error('Claude Code ended before completing the turn')
       this.settings.sessions = {
         ...this.settings.sessions,
-        [input.threadId]: { sessionId, cwd: resolve(input.cwd) }
+        [input.threadId]: { sessionId, cwd: resolve(input.cwd), usageBaseline: metrics.snapshot() }
       }
       this.save()
       this.readyToCommit.add(input.threadId)
@@ -671,6 +714,25 @@ export class ClaudeSubscriptionProviderService {
       this.activeThreads.delete(input.threadId)
       if (steerTimer) clearInterval(steerTimer)
       input.signal?.removeEventListener('abort', cancel)
+      const report = metrics.report()
+      try {
+        const baseline = metrics.snapshot()
+        if (baseline && this.settings.signedIn && !this.stopped) {
+          const current = this.settings.sessions?.[input.threadId]
+          this.settings.sessions = {
+            ...this.settings.sessions,
+            [input.threadId]: {
+              ...(current?.sessionId === baseline.sessionId ? current : {}),
+              sessionId: baseline.sessionId,
+              cwd: resolve(input.cwd),
+              usageBaseline: baseline
+            }
+          }
+          this.save()
+        }
+      } finally {
+        input.onMetrics?.(report)
+      }
       for (const [callId, title] of tools) input.onTool?.({ phase: 'complete', callId, title })
     }
   }
