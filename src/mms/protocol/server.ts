@@ -16,6 +16,9 @@ import { cleanupStaleUnixSocket, resolveLocalEndpoint, unlinkUnixSocketIfExists 
 import { dispatchMethod } from './handlers'
 import { parseEnvelope, validateHello, validateRequest, asAfterSequence, isObject } from './validators'
 import {
+  MMS_PROTOCOL_CHUNK_CAPABILITY,
+  MMS_PROTOCOL_CHUNK_BYTES,
+  MMS_PROTOCOL_MAX_ENVELOPE_BYTES,
   MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS,
   MMS_PROTOCOL_MAX_FRAME_BYTES,
   MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES,
@@ -35,7 +38,8 @@ import { BROWSER_ATTACHED_V1_CAPABILITY } from '../../shared/browser/connectionC
 import { ProfileError } from '../../shared/profiles/errors'
 import type { ConnectionCommandRouter } from './connectionCommands'
 import { NET_LOCAL_CAPABILITY } from '../../shared/net/local'
-import { writeConnectionEventFrame } from './connectionEventWriter'
+import { OutboundWriter } from './outboundWriter'
+import { envelopeFrames } from './envelopeChunks'
 import { MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES } from './types'
 
 
@@ -94,9 +98,9 @@ interface ClientSession {
   inFlightIds: Set<string>
   /** Bounded completed response cache for deterministic duplicate-id handling. */
   completedResponses: Map<string, ProtocolResponse>
-  /** True while a drain listener is pending, so we never stack duplicate listeners. */
-  awaitingDrain: boolean
-  connectionEventChain: Promise<void>
+  completedResponseSizes: Map<string, number>
+  completedResponseBytes: number
+  writer: OutboundWriter
   connectionEventPending: number
   connectionEventLifetime: AbortController
 }
@@ -666,11 +670,13 @@ export class MmsProtocolServer {
       bindingChain: Promise.resolve(),
       inFlightIds: new Set(),
       completedResponses: new Map(),
-      awaitingDrain: false,
-      connectionEventChain: Promise.resolve(),
+      completedResponseSizes: new Map(),
+      completedResponseBytes: 0,
+      writer: undefined as unknown as OutboundWriter,
       connectionEventPending: 0,
       connectionEventLifetime: new AbortController()
     }
+    session.writer = new OutboundWriter(socket, () => this.closeClient(session))
     this.clients.set(session.id, session)
 
     // Serialize decode + admission only. Disconnect cancels remaining chain work.
@@ -748,11 +754,13 @@ export class MmsProtocolServer {
       session.capabilities = new Set(
         advertised.filter(
           (capability) =>
+            capability !== MMS_PROTOCOL_CHUNK_CAPABILITY &&
             capability !== PROFILES_V1_CAPABILITY &&
             capability !== ERROR_INFO_CAPABILITY &&
             capability !== BROWSER_ATTACHED_V1_CAPABILITY
         )
       )
+      if (requested.has(MMS_PROTOCOL_CHUNK_CAPABILITY) && advertised.includes(MMS_PROTOCOL_CHUNK_CAPABILITY)) session.capabilities.add(MMS_PROTOCOL_CHUNK_CAPABILITY)
       if (requested.has(ERROR_INFO_CAPABILITY)) session.capabilities.add(ERROR_INFO_CAPABILITY)
       if (requested.has(PROFILES_V1_CAPABILITY) && advertised.includes(PROFILES_V1_CAPABILITY)) {
         session.capabilities.add(PROFILES_V1_CAPABILITY)
@@ -1104,11 +1112,18 @@ export class MmsProtocolServer {
   }
 
   private cacheCompleted(session: ClientSession, res: ProtocolResponse): void {
+    const bytes = Buffer.byteLength(JSON.stringify(res), 'utf8')
+    session.completedResponseBytes -= session.completedResponseSizes.get(res.id) ?? 0
     session.completedResponses.set(res.id, res)
-    while (session.completedResponses.size > MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS) {
+    session.completedResponseSizes.set(res.id, bytes)
+    session.completedResponseBytes += bytes
+    while (session.completedResponses.size > MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS ||
+           session.completedResponseBytes > 2 * MMS_PROTOCOL_MAX_ENVELOPE_BYTES) {
       const first = session.completedResponses.keys().next().value
       if (first === undefined) break
       session.completedResponses.delete(first)
+      session.completedResponseBytes -= session.completedResponseSizes.get(first) ?? 0
+      session.completedResponseSizes.delete(first)
     }
   }
 
@@ -1233,20 +1248,14 @@ export class MmsProtocolServer {
     }
     session.connectionEventPending++
     const combined = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal
-    const operation = session.connectionEventChain
-      .then(async () => {
-        if (!valid()) throw new DomainRpcError('connection_closed', 'Display profile binding changed')
-        if (session.socket.writableLength + frame.length > MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES) {
-          this.closeClient(session)
-          throw new DomainRpcError('connection_closed', 'Display write backlog exceeded')
-        }
-        await writeConnectionEventFrame(session.socket, frame, combined)
-      })
-      .finally(() => {
-        session.connectionEventPending--
-      })
-    session.connectionEventChain = operation.catch(() => {})
-    return operation
+    const operation = session.writer.enqueue(frame.length, () => [frame], combined, () => {
+      if (!valid()) throw new DomainRpcError('connection_closed', 'Display profile binding changed')
+    })
+    if (!operation) {
+      session.connectionEventPending--
+      return Promise.reject(new DomainRpcError('connection_closed', 'Display write backlog exceeded'))
+    }
+    return operation.finally(() => { session.connectionEventPending-- })
   }
 
   /** Best-effort write that never disconnects solely for backpressure (shutdown path). */
@@ -1261,43 +1270,32 @@ export class MmsProtocolServer {
   ): boolean {
     if (session.closed || session.socket.destroyed) return false
     try {
-      const frame = encodeFrame(value)
-      const queued = typeof session.socket.writableLength === 'number'
-        ? session.socket.writableLength
-        : 0
-      if (
-        enforceBackpressure &&
-        session.authenticated &&
-        queued + frame.length > MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES
-      ) {
-        // Slow authenticated client — disconnect without affecting MMS.
-        this.closeClient(session)
-        return false
+      // Rejected handshakes and shutdown notifications are written immediately
+      // before the caller closes the socket; they never carry large payloads.
+      if (!session.authenticated || !enforceBackpressure) {
+        session.socket.write(encodeFrame(value))
+        return true
       }
-      const ok = session.socket.write(frame)
-      if (!ok && !session.awaitingDrain) {
-        session.awaitingDrain = true
-        session.socket.pause()
-        session.socket.once('drain', () => {
-          session.awaitingDrain = false
-          if (!session.closed) session.socket.resume()
-        })
+      let body = Buffer.from(JSON.stringify(value), 'utf8')
+      let chunked = session.authenticated && session.capabilities.has(MMS_PROTOCOL_CHUNK_CAPABILITY) &&
+        isObject(value) && (value.kind === 'res' || value.kind === 'event') && body.length > MMS_PROTOCOL_CHUNK_BYTES
+      const limit = chunked ? MMS_PROTOCOL_MAX_ENVELOPE_BYTES : Math.min(MMS_PROTOCOL_MAX_FRAME_BYTES, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES - 4)
+      if (body.length > limit) {
+        if (isObject(value) && value.kind === 'res') {
+          body = Buffer.from(JSON.stringify({ kind: 'res', id: value.id, ok: false,
+            error: { code: 'response_too_large', message: chunked ? 'Response exceeds the supported transfer limit.' : 'Response exceeds this client’s transport limit. Update Mousse to receive large threads.',
+              ...(session.capabilities.has(ERROR_INFO_CAPABILITY) ? { errorInfo: { category: 'unsupported', retryable: false } } : {}) } }))
+        } else if (isObject(value) && value.kind === 'event') {
+          body = Buffer.from(JSON.stringify({ kind: 'error', code: 'event_too_large',
+            message: chunked ? 'Thread update exceeds the supported transfer limit.' : 'Thread update exceeds this client’s transport limit. Update Mousse to receive large threads.' }))
+        } else throw new FrameTooLargeError(body.length, limit)
+        chunked = false
       }
-      // Post-write backlog check (writableLength may update after write returns false).
-      const after = typeof session.socket.writableLength === 'number'
-        ? session.socket.writableLength
-        : 0
-      if (
-        enforceBackpressure &&
-        session.authenticated &&
-        after > MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES
-      ) {
-        this.closeClient(session)
-        return false
-      }
-      return true
+      const operation = session.writer.enqueue(body.length, () => envelopeFrames(body, chunked))
+      operation?.catch(() => {})
+      return operation !== null
     } catch {
-      this.closeClient(session)
+      if (enforceBackpressure) this.closeClient(session)
       return false
     }
   }
@@ -1324,11 +1322,14 @@ export class MmsProtocolServer {
   private closeClient(session: ClientSession): void {
     if (session.closed) return
     session.closed = true
+    session.writer.close()
     session.connectionEventLifetime.abort()
     session.subscribeState = 'none'
     session.eventBuffer = []
     session.inFlightIds.clear()
     session.completedResponses.clear()
+    session.completedResponseSizes.clear()
+    session.completedResponseBytes = 0
     this.clients.delete(session.id)
     this.opts.commandRouter?.revoke(session.id, 'close')
     this.opts.mms.domains?.notifyConnectionClosed(session.id)

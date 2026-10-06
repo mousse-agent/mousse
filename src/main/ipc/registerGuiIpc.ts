@@ -21,6 +21,7 @@ import { PresentationState } from '../mms/PresentationState'
 import { bootstrapPresentation } from '../mms/bootstrapPresentation'
 export { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { MmsProtocolError } from '../../mms/protocol/client'
+import { guiChatRequestError } from '../mms/requestErrors'
 import type { ProtocolEvent } from '../../mms/protocol'
 import {
   bridgeProtocolEvent,
@@ -772,13 +773,14 @@ export function registerGuiIpc(
       }
       return result
     } catch (err) {
-      setThreadActivity(targetThreadId, 'idle')
-      activityTrackerFor().setBusyThreadId(null)
-      const error = err instanceof MmsProtocolError
-        ? knownAppError({ code: err.code, message: err.message, details: err.details, errorInfo: err.errorInfo })
-        : normalizeAppError(err)
+      const error = guiChatRequestError(err)
+      const disconnected = error.code === 'workspace_connection_lost'
+      if (!disconnected) {
+        setThreadActivity(targetThreadId, 'idle')
+        activityTrackerFor().setBusyThreadId(null)
+      }
       console.error('GUI chat request failed', errorDiagnostic(error, 'orchestrator.send'))
-      return { message: '', actions: [], requestAcknowledged: false, error: serializeAppError(error) }
+      return { message: '', actions: [], ...(disconnected ? {} : { requestAcknowledged: false }), error: serializeAppError(error) }
     }
   }
 

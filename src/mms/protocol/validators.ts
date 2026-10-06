@@ -12,6 +12,8 @@ import {
   parseServerCommandRequest
 } from './connectionCommandValidate'
 import {
+  MMS_PROTOCOL_CHUNK_BYTES,
+  MMS_PROTOCOL_MAX_ENVELOPE_BYTES,
   MMS_PROTOCOL_MAX_ID_LENGTH,
   MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES,
   MMS_PROTOCOL_MAX_IMAGE_DATA_CHARS,
@@ -58,6 +60,17 @@ function isClientType(v: unknown): v is ProtocolClientType {
 export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
   if (!isObject(raw) || typeof raw.kind !== 'string') return null
   switch (raw.kind) {
+    case 'envelope_chunk': {
+      if (Object.keys(raw).some(key => !['kind', 'transferId', 'index', 'totalBytes', 'data'].includes(key)) ||
+          !isBoundedString(raw.transferId, 64, { nonEmpty: true }) ||
+          !Number.isSafeInteger(raw.index) || (raw.index as number) < 0 ||
+          !Number.isSafeInteger(raw.totalBytes) || (raw.totalBytes as number) < 1 ||
+          (raw.totalBytes as number) > MMS_PROTOCOL_MAX_ENVELOPE_BYTES ||
+          !isBoundedString(raw.data, Math.ceil(MMS_PROTOCOL_CHUNK_BYTES / 3) * 4, { nonEmpty: true }) ||
+          !/^[A-Za-z0-9+/]+={0,2}$/.test(raw.data)) return null
+      return raw as unknown as import('./types').ProtocolEnvelopeChunk
+    }
+
     case 'connection_event': {
       if (
         Object.keys(raw).some(
