@@ -62,7 +62,7 @@ it('queues the first wheel deltas until all visible guest snapshots are ready', 
   expect(wheel().preventDefault).toHaveBeenCalledOnce()
   expect(wheel({ deltaY: -4 }).preventDefault).toHaveBeenCalledOnce()
   expect(scroller.scrollBy).not.toHaveBeenCalled()
-  expect(b.suspend).not.toHaveBeenCalled()
+  expect(b.suspend).toHaveBeenCalledOnce()
   ready()
   await Promise.resolve()
   await Promise.resolve()

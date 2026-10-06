@@ -36,7 +36,7 @@ export function subscribeAppletScroll(scroller: HTMLElement, preview: Preview): 
       scrolling = true
       preparing = true
       void Promise.allSettled(
-        [...previews].filter((item) => item.active()).map((item) => item.suspend())
+        [...previews].map((item) => item.suspend())
       ).then(() => {
         preparing = false
         if (disposed) return

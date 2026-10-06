@@ -109,6 +109,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
         remove()
         return
       }
+      if (scrollPaused && !runtime.current) return
       const bounds = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
       if (!runtime.current && !mounting) {
         mounting = true
