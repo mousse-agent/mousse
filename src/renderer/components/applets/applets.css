@@ -1,0 +1,111 @@
+.mousse-applet {
+  margin: 16px 0;
+  border: 1px solid var(--border, #383840);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--surface-base, #1b1c23);
+  color: var(--text-primary, #e8e8ec);
+}
+.mousse-applet-header {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 14px 16px 8px;
+}
+.mousse-applet-header strong {
+  font-size: 14px;
+}
+.mousse-applet-header p {
+  font-size: 12px;
+  opacity: 0.72;
+  margin: 4px 0 0;
+}
+.mousse-applet-revision {
+  font-size: 10px;
+  opacity: 0.6;
+  white-space: nowrap;
+}
+.mousse-applet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 16px 12px;
+}
+.mousse-applet-actions button {
+  border: 1px solid var(--border, #383840);
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.mousse-applet-actions button:focus-visible {
+  outline: 2px solid var(--accent, #ac86ce);
+  outline-offset: 2px;
+}
+.mousse-applet-actions button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.mousse-applet-preview {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  background: #fff;
+  color: #777;
+  font-size: 12px;
+  contain: layout paint;
+}
+.mousse-applet-source {
+  max-height: 620px;
+  overflow: auto;
+  padding: 12px 16px;
+  font-size: 12px;
+}
+.mousse-applet-source pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.mousse-applet-source h4 {
+  font-weight: 600;
+  margin: 12px 0 6px;
+}
+.mousse-applet-error {
+  padding: 8px 16px;
+  font-size: 12px;
+  color: #ec9a9a;
+}
+.mousse-applet footer {
+  padding: 8px 16px;
+  font-size: 10px;
+  opacity: 0.6;
+}
+.mousse-applet-error button {
+  display: block;
+  margin-top: 8px;
+  text-decoration: underline;
+}
+.mousse-applet-conversation-input {
+  padding: 12px 16px;
+  font-size: 12px;
+  border-top: 1px solid var(--border, #383840);
+}
+.mousse-applet-conversation-input p {
+  white-space: pre-wrap;
+  max-height: 140px;
+  overflow: auto;
+}
+.mousse-applet-conversation-input button {
+  margin: 8px 12px 0 0;
+  text-decoration: underline;
+}
+
+.mousse-applet button {
+  color: inherit;
+  font-family: inherit;
+}
+.mousse-applet-pending .mousse-applet-preview {
+  background: var(--surface-strong, #24242c);
+  color: var(--text-secondary, #b1b1ba);
+}

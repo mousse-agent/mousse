@@ -100,6 +100,7 @@ export function analyzeAssistantMessage(
       if (part.text) return { toolsOnly: false, toolItems: [] };
       continue;
     }
+    if (isRecord(part) && (part.type === "data-applet" || part.type === "data-applet-pending")) return { toolsOnly: false, toolItems: [] };
     if (isErrorPart(part)) return { toolsOnly: false, toolItems: [] };
     if (!isV5ToolPart(part)) continue;
     if (part.type === "tool-TaskOutput") continue;

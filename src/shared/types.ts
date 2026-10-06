@@ -415,6 +415,8 @@ export interface ThreadMessagesSnapshot {
 }
 
 export interface ChatMessage {
+  /** Durable completed-response applets; generated code never executes in the shell. */
+  presentationParts?: import('./applets').AppletPresentationPart[]
   id: string
   role: 'user' | 'assistant' | 'system'
   content: string

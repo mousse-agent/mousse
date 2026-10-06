@@ -12,6 +12,7 @@ import type { UIMessage, ChatStatus } from "ai";
 import { cn } from "./utils/cn";
 
 import { UserMessage } from "./user-message";
+import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
 import { Markdown } from "./markdown";
 import { ErrorMessage } from "./error-message";
 import type { CustomToolRendererProps } from "./types";
@@ -115,7 +116,8 @@ function getLastAssistantHasContent(messages: UIMessage[]) {
     if (msg?.role !== "assistant") continue;
     return (msg.parts ?? []).some((part) => {
       if (isTextPart(part)) return part.text.trim().length > 0;
-      return isV5ToolPart(part);
+      if (isRecord(part) && part.type === "data-applet-pending") return true;
+      return isV5ToolPart(part) || isAppletPart(part);
     });
   }
   return false;
@@ -1551,6 +1553,17 @@ function AssistantParts({
       const part = parts[i]!;
 
       if (isV5ToolPart(part) && part.type === "tool-TaskOutput") {
+        i++;
+        continue;
+      }
+
+      if (isRecord(part) && part.type === "data-applet-pending") {
+        elems.push(<section className="mousse-applet mousse-applet-pending" key={`${msg.id}-applet-pending-${i}`} role="status" aria-label="Generating applet"><header className="mousse-applet-header"><strong>Generating interactive applet…</strong></header><div className="mousse-applet-preview" style={{ height: 320 }}>Preview appears when the response is complete.</div></section>);
+        i++;
+        continue;
+      }
+      if (isAppletPart(part)) {
+        elems.push(<AppletCard key={`${msg.id}-applet-${part.data.revisionId}`} reference={part.data} />);
         i++;
         continue;
       }

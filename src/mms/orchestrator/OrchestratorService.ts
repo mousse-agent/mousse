@@ -1,3 +1,7 @@
+import { AppletStore } from '../applets/AppletStore'
+import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
+import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
+import { validateAppletSubmission, type AppletSubmission } from '../../shared/applets'
 import { logDebug } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
 import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
@@ -506,6 +510,8 @@ export async function retryContextOverflowOnce<T>(
 }
 
 export class OrchestratorService extends EventEmitter {
+  private appletStore?: AppletStore
+  setAppletStore(store: AppletStore): void { this.appletStore = store }
   private claudeSubscription?: ClaudeSubscriptionProviderService
   setClaudeSubscriptionProvider(provider: ClaudeSubscriptionProviderService): void { this.claudeSubscription = provider }
   private antigravity?: AntigravityProviderService
@@ -1113,6 +1119,7 @@ export class OrchestratorService extends EventEmitter {
     session = new ThreadSession(threadId)
     if (this.threadStore?.getThread(threadId)) {
       const data = this.threadStore.loadThreadData(threadId)
+      this.recoverApplets(threadId, data.messages)
       session.load(
         data.messages,
         data.llmContext ?? migrateLegacyContext(data.messages),
@@ -1186,6 +1193,8 @@ export class OrchestratorService extends EventEmitter {
       )
     }
 
+    this.recoverApplets(threadId, this.boundSession.messages)
+
     if (this.projectManager && this.threadStore) {
       try {
         const projectPath = resolveThreadProjectPath(this.projectManager, this.threadStore, threadId)
@@ -1246,6 +1255,22 @@ export class OrchestratorService extends EventEmitter {
       nativeContext ?? migrateLegacyContext(messages),
       queue
     )
+  }
+
+  /** Reattach only bundles already durably published by this exact completed turn. */
+  private recoverApplets(threadId: string, messages: ChatMessage[]): void {
+    if (!this.appletStore || !this.threadStore) return
+    const recovered = new Map<string, NonNullable<ChatMessage['presentationParts']>>()
+    for (const message of messages) {
+      if (message.role !== 'assistant' || message.presentationParts || !message.turnId || message.incomplete || message.streaming) continue
+      const parts = recoverAppletPresentation(this.appletStore, {threadId,messageId:message.id,turnId:message.turnId,content:message.content})
+      if (parts) { message.presentationParts = parts; recovered.set(message.id, parts) }
+    }
+    if (recovered.size) this.threadStore.mutateThreadData(threadId, current => ({messages: current.messages.map(message => {
+      const parts = recovered.get(message.id)
+      const original = messages.find(candidate => candidate.id === message.id)
+      return parts && !message.presentationParts && message.content === original?.content && message.turnId === original?.turnId ? {...message, presentationParts: parts} : message
+    })}))
   }
 
   getMessages(threadId?: string): ChatMessage[] {
@@ -1714,6 +1739,11 @@ export class OrchestratorService extends EventEmitter {
     const originalRequest = title || lastUser?.content?.trim() || 'Implementation plan'
     this.addPlanCardMessage(originalRequest, markdown)
     if (threadId) this.emitThreadMessages(threadId, this.messages)
+  }
+
+  private appletCatalogue(): string {
+    const references = this.messages.filter(message => !message.hidden).flatMap(message => message.presentationParts ?? []).filter(part => part.type === 'applet').map(part => part.reference)
+    return references.length ? '\nExisting applets in this conversation (use appletId and expectedRevision to revise; latest visible revision per applet):\n' + JSON.stringify([...new Map(references.map(ref => [ref.appletId, ref])).values()].slice(-20)) : ''
   }
 
   private addMessage(
@@ -2859,6 +2889,7 @@ export class OrchestratorService extends EventEmitter {
     // Authoritative turn lifecycle boundary (includes queue/background turns).
     this.emit('turn-started', { threadId: session.threadId })
 
+    const stagedApplets: AppletSubmission[] = []
     let assistantText: string
     let aborted = false
     let responseMetadata: ChatMessage['responseMetadata'] | undefined
@@ -2910,6 +2941,7 @@ export class OrchestratorService extends EventEmitter {
           } : {}),
           threadId: session.threadId, cwd: nativeCwd, model,
           prompt: userContent, images, signal: turn.abort.signal,
+          appletInstructions: this.appletStore ? APPLET_GENERATION_GUIDANCE + this.appletCatalogue() : undefined,
           history: nativeAgentHistory(this.nativeContext, turnNativeStartBoundary.messageIndex),
           drainSteer: () => {
             const parts = [opts?.externalDrainSteer?.()?.trim(), this.drainSteerForSession(session, turn)?.trim()]
@@ -2993,6 +3025,12 @@ export class OrchestratorService extends EventEmitter {
             },
             {
               mode,
+              appletInstructions: this.appletStore ? this.appletCatalogue() : undefined,
+              onPublishApplet: this.appletStore ? (value) => {
+                if (stagedApplets.length >= 3) throw new Error('Only three applets may be published per response.')
+                stagedApplets.push(validateAppletSubmission(value))
+                return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
+              } : undefined,
               llmProvider: modelOverride?.llmProvider,
               model: modelOverride?.model,
               projectPath: session.projectCwd ?? undefined,
@@ -3186,13 +3224,20 @@ export class OrchestratorService extends EventEmitter {
     }
 
     if (mode === 'plan') {
-      const planMarkdown = stripActionBlocks(assistantText) || assistantText.trim() || 'No plan generated.'
+      const planMarkdown = (stripActionBlocks(assistantText) || assistantText.trim() || 'No plan generated.') + stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
       if (this.activeAssistantMessageId) {
         const streamingId = this.activeAssistantMessageId
         this.activeAssistantMessageId = null
         this.removeMessage(streamingId)
       }
       const planMsg = this.addPlanCardMessage(userContent, planMarkdown, responseMetadata)
+      if (this.appletStore && !executionFailed) {
+        planMsg.turnId = turnId
+        this.persist(true)
+        planMsg.presentationParts = publishAppletPresentation(this.appletStore, {threadId:session.threadId,messageId:planMsg.id,turnId,content:planMsg.content})
+        this.persist(true)
+        this.emitMessageUpdated(planMsg)
+      }
       const response: OrchestratorResponse = {
         message: planMsg.content,
         actions: []
@@ -3212,7 +3257,7 @@ export class OrchestratorService extends EventEmitter {
 
     const parsedActions = nativeAgentTurn ? [] : parseActions(assistantText)
     const actions = filterActionsForChatMode(parsedActions, mode)
-    const displayText = stripActionBlocks(assistantText)
+    const displayText = stripActionBlocks(assistantText) + stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
 
     if (this.activeAssistantMessageId) {
       this.updateStreamingAssistantMessage(
@@ -3238,6 +3283,17 @@ export class OrchestratorService extends EventEmitter {
       )
     } else {
       this.addMessage('assistant', displayText || 'Done.', undefined, responseMetadata)
+    }
+
+    if (this.appletStore && !executionFailed) {
+      const finalMessage = [...session.messages].reverse().find(message => message.role === 'assistant' && !message.kind && message.content === (displayText || 'Done.'))
+      if (finalMessage) {
+        finalMessage.turnId = turnId
+        this.persist(true)
+        finalMessage.presentationParts = publishAppletPresentation(this.appletStore, { threadId: session.threadId, messageId: finalMessage.id, turnId, content: finalMessage.content })
+        this.persist(true)
+        this.emitMessageUpdated(finalMessage)
+      }
     }
 
     for (const action of actions) {

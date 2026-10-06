@@ -1,3 +1,4 @@
+import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import { appendProjectAgentInstructions } from './projectInstructions'
@@ -285,7 +286,7 @@ Skill id: ${mode.skillId}`)
   const systemPrompt = projectInstructions
     ? `${projectInstructions}\n\n${sections.join('\n\n')}`
     : sections.join('\n\n')
-  return appendProjectAgentInstructions(systemPrompt, options.projectPath)
+  return appendProjectAgentInstructions(systemPrompt + (options.subagent || options.subagentDiscovery ? '' : APPLET_GENERATION_GUIDANCE), options.projectPath)
 }
 
 export const ORCHESTRATOR_SYSTEM_PROMPT = buildOrchestratorSystemPrompt()

@@ -1,0 +1,114 @@
+import { build } from 'esbuild'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { spawn } from 'node:child_process'
+import electron from 'electron'
+
+const directory = await mkdtemp(join(tmpdir(), 'mousse-in-thread-applets-'))
+const screenshot = '/tmp/mousse-in-thread-applets-native.png'
+try {
+  await build({
+    stdin: {
+      loader: 'tsx',
+      resolveDir: process.cwd(),
+      contents: `
+    import React from 'react'; import {createRoot} from 'react-dom/client';
+    import {AppletCard} from './src/renderer/components/applets/AppletCard';
+    import {useAppStore} from './src/renderer/stores/appStore';
+    useAppStore.setState({activeThreadId:'thread',profileId:'profile'});
+    const ref={appletId:'applet',revisionId:'revision',sourceHash:'hash',title:'Interactive costs',description:'Saved counter illustration'};
+    function Fixture(){const[menu,setMenu]=React.useState(false);return <div className="mousse-chat-shell"><nav style={{height:40}}><button id="menu" onClick={()=>setMenu(!menu)}>Menu</button></nav>{menu&&<div role="menu" style={{position:'absolute',top:60,left:100,zIndex:99,background:'#333',padding:30}}>Host menu</div>}<div className="an-message-list" style={{position:'absolute',top:40,left:0,right:0,height:390,overflowY:'auto'}}><AppletCard reference={ref}/><div style={{height:400}}>Transcript after applet</div></div><div className="chat-composer-stack" style={{position:'absolute',top:430,left:0,right:0,bottom:0,background:'rgb(0,255,0)'}}>Composer remains accessible</div></div>}
+    createRoot(document.getElementById('root')).render(<Fixture/>);
+  `
+    },
+    outfile: join(directory, 'renderer.js'),
+    bundle: true,
+    platform: 'browser',
+    format: 'iife',
+    jsx: 'automatic'
+  })
+  await writeFile(
+    join(directory, 'index.html'),
+    '<html><head><link rel="stylesheet" href="renderer.css"></head><body style="margin:0;background:rgb(0,0,255)"><div id="root"></div><script src="renderer.js"></script></body></html>'
+  )
+  await build({
+    entryPoints: ['src/preload/index.ts'],
+    outfile: join(directory, 'preload.cjs'),
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    external: ['electron']
+  })
+  await build({
+    stdin: {
+      resolveDir: process.cwd(),
+      contents: `
+    import {app,BrowserWindow,ipcMain,webContents,nativeImage} from 'electron';
+    import {execFileSync} from 'node:child_process';import {writeFileSync} from 'node:fs';import assert from 'node:assert/strict';
+    import {registerAppletIpc} from './src/main/applets/registerAppletIpc';
+    const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+    app.whenReady().then(async()=>{
+      const owner=new BrowserWindow({width:800,height:600,frame:false,webPreferences:{preload:${JSON.stringify(join(directory, 'preload.cjs'))},sandbox:true,contextIsolation:true,nodeIntegration:false}});
+      let saved={count:0};
+      const bundle={schemaVersion:1,appletId:'applet',revisionId:'revision',sourceHash:'hash',title:'Interactive costs',description:'Saved counter illustration',threadId:'thread',messageId:'message',turnId:'turn',createdAt:new Date().toISOString(),runtimePolicyVersion:1,source:{schemaVersion:1,title:'Interactive costs',description:'Saved counter illustration',stateVersion:1,html:'<button id="increment">Add one</button><output id="count"></output>',css:'html,body{margin:0;background:rgb(255,0,0);height:100%;}button{margin:20px;padding:15px}',js:'let count=mousseApplet.state?.count??0;document.querySelector("output").textContent=count;document.querySelector("button").onclick=()=>{count++;document.querySelector("output").textContent=count;mousseApplet.saveState({count})}'} };
+      const gui={on:()=>{},getWindowBindingForSender:()=>({profileId:'profile',epoch:1}),runWithSender:(_sender,callback)=>callback(),request:async(method,input)=>{assert.equal(input.threadId,'thread');if(method==='applets.get')return bundle;if(method==='applets.state.get')return{state:saved};if(method==='applets.state.save'){saved=input.state;return{ok:true}}throw new Error('Unexpected request '+method)}};
+      registerAppletIpc((channel,handler)=>ipcMain.handle(channel,handler),gui,()=>[owner]);
+      const guests=()=>webContents.getAllWebContents().filter(value=>value.id!==owner.webContents.id&&value.getURL().startsWith('mousse-applet:'));
+      const wait=async(predicate,label)=>{for(let n=0;n<60;n++){if(await predicate())return;await pause(50)}throw new Error('Timed out: '+label)};
+      const click=async(text)=>{const point=await owner.webContents.executeJavaScript('(()=>{const button=Array.from(document.querySelectorAll("button")).find(b=>b.textContent.trim()==='+JSON.stringify(text)+');if(!button)throw new Error("Missing button");const r=button.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()');owner.webContents.sendInputEvent({type:'mouseMove',x:Math.round(point.x),y:Math.round(point.y)});await pause(50);owner.webContents.sendInputEvent({type:'mouseDown',x:Math.round(point.x),y:Math.round(point.y),button:'left',clickCount:1});await pause(50);owner.webContents.sendInputEvent({type:'mouseUp',x:Math.round(point.x),y:Math.round(point.y),button:'left',clickCount:1});await pause(160)};
+      try{
+        await owner.loadFile(${JSON.stringify(join(directory, 'index.html'))});owner.show();
+        await wait(()=>guests().length===1,'initial production card mount');
+        assert.equal(await owner.webContents.executeJavaScript('getComputedStyle(document.querySelector(".mousse-applet-actions button")).color'),'rgb(232, 232, 236)','Dark toolbar inherits readable foreground');
+        const first=guests()[0];await wait(()=>first.executeJavaScript('document.querySelector("output").textContent==="0"'),'initial applet counter');
+        await pause(350);
+        execFileSync('import',['-window',String(owner.getNativeWindowHandle().readUInt32LE()),'/tmp/mousse-in-thread-applets-initial.png']);
+        const point=await first.executeJavaScript('(()=>{const r=document.querySelector("button").getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()');
+        first.sendInputEvent({type:'mouseMove',x:Math.round(point.x),y:Math.round(point.y)});await pause(50);first.sendInputEvent({type:'mouseDown',x:Math.round(point.x),y:Math.round(point.y),button:'left',clickCount:1});await pause(50);first.sendInputEvent({type:'mouseUp',x:Math.round(point.x),y:Math.round(point.y),button:'left',clickCount:1});
+        await wait(()=>saved.count===1,'real pointer interaction persisted through production IPC');
+        await pause(100);const image=nativeImage.createFromBuffer(execFileSync('import',['-window',String(owner.getNativeWindowHandle().readUInt32LE()),'png:-']));writeFileSync(${JSON.stringify(screenshot)},image.toPNG());
+        const bitmap=image.toBitmap(),size=image.getSize();const pixel=(x,y)=>{const scale=size.width/owner.getContentSize()[0];const offset=(Math.round(y*scale)*size.width+Math.round(x*scale))*4;return Array.from(bitmap.subarray(offset,offset+3))};
+        assert.deepEqual(pixel(600,400),[0,0,255],'Native guest paints inside preview');assert.deepEqual(pixel(600,500),[0,255,0],'Native guest is clipped above composer');
+        await click('Menu');await wait(()=>guests().length===0,'host menu hides guest');await click('Menu');await wait(()=>guests().length===1,'closing menu restores guest');
+        await wait(()=>guests()[0].executeJavaScript('document.querySelector("output").textContent==="1"'),'menu remount restores saved state');
+        await click('Source');await wait(()=>guests().length===0,'source button remains reachable and hides guest');
+        assert(await owner.webContents.executeJavaScript('document.querySelector(".mousse-applet-source pre").textContent.includes("increment")'));
+        await click('Preview');await wait(()=>guests().length===1,'source returns to preview');await click('Restart');await wait(()=>guests().length===1,'restart remounts guest');
+        await wait(()=>guests()[0].executeJavaScript('document.querySelector("output").textContent==="1"'),'restart restores persisted state');
+        await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=700');await wait(()=>guests().length===0,'offscreen guest unmount');
+        console.log('Production applet card passed: Electron mouse input controls, source/restart, menu suspension, saved state, composer clipping, offscreen teardown. Screenshot: '+${JSON.stringify(screenshot)});
+        owner.destroy();app.quit();
+      }catch(error){console.error(error);owner.destroy();app.exit(1)}
+    });
+  `
+    },
+    outfile: join(directory, 'main.cjs'),
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    external: ['electron']
+  })
+  const env = { ...process.env }
+  delete env.ELECTRON_RUN_AS_NODE
+  await new Promise((resolve, reject) => {
+    const child = spawn(electron, [join(directory, 'main.cjs'), '--ozone-platform=x11'], {
+      env,
+      stdio: 'inherit'
+    })
+    const timer = setTimeout(() => {
+      child.kill()
+      reject(new Error('Production applet UI probe timed out'))
+    }, 25_000)
+    child.once('error', (error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
+    child.once('exit', (code) => {
+      clearTimeout(timer)
+      code === 0 ? resolve() : reject(new Error('Production applet UI probe failed: ' + code))
+    })
+  })
+} finally {
+  await rm(directory, { recursive: true, force: true })
+}
