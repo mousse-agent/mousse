@@ -7,7 +7,7 @@ export const INTEGRATION_METHODS = [
   'integrations.snapshot', 'skills.create', 'skills.update', 'skills.editor',
   'skills.enable', 'skills.archive', 'skills.importPackage', 'skills.exportPackage',
   'mcp.create', 'mcp.update', 'mcp.read', 'mcp.enable', 'mcp.delete',
-  'mcp.testConnection', 'mcp.beginAuth', 'mcp.cancelAuth', 'mcp.revokeAuth'
+  'mcp.testConnection', 'mcp.beginAuth', 'mcp.cancelAuth', 'mcp.revokeAuth', 'mcp.authBrowserResult'
 ] as const
 export type IntegrationMethod = (typeof INTEGRATION_METHODS)[number]
 export interface IntegrationPlatformSnapshot {
@@ -16,7 +16,7 @@ export interface IntegrationPlatformSnapshot {
 }
 export interface IntegrationPackageDownload { fileName: string; base64: string; contentType: string }
 export interface IntegrationPlatformRequester {
-  request<T>(method: IntegrationMethod, params: unknown): Promise<T>
+  request<T>(method: Exclude<IntegrationMethod, 'mcp.authBrowserResult'>, params: unknown): Promise<T>
 }
 export interface IntegrationProfileParams { profileId: string; projectId?: string }
 export interface IntegrationIdentityParams extends IntegrationProfileParams { installationId: string }

@@ -355,7 +355,7 @@ export class LocalMmsClient implements MmsClient {
       this.opts.requestTimeoutMs ??
       (method === 'orchestrator.send'
         ? MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS
-        : method === 'providers.loginOAuth' || method === 'providers.loginApiKey'
+        : method === 'providers.loginOAuth' || method === 'providers.loginApiKey' || method === 'mcp.beginAuth' || method === 'mcp.authenticate'
         ? MMS_PROTOCOL_LOGIN_TIMEOUT_MS
         : MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS)
     if (!this._connected || !this.socket || this.socket.destroyed) {
@@ -468,7 +468,7 @@ export class LocalMmsClient implements MmsClient {
       return
     }
     if (env.kind === 'connection_event') {
-      if (!this._hello?.capabilities.includes('net.v1')) return
+      if (!this._hello?.capabilities.includes(env.type === 'mcp.auth-url' ? 'integrations.lifecycle.v1' : 'net.v1')) return
       for (const handler of this.connectionEventHandlers) {
         try {
           handler(env)

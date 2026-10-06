@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto'
 import { INTEGRATION_CAPABILITY, INTEGRATION_METHODS, type IntegrationMethod } from '../../shared/integrationPlatform'
 import type { McpCreateInput, McpUpdateInput, SkillCreateInput, SkillUpdateInput } from '../../shared/integrations/lifecycle'
 import type { ProjectManager } from '../data/ProjectManager'
@@ -24,6 +25,9 @@ interface AuthAttempt {
   connectionId: string
   projectPath?: string
   installationId: string
+  attemptId: string
+  epoch: number
+  browserResult?: (opened: boolean) => void
 }
 type Params = Record<string, unknown>
 const CREATE_SKILL = ['name', 'description', 'scope', 'instructions', 'license', 'compatibility', 'enable']
@@ -45,7 +49,8 @@ const fields: Record<IntegrationMethod, readonly string[]> = {
   'mcp.testConnection': ['installationId'],
   'mcp.beginAuth': ['installationId'],
   'mcp.cancelAuth': ['installationId'],
-  'mcp.revokeAuth': ['installationId']
+  'mcp.revokeAuth': ['installationId'],
+  'mcp.authBrowserResult': ['attemptId', 'opened']
 }
 
 function validate(method: IntegrationMethod, value: unknown): Params {
@@ -84,6 +89,7 @@ function validate(method: IntegrationMethod, value: unknown): Params {
   }
   if (p.format !== undefined && p.format !== 'zip' && p.format !== 'markdown') throw new DomainRpcError('invalid_params', 'Invalid export format')
   if (method === 'skills.importPackage' && (typeof p.zipBase64 !== 'string' || !p.zipBase64 || p.zipBase64.length > 480 * 1024 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(p.zipBase64))) throw new DomainRpcError('invalid_params', 'Expected a ZIP package encoded as base64 (maximum 360 KiB)')
+  if (method === 'mcp.authBrowserResult' && (typeof p.attemptId !== 'string' || !/^[a-f0-9-]{36}$/.test(p.attemptId) || typeof p.opened !== 'boolean')) throw new DomainRpcError('invalid_params', 'Invalid browser authorization result')
   return p
 }
 
@@ -129,14 +135,41 @@ export function registerIntegrationMethods(domains: DomainHandlerRegistry, servi
       const projectPath = ownedProject(service, p.projectId)
       const id = p.installationId as string
       const authKey = JSON.stringify([binding!.profileId, context.connection!.id, binding!.epoch, projectPath, id])
+      if (method === 'mcp.authBrowserResult') {
+        const attempt = [...auth.values()].find(value => value.attemptId === p.attemptId && value.connectionId === context.connection!.id && value.profileId === binding!.profileId && value.epoch === binding!.epoch)
+        if (!attempt || !attempt.browserResult) throw new DomainRpcError('auth_attempt_unavailable', 'Authorization attempt is no longer active')
+        attempt.browserResult(p.opened as boolean)
+        return { acknowledged: true }
+      }
       if (method === 'mcp.cancelAuth') { auth.get(authKey)?.controller.abort(); auth.delete(authKey); return { cancelled: true } }
       if (method === 'mcp.beginAuth') {
         auth.get(authKey)?.controller.abort()
         const controller = new AbortController()
-        const attempt: AuthAttempt = { controller, profileId: binding!.profileId, connectionId: context.connection!.id, projectPath, installationId: id }
+        const attempt: AuthAttempt = { controller, profileId: binding!.profileId, connectionId: context.connection!.id, projectPath, installationId: id, attemptId: randomUUID(), epoch: binding!.epoch }
         auth.set(authKey, attempt)
         const timer = setTimeout(() => controller.abort(), 300_000)
-        try { return await service.mcpManager.authenticateServer(id, projectPath, controller.signal) }
+        try { return await service.mcpManager.authenticateServer(id, projectPath, controller.signal, async url => {
+          if (auth.get(authKey) !== attempt || controller.signal.aborted) throw new Error('Authorization attempt is no longer active')
+          attempt.attemptId = randomUUID()
+          const parsed = new URL(url)
+          if (!['http:', 'https:'].includes(parsed.protocol) || url.length > 16_384 || parsed.username || parsed.password) throw new Error('Invalid authorization URL')
+          if (context.connection!.clientType !== 'gui' || !context.connection!.emitConnectionEvent) throw new Error('Authorization requires the desktop app to open your browser')
+          let resolveResult!: (opened: boolean) => void
+          const result = new Promise<boolean>(resolve => { resolveResult = resolve })
+          attempt.browserResult = resolveResult
+          const timeout = setTimeout(() => resolveResult(false), 15_000)
+          const onAbort = (): void => resolveResult(false)
+          controller.signal.addEventListener('abort', onAbort, { once: true })
+          try {
+            if (controller.signal.aborted) throw new Error('Authorization cancelled')
+            await context.connection!.emitConnectionEvent('mcp.auth-url', { installationId: id, attemptId: attempt.attemptId, url: parsed.toString() }, controller.signal)
+            if (!await result) throw new Error(controller.signal.aborted ? 'Authorization cancelled' : 'Could not open your browser for sign-in. Check your default browser and try again.')
+          } finally {
+            clearTimeout(timeout)
+            controller.signal.removeEventListener('abort', onAbort)
+            attempt.browserResult = undefined
+          }
+        }) }
         finally { clearTimeout(timer); if (auth.get(authKey) === attempt) auth.delete(authKey) }
       }
       if (['mcp.revokeAuth', 'mcp.delete', 'mcp.update'].includes(method) || (method === 'mcp.enable' && p.enabled === false)) abortMatching((attempt) => attempt.profileId === binding!.profileId && attempt.projectPath === projectPath && attempt.installationId === id)

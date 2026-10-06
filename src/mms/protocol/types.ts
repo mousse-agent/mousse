@@ -110,7 +110,7 @@ export interface ProtocolEvent {
 /** One authenticated socket's live display lane. Never sequenced or replayed. */
 export interface ProtocolConnectionEvent {
   kind: 'connection_event'
-  type: 'bridge.hub.thread'
+  type: 'bridge.hub.thread' | 'mcp.auth-url'
   profileId: string
   profileEpoch: number
   data: unknown

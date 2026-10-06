@@ -51,6 +51,7 @@ import { surfaceToWindowBackground } from '../../shared/accentPalette'
 import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
 import { showCopyMenu } from '../contextMenu'
 import { openExternalSafely } from '../safeExternalUrl'
+import { dispatchMcpAuthBrowser } from '../mcpAuthBrowser'
 import {
   attachWindowStateListeners,
   beginWindowDrag,
@@ -610,9 +611,18 @@ export function registerGuiIpc(
   guiMms.on('window-connection-event', ({ senderId, event }: { senderId: number; event: import('../../mms/protocol/types').ProtocolConnectionEvent }) => {
     const win = BrowserWindow.getAllWindows().find(candidate => candidate.webContents.id === senderId)
     const binding = guiMms.getWindowBindingForSender(senderId)
-    if (!win || win.isDestroyed() || !binding || event.type !== 'bridge.hub.thread' ||
+    if (!win || win.isDestroyed() || !binding ||
       event.profileId !== binding.profileId || event.profileEpoch !== binding.epoch) return
-    win.webContents.send('bridge:thread-part', event.data)
+    if (event.type === 'mcp.auth-url') {
+      void guiMms.runWithSender(win.webContents, () => dispatchMcpAuthBrowser(
+        event,
+        () => win.isDestroyed() ? null : guiMms.getWindowBindingForSender(senderId),
+        target => shell.openExternal(target),
+        (attemptId, opened) => guiMms.request('mcp.authBrowserResult', { attemptId, opened })
+      )).catch(error => console.warn('MCP browser authorization failed', error instanceof Error ? error.message : 'Unknown error'))
+      return
+    }
+    if (event.type === 'bridge.hub.thread') win.webContents.send('bridge:thread-part', event.data)
   })
   guiMms.on('window-event', ({ senderId, event, replay }: { senderId: number; event: ProtocolEvent; replay?: boolean }) => {
     const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
