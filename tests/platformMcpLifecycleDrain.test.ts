@@ -388,13 +388,14 @@ describe('OAuth callback and local HTTP I/O during shutdown', () => {
         })
       ]),
       settingsStore() as never,
-      async () => {
-        redirected.resolve()
-      },
+      async () => { throw new Error('The default opener must not run for this attempt') },
       { context: contextFor(root) }
     )
     managers.push(manager)
-    const pending = manager.authenticateServer('inst-echo')
+    const pending = manager.authenticateServer('inst-echo', undefined, undefined, async url => {
+      expect(new URL(url).pathname).toBe('/authorize')
+      redirected.resolve()
+    })
     await redirected.promise
     await waitUntil('oauth callback port', () => isPortOpen(8791))
     const oauthDir = getManagedMcpOAuthDir(root)

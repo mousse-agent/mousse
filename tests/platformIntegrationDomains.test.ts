@@ -151,6 +151,59 @@ describe('managed integration domain methods', () => {
     await expect(call('integrations.snapshot', {})).rejects.toMatchObject({ code: 'service_unavailable' })
   })
 
+  it('opens authorization only through its owning GUI connection and requires a truthful browser result', async () => {
+    const a = service('profile-a'), domains = new DomainHandlerRegistry()
+    const registration = registerIntegrationMethods(domains, () => a)
+    const context = (connectionId = 'owner', epoch = 1): HandlerContext => ({
+      mms: {} as HandlerContext['mms'], globalSequence: () => 0,
+      connection: { id: connectionId, clientType: 'gui', binding: { profileId: 'profile-a', epoch }, capabilities: new Set([INTEGRATION_CAPABILITY]), emitConnectionEvent: vi.fn(async () => {}) }
+    })
+    const owner = context()
+    vi.spyOn(a.mcpManager, 'authenticateServer').mockImplementation(async (_id, _path, _signal, open) => {
+      try { await open!('https://login.example.test/authorize?state=fixture'); return { success: true } }
+      catch (error) { return { success: false, error: (error as Error).message } }
+    })
+    const pending = domains.dispatch(owner, 'mcp.beginAuth', { installationId: 'fixture' })
+    const emit = vi.mocked(owner.connection!.emitConnectionEvent!)
+    await vi.waitFor(() => expect(emit).toHaveBeenCalledOnce())
+    const data = emit.mock.calls[0][1] as { attemptId: string; url: string }
+    expect(emit.mock.calls[0][0]).toBe('mcp.auth-url')
+    expect(data.url).toContain('https://login.example.test/authorize')
+    await expect(domains.dispatch(context('other'), 'mcp.authBrowserResult', { attemptId: data.attemptId, opened: true })).rejects.toMatchObject({ code: 'auth_attempt_unavailable' })
+    await expect(domains.dispatch(context('owner', 2), 'mcp.authBrowserResult', { attemptId: data.attemptId, opened: true })).rejects.toMatchObject({ code: 'auth_attempt_unavailable' })
+    await domains.dispatch(owner, 'mcp.authBrowserResult', { attemptId: data.attemptId, opened: false })
+    await expect(pending).resolves.toMatchObject({ success: false, error: expect.stringContaining('Could not open your browser') })
+    await expect(domains.dispatch(owner, 'mcp.authBrowserResult', { attemptId: data.attemptId, opened: true })).rejects.toMatchObject({ code: 'auth_attempt_unavailable' })
+    const retry = domains.dispatch(owner, 'mcp.beginAuth', { installationId: 'fixture' })
+    await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(2))
+    const next = emit.mock.calls[1][1] as { attemptId: string }
+    await domains.dispatch(owner, 'mcp.authBrowserResult', { attemptId: next.attemptId, opened: true })
+    await expect(retry).resolves.toMatchObject({ success: true })
+    registration.dispose()
+  })
+
+  it('cancels an outstanding browser dispatch and refuses unsafe authorization URLs', async () => {
+    const a = service('profile-a'), domains = new DomainHandlerRegistry()
+    const registration = registerIntegrationMethods(domains, () => a)
+    const emit = vi.fn(async () => {})
+    const owner: HandlerContext = { mms: {} as HandlerContext['mms'], globalSequence: () => 0, connection: { id: 'owner', clientType: 'gui', binding: { profileId: 'profile-a', epoch: 1 }, capabilities: new Set([INTEGRATION_CAPABILITY]), emitConnectionEvent: emit } }
+    const authenticate = vi.spyOn(a.mcpManager, 'authenticateServer').mockImplementation(async (_id, _path, _signal, open) => {
+      try { await open!('https://login.example.test/authorize'); return { success: true } }
+      catch (error) { return { success: false, error: (error as Error).message } }
+    })
+    const pending = domains.dispatch(owner, 'mcp.beginAuth', { installationId: 'fixture' })
+    await vi.waitFor(() => expect(emit).toHaveBeenCalledOnce())
+    registration.disconnect('owner')
+    await expect(pending).resolves.toMatchObject({ success: false, error: 'Authorization cancelled' })
+    authenticate.mockImplementation(async (_id, _path, _signal, open) => {
+      try { await open!('file:///tmp/unsafe'); return { success: true } }
+      catch (error) { return { success: false, error: (error as Error).message } }
+    })
+    await expect(domains.dispatch(owner, 'mcp.beginAuth', { installationId: 'fixture' })).resolves.toMatchObject({ success: false, error: 'Invalid authorization URL' })
+    expect(emit).toHaveBeenCalledOnce()
+    registration.dispose()
+  })
+
   it('connects a real fixture MCP server and returns truthful missing-server results', async () => {
     const { a, call } = fixture()
     const created = await call<ManagedMcpRecord>('mcp.create', {
