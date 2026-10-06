@@ -93,6 +93,13 @@ try {
           assert.notDeepEqual(pixel(600,Math.round(rect.top)-5),[0,0,255],'Native preview does not cover toolbar');
           assert.deepEqual(pixel(600,Math.round(rect.top)+25),[0,0,255],'Live preview returns at current DOM position');
           assert.deepEqual(pixel(600,500),[0,255,0],'Composer stays clear after gesture');
+          await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=700');
+          await wait(()=>guests().length===0,'offscreen guest tears down during gesture');
+          await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=0');
+          await pause(50);
+          assert.equal(guests().length,0,'Newly visible preview waits for scroll to settle');
+          await wait(()=>guests().length===1,'newly visible preview mounts after gesture');
+          await wait(()=>guests()[0].executeJavaScript('document.querySelector("output").textContent==="1"'),'offscreen return restores saved state');
           console.log('Header wheel regression passed: DOM snapshot during scroll, no native header overlap, same guest/state after resume, composer clipping.');
           owner.destroy();app.quit();return;
         }
