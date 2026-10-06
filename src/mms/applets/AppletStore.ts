@@ -1,3 +1,5 @@
+import { exportAppletHtml } from '../../shared/appletExport'
+import type { AppletAppearance } from '../../shared/appletAppearance'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -9,8 +11,7 @@ import {
   appletJsonBytes,
   validateAppletSubmission,
   type AppletBundle,
-  type AppletReference,
-  type AppletSubmission
+  type AppletReference
 } from '../../shared/applets'
 
 interface AppletIndex {
@@ -240,24 +241,8 @@ export class AppletStore {
   exportSource(threadId: string, appletId: string, revisionId: string): string {
     return JSON.stringify(this.load(threadId, appletId, revisionId).source, null, 2)
   }
-  exportHtml(threadId: string, appletId: string, revisionId: string): string {
-    return exportAppletHtml(this.load(threadId, appletId, revisionId).source)
+  exportHtml(threadId: string, appletId: string, revisionId: string, appearance?: AppletAppearance): string {
+    return exportAppletHtml(this.load(threadId, appletId, revisionId).source,appearance)
   }
 }
-/** Export is explicitly executable, offline HTML; generated source is confined to its own sandbox. */
-export function exportAppletHtml(source: AppletSubmission): string {
-  const safe = validateAppletSubmission(source)
-  const payload = JSON.stringify(safe)
-    .replace(/</g, '\\u003c')
-    .replace(/>/g, '\\u003e')
-    .replace(/&/g, '\\u0026')
-  return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Exported Mousse applet</title><style>html,body,iframe{width:100%;height:100%;margin:0;border:0}</style><iframe sandbox="allow-scripts" title="Exported applet"></iframe><script>
-const s=${payload};
-const policy="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'";
-const json=v=>JSON.stringify(v).replace(/</g,'\\\\u003c');
-const escapeScript=v=>v.replace(/<\\/script/gi,'<\\\\/script');
-const bootstrap="for(const name of ['RTCPeerConnection','webkitRTCPeerConnection','RTCDataChannel','WebTransport']){Object.defineProperty(window,name,{value:undefined,configurable:false,writable:false})}window.mousseApplet={data:"+json(s.data??null)+",state:null,saveState:value=>{window.mousseApplet.state=value},resize:()=>{},reportError:message=>console.error(message),requestConversationInput:()=>{}};";
-const script=v=>'<script>'+escapeScript(v)+'<\\/script>';
-document.querySelector('iframe').srcdoc='<meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="'+policy.replace(/"/g,'&quot;')+'">'+script(bootstrap)+'<style>'+s.css.replace(/<\\/style/gi,'<\\\\/style')+'</style>'+s.html+script(s.js);
-</script>`
-}
+export { exportAppletHtml } from '../../shared/appletExport'

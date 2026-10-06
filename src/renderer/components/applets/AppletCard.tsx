@@ -2,6 +2,8 @@ import { memo, useEffect, useRef, useState } from 'react'
 import type { AppletBundle, AppletReference } from '../../../shared/applets'
 import { useAppStore } from '../../stores/appStore'
 import './applets.css'
+import { Button } from '../ui/Button'
+import { readAppletAppearance, subscribeAppletAppearance } from './appearance'
 import { subscribeAppletScroll } from './scrollPresentation'
 import { appletHostBlocked, subscribeAppletHostVisibility } from './hostVisibility'
 
@@ -52,6 +54,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
     let intersecting = false
     let failed = false
     let frame = 0
+    let appearance = readAppletAppearance()
     let lastGeometry = ''
     let resizeTimer: ReturnType<typeof setTimeout> | undefined
     setReady(false)
@@ -66,7 +69,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
       const id = runtime.current
       if (!id) return
       try {
-        const result = await api.snapshot({runtimeId:id})
+        const result = await api.snapshot({ runtimeId: id })
         if (!disposed && scrollPaused && runtime.current === id) {
           if (result.image) {
             const image = new Image()
@@ -75,10 +78,13 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
           }
           if (disposed || !scrollPaused || runtime.current !== id) return
           setScrollImage(result.image)
-          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
-          if (!disposed && scrollPaused && runtime.current === id) await api.suspend({runtimeId:id})
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+          if (!disposed && scrollPaused && runtime.current === id)
+            await api.suspend({ runtimeId: id })
         }
-      } catch { /* Profile/thread teardown owns the guest lifecycle. */ }
+      } catch {
+        /* Profile/thread teardown owns the guest lifecycle. */
+      }
     }
     const measure = async () => {
       frame = 0
@@ -120,13 +126,16 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
             revisionId: reference.revisionId,
             sourceHash: reference.sourceHash,
             bounds,
-            clip
+            clip,
+            appearance
           })
           if (disposed) {
             await api.unmount({ runtimeId: result.runtimeId })
             return
           }
           runtime.current = result.runtimeId
+          await api.appearance({ runtimeId: result.runtimeId, appearance }).catch(() => {})
+          if (disposed) return
           lastGeometry = ''
           setReady(true)
           if (scrollPaused) await suspend()
@@ -161,15 +170,22 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
           void measure()
         })
     }
-    const unsubscribeScroll = scroller ? subscribeAppletScroll(scroller, {
-      active: () => !!runtime.current || (mounting && intersecting),
-      suspend,
-      resume: () => {
-        scrollPaused = false
-        lastGeometry = ''
-        schedule()
-      }
-    }) : () => {}
+    const unsubscribeScroll = scroller
+      ? subscribeAppletScroll(scroller, {
+          active: () => !!runtime.current || (mounting && intersecting),
+          suspend,
+          resume: () => {
+            scrollPaused = false
+            lastGeometry = ''
+            schedule()
+          }
+        })
+      : () => {}
+    const unsubscribeAppearance = subscribeAppletAppearance((value) => {
+      appearance = value
+      const id = runtime.current
+      if (id) void api.appearance({ runtimeId: id, appearance: value }).catch(() => {})
+    })
     const unsubscribeHost = subscribeAppletHostVisibility(schedule)
     const observer = new ResizeObserver(schedule)
     observer.observe(node)
@@ -213,6 +229,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
       intersection.disconnect()
       unsubscribe()
       unsubscribeHost()
+      unsubscribeAppearance()
       unsubscribeScroll()
       clearTimeout(resizeTimer)
       window.removeEventListener('scroll', schedule, true)
@@ -274,6 +291,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
         appletId: reference.appletId,
         revisionId: reference.revisionId,
         format,
+        appearance: readAppletAppearance(),
         runtimeId: runtime.current ?? undefined
       })
     } catch (cause) {
@@ -292,14 +310,16 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
         </span>
       </header>
       <div className="mousse-applet-actions">
-        <button
+        <Button
+          size="sm"
           type="button"
           onClick={() => setExpanded((value) => !value)}
           aria-expanded={expanded}
         >
           {expanded ? 'Collapse' : 'Expand'}
-        </button>
-        <button
+        </Button>
+        <Button
+          size="sm"
           type="button"
           onClick={() => {
             setError(null)
@@ -307,30 +327,35 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
           }}
         >
           Restart
-        </button>
-        <button type="button" onClick={() => void showSource()} aria-expanded={sourceOpen}>
+        </Button>
+        <Button
+          size="sm"
+          type="button"
+          onClick={() => void showSource()}
+          aria-expanded={sourceOpen}
+        >
           {sourceOpen ? 'Preview' : 'Source'}
-        </button>
-        <button type="button" onClick={() => void exportApplet('html')}>
+        </Button>
+        <Button size="sm" type="button" onClick={() => void exportApplet('html')}>
           Export HTML
-        </button>
-        <button type="button" onClick={() => void exportApplet('source')}>
+        </Button>
+        <Button size="sm" type="button" onClick={() => void exportApplet('source')}>
           Export source
-        </button>
-        <button type="button" disabled={!ready} onClick={() => void exportApplet('png')}>
+        </Button>
+        <Button size="sm" type="button" disabled={!ready} onClick={() => void exportApplet('png')}>
           Export PNG
-        </button>
+        </Button>
       </div>
       {error && (
         <p className="mousse-applet-error" role="alert">
           {error}
-          <button type="button" onClick={requestRepair}>
+          <Button size="sm" type="button" onClick={requestRepair}>
             Ask the assistant to fix this
-          </button>
+          </Button>
         </p>
       )}
       {sourceOpen ? (
-        <div className="mousse-applet-source">
+        <div className="mousse-applet-source scrollbar-ultra-thin">
           {bundle ? (
             <>
               <h4>HTML</h4>
@@ -353,7 +378,14 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
           style={{ height: expanded ? 620 : height }}
           aria-label="Applet preview"
         >
-          {scrollImage && <img className="mousse-applet-scroll-frame" src={scrollImage} alt="" aria-hidden="true" />}
+          {scrollImage && (
+            <img
+              className="mousse-applet-scroll-frame"
+              src={scrollImage}
+              alt=""
+              aria-hidden="true"
+            />
+          )}
           {!ready && (
             <span>
               {error
@@ -364,14 +396,14 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
         </div>
       )}
       {conversationInput && (
-        <aside className="mousse-applet-conversation-input">
+        <aside className="mousse-applet-conversation-input scrollbar-ultra-thin">
           <p>{conversationInput}</p>
-          <button type="button" onClick={addConversationInput}>
+          <Button size="sm" type="button" onClick={addConversationInput}>
             Add to conversation draft
-          </button>
-          <button type="button" onClick={() => setConversationInput(null)}>
+          </Button>
+          <Button size="sm" type="button" onClick={() => setConversationInput(null)}>
             Dismiss
-          </button>
+          </Button>
         </aside>
       )}
       <footer>Offline applet · interactions stay on this device</footer>

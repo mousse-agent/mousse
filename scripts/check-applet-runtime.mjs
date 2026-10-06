@@ -22,7 +22,7 @@ try {
       const mount=(id,source)=>manager.mount({runtimeId:id,threadId:'test',revisionId:id,source,bounds,clip});
       try{
         await owner.loadURL('data:text/html,<body style="margin:0;background:rgb(0,255,0)">Owner</body>');owner.webContents.setZoomFactor(1);owner.setPosition(0,0);
-        await mount('working',{html:'<button id="button">Add</button><output id="count">0</output>',css:'body{background:rgb(255,0,0);height:100vh}',js:'document.querySelector("button").onclick=()=>{document.querySelector("output").textContent="1";mousseApplet.saveState({count:1})};mousseApplet.saveState({node:typeof require,host:typeof window.mousse,rtc:typeof RTCPeerConnection});fetch("https://example.com").then(()=>mousseApplet.reportError("NETWORK LEAK"),()=>mousseApplet.saveState({network:"blocked"}));'});
+        await mount('working',{html:'<main class="red"><button id="button">Add</button><output id="count">0</output></main>',css:'.red{background:rgb(255,0,0);height:100vh}',js:'document.querySelector("button").onclick=()=>{document.querySelector("output").textContent="1";mousseApplet.saveState({count:1})};mousseApplet.saveState({node:typeof require,host:typeof window.mousse,rtc:typeof RTCPeerConnection});fetch("https://example.com").then(()=>mousseApplet.reportError("NETWORK LEAK"),()=>mousseApplet.saveState({network:"blocked"}));'});
         await pause(250);
         const guest=webContents.getAllWebContents().find(w=>w.id!==owner.webContents.id);
         assert(guest);const originalSession=guest.session,originalUrl=guest.getURL();if(!layoutOnly){assert.notEqual(guest.getOSProcessId(),owner.webContents.getOSProcessId(),'Guest needs an independent process');

@@ -18,3 +18,12 @@ Run `node scripts/check-applet-runtime.mjs` on Linux with X11 and ImageMagick `i
 Native views and Chromium's scrolling DOM do not move in one compositor transaction. Following scroll events alone can leave the native preview briefly covering a moving card header. I use a captured frame in the host DOM during a transcript scroll gesture. The first wheel deltas wait until the frame is decoded and painted and the native surface is hidden; subsequent events retain normal scrolling. After the gesture settles, current bounds restore the same guest. This preserves in-memory interaction state and avoids native positioning work during scrolling. Source-panel scrolling and control-wheel zoom retain their default behavior.
 
 `node scripts/check-in-thread-applets.mjs --scroll-only` verifies actual header wheel input, DOM frame presentation, native surface suppression, retained guest identity/state, resumed bounds, and composer clipping.
+
+
+## Appearance inheritance
+
+I pass a validated, finite set of resolved visual tokens into each guest. Theme/accent colors, solid surfaces, typography, spacing, radii, semantic colors, controls, focus treatment and reduced-motion preferences update through an immutable bootstrap function without rerunning generated JavaScript. Acrylic settings never cross this boundary; applet surfaces remain opaque and backdrop filters are disabled.
+
+The same shared document generator supplies standalone HTML exports. Thin scrollbars are enforced in the first important CSS layer, including nested scrollers, and reveal on hover, focus or scroll activity. The curated offline catalogue contains 25 actual Mousse Hugeicons; applets can create safe SVG elements with `mousseApplet.icon` or declarative `data-mousse-icon` markers. Generated canvas content can redraw on `mousse-appearance-change`.
+
+`node scripts/check-applet-appearance.mjs` checks guest controls, icon geometry, scrollbar cascade/autohide, live appearance, acrylic exclusion, reduced motion, isolation and export parity. `node scripts/check-in-thread-applets.mjs --appearance-only` checks the production renderer/preload/IPC path and preserved guest identity/state.

@@ -31,14 +31,6 @@
   gap: 6px;
   padding: 8px 16px 12px;
 }
-.mousse-applet-actions button {
-  border: 1px solid var(--border, #383840);
-  border-radius: 6px;
-  background: transparent;
-  padding: 4px 8px;
-  font-size: 11px;
-  cursor: pointer;
-}
 .mousse-applet-actions button:focus-visible {
   outline: 2px solid var(--accent, #ac86ce);
   outline-offset: 2px;
@@ -52,8 +44,8 @@
   display: grid;
   place-items: center;
   width: 100%;
-  background: #fff;
-  color: #777;
+  background: var(--surface-base, #1b1c23);
+  color: var(--text-secondary, #b1b1ba);
   font-size: 12px;
   contain: layout paint;
 }
@@ -117,4 +109,30 @@
   height: 100%;
   object-fit: fill;
   pointer-events: none;
+}
+
+.mousse-applet-source,
+.mousse-applet-conversation-input p {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.mousse-applet-source:hover,
+.mousse-applet-source:focus-within,
+.mousse-applet-conversation-input p:hover {
+  scrollbar-color: var(--vscode-scrollbarSlider-hoverBackground, var(--border)) transparent;
+}
+.mousse-applet-source::-webkit-scrollbar,
+.mousse-applet-conversation-input p::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+.mousse-applet-source::-webkit-scrollbar-thumb,
+.mousse-applet-conversation-input p::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: transparent;
+}
+.mousse-applet-source:hover::-webkit-scrollbar-thumb,
+.mousse-applet-source:focus-within::-webkit-scrollbar-thumb,
+.mousse-applet-conversation-input p:hover::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-hoverBackground, var(--border));
 }

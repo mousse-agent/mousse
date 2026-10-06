@@ -8,6 +8,7 @@ import electron from 'electron'
 const directory = await mkdtemp(join(tmpdir(), 'mousse-in-thread-applets-'))
 const screenshot = '/tmp/mousse-in-thread-applets-native.png'
 const scrollOnly = process.argv.includes('--scroll-only')
+const appearanceOnly = process.argv.includes('--appearance-only')
 try {
   await build({
     stdin: {
@@ -31,7 +32,7 @@ try {
   })
   await writeFile(
     join(directory, 'index.html'),
-    '<html><head><link rel="stylesheet" href="renderer.css"></head><body style="margin:0;background:rgb(0,0,255)"><div id="root"></div><script src="renderer.js"></script></body></html>'
+    '<html data-theme="dark"><head><link rel="stylesheet" href="renderer.css"></head><body style="margin:0;background:rgb(0,0,255)"><div id="root"></div><script src="renderer.js"></script></body></html>'
   )
   await build({
     entryPoints: ['src/preload/index.ts'],
@@ -52,7 +53,7 @@ try {
     app.whenReady().then(async()=>{
       const owner=new BrowserWindow({width:800,height:600,frame:false,webPreferences:{preload:${JSON.stringify(join(directory, 'preload.cjs'))},sandbox:true,contextIsolation:true,nodeIntegration:false}});
       let saved={count:0};
-      const bundle={schemaVersion:1,appletId:'applet',revisionId:'revision',sourceHash:'hash',title:'Interactive costs',description:'Saved counter illustration',threadId:'thread',messageId:'message',turnId:'turn',createdAt:new Date().toISOString(),runtimePolicyVersion:1,source:{schemaVersion:1,title:'Interactive costs',description:'Saved counter illustration',stateVersion:1,html:'<button id="increment">Add one</button><output id="count"></output>',css:'html,body{margin:0;background:rgb(255,0,0);height:100%;}button{margin:20px;padding:15px}',js:'let count=mousseApplet.state?.count??0;document.querySelector("output").textContent=count;document.querySelector("button").onclick=()=>{count++;document.querySelector("output").textContent=count;mousseApplet.saveState({count})}'} };
+      const bundle={schemaVersion:1,appletId:'applet',revisionId:'revision',sourceHash:'hash',title:'Interactive costs',description:'Saved counter illustration',threadId:'thread',messageId:'message',turnId:'turn',createdAt:new Date().toISOString(),runtimePolicyVersion:1,source:{schemaVersion:1,title:'Interactive costs',description:'Saved counter illustration',stateVersion:1,html:'<main class="applet-canvas"><button id="increment">Add one</button><output id="count"></output></main>',css:'.applet-canvas{background:rgb(255,0,0);min-height:100vh}button{margin:20px;padding:15px}',js:'let count=mousseApplet.state?.count??0;document.querySelector("output").textContent=count;document.querySelector("button").onclick=()=>{count++;document.querySelector("output").textContent=count;mousseApplet.saveState({count})}'} };
       const gui={on:()=>{},getWindowBindingForSender:()=>({profileId:'profile',epoch:1}),runWithSender:(_sender,callback)=>callback(),request:async(method,input)=>{assert.equal(input.threadId,'thread');if(method==='applets.get')return bundle;if(method==='applets.state.get')return{state:saved};if(method==='applets.state.save'){saved=input.state;return{ok:true}}throw new Error('Unexpected request '+method)}};
       registerAppletIpc((channel,handler)=>ipcMain.handle(channel,handler),gui,()=>[owner]);
       const guests=()=>webContents.getAllWebContents().filter(value=>value.id!==owner.webContents.id&&value.getURL().startsWith('mousse-applet:'));
@@ -68,6 +69,17 @@ try {
         const point=await first.executeJavaScript('(()=>{const r=document.querySelector("button").getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()');
         first.sendInputEvent({type:'mouseMove',x:Math.round(point.x),y:Math.round(point.y)});await pause(50);first.sendInputEvent({type:'mouseDown',x:Math.round(point.x),y:Math.round(point.y),button:'left',clickCount:1});await pause(50);first.sendInputEvent({type:'mouseUp',x:Math.round(point.x),y:Math.round(point.y),button:'left',clickCount:1});
         await wait(()=>saved.count===1,'real pointer interaction persisted through production IPC');
+        if (${appearanceOnly}) {
+          const id=first.id;
+          await owner.webContents.executeJavaScript('(()=>{const r=document.documentElement;r.dataset.theme="light";r.setAttribute("data-acrylic","true");for(const[k,v]of Object.entries({"--surface-base":"#fafafa","--surface-strong":"#eeeeee","--surface-soft":"#dddddd","--accent":"#6251aa","--accent-rgb":"98,81,170","--text-primary":"#222222","--text-secondary":"#555555","--theme-btn-radius":"11px"}))r.style.setProperty(k,v);r.style.setProperty("--bg-primary","rgba(255,255,255,.4)");r.style.setProperty("--glass-blur","blur(20px)");document.body.style.fontFamily="Arial, sans-serif";document.body.style.fontSize="18px"})()');
+          await wait(()=>first.executeJavaScript('mousseApplet.appearance.theme==="light" && getComputedStyle(document.body).backgroundColor==="rgb(250, 250, 250)"'),'theme change updates mounted guest');
+          const values=await first.executeJavaScript('(()=>{const s=getComputedStyle(document.body),b=getComputedStyle(document.querySelector("button"));return {font:s.fontFamily,size:s.fontSize,color:s.color,blur:s.backdropFilter,radius:b.borderRadius,acrylicToken:document.documentElement.style.getPropertyValue("--glass-blur"),opaque:mousseApplet.appearance.tokens["--bg-primary"],count:document.querySelector("output").textContent}})()');
+          assert(values.font.includes('Arial'));assert.equal(values.size,'18px');assert.equal(values.color,'rgb(34, 34, 34)');assert.equal(values.blur,'none');assert.equal(values.acrylicToken,'');assert.equal(values.radius,'11px');assert.equal(values.opaque,'#fafafa');assert.equal(values.count,'1');assert.equal(guests()[0].id,id);
+          assert(await first.executeJavaScript('(()=>{const icon=mousseApplet.icon("plus",{label:"Add"});document.querySelector("button").prepend(icon);return icon.tagName==="svg"&&icon.getAttribute("data-icon-library")==="hugeicons"&&icon.querySelector("path")!==null})()'));
+          await pause(150);execFileSync('import',['-window',String(owner.getNativeWindowHandle().readUInt32LE()),'/tmp/mousse-applet-appearance-card.png']);
+          console.log('Production card appearance passed: live light-theme/accent/font/radius update, same guest/state, opaque surfaces without acrylic, real Mousse icon geometry.');
+          owner.destroy();app.quit();return;
+        }
         if (${scrollOnly}) {
           const firstId = first.id;
           const before = await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop');

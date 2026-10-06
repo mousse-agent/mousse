@@ -1,3 +1,4 @@
+import { validateAppletAppearance } from '../../shared/appletAppearance'
 import { appletJsonBytes, APPLET_STATE_LIMIT } from '../../shared/applets'
 import { ConversationActionService } from '../actions/ConversationActionService'
 import { assertHeldThreadLease, withGitMutationLocks } from '../actions/GitOperationCoordinator'
@@ -303,7 +304,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'applets.export': {
       if (!isObject(params)) throw new Error('Expected applet request.')
       if (params.profileId !== undefined && params.profileId !== ctx.mms.profileId) throw new Error('Applet profile binding changed.')
-      const allowed = new Set(['profileId', 'threadId', 'appletId', 'revisionId', ...(method === 'applets.state.save' ? ['state'] : []), ...(method === 'applets.export' ? ['format'] : [])])
+      const allowed = new Set(['profileId', 'threadId', 'appletId', 'revisionId', ...(method === 'applets.state.save' ? ['state'] : []), ...(method === 'applets.export' ? ['format','appearance'] : [])])
       if (Object.keys(params).some(key => !allowed.has(key))) throw new Error('Unexpected applet request field.')
       const threadId = asString(params.threadId, 'threadId', 160)
       const appletId = asString(params.appletId, 'appletId', 80)
@@ -318,7 +319,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ctx.mms.applets.saveState(threadId, appletId, revisionId, params.state)
         return {saved:true}
       }
-      if (params.format === 'html') return {content:ctx.mms.applets.exportHtml(threadId, appletId, revisionId)}
+      if (params.format === 'html') return {content:ctx.mms.applets.exportHtml(threadId, appletId, revisionId, params.appearance===undefined?undefined:validateAppletAppearance(params.appearance))}
       if (params.format === 'source') return {content:ctx.mms.applets.exportSource(threadId, appletId, revisionId)}
       throw new Error('Unsupported applet export format.')
     }

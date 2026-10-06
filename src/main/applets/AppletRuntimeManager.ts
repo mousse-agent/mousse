@@ -7,7 +7,8 @@ import {
   type Session
 } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { APPLET_EVENT_PREFIX, appletDocument, type AppletSource } from './document'
+import type { AppletAppearance } from '../../shared/appletAppearance'
+import { APPLET_EVENT_PREFIX, APPLET_APPLY_APPEARANCE, appletDocument, type AppletSource } from './document'
 
 // Fail closed between profile managers without retaining a former owner.
 const denyRequests: Parameters<Session['webRequest']['onBeforeRequest']>[0] = (
@@ -27,6 +28,7 @@ export interface AppletMount {
   revisionId: string
   source: AppletSource
   state?: unknown
+  appearance?: AppletAppearance
   bounds: Rectangle
   clip: Rectangle
 }
@@ -141,7 +143,7 @@ export class AppletRuntimeManager {
     container.addChildView(guest)
     this.owner.contentView.addChildView(container)
     const documentUrl = `mousse-applet://runtime/${randomUUID()}`
-    this.documents.set(documentUrl, appletDocument(input.source, input.state))
+    this.documents.set(documentUrl, appletDocument(input.source, input.state, input.appearance))
     const runtime: Runtime = {
       mount: input,
       container,
@@ -236,6 +238,15 @@ export class AppletRuntimeManager {
     })
     runtime.mount.bounds = bounds
     runtime.mount.clip = clip
+  }
+
+  async appearance(runtimeId: string, appearance: AppletAppearance): Promise<void> {
+    const runtime = this.runtimes.get(runtimeId)
+    if (!runtime) throw new Error('Applet is not running')
+    const argument = JSON.stringify(appearance).replace(/</g, '\\u003c')
+    await runtime.guest.webContents.executeJavaScript(`window[${JSON.stringify(APPLET_APPLY_APPEARANCE)}](${argument})`)
+    if (this.runtimes.get(runtimeId) !== runtime) throw new Error('Applet is no longer running')
+    runtime.mount.appearance = appearance
   }
 
   async snapshot(runtimeId: string): Promise<string | null> {

@@ -280,3 +280,19 @@ it('recovers a completed turn publication after its transcript reference is lost
   main.orchestrator.bindThread(thread.id,durable.messages,durable.llmContext,durable.messageQueue)
   expect(reference(main,thread.id)).toEqual(ref)
 })
+
+
+it('exports the validated current appearance and rejects appearance injection', async () => {
+  const {main,thread}=await fixture()
+  vi.spyOn(main.claudeSubscription,'chat').mockImplementation(async input => {
+    const content=fence(source);input.onText(content);return content
+  })
+  await main.orchestrator.send({content:'Illustrate costs',mode:'agent'},false,{threadId:thread.id})
+  const ref=reference(main,thread.id)
+  const appearance={theme:'light',colorScheme:'light',fontFamily:'system-ui',fontSize:'14px',reducedMotion:true,tokens:{'--accent':'#6251aa','--bg-primary':'#fafafa'}}
+  const result=await request(main,'applets.export',{threadId:thread.id,appletId:ref.appletId,revisionId:ref.revisionId,format:'html',appearance}) as {content:string}
+  expect(result.content).toContain('sandbox="allow-scripts"')
+  expect(result.content).toContain('#6251aa')
+  expect(result.content).toContain('mousse-appearance-change')
+  await expect(request(main,'applets.export',{threadId:thread.id,appletId:ref.appletId,revisionId:ref.revisionId,format:'html',appearance:{...appearance,tokens:{'--accent':'red; background:url(https://example.test/)'}}})).rejects.toThrow('Invalid applet appearance token')
+})
