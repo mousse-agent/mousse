@@ -7,7 +7,8 @@ import type { Options, Query, SDKUserMessage } from '@anthropic-ai/claude-agent-
 import type {
   ConfiguredProvider,
   ProviderLoginOption,
-  ProviderLoginResult
+  ProviderLoginResult,
+  ProviderUsage
 } from '../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
@@ -22,6 +23,7 @@ import {
   type ClaudeSubscriptionMetrics,
   type ClaudeUsageBaseline
 } from './metrics'
+import { parseClaudeSubscriptionUsage } from './usage'
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
 type SavedSession = {
@@ -384,6 +386,79 @@ export class ClaudeSubscriptionProviderService {
           efforts: model.supportedEffortLevels
         }))
         this.save()
+      }
+    } finally {
+      clearTimeout(timer)
+      controller.abort()
+      query?.close()
+      this.controllers.delete(controller)
+      signal?.removeEventListener('abort', cancel)
+    }
+  }
+  async getUsage(cwd: string, signal?: AbortSignal): Promise<ProviderUsage> {
+    const unavailable = parseClaudeSubscriptionUsage(undefined)
+    if (!this.configured()) return unavailable
+    const controller = new AbortController()
+    this.controllers.add(controller)
+    const cancel = () => controller.abort()
+    signal?.addEventListener('abort', cancel, { once: true })
+    if (signal?.aborted) cancel()
+    let query: Query | undefined
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, 15_000)
+    const aborted = new Promise<never>((_, reject) => {
+      const fail = () => reject(new Error(timedOut ? 'Usage check timed out' : 'Usage check canceled'))
+      controller.signal.addEventListener('abort', fail, { once: true })
+      if (controller.signal.aborted) fail()
+    })
+    // Pre-aborted callers may leave before reaching either race.
+    void aborted.catch(() => {})
+    try {
+      controller.signal.throwIfAborted()
+      const idle = async function* (): AsyncGenerator<SDKUserMessage> {
+        if (controller.signal.aborted) return
+        await new Promise<void>((resolveIdle) =>
+          controller.signal.addEventListener('abort', () => resolveIdle(), { once: true })
+        )
+      }
+      const pending = this.createQuery(idle(), {
+        ...this.options(cwd, controller),
+        tools: [],
+        canUseTool: async () => ({ behavior: 'deny', message: 'Usage checks cannot run tools' })
+      }).then((created) => {
+        // Initialization may ignore abort: dispose a late query after this request has settled.
+        if (controller.signal.aborted) created.close()
+        else query = created
+        return created
+      })
+      query = await Promise.race([pending, aborted])
+      controller.signal.throwIfAborted()
+      const usageQuery = query as Query & {
+        usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: (
+          opts: { skipBehaviors: boolean }
+        ) => Promise<unknown>
+      }
+      const readUsage = usageQuery.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET
+      if (typeof readUsage !== 'function') return unavailable
+      const response = await Promise.race([
+        readUsage.call(query, { skipBehaviors: true }),
+        aborted
+      ])
+      controller.signal.throwIfAborted()
+      return parseClaudeSubscriptionUsage(response)
+    } catch {
+      return {
+        ...unavailable,
+        status: 'error',
+        // SDK errors may contain URLs or account details; do not forward their raw text.
+        message: timedOut
+          ? 'Claude usage check timed out. Try refreshing.'
+          : controller.signal.aborted
+            ? 'Claude usage check was canceled.'
+            : 'Unable to retrieve Claude account usage limits. Try refreshing.'
       }
     } finally {
       clearTimeout(timer)
