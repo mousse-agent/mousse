@@ -1,4 +1,4 @@
-import { FileText, Link2, Pencil, Plus, RefreshCw, Search, Shield, Upload } from 'lucide-react'
+import { FileText, Link2, Pencil, Plus, RefreshCw, Search, Shield, Upload } from '../../lib/icons'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { IntegrationPlatformClient, IntegrationPlatformSnapshot } from '../../../shared/integrationPlatform'
 import type { McpServerConfig, SkillDescriptor } from '../../../shared/integrations'
@@ -13,6 +13,7 @@ export interface IntegrationsWorkspaceProps {
   projectId?: string
   projects?: Array<{ id: string; name: string }>
   initialTab?: 'skills' | 'mcp'
+  showHeading?: boolean
   onTestSkill?: TestSkill
 }
 type Dialog = { kind: 'skill-create' | 'skill-upload' | 'mcp-create' } | { kind: 'skill-edit' | 'mcp-edit'; id: string } | null
@@ -22,7 +23,7 @@ export function IntegrationsWorkspace(props: IntegrationsWorkspaceProps) {
   return <ScopedWorkspace key={`${props.profileId}:${props.projectId ?? ''}:${props.initialTab ?? 'skills'}`} {...props} />
 }
 
-function ScopedWorkspace({ client, profileId, projectId, projects = [], initialTab = 'skills', onTestSkill }: IntegrationsWorkspaceProps) {
+function ScopedWorkspace({ client, profileId, projectId, projects = [], initialTab = 'skills', showHeading = true, onTestSkill }: IntegrationsWorkspaceProps) {
   const [tab, setTab] = useState(initialTab)
   const [snapshot, setSnapshot] = useState<IntegrationPlatformSnapshot | null>(null)
   const [loading, setLoading] = useState(true), [refreshing, setRefreshing] = useState(false)
@@ -65,7 +66,7 @@ function ScopedWorkspace({ client, profileId, projectId, projects = [], initialT
   }
   return <div className="integrations-root" data-integrations-workspace="" data-profile-id={profileId} data-project-id={projectId ?? ''}>
     <header className="integrations-header">
-      <div><h1>Integrations</h1><p>Skills and MCP connections for {projectId ? 'this project in this profile' : 'this profile'}.</p></div>
+      {showHeading && <div><h1>Integrations</h1><p>Skills and MCP connections for {projectId ? 'this project in this profile' : 'this profile'}.</p></div>}
       <div className="integrations-header__actions">
         <button type="button" className="btn btn-sm" data-action="refresh-integrations" disabled={loading || refreshing || Boolean(dialog)} onClick={() => void load(true)}><RefreshCw size={14} /> Refresh</button>
         {tab === 'skills' ? <>
@@ -113,7 +114,7 @@ function IntegrationList({ skills, servers, pendingToggle, onEditSkill, onEditMc
     const enabled = row.kind === 'skill' ? row.value.enabled !== false && !row.value.archived : row.value.enabled !== false
     const description = row.kind === 'skill' ? row.value.description || 'No description provided.' : row.value.transport === 'stdio' ? row.value.command ?? 'Executable' : row.value.url ?? 'No endpoint'
     return <article className={`integration-row${enabled ? '' : ' is-disabled'}`} key={`${row.kind}:${id}`} {...(row.kind === 'skill' ? { 'data-skill-card': id } : { 'data-mcp-card': id })}>
-      <div className="integration-row__icon" title={row.kind === 'skill' ? 'Skill' : 'MCP connection'}>{row.kind === 'skill' ? <FileText size={17} /> : <Link2 size={17} />}</div>
+      <div className="integration-row__icon" title={row.kind === 'skill' ? 'Skill' : 'MCP connection'}>{row.kind === 'skill' ? <FileText size={16} /> : <Link2 size={16} />}</div>
       <div className="integration-row__main"><h2>{item.name}</h2><p>{description}</p>{item.diagnostics?.length ? <p className="integration-diagnostic">{item.diagnostics[0].message}</p> : null}</div>
       <div className="integration-row__actions">
         {managed ? <button type="button" className="integration-icon-button" aria-label={`Edit ${item.name}`} title="Edit" onClick={() => row.kind === 'skill' ? onEditSkill(id) : onEditMcp(id)}><Pencil size={15} /></button> : null}

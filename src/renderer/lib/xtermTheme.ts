@@ -1,4 +1,5 @@
-import type { ITheme } from '@xterm/xterm'
+import type { ITheme, Terminal } from '@xterm/xterm'
+import { CODE_FONT } from './typography'
 
 const XTERM_THEME_BASE = {
   foreground: '#f0def1',
@@ -22,11 +23,27 @@ const XTERM_THEME_BASE = {
   brightWhite: '#f4e5f4'
 } as const
 
-export const XTERM_FONT = 'Consolas, "Courier New", monospace'
+export const XTERM_FONT = CODE_FONT
 
 function readTerminalBackground(): string {
+  if (document.documentElement.dataset.acrylic === 'true') return '#00000000'
   const value = getComputedStyle(document.documentElement).getPropertyValue('--terminal-bg').trim()
   return value || '#1a1228'
+}
+
+export function followXtermAppearance(terminal: Terminal): void {
+  const observer = new MutationObserver(() => {
+    terminal.options.theme = getXtermTheme()
+  })
+  terminal.loadAddon({
+    activate() {
+      observer.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['data-acrylic', 'data-theme', 'style']
+      })
+    },
+    dispose() { observer.disconnect() }
+  })
 }
 
 export function getXtermTheme(): ITheme {

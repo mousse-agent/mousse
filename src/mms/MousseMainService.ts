@@ -1,3 +1,6 @@
+import { registerChatMethods } from './chats/registerMethods'
+import { registerChatNetworkMethods } from './chats/network/registerMethods'
+import { registerChatResourceMethods } from './chats/resources/registerMethods'
 import { homedir } from 'os'
 import { join } from 'path'
 import { MousseConfigStore } from './config/MousseConfigStore'
@@ -16,6 +19,12 @@ import {
 import { ProfileHost } from './profiles/ProfileHost'
 import { registerProfileDomain } from './profiles/profileDomain'
 import type { ProfileId } from '../shared/profiles/ids'
+import { registerNetMethods } from './net/registerMethods'
+import { registerBridgeMethods } from './bridge/registerMethods'
+import { registerSpaceMethods } from './spaces/registerMethods'
+import { registerSpaceArchiveMethods } from './spaces/archive/registerMethods'
+import { registerBotMethods } from './bots/registerMethods'
+import { BotLocalService } from './bots/BotLocalService'
 import { registerAgentDefinitionMethods } from './agentDefinitions/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
@@ -200,6 +209,24 @@ export class MousseMainService extends MmsProfileServices {
       }
       return services
     }
+    registerNetMethods(this.domains, async profileId => (await profile(profileId)).net)
+    registerBridgeMethods(this.domains, async profileId => (await profile(profileId)).bridge)
+    registerSpaceMethods(this.domains, async profileId => (await profile(profileId)).spaces.local)
+    registerSpaceArchiveMethods(this.domains, async profileId => (await profile(profileId)).archives)
+    const botLocals = new WeakMap<import('./bots/BotProfileService').BotProfileService, BotLocalService>()
+    registerBotMethods(this.domains, async profileId => {
+      const bots = (await profile(profileId)).bots
+      let local = botLocals.get(bots)
+      if (!local) {
+        local = new BotLocalService(bots)
+        botLocals.set(bots, local)
+      }
+      return local
+    })
+    registerChatMethods(this.domains, async (profileId) => (await profile(profileId)).platform.chats, async profileId => (await profile(profileId)).chatNetwork)
+    registerChatNetworkMethods(this.domains, async profileId => (await profile(profileId)).chatNetwork)
+    const chatResourceDomains = registerChatResourceMethods(this.domains, async (profileId) => (await profile(profileId)).platform.chatResources)
+    this.domainCleanupSubscriptions.push(() => chatResourceDomains.dispose())
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
       (await profile(profileId)).platform.agentDomain(request.method, request.params))
     registerWorkflowDefinitionMethods(this.domains, async (profileId) =>

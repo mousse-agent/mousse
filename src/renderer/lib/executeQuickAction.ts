@@ -94,9 +94,9 @@ export async function executeSendInNewChat(action: QuickAction, profileId: strin
 
 /**
  * Type 3: open a new Mousse terminal tab, focus it, and run the command there.
- * The new tab becomes the thread's active tab (`addProjectTerminalTab`), the main
- * area switches to the terminal view, and `ProjectTerminalPanel` auto-spawns the
- * shell + focuses it. We then wait for the live PTY and type the command.
+ * The new tab becomes the thread's active tab (`addProjectTerminalTab`) and the
+ * terminal surface opens. `ProjectTerminalPanel` spawns the shell when that view
+ * is shown. We then wait for the live PTY and type the command.
  */
 export async function executeBashInNewTerminal(action: QuickAction, profileId: string): Promise<void> {
   const command = action.payload.trim()
@@ -104,8 +104,7 @@ export async function executeBashInNewTerminal(action: QuickAction, profileId: s
   const store = requireActiveProfile(profileId)
   const tabId = store.addProjectTerminalTab(store.activeThreadId)
   store.updateProjectTerminalTab(tabId, { title: action.label.slice(0, 40) || 'Terminal' })
-  store.setMainAreaOpen(true)
-  store.setMainView('terminal')
+  store.openSurfaceKind('terminal')
 
   const deadline = Date.now() + TERMINAL_SPAWN_TIMEOUT_MS
   for (;;) {

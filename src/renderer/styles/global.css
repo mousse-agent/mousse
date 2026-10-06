@@ -7,6 +7,7 @@
 @import './themes/index.css';
 @import './layout-tokens.css';
 @import './vscode-compat.css';
+@import './linux-window.css';
 @import "../chat/components/agent-elements/agent-ui.css";
 
 /* Bridge mousse dark theme into agent-elements — app is always dark ( --surface-base #1b1c23 ), not .dark class */
@@ -88,16 +89,39 @@ html[data-theme='light'] {
   padding-left: 16px !important;
   padding-right: 16px !important;
 }
-/* Dim idle tool chrome (thought rows, tool groups, tool cards) so the
-   assistant's text keeps the contrast. Restores on hover, keyboard focus,
-   or while a tool is actively running. Nested chrome inherits the group's
-   level instead of dimming twice. */
+/* Dim tool chrome (thought rows, tool groups, tool cards) so the
+   assistant's text keeps the contrast. Hover and focus stay at the same
+   level — brightening them matches the reply text. A running shimmer and
+   a card waiting for approval still come up to full opacity. Nested chrome
+   inherits the group's level instead of dimming twice, and drops the
+   outer margin so rows inside a group sit close together. */
 .an-message-list .an-tool-chrome {
   opacity: 0.55;
+  margin-block: 2px;
   transition: opacity 0.15s ease-out;
 }
-.an-message-list .an-tool-chrome:hover,
-.an-message-list .an-tool-chrome:focus-within,
+/* Quiet status under each prompt: "Working" while the turn runs, then
+   "Worked for …", a hairline, and a gap before the reply. */
+.an-message-list .turn-work {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 6px;
+}
+.an-message-list .turn-work-label {
+  color: color-mix(in srgb, var(--text-secondary) 70%, transparent);
+  font-size: 12.5px;
+  font-weight: 450;
+  letter-spacing: -0.011em;
+  line-height: 1.3;
+}
+.an-message-list .turn-work-rule {
+  height: 1px;
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+}
+.an-message-list .turn-work + .turn-answer {
+  margin-top: 16px;
+}
 .an-message-list .an-tool-chrome:has(.an-text-shimmer--active) {
   opacity: 1;
 }
@@ -109,6 +133,7 @@ html[data-theme='light'] {
 }
 .an-message-list .an-tool-chrome .an-tool-chrome {
   opacity: inherit;
+  margin-block: 0;
 }
 /* Chat convention: a single newline is an intended line break (verses,
    addresses, signatures). Spec markdown would join them into prose.
@@ -329,10 +354,11 @@ textarea:focus {
 /* macOS places the traffic lights over the upper-left corner of the
    hidden titlebar. Keep overlay-page controls clear of that native area,
    with breathing room beyond the lights themselves. */
-html.platform-darwin .overlay-page-drag-header {
-  padding-left: calc(var(--titlebar-traffic-light-inset) + 16px);
+html.platform-darwin .overlay-titlebar {
+  padding-left: calc(var(--titlebar-traffic-light-inset) + (var(--navigation-rail-width) - var(--titlebar-height) * 0.64) / 2);
 }
 
+.overlay-page-drag-header .overlay-titlebar-back,
 .overlay-page-drag-header .settings-back-btn,
 .overlay-page-drag-header .scheduled-page-back-btn,
 .overlay-page-drag-header .channels-page-back-btn,
@@ -383,6 +409,12 @@ html.platform-darwin .overlay-page-drag-header {
   display: none !important;
 }
 
+/* Preserve live editors and browser viewports without painting the workspace
+   through the translucent page that currently replaces it. */
+.app[data-overlay-active='true'] {
+  visibility: hidden;
+}
+
 *,
 *::before,
 *::after {
@@ -397,4 +429,34 @@ html.platform-darwin .overlay-page-drag-header {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+.chat-user-image-carousel {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  margin-left: auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 4px;
+  scroll-snap-type: x proximity;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+.chat-user-image-carousel > * {
+  flex: 0 0 auto;
+  scroll-snap-align: start;
+}
+
+.chat-user-bubble {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.chat-user-bubble .chat-user-image-carousel {
+  margin-left: 0;
 }

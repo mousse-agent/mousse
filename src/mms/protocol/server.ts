@@ -33,6 +33,9 @@ import { PROFILES_V1_CAPABILITY } from '../../shared/profiles/types'
 import { BROWSER_ATTACHED_V1_CAPABILITY } from '../../shared/browser/connectionCommands'
 import { ProfileError } from '../../shared/profiles/errors'
 import type { ConnectionCommandRouter } from './connectionCommands'
+import { NET_LOCAL_CAPABILITY } from '../../shared/net/local'
+import { writeConnectionEventFrame } from './connectionEventWriter'
+import { MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES } from './types'
 
 
 export interface ProtocolServerOptions {
@@ -92,6 +95,9 @@ interface ClientSession {
   completedResponses: Map<string, ProtocolResponse>
   /** True while a drain listener is pending, so we never stack duplicate listeners. */
   awaitingDrain: boolean
+  connectionEventChain: Promise<void>
+  connectionEventPending: number
+  connectionEventLifetime: AbortController
 }
 
 export class MmsProtocolServer {
@@ -157,6 +163,9 @@ export class MmsProtocolServer {
       }
       this.profileLifecycleUnsubscribe = this.opts.mms.domains?.onProfileDisposed((profileId) => {
         this.opts.commandRouter?.revokeProfile(profileId)
+        for (const client of this.clients.values()) {
+          if (client.binding?.profileId === profileId) client.connectionEventLifetime.abort()
+        }
         this.disposeProfileEvents(profileId)
       }) ?? null
     }
@@ -323,6 +332,9 @@ export class MmsProtocolServer {
         )
       )
     }
+    onEmitter(services.events, 'net:updated', (status: import('../../shared/net').NetStatus) => {
+      emitToSubscribers(this.ring.push('net.updated', status))
+    })
     // Some daemon-owned producers (Telegram/Discord/webhooks and scheduled jobs)
     // create threads directly rather than through a protocol request. Fan those
     // creations out through the same sequenced event consumed by the GUI.
@@ -630,12 +642,6 @@ export class MmsProtocolServer {
     onEmitter(services.channels, 'activity', (event: unknown) => {
       emitToSubscribers(this.ring.push('channels.activity', { event }, undefined))
     })
-    onEmitter(services.events, 'control:status-changed', (status: unknown) => {
-      emitToSubscribers(this.ring.push('control.status-changed', status, undefined))
-    })
-    onEmitter(services.events, 'control:pairing-request', (request: unknown) => {
-      emitToSubscribers(this.ring.push('control.pairing-request', request, undefined))
-    })
   }
 
   private onConnection(socket: Socket): void {
@@ -659,7 +665,10 @@ export class MmsProtocolServer {
       bindingChain: Promise.resolve(),
       inFlightIds: new Set(),
       completedResponses: new Map(),
-      awaitingDrain: false
+      awaitingDrain: false,
+      connectionEventChain: Promise.resolve(),
+      connectionEventPending: 0,
+      connectionEventLifetime: new AbortController()
     }
     this.clients.set(session.id, session)
 
@@ -929,11 +938,21 @@ export class MmsProtocolServer {
         capabilities: admittedCapabilities ?? session.capabilities
       })
       this.wireOrchestratorEvents(resolved.services)
+      const connectionEventLifetime = session.connectionEventLifetime
       const connection = {
         id: session.id,
         clientType: session.clientType,
         binding: resolved.binding,
         capabilities: admittedCapabilities ?? session.capabilities,
+        emitConnectionEvent: (type: 'bridge.hub.thread', data: unknown, signal?: AbortSignal) =>
+          this.emitConnectionEvent(
+            session,
+            resolved.binding,
+            connectionEventLifetime,
+            type,
+            data,
+            signal
+          ),
         bind: (value: TrustedProfileBinding) => {
           if (
             session.binding &&
@@ -942,6 +961,8 @@ export class MmsProtocolServer {
             // Cancel in-flight reverse commands for the old binding before
             // domain listeners observe the close, then before new work.
             this.opts.commandRouter?.revoke(session.id, 'rebind')
+            session.connectionEventLifetime.abort()
+            session.connectionEventLifetime = new AbortController()
             // Give profile-owned integrations a chance to close the old
             // connection before its binding is replaced.
             this.opts.mms.domains?.notifyConnectionClosed(session.id)
@@ -1144,6 +1165,73 @@ export class MmsProtocolServer {
     return this.writeFrame(session, value, true)
   }
 
+  private emitConnectionEvent(
+    session: ClientSession,
+    binding: TrustedProfileBinding | undefined,
+    lifetime: AbortController,
+    type: 'bridge.hub.thread',
+    data: unknown,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const valid = (): boolean =>
+      !session.closed &&
+      session.authenticated &&
+      session.capabilities.has(NET_LOCAL_CAPABILITY) &&
+      !!binding &&
+      session.binding?.profileId === binding.profileId &&
+      session.binding.epoch === binding.epoch &&
+      session.connectionEventLifetime === lifetime &&
+      !lifetime.signal.aborted &&
+      !signal?.aborted
+    if (!valid()) {
+      return Promise.reject(
+        new DomainRpcError(
+          'connection_closed',
+          'Display requires the current authenticated profile binding'
+        )
+      )
+    }
+    if (type !== 'bridge.hub.thread') {
+      return Promise.reject(new DomainRpcError('invalid_params', 'Unsupported connection event'))
+    }
+    if (session.connectionEventPending >= 8) {
+      return Promise.reject(
+        new DomainRpcError('resource_limit', 'Too many pending display frames')
+      )
+    }
+    let frame: Buffer
+    try {
+      frame = encodeFrame(
+        {
+          kind: 'connection_event',
+          type,
+          profileId: binding!.profileId,
+          profileEpoch: binding!.epoch,
+          data
+        },
+        MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES
+      )
+    } catch (error) {
+      return Promise.reject(error)
+    }
+    session.connectionEventPending++
+    const combined = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal
+    const operation = session.connectionEventChain
+      .then(async () => {
+        if (!valid()) throw new DomainRpcError('connection_closed', 'Display profile binding changed')
+        if (session.socket.writableLength + frame.length > MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES) {
+          this.closeClient(session)
+          throw new DomainRpcError('connection_closed', 'Display write backlog exceeded')
+        }
+        await writeConnectionEventFrame(session.socket, frame, combined)
+      })
+      .finally(() => {
+        session.connectionEventPending--
+      })
+    session.connectionEventChain = operation.catch(() => {})
+    return operation
+  }
+
   /** Best-effort write that never disconnects solely for backpressure (shutdown path). */
   private trySendRaw(session: ClientSession, value: unknown): void {
     this.writeFrame(session, value, false)
@@ -1219,6 +1307,7 @@ export class MmsProtocolServer {
   private closeClient(session: ClientSession): void {
     if (session.closed) return
     session.closed = true
+    session.connectionEventLifetime.abort()
     session.subscribeState = 'none'
     session.eventBuffer = []
     session.inFlightIds.clear()

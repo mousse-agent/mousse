@@ -7,47 +7,51 @@
 .profile-username-block {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 5px;
 }
 
 .profile-username-label {
-  font-size: 13px;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--text-secondary);
 }
 
 .profile-username-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  max-width: 360px;
+  gap: 6px;
+  width: 100%;
+  max-width: 340px;
 }
 
 .profile-username-input {
   flex: 1;
   min-width: 0;
-  padding: 10px 12px;
-  border-radius: 8px;
+  height: 34px;
+  padding: 6px 10px;
+  border-radius: 6px;
   border: 1px solid var(--border);
-  background: rgba(var(--surface-strong-rgb), 0.5);
+  background: var(--bg-secondary);
   color: var(--text-primary);
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
 }
 
 .profile-username-input:focus {
   outline: none;
-  border-color: rgba(var(--accent-pale-rgb), 0.45);
-  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.18);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.35);
 }
 
 .profile-username-shuffle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border-radius: 6px;
   border: 1px solid var(--border);
   color: var(--text-secondary);
   background: rgba(var(--surface-strong-rgb), 0.35);

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Palette, Plug, Plus, Radio, Server, Sparkles, Trash2, User, Wrench } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
+import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Palette, Plug, Plus, Radio, RefreshCw, Server, Sparkles, Trash2, User, Wrench } from '../lib/icons'
 import type {
   AgentTypeId,
   MousseSettings,
@@ -19,7 +20,7 @@ import { useAppStore } from '../stores/appStore'
 import { ProviderLoginModal } from './ProviderLoginModal'
 import { ModelFamilySettingsFields } from './ModelFamilySettingsFields'
 import { ProfileSection } from './ProfileSection'
-import { ConnectionsSection } from './ConnectionsSection'
+import { NetDevicesSection } from './NetDevicesSection'
 import { StorageSettings } from './StorageSettings'
 import { IntegrationsWorkspace } from './integrations'
 import { createIntegrationPlatformClient } from '../services/integrationPlatformClient'
@@ -74,13 +75,11 @@ function SectionHeading({
   icon: Icon,
   title,
   description,
-  trailing,
   className
 }: {
   icon: IconType
   title: string
   description?: string
-  trailing?: ReactNode
   className?: string
 }) {
   return (
@@ -92,7 +91,6 @@ function SectionHeading({
         <h2>{title}</h2>
         {description && <p className="settings-section-desc">{description}</p>}
       </div>
-      {trailing}
     </div>
   )
 }
@@ -109,14 +107,12 @@ const SETTINGS_SECTIONS = [
   { id: 'integrations', label: 'Skills & MCP', icon: Sparkles },
   { id: 'skills', label: 'Skill defaults', icon: Sparkles },
   { id: 'agents', label: 'Agents', icon: Bot },
-  { id: 'connections', label: 'Connections', icon: Radio }
+  { id: 'connections', label: 'Devices', icon: Radio }
 ] as const
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id']
 
-// Keep the Connections settings implementation available for future releases,
-// but omit its navigation entry until the feature is ready to be exposed.
-const VISIBLE_SETTINGS_SECTIONS = SETTINGS_SECTIONS.filter(({ id }) => id !== 'connections')
+const VISIBLE_SETTINGS_SECTIONS = SETTINGS_SECTIONS
 
 export function SettingsPage() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
@@ -150,6 +146,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const [ambientInstructions, setAmbientInstructions] = useState<string[]>([])
   const [connecting, setConnecting] = useState(false)
   const [connectError, setConnectError] = useState<string | null>(null)
+  const [providerRefreshError, setProviderRefreshError] = useState<string | null>(null)
+  const [refreshingNativeModels, setRefreshingNativeModels] = useState(false)
   const [loginActive, setLoginActive] = useState(false)
   const [restartRequired, setRestartRequired] = useState(false)
   const [webToolCredentials, setWebToolCredentials] = useState({ exa: false, parallel: false })
@@ -275,6 +273,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   )
 
   const previewAcrylicIntensity = useCallback((acrylicIntensity: number) => {
+    applyAcrylicIntensity(acrylicIntensity)
     setSettings((prev) =>
       prev
         ? {
@@ -290,8 +289,10 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     const gen = ++intensityCommitGen.current
     intensityCommitTimer.current = setTimeout(() => {
       intensityCommitTimer.current = null
-      void window.mousse.settings
-        .set({ appearance: { ...settings!.appearance, acrylicIntensity } })
+      const save = window.mousse.platform === 'linux'
+        ? persistLinuxAcrylicIntensity(acrylicIntensity)
+        : window.mousse.settings.set({ appearance: { ...settings!.appearance, acrylicIntensity } })
+      void save
         .then((updated) => {
           // Drop stale responses if the user kept dragging.
           if (gen !== intensityCommitGen.current) return
@@ -299,7 +300,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
           void window.mousse.window.syncBackground()
         })
     }, 120)
-  }, [])
+  }, [settings])
 
   const ensureValidProviderSelection = useCallback(
     async (nextSettings: MousseSettings, providers = options?.llmProviders ?? []) => {
@@ -554,14 +555,14 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   }, [setSettingsOpen])
 
   const settingsHeader = (
-    <header className="settings-header overlay-page-drag-header">
+    <header className="settings-header overlay-titlebar overlay-page-drag-header">
       <button
         type="button"
-        className="settings-back-btn"
+        className="overlay-titlebar-back"
         onClick={closeSettings}
         aria-label="Back"
       >
-        <ArrowLeft size={16} />
+        <ArrowLeft size={14} strokeWidth={2} />
       </button>
       <h1>Settings</h1>
     </header>
@@ -641,7 +642,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
                 aria-current={active ? 'page' : undefined}
               >
                 <span className="settings-nav-item-icon">
-                  <Icon size={15} />
+                  <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
                 </span>
                 {section.label}
               </button>
@@ -654,7 +655,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
           {activeSection === 'context' && (() => {
             const context = normalizeContextSettings(settings.context)
             return <section id="context" className="settings-section">
-              <SectionHeading icon={Cpu} title="Context compaction" description="Control automatic compaction during long agent tasks." />
               <div className="settings-row">
                 <div>
                   <label htmlFor="context-compaction-enabled">Use context compaction</label>
@@ -690,26 +690,16 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
                 {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
               </select>
             </label>
-            <IntegrationsWorkspace client={integrationClient} profileId={profileId} projectId={integrationProject || undefined} projects={projects} />
+            <IntegrationsWorkspace client={integrationClient} profileId={profileId} projectId={integrationProject || undefined} projects={projects} showHeading={false} />
           </section>}
           {activeSection === 'profile' && (
           <section id="profile" className="settings-section">
-            <SectionHeading
-              icon={User}
-              title="Profile"
-              description="Your display name and editing activity in Mousse."
-            />
             <ProfileSection settings={settings} onUpdate={updateSettings} />
           </section>
           )}
 
           {activeSection === 'appearance' && (
           <section id="appearance" className="settings-section">
-            <SectionHeading
-              icon={Palette}
-              title="Appearance"
-              description="Pick a color theme, then optionally enable acrylic glass over any of them."
-            />
 
           <p className="settings-section-desc" style={{ marginBottom: 10 }}>
             Color theme
@@ -831,11 +821,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
           {activeSection === 'notifications' && (
         <section id="notifications" className="settings-section">
-          <SectionHeading
-            icon={Bell}
-            title="Notifications"
-            description="Choose how Mousse alerts you when background work needs your attention."
-          />
 
           <div className="registry-controls">
             <div className="registry-control-row">
@@ -866,17 +851,12 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
           {activeSection === 'providers' && (
         <section id="providers" className="settings-section">
-          <SectionHeading
-            icon={Plug}
-            title="Providers"
-            description="Authenticate LLM providers. Connected providers appear in model pickers across the app."
-            trailing={
-              <button type="button" className="settings-add-btn" onClick={() => void openAddProvider()}>
-                <Plus size={14} />
-                Add provider
-              </button>
-            }
-          />
+          <div className="settings-provider-actions">
+            <button type="button" className="settings-add-btn" onClick={() => void openAddProvider()}>
+              <Plus size={14} />
+              Add provider
+            </button>
+          </div>
 
           {configuredProviders.length === 0 ? (
             <div className="provider-empty-state">
@@ -888,15 +868,32 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
             </div>
           ) : (
             <div className="provider-list">
+              {providerRefreshError && <p className="settings-error">{providerRefreshError}</p>}
               {configuredProviders.map((provider) => (
                 <div key={provider.id} className="provider-list-item">
                   <div>
                     <strong>{provider.label}</strong>
                     <span className="provider-list-meta">
-                      {provider.authType === 'oauth' ? 'Subscription' : 'API key'}
+                      {provider.source?.startsWith('unsupported')
+                        ? 'Unsupported credential'
+                        : provider.authType === 'oauth' ? 'Subscription' : 'API key'}
                       {provider.source ? ` · ${provider.source}` : ''}
                     </span>
                   </div>
+                  {['antigravity', 'claude-subscription'].includes(provider.id) && (
+                    <button type="button" className="provider-remove-btn" title={`Refresh ${provider.label} models`}
+                      aria-label={`Refresh ${provider.label} models`} disabled={refreshingNativeModels}
+                      onClick={() => {
+                        setRefreshingNativeModels(true)
+                        setProviderRefreshError(null)
+                        void window.mousse.providers.refreshModels(provider.id)
+                          .then(() => refreshProviderData())
+                          .catch((error: unknown) => setProviderRefreshError(error instanceof Error ? error.message : String(error)))
+                          .finally(() => setRefreshingNativeModels(false))
+                      }}>
+                      <RefreshCw size={14} className={refreshingNativeModels ? 'icon-spin' : undefined} />
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="provider-remove-btn"
@@ -915,8 +912,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
               {addStep === 'provider' && (
                 <>
                   <p className="settings-section-desc">
-                    Choose a provider. All pi-ai built-in providers are listed — API keys and
-                    subscription logins where supported.
+                    Choose a provider. API keys, Claude Subscription, other supported subscription
+                    logins, and Google’s Antigravity agent are available here.
                   </p>
                   <div className="provider-filter-row">
                     <input
@@ -1030,7 +1027,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
                   {selectedProvider.authType === 'oauth' && (
                     <p className="provider-login-hint">
-                      You will be redirected to sign in with your subscription account.
+                      {selectedProvider.id === 'claude-subscription' ? 'Connect through official Claude Code sign-in. Claude manages your account and usage.' : 'You will be redirected to sign in with your subscription account.'}
                     </p>
                   )}
 
@@ -1070,18 +1067,13 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
           {activeSection === 'orchestrator' && (
         <section id="orchestrator" className="settings-section">
-          <SectionHeading
-            icon={Cpu}
-            title="Orchestrator model"
-            description="Choose which connected provider and model power the orchestrator chat."
-          />
 
           {!hasConfiguredProviders ? (
             <p className="provider-empty-hint">Add a provider under Providers to select a model.</p>
           ) : (
             <>
               <div className="settings-row">
-                <label htmlFor="llm-provider">Provider</label>
+                <label htmlFor="llm-provider">Orchestrator provider</label>
                 <select
                   id="llm-provider"
                   className="settings-select"
@@ -1220,11 +1212,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
           {activeSection === 'tools' && (
         <section id="tools" className="settings-section">
-          <SectionHeading
-            icon={Wrench}
-            title="Tools"
-            description="Built-in Mousse tools and standard MCP servers. Selected tools are exposed to the orchestrator or spawned CLIs."
-          />
 
           <div className="integration-list">
             <div className="integration-card integration-group-card">
@@ -1564,11 +1551,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
           {activeSection === 'skills' && (
         <section id="skills" className="settings-section">
-          <SectionHeading
-            icon={Sparkles}
-            title="Skills"
-            description="Discovered Skills stay as standard folders. Selected Skills can be listed or loaded by the orchestrator and materialized for spawned CLIs."
-          />
 
           <div className="registry-controls">
             <div className="registry-control-row">
@@ -1740,11 +1722,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
           {activeSection === 'agents' && (
         <section id="agents" className="settings-section">
-          <SectionHeading
-            icon={Bot}
-            title="Agents"
-            description="Enable agent types and choose which model each CLI uses when spawned."
-          />
 
           <div className="agent-config-list">
             {options.agentTypes.map((agent) => {
@@ -1980,12 +1957,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
           {activeSection === 'connections' && (
           <section id="connections" className="settings-section">
-            <SectionHeading
-              icon={Radio}
-              title="Remote Connections & Mobile"
-              description="Manage Mousse Plus / self-hosted control server status, mobile QR v2 pairings, and device grants."
-            />
-            <ConnectionsSection />
+            <NetDevicesSection />
           </section>
           )}
         </div>

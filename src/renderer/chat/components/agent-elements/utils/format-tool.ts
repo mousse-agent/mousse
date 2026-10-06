@@ -83,8 +83,8 @@ export function getToolStatus(part: any, chatStatus?: string) {
 }
 
 /**
- * Heading for a Thought row: first non-empty line of the thought content,
- * truncated. Rendered at lower opacity after the "Thought" label.
+ * Heading for a thinking row: first non-empty line of the thought content,
+ * truncated. Shown beside the thinking icon, and as an activity-group title.
  */
 export function thoughtHeading(content: string | undefined): string {
   if (!content) return "";

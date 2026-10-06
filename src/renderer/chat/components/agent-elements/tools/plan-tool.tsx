@@ -3,7 +3,7 @@ import {
   IconChevronsDown,
   IconChevronsUp,
   IconFileDescription,
-} from "@tabler/icons-react";
+} from "../../../../lib/icons";
 import { useAppStore } from "../../../../stores/appStore";
 import { Markdown } from "../markdown";
 import { IconSpinner } from "../icons";
@@ -178,7 +178,7 @@ export const PlanTool = memo(function PlanTool({
       <div className="h-7 pl-3 pr-2.5 flex items-center justify-between">
         <div className="min-w-0 flex items-center gap-1">
           {isPending ? (
-            <IconSpinner className="w-3 h-3 text-an-tool-color-muted animate-spin shrink-0" />
+            <IconSpinner className="w-4 h-4 text-an-tool-color-muted animate-spin shrink-0" />
           ) : (
             <IconFileDescription className="w-3.5 h-3.5 text-an-tool-color-muted shrink-0" />
           )}

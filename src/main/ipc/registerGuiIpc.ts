@@ -1,10 +1,19 @@
 import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
+import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
+import { CHAT_METHODS } from '../../shared/chats'
+import { CHAT_RESOURCE_METHODS } from '../../shared/chatResources'
+import { CHAT_NETWORK_METHODS } from '../../shared/chatsNetwork'
+import { NET_LOCAL_METHODS } from '../../shared/net/local'
+import { BRIDGE_HUB_LOCAL_METHODS } from '../../shared/bridge/types'
+import { SPACES_LOCAL_METHODS } from '../../shared/spaces/local'
+import { BOTS_LOCAL_METHODS } from '../../shared/bots/local'
+import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
  * Does not take a MousseMainService / owner lease.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, Notification, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell } from 'electron'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
@@ -37,10 +46,10 @@ import {
   type MousseSettings,
   type MousseSettingsUpdate
 } from '../../shared/settings'
-import { buildAccentCssVars, surfaceToWindowBackground } from '../../shared/accentPalette'
+import { surfaceToWindowBackground } from '../../shared/accentPalette'
+import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
 import { showCopyMenu } from '../contextMenu'
 import { openExternalSafely } from '../safeExternalUrl'
-import { approvePairingWithConfirmation } from '../pairingApproval'
 import {
   attachWindowStateListeners,
   beginWindowDrag,
@@ -51,7 +60,7 @@ import {
   type WindowDragPoint
 } from '../windowState'
 import { applyWindowMaterial, attachWindowFocusListeners, setWindowProfileSettings } from '../windowMaterial'
-import { closeAgentsTasksWindow, openAgentsTasksWindow } from '../agentsTasksWindow'
+import { closeAgentsTasksWindow, getAgentsTasksWindow, openAgentsTasksWindow } from '../agentsTasksWindow'
 import {
   getThreadNotificationPresentation,
   type ThreadNotificationKind
@@ -74,8 +83,11 @@ import type {
   TurnStateSnapshot,
   UserQuestionAnswers
 } from '../../shared/types'
-import type { RemoteScope } from '../../shared/controlTypes'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
+import type {
+  GitHubCloneRepositoryInput,
+  GitHubCreateRepositoryInput
+} from '../../shared/github'
 
 
 export interface GuiIpcServices {
@@ -102,6 +114,14 @@ let activeGuiMms: GuiMmsController | null = null
  * owned by the platform domain layer through this list.
  */
 export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new Set([
+  ...CHAT_METHODS,
+  ...CHAT_RESOURCE_METHODS,
+  ...CHAT_NETWORK_METHODS,
+  ...NET_LOCAL_METHODS.filter(method => !['net.plus.bind','net.plus.connect'].includes(method)),
+  ...BRIDGE_HUB_LOCAL_METHODS,
+  ...SPACES_LOCAL_METHODS,
+  ...BOTS_LOCAL_METHODS,
+  ...SPACE_ARCHIVE_METHODS,
   ...BROWSER_ACCESS_METHODS,
   ...BROWSER_GUI_METHODS,
   ...BROWSER_SETUP_METHODS,
@@ -115,6 +135,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   'agentDefinitions.duplicate', 'agentDefinitions.importBundle',
   'agentDefinitions.exportBundle', 'agentDefinitions.validate', 'agentDefinitions.tryRun',
   'integrations.snapshot',
+  'chatReferences.resolve',
   'skills.create', 'skills.update', 'skills.editor', 'skills.enable', 'skills.archive',
   'skills.importPackage', 'skills.exportPackage',
   'mcp.create', 'mcp.update', 'mcp.read', 'mcp.enable', 'mcp.delete',
@@ -159,10 +180,9 @@ function applyWindowAccentBackground(
   if (!win || win.isDestroyed()) return
   setWindowProfileSettings(win, settings)
   const appearance = normalizeAppearance(settings.appearance)
-  const surfaceBase = buildAccentCssVars(appearance.accentColor)['--surface-base']
-  if (!surfaceBase) return
+  const surfaceBase = appearanceSurfaceBase(appearance, nativeTheme?.shouldUseDarkColors ?? true)
   win.setBackgroundColor(
-    surfaceToWindowBackground(surfaceBase, appearanceUsesAcrylic(appearance) ? 0 : 1)
+    surfaceToWindowBackground(surfaceBase, process.platform === 'linux' || appearanceUsesAcrylic(appearance) ? 0 : 1)
   )
 }
 
@@ -195,6 +215,7 @@ export function registerGuiIpc(
     repoRoot
   } = services
   activeGuiMms = guiMms
+  registerLinuxWindowResizeIpc(getWindow, getAgentsTasksWindow)
 
   const browserHost = (event: Electron.IpcMainInvokeEvent): AttachedBrowserHost => {
     if (event.senderFrame !== event.sender.mainFrame || !services.attachedBrowserHost) throw new Error('In-app browser automation is unavailable')
@@ -232,7 +253,13 @@ export function registerGuiIpc(
       if (Buffer.byteLength(encoded, 'utf8') > 512 * 1024) {
         throw new PlatformRequestError('platform_params_too_large', 'Platform parameters exceed the size limit')
       }
-      return { ok: true, value: await guiMms.request(method, params) }
+      const value = await guiMms.request(method, params)
+      return {
+        ok: true,
+        value: method === 'chatReferences.resolve'
+          ? (value as { reference: unknown }).reference
+          : value
+      }
     } catch (error) {
       const descriptor = error instanceof MmsProtocolError
         ? knownAppError({ code: error.code, message: error.message, details: error.details, errorInfo: error.errorInfo })
@@ -548,12 +575,6 @@ export function registerGuiIpc(
         }
       }
     }
-    if (event.type === 'control.status-changed') {
-      broadcast('control:status-changed', event.data)
-    }
-    if (event.type === 'control.pairing-request') {
-      broadcast('control:pairing-request', event.data)
-    }
     if (event.type === 'ui.focus-intent') {
       const win = getWindow()
       if (win && !win.isDestroyed()) {
@@ -584,6 +605,13 @@ export function registerGuiIpc(
   // directly to the trusted sender instead of the installation-wide broadcast
   // bus; this is what prevents a B window from seeing A's questions, PTY or
   // transcript updates.
+  guiMms.on('window-connection-event', ({ senderId, event }: { senderId: number; event: import('../../mms/protocol/types').ProtocolConnectionEvent }) => {
+    const win = BrowserWindow.getAllWindows().find(candidate => candidate.webContents.id === senderId)
+    const binding = guiMms.getWindowBindingForSender(senderId)
+    if (!win || win.isDestroyed() || !binding || event.type !== 'bridge.hub.thread' ||
+      event.profileId !== binding.profileId || event.profileEpoch !== binding.epoch) return
+    win.webContents.send('bridge:thread-part', event.data)
+  })
   guiMms.on('window-event', ({ senderId, event, replay }: { senderId: number; event: ProtocolEvent; replay?: boolean }) => {
     const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
     if (!win || win.isDestroyed()) return
@@ -643,8 +671,6 @@ export function registerGuiIpc(
         applyWindowAccentBackground(win, next)
       }
     }
-    if (event.type === 'control.status-changed') target('control:status-changed', event.data)
-    if (event.type === 'control.pairing-request') target('control:pairing-request', event.data)
     if (event.type === 'ui.focus-intent') {
       if (win.isMinimized()) win.restore()
       win.show()
@@ -1029,13 +1055,6 @@ export function registerGuiIpc(
     // (potentially large) thread.snapshot round-trip completes.
     broadcast('thread:selected', { id: threadId })
 
-    // A completed state is an unread-style notification. Viewing the thread
-    // acknowledges it, while processing and awaiting-input states remain visible.
-    // Clear it before the snapshot round-trip so the glow vanishes immediately.
-    if (activityTrackerFor().getState(threadId) === 'completed') {
-      setThreadActivity(threadId, 'idle')
-    }
-
     const snap = await guiMms.snapshotThread(threadId)
     // A newer select won the race — discard this snapshot.
     if (gen !== selectGeneration || currentPresentation().getActiveThreadId() !== threadId) {
@@ -1063,21 +1082,12 @@ export function registerGuiIpc(
         snap.activeTurn.running ||
         snap.queue.length > 0 ||
         snap.claimed.length > 0
-      let activity: import('../../shared/types').ThreadActivityState =
+      const activity: import('../../shared/types').ThreadActivityState =
         full.activity && full.activity !== 'idle'
           ? full.activity
           : hasPendingWork
             ? 'processing'
             : 'idle'
-      // The daemon keeps reporting completed until the next turn starts, so a
-      // snapshot fill must never light the completion glow: a live completion
-      // was already acknowledged (and cleared) above, and any older label is
-      // consumed history. Fresh completions arrive as activity events, which
-      // the tracker observes directly — the fill only covers threads this GUI
-      // never saw finish.
-      if (activity === 'completed') {
-        activity = 'idle'
-      }
       setThreadActivity(threadId, activity)
     }
     broadcastThreadSnapshot(
@@ -1665,13 +1675,27 @@ export function registerGuiIpc(
 
   registerHandler('app:getFilesRoot', async (_e, threadId?: string | null) => {
     const id = threadId ?? currentPresentation().getActiveThreadId()
-    return (await resolveProjectPath(undefined, id)) ?? homedir()
+    return resolveFilesRoot(undefined, id)
   })
 
-  // Standalone threads intentionally browse the user's home directory. Always resolve
-  // project-backed operations from the supplied thread instead of reusing GUI selection.
-  const resolveFilesRoot = async (projectId?: string, threadId?: string | null): Promise<string> =>
-    (await resolveProjectPath(projectId, threadId)) ?? homedir()
+  // Standalone threads intentionally browse the user's home directory. A ready
+  // per-thread workspace is authoritative over the project's primary checkout;
+  // FileService still applies its existing root guard to the selected root.
+  const resolveFilesRoot = async (projectId?: string, threadId?: string | null): Promise<string> => {
+    if (threadId) {
+      try {
+        const status = await guiMms.request<{
+          execution?: { projectPath?: string; lifecycle?: string }
+        }>('workspace.getStatus', { threadId })
+        if (status.execution?.lifecycle === 'ready' && status.execution.projectPath) {
+          return status.execution.projectPath
+        }
+      } catch {
+        // Missing/unready workspace falls back to the daemon-authoritative project.
+      }
+    }
+    return (await resolveProjectPath(projectId, threadId)) ?? homedir()
+  }
 
   registerHandler(
     'fs:listDir',
@@ -1742,6 +1766,33 @@ export function registerGuiIpc(
   )
   registerHandler('git:push', async (_e, projectId?: string, cwd?: string) => {
     await gitService.push(await resolveGitCwd(projectId, cwd))
+  })
+
+  registerHandler('github:status', async () => {
+    const response = await guiMms.request<{ availability: unknown }>('github.status')
+    return response.availability
+  })
+  registerHandler('github:createRepository', async (_e, input: GitHubCreateRepositoryInput) => {
+    const response = await guiMms.request<{ result: unknown }>('github.createRepository', input)
+    return response.result
+  })
+  registerHandler('github:chooseCloneDestination', async () => {
+    const win = getWindow()
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose an empty folder for the cloned repository',
+      buttonLabel: 'Use this folder',
+      properties: ['openDirectory', 'createDirectory']
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
+  registerHandler('github:cloneRepository', async (_e, input: GitHubCloneRepositoryInput) => {
+    const response = await guiMms.request<{ project: unknown; projects: unknown[] }>(
+      'github.cloneRepository',
+      input
+    )
+    broadcast('projects:updated', response.projects)
+    return { project: response.project }
   })
 
   const boundBrowserProfile = (): string => {
@@ -1851,6 +1902,12 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ options: unknown[] }>('providers.getLoginOptions', {
       authType
     })
+    return res.options
+  })
+  registerHandler('providers:refreshModels', async (_e, providerId: string) => {
+    const res = await guiMms.request<{ options: unknown[] }>('providers.refreshModels', { providerId })
+    const configured = await guiMms.request<{ providers: unknown[] }>('providers.listConfigured')
+    broadcast('providers:changed', configured.providers)
     return res.options
   })
   registerHandler('providers:getAmbientInfo', async (_e, providerId: string) => {
@@ -2014,6 +2071,7 @@ export function registerGuiIpc(
     endWindowDrag(win, settings)
   })
   registerHandler('window:close', () => {
+    console.info('[window] Close requested by caption control')
     getWindow()?.close()
   })
   registerHandler('window:isMaximized', () => {
@@ -2022,59 +2080,6 @@ export function registerGuiIpc(
   })
   registerHandler('clipboard:showCopyMenu', (_e, x: number, y: number, text: string) => {
     showCopyMenu(getWindow, x, y, text)
-  })
-
-  // --- Control Protocol 2.0 / Remote & Mobile IPC handlers ---
-  registerHandler('control:status', async () => {
-    return guiMms.controlStatus()
-  })
-  registerHandler('control:login', async () => {
-    return guiMms.controlLogin()
-  })
-  registerHandler('control:logout', async () => {
-    return guiMms.controlLogout()
-  })
-  registerHandler('control:enroll', async (_e, serverUrl: string, pairingCode: string) => {
-    return guiMms.controlEnroll(serverUrl, pairingCode)
-  })
-  registerHandler('control:disconnect', async () => {
-    return guiMms.controlDisconnect()
-  })
-  registerHandler('control:setMode', async (_e, mode: 'hosted' | 'self-hosted') => {
-    return guiMms.controlSetMode(mode)
-  })
-  registerHandler('control:pairing:create', async (_e, options?: { scopes?: RemoteScope[]; ttlMs?: number }) => {
-    return guiMms.pairingCreate(options)
-  })
-  registerHandler('control:pairing:list', async () => {
-    return guiMms.pairingList()
-  })
-  registerHandler('control:pairing:approve', async (_e, pairingId: string, scopes?: RemoteScope[]) => {
-    return approvePairingWithConfirmation(
-      {
-        controlStatus: () => guiMms.controlStatus(),
-        pairingApprove: (id, approvedScopes) => guiMms.pairingApprove(id, approvedScopes),
-        showMessageBox: (win, options) =>
-          win && !win.isDestroyed() ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options),
-        window: getWindow()
-      },
-      pairingId,
-      scopes
-    )
-  })
-  registerHandler('control:pairing:reject', async (_e, pairingId: string) => {
-    return guiMms.pairingReject(pairingId)
-  })
-  registerHandler('control:pairing:revoke', async (_e, pairingIdOrDeviceId: string) => {
-    return guiMms.pairingRevoke(pairingIdOrDeviceId)
-  })
-  registerHandler('control:openDashboard', async (_e, url?: string) => {
-    const ok = await openExternalSafely(
-      (target) => shell.openExternal(target),
-      url || 'https://mousse.plus',
-      'control:openDashboard'
-    )
-    return { ok }
   })
 
   return { syncDaemonTurnSnapshot }

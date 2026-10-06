@@ -6,8 +6,10 @@ import {
   Folder,
   FolderOpen,
   RefreshCw
-} from 'lucide-react'
+} from '../lib/icons'
 import type { FileEntry } from '../../shared/types'
+import { setReferenceDragData } from '../../shared/chatReferences'
+import { useAppStore } from '../stores/appStore'
 
 interface FileTreeProps {
   filesRoot: string
@@ -26,6 +28,9 @@ interface TreeNodeProps {
   expandedPaths: Set<string>
   toggleExpand: (path: string) => void
   loadChildren: (path: string) => Promise<FileEntry[]>
+  filesRoot: string
+  threadId: string | null
+  projectId?: string
 }
 
 function TreeNode({
@@ -35,7 +40,10 @@ function TreeNode({
   onSelectFile,
   expandedPaths,
   toggleExpand,
-  loadChildren
+  loadChildren,
+  filesRoot,
+  threadId,
+  projectId
 }: TreeNodeProps) {
   const [children, setChildren] = useState<FileEntry[] | null>(null)
   const [loading, setLoading] = useState(false)
@@ -65,6 +73,16 @@ function TreeNode({
         className={`file-tree-row${selectedPath === entry.path ? ' selected' : ''}`}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={handleClick}
+        draggable={!isDir}
+        onDragStart={(event) => {
+          if (isDir) return
+          const absolute = /^(?:[a-zA-Z]:[\\/]|\/)/.test(entry.path)
+            ? entry.path
+            : `${filesRoot.replace(/[\\/]$/, '')}/${entry.path.replace(/^[\\/]/, '')}`
+          setReferenceDragData(event.dataTransfer, {
+            kind: 'file', title: entry.name, path: absolute, threadId: threadId ?? undefined, projectId
+          })
+        }}
       >
         {isDir ? (
           expanded ? (
@@ -99,6 +117,9 @@ function TreeNode({
               expandedPaths={expandedPaths}
               toggleExpand={toggleExpand}
               loadChildren={loadChildren}
+              filesRoot={filesRoot}
+              threadId={threadId}
+              projectId={projectId}
             />
           ))}
         </div>
@@ -115,6 +136,7 @@ export function FileTree({
   onSelectFile,
   refreshKey
 }: FileTreeProps) {
+  const projectId = useAppStore((s) => s.threads.find((thread) => thread.id === threadId)?.projectId)
   const [rootEntries, setRootEntries] = useState<FileEntry[]>([])
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set(['']))
   const [loading, setLoading] = useState(false)
@@ -170,6 +192,9 @@ export function FileTree({
             expandedPaths={expandedPaths}
             toggleExpand={toggleExpand}
             loadChildren={loadChildren}
+            filesRoot={filesRoot}
+            threadId={threadId}
+            projectId={projectId}
           />
         ))
       )}

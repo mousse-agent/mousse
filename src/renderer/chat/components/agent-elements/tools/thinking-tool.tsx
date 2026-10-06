@@ -3,6 +3,7 @@ import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
 import { ToolRowBase } from "./tool-row-base";
 import { Markdown } from "../markdown";
+import { IconBrain } from "../../../../lib/icons";
 import { thoughtHeading } from "../utils/format-tool";
 import {
   mapPartStateToInvocationState,
@@ -29,11 +30,13 @@ export function ThinkingCollapsed({
 }: ThinkingCollapsedProps) {
   useToolComplete(state === "animating", step.duration, onComplete);
 
+  const heading = thoughtHeading(step.thoughtContent);
+
   return (
     <ToolRowBase
+      icon={<IconBrain size={18} />}
       shimmerLabel="Thinking"
-      completeLabel="Thought"
-      detail={thoughtHeading(step.thoughtContent)}
+      completeLabel={heading || "Thinking"}
       isAnimating={state === "animating"}
       expandable={!!step.thoughtContent}
       defaultOpen={defaultOpen}

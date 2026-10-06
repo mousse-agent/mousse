@@ -1,5 +1,5 @@
 import ReactMarkdown from 'react-markdown'
-import { FileText, X } from 'lucide-react'
+import { FileText, X } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import '../styles/chat-markdown.css'
 

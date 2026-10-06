@@ -1,0 +1,613 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import {
+  createAssistantMessageEventStream,
+  type AssistantMessage,
+  type AssistantMessageEventStream,
+  type Context,
+  type Model,
+  type Provider,
+  type StreamOptions
+} from '@earendil-works/pi-ai'
+import { ProviderAuthService } from '../../../../src/mms/providers/ProviderAuthService'
+import { SettingsStore } from '../../../../src/mms/settings/SettingsStore'
+import { MousseConfigStore } from '../../../../src/mms/config/MousseConfigStore'
+import { NetDatabase } from '../../../../src/mms/net/store/database'
+import { SqliteExecutionLedger } from '../../../../src/mms/net/store/executions'
+import { SqliteBudgetLedger } from '../../../../src/mms/net/store/budgets'
+import type {
+  BotRunRequest,
+  CompartmentStore,
+  BotExecutionBinding
+} from '../../../../src/mms/net/contracts'
+import {
+  NativeBotRuntime,
+  effectiveBotPolicyDigest,
+  modelDigest,
+  nativeSdkVersion,
+  type NativeBotDefinition
+} from '../../../../src/mms/bots/runtime'
+import { NetError, newId } from '../../../../src/shared/net'
+const cleanups: Array<() => void> = []
+afterEach(() => {
+  for (const cleanup of cleanups.splice(0).reverse()) cleanup()
+})
+const costs = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+function message(
+  content: AssistantMessage['content'],
+  stopReason: AssistantMessage['stopReason'] = 'stop',
+  units = 10
+): AssistantMessage {
+  return {
+    role: 'assistant',
+    api: 'anthropic-messages',
+    provider: 'bot-fixture',
+    model: 'bounded-fixture',
+    content,
+    stopReason,
+    usage: {
+      input: 10,
+      output: 10,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 20,
+      cost: { ...costs, total: units / 1000000 }
+    },
+    timestamp: Date.now()
+  }
+}
+type Script = (
+  context: Context,
+  options: StreamOptions,
+  stream: AssistantMessageEventStream
+) => void
+async function setup(scripts: Script[], ceiling = 100, maxElapsedMs = 10000) {
+  const path = realpathSync(mkdtempSync(join(tmpdir(), 'bot-runtime-'))),
+    db = new NetDatabase({ profileDir: path }),
+    auth = new ProviderAuthService(join(path, 'auth.json')),
+    settings = new SettingsStore(MousseConfigStore.load(path))
+  cleanups.push(() => {
+    auth.stop()
+    db.close()
+    rmSync(path, { recursive: true, force: true })
+  })
+  const captured: Array<{ context: Context; options: StreamOptions }> = [],
+    model: Model<'anthropic-messages'> = {
+      id: 'bounded-fixture',
+      name: 'Bounded deterministic fixture',
+      api: 'anthropic-messages',
+      provider: 'bot-fixture',
+      baseUrl: 'https://invalid.test',
+      reasoning: false,
+      input: ['text'],
+      cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 },
+      contextWindow: 10000,
+      maxTokens: 1000
+    }
+  const stream = (context: Context, options: StreamOptions = {}) => {
+    captured.push({ context: structuredClone(context), options })
+    const result = createAssistantMessageEventStream(),
+      script = scripts.shift()
+    if (!script) throw Error('Unexpected billable call')
+    queueMicrotask(() => script(context, options, result))
+    return result
+  }
+  const provider: Provider<'anthropic-messages'> = {
+    id: 'bot-fixture',
+    name: 'Fixture',
+    auth: {
+      apiKey: {
+        name: 'Fixture',
+        resolve: async () => ({ auth: { apiKey: 'fixture-not-a-credential' } })
+      }
+    },
+    getModels: () => [model],
+    stream: (_model, context, options) => stream(context, options),
+    streamSimple: (_model, context, options) => stream(context, options)
+  }
+  auth.models.setProvider(provider)
+  await auth.credentials.modify(provider.id, async () => ({
+    type: 'api_key',
+    key: 'fixture-not-a-credential'
+  }))
+  const definition: NativeBotDefinition = {
+    revision: 'revision1',
+    systemPrompt: 'Only the supplied bot compartment. Never use host context.',
+    billing: {
+      provider: provider.id,
+      model: model.id,
+      api: model.api,
+      modelDigest: modelDigest(model),
+      sdkVersion: nativeSdkVersion(),
+      platform: process.platform,
+      nodeVersion: process.versions.node,
+      runtimeVersion: 'mousse-net-native-v1',
+      maximumUnits: 60,
+      maxOutputTokens: 50,
+      maxRequestBytes: 65536,
+      evidence:
+        'Deterministic local fixture charges10 units/call and honors all request limits; no paid provider qualification.'
+    },
+    readerTools: ['safe_read', 'safe_list', 'safe_search'],
+    approval: 'always',
+    maxModelCalls: 10,
+    maxToolCalls: 10,
+    maxElapsedMs
+  }
+  const executions = new SqliteExecutionLedger(db),
+    budgets = new SqliteBudgetLedger(db),
+    bot = newId('bot'),
+    space = newId('space'),
+    outputStream = newId('stream'),
+    compartment = `cmp1/public/${bot}/${space}`,
+    profileId = 'test-profile'
+  db.database.exec(
+    'CREATE TABLE test_compartments(id TEXT PRIMARY KEY,binding TEXT,history TEXT);CREATE TABLE test_qualification(active INTEGER)'
+  )
+  db.database.prepare('INSERT INTO test_qualification VALUES(1)').run()
+  db.database
+    .prepare('INSERT INTO test_compartments VALUES(?,?,?)')
+    .run(
+      compartment,
+      JSON.stringify({ profileId, bot, space }),
+      JSON.stringify([{ role: 'user', text: 'PUBLIC HISTORY', ts: Date.now() }])
+    )
+  db.database
+    .prepare('INSERT INTO test_compartments VALUES(?,?,?)')
+    .run(
+      'unrelated-private',
+      JSON.stringify({ profileId, bot, space, privateStream: newId('stream'), visibilityEpoch: 1 }),
+      JSON.stringify([{ role: 'user', text: 'PRIVATE SECRET', ts: Date.now() }])
+    )
+  const compartments: CompartmentStore = {
+    publicId: () => compartment,
+    privateId: () => {
+      throw Error('unused')
+    },
+    bind: () => {
+      throw Error('unused')
+    },
+    binding: (id) => {
+      const row = db.database.prepare('SELECT binding FROM test_compartments WHERE id=?').get(id)
+      return row ? JSON.parse(row.binding as string) : undefined
+    },
+    history: (id, limit) => {
+      const row = db.database.prepare('SELECT history FROM test_compartments WHERE id=?').get(id)
+      if (!row) throw new NetError('forbidden')
+      return JSON.parse(row.history as string).slice(-limit)
+    },
+    appendTurn: () => {
+      throw Error('root owns terminal history')
+    },
+    drop: () => {
+      throw Error('unused')
+    }
+  }
+  const bindings = new Map<string, BotExecutionBinding>()
+  let current = true
+  budgets.setDailyBudget(bot, space, 1000)
+  function request() {
+    const event = newId('event'),
+      now = Date.now(),
+      admitted = db.transaction(() => {
+        const admitted = executions.admit(
+          { scope: space, target: bot, trigger: event },
+          'a'.repeat(64),
+          now
+        )
+        budgets.reserve(bot, space, admitted.record.id, ceiling, now)
+        return admitted
+      })
+    const execution = admitted.record.id,
+      binding: BotExecutionBinding = {
+        profileId,
+        space,
+        bot,
+        stream: outputStream,
+        compartment,
+        backingThreadId: randomUUID(),
+        workspaceId: randomUUID(),
+        definitionRevision: definition.revision,
+        profileDigest: effectiveBotPolicyDigest(definition, 'chat')
+      }
+    db.transaction(() => executions.bindRun(execution, binding))
+    executions.transition(execution, 'running', Date.now())
+    bindings.set(execution, binding)
+    const controller = new AbortController()
+    const request: BotRunRequest = {
+      execution,
+      bot,
+      space,
+      profile: 'chat',
+      compartment,
+      prompt: 'New public prompt',
+      spendCeilingUnits: ceiling,
+      outputStream,
+      backingThreadId: binding.backingThreadId,
+      workspaceId: binding.workspaceId,
+      definitionRevision: binding.definitionRevision,
+      profileDigest: binding.profileDigest,
+      spend: {
+        authorizeCall: async (maximum) => {
+          const id = randomUUID()
+          budgets.authorizeCall(execution, id, maximum)
+          return { id }
+        },
+        settleCall: async (id, spent) => budgets.settleCall(execution, id, spent),
+        remainingUnits: () =>
+          ceiling -
+          Number(
+            db.database
+              .prepare(
+                'SELECT COALESCE(sum(COALESCE(spent,maximum)),0) AS n FROM net_budget_calls WHERE execution=?'
+              )
+              .get(execution)!.n
+          )
+      },
+      approvals: {
+        requestAction: async () => {
+          throw Error('chat must never ask permission')
+        },
+        consume: async () => {
+          throw Error('chat must never consume permission')
+        }
+      },
+      signal: controller.signal
+    }
+    return { request, controller }
+  }
+  const runtime = new NativeBotRuntime({
+    profileId,
+    installationHome: path,
+    settings,
+    providerAuth: auth,
+    sdkVersion: nativeSdkVersion(),
+    definition,
+    compartments,
+    executionBinding: (id) => executions.get(id)?.binding,
+    assertCurrent: (r) => {
+      if (!current || executions.get(r.execution)?.state !== 'running')
+        throw new NetError('forbidden')
+    },
+    qualification: {
+      active: () =>
+        Boolean(db.database.prepare('SELECT active FROM test_qualification').get()!.active),
+      invalidate: () =>
+        db.transaction(() => {
+          db.database.prepare('UPDATE test_qualification SET active=0').run()
+        })
+    }
+  })
+  return {
+    path,
+    db,
+    auth,
+    definition,
+    model,
+    runtime,
+    captured,
+    request,
+    executions,
+    budgets,
+    bindings,
+    setCurrent(value: boolean) {
+      current = value
+    },
+    events: { onProgress: vi.fn(), onToolSummary: vi.fn(), onWaitingApproval: vi.fn() }
+  }
+}
+const done =
+  (value: AssistantMessage): Script =>
+  (_context, _options, stream) => {
+    stream.push({
+      type: 'done',
+      reason: value.stopReason === 'toolUse' ? 'toolUse' : 'stop',
+      message: value
+    })
+    stream.end(value)
+  }
+describe('actual MMS native bot loop and durable spend', () => {
+  it('advertises zero chat tools, rejects every invented native bypass, and loads only its bound compartment', async () => {
+    const names = [
+        'bash',
+        'read',
+        'read_file',
+        'grep',
+        'find',
+        'write',
+        'load_skill',
+        'ask_user',
+        'create_subagent',
+        'mcp_secret',
+        'browser_navigate',
+        'web_search'
+      ],
+      p = await setup([
+        done(
+          message(
+            names.map((name, index) => ({
+              type: 'toolCall',
+              id: `t${index}`,
+              name,
+              arguments: { command: 'secret', path: '/etc/passwd' }
+            })),
+            'toolUse'
+          )
+        ),
+        done(message([{ type: 'text', text: 'Bound public answer' }]))
+      ]),
+      r = p.request()
+    expect(p.runtime.supports('chat')).toBe(true)
+    expect(p.runtime.supports('reader')).toBe(false)
+    expect(p.runtime.supports('operator')).toBe(false)
+    expect(await p.runtime.run(r.request, p.events)).toEqual({
+      text: 'Bound public answer',
+      spentUnits: 20
+    })
+    expect(p.captured).toHaveLength(2)
+    for (const entry of p.captured) {
+      expect(entry.context.tools).toBeUndefined()
+      expect(JSON.stringify(entry.context)).not.toContain('PRIVATE SECRET')
+      expect(entry.context.systemPrompt).toBe(p.definition.systemPrompt)
+      expect(entry.options.maxTokens).toBe(50)
+      expect(entry.options.sessionId).toBeUndefined()
+    }
+    const results = p.captured[1].context.messages.filter((row) => row.role === 'toolResult')
+    expect(results).toHaveLength(names.length)
+    expect(results.every((row) => row.role === 'toolResult' && row.isError)).toBe(true)
+    expect(p.events.onToolSummary).not.toHaveBeenCalled()
+    expect(p.db.database.prepare('SELECT maximum,spent FROM net_budget_calls').all()).toEqual([
+      { maximum: 60, spent: 10 },
+      { maximum: 60, spent: 10 }
+    ])
+  })
+  it('refuses a second billable call one unit below its maximum before invoking the provider', async () => {
+    const p = await setup(
+        [
+          done(
+            message([{ type: 'toolCall', id: 'invented', name: 'bash', arguments: {} }], 'toolUse')
+          )
+        ],
+        69
+      ),
+      r = p.request()
+    await expect(p.runtime.run(r.request, p.events)).rejects.toMatchObject({
+      code: 'budget_exhausted'
+    })
+    expect(p.captured).toHaveLength(1)
+    expect(p.db.database.prepare('SELECT maximum,spent FROM net_budget_calls').all()).toEqual([
+      { maximum: 60, spent: 10 }
+    ])
+  })
+  it('rejects changed bindings and unknown billing before model calls', async () => {
+    const p = await setup([]),
+      r = p.request()
+    await expect(
+      p.runtime.run({ ...r.request, compartment: 'unrelated-private' }, p.events)
+    ).rejects.toMatchObject({ code: 'forbidden' })
+    await expect(
+      p.runtime.run({ ...r.request, projectRoot: '/tmp' }, p.events)
+    ).rejects.toMatchObject({ code: 'forbidden' })
+    p.model.cost.input = 2
+    expect(p.runtime.supports('chat')).toBe(false)
+    await expect(p.runtime.run(r.request, p.events)).rejects.toMatchObject({
+      code: 'profile_unsupported'
+    })
+    expect(p.captured).toHaveLength(0)
+    expect(p.db.database.prepare('SELECT count(*) AS n FROM net_budget_calls').get()!.n).toBe(0)
+  })
+  it('holds unknown/over-limit charges and durably suspends failed billing qualification', async () => {
+    const p = await setup([
+        done(message([{ type: 'text', text: 'unexpected charge' }], 'stop', 61))
+      ]),
+      r = p.request()
+    await expect(p.runtime.run(r.request, p.events)).rejects.toMatchObject({
+      code: 'profile_unsupported',
+      details: { maximumUnits: 60, reportedUnits: 61 }
+    })
+    expect(p.db.database.prepare('SELECT maximum,spent FROM net_budget_calls').all()).toEqual([
+      { maximum: 60, spent: null }
+    ])
+    expect(p.runtime.supports('chat')).toBe(false)
+    expect(p.db.database.prepare('SELECT active FROM test_qualification').get()!.active).toBe(0)
+    const unknown = await setup([
+        done({
+          ...message([]),
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: costs }
+        })
+      ]),
+      u = unknown.request()
+    await expect(unknown.runtime.run(u.request, unknown.events)).rejects.toMatchObject({
+      code: 'outcome_uncertain',
+      details: { quiesced: true }
+    })
+    expect(
+      unknown.db.database.prepare('SELECT spent FROM net_budget_calls').get()!.spent
+    ).toBeNull()
+  })
+  it('propagates cancellation to the exact provider call and reconciles known terminal spend before returning', async () => {
+    let aborted = false
+    const p = await setup([
+        (_context, options, stream) => {
+          options.signal!.addEventListener(
+            'abort',
+            () => {
+              aborted = true
+              const terminal = message([], 'aborted', 10)
+              stream.push({ type: 'error', reason: 'aborted', error: terminal })
+              stream.end(terminal)
+            },
+            { once: true }
+          )
+        }
+      ]),
+      r = p.request(),
+      run = p.runtime.run(r.request, p.events)
+    await vi.waitFor(() => expect(p.captured).toHaveLength(1))
+    r.controller.abort()
+    await expect(run).rejects.toMatchObject({ code: 'cancelled' })
+    expect(aborted).toBe(true)
+    expect(p.db.database.prepare('SELECT spent FROM net_budget_calls').get()!.spent).toBe(10)
+  })
+  it('reserves each actual native retry separately before another provider attempt', async () => {
+    const failed = { ...message([], 'error'), errorMessage: 'HTTP 503 Service unavailable' }
+    const p = await setup(
+        [
+          (_c, _o, s) => {
+            s.push({ type: 'error', reason: 'error', error: failed })
+            s.end(failed)
+          },
+          done(message([{ type: 'text', text: 'recovered' }]))
+        ],
+        100,
+        30000
+      ),
+      r = p.request()
+    await expect(p.runtime.run(r.request, p.events)).resolves.toEqual({
+      text: 'recovered',
+      spentUnits: 20
+    })
+    expect(p.captured).toHaveLength(2)
+    expect(p.db.database.prepare('SELECT maximum,spent FROM net_budget_calls').all()).toEqual([
+      { maximum: 60, spent: 10 },
+      { maximum: 60, spent: 10 }
+    ])
+  }, 20000)
+  it('checks current authority after spend reservation and aborts before dispatch when it changes', async () => {
+    const p = await setup([]),
+      r = p.request(),
+      original = r.request.spend.authorizeCall
+    r.request.spend.authorizeCall = async (max) => {
+      const call = await original(max)
+      p.setCurrent(false)
+      return call
+    }
+    await expect(p.runtime.run(r.request, p.events)).rejects.toMatchObject({ code: 'forbidden' })
+    expect(p.captured).toHaveLength(0)
+    expect(p.db.database.prepare('SELECT spent FROM net_budget_calls').get()!.spent).toBe(0)
+  })
+  it.each(['known', 'unknown'] as const)(
+    'fences concurrent runs after qualification loss and retains %s terminal spend',
+    async (evidence) => {
+      let release: () => void = () => {},
+        aborted = false
+      const p = await setup(
+        [
+          (_context, options, stream) => {
+            options.signal!.addEventListener(
+              'abort',
+              () => {
+                aborted = true
+              },
+              { once: true }
+            )
+            release = () => {
+              const terminal = message(
+                [{ type: 'toolCall', id: 'invented', name: 'bash', arguments: {} }],
+                'toolUse'
+              )
+              if (evidence === 'unknown') terminal.usage.totalTokens = 0
+              stream.push({ type: 'done', reason: 'toolUse', message: terminal })
+              stream.end(terminal)
+            }
+          },
+          done(message([{ type: 'text', text: 'over maximum' }], 'stop', 61)),
+          done(message([{ type: 'text', text: 'must never dispatch' }]))
+        ],
+        100,
+        30000
+      )
+      const first = p.request(),
+        second = p.request(),
+        run = p.runtime.run(first.request, p.events)
+      // Attach before invalidation so a promptly aborted sibling cannot become unhandled.
+      const firstOutcome = run.then(
+        () => {
+          throw Error('Suspended sibling returned output')
+        },
+        (error) => error
+      )
+      await vi.waitFor(() => expect(p.captured).toHaveLength(1))
+      await expect(p.runtime.run(second.request, p.events)).rejects.toMatchObject({
+        code: 'profile_unsupported'
+      })
+      expect(p.runtime.supports('chat')).toBe(false)
+      expect(aborted).toBe(true)
+      expect(p.captured.every((call) => call.options.signal!.aborted)).toBe(true)
+      p.events.onProgress.mockClear()
+      p.events.onToolSummary.mockClear()
+      release()
+      expect(await firstOutcome).toMatchObject({ code: 'cancelled' })
+      expect(p.captured).toHaveLength(2)
+      expect(p.events.onProgress).not.toHaveBeenCalled()
+      expect(p.events.onToolSummary).not.toHaveBeenCalled()
+      expect(
+        p.db.database
+          .prepare('SELECT maximum,spent FROM net_budget_calls WHERE execution=?')
+          .all(first.request.execution)
+      ).toEqual([{ maximum: 60, spent: evidence === 'known' ? 10 : null }])
+      expect(
+        p.db.database
+          .prepare('SELECT spent FROM net_budget_calls WHERE execution=?')
+          .get(second.request.execution)!.spent
+      ).toBeNull()
+      expect(p.db.database.prepare('SELECT active FROM test_qualification').get()!.active).toBe(0)
+    }
+  )
+  it('rechecks externally revoked qualification before exposing a settled tool-use result', async () => {
+    let release: () => void = () => {}
+    const p = await setup([
+        (_context, _options, stream) => {
+          release = () => {
+            const terminal = message(
+              [{ type: 'toolCall', id: 'invented', name: 'bash', arguments: {} }],
+              'toolUse'
+            )
+            stream.push({ type: 'done', reason: 'toolUse', message: terminal })
+            stream.end(terminal)
+          }
+        },
+        done(message([{ type: 'text', text: 'must never dispatch' }]))
+      ]),
+      r = p.request(),
+      run = p.runtime.run(r.request, p.events),
+      outcome = run.catch((error) => error)
+    await vi.waitFor(() => expect(p.captured).toHaveLength(1))
+    p.db.transaction(() => p.db.database.prepare('UPDATE test_qualification SET active=0').run())
+    release()
+    expect(await outcome).toMatchObject({ code: 'profile_unsupported' })
+    expect(p.captured).toHaveLength(1)
+    expect(p.db.database.prepare('SELECT spent FROM net_budget_calls').get()!.spent).toBe(10)
+    expect(p.events.onProgress).not.toHaveBeenCalled()
+  })
+
+  it('reports unproven quiescence when a real dispatched provider ignores abort, retaining its unknown charge', async () => {
+    let release: () => void = () => {}
+    const p = await setup([
+        (_context, _options, stream) => {
+          release = () => {
+            const terminal = message([])
+            stream.push({ type: 'done', reason: 'stop', message: terminal })
+            stream.end(terminal)
+          }
+        }
+      ]),
+      r = p.request(),
+      run = p.runtime.run(r.request, p.events),
+      outcome = run.catch((error) => error)
+    await vi.waitFor(() => expect(p.captured).toHaveLength(1))
+    r.controller.abort()
+    expect(await outcome).toMatchObject({ code: 'outcome_uncertain', details: { quiesced: false } })
+    expect(p.db.database.prepare('SELECT spent FROM net_budget_calls').get()!.spent).toBeNull()
+    expect(p.runtime.supports('chat')).toBe(false)
+    release()
+    await vi.waitFor(() =>
+      expect(p.db.database.prepare('SELECT spent FROM net_budget_calls').get()!.spent).toBe(10)
+    )
+    expect(p.events.onProgress).not.toHaveBeenCalled()
+    expect(p.captured).toHaveLength(1)
+  }, 10000)
+})

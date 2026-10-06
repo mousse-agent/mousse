@@ -1,7 +1,7 @@
 import { memo } from "react";
 import type { TimelineStep, StepState } from "../types/timeline";
 import type { SourceType } from "../icons/source-icons";
-import { IconFileText } from "@tabler/icons-react";
+import { IconFileText, IconFolderSearch, IconSearch } from "../../../../lib/icons";
 import { ToolRowBase } from "./tool-row-base";
 import { useToolComplete } from "../hooks/use-tool-complete";
 import {
@@ -62,6 +62,13 @@ export function SearchGroupRich({
         <CompleteTracker key={step.id} step={step} />
       ))}
       <ToolRowBase
+        icon={
+          toolLabel === "Glob" ? (
+            <IconFolderSearch size={18} />
+          ) : (
+            <IconSearch size={18} />
+          )
+        }
         shimmerLabel="Searching..."
         completeLabel={completeLabel}
         detail={detail}

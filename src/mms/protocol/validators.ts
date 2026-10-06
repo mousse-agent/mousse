@@ -5,7 +5,6 @@ import { knownAppError, parseErrorInfo } from '../../shared/errors'
  */
 
 import type { ChatImageAttachment, ChatMode } from '../../shared/types'
-import type { RemoteScope } from '../../shared/controlTypes'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import {
   parseClientCommandResponse,
@@ -14,6 +13,7 @@ import {
 } from './connectionCommandValidate'
 import {
   MMS_PROTOCOL_MAX_ID_LENGTH,
+  MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES,
   MMS_PROTOCOL_MAX_IMAGE_DATA_CHARS,
   MMS_PROTOCOL_MAX_IMAGES,
   MMS_PROTOCOL_MAX_METHOD_LENGTH,
@@ -58,6 +58,33 @@ function isClientType(v: unknown): v is ProtocolClientType {
 export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
   if (!isObject(raw) || typeof raw.kind !== 'string') return null
   switch (raw.kind) {
+    case 'connection_event': {
+      if (
+        Object.keys(raw).some(
+          key => !['kind', 'type', 'profileId', 'profileEpoch', 'data'].includes(key)
+        ) ||
+        raw.type !== 'bridge.hub.thread' ||
+        !isBoundedString(raw.profileId, 128, { nonEmpty: true }) ||
+        !Number.isSafeInteger(raw.profileEpoch) ||
+        (raw.profileEpoch as number) < 1
+      ) {
+        return null
+      }
+      try {
+        if (Buffer.byteLength(JSON.stringify(raw), 'utf8') > MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES) {
+          return null
+        }
+      } catch {
+        return null
+      }
+      return {
+        kind: 'connection_event',
+        type: 'bridge.hub.thread',
+        profileId: raw.profileId,
+        profileEpoch: raw.profileEpoch as number,
+        data: raw.data
+      }
+    }
     case 'hello': {
       if (
         typeof raw.protocolVersion !== 'number' ||
@@ -806,75 +833,4 @@ export function asCursorMcpConfigPatch(v: unknown): Record<string, unknown> {
   }
   walk(o, 0)
   return o
-}
-
-export function asRemoteScope(v: unknown, name = 'scope'): RemoteScope {
-  if (
-    v === 'mousse:read' ||
-    v === 'mousse:chat' ||
-    v === 'mousse:write' ||
-    v === 'mousse:terminal' ||
-    v === 'mousse:settings'
-  ) {
-    return v
-  }
-  throw new Error(`${name} must be a valid RemoteScope`)
-}
-
-export function asRemoteScopeArray(v: unknown, name = 'scopes'): RemoteScope[] {
-  if (!Array.isArray(v)) throw new Error(`${name} must be an array`)
-  return v.map((item, idx) => asRemoteScope(item, `${name}[${idx}]`))
-}
-
-export function asOptionalRemoteScopeArray(v: unknown, name = 'scopes'): RemoteScope[] | undefined {
-  if (v === undefined || v === null) return undefined
-  return asRemoteScopeArray(v, name)
-}
-
-export function asControlEnrollParams(v: unknown): { serverUrl: string; pairingCode: string } {
-  const o = asPlainObject(v, 'params')
-  return {
-    serverUrl: asString(o.serverUrl, 'serverUrl', 2048),
-    pairingCode: asString(o.pairingCode, 'pairingCode', 128)
-  }
-}
-
-export function asPairingCreateParams(v: unknown): { scopes?: RemoteScope[]; ttlMs?: number } {
-  if (v === undefined || v === null) return {}
-  const o = asPlainObject(v, 'params')
-  return {
-    scopes: asOptionalRemoteScopeArray(o.scopes, 'scopes'),
-    ttlMs: asOptionalBoundedInt(o.ttlMs, 'ttlMs', { min: 10_000, max: 24 * 60 * 60 * 1000 })
-  }
-}
-
-export function asPairingApproveParams(v: unknown): { pairingId: string; scopes?: RemoteScope[] } {
-  const o = asPlainObject(v, 'params')
-  return {
-    pairingId: asString(o.pairingId, 'pairingId', 128),
-    scopes: asOptionalRemoteScopeArray(o.scopes, 'scopes')
-  }
-}
-
-export function asPairingRejectParams(v: unknown): { pairingId: string } {
-  const o = asPlainObject(v, 'params')
-  return {
-    pairingId: asString(o.pairingId, 'pairingId', 128)
-  }
-}
-
-export function asPairingRevokeParams(v: unknown): { pairingIdOrDeviceId: string } {
-  const o = asPlainObject(v, 'params')
-  return {
-    pairingIdOrDeviceId: asString(o.pairingIdOrDeviceId, 'pairingIdOrDeviceId', 128)
-  }
-}
-
-export function asControlSetModeParams(v: unknown): { mode: 'hosted' | 'self-hosted' } {
-  const o = asPlainObject(v, 'params')
-  const mode = asString(o.mode, 'mode', 32)
-  if (mode !== 'hosted' && mode !== 'self-hosted') {
-    throw new Error('mode must be "hosted" or "self-hosted"')
-  }
-  return { mode }
 }

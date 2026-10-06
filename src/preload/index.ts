@@ -1,4 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import { readStartupAppearanceArgument } from '../shared/startupAppearance'
+import type { BridgeDisplayPart } from '../shared/bridge'
+import type { WindowResizeEdge } from '../shared/windowResize'
 import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity, NamedAgentRequest, NamedAgentRecallRequest, NamedAgentIntegrationRequest, NamedAgentIntegrationReview } from '../shared/agentEpisodes'
 import type {
   Agent,
@@ -42,7 +45,7 @@ import type {
   UserQuestionAnswers
 } from '../shared/types'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
-import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
+import type { LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
 import type {
   McpConfigSourceDescriptor,
@@ -59,14 +62,21 @@ import type {
   ProviderLoginResponse,
   ProviderLoginResult
 } from '../shared/providerAuth'
-import type {
-  ControlStatus,
-  CreatePairingResult,
-  PairingGrant,
-  RemoteScope
-} from '../shared/controlTypes'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
+import type { ChatReference } from '../shared/chatReferences'
 import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
+import type {
+  GitHubApi,
+  GitHubAvailability,
+  GitHubCloneRepositoryInput,
+  GitHubCloneRepositoryResult,
+  GitHubCreateRepositoryInput,
+  GitHubCreateRepositoryResult
+} from '../shared/github'
+
+interface ChatReferencesApi {
+  resolve(reference: ChatReference): Promise<ChatReference | null>
+}
 
 export interface AppInfo {
   deviceName?: string
@@ -104,10 +114,23 @@ async function storageInvoke<T>(channel: string, ...args: unknown[]): Promise<T>
 
 const api = {
   platform: process.platform,
+  startupAppearance: readStartupAppearanceArgument(process.argv),
   /** Bounded profile-aware bridge for new platform feature clients. */
   platformRequest: {
     request: platformRequest
   },
+  bridge: {
+    /** Parts belong to this window's authenticated profile connection. */
+    onThreadPart: (callback: (part: BridgeDisplayPart) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, part: BridgeDisplayPart) => callback(part)
+      ipcRenderer.on('bridge:thread-part', handler)
+      return () => { ipcRenderer.removeListener('bridge:thread-part', handler) }
+    }
+  },
+  chatReferences: {
+    resolve: (reference: ChatReference): Promise<ChatReference | null> =>
+      platformRequest<ChatReference | null>('chatReferences.resolve', { reference })
+  } satisfies ChatReferencesApi,
   orchestrator: {
     /** Compatibility: send to the active thread (stacks on the queue when busy). */
     send: (request: OrchestratorSendInput): Promise<OrchestratorResponse> =>
@@ -411,6 +434,15 @@ const api = {
     writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null): Promise<void> =>
       ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId)
   },
+  github: {
+    status: (): Promise<GitHubAvailability> => ipcRenderer.invoke('github:status'),
+    createRepository: (input: GitHubCreateRepositoryInput): Promise<GitHubCreateRepositoryResult> =>
+      ipcRenderer.invoke('github:createRepository', input),
+    chooseCloneDestination: (): Promise<string | null> =>
+      ipcRenderer.invoke('github:chooseCloneDestination'),
+    cloneRepository: (input: GitHubCloneRepositoryInput): Promise<GitHubCloneRepositoryResult> =>
+      ipcRenderer.invoke('github:cloneRepository', input)
+  } satisfies GitHubApi,
   git: {
     status: (projectId?: string, cwd?: string): Promise<GitStatusSnapshot> =>
       ipcRenderer.invoke('git:status', projectId, cwd),
@@ -722,6 +754,8 @@ const api = {
       ipcRenderer.invoke('providers:getSubscriptionUsage', providerId),
     getLoginOptions: (authType?: 'api_key' | 'oauth'): Promise<ProviderLoginOption[]> =>
       ipcRenderer.invoke('providers:getLoginOptions', authType),
+    refreshModels: (providerId: string): Promise<LlmProviderOption[]> =>
+      ipcRenderer.invoke('providers:refreshModels', providerId),
     getAmbientInfo: (providerId: string): Promise<AmbientProviderInfo | undefined> =>
       ipcRenderer.invoke('providers:getAmbientInfo', providerId),
     setApiKey: (providerId: string, apiKey: string): Promise<void> =>
@@ -792,6 +826,9 @@ const api = {
       ipcRenderer.invoke('clipboard:showCopyMenu', x, y, text)
   },
   window: {
+    resizeStart: (edge: WindowResizeEdge, pointerId: number): Promise<boolean> => ipcRenderer.invoke('window:resizeStart', edge, pointerId),
+    resizeMove: (pointerId: number): Promise<void> => ipcRenderer.invoke('window:resizeMove', pointerId),
+    resizeEnd: (pointerId: number): Promise<void> => ipcRenderer.invoke('window:resizeEnd', pointerId),
     minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),
     maximize: (): Promise<void> => ipcRenderer.invoke('window:maximize'),
     dragStart: (point: { screenX: number; screenY: number }): Promise<void> =>
@@ -815,48 +852,6 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, focused: boolean) => cb(focused)
       ipcRenderer.on('window:focus-changed', handler)
       return () => ipcRenderer.removeListener('window:focus-changed', handler)
-    }
-  },
-  control: {
-    getStatus: (): Promise<ControlStatus> => ipcRenderer.invoke('control:status'),
-    login: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('control:login'),
-    logout: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('control:logout'),
-    enroll: (serverUrl: string, pairingCode: string): Promise<{ ok: boolean; error?: string }> =>
-      ipcRenderer.invoke('control:enroll', serverUrl, pairingCode),
-    disconnect: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('control:disconnect'),
-    setMode: (mode: 'hosted' | 'self-hosted'): Promise<{ ok: boolean }> =>
-      ipcRenderer.invoke('control:setMode', mode),
-    createPairing: (options?: { scopes?: RemoteScope[]; ttlMs?: number }): Promise<CreatePairingResult> =>
-      ipcRenderer.invoke('control:pairing:create', options),
-    listPairings: (): Promise<{ pairings: PairingGrant[] }> => ipcRenderer.invoke('control:pairing:list'),
-    approvePairing: (
-      pairingId: string,
-      scopes?: RemoteScope[]
-    ): Promise<{ grant: PairingGrant; receipt: string; receiptSignature: string }> =>
-      ipcRenderer.invoke('control:pairing:approve', pairingId, scopes),
-    rejectPairing: (pairingId: string): Promise<{ ok: boolean }> =>
-      ipcRenderer.invoke('control:pairing:reject', pairingId),
-    revokePairing: (pairingIdOrDeviceId: string): Promise<{ ok: boolean; revoked?: PairingGrant }> =>
-      ipcRenderer.invoke('control:pairing:revoke', pairingIdOrDeviceId),
-    openDashboard: (url?: string): Promise<{ ok: boolean }> =>
-      ipcRenderer.invoke('control:openDashboard', url),
-    onStatusChanged: (cb: (status: ControlStatus) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, status: ControlStatus) => cb(status)
-      ipcRenderer.on('control:status-changed', handler)
-      return () => ipcRenderer.removeListener('control:status-changed', handler)
-    },
-    onPairingRequest: (
-      cb: (req: {
-        pairingId: string
-        mobileDeviceId: string
-        mobileDeviceName?: string
-        fingerprint: string
-        requestedScopes: RemoteScope[]
-      }) => void
-    ): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, req: any) => cb(req)
-      ipcRenderer.on('control:pairing-request', handler)
-      return () => ipcRenderer.removeListener('control:pairing-request', handler)
     }
   }
 }

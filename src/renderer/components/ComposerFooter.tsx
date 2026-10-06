@@ -9,13 +9,14 @@ import {
   Square,
   Sparkles,
   ClipboardList
-} from 'lucide-react'
+} from '../lib/icons'
 import type { LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
 import type { SkillDescriptor } from '../../shared/integrations'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { chatModeEquals, getChatModeLabel } from '../../shared/chatMode'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
+import { ComposerEffortPicker } from './ComposerEffortPicker'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
@@ -130,8 +131,10 @@ export function ComposerFooter({
   const modeMenuContentRef = useRef<HTMLDivElement>(null)
   const contextBtnRef = useRef<HTMLButtonElement>(null)
   const handleMenuScroll = useMenuScrollFade()
-  const modelButtonParts = getGroupedModelButtonParts(selectedProviderId, selectedModelId, providers)
+  const modelButtonParts = getGroupedModelButtonParts(selectedProviderId, selectedModelId, providers, false)
   const modelButtonLabel = modelButtonParts.join(' · ')
+  const selectedProvider = providers.find((entry) => entry.id === selectedProviderId)
+  const providerModels = selectedProvider?.models ?? []
   const ModeIcon = getModeIcon(chatMode)
   const activeSkill = typeof chatMode === 'object'
     ? enabledSkills.find((skill) => skill.id === chatMode.skillId)
@@ -249,7 +252,7 @@ export function ComposerFooter({
                   aria-label="Agent"
                 >
                   <div className="composer-mode-menu-heading">Agent</div>
-                  {BUILTIN_CHAT_MODES.map((mode) => {
+                  {BUILTIN_CHAT_MODES.filter((mode) => selectedProviderId !== 'antigravity' || mode !== 'plan').map((mode) => {
                     const selected = chatModeEquals(chatMode, mode)
                     const isDefault = mode === DEFAULT_CHAT_MODE
                     return (
@@ -354,10 +357,11 @@ export function ComposerFooter({
             {!modelReadOnly && <ChevronDown size={12} strokeWidth={2} />}
           </button>
         </div>
+        <ComposerEffortPicker providerId={selectedProviderId} modelId={selectedModelId} models={providerModels} readOnly={modelReadOnly} onSelect={onModelSelect} />
       </div>
 
       <div className="composer-footer-right">
-        <div className="composer-context-anchor">
+        {!['antigravity', 'claude-subscription'].includes(selectedProviderId ?? '') && <div className="composer-context-anchor">
           <ContextUsageRing
             percent={contextUsage.percent}
             onClick={() => onContextOpenChange(!contextOpen)}
@@ -370,7 +374,7 @@ export function ComposerFooter({
             usage={contextUsage}
             anchorRef={contextBtnRef}
           />
-        </div>
+        </div>}
 
         <button
           type="button"

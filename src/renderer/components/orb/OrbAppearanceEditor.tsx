@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, type KeyboardEvent } from 'react'
-import { ChevronLeft, ChevronRight, RotateCcw, Plus, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, RotateCcw, Plus, X } from '../../lib/icons'
 import { LiquidGlassOrb } from './LiquidGlassOrb'
 import { DEFAULT_ORB_APPEARANCE, ORB_PALETTES, normalizeOrbAppearance, orbPaletteName, selectOrbPalette, stepOrbPalette, type OrbAppearance } from './orbAppearance'
 import './orb.css'
@@ -49,9 +49,9 @@ export function OrbAppearanceEditor({ value: input, onChange, name = 'Your agent
       </div>
       <div className="orb-identity__controls">
         <div className="orb-palette" role="group" aria-label="Orb color palette" onKeyDown={onPaletteKey}>
-          <button type="button" className="orb-arrow" aria-label="Previous orb palette" disabled={readOnly} onClick={() => cycle(-1)}><ChevronLeft size={18} /></button>
+          <button type="button" className="orb-arrow" aria-label="Previous orb palette" disabled={readOnly} onClick={() => cycle(-1)}><ChevronLeft size={16} /></button>
           <div className="orb-palette__name" aria-live="polite" aria-atomic="true"><span>{orbPaletteName(value)}</span><small>Color palette</small></div>
-          <button type="button" className="orb-arrow" aria-label="Next orb palette" disabled={readOnly} onClick={() => cycle(1)}><ChevronRight size={18} /></button>
+          <button type="button" className="orb-arrow" aria-label="Next orb palette" disabled={readOnly} onClick={() => cycle(1)}><ChevronRight size={16} /></button>
         </div>
         <div className="orb-swatches" role="group" aria-label="Choose an orb palette" onKeyDown={onPaletteKey}>
           {ORB_PALETTES.map((palette) => (

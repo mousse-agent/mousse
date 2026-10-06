@@ -1,3 +1,140 @@
+.storage-settings {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.storage-settings p {
+  margin: 10px 0;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.storage-settings h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.storage-policy,
+.storage-task,
+.storage-preview {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  min-width: 0;
+}
+
+.storage-policy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+  margin: 16px 0;
+}
+
+.storage-grace-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+
+.storage-grace-field .settings-input {
+  width: 90px;
+  flex-shrink: 0;
+}
+
+.storage-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.storage-checkbox input {
+  flex-shrink: 0;
+  margin-top: 4px;
+  accent-color: var(--accent);
+}
+
+.storage-settings .storage-tasks-heading {
+  margin: 24px 0 12px;
+}
+
+.storage-task {
+  margin-bottom: 12px;
+}
+
+.storage-task-heading,
+.storage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.storage-task-heading {
+  justify-content: space-between;
+}
+
+.storage-task-heading strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.storage-state {
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.storage-task-id,
+.storage-muted {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.storage-task-id {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.storage-actions {
+  margin-top: 12px;
+}
+
+.storage-settings .settings-inline-btn {
+  min-height: 30px;
+  white-space: normal;
+  text-align: left;
+}
+
+.storage-settings .settings-inline-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.storage-preview {
+  margin-top: 20px;
+}
+
+.storage-preview-resources {
+  max-height: 260px;
+  overflow: auto;
+  padding: 0 12px;
+  margin: 12px 0;
+  border-left: 2px solid var(--border);
+}
+
+.storage-settings [role='alert'] {
+  color: var(--text-error, #e88686);
+}
+
 .settings-page {
   position: fixed;
   inset: 0;
@@ -15,40 +152,6 @@
 .settings-page textarea,
 .settings-page a {
   -webkit-app-region: no-drag;
-}
-
-.settings-header {
-  display: flex;
-  align-items: center;
-  gap: var(--theme-header-gap, 12px);
-  padding: var(--theme-settings-header-padding, 16px 20px);
-  border-bottom: 1px solid var(--border);
-  background: transparent;
-  flex-shrink: 0;
-}
-
-.settings-header h1 {
-  font-size: 20px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-}
-
-.settings-back-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  border-radius: 6px;
-  color: var(--text-secondary);
-  transition: background 0.15s, color 0.15s;
-  -webkit-app-region: no-drag;
-}
-
-.settings-back-btn:hover {
-  background: rgba(var(--accent-rgb), 0.16);
-  color: var(--text-primary);
 }
 
 .settings-body {
@@ -75,8 +178,9 @@
 .settings-nav-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
+  gap: 10px;
+  min-height: 36px;
+  padding: 8px;
   border-radius: 6px;
   font-size: 13px;
   color: var(--text-secondary);
@@ -101,8 +205,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   flex-shrink: 0;
   color: inherit;
 }
@@ -114,13 +218,15 @@
   padding: var(--theme-settings-content-padding, 16px 20px 28px);
   display: flex;
   flex-direction: column;
+  align-items: center;
   min-width: 0;
   gap: 0;
 }
 
 .settings-section {
-  width: 100%;
-  max-width: 640px;
+  width: min(100%, var(--an-max-width, 680px));
+  max-width: var(--an-max-width, 680px);
+  min-width: 0;
 }
 
 .settings-section h2 {
@@ -142,6 +248,12 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
+  margin-bottom: 14px;
+}
+
+.settings-provider-actions {
+  display: flex;
+  justify-content: flex-end;
   margin-bottom: 14px;
 }
 
@@ -583,7 +695,7 @@
 .registry-controls {
   display: flex;
   flex-direction: column;
-  max-width: 640px;
+  max-width: 100%;
   margin-bottom: 14px;
   border: 1px solid var(--border);
   border-radius: 8px;

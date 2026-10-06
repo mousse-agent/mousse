@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import { ChevronDown, ChevronRight } from 'lucide-react'
+import { ChevronDown, ChevronRight } from '../../lib/icons'
 
 export function Collapsible({ trigger, defaultOpen = false, children }: { trigger: ReactNode; defaultOpen?: boolean; children: ReactNode }) {
   const [open, setOpen] = useState(defaultOpen)

@@ -1,0 +1,35 @@
+.profile-switcher.profile-switcher-sidebar {
+  display: block;
+  flex: 0 0 auto;
+  min-width: 0;
+  margin: 8px;
+  padding: 0;
+  -webkit-app-region: no-drag;
+}
+
+.profile-sidebar-trigger {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 44px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-secondary) 5%, transparent);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.profile-sidebar-trigger:hover,
+.profile-sidebar-trigger[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--text-secondary) 9%, transparent);
+}
+.profile-sidebar-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.profile-sidebar-trigger > svg { flex-shrink: 0; color: var(--text-secondary); }
+.profile-sidebar-text { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+.profile-sidebar-text strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
+.profile-sidebar-text > span { color: var(--text-secondary); font-size: 11px; }
+.profile-switcher.profile-sidebar-loading { padding: 14px 9px; color: var(--text-secondary); font-size: 12px; }
+.profile-switcher-sidebar > button:not(.profile-sidebar-trigger) { padding: 8px; font-size: 12px; }

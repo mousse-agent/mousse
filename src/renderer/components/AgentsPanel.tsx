@@ -1,13 +1,14 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
-import { Bot, TerminalSquare, X } from 'lucide-react'
+import { Bot, TerminalSquare, X } from '../lib/icons'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
-import { XTERM_FONT, getXtermTheme } from '../lib/xtermTheme'
+import { XTERM_FONT, getXtermTheme, followXtermAppearance } from '../lib/xtermTheme'
 import { confirmStopAgent } from '../lib/confirmStopAgent'
 import { useAppStore } from '../stores/appStore'
 import type { Agent } from '../../shared/types'
 import { MousseAgentChat } from './MousseAgentChat'
-import { NamedAgents } from './NamedAgents'
+import { setReferenceDragData } from '../../shared/chatReferences'
+import { AgentsTasksView } from './AgentsTasksView'
 
 interface TerminalInstance {
   ptyId: string
@@ -28,10 +29,11 @@ function isVisibleAgent(agent: Agent): boolean {
 
 export function AgentsPanel() {
   const agents = useAppStore((s) => s.agents)
-  const activeThreadId = useAppStore((s) => s.activeThreadId)
-  const [showNamed, setShowNamed] = useState(true)
+  const [showOverview, setShowOverview] = useState(true)
   const mainView = useAppStore((s) => s.mainView)
   const activePtyId = useAppStore((s) => s.activePtyId)
+  const activeThreadId = useAppStore((s) => s.activeThreadId)
+  const activeProjectId = useAppStore((s) => s.threads.find((thread) => thread.id === s.activeThreadId)?.projectId)
   const activeAgentId = useAppStore((s) => s.activeAgentId)
   const setActivePtyId = useAppStore((s) => s.setActivePtyId)
   const setActiveAgentId = useAppStore((s) => s.setActiveAgentId)
@@ -76,12 +78,14 @@ export function AgentsPanel() {
     if (!containerRef.current || instancesRef.current.has(ptyId)) return
 
     const terminal = new Terminal({
+      allowTransparency: true,
       cursorBlink: true,
       fontSize: 13,
       fontFamily: XTERM_FONT,
       theme: getXtermTheme()
     })
 
+    followXtermAppearance(terminal)
     const fitAddon = new FitAddon()
     terminal.loadAddon(fitAddon)
 
@@ -221,19 +225,21 @@ export function AgentsPanel() {
 
   return (
     <div className="terminal-panel agents-panel">
-      <div className="terminal-tabs">
-        <button className={`terminal-tab ${showNamed ? 'active' : ''}`} onClick={() => setShowNamed(true)}>Named agents</button>
-        {showEmpty ? (
-          <span style={{ padding: '8px 16px', color: 'var(--text-secondary)', fontSize: 12 }}>
-            No active agents
-          </span>
-        ) : (
-          visibleAgents.map((agent) => (
+      {visibleAgents.length > 0 && (
+        <div className="terminal-tabs">
+          <button className={`terminal-tab ${showOverview ? 'active' : ''}`} onClick={() => setShowOverview(true)}>Tasks</button>
+          {visibleAgents.map((agent) => (
             <button
               key={agent.id}
-              className={`terminal-tab ${activeAgent?.id === agent.id ? 'active' : ''}`}
+              className={`terminal-tab ${!showOverview && activeAgent?.id === agent.id ? 'active' : ''}`}
+              draggable
+              onDragStart={(event) => setReferenceDragData(event.dataTransfer, {
+                kind: 'agent', title: `${agent.cliType} ${agent.id.slice(0, 8)}`,
+                agentId: agent.id, sessionId: agent.ptyId, path: agent.worktreePath,
+                threadId: activeThreadId ?? undefined, projectId: activeProjectId
+              })}
               onClick={() => {
-                setShowNamed(false)
+                setShowOverview(false)
                 setActiveAgentId(agent.id)
                 if (agent.ptyId) setActivePtyId(agent.ptyId)
               }}
@@ -263,14 +269,14 @@ export function AgentsPanel() {
                 <X size={11} strokeWidth={2} />
               </span>
             </button>
-          ))
-        )}
-      </div>
+          ))}
+        </div>
+      )}
       <div
-        className={`terminal-container agents-panel-body${showEmpty ? ' terminal-container-empty' : ''}`}
+        className={`terminal-container agents-panel-body${showOverview || showEmpty ? ' terminal-container-empty' : ''}`}
       >
-        {showNamed && <NamedAgents key={activeThreadId} threadId={activeThreadId} />}
-        {!showNamed && showEmpty && (
+        {showOverview && <AgentsTasksView variant="panel" />}
+        {!showOverview && showEmpty && (
           <div className="terminal-empty">
             <p>No agents yet</p>
             <p className="terminal-empty-hint">
@@ -278,17 +284,17 @@ export function AgentsPanel() {
             </p>
           </div>
         )}
-        {!showNamed && showPreparing && activeAgent && (
+        {!showOverview && showPreparing && activeAgent && (
           <div className="terminal-empty">
             <p>{activeAgent.startupPhase === 'discovery' ? 'Discovering files…' : 'Preparing agent…'}</p>
             <p className="terminal-empty-hint">{activeAgent.task}</p>
           </div>
         )}
-        {!showNamed && showGui && !showPreparing && activeAgent?.executionMode === 'gui' && (
+        {!showOverview && showGui && !showPreparing && activeAgent?.executionMode === 'gui' && (
           <MousseAgentChat key={activeAgent.id} agentId={activeAgent.id} active />
         )}
         <div
-          className={`agents-terminal-host${showTerminal && !showNamed ? '' : ' hidden'}`}
+          className={`agents-terminal-host${showTerminal && !showOverview ? '' : ' hidden'}`}
           ref={containerRef}
         />
       </div>

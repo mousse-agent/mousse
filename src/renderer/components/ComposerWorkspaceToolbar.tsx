@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { Check, ChevronDown, Folder, FolderPlus, GitBranch, Laptop } from 'lucide-react'
+import { Check, ChevronDown, Folder, FolderPlus, GitBranch, Laptop } from '../lib/icons'
 import type { Project } from '../../shared/types'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import '../styles/composer-workspace.css'

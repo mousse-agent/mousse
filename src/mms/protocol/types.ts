@@ -52,6 +52,7 @@ export type EnvelopeKind =
   | 'server_req'
   | 'client_res'
   | 'server_cancel'
+  | 'connection_event'
 
 export interface ProtocolHello {
   kind: 'hello'
@@ -105,6 +106,16 @@ export interface ProtocolEvent {
   data: unknown
   ts: string
 }
+
+/** One authenticated socket's live display lane. Never sequenced or replayed. */
+export interface ProtocolConnectionEvent {
+  kind: 'connection_event'
+  type: 'bridge.hub.thread'
+  profileId: string
+  profileEpoch: number
+  data: unknown
+}
+export const MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES = 64 * 1024
 
 export interface ProtocolTransportError {
   kind: 'error'
@@ -161,6 +172,7 @@ export type ProtocolEnvelope =
   | ProtocolServerCommandRequest
   | ProtocolClientCommandResponse
   | ProtocolServerCommandCancel
+  | ProtocolConnectionEvent
 
 /**
  * Allowlisted methods Phase 2–5 (full GUI/CLI local protocol).
@@ -170,6 +182,7 @@ export const PROTOCOL_METHODS = [
   'health',
   'capabilities',
   'projects.list',
+  'chatReferences.resolve',
   'projects.open',
   'projects.remove',
   'projects.rename',
@@ -293,6 +306,7 @@ export const PROTOCOL_METHODS = [
   'providers.getUsage',
   'providers.getSubscriptionUsage',
   'providers.getLoginOptions',
+  'providers.refreshModels',
   'providers.getAmbientInfo',
   'providers.setApiKey',
   'providers.verifyAmbient',
@@ -337,23 +351,14 @@ export const PROTOCOL_METHODS = [
   'git.checkout',
   'git.commit',
   'git.push',
+  'github.status',
+  'github.createRepository',
+  'github.cloneRepository',
 
   'daemon.shutdown',
   'events.subscribe',
   'gui.devtoolsPoll',
-  'gui.devtoolsRespond',
-
-  'control.status',
-  'control.login',
-  'control.logout',
-  'control.enroll',
-  'control.disconnect',
-  'control.setMode',
-  'pairing.create',
-  'pairing.list',
-  'pairing.approve',
-  'pairing.reject',
-  'pairing.revoke'
+  'gui.devtoolsRespond'
 ] as const
 
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number]
@@ -375,15 +380,13 @@ export const PROTOCOL_CAPABILITIES = [
   'skills',
   'settings',
   'providers',
-  'connections',
   'events',
   'devgui',
-  'control.v2',
-  'pairing.v2',
   'profiles-v1'
 ] as const
 
 export type ProtocolEventType =
+  | 'net.updated'
   | 'projects.updated'
   | 'threads.updated'
   | 'thread.title-generation-failed'
@@ -423,8 +426,6 @@ export type ProtocolEventType =
   | 'providers.changed'
   | 'providers.login-event'
   | 'mcp.changed'
-  | 'control.status-changed'
-  | 'control.pairing-request'
   | 'turn.interrupted'
   | 'turn.aborted'
   | 'turn.steered'

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, Copy, ExternalLink, Loader2, X } from 'lucide-react'
+import { Check, Copy, ExternalLink, Loader2, X } from '../lib/icons'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
 
 interface ProviderLoginModalProps {
@@ -9,7 +9,7 @@ interface ProviderLoginModalProps {
 
 /** Sign-in target that must stay visible while the flow waits for the browser. */
 type LoginLink =
-  | { kind: 'url'; url: string; instructions?: string }
+  | { kind: 'url'; url: string; instructions?: string; usesCallbackServer?: boolean }
   | { kind: 'device'; userCode: string; verificationUri: string }
 
 type StepEvent = Exclude<ProviderLoginEvent, { type: 'auth_url' | 'device_code' | 'manual_code' }>
@@ -40,8 +40,9 @@ export function ProviderLoginModal({ active, onClose }: ProviderLoginModalProps)
     const unsub = window.mousse.providers.onLoginEvent((event) => {
       setSessionId(event.sessionId)
       if (event.type === 'auth_url') {
-        setLink({ kind: 'url', url: event.url, instructions: event.instructions })
+        setLink({ kind: 'url', url: event.url, instructions: event.instructions, usesCallbackServer: event.usesCallbackServer })
         setStep(null)
+        if (event.usesCallbackServer) setManualMessage("If the browser cannot reach this machine, paste its final redirect URL.")
         return
       }
       if (event.type === 'device_code') {
@@ -138,14 +139,14 @@ export function ProviderLoginModal({ active, onClose }: ProviderLoginModalProps)
         <div className="provider-login-body">
           {!step && !link && (
             <div className="provider-login-loading">
-              <Loader2 size={20} className="icon-spin" />
+              <Loader2 size={16} className="icon-spin" />
               <span>Starting authentication…</span>
             </div>
           )}
 
           {step?.type === 'progress' && (
             <div className="provider-login-loading">
-              <Loader2 size={20} className="icon-spin" />
+              <Loader2 size={16} className="icon-spin" />
               <span>{step.message}</span>
             </div>
           )}

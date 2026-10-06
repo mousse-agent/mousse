@@ -1,4 +1,4 @@
-import { Archive, Copy, Download, Star } from 'lucide-react'
+import { Archive, Copy, Download, Star } from '../../lib/icons'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AgentDefinitionRecord,

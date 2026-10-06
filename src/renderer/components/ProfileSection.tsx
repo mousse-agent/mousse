@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { RefreshCw } from '../lib/icons'
 import type { MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../../shared/lineEditStats'
 import { generateRandomUsername } from '../../shared/randomUsername'

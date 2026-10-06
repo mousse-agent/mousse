@@ -1,12 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
-import { Pin, Plus, TerminalSquare, X } from 'lucide-react'
-import { PinOffRegular, PinRegular } from '@fluentui/react-icons'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { PROJECT_SHELL_AGENT_ID } from '../../shared/types'
 import { useFilesRoot } from '../hooks/useActiveProjectPath'
-import { XTERM_FONT, getXtermTheme } from '../lib/xtermTheme'
+import { XTERM_FONT, getXtermTheme, followXtermAppearance } from '../lib/xtermTheme'
 import { useAppStore } from '../stores/appStore'
 import {
   clearStalePtyBinding,
@@ -27,7 +25,6 @@ export function ProjectTerminalPanel() {
   const tabs = useAppStore((s) => s.projectTerminalTabs)
   const activeByThread = useAppStore((s) => s.activeProjectTerminalTabByThread)
   const addProjectTerminalTab = useAppStore((s) => s.addProjectTerminalTab)
-  const closeProjectTerminalTab = useAppStore((s) => s.closeProjectTerminalTab)
   const setActiveProjectTerminalTab = useAppStore((s) => s.setActiveProjectTerminalTab)
   const updateProjectTerminalTab = useAppStore((s) => s.updateProjectTerminalTab)
 
@@ -35,11 +32,7 @@ export function ProjectTerminalPanel() {
   const instancesRef = useRef<Map<string, TerminalInstance>>(new Map())
   const spawningRef = useRef<Set<string>>(new Set())
   const activePtyRef = useRef<string | null>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
   const fitFrameRef = useRef<number | null>(null)
-
-  const [menuTabId, setMenuTabId] = useState<string | null>(null)
-  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null)
 
   const threadKey = activeThreadId ?? '__standalone__'
   const visibleTabs = useMemo(
@@ -50,7 +43,6 @@ export function ProjectTerminalPanel() {
   const activeTab = visibleTabs.find((tab) => tab.id === requestedActiveId) ?? visibleTabs[0] ?? null
   const activeTabId = activeTab?.id ?? null
   const activePtyId = activeTab?.ptyId ?? null
-  const menuTab = menuTabId ? tabs.find((tab) => tab.id === menuTabId) ?? null : null
 
   const unmountTerminal = useCallback((ptyId: string) => {
     const inst = instancesRef.current.get(ptyId)
@@ -93,12 +85,14 @@ export function ProjectTerminalPanel() {
       if (!containerRef.current || instancesRef.current.has(ptyId)) return
 
       const terminal = new Terminal({
+        allowTransparency: true,
         cursorBlink: true,
         fontSize: 13,
         fontFamily: XTERM_FONT,
         theme: getXtermTheme()
       })
 
+      followXtermAppearance(terminal)
       const fitAddon = new FitAddon()
       terminal.loadAddon(fitAddon)
 
@@ -219,53 +213,21 @@ export function ProjectTerminalPanel() {
     void spawnShellForTab(tabId)
   }, [addProjectTerminalTab, activeThreadId, terminalCwd, spawnShellForTab])
 
-  const handleCloseTab = useCallback(
-    async (tabId: string) => {
-      const tab = tabs.find((entry) => entry.id === tabId)
-
-      // Remove first: pinned tabs are shared by every thread, and waiting for the
-      // PTY acknowledgement would leave the shared/persisted tab visible (or allow
-      // an exit event to race with closing it).
-      closeProjectTerminalTab(tabId)
-      if (menuTabId === tabId) {
-        setMenuTabId(null)
-        setMenuPos(null)
-      }
-
-      if (tab?.ptyId) {
-        unmountTerminal(tab.ptyId)
-        await window.mousse.pty.kill(tab.ptyId).catch(() => {})
-      }
-    },
-    [tabs, unmountTerminal, closeProjectTerminalTab, menuTabId]
-  )
-
-  const handleTogglePin = useCallback(
-    (tabId: string) => {
-      const tab = tabs.find((entry) => entry.id === tabId)
-      if (!tab) return
-      updateProjectTerminalTab(tabId, {
-        ownerThreadId: tab.ownerThreadId === null ? activeThreadId : null
-      })
-      setMenuTabId(null)
-      setMenuPos(null)
-    },
-    [tabs, activeThreadId, updateProjectTerminalTab]
-  )
-
-  const openTabMenu = useCallback((tabId: string, event: ReactMouseEvent) => {
-    event.preventDefault()
-    event.stopPropagation()
-    setMenuTabId(tabId)
-    setMenuPos({ x: event.clientX, y: event.clientY })
-  }, [])
-
   useEffect(() => {
     const unsub = window.mousse.pty.onData(({ ptyId, data }) => {
       instancesRef.current.get(ptyId)?.terminal.write(data)
     })
     return unsub
   }, [])
+
+  useEffect(() => {
+    const live = new Set(tabs.flatMap((tab) => (tab.ptyId ? [tab.ptyId] : [])))
+    for (const ptyId of instancesRef.current.keys()) {
+      if (live.has(ptyId)) continue
+      unmountTerminal(ptyId)
+      void window.mousse.pty.kill(ptyId).catch(() => {})
+    }
+  }, [tabs, unmountTerminal])
 
   useEffect(() => {
     const unsub = window.mousse.pty.onExit(({ ptyId, agentId }) => {
@@ -277,13 +239,6 @@ export function ProjectTerminalPanel() {
     })
     return unsub
   }, [updateProjectTerminalTab, unmountTerminal])
-
-  useEffect(() => {
-    if (mainView !== 'terminal' || !terminalCwd) return
-    if (visibleTabs.length > 0) return
-    const tabId = addProjectTerminalTab(activeThreadId)
-    void spawnShellForTab(tabId)
-  }, [mainView, terminalCwd, visibleTabs.length, activeThreadId, addProjectTerminalTab, spawnShellForTab])
 
   useEffect(() => {
     if (activeTab && requestedActiveId !== activeTab.id) {
@@ -336,28 +291,6 @@ export function ProjectTerminalPanel() {
   }, [mainView, activePtyId, fitTerminal])
 
   useEffect(() => {
-    if (!menuTabId) return
-    const close = (event: MouseEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) {
-        setMenuTabId(null)
-        setMenuPos(null)
-      }
-    }
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setMenuTabId(null)
-        setMenuPos(null)
-      }
-    }
-    document.addEventListener('mousedown', close)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', close)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [menuTabId])
-
-  useEffect(() => {
     return () => {
       if (fitFrameRef.current !== null) {
         cancelAnimationFrame(fitFrameRef.current)
@@ -367,64 +300,6 @@ export function ProjectTerminalPanel() {
 
   return (
     <div className="terminal-panel project-terminal-panel">
-      <div className="terminal-tabs">
-        {visibleTabs.map((tab) => (
-          <div
-            key={tab.id}
-            className={`terminal-tab${tab.id === activeTabId ? ' active' : ''}`}
-            role="tab"
-            aria-selected={tab.id === activeTabId}
-            onContextMenu={(event) => openTabMenu(tab.id, event)}
-          >
-            <button
-              type="button"
-              className="terminal-tab-select"
-              onClick={() => setActiveProjectTerminalTab(activeThreadId, tab.id)}
-              title={tab.title}
-            >
-              {tab.ownerThreadId === null && (
-                <Pin size={10} className="terminal-tab-pin-icon" aria-hidden="true" />
-              )}
-              <TerminalSquare size={13} strokeWidth={2} className="terminal-tab-icon" />
-              <span>{tab.title}</span>
-            </button>
-            <button
-              type="button"
-              className="terminal-tab-close"
-              onClick={() => void handleCloseTab(tab.id)}
-              aria-label={`Close ${tab.title}`}
-              title="Close terminal"
-            >
-              <X size={12} strokeWidth={2} />
-            </button>
-          </div>
-        ))}
-        <button
-          type="button"
-          className="terminal-tab-add"
-          onClick={handleAddTab}
-          disabled={!terminalCwd}
-          aria-label="New terminal"
-          title="New terminal"
-        >
-          <Plus size={14} strokeWidth={2} />
-        </button>
-      </div>
-      {menuTab && menuPos && (
-        <div
-          ref={menuRef}
-          className="terminal-tab-menu"
-          style={{ left: menuPos.x, top: menuPos.y }}
-          role="menu"
-        >
-          <button type="button" role="menuitem" onClick={() => handleTogglePin(menuTab.id)}>
-            <span>
-              {menuTab.ownerThreadId === null ? 'Unpin from all threads' : 'Pin across threads'}
-            </span>
-            {menuTab.ownerThreadId === null ? <PinOffRegular /> : <PinRegular />}
-          </button>
-        </div>
-      )}
       <div
         className={`terminal-container${visibleTabs.length === 0 ? ' terminal-container-empty' : ''}`}
         ref={containerRef}

@@ -1,4 +1,4 @@
-import { Archive, Copy, Download, Redo2, Undo2, Code2, Network, Wand2, Play, ListTree, History, CircleCheck } from 'lucide-react'
+import { Archive, Copy, Download, Redo2, Undo2, Code2, Network, Wand2, Play, ListTree, History, CircleCheck } from '../../lib/icons'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { WorkflowBundle, WorkflowDiagnostic, WorkflowEditorDocument, WorkflowManifest, WorkflowNode } from '../../../shared/workflows'
 import type { AgentDefinitionsClient } from '../agentDefinitions/client'

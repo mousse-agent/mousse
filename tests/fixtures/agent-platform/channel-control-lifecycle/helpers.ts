@@ -9,8 +9,6 @@ import { ChannelSessionManager } from '../../../../src/mms/channels/ChannelSessi
 import { ChannelStore } from '../../../../src/mms/channels/ChannelStore'
 import type { ChannelAdapter, InboundChannelMessage, OutboundChannelMessage, SendResult } from '../../../../src/mms/channels/types'
 import { MousseConfigStore } from '../../../../src/mms/config/MousseConfigStore'
-import { MmsControlService } from '../../../../src/mms/control/MmsControlService'
-import type { RemoteMethodExecutionHandler } from '../../../../src/mms/control/relay/remoteDispatcher'
 import { ProjectManager } from '../../../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../../../src/mms/data/ThreadDataStore'
 import type { OrchestratorService } from '../../../../src/mms/orchestrator/OrchestratorService'
@@ -209,17 +207,6 @@ export function createChannelService(
     }
   )
   return { ...world, service }
-}
-
-export function createControlService(
-  home: string,
-  executor?: RemoteMethodExecutionHandler
-): MmsControlService {
-  return new MmsControlService({
-    homeDir: home,
-    instanceId: `fixture-${home.slice(-8)}`,
-    executor: executor ?? { execute: async () => ({ ok: true }) }
-  })
 }
 
 export function heldTurnRunner(

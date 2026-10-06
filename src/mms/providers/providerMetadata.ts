@@ -6,7 +6,8 @@
  * Grok in the UI so users can find the provider they are looking for.
  */
 export const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
-  xai: 'Grok (xAI)'
+  xai: 'Grok (xAI)',
+  'claude-subscription': 'Claude Subscription'
 }
 
 export function getProviderDisplayName(providerId: string, fallback?: string): string {

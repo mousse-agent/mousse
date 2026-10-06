@@ -1,0 +1,8 @@
+/* Keep interface section labels in their written case without affecting
+   authored content, identifiers, credential codes or avatar initials. */
+.app .threads-sidebar-recent-heading,
+.app .chat-section-heading h2,
+.profile-menu .profile-menu-heading {
+  text-transform: none;
+  letter-spacing: normal;
+}

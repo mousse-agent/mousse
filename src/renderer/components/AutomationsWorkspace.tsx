@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, Clock, RefreshCw, Workflow } from 'lucide-react'
+import { Bot, Clock, RefreshCw, Workflow } from '../lib/icons'
 import { MOUSSE_BUILTIN_TOOLS } from '../../shared/integrations'
 import { createAgentDefinitionsClient } from '../services/agentDefinitionsClient'
 import { createWorkflowDefinitionsClient } from '../services/workflowDefinitionsClient'

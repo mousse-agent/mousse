@@ -13,6 +13,7 @@ try {
     stdin: { resolveDir: process.cwd(), loader: 'tsx', contents: `
       import { createRoot } from 'react-dom/client'
       import { OrchestratorChat } from './src/renderer/components/OrchestratorChat'
+      import { MainViewTabs } from './src/renderer/components/MainViewTabs'
       import { useAppStore } from './src/renderer/stores/appStore'
       const subscription = () => () => {}
       const projects = [{id:'a',name:'mousse',path:'/fixture/mousse'}, {id:'b',name:'Other project',path:'/fixture/other'}]
@@ -25,7 +26,10 @@ try {
         settings:{get:async()=>({provider:{llmProvider:'openai',model:'test'},integrations:{skills:{enabledSkills:[]}}}),
           getOptions:async()=>({llmProviders:[{id:'openai',label:'OpenAI',models:[{id:'test',label:'Test'}]}]}),onChanged:subscription},
         providers:{onChanged:subscription}, skills:{list:async()=>({skills:[]}),onChanged:subscription},
-        projects:{open:async()=>{fixture.calls.push(['open']);return projects[1]}},
+        projects:{open:async()=>{fixture.calls.push(['open']);return projects[1]},listThreads:async()=>[]},
+        chatReferences:{resolve:async(reference)=>{if(fixture.referenceError)throw new Error('Reference unavailable');return {...reference,metadataPath:'/fixture/meta.json'}}},
+        workspace:{getStatus:async()=>({})},
+        app:{getActiveProjectPath:async(id)=>{const project=projects.find(p=>p.id===useAppStore.getState().threads.find(t=>t.id===id)?.projectId);if(fixture.pendingPath)await new Promise(resolve=>fixture.resumePath=resolve);return project?.path ?? null}},
         threads:{
           create:async(_,projectId,opts)=>{
             fixture.calls.push(['create',projectId ?? null,opts]);
@@ -48,12 +52,12 @@ try {
         }
       }
       fixture.reset = (thread=null) => {
-        fixture.calls=[];fixture.selectError=false;fixture.createError=false;fixture.toggleError=false;fixture.pendingCreate=false;fixture.modelError=false;fixture.sendError=false;
+        fixture.calls=[];fixture.selectError=false;fixture.createError=false;fixture.toggleError=false;fixture.pendingCreate=false;fixture.modelError=false;fixture.sendError=false;fixture.referenceError=false;fixture.pendingPath=false;
         useAppStore.setState({activeThreadId:thread?.id ?? null,threads:thread?[thread]:[],projects,
-          messages:[],loading:false,turnStates:{},composerDrafts:{},composerWorkspaceDrafts:{},browserElementAttachmentsByThread:{}})
+          messages:[],loading:false,mainView:'agents',turnStates:{},composerDrafts:{},composerReferences:{},composerWorkspaceDrafts:{},browserElementAttachmentsByThread:{}})
       }
       fixture.reset()
-      createRoot(document.getElementById('root')).render(<OrchestratorChat />)
+      createRoot(document.getElementById('root')).render(<><MainViewTabs /><OrchestratorChat /></>)
     ` }, bundle: true, platform: 'browser', format: 'iife', write: false, outfile: join(directory,'fixture.js'),
     jsx: 'automatic', loader: { '.svg':'dataurl','.webp':'dataurl' }, define: {'process.env.NODE_ENV':'"production"'}, minify: true,
     plugins: [{name:'transcript',setup(builder){
@@ -192,6 +196,33 @@ try {
         assert.equal(await evaluate('document.querySelector("[role=alert]").textContent'),'[delivery_rejected] Delivery rejected')
         assert.equal(await evaluate('fixture.store.getState().composerDrafts.draft'),undefined)
         console.log('PASS: creation/model failures and structured send rejection preserve the exact staged draft')
+        await evaluate('fixture.reset('+JSON.stringify(draft)+')');await pause(100)
+        await prompt('Prompt with references')
+        await evaluate('(()=>{const transfer=new DataTransfer();transfer.setData("application/x-mousse-reference",JSON.stringify({id:"project:a",kind:"project",title:"mousse",projectId:"a"}));document.querySelector(".composer").dispatchEvent(new DragEvent("drop",{bubbles:true,dataTransfer:transfer}))})()');await pause(100)
+        assert.equal(await evaluate('document.querySelector(".composer-reference-link").textContent'),'mousse')
+        await choose('b');await evaluate('fixture.selectError=true');await send()
+        assert.equal(await evaluate('document.querySelector(".composer-input").value'),'Prompt with references')
+        assert.equal(await evaluate('fixture.store.getState().composerReferences[fixture.store.getState().activeThreadId][0].projectId'),'a')
+        assert.equal(await evaluate('fixture.store.getState().composerReferences.draft'),undefined)
+        await evaluate('fixture.selectError=false;fixture.referenceError=true');await send()
+        assert.equal(await evaluate('document.querySelector("[role=alert]").textContent'),'Reference unavailable')
+        assert.equal((await calls()).some(c=>c[0]==='send'),false)
+        await evaluate('fixture.referenceError=false;fixture.sendError=true');await send()
+        assert.equal(await evaluate('document.querySelector(".composer-input").value'),'Prompt with references')
+        assert.equal(await evaluate('fixture.store.getState().composerReferences[fixture.store.getState().activeThreadId].length'),1)
+        assert.equal((await calls()).at(-1)[2].includes('Mousse references data='),true)
+        await evaluate('fixture.sendError=false');await send()
+        assert.equal(await evaluate('document.querySelector(".composer-input").value'),'')
+        assert.equal(await evaluate('!!document.querySelector(".composer-reference-link")'),false)
+        console.log('PASS: dropped references follow project changes, survive resolution/delivery failure, and reach the prompt')
+        await evaluate('fixture.reset('+JSON.stringify(draft)+')');await pause(120)
+        await evaluate('fixture.store.getState().setMainView("files");fixture.pendingPath=true;fixture.store.getState().upsertThread({id:"other",name:"Other",projectId:"b"});fixture.store.getState().switchToThread("other")');await pause(100)
+        assert.equal(await evaluate('fixture.store.getState().mainView'),'files')
+        await evaluate('fixture.resumePath()');await pause(100)
+        assert.equal(await evaluate('fixture.store.getState().mainView'),'files')
+        await evaluate('fixture.reset()');await pause(120)
+        assert.equal(await evaluate('fixture.store.getState().mainView'),'agents')
+        console.log('PASS: Files remains selected during a pending project-path lookup')
         // Draft choices survive both thread switching and profile-local persistence.
         await evaluate('fixture.reset('+JSON.stringify(draft)+');fixture.store.getState().activateProfile("toolbar-profile")');await pause(100)
         await evaluate('fixture.reset('+JSON.stringify(draft)+')');await pause(60)

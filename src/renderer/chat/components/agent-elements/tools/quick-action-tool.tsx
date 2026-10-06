@@ -9,7 +9,7 @@ import {
   IconSend,
   IconTerminal2,
   IconX,
-} from "@tabler/icons-react";
+} from "../../../../lib/icons";
 import { Markdown } from "../markdown";
 import { IconSpinner } from "../icons";
 import { areToolPropsEqual, getToolStatus } from "../utils/format-tool";
@@ -178,7 +178,7 @@ export const QuickActionTool = memo(function QuickActionTool({
       <div className="h-7 pl-3 pr-2.5 flex items-center justify-between">
         <div className="min-w-0 flex items-center gap-1">
           {isPending ? (
-            <IconSpinner className="w-3 h-3 text-an-tool-color-muted animate-spin shrink-0" />
+            <IconSpinner className="w-4 h-4 text-an-tool-color-muted animate-spin shrink-0" />
           ) : outcome.tone === "created" ? (
             <IconCheck
               className="w-3.5 h-3.5 text-an-diff-added-text shrink-0"

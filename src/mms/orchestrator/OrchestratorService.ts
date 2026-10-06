@@ -12,7 +12,7 @@ import type { AgentWorkspacePolicy, AgentEpisode } from '../../shared/agentEpiso
 import { AsyncLocalStorage } from 'async_hooks'
 import { join } from 'node:path'
 import { readFileSync } from 'node:fs'
-import { normalizeContextSettings, resolveContextCompactionTokens } from '../../shared/settings'
+import { normalizeContextSettings, resolveContextCompactionTokens, resolveModelForMode } from '../../shared/settings'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type { WorkflowChatExecutor } from '../platform/MmsWorkflowChatBridge'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
@@ -30,6 +30,9 @@ import { AgentExecutionService } from '../agentDefinitions/AgentExecutionService
 import { createNativeAgentRuntime } from '../agentDefinitions/nativeRuntime'
 import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
 import { EventEmitter } from 'events'
+import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
+import type { ClaudeSubscriptionProviderService } from '../providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import type { AntigravityProviderService } from '../providers/antigravity/AntigravityProviderService'
 import { v4 as uuidv4 } from 'uuid'
 import {
   isDelegationSettledStatus,
@@ -503,6 +506,10 @@ export async function retryContextOverflowOnce<T>(
 }
 
 export class OrchestratorService extends EventEmitter {
+  private claudeSubscription?: ClaudeSubscriptionProviderService
+  setClaudeSubscriptionProvider(provider: ClaudeSubscriptionProviderService): void { this.claudeSubscription = provider }
+  private antigravity?: AntigravityProviderService
+  setAntigravityProvider(provider: AntigravityProviderService): void { this.antigravity = provider }
   private readonly lifecycle = new OwnedWorkBarrier()
 
   getOwnedActivity(): Record<string, number> {
@@ -573,7 +580,7 @@ export class OrchestratorService extends EventEmitter {
         // newly admitted thread, so reusing the GUI client's instance would let
         // the run observe or mutate the constructor's original task queue.
         const runId = request.runId ?? uuidv4()
-        const browserRuntime = this.browserRuntime ?? readHostBrowserRuntime(request.host)
+        const browserRuntime = readHostBrowserRuntime(request.host) ?? this.browserRuntime
         const llm = new LlmClient(
           this.settingsStore,
           this.providerAuth,
@@ -673,8 +680,7 @@ export class OrchestratorService extends EventEmitter {
   private phaseToActivity(phase: TurnPhase): ThreadActivityState {
     if (phase === 'awaiting_input') return 'awaiting_input'
     if (phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing') return 'processing'
-    // A finished turn rests at completed (not idle) so background threads keep
-    // their unread glow until visited. selectThread acknowledges it to idle.
+    // Keep a finished turn completed until its runtime activity changes.
     if (phase === 'completed') return 'completed'
     return 'idle'
   }
@@ -1611,6 +1617,16 @@ export class OrchestratorService extends EventEmitter {
     const run = async (): Promise<ContextUsageSnapshot> => {
       const request = normalizeContextUsageRequest(input)
       const modelOverride = this.session.modelOverride
+      const selectedModel = modelOverride ?? resolveModelForMode(this.settingsStore.get(), request.mode, [
+        ...(this.providerAuth.credentials?.listProviderIds() ?? []),
+        ...(this.antigravity?.configured() ? ['antigravity'] : []),
+        ...(this.claudeSubscription?.configured() ? ['claude-subscription'] : [])
+      ])
+      if (selectedModel.llmProvider === 'antigravity' || selectedModel.llmProvider === 'claude-subscription') {
+        // Native agents own their context and do not publish a token window.
+        // Do not display a fabricated Mousse context measurement.
+        return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model, source: 'estimated', categories: [] }
+      }
       const { limit, modelName } = this.llm.getSelectedModelContextLimit(request.mode, modelOverride)
       const contextInputs = await this.llm.getContextInputs(
         request.mode,
@@ -2851,6 +2867,14 @@ export class OrchestratorService extends EventEmitter {
     let providerError: AppErrorShape | undefined
     let failureDiagnostic: Record<string, unknown> | undefined
     let compactionNote: ChatMessage | undefined
+    const selectedModel = opts?.modelOverride ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
+      ...(this.providerAuth.credentials?.listProviderIds() ?? []),
+      ...(this.antigravity?.configured() ? ['antigravity'] : []),
+      ...(this.claudeSubscription?.configured() ? ['claude-subscription'] : [])
+    ])
+    const antigravityTurn = selectedModel.llmProvider === 'antigravity'
+    const claudeSubscriptionTurn = selectedModel.llmProvider === 'claude-subscription'
+    const nativeAgentTurn = antigravityTurn || claudeSubscriptionTurn
     const onCompaction = (phase: 'start' | 'complete' | 'unchanged'): void => {
       if (phase === 'start') {
         compactionNote = { id: uuidv4(), role: 'assistant', kind: 'context_compaction',
@@ -2866,6 +2890,59 @@ export class OrchestratorService extends EventEmitter {
       this.persist(true)
     }
     try {
+      if (nativeAgentTurn) {
+        if (antigravityTurn && mode === 'plan') throw new Error('Use Antigravity’s /plan command in a chat turn')
+        const model = selectedModel.model
+        const nativeProvider = claudeSubscriptionTurn ? this.claudeSubscription : this.antigravity
+        if (!nativeProvider || (antigravityTurn && !session.projectCwd)) throw new Error(`${selectedModel.llmProvider} requires a project workspace`)
+        const nativeCwd = session.projectCwd ?? this.claudeSubscription!.standaloneWorkspace(session.threadId)
+        let started = false
+        let thinkingStarted = false
+        let thinkingText = ''
+        assistantText = await nativeProvider.chat({
+          ...(claudeSubscriptionTurn ? {
+            mode: mode === 'plan' ? 'plan' as const : 'default' as const,
+            onThinking: (content: string) => {
+              if (!thinkingStarted) { this.handleStreamingThinkingEvent({ phase: 'start', content: '' }); thinkingStarted = true }
+              thinkingText = content
+              this.handleStreamingThinkingEvent({ phase: 'delta', content })
+            }
+          } : {}),
+          threadId: session.threadId, cwd: nativeCwd, model,
+          prompt: userContent, images, signal: turn.abort.signal,
+          history: nativeAgentHistory(this.nativeContext, turnNativeStartBoundary.messageIndex),
+          drainSteer: () => {
+            const parts = [opts?.externalDrainSteer?.()?.trim(), this.drainSteerForSession(session, turn)?.trim()]
+              .filter((part): part is string => Boolean(part))
+            return parts.length ? parts.join('\n') : undefined
+          },
+          onSteer: (content) => {
+            this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(content))
+            this.nativeContext.acceptedSteerItemIds = Array.from(new Set([
+              ...(this.nativeContext.acceptedSteerItemIds ?? []), ...session.drainedExternalSteerIds
+            ]))
+            this.persist(true)
+            this.acknowledgeDrainedSteers(session)
+          },
+          onText: (content) => {
+            if (!started) { this.handleStreamingTextEvent({ phase: 'start', content: '', contentIndex: 0 }); started = true }
+            this.handleStreamingTextEvent({ phase: 'delta', content, contentIndex: 0 })
+          },
+          onTool: (event) => {
+            conversationToolsUsed = true
+            this.handleStreamingToolEvent({
+              kind: 'mcp_tool_call', phase: event.phase, callId: event.callId,
+              title: event.title, summary: event.toolName ?? event.title, details: []
+            })
+          }
+        })
+        if (thinkingStarted) this.handleStreamingThinkingEvent({ phase: 'complete', content: thinkingText })
+        this.nativeContext = appendNativeMessage(this.nativeContext, nativeAgentAssistantMessage(assistantText, model, selectedModel.llmProvider))
+        this.persist(true)
+        nativeProvider.commitConversation(session.threadId, nativeAgentHistory(this.nativeContext))
+        if (started) this.handleStreamingTextEvent({ phase: 'complete', content: assistantText, contentIndex: 0 })
+        responseMetadata = { modelName: model }
+      } else {
       const browserExecution = this.mainBrowserFactory
         ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
         : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined
@@ -3005,6 +3082,7 @@ export class OrchestratorService extends EventEmitter {
         contextRevision: this.nativeContext.revision ?? 0,
         modelKey: result.contextInputs.modelKey
       })
+      }
     } catch (err) {
       const normalized = normalizeAppError(err, 'orchestrator_turn_failed')
       const isAbort = turn.abort.signal.aborted || normalized.errorInfo.category === 'cancelled'
@@ -3075,11 +3153,15 @@ export class OrchestratorService extends EventEmitter {
       const partial =
         stripActionBlocks(assistantText).trim() ||
         streamedPartial?.trim() ||
-        '(Stopped)'
+        ''
       if (this.activeAssistantMessageId) {
-        this.updateStreamingAssistantMessage(this.activeAssistantMessageId, partial, false, undefined, true)
+        if (partial) {
+          this.updateStreamingAssistantMessage(this.activeAssistantMessageId, partial, false, undefined, true)
+        } else {
+          this.removeMessage(this.activeAssistantMessageId)
+        }
         this.activeAssistantMessageId = null
-      } else {
+      } else if (partial) {
         const stopped = this.addMessage('assistant', partial)
         const index = this.messages.findIndex((message) => message.id === stopped.id)
         if (index !== -1) {
@@ -3128,7 +3210,7 @@ export class OrchestratorService extends EventEmitter {
       return response
     }
 
-    const parsedActions = parseActions(assistantText)
+    const parsedActions = nativeAgentTurn ? [] : parseActions(assistantText)
     const actions = filterActionsForChatMode(parsedActions, mode)
     const displayText = stripActionBlocks(assistantText)
 

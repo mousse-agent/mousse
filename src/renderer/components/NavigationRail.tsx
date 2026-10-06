@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { FolderOpen, Gauge, House, MoreHorizontal, Radio, Search, Settings, Terminal, Workflow, type LucideIcon } from 'lucide-react'
+import { FolderOpen, Gauge, House, MoreHorizontal, Radio, Search, Settings, Terminal, Workflow, type LucideIcon } from '../lib/icons'
 import type { MainView } from '../../shared/types'
 import { useActiveProjectPath } from '../hooks/useActiveProjectPath'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
+import { openSurface } from '../lib/surfaces'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { ThreadSearchDialog } from './ThreadSearchDialog'
-import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import '../styles/navigation-rail.css'
 
 interface NavigationRailProps {
@@ -16,16 +16,16 @@ interface NavigationRailProps {
 
 export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailProps) {
   const mainView = useAppStore((s) => s.mainView)
+  const sidebarMode = useAppStore((s) => s.sidebarMode)
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
   const scheduledOpen = useAppStore((s) => s.scheduledOpen)
   const channelsOpen = useAppStore((s) => s.channelsOpen)
-  const setMainView = useAppStore((s) => s.setMainView)
   const setMainAreaOpen = useAppStore((s) => s.setMainAreaOpen)
   const setThreadsSidebarOpen = useAppStore((s) => s.setThreadsSidebarOpen)
   const setScheduledOpen = useAppStore((s) => s.setScheduledOpen)
   const setChannelsOpen = useAppStore((s) => s.setChannelsOpen)
+  const usageOpen = useAppStore((s) => s.usageOpen)
   const settingsOpen = useAppStore((s) => s.settingsOpen)
-  const activateProfile = useAppStore((s) => s.activateProfile)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const switchToThread = useAppStore((s) => s.switchToThread)
   const projectPath = useActiveProjectPath()
@@ -74,17 +74,22 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
   }, [moreOpen])
 
   const openView = async (view: MainView) => {
-    if (view !== mainView && !await confirmNavigation()) return
-    setMainView(view)
-    setMainAreaOpen(true)
+    if ((view !== mainView || sidebarMode !== 'projects') && !await confirmNavigation()) return
+    openSurface(view)
     setMoreOpen(false)
+  }
+  const showHome = async () => {
+    if (sidebarMode !== 'projects' && !await confirmNavigation()) return
+    useAppStore.getState().setSidebarMode('projects')
+    setThreadsSidebarOpen(true)
+    setMainAreaOpen(false)
   }
   const overlayOpen = scheduledOpen || channelsOpen || searchOpen
   const shortcut = (label: string, Icon: LucideIcon, active: boolean, onClick: () => void, disabled = false) => (
     <button type="button" className={`navigation-rail-button${active ? ' active' : ''}`}
       aria-label={label} title={label} aria-current={active ? 'page' : undefined}
       onClick={onClick} disabled={disabled}>
-      <Icon size={25} strokeWidth={1.8} aria-hidden="true" />
+      <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
       {label === 'Home' && active && <span className="navigation-rail-active-dot" aria-hidden="true" />}
     </button>
   )
@@ -92,20 +97,16 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
   return (
     <>
       <nav className="navigation-rail" aria-label="Mousse navigation" onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave}>
-        {shortcut('Home', House, !overlayOpen && !mainAreaOpen, () => {
-          setThreadsSidebarOpen(true)
-          setMainAreaOpen(false)
-        })}
+        {shortcut('Home', House, !overlayOpen && !mainAreaOpen && sidebarMode === 'projects', () => void showHome())}
         {shortcut('Automations', Workflow, scheduledOpen, () => setScheduledOpen(true))}
         {shortcut('Channels', Radio, channelsOpen, () => setChannelsOpen(true))}
         <button ref={moreRef} type="button" className={`navigation-rail-button${moreOpen ? ' active' : ''}`}
           aria-label="More" title="More" aria-haspopup="menu" aria-expanded={moreOpen}
           aria-controls={moreOpen ? 'navigation-rail-more' : undefined} onClick={() => setMoreOpen(!moreOpen)}>
-          <MoreHorizontal size={25} strokeWidth={1.8} aria-hidden="true" />
+          <MoreHorizontal size={18} strokeWidth={1.8} aria-hidden="true" />
         </button>
         <div className="navigation-rail-separator" role="separator" />
-        {shortcut('Subscription usage', Gauge, false, () => window.dispatchEvent(new Event('mousse:open-usage')))}
-        <ProfileSwitcher variant="rail" onSwitched={(profile) => activateProfile(profile.id)} />
+        {shortcut('Subscription usage', Gauge, usageOpen, () => useAppStore.getState().setUsageOpen(true))}
         {shortcut('Settings', Settings, settingsOpen, () => setSettingsOpen(true))}
       </nav>
       {moreOpen && <FloatingPortal>
@@ -123,9 +124,12 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
         </div>
       </FloatingPortal>}
       <ThreadSearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} onSelect={(threadId) => {
-        switchToThread(threadId)
-        void window.mousse.threads.select(threadId)
-        setThreadsSidebarOpen(true)
+        void confirmNavigation().then((allowed) => {
+          if (!allowed) return
+          switchToThread(threadId)
+          void window.mousse.threads.select(threadId)
+          setThreadsSidebarOpen(true)
+        })
       }} />
     </>
   )
