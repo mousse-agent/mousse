@@ -1302,6 +1302,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const llmProviders = getPiLlmProviders(ctx.mms.providerAuth)
       const antigravity = ctx.mms.antigravity.llmProvider()
       if (antigravity) llmProviders.push(antigravity)
+      const claudeSubscription = ctx.mms.claudeSubscription.llmProvider()
+      if (claudeSubscription) llmProviders.push(claudeSubscription)
       const agentTypes = buildAgentTypesFromCatalogs(ctx.mms.providerAuth.getCatalogLlmProviders())
       return {
         options: {
@@ -1313,7 +1315,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
     }
     case 'providers.listConfigured':
-      return { providers: [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider()].filter((provider) => provider !== undefined)] }
+      return { providers: [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)] }
     case 'providers.getUsage':
       return ctx.mms.providerAuth.getUsage()
     case 'providers.getSubscriptionUsage': {
@@ -1324,14 +1326,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.getLoginOptions': {
       const p = isObject(params) ? params : {}
       const authType = asOptionalString(p.authType, 32) as 'api_key' | 'oauth' | undefined
-      return { options: [...ctx.mms.providerAuth.getLoginOptions(authType), ...(authType === 'api_key' || ctx.mms.antigravity.configured() ? [] : [ctx.mms.antigravity.loginOption()])] }
+      return { options: [...ctx.mms.providerAuth.getLoginOptions(authType), ...(authType === 'api_key' || ctx.mms.antigravity.configured() ? [] : [ctx.mms.antigravity.loginOption()]), ...(authType === 'api_key' || ctx.mms.claudeSubscription.configured() ? [] : [ctx.mms.claudeSubscription.loginOption()])] }
     }
     case 'providers.refreshModels': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
-      if (providerId === 'antigravity') await ctx.mms.antigravity.refreshModels(ctx.mms.worktrees.getRepoRoot())
+      if (providerId === 'claude-subscription') await ctx.mms.claudeSubscription.refreshModels(ctx.mms.worktrees.getRepoRoot())
+      else if (providerId === 'antigravity') await ctx.mms.antigravity.refreshModels(ctx.mms.worktrees.getRepoRoot())
       else await ctx.mms.providerAuth.refreshDynamicModels()
-      return { options: [...getPiLlmProviders(ctx.mms.providerAuth), ...[ctx.mms.antigravity.llmProvider()].filter((provider) => provider !== undefined)] }
+      return { options: [...getPiLlmProviders(ctx.mms.providerAuth), ...[ctx.mms.antigravity.llmProvider(), ctx.mms.claudeSubscription.llmProvider()].filter((provider) => provider !== undefined)] }
     }
     case 'providers.getAmbientInfo': {
       const p = isObject(params) ? params : {}
@@ -1344,7 +1347,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const apiKey = asString(p.apiKey, 'apiKey', 8192)
       await ctx.mms.providerAuth.setApiKey(providerId, apiKey)
       await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
-      const providers = ctx.mms.providerAuth.getConfiguredProviders()
+      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
       ctx.emitEvent?.('providers.changed', { providers })
       return { providers }
     }
@@ -1374,16 +1377,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
       const result = await ctx.mms.providerAuth.verifyAmbientProvider(providerId)
-      const providers = ctx.mms.providerAuth.getConfiguredProviders()
+      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
       if (result?.success) ctx.emitEvent?.('providers.changed', { providers })
       return { result, providers }
     }
     case 'providers.logout': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
-      if (providerId === 'antigravity') await ctx.mms.antigravity.logout()
+      if (providerId === 'claude-subscription') await ctx.mms.claudeSubscription.logout()
+      else if (providerId === 'antigravity') await ctx.mms.antigravity.logout()
       else await ctx.mms.providerAuth.logout(providerId)
-      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider()].filter((provider) => provider !== undefined)]
+      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
       ctx.emitEvent?.('providers.changed', { providers })
       return { providers }
     }
@@ -1399,13 +1403,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       session.on('event', forward)
       try {
-        const result = providerId === 'antigravity'
+        const result = providerId === 'claude-subscription'
+          ? await ctx.mms.claudeSubscription.login(session, ctx.mms.worktrees.getRepoRoot())
+          : providerId === 'antigravity'
           ? await ctx.mms.antigravity.login(session, ctx.mms.worktrees.getRepoRoot())
           : await ctx.mms.providerAuth.runOAuthLogin(session, providerId)
         if (result && (result as { success?: boolean }).success !== false) {
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
-        const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider()].filter((provider) => provider !== undefined)]
+        const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
         if (result && (result as { success?: boolean }).success !== false) {
           ctx.emitEvent?.('providers.changed', { providers })
         }
@@ -1435,7 +1441,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (result && (result as { success?: boolean }).success !== false) {
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
-        const providers = ctx.mms.providerAuth.getConfiguredProviders()
+        const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
         if (result && (result as { success?: boolean }).success !== false) {
           ctx.emitEvent?.('providers.changed', { providers })
         }

@@ -361,7 +361,7 @@ export function ComposerFooter({
       </div>
 
       <div className="composer-footer-right">
-        {selectedProviderId !== 'antigravity' && <div className="composer-context-anchor">
+        {!['antigravity', 'claude-subscription'].includes(selectedProviderId ?? '') && <div className="composer-context-anchor">
           <ContextUsageRing
             percent={contextUsage.percent}
             onClick={() => onContextOpenChange(!contextOpen)}

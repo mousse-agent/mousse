@@ -23,6 +23,16 @@ Legacy personal data migrates to Default using the durable `migration/journal.js
 
 **Precedence:** Environment overrides apply at runtime for channels (tokens/ports) after reading `mousse.conf`. All other settings come from `mousse.conf` unless a store merges live edits in memory.
 
+## Claude Subscription provider
+
+In **Settings → Providers → Add provider → Subscription**, choose **Claude Subscription**. Connect uses the official Claude Code executable and its own Claude account login. Install Claude Code first if it is unavailable. The existing Anthropic API-key provider remains a separate option.
+
+Each profile uses its own `providers/claude-subscription/claude-config` directory through `CLAUDE_CONFIG_DIR`. Claude Code owns credential storage and renewal; Mousse does not copy subscription tokens into `auth.json`. Ambient API keys, OAuth token overrides and cloud-provider routing variables are removed for subscription processes. Mousse checks that the official CLI reports a Claude account sign-in rather than an API-key or Console session.
+
+After connecting, select Claude Subscription and a Claude model in the composer. Turns use Claude Code's tools, with permission requests shown in the thread. Plan mode, streamed replies, cancellation and conversation continuity are supported. Claude Code owns its context window; Mousse does not display a fabricated context percentage. Native tool edits follow Claude Code's execution path, as with Antigravity, rather than Mousse's parsed action blocks.
+
+Account eligibility, usage limits and billing are managed by Claude. Consult [Claude's current subscription/SDK policy](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) for changes. Disconnect signs out only this profile's Claude configuration and cancels its running provider work.
+
 ## File format
 
 ```jsonc
