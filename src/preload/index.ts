@@ -1,3 +1,4 @@
+import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import type { BridgeDisplayPart } from '../shared/bridge'
@@ -131,6 +132,21 @@ const api = {
     resolve: (reference: ChatReference): Promise<ChatReference | null> =>
       platformRequest<ChatReference | null>('chatReferences.resolve', { reference })
   } satisfies ChatReferencesApi,
+  applets: {
+    get: input => ipcRenderer.invoke('applets:get', input),
+    mount: input => ipcRenderer.invoke('applets:mount', input),
+    update: input => ipcRenderer.invoke('applets:update', input),
+    appearance: input => ipcRenderer.invoke('applets:appearance', input),
+    snapshot: input => ipcRenderer.invoke('applets:snapshot', input),
+    suspend: input => ipcRenderer.invoke('applets:suspend', input),
+    unmount: input => ipcRenderer.invoke('applets:unmount', input),
+    export: input => ipcRenderer.invoke('applets:export', input),
+    onEvent: callback => {
+      const handler = (_event: Electron.IpcRendererEvent, value: AppletUiEvent) => callback(value)
+      ipcRenderer.on('applets:event', handler)
+      return () => ipcRenderer.removeListener('applets:event', handler)
+    }
+  } satisfies AppletApi,
   orchestrator: {
     /** Compatibility: send to the active thread (stacks on the queue when busy). */
     send: (request: OrchestratorSendInput): Promise<OrchestratorResponse> =>

@@ -1,3 +1,5 @@
+import { validateAppletAppearance } from '../../shared/appletAppearance'
+import { appletJsonBytes, APPLET_STATE_LIMIT } from '../../shared/applets'
 import { ConversationActionService } from '../actions/ConversationActionService'
 import { assertHeldThreadLease, withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import { tryAcquireExecutionLease, heartbeatExecutionLease, releaseExecutionLeaseHandle } from '../queue/ThreadExecutionLease'
@@ -296,6 +298,31 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
   }
   if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
   switch (method) {
+    case 'applets.get':
+    case 'applets.state.get':
+    case 'applets.state.save':
+    case 'applets.export': {
+      if (!isObject(params)) throw new Error('Expected applet request.')
+      if (params.profileId !== undefined && params.profileId !== ctx.mms.profileId) throw new Error('Applet profile binding changed.')
+      const allowed = new Set(['profileId', 'threadId', 'appletId', 'revisionId', ...(method === 'applets.state.save' ? ['state'] : []), ...(method === 'applets.export' ? ['format','appearance'] : [])])
+      if (Object.keys(params).some(key => !allowed.has(key))) throw new Error('Unexpected applet request field.')
+      const threadId = asString(params.threadId, 'threadId', 160)
+      const appletId = asString(params.appletId, 'appletId', 80)
+      const revisionId = asString(params.revisionId, 'revisionId', 80)
+      const messages = ctx.mms.threads.loadThreadData(threadId).messages
+      const visible = messages.some(message => !message.hidden && message.role === 'assistant' && !message.incomplete && !message.streaming && message.presentationParts?.some(part => part.type === 'applet' && part.reference.appletId === appletId && part.reference.revisionId === revisionId))
+      if (!visible) throw new Error('Applet is not available in this conversation.')
+      if (method === 'applets.get') return ctx.mms.applets.load(threadId, appletId, revisionId)
+      if (method === 'applets.state.get') return {state: ctx.mms.applets.loadState(threadId, appletId, revisionId)}
+      if (method === 'applets.state.save') {
+        if (appletJsonBytes(params.state) > APPLET_STATE_LIMIT) throw new Error('Applet state is too large.')
+        ctx.mms.applets.saveState(threadId, appletId, revisionId, params.state)
+        return {saved:true}
+      }
+      if (params.format === 'html') return {content:ctx.mms.applets.exportHtml(threadId, appletId, revisionId, params.appearance===undefined?undefined:validateAppletAppearance(params.appearance))}
+      if (params.format === 'source') return {content:ctx.mms.applets.exportSource(threadId, appletId, revisionId)}
+      throw new Error('Unsupported applet export format.')
+    }
     case 'health':
       return {
         ok: true,
