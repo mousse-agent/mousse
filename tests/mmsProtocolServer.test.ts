@@ -625,6 +625,36 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     await client.close()
   })
 
+  it('oversized subscribe replay requests a snapshot without closing the connection', async () => {
+    const client = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'test' })
+    await client.connect()
+    try {
+      // Each event fits the wire limits, but their combined UTF-8 history does
+      // not. Seed only this temporary service's profile audience.
+      const internal = server as unknown as {
+        ringFor(profileId: string): EventSequenceRing
+        emitToSubscribers(event: ReturnType<EventSequenceRing['push']>, profileId: string): void
+      }
+      const ring = internal.ringFor(mms.profileId)
+      ring.push('large.update', { text: '界'.repeat(240_000) })
+      ring.push('large.update', { text: '界'.repeat(240_000) })
+      const boundary = ring.currentSequence
+      const received: number[] = []
+      client.onEvent(event => received.push(event.sequence))
+      const sub = await client.subscribe(0)
+      expect(sub).toEqual({ sequence: boundary, gap: true, replay: [] })
+      expect(client.requiresResnapshot).toBe(true)
+      expect(client.connected).toBe(true)
+      await expect(client.request('health')).resolves.toBeDefined()
+      const next = ring.push('small.update', { complete: true })
+      internal.emitToSubscribers(next, mms.profileId)
+      await vi.waitFor(() => expect(received).toHaveLength(1))
+      expect(received[0]).toBeGreaterThan(sub.sequence)
+    } finally {
+      await client.close()
+    }
+  })
+
   it('new instance forces resnapshot (sequence regression)', async () => {
     const client = new LocalMmsClient({
       homeDir: home,
@@ -875,6 +905,97 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
         messages.some((m) => m.content === 'completed-after-disconnect')
     ).toBe(true)
     void chatStarted
+  })
+
+  it('delivers large snapshots and live Unicode message collections without disconnecting', async () => {
+    const client = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'test', requestedCapabilities: ['health'] })
+    await client.connect()
+    await client.subscribe(0)
+    const thread = mms.threads.createThread('Large snapshot')
+    mms.orchestrator.bindThread(thread.id, [], undefined, [])
+    const messages = [{ id: 'large', role: 'assistant', content: '🫧漢字'.repeat(550_000) }]
+    vi.spyOn(mms.orchestrator, 'getMessages').mockReturnValue(messages as never)
+    const snapshot = await client.request<{ messages: unknown[] }>('thread.snapshot', { threadId: thread.id })
+    expect(snapshot.messages).toEqual(messages)
+    const events: string[] = []
+    const delivered = new Promise<void>(resolve => client.onEvent(event => {
+      if (event.threadId !== thread.id) return
+      events.push(event.type)
+      if (event.type === 'thread.messages') {
+        expect(event.data).toEqual({ messages })
+      }
+      if (event.type === 'turn.started') resolve()
+    }))
+    mms.orchestrator.emit('thread-messages', { threadId: thread.id, messages })
+    mms.orchestrator.emit('turn-started', { threadId: thread.id })
+    await delivered
+    expect(events.filter(type => type === 'thread.messages' || type === 'turn.started')).toEqual(['thread.messages', 'turn.started'])
+    expect(await client.request('health')).toBeTruthy()
+    await client.close()
+  })
+
+  it('reports oversized responses and events to legacy clients while retaining their connection', async () => {
+    const thread = mms.threads.createThread('Legacy large')
+    mms.orchestrator.bindThread(thread.id, [], undefined, [])
+    vi.spyOn(mms.orchestrator, 'getMessages').mockReturnValue([{ content: 'x'.repeat(2_200_000) }] as never)
+    const result = await new Promise<unknown>((resolve, reject) => {
+      const socket = createConnection(endpoint)
+      const decoder = new FrameDecoder()
+      const timer = setTimeout(() => { socket.destroy(); reject(new Error('legacy timeout')) }, 5000)
+      socket.on('error', reject)
+      socket.on('connect', () => socket.write(encodeFrame({ kind: 'hello', protocolVersion: MMS_PROTOCOL_VERSION, ownerToken, clientType: 'test' })))
+      socket.on('data', bytes => {
+        decoder.push(bytes)
+        for (const raw of decoder.shiftAll()) {
+          const env = parseEnvelope(raw)
+          if (env?.kind === 'hello_ok') socket.write(encodeFrame({ kind: 'req', id: 'large', method: 'thread.snapshot', params: { threadId: thread.id } }))
+          if (env?.kind === 'res' && env.id === 'large') {
+            expect(env.ok).toBe(false)
+            expect(env.error?.code).toBe('response_too_large')
+            socket.write(encodeFrame({ kind: 'req', id: 'health', method: 'health' }))
+          }
+          if (env?.kind === 'res' && env.id === 'health') {
+            socket.write(encodeFrame({ kind: 'req', id: 'sub-large', method: 'events.subscribe', params: { afterSequence: 0 } }))
+          }
+          if (env?.kind === 'res' && env.id === 'sub-large') {
+            mms.orchestrator.emit('thread-messages', { threadId: thread.id, messages: [{ content: 'x'.repeat(2_200_000) }] })
+          }
+          if (env?.kind === 'error') {
+            expect(env.code).toBe('event_too_large')
+            socket.write(encodeFrame({ kind: 'req', id: 'still-alive', method: 'health' }))
+          }
+          if (env?.kind === 'res' && env.id === 'still-alive') {
+            clearTimeout(timer)
+            socket.destroy()
+            resolve(env.result)
+          }
+        }
+      })
+    })
+    expect(result).toBeTruthy()
+  })
+
+  it('forces recovery when a live event exceeds the supported logical transfer limit', async () => {
+    const client = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'test' })
+    await client.connect()
+    const closed = new Promise<Error>(resolve => client.onConnectionClosed(resolve))
+    ;(client as unknown as { handleEnvelope: (envelope: unknown) => void }).handleEnvelope({ kind: 'error', code: 'event_too_large', message: 'Thread update exceeds the supported transfer limit.' })
+    const error = await closed
+    expect(error.message).toMatch(/supported transfer limit/)
+    expect((error as { errorInfo?: unknown }).errorInfo).toEqual({ category: 'unsupported', retryable: false })
+    expect(client.connected).toBe(false)
+    expect(client.requiresResnapshot).toBe(true)
+    await client.close()
+  })
+
+  it('bounds retained duplicate response bodies by bytes as well as request count', () => {
+    const cache = { completedResponses: new Map(), completedResponseSizes: new Map(), completedResponseBytes: 0 }
+    const cacheCompleted = (server as unknown as { cacheCompleted: (session: typeof cache, response: unknown) => void }).cacheCompleted.bind(server)
+    const body = 'x'.repeat(20 * 1024 * 1024)
+    for (let index = 0; index < 4; index++) cacheCompleted(cache, { kind: 'res', id: String(index), ok: true, result: body })
+    expect(cache.completedResponseBytes).toBeLessThanOrEqual(64 * 1024 * 1024)
+    expect([...cache.completedResponses.keys()]).toEqual(['1', '2', '3'])
+    expect(cache.completedResponseSizes.size).toBe(3)
   })
 
   it('snapshot includes claimed, connectionFailed, and lifecycle turn state', async () => {

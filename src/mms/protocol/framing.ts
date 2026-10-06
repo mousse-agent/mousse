@@ -45,19 +45,20 @@ export class FrameDecoder {
   push(chunk: Buffer): void {
     if (!chunk.length) return
     this.buffer = this.buffer.length === 0 ? Buffer.from(chunk) : Buffer.concat([this.buffer, chunk])
-    // Reject oversize as soon as the length header is known.
-    if (this.buffer.length >= 4) {
-      const len = this.buffer.readUInt32BE(0)
+    // Bound every frame, including headers after complete coalesced frames.
+    // A read can legally contain several frames whose combined size exceeds
+    // the individual frame limit; only an incomplete frame needs that bound.
+    let offset = 0
+    while (this.buffer.length - offset >= 4) {
+      const len = this.buffer.readUInt32BE(offset)
       if (len > this.maxBytes) {
         this.buffer = Buffer.alloc(0)
         throw new FrameTooLargeError(len, this.maxBytes)
       }
+      if (this.buffer.length - offset < len + 4) break
+      offset += len + 4
     }
-    // Bound total buffer growth for incomplete frames
-    if (this.buffer.length > this.maxBytes + 4) {
-      this.buffer = Buffer.alloc(0)
-      throw new FrameDecodeError('Decode buffer exceeded maximum without a complete frame')
-    }
+
   }
 
   /** Returns next decoded JSON value, or null if more data needed. */

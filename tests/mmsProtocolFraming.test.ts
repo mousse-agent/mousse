@@ -37,6 +37,13 @@ describe('protocol framing', () => {
     expect(dec.shiftAll()).toEqual([{ n: 1 }, { n: 2 }])
   })
 
+  it('allows coalesced valid frames larger in aggregate than the frame limit', () => {
+    const decoder = new FrameDecoder(40)
+    const values = [{ text: 'a'.repeat(20) }, { text: 'b'.repeat(20) }]
+    decoder.push(Buffer.concat(values.map(value => encodeFrame(value, 40))))
+    expect(decoder.shiftAll()).toEqual(values)
+  })
+
   it('rejects oversize frames', () => {
     const header = Buffer.alloc(4)
     header.writeUInt32BE(MMS_PROTOCOL_MAX_FRAME_BYTES + 1, 0)
