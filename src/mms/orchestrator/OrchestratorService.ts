@@ -30,7 +30,8 @@ import { AgentExecutionService } from '../agentDefinitions/AgentExecutionService
 import { createNativeAgentRuntime } from '../agentDefinitions/nativeRuntime'
 import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
 import { EventEmitter } from 'events'
-import { antigravityAssistantMessage, antigravityHistory } from '../providers/antigravity/history'
+import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
+import type { ClaudeSubscriptionProviderService } from '../providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import type { AntigravityProviderService } from '../providers/antigravity/AntigravityProviderService'
 import { v4 as uuidv4 } from 'uuid'
 import {
@@ -505,6 +506,8 @@ export async function retryContextOverflowOnce<T>(
 }
 
 export class OrchestratorService extends EventEmitter {
+  private claudeSubscription?: ClaudeSubscriptionProviderService
+  setClaudeSubscriptionProvider(provider: ClaudeSubscriptionProviderService): void { this.claudeSubscription = provider }
   private antigravity?: AntigravityProviderService
   setAntigravityProvider(provider: AntigravityProviderService): void { this.antigravity = provider }
   private readonly lifecycle = new OwnedWorkBarrier()
@@ -1616,11 +1619,12 @@ export class OrchestratorService extends EventEmitter {
       const modelOverride = this.session.modelOverride
       const selectedModel = modelOverride ?? resolveModelForMode(this.settingsStore.get(), request.mode, [
         ...(this.providerAuth.credentials?.listProviderIds() ?? []),
-        ...(this.antigravity?.configured() ? ['antigravity'] : [])
+        ...(this.antigravity?.configured() ? ['antigravity'] : []),
+        ...(this.claudeSubscription?.configured() ? ['claude-subscription'] : [])
       ])
-      if (selectedModel.llmProvider === 'antigravity') {
-        // ACP owns its context and does not publish a token window in its model
-        // selector. Do not display a fabricated Mousse context measurement.
+      if (selectedModel.llmProvider === 'antigravity' || selectedModel.llmProvider === 'claude-subscription') {
+        // Native agents own their context and do not publish a token window.
+        // Do not display a fabricated Mousse context measurement.
         return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model, source: 'estimated', categories: [] }
       }
       const { limit, modelName } = this.llm.getSelectedModelContextLimit(request.mode, modelOverride)
@@ -2865,9 +2869,12 @@ export class OrchestratorService extends EventEmitter {
     let compactionNote: ChatMessage | undefined
     const selectedModel = opts?.modelOverride ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
       ...(this.providerAuth.credentials?.listProviderIds() ?? []),
-      ...(this.antigravity?.configured() ? ['antigravity'] : [])
+      ...(this.antigravity?.configured() ? ['antigravity'] : []),
+      ...(this.claudeSubscription?.configured() ? ['claude-subscription'] : [])
     ])
     const antigravityTurn = selectedModel.llmProvider === 'antigravity'
+    const claudeSubscriptionTurn = selectedModel.llmProvider === 'claude-subscription'
+    const nativeAgentTurn = antigravityTurn || claudeSubscriptionTurn
     const onCompaction = (phase: 'start' | 'complete' | 'unchanged'): void => {
       if (phase === 'start') {
         compactionNote = { id: uuidv4(), role: 'assistant', kind: 'context_compaction',
@@ -2883,15 +2890,27 @@ export class OrchestratorService extends EventEmitter {
       this.persist(true)
     }
     try {
-      if (antigravityTurn) {
-        if (mode === 'plan') throw new Error('Use Antigravity’s /plan command in a chat turn')
+      if (nativeAgentTurn) {
+        if (antigravityTurn && mode === 'plan') throw new Error('Use Antigravity’s /plan command in a chat turn')
         const model = selectedModel.model
-        if (!this.antigravity || !session.projectCwd) throw new Error('Antigravity requires a project workspace')
+        const nativeProvider = claudeSubscriptionTurn ? this.claudeSubscription : this.antigravity
+        if (!nativeProvider || (antigravityTurn && !session.projectCwd)) throw new Error(`${selectedModel.llmProvider} requires a project workspace`)
+        const nativeCwd = session.projectCwd ?? this.claudeSubscription!.standaloneWorkspace(session.threadId)
         let started = false
-        assistantText = await this.antigravity.chat({
-          threadId: session.threadId, cwd: session.projectCwd, model,
+        let thinkingStarted = false
+        let thinkingText = ''
+        assistantText = await nativeProvider.chat({
+          ...(claudeSubscriptionTurn ? {
+            mode: mode === 'plan' ? 'plan' as const : 'default' as const,
+            onThinking: (content: string) => {
+              if (!thinkingStarted) { this.handleStreamingThinkingEvent({ phase: 'start', content: '' }); thinkingStarted = true }
+              thinkingText = content
+              this.handleStreamingThinkingEvent({ phase: 'delta', content })
+            }
+          } : {}),
+          threadId: session.threadId, cwd: nativeCwd, model,
           prompt: userContent, images, signal: turn.abort.signal,
-          history: antigravityHistory(this.nativeContext, turnNativeStartBoundary.messageIndex),
+          history: nativeAgentHistory(this.nativeContext, turnNativeStartBoundary.messageIndex),
           drainSteer: () => {
             const parts = [opts?.externalDrainSteer?.()?.trim(), this.drainSteerForSession(session, turn)?.trim()]
               .filter((part): part is string => Boolean(part))
@@ -2917,9 +2936,10 @@ export class OrchestratorService extends EventEmitter {
             })
           }
         })
-        this.nativeContext = appendNativeMessage(this.nativeContext, antigravityAssistantMessage(assistantText, model))
+        if (thinkingStarted) this.handleStreamingThinkingEvent({ phase: 'complete', content: thinkingText })
+        this.nativeContext = appendNativeMessage(this.nativeContext, nativeAgentAssistantMessage(assistantText, model, selectedModel.llmProvider))
         this.persist(true)
-        this.antigravity.commitConversation(session.threadId, antigravityHistory(this.nativeContext))
+        nativeProvider.commitConversation(session.threadId, nativeAgentHistory(this.nativeContext))
         if (started) this.handleStreamingTextEvent({ phase: 'complete', content: assistantText, contentIndex: 0 })
         responseMetadata = { modelName: model }
       } else {
@@ -3190,7 +3210,7 @@ export class OrchestratorService extends EventEmitter {
       return response
     }
 
-    const parsedActions = antigravityTurn ? [] : parseActions(assistantText)
+    const parsedActions = nativeAgentTurn ? [] : parseActions(assistantText)
     const actions = filterActionsForChatMode(parsedActions, mode)
     const displayText = stripActionBlocks(assistantText)
 
