@@ -238,6 +238,30 @@ export class AppletRuntimeManager {
     runtime.mount.clip = clip
   }
 
+  async snapshot(runtimeId: string): Promise<string | null> {
+    const runtime = this.runtimes.get(runtimeId)
+    if (!runtime) throw new Error('Applet is not running')
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const image = await Promise.race([
+        runtime.guest.webContents.capturePage(undefined, {stayHidden:true}),
+        new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 150) })
+      ])
+      if (!image || image.isEmpty()) return null
+      const png = image.toPNG()
+      return png.length <= 8 * 1024 * 1024 ? `data:image/png;base64,${png.toString('base64')}` : null
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  suspend(runtimeId: string): void {
+    const runtime = this.runtimes.get(runtimeId)
+    if (!runtime) throw new Error('Applet is not running')
+    runtime.visible = false
+    runtime.container.setVisible(false)
+  }
+
   unmount(runtimeId: string): void {
     const runtime = this.runtimes.get(runtimeId)
     if (!runtime) return

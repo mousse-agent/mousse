@@ -60,6 +60,18 @@ export function registerAppletIpc(register:Register, gui:GuiMmsController, allow
     catch(error){own.entries.delete(runtimeId);throw error}
     return{runtimeId}
   })
+  register('applets:snapshot',async(event,input)=>{
+    const own=owner(event),runtimeId=string(object(input).runtimeId)
+    if(!own.entries.has(runtimeId))throw new Error('Applet runtime is not owned by this window.')
+    const image=await own.manager.snapshot(runtimeId)
+    if(owners.get(event.sender.id)!==own)throw new Error('Profile changed while scrolling applet.')
+    return {image}
+  })
+  register('applets:suspend',(event,input)=>{
+    const own=owner(event),runtimeId=string(object(input).runtimeId)
+    if(!own.entries.has(runtimeId))throw new Error('Applet runtime is not owned by this window.')
+    own.manager.suspend(runtimeId)
+  })
   register('applets:update',(event,input)=>{
     const own=owner(event),raw=object(input),runtimeId=string(raw.runtimeId)
     if(!own.entries.has(runtimeId))throw new Error('Applet runtime is not owned by this window.')

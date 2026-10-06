@@ -7,6 +7,7 @@ import electron from 'electron'
 
 const directory = await mkdtemp(join(tmpdir(), 'mousse-in-thread-applets-'))
 const screenshot = '/tmp/mousse-in-thread-applets-native.png'
+const scrollOnly = process.argv.includes('--scroll-only')
 try {
   await build({
     stdin: {
@@ -67,6 +68,34 @@ try {
         const point=await first.executeJavaScript('(()=>{const r=document.querySelector("button").getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()');
         first.sendInputEvent({type:'mouseMove',x:Math.round(point.x),y:Math.round(point.y)});await pause(50);first.sendInputEvent({type:'mouseDown',x:Math.round(point.x),y:Math.round(point.y),button:'left',clickCount:1});await pause(50);first.sendInputEvent({type:'mouseUp',x:Math.round(point.x),y:Math.round(point.y),button:'left',clickCount:1});
         await wait(()=>saved.count===1,'real pointer interaction persisted through production IPC');
+        if (${scrollOnly}) {
+          const firstId = first.id;
+          const before = await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop');
+          const header = await owner.webContents.executeJavaScript('(()=>{const r=document.querySelector(".mousse-applet-header").getBoundingClientRect();return{x:Math.round(r.x+100),y:Math.round(r.y+r.height/2)}})()');
+          owner.webContents.sendInputEvent({type:'mouseMove',...header});
+          owner.webContents.sendInputEvent({type:'mouseWheel',...header,deltaX:0,deltaY:-24,canScroll:true});
+          await wait(()=>owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop>'+before),'header wheel scrolls transcript');
+          await wait(()=>owner.webContents.executeJavaScript('!!document.querySelector(".mousse-applet-scroll-frame")'),'host DOM snapshot replaces native guest during scroll');
+          assert.equal(guests()[0].id,firstId,'Scrolling preserves the guest renderer');
+          assert.equal(owner.contentView.children[0].getVisible(),false,'Native surface is hidden while host scrolls');
+          for(let n=0;n<12;n++){
+            owner.webContents.sendInputEvent({type:'mouseWheel',...header,deltaX:0,deltaY:n<6?-3:3,canScroll:true});
+            await pause(16);
+            assert.equal(owner.contentView.children[0].getVisible(),false,'Native guest cannot overlap scrolling header');
+          }
+          await wait(()=>owner.contentView.children[0].getVisible(),'live guest resumes after gesture');
+          assert.equal(guests()[0].id,firstId,'Resume does not reload guest');
+          assert.equal(await first.executeJavaScript('document.querySelector("output").textContent'),'1','Interaction survives header scrolling');
+          const rect=await owner.webContents.executeJavaScript('(()=>{const r=document.querySelector(".mousse-applet-preview").getBoundingClientRect();return{top:r.top,bottom:r.bottom}})()');
+          const image=nativeImage.createFromBuffer(execFileSync('import',['-window',String(owner.getNativeWindowHandle().readUInt32LE()),'png:-']));
+          const size=image.getSize(),bitmap=image.toBitmap(),scale=size.width/owner.getContentSize()[0];
+          const pixel=(x,y)=>{const offset=(Math.round(y*scale)*size.width+Math.round(x*scale))*4;return Array.from(bitmap.subarray(offset,offset+3))};
+          assert.notDeepEqual(pixel(600,Math.round(rect.top)-5),[0,0,255],'Native preview does not cover toolbar');
+          assert.deepEqual(pixel(600,Math.round(rect.top)+25),[0,0,255],'Live preview returns at current DOM position');
+          assert.deepEqual(pixel(600,500),[0,255,0],'Composer stays clear after gesture');
+          console.log('Header wheel regression passed: DOM snapshot during scroll, no native header overlap, same guest/state after resume, composer clipping.');
+          owner.destroy();app.quit();return;
+        }
         await pause(100);const image=nativeImage.createFromBuffer(execFileSync('import',['-window',String(owner.getNativeWindowHandle().readUInt32LE()),'png:-']));writeFileSync(${JSON.stringify(screenshot)},image.toPNG());
         const bitmap=image.toBitmap(),size=image.getSize();const pixel=(x,y)=>{const scale=size.width/owner.getContentSize()[0];const offset=(Math.round(y*scale)*size.width+Math.round(x*scale))*4;return Array.from(bitmap.subarray(offset,offset+3))};
         assert.deepEqual(pixel(600,400),[0,0,255],'Native guest paints inside preview');assert.deepEqual(pixel(600,500),[0,255,0],'Native guest is clipped above composer');

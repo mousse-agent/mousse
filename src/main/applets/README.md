@@ -11,3 +11,10 @@ A native clipping `View` contains the guest. Bounds arrive in host CSS pixels an
 Three ephemeral partitions are reused per owning window across profile-manager recreation. Destroying a manager removes its document routes, guest views, download and owner listeners, and owner-capturing request handlers. Stateless denial remains installed between managers. Old document URLs never become valid in a replacement manager.
 
 Run `node scripts/check-applet-runtime.mjs` on Linux with X11 and ImageMagick `import` available. It uses temporary Electron user data and production runtime modules without starting a development server. Cross-platform compositor and packaged-app qualification still require their respective environments.
+
+
+## Scrolling presentation
+
+Native views and Chromium's scrolling DOM do not move in one compositor transaction. Following scroll events alone can leave the native preview briefly covering a moving card header. I use a captured frame in the host DOM during a transcript scroll gesture. The first wheel deltas wait until the frame is decoded and painted and the native surface is hidden; subsequent events retain normal scrolling. After the gesture settles, current bounds restore the same guest. This preserves in-memory interaction state and avoids native positioning work during scrolling. Source-panel scrolling and control-wheel zoom retain their default behavior.
+
+`node scripts/check-in-thread-applets.mjs --scroll-only` verifies actual header wheel input, DOM frame presentation, native surface suppression, retained guest identity/state, resumed bounds, and composer clipping.

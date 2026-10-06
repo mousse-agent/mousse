@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 import type { AppletBundle, AppletReference } from '../../../shared/applets'
 import { useAppStore } from '../../stores/appStore'
 import './applets.css'
+import { subscribeAppletScroll } from './scrollPresentation'
 import { appletHostBlocked, subscribeAppletHostVisibility } from './hostVisibility'
 
 export function isAppletPart(
@@ -27,6 +28,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
   const [bundle, setBundle] = useState<AppletBundle | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
+  const [scrollImage, setScrollImage] = useState<string | null>(null)
   const [restart, setRestart] = useState(0)
   const [height, setHeight] = useState(320)
   const [conversationInput, setConversationInput] = useState<string | null>(null)
@@ -42,8 +44,10 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
     if (!threadId || !preview.current || sourceOpen) return
     const node = preview.current
     const api = window.mousse.applets
-    const scroller = node.closest('.an-message-list')
+    const scroller = node.closest<HTMLElement>('.an-message-list')
     let disposed = false
+    let scrollPaused = false
+    setScrollImage(null)
     let mounting = false
     let intersecting = false
     let failed = false
@@ -56,6 +60,25 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
       runtime.current = null
       if (id) void api.unmount({ runtimeId: id }).catch(() => {})
       setReady(false)
+    }
+    const suspend = async () => {
+      scrollPaused = true
+      const id = runtime.current
+      if (!id) return
+      try {
+        const result = await api.snapshot({runtimeId:id})
+        if (!disposed && scrollPaused && runtime.current === id) {
+          if (result.image) {
+            const image = new Image()
+            image.src = result.image
+            await image.decode().catch(() => {})
+          }
+          if (disposed || !scrollPaused || runtime.current !== id) return
+          setScrollImage(result.image)
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+          if (!disposed && scrollPaused && runtime.current === id) await api.suspend({runtimeId:id})
+        }
+      } catch { /* Profile/thread teardown owns the guest lifecycle. */ }
     }
     const measure = async () => {
       frame = 0
@@ -105,6 +128,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
           runtime.current = result.runtimeId
           lastGeometry = ''
           setReady(true)
+          if (scrollPaused) await suspend()
           schedule()
         } catch (cause) {
           if (!disposed) {
@@ -116,7 +140,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
         }
       }
       const geometry = JSON.stringify({ bounds, clip })
-      if (runtime.current && geometry !== lastGeometry) {
+      if (runtime.current && !scrollPaused && geometry !== lastGeometry) {
         lastGeometry = geometry
         void api
           .update({ runtimeId: runtime.current, bounds, clip, visible: true })
@@ -136,6 +160,15 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
           void measure()
         })
     }
+    const unsubscribeScroll = scroller ? subscribeAppletScroll(scroller, {
+      active: () => !!runtime.current || (mounting && intersecting),
+      suspend,
+      resume: () => {
+        scrollPaused = false
+        lastGeometry = ''
+        schedule()
+      }
+    }) : () => {}
     const unsubscribeHost = subscribeAppletHostVisibility(schedule)
     const observer = new ResizeObserver(schedule)
     observer.observe(node)
@@ -179,6 +212,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
       intersection.disconnect()
       unsubscribe()
       unsubscribeHost()
+      unsubscribeScroll()
       clearTimeout(resizeTimer)
       window.removeEventListener('scroll', schedule, true)
       window.removeEventListener('resize', schedule)
@@ -318,6 +352,7 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
           style={{ height: expanded ? 620 : height }}
           aria-label="Applet preview"
         >
+          {scrollImage && <img className="mousse-applet-scroll-frame" src={scrollImage} alt="" aria-hidden="true" />}
           {!ready && (
             <span>
               {error

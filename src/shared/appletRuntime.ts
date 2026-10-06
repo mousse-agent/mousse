@@ -8,6 +8,8 @@ export interface AppletApi {
   get(input: AppletIdentity): Promise<AppletBundle>
   mount(input: AppletMountRequest): Promise<{runtimeId: string}>
   update(input: AppletLayoutRequest): Promise<void>
+  snapshot(input: {runtimeId:string}): Promise<{image:string|null}>
+  suspend(input: {runtimeId:string}): Promise<void>
   unmount(input: {runtimeId:string}): Promise<void>
   export(input: AppletIdentity & {format:'html'|'source'|'png';runtimeId?:string}): Promise<{cancelled:boolean}>
   onEvent(callback:(event:AppletUiEvent)=>void):()=>void

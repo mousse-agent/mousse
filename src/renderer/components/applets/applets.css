@@ -109,3 +109,12 @@
   background: var(--surface-strong, #24242c);
   color: var(--text-secondary, #b1b1ba);
 }
+
+.mousse-applet-scroll-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+}
