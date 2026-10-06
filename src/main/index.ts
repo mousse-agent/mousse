@@ -1,3 +1,4 @@
+import { attachLinuxWindowShape } from './linuxWindowShape'
 import { app, BrowserWindow, dialog, nativeTheme, session, shell, type WebContents } from 'electron'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -198,6 +199,8 @@ function startGuiApp(): void {
     })
 
     mainWindow.on('close', () => console.info('[window] Main window close event'))
+    attachLinuxWindowShape(mainWindow)
+
     mainWindow.on('ready-to-show', () => {
       mainWindow?.show()
       if (settings) refreshWindowChrome(mainWindow, settings)
