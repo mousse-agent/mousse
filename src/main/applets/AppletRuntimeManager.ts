@@ -36,7 +36,7 @@ export interface AppletRuntimeEvent {
   runtimeId: string
   threadId: string
   revisionId: string
-  type: 'ready' | 'resize' | 'state' | 'error' | 'conversation-input'
+  type: 'ready' | 'resize' | 'state' | 'error' | 'conversation-input' | 'visual-changed'
   payload: unknown
 }
 interface Runtime {
@@ -56,6 +56,10 @@ export class AppletRuntimeManager {
   private readonly runtimes = new Map<string, Runtime>()
   private readonly documents = new Map<string, string>()
   private readonly sessions = new Map<number, Session>()
+  private readonly scrollPositions = new Map<
+    string,
+    Map<string, { path: number[]; top: number; left: number }>
+  >()
   private readonly partitionPrefix: string
   private destroyed = false
   private readonly onOwnerClosed = () => this.destroy()
@@ -143,7 +147,14 @@ export class AppletRuntimeManager {
     container.addChildView(guest)
     this.owner.contentView.addChildView(container)
     const documentUrl = `mousse-applet://runtime/${randomUUID()}`
-    this.documents.set(documentUrl, appletDocument(input.source, input.state, input.appearance))
+    this.documents.set(
+      documentUrl,
+      appletDocument(input.source, input.state, input.appearance, [
+        ...(this.scrollPositions
+          .get(JSON.stringify([input.threadId, input.revisionId]))
+          ?.values() ?? [])
+      ])
+    )
     const runtime: Runtime = {
       mount: input,
       container,
@@ -272,6 +283,23 @@ export class AppletRuntimeManager {
     if (!runtime) throw new Error('Applet is not running')
     runtime.visible = false
     runtime.container.setVisible(false)
+    // Refresh already reported targets without delaying host scrolling. This
+    // catches the final offset even if high-frequency guest reports were capped.
+    const positions = [
+      ...(this.scrollPositions
+        .get(JSON.stringify([runtime.mount.threadId, runtime.mount.revisionId]))
+        ?.values() ?? [])
+    ]
+    if (positions.length)
+      void runtime.guest.webContents
+        .executeJavaScript(
+          `(${JSON.stringify(positions)}).map(position=>{let node=document.documentElement;for(const index of position.path)node=node?.children[index];return node?{path:position.path,top:node.scrollTop,left:node.scrollLeft}:null})`
+        )
+        .then((values) => {
+          if (this.runtimes.get(runtimeId) !== runtime || !Array.isArray(values)) return
+          for (const value of values.slice(0, 64)) this.rememberScroll(runtime, value)
+        })
+        .catch(() => {})
   }
 
   unmount(runtimeId: string): void {
@@ -288,6 +316,7 @@ export class AppletRuntimeManager {
   destroy(): void {
     if (this.destroyed) return
     this.destroyed = true
+    this.scrollPositions.clear()
     this.owner.removeListener('closed', this.onOwnerClosed)
     clearInterval(this.watchdog)
     for (const id of this.runtimes.keys()) this.unmount(id)
@@ -313,6 +342,29 @@ export class AppletRuntimeManager {
     const { runtimeId, threadId, revisionId } = runtime.mount
     this.emit({ runtimeId, threadId, revisionId, type, payload })
   }
+  private rememberScroll(runtime: Runtime, payload: unknown): void {
+    const value = payload as { path: unknown; top: unknown; left: unknown } | null
+    if (
+      !value ||
+      !Array.isArray(value.path) ||
+      value.path.length > 16 ||
+      !value.path.every((index) => Number.isInteger(index) && index >= 0 && index <= 2048) ||
+      typeof value.top !== 'number' ||
+      typeof value.left !== 'number' ||
+      ![value.top, value.left].every((offset) => Number.isFinite(offset) && Math.abs(offset) <= 1e7)
+    )
+      return
+    const key = JSON.stringify([runtime.mount.threadId, runtime.mount.revisionId])
+    const positions = this.scrollPositions.get(key) ?? new Map()
+    const target = JSON.stringify(value.path)
+    if (positions.size >= 64 && !positions.has(target))
+      positions.delete(positions.keys().next().value!)
+    positions.set(target, { path: value.path, top: value.top, left: value.left })
+    this.scrollPositions.delete(key)
+    this.scrollPositions.set(key, positions)
+    if (this.scrollPositions.size > 32)
+      this.scrollPositions.delete(this.scrollPositions.keys().next().value!)
+  }
   private receive(runtime: Runtime, message: string): void {
     if (!message.startsWith(APPLET_EVENT_PREFIX) || message.length > 65536) return
     if (Date.now() - runtime.epoch >= 1000) {
@@ -327,7 +379,10 @@ export class AppletRuntimeManager {
       }
       if (event.type === 'heartbeat') runtime.heartbeat = Date.now()
       else if (event.type === 'ready') this.notify(runtime, 'ready', null)
-      else if (
+      else if (event.type === 'visual-changed') this.notify(runtime, 'visual-changed', null)
+      else if (event.type === 'scroll-position') {
+        this.rememberScroll(runtime, event.payload)
+      } else if (
         event.type === 'resize' &&
         typeof event.payload === 'number' &&
         Number.isFinite(event.payload)

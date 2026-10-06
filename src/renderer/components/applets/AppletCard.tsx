@@ -240,7 +240,12 @@ export const AppletCard = memo(function AppletCard({ reference }: { reference: A
         }, 80)
       }
       if (event.type === 'ready') { setReady(true); refreshSnapshot() }
-      if (event.type === 'state-changed') refreshSnapshot()
+      if (event.type === 'state-changed' || event.type === 'visual-changed') {
+        // Inner scroll/input changed pixels without changing saved state.
+        snapshotVersion++
+        setScrollImage(null)
+        refreshSnapshot()
+      }
       if (event.type === 'conversation-input' && typeof event.text === 'string')
         setConversationInput(event.text.slice(0, 8000))
     })

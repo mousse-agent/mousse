@@ -59,7 +59,7 @@ try {
     app.whenReady().then(async()=>{
       const owner=new BrowserWindow({width:800,height:600,frame:false,webPreferences:{preload:${JSON.stringify(join(directory, 'preload.cjs'))},sandbox:true,contextIsolation:true,nodeIntegration:false}});
       let saved={count:0};
-      const bundle={schemaVersion:1,appletId:'applet',revisionId:'revision',sourceHash:'hash',title:'Interactive costs',description:'Saved counter illustration',threadId:'thread',messageId:'message',turnId:'turn',createdAt:new Date().toISOString(),runtimePolicyVersion:1,source:{schemaVersion:1,title:'Interactive costs',description:'Saved counter illustration',stateVersion:1,html:'<main class="applet-canvas"><button id="increment">Add one</button><output id="count"></output></main>',css:'.applet-canvas{background:rgb(255,0,0);min-height:100vh}button{margin:20px;padding:15px}',js:'let count=mousseApplet.state?.count??0;document.querySelector("output").textContent=count;document.querySelector("button").onclick=()=>{count++;document.querySelector("output").textContent=count;mousseApplet.saveState({count})}'} };
+      const bundle={schemaVersion:1,appletId:'applet',revisionId:'revision',sourceHash:'hash',title:'Interactive costs',description:'Saved counter illustration',threadId:'thread',messageId:'message',turnId:'turn',createdAt:new Date().toISOString(),runtimePolicyVersion:1,source:{schemaVersion:1,title:'Interactive costs',description:'Saved counter illustration',stateVersion:1,html:'<main class="applet-canvas"><button id="increment">Add one</button><output id="count"></output><div id="nested" style="height:80px;overflow:auto"><div style="height:200px;background:rgb(255,0,0)">Top</div><div style="height:400px;background:rgb(0,255,255)">Scrolled content</div></div></main>',css:'.applet-canvas{background:rgb(255,0,0);min-height:100vh}button{margin:20px;padding:15px}',js:'let count=mousseApplet.state?.count??0;document.querySelector("output").textContent=count;document.querySelector("button").onclick=()=>{count++;document.querySelector("output").textContent=count;mousseApplet.saveState({count})}'} };
       const gui={on:()=>{},getWindowBindingForSender:()=>({profileId:'profile',epoch:1}),runWithSender:(_sender,callback)=>callback(),request:async(method,input)=>{assert.equal(input.threadId,'thread');if(method==='applets.get')return bundle;if(method==='applets.state.get')return{state:saved};if(method==='applets.state.save'){saved=input.state;return{ok:true}}throw new Error('Unexpected request '+method)}};
       registerAppletIpc((channel,handler)=>ipcMain.handle(channel,handler),gui,()=>[owner]);
       const guests=()=>webContents.getAllWebContents().filter(value=>value.id!==owner.webContents.id&&value.getURL().startsWith('mousse-applet:'));
@@ -89,6 +89,16 @@ try {
         if (${scrollOnly}) {
           await wait(()=>owner.webContents.executeJavaScript('!!document.querySelector(".mousse-applet-scroll-frame")'),'cached frame prepared before scrolling');
           await pause(800);
+          await first.executeJavaScript('document.querySelector("#nested").scrollTop=200');
+          await wait(()=>owner.webContents.executeJavaScript('document.querySelector(".mousse-applet-scroll-frame")===null'),'inner scroll invalidates stale snapshot');
+          await wait(()=>owner.webContents.executeJavaScript('!!document.querySelector(".mousse-applet-scroll-frame")'),'inner scroll refreshes snapshot');
+          await pause(1000);const cached=await owner.webContents.executeJavaScript('document.querySelector(".mousse-applet-scroll-frame").src');
+          const nested=await first.executeJavaScript('(()=>{const r=document.querySelector("#nested").getBoundingClientRect();return{x:Math.round(r.x+120),y:Math.round(r.y+40)}})()');
+          const cachedImage=nativeImage.createFromDataURL(cached),cachedSize=cachedImage.getSize(),cachedPixels=cachedImage.toBitmap();
+          const guestWidth=await first.executeJavaScript("innerWidth");const cacheScale=cachedSize.width/guestWidth;const cachedOffset=(Math.round(nested.y*cacheScale)*cachedSize.width+Math.round(nested.x*cacheScale))*4;
+          assert.deepEqual(Array.from(cachedPixels.subarray(cachedOffset,cachedOffset+3)),[255,255,0],'Cached frame depicts inner scroll position, not previous red content');
+          assert.equal(await first.executeJavaScript('document.querySelector("#nested").scrollTop'),200);
+          await pause(800);
           const capturesBefore=snapshotCalls;
           const firstId = first.id;
           const before = await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop');
@@ -105,10 +115,12 @@ try {
             owner.webContents.sendInputEvent({type:'mouseWheel',...header,deltaX:0,deltaY:n<6?-3:3,canScroll:true});
             await pause(16);
             assert.equal(owner.contentView.children[0].getVisible(),false,'Native guest cannot overlap scrolling header');
+            assert.equal(await first.executeJavaScript('document.querySelector("#nested").scrollTop'),200,'Inner scroll stays fixed during transcript gesture');
           }
           assert.equal(snapshotCalls,capturesBefore,'Scrolling never starts an expensive snapshot capture');
           await wait(()=>owner.contentView.children[0].getVisible(),'live guest resumes after gesture');
           assert.equal(guests()[0].id,firstId,'Resume does not reload guest');
+          assert.equal(await first.executeJavaScript('document.querySelector("#nested").scrollTop'),200,'Inner scroll survives native resume');
           assert.equal(await first.executeJavaScript('document.querySelector("output").textContent'),'1','Interaction survives header scrolling');
           const rect=await owner.webContents.executeJavaScript('(()=>{const r=document.querySelector(".mousse-applet-preview").getBoundingClientRect();return{top:r.top,bottom:r.bottom}})()');
           const image=nativeImage.createFromBuffer(execFileSync('import',['-window',String(owner.getNativeWindowHandle().readUInt32LE()),'png:-']));
@@ -117,6 +129,15 @@ try {
           assert.notDeepEqual(pixel(600,Math.round(rect.top)-5),[0,0,255],'Native preview does not cover toolbar');
           assert.deepEqual(pixel(600,Math.round(rect.top)+25),[0,0,255],'Live preview returns at current DOM position');
           assert.deepEqual(pixel(600,500),[0,255,0],'Composer stays clear after gesture');
+          await first.executeJavaScript('document.querySelector("#nested").scrollTop=250');
+          await wait(()=>owner.webContents.executeJavaScript('document.querySelector(".mousse-applet-scroll-frame")===null'),'second inner scroll invalidates old cache');
+          await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop+=5');
+          await pause(50);
+          assert.equal(await owner.webContents.executeJavaScript('document.querySelector(".mousse-applet-scroll-frame")===null'),true,'Immediate transcript gesture cannot show stale inner scroll position');
+          assert.equal(await first.executeJavaScript('document.querySelector("#nested").scrollTop'),250,'Immediate gesture preserves inner scroll state');
+          await wait(()=>owner.contentView.children[0].getVisible(),'immediate gesture resumes live guest');
+          assert.equal(await first.executeJavaScript('document.querySelector("#nested").scrollTop'),250,'Immediate gesture resume preserves inner scroll state');
+          for(const payload of [{path:Array(17).fill(0),top:0,left:0},{path:[-1],top:0,left:0},{path:[2049],top:0,left:0},{path:[],top:Infinity,left:0},{path:[],top:'250',left:0}])first.emit('console-message',{message:'__MOUSSE_APPLET_EVENT__'+JSON.stringify({type:'scroll-position',payload})});
           await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=700');
           await wait(()=>guests().length===0,'offscreen guest tears down during gesture');
           await owner.webContents.executeJavaScript('document.querySelector(".an-message-list").scrollTop=0');
@@ -124,7 +145,8 @@ try {
           assert.equal(guests().length,0,'Newly visible preview waits for scroll to settle');
           await wait(()=>guests().length===1,'newly visible preview mounts after gesture');
           await wait(()=>guests()[0].executeJavaScript('document.querySelector("output").textContent==="1"'),'offscreen return restores saved state');
-          console.log('Header wheel regression passed: passive scrolling with 600ms snapshot latency, no captures during gesture, cached DOM frame, no native header overlap, same guest/state after resume, composer clipping.');
+          assert.equal(await guests()[0].executeJavaScript('document.querySelector("#nested").scrollTop'),250,'Offscreen return restores nested scroll position');
+          console.log('Header wheel regression passed: passive scrolling with 600ms snapshot latency, no captures during gesture, cached DOM frame, no native header overlap, same guest/state after resume, current nested-scroll snapshot, immediate-gesture fallback, bounded validated offscreen scroll restoration, composer clipping.');
           owner.destroy();app.quit();return;
         }
         await pause(100);const image=nativeImage.createFromBuffer(execFileSync('import',['-window',String(owner.getNativeWindowHandle().readUInt32LE()),'png:-']));writeFileSync(${JSON.stringify(screenshot)},image.toPNG());

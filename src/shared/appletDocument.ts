@@ -20,7 +20,8 @@ export const APPLET_EVENT_PREFIX = '__MOUSSE_APPLET_EVENT__'
 export function appletDocument(
   source: AppletSource,
   state?: unknown,
-  appearance?: AppletAppearance
+  appearance?: AppletAppearance,
+  scrollPositions?: Array<{path:number[];top:number;left:number}>
 ): string {
   const nonce = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(24)), (value) =>
     value.toString(16).padStart(2, '0')
@@ -64,8 +65,12 @@ export function appletDocument(
  addEventListener('error',event=>{event.preventDefault();send('error',String(event.message).slice(0,2000))});
  addEventListener('unhandledrejection',event=>{event.preventDefault();send('error','An applet promise failed.')});
  addEventListener('DOMContentLoaded',()=>{
-  const timers=new WeakMap();document.addEventListener('scroll',event=>{const node=event.target===document?document.documentElement:event.target;if(!(node instanceof Element))return;node.classList.add('mousse-scrolling');clearTimeout(timers.get(node));timers.set(node,setTimeout(()=>{node.classList.remove('mousse-scrolling');timers.delete(node)},900))},true);
+
+  let visualTimer,visualPending=false;const visualChanged=()=>{visualPending=true;if(visualTimer)return;send('visual-changed',null);visualPending=false;visualTimer=setTimeout(()=>{visualTimer=undefined;if(visualPending)visualChanged()},80)};
+  for(const type of ['input','change','click'])document.addEventListener(type,visualChanged,true);
+  const timers=new WeakMap();document.addEventListener('scroll',event=>{const node=event.target===document?document.documentElement:event.target;if(!(node instanceof Element))return;visualChanged();const path=[];let cursor=node;while(cursor&&cursor!==document.documentElement&&path.length<16){const parent=cursor.parentElement;if(!parent)break;path.unshift(Array.prototype.indexOf.call(parent.children,cursor));cursor=parent}if(cursor===document.documentElement)send('scroll-position',{path,top:node.scrollTop,left:node.scrollLeft});node.classList.add('mousse-scrolling');clearTimeout(timers.get(node));timers.set(node,setTimeout(()=>{node.classList.remove('mousse-scrolling');timers.delete(node)},900))},true);
   const decorate=root=>{if(!(root instanceof Element))return;const nodes=[...(root.matches('[data-mousse-icon]')?[root]:[]),...root.querySelectorAll('[data-mousse-icon]')].slice(0,256);for(const node of nodes){const name=node.getAttribute('data-mousse-icon'),key=JSON.stringify([name,node.getAttribute('data-icon-size'),node.getAttribute('data-icon-label')]);if(node.dataset.mousseIconRendered===key)continue;try{node.replaceChildren(makeIcon(name,{size:Number(node.getAttribute('data-icon-size'))||16,label:node.getAttribute('data-icon-label')||''}));node.dataset.mousseIconRendered=key}catch{}}};decorate(document.body);new MutationObserver(records=>{for(const record of records){if(record.type==='attributes')decorate(record.target);else for(const node of record.addedNodes)decorate(node)}}).observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['data-mousse-icon','data-icon-size','data-icon-label']});
-  send('ready',null);let timer;new ResizeObserver(()=>{clearTimeout(timer);timer=setTimeout(()=>send('resize',Math.ceil(document.documentElement.scrollHeight)),100)}).observe(document.body)});
+  setTimeout(()=>{
+  const savedScroll=${json(scrollPositions??[])};for(const position of savedScroll){let node=document.documentElement;for(const index of position.path)node=node?.children[index];if(node){node.scrollTop=position.top;node.scrollLeft=position.left}};send('ready',null)},0);let timer;new ResizeObserver(()=>{clearTimeout(timer);timer=setTimeout(()=>send('resize',Math.ceil(document.documentElement.scrollHeight)),100)}).observe(document.body)});
 })();</script></head><body>${source.html}<style id="mousse-applet-final-style">${APPLET_HOST_STYLES}</style><script nonce="${nonce}">${script}</script></body></html>`
 }
