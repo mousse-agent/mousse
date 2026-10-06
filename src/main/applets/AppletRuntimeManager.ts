@@ -223,7 +223,6 @@ export class AppletRuntimeManager {
         nativeClip.y + nativeClip.height
       )
     runtime.visible = right > left && bottom > top
-    runtime.container.setVisible(runtime.visible)
     runtime.container.setBounds({
       x: Math.round(left),
       y: Math.round(top),
@@ -236,6 +235,8 @@ export class AppletRuntimeManager {
       width: Math.round(nativeBounds.width),
       height: Math.round(nativeBounds.height)
     })
+    // Move the hidden surface before revealing it at the settled DOM position.
+    runtime.container.setVisible(runtime.visible)
     runtime.mount.bounds = bounds
     runtime.mount.clip = clip
   }
