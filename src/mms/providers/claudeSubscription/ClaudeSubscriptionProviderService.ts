@@ -11,6 +11,8 @@ import type {
 } from '../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
+import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
+import { AppError } from '../../../shared/errors'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import type { LoginSession } from '../LoginSession'
@@ -155,6 +157,12 @@ export class ClaudeSubscriptionProviderService {
       this.settings = {}
     }
   }
+  standaloneWorkspace(threadId: string): string {
+    const directory = join(this.profileHome, 'providers', CLAUDE_SUBSCRIPTION_PROVIDER_ID, 'workspaces', historyKey(threadId))
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    return directory
+  }
+
   private save(): void {
     mkdirSync(this.configDir, { recursive: true, mode: 0o700 })
     atomicWriteJsonSync(this.settingsPath, this.settings)
@@ -381,7 +389,7 @@ export class ClaudeSubscriptionProviderService {
   }
   async chat(input: ClaudeSubscriptionChatInput): Promise<string> {
     input.signal?.throwIfAborted()
-    if (!this.configured()) throw new Error('Connect Claude Subscription in Settings first')
+    if (!this.configured()) throw new AppError({ code: 'claude_subscription_not_connected', message: 'Connect Claude Subscription in Settings → Providers first.', errorInfo: { category: 'unavailable', retryable: false } })
     if (this.activeThreads.has(input.threadId))
       throw new Error('A Claude turn is already running for this thread')
     this.activeThreads.add(input.threadId)
@@ -426,7 +434,7 @@ export class ClaudeSubscriptionProviderService {
     }
     try {
       if (!(await this.authenticated(controller.signal)))
-        throw new Error('Claude subscription sign-in expired. Reconnect in Settings.')
+        throw new AppError({ code: 'claude_subscription_sign_in_required', message: 'Claude subscription sign-in expired. Reconnect in Settings → Providers.', errorInfo: { category: 'unavailable', retryable: false } })
       controller.signal.throwIfAborted()
       input.signal?.throwIfAborted()
       controller.signal.throwIfAborted()
@@ -456,9 +464,13 @@ export class ClaudeSubscriptionProviderService {
           session_id: resume ?? ''
         }
       }
+      const selected = parseThinkingSuffixFromModelId(input.model)
+      const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(selected.effort ?? '')
+        ? selected.effort as Options['effort'] : undefined
       const options: Options = {
         ...this.options(input.cwd, controller),
-        model: input.model,
+        model: selected.baseId,
+        effort,
         resume,
         permissionMode: input.mode ?? 'default',
         // Ask hooks ensure ambient rules cannot silently approve writes or shell calls.

@@ -2894,7 +2894,8 @@ export class OrchestratorService extends EventEmitter {
         if (antigravityTurn && mode === 'plan') throw new Error('Use Antigravity’s /plan command in a chat turn')
         const model = selectedModel.model
         const nativeProvider = claudeSubscriptionTurn ? this.claudeSubscription : this.antigravity
-        if (!nativeProvider || !session.projectCwd) throw new Error(`${selectedModel.llmProvider} requires a project workspace`)
+        if (!nativeProvider || (antigravityTurn && !session.projectCwd)) throw new Error(`${selectedModel.llmProvider} requires a project workspace`)
+        const nativeCwd = session.projectCwd ?? this.claudeSubscription!.standaloneWorkspace(session.threadId)
         let started = false
         let thinkingStarted = false
         let thinkingText = ''
@@ -2907,7 +2908,7 @@ export class OrchestratorService extends EventEmitter {
               this.handleStreamingThinkingEvent({ phase: 'delta', content })
             }
           } : {}),
-          threadId: session.threadId, cwd: session.projectCwd, model,
+          threadId: session.threadId, cwd: nativeCwd, model,
           prompt: userContent, images, signal: turn.abort.signal,
           history: nativeAgentHistory(this.nativeContext, turnNativeStartBoundary.messageIndex),
           drainSteer: () => {

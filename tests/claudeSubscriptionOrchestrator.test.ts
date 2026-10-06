@@ -4,9 +4,9 @@ import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
-import type { ClaudeSubscriptionProviderService } from '../src/mms/providers/antigravity/ClaudeSubscriptionProviderService'
+import type { ClaudeSubscriptionProviderService } from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 
-it.each(['agent', 'plan'] as const)('routes %s turns through Claude and persists replies and accepted steer', async (mode) => {
+it.each([['agent', true], ['plan', true], ['agent', false], ['plan', false]] as const)('routes %s turns with project=%s through Claude', async (mode, projectBound) => {
   const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-claude-orchestrator-'))
   const workspace = join(home, 'workspace')
   mkdirSync(workspace)
@@ -24,13 +24,14 @@ it.each(['agent', 'plan'] as const)('routes %s turns through Claude and persists
         input.onSteer?.('accepted guidance')
       }
       expect(input.mode).toBe(mode === 'plan' ? 'plan' : 'default')
+      expect(input.cwd).toBe(projectBound ? workspace : main.claudeSubscription.standaloneWorkspace(input.threadId))
       input.onThinking?.('Considering the request')
       input.onText('Claude answer')
       return 'Claude answer'
     })
     const committed = vi.spyOn(main.claudeSubscription, 'commitConversation')
     const project = main.projects.openProject(workspace)
-    const thread = main.threads.createThread('Existing conversation', project.id, workspace)
+    const thread = projectBound ? main.threads.createThread('Existing conversation', project.id, workspace) : main.threads.createThread('Standalone conversation')
     await main.orchestrator.send({ content: 'first request', mode }, false, {
       threadId: thread.id
     })

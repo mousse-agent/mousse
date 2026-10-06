@@ -375,3 +375,18 @@ describe('Claude Subscription native provider', () => {
   })
 
 })
+
+it.each(['low', 'medium', 'high', 'xhigh', 'max'])('passes %s effort separately from the Claude model alias', async (effort) => {
+  const captured: Options[] = []
+  const { service, home } = fixture(({ options }) => { captured.push(options); return fakeQuery([result]) })
+  await service.chat({ ...chatInput(home), model: `opus:${effort}` })
+  expect(captured[0]).toMatchObject({ model: 'opus', effort })
+})
+
+it('keeps standalone workspaces profile-owned even for non-path thread IDs', () => {
+  const { service, home } = fixture(() => fakeQuery())
+  const path = service.standaloneWorkspace('../../outside')
+  expect(path).toMatch(new RegExp('/workspaces/[a-f0-9]{64}$'))
+  expect(path.startsWith(home)).toBe(true)
+  expect(service.standaloneWorkspace('../../outside')).toBe(path)
+})
