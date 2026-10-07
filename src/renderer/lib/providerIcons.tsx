@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import xaiLogo from '../assets/xai_logo.webp'
 import antgroupAsset from '../assets/provider-icons/antgroup-color.svg'
 import anthropicAsset from '../assets/provider-icons/anthropic.svg'
+import claudeAsset from '../assets/provider-icons/claude.svg'
 import awsAsset from '../assets/provider-icons/aws-color.svg'
 import azureAsset from '../assets/provider-icons/azure-color.svg'
 import basetenAsset from '../assets/provider-icons/baseten.svg'
@@ -141,6 +142,7 @@ const PROVIDER_ICONS: Record<string, (props: { size?: number; className?: string
 const PROVIDER_ASSET_ICONS: Record<string, { src: string; monochrome?: boolean }> = {
   antgroup: { src: antgroupAsset },
   anthropic: { src: anthropicAsset, monochrome: true },
+  claude: { src: claudeAsset, monochrome: true },
   aws: { src: awsAsset },
   azure: { src: azureAsset },
   baseten: { src: basetenAsset, monochrome: true },
@@ -205,6 +207,7 @@ function ProviderAssetIcon({
 
 function normalizeProviderId(providerId: string): string {
   const id = providerId.toLowerCase()
+  if (id === 'claude' || id === 'claude-subscription') return 'claude'
   if (id.includes('anthropic')) return 'anthropic'
   if (id.includes('ant-ling') || id.includes('antling')) return 'antgroup'
   if (id.includes('azure')) return 'azure'
