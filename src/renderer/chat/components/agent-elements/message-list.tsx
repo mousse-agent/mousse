@@ -1653,7 +1653,7 @@ function AssistantParts({
       return brand === 'anthropic' || selection.provider === 'claude-subscription' ? 'claude' : brand;
     };
     return <div role="status" aria-label={`Context handoff: ${handoff.from.model} to ${handoff.to.model}`}
-      className="flex items-center gap-2 py-1 text-xs text-muted-foreground">
+      className="flex w-full items-center justify-center gap-2 py-1 text-xs text-muted-foreground">
       <span className="inline-flex items-center gap-1.5" title={handoff.from.provider}><ProviderIcon providerId={iconId(handoff.from)} size={14} />{handoff.from.model}</span>
       <span aria-hidden="true">→</span>
       <span className="inline-flex items-center gap-1.5" title={handoff.to.provider}><ProviderIcon providerId={iconId(handoff.to)} size={14} />{handoff.to.model}</span>
