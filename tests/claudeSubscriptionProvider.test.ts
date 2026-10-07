@@ -502,3 +502,31 @@ it('keeps ask permissions while recording successful official file edits only on
   await service.chat({ ...chatInput(home), onLineEdits })
   expect(onLineEdits).toHaveBeenCalledExactlyOnceWith(2)
 })
+
+
+it('starts a fresh Claude session with canonical history when the model changes', async () => {
+  const inputs: Array<{ options: Options; prompt: unknown }> = []
+  const { service, home } = fixture((input) => { inputs.push(input); return fakeQuery([result]) })
+  await service.chat(chatInput(home))
+  service.commitConversation('thread', 'full canonical history')
+  await service.chat({ ...chatInput(home), model: 'opus:medium', history: 'full canonical history' })
+  expect(inputs[1].options.resume).toBeUndefined()
+  const prompt: unknown[] = []
+  for await (const message of inputs[1].prompt as AsyncIterable<unknown>) prompt.push(message)
+  expect(JSON.stringify(prompt)).toContain('full canonical history')
+  expect(inputs[1].options.model).toBe('opus')
+  service.commitConversation('thread', 'next history')
+  await service.chat({ ...chatInput(home), model: 'opus:high', history: 'next history' })
+  expect(inputs[2].options.resume).toBe('vendor-session')
+})
+
+it('reports the vendor OAuth refresh lock as recoverable without committing a session', async () => {
+  const { service, home, settings } = fixture(() => fakeQuery([{
+    ...result, subtype: 'error_during_execution', is_error: true,
+    errors: ['Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh.']
+  }]))
+  await expect(service.chat(chatInput(home))).rejects.toMatchObject({
+    code: 'claude_subscription_auth_refresh_busy', errorInfo: { category: 'unavailable', retryable: true }
+  })
+  expect(settings().sessions?.thread).toBeUndefined()
+})

@@ -1644,6 +1644,15 @@ function AssistantParts({
     toolRenderers,
   ]);
 
+  const handoff = (msg.metadata as { contextHandoff?: { from: { provider: string; model: string }; to: { provider: string; model: string } } } | undefined)?.contextHandoff;
+  if (handoff) {
+    return <div role="status" aria-label={`Context handoff: ${handoff.from.model} to ${handoff.to.model}`}
+      className="flex items-center gap-2 py-1 text-xs text-muted-foreground">
+      <span title={handoff.from.provider}>{handoff.from.model}</span>
+      <span aria-hidden="true">→</span>
+      <span title={handoff.to.provider}>{handoff.to.model}</span>
+    </div>;
+  }
   const compactionMetadata = msg.metadata as { compaction?: boolean; compacting?: boolean } | undefined;
   if (compactionMetadata?.compaction) {
     const text = parts.filter(isTextPart).map((part) => part.text).join('');
