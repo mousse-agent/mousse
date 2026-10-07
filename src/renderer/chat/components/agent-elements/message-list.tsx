@@ -10,6 +10,8 @@ import React, {
 } from "react";
 import type { UIMessage, ChatStatus } from "ai";
 import { cn } from "./utils/cn";
+import { ProviderIcon } from "../../../lib/providerIcons";
+import { inferModelBrand } from "../../../../shared/modelVariants";
 
 import { UserMessage } from "./user-message";
 import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
@@ -1646,11 +1648,15 @@ function AssistantParts({
 
   const handoff = (msg.metadata as { contextHandoff?: { from: { provider: string; model: string }; to: { provider: string; model: string } } } | undefined)?.contextHandoff;
   if (handoff) {
+    const iconId = (selection: { provider: string; model: string }) => {
+      const brand = inferModelBrand(selection.model, undefined, selection.provider).brandId;
+      return brand === 'anthropic' || selection.provider === 'claude-subscription' ? 'claude' : brand;
+    };
     return <div role="status" aria-label={`Context handoff: ${handoff.from.model} to ${handoff.to.model}`}
       className="flex items-center gap-2 py-1 text-xs text-muted-foreground">
-      <span title={handoff.from.provider}>{handoff.from.model}</span>
+      <span className="inline-flex items-center gap-1.5" title={handoff.from.provider}><ProviderIcon providerId={iconId(handoff.from)} size={14} />{handoff.from.model}</span>
       <span aria-hidden="true">→</span>
-      <span title={handoff.to.provider}>{handoff.to.model}</span>
+      <span className="inline-flex items-center gap-1.5" title={handoff.to.provider}><ProviderIcon providerId={iconId(handoff.to)} size={14} />{handoff.to.model}</span>
     </div>;
   }
   const compactionMetadata = msg.metadata as { compaction?: boolean; compacting?: boolean } | undefined;

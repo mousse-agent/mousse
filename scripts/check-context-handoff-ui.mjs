@@ -46,6 +46,7 @@ try {
       try{await win.loadFile(join(process.argv[2],'fixture.html'));await pause(100);const js=code=>win.webContents.executeJavaScript(code);const click=async selector=>{await js('document.querySelector('+JSON.stringify(selector)+').click()');await pause(30)};
         assert.equal(await js('document.querySelectorAll("[role=status]").length'),1);
         assert.equal(await js('document.querySelector("[role=status]").textContent'),'gpt-6.1-sol→opus:medium');
+        assert.equal(await js('document.querySelectorAll("[role=status] img, [role=status] svg").length'),2);
         const text=await js('document.body.textContent');assert(text.indexOf('New request')<text.indexOf('gpt-6.1-sol'));assert(text.indexOf('opus:medium')<text.indexOf('New answer'));
         console.log('Context handoff UI passed: one compact marker, old model, arrow, new model, between new prompt and answer.');win.destroy();app.quit();
       }catch(error){console.error(error);win.destroy();app.exit(1)}
