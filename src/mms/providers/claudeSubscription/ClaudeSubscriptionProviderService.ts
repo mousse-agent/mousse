@@ -29,6 +29,7 @@ export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
 type SavedSession = {
   sessionId: string
   cwd: string
+  model?: string
   historyKey?: string
   usageBaseline?: ClaudeUsageBaseline
 }
@@ -494,7 +495,7 @@ export class ClaudeSubscriptionProviderService {
     this.readyToCommit.delete(input.threadId)
     const saved = this.settings.sessions?.[input.threadId]
     const resume =
-      saved?.cwd === resolve(input.cwd) && saved.historyKey === historyKey(input.history ?? '')
+      saved?.cwd === resolve(input.cwd) && saved.model === parseThinkingSuffixFromModelId(input.model).baseId && saved.historyKey === historyKey(input.history ?? '')
         ? saved.sessionId
         : undefined
     const metrics = new ClaudeMetricsCollector(resume, saved?.usageBaseline)
@@ -738,10 +739,17 @@ export class ClaudeSubscriptionProviderService {
             if (
               (message.subtype !== 'success' || message.is_error) &&
               !(interruptRequested && steers.length)
-            )
-              throw new Error(
-                'errors' in message ? message.errors.join('\n') : 'Claude Code turn failed'
-              )
+            ) {
+              const failure = 'errors' in message ? message.errors.join('\n') : 'Claude Code turn failed'
+              if (/Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh/i.test(failure)) {
+                throw new AppError({
+                  code: 'claude_subscription_auth_refresh_busy',
+                  message: 'Claude is refreshing your subscription sign-in. Your conversation is saved. Wait a minute and send your message again; if this continues, reconnect Claude Subscription in Settings → Providers.',
+                  errorInfo: { category: 'unavailable', retryable: true }
+                })
+              }
+              throw new Error(failure)
+            }
             if (text.length === turnTextLength && 'result' in message) {
               text += message.result
               input.onText(text)
@@ -776,7 +784,7 @@ export class ClaudeSubscriptionProviderService {
       if (!success || !sessionId) throw new Error('Claude Code ended before completing the turn')
       this.settings.sessions = {
         ...this.settings.sessions,
-        [input.threadId]: { sessionId, cwd: resolve(input.cwd), usageBaseline: metrics.snapshot() }
+        [input.threadId]: { sessionId, cwd: resolve(input.cwd), model: selected.baseId, usageBaseline: metrics.snapshot() }
       }
       this.save()
       this.readyToCommit.add(input.threadId)

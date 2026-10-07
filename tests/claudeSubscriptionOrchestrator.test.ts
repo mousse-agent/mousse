@@ -198,3 +198,40 @@ it.each([false, true])('retries Claude context overflow only before provider pro
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+it('admits a model handoff only on send, retains history and persists one marker across reload', async () => {
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-model-handoff-'))
+  vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+  const main = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+  await main.start()
+  try {
+    main.settings.set({ provider: { llmProvider: 'claude-subscription', model: 'opus' } })
+    const thread = main.threads.createThread('Model handoff')
+    const histories: string[] = []
+    vi.spyOn(main.claudeSubscription, 'chat').mockImplementation(async input => {
+      histories.push(input.history ?? '')
+      input.onText(`Answer from ${input.model}`)
+      return `Answer from ${input.model}`
+    })
+    await main.orchestrator.send({ content: 'first', mode: 'agent' }, false, { threadId: thread.id })
+    main.orchestrator.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'sonnet' })
+    main.orchestrator.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'haiku' })
+    expect(main.orchestrator.getMessages(thread.id).filter(m=>m.kind==='context_handoff')).toHaveLength(0)
+    await main.orchestrator.send({ content: 'second', mode: 'agent' }, false, { threadId: thread.id })
+    const data = main.threads.loadThreadData(thread.id)
+    const markers = data.messages.filter(m=>m.kind==='context_handoff')
+    expect(markers).toHaveLength(1)
+    expect(markers[0].contextHandoff).toEqual({ from:{provider:'claude-subscription',model:'opus'}, to:{provider:'claude-subscription',model:'haiku'} })
+    const userIndex = data.messages.findIndex(m=>m.content==='second')
+    expect(data.messages[userIndex+1].kind).toBe('context_handoff')
+    expect(histories[1]).toContain('Answer from opus')
+    expect(histories[1]).not.toContain('→')
+    main.orchestrator.markThreadRestored(thread.id)
+    await main.orchestrator.send({ content: 'third', mode: 'agent' }, false, { threadId: thread.id })
+    expect(main.threads.loadThreadData(thread.id).messages.filter(m=>m.kind==='context_handoff')).toHaveLength(1)
+  } finally {
+    await main.stop()
+    vi.restoreAllMocks()
+    rmSync(home, { recursive: true, force: true })
+  }
+})

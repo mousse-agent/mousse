@@ -1,3 +1,4 @@
+import { contextHandoff, previousTurnModel } from './contextHandoff'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
 import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
@@ -2747,6 +2748,7 @@ export class OrchestratorService extends EventEmitter {
     const externalEffects = mode === 'agent' || mode === 'build' || typeof mode === 'object'
       ? [{ kind: 'unknown' as const, description: 'Agent tools may affect processes, ignored files, or external services; code undo only restores tracked workspace changes.', reversible: false as const }]
       : []
+    const previousModel = previousTurnModel(session.messages, this.nativeContext)
     const turnPresentationStart = session.messages.length
     const turnNativeStartBoundary = {
       messageIndex: this.nativeContext.messages.length,
@@ -2923,6 +2925,23 @@ export class OrchestratorService extends EventEmitter {
       ...(this.antigravity?.configured() ? ['antigravity'] : []),
       ...(this.claudeSubscription?.configured() ? ['claude-subscription'] : [])
     ])
+    if (displayUserMessage && !reuseLastUser) {
+      const selection = { provider: selectedModel.llmProvider, model: selectedModel.model }
+      const admittedUser = session.messages.slice(turnPresentationStart).find(message => message.role === 'user' && !message.hidden)
+      if (admittedUser) {
+        admittedUser.modelSelection = selection
+        this.emitMessageUpdated(admittedUser)
+        const handoff = contextHandoff(previousModel, selection)
+        if (handoff) {
+          const marker: ChatMessage = { id: uuidv4(), role: 'assistant', kind: 'context_handoff',
+            content: `${handoff.from.model} → ${handoff.to.model}`, contextHandoff: handoff,
+            timestamp: new Date().toISOString(), turnId }
+          session.messages.push(marker)
+          this.emitMessageAdded(marker)
+        }
+        this.persist(true)
+      }
+    }
     const antigravityTurn = selectedModel.llmProvider === 'antigravity'
     const claudeSubscriptionTurn = selectedModel.llmProvider === 'claude-subscription'
     const nativeAgentTurn = antigravityTurn || claudeSubscriptionTurn

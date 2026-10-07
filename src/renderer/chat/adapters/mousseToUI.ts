@@ -285,6 +285,15 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
       continue
     }
 
+    if (msg.kind === 'context_handoff' && msg.contextHandoff) {
+      base.metadata = { ...base.metadata as object, contextHandoff: msg.contextHandoff }
+      base.parts = [{ type: 'text', text: msg.content } as unknown as UIMessage['parts'][number]]
+      base.role = 'assistant'
+      out.push(base)
+      lastAssistantText = null
+      continue
+    }
+
     if (msg.kind === 'progress' || msg.kind === 'warning' || msg.kind === 'context_compaction') {
       if (msg.kind === 'context_compaction') base.metadata = { ...base.metadata as object, compaction: true, compacting: msg.streaming === true }
       base.parts = [{ type: 'text', text: msg.content } as unknown as UIMessage['parts'][number]]
