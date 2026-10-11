@@ -4,6 +4,9 @@ import { writeFileSync } from 'node:fs'
 
 const directory = process.env.MOUSSE_SIDEBAR_MOTION_DIRECTORY!
 app.setPath('userData', join(directory, 'user-data'))
+// Software compositing, as in the other Electron fixtures: CI's Linux GPU process
+// can stall frames long enough to skip the 200ms transition entirely.
+app.disableHardwareAcceleration()
 app.commandLine.appendSwitch('disable-renderer-backgrounding')
 app.commandLine.appendSwitch('disable-background-timer-throttling')
 

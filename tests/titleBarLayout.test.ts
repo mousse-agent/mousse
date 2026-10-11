@@ -30,9 +30,10 @@ describe('title bar layout', () => {
 
   it('keeps overlay-page headers clear of the macOS traffic lights', () => {
     // Back buttons must not crowd the native red/yellow/green cluster:
-    // inset plus breathing room, darwin only.
+    // inset plus breathing room, darwin only. Every overlay drag header is
+    // an `.overlay-titlebar`, which carries the inset.
     expect(globalStyles).toMatch(
-      /html\.platform-darwin \.overlay-page-drag-header\s*\{[\s\S]*?padding-left:\s*calc\(var\(--titlebar-traffic-light-inset\)[^;]*\)/
+      /html\.platform-darwin \.overlay-titlebar\s*\{[^}]*?padding-left:\s*calc\(var\(--titlebar-traffic-light-inset\)\s*\+[^;]*\)/
     )
   })
 })
