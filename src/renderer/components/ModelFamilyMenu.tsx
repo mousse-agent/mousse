@@ -504,7 +504,7 @@ function ProfileModelFamilyMenu({
           onClick={() => selectEntry(entry)}
         >
           <span className="model-picker-row-icon">
-            <ProviderIcon providerId={entry.brandId} size={16} />
+            <ProviderIcon providerId={entry.brandId === 'anthropic' ? 'claude' : entry.brandId} size={16} />
           </span>
           <span className="model-picker-row-text">
             <span className="model-picker-row-title">{entry.family.familyLabel}</span>
