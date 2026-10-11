@@ -390,3 +390,115 @@ it('keeps standalone workspaces profile-owned even for non-path thread IDs', () 
   expect(path.startsWith(home)).toBe(true)
   expect(service.standaloneWorkspace('../../outside')).toBe(path)
 })
+
+const measuredResult = (input = 10, output = 5, cost = 0.1, uuid = 'usage-result') => ({
+  ...result,
+  uuid,
+  total_cost_usd: cost,
+  usage: {
+    input_tokens: input,
+    output_tokens: output,
+    cache_read_input_tokens: 2,
+    cache_creation_input_tokens: 1
+  },
+  modelUsage: {
+    'claude-sonnet-4-6': {
+      inputTokens: input,
+      outputTokens: output,
+      cacheReadInputTokens: 2,
+      cacheCreationInputTokens: 1,
+      costUSD: cost,
+      contextWindow: 200000
+    }
+  }
+})
+
+it('reports measured usage once, persists baselines and subtracts them after daemon restart', async () => {
+  const { service, home, settings, runAuth } = fixture(() => fakeQuery([measuredResult()]))
+  const first = vi.fn()
+  await service.chat({ ...chatInput(home), onMetrics: first })
+  service.commitConversation('thread', 'canonical')
+  expect(first).toHaveBeenCalledOnce()
+  expect(first.mock.calls[0][0].usage).toMatchObject({ input: 10, output: 5, cost: { total: 0.1 } })
+  expect(settings().sessions.thread.usageBaseline.sessionId).toBe('vendor-session')
+  const restarted = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+    runAuth,
+    query: () => fakeQuery([measuredResult(14, 7, 0.15, 'next-result')])
+  })
+  const second = vi.fn()
+  await restarted.chat({ ...chatInput(home), history: 'canonical', onMetrics: second })
+  expect(second).toHaveBeenCalledOnce()
+  expect(second.mock.calls[0][0].usage).toMatchObject({
+    input: 4,
+    output: 2,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cost: { total: expect.closeTo(0.05) }
+  })
+})
+
+it('reports available SDK usage on failure and caller abort without committing history', async () => {
+  const failed = fixture(() =>
+    fakeQuery([
+      { ...measuredResult(), subtype: 'error_during_execution', is_error: true, errors: ['failed'] }
+    ])
+  )
+  const onFailure = vi.fn()
+  await expect(
+    failed.service.chat({ ...chatInput(failed.home), onMetrics: onFailure })
+  ).rejects.toThrow('failed')
+  expect(onFailure).toHaveBeenCalledOnce()
+  expect(onFailure.mock.calls[0][0].usage.input).toBe(10)
+  expect(failed.settings().sessions.thread.historyKey).toBeUndefined()
+  const controller = new AbortController()
+  const aborted = fixture(() => {
+    const q = fakeQuery()
+    q[Symbol.asyncIterator] = async function* () {
+      controller.abort()
+      yield measuredResult() as never
+    }
+    return q
+  })
+  const onAbort = vi.fn()
+  await expect(
+    aborted.service.chat({
+      ...chatInput(aborted.home),
+      signal: controller.signal,
+      onMetrics: onAbort
+    })
+  ).rejects.toThrow()
+  expect(onAbort).toHaveBeenCalledOnce()
+  expect(onAbort.mock.calls[0][0].usage.input).toBe(10)
+  expect(aborted.settings().sessions.thread.historyKey).toBeUndefined()
+})
+
+it('keeps ask permissions while recording successful official file edits only once', async () => {
+  const { service, home } = fixture(({ options }) => {
+    const q = fakeQuery()
+    q[Symbol.asyncIterator] = async function* () {
+      const pre = options.hooks!.PreToolUse![0].hooks[0]
+      const post = options.hooks!.PostToolUse![0].hooks[0]
+      const event = {
+        hook_event_name: 'PreToolUse',
+        tool_use_id: 'native-write',
+        tool_name: 'Write',
+        tool_input: { file_path: 'written' }
+      }
+      expect(
+        await pre(event as never, 'native-write', { signal: new AbortController().signal })
+      ).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } })
+      writeFileSync(join(home, 'written'), 'one\ntwo')
+      await post({ ...event, hook_event_name: 'PostToolUse' } as never, 'native-write', {
+        signal: new AbortController().signal
+      })
+      await post({ ...event, hook_event_name: 'PostToolUse' } as never, 'native-write', {
+        signal: new AbortController().signal
+      })
+      yield result as never
+    }
+    return q
+  })
+  const onLineEdits = vi.fn()
+  await service.chat({ ...chatInput(home), onLineEdits })
+  expect(onLineEdits).toHaveBeenCalledExactlyOnceWith(2)
+})

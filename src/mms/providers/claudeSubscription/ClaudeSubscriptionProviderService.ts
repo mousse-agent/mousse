@@ -7,7 +7,8 @@ import type { Options, Query, SDKUserMessage } from '@anthropic-ai/claude-agent-
 import type {
   ConfiguredProvider,
   ProviderLoginOption,
-  ProviderLoginResult
+  ProviderLoginResult,
+  ProviderUsage
 } from '../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
@@ -16,9 +17,21 @@ import { AppError } from '../../../shared/errors'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import type { LoginSession } from '../LoginSession'
+import {
+  ClaudeMetricsCollector,
+  ClaudeNativeEditCounter,
+  type ClaudeSubscriptionMetrics,
+  type ClaudeUsageBaseline
+} from './metrics'
+import { parseClaudeSubscriptionUsage } from './usage'
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
-type SavedSession = { sessionId: string; cwd: string; historyKey?: string }
+type SavedSession = {
+  sessionId: string
+  cwd: string
+  historyKey?: string
+  usageBaseline?: ClaudeUsageBaseline
+}
 type Settings = {
   signedIn?: boolean
   binaryPath?: string
@@ -37,6 +50,8 @@ export type ClaudeSubscriptionChatInput = {
   mode?: 'plan' | 'default'
   onText: (text: string) => void
   onThinking?: (text: string) => void
+  onMetrics?: (report: ClaudeSubscriptionMetrics) => void
+  onLineEdits?: (lines: number) => void
   drainSteer?: () => string | undefined
   onSteer?: (text: string) => void
   onTool?: (event: {
@@ -380,6 +395,79 @@ export class ClaudeSubscriptionProviderService {
       signal?.removeEventListener('abort', cancel)
     }
   }
+  async getUsage(cwd: string, signal?: AbortSignal): Promise<ProviderUsage> {
+    const unavailable = parseClaudeSubscriptionUsage(undefined)
+    if (!this.configured()) return unavailable
+    const controller = new AbortController()
+    this.controllers.add(controller)
+    const cancel = () => controller.abort()
+    signal?.addEventListener('abort', cancel, { once: true })
+    if (signal?.aborted) cancel()
+    let query: Query | undefined
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, 15_000)
+    const aborted = new Promise<never>((_, reject) => {
+      const fail = () => reject(new Error(timedOut ? 'Usage check timed out' : 'Usage check canceled'))
+      controller.signal.addEventListener('abort', fail, { once: true })
+      if (controller.signal.aborted) fail()
+    })
+    // Pre-aborted callers may leave before reaching either race.
+    void aborted.catch(() => {})
+    try {
+      controller.signal.throwIfAborted()
+      const idle = async function* (): AsyncGenerator<SDKUserMessage> {
+        if (controller.signal.aborted) return
+        await new Promise<void>((resolveIdle) =>
+          controller.signal.addEventListener('abort', () => resolveIdle(), { once: true })
+        )
+      }
+      const pending = this.createQuery(idle(), {
+        ...this.options(cwd, controller),
+        tools: [],
+        canUseTool: async () => ({ behavior: 'deny', message: 'Usage checks cannot run tools' })
+      }).then((created) => {
+        // Initialization may ignore abort: dispose a late query after this request has settled.
+        if (controller.signal.aborted) created.close()
+        else query = created
+        return created
+      })
+      query = await Promise.race([pending, aborted])
+      controller.signal.throwIfAborted()
+      const usageQuery = query as Query & {
+        usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: (
+          opts: { skipBehaviors: boolean }
+        ) => Promise<unknown>
+      }
+      const readUsage = usageQuery.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET
+      if (typeof readUsage !== 'function') return unavailable
+      const response = await Promise.race([
+        readUsage.call(query, { skipBehaviors: true }),
+        aborted
+      ])
+      controller.signal.throwIfAborted()
+      return parseClaudeSubscriptionUsage(response)
+    } catch {
+      return {
+        ...unavailable,
+        status: 'error',
+        // SDK errors may contain URLs or account details; do not forward their raw text.
+        message: timedOut
+          ? 'Claude usage check timed out. Try refreshing.'
+          : controller.signal.aborted
+            ? 'Claude usage check was canceled.'
+            : 'Unable to retrieve Claude account usage limits. Try refreshing.'
+      }
+    } finally {
+      clearTimeout(timer)
+      controller.abort()
+      query?.close()
+      this.controllers.delete(controller)
+      signal?.removeEventListener('abort', cancel)
+    }
+  }
   commitConversation(threadId: string, history: string): void {
     if (!this.readyToCommit.delete(threadId)) return
     const saved = this.settings.sessions?.[threadId]
@@ -409,6 +497,8 @@ export class ClaudeSubscriptionProviderService {
       saved?.cwd === resolve(input.cwd) && saved.historyKey === historyKey(input.history ?? '')
         ? saved.sessionId
         : undefined
+    const metrics = new ClaudeMetricsCollector(resume, saved?.usageBaseline)
+    const editCounter = new ClaudeNativeEditCounter(input.cwd, input.onLineEdits)
     if (saved) {
       delete saved.historyKey
       this.save()
@@ -479,9 +569,35 @@ export class ClaudeSubscriptionProviderService {
           PreToolUse: [
             {
               hooks: [
-                async () => ({
-                  hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' }
-                })
+                async (event) => {
+                  if (event.hook_event_name === 'PreToolUse')
+                    await editCounter.start(event.tool_use_id, event.tool_name, event.tool_input)
+                  return {
+                    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' }
+                  }
+                }
+              ]
+            }
+          ],
+          PostToolUse: [
+            {
+              hooks: [
+                async (event) => {
+                  if (event.hook_event_name === 'PostToolUse')
+                    await editCounter.success(event.tool_use_id, event.tool_response)
+                  return {}
+                }
+              ]
+            }
+          ],
+          PostToolUseFailure: [
+            {
+              hooks: [
+                async (event) => {
+                  if (event.hook_event_name === 'PostToolUseFailure')
+                    editCounter.failure(event.tool_use_id)
+                  return {}
+                }
               ]
             }
           ]
@@ -582,6 +698,7 @@ export class ClaudeSubscriptionProviderService {
         query = await this.createQuery(nextPrompt, options)
         this.queries.set(input.threadId, query)
         for await (const message of query) {
+          metrics.observe(message)
           controller.signal.throwIfAborted()
           sessionId = message.session_id || sessionId
           if (message.type === 'stream_event') {
@@ -640,6 +757,7 @@ export class ClaudeSubscriptionProviderService {
         controller.signal.throwIfAborted()
         if (!sessionId) throw new Error('Claude steering could not identify the active session')
         options.resume = sessionId
+        metrics.beginQuery(sessionId)
         const guidance = steers.splice(0).join('\n')
         nextPrompt = (async function* (): AsyncGenerator<SDKUserMessage> {
           yield {
@@ -658,7 +776,7 @@ export class ClaudeSubscriptionProviderService {
       if (!success || !sessionId) throw new Error('Claude Code ended before completing the turn')
       this.settings.sessions = {
         ...this.settings.sessions,
-        [input.threadId]: { sessionId, cwd: resolve(input.cwd) }
+        [input.threadId]: { sessionId, cwd: resolve(input.cwd), usageBaseline: metrics.snapshot() }
       }
       this.save()
       this.readyToCommit.add(input.threadId)
@@ -671,6 +789,25 @@ export class ClaudeSubscriptionProviderService {
       this.activeThreads.delete(input.threadId)
       if (steerTimer) clearInterval(steerTimer)
       input.signal?.removeEventListener('abort', cancel)
+      const report = metrics.report()
+      try {
+        const baseline = metrics.snapshot()
+        if (baseline && this.settings.signedIn && !this.stopped) {
+          const current = this.settings.sessions?.[input.threadId]
+          this.settings.sessions = {
+            ...this.settings.sessions,
+            [input.threadId]: {
+              ...(current?.sessionId === baseline.sessionId ? current : {}),
+              sessionId: baseline.sessionId,
+              cwd: resolve(input.cwd),
+              usageBaseline: baseline
+            }
+          }
+          this.save()
+        }
+      } finally {
+        input.onMetrics?.(report)
+      }
       for (const [callId, title] of tools) input.onTool?.({ phase: 'complete', callId, title })
     }
   }

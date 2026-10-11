@@ -36,6 +36,7 @@ import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/a
 import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
 import type { ClaudeSubscriptionProviderService } from '../providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import type { ClaudeSubscriptionMetrics } from '../providers/claudeSubscription/metrics'
 import type { AntigravityProviderService } from '../providers/antigravity/AntigravityProviderService'
 import { v4 as uuidv4 } from 'uuid'
 import {
@@ -1647,7 +1648,26 @@ export class OrchestratorService extends EventEmitter {
         ...(this.antigravity?.configured() ? ['antigravity'] : []),
         ...(this.claudeSubscription?.configured() ? ['claude-subscription'] : [])
       ])
-      if (selectedModel.llmProvider === 'antigravity' || selectedModel.llmProvider === 'claude-subscription') {
+      if (selectedModel.llmProvider === 'claude-subscription') {
+        const key = `claude-subscription:${selectedModel.model}`
+        const stored = this.nativeContext.lastTurnUsage
+        const capacity = this.nativeContext.nativeProviderModel
+        const matches = stored?.modelKey === key && stored.contextRevision === (this.nativeContext.revision ?? 0)
+        const limit = capacity?.selectedModel === selectedModel.model ? capacity.contextWindow ?? 0 : 0
+        const usage = computeContextUsage({
+          messages: getActiveMessages(this.nativeContext), draftInput: request.draftInput,
+          contextLimit: limit, modelName: capacity?.selectedModel === selectedModel.model ? capacity.modelName : selectedModel.model,
+          lastMeasuredInput: matches ? stored.input : null,
+          lastMeasuredCacheRead: matches ? stored.cacheRead : null,
+          lastMeasuredCacheWrite: matches ? stored.cacheWrite : null,
+          measuredAtMessageLength: matches ? stored.measuredAtHistoryLength : 0,
+          summaryText: getCompactionSummary(this.nativeContext),
+          systemPromptText: '', legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated'
+        })
+        const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
+        return { ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed }
+      }
+      if (selectedModel.llmProvider === 'antigravity') {
         // Native agents own their context and do not publish a token window.
         // Do not display a fabricated Mousse context measurement.
         return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model, source: 'estimated', categories: [] }
@@ -2927,13 +2947,51 @@ export class OrchestratorService extends EventEmitter {
         const nativeProvider = claudeSubscriptionTurn ? this.claudeSubscription : this.antigravity
         if (!nativeProvider || (antigravityTurn && !session.projectCwd)) throw new Error(`${selectedModel.llmProvider} requires a project workspace`)
         const nativeCwd = session.projectCwd ?? this.claudeSubscription!.standaloneWorkspace(session.threadId)
+        let claudeMetrics: ClaudeSubscriptionMetrics | undefined
+        const nativeStartedAt = Date.now()
+        if (claudeSubscriptionTurn) {
+          const contextSettings = normalizeContextSettings(this.settingsStore.get().context)
+          const capacity = this.nativeContext.nativeProviderModel
+          const knownLimit = capacity?.selectedModel === model ? capacity.contextWindow : undefined
+          const configuredThreshold = typeof contextSettings.compactionTokens === 'number'
+            ? contextSettings.compactionTokens : knownLimit
+          const previous = session.lastMeasuredContextSignature === `claude-subscription:${model}`
+            ? (session.lastMeasuredInput ?? 0) + (session.lastMeasuredCacheRead ?? 0) + (session.lastMeasuredCacheWrite ?? 0)
+            : 0
+          const activeTokens = Math.max(previous, estimateActiveContextTokens(getActiveMessages(this.nativeContext), getCompactionSummary(this.nativeContext)))
+          // When the SDK has not reported capacity yet, a numeric Mousse threshold
+          // still applies; model-max waits for an actual provider window.
+          if (contextSettings.compactionEnabled && configuredThreshold !== undefined &&
+              shouldCompactNativeContext(activeTokens, knownLimit ?? configuredThreshold, DEFAULT_COMPACTION_RESERVE_TOKENS, configuredThreshold)) {
+            onCompaction('start')
+            const compacted = compactNativeContext(this.nativeContext)
+            if (compacted !== this.nativeContext) {
+              this.nativeContext = compacted
+              this.clearLastTurnUsage()
+              this.persist(true)
+              onCompaction('complete')
+            } else onCompaction('unchanged')
+          }
+        }
         let started = false
         let thinkingStarted = false
         let thinkingText = ''
-        assistantText = await nativeProvider.chat({
+        let nativeProviderProgress = false
+        const runNativeChat = () => nativeProvider.chat({
           ...(claudeSubscriptionTurn ? {
             mode: mode === 'plan' ? 'plan' as const : 'default' as const,
+            onMetrics: (report: ClaudeSubscriptionMetrics) => {
+              claudeMetrics = report
+              responseMetadata = { modelName: report.realModelName ?? model, totalResponseTimeMs: report.totalResponseTimeMs, tokensUsed: report.totalTokensUsed, tokensPerSecond: report.tokensPerSecond }
+              if (report.usage) this.lineEditStats?.recordUsage({
+                timestamp: new Date().toISOString(), provider: 'claude-subscription',
+                model: report.realModelName ?? model, input: report.usage.input, output: report.usage.output,
+                cacheRead: report.usage.cacheRead, cacheWrite: report.usage.cacheWrite
+              })
+            },
+            onLineEdits: (lines: number) => this.lineEditStats?.record('orchestrator', lines),
             onThinking: (content: string) => {
+              nativeProviderProgress = true
               if (!thinkingStarted) { this.handleStreamingThinkingEvent({ phase: 'start', content: '' }); thinkingStarted = true }
               thinkingText = content
               this.handleStreamingThinkingEvent({ phase: 'delta', content })
@@ -2949,6 +3007,7 @@ export class OrchestratorService extends EventEmitter {
             return parts.length ? parts.join('\n') : undefined
           },
           onSteer: (content) => {
+            nativeProviderProgress = true
             this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(content))
             this.nativeContext.acceptedSteerItemIds = Array.from(new Set([
               ...(this.nativeContext.acceptedSteerItemIds ?? []), ...session.drainedExternalSteerIds
@@ -2957,10 +3016,12 @@ export class OrchestratorService extends EventEmitter {
             this.acknowledgeDrainedSteers(session)
           },
           onText: (content) => {
+            nativeProviderProgress = true
             if (!started) { this.handleStreamingTextEvent({ phase: 'start', content: '', contentIndex: 0 }); started = true }
             this.handleStreamingTextEvent({ phase: 'delta', content, contentIndex: 0 })
           },
           onTool: (event) => {
+            nativeProviderProgress = true
             conversationToolsUsed = true
             this.handleStreamingToolEvent({
               kind: 'mcp_tool_call', phase: event.phase, callId: event.callId,
@@ -2968,12 +3029,36 @@ export class OrchestratorService extends EventEmitter {
             })
           }
         })
+        assistantText = claudeSubscriptionTurn
+          ? await retryContextOverflowOnce(runNativeChat, () => {
+            if (!normalizeContextSettings(this.settingsStore.get().context).compactionEnabled) return false
+            onCompaction('start')
+            const compacted = compactNativeContext(this.nativeContext)
+            if (compacted === this.nativeContext) { onCompaction('unchanged'); return false }
+            this.nativeContext = compacted
+            this.clearLastTurnUsage()
+            this.persist(true)
+            onCompaction('complete')
+            return true
+          }, () => !nativeProviderProgress && !conversationToolsUsed && !turn.abort.signal.aborted)
+          : await runNativeChat()
         if (thinkingStarted) this.handleStreamingThinkingEvent({ phase: 'complete', content: thinkingText })
-        this.nativeContext = appendNativeMessage(this.nativeContext, nativeAgentAssistantMessage(assistantText, model, selectedModel.llmProvider))
+        this.nativeContext = appendNativeMessage(this.nativeContext, nativeAgentAssistantMessage(assistantText, claudeMetrics?.realModelName ?? model, selectedModel.llmProvider, claudeMetrics?.usage))
+        if (claudeSubscriptionTurn && claudeMetrics?.context) {
+          const context = claudeMetrics.context
+          const previousCapacity = this.nativeContext.nativeProviderModel
+          this.nativeContext.nativeProviderModel = { provider: 'claude-subscription', selectedModel: model, modelName: context.modelName ?? claudeMetrics.realModelName ?? model, contextWindow: context.contextWindow ?? (previousCapacity?.selectedModel === model ? previousCapacity.contextWindow : undefined) }
+          this.recordLastTurnUsage({
+            input: context.input, cacheRead: context.cacheRead, cacheWrite: context.cacheWrite,
+            signature: `claude-subscription:${model}`, modelKey: `claude-subscription:${model}`,
+            contextRevision: this.nativeContext.revision ?? 0,
+            measuredAtHistoryLength: Math.max(0, getActiveMessages(this.nativeContext).length - 1)
+          })
+        }
         this.persist(true)
         nativeProvider.commitConversation(session.threadId, nativeAgentHistory(this.nativeContext))
         if (started) this.handleStreamingTextEvent({ phase: 'complete', content: assistantText, contentIndex: 0 })
-        responseMetadata = { modelName: model }
+        responseMetadata ??= { modelName: model, totalResponseTimeMs: Date.now() - nativeStartedAt }
       } else {
       const browserExecution = this.mainBrowserFactory
         ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })

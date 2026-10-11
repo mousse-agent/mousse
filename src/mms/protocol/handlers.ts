@@ -1343,8 +1343,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'providers.listConfigured':
       return { providers: [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)] }
-    case 'providers.getUsage':
-      return ctx.mms.providerAuth.getUsage()
+    case 'providers.getUsage': {
+      const [usage, claude] = await Promise.all([
+        ctx.mms.providerAuth.getUsage(),
+        ctx.mms.claudeSubscription.configured()
+          ? ctx.mms.claudeSubscription.getUsage(ctx.mms.worktrees.getRepoRoot())
+          : Promise.resolve(undefined)
+      ])
+      return {
+        ...usage,
+        providers: [...usage.providers, ...(claude ? [claude] : [])],
+        fetchedAt: new Date().toISOString()
+      }
+    }
     case 'providers.getSubscriptionUsage': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)

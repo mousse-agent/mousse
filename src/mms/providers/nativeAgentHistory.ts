@@ -15,12 +15,12 @@ export function nativeAgentHistory(context: NativeLlmContext, end = context.mess
     : ''
 }
 
-/** Native agent transports own their context usage. Preserve its text in the canonical transcript. */
-export function nativeAgentAssistantMessage(text: string, model: string, provider: string): AssistantMessage {
+/** Preserve native transport text and available provider usage in the canonical transcript. */
+export function nativeAgentAssistantMessage(text: string, model: string, provider: string, usage?: AssistantMessage['usage'] | null): AssistantMessage {
   return {
     role: 'assistant', content: [{ type: 'text', text }], provider, model,
     api: 'openai-completions', stopReason: 'stop', timestamp: Date.now(),
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+    usage: usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }
   }
 }

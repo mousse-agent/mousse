@@ -845,6 +845,13 @@ export interface NativeLlmContext {
   /** Steer queue IDs whose content has been checkpointed into native history. */
   acceptedSteerItemIds?: string[]
   compaction?: NativeCompactionCheckpoint
+  /** Actual model capacity reported by a native provider, retained across compaction. */
+  nativeProviderModel?: {
+    provider: 'claude-subscription'
+    selectedModel: string
+    modelName: string
+    contextWindow?: number
+  }
   /** Restored on session load so context usage stays measured after persist/reload. */
   lastTurnUsage?: NativeLastTurnUsage
 }
