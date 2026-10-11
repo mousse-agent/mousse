@@ -738,6 +738,12 @@ export function OrchestratorChat() {
     // A skill chip attached in the composer applies to this prompt only —
     // the global chat mode is left untouched.
     clearComposer(false)
+    // Thread preparation is complete. The send promise lasts for the entire
+    // first turn, so it must not keep typing, queueing, or Stop disabled.
+    if (startingBlank) {
+      blankSendPending.current = false
+      setWorkspacePending(false)
+    }
     const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId)
     if (sent === false && stillVisible()) {
       setInput((current) => current === text || !current ? input : current)
