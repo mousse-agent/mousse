@@ -193,3 +193,9 @@ describe('partitionTurnSegments', () => {
     ])
   })
 })
+
+describe('applet activity segmentation', () => {
+  it('keeps an applet alongside tools on its own visible message surface', () => {
+    expect(analyzeAssistantMessage([{ type: 'tool-Bash', toolCallId: 't', state: 'output-available' }, { type: 'data-applet', data: { appletId: 'a' } }], false).toolsOnly).toBe(false)
+  })
+})

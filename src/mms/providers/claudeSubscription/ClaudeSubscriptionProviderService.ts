@@ -30,6 +30,7 @@ export type ClaudeSubscriptionChatInput = {
   cwd: string
   model: string
   prompt: string
+  appletInstructions?: string
   history?: string
   images?: ChatImageAttachment[]
   signal?: AbortSignal
@@ -438,7 +439,7 @@ export class ClaudeSubscriptionProviderService {
       controller.signal.throwIfAborted()
       input.signal?.throwIfAborted()
       controller.signal.throwIfAborted()
-      const prompt =
+      const prompt = (input.appletInstructions ? input.appletInstructions + '\n\nCurrent request:\n' : '') +
         (!resume && input.history
           ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
           : '') + input.prompt

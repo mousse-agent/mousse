@@ -371,7 +371,7 @@ export class AntigravityProviderService {
     this.save()
   }
 
-  async chat(input: { threadId: string; cwd: string; model: string; prompt: string; history?: string; images?: ChatImageAttachment[]; signal?: AbortSignal; onText: (text: string) => void; drainSteer?: () => string | undefined; onSteer?: (text: string) => void; onTool?: (event: { phase: 'start' | 'complete'; callId: string; title: string; toolName?: string }) => void }): Promise<string> {
+  async chat(input: { threadId: string; cwd: string; model: string; prompt: string; appletInstructions?: string; history?: string; images?: ChatImageAttachment[]; signal?: AbortSignal; onText: (text: string) => void; drainSteer?: () => string | undefined; onSteer?: (text: string) => void; onTool?: (event: { phase: 'start' | 'complete'; callId: string; title: string; toolName?: string }) => void }): Promise<string> {
     input.signal?.throwIfAborted()
     if (!this.configured()) throw new Error('Antigravity is not signed in')
     const historyKey = this.historyKey(input.history ?? '')
@@ -484,7 +484,7 @@ export class AntigravityProviderService {
       const history = !resumed && input.history
         ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
         : ''
-      let prompt = history + (input.prompt || '(image attachment)')
+      let prompt = history + (input.appletInstructions ? input.appletInstructions + '\n\nCurrent request:\n' : '') + (input.prompt || '(image attachment)')
       let attachments = imageBlocks
       for (;;) {
         input.signal?.throwIfAborted()

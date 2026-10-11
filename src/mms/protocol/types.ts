@@ -179,6 +179,7 @@ export type ProtocolEnvelope =
  * Remote/HTTP is out of scope.
  */
 export const PROTOCOL_METHODS = [
+  'applets.get', 'applets.state.get', 'applets.state.save', 'applets.export',
   'health',
   'capabilities',
   'projects.list',

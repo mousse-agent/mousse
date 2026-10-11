@@ -1,3 +1,4 @@
+import { registerAppletIpc } from '../applets/registerAppletIpc'
 import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
 import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
 import { CHAT_METHODS } from '../../shared/chats'
@@ -216,6 +217,7 @@ export function registerGuiIpc(
   } = services
   activeGuiMms = guiMms
   registerLinuxWindowResizeIpc(getWindow, getAgentsTasksWindow)
+  registerAppletIpc(registerHandler, guiMms, () => [getWindow(), getAgentsTasksWindow()])
 
   const browserHost = (event: Electron.IpcMainInvokeEvent): AttachedBrowserHost => {
     if (event.senderFrame !== event.sender.mainFrame || !services.attachedBrowserHost) throw new Error('In-app browser automation is unavailable')

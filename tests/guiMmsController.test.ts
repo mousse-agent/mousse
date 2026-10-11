@@ -49,6 +49,33 @@ describe('GuiMmsController lifecycle', () => {
     delete process.env.MOUSSE_HOME
   })
 
+  it('hides applet owner bindings throughout overlapping profile transitions', async () => {
+    const gui = new GuiMmsController({homeDir:home,disableAutoStart:true,endpointOverride:endpoint,ownerTokenOverride:ownerToken})
+    const sender = Object.assign(new EventEmitter(), {id:987,isDestroyed:()=>false}) as unknown as WebContents
+    await gui.start()
+    try {
+      const binding = await gui.prepareWindow(sender)
+      const internals = gui as unknown as {windowSessions:Map<number,{client:{request:(method:string,params?:unknown)=>Promise<unknown>}}>}
+      const client=internals.windowSessions.get(sender.id)!.client
+      const original=client.request.bind(client)
+      const releases:Array<()=>void>=[]
+      vi.spyOn(client,'request').mockImplementation(async (method,params)=>{
+        if(method==='profiles.bind')await new Promise<void>(resolve=>releases.push(resolve))
+        return original(method,params)
+      })
+      const events=vi.fn();gui.on('window-profile-changing',events)
+      const first=gui.runWithSender(sender,()=>gui.request('profiles.bind',{profile:binding.profileId}))
+      const second=gui.runWithSender(sender,()=>gui.request('profiles.bind',{profile:binding.profileId}))
+      await vi.waitFor(()=>expect(releases).toHaveLength(2))
+      expect(gui.getWindowBindingForSender(sender.id)).toBeNull()
+      releases[0]();await first
+      expect(gui.getWindowBindingForSender(sender.id)).toBeNull()
+      releases[1]();await second
+      expect(gui.getWindowBindingForSender(sender.id)?.profileId).toBe(binding.profileId)
+      expect(events).toHaveBeenCalledTimes(4)
+    } finally {await gui.stop()}
+  })
+
   it('connects when daemon is already running (no ownership)', async () => {
     const gui = new GuiMmsController({
       homeDir: home,

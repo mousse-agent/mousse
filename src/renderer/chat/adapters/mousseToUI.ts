@@ -1,3 +1,4 @@
+import { streamingAppletPresentation } from '../../components/applets/streamPresentation'
 import type { ChatMessage } from '../../../shared/types'
 import type { UIMessage } from 'ai'
 import { isToolTimelineMessage } from '../../../shared/types'
@@ -192,7 +193,7 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
       // (tool-PlanWrite) so plans render with the same chrome as other tool
       // cards. Preview and implement actions live on the card itself — the
       // sidebar document preview no longer auto-opens.
-      const planMarkdown = msg.planCard.planMarkdown?.trim() || msg.content?.trim() || 'No plan generated.'
+      const planMarkdown = msg.presentationParts ? msg.presentationParts.filter(part => part.type === 'text').map(part => part.text).join('\n').trim() || 'Interactive plan' : msg.planCard.planMarkdown?.trim() || msg.content?.trim() || 'No plan generated.'
       const request = msg.planCard.originalRequest?.trim() || 'Implementation plan'
       const title = request.length > 90 ? `${request.slice(0, 87)}…` : request
       base.role = 'assistant'
@@ -206,6 +207,9 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
         },
         output: planMarkdown,
       } as unknown as UIMessage['parts'][number]]
+      if (!msg.streaming && !msg.incomplete) for (const part of msg.presentationParts ?? []) {
+        if (part.type === 'applet') base.parts.push({type:'data-applet',data:part.reference} as unknown as UIMessage['parts'][number])
+      }
       out.push(base)
       lastAssistantText = null
       continue
@@ -285,6 +289,26 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
       if (msg.kind === 'context_compaction') base.metadata = { ...base.metadata as object, compaction: true, compacting: msg.streaming === true }
       base.parts = [{ type: 'text', text: msg.content } as unknown as UIMessage['parts'][number]]
       base.role = 'assistant'
+      out.push(base)
+      lastAssistantText = null
+      continue
+    }
+
+    if (msg.role === 'assistant' && msg.streaming) {
+      const pending = streamingAppletPresentation(msg.content)
+      if (pending.some(part => part.type === 'data-applet-pending')) {
+        base.parts = pending as UIMessage['parts']
+        out.push(base)
+        lastAssistantText = null
+        continue
+      }
+    }
+
+    // Only durable, completed assistant references become executable presentation.
+    if (msg.role === 'assistant' && !msg.streaming && !msg.incomplete && msg.presentationParts?.length) {
+      base.parts = msg.presentationParts.map(part => part.type === 'text'
+        ? { type: 'text', text: part.text }
+        : { type: 'data-applet', data: part.reference }) as UIMessage['parts']
       out.push(base)
       lastAssistantText = null
       continue
