@@ -462,6 +462,11 @@ export interface ChatMessage {
     | 'warning'
     /** Presentation-only marker emitted when retained model context is compacted. */
     | 'context_compaction'
+    /** Presentation-only model transition; never injected into provider context. */
+    | 'context_handoff'
+  /** Selection actually admitted for this user turn, independent of composer edits. */
+  modelSelection?: { provider: string; model: string }
+  contextHandoff?: { from: { provider: string; model: string }; to: { provider: string; model: string } }
   planCard?: PlanCardMetadata
   thinking?: {
     content: string
