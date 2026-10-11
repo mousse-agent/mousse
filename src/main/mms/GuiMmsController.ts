@@ -42,14 +42,10 @@ import { AGENT_DEFINITION_CAPABILITY } from '../../shared/agentPlatform'
 import { WORKFLOW_DEFINITIONS_CAPABILITY } from '../../shared/workflowPlatform'
 import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
 import { INTEGRATION_CAPABILITY } from '../../shared/integrationPlatform'
+import { CHAT_CAPABILITY } from '../../shared/chats'
+import { NET_LOCAL_CAPABILITY } from '../../shared/net/local'
 import type { TrustedProfileBinding } from '../../mms/protocol/domainRegistry'
 import { resolveLocalEndpoint } from '../../mms/protocol/endpoint'
-import type {
-  ControlStatus,
-  CreatePairingResult,
-  PairingGrant,
-  RemoteScope
-} from '../../shared/controlTypes'
 
 export type GuiMmsConnectionState =
   | 'idle'
@@ -123,6 +119,8 @@ const GUI_PLATFORM_CAPABILITIES = [
   WORKFLOW_DEFINITIONS_CAPABILITY,
   WORKFLOW_RUN_CAPABILITY,
   INTEGRATION_CAPABILITY,
+  CHAT_CAPABILITY,
+  NET_LOCAL_CAPABILITY,
   BROWSER_VIEWER_CAPABILITY,
   BROWSER_SETUP_CAPABILITY
 ] as const
@@ -131,6 +129,7 @@ export class GuiMmsController extends EventEmitter {
   readonly homeDir: string
   private client: LocalMmsClient | null = null
   private readonly senderAls = new AsyncLocalStorage<WebContents>()
+  private readonly profileTransitions = new Map<number, number>()
   private readonly windowSessions = new Map<number, WindowSession>()
   private readonly windowSessionOpenings = new Map<number, Promise<WindowSession>>()
   private attachedBrowserHost?: GuiAttachedBrowserHost
@@ -144,6 +143,7 @@ export class GuiMmsController extends EventEmitter {
   private disconnectTimer: ReturnType<typeof setInterval> | null = null
   private lastHello: ProtocolHelloOk | null = null
   private startedDaemon: ChildProcess | null = null
+  private startPromise: Promise<ProtocolHelloOk> | null = null
   private readonly maxReconnect: number
   private readonly reconnectBaseMs: number
   private readonly disableAutoStart: boolean
@@ -215,12 +215,21 @@ export class GuiMmsController extends EventEmitter {
   async start(): Promise<ProtocolHelloOk> {
     if (this.quitting) throw new Error('GuiMmsController is stopped')
     if (this.connected && this.lastHello) return this.lastHello
-
-    // Tests may inject endpoint+token without a full runtime publication.
-    if (!(this.endpointOverride && this.ownerTokenOverride)) {
-      await this.ensureDaemonReady()
+    if (this.startPromise) return this.startPromise
+    // Renderer bootstrap requests and main's eager start share one discovery,
+    // daemon spawn and base handshake. Window sessions keep their own fences.
+    const operation = (async () => {
+      // Tests may inject endpoint+token without a full runtime publication.
+      if (!(this.endpointOverride && this.ownerTokenOverride)) await this.ensureDaemonReady()
+      if (this.quitting) throw new Error('GuiMmsController is stopped')
+      return this.connectOnce()
+    })()
+    this.startPromise = operation
+    try {
+      return await operation
+    } finally {
+      if (this.startPromise === operation) this.startPromise = null
     }
-    return this.connectOnce()
   }
 
   /**
@@ -228,6 +237,7 @@ export class GuiMmsController extends EventEmitter {
    */
   async stop(): Promise<void> {
     this.quitting = true
+    await this.startPromise?.catch(() => undefined)
     await Promise.allSettled([...this.windowSessionOpenings.values()])
     await this.attachedBrowserHost?.shutdown()
     this.clearAllTimersAndListeners()
@@ -283,23 +293,34 @@ export class GuiMmsController extends EventEmitter {
   }
 
   async request<T = unknown>(method: string, params?: unknown): Promise<T> {
-    const client = await this.clientForCurrentSender()
     const sender = this.senderAls.getStore()
-    if (method === 'profiles.bind' && sender) await this.attachedBrowserHost?.releaseWindow(sender)
-    const result = await client.request<T>(method, params)
-    if (method === 'profiles.bind') {
-      const sender = this.senderAls.getStore()
-      if (sender) {
+    const transition = method === 'profiles.bind' && sender
+    if (transition) {
+      this.profileTransitions.set(sender.id, (this.profileTransitions.get(sender.id) ?? 0) + 1)
+      this.emit('window-profile-changing', {senderId: sender.id})
+    }
+    try {
+      const client = await this.clientForCurrentSender()
+      if (transition) await this.attachedBrowserHost?.releaseWindow(sender)
+      const result = await client.request<T>(method, params)
+      if (transition) {
         const session = this.windowSessions.get(sender.id)
-        const bound = result as unknown as { profile?: { id?: string }; epoch?: number }
+        const bound = result as unknown as {profile?:{id?:string};epoch?:number}
         if (session && bound?.profile?.id && typeof bound.epoch === 'number' && Number.isSafeInteger(bound.epoch)) {
-          session.binding = { profileId: bound.profile.id, epoch: bound.epoch }
+          session.binding = {profileId:bound.profile.id,epoch:bound.epoch}
           await session.client.subscribe(0)
           await this.attachedBrowserHost?.acknowledgeClosed(sender)
         }
       }
+      return result
+    } finally {
+      if (transition) {
+        this.emit('window-profile-changing', {senderId:sender.id})
+        const remaining = (this.profileTransitions.get(sender.id) ?? 1) - 1
+        if (remaining > 0) this.profileTransitions.set(sender.id, remaining)
+        else this.profileTransitions.delete(sender.id)
+      }
     }
-    return result
   }
 
   getWindowBinding(): TrustedProfileBinding | null {
@@ -315,7 +336,7 @@ export class GuiMmsController extends EventEmitter {
 
   getWindowBindingForSender(senderId: number): TrustedProfileBinding | null {
     const session = this.windowSessions.get(senderId)
-    return session?.client.connected ? session.binding : null
+    return !this.profileTransitions.has(senderId) && !session?.closing && session?.client.connected ? session.binding : null
   }
 
   /** Private host requests never reconnect or change the owning window connection. */
@@ -419,7 +440,13 @@ export class GuiMmsController extends EventEmitter {
       this.emit('window-event', { senderId: sender.id, event, replay: delivery?.replay === true })
       if (windowClient.requiresResnapshot) this.emit('window-resnapshot', { senderId: sender.id })
     })
-    this.windowEventUnsubs.set(sender.id, unsubscribe)
+    const unsubscribeConnection = windowClient.onConnectionEvent(event => {
+      const binding = session.binding
+      if (sender.isDestroyed() || this.windowSessions.get(sender.id) !== session ||
+        !binding || event.profileId !== binding.profileId || event.profileEpoch !== binding.epoch) return
+      this.emit('window-connection-event', { senderId: sender.id, event })
+    })
+    this.windowEventUnsubs.set(sender.id, () => { unsubscribe(); unsubscribeConnection() })
     await windowClient.subscribe(0)
     await this.attachedBrowserHost?.acknowledgeClosed(sender)
     return session
@@ -432,6 +459,7 @@ export class GuiMmsController extends EventEmitter {
   }
 
   private async closeWindowSession(senderId: number, session: WindowSession): Promise<void> {
+    this.emit('window-profile-changing', {senderId})
     if (session.closing) return session.closing
     const operation = (async () => {
       await this.attachedBrowserHost?.releaseWindow(session.sender)
@@ -444,53 +472,6 @@ export class GuiMmsController extends EventEmitter {
     session.closing = operation
     void operation.catch(() => { if (session.closing === operation) session.closing = undefined })
     return operation
-  }
-
-  async controlStatus(): Promise<ControlStatus> {
-    return this.request<ControlStatus>('control.status')
-  }
-
-  async controlLogin(): Promise<{ ok: boolean; error?: string }> {
-    return this.request<{ ok: boolean; error?: string }>('control.login')
-  }
-
-  async controlLogout(): Promise<{ ok: boolean }> {
-    return this.request<{ ok: boolean }>('control.logout')
-  }
-
-  async controlEnroll(serverUrl: string, pairingCode: string): Promise<{ ok: boolean; error?: string }> {
-    return this.request<{ ok: boolean; error?: string }>('control.enroll', { serverUrl, pairingCode })
-  }
-
-  async controlDisconnect(): Promise<{ ok: boolean }> {
-    return this.request<{ ok: boolean }>('control.disconnect')
-  }
-
-  async controlSetMode(mode: 'hosted' | 'self-hosted'): Promise<{ ok: boolean }> {
-    return this.request<{ ok: boolean }>('control.setMode', { mode })
-  }
-
-  async pairingCreate(options?: { scopes?: RemoteScope[]; ttlMs?: number }): Promise<CreatePairingResult> {
-    return this.request<CreatePairingResult>('pairing.create', options)
-  }
-
-  async pairingList(): Promise<{ pairings: PairingGrant[] }> {
-    return this.request<{ pairings: PairingGrant[] }>('pairing.list')
-  }
-
-  async pairingApprove(
-    pairingId: string,
-    scopes?: RemoteScope[]
-  ): Promise<{ grant: PairingGrant; receipt: string; receiptSignature: string }> {
-    return this.request('pairing.approve', { pairingId, scopes })
-  }
-
-  async pairingReject(pairingId: string): Promise<{ ok: boolean }> {
-    return this.request<{ ok: boolean }>('pairing.reject', { pairingId })
-  }
-
-  async pairingRevoke(pairingIdOrDeviceId: string): Promise<{ ok: boolean; revoked?: PairingGrant }> {
-    return this.request<{ ok: boolean; revoked?: PairingGrant }>('pairing.revoke', { pairingIdOrDeviceId })
   }
 
   private waitForConnection(): Promise<void> {

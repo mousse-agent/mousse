@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { MessageSquare, MessageSquarePlus, Pencil, Plus, Terminal, X, Zap } from 'lucide-react'
+import { MessageSquare, MessageSquarePlus, Pencil, Plus, Terminal, X, Zap } from '../lib/icons'
 import { IconButton } from './IconButton'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import {
@@ -27,12 +27,12 @@ const KIND_OPTIONS: { value: QuickActionKind; label: string; hint: string }[] = 
   { value: 'bash', label: 'Run bash command', hint: 'Shell command' }
 ]
 
-export function QuickActionsButton() {
+export function QuickActionsButton({ variant = 'ghost' }: { variant?: 'ghost' | 'titlebar' }) {
   const profileId = useAppStore((state) => state.profileId)
-  return <ProfileQuickActionsButton key={profileId} profileId={profileId} />
+  return <ProfileQuickActionsButton key={profileId} profileId={profileId} variant={variant} />
 }
 
-function ProfileQuickActionsButton({ profileId }: { profileId: string }) {
+function ProfileQuickActionsButton({ profileId, variant }: { profileId: string; variant: 'ghost' | 'titlebar' }) {
   const [actions, setActions] = useState<QuickAction[]>(() => loadQuickActions(profileId))
   const [menuOpen, setMenuOpen] = useState(false)
   const [editorOpen, setEditorOpen] = useState(false)
@@ -51,7 +51,7 @@ function ProfileQuickActionsButton({ profileId }: { profileId: string }) {
     open: menuOpen,
     anchorRef: buttonRef,
     contentRef: menuRef,
-    placement: 'below-start',
+    placement: variant === 'titlebar' ? 'below-end' : 'below-start',
     deps: [actions.length]
   })
 
@@ -181,6 +181,7 @@ function ProfileQuickActionsButton({ profileId }: { profileId: string }) {
         ref={buttonRef}
         icon={Zap}
         label="Quick actions"
+        variant={variant}
         onClick={() => {
           setMenuError(null)
           setMenuOpen((open) => !open)

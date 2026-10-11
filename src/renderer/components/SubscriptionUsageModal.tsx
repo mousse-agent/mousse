@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { Loader2, X } from 'lucide-react'
+import { Loader2, X } from '../lib/icons'
 
 interface SubscriptionUsageModalProps {
   open: boolean
@@ -50,7 +50,7 @@ export function SubscriptionUsageModal({
         </header>
         <div className="subscription-usage-body">
           {loading ? (
-            <div className="subscription-usage-loading"><Loader2 size={18} className="icon-spin" /> Loading usage…</div>
+            <div className="subscription-usage-loading"><Loader2 size={16} className="icon-spin" /> Loading usage…</div>
           ) : error ? (
             <p className="subscription-usage-status">{error}</p>
           ) : usage ? (

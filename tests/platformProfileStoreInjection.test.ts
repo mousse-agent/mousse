@@ -15,7 +15,7 @@ import { ScheduledJobStore, readTickerHeartbeat, recordTickerHeartbeat } from '.
 import { LineEditStatsStore } from '../src/mms/stats/LineEditStatsStore'
 import { MmsProfileServices } from '../src/mms/MmsProfileServices'
 
-const fixture = mkdtempSync(join(tmpdir(), 'mousse-profile-injection-'))
+const fixture = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-profile-injection-'))
 let sequence = 0
 function home(label: string) { const path = join(fixture, label + '-' + sequence++); mkdirSync(path); return path }
 afterEach(() => vi.unstubAllEnvs())
@@ -196,20 +196,22 @@ describe('explicit profile store roots', () => {
       scheduled: { shutdown: () => { calls.push('scheduled'); if (failed === 'scheduled') throw new Error('scheduled failed') } },
       channels: { shutdown: async () => { calls.push('channels') } },
       orchestrator: { shutdown: async () => { calls.push('orchestrator') } },
-      control: { shutdown: async () => { calls.push('control') } },
+      net: { shutdown: async () => { calls.push('net') } },
       requests: { waitForIdle: async () => { calls.push('requests') } },
+      antigravity: { stop: () => { calls.push('antigravity') } },
+      claudeSubscription: { stop: () => { calls.push('claudeSubscription') } },
       ptyManager: { shutdown: async () => { calls.push('pty') } },
       headlessRunner: { shutdown: async () => { calls.push('headless') } },
       mcpManager: { shutdown: async () => { calls.push('mcp') } },
       config: { stopWatching: () => { calls.push('config') } },
-      getOwnedActivity: () => ({ platform: 0, scheduled: 0, channels: 0, orchestrator: 0, control: 0, requests: 0, ptys: 0, headless: 0, mcp: 0 })
+      getOwnedActivity: () => ({ platform: 0, scheduled: 0, channels: 0, orchestrator: 0, net: 0, requests: 0, ptys: 0, headless: 0, mcp: 0 })
     })
     const stop = MmsProfileServices.prototype.stop as (this: typeof service) => Promise<void>
     await expect(stop.call(service)).rejects.toMatchObject({
       message: 'Failed to drain profile services',
       errors: [expect.objectContaining({ message: `${failed} failed` })]
     })
-    expect(calls).toEqual(['begin', 'undoRetention', 'lifecycle', 'platform', 'scheduled', 'channels', 'orchestrator', 'control', 'requests', 'pty', 'headless', 'mcp'])
+    expect(calls).toEqual(['begin', 'undoRetention', 'lifecycle', 'platform', 'scheduled', 'channels', 'orchestrator', 'net', 'requests', 'antigravity', 'claudeSubscription', 'pty', 'headless', 'mcp'])
     expect(service.started).toBe(true)
   })
 })

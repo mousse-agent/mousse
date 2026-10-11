@@ -1,5 +1,5 @@
 import { useCallback } from 'react'
-import { ArrowLeft, Radio } from 'lucide-react'
+import { ArrowLeft } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import { ChannelsPanel } from './ChannelsPanel'
 import '../styles/channels-panel.css'
@@ -15,14 +15,11 @@ export function ChannelsPage() {
 
   return (
     <div className="channels-page overlay-page" hidden={!channelsOpen}>
-      <header className="channels-page-header overlay-page-drag-header">
-        <button type="button" className="channels-page-back-btn" onClick={closeChannels} aria-label="Back">
-          <ArrowLeft size={16} strokeWidth={2} />
+      <header className="overlay-titlebar overlay-page-drag-header">
+        <button type="button" className="overlay-titlebar-back" onClick={closeChannels} aria-label="Back">
+          <ArrowLeft size={14} strokeWidth={2} />
         </button>
-        <div className="channels-page-title">
-          <Radio size={20} strokeWidth={2} className="channels-page-title-icon" aria-hidden="true" />
-          <h1>Channels</h1>
-        </div>
+        <h1>Channels</h1>
       </header>
       <div className="channels-page-body">
         <ChannelsPanel key={profileId} />

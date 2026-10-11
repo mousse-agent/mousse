@@ -1,4 +1,4 @@
-import { Plus, Star, Upload } from 'lucide-react'
+import { Plus, Star, Upload } from '../../lib/icons'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { AGENT_RUNTIME_KINDS } from '../../../shared/agents/types'
 import { EmptyState } from '../ui/EmptyState'

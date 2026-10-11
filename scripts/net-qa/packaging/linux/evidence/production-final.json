@@ -1,0 +1,420 @@
+{
+  "v": 1,
+  "source": "9a72843ad9119bd9360cb5cc70494c32748a0976",
+  "hostNode": "v24.20.0",
+  "platform": "linux",
+  "arch": "arm64",
+  "hashes": {
+    "asar": "cafe84fbc70af41f2577bca5ee4ba4556e8687d7376934669168d1f61ad18519",
+    "executable": "9c668b8b83bd454b772eb85c301e95a231689b3da79e20f0e428b2519f83175c"
+  },
+  "driver": "6d1a11fc83c7aeba0e12ecc8fb83ac20c6e5b2220e30f23664d683e6652c2169",
+  "productionMain": "out/main/cli.js",
+  "sandbox": "root ELECTRON_DISABLE_SANDBOX=1 in isolated container",
+  "providersActivated": false,
+  "steps": [
+    {
+      "command": "bridge rename",
+      "actualExitCode": 2,
+      "error": "bad_request"
+    },
+    {
+      "command": "net unknown-local-command",
+      "actualExitCode": 2,
+      "error": "bad_request"
+    },
+    {
+      "profile": "a",
+      "command": "net status",
+      "ok": true
+    },
+    {
+      "profile": "a",
+      "command": "net init",
+      "ok": true
+    },
+    {
+      "profile": "a",
+      "command": "net status",
+      "ok": true
+    },
+    {
+      "profile": "a",
+      "command": "net protect",
+      "ok": true
+    },
+    {
+      "profile": "a",
+      "command": "net status",
+      "ok": true
+    },
+    {
+      "profile": "a",
+      "command": "bridge invite",
+      "ok": true
+    },
+    {
+      "profile": "b",
+      "command": "bridge join",
+      "ok": true
+    },
+    {
+      "profile": "b",
+      "command": "net protect",
+      "ok": true
+    },
+    {
+      "profile": "b",
+      "command": "net status",
+      "ok": true
+    },
+    {
+      "profile": "b",
+      "command": "net status",
+      "ok": true
+    },
+    {
+      "profile": "b",
+      "command": "bridge create",
+      "ok": true
+    },
+    {
+      "profile": "b",
+      "command": "bridge create",
+      "ok": true
+    },
+    {
+      "profile": "b",
+      "command": "bridge result",
+      "ok": true
+    },
+    {
+      "profile": "b",
+      "command": "bridge threads",
+      "ok": true
+    },
+    {
+      "profile": "b",
+      "command": "bridge get",
+      "ok": true
+    },
+    {
+      "profile": "b",
+      "command": "net disable",
+      "ok": true
+    },
+    {
+      "profile": "b",
+      "command": "bridge threads",
+      "denied": "cancelled"
+    },
+    {
+      "profile": "c",
+      "command": "net init",
+      "ok": true
+    },
+    {
+      "profile": "c",
+      "command": "net protect",
+      "ok": true
+    },
+    {
+      "profile": "c",
+      "command": "net status",
+      "ok": true
+    },
+    {
+      "profile": "d",
+      "command": "net init",
+      "ok": true
+    },
+    {
+      "profile": "d",
+      "command": "net protect",
+      "ok": true
+    },
+    {
+      "profile": "d",
+      "command": "net status",
+      "ok": true
+    },
+    {
+      "profile": "a",
+      "command": "spaces create",
+      "ok": true
+    },
+    {
+      "profile": "a",
+      "command": "spaces invite",
+      "ok": true
+    },
+    {
+      "profile": "c",
+      "command": "spaces join",
+      "ok": true
+    },
+    {
+      "profile": "a",
+      "command": "spaces invite",
+      "ok": true
+    },
+    {
+      "profile": "d",
+      "command": "spaces join",
+      "ok": true
+    },
+    {
+      "profile": "a",
+      "command": "spaces post",
+      "ok": true
+    },
+    {
+      "profile": "c",
+      "command": "spaces post",
+      "ok": true
+    },
+    {
+      "profile": "d",
+      "command": "spaces post",
+      "ok": true
+    },
+    {
+      "profile": "a",
+      "command": "spaces tail",
+      "ok": true
+    },
+    {
+      "profile": "c",
+      "command": "spaces tail",
+      "ok": true
+    },
+    {
+      "profile": "d",
+      "command": "spaces tail",
+      "ok": true
+    },
+    {
+      "profile": "c",
+      "command": "net disable",
+      "ok": true
+    },
+    {
+      "profile": "c",
+      "command": "spaces post",
+      "denied": "cancelled"
+    },
+    {
+      "profile": "c",
+      "command": "net init",
+      "denied": "cancelled"
+    },
+    {
+      "profile": "c",
+      "command": "net status",
+      "ok": true
+    },
+    {
+      "profile": "c",
+      "command": "net unlock",
+      "ok": true
+    },
+    {
+      "profile": "c",
+      "command": "spaces list",
+      "denied": "cancelled"
+    },
+    {
+      "profile": "c",
+      "command": "net init",
+      "ok": true
+    },
+    {
+      "profile": "c",
+      "command": "spaces tail",
+      "ok": true
+    }
+  ],
+  "cleanup": [
+    {
+      "pid": 429,
+      "forced": false,
+      "code": 0,
+      "signal": null
+    },
+    {
+      "pid": 1229,
+      "forced": false,
+      "code": 0,
+      "signal": null
+    },
+    {
+      "pid": 2485,
+      "forced": false,
+      "code": 0,
+      "signal": null
+    },
+    {
+      "pid": 1456,
+      "forced": false,
+      "code": 0,
+      "signal": null
+    },
+    {
+      "pid": 99,
+      "forced": false,
+      "code": 0,
+      "signal": null
+    }
+  ],
+  "version": "mousse-cli 0.1.1",
+  "initial": {
+    "enabled": false,
+    "features": {
+      "netBridge": false,
+      "netSpaces": false
+    },
+    "keystore": "missing",
+    "routes": [],
+    "peers": []
+  },
+  "initialized": {
+    "enabled": true,
+    "features": {
+      "netBridge": true,
+      "netSpaces": true
+    },
+    "keystore": "unlocked",
+    "protected": true,
+    "self": {
+      "user": "usr_14qyb4jc8dgz54jnx5j8xww190",
+      "node": "nod_16syemnwsjnf8pastamsydhh55",
+      "isAuthority": true
+    },
+    "rosterState": "ok",
+    "routes": [
+      {
+        "transport": "direct",
+        "address": "ws://127.0.0.1:44745/mousse-net",
+        "priority": 0
+      }
+    ],
+    "transports": [
+      {
+        "id": "direct",
+        "enabled": true,
+        "state": "ready",
+        "routes": [
+          {
+            "transport": "direct",
+            "address": "ws://127.0.0.1:44745/mousse-net",
+            "priority": 0
+          }
+        ]
+      }
+    ],
+    "peers": []
+  },
+  "authority": {
+    "node": "nod_16syemnwsjnf8pastamsydhh55",
+    "user": "usr_14qyb4jc8dgz54jnx5j8xww190",
+    "protected": true
+  },
+  "enrollment": {
+    "sameUser": true,
+    "distinctNode": true,
+    "protected": true
+  },
+  "bridge": {
+    "id": "rpc_74145026b0317038510385ada0",
+    "thread": "19fc360f-2127-4f51-ac1b-eb98903b89bd",
+    "executionCount": 1,
+    "display": {
+      "kind": "snapshot",
+      "sha256": "b00ebd4396938ce899a42ff69222ec980418bf3a0d25dbf1ff8c864843434865",
+      "bytes": 352,
+      "nameVerified": true
+    }
+  },
+  "denials": [
+    {
+      "command": "bridge threads",
+      "actualExitCode": 130,
+      "expectedExitCode": 130,
+      "body": {
+        "code": "cancelled",
+        "error": "The operation was cancelled."
+      },
+      "stdoutEmpty": true
+    },
+    {
+      "command": "spaces post",
+      "actualExitCode": 130,
+      "expectedExitCode": 130,
+      "body": {
+        "code": "cancelled",
+        "error": "The operation was cancelled."
+      },
+      "stdoutEmpty": true
+    },
+    {
+      "command": "net init",
+      "actualExitCode": 130,
+      "expectedExitCode": 130,
+      "body": {
+        "code": "cancelled",
+        "error": "The operation was cancelled."
+      },
+      "stdoutEmpty": true
+    },
+    {
+      "command": "spaces list",
+      "actualExitCode": 130,
+      "expectedExitCode": 130,
+      "body": {
+        "code": "cancelled",
+        "error": "The operation was cancelled."
+      },
+      "stdoutEmpty": true
+    }
+  ],
+  "spaces": {
+    "space": "spc_6tpvfsdmhfwz5wydnxgaqzw2f3",
+    "stream": "str_0d3n6kscyz05mcn8xa713rss4c",
+    "independentUsers": 3,
+    "replicas": 3,
+    "originals": [
+      {
+        "id": "evt_6yaze3egw64g025shbs4wfhc1d",
+        "position": {
+          "epoch": 1,
+          "seq": 1
+        }
+      },
+      {
+        "id": "evt_5f1nsj4704kq23dah3hbmehdv9",
+        "position": {
+          "epoch": 1,
+          "seq": 2
+        }
+      },
+      {
+        "id": "evt_0p3mqwmwb5cy2vgd61v9mev7x9",
+        "position": {
+          "epoch": 1,
+          "seq": 3
+        }
+      }
+    ],
+    "rollback": {
+      "persistedOff": true,
+      "restartOff": true,
+      "explicitOptIn": true,
+      "outboxOriginalSha256": "2d9ee4c408b537e53a1fff5f79cb93cacd99ffce33cbecf44ff19ccb279a8bf9",
+      "originalBytesRetained": true
+    }
+  },
+  "status": "passed",
+  "exitStatusQualified": true,
+  "remainingOwnedChildren": 0,
+  "remainingOwnedProcesses": []
+}

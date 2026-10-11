@@ -7,7 +7,7 @@ import {
   EditRegular,
   PinOffRegular,
   PinRegular
-} from '@fluentui/react-icons'
+} from '../lib/icons'
 import { FloatingPortal, FLOATING_LAYER_Z_INDEX } from '../lib/floatingLayer'
 
 export interface ThreadsContextMenuTarget {

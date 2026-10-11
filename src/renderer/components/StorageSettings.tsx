@@ -75,14 +75,16 @@ export function StorageSettings() {
       if (mounted.current) setBusy(false)
     }
   }
-  return <section className="settings-section">
+  return <section className="settings-section storage-settings">
     <h2>Storage and trash</h2>
-    <p>Trash remains restorable for review. Undo has its own retention window. Retained conversations and Git history reachable from other branches are separate from reclaimable checkout files.</p>
-    <div className="settings-row">
-      <label>Trash grace period (days) <input className="settings-input" style={{ width: 90 }} aria-label="Trash grace period in days" type="number" min={1} max={3650} value={policy.graceDays} disabled={busy} onChange={(event) => { dirty.current = true; setPolicy({ ...policy, graceDays: Number(event.target.value) }) }} /></label>
-      <label><input type="checkbox" checked={policy.automaticPurge} disabled={busy} onChange={(event) => { dirty.current = true; setPolicy({ ...policy, automaticPurge: event.target.checked }) }} /> Automatically purge eligible trash after the grace period</label>
+    <p className="settings-section-desc">Configure global trash retention and automatic cleanup.</p>
+    <div className="storage-policy">
+      <h3>Trash retention</h3>
+      <label className="storage-grace-field"><span>Grace period <span className="storage-muted">(days)</span></span><input className="settings-input" aria-label="Trash grace period in days" type="number" min={1} max={3650} value={policy.graceDays} disabled={busy} onChange={(event) => { dirty.current = true; setPolicy({ ...policy, graceDays: Number(event.target.value) }) }} /></label>
+      <label className="storage-checkbox"><input type="checkbox" checked={policy.automaticPurge} disabled={busy} onChange={(event) => { dirty.current = true; setPolicy({ ...policy, automaticPurge: event.target.checked }) }} /><span>Automatically purge eligible trash after the grace period</span></label>
       <button className="settings-inline-btn" disabled={busy} onClick={() => void run(() => window.mousse.threads.configureTrash(policy), true)}>Save trash policy</button>
     </div>
+    <p>Trash remains restorable for review. Undo has its own retention window. Retained conversations and Git history reachable from other branches are separate from reclaimable checkout files.</p>
     <p>Automatic cleanup retains unpublished results and any files that need a human discard decision. Permanent deletion cannot be undone once it starts.</p>
     {error && <p role="alert">{error}</p>}
     {savedPolicy && <p role="status">Automatic cleanup: {!savedPolicy.automaticPurge ? 'off' : suspended ? 'suspended' : 'enabled'}.</p>}

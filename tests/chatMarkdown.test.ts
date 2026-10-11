@@ -63,6 +63,18 @@ describe('chat Markdown list rendering', () => {
     ).toBe(true)
   })
 
+  it('preserves canonical file targets through Streamdown sanitization', () => {
+    const target = 'mousse-file://open?path=C%3A%5Crepo%5Csrc%5Ca.ts&line=12&column=3'
+    const markup = render(`[Open source](${target})`)
+    expect(markup).toContain('href="mousse-file://open?path=C%3A%5Crepo%5Csrc%5Ca.ts&amp;line=12&amp;column=3"')
+    expect(markup).toContain('Open source')
+  })
+
+  it('removes executable source targets', () => {
+    const markup = render('[unsafe](javascript:alert(1))')
+    expect(markup).not.toContain('javascript:')
+  })
+
   it('renders inline code compactly without the roomy default pill', () => {
     const markup = render('- item with (`abc123`) code')
 

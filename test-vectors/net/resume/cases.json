@@ -1,0 +1,366 @@
+{
+  "version": 1,
+  "description": "Ordered subscriber/source/staging contract inputs and explicit cursor oracles; actual store/session implementations execute these in P1.",
+  "cases": [
+    {
+      "id": "live-before-replay-cut-and-resume",
+      "initial": {
+        "epoch": 1,
+        "seq": 79
+      },
+      "actions": [
+        {
+          "kind": "subscribed",
+          "epoch": 1,
+          "head": 104,
+          "through": 104
+        },
+        {
+          "kind": "live",
+          "epoch": 1,
+          "first": 105,
+          "last": 105
+        },
+        {
+          "kind": "replay",
+          "epoch": 1,
+          "first": 80,
+          "last": 89
+        },
+        {
+          "kind": "cut"
+        },
+        {
+          "kind": "subscribe",
+          "epoch": 1,
+          "after": 89
+        },
+        {
+          "kind": "subscribed",
+          "epoch": 1,
+          "head": 105,
+          "through": 105
+        },
+        {
+          "kind": "replay",
+          "epoch": 1,
+          "first": 90,
+          "last": 105
+        },
+        {
+          "kind": "caughtUp"
+        }
+      ],
+      "checkpoints": [
+        {
+          "afterAction": 1,
+          "cursor": {
+            "epoch": 1,
+            "seq": 79
+          },
+          "buffered": [
+            105
+          ],
+          "caughtUp": false
+        },
+        {
+          "afterAction": 3,
+          "cursor": {
+            "epoch": 1,
+            "seq": 89
+          },
+          "buffered": [],
+          "caughtUp": false
+        },
+        {
+          "afterAction": 7,
+          "cursor": {
+            "epoch": 1,
+            "seq": 105
+          },
+          "buffered": [],
+          "caughtUp": true
+        }
+      ],
+      "expected": {
+        "cursor": {
+          "epoch": 1,
+          "seq": 105
+        },
+        "appliedPositions": [
+          {
+            "epoch": 1,
+            "first": 80,
+            "last": 105
+          }
+        ],
+        "duplicateApplications": 0
+      }
+    },
+    {
+      "id": "caught-up-cannot-skip-gap",
+      "initial": {
+        "epoch": 1,
+        "seq": 89
+      },
+      "actions": [
+        {
+          "kind": "subscribed",
+          "epoch": 1,
+          "head": 104,
+          "through": 104
+        },
+        {
+          "kind": "live",
+          "epoch": 1,
+          "first": 104,
+          "last": 104
+        },
+        {
+          "kind": "caughtUp"
+        }
+      ],
+      "checkpoints": [
+        {
+          "afterAction": 2,
+          "cursor": {
+            "epoch": 1,
+            "seq": 89
+          },
+          "buffered": [],
+          "caughtUp": false
+        }
+      ],
+      "expected": {
+        "cursor": {
+          "epoch": 1,
+          "seq": 89
+        },
+        "subscribeAfter": 89,
+        "appliedPositions": [],
+        "duplicateApplications": 0
+      }
+    },
+    {
+      "id": "conflicting-duplicate-preserves-prefix",
+      "initial": {
+        "epoch": 1,
+        "seq": 10
+      },
+      "actions": [
+        {
+          "kind": "duplicate",
+          "epoch": 1,
+          "seq": 10,
+          "storedDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receivedDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "checkpoints": [
+        {
+          "afterAction": 0,
+          "cursor": {
+            "epoch": 1,
+            "seq": 10
+          },
+          "buffered": [],
+          "caughtUp": false
+        }
+      ],
+      "expected": {
+        "cursor": {
+          "epoch": 1,
+          "seq": 10
+        },
+        "error": "conflict",
+        "appliedPositions": [],
+        "duplicateApplications": 0
+      }
+    },
+    {
+      "id": "epoch-reuses-sequence-only-through-complete-meta-snapshot",
+      "initial": {
+        "epoch": 1,
+        "seq": 1
+      },
+      "actions": [
+        {
+          "kind": "newEpochRecord",
+          "epoch": 2,
+          "seq": 1
+        },
+        {
+          "kind": "snapshotBegin",
+          "epoch": 2,
+          "through": 1
+        },
+        {
+          "kind": "snapshotChunk",
+          "epoch": 1,
+          "first": 1,
+          "last": 2,
+          "role": "fullPriorFrozenMetaPrefix"
+        },
+        {
+          "kind": "snapshotChunk",
+          "epoch": 2,
+          "first": 1,
+          "last": 1,
+          "role": "ownerDescriptorActivation",
+          "previousSafeHead": {
+            "epoch": 1,
+            "seq": 2
+          }
+        },
+        {
+          "kind": "snapshotCommit"
+        }
+      ],
+      "checkpoints": [
+        {
+          "afterAction": 0,
+          "cursor": {
+            "epoch": 1,
+            "seq": 1
+          },
+          "buffered": [],
+          "caughtUp": false
+        },
+        {
+          "afterAction": 3,
+          "cursor": {
+            "epoch": 1,
+            "seq": 1
+          },
+          "buffered": [],
+          "caughtUp": false
+        },
+        {
+          "afterAction": 4,
+          "cursor": {
+            "epoch": 2,
+            "seq": 1
+          },
+          "buffered": [],
+          "caughtUp": false
+        }
+      ],
+      "expected": {
+        "cursor": {
+          "epoch": 2,
+          "seq": 1
+        },
+        "snapshotRecordsExecutable": false,
+        "preserveOriginalEpochs": true,
+        "appliedPositions": [],
+        "duplicateApplications": 0
+      }
+    },
+    {
+      "id": "large-incomplete-staging-crash-keeps-active-generation",
+      "initial": {
+        "epoch": 1,
+        "seq": 10
+      },
+      "actions": [
+        {
+          "kind": "snapshotBegin",
+          "epoch": 2,
+          "through": 500
+        },
+        {
+          "kind": "snapshotChunk",
+          "epoch": 1,
+          "first": 1,
+          "last": 10,
+          "role": "fullPriorMetaPrefix"
+        },
+        {
+          "kind": "snapshotChunk",
+          "epoch": 2,
+          "first": 1,
+          "last": 15,
+          "bytes": 983040,
+          "role": "newEpochPrefix"
+        },
+        {
+          "kind": "crash"
+        },
+        {
+          "kind": "restart"
+        }
+      ],
+      "checkpoints": [
+        {
+          "afterAction": 2,
+          "cursor": {
+            "epoch": 1,
+            "seq": 10
+          },
+          "buffered": [],
+          "caughtUp": false
+        },
+        {
+          "afterAction": 4,
+          "cursor": {
+            "epoch": 1,
+            "seq": 10
+          },
+          "buffered": [],
+          "caughtUp": false
+        }
+      ],
+      "expected": {
+        "cursor": {
+          "epoch": 1,
+          "seq": 10
+        },
+        "stagingDiscarded": true,
+        "snapshotRecordsExecutable": false,
+        "appliedPositions": [],
+        "duplicateApplications": 0
+      }
+    },
+    {
+      "id": "overlap-row-overflow-resumes-durable-cursor",
+      "initial": {
+        "epoch": 1,
+        "seq": 0
+      },
+      "actions": [
+        {
+          "kind": "subscribed",
+          "epoch": 1,
+          "head": 1,
+          "through": 1
+        },
+        {
+          "kind": "live",
+          "epoch": 1,
+          "first": 2,
+          "last": 1002
+        }
+      ],
+      "checkpoints": [
+        {
+          "afterAction": 1,
+          "cursor": {
+            "epoch": 1,
+            "seq": 0
+          },
+          "buffered": [],
+          "caughtUp": false
+        }
+      ],
+      "expected": {
+        "cursor": {
+          "epoch": 1,
+          "seq": 0
+        },
+        "subscribeAfter": 0,
+        "appliedPositions": [],
+        "duplicateApplications": 0
+      }
+    }
+  ]
+}

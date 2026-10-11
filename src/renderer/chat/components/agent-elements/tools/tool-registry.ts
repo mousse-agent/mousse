@@ -7,17 +7,18 @@ import {
   IconTerminal2 as Terminal,
   IconCircleX as XCircle,
   IconFileCode as FileCode2,
+  Brain,
   IconSparkles as Sparkles,
   IconGlobe as Globe,
   IconFilePlus as FilePlus,
   IconChecklist as ListTodo,
   IconLogout as LogOut,
-} from "@tabler/icons-react";
+} from "../../../../lib/icons";
 
 export type ToolVariant = "simple" | "collapsible";
 
 export type ToolMeta = {
-  icon: React.ComponentType<{ className?: string }>;
+  icon: React.ComponentType<{ className?: string; size?: number }>;
   title: (part: any) => string;
   subtitle?: (part: any) => string;
   variant: ToolVariant;
@@ -358,12 +359,8 @@ export const toolRegistry: Record<string, ToolMeta> = {
     variant: "simple",
   },
   "tool-Thinking": {
-    icon: Sparkles,
-    title: (part) => {
-      const isPending =
-        part.state !== "output-available" && part.state !== "output-error";
-      return isPending ? "Thinking..." : "Thought";
-    },
+    icon: Brain,
+    title: () => "Thinking",
     variant: "collapsible",
   },
 };

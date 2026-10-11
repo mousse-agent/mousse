@@ -15,10 +15,12 @@ import { runChannels } from './commands/channels'
 import { runConfig } from './commands/config'
 import { runService } from './commands/service'
 import { runThreadActionCommand } from './commands/threadActions'
-import { runControl } from './commands/control'
-import { runConnections } from './commands/connections'
-import { runLogin } from './commands/login'
-import { runLogout } from './commands/logout'
+import { runRelay } from './commands/relay'
+import { runNet, runBridge } from './commands/net'
+import { BRIDGE_HUB_SUBCOMMANDS, runBridgeHubCommand } from './commands/bridge'
+import { runSpacesCommand } from './commands/spaces'
+import { runBotsCommand } from './commands/bots'
+import { runDeprecatedControl } from './commands/deprecatedControl'
 import { stripCliModeArgs } from './cliLaunch'
 
 /**
@@ -77,17 +79,30 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
       case 'service':
         await runService(args)
         break
+      case 'relay':
+        await runRelay(args)
+        break
+      case 'net':
+        await runNet(args)
+        break
+      case 'bridge':
+        if (BRIDGE_HUB_SUBCOMMANDS.includes(args.subcommand as typeof BRIDGE_HUB_SUBCOMMANDS[number])) {
+          await runBridgeHubCommand(args)
+        } else {
+          await runBridge(args)
+        }
+        break
+      case 'spaces':
+        await runSpacesCommand(args)
+        break
+      case 'bots':
+        await runBotsCommand(args)
+        break
       case 'control':
-        await runControl(args)
-        break
       case 'connections':
-        await runConnections(args)
-        break
       case 'login':
-        await runLogin(args)
-        break
       case 'logout':
-        await runLogout(args)
+        runDeprecatedControl(args)
         break
       case 'workspace':
       case 'publish':
@@ -148,4 +163,3 @@ function readPackageVersion(): string {
     return 'mousse-cli'
   }
 }
-

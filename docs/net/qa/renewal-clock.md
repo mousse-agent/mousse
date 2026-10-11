@@ -1,0 +1,16 @@
+# Renewal clock race, 2026-10-04
+
+I inspected [PR #45's Application checks](https://github.com/mousse-agent/mousse/actions/runs/37178121151/job/111364926721) at `1a971a5056eeaf752792eae4e43e87da892c9915` and compared them with [the exact master baseline](https://github.com/mousse-agent/mousse/actions/runs/37135616520) at `7c973adf2ada0e854a44985c36ceef48e1588063`. The candidate had 15 failing tests; all 14 baseline failures also appeared, plus `tests/net/spaces/discovery/renewal.test.ts` reporting `Renewal must use the authority clock.` The baseline failures remain unresolved. Their test sources are unchanged; I compared the failure blocks, including both built-Electron failures, without claiming identical incidental diagnostics or a green application suite.
+
+The owner timer passed one live `clock.now()` sample to `renewExpiring`, which sampled the clock again and required exact equality. A legitimate millisecond tick therefore rejected renewal. I reproduced that production path deterministically before editing production code: the new service regression initializes a real authority, advances into its renewal window, ticks the clock one millisecond per read, and fires the actual hourly owner timer. The original source failed with status `bad_request`.
+
+I removed the caller-supplied instant from the internal identity API. Renewal samples its authority clock once for eligibility and renewed delegation timestamps; roster issuance still independently samples its own time. Both production callers and every test call use the new signature. I retained safe-integer/nonnegative clock validation, authority enforcement, nonexpired/nonrevoked filtering, signing, conflict checks and transactional validation. No wire or IPC contract changes.
+
+On Node 24.20.0, Darwin arm64, I verified:
+
+- `vitest run tests/net/service.test.ts tests/net/spaces/discovery/renewal.test.ts --maxWorkers=1`: 5/5 passed, including the original CI failure and the timer regression. The regression verifies a signed renewal, one roster version increment, unchanged authority and the original seven-day delegation lifetime.
+- `vitest run tests/net/identity/identity.test.ts tests/net/sync/integration.test.ts tests/net/spaces/host/meta.test.ts -t 'renew|expiry|revok' --maxWorkers=1`: 7 passed, 50 excluded by the focused selection.
+- `vitest run tests/net/sync/integration.test.ts -t 'supplies an expired original lease' --maxWorkers=1`: 1 passed, 32 excluded. This covers the other directly changed sync caller and original historical-lease replay.
+- Both node and renderer TypeScript checks passed. All nine changed TypeScript files passed Prettier 3.9.9 after formatting the shortened discovery renewal call. Changed production sources lint with no errors and the existing `NetService.ts:289` floating-promise warning. ESLint does not configure these test files, so I do not claim they were linted.
+
+I ran 13 focused checks, not the full suite or Ubuntu CI locally. An independent source review found no concrete blocker and confirmed the timer regression/security scope; it does not replace the required other-human sensitive-change review. The existing draft stack remains #45 → #50 → #52, pending that review. I retain the original private-authorization report's historical intermittent-failure note and link this later diagnosis rather than rewriting its evidence.

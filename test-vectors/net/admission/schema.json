@@ -1,0 +1,1162 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "P0 normalized admission evidence fixtures",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "description",
+    "admissionCases",
+    "multiBotCases",
+    "approvalCases",
+    "recoveryCases",
+    "compartmentCases",
+    "transactionCases"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "admissionCases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]+$",
+            "maxLength": 128
+          },
+          "input": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "space": {
+                "type": "string",
+                "pattern": "^spc_[0-9a-hjkmnp-tv-z]{26}$"
+              },
+              "bot": {
+                "type": "string",
+                "pattern": "^bot_[0-9a-hjkmnp-tv-z]{26}$"
+              },
+              "event": {
+                "type": "string",
+                "pattern": "^evt_[0-9a-hjkmnp-tv-z]{26}$"
+              },
+              "envelopeUtf8": {
+                "type": "string",
+                "maxLength": 65536
+              },
+              "payloadHash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "eventType": {
+                "type": "string",
+                "maxLength": 65536
+              },
+              "source": {
+                "enum": [
+                  "record",
+                  "snapshot",
+                  "ephemeral"
+                ]
+              },
+              "authorKind": {
+                "enum": [
+                  "human",
+                  "bot"
+                ]
+              },
+              "placedHere": {
+                "type": "boolean"
+              },
+              "placementActive": {
+                "type": "boolean"
+              },
+              "placementActivationHostTs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "delegationCurrent": {
+                "type": "boolean"
+              },
+              "rosterConflict": {
+                "type": "boolean"
+              },
+              "metaEpoch": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "eventMetaEpoch": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "metaAppliedSeq": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "metaConfirmedSeq": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "eventMetaSeq": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "metaConfirmationAgeMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "upgradeRequired": {
+                "type": "boolean"
+              },
+              "frozen": {
+                "type": "boolean"
+              },
+              "signatureVerified": {
+                "type": "boolean"
+              },
+              "authorDelegationCurrent": {
+                "type": "boolean"
+              },
+              "currentMember": {
+                "type": "boolean"
+              },
+              "steerAllowed": {
+                "type": "boolean"
+              },
+              "mentionsBot": {
+                "type": "boolean"
+              },
+              "privateKeyAvailable": {
+                "type": "boolean"
+              },
+              "profile": {
+                "enum": [
+                  "chat",
+                  "reader",
+                  "operator"
+                ]
+              },
+              "steerPolicy": {
+                "enum": [
+                  "owner",
+                  "roles",
+                  "everyone"
+                ]
+              },
+              "runtimeQualified": {
+                "type": "boolean"
+              },
+              "spendBoundKnown": {
+                "type": "boolean"
+              },
+              "localNow": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "hostOffsetMs": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "clockMeasurementAgeMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "clockRoundTripMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "hostRecvTs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "authorTs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "dailyRemainingUnits": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "runCeilingUnits": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "activeRuns": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "concurrencyLimit": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "memberAdmittedLastHour": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "memberHourlyLimit": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "existing": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "payloadHash": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "state": {
+                        "enum": [
+                          "accepted",
+                          "running",
+                          "waitingApproval",
+                          "completed",
+                          "failed",
+                          "cancelled",
+                          "uncertain",
+                          "expired"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "payloadHash",
+                      "state"
+                    ]
+                  }
+                ]
+              },
+              "failurePoint": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "enum": [
+                      "execution-insert",
+                      "budget-reserve",
+                      "capacity-reserve",
+                      "rate-charge",
+                      "binding-insert",
+                      "accepted-outbox-insert",
+                      "expired-outbox-insert",
+                      "commit"
+                    ]
+                  }
+                ]
+              },
+              "clockWallMonotonicDeltaMs": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "space",
+              "bot",
+              "event",
+              "envelopeUtf8",
+              "payloadHash",
+              "eventType",
+              "source",
+              "authorKind",
+              "placedHere",
+              "placementActive",
+              "placementActivationHostTs",
+              "delegationCurrent",
+              "rosterConflict",
+              "metaEpoch",
+              "eventMetaEpoch",
+              "metaAppliedSeq",
+              "metaConfirmedSeq",
+              "eventMetaSeq",
+              "metaConfirmationAgeMs",
+              "upgradeRequired",
+              "frozen",
+              "signatureVerified",
+              "authorDelegationCurrent",
+              "currentMember",
+              "steerAllowed",
+              "mentionsBot",
+              "privateKeyAvailable",
+              "profile",
+              "steerPolicy",
+              "runtimeQualified",
+              "spendBoundKnown",
+              "localNow",
+              "hostOffsetMs",
+              "clockMeasurementAgeMs",
+              "clockRoundTripMs",
+              "hostRecvTs",
+              "authorTs",
+              "dailyRemainingUnits",
+              "runCeilingUnits",
+              "activeRuns",
+              "concurrencyLimit",
+              "memberAdmittedLastHour",
+              "memberHourlyLimit",
+              "existing",
+              "failurePoint",
+              "clockWallMonotonicDeltaMs"
+            ]
+          },
+          "expected": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "decision",
+              "deltas"
+            ],
+            "properties": {
+              "decision": {
+                "enum": [
+                  "admit",
+                  "reject",
+                  "duplicate",
+                  "expired",
+                  "ignore"
+                ]
+              },
+              "code": {
+                "type": "string"
+              },
+              "state": {
+                "enum": [
+                  "accepted",
+                  "running",
+                  "waitingApproval",
+                  "completed",
+                  "failed",
+                  "cancelled",
+                  "uncertain",
+                  "expired"
+                ]
+              },
+              "deltas": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "executions": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "reservations": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "receipts": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "rateCharges": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "concurrencySlots": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "modelCalls": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "required": [
+                  "executions",
+                  "reservations",
+                  "receipts",
+                  "rateCharges",
+                  "concurrencySlots",
+                  "modelCalls"
+                ]
+              }
+            }
+          }
+        },
+        "required": [
+          "id",
+          "input",
+          "expected"
+        ]
+      }
+    },
+    "multiBotCases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "bots": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 16,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^bot_[0-9a-hjkmnp-tv-z]{26}$"
+            }
+          },
+          "trigger": {
+            "type": "string",
+            "pattern": "^evt_[0-9a-hjkmnp-tv-z]{26}$"
+          },
+          "expected": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "independentExecutionKeys": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "reservations": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "receipts": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "distinctBackingThreads": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "independentExecutionKeys",
+              "reservations",
+              "receipts",
+              "distinctBackingThreads"
+            ]
+          },
+          "targets": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "space": {
+                  "type": "string",
+                  "pattern": "^spc_[0-9a-hjkmnp-tv-z]{26}$"
+                },
+                "bot": {
+                  "type": "string",
+                  "pattern": "^bot_[0-9a-hjkmnp-tv-z]{26}$"
+                },
+                "event": {
+                  "type": "string",
+                  "pattern": "^evt_[0-9a-hjkmnp-tv-z]{26}$"
+                },
+                "envelopeUtf8": {
+                  "type": "string",
+                  "maxLength": 65536
+                },
+                "payloadHash": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "eventType": {
+                  "type": "string",
+                  "maxLength": 65536
+                },
+                "source": {
+                  "enum": [
+                    "record",
+                    "snapshot",
+                    "ephemeral"
+                  ]
+                },
+                "authorKind": {
+                  "enum": [
+                    "human",
+                    "bot"
+                  ]
+                },
+                "placedHere": {
+                  "type": "boolean"
+                },
+                "placementActive": {
+                  "type": "boolean"
+                },
+                "placementActivationHostTs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "delegationCurrent": {
+                  "type": "boolean"
+                },
+                "rosterConflict": {
+                  "type": "boolean"
+                },
+                "metaEpoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "eventMetaEpoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "metaAppliedSeq": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "metaConfirmedSeq": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "eventMetaSeq": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "metaConfirmationAgeMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "upgradeRequired": {
+                  "type": "boolean"
+                },
+                "frozen": {
+                  "type": "boolean"
+                },
+                "signatureVerified": {
+                  "type": "boolean"
+                },
+                "authorDelegationCurrent": {
+                  "type": "boolean"
+                },
+                "currentMember": {
+                  "type": "boolean"
+                },
+                "steerAllowed": {
+                  "type": "boolean"
+                },
+                "mentionsBot": {
+                  "type": "boolean"
+                },
+                "privateKeyAvailable": {
+                  "type": "boolean"
+                },
+                "profile": {
+                  "enum": [
+                    "chat",
+                    "reader",
+                    "operator"
+                  ]
+                },
+                "steerPolicy": {
+                  "enum": [
+                    "owner",
+                    "roles",
+                    "everyone"
+                  ]
+                },
+                "runtimeQualified": {
+                  "type": "boolean"
+                },
+                "spendBoundKnown": {
+                  "type": "boolean"
+                },
+                "localNow": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "hostOffsetMs": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                "clockMeasurementAgeMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "clockRoundTripMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "hostRecvTs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "authorTs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "dailyRemainingUnits": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "runCeilingUnits": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "activeRuns": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "concurrencyLimit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "memberAdmittedLastHour": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "memberHourlyLimit": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "existing": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "payloadHash": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "state": {
+                          "enum": [
+                            "accepted",
+                            "running",
+                            "waitingApproval",
+                            "completed",
+                            "failed",
+                            "cancelled",
+                            "uncertain",
+                            "expired"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "payloadHash",
+                        "state"
+                      ]
+                    }
+                  ]
+                },
+                "failurePoint": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "enum": [
+                        "execution-insert",
+                        "budget-reserve",
+                        "capacity-reserve",
+                        "rate-charge",
+                        "binding-insert",
+                        "accepted-outbox-insert",
+                        "expired-outbox-insert",
+                        "commit"
+                      ]
+                    }
+                  ]
+                },
+                "clockWallMonotonicDeltaMs": {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "space",
+                "bot",
+                "event",
+                "envelopeUtf8",
+                "payloadHash",
+                "eventType",
+                "source",
+                "authorKind",
+                "placedHere",
+                "placementActive",
+                "placementActivationHostTs",
+                "delegationCurrent",
+                "rosterConflict",
+                "metaEpoch",
+                "eventMetaEpoch",
+                "metaAppliedSeq",
+                "metaConfirmedSeq",
+                "eventMetaSeq",
+                "metaConfirmationAgeMs",
+                "upgradeRequired",
+                "frozen",
+                "signatureVerified",
+                "authorDelegationCurrent",
+                "currentMember",
+                "steerAllowed",
+                "mentionsBot",
+                "privateKeyAvailable",
+                "profile",
+                "steerPolicy",
+                "runtimeQualified",
+                "spendBoundKnown",
+                "localNow",
+                "hostOffsetMs",
+                "clockMeasurementAgeMs",
+                "clockRoundTripMs",
+                "hostRecvTs",
+                "authorTs",
+                "dailyRemainingUnits",
+                "runCeilingUnits",
+                "activeRuns",
+                "concurrencyLimit",
+                "memberAdmittedLastHour",
+                "memberHourlyLimit",
+                "existing",
+                "failurePoint",
+                "clockWallMonotonicDeltaMs"
+              ]
+            }
+          }
+        },
+        "required": [
+          "id",
+          "bots",
+          "trigger",
+          "expected",
+          "targets"
+        ]
+      }
+    },
+    "approvalCases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]+$",
+            "maxLength": 128
+          },
+          "input": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "enum": [
+                  "runtimeAction",
+                  "steerPolicyChange"
+                ]
+              },
+              "now": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "requestExpiresAt": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "grantExpiresAt": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "argumentDigestMatches": {
+                "type": "boolean"
+              },
+              "bindingMatches": {
+                "type": "boolean"
+              },
+              "placementMatches": {
+                "type": "boolean"
+              },
+              "alreadyConsumed": {
+                "type": "boolean"
+              },
+              "executionState": {
+                "enum": [
+                  "accepted",
+                  "running",
+                  "waitingApproval",
+                  "completed",
+                  "failed",
+                  "cancelled",
+                  "uncertain",
+                  "expired"
+                ]
+              },
+              "ownerSignatureValid": {
+                "type": "boolean"
+              },
+              "profileAllowsAction": {
+                "type": "boolean"
+              },
+              "stopActive": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "now",
+              "requestExpiresAt",
+              "grantExpiresAt",
+              "argumentDigestMatches",
+              "bindingMatches",
+              "placementMatches",
+              "alreadyConsumed",
+              "executionState",
+              "ownerSignatureValid",
+              "profileAllowsAction",
+              "stopActive"
+            ]
+          },
+          "expected": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "decision",
+              "modelCalls"
+            ],
+            "properties": {
+              "decision": {
+                "enum": [
+                  "dispatch",
+                  "reject",
+                  "newMentionRequired"
+                ]
+              },
+              "modelCalls": {
+                "const": 0
+              },
+              "code": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "required": [
+          "id",
+          "input",
+          "expected"
+        ]
+      }
+    },
+    "recoveryCases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]+$",
+            "maxLength": 128
+          },
+          "input": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "enum": [
+                  "accepted",
+                  "running",
+                  "waitingApproval",
+                  "completed",
+                  "failed",
+                  "cancelled",
+                  "uncertain",
+                  "expired"
+                ]
+              },
+              "externalEffectObserved": {
+                "type": "boolean"
+              },
+              "cost": {
+                "enum": [
+                  "none",
+                  "known",
+                  "unknown"
+                ]
+              },
+              "ledgerHealthy": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "state",
+              "externalEffectObserved",
+              "cost",
+              "ledgerHealthy"
+            ]
+          },
+          "expected": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "enum": [
+                  "failed",
+                  "uncertain",
+                  "recoveryRequired"
+                ]
+              },
+              "automaticRetry": {
+                "const": false
+              },
+              "retainDedup": {
+                "const": true
+              },
+              "retainReservation": {
+                "type": "boolean"
+              },
+              "modelCalls": {
+                "const": 0
+              }
+            },
+            "required": [
+              "state",
+              "automaticRetry",
+              "retainDedup",
+              "retainReservation",
+              "modelCalls"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "input",
+          "expected"
+        ]
+      }
+    },
+    "compartmentCases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]+$",
+            "maxLength": 128
+          },
+          "input": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "oldVisibilityEpoch": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "newVisibilityEpoch": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "newKeyEpoch": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "oldVisibilityEpoch",
+              "newVisibilityEpoch",
+              "newKeyEpoch"
+            ]
+          },
+          "expected": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "enum": [
+                  "fresh",
+                  "same"
+                ]
+              },
+              "loadPreviousPrivateTurns": {
+                "type": "boolean"
+              },
+              "publicMayReadPrivate": {
+                "const": false
+              }
+            },
+            "required": [
+              "context",
+              "loadPreviousPrivateTurns",
+              "publicMayReadPrivate"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "input",
+          "expected"
+        ]
+      }
+    },
+    "transactionCases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "input": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "remainingUnits": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "ceilingsUnits": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 16,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "sameExecutionKey": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "remainingUnits",
+              "ceilingsUnits",
+              "sameExecutionKey"
+            ]
+          },
+          "expected": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "admitted": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "duplicates": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "rejected": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "heldUnits": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "newReceipts": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "modelCallsBeforeCommit": {
+                "const": 0
+              }
+            },
+            "required": [
+              "admitted",
+              "duplicates",
+              "rejected",
+              "heldUnits",
+              "newReceipts",
+              "modelCallsBeforeCommit"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "input",
+          "expected"
+        ]
+      }
+    }
+  }
+}

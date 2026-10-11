@@ -28,7 +28,7 @@ export function GenericToolRow({
 }
 
 export type GenericToolProps = {
-  icon?: React.ComponentType<{ className?: string }>;
+  icon?: React.ComponentType<{ className?: string; size?: number }>;
   title: string;
   subtitle?: string;
   isPending: boolean;
@@ -47,7 +47,7 @@ export const GenericTool = memo(function GenericTool({
     <ToolRowBase
       icon={
         Icon ? (
-          <Icon className="w-full h-full shrink-0 text-muted-foreground" />
+          <Icon size={18} className="shrink-0 text-muted-foreground" />
         ) : undefined
       }
       shimmerLabel={title}

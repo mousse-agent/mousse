@@ -7,7 +7,7 @@ import {
   useState,
   type RefObject
 } from 'react'
-import { ChevronRight, LayoutGrid, Search, Star } from 'lucide-react'
+import { ChevronRight, LayoutGrid, Search, Star } from '../lib/icons'
 import type { LlmProviderOption } from '../../shared/settings'
 import {
   compareModelsNewestFirst,
@@ -111,25 +111,6 @@ function VariantPanel({
 
   return (
     <div className="model-family-variant-panel" onMouseDown={(event) => event.stopPropagation()}>
-      {family.efforts.length > 0 && (
-        <div className="model-family-variant-section" role="group" aria-label="Effort">
-          <div className="model-family-variant-heading">Effort</div>
-          <div className="model-family-variant-options">
-            {family.efforts.map((option) => (
-              <button
-                key={option}
-                type="button"
-                aria-pressed={effort === option}
-                className={`model-family-variant-chip${effort === option ? ' selected' : ''}`}
-                onClick={() => applyOption({ effort: option })}
-              >
-                {formatEffortLabel(option)}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
       {family.contexts.length > 0 && (
         <div className="model-family-variant-section">
           <div className="model-family-variant-heading">Context</div>
@@ -148,23 +129,6 @@ function VariantPanel({
         </div>
       )}
 
-      {family.speeds.length > 0 && (
-        <div className="model-family-variant-section">
-          <div className="model-family-variant-heading">Speed</div>
-          <div className="model-family-variant-options">
-            {family.speeds.map((option) => (
-              <button
-                key={option}
-                type="button"
-                className={`model-family-variant-chip${speed === option ? ' selected' : ''}`}
-                onClick={() => applyOption({ speed: option })}
-              >
-                {option}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   )
 }
@@ -260,6 +224,7 @@ function ProfileModelFamilyMenu({
 
   const localShellRef = useRef<HTMLDivElement | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const scrollHighlightRef = useRef(true)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const variantPanelRef = useRef<HTMLElement>(null)
   const activeRowRef = useRef<HTMLElement | null>(null)
@@ -315,13 +280,17 @@ function ProfileModelFamilyMenu({
     })
   }, [allEntries, favorites, favoritesOnly, groupedProviders, railFilter, searchQuery])
 
-  useEffect(() => {
-    setHighlightIndex(0)
-  }, [searchQuery, railFilter, favoritesOnly, filteredEntries.length])
+  useLayoutEffect(() => {
+    const selectedIndex = filteredEntries.findIndex((entry) =>
+      entry.providerId === selectedProviderId && isFamilySelected(entry.family, selectedModelId)
+    )
+    scrollHighlightRef.current = true
+    setHighlightIndex(Math.max(0, selectedIndex))
+  }, [filteredEntries, selectedProviderId, selectedModelId])
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
-      searchInputRef.current?.focus()
+      searchInputRef.current?.focus({ preventScroll: true })
     })
     return () => window.cancelAnimationFrame(frame)
   }, [])
@@ -418,6 +387,7 @@ function ProfileModelFamilyMenu({
 
       if (event.key === 'ArrowDown') {
         event.preventDefault()
+        scrollHighlightRef.current = true
         setHighlightIndex((index) =>
           filteredEntries.length === 0 ? 0 : Math.min(index + 1, filteredEntries.length - 1)
         )
@@ -425,6 +395,7 @@ function ProfileModelFamilyMenu({
       }
       if (event.key === 'ArrowUp') {
         event.preventDefault()
+        scrollHighlightRef.current = true
         setHighlightIndex((index) => Math.max(index - 1, 0))
         return
       }
@@ -441,12 +412,18 @@ function ProfileModelFamilyMenu({
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [filteredEntries, highlightIndex, selectEntry])
 
-  useEffect(() => {
-    const row = menuRef.current?.querySelector<HTMLElement>(
-      `[data-model-index="${highlightIndex}"]`
-    )
-    row?.scrollIntoView({ block: 'nearest' })
-  }, [highlightIndex])
+  useLayoutEffect(() => {
+    if (!scrollHighlightRef.current) return
+    scrollHighlightRef.current = false
+    const menu = menuRef.current
+    const row = menu?.querySelector<HTMLElement>(`[data-model-index="${highlightIndex}"]`)
+    if (!menu || !row) return
+    const menuRect = menu.getBoundingClientRect()
+    const rowRect = row.getBoundingClientRect()
+    if (rowRect.top < menuRect.top || rowRect.bottom > menuRect.bottom) {
+      menu.scrollTop += rowRect.top - menuRect.top - (menu.clientHeight - rowRect.height) / 2
+    }
+  }, [highlightIndex, filteredEntries])
 
   const handleMenuScroll = (event: React.UIEvent<HTMLElement>) => {
     onMenuScroll?.(event)
@@ -468,7 +445,7 @@ function ProfileModelFamilyMenu({
       activeFamily.family.familyId === entry.family.familyId
 
     const openVariantPanel = (element: HTMLElement) => {
-      if (!entry.family.hasSubOptions) {
+      if (!(entry.family.contexts.length > 1)) {
         clearHideTimer()
         activeRowRef.current = null
         setActiveFamily(null)
@@ -512,7 +489,7 @@ function ProfileModelFamilyMenu({
               <span>{entry.brandLabel}</span>
             </span>
           </span>
-          {entry.family.hasSubOptions ? (
+          {(entry.family.contexts.length > 1) ? (
             <ChevronRight size={12} className="model-picker-row-chevron" />
           ) : null}
           {shortcut ? <span className="model-picker-shortcut">{shortcut}</span> : null}
@@ -613,7 +590,7 @@ function ProfileModelFamilyMenu({
         </div>
       </div>
 
-      {activeFamily?.family.hasSubOptions && (
+      {(activeFamily && activeFamily.family.contexts.length > 1) && (
         <aside
           ref={variantPanelRef}
           className={`composer-model-variant-panel composer-model-variant-panel-${panelSide}`}
@@ -650,7 +627,8 @@ export function getGroupedModelButtonLabel(
 export function getGroupedModelButtonParts(
   providerId: string,
   modelId: string,
-  providers: LlmProviderOption[]
+  providers: LlmProviderOption[],
+  includeEffort = true
 ): string[] {
   if (!providerId) return ['Select model']
   const provider = providers.find((entry) => entry.id === providerId)
@@ -664,9 +642,8 @@ export function getGroupedModelButtonParts(
   const bits = [parsed.familyLabel]
   if (parsed.context) bits.push(parsed.context)
   const effort = getCurrentEffort(modelId, provider.models, providerId)
-  if (effort && getEffortsForModel(providerId, modelId, provider.models).length > 0) {
+  if (includeEffort && effort && getEffortsForModel(providerId, modelId, provider.models).length > 0) {
     bits.push(formatEffortLabel(effort))
   }
-  if (parsed.speed) bits.push(formatEffortLabel(parsed.speed))
   return bits
 }

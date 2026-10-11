@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toolRegistry } from "./tool-registry";
 import { GenericTool } from "./generic-tool";
 import { getToolStatus } from "../utils/format-tool";
@@ -9,6 +9,7 @@ export type ToolGroupProps = {
   part: any;
   nestedTools?: any[];
   chatStatus?: string;
+  icon?: ReactNode;
   completeLabel: string;
   shimmerLabel?: string;
   interruptedLabel: string;
@@ -95,6 +96,7 @@ export const ToolGroup = memo(function ToolGroup({
   part,
   nestedTools = [],
   chatStatus,
+  icon,
   completeLabel,
   shimmerLabel,
   interruptedLabel,
@@ -210,11 +212,12 @@ export const ToolGroup = memo(function ToolGroup({
   );
 
   if (isInterrupted && !part.output) {
-    return <ToolRowBase completeLabel={interruptedLabel} isAnimating={false} />;
+    return <ToolRowBase icon={icon} completeLabel={interruptedLabel} isAnimating={false} />;
   }
 
   return (
     <ToolRowBase
+      icon={icon}
       completeLabel={completeLabel}
       shimmerLabel={shimmerLabel}
       isAnimating={isPending}

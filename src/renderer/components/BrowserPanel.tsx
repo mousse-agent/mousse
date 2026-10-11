@@ -7,11 +7,9 @@ import {
   Globe,
   Minus,
   MoreVertical,
-  Pin,
   Plus,
-  RefreshCw,
-  X
-} from 'lucide-react'
+  RefreshCw
+} from '../lib/icons'
 import {
   ArrowSyncRegular,
   BroomRegular,
@@ -20,7 +18,7 @@ import {
   PinOffRegular,
   PinRegular,
   WindowDevToolsRegular
-} from '@fluentui/react-icons'
+} from '../lib/icons'
 import type { BrowserElementAttachment, BrowserTabState } from '../../shared/types'
 import type { BrowserAccessState } from '../../shared/browser/access'
 import type { InAppBrowserState } from '../../shared/browser/inApp'
@@ -371,7 +369,6 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   const tabs = useAppStore((s) => s.browserTabs)
   const activeByThread = useAppStore((s) => s.browserActiveTabByThread)
   const addTab = useAppStore((s) => s.addBrowserTab)
-  const closeTab = useAppStore((s) => s.closeBrowserTab)
   const updateTab = useAppStore((s) => s.updateBrowserTab)
   const setActiveTab = useAppStore((s) => s.setActiveBrowserTab)
   const addElementAttachment = useAppStore((s) => s.addBrowserElementAttachment)
@@ -428,8 +425,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       if (provisionedRequests.current.has(request.requestId)) continue
       provisionedRequests.current.add(request.requestId)
       const store = useAppStore.getState()
-      store.setMainAreaOpen(true)
-      store.setMainView('browser')
+      store.openSurfaceKind('browser')
       // A browser-wide tab is visible even if the requesting thread is not active.
       // The trusted host registers it on dom-ready, waking the waiting tool call.
       const tabId = store.addBrowserTab(null)
@@ -439,8 +435,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
   useEffect(() => {
     if (!pendingAccess) return
     const store = useAppStore.getState()
-    store.setMainAreaOpen(true)
-    store.setMainView('browser')
+    store.openSurfaceKind('browser')
   }, [pendingAccess?.requestId])
   useEffect(() => window.mousse?.inAppBrowser?.onState((state) => {
     if (state.profileId === profileId) setControlByTab((previous) => ({ ...previous, [state.uiTabId]: state }))
@@ -636,43 +631,20 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
           : <button type="button" disabled={browserBusy || !access.allowed} onClick={() => void browserControl('resume')}>Resume agent</button>}
       </div>}
       {browserError && <div className="browser-agent-controls" role="alert">{browserError}</div>}
-      <div className="browser-tabs">
-        {visibleTabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            className={`browser-tab${tab.id === activeTab?.id ? ' active' : ''}`}
-            onClick={() => setActiveTab(activeThreadId, tab.id)}
-            title={tab.title}
-          >
-            {tab.ownerThreadId === null && <Pin size={10} />}
-            <span>{tab.title}</span>
-            <span
-              className="browser-tab-close"
-              role="button"
-              aria-label="Close tab"
-              onClick={(event) => { event.stopPropagation(); closeTab(tab.id) }}
-            ><X size={12} /></span>
-          </button>
-        ))}
-        <button type="button" className="browser-new-tab" onClick={() => addTab(activeThreadId)} aria-label="New tab">
-          <Plus size={14} />
-        </button>
-      </div>
       {hasVisibleTabs ? (
         <>
           <div className="browser-toolbar">
             <div style={{ display: 'contents' }} inert={agentControlled}>
-            <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" disabled={!canGoBack} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goBack(), undefined)} aria-label="Back"><ArrowLeft size={16} /></button>
-            <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" disabled={!canGoForward} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goForward(), undefined)} aria-label="Forward"><ArrowRight size={16} /></button>
-            <button type="button" className="icon-btn icon-btn-ghost browser-toolbar-btn" onClick={() => withWebview(getActiveWebview(), (wv) => wv.reload(), undefined)} aria-label="Reload"><RefreshCw size={16} className={loading ? 'spin' : ''} /></button>
+            <button type="button" className="browser-toolbar-btn" disabled={!canGoBack} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goBack(), undefined)} aria-label="Back"><ArrowLeft size={16} /></button>
+            <button type="button" className="browser-toolbar-btn" disabled={!canGoForward} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goForward(), undefined)} aria-label="Forward"><ArrowRight size={16} /></button>
+            <button type="button" className="browser-toolbar-btn" onClick={() => withWebview(getActiveWebview(), (wv) => wv.reload(), undefined)} aria-label="Reload"><RefreshCw size={16} className={loading ? 'spin' : ''} /></button>
             <form className="browser-url-form" onSubmit={(event) => { event.preventDefault(); navigate() }}>
               <Globe size={14} className="browser-url-icon" />
               <input className="browser-url-input" value={inputUrl} onFocus={() => { editingAddress.current = true }} onBlur={() => { editingAddress.current = false }} onChange={(event) => setInputUrl(event.target.value)} placeholder="Search or enter URL" spellCheck={false} />
             </form>
             <button
               type="button"
-              className={`icon-btn icon-btn-ghost browser-toolbar-btn${picking ? ' active' : ''}`}
+              className={`browser-toolbar-btn${picking ? ' active' : ''}`}
               onClick={() => void chooseElement()}
               disabled={!activeTab || activeTab.url === BLANK_URL}
               aria-label={picking ? 'Cancel element selection' : 'Point and click to select element'}
@@ -685,7 +657,7 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
               <button
                 ref={menuButtonRef}
                 type="button"
-                className="icon-btn icon-btn-ghost browser-toolbar-btn"
+                className="browser-toolbar-btn"
                 onClick={() => setMenuOpen((open) => !open)}
                 aria-label="Browser menu"
                 aria-expanded={menuOpen}

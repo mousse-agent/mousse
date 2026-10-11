@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { DiffEditor, type BeforeMount, type DiffOnMount } from '@monaco-editor/react'
 import type { Monaco } from '@monaco-editor/react'
-import { Cloud, GitBranch, Milestone, RefreshCw } from 'lucide-react'
+import { Cloud, Download, FolderOpen, GitBranch, Milestone, RefreshCw } from '../lib/icons'
 import type { GitCommit, GitFileChange, GitStatusSnapshot } from '../../shared/types'
+import type { GitHubAvailability, GitHubRepositoryVisibility } from '../../shared/github'
 import { useActiveProjectPath } from '../hooks/useActiveProjectPath'
+import { useAppStore } from '../stores/appStore'
+import { CODE_FONT } from '../lib/typography'
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../utils/monacoTheme'
 import { languageForPath } from '../utils/fileEditor'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
@@ -139,12 +142,27 @@ function CommitsSection({
 
 export function GitPanel() {
   const projectPath = useActiveProjectPath()
+  const projects = useAppStore((state) => state.projects)
+  const threads = useAppStore((state) => state.threads)
+  const activeThreadId = useAppStore((state) => state.activeThreadId)
+  const activeProject = useMemo(() => {
+    const projectId = threads.find((thread) => thread.id === activeThreadId)?.projectId
+    return projects.find((project) => project.id === projectId) ?? projects.find((project) => project.path === projectPath)
+  }, [activeThreadId, projectPath, projects, threads])
   const [status, setStatus] = useState<GitStatusSnapshot | null>(null)
   const [commits, setCommits] = useState<GitCommit[]>([])
   const [loading, setLoading] = useState(false)
   const [selected, setSelected] = useState<{ path: string; staged: boolean } | null>(null)
   const [diff, setDiff] = useState('')
   const [diffLoading, setDiffLoading] = useState(false)
+  const [githubStatus, setGithubStatus] = useState<GitHubAvailability | null>(null)
+  const [githubBusy, setGithubBusy] = useState(false)
+  const [githubError, setGithubError] = useState('')
+  const [githubNotice, setGithubNotice] = useState('')
+  const [repositoryName, setRepositoryName] = useState('')
+  const [visibility, setVisibility] = useState<GitHubRepositoryVisibility>('private')
+  const [cloneRepository, setCloneRepository] = useState('')
+  const [cloneDestination, setCloneDestination] = useState('')
   const [sectionFlex, setSectionFlex] = useState<Record<GitSectionId, number>>({
     staged: 1,
     changes: 1,
@@ -177,8 +195,76 @@ export function GitPanel() {
   useEffect(() => {
     setSelected(null)
     setDiff('')
+    setGithubError('')
+    setGithubNotice('')
     void refresh()
   }, [refresh])
+
+  useEffect(() => {
+    setRepositoryName(activeProject?.name.replace(/[^A-Za-z0-9._-]/g, '-') ?? '')
+  }, [activeProject?.id, activeProject?.name])
+
+  const refreshGitHubStatus = useCallback(async () => {
+    try {
+      setGithubStatus(await window.mousse.github.status())
+    } catch (error) {
+      setGithubStatus({ state: 'error', message: error instanceof Error ? error.message : String(error) })
+    }
+  }, [])
+
+  useEffect(() => {
+    if (projectPath && status && !status.isRepo) void refreshGitHubStatus()
+  }, [projectPath, refreshGitHubStatus, status])
+
+  const createGitHubRepository = useCallback(async () => {
+    if (!activeProject) {
+      setGithubError('The selected folder is not associated with a project.')
+      return
+    }
+    setGithubBusy(true)
+    setGithubError('')
+    setGithubNotice('')
+    try {
+      const result = await window.mousse.github.createRepository({
+        projectId: activeProject.id,
+        name: repositoryName.trim(),
+        visibility
+      })
+      setGithubNotice(result.repositoryUrl
+        ? `Created ${result.repositoryUrl}. No commits were pushed.`
+        : 'GitHub repository created and connected as origin. No commits were pushed.')
+      await refresh()
+    } catch (error) {
+      setGithubError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setGithubBusy(false)
+      void refreshGitHubStatus()
+    }
+  }, [activeProject, refresh, refreshGitHubStatus, repositoryName, visibility])
+
+  const chooseCloneDestination = useCallback(async () => {
+    const selectedPath = await window.mousse.github.chooseCloneDestination()
+    if (selectedPath) setCloneDestination(selectedPath)
+  }, [])
+
+  const cloneGitHubRepository = useCallback(async () => {
+    setGithubBusy(true)
+    setGithubError('')
+    setGithubNotice('')
+    try {
+      const result = await window.mousse.github.cloneRepository({
+        repository: cloneRepository.trim(),
+        destination: cloneDestination.trim()
+      })
+      setGithubNotice(`Cloned to ${result.project.path} and added it as a Mousse project.`)
+      await window.mousse.threads.createAndSelect('New Chat', result.project.id)
+    } catch (error) {
+      setGithubError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setGithubBusy(false)
+      void refreshGitHubStatus()
+    }
+  }, [cloneDestination, cloneRepository, refreshGitHubStatus])
 
   const loadDiff = useCallback(
     async (path: string, staged: boolean) => {
@@ -278,7 +364,38 @@ export function GitPanel() {
   const renderSidebarBody = () => {
     if (!projectPath) return <div className="git-empty">No project open</div>
     if (loading) return <div className="git-empty">Loading…</div>
-    if (!status?.isRepo) return <div className="git-empty">Not a git repository</div>
+    if (!status?.isRepo) return (
+      <div className="github-setup">
+        <div className="github-setup-heading"><Cloud size={16} /> Not a Git repository</div>
+        <p>Create a GitHub repository for this project, or clone into a separate empty folder.</p>
+        <div className={`github-status github-status-${githubStatus?.state ?? 'busy'}`}>
+          {githubStatus?.message ?? 'Checking GitHub CLI…'}
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => void refreshGitHubStatus()} disabled={githubBusy}>Check again</button>
+        </div>
+        {githubError ? <div className="github-message github-error" role="alert">{githubError}</div> : null}
+        {githubNotice ? <div className="github-message github-notice" role="status">{githubNotice}</div> : null}
+
+        <section className="github-flow">
+          <h3>Create GitHub repository</h3>
+          <p>Initializes Git locally, creates the remote, and adds <code>origin</code>. Existing files and commits are not pushed.</p>
+          <label>Repository name<input value={repositoryName} onChange={(event) => setRepositoryName(event.target.value)} disabled={githubBusy} /></label>
+          <label>Visibility<select value={visibility} onChange={(event) => setVisibility(event.target.value as GitHubRepositoryVisibility)} disabled={githubBusy}><option value="private">Private</option><option value="public">Public</option></select></label>
+          <button type="button" className="btn btn-primary btn-sm" onClick={() => void createGitHubRepository()} disabled={githubBusy || githubStatus?.state !== 'ready' || !repositoryName.trim() || !activeProject}>
+            <Cloud size={14} /> {githubBusy ? 'Working…' : 'Create repository'}
+          </button>
+        </section>
+
+        <section className="github-flow">
+          <h3>Clone repository</h3>
+          <p>Choose a new or empty folder. Mousse will never overwrite nonempty project content and will add the clone as a project.</p>
+          <label>GitHub repository<input placeholder="owner/repository" value={cloneRepository} onChange={(event) => setCloneRepository(event.target.value)} disabled={githubBusy} /></label>
+          <label>Destination<div className="github-destination"><input value={cloneDestination} readOnly placeholder="Choose an empty folder" /><button type="button" className="btn btn-ghost btn-sm" onClick={() => void chooseCloneDestination()} disabled={githubBusy} title="Choose destination"><FolderOpen size={14} /></button></div></label>
+          <button type="button" className="btn btn-primary btn-sm" onClick={() => void cloneGitHubRepository()} disabled={githubBusy || githubStatus?.state !== 'ready' || !cloneRepository.trim() || !cloneDestination.trim()}>
+            <Download size={14} /> {githubBusy ? 'Working…' : 'Clone and open project'}
+          </button>
+        </section>
+      </div>
+    )
 
     const nodes: ReactNode[] = []
     const fileSectionCount =
@@ -427,7 +544,7 @@ export function GitPanel() {
                 folding: true,
                 renderWhitespace: 'selection',
                 wordWrap: 'off',
-                fontFamily: "Outfit, 'Segoe UI', sans-serif",
+                fontFamily: CODE_FONT,
                 fontSize: 12
               }}
             />

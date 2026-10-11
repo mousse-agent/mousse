@@ -1,7 +1,8 @@
-import { createContext, useContext, useMemo } from 'react'
+import { createContext, useContext, useLayoutEffect, useMemo, useRef } from 'react'
 import type { ReactNode } from 'react'
 import type { UIMessage, ChatStatus } from 'ai'
 import { useAppStore } from '../../stores/appStore'
+import { X } from '../../lib/icons'
 import { PromptUndoProvider } from '../../components/PromptUndoControls'
 import { AgentChat } from './agent-elements/agent-chat'
 import type { CustomToolRendererProps } from './agent-elements/types'
@@ -30,7 +31,23 @@ const MousseComposerContext = createContext<ReactNode>(null)
 // (and losing textarea focus) on every parent render.
 function MousseInputBarSlot() {
   const composer = useContext(MousseComposerContext)
-  return <div className="shrink-0">{composer}</div>
+  const ref = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const el = ref.current
+    const shell = el?.closest('.mousse-chat-shell')
+    if (!el || !(shell instanceof HTMLElement)) return
+    const apply = () => {
+      shell.style.setProperty('--chat-composer-stack', `${el.offsetHeight}px`)
+    }
+    apply()
+    const observer = new ResizeObserver(apply)
+    observer.observe(el)
+    return () => {
+      observer.disconnect()
+      shell.style.removeProperty('--chat-composer-stack')
+    }
+  }, [])
+  return <div ref={ref} className="chat-composer-stack shrink-0">{composer}</div>
 }
 
 interface MousseAgentChatShellProps {
@@ -61,6 +78,7 @@ export function MousseAgentChatShell({
   quickActionApproval,
 }: MousseAgentChatShellProps) {
   const profileId = useAppStore(state => state.profileId)
+  const interrupted = useAppStore(state => Boolean(threadId && state.turnStates[threadId]?.phase === 'stopped'))
   const slots = useMemo(
     () => ({ InputBar: MousseInputBarSlot as never }),
     []
@@ -78,6 +96,12 @@ export function MousseAgentChatShell({
           error={error}
           toolRenderers={toolRenderers}
           slots={slots}
+          lastTurnNotice={interrupted ? <div className="chat-run-interrupted" role="status">
+            <span className="chat-run-interrupted-label">
+              <X size={12} strokeWidth={1.8} aria-hidden="true" />
+              <span>Run interrupted</span>
+            </span>
+          </div> : undefined}
           showCopyToolbar
           enableImagePreview
         />

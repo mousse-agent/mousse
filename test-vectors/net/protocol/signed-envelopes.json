@@ -1,0 +1,24 @@
+{
+  "description": "Public deterministic RFC8032 test seed, no production secrets. Exact noncanonical envelope bytes; node-key detached signatures.",
+  "publicKeySpki": "MCowBQYDK2VwAyEA11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+  "cases": [
+    {
+      "name": "valid exact envelope bytes",
+      "envelope": "ewogICJ2IjogMSwKICAibWlub3IiOiAwLAogICJpZCI6ICJldnRfMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLAogICJzdHJlYW0iOiAic3RyXzAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwKICAidHlwZSI6ICJtZXNzYWdlLnBvc3RlZCIsCiAgImNyaXQiOiBmYWxzZSwKICAiYXV0aG9yIjogewogICAgInVzZXIiOiAidXNyXzAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwKICAgICJub2RlIjogIm5vZF8wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsCiAgICAia2V5RXBvY2giOiAxCiAgfSwKICAidHMiOiAwLAogICJhdXRoIjogewogICAgIm1ldGFFcG9jaCI6IDEsCiAgICAibWV0YVNlcSI6IDAKICB9LAogICJib2R5IjogewogICAgInRleHQiOiAiaGVsbG8iCiAgfQp9",
+      "signature": "5amI9-H0nhuViZYa_omexNDbSomVeFHpU324mtYoJ3BtBZHGXHD0ucdto0S8I3APoTPROfoGPexg2lqtuPyRAw",
+      "valid": true
+    },
+    {
+      "name": "content tampered",
+      "envelope": "ewogICJ2IjogMSwKICAibWlub3IiOiAwLAogICJpZCI6ICJldnRfMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLAogICJzdHJlYW0iOiAic3RyXzAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwKICAidHlwZSI6ICJtZXNzYWdlLnBvc3RlZCIsCiAgImNyaXQiOiBmYWxzZSwKICAiYXV0aG9yIjogewogICAgInVzZXIiOiAidXNyXzAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwKICAgICJub2RlIjogIm5vZF8wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsCiAgICAia2V5RXBvY2giOiAxCiAgfSwKICAidHMiOiAwLAogICJhdXRoIjogewogICAgIm1ldGFFcG9jaCI6IDEsCiAgICAibWV0YVNlcSI6IDAKICB9LAogICJib2R5IjogewogICAgInRleHQiOiAiamVsbG8iCiAgfQp9",
+      "signature": "5amI9-H0nhuViZYa_omexNDbSomVeFHpU324mtYoJ3BtBZHGXHD0ucdto0S8I3APoTPROfoGPexg2lqtuPyRAw",
+      "valid": false
+    },
+    {
+      "name": "wrong signature",
+      "envelope": "ewogICJ2IjogMSwKICAibWlub3IiOiAwLAogICJpZCI6ICJldnRfMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLAogICJzdHJlYW0iOiAic3RyXzAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwKICAidHlwZSI6ICJtZXNzYWdlLnBvc3RlZCIsCiAgImNyaXQiOiBmYWxzZSwKICAiYXV0aG9yIjogewogICAgInVzZXIiOiAidXNyXzAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwKICAgICJub2RlIjogIm5vZF8wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsCiAgICAia2V5RXBvY2giOiAxCiAgfSwKICAidHMiOiAwLAogICJhdXRoIjogewogICAgIm1ldGFFcG9jaCI6IDEsCiAgICAibWV0YVNlcSI6IDAKICB9LAogICJib2R5IjogewogICAgInRleHQiOiAiaGVsbG8iCiAgfQp9",
+      "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "valid": false
+    }
+  ]
+}

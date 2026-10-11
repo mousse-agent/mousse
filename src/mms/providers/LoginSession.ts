@@ -156,6 +156,10 @@ export class LoginSession extends EventEmitter {
     })
   }
 
+  waitForCallbackUrl(): Promise<string> {
+    return this.waitForManualCode('Paste the Google redirect URL')
+  }
+
   private waitForManualCode(message: string, signal?: AbortSignal): Promise<string> {
     return new Promise((resolve, reject) => {
       if (this.abort.signal.aborted || signal?.aborted) {

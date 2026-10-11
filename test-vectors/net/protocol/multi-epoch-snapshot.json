@@ -1,0 +1,52 @@
+{
+  "description": "Structural snapshot chunks, not cryptographically qualified descriptor/history evidence. P1 stage verifies the full semantic chain; each chunk preserves original epoch and sequence with one fixed final target.",
+  "target": {
+    "epoch": 2,
+    "seq": 1
+  },
+  "chunks": [
+    {
+      "t": "snapshot.chunk",
+      "stream": "str_00000000000000000000000000",
+      "epoch": 2,
+      "throughSeq": 1,
+      "records": [
+        {
+          "epoch": 1,
+          "seq": 1,
+          "recvTs": 0
+        },
+        {
+          "epoch": 1,
+          "seq": 2,
+          "recvTs": 1
+        }
+      ],
+      "done": false,
+      "parts": [
+        1,
+        64,
+        1,
+        64
+      ]
+    },
+    {
+      "t": "snapshot.chunk",
+      "stream": "str_00000000000000000000000000",
+      "epoch": 2,
+      "throughSeq": 1,
+      "records": [
+        {
+          "epoch": 2,
+          "seq": 1,
+          "recvTs": 2
+        }
+      ],
+      "done": true,
+      "parts": [
+        1,
+        64
+      ]
+    }
+  ]
+}

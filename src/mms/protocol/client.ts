@@ -5,9 +5,11 @@ import { ERROR_INFO_CAPABILITY, parseErrorInfo, type ErrorInfo } from '../../sha
 
 import { createConnection, type Socket } from 'net'
 import { randomBytes } from 'crypto'
+import { EnvelopeAssembler } from './envelopeChunks'
 import { FrameDecoder, encodeFrame, FrameDecodeError, FrameTooLargeError } from './framing'
 import { parseEnvelope } from './validators'
 import {
+  MMS_PROTOCOL_CHUNK_CAPABILITY,
   MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS,
   MMS_PROTOCOL_LOGIN_TIMEOUT_MS,
   MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES,
@@ -16,6 +18,7 @@ import {
   MMS_PROTOCOL_VERSION,
   type ProtocolClientType,
   type ProtocolEvent,
+  type ProtocolConnectionEvent,
   type ProtocolHelloOk,
   type ProtocolResponse
 } from './types'
@@ -76,8 +79,11 @@ interface Pending {
 export class LocalMmsClient implements MmsClient {
   private socket: Socket | null = null
   private decoder = new FrameDecoder()
+  private assembler = new EnvelopeAssembler(() => this.onDisconnect(new FrameDecodeError('Envelope transfer timed out')))
   private pending = new Map<string, Pending>()
   private eventHandlers = new Set<(event: ProtocolEvent, delivery?: { replay: boolean }) => void>()
+  private connectionEventHandlers = new Set<(event: ProtocolConnectionEvent) => void>()
+  private connectionClosedHandlers = new Set<(error: Error) => void>()
   private readonly commands = new ClientCommandReceiver()
   private _hello: ProtocolHelloOk | null = null
   private _connected = false
@@ -166,6 +172,7 @@ export class LocalMmsClient implements MmsClient {
         // Install session handlers after hello. Command writer must be live
         // before residual same-chunk frames are processed.
         this._connected = true
+        this._hello = hello
         this.commands.bindWriter((envelope) => {
           try {
             this.write(envelope, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES)
@@ -190,7 +197,7 @@ export class LocalMmsClient implements MmsClient {
               ownerToken: this.opts.ownerToken,
               clientType: this.opts.clientType ?? 'cli',
               clientBuild: this.opts.clientBuild,
-              requestedCapabilities: this.opts.requestedCapabilities ?? [ERROR_INFO_CAPABILITY]
+              requestedCapabilities: [...new Set([...(this.opts.requestedCapabilities ?? [ERROR_INFO_CAPABILITY]), MMS_PROTOCOL_CHUNK_CAPABILITY])]
             })
           )
         } catch (err) {
@@ -286,11 +293,13 @@ export class LocalMmsClient implements MmsClient {
   }
 
   async close(): Promise<void> {
+    const wasConnected = this._connected
     this.closing = true
     this.commands.unbindWriter()
     this.rejectAllPending(new Error('Client closed'))
     this.teardownSocket()
     this._connected = false
+    if (wasConnected) this.notifyConnectionClosed(new Error('Client closed'))
     // Keep priorConnection / lastSequence for reconnect identity checks.
   }
 
@@ -319,6 +328,26 @@ export class LocalMmsClient implements MmsClient {
     return () => this.eventHandlers.delete(handler)
   }
 
+  onConnectionEvent(handler: (event: ProtocolConnectionEvent) => void): () => void {
+    this.connectionEventHandlers.add(handler)
+    return () => this.connectionEventHandlers.delete(handler)
+  }
+
+  onConnectionClosed(handler: (error: Error) => void): () => void {
+    this.connectionClosedHandlers.add(handler)
+    return () => this.connectionClosedHandlers.delete(handler)
+  }
+
+  private notifyConnectionClosed(error: Error): void {
+    for (const handler of this.connectionClosedHandlers) {
+      try {
+        handler(error)
+      } catch {
+        /* isolate lifecycle consumers */
+      }
+    }
+  }
+
   async request<T = unknown>(
     method: string,
     params?: unknown,
@@ -329,7 +358,7 @@ export class LocalMmsClient implements MmsClient {
       this.opts.requestTimeoutMs ??
       (method === 'orchestrator.send'
         ? MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS
-        : method === 'providers.loginOAuth' || method === 'providers.loginApiKey'
+        : method === 'providers.loginOAuth' || method === 'providers.loginApiKey' || method === 'mcp.beginAuth' || method === 'mcp.authenticate'
         ? MMS_PROTOCOL_LOGIN_TIMEOUT_MS
         : MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS)
     if (!this._connected || !this.socket || this.socket.destroyed) {
@@ -432,13 +461,34 @@ export class LocalMmsClient implements MmsClient {
   }
 
   private handleEnvelope(raw: unknown): void {
-    const env = parseEnvelope(raw)
+    let env = parseEnvelope(raw)
+    if (env?.kind === 'envelope_chunk') {
+      if (!this._hello?.capabilities.includes(MMS_PROTOCOL_CHUNK_CAPABILITY)) throw new FrameDecodeError('Unnegotiated envelope chunk')
+      const complete = this.assembler.accept(env)
+      if (complete === null) return
+      env = parseEnvelope(complete)
+      if (!env || !['res', 'event'].includes(env.kind)) throw new FrameDecodeError('Invalid assembled envelope')
+    } else if (this.assembler.active) {
+      throw new FrameDecodeError('Interrupted envelope transfer')
+    }
     if (!env) {
+      if (raw && typeof raw === 'object' && (raw as { kind?: unknown }).kind === 'envelope_chunk') throw new FrameDecodeError('Malformed envelope chunk')
       this.commands.rejectMalformed(raw)
       return
     }
     if (env.kind === 'server_req') {
       this.commands.handleServerRequest(env)
+      return
+    }
+    if (env.kind === 'connection_event') {
+      if (!this._hello?.capabilities.includes(env.type === 'mcp.auth-url' ? 'integrations.lifecycle.v1' : 'net.v1')) return
+      for (const handler of this.connectionEventHandlers) {
+        try {
+          handler(env)
+        } catch {
+          /* isolate display consumers */
+        }
+      }
       return
     }
     if (env.kind === 'server_cancel') {
@@ -458,6 +508,10 @@ export class LocalMmsClient implements MmsClient {
       return
     }
     if (env.kind === 'error') {
+      if (env.code === 'event_too_large') {
+        this.needsResnapshot = true
+        this.onDisconnect(new MmsProtocolError(env.code, env.message, undefined, { category: 'unsupported', retryable: false }))
+      }
       return
     }
   }
@@ -520,6 +574,7 @@ export class LocalMmsClient implements MmsClient {
   }
 
   private onDisconnect(err: Error): void {
+    const wasConnected = this._connected
     this.commands.unbindWriter()
     if (this.closing) {
       this.rejectAllPending(new Error('Client closed'))
@@ -532,6 +587,7 @@ export class LocalMmsClient implements MmsClient {
       return
     }
     this._connected = false
+    if (wasConnected) this.notifyConnectionClosed(err)
     this.rejectAllPending(err)
     this.teardownSocket()
     // Keep priorConnection / lastSequence / needsResnapshot for reconnect decisions.
@@ -539,6 +595,7 @@ export class LocalMmsClient implements MmsClient {
   }
 
   private teardownSocket(): void {
+    this.assembler.reset()
     if (!this.socket) return
     const s = this.socket
     this.socket = null

@@ -6,7 +6,7 @@ import {
   RefreshCw,
   Trash2,
   Zap
-} from 'lucide-react'
+} from '../lib/icons'
 import type {
   CreateScheduledJobInput,
   JobSchedule,

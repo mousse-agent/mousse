@@ -3,6 +3,8 @@ import type { UIMessage } from "ai";
 import { cn } from "./utils/cn";
 import { FileAttachment } from "./input/file-attachment";
 import { ImageLightbox } from "./image-lightbox";
+import { ChatReferencePill } from "../../../components/ReferencePill";
+import { parseChatReference, type ChatReference } from "../../../../shared/chatReferences";
 
 export type UserMessageProps = {
   message: UIMessage;
@@ -107,7 +109,12 @@ export const UserMessage = memo(function UserMessage({
 
   const images: string[] = [];
   const files: Array<{ filename: string; size?: number; isImage?: boolean }> = [];
+  const references: ChatReference[] = [];
   for (const part of message.parts ?? []) {
+    if (isRecord(part) && part.type === "data-mousse-reference") {
+      const reference = parseChatReference(part.data);
+      if (reference) references.push(reference);
+    }
     const imageUrl = getImageUrlFromPart(part);
     if (imageUrl) images.push(imageUrl);
     const file = getFileFromPart(part);
@@ -124,7 +131,7 @@ export const UserMessage = memo(function UserMessage({
     }
   }
 
-  if (!text && images.length === 0 && files.length === 0) return null;
+  if (!text && images.length === 0 && files.length === 0 && references.length === 0) return null;
 
   const lightboxImages = images.map((url, i) => ({
     id: `${message.id}-img-${i}`,
@@ -134,8 +141,9 @@ export const UserMessage = memo(function UserMessage({
 
   return (
     <div className={cn("flex flex-col items-end gap-1", className)}>
-      {images.length > 0 &&
-        images.map((url, i) => (
+      <div className="chat-user-bubble max-w-[calc(95%-40px)] ms-[70px] px-3.5 py-1.5 text-base rounded-an-message bg-an-user-message-bg text-an-user-message-text">
+      {images.length > 0 && <div className="chat-user-image-carousel" role="region" aria-label="Attached images" tabIndex={0}>
+        {images.map((url, i) => (
           <div
             key={i}
             className={cn(
@@ -153,6 +161,7 @@ export const UserMessage = memo(function UserMessage({
             />
           </div>
         ))}
+      </div>}
       {enableImagePreview && lightboxImages.length > 0 && (
         <ImageLightbox
           open={lightboxIndex !== null}
@@ -160,6 +169,11 @@ export const UserMessage = memo(function UserMessage({
           images={lightboxImages}
           initialIndex={lightboxIndex ?? 0}
         />
+      )}
+      {references.length > 0 && (
+        <div className="flex flex-wrap justify-end gap-2">
+          {references.map((reference) => <ChatReferencePill key={reference.id} reference={reference} />)}
+        </div>
       )}
       {files.length > 0 && (
         <div className="flex flex-col items-end gap-2">
@@ -175,14 +189,9 @@ export const UserMessage = memo(function UserMessage({
         </div>
       )}
       {text && (
-        <div className="max-w-[calc(95%-40px)] ms-[70px]">
-          <div className="px-3.5 py-1.5 text-base transition-colors rounded-an-message bg-an-user-message-bg text-an-user-message-text">
-            <p className="leading-6 whitespace-pre-wrap wrap-break-word">
-              {text}
-            </p>
-          </div>
-        </div>
+        <p className="leading-6 whitespace-pre-wrap wrap-break-word">{text}</p>
       )}
+      </div>
     </div>
   );
 });

@@ -147,6 +147,15 @@ export interface NamedAgentToolRequest {
 }
 export interface NamedAgentRecallRequest extends Omit<NamedAgentToolRequest, 'name'> { agent: string; expectedAgentGeneration: number; contextMode?: 'continue' | 'fresh'; resumeResult?: boolean }
 export interface LlmChatOptions {
+  appletInstructions?: string
+  onPublishApplet?: (source: unknown) => unknown
+
+  /** Host-owned isolated inventory. Never accepted from a protocol DTO. */
+  runtimeContext?: {
+    systemPrompt: string
+    tools: Tool[]
+    executeTool(call: ToolCall, signal?: AbortSignal): Promise<ToolResultMessage>
+  }
   delegation?: {
     create(input: NamedAgentToolRequest): Promise<unknown>
     recall(input: NamedAgentRecallRequest): Promise<unknown>
@@ -796,6 +805,29 @@ export class LlmClient {
     onThinkingEvent?: LlmThinkingEventHandler,
     onTextEvent?: LlmTextEventHandler
   ): Promise<LlmChatResult> {
+    const isolated = options.runtimeContext
+    if (
+      isolated &&
+      (options.delegation ||
+        options.browser ||
+        this.browserBinding ||
+        options.subagentDiscovery ||
+        options.contextSummary ||
+        options.toolLoopSafety ||
+        options.trustedAgent ||
+        options.toolAccess ||
+        options.projectPath ||
+        this.getProjectPath?.())
+    ) {
+      throw new Error('Isolated runtime context cannot share local tools, browser, project or memory context.')
+    }
+    const runtimeContext = isolated
+      ? {
+          systemPrompt: isolated.systemPrompt,
+          tools: structuredClone(isolated.tools),
+          executeTool: isolated.executeTool.bind(isolated)
+        }
+      : undefined
     const discovery = options.subagentDiscovery
     const subagent = options.subagent === true || Boolean(discovery)
     const trustedAgent = options.trustedAgent
@@ -883,7 +915,20 @@ export class LlmClient {
     )
 
     const actor = options.actor ?? defaultIntegrationActor(subagent)
-    const requestContext = await this.prepareRequestContext(
+    const requestContext: Awaited<ReturnType<LlmClient['prepareRequestContext']>> = runtimeContext ? {
+      enabledSkills: [],
+      loadedSkills: [],
+      mcpTools: [],
+      tools: runtimeContext.tools,
+      systemPrompt: runtimeContext.systemPrompt,
+      contextInputs: {
+        systemPromptText: runtimeContext.systemPrompt,
+        mcpToolsText: '',
+        otherToolsText: serializeToolDefinitions(runtimeContext.tools),
+        signature: '',
+        modelKey: ''
+      }
+    } : await this.prepareRequestContext(
       mode,
       userContent,
       projectPath,
@@ -895,6 +940,11 @@ export class LlmClient {
       browserBinding
     )
     let { enabledSkills, loadedSkills, mcpTools, tools, systemPrompt, contextInputs } = requestContext
+    if (options.onPublishApplet && !runtimeContext && !subagent) {
+      tools = [...tools, { name: 'publish_applet', description: 'Publish a complete offline HTML/CSS/JS illustration or interactive dashboard in this thread. This stages presentation until the response completes; never performs workspace or network actions.', parameters: Type.Object({schemaVersion: Type.Literal(1), title: Type.String({maxLength:120}), description: Type.String({maxLength:1000}), html: Type.String(), css: Type.String(), js: Type.String(), data: Type.Optional(Type.Unknown()), stateVersion: Type.Optional(Type.Integer({minimum:1})), appletId: Type.Optional(Type.String()), expectedRevision: Type.Optional(Type.String())}) }]
+      systemPrompt += options.appletInstructions ?? ''
+      contextInputs = {...contextInputs, systemPromptText: systemPrompt, otherToolsText: serializeToolDefinitions(tools.filter(tool => !mcpTools.some(mcp => mcp.providerName === tool.name)))}
+    }
     if (trustedAgent) {
       enabledSkills = enabledSkills.filter((skill) => trustedAgent.grants.skills.some(
         (grant) => grant.id === skill.id || grant.id === skill.installationId
@@ -1239,6 +1289,11 @@ export class LlmClient {
         recordAttempt()
 
         const dispatch = async (): Promise<ToolResultMessage> => {
+          if (runtimeContext) return runtimeContext.executeTool(toolCall, requestSignal)
+          if (toolCall.name === 'publish_applet' && options.onPublishApplet) {
+            try { return toolResult(toolCall, JSON.stringify(options.onPublishApplet(toolCall.arguments)), false) }
+            catch (error) { return toolResult(toolCall, error instanceof Error ? error.message : 'Invalid applet.', true) }
+          }
           if (options.delegation && toolCall.name === 'list_subagents') return toolResult(toolCall, JSON.stringify(options.delegation.list()), false)
           if (options.delegation && toolCall.name === 'create_subagent') {
             const input = toolCall.arguments as unknown as NamedAgentToolRequest
@@ -2892,4 +2947,3 @@ function isValidAction(a: unknown): a is OrchestratorAction {
   return false
 
 }
-

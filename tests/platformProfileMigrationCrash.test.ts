@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { build } from 'esbuild'
-import { ControlStore } from '../src/mms/control/storage/controlStore'
+import { LegacyControlCredentials } from '../src/mms/profiles/migration/LegacyControlCredentials'
+import { writeOriginalControlCredentials } from './fixtures/agent-platform/migration-crash/legacyCredentials'
 import {
   createControlStoreCredentialAdapter,
   createInstallationPaths,
@@ -47,7 +48,7 @@ function legacyHome(root: string): string {
     'schedule-disabled': { state: 'paused', nextRunAt: null, runHistory: [] }
   }))
   writeFileSync(join(home, 'browser', 'Default', 'cookie.txt'), 'legacy-default-cookie')
-  new ControlStore(home).saveCredentials({ ...FIXTURE_CONTROL_CREDENTIALS })
+  writeOriginalControlCredentials(home, { ...FIXTURE_CONTROL_CREDENTIALS })
   return home
 }
 
@@ -71,6 +72,7 @@ async function crash(root: string, home: string, crashAfter: MigrationStepId): P
     childProcess.once('exit', (code, signal) => { clearTimeout(timer); done({ code, signal, stderr }) })
   })
   expect(result.code, result.stderr).not.toBe(0)
+  if (process.platform !== 'win32') expect(result.signal, result.stderr).toBe('SIGKILL')
 }
 
 describe('profile migration recovery after abrupt process loss', () => {
@@ -108,7 +110,7 @@ describe('profile migration recovery after abrupt process loss', () => {
         'schedule-disabled': { state: 'paused', nextRunAt: null, runHistory: [] }
       })
       expect(readFileSync(join(profileRoot, 'browser', 'Default', 'cookie.txt'), 'utf8')).toBe('legacy-default-cookie')
-      expect(new ControlStore(profileRoot).getCredentials()).toEqual(FIXTURE_CONTROL_CREDENTIALS)
+      expect(new LegacyControlCredentials(profileRoot).getCredentials()).toEqual(FIXTURE_CONTROL_CREDENTIALS)
 
       expect(readFileSync(join(home, 'auth.json'), 'utf8')).toContain('installation-only-fixture-secret')
       expect(() => readFileSync(join(profileRoot, 'auth.json'), 'utf8')).toThrow()
@@ -116,7 +118,7 @@ describe('profile migration recovery after abrupt process loss', () => {
       const bRoot = installation.profileRoot(b.id)
       expect(() => readFileSync(join(bRoot, 'threads-index.json'), 'utf8')).toThrow()
       expect(() => readFileSync(join(bRoot, 'auth.json'), 'utf8')).toThrow()
-      expect(new ControlStore(bRoot).getCredentials()).toBeNull()
+      expect(new LegacyControlCredentials(bRoot).getCredentials()).toBeNull()
 
       const again = new ProfileMigrationService(installation, manager).run({ adapters: {
         credentials: createControlStoreCredentialAdapter(), gitWorktrees: createRetainingGitWorktreeAdapter()

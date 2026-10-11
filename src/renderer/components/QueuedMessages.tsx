@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import { GripVertical, MoreHorizontal, Pencil, Trash2, X } from 'lucide-react'
+import { GripVertical, MoreHorizontal, Pencil, Trash2, X } from '../lib/icons'
 import type { QueuedMessage } from '../../shared/types'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { imagePayloadToDataUrl } from '../utils/imageAttachments'

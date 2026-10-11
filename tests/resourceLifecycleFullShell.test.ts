@@ -5,6 +5,7 @@ import { promisify } from 'node:util'
 import electron from 'electron'
 import { expect, it, vi } from 'vitest'
 import { seedFullShellFixture } from './fixtures/git-foundation-full-shell-seed'
+import { fullShellElectronArgs } from './fixtures/fullShellElectron'
 import { terminateChild } from './fixtures/agent-platform/process-lifecycle/terminateChild'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { AgentEpisodeStore } from '../src/mms/agents/AgentEpisodeStore'
@@ -12,7 +13,7 @@ import { UndoRetentionService } from '../src/mms/actions/UndoRetentionService'
 import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 import { git } from './fixtures/gitFoundation'
 
-it('renders real named integration, expired Undo, trash restore and permanent deletion in the full built app', async () => {
+it('renders real named integration, unavailable expired Undo, trash restore and permanent deletion in the full built app', async () => {
   const fixture = await seedFullShellFixture()
   let child: ReturnType<typeof spawn> | undefined
   const source = await MousseMainService.create({ homeDir: fixture.home, headless: true, ownerKind: 'test' })
@@ -41,11 +42,12 @@ it('renders real named integration, expired Undo, trash restore and permanent de
     delete env.ELECTRON_RUN_AS_NODE
     const result = await new Promise<{ code: number | null; output: string }>((done, reject) => {
       const log = join(fixture.root, 'electron.log'), fd = openSync(log, 'a')
-      try { child = spawn(electron as unknown as string, [resolve('tests/fixtures/resource-lifecycle-full-shell-driver.mjs')], { cwd: process.cwd(), env, windowsHide: true, stdio: ['ignore', fd, fd] }) }
+      try { child = spawn(electron as unknown as string, fullShellElectronArgs(resolve('tests/fixtures/resource-lifecycle-full-shell-driver.mjs')), { cwd: process.cwd(), env, windowsHide: true, stdio: ['ignore', fd, fd] }) }
       finally { closeSync(fd) }
       child.once('error', reject); child.once('exit', (code) => done({ code, output: readFileSync(log, 'utf8').slice(-16000) }))
     })
     expect(result.code, result.output).toBe(0)
+    expect(existsSync(evidence), 'The full-shell driver exited without producing evidence.\n' + result.output).toBe(true)
     expect(JSON.parse(readFileSync(evidence, 'utf8'))).toMatchObject({ expiredUndoUnavailable: true, namedRecallVisible: true, integrationDiffVisible: true, integrationApplied: true, restoreIdle: true, purged: true, primaryPreserved: true })
     expect(git(fixture.repo, 'rev-parse', 'HEAD')).toBe(fixture.baseSha)
     expect(git(fixture.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/', 'refs/heads/mousse/')).toBe('')

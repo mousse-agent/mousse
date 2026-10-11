@@ -1,5 +1,5 @@
 "use client"
-import { Loader2 } from "lucide-react"
+import { Loader2 } from "../../../lib/icons"
 import { cn } from "./utils/cn"
 
 export type SpiralLoaderProps = { size?: number; className?: string }

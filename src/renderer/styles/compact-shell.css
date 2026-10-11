@@ -1,0 +1,177 @@
+/* Keep density changes in shell chrome, separate from conversation styles.
+   Title-bar metrics also live on html so overlay pages, which render outside
+   .app, use the same bar as the main window. */
+html {
+  --navigation-rail-width: 52px;
+}
+
+.app {
+  --navigation-rail-width: 52px;
+  --theme-header-padding: 6px 10px;
+  --theme-header-gap: 8px;
+  --theme-tab-padding: 5px 9px;
+  --theme-tab-gap: 5px;
+}
+
+/* Native macOS traffic lights retain their original titlebar clearance. */
+html:not(.platform-darwin),
+html:not(.platform-darwin) .app {
+  --titlebar-height: 40px;
+  --theme-titlebar-height: 40px;
+}
+
+.app .titlebar {
+  background: var(--vscode-titleBar-activeBackground, var(--surface-strong));
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-bottom: 1px solid rgba(var(--accent-pale-rgb), 0.07);
+}
+
+.app .titlebar-title,
+.overlay-titlebar h1 { font-size: 18px; }
+.app .titlebar-controls { gap: 1px; }
+
+.app .threads-sidebar,
+.app .sidebar {
+  background: var(--vscode-sideBar-background, var(--surface-strong));
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.app .threads-sidebar { --threads-sidebar-row-height: 28px; }
+.app .threads-sidebar-toolbar { padding: 5px 8px 2px; }
+.app .threads-sidebar-toolbar-button { border-radius: 5px; }
+
+.app .threads-sidebar-tabs {
+  gap: 2px;
+  margin: 4px 8px 8px;
+  padding: 2px;
+  border-radius: 7px;
+  background: transparent;
+}
+
+.app .threads-sidebar-tab {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 5px;
+}
+
+.app .threads-sidebar-tab.active {
+  background: rgba(var(--accent-rgb), 0.07);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.18);
+}
+
+.app .threads-sidebar-scroll { padding-bottom: 6px; }
+.app .threads-sidebar-heading { padding: 6px 10px 4px; }
+.app .threads-sidebar-tree { padding: 0 8px 3px; }
+.app .threads-sidebar-project { margin-bottom: 4px; }
+.app .threads-sidebar-project-row { font-size: 13px; }
+.app .threads-sidebar-project-row.expanded,
+.app .threads-sidebar-project:has(.threads-sidebar-thread.active) > .threads-sidebar-project-row {
+  background: rgba(var(--accent-rgb), 0.07);
+  border-radius: 5px;
+}
+
+.app .threads-sidebar-project-toggle {
+  min-height: 30px;
+  gap: 7px;
+  padding: 5px 6px;
+  font-size: 13px;
+}
+
+.app .threads-sidebar-children { margin: 1px 0 4px 14px; padding-left: 4px; }
+.app .threads-sidebar-thread { gap: 7px; padding: 4px 7px; border-radius: 5px; font-size: 13px; }
+.app .threads-sidebar-thread-root { padding-left: 9px; }
+.app .threads-sidebar-thread-name-text { will-change: auto; }
+.app .threads-sidebar-thread.active { background: rgba(var(--accent-rgb), 0.09); }
+.app .threads-sidebar-selected-dot { display: none; }
+.app .threads-sidebar-section-settled { margin-top: 8px; }
+.app .threads-sidebar-empty { padding: 5px 7px; font-size: 12px; }
+.app .threads-sidebar-show-more { min-height: 26px; padding: 4px 7px; font-size: 12px; }
+.app .threads-sidebar-open-project { min-height: 28px; gap: 7px; padding: 5px 6px; margin: 3px 8px; border-radius: 5px; font-size: 12px; }
+.app .threads-sidebar-recent { margin-top: 10px; padding-top: 4px; }
+.app .threads-sidebar-recent-heading { padding: 6px 14px; }
+.app .threads-sidebar-device { gap: 8px; margin: 6px 8px 8px; padding: 7px 8px; border-radius: 7px; }
+.app .threads-sidebar-device-text { gap: 1px; }
+.app .threads-sidebar-device-name { font-size: 12px; }
+
+.app .main-area > .header {
+  min-height: 40px;
+  padding: 6px 10px;
+  gap: 8px;
+  border-bottom: 1px solid rgba(var(--accent-pale-rgb), 0.08);
+  background: var(--vscode-editorGroupHeader-tabsBackground, var(--surface-strong));
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.app .sidebar > .header { padding: 4px 8px; }
+.app .header-actions { gap: 4px; }
+.app .header-actions .icon-btn-ghost { width: 28px; height: 28px; border-radius: 5px; }
+.app .main-view-tab { min-height: 28px; padding: 0; gap: 0; border-radius: 5px; font-size: 12px; }
+.app .main-view-tab-select { padding: 5px 7px 5px 9px; gap: 5px; }
+.app .main-view-tab:not(:has(.main-view-tab-close)) .main-view-tab-select { padding-right: 9px; }
+.app .main-view-tab.active { background: rgba(var(--accent-rgb), 0.07); box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.18); }
+
+.app .panel-toolbar {
+  min-height: 34px;
+  padding: 4px 9px;
+  gap: 6px;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.app .panel-toolbar .btn-sm { min-height: 26px; padding: 4px 7px; border-radius: 5px; }
+.app .panel-toolbar .icon-btn-ghost { width: 28px; height: 28px; }
+.app .terminal-tabs { padding: 4px 6px 0; gap: 2px; backdrop-filter: none; -webkit-backdrop-filter: none; }
+.app .terminal-tab-select { min-height: 28px; padding: 5px 6px 5px 9px; }
+.app button.terminal-tab { min-height: 28px; padding: 5px 10px; }
+.app .terminal-tab-add { width: 28px; height: 28px; margin-block: 0; }
+.app .browser-tabs { min-height: 31px; padding: 3px 6px 0; }
+.app .browser-tab { border-radius: 5px 5px 0 0; }
+.app .file-tree-root-label { padding: 4px 10px 5px; }
+.app .file-tree-row { min-height: 26px; padding-block: 3px; }
+.app .git-section-title { padding: 6px 10px 4px; }
+.app .git-file-row { min-height: 28px; padding: 4px 10px; gap: 6px; }
+
+/* Agent chat lists share the same density without changing the transcript. */
+.app .chats-sidebar-content { padding: 0 4px 8px; }
+.app .chat-section-heading { margin: 8px 6px 6px; }
+.app .chat-roster { gap: 8px; padding: 0 6px 5px; }
+.app .chat-roster button { gap: 4px; }
+.app .chats-sidebar-content .chat-avatar { width: 28px; height: 28px; border-radius: 7px; font-size: 12px; }
+.app .chat-list-row { gap: 8px; padding: 6px; border-radius: 5px; }
+.app .chat-list-row.active { background: rgba(var(--accent-rgb), 0.07); box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.16); }
+.app .chat-list-text { gap: 2px; }
+.app .chat-empty-hint { margin: 0 6px 8px; }
+.app .chat-recent-section { margin-top: 8px; }
+.app .chat-conversation-header { gap: 8px; padding: 10px 14px; }
+.app .chat-conversation-header h1 { font-size: 14px; margin-bottom: 2px; }
+.app .chat-resource-header { padding: 10px; }
+.app .chat-resource-tabs { padding: 5px; gap: 3px; }
+
+.profile-menu { border-radius: 8px; }
+.profile-current-card { min-height: 102px; padding: 14px 14px 10px; gap: 6px; }
+.profile-avatar-large { width: 42px; height: 42px; font-size: 17px; }
+.profile-menu-section { padding: 5px 0; }
+.profile-menu-heading { padding: 5px 12px; font-size: 11px; }
+.profile-menu-row { min-height: 34px; padding: 5px 12px; gap: 7px; font-size: 12px; }
+
+.app .threads-sidebar-scroll {
+  display: flex;
+  flex-direction: column;
+}
+.app .threads-sidebar-section-projects,
+.app .threads-sidebar-section-feed {
+  flex: 1 0 auto;
+}
+.app .threads-sidebar-section-settled,
+.app .threads-sidebar-bottom-recent {
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding-top: 8px;
+  max-height: 40%;
+  overflow-y: auto;
+}

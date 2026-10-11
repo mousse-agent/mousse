@@ -31,20 +31,11 @@ export class ThreadActivityTracker {
     }
   }
 
-  /**
-   * Reconcile a daemon-wide runtime snapshot without turning historical terminal
-   * states into new unread notifications. A completion is only unread when this
-   * process observed the thread transition from processing to completed.
-   */
+  /** Reconcile the authoritative runtime states, including completed turns. */
   reconcileSnapshot(snapshot: ThreadActivitySnapshot): void {
     const next = new Map<string, ThreadActivityState>()
     for (const [threadId, state] of Object.entries(snapshot)) {
-      if (state === 'idle') continue
-      const previous = this.activity.get(threadId)
-      if (state === 'completed' && previous !== 'processing' && previous !== 'completed') {
-        continue
-      }
-      next.set(threadId, state)
+      if (state !== 'idle') next.set(threadId, state)
     }
     this.activity = next
   }

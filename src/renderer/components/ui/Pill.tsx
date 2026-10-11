@@ -1,4 +1,4 @@
-import { X, type LucideIcon } from 'lucide-react'
+import { X, type LucideIcon } from '../../lib/icons'
 import type { ReactNode } from 'react'
 
 export function Pill({ icon: Icon, iconNode, label, onRemove, variant }: { icon?: LucideIcon; iconNode?: ReactNode; label: string; onRemove?: () => void; variant?: string }) {

@@ -1,0 +1,145 @@
+import { spawn } from 'node:child_process'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import electron from 'electron'
+import ts from 'typescript'
+import { build } from 'esbuild'
+
+if (process.platform !== 'linux') throw new Error('Run this rendering check on Linux')
+const directory = await mkdtemp(join(tmpdir(), 'mousse-linux-rendering-'))
+try {
+  const source = await readFile(new URL('../src/main/linuxRendering.ts', import.meta.url), 'utf8')
+  await writeFile(join(directory, 'policy.cjs'), ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS }
+  }).outputText)
+  const preview = await build({
+    entryPoints: [new URL('../src/renderer/lib/acrylicIntensity.ts', import.meta.url).pathname],
+    bundle: true, platform: 'browser', format: 'iife', globalName: 'acrylicPreview', write: false
+  })
+  const acrylicCss = await readFile(new URL('../src/renderer/styles/themes/acrylic.css', import.meta.url), 'utf8')
+  const cornerCss = await readFile(new URL('../src/renderer/styles/linux-window.css', import.meta.url), 'utf8')
+  await writeFile(join(directory, 'check.cjs'), `
+const assert = require('node:assert/strict')
+const { app, BrowserWindow } = require('electron')
+const { linuxTransparencyOptions } = require('./policy.cjs')
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
+app.whenReady().then(async () => {
+  const window = new BrowserWindow({ width: 1000, height: 700, frame: false,
+    ...linuxTransparencyOptions(process.platform),
+    backgroundColor: '#00000000', webPreferences: { backgroundThrottling: false } })
+  try {
+    await window.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(
+      '<style>body{margin:0;background:transparent;color:white;font:18px sans-serif}main{display:flex;height:100vh}aside{width:300px;flex-shrink:0;background:rgba(40,32,48,.68)}section{flex:1;overflow:hidden;background:rgba(23,17,31,.58)}img{width:180px}article{padding:20px;border-bottom:1px solid #777}</style>' +
+      '<main><aside>Resizable sidebar</aside><section>' +
+      Array.from({length:12}, (_,i) => '<article>Text and image resize check ' + i +
+      '<img src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27180%27 height=%2740%27%3E%3Crect width=%27180%27 height=%2740%27 fill=%27orange%27/%3E%3C/svg%3E"></article>').join('') + '</section></main>'))
+    assert(await window.webContents.executeJavaScript(
+      'Array.from(document.images).every(image => image.complete && image.naturalWidth > 0)'),
+      'Fixture images must be decoded before comparing pixels')
+    await pause(300)
+    const baseline = (await window.webContents.capturePage()).toBitmap()
+    const hasAlpha = bitmap => {
+      for (let i = 3; i < bitmap.length; i += 4) if (bitmap[i] < 255) return true
+      return false
+    }
+    assert(hasAlpha(baseline), 'Acrylic must retain real alpha in the native surface')
+    await window.webContents.executeJavaScript('document.querySelectorAll("article").forEach(node => node.style.visibility = "hidden")')
+    await pause(80)
+    const empty = (await window.webContents.capturePage()).toBitmap()
+    await window.webContents.executeJavaScript('document.querySelectorAll("article").forEach(node => node.style.visibility = "visible")')
+    for (const width of [460, 180, 380, 220, 500, 300]) {
+      await window.webContents.executeJavaScript('document.querySelector("aside").style.width = "' + width + 'px"')
+      await pause(40)
+    }
+    for (const width of [1100, 900, 1200, 1000]) {
+      window.setSize(width, 700)
+      await pause(80)
+    }
+    await pause(300)
+    const resized = (await window.webContents.capturePage()).toBitmap()
+    assert(baseline.equals(resized), 'Text/image pixels differ after returning to original layout')
+    await window.webContents.executeJavaScript('document.querySelectorAll("article").forEach(node => node.style.visibility = "hidden")')
+    await pause(80)
+    assert(empty.equals((await window.webContents.capturePage()).toBitmap()),
+      'Removed text and images must clear instead of accumulating on translucent surfaces')
+    window.setBackgroundColor('#17111f')
+    await pause(80)
+    assert(!hasAlpha((await window.webContents.capturePage()).toBitmap()), 'Solid mode must be opaque')
+    window.setBackgroundColor('#00000000')
+    await pause(80)
+    assert(empty.equals((await window.webContents.capturePage()).toBitmap()), 'Acrylic toggle must restore clean alpha')
+    await window.webContents.executeJavaScript(${JSON.stringify(preview.outputFiles[0].text)})
+    await window.webContents.executeJavaScript(${JSON.stringify(`
+      document.documentElement.setAttribute('data-acrylic', 'true');
+      document.documentElement.classList.add('platform-linux');
+      document.body.innerHTML = '<div class="settings-page"></div><div class="sidebar"></div><div class="threads-sidebar"></div><div class="titlebar"></div><div class="main-area"><div class="header"></div></div>';
+      const style = document.createElement('style');
+      style.textContent = ':root{--surface-base-rgb:23,17,31;--surface-strong-rgb:40,32,48;--surface-soft-rgb:32,28,39} .settings-page{position:fixed;inset:0;background:black} .sidebar,.threads-sidebar,.titlebar,.main-area .header{background:black}' + ${JSON.stringify(acrylicCss)};
+      document.head.append(style);
+    `)})
+    const colors = () => window.webContents.executeJavaScript(
+      'Array.from(document.querySelectorAll(".settings-page,.sidebar,.threads-sidebar,.titlebar,.main-area,.header")).map(node => ({color:getComputedStyle(node).backgroundColor,image:getComputedStyle(node).backgroundImage,opacity:getComputedStyle(node).opacity}))')
+    await window.webContents.executeJavaScript('acrylicPreview.applyAcrylicIntensity(0)')
+    await pause(80)
+    const solidColors = await colors()
+    const lowGlass = (await window.webContents.capturePage()).toBitmap()[3]
+    await window.webContents.executeJavaScript('acrylicPreview.applyAcrylicIntensity(100)')
+    await pause(80)
+    const glassColors = await colors()
+    const highGlass = (await window.webContents.capturePage()).toBitmap()[3]
+    assert(lowGlass > highGlass + 80, 'Slider endpoints must visibly change native surface opacity')
+    solidColors.forEach((color, i) => {
+      assert.notDeepEqual(color, glassColors[i], 'Every large acrylic surface must follow intensity')
+      assert.equal(glassColors[i].opacity, '1', 'The slider must not fade text')
+    })
+    await window.webContents.executeJavaScript('document.documentElement.classList.remove("platform-linux")')
+    const otherPlatform = await colors()
+    assert.equal(otherPlatform[0].color, 'rgb(0, 0, 0)', 'Other-platform settings background must remain unchanged')
+    assert.equal(otherPlatform[1].color, 'rgb(0, 0, 0)', 'Other-platform sidebar background must remain unchanged')
+    await window.webContents.executeJavaScript(${JSON.stringify(`
+      document.documentElement.classList.add('platform-linux');
+      document.documentElement.setAttribute('data-window-maximized', 'false');
+      document.body.innerHTML = '<div style="position:fixed;inset:0;background:rgb(23,17,31)"></div>';
+      const corners = document.createElement('style');
+      corners.textContent = 'html,body{width:100%;height:100%;margin:0}' + ${JSON.stringify(cornerCss)};
+      document.head.append(corners);
+    `)})
+    const cornerAlpha = async () => {
+      await pause(80)
+      const capture = await window.webContents.capturePage()
+      const bitmap = capture.toBitmap()
+      const { width, height } = capture.getSize()
+      return [bitmap[3], bitmap[(width - 1) * 4 + 3],
+        bitmap[((height - 1) * width) * 4 + 3], bitmap[(width * height - 1) * 4 + 3]]
+    }
+    assert.deepEqual(await cornerAlpha(), [0, 0, 0, 0], 'All floating-window corners must be clear in solid mode')
+    await window.webContents.executeJavaScript('document.body.firstElementChild.style.background = "rgba(23,17,31,.58)"')
+    assert.deepEqual(await cornerAlpha(), [0, 0, 0, 0], 'All floating-window corners must be clear in acrylic mode')
+    await window.webContents.executeJavaScript('document.body.firstElementChild.style.background = "rgb(23,17,31)"; document.documentElement.setAttribute("data-window-maximized", "true")')
+    assert.deepEqual(await cornerAlpha(), [255, 255, 255, 255], 'Maximized windows must fill square corners')
+    await window.webContents.executeJavaScript('document.documentElement.setAttribute("data-window-maximized", "false")')
+    assert.deepEqual(await cornerAlpha(), [0, 0, 0, 0], 'Restored windows must regain rounded corners')
+    await window.webContents.executeJavaScript('document.documentElement.classList.remove("platform-linux")')
+    assert.deepEqual(await cornerAlpha(), [255, 255, 255, 255], 'Other-platform corners must remain unchanged')
+    console.log('PASS: Linux native alpha, translucent resize, old-content clearing, and solid/acrylic toggles')
+    console.log('PASS: Live intensity preview changes all acrylic surfaces and captured alpha without fading text')
+    console.log('PASS: Four rounded Linux corners in solid/acrylic mode, square maximized corners, restore, and platform isolation')
+  } finally { window.destroy() }
+  app.quit()
+}).catch(error => { console.error(error); app.exit(1) })
+`)
+  const env = { ...process.env }
+  delete env.ELECTRON_RUN_AS_NODE
+  process.exitCode = await new Promise((resolve, reject) => {
+    const child = spawn(electron, [join(directory, 'check.cjs')], { env, stdio: 'inherit' })
+    const timeout = setTimeout(() => {
+      child.kill()
+      reject(new Error('Linux rendering check timed out after 30 seconds'))
+    }, 30_000)
+    child.once('error', error => { clearTimeout(timeout); reject(error) })
+    child.once('exit', code => { clearTimeout(timeout); resolve(code ?? 1) })
+  })
+} finally {
+  await rm(directory, { recursive: true, force: true })
+}

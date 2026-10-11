@@ -21,7 +21,7 @@ import {
   IconChevronUp,
   IconMessageCircleQuestion,
   IconX,
-} from "@tabler/icons-react";
+} from "../../../lib/icons";
 import { SendButton } from "./input/send-button";
 import { AttachmentButton } from "./input/attachment-button";
 import { FileAttachment } from "./input/file-attachment";

@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import {
   CLAUDE_PROVIDER_ID,
   createClaudeSdkClient,
@@ -17,8 +21,21 @@ describe('claudeSdkProvider', () => {
     expect(model.baseUrl).toBe('https://api.anthropic.com')
   })
 
-  it('builds an SDK client with authToken for Claude OAuth secrets', () => {
-    const client = createClaudeSdkClient({ authToken: 'sk-ant-oat-test' })
-    expect(client.authToken).toBe('sk-ant-oat-test')
+  it('rejects Claude subscription tokens for the Messages SDK', () => {
+    expect(() => createClaudeSdkClient({ apiKey: 'sk-ant-oat-test' })).toThrow(/subscription credentials/)
+    expect(() => createClaudeSdkClient({ apiKey: 'sk-ant-ort-test' })).toThrow(/subscription credentials/)
+  })
+
+  it('does not offer Claude subscription login through Anthropic Messages', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mousse-claude-auth-'))
+    const auth = new ProviderAuthService(join(dir, 'auth.json'))
+    try {
+      await expect(auth.setApiKey('anthropic', 'sk-ant-oat-secret')).rejects.toThrow(/subscription credentials/)
+      expect(auth.has('anthropic')).toBe(false)
+      expect(auth.getLoginOptions('oauth').some((option) => option.id === 'anthropic')).toBe(false)
+    } finally {
+      auth.stop()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

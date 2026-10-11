@@ -30,4 +30,12 @@ describe('GitPanel', () => {
     expect(source).toContain('Milestone')
     expect(source).toContain('commit.pushed')
   })
+
+  it('offers explicit no-push create and safe clone flows when the project is not a repository', () => {
+    expect(source).toContain('Create GitHub repository')
+    expect(source).toContain('Existing files and commits are not pushed.')
+    expect(source).toContain('chooseCloneDestination')
+    expect(source).toContain('never overwrite nonempty project content')
+    expect(source).toContain("threads.createAndSelect('New Chat', result.project.id)")
+  })
 })

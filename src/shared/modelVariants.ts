@@ -53,9 +53,6 @@ export function parseThinkingSuffixFromModelId(modelId: string): {
   if (EFFORT_SUFFIXES.has(suffix)) {
     return { baseId: modelId.slice(0, colonIdx), effort: suffix }
   }
-  if (SPEED_SUFFIXES.has(suffix)) {
-    return { baseId: modelId.slice(0, colonIdx) }
-  }
 
   return { baseId: modelId }
 }
@@ -98,16 +95,19 @@ function parseIdSuffixes(id: string): {
   let effort: string | undefined
   let speed: string | undefined
 
-  const colonIdx = remaining.lastIndexOf(':')
-  if (colonIdx !== -1) {
+  // Endpoint speed can precede an appended effort (e.g. :fast:high).
+  while (true) {
+    const colonIdx = remaining.lastIndexOf(':')
+    if (colonIdx === -1) break
     const suffix = remaining.slice(colonIdx + 1)
     if (SPEED_SUFFIXES.has(suffix)) {
-      speed = suffix
-      remaining = remaining.slice(0, colonIdx)
+      speed ??= suffix
     } else if (EFFORT_SUFFIXES.has(suffix)) {
-      effort = suffix
-      remaining = remaining.slice(0, colonIdx)
+      effort ??= suffix
+    } else {
+      break
     }
+    remaining = remaining.slice(0, colonIdx)
   }
 
   const atIdx = remaining.indexOf('@')
@@ -123,8 +123,8 @@ export function parseModelVariant(model: LlmModelOption): ParsedModelVariant {
   const context = parseContextFromLabel(model.label) ?? parsedId.context
   const alias = parseAliasFromLabel(model.label)
   const speed =
-    parsedId.speed ??
-    (/\(fast\)/i.test(model.label) ? 'fast' : /\((slow)\)/i.test(model.label) ? 'slow' : undefined)
+    model.speed ?? parsedId.speed ??
+    (/\(fast\)/i.test(model.label) ? 'fast' : /\((slow)\)/i.test(model.label) ? 'slow' : 'standard')
 
   return {
     id: model.id,
@@ -525,4 +525,43 @@ export function getCurrentEffort(
   if (!model) return undefined
   const parsed = parseModelVariant(model)
   return parsed.effort ?? model.efforts?.[0]
+}
+
+/** Resolve a toggle only when the catalog lists both endpoint speeds for this context. */
+export function getModelFastToggle(
+  providerId: string,
+  modelId: string,
+  models: LlmModelOption[]
+): { active: boolean; targetModelId: string } | undefined {
+  const { baseId, effort: effortFromId } = parseThinkingSuffixFromModelId(modelId)
+  const model = models.find((entry) => entry.id === modelId) ?? models.find((entry) => entry.id === baseId)
+  const family = findModelFamily(providerId, models, modelId)
+  if (!model || !family) return undefined
+
+  const current = parseModelVariant(model)
+  const variants = family.variants.filter((variant) => variant.context === current.context)
+  if (!variants.some((variant) => variant.speed === 'fast') ||
+      !variants.some((variant) => variant.speed !== 'fast')) return undefined
+
+  const active = current.speed === 'fast'
+  const candidates = variants.filter((variant) => (variant.speed === 'fast') !== active)
+  // Prefer the same selectable id over a provider alias for this family.
+  const currentBase = parseIdSuffixes(model.id).baseId
+  const matching = candidates.filter((variant) => parseIdSuffixes(variant.id).baseId === currentBase)
+  // Explicit endpoints override provider defaults, which may themselves enable Fast.
+  const endpoints = (matching.length > 0 ? matching : candidates).sort((a, b) =>
+    Number(parseIdSuffixes(b.id).speed !== undefined) - Number(parseIdSuffixes(a.id).speed !== undefined)
+  )
+  const effort = effortFromId ?? current.effort
+  const target = endpoints.find((variant) => variant.effort === effort) ??
+    endpoints.find((variant) => !variant.effort && effort && variant.availableEfforts?.includes(effort)) ??
+    endpoints.find((variant) => !variant.effort) ?? endpoints[0]
+  if (!target) return undefined
+
+  return {
+    active,
+    targetModelId: effort && !target.effort && target.availableEfforts?.includes(effort)
+      ? applyEffortToModelId(target.id, effort)
+      : target.id
+  }
 }

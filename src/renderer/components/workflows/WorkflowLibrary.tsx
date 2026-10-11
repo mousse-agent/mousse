@@ -1,4 +1,4 @@
-import { Plus, Upload } from 'lucide-react'
+import { Plus, Upload } from '../../lib/icons'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { EmptyState } from '../ui/EmptyState'
 import { SearchInput } from '../ui/SearchInput'

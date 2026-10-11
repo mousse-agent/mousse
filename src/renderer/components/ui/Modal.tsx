@@ -1,5 +1,5 @@
 import { useEffect, useId, type ReactNode } from 'react'
-import { X } from 'lucide-react'
+import { X } from '../../lib/icons'
 
 export function Modal({ open, title, onClose, children, footer }: { open: boolean; title: string; onClose: () => void; children: ReactNode; footer?: ReactNode }) {
   const titleId = useId()

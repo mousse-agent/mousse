@@ -1,4 +1,4 @@
-import { FileText, X } from 'lucide-react'
+import { FileText, X } from '../lib/icons'
 import { truncateFileName } from '../utils/messageAttachments'
 
 interface FileAttachmentPillProps {

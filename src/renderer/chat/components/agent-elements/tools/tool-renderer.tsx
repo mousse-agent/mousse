@@ -1,4 +1,5 @@
 import React, { memo } from "react";
+import { IconSparkles } from "../../../../lib/icons";
 import { toolRegistry, parseMcpToolType } from "./tool-registry";
 import { getToolStatus } from "../utils/format-tool";
 import { GenericTool } from "./generic-tool";
@@ -67,6 +68,7 @@ export const ToolRenderer = memo(function ToolRenderer({
           part={part}
           nestedTools={nestedTools}
           chatStatus={chatStatus}
+          icon={<IconSparkles size={18} />}
           completeLabel={`${labelBase} completed`}
           shimmerLabel={`Running ${labelBase.toLowerCase()}`}
           interruptedLabel={`${labelBase} interrupted`}
@@ -103,6 +105,7 @@ export const ToolRenderer = memo(function ToolRenderer({
     const { isPending, isError } = getToolStatus(part, chatStatus);
     return (
       <GenericTool
+        icon={meta.icon}
         title={meta.title(part)}
         subtitle={meta.subtitle?.(part)}
         isPending={isPending}

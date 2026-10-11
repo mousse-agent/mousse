@@ -1,4 +1,4 @@
-import { Crosshair, X } from 'lucide-react'
+import { Crosshair, X } from '../lib/icons'
 import {
   browserElementLabel,
   truncateLabel,

@@ -1,6 +1,7 @@
 import { createErrorProvider } from '../../shared/errors'
 import { existsSync } from 'node:fs'
 import simpleGit, { type SimpleGit, type StatusResult } from 'simple-git'
+import { GitHubService } from './GitHubService'
 import type {
   GitBranchInfo,
   GitCommit,
@@ -53,6 +54,9 @@ function mapStatus(entry: StatusResult['files'][number]): GitFileChange | null {
 }
 
 export class GitService {
+  /** Profile-scoped GitHub CLI integration alongside the existing Git operations. */
+  readonly github = new GitHubService()
+
   private gitFor(cwd: string): SimpleGit {
     return simpleGit(cwd)
   }

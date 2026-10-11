@@ -5,6 +5,9 @@
 
 import type { BrowserWorkerRequest, BrowserWorkerResponse } from '../../shared/browser/types'
 
+export const MMS_PROTOCOL_CHUNK_CAPABILITY = 'envelope-chunks.v1'
+export const MMS_PROTOCOL_CHUNK_BYTES = 256 * 1024
+export const MMS_PROTOCOL_MAX_ENVELOPE_BYTES = 32 * 1024 * 1024
 export const MMS_PROTOCOL_VERSION = 1
 export const MMS_PROTOCOL_MAX_FRAME_BYTES = 4 * 1024 * 1024 // 4 MiB
 export const MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS = 60_000
@@ -52,6 +55,7 @@ export type EnvelopeKind =
   | 'server_req'
   | 'client_res'
   | 'server_cancel'
+  | 'connection_event'
 
 export interface ProtocolHello {
   kind: 'hello'
@@ -106,6 +110,16 @@ export interface ProtocolEvent {
   ts: string
 }
 
+/** One authenticated socket's live display lane. Never sequenced or replayed. */
+export interface ProtocolConnectionEvent {
+  kind: 'connection_event'
+  type: 'bridge.hub.thread' | 'mcp.auth-url'
+  profileId: string
+  profileEpoch: number
+  data: unknown
+}
+export const MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES = 64 * 1024
+
 export interface ProtocolTransportError {
   kind: 'error'
   code: string
@@ -150,7 +164,16 @@ export interface ProtocolServerCommandCancel {
   registrationEpoch: number
 }
 
+export interface ProtocolEnvelopeChunk {
+  kind: 'envelope_chunk'
+  transferId: string
+  index: number
+  totalBytes: number
+  data: string
+}
+
 export type ProtocolEnvelope =
+  | ProtocolEnvelopeChunk
   | ProtocolHello
   | ProtocolHelloOk
   | ProtocolHelloErr
@@ -161,15 +184,18 @@ export type ProtocolEnvelope =
   | ProtocolServerCommandRequest
   | ProtocolClientCommandResponse
   | ProtocolServerCommandCancel
+  | ProtocolConnectionEvent
 
 /**
  * Allowlisted methods Phase 2–5 (full GUI/CLI local protocol).
  * Remote/HTTP is out of scope.
  */
 export const PROTOCOL_METHODS = [
+  'applets.get', 'applets.state.get', 'applets.state.save', 'applets.export',
   'health',
   'capabilities',
   'projects.list',
+  'chatReferences.resolve',
   'projects.open',
   'projects.remove',
   'projects.rename',
@@ -293,6 +319,7 @@ export const PROTOCOL_METHODS = [
   'providers.getUsage',
   'providers.getSubscriptionUsage',
   'providers.getLoginOptions',
+  'providers.refreshModels',
   'providers.getAmbientInfo',
   'providers.setApiKey',
   'providers.verifyAmbient',
@@ -337,28 +364,20 @@ export const PROTOCOL_METHODS = [
   'git.checkout',
   'git.commit',
   'git.push',
+  'github.status',
+  'github.createRepository',
+  'github.cloneRepository',
 
   'daemon.shutdown',
   'events.subscribe',
   'gui.devtoolsPoll',
-  'gui.devtoolsRespond',
-
-  'control.status',
-  'control.login',
-  'control.logout',
-  'control.enroll',
-  'control.disconnect',
-  'control.setMode',
-  'pairing.create',
-  'pairing.list',
-  'pairing.approve',
-  'pairing.reject',
-  'pairing.revoke'
+  'gui.devtoolsRespond'
 ] as const
 
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number]
 
 export const PROTOCOL_CAPABILITIES = [
+  MMS_PROTOCOL_CHUNK_CAPABILITY,
   'errors.v1',
   'health',
   'projects',
@@ -375,15 +394,13 @@ export const PROTOCOL_CAPABILITIES = [
   'skills',
   'settings',
   'providers',
-  'connections',
   'events',
   'devgui',
-  'control.v2',
-  'pairing.v2',
   'profiles-v1'
 ] as const
 
 export type ProtocolEventType =
+  | 'net.updated'
   | 'projects.updated'
   | 'threads.updated'
   | 'thread.title-generation-failed'
@@ -423,8 +440,6 @@ export type ProtocolEventType =
   | 'providers.changed'
   | 'providers.login-event'
   | 'mcp.changed'
-  | 'control.status-changed'
-  | 'control.pairing-request'
   | 'turn.interrupted'
   | 'turn.aborted'
   | 'turn.steered'

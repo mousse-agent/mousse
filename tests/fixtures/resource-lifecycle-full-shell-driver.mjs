@@ -39,7 +39,11 @@ async function check() {
   if (await evaluate(`document.querySelectorAll('button[aria-label="Undo"]').length`)) throw Error('Expired prompt incorrectly exposes Undo')
   proof.expiredUndoUnavailable = true; await screenshot('01-expired-undo')
   await evaluate(`(() => {const show=document.querySelector('button[aria-label="Show app panel"]');if(show) {if(!show.checkVisibility()) throw Error('Show app panel hidden');show.click()}})()`)
-  await evaluate(`(() => {const button=document.querySelector('nav[aria-label="Main area view"] button[aria-label="Agents"]');if(!button.checkVisibility()) throw Error('Agents navigation hidden');button.click()})()`)
+  // With no live agent, the Agents surface opens from the surface picker or the tab bar's "Open a surface" menu.
+  const agentsChoice = `[...document.querySelectorAll('.surface-menu-row')].find(row => row.querySelector('.surface-menu-row-label')?.textContent.trim() === 'Agents' && row.checkVisibility())`
+  await evaluate(`(() => {if(${agentsChoice}) return;const add=document.querySelector('button[aria-label="Open a surface"]');if(!add?.checkVisibility()) throw Error('Surface menu hidden');add.click()})()`)
+  await until(() => evaluate(`Boolean(${agentsChoice})`), Boolean, 'Agents surface choice')
+  await evaluate(`${agentsChoice}.click()`)
   await until(text, (value) => value.includes('Named agents'), 'Named agents surface')
   await click('Named agents')
   await until(text, (value) => value.includes('UI Reviewer'), 'Retained named identity')

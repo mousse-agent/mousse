@@ -2,6 +2,7 @@ import { context } from 'esbuild'
 import { existsSync, mkdirSync } from 'fs'
 import { dirname, resolve } from 'path'
 import { fileURLToPath } from 'url'
+import { buildPackagedNativeReader } from './build-net-native-reader.mjs'
 import { buildBrowserWorker, getBrowserWorkerBuildOptions } from './build-browser-worker.mjs'
 import { cachedBuild } from './cached-build.mjs'
 
@@ -49,6 +50,7 @@ export function getCliBuildOptions(projectRoot = root) {
  */
 export async function buildCli(opts = {}) {
   const { watch = false, onRebuild, log = true, reuse = false } = opts
+  buildPackagedNativeReader()
   mkdirSync(dirname(outfile), { recursive: true })
   const options = getCliBuildOptions(root)
 

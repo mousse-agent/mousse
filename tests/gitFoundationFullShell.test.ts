@@ -1,10 +1,11 @@
 import { spawn, execFile } from 'node:child_process'
-import { closeSync, openSync, readFileSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import electron from 'electron'
 import { expect, it } from 'vitest'
 import { seedFullShellFixture } from './fixtures/git-foundation-full-shell-seed'
+import { fullShellElectronArgs } from './fixtures/fullShellElectron'
 import { terminateChild } from './fixtures/agent-platform/process-lifecycle/terminateChild'
 import { git } from './fixtures/gitFoundation'
 
@@ -25,7 +26,7 @@ it('full built Electron app refreshes visible conversation and real task bytes a
       const log = join(fixture.root, 'electron.log')
       const logFd = openSync(log, 'a')
       try {
-        child = spawn(electron as unknown as string, [resolve('tests/fixtures/git-foundation-full-shell-driver.mjs')], {
+        child = spawn(electron as unknown as string, fullShellElectronArgs(resolve('tests/fixtures/git-foundation-full-shell-driver.mjs')), {
           cwd: process.cwd(), env, windowsHide: true, stdio: ['ignore', logFd, logFd]
         })
       } finally { closeSync(logFd) }
@@ -33,6 +34,7 @@ it('full built Electron app refreshes visible conversation and real task bytes a
       child.once('exit', (code) => done({ code, stderr: readFileSync(log, 'utf8').slice(-12_000) }))
     })
     expect(result.code, result.stderr).toBe(0)
+    expect(existsSync(evidence), 'The full-shell driver exited without producing evidence.\n' + result.stderr).toBe(true)
     expect(JSON.parse(readFileSync(evidence, 'utf8'))).toMatchObject({
       cycles: 2, transcriptUndo: true, transcriptRedo: true, taskBytesUndo: true, taskBytesRedo: true, primaryPreserved: true
     })

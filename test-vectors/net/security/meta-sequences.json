@@ -1,0 +1,1538 @@
+{
+  "format": "mousse-net-security-oracle-v1",
+  "kind": "abstract-meta-sequence",
+  "normative": "docs/net/state-machines.md#space-meta-projection-and-role-authorization",
+  "limitations": "Records are semantic inputs with separately stipulated valid signatures, not wire envelopes or cryptographic test vectors. Host must reject invalid records before storage; replica expectations intentionally model an adversarial host that stored them anyway. Materialized projection is the oracle, not an implementation.",
+  "securityTests": [
+    "SEC-008",
+    "SEC-010",
+    "SEC-011",
+    "SEC-012",
+    "SEC-048"
+  ],
+  "ids": {
+    "owner": "usr_00000000000000000000000001",
+    "admin": "usr_00000000000000000000000002",
+    "member": "usr_00000000000000000000000003",
+    "new": "usr_00000000000000000000000004",
+    "host": "nod_00000000000000000000000005",
+    "ownerNode": "nod_00000000000000000000000006",
+    "memberNode": "nod_00000000000000000000000007",
+    "bot": "bot_00000000000000000000000008",
+    "space": "spc_00000000000000000000000009",
+    "channel": "str_0000000000000000000000000a",
+    "invite": "inv_0000000000000000000000000b"
+  },
+  "initial": {
+    "epoch": 1,
+    "appliedSeq": 0,
+    "owner": "usr_00000000000000000000000001",
+    "host": "nod_00000000000000000000000005",
+    "frozen": false,
+    "upgradeRequired": false,
+    "members": {},
+    "bots": {},
+    "channels": {},
+    "inviteUses": [],
+    "settings": {
+      "name": "fixture-space",
+      "membersMayAddBots": true,
+      "maxBlobBytes": 26214400,
+      "minProtoMinor": 0
+    }
+  },
+  "sequences": [
+    {
+      "id": "role-bot-channel-freeze-and-epoch",
+      "steps": [
+        {
+          "id": "bootstrap",
+          "record": {
+            "epoch": 1,
+            "seq": 1,
+            "type": "space.created",
+            "author": "usr_00000000000000000000000001",
+            "body": {
+              "owner": "usr_00000000000000000000000001"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {
+              "ownerDescriptorSignatureValid": true,
+              "ownerRole": "owner",
+              "descriptorEpoch": 1
+            }
+          },
+          "expected": {
+            "hostDecision": "allow",
+            "code": null,
+            "replicaSemanticApplied": true,
+            "violation": false,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 1,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                }
+              },
+              "bots": {},
+              "channels": {},
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "owner-add-admin",
+          "record": {
+            "epoch": 1,
+            "seq": 2,
+            "type": "member.joined",
+            "author": "usr_00000000000000000000000001",
+            "body": {
+              "user": "usr_00000000000000000000000002",
+              "role": "admin"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "allow",
+            "code": null,
+            "replicaSemanticApplied": true,
+            "violation": false,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 2,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                }
+              },
+              "bots": {},
+              "channels": {},
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "admin-add-member",
+          "record": {
+            "epoch": 1,
+            "seq": 3,
+            "type": "member.joined",
+            "author": "usr_00000000000000000000000002",
+            "body": {
+              "user": "usr_00000000000000000000000003",
+              "role": "member"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "allow",
+            "code": null,
+            "replicaSemanticApplied": true,
+            "violation": false,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 3,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {},
+              "channels": {},
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "admin-cannot-promote",
+          "record": {
+            "epoch": 1,
+            "seq": 4,
+            "type": "member.roleChanged",
+            "author": "usr_00000000000000000000000002",
+            "body": {
+              "user": "usr_00000000000000000000000003",
+              "role": "admin"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "reject",
+            "code": "forbidden",
+            "replicaSemanticApplied": false,
+            "violation": true,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 4,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {},
+              "channels": {},
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "owner-promotes-member",
+          "record": {
+            "epoch": 1,
+            "seq": 5,
+            "type": "member.roleChanged",
+            "author": "usr_00000000000000000000000001",
+            "body": {
+              "user": "usr_00000000000000000000000003",
+              "role": "admin"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "allow",
+            "code": null,
+            "replicaSemanticApplied": true,
+            "violation": false,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 5,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {},
+              "channels": {},
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "admin-cannot-remove-admin",
+          "record": {
+            "epoch": 1,
+            "seq": 6,
+            "type": "member.removed",
+            "author": "usr_00000000000000000000000002",
+            "body": {
+              "user": "usr_00000000000000000000000003"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "reject",
+            "code": "forbidden",
+            "replicaSemanticApplied": false,
+            "violation": true,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 6,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {},
+              "channels": {},
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "admin-self-demotion",
+          "record": {
+            "epoch": 1,
+            "seq": 7,
+            "type": "member.roleChanged",
+            "author": "usr_00000000000000000000000003",
+            "body": {
+              "user": "usr_00000000000000000000000003",
+              "role": "member"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "allow",
+            "code": null,
+            "replicaSemanticApplied": true,
+            "violation": false,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 7,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {},
+              "channels": {},
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "owner-cannot-leave",
+          "record": {
+            "epoch": 1,
+            "seq": 8,
+            "type": "member.left",
+            "author": "usr_00000000000000000000000001",
+            "body": {
+              "user": "usr_00000000000000000000000001"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "reject",
+            "code": "forbidden",
+            "replicaSemanticApplied": false,
+            "violation": true,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 8,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {},
+              "channels": {},
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "owner-cannot-demote",
+          "record": {
+            "epoch": 1,
+            "seq": 9,
+            "type": "member.roleChanged",
+            "author": "usr_00000000000000000000000001",
+            "body": {
+              "user": "usr_00000000000000000000000001",
+              "role": "member"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "reject",
+            "code": "forbidden",
+            "replicaSemanticApplied": false,
+            "violation": true,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 9,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {},
+              "channels": {},
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "cannot-create-second-owner",
+          "record": {
+            "epoch": 1,
+            "seq": 10,
+            "type": "member.joined",
+            "author": "usr_00000000000000000000000001",
+            "body": {
+              "user": "usr_00000000000000000000000004",
+              "role": "owner"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "reject",
+            "code": "forbidden",
+            "replicaSemanticApplied": false,
+            "violation": true,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 10,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {},
+              "channels": {},
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "member-adds-own-chat",
+          "record": {
+            "epoch": 1,
+            "seq": 11,
+            "type": "bot.added",
+            "author": "usr_00000000000000000000000003",
+            "body": {
+              "bot": "bot_00000000000000000000000008",
+              "owner": "usr_00000000000000000000000003",
+              "profile": "chat",
+              "steer": "everyone"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {
+              "delegationValid": true,
+              "hostNode": "nod_00000000000000000000000007",
+              "runtimeQualified": true
+            }
+          },
+          "expected": {
+            "hostDecision": "allow",
+            "code": null,
+            "replicaSemanticApplied": true,
+            "violation": false,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 11,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {
+                "bot_00000000000000000000000008": {
+                  "owner": "usr_00000000000000000000000003",
+                  "profile": "chat",
+                  "steer": "everyone"
+                }
+              },
+              "channels": {},
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "admin-cannot-change-bot-policy",
+          "record": {
+            "epoch": 1,
+            "seq": 12,
+            "type": "bot.policyChanged",
+            "author": "usr_00000000000000000000000002",
+            "body": {
+              "bot": "bot_00000000000000000000000008",
+              "profile": "operator",
+              "steer": "owner"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "reject",
+            "code": "forbidden",
+            "replicaSemanticApplied": false,
+            "violation": true,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 12,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {
+                "bot_00000000000000000000000008": {
+                  "owner": "usr_00000000000000000000000003",
+                  "profile": "chat",
+                  "steer": "everyone"
+                }
+              },
+              "channels": {},
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "operator-everyone-forbidden",
+          "record": {
+            "epoch": 1,
+            "seq": 13,
+            "type": "bot.policyChanged",
+            "author": "usr_00000000000000000000000003",
+            "body": {
+              "bot": "bot_00000000000000000000000008",
+              "profile": "operator",
+              "steer": "everyone"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "reject",
+            "code": "forbidden",
+            "replicaSemanticApplied": false,
+            "violation": true,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 13,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {
+                "bot_00000000000000000000000008": {
+                  "owner": "usr_00000000000000000000000003",
+                  "profile": "chat",
+                  "steer": "everyone"
+                }
+              },
+              "channels": {},
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "owner-policy-valid",
+          "record": {
+            "epoch": 1,
+            "seq": 14,
+            "type": "bot.policyChanged",
+            "author": "usr_00000000000000000000000003",
+            "body": {
+              "bot": "bot_00000000000000000000000008",
+              "profile": "operator",
+              "steer": "owner"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {
+              "runtimeQualified": true
+            }
+          },
+          "expected": {
+            "hostDecision": "allow",
+            "code": null,
+            "replicaSemanticApplied": true,
+            "violation": false,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 14,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {
+                "bot_00000000000000000000000008": {
+                  "owner": "usr_00000000000000000000000003",
+                  "profile": "operator",
+                  "steer": "owner"
+                }
+              },
+              "channels": {},
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "admin-channel-create",
+          "record": {
+            "epoch": 1,
+            "seq": 15,
+            "type": "channel.created",
+            "author": "usr_00000000000000000000000002",
+            "body": {
+              "stream": "str_0000000000000000000000000a",
+              "name": "general"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "allow",
+            "code": null,
+            "replicaSemanticApplied": true,
+            "violation": false,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 15,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {
+                "bot_00000000000000000000000008": {
+                  "owner": "usr_00000000000000000000000003",
+                  "profile": "operator",
+                  "steer": "owner"
+                }
+              },
+              "channels": {
+                "str_0000000000000000000000000a": {
+                  "name": "general",
+                  "archived": false
+                }
+              },
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "admin-channel-rename",
+          "record": {
+            "epoch": 1,
+            "seq": 16,
+            "type": "channel.renamed",
+            "author": "usr_00000000000000000000000002",
+            "body": {
+              "stream": "str_0000000000000000000000000a",
+              "name": "renamed"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "allow",
+            "code": null,
+            "replicaSemanticApplied": true,
+            "violation": false,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 16,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {
+                "bot_00000000000000000000000008": {
+                  "owner": "usr_00000000000000000000000003",
+                  "profile": "operator",
+                  "steer": "owner"
+                }
+              },
+              "channels": {
+                "str_0000000000000000000000000a": {
+                  "name": "renamed",
+                  "archived": false
+                }
+              },
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "member-settings-forbidden",
+          "record": {
+            "epoch": 1,
+            "seq": 17,
+            "type": "settings.changed",
+            "author": "usr_00000000000000000000000003",
+            "body": {
+              "name": "stolen"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "reject",
+            "code": "forbidden",
+            "replicaSemanticApplied": false,
+            "violation": true,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 17,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {
+                "bot_00000000000000000000000008": {
+                  "owner": "usr_00000000000000000000000003",
+                  "profile": "operator",
+                  "steer": "owner"
+                }
+              },
+              "channels": {
+                "str_0000000000000000000000000a": {
+                  "name": "renamed",
+                  "archived": false
+                }
+              },
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": true,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "admin-settings-change",
+          "record": {
+            "epoch": 1,
+            "seq": 18,
+            "type": "settings.changed",
+            "author": "usr_00000000000000000000000002",
+            "body": {
+              "membersMayAddBots": false
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "allow",
+            "code": null,
+            "replicaSemanticApplied": true,
+            "violation": false,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 18,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {
+                "bot_00000000000000000000000008": {
+                  "owner": "usr_00000000000000000000000003",
+                  "profile": "operator",
+                  "steer": "owner"
+                }
+              },
+              "channels": {
+                "str_0000000000000000000000000a": {
+                  "name": "renamed",
+                  "archived": false
+                }
+              },
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": false,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "admin-channel-archive",
+          "record": {
+            "epoch": 1,
+            "seq": 19,
+            "type": "channel.archived",
+            "author": "usr_00000000000000000000000002",
+            "body": {
+              "stream": "str_0000000000000000000000000a"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "allow",
+            "code": null,
+            "replicaSemanticApplied": true,
+            "violation": false,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 19,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {
+                "bot_00000000000000000000000008": {
+                  "owner": "usr_00000000000000000000000003",
+                  "profile": "operator",
+                  "steer": "owner"
+                }
+              },
+              "channels": {
+                "str_0000000000000000000000000a": {
+                  "name": "renamed",
+                  "archived": true
+                }
+              },
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": false,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "archived-rename-rejected",
+          "record": {
+            "epoch": 1,
+            "seq": 20,
+            "type": "channel.renamed",
+            "author": "usr_00000000000000000000000002",
+            "body": {
+              "stream": "str_0000000000000000000000000a",
+              "name": "again"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "reject",
+            "code": "bad_request",
+            "replicaSemanticApplied": false,
+            "violation": true,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 20,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {
+                "bot_00000000000000000000000008": {
+                  "owner": "usr_00000000000000000000000003",
+                  "profile": "operator",
+                  "steer": "owner"
+                }
+              },
+              "channels": {
+                "str_0000000000000000000000000a": {
+                  "name": "renamed",
+                  "archived": true
+                }
+              },
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": false,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "member-cannot-freeze",
+          "record": {
+            "epoch": 1,
+            "seq": 21,
+            "type": "space.frozen",
+            "author": "usr_00000000000000000000000003",
+            "body": {
+              "reason": "attack"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "reject",
+            "code": "forbidden",
+            "replicaSemanticApplied": false,
+            "violation": true,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 21,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {
+                "bot_00000000000000000000000008": {
+                  "owner": "usr_00000000000000000000000003",
+                  "profile": "operator",
+                  "steer": "owner"
+                }
+              },
+              "channels": {
+                "str_0000000000000000000000000a": {
+                  "name": "renamed",
+                  "archived": true
+                }
+              },
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": false,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "admin-remove-bot",
+          "record": {
+            "epoch": 1,
+            "seq": 22,
+            "type": "bot.removed",
+            "author": "usr_00000000000000000000000002",
+            "body": {
+              "bot": "bot_00000000000000000000000008"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "allow",
+            "code": null,
+            "replicaSemanticApplied": true,
+            "violation": false,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 22,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                },
+                "usr_00000000000000000000000003": {
+                  "role": "member",
+                  "rootPin": "fixture-root-member"
+                }
+              },
+              "bots": {},
+              "channels": {
+                "str_0000000000000000000000000a": {
+                  "name": "renamed",
+                  "archived": true
+                }
+              },
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": false,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "member-self-left",
+          "record": {
+            "epoch": 1,
+            "seq": 23,
+            "type": "member.left",
+            "author": "usr_00000000000000000000000003",
+            "body": {
+              "user": "usr_00000000000000000000000003"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "allow",
+            "code": null,
+            "replicaSemanticApplied": true,
+            "violation": false,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 23,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                }
+              },
+              "bots": {},
+              "channels": {
+                "str_0000000000000000000000000a": {
+                  "name": "renamed",
+                  "archived": true
+                }
+              },
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": false,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "owner-freezes",
+          "record": {
+            "epoch": 1,
+            "seq": 24,
+            "type": "space.frozen",
+            "author": "usr_00000000000000000000000001",
+            "body": {
+              "reason": "move"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "allow",
+            "code": null,
+            "replicaSemanticApplied": true,
+            "violation": false,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 24,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": true,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                }
+              },
+              "bots": {},
+              "channels": {
+                "str_0000000000000000000000000a": {
+                  "name": "renamed",
+                  "archived": true
+                }
+              },
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": false,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "frozen-settings-rejected",
+          "record": {
+            "epoch": 1,
+            "seq": 25,
+            "type": "settings.changed",
+            "author": "usr_00000000000000000000000001",
+            "body": {
+              "name": "write"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {}
+          },
+          "expected": {
+            "hostDecision": "reject",
+            "code": "space_frozen",
+            "replicaSemanticApplied": false,
+            "violation": true,
+            "projection": {
+              "epoch": 1,
+              "appliedSeq": 25,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000005",
+              "frozen": true,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                }
+              },
+              "bots": {},
+              "channels": {
+                "str_0000000000000000000000000a": {
+                  "name": "renamed",
+                  "archived": true
+                }
+              },
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": false,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        },
+        {
+          "id": "owner-new-epoch-activates",
+          "record": {
+            "epoch": 2,
+            "seq": 1,
+            "type": "space.descriptor",
+            "author": "usr_00000000000000000000000001",
+            "body": {
+              "epoch": 2,
+              "host": "nod_00000000000000000000000006"
+            },
+            "signatureValid": true,
+            "currentDelegation": true,
+            "evidence": {
+              "ownerDescriptorSignatureValid": true,
+              "previousMetaAuth": {
+                "metaEpoch": 1,
+                "metaSeq": 25
+              },
+              "fullPriorSignedHistory": true
+            }
+          },
+          "expected": {
+            "hostDecision": "allow",
+            "code": null,
+            "replicaSemanticApplied": true,
+            "violation": false,
+            "projection": {
+              "epoch": 2,
+              "appliedSeq": 1,
+              "owner": "usr_00000000000000000000000001",
+              "host": "nod_00000000000000000000000006",
+              "frozen": false,
+              "upgradeRequired": false,
+              "members": {
+                "usr_00000000000000000000000001": {
+                  "role": "owner",
+                  "rootPin": "fixture-root-owner"
+                },
+                "usr_00000000000000000000000002": {
+                  "role": "admin",
+                  "rootPin": "fixture-root-admin"
+                }
+              },
+              "bots": {},
+              "channels": {
+                "str_0000000000000000000000000a": {
+                  "name": "renamed",
+                  "archived": true
+                }
+              },
+              "inviteUses": [],
+              "settings": {
+                "name": "fixture-space",
+                "membersMayAddBots": false,
+                "maxBlobBytes": 26214400,
+                "minProtoMinor": 0
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

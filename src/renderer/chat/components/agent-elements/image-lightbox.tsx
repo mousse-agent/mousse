@@ -6,7 +6,7 @@ import {
   IconChevronLeft,
   IconChevronRight,
   IconX,
-} from "@tabler/icons-react";
+} from "../../../lib/icons";
 import { cn } from "./utils/cn";
 
 export type LightboxImage = {
@@ -117,7 +117,7 @@ export function ImageLightbox({
         aria-label="Close fullscreen (Esc)"
         className="absolute top-4 right-4 z-10 inline-flex size-9 items-center justify-center rounded-full bg-black/50 text-white hover:bg-black/70 transition-colors"
       >
-        <IconX className="size-5" />
+        <IconX className="size-4" />
       </button>
 
       {hasMultipleImages && (
@@ -127,7 +127,7 @@ export function ImageLightbox({
           aria-label="Previous image (←)"
           className="absolute left-4 top-1/2 z-10 inline-flex size-10 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white hover:bg-black/70 transition-colors"
         >
-          <IconChevronLeft className="size-6" />
+          <IconChevronLeft className="size-4" />
         </button>
       )}
 
@@ -146,7 +146,7 @@ export function ImageLightbox({
           aria-label="Next image (→)"
           className="absolute right-4 top-1/2 z-10 inline-flex size-10 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white hover:bg-black/70 transition-colors"
         >
-          <IconChevronRight className="size-6" />
+          <IconChevronRight className="size-4" />
         </button>
       )}
 

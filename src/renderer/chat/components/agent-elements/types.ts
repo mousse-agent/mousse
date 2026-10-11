@@ -137,6 +137,7 @@ export type AgentChatProps = {
   };
 
   /** Show copy toolbar on text turns */
+  lastTurnNotice?: React.ReactNode;
   showCopyToolbar?: boolean;
 
   /**

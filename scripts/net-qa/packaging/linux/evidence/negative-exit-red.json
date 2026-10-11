@@ -1,0 +1,85 @@
+{
+  "source": "dfabc2cb03209845407b9149c0f62b9096f4916c",
+  "hashes": {
+    "asar": "b45bec38f1e1448fb1b954a3dc2f2b65c4ee44fc0936da8d66b769b76ae1542a",
+    "executable": "9c668b8b83bd454b772eb85c301e95a231689b3da79e20f0e428b2519f83175c"
+  },
+  "driverSha256": "88f5e35283307d8c5c5b05f2cbc63b20bce218cc748eb3a4509feb0aa73ab69f",
+  "scope": "physical CLI exit status after genuine net.disable",
+  "denials": [
+    {
+      "command": "bridge threads",
+      "actualExitCode": 0,
+      "expectedExitCode": 130,
+      "body": {
+        "code": "cancelled",
+        "error": "The operation was cancelled."
+      },
+      "stdoutEmpty": true
+    },
+    {
+      "command": "spaces post",
+      "actualExitCode": 0,
+      "expectedExitCode": 130,
+      "body": {
+        "code": "cancelled",
+        "error": "The operation was cancelled."
+      },
+      "stdoutEmpty": true
+    },
+    {
+      "command": "net init",
+      "actualExitCode": 0,
+      "expectedExitCode": 130,
+      "body": {
+        "code": "cancelled",
+        "error": "The operation was cancelled."
+      },
+      "stdoutEmpty": true
+    },
+    {
+      "command": "spaces list",
+      "actualExitCode": 0,
+      "expectedExitCode": 130,
+      "body": {
+        "code": "cancelled",
+        "error": "The operation was cancelled."
+      },
+      "stdoutEmpty": true
+    }
+  ],
+  "originalBytesRetained": true,
+  "cleanup": [
+    {
+      "pid": 391,
+      "forced": false,
+      "code": 0,
+      "signal": null
+    },
+    {
+      "pid": 1199,
+      "forced": false,
+      "code": 0,
+      "signal": null
+    },
+    {
+      "pid": 2450,
+      "forced": false,
+      "code": 0,
+      "signal": null
+    },
+    {
+      "pid": 1424,
+      "forced": false,
+      "code": 0,
+      "signal": null
+    },
+    {
+      "pid": 51,
+      "forced": false,
+      "code": 0,
+      "signal": null
+    }
+  ],
+  "remainingOwnedProcesses": []
+}

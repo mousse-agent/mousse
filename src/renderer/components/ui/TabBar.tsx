@@ -1,4 +1,4 @@
-import { Plus, X } from 'lucide-react'
+import { Plus, X } from '../../lib/icons'
 import type { ReactNode } from 'react'
 
 export interface TabItem { id: string; label: ReactNode; active?: boolean; icon?: ReactNode }

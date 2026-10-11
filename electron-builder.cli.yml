@@ -11,9 +11,11 @@ extraMetadata:
 compression: normal
 files:
   - out/main/**/*
+  - out/net-native/**/*
   - out/browser-worker/**/*
   - package.json
   - '!**/*.map'
+  - '!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**'
   - '!**/node_modules/@fluentui/**'
   - '!**/node_modules/lucide-react/**'
   - '!**/node_modules/monaco-editor/**'
@@ -32,6 +34,7 @@ files:
   - '!**/node_modules/node-pty/**/*.{map,ts,md}'
   - '!**/node_modules/node-pty/**/*.test.js'
 asarUnpack:
+  - out/net-native/**
   - out/browser-worker/**
   - node_modules/node-pty/build/Release/**
   - node_modules/node-pty/prebuilds/darwin-*/**

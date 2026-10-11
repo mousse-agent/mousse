@@ -18,6 +18,7 @@ export function AgentChat({
   toolRenderers,
   attachments,
   showCopyToolbar,
+  lastTurnNotice,
   initialScrollBehavior,
   enableImagePreview,
   suggestions,
@@ -30,6 +31,7 @@ export function AgentChat({
 }: AgentChatProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
+  const [atBottom, setAtBottom] = useState(true);
 
   const ResolvedInputBar = slots?.InputBar ?? InputBar;
   const isEmpty = !error && messages.length === 0;
@@ -119,6 +121,7 @@ export function AgentChat({
         classNames?.root,
         className,
       )}
+      data-composer-compact={!atBottom || undefined}
       style={style}
     >
       {isCenteredEmptyState ? (
@@ -155,6 +158,8 @@ export function AgentChat({
           classNames={classNames}
           slots={slots}
           toolRenderers={toolRenderers}
+          onAtBottomChange={setAtBottom}
+          lastTurnNotice={lastTurnNotice}
           showCopyToolbar={showCopyToolbar}
           initialScrollBehavior={initialScrollBehavior}
           enableImagePreview={enableImagePreview}

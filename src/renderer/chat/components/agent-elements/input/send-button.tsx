@@ -1,4 +1,4 @@
-import { IconArrowUp, IconPlayerStopFilled } from "@tabler/icons-react";
+import { IconArrowUp, IconPlayerStopFilled } from "../../../../lib/icons";
 import { cn } from "../utils/cn";
 
 export type SendButtonProps = {

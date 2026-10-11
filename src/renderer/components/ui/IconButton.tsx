@@ -1,5 +1,5 @@
 import { forwardRef, type ButtonHTMLAttributes } from 'react'
-import type { LucideIcon } from 'lucide-react'
+import type { LucideIcon } from '../../lib/icons'
 
 interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   icon: LucideIcon
@@ -28,7 +28,7 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
       aria-label={label}
       {...props}
     >
-      <Icon size={size} strokeWidth={2} />
+      <Icon size={variant === 'titlebar' ? 14 : size} strokeWidth={2} />
     </button>
   )
 })

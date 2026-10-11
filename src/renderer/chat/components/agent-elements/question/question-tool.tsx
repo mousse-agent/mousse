@@ -3,7 +3,7 @@ import {
   IconChevronDown,
   IconChevronUp,
   IconMessageCircleQuestion,
-} from "@tabler/icons-react";
+} from "../../../../lib/icons";
 import { QuestionPrompt } from "./question-prompt";
 import type { QuestionAnswer, QuestionConfig } from "./question-prompt";
 

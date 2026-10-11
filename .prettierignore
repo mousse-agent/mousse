@@ -1,0 +1,17 @@
+# Prettier is only run through `npm run format:net` / `format:net:check`, on the Mousse Net paths.
+node_modules
+out
+dist
+release
+coverage
+
+# Never reformat frozen vectors, fixtures, evidence, or non-source files.
+test-vectors
+**/fixtures/**
+**/evidence/**
+*.json
+*.md
+*.pem
+*.cc
+*.sh
+Dockerfile

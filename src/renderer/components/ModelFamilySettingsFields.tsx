@@ -174,7 +174,7 @@ export function ModelFamilySettingsFields({
             }}
           >
             {family.speeds.map((option) => (
-              <option key={option} value={option}>
+              <option key={option === 'standard' || option === 'slow' ? 'Standard' : option === 'fast' ? 'Fast' : option} value={option}>
                 {option}
               </option>
             ))}

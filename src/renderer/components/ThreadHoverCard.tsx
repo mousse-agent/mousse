@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
-import { Bot, GitBranch, Sparkles } from 'lucide-react'
+import { Bot, GitBranch, Sparkles } from '../lib/icons'
 import type { Thread } from '../../shared/types'
 import { isActiveAgentStatus } from '../../shared/types'
 import {

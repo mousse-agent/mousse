@@ -1,5 +1,5 @@
 import { memo, useState } from "react";
-import { IconCheck, IconChevronRight, IconX } from "@tabler/icons-react";
+import { IconCheck, IconChevronRight, IconTerminal2, IconX } from "../../../../lib/icons";
 import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
@@ -52,7 +52,7 @@ export function BashToolTerminalCard({
         {isPending ? (
           <>
             <svg
-              className="w-3 h-3 text-an-tool-color-muted animate-spin shrink-0"
+              className="w-4 h-4 text-an-tool-color-muted animate-spin shrink-0"
               viewBox="0 0 16 16"
               fill="none"
             >
@@ -77,11 +77,12 @@ export function BashToolTerminalCard({
           </>
         ) : (
           <>
+            <IconTerminal2 size={18} className="text-an-tool-color-muted shrink-0" />
             {isError ? (
-              <IconX className="w-3 h-3 text-red-400 shrink-0" strokeWidth={2.5} />
+              <IconX className="w-4 h-4 text-red-400 shrink-0" strokeWidth={2.5} />
             ) : (
               <IconCheck
-                className="w-3 h-3 text-green-500/70 shrink-0"
+                className="w-4 h-4 text-green-500/70 shrink-0"
                 strokeWidth={2.5}
               />
             )}
@@ -103,7 +104,7 @@ export function BashToolTerminalCard({
         )}
         <IconChevronRight
           className={cn(
-            "w-3 h-3 shrink-0 text-an-tool-color-muted transition-transform duration-150 ease-out",
+            "w-4 h-4 shrink-0 text-an-tool-color-muted transition-transform duration-150 ease-out",
             expanded && "rotate-90",
           )}
         />

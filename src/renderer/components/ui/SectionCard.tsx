@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import { ChevronDown, ChevronRight } from 'lucide-react'
+import { ChevronDown, ChevronRight } from '../../lib/icons'
 
 export function SectionCard({ icon, title, description, defaultOpen = true, children, className = '' }: { icon?: ReactNode; title: string; description?: string; children: ReactNode; defaultOpen?: boolean; className?: string }) {
   const [open, setOpen] = useState(defaultOpen)

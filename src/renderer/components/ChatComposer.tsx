@@ -1,7 +1,7 @@
 import { normalizeVoiceError } from '../utils/voiceErrors'
 import type { AppErrorShape } from '../../shared/errors'
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Mic, X } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Mic, X } from '../lib/icons'
 import type { LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
@@ -23,6 +23,9 @@ import { BrowserElementPill } from './BrowserElementPill'
 import { FileAttachment } from '../chat/components/agent-elements/input/file-attachment'
 import { formatBrowserElementBlock } from '../utils/messageAttachments'
 import { collectImageFilesFromDataTransfer } from '../utils/imageAttachments'
+import type { ChatReference } from '../../shared/chatReferences'
+import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseReferenceDragData } from '../../shared/chatReferences'
+import { ChatReferencePill } from './ReferencePill'
 
 export interface AttachedFile {
   id: string
@@ -46,6 +49,10 @@ export interface ChatComposerProps {
   onVoiceMessagesChange: (voices: VoiceMessage[]) => void
   browserElements?: BrowserElementAttachment[]
   onRemoveBrowserElement?: (id: string) => void
+  references?: ChatReference[]
+  onAddReference?: (reference: ChatReference) => void | Promise<void>
+  onRemoveReference?: (id: string) => void
+  onReferenceError?: (message: string) => void
   chatMode: ChatMode
   onChatModeChange: (mode: ChatMode) => void
   enabledSkills: SkillDescriptor[]
@@ -89,6 +96,10 @@ export function ChatComposer({
   onVoiceMessagesChange,
   browserElements = [],
   onRemoveBrowserElement = () => {},
+  references = [],
+  onAddReference = () => {},
+  onRemoveReference = () => {},
+  onReferenceError = () => {},
   chatMode,
   onChatModeChange,
   enabledSkills,
@@ -105,7 +116,7 @@ export function ChatComposer({
   onContextOpenChange,
   loading = false,
   disabled = false,
-  placeholder = 'What do you to want to build?',
+  placeholder = 'Describe a task or ask a question',
   onSend,
   onStop,
   hideModePicker = false,
@@ -117,6 +128,29 @@ export function ChatComposer({
   const recordingTimerRef = useRef<number | null>(null)
   const recordingStartRef = useRef<number>(0)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
+  const resizeDraft = useCallback(() => {
+    const inputElement = composerInputRef.current
+    if (!inputElement) return
+    inputElement.style.height = '0px'
+    const height = Math.max(64, Math.min(200, inputElement.scrollHeight))
+    inputElement.style.removeProperty('height')
+    inputElement.style.setProperty('--draft-input-height', `${height}px`)
+  }, [])
+  useLayoutEffect(() => { resizeDraft() }, [input, resizeDraft])
+  useEffect(() => {
+    const inputElement = composerInputRef.current
+    if (!inputElement) return
+    let width = inputElement.clientWidth
+    const observer = new ResizeObserver(() => {
+      if (inputElement.clientWidth !== width) {
+        width = inputElement.clientWidth
+        resizeDraft()
+      }
+    })
+    observer.observe(inputElement)
+    return () => observer.disconnect()
+  }, [resizeDraft])
+
   const suggestionRefs = useRef(new Map<number, HTMLButtonElement>())
   const [isRecording, setIsRecording] = useState(false)
   const [recordingPending, setRecordingPending] = useState(false)
@@ -125,6 +159,7 @@ export function ChatComposer({
   const capturePending = useRef(false)
   const captureMounted = useRef(true)
   const captureStream = useRef<MediaStream | null>(null)
+  const [pendingReferences, setPendingReferences] = useState(0)
   const [recordingDuration, setRecordingDuration] = useState(0)
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
   const [selectedSuggestion, setSelectedSuggestion] = useState(0)
@@ -140,7 +175,7 @@ export function ChatComposer({
     : findInlineSkillToken(input, enabledSkills)
   const backdropRef = useRef<HTMLDivElement>(null)
 
-  const hasAttachments = attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0
+  const hasAttachments = attachedFiles.length > 0 || voiceMessages.length > 0 || browserElements.length > 0 || references.length > 0
   const trimmedInput = removeInlineSkillToken(input, skillsPickerDisabled ? [] : enabledSkills).trim()
   const skillsPickerQuery = skillsPickerDisabled ? null : parseSkillsPickerQuery(input)
   const skillSuggestions =
@@ -155,6 +190,7 @@ export function ChatComposer({
     (trimmedInput.length > 0 || hasAttachments) &&
     !isRecording &&
     !recordingPending &&
+    pendingReferences === 0 &&
     !disabled &&
     skillsPickerQuery === null
 
@@ -220,10 +256,28 @@ export function ChatComposer({
     event.target.value = ''
   }
 
+  const imagePasteKey = useRef({ held: false, consumed: false })
+  useEffect(() => {
+    const reset = () => { imagePasteKey.current = { held: false, consumed: false } }
+    const release = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() === 'v' || event.key === 'Control' || event.key === 'Meta') reset()
+    }
+    window.addEventListener('keyup', release)
+    window.addEventListener('blur', reset)
+    return () => {
+      window.removeEventListener('keyup', release)
+      window.removeEventListener('blur', reset)
+    }
+  }, [])
+
   const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const images = collectImageFilesFromDataTransfer(event.clipboardData)
     if (images.length === 0) return
     event.preventDefault()
+    if (imagePasteKey.current.held) {
+      if (imagePasteKey.current.consumed) return
+      imagePasteKey.current.consumed = true
+    }
     addFiles(images)
   }
 
@@ -390,6 +444,14 @@ export function ChatComposer({
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+      if (!e.repeat) imagePasteKey.current = { held: true, consumed: false }
+      if (e.repeat && imagePasteKey.current.consumed) {
+        e.preventDefault()
+        return
+      }
+    }
+
     if (showSkillsPicker) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
@@ -444,6 +506,11 @@ export function ChatComposer({
         return
       }
     }
+    if (e.key === 'Backspace' && input.length === 0 && references.length > 0) {
+      e.preventDefault()
+      onRemoveReference(references[references.length - 1].id)
+      return
+    }
     if (e.key === 'Backspace' && input.length === 0 && browserElements.length > 0) {
       e.preventDefault()
       onRemoveBrowserElement(browserElements[browserElements.length - 1].id)
@@ -459,8 +526,36 @@ export function ChatComposer({
     onStop?.()
   }
 
+  const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    if (disabled) return
+    if (event.dataTransfer.types.includes(MOUSSE_REFERENCE_MIME) || event.dataTransfer.types.includes('Files')) {
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'copy'
+    }
+  }
+
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    if (disabled) return
+    const reference = parseReferenceDragData(event.dataTransfer)
+    if (reference) {
+      event.preventDefault()
+      event.stopPropagation()
+      setPendingReferences((count) => count + 1)
+      void Promise.resolve().then(() => onAddReference(reference)).catch((error) => {
+        onReferenceError(error instanceof Error ? error.message : String(error))
+      }).finally(() => setPendingReferences((count) => count - 1))
+      return
+    }
+    const files = Array.from(event.dataTransfer.files)
+    if (files.length) {
+      event.preventDefault()
+      addFiles(files)
+    }
+  }
+
   return (
-    <div className="composer">
+    <div className="composer" onDragOver={handleDragOver} onDrop={handleDrop}>
+      {pendingReferences > 0 && <div className="composer-attachments" role="status">Attaching reference…</div>}
       {(hasAttachments || isRecording) && (
         <div className="composer-attachments">
           <div className="composer-attachments-scroll">
@@ -480,6 +575,9 @@ export function ChatComposer({
                 url={previewUrl}
                 onRemove={() => removeFile(id)}
               />
+            ))}
+            {references.map((reference) => (
+              <ChatReferencePill key={reference.id} reference={reference} onRemove={() => onRemoveReference(reference.id)} />
             ))}
             {browserElements.map((element) => (
               <BrowserElementPill
@@ -522,6 +620,7 @@ export function ChatComposer({
           onKeyDown={handleKeyDown}
           onScroll={handleInputScroll}
           onPaste={handlePaste}
+          onFocus={resizeDraft}
           placeholder={
             loading
               ? 'Running… send queues next'
@@ -637,7 +736,10 @@ export function ChatComposer({
         selectedModelId={selectedModelId}
         modelMenuOpen={modelMenuOpen}
         onModelMenuOpenChange={onModelMenuOpenChange}
-        onModelSelect={onModelSelect}
+        onModelSelect={(providerId, modelId) => {
+          if (providerId === 'antigravity' && chatMode === 'plan') handleChatModeChange('agent')
+          onModelSelect(providerId, modelId)
+        }}
         modelReadOnly={modelReadOnly}
         onOpenSettings={onOpenSettings}
         contextUsage={contextUsage}
@@ -668,7 +770,8 @@ export function buildComposerMessageContent(
   input: string,
   attachedFiles: AttachedFile[],
   voiceMessages: VoiceMessage[],
-  browserElements: BrowserElementAttachment[] = []
+  browserElements: BrowserElementAttachment[] = [],
+  references: ChatReference[] = []
 ): string {
   const parts: string[] = []
   if (input.trim()) parts.push(input.trim())
@@ -692,6 +795,8 @@ export function buildComposerMessageContent(
   if (browserElements.length) {
     parts.push(browserElements.map((element) => formatBrowserElementBlock(element)).join('\n\n'))
   }
+
+  if (references.length) parts.push(formatChatReferences(references))
 
   return parts.join('\n\n')
 }

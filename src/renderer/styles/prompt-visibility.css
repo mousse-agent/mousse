@@ -1,0 +1,56 @@
+/* Short, tightly stacked marks; only pointer/focus proximity forms a bump. */
+.an-message-list-wrap .chat-prompt-rail {
+  right: 8px;
+}
+
+.an-message-list-wrap .chat-prompt-tick {
+  height: 9px;
+  padding: 0 2px;
+}
+
+.an-message-list-wrap .chat-prompt-tick span {
+  height: 2px;
+  border-radius: 1px;
+  opacity: 0.22;
+  transform: none;
+  transition: width 160ms ease, transform 160ms ease, opacity 160ms ease;
+}
+
+.an-message-list-wrap .chat-prompt-tick[aria-current] span {
+  opacity: 0.22;
+}
+
+.an-message-list-wrap .chat-prompt-tick[data-visible="true"] span {
+  opacity: 0.9;
+}
+
+.an-message-list-wrap .chat-prompt-rail:is(:hover, :focus-within, .is-active) .chat-prompt-tick span {
+  transform: none;
+}
+
+.an-message-list-wrap .chat-prompt-rail.is-previewing .chat-prompt-tick span {
+  transform: translateX(-2px);
+}
+
+.an-message-list-wrap .chat-prompt-tick:is(:hover, :focus-visible) span {
+  opacity: 1;
+}
+
+.an-message-list-wrap .chat-prompt-tick:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+.an-message-list-wrap .chat-prompt-preview {
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .an-message-list-wrap .chat-prompt-tick span {
+    transition: none;
+  }
+}

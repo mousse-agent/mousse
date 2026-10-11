@@ -1,0 +1,175 @@
+/* Scoped above the base composer rules so density survives stylesheet order. */
+.chat-input-area .composer {
+  border-radius: 12px;
+  border-color: var(--border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.chat-input-area .composer:focus-within {
+  border-color: rgba(var(--accent-rgb), 0.4);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.1);
+}
+
+/* Keep the textarea and inline-token backdrop on exactly the same grid. */
+.chat-input-area .composer-input,
+.chat-input-area .composer-input-backdrop {
+  padding: 10px 12px 4px;
+}
+
+.chat-input-area .composer-input {
+  height: var(--draft-input-height, 64px);
+  min-height: 64px;
+  max-height: 200px;
+}
+
+.chat-input-area .composer-input-wrap {
+  position: relative;
+  min-height: 64px;
+  max-height: 200px;
+}
+
+/* The mirrored draft must not contribute its full content height to the grid. */
+.chat-input-area .composer-input-backdrop {
+  position: absolute;
+  inset: 0;
+}
+
+.chat-input-area .composer-footer {
+  padding: 4px 6px 6px;
+  gap: 6px;
+  border-radius: 0 0 12px 12px;
+}
+
+.chat-input-area .composer-footer-left {
+  gap: 6px;
+}
+
+.chat-input-area .composer-footer-right {
+  gap: 4px;
+}
+
+.chat-input-area .composer-pill-btn {
+  padding: 4px 6px;
+  gap: 4px;
+  border-radius: 6px;
+  background: transparent;
+}
+
+.chat-input-area .composer-pill-btn:hover,
+.chat-input-area .composer-pill-btn.open {
+  background: rgba(var(--accent-rgb), 0.08);
+  border-color: rgba(var(--accent-rgb), 0.12);
+}
+
+.chat-input-area .composer-icon-btn,
+.chat-input-area .composer-action-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+}
+
+.chat-input-area .composer-action-btn-active {
+  box-shadow: 0 1px 4px rgba(var(--accent-rgb), 0.18);
+}
+
+.chat-input-area .composer-attachments {
+  padding: 6px 8px 0;
+}
+
+.chat-input-area .composer-attachment-pill {
+  padding: 3px 6px;
+  border-radius: 6px;
+}
+
+.chat-input-area .composer-workspace-toolbar {
+  gap: 12px;
+  margin: 0 8px -12px;
+  padding: 5px 10px 17px;
+  border-color: var(--border);
+  border-radius: 10px 10px 0 0;
+}
+
+.chat-input-area .composer-workspace-project {
+  padding: 4px 6px;
+  margin-left: -6px;
+  border-radius: 6px;
+}
+
+.composer-workspace-menu .composer-workspace-menu-item {
+  padding: 6px 8px;
+  gap: 8px;
+}
+
+@media (max-width: 600px) {
+  .chat-input-area .composer-workspace-toolbar {
+    gap: 6px 10px;
+  }
+}
+
+.chat-run-interrupted {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  width: min(100%, var(--an-max-width, 680px));
+  box-sizing: border-box;
+  margin: 0 auto;
+  padding: 12px 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.chat-run-interrupted::before,
+.chat-run-interrupted::after {
+  content: "";
+  height: 1px;
+  background: var(--border);
+}
+.chat-run-interrupted-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.chat-run-interrupted svg { flex-shrink: 0; }
+
+/* Browsing earlier messages leaves one input line; focus restores the full draft. */
+.mousse-chat-shell[data-composer-compact]:not(:has(.composer:focus-within)):not(:has(.composer-input:not(:placeholder-shown))) .composer-input {
+  height: 34px;
+  min-height: 34px;
+  max-height: 34px;
+  overflow-y: hidden;
+  white-space: nowrap;
+}
+.mousse-chat-shell[data-composer-compact]:not(:has(.composer:focus-within)):not(:has(.composer-input:not(:placeholder-shown))) .composer-input-wrap {
+  height: 34px;
+  min-height: 34px;
+  max-height: 34px;
+  overflow: hidden;
+}
+.mousse-chat-shell[data-composer-compact]:not(:has(.composer:focus-within)):not(:has(.composer-input:not(:placeholder-shown))) .composer-input-backdrop {
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.chat-input-area .composer-input {
+  /* Let Chromium use the custom track and thumb without native arrow buttons. */
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+.chat-input-area .composer-input::-webkit-scrollbar {
+  width: 4px;
+}
+.chat-input-area .composer-input::-webkit-scrollbar-track {
+  background: transparent;
+}
+.chat-input-area .composer-input::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text-secondary) 30%, transparent);
+  border-radius: 999px;
+}
+.chat-input-area .composer-input::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text-secondary) 55%, transparent);
+}
+.chat-input-area .composer-input::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}

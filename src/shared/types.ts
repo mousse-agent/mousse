@@ -376,6 +376,8 @@ export interface Agent {
   exitCode?: number | null
   exitSignal?: string | null
   exitedAt?: string
+  /** When this agent last left starting or running. Cleared if work resumes. */
+  idleAt?: string
   status: AgentStatus
   /** More precise startup stage while status is `starting`. */
   startupPhase?: 'discovery' | 'worktree' | 'launching'
@@ -413,6 +415,8 @@ export interface ThreadMessagesSnapshot {
 }
 
 export interface ChatMessage {
+  /** Durable completed-response applets; generated code never executes in the shell. */
+  presentationParts?: import('./applets').AppletPresentationPart[]
   id: string
   role: 'user' | 'assistant' | 'system'
   content: string
@@ -458,6 +462,11 @@ export interface ChatMessage {
     | 'warning'
     /** Presentation-only marker emitted when retained model context is compacted. */
     | 'context_compaction'
+    /** Presentation-only model transition; never injected into provider context. */
+    | 'context_handoff'
+  /** Selection actually admitted for this user turn, independent of composer edits. */
+  modelSelection?: { provider: string; model: string }
+  contextHandoff?: { from: { provider: string; model: string }; to: { provider: string; model: string } }
   planCard?: PlanCardMetadata
   thinking?: {
     content: string
@@ -841,6 +850,13 @@ export interface NativeLlmContext {
   /** Steer queue IDs whose content has been checkpointed into native history. */
   acceptedSteerItemIds?: string[]
   compaction?: NativeCompactionCheckpoint
+  /** Actual model capacity reported by a native provider, retained across compaction. */
+  nativeProviderModel?: {
+    provider: 'claude-subscription'
+    selectedModel: string
+    modelName: string
+    contextWindow?: number
+  }
   /** Restored on session load so context usage stays measured after persist/reload. */
   lastTurnUsage?: NativeLastTurnUsage
 }

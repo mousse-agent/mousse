@@ -1,0 +1,59 @@
+.app .sliding-threads-pane {
+  position: relative;
+  flex: 0 0 auto;
+  width: 0;
+  min-width: 0;
+  min-height: 0;
+  transition: width 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.app .sliding-threads-pane.is-expanded { width: var(--threads-pane-layout-width); }
+.app .sliding-threads-pane.is-hidden { visibility: hidden; }
+.app .sliding-threads-pane[aria-hidden='true'] { pointer-events: none; }
+
+.app .sliding-threads-pane-clip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.app .sliding-threads-pane-content {
+  display: flex;
+  width: var(--threads-pane-width);
+  height: 100%;
+  transform: translateX(-100%);
+  transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.app .sliding-threads-pane.is-expanded .sliding-threads-pane-content { transform: none; }
+.app .sliding-threads-pane .threads-sidebar { height: 100%; animation: none; }
+
+/* Keep the resize hit area outside the content clip so dragging stays easy. */
+.app .sliding-threads-pane > .resizer-threads {
+  position: absolute;
+  inset: 0 0 0 auto;
+  opacity: 0;
+  transition: opacity 200ms;
+}
+.app .sliding-threads-pane.is-expanded > .resizer-threads { opacity: 1; }
+
+.app .sliding-threads-pane--overlay {
+  position: absolute;
+  left: var(--navigation-rail-width);
+  top: 0;
+  bottom: 0;
+  width: var(--threads-pane-width);
+  z-index: 50;
+  transition: none;
+}
+
+.app .sliding-threads-pane--overlay.is-expanded { width: var(--threads-pane-width); }
+.app .sliding-threads-pane--overlay .threads-sidebar { border-right: 1px solid rgba(var(--accent-pale-rgb), 0.12); }
+.app .sliding-threads-pane.is-resizing,
+.app .sliding-threads-pane.is-resizing .sliding-threads-pane-content { transition: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .app .sliding-threads-pane,
+  .app .sliding-threads-pane-content,
+  .app .sliding-threads-pane > .resizer-threads { transition: none; }
+}

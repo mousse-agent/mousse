@@ -1,0 +1,1639 @@
+{
+  "description": "Frozen structural examples; Signed placeholders are NOT cryptographically verified identity credentials. See signed-envelopes.json for exact cryptographic vectors.",
+  "error": {
+    "code": "forbidden",
+    "message": "denied",
+    "retryable": false
+  },
+  "messages": [
+    {
+      "t": "hello",
+      "protoMajor": 1,
+      "protoMinor": 0,
+      "caps": [
+        "streams.v1",
+        "blobs.v1",
+        "rpc.v1",
+        "presence.v1"
+      ],
+      "node": "nod_00000000000000000000000000",
+      "delegation": {
+        "payload": "e30",
+        "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "roster": {
+        "payload": "e30",
+        "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "routes": {
+        "payload": "e30",
+        "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "now": 0
+    },
+    {
+      "t": "helloAck",
+      "protoMinor": 0,
+      "caps": [
+        "streams.v1"
+      ],
+      "now": 0
+    },
+    {
+      "t": "ping",
+      "n": 1,
+      "now": 0
+    },
+    {
+      "t": "pong",
+      "n": 1,
+      "now": 0
+    },
+    {
+      "t": "goAway",
+      "error": {
+        "code": "forbidden",
+        "message": "denied",
+        "retryable": false
+      }
+    },
+    {
+      "t": "error",
+      "re": "evt_00000000000000000000000000",
+      "error": {
+        "code": "forbidden",
+        "message": "denied",
+        "retryable": false
+      }
+    },
+    {
+      "t": "subscribe",
+      "stream": "str_00000000000000000000000000",
+      "after": {
+        "epoch": 1,
+        "seq": 0
+      }
+    },
+    {
+      "t": "subscribed",
+      "stream": "str_00000000000000000000000000",
+      "head": {
+        "epoch": 1,
+        "seq": 1
+      },
+      "replayThrough": 1
+    },
+    {
+      "t": "events",
+      "stream": "str_00000000000000000000000000",
+      "records": [
+        {
+          "seq": 1,
+          "epoch": 1,
+          "recvTs": 0
+        }
+      ],
+      "replay": true,
+      "parts": [
+        1,
+        64
+      ]
+    },
+    {
+      "t": "events",
+      "stream": "str_00000000000000000000000000",
+      "records": [
+        {
+          "seq": 1,
+          "epoch": 1,
+          "recvTs": 0
+        }
+      ],
+      "replay": false,
+      "parts": [
+        1,
+        64
+      ]
+    },
+    {
+      "t": "caughtUp",
+      "stream": "str_00000000000000000000000000"
+    },
+    {
+      "t": "snapshotRequired",
+      "stream": "str_00000000000000000000000000",
+      "reason": "epochChanged",
+      "head": {
+        "epoch": 1,
+        "seq": 1
+      }
+    },
+    {
+      "t": "snapshot.get",
+      "stream": "str_00000000000000000000000000"
+    },
+    {
+      "t": "snapshot.chunk",
+      "stream": "str_00000000000000000000000000",
+      "epoch": 1,
+      "throughSeq": 1,
+      "records": [
+        {
+          "seq": 1,
+          "epoch": 1,
+          "recvTs": 0
+        }
+      ],
+      "done": true,
+      "parts": [
+        1,
+        64
+      ]
+    },
+    {
+      "t": "unsubscribe",
+      "stream": "str_00000000000000000000000000"
+    },
+    {
+      "t": "metaHead.get",
+      "stream": "str_00000000000000000000000000",
+      "n": 1
+    },
+    {
+      "t": "metaHead",
+      "stream": "str_00000000000000000000000000",
+      "n": 1,
+      "head": {
+        "epoch": 1,
+        "seq": 1
+      },
+      "now": 0
+    },
+    {
+      "t": "append",
+      "stream": "str_00000000000000000000000000",
+      "id": "evt_00000000000000000000000000",
+      "parts": [
+        1,
+        64
+      ]
+    },
+    {
+      "t": "appendResult",
+      "stream": "str_00000000000000000000000000",
+      "id": "evt_00000000000000000000000000",
+      "epoch": 1,
+      "seq": 1,
+      "recvTs": 0
+    },
+    {
+      "t": "appendResult",
+      "stream": "str_00000000000000000000000000",
+      "id": "evt_00000000000000000000000000",
+      "error": {
+        "code": "forbidden",
+        "message": "denied",
+        "retryable": false
+      }
+    },
+    {
+      "t": "blob.put.begin",
+      "stream": "str_00000000000000000000000000",
+      "blob": "blb_0000000000000000000000000000000000000000000000000000000000000000",
+      "bytes": 1,
+      "sealed": false
+    },
+    {
+      "t": "blob.chunk",
+      "blob": "blb_0000000000000000000000000000000000000000000000000000000000000000",
+      "offset": 0,
+      "parts": [
+        1
+      ]
+    },
+    {
+      "t": "blob.put.end",
+      "blob": "blb_0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "t": "blob.put.result",
+      "blob": "blb_0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "t": "blob.put.result",
+      "blob": "blb_0000000000000000000000000000000000000000000000000000000000000000",
+      "error": {
+        "code": "forbidden",
+        "message": "denied",
+        "retryable": false
+      }
+    },
+    {
+      "t": "blob.get",
+      "stream": "str_00000000000000000000000000",
+      "blob": "blb_0000000000000000000000000000000000000000000000000000000000000000",
+      "offset": 0
+    },
+    {
+      "t": "blob.end",
+      "blob": "blb_0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "t": "blob.end",
+      "blob": "blb_0000000000000000000000000000000000000000000000000000000000000000",
+      "error": {
+        "code": "forbidden",
+        "message": "denied",
+        "retryable": false
+      }
+    },
+    {
+      "t": "rpc.request",
+      "id": "rpc_00000000000000000000000000",
+      "method": "projects.list",
+      "params": {},
+      "idem": "once",
+      "deadlineMs": 1000
+    },
+    {
+      "t": "rpc.progress",
+      "id": "rpc_00000000000000000000000000",
+      "data": {
+        "pct": 0
+      }
+    },
+    {
+      "t": "rpc.result",
+      "id": "rpc_00000000000000000000000000",
+      "result": null
+    },
+    {
+      "t": "rpc.result",
+      "id": "rpc_00000000000000000000000000",
+      "error": {
+        "code": "forbidden",
+        "message": "denied",
+        "retryable": false
+      }
+    },
+    {
+      "t": "rpc.cancel",
+      "id": "rpc_00000000000000000000000000"
+    },
+    {
+      "t": "rpc.result.get",
+      "id": "rpc_00000000000000000000000000"
+    },
+    {
+      "t": "presence",
+      "stream": "str_00000000000000000000000000",
+      "subject": "bot_00000000000000000000000000",
+      "counter": 1,
+      "ts": 0,
+      "state": "idle",
+      "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "t": "ephemeral",
+      "stream": "str_00000000000000000000000000",
+      "kind": "typing",
+      "data": true
+    },
+    {
+      "t": "revoked",
+      "subject": "nod_00000000000000000000000000"
+    },
+    {
+      "t": "rosterUpdate",
+      "roster": {
+        "payload": "e30",
+        "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    },
+    {
+      "t": "enroll.request",
+      "invite": "inv_00000000000000000000000000",
+      "node": "nod_00000000000000000000000000",
+      "keys": {
+        "sign": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "agree": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "transport": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "name": "new node",
+      "proof": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "t": "enroll.result",
+      "delegation": {
+        "payload": "e30",
+        "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "roster": {
+        "payload": "e30",
+        "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    },
+    {
+      "t": "enroll.result",
+      "error": {
+        "code": "forbidden",
+        "message": "denied",
+        "retryable": false
+      }
+    },
+    {
+      "t": "space.join.request",
+      "invite": "inv_00000000000000000000000000",
+      "space": "spc_00000000000000000000000000",
+      "user": "usr_00000000000000000000000000",
+      "rootKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "node": "nod_00000000000000000000000000",
+      "delegation": {
+        "payload": "e30",
+        "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "roster": {
+        "payload": "e30",
+        "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "name": "new member",
+      "proof": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "t": "space.join.result",
+      "space": "spc_00000000000000000000000000",
+      "descriptor": {
+        "payload": "e30",
+        "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "member": {
+        "epoch": 1,
+        "seq": 2,
+        "recvTs": 1000
+      },
+      "parts": [
+        727,
+        64
+      ]
+    },
+    {
+      "t": "space.join.result",
+      "space": "spc_00000000000000000000000000",
+      "error": {
+        "code": "forbidden",
+        "message": "denied",
+        "retryable": false
+      }
+    },
+    {
+      "t": "rpc.result",
+      "id": "rpc_00000000000000000000000000",
+      "result": {
+        "encoding": "json"
+      },
+      "blob": {
+        "stream": "str_00000000000000000000000000",
+        "event": "evt_00000000000000000000000000",
+        "blob": "blb_0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "t": "space.discovery.get",
+      "n": 1,
+      "space": "spc_00000000000000000000000000",
+      "metaHead": {
+        "epoch": 1,
+        "seq": 3
+      },
+      "stream": "str_00000000000000000000000000"
+    },
+    {
+      "t": "space.discovery.result",
+      "n": 1,
+      "space": "spc_00000000000000000000000000",
+      "metaHead": {
+        "epoch": 1,
+        "seq": 3
+      },
+      "stream": "str_00000000000000000000000000",
+      "descriptor": {
+        "id": "str_00000000000000000000000000",
+        "kind": "space.private",
+        "authority": "nod_00000000000000000000000000",
+        "space": "spc_00000000000000000000000000",
+        "parent": "str_00000000000000000000000001",
+        "participants": [
+          "usr_00000000000000000000000000"
+        ],
+        "createdAt": 0
+      },
+      "head": {
+        "epoch": 1,
+        "seq": 2
+      },
+      "parent": {
+        "epoch": 1,
+        "seq": 1,
+        "recvTs": 0
+      },
+      "controls": [
+        {
+          "epoch": 1,
+          "seq": 2,
+          "recvTs": 0
+        }
+      ],
+      "parts": [
+        1,
+        64,
+        1,
+        64
+      ]
+    },
+    {
+      "t": "space.discovery.result",
+      "n": 1,
+      "space": "spc_00000000000000000000000000",
+      "metaHead": {
+        "epoch": 1,
+        "seq": 3
+      },
+      "stream": "str_00000000000000000000000000",
+      "error": {
+        "code": "forbidden",
+        "message": "denied",
+        "retryable": false
+      }
+    },
+    {
+      "t": "space.identity.get",
+      "n": 1,
+      "space": "spc_00000000000000000000000000",
+      "metaHead": {
+        "epoch": 1,
+        "seq": 3
+      },
+      "user": "usr_00000000000000000000000000"
+    },
+    {
+      "t": "space.identity.result",
+      "n": 1,
+      "space": "spc_00000000000000000000000000",
+      "metaHead": {
+        "epoch": 1,
+        "seq": 3
+      },
+      "user": "usr_00000000000000000000000000",
+      "roster": {
+        "payload": "e30",
+        "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    },
+    {
+      "t": "space.identity.result",
+      "n": 1,
+      "space": "spc_00000000000000000000000000",
+      "metaHead": {
+        "epoch": 1,
+        "seq": 3
+      },
+      "user": "usr_00000000000000000000000000",
+      "error": {
+        "code": "forbidden",
+        "message": "denied",
+        "retryable": false
+      }
+    },
+    {
+      "t": "space.proof.cancel",
+      "n": 1
+    }
+  ],
+  "events": [
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "space.created",
+      "crit": true,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "descriptor": {
+          "payload": "e30",
+          "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "settings": {
+          "name": "P0",
+          "membersMayAddBots": true,
+          "maxBlobBytes": 26214400,
+          "minProtoMinor": 0
+        },
+        "owner": {
+          "user": "usr_00000000000000000000000000",
+          "rootKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "role": "owner",
+          "displayName": "Owner"
+        }
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "space.descriptor",
+      "crit": true,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "descriptor": {
+          "payload": "e30",
+          "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "space.frozen",
+      "crit": true,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "reason": "transfer"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "settings.changed",
+      "crit": true,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "settings": {
+          "name": "Renamed"
+        }
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "member.joined",
+      "crit": true,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 1000,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 1
+      },
+      "body": {
+        "member": {
+          "user": "usr_00000000000000000000000000",
+          "rootKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "role": "member",
+          "displayName": "Owner"
+        },
+        "invite": {
+          "payload": "e30",
+          "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "inviteUse": 1
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "member.left",
+      "crit": true,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "user": "usr_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "member.removed",
+      "crit": true,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "user": "usr_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "member.roleChanged",
+      "crit": true,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "user": "usr_00000000000000000000000000",
+        "role": "admin"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.added",
+      "crit": true,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "record": {
+          "bot": "bot_00000000000000000000000000",
+          "owner": "usr_00000000000000000000000000",
+          "delegation": {
+            "payload": "e30",
+            "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          },
+          "displayName": "Bot",
+          "profile": "chat",
+          "policy": {
+            "steer": {
+              "kind": "owner"
+            },
+            "visibility": "public"
+          }
+        }
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.removed",
+      "crit": true,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "bot": "bot_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.policyChanged",
+      "crit": true,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "bot": "bot_00000000000000000000000000",
+        "policy": {
+          "steer": {
+            "kind": "owner"
+          },
+          "visibility": "public"
+        }
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "channel.created",
+      "crit": true,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "stream": "str_00000000000000000000000000",
+        "name": "general"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "channel.renamed",
+      "crit": true,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "stream": "str_00000000000000000000000000",
+        "name": "renamed"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "channel.archived",
+      "crit": true,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "stream": "str_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "message.posted",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "text": "hello"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "message.edited",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "text": "edited"
+      },
+      "refs": {
+        "subject": "evt_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "message.deleted",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {},
+      "refs": {
+        "subject": "evt_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "thread.opened",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "stream": "str_00000000000000000000000000",
+        "title": "work",
+        "private": false
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "thread.closed",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "stream": "str_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "participants.changed",
+      "crit": true,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "participants": [
+          "usr_00000000000000000000000000",
+          "bot_00000000000000000000000000"
+        ],
+        "keyEpoch": 1,
+        "wrapped": [
+          {
+            "node": "nod_00000000000000000000000000",
+            "ephemeral": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "nonce": "AAAAAAAAAAAAAAAA",
+            "ct": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "recipientAgreementKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          }
+        ],
+        "controller": "usr_00000000000000000000000000",
+        "visibilityEpoch": 1,
+        "writers": [
+          {
+            "node": "nod_00000000000000000000000000",
+            "noncePrefix": "AAAAAA"
+          }
+        ]
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.run.accepted",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "title": "work"
+      },
+      "refs": {
+        "subject": "evt_00000000000000000000000000",
+        "execution": "exe_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.run.progress",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "text": "progress"
+      },
+      "refs": {
+        "subject": "evt_00000000000000000000000000",
+        "execution": "exe_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.run.toolSummary",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "tool": "read",
+        "summary": "one file"
+      },
+      "refs": {
+        "subject": "evt_00000000000000000000000000",
+        "execution": "exe_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.run.waitingApproval",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "summary": "approval"
+      },
+      "refs": {
+        "subject": "evt_00000000000000000000000000",
+        "execution": "exe_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.run.completed",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "text": "done"
+      },
+      "refs": {
+        "subject": "evt_00000000000000000000000000",
+        "execution": "exe_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.run.failed",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "code": "budget_exhausted",
+        "message": "budget"
+      },
+      "refs": {
+        "subject": "evt_00000000000000000000000000",
+        "execution": "exe_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.run.cancelled",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "by": "usr_00000000000000000000000000"
+      },
+      "refs": {
+        "subject": "evt_00000000000000000000000000",
+        "execution": "exe_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.run.uncertain",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "summary": "effect unknown"
+      },
+      "refs": {
+        "subject": "evt_00000000000000000000000000",
+        "execution": "exe_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.run.expired",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {},
+      "refs": {
+        "subject": "evt_00000000000000000000000000",
+        "execution": "exe_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.permission.requested",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "requester": "usr_00000000000000000000000000",
+        "summary": "approval",
+        "expiresAt": 86400000,
+        "bot": "bot_00000000000000000000000000",
+        "trigger": "evt_00000000000000000000000000",
+        "binding": {
+          "stream": "str_00000000000000000000000000",
+          "compartment": "public/p0"
+        },
+        "kind": "steerPolicyChange",
+        "proposedPolicy": {
+          "steer": {
+            "kind": "everyone"
+          },
+          "visibility": "public"
+        }
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.permission.granted",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "request": "evt_00000000000000000000000000",
+        "kind": "steerPolicyChange",
+        "requestHash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "expiresAt": 86400000
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.permission.denied",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "request": "evt_00000000000000000000000000"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.permission.requested",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "requester": "usr_00000000000000000000000000",
+        "summary": "approval",
+        "expiresAt": 86400000,
+        "bot": "bot_00000000000000000000000000",
+        "trigger": "evt_00000000000000000000000000",
+        "binding": {
+          "stream": "str_00000000000000000000000000",
+          "compartment": "private/p0",
+          "visibilityEpoch": 1
+        },
+        "kind": "runtimeAction",
+        "execution": "exe_00000000000000000000000000",
+        "actionHash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "profileDigest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "bot.permission.granted",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 0
+      },
+      "body": {
+        "request": "evt_00000000000000000000000000",
+        "kind": "runtimeAction",
+        "requestHash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "expiresAt": 86400000,
+        "execution": "exe_00000000000000000000000000",
+        "actionHash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "profileDigest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "binding": {
+          "stream": "str_00000000000000000000000000",
+          "compartment": "private/p0",
+          "visibilityEpoch": 1
+        }
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "artifact.published",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "body": {
+        "rpc": "rpc_00000000000000000000000000",
+        "purpose": "input"
+      },
+      "blobs": [
+        {
+          "id": "blb_0000000000000000000000000000000000000000000000000000000000000000",
+          "bytes": 1,
+          "mime": "application/octet-stream"
+        }
+      ]
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "artifact.published",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "body": {
+        "rpc": "rpc_00000000000000000000000000",
+        "purpose": "result"
+      },
+      "blobs": [
+        {
+          "id": "blb_0000000000000000000000000000000000000000000000000000000000000000",
+          "bytes": 1,
+          "mime": "application/octet-stream"
+        }
+      ]
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "thread.snapshot.begin",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "body": {
+        "threadId": "display-thread",
+        "snapshot": "00000000-0000-0000-0000-000000000000",
+        "totalBytes": 2,
+        "chunks": 1,
+        "sha256": "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "thread.snapshot.chunk",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "body": {
+        "threadId": "display-thread",
+        "snapshot": "00000000-0000-0000-0000-000000000000",
+        "index": 0,
+        "data": "e30"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "thread.snapshot.end",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "body": {
+        "threadId": "display-thread",
+        "snapshot": "00000000-0000-0000-0000-000000000000",
+        "sha256": "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o"
+      }
+    },
+    {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000000",
+      "stream": "str_00000000000000000000000000",
+      "type": "thread.event",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "keyEpoch": 1
+      },
+      "ts": 0,
+      "body": {
+        "threadId": "display-thread",
+        "type": "thread.metadata",
+        "data": {
+          "name": "Renamed"
+        }
+      }
+    }
+  ],
+  "documents": {
+    "signed": {
+      "payload": "e30",
+      "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    "nodeDelegation": {
+      "v": 1,
+      "owner": "usr_00000000000000000000000000",
+      "name": "node",
+      "keyEpoch": 1,
+      "issuedAt": 0,
+      "expiresAt": 604800000,
+      "kind": "node",
+      "subject": "nod_00000000000000000000000000",
+      "keys": {
+        "sign": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "agree": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "transport": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "caps": [
+        "read",
+        "chat",
+        "write"
+      ]
+    },
+    "botDelegation": {
+      "v": 1,
+      "owner": "usr_00000000000000000000000000",
+      "name": "node",
+      "keyEpoch": 1,
+      "issuedAt": 0,
+      "expiresAt": 604800000,
+      "kind": "bot",
+      "subject": "bot_00000000000000000000000000",
+      "keys": {
+        "sign": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "hostNode": "nod_00000000000000000000000000"
+    },
+    "roster": {
+      "v": 1,
+      "owner": "usr_00000000000000000000000000",
+      "rootKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "recoveryEpoch": 0,
+      "lineage": "p0-lineage",
+      "version": 1,
+      "authorityNode": "nod_00000000000000000000000000",
+      "nodes": [
+        {
+          "payload": "e30",
+          "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      ],
+      "bots": [],
+      "revoked": [],
+      "issuedAt": 0
+    },
+    "routes": {
+      "v": 1,
+      "node": "nod_00000000000000000000000000",
+      "routes": [
+        {
+          "transport": "memory",
+          "address": "p0",
+          "priority": 0
+        }
+      ],
+      "version": 1,
+      "issuedAt": 0
+    },
+    "spaceDescriptor": {
+      "v": 1,
+      "space": "spc_00000000000000000000000000",
+      "owner": "usr_00000000000000000000000000",
+      "hostNode": "nod_00000000000000000000000000",
+      "hostTransportKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "routes": {
+        "payload": "e30",
+        "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "epoch": 1,
+      "issuedAt": 0
+    },
+    "inviteAuthorization": {
+      "v": 1,
+      "invite": "inv_00000000000000000000000000",
+      "space": "spc_00000000000000000000000000",
+      "epoch": 1,
+      "issuer": {
+        "user": "usr_00000000000000000000000000",
+        "node": "nod_00000000000000000000000000",
+        "delegation": {
+          "payload": "e30",
+          "sig": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      },
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 1
+      },
+      "role": "member",
+      "issuedAt": 0,
+      "expiresAt": 86400000,
+      "uses": 1
+    }
+  },
+  "streamDescriptors": [
+    {
+      "id": "str_00000000000000000000000000",
+      "kind": "node.artifact",
+      "authority": "nod_00000000000000000000000000",
+      "artifact": {
+        "user": "usr_00000000000000000000000000",
+        "caller": "nod_00000000000000000000000000",
+        "rpc": "rpc_00000000000000000000000000",
+        "method": "dispatch.run",
+        "capability": "write"
+      },
+      "createdAt": 0
+    }
+  ]
+}

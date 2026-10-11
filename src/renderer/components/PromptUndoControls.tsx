@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
-import { IconArrowBackUp } from '@tabler/icons-react'
+import { IconArrowBackUp } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import { invalidateThreadActionHistory, readThreadActionHistory, type ThreadActionHistory } from '../utils/threadActionHistory'
 

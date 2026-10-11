@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Plus, Upload } from 'lucide-react'
+import { Plus, Upload } from '../../lib/icons'
 import type { IntegrationPlatformClient } from '../../../shared/integrationPlatform'
 import type { SkillDescriptor } from '../../../shared/integrations'
 import type { SkillEditorDto } from '../../../shared/integrations/lifecycle'
@@ -48,8 +48,8 @@ export function AddSkillDialog({ client, profileId, projectId, scope, initialMod
 
   return <Modal title="Add skill" onClose={close}>
     <div className="integrations-choice">
-      <button type="button" disabled={busy} data-action="choose-create-skill" className={mode === 'create' ? 'selected' : ''} onClick={() => { setMode('create'); setError(null) }}><Plus size={18} /><strong>Create skill</strong><span>Write reusable instructions.</span></button>
-      <button type="button" disabled={busy} data-action="choose-upload-skill" className={mode === 'upload' ? 'selected' : ''} onClick={() => { setMode('upload'); setError(null) }}><Upload size={18} /><strong>Upload package</strong><span>Choose Markdown, ZIP, or a folder.</span></button>
+      <button type="button" disabled={busy} data-action="choose-create-skill" className={mode === 'create' ? 'selected' : ''} onClick={() => { setMode('create'); setError(null) }}><Plus size={16} /><strong>Create skill</strong><span>Write reusable instructions.</span></button>
+      <button type="button" disabled={busy} data-action="choose-upload-skill" className={mode === 'upload' ? 'selected' : ''} onClick={() => { setMode('upload'); setError(null) }}><Upload size={16} /><strong>Upload package</strong><span>Choose Markdown, ZIP, or a folder.</span></button>
     </div>
     <form className="integration-form" onSubmit={(event) => { event.preventDefault(); void save() }}>
       <fieldset className="integration-fields" disabled={busy}>
@@ -62,8 +62,8 @@ export function AddSkillDialog({ client, profileId, projectId, scope, initialMod
           <input ref={inputRef} data-action="skill-upload-input" type="file" accept=".md,.zip,text/markdown,application/zip" hidden onChange={(event) => { setFolderFiles([]); setFile(event.target.files?.[0] ?? null) }} />
           <input ref={folderRef} data-action="skill-folder-input" type="file" hidden multiple onChange={(event) => { setFile(null); setFolderFiles(Array.from(event.target.files ?? [])) }} />
           <div className="integration-upload-options">
-            <button type="button" className="integration-drop" onClick={() => inputRef.current?.click()}><Upload size={22} /><strong>{file?.name ?? 'Choose SKILL.md or ZIP'}</strong><span>Up to 360 KiB compressed.</span></button>
-            <button type="button" className="integration-drop" onClick={() => folderRef.current?.click()}><Upload size={22} /><strong>{folderFiles.length ? `${folderFiles.length} folder files` : 'Import a folder'}</strong><span>Include SKILL.md at the folder root.</span></button>
+            <button type="button" className="integration-drop" onClick={() => inputRef.current?.click()}><Upload size={16} /><strong>{file?.name ?? 'Choose SKILL.md or ZIP'}</strong><span>Up to 360 KiB compressed.</span></button>
+            <button type="button" className="integration-drop" onClick={() => folderRef.current?.click()}><Upload size={16} /><strong>{folderFiles.length ? `${folderFiles.length} folder files` : 'Import a folder'}</strong><span>Include SKILL.md at the folder root.</span></button>
           </div>
           <p className="integration-help">Scripts and assets are preserved. Import does not execute the package.</p>
         </>}

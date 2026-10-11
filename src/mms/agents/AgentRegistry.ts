@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
-import { normalizeAgentStatus, type Agent, type AgentStatus } from '../../shared/types'
+import { isTerminalAgentStatus, normalizeAgentStatus, type Agent, type AgentStatus } from '../../shared/types'
 import { AgentLifecycleService } from './AgentLifecycleService'
 
 export class AgentRegistry extends EventEmitter {
@@ -53,7 +53,16 @@ export class AgentRegistry extends EventEmitter {
   updateStatus(id: string, status: AgentStatus): Agent | undefined {
     const agent = this.agents.get(id)
     if (!agent || !this.lifecycle.canTransition(agent.status, status)) return undefined
+    const working = agent.status === 'starting' || agent.status === 'running'
     agent.status = status
+    if (status === 'starting' || status === 'running') {
+      agent.idleAt = undefined
+    } else if (working && !agent.idleAt) {
+      agent.idleAt = new Date().toISOString()
+    }
+    if (isTerminalAgentStatus(status) && !agent.exitedAt) {
+      agent.exitedAt = agent.idleAt ?? new Date().toISOString()
+    }
     this.emit('updated', this.list())
     this.persist()
     return agent

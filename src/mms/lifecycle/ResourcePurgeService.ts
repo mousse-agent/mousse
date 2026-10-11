@@ -18,6 +18,8 @@ const within = (root: string, path: string): boolean => { const rel = relative(r
 const active = new Set<string>()
 
 const purgeErrors = createErrorProvider({
+  resource_purge_discard_required: { category: 'denied', retryable: false, message: 'Sole-copy discard requires an exact human-reviewed preview.' },
+  resource_purge_repository_unavailable: { category: 'unavailable', retryable: false, message: 'Repository is unavailable; purge remains pending. Reconnect the repository and retry.' },
   resource_purge_preview_stale: { category: 'conflict', retryable: false, message: 'Purge preview changed; review a fresh inventory.' },
   resource_policy_invalid: { category: 'invalid', retryable: false, message: 'Invalid trash retention policy. Grace days must be an integer from 1 to 3650.' },
   resource_purge_io_error: { category: 'conflict', retryable: false, message: 'Purge could not remove a locked or permission-protected resource. Close applications using it and retry the pending purge.' }
@@ -267,7 +269,7 @@ export class ResourcePurgeService {
         const preview = await this.previewOwned(input.taskId)
         if (preview.blockers.length) throw new Error(preview.blockers.join('; '))
         if (preview.digest !== input.previewDigest || input.expectedGeneration !== preview.generation) throw purgeErrors.create('resource_purge_preview_stale')
-        if (preview.items.some((item) => item.discardRequired) && !(input.human && input.discard)) throw new Error('Sole-copy discard requires an exact human-reviewed preview')
+        if (preview.items.some((item) => item.discardRequired) && !(input.human && input.discard)) throw purgeErrors.create('resource_purge_discard_required')
         this.store.enableCleanupWriter()
         record = this.store.update(input.taskId, (current) => {
           if (current.state !== 'trashed' || current.generation !== preview.generation) throw new Error('Task changed before purge boundary')
@@ -346,9 +348,9 @@ export class ResourcePurgeService {
       return
     }
     const commonDir = item.commonDir!
-    if (!existsSync(commonDir)) throw new Error('Repository is unavailable; purge remains pending')
+    if (!existsSync(commonDir)) throw purgeErrors.create('resource_purge_repository_unavailable')
     const worktree = lifecycleGit(commonDir, ['worktree', 'list', '--porcelain']).split(/\r?\n/).find((line) => line.startsWith('worktree '))?.slice(9)
-    if (!worktree || !existsSync(worktree)) throw new Error('Repository checkout unavailable for mutation ownership')
+    if (!worktree || !existsSync(worktree)) throw purgeErrors.create('resource_purge_repository_unavailable')
     const identity = resolveRepositoryIdentity(worktree, { requireMutationCapability: true })
     if (resolve(identity.commonDir) !== resolve(commonDir)) throw new Error('Repository identity changed')
     const lease = await acquireRepositoryLease(identity, { signal: AbortSignal.timeout(10_000) })

@@ -5,7 +5,7 @@ import {
   IconFileCode as FileCode,
   IconFileTypeJs as FileJson,
   IconPhoto as ImageIcon,
-} from "@tabler/icons-react";
+} from "../../../../lib/icons";
 import { cn } from "../utils/cn";
 import { ImageLightbox } from "../image-lightbox";
 
@@ -93,7 +93,6 @@ export function FileAttachment({
   display = "chip",
   enableImagePreview = true,
 }: FileAttachmentProps) {
-  const [isHovered, setIsHovered] = useState(false);
   const [isLightboxOpen, setIsLightboxOpen] = useState(false);
   const iconName = getFileIconName(filename, isImage);
   // Image attachments with a renderable preview (pasted screenshots, dragged
@@ -117,8 +116,6 @@ export function FileAttachment({
           : "flex items-center gap-2 pl-1 pr-2 py-1 min-w-[120px] max-w-[200px]",
         className,
       )}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
       title={isImageOnly ? filename : undefined}
     >
       {isImageOnly ? (
@@ -175,14 +172,18 @@ export function FileAttachment({
 
       {onRemove && (
         <button
+          onMouseDown={(e) => {
+            // Keep input focus stable when this button disappears after removal.
+            e.preventDefault();
+          }}
           onClick={(e) => {
             e.stopPropagation();
             onRemove();
           }}
-          className={`absolute -top-1.5 -right-1.5 size-4 rounded-full bg-an-background border border-an-border-color
+          className={`absolute top-1 right-1 size-5 rounded-full bg-an-background border border-an-border-color
                      flex items-center justify-center transition-[opacity,transform] duration-150 ease-out active:scale-[0.97] z-10
-                     text-an-foreground-muted hover:text-an-foreground
-                     ${isHovered ? "opacity-100" : "opacity-0"}`}
+                     text-an-foreground hover:bg-an-background-secondary opacity-100`}
+          aria-label={`Remove ${filename}`}
           type="button"
         >
           <X className="size-3" />

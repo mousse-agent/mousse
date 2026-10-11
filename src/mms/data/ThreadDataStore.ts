@@ -413,6 +413,7 @@ export class ThreadDataStore extends EventEmitter {
     }
 
     this.patchListCache(updated)
+    this.emit('updated', updated)
     return updated
   }
 

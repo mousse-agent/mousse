@@ -9,5 +9,6 @@ it.each(['ready', 'error', 'submitted', 'streaming'] as const)('renders a retain
     status
   }))
   expect(html).toContain('Retained request after restore or interruption')
-  expect(html.includes('Processing...')).toBe(status === 'submitted' || status === 'streaming')
+  // The live turn status replaced the old "Processing..." shimmer row.
+  expect(html.includes('Working for')).toBe(status === 'submitted' || status === 'streaming')
 })

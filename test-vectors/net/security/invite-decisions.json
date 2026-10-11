@@ -1,0 +1,419 @@
+{
+  "format": "mousse-net-security-oracle-v1",
+  "kind": "abstract-invite-authorization",
+  "securityTests": [
+    "SEC-007",
+    "SEC-008",
+    "SEC-009"
+  ],
+  "limitations": "Checks use stipulated validated credentials and current issuer roster. No bearer token or secret is present. A malicious host may fabricate redemption of unused authorized bearer slots; these cases do not assert joiner intent.",
+  "cases": [
+    {
+      "id": "admin-member-invite",
+      "input": {
+        "issuerRoleAtIssue": "admin",
+        "issuerRoleNow": "admin",
+        "issuerCurrentRosterAvailable": true,
+        "issuerDelegationCurrent": true,
+        "inviteSignatureValid": true,
+        "descriptorEpoch": 1,
+        "inviteEpoch": 1,
+        "role": "member",
+        "uses": 1,
+        "inviteUse": 1,
+        "usedSlots": [],
+        "memberRootMatches": true,
+        "receiptSignedByCurrentHost": true,
+        "issuedAt": 1000,
+        "expiresAt": 86401000,
+        "receiptAt": 2000,
+        "optionalJoinerMatches": true
+      },
+      "expected": {
+        "decision": "allow",
+        "code": null,
+        "memberAdded": true
+      }
+    },
+    {
+      "id": "owner-admin-invite",
+      "input": {
+        "issuerRoleAtIssue": "owner",
+        "issuerRoleNow": "owner",
+        "issuerCurrentRosterAvailable": true,
+        "issuerDelegationCurrent": true,
+        "inviteSignatureValid": true,
+        "descriptorEpoch": 1,
+        "inviteEpoch": 1,
+        "role": "admin",
+        "uses": 1,
+        "inviteUse": 1,
+        "usedSlots": [],
+        "memberRootMatches": true,
+        "receiptSignedByCurrentHost": true,
+        "issuedAt": 1000,
+        "expiresAt": 86401000,
+        "receiptAt": 2000,
+        "optionalJoinerMatches": true
+      },
+      "expected": {
+        "decision": "allow",
+        "code": null,
+        "memberAdded": true
+      }
+    },
+    {
+      "id": "admin-admin-invite",
+      "input": {
+        "issuerRoleAtIssue": "admin",
+        "issuerRoleNow": "admin",
+        "issuerCurrentRosterAvailable": true,
+        "issuerDelegationCurrent": true,
+        "inviteSignatureValid": true,
+        "descriptorEpoch": 1,
+        "inviteEpoch": 1,
+        "role": "admin",
+        "uses": 1,
+        "inviteUse": 1,
+        "usedSlots": [],
+        "memberRootMatches": true,
+        "receiptSignedByCurrentHost": true,
+        "issuedAt": 1000,
+        "expiresAt": 86401000,
+        "receiptAt": 2000,
+        "optionalJoinerMatches": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "forbidden",
+        "memberAdded": false
+      }
+    },
+    {
+      "id": "member-issuer",
+      "input": {
+        "issuerRoleAtIssue": "member",
+        "issuerRoleNow": "member",
+        "issuerCurrentRosterAvailable": true,
+        "issuerDelegationCurrent": true,
+        "inviteSignatureValid": true,
+        "descriptorEpoch": 1,
+        "inviteEpoch": 1,
+        "role": "member",
+        "uses": 1,
+        "inviteUse": 1,
+        "usedSlots": [],
+        "memberRootMatches": true,
+        "receiptSignedByCurrentHost": true,
+        "issuedAt": 1000,
+        "expiresAt": 86401000,
+        "receiptAt": 2000,
+        "optionalJoinerMatches": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "forbidden",
+        "memberAdded": false
+      }
+    },
+    {
+      "id": "issuer-demoted",
+      "input": {
+        "issuerRoleAtIssue": "admin",
+        "issuerRoleNow": "member",
+        "issuerCurrentRosterAvailable": true,
+        "issuerDelegationCurrent": true,
+        "inviteSignatureValid": true,
+        "descriptorEpoch": 1,
+        "inviteEpoch": 1,
+        "role": "member",
+        "uses": 1,
+        "inviteUse": 1,
+        "usedSlots": [],
+        "memberRootMatches": true,
+        "receiptSignedByCurrentHost": true,
+        "issuedAt": 1000,
+        "expiresAt": 86401000,
+        "receiptAt": 2000,
+        "optionalJoinerMatches": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "forbidden",
+        "memberAdded": false
+      }
+    },
+    {
+      "id": "issuer-roster-missing",
+      "input": {
+        "issuerRoleAtIssue": "admin",
+        "issuerRoleNow": "admin",
+        "issuerCurrentRosterAvailable": false,
+        "issuerDelegationCurrent": true,
+        "inviteSignatureValid": true,
+        "descriptorEpoch": 1,
+        "inviteEpoch": 1,
+        "role": "member",
+        "uses": 1,
+        "inviteUse": 1,
+        "usedSlots": [],
+        "memberRootMatches": true,
+        "receiptSignedByCurrentHost": true,
+        "issuedAt": 1000,
+        "expiresAt": 86401000,
+        "receiptAt": 2000,
+        "optionalJoinerMatches": true
+      },
+      "expected": {
+        "decision": "defer",
+        "code": "meta_stale",
+        "memberAdded": false
+      }
+    },
+    {
+      "id": "reused-slot",
+      "input": {
+        "issuerRoleAtIssue": "admin",
+        "issuerRoleNow": "admin",
+        "issuerCurrentRosterAvailable": true,
+        "issuerDelegationCurrent": true,
+        "inviteSignatureValid": true,
+        "descriptorEpoch": 1,
+        "inviteEpoch": 1,
+        "role": "member",
+        "uses": 1,
+        "inviteUse": 1,
+        "usedSlots": [
+          1
+        ],
+        "memberRootMatches": true,
+        "receiptSignedByCurrentHost": true,
+        "issuedAt": 1000,
+        "expiresAt": 86401000,
+        "receiptAt": 2000,
+        "optionalJoinerMatches": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "invite_invalid",
+        "memberAdded": false
+      }
+    },
+    {
+      "id": "slot-zero",
+      "input": {
+        "issuerRoleAtIssue": "admin",
+        "issuerRoleNow": "admin",
+        "issuerCurrentRosterAvailable": true,
+        "issuerDelegationCurrent": true,
+        "inviteSignatureValid": true,
+        "descriptorEpoch": 1,
+        "inviteEpoch": 1,
+        "role": "member",
+        "uses": 1,
+        "inviteUse": 0,
+        "usedSlots": [],
+        "memberRootMatches": true,
+        "receiptSignedByCurrentHost": true,
+        "issuedAt": 1000,
+        "expiresAt": 86401000,
+        "receiptAt": 2000,
+        "optionalJoinerMatches": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "invite_invalid",
+        "memberAdded": false
+      }
+    },
+    {
+      "id": "slot-exceeds-uses",
+      "input": {
+        "issuerRoleAtIssue": "admin",
+        "issuerRoleNow": "admin",
+        "issuerCurrentRosterAvailable": true,
+        "issuerDelegationCurrent": true,
+        "inviteSignatureValid": true,
+        "descriptorEpoch": 1,
+        "inviteEpoch": 1,
+        "role": "member",
+        "uses": 1,
+        "inviteUse": 2,
+        "usedSlots": [],
+        "memberRootMatches": true,
+        "receiptSignedByCurrentHost": true,
+        "issuedAt": 1000,
+        "expiresAt": 86401000,
+        "receiptAt": 2000,
+        "optionalJoinerMatches": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "invite_invalid",
+        "memberAdded": false
+      }
+    },
+    {
+      "id": "expired",
+      "input": {
+        "issuerRoleAtIssue": "admin",
+        "issuerRoleNow": "admin",
+        "issuerCurrentRosterAvailable": true,
+        "issuerDelegationCurrent": true,
+        "inviteSignatureValid": true,
+        "descriptorEpoch": 1,
+        "inviteEpoch": 1,
+        "role": "member",
+        "uses": 1,
+        "inviteUse": 1,
+        "usedSlots": [],
+        "memberRootMatches": true,
+        "receiptSignedByCurrentHost": true,
+        "issuedAt": 1000,
+        "expiresAt": 86401000,
+        "receiptAt": 86401000,
+        "optionalJoinerMatches": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "invite_invalid",
+        "memberAdded": false
+      }
+    },
+    {
+      "id": "wrong-epoch",
+      "input": {
+        "issuerRoleAtIssue": "admin",
+        "issuerRoleNow": "admin",
+        "issuerCurrentRosterAvailable": true,
+        "issuerDelegationCurrent": true,
+        "inviteSignatureValid": true,
+        "descriptorEpoch": 1,
+        "inviteEpoch": 2,
+        "role": "member",
+        "uses": 1,
+        "inviteUse": 1,
+        "usedSlots": [],
+        "memberRootMatches": true,
+        "receiptSignedByCurrentHost": true,
+        "issuedAt": 1000,
+        "expiresAt": 86401000,
+        "receiptAt": 2000,
+        "optionalJoinerMatches": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "invite_invalid",
+        "memberAdded": false
+      }
+    },
+    {
+      "id": "wrong-optional-joiner",
+      "input": {
+        "issuerRoleAtIssue": "admin",
+        "issuerRoleNow": "admin",
+        "issuerCurrentRosterAvailable": true,
+        "issuerDelegationCurrent": true,
+        "inviteSignatureValid": true,
+        "descriptorEpoch": 1,
+        "inviteEpoch": 1,
+        "role": "member",
+        "uses": 1,
+        "inviteUse": 1,
+        "usedSlots": [],
+        "memberRootMatches": true,
+        "receiptSignedByCurrentHost": true,
+        "issuedAt": 1000,
+        "expiresAt": 86401000,
+        "receiptAt": 2000,
+        "optionalJoinerMatches": false
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "invite_invalid",
+        "memberAdded": false
+      }
+    },
+    {
+      "id": "old-host-receipt",
+      "input": {
+        "issuerRoleAtIssue": "admin",
+        "issuerRoleNow": "admin",
+        "issuerCurrentRosterAvailable": true,
+        "issuerDelegationCurrent": true,
+        "inviteSignatureValid": true,
+        "descriptorEpoch": 1,
+        "inviteEpoch": 1,
+        "role": "member",
+        "uses": 1,
+        "inviteUse": 1,
+        "usedSlots": [],
+        "memberRootMatches": true,
+        "receiptSignedByCurrentHost": false,
+        "issuedAt": 1000,
+        "expiresAt": 86401000,
+        "receiptAt": 2000,
+        "optionalJoinerMatches": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "forbidden",
+        "memberAdded": false
+      }
+    },
+    {
+      "id": "tampered-invite",
+      "input": {
+        "issuerRoleAtIssue": "admin",
+        "issuerRoleNow": "admin",
+        "issuerCurrentRosterAvailable": true,
+        "issuerDelegationCurrent": true,
+        "inviteSignatureValid": false,
+        "descriptorEpoch": 1,
+        "inviteEpoch": 1,
+        "role": "member",
+        "uses": 1,
+        "inviteUse": 1,
+        "usedSlots": [],
+        "memberRootMatches": true,
+        "receiptSignedByCurrentHost": true,
+        "issuedAt": 1000,
+        "expiresAt": 86401000,
+        "receiptAt": 2000,
+        "optionalJoinerMatches": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "bad_signature",
+        "memberAdded": false
+      }
+    },
+    {
+      "id": "verify-only-issuer",
+      "input": {
+        "issuerRoleAtIssue": "admin",
+        "issuerRoleNow": "admin",
+        "issuerCurrentRosterAvailable": true,
+        "issuerDelegationCurrent": false,
+        "inviteSignatureValid": true,
+        "descriptorEpoch": 1,
+        "inviteEpoch": 1,
+        "role": "member",
+        "uses": 1,
+        "inviteUse": 1,
+        "usedSlots": [],
+        "memberRootMatches": true,
+        "receiptSignedByCurrentHost": true,
+        "issuedAt": 1000,
+        "expiresAt": 86401000,
+        "receiptAt": 2000,
+        "optionalJoinerMatches": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "bad_delegation",
+        "memberAdded": false
+      }
+    }
+  ]
+}

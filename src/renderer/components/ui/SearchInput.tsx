@@ -1,4 +1,4 @@
-import { Search, X } from 'lucide-react'
+import { Search, X } from '../../lib/icons'
 
 export function SearchInput({ value, onChange, placeholder = 'Search' }: { value: string; onChange: (v: string) => void; placeholder?: string }) {
   return (

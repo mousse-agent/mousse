@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Search, X } from 'lucide-react'
+import { Search, X } from '../lib/icons'
 import type { ThreadSearchResult } from '../../shared/types'
 import '../styles/thread-search.css'
 

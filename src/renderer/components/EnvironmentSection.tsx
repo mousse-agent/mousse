@@ -4,7 +4,7 @@ import {
   GitBranch,
   GitCommitHorizontal,
   SquarePlus
-} from 'lucide-react'
+} from '../lib/icons'
 import type { Agent, GitBranchInfo, GitDiffStats, GitStatusSnapshot } from '../../shared/types'
 
 interface WorktreeOption {

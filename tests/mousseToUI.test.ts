@@ -523,3 +523,36 @@ describe('mousseToUIMessages standardize layer', () => {
     expect(part.state).toBe('output-available')
   })
 })
+
+describe('durable applet presentation', () => {
+  const reference = { appletId: 'chart', revisionId: 'rev1', sourceHash: 'hash', title: 'Costs', description: 'A comparison' }
+  const presentationParts: ChatMessage['presentationParts'] = [{ type: 'text', text: 'Before' }, { type: 'applet', reference }, { type: 'text', text: 'After' }]
+  it('preserves text and applet ordering without displaying source twice', () => {
+    const out = mousseToUIMessages([base({ role: 'assistant', content: 'raw source', presentationParts })])
+    expect(out[0].parts).toEqual([{ type: 'text', text: 'Before' }, { type: 'data-applet', data: reference }, { type: 'text', text: 'After' }])
+  })
+  it.each([{ streaming: true }, { incomplete: true }, { role: 'user' as const }, { role: 'system' as const }])('keeps unpublished or nonassistant references inert: %j', flags => {
+    const out = mousseToUIMessages([base({ role: 'assistant', content: '<html>example</html>', presentationParts, ...flags })])
+    expect(out.flatMap(message => message.parts).some(part => part.type === 'data-applet')).toBe(false)
+  })
+  it('does not deduplicate distinct applet-only revisions', () => {
+    const out = mousseToUIMessages([base({ id: 'one', role: 'assistant', presentationParts: [{ type: 'applet', reference }] }), base({ id: 'two', role: 'assistant', presentationParts: [{ type: 'applet', reference: { ...reference, revisionId: 'rev2' } }] })])
+    expect(out.map(message => message.id)).toEqual(['one', 'two'])
+  })
+})
+
+describe('streaming applet placeholders', () => {
+  it('shows a stable inert placeholder while explicit applet source streams', () => {
+    const out = mousseToUIMessages([base({role:'assistant',streaming:true,content:'Explanation\n```mousse-applet\n{"html":"large partial source'})])
+    expect(out[0].parts).toEqual([{type:'text',text:'Explanation\n'},{type:'data-applet-pending',data:{}}])
+  })
+  it('keeps applet-looking fences inside ordinary code examples inert text', () => {
+    const content = '````markdown\n```mousse-applet\n{}\n```\n````'
+    const out = mousseToUIMessages([base({role:'assistant',streaming:true,content})])
+    expect(out[0].parts).toEqual([{type:'text',text:content}])
+  })
+  it('preserves explanatory text after a streamed completed fence without executing it', () => {
+    const out = mousseToUIMessages([base({role:'assistant',streaming:true,content:'~~~mousse-applet\n{}\n~~~\nAfter'})])
+    expect(out[0].parts).toEqual([{type:'data-applet-pending',data:{}},{type:'text',text:'After'}])
+  })
+})

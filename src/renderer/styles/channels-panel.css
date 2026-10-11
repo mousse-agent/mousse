@@ -22,57 +22,6 @@
   -webkit-app-region: no-drag;
 }
 
-.channels-page-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 14px 20px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-
-.channels-page-title {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.channels-page-title-icon {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 9px;
-  background: var(--gradient-accent);
-  color: #fff;
-}
-
-.channels-page-header h1 {
-  margin: 0;
-  font-size: 17px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
-}
-
-.channels-page-back-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  border-radius: 8px;
-  color: var(--text-secondary);
-  border: 1px solid transparent;
-  transition: all 0.15s;
-}
-
-.channels-page-back-btn:hover {
-  background: rgba(var(--accent-rgb), 0.12);
-  border-color: var(--border);
-  color: var(--text-primary);
-}
-
 .channels-page-body {
   flex: 1;
   display: flex;

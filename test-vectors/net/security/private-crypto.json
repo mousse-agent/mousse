@@ -1,0 +1,109 @@
+{
+  "format": "mousse-net-security-oracle-v1",
+  "kind": "private-crypto-known-answer",
+  "securityTests": [
+    "SEC-022",
+    "SEC-023",
+    "SEC-026"
+  ],
+  "warning": "All private seeds, keys and nonces in this file are public test material. Never use them for real encryption. This fixture proves byte construction, not controller authorization or runtime confidentiality.",
+  "encoding": "base64url unpadded; deterministic recursive sorted-key compact JSON; AES-GCM ct includes 16-byte tag",
+  "wrap": {
+    "ephemeralPrivateRaw": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+    "recipientPrivateRaw": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+    "info": {
+      "space": "spc_00000000000000000000000001",
+      "stream": "str_00000000000000000000000001",
+      "keyEpoch": 1,
+      "visibilityEpoch": 1,
+      "node": "nod_00000000000000000000000001",
+      "ephemeral": "pOCSkrZRwni5dyxWn1-puxPZBrRqtoyd-dwrRAn4ogk",
+      "recipientAgreementKey": "zo060cy2M-x7cMF4FKXHbs0CloUFDTRHRboFhw5YfVk"
+    },
+    "infoUtf8": "{\"ephemeral\":\"pOCSkrZRwni5dyxWn1-puxPZBrRqtoyd-dwrRAn4ogk\",\"keyEpoch\":1,\"node\":\"nod_00000000000000000000000001\",\"recipientAgreementKey\":\"zo060cy2M-x7cMF4FKXHbs0CloUFDTRHRboFhw5YfVk\",\"space\":\"spc_00000000000000000000000001\",\"stream\":\"str_00000000000000000000000001\",\"visibilityEpoch\":1}",
+    "salt": "FVuXsfQoG1vmRlVu4LviQjRi5SlVDIZn1cZQJLn16Z8",
+    "sharedSecret": "LtdqtUmx5zwDHrSclEjweYrqgbaYJ5oMPcPkn7_EuVM",
+    "wrappingKey": "TXzdItvxy9pQlAJXpqIgOdlOzlYGDpuEJ1Z4O1dDY_k",
+    "contentKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "nonce": "AAECAwQFBgcICQoL",
+    "aad": "bW91c3NlLW5ldC9wcml2YXRlLXdyYXAvdjEAeyJlcGhlbWVyYWwiOiJwT0NTa3JaUnduaTVkeXhXbjEtcHV4UFpCclJxdG95ZC1kd3JSQW40b2drIiwia2V5RXBvY2giOjEsIm5vZGUiOiJub2RfMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJyZWNpcGllbnRBZ3JlZW1lbnRLZXkiOiJ6bzA2MGN5Mk0teDdjTUY0RktYSGJzMENsb1VGRFRSSFJib0ZodzVZZlZrIiwic3BhY2UiOiJzcGNfMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdHJlYW0iOiJzdHJfMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJ2aXNpYmlsaXR5RXBvY2giOjF9",
+    "ciphertext": "_KGIGoZB72Pa0HR0BqnOmMeRfZXccbUt4A3_Bl2v3gilopEaKH9RZVnLnWttG0Qe",
+    "expectedOpen": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+  },
+  "content": {
+    "metadata": {
+      "v": 1,
+      "minor": 0,
+      "id": "evt_00000000000000000000000001",
+      "stream": "str_00000000000000000000000001",
+      "type": "message.posted",
+      "crit": false,
+      "author": {
+        "user": "usr_00000000000000000000000001",
+        "node": "nod_00000000000000000000000001",
+        "keyEpoch": 1
+      },
+      "ts": 1000,
+      "auth": {
+        "metaEpoch": 1,
+        "metaSeq": 1
+      }
+    },
+    "writerPrefix": "AQIDBA",
+    "counter": "1",
+    "nonce": "AQIDBAAAAAAAAAAB",
+    "aad": "bW91c3NlLW5ldC9wcml2YXRlLWNvbnRlbnQvdjEAeyJhdXRoIjp7Im1ldGFFcG9jaCI6MSwibWV0YVNlcSI6MX0sImF1dGhvciI6eyJrZXlFcG9jaCI6MSwibm9kZSI6Im5vZF8wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsInVzZXIiOiJ1c3JfMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEifSwiY3JpdCI6ZmFsc2UsImlkIjoiZXZ0XzAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwibWlub3IiOjAsInN0cmVhbSI6InN0cl8wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsInRzIjoxMDAwLCJ0eXBlIjoibWVzc2FnZS5wb3N0ZWQiLCJ2IjoxfQ",
+    "plaintext": "eyJ0ZXh0IjoiZml4dHVyZSBzZWNyZXQifQ",
+    "ciphertext": "qtOzW2MzSPkqX4AKr87AolMI46xzIALIywQIExCJCl0b54usMB7aSqA",
+    "sealed": {
+      "keyEpoch": 1,
+      "nonce": "AQIDBAAAAAAAAAAB",
+      "ct": "qtOzW2MzSPkqX4AKr87AolMI46xzIALIywQIExCJCl0b54usMB7aSqA"
+    }
+  },
+  "blob": {
+    "context": {
+      "space": "spc_00000000000000000000000001",
+      "stream": "str_00000000000000000000000001",
+      "keyEpoch": 1
+    },
+    "counter": "2",
+    "nonce": "AQIDBAAAAAAAAAAC",
+    "aad": "bW91c3NlLW5ldC9wcml2YXRlLWJsb2IvdjEAeyJrZXlFcG9jaCI6MSwic3BhY2UiOiJzcGNfMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJzdHJlYW0iOiJzdHJfMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEifQ",
+    "plaintext": "cHJpdmF0ZSBhdHRhY2htZW50Cg",
+    "storedBytes": "AQAAAAAAAAABAQIDBAAAAAAAAAAC-RcnMhLyc03dCl3H-Gu55eFOMSFlSFNh3tPn4loTRSbTjw0",
+    "id": "blb_747fde8295383fdf42cf48916ae13140c7eea4c9e364c3ad2591b4adb1e36144"
+  },
+  "negativeCases": [
+    {
+      "id": "swap-stream",
+      "change": "stream in wrap info/AAD",
+      "expected": "authentication-failure-no-key-adoption"
+    },
+    {
+      "id": "swap-recipient",
+      "change": "node or recipientAgreementKey in wrap info/AAD",
+      "expected": "authentication-failure-no-key-adoption"
+    },
+    {
+      "id": "swap-epoch",
+      "change": "keyEpoch/visibilityEpoch in wrap info/AAD",
+      "expected": "authentication-failure-no-key-adoption"
+    },
+    {
+      "id": "redirect-content",
+      "change": "stream/author/refs in metadata AAD",
+      "expected": "authentication-failure-no-plaintext"
+    },
+    {
+      "id": "bad-tag",
+      "change": "last ciphertext byte",
+      "expected": "authentication-failure-no-plaintext"
+    },
+    {
+      "id": "reused-nonce",
+      "change": "attempt reserve existing prefix/counter at same keyEpoch",
+      "expected": "block-before-encryption"
+    }
+  ]
+}

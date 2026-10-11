@@ -1,0 +1,416 @@
+{
+  "format": "mousse-net-security-oracle-v1",
+  "kind": "abstract-private-key-state",
+  "securityTests": [
+    "SEC-021",
+    "SEC-024",
+    "SEC-025",
+    "SEC-026"
+  ],
+  "limitations": "A/B/C and node aliases are semantic fixture labels, not wire IDs. Actual crypto bytes are frozen separately in private-crypto.json.",
+  "cases": [
+    {
+      "id": "same-audience-node-rotation",
+      "input": {
+        "controllerSignatureValid": true,
+        "authorIsController": true,
+        "participantsBefore": [
+          "A",
+          "B"
+        ],
+        "participantsAfter": [
+          "A",
+          "B"
+        ],
+        "keyEpochBefore": 1,
+        "keyEpochAfter": 2,
+        "visibilityEpochBefore": 1,
+        "visibilityEpochAfter": 1,
+        "revokedRecipients": [],
+        "recipients": [
+          "A1",
+          "B1"
+        ],
+        "writerPrefixesUnique": true,
+        "recipientAgreementKeysMatch": true,
+        "nonceStateTrusted": true
+      },
+      "expected": {
+        "decision": "allow",
+        "code": null,
+        "compartmentReset": false
+      }
+    },
+    {
+      "id": "participant-add-fresh",
+      "input": {
+        "controllerSignatureValid": true,
+        "authorIsController": true,
+        "participantsBefore": [
+          "A",
+          "B"
+        ],
+        "participantsAfter": [
+          "A",
+          "B",
+          "C"
+        ],
+        "keyEpochBefore": 1,
+        "keyEpochAfter": 2,
+        "visibilityEpochBefore": 1,
+        "visibilityEpochAfter": 2,
+        "revokedRecipients": [],
+        "recipients": [
+          "A1",
+          "B1",
+          "C1"
+        ],
+        "writerPrefixesUnique": true,
+        "recipientAgreementKeysMatch": true,
+        "nonceStateTrusted": true
+      },
+      "expected": {
+        "decision": "allow",
+        "code": null,
+        "compartmentReset": true,
+        "carryOldPrivateContext": false
+      }
+    },
+    {
+      "id": "participant-remove-fresh",
+      "input": {
+        "controllerSignatureValid": true,
+        "authorIsController": true,
+        "participantsBefore": [
+          "A",
+          "B"
+        ],
+        "participantsAfter": [
+          "A"
+        ],
+        "keyEpochBefore": 1,
+        "keyEpochAfter": 2,
+        "visibilityEpochBefore": 1,
+        "visibilityEpochAfter": 2,
+        "revokedRecipients": [],
+        "recipients": [
+          "A1"
+        ],
+        "writerPrefixesUnique": true,
+        "recipientAgreementKeysMatch": true,
+        "nonceStateTrusted": true
+      },
+      "expected": {
+        "decision": "allow",
+        "code": null,
+        "compartmentReset": true,
+        "oldBKeyCanDecryptOld": true,
+        "oldBKeyCanDecryptNew": false
+      }
+    },
+    {
+      "id": "participant-add-no-visibility-bump",
+      "input": {
+        "controllerSignatureValid": true,
+        "authorIsController": true,
+        "participantsBefore": [
+          "A",
+          "B"
+        ],
+        "participantsAfter": [
+          "A",
+          "B",
+          "C"
+        ],
+        "keyEpochBefore": 1,
+        "keyEpochAfter": 2,
+        "visibilityEpochBefore": 1,
+        "visibilityEpochAfter": 1,
+        "revokedRecipients": [],
+        "recipients": [
+          "A1",
+          "B1",
+          "C1"
+        ],
+        "writerPrefixesUnique": true,
+        "recipientAgreementKeysMatch": true,
+        "nonceStateTrusted": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "conflict"
+      }
+    },
+    {
+      "id": "reused-key-epoch",
+      "input": {
+        "controllerSignatureValid": true,
+        "authorIsController": true,
+        "participantsBefore": [
+          "A",
+          "B"
+        ],
+        "participantsAfter": [
+          "A",
+          "B"
+        ],
+        "keyEpochBefore": 1,
+        "keyEpochAfter": 1,
+        "visibilityEpochBefore": 1,
+        "visibilityEpochAfter": 1,
+        "revokedRecipients": [],
+        "recipients": [
+          "A1",
+          "B1"
+        ],
+        "writerPrefixesUnique": true,
+        "recipientAgreementKeysMatch": true,
+        "nonceStateTrusted": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "conflict"
+      }
+    },
+    {
+      "id": "non-controller-change",
+      "input": {
+        "controllerSignatureValid": true,
+        "authorIsController": false,
+        "participantsBefore": [
+          "A",
+          "B"
+        ],
+        "participantsAfter": [
+          "A",
+          "B"
+        ],
+        "keyEpochBefore": 1,
+        "keyEpochAfter": 2,
+        "visibilityEpochBefore": 1,
+        "visibilityEpochAfter": 1,
+        "revokedRecipients": [],
+        "recipients": [
+          "A1",
+          "B1"
+        ],
+        "writerPrefixesUnique": true,
+        "recipientAgreementKeysMatch": true,
+        "nonceStateTrusted": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "forbidden"
+      }
+    },
+    {
+      "id": "revoked-recipient-retained",
+      "input": {
+        "controllerSignatureValid": true,
+        "authorIsController": true,
+        "participantsBefore": [
+          "A",
+          "B"
+        ],
+        "participantsAfter": [
+          "A",
+          "B"
+        ],
+        "keyEpochBefore": 1,
+        "keyEpochAfter": 2,
+        "visibilityEpochBefore": 1,
+        "visibilityEpochAfter": 1,
+        "revokedRecipients": [
+          "B1"
+        ],
+        "recipients": [
+          "A1",
+          "B1"
+        ],
+        "writerPrefixesUnique": true,
+        "recipientAgreementKeysMatch": true,
+        "nonceStateTrusted": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "revoked"
+      }
+    },
+    {
+      "id": "duplicate-prefix",
+      "input": {
+        "controllerSignatureValid": true,
+        "authorIsController": true,
+        "participantsBefore": [
+          "A",
+          "B"
+        ],
+        "participantsAfter": [
+          "A",
+          "B"
+        ],
+        "keyEpochBefore": 1,
+        "keyEpochAfter": 2,
+        "visibilityEpochBefore": 1,
+        "visibilityEpochAfter": 1,
+        "revokedRecipients": [],
+        "recipients": [
+          "A1",
+          "B1"
+        ],
+        "writerPrefixesUnique": false,
+        "recipientAgreementKeysMatch": true,
+        "nonceStateTrusted": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "conflict"
+      }
+    },
+    {
+      "id": "wrong-agreement-key",
+      "input": {
+        "controllerSignatureValid": true,
+        "authorIsController": true,
+        "participantsBefore": [
+          "A",
+          "B"
+        ],
+        "participantsAfter": [
+          "A",
+          "B"
+        ],
+        "keyEpochBefore": 1,
+        "keyEpochAfter": 2,
+        "visibilityEpochBefore": 1,
+        "visibilityEpochAfter": 1,
+        "revokedRecipients": [],
+        "recipients": [
+          "A1",
+          "B1"
+        ],
+        "writerPrefixesUnique": true,
+        "recipientAgreementKeysMatch": false,
+        "nonceStateTrusted": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "bad_delegation"
+      }
+    },
+    {
+      "id": "untrusted-restored-counter",
+      "input": {
+        "controllerSignatureValid": true,
+        "authorIsController": true,
+        "participantsBefore": [
+          "A",
+          "B"
+        ],
+        "participantsAfter": [
+          "A",
+          "B"
+        ],
+        "keyEpochBefore": 1,
+        "keyEpochAfter": 2,
+        "visibilityEpochBefore": 1,
+        "visibilityEpochAfter": 1,
+        "revokedRecipients": [],
+        "recipients": [
+          "A1",
+          "B1"
+        ],
+        "writerPrefixesUnique": true,
+        "recipientAgreementKeysMatch": true,
+        "nonceStateTrusted": false
+      },
+      "expected": {
+        "decision": "block-seal",
+        "code": "conflict",
+        "requireFreshKeyEpoch": true
+      }
+    },
+    {
+      "id": "forged-control",
+      "input": {
+        "controllerSignatureValid": false,
+        "authorIsController": true,
+        "participantsBefore": [
+          "A",
+          "B"
+        ],
+        "participantsAfter": [
+          "A",
+          "B"
+        ],
+        "keyEpochBefore": 1,
+        "keyEpochAfter": 2,
+        "visibilityEpochBefore": 1,
+        "visibilityEpochAfter": 1,
+        "revokedRecipients": [],
+        "recipients": [
+          "A1",
+          "B1"
+        ],
+        "writerPrefixesUnique": true,
+        "recipientAgreementKeysMatch": true,
+        "nonceStateTrusted": true
+      },
+      "expected": {
+        "decision": "reject",
+        "code": "bad_signature"
+      }
+    }
+  ],
+  "rewrapCases": [
+    {
+      "id": "same-user-current-node",
+      "sameUser": true,
+      "currentNode": true,
+      "newParticipant": false,
+      "oldEpoch": false,
+      "expected": "allow"
+    },
+    {
+      "id": "different-user",
+      "sameUser": false,
+      "currentNode": true,
+      "newParticipant": true,
+      "oldEpoch": false,
+      "expected": "forbidden"
+    },
+    {
+      "id": "revoked-node",
+      "sameUser": true,
+      "currentNode": false,
+      "newParticipant": false,
+      "oldEpoch": false,
+      "expected": "revoked"
+    },
+    {
+      "id": "new-user-old-key",
+      "sameUser": false,
+      "currentNode": true,
+      "newParticipant": true,
+      "oldEpoch": true,
+      "expected": "forbidden"
+    }
+  ],
+  "nonceCases": [
+    {
+      "id": "crash-after-reserve",
+      "prefixHex": "01020304",
+      "beforeCounter": "6",
+      "reservedCounter": "7",
+      "crashBeforeSend": true,
+      "expectedNextCounter": "8",
+      "expectedNonceHex": "010203040000000000000008"
+    },
+    {
+      "id": "same-key-clone",
+      "prefixHex": "01020304",
+      "counterRestoredWithoutTrust": true,
+      "expected": "block-seal-until-new-epoch"
+    }
+  ]
+}

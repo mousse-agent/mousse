@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, ChevronRight, Pencil, Plus, UserCircle, Users } from 'lucide-react'
+import { Check, ChevronRight, ChevronUp, Pencil, Plus, UserCircle, Users } from '../../lib/icons'
 import type { ProfilePublicDto } from '../../../shared/profiles/types'
 import { confirmNavigation } from '../../services/navigationGuards'
 import { migrateLegacyProfilePreferences } from '../../lib/profilePreferences'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
+import { useAppStore } from '../../stores/appStore'
+import './profile-sidebar-footer.css'
 
 interface ProfileSwitcherProps {
-  variant?: 'titlebar' | 'rail'
+  variant?: 'titlebar' | 'rail' | 'sidebar'
   onSwitched?: (profile: ProfilePublicDto) => void
 }
 
@@ -22,23 +24,41 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
   const [editing, setEditing] = useState(false)
   const [editName, setEditName] = useState('')
   const requestEpoch = useRef(0)
+  const reloadEpoch = useRef(0)
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const rail = variant === 'rail'
+  const sidebar = variant === 'sidebar'
+  const floating = rail || sidebar
+  const profileId = useAppStore((state) => state.profileId)
+  const observedProfileId = sidebar ? profileId : undefined
   const menuStyle = useFloatingPosition({
-    open: open && rail, anchorRef: triggerRef, contentRef: menuRef, placement: 'right-start',
+    open: open && floating, anchorRef: triggerRef, contentRef: menuRef, placement: sidebar ? 'above-start' : 'right-start',
     deps: [editing, showCreate, profiles.length, error]
   })
 
   const reload = async () => {
-    const [result, status] = await Promise.all([
+    const epoch = ++reloadEpoch.current
+    let result: Awaited<ReturnType<typeof window.mousse.profiles.list>>
+    let status: Awaited<ReturnType<typeof window.mousse.profiles.status>>
+    try {
+      [result, status] = await Promise.all([
       window.mousse.profiles.list(),
       window.mousse.profiles.status()
-    ])
-    setProfiles(result.profiles)
+      ])
+    } catch (cause) {
+      if (epoch !== reloadEpoch.current) return
+      throw cause
+    }
+    if (epoch !== reloadEpoch.current) return
     const bound = status.binding?.profileId ?? result.defaultProfileId
+    // A footer always belongs to the active window profile, including while
+    // replies for a previous profile or an unmounted sidebar are still pending.
+    if (sidebar && bound !== useAppStore.getState().profileId) return
+    setProfiles(result.profiles)
     setCurrent(bound)
+    setError(null)
     const selected = result.profiles.find((profile) => profile.id === bound)
     if (selected) {
       migrateLegacyProfilePreferences(selected)
@@ -47,15 +67,24 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
   }
 
   useEffect(() => {
+    setOpen(false)
     void reload().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
-  }, [])
+    const refresh = () => { void reload().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause))) }
+    window.addEventListener('mousse:profiles-changed', refresh)
+    window.addEventListener('focus', refresh)
+    return () => {
+      reloadEpoch.current += 1
+      window.removeEventListener('mousse:profiles-changed', refresh)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [observedProfileId])
 
   useEffect(() => {
-    if (!open || !rail || menuStyle.visibility !== 'visible') return
+    if (!open || !floating || menuStyle.visibility !== 'visible') return
     if (!menuRef.current?.contains(document.activeElement)) {
       menuRef.current?.querySelector<HTMLElement>('input:not(:disabled), button:not(:disabled)')?.focus()
     }
-  }, [open, rail, menuStyle.visibility])
+  }, [open, floating, menuStyle.visibility])
 
   useEffect(() => {
     if (!open) return
@@ -69,7 +98,7 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
         triggerRef.current?.focus()
         return
       }
-      if (!rail || !menuRef.current?.contains(document.activeElement)) return
+      if (!floating || !menuRef.current?.contains(document.activeElement)) return
       const buttons = [...menuRef.current.querySelectorAll<HTMLButtonElement>('button[role^="menuitem"]:not(:disabled)')]
       const index = buttons.indexOf(document.activeElement as HTMLButtonElement)
       // Inline profile forms keep normal text editing and Tab navigation.
@@ -85,7 +114,7 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
       window.removeEventListener('mousedown', close)
       window.removeEventListener('keydown', escape)
     }
-  }, [open, rail])
+  }, [open, floating])
 
   const switchProfile = async (ref: string) => {
     if (!await confirmNavigation('profile')) return
@@ -108,7 +137,7 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
 
   const updateCurrent = async () => {
     const displayName = editName.trim()
-    const profile = profiles.find((item) => item.id === current)
+    const profile = profiles.find((item) => item.id === (sidebar ? profileId : current))
     if (!profile || !displayName || displayName === profile.displayName) {
       setEditing(false)
       return
@@ -119,6 +148,7 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
       const result = await window.mousse.profiles.update(profile.id, profile.revision, { displayName })
       setProfiles((items) => items.map((item) => item.id === result.profile.id ? result.profile : item))
       setEditing(false)
+      window.dispatchEvent(new Event('mousse:profiles-changed'))
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -136,6 +166,7 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
       setProfiles((items) => [...items, result.profile])
       setNewName('')
       setShowCreate(false)
+      window.dispatchEvent(new Event('mousse:profiles-changed'))
       await switchProfile(result.profile.id)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -144,7 +175,7 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
   }
 
   const archiveCurrent = async () => {
-    const profile = profiles.find((item) => item.id === current)
+    const profile = profiles.find((item) => item.id === (sidebar ? profileId : current))
     if (!profile || profile.isDefault || profiles.filter((item) => item.status === 'active').length <= 1) return
     if (!await confirmNavigation('profile')) return
     if (!window.confirm(`Archive ${profile.displayName}?`)) return
@@ -152,6 +183,7 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
     setError(null)
     try {
       await window.mousse.profiles.archive(profile.id, profile.revision)
+      window.dispatchEvent(new Event('mousse:profiles-changed'))
       await reload()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -161,13 +193,15 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
   }
 
   const active = profiles.filter((item) => item.status === 'active')
-  const selected = profiles.find((item) => item.id === current) ?? active[0]
-  if (!selected) return error ? <div className="profile-switcher" role="alert">
+  const selected = sidebar
+    ? profiles.find((item) => item.id === profileId)
+    : profiles.find((item) => item.id === current) ?? active[0]
+  if (!selected) return error ? <div className={`profile-switcher${sidebar ? ' profile-switcher-sidebar' : ''}`} role="alert">
     <button type="button" title={error} onClick={() => {
       setError(null)
       void reload().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
     }}>Retry profiles</button>
-  </div> : null
+  </div> : sidebar ? <div className="profile-switcher profile-switcher-sidebar profile-sidebar-loading" role="status">Loading profile…</div> : null
 
   const avatar = (profile: ProfilePublicDto, large = false) => (
     <span className={`profile-avatar${large ? ' profile-avatar-large' : ''}`} style={{ background: profile.color || undefined }} aria-hidden="true">
@@ -175,8 +209,8 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
     </span>
   )
 
-  const menu = open && <div ref={menuRef} className={`profile-menu${rail ? ' profile-menu-rail' : ''}`}
-    style={rail ? menuStyle : undefined} role="menu" aria-label="Profiles">
+  const menu = open && <div ref={menuRef} className={`profile-menu${floating ? ' profile-menu-rail' : ''}`}
+    style={floating ? menuStyle : undefined} role="menu" aria-label="Profiles">
         <div className="profile-current-card">
           {avatar(selected, true)}
           <strong>{selected.displayName}</strong>
@@ -205,27 +239,31 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
 
         <div className="profile-menu-section profile-menu-actions">
           <button className="profile-menu-row" type="button" role="menuitem" onClick={() => { setShowCreate((value) => !value); setEditing(false) }} disabled={busy}>
-            <Plus size={17} /><span>Add Mousse profile</span>
+            <Plus size={16} /><span>Add Mousse profile</span>
           </button>
           {showCreate && <form className="profile-inline-form" onSubmit={(event) => { event.preventDefault(); void createProfile() }}>
             <input aria-label="New profile name" autoFocus value={newName} maxLength={64} onChange={(event) => setNewName(event.target.value)} placeholder="Profile name" />
             <button type="submit" disabled={busy || !newName.trim()}>Add</button>
           </form>}
           <button className="profile-menu-row" type="button" role="menuitem" disabled={selected.isDefault || active.length <= 1 || busy} onClick={() => void archiveCurrent()}>
-            <Users size={17} /><span>Manage Mousse profiles</span>
+            <Users size={16} /><span>Manage Mousse profiles</span>
           </button>
         </div>
         {error && <div className="profile-switcher-error" role="alert">{error}</div>}
       </div>
 
   return (
-    <div ref={rootRef} className={`profile-switcher${rail ? ' profile-switcher-rail' : ''}`} data-profile-id={selected.id}>
-      <button ref={triggerRef} className={rail ? `navigation-rail-button${open ? ' active' : ''}` : 'profile-menu-trigger'}
-        type="button" aria-label="Profiles" title="Profiles" aria-haspopup="menu" aria-expanded={open}
+    <div ref={rootRef} className={`profile-switcher${rail ? ' profile-switcher-rail' : ''}${sidebar ? ' profile-switcher-sidebar' : ''}`} data-profile-id={selected.id}>
+      <button ref={triggerRef} className={sidebar ? 'profile-sidebar-trigger' : rail ? `navigation-rail-button${open ? ' active' : ''}` : 'profile-menu-trigger'}
+        type="button" aria-label={sidebar ? `Mousse profile: ${selected.displayName}` : 'Profiles'} title={sidebar ? selected.displayName : 'Profiles'} aria-haspopup="menu" aria-expanded={open}
         onClick={() => setOpen((value) => !value)}>
-        <UserCircle size={rail ? 25 : undefined} strokeWidth={rail ? 1.8 : undefined} aria-hidden="true" />
+        {sidebar ? <>
+          {avatar(selected)}
+          <span className="profile-sidebar-text"><strong>{selected.displayName}</strong><span>Mousse profile</span></span>
+          <ChevronUp size={16} aria-hidden="true" />
+        </> : <UserCircle size={rail ? 18 : 16} strokeWidth={rail ? 1.8 : undefined} aria-hidden="true" />}
       </button>
-      {rail ? <FloatingPortal>{menu}</FloatingPortal> : menu}
+      {floating ? <FloatingPortal>{menu}</FloatingPortal> : menu}
     </div>
   )
 }

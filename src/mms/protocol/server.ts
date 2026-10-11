@@ -16,7 +16,11 @@ import { cleanupStaleUnixSocket, resolveLocalEndpoint, unlinkUnixSocketIfExists 
 import { dispatchMethod } from './handlers'
 import { parseEnvelope, validateHello, validateRequest, asAfterSequence, isObject } from './validators'
 import {
+  MMS_PROTOCOL_CHUNK_CAPABILITY,
+  MMS_PROTOCOL_CHUNK_BYTES,
+  MMS_PROTOCOL_MAX_ENVELOPE_BYTES,
   MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS,
+  MMS_PROTOCOL_MAX_FRAME_BYTES,
   MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES,
   MMS_PROTOCOL_MAX_PENDING_REQUESTS,
   MMS_PROTOCOL_VERSION,
@@ -33,6 +37,11 @@ import { PROFILES_V1_CAPABILITY } from '../../shared/profiles/types'
 import { BROWSER_ATTACHED_V1_CAPABILITY } from '../../shared/browser/connectionCommands'
 import { ProfileError } from '../../shared/profiles/errors'
 import type { ConnectionCommandRouter } from './connectionCommands'
+import { INTEGRATION_CAPABILITY } from '../../shared/integrationPlatform'
+import { NET_LOCAL_CAPABILITY } from '../../shared/net/local'
+import { OutboundWriter } from './outboundWriter'
+import { envelopeFrames } from './envelopeChunks'
+import { MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES } from './types'
 
 
 export interface ProtocolServerOptions {
@@ -90,8 +99,11 @@ interface ClientSession {
   inFlightIds: Set<string>
   /** Bounded completed response cache for deterministic duplicate-id handling. */
   completedResponses: Map<string, ProtocolResponse>
-  /** True while a drain listener is pending, so we never stack duplicate listeners. */
-  awaitingDrain: boolean
+  completedResponseSizes: Map<string, number>
+  completedResponseBytes: number
+  writer: OutboundWriter
+  connectionEventPending: number
+  connectionEventLifetime: AbortController
 }
 
 export class MmsProtocolServer {
@@ -157,6 +169,9 @@ export class MmsProtocolServer {
       }
       this.profileLifecycleUnsubscribe = this.opts.mms.domains?.onProfileDisposed((profileId) => {
         this.opts.commandRouter?.revokeProfile(profileId)
+        for (const client of this.clients.values()) {
+          if (client.binding?.profileId === profileId) client.connectionEventLifetime.abort()
+        }
         this.disposeProfileEvents(profileId)
       }) ?? null
     }
@@ -323,6 +338,9 @@ export class MmsProtocolServer {
         )
       )
     }
+    onEmitter(services.events, 'net:updated', (status: import('../../shared/net').NetStatus) => {
+      emitToSubscribers(this.ring.push('net.updated', status))
+    })
     // Some daemon-owned producers (Telegram/Discord/webhooks and scheduled jobs)
     // create threads directly rather than through a protocol request. Fan those
     // creations out through the same sequenced event consumed by the GUI.
@@ -630,12 +648,6 @@ export class MmsProtocolServer {
     onEmitter(services.channels, 'activity', (event: unknown) => {
       emitToSubscribers(this.ring.push('channels.activity', { event }, undefined))
     })
-    onEmitter(services.events, 'control:status-changed', (status: unknown) => {
-      emitToSubscribers(this.ring.push('control.status-changed', status, undefined))
-    })
-    onEmitter(services.events, 'control:pairing-request', (request: unknown) => {
-      emitToSubscribers(this.ring.push('control.pairing-request', request, undefined))
-    })
   }
 
   private onConnection(socket: Socket): void {
@@ -659,8 +671,13 @@ export class MmsProtocolServer {
       bindingChain: Promise.resolve(),
       inFlightIds: new Set(),
       completedResponses: new Map(),
-      awaitingDrain: false
+      completedResponseSizes: new Map(),
+      completedResponseBytes: 0,
+      writer: undefined as unknown as OutboundWriter,
+      connectionEventPending: 0,
+      connectionEventLifetime: new AbortController()
     }
+    session.writer = new OutboundWriter(socket, () => this.closeClient(session))
     this.clients.set(session.id, session)
 
     // Serialize decode + admission only. Disconnect cancels remaining chain work.
@@ -738,11 +755,13 @@ export class MmsProtocolServer {
       session.capabilities = new Set(
         advertised.filter(
           (capability) =>
+            capability !== MMS_PROTOCOL_CHUNK_CAPABILITY &&
             capability !== PROFILES_V1_CAPABILITY &&
             capability !== ERROR_INFO_CAPABILITY &&
             capability !== BROWSER_ATTACHED_V1_CAPABILITY
         )
       )
+      if (requested.has(MMS_PROTOCOL_CHUNK_CAPABILITY) && advertised.includes(MMS_PROTOCOL_CHUNK_CAPABILITY)) session.capabilities.add(MMS_PROTOCOL_CHUNK_CAPABILITY)
       if (requested.has(ERROR_INFO_CAPABILITY)) session.capabilities.add(ERROR_INFO_CAPABILITY)
       if (requested.has(PROFILES_V1_CAPABILITY) && advertised.includes(PROFILES_V1_CAPABILITY)) {
         session.capabilities.add(PROFILES_V1_CAPABILITY)
@@ -929,11 +948,21 @@ export class MmsProtocolServer {
         capabilities: admittedCapabilities ?? session.capabilities
       })
       this.wireOrchestratorEvents(resolved.services)
+      const connectionEventLifetime = session.connectionEventLifetime
       const connection = {
         id: session.id,
         clientType: session.clientType,
         binding: resolved.binding,
         capabilities: admittedCapabilities ?? session.capabilities,
+        emitConnectionEvent: (type: 'bridge.hub.thread' | 'mcp.auth-url', data: unknown, signal?: AbortSignal) =>
+          this.emitConnectionEvent(
+            session,
+            resolved.binding,
+            connectionEventLifetime,
+            type,
+            data,
+            signal
+          ),
         bind: (value: TrustedProfileBinding) => {
           if (
             session.binding &&
@@ -942,6 +971,8 @@ export class MmsProtocolServer {
             // Cancel in-flight reverse commands for the old binding before
             // domain listeners observe the close, then before new work.
             this.opts.commandRouter?.revoke(session.id, 'rebind')
+            session.connectionEventLifetime.abort()
+            session.connectionEventLifetime = new AbortController()
             // Give profile-owned integrations a chance to close the old
             // connection before its binding is replaced.
             this.opts.mms.domains?.notifyConnectionClosed(session.id)
@@ -1045,8 +1076,24 @@ export class MmsProtocolServer {
       result: {
         sequence: currentSeq,
         gap: replay.gap,
-        replay: replay.events
+        replay: [] as ProtocolEvent[]
       }
+    }
+    // The ring is bounded by event count, but a valid event can contain a large
+    // thread update. Keep replay below both wire limits and reserve half the
+    // outbound budget for live events around this boundary. Oversized history
+    // requires a snapshot, rather than disconnecting every newly opened GUI.
+    const result = res.result as { sequence: number; gap: boolean; replay: ProtocolEvent[] }
+    const replayBudget = Math.min(MMS_PROTOCOL_MAX_FRAME_BYTES, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES / 2)
+    let replayBytes = 4 + Buffer.byteLength(JSON.stringify(res), 'utf8')
+    for (const event of replay.events) {
+      replayBytes += Buffer.byteLength(JSON.stringify(event), 'utf8') + (result.replay.length ? 1 : 0)
+      if (replayBytes > replayBudget) {
+        result.gap = true
+        result.replay = []
+        break
+      }
+      result.replay.push(event)
     }
     this.sendRaw(session, res)
 
@@ -1066,11 +1113,18 @@ export class MmsProtocolServer {
   }
 
   private cacheCompleted(session: ClientSession, res: ProtocolResponse): void {
+    const bytes = Buffer.byteLength(JSON.stringify(res), 'utf8')
+    session.completedResponseBytes -= session.completedResponseSizes.get(res.id) ?? 0
     session.completedResponses.set(res.id, res)
-    while (session.completedResponses.size > MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS) {
+    session.completedResponseSizes.set(res.id, bytes)
+    session.completedResponseBytes += bytes
+    while (session.completedResponses.size > MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS ||
+           session.completedResponseBytes > 2 * MMS_PROTOCOL_MAX_ENVELOPE_BYTES) {
       const first = session.completedResponses.keys().next().value
       if (first === undefined) break
       session.completedResponses.delete(first)
+      session.completedResponseBytes -= session.completedResponseSizes.get(first) ?? 0
+      session.completedResponseSizes.delete(first)
     }
   }
 
@@ -1144,6 +1198,67 @@ export class MmsProtocolServer {
     return this.writeFrame(session, value, true)
   }
 
+  private emitConnectionEvent(
+    session: ClientSession,
+    binding: TrustedProfileBinding | undefined,
+    lifetime: AbortController,
+    type: 'bridge.hub.thread' | 'mcp.auth-url',
+    data: unknown,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const valid = (): boolean =>
+      !session.closed &&
+      session.authenticated &&
+      session.capabilities.has(type === 'mcp.auth-url' ? INTEGRATION_CAPABILITY : NET_LOCAL_CAPABILITY) &&
+      !!binding &&
+      session.binding?.profileId === binding.profileId &&
+      session.binding.epoch === binding.epoch &&
+      session.connectionEventLifetime === lifetime &&
+      !lifetime.signal.aborted &&
+      !signal?.aborted
+    if (!valid()) {
+      return Promise.reject(
+        new DomainRpcError(
+          'connection_closed',
+          'Display requires the current authenticated profile binding'
+        )
+      )
+    }
+    if (type !== 'bridge.hub.thread' && type !== 'mcp.auth-url') {
+      return Promise.reject(new DomainRpcError('invalid_params', 'Unsupported connection event'))
+    }
+    if (session.connectionEventPending >= 8) {
+      return Promise.reject(
+        new DomainRpcError('resource_limit', 'Too many pending display frames')
+      )
+    }
+    let frame: Buffer
+    try {
+      frame = encodeFrame(
+        {
+          kind: 'connection_event',
+          type,
+          profileId: binding!.profileId,
+          profileEpoch: binding!.epoch,
+          data
+        },
+        MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES
+      )
+    } catch (error) {
+      return Promise.reject(error)
+    }
+    session.connectionEventPending++
+    const combined = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal
+    const operation = session.writer.enqueue(frame.length, () => [frame], combined, () => {
+      if (!valid()) throw new DomainRpcError('connection_closed', 'Display profile binding changed')
+    })
+    if (!operation) {
+      session.connectionEventPending--
+      return Promise.reject(new DomainRpcError('connection_closed', 'Display write backlog exceeded'))
+    }
+    return operation.finally(() => { session.connectionEventPending-- })
+  }
+
   /** Best-effort write that never disconnects solely for backpressure (shutdown path). */
   private trySendRaw(session: ClientSession, value: unknown): void {
     this.writeFrame(session, value, false)
@@ -1156,43 +1271,32 @@ export class MmsProtocolServer {
   ): boolean {
     if (session.closed || session.socket.destroyed) return false
     try {
-      const frame = encodeFrame(value)
-      const queued = typeof session.socket.writableLength === 'number'
-        ? session.socket.writableLength
-        : 0
-      if (
-        enforceBackpressure &&
-        session.authenticated &&
-        queued + frame.length > MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES
-      ) {
-        // Slow authenticated client — disconnect without affecting MMS.
-        this.closeClient(session)
-        return false
+      // Rejected handshakes and shutdown notifications are written immediately
+      // before the caller closes the socket; they never carry large payloads.
+      if (!session.authenticated || !enforceBackpressure) {
+        session.socket.write(encodeFrame(value))
+        return true
       }
-      const ok = session.socket.write(frame)
-      if (!ok && !session.awaitingDrain) {
-        session.awaitingDrain = true
-        session.socket.pause()
-        session.socket.once('drain', () => {
-          session.awaitingDrain = false
-          if (!session.closed) session.socket.resume()
-        })
+      let body = Buffer.from(JSON.stringify(value), 'utf8')
+      let chunked = session.authenticated && session.capabilities.has(MMS_PROTOCOL_CHUNK_CAPABILITY) &&
+        isObject(value) && (value.kind === 'res' || value.kind === 'event') && body.length > MMS_PROTOCOL_CHUNK_BYTES
+      const limit = chunked ? MMS_PROTOCOL_MAX_ENVELOPE_BYTES : Math.min(MMS_PROTOCOL_MAX_FRAME_BYTES, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES - 4)
+      if (body.length > limit) {
+        if (isObject(value) && value.kind === 'res') {
+          body = Buffer.from(JSON.stringify({ kind: 'res', id: value.id, ok: false,
+            error: { code: 'response_too_large', message: chunked ? 'Response exceeds the supported transfer limit.' : 'Response exceeds this client’s transport limit. Update Mousse to receive large threads.',
+              ...(session.capabilities.has(ERROR_INFO_CAPABILITY) ? { errorInfo: { category: 'unsupported', retryable: false } } : {}) } }))
+        } else if (isObject(value) && value.kind === 'event') {
+          body = Buffer.from(JSON.stringify({ kind: 'error', code: 'event_too_large',
+            message: chunked ? 'Thread update exceeds the supported transfer limit.' : 'Thread update exceeds this client’s transport limit. Update Mousse to receive large threads.' }))
+        } else throw new FrameTooLargeError(body.length, limit)
+        chunked = false
       }
-      // Post-write backlog check (writableLength may update after write returns false).
-      const after = typeof session.socket.writableLength === 'number'
-        ? session.socket.writableLength
-        : 0
-      if (
-        enforceBackpressure &&
-        session.authenticated &&
-        after > MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES
-      ) {
-        this.closeClient(session)
-        return false
-      }
-      return true
+      const operation = session.writer.enqueue(body.length, () => envelopeFrames(body, chunked))
+      operation?.catch(() => {})
+      return operation !== null
     } catch {
-      this.closeClient(session)
+      if (enforceBackpressure) this.closeClient(session)
       return false
     }
   }
@@ -1219,10 +1323,14 @@ export class MmsProtocolServer {
   private closeClient(session: ClientSession): void {
     if (session.closed) return
     session.closed = true
+    session.writer.close()
+    session.connectionEventLifetime.abort()
     session.subscribeState = 'none'
     session.eventBuffer = []
     session.inFlightIds.clear()
     session.completedResponses.clear()
+    session.completedResponseSizes.clear()
+    session.completedResponseBytes = 0
     this.clients.delete(session.id)
     this.opts.commandRouter?.revoke(session.id, 'close')
     this.opts.mms.domains?.notifyConnectionClosed(session.id)

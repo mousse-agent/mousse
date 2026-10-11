@@ -24,9 +24,16 @@ describe('chat layout styles', () => {
     expect(globalCss).toMatch(
       /\.an-message-list \.an-tool-chrome\s*\{[\s\S]*?opacity:\s*0\.55/
     )
-    expect(globalCss).toMatch(/\.an-tool-chrome:hover/)
-    expect(globalCss).toMatch(/\.an-tool-chrome:focus-within/)
-    expect(globalCss).toMatch(/:has\(\.an-text-shimmer--active\)/)
+    // Hover and keyboard focus intentionally keep the dimmed level; only a
+    // running shimmer or a card awaiting approval returns to full opacity.
+    expect(globalCss).not.toMatch(/\.an-tool-chrome:hover/)
+    expect(globalCss).not.toMatch(/\.an-tool-chrome:focus-within/)
+    expect(globalCss).toMatch(
+      /\.an-tool-chrome:has\(\.an-text-shimmer--active\)\s*\{\s*opacity:\s*1;/
+    )
+    expect(globalCss).toMatch(
+      /\.an-tool-chrome\[data-awaiting-approval="true"\]\s*\{\s*opacity:\s*1;/
+    )
     const toolRowBase = readFileSync(
       resolve(process.cwd(), 'src/renderer/chat/components/agent-elements/tools/tool-row-base.tsx'),
       'utf8'

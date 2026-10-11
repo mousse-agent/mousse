@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { ControlStore } from '../../control/storage/controlStore'
+import { LegacyControlCredentials } from './LegacyControlCredentials'
 import type { ProfileId } from '../../../shared/profiles/ids'
 import type { ControlCredentialsPlaintext } from '../../../shared/profiles/types'
 import { digestPath } from './digest'
@@ -16,13 +16,13 @@ import { copyTreeAtomic } from './copy'
 export function createControlStoreCredentialAdapter(): ControlCredentialMigrationAdapter {
   return {
     decryptFromControlHome(homeDir: string): ControlCredentialsPlaintext | null {
-      return new ControlStore(homeDir).getCredentials()
+      return new LegacyControlCredentials(homeDir).getCredentials()
     },
     encryptToControlHome(homeDir: string, credentials: ControlCredentialsPlaintext): void {
-      new ControlStore(homeDir).saveCredentials(credentials)
+      new LegacyControlCredentials(homeDir).saveCredentials(credentials)
     },
     verifyReadback(homeDir: string, expected: ControlCredentialsPlaintext): boolean {
-      const loaded = new ControlStore(homeDir).getCredentials()
+      const loaded = new LegacyControlCredentials(homeDir).getCredentials()
       if (!loaded) return false
       return (
         loaded.accountId === expected.accountId &&

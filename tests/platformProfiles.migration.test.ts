@@ -10,7 +10,8 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { ControlStore } from '../src/mms/control/storage/controlStore'
+import { LegacyControlCredentials } from '../src/mms/profiles/migration/LegacyControlCredentials'
+import { writeOriginalControlCredentials } from './fixtures/agent-platform/migration-crash/legacyCredentials'
 import { FIXTURE_CONTROL_CREDENTIALS, FIXTURE_LEGACY_MOUSSE_CONF } from '../src/shared/profiles'
 import { MigrationAmbiguityError, MigrationValidationError } from '../src/shared/profiles/errors'
 import {
@@ -60,8 +61,7 @@ function plantLegacyHome(home: string): void {
     join(home, 'repositories', 'repoaaaa', 'worktrees', 'threads', 'thread-1', '.git'),
     'gitdir: /tmp/fake.git/worktrees/thread-1\n'
   )
-  const control = new ControlStore(home)
-  control.saveCredentials({ ...FIXTURE_CONTROL_CREDENTIALS })
+  writeOriginalControlCredentials(home, { ...FIXTURE_CONTROL_CREDENTIALS })
 }
 
 afterEach(() => {
@@ -139,9 +139,9 @@ describe('ProfileMigrationService', () => {
 
     const destEnc = readFileSync(join(liveRoot, 'control', 'credentials.enc'))
     expect(destEnc.equals(sourceEnc)).toBe(false)
-    const destStore = new ControlStore(liveRoot)
+    const destStore = new LegacyControlCredentials(liveRoot)
     expect(destStore.getCredentials()?.refreshToken).toBe(FIXTURE_CONTROL_CREDENTIALS.refreshToken)
-    expect(new ControlStore(home).getCredentials()?.accountId).toBe(FIXTURE_CONTROL_CREDENTIALS.accountId)
+    expect(new LegacyControlCredentials(home).getCredentials()?.accountId).toBe(FIXTURE_CONTROL_CREDENTIALS.accountId)
 
     const listed = manager.list()
     expect(listed).toHaveLength(1)
@@ -187,18 +187,17 @@ describe('ProfileMigrationService', () => {
     const home = tempHome()
     const other = join(home, '..', 'other-home')
     mkdirSync(other, { recursive: true })
-    const source = new ControlStore(home)
-    source.saveCredentials({ ...FIXTURE_CONTROL_CREDENTIALS })
+    writeOriginalControlCredentials(home, { ...FIXTURE_CONTROL_CREDENTIALS })
     mkdirSync(join(other, 'control'), { recursive: true })
     writeFileSync(join(other, 'control', 'credentials.enc'), readFileSync(join(home, 'control', 'credentials.enc')))
-    expect(new ControlStore(other).getCredentials()).toBeNull()
+    expect(new LegacyControlCredentials(other).getCredentials()).toBeNull()
 
     const adapter = createControlStoreCredentialAdapter()
     const plain = adapter.decryptFromControlHome(home)
     expect(plain?.accessToken).toBe('access-fixture')
     adapter.encryptToControlHome(other, plain!)
     expect(adapter.verifyReadback(other, plain!)).toBe(true)
-    expect(new ControlStore(other).getCredentials()?.accountId).toBe('usr-fixture-1')
+    expect(new LegacyControlCredentials(other).getCredentials()?.accountId).toBe('usr-fixture-1')
   })
 
   it('resumes after a crash before commit without treating staging as authoritative', () => {

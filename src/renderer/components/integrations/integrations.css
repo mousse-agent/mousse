@@ -17,7 +17,7 @@
 .integrations-root .integration-editor__body { flex: none; height: min(55vh, 520px); grid-template-rows: minmax(0, 1fr); }
 .integrations-root [role="tabpanel"] { min-height: 0; overflow: auto; }
 .integration-settings-scope { display: flex; align-items: center; gap: 12px; padding: 0 24px 16px; }
-#integrations.settings-section { max-width: none; min-height: 0; height: 100%; }
+#integrations.settings-section { align-self: stretch; width: 100%; max-width: none; min-height: 0; height: 100%; }
 .integrations-root .integrations-header__actions { flex-wrap: wrap; }
 .integrations-root .integration-header-icon { width: 34px; padding: 0; display: inline-grid; place-items: center; flex: 0 0 34px; }
 @media (max-width: 760px) { .integrations-root .integration-upload-options { grid-template-columns: 1fr; } .integrations-root .integration-editor__body { height: auto; grid-template-rows: minmax(360px, 50vh) auto; } }
