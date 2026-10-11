@@ -12,7 +12,9 @@ export const SURFACE_CHOICES: SurfaceChoice[] = [
   { id: 'browser', label: 'Browser', shortcut: 'B' },
   { id: 'terminal', label: 'Terminal', shortcut: 'T' },
   { id: 'files', label: 'Files', shortcut: 'F' },
-  { id: 'git', label: 'Diff', shortcut: 'D' }
+  { id: 'git', label: 'Diff', shortcut: 'D' },
+  // Named agents (recall, integration review) live here even with no live agent.
+  { id: 'agents', label: 'Agents', shortcut: 'A' }
 ]
 
 export interface SurfaceTabItem {
@@ -31,8 +33,8 @@ export function surfaceTabItems(input: {
   documents: Array<{ id: string; title: string }>
 }): SurfaceTabItem[] {
   const items: SurfaceTabItem[] = []
-  if (input.hasAgents) {
-    items.push({ key: 'agents', view: 'agents', label: 'Agents', closable: false })
+  if (input.hasAgents || input.opened.includes('agents')) {
+    items.push({ key: 'agents', view: 'agents', label: 'Agents', closable: !input.hasAgents })
   }
   for (const kind of input.opened) {
     if (kind === 'terminal') {

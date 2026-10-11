@@ -9,6 +9,7 @@ import type { Agent } from '../../shared/types'
 import { MousseAgentChat } from './MousseAgentChat'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { AgentsTasksView } from './AgentsTasksView'
+import { NamedAgents } from './NamedAgents'
 
 interface TerminalInstance {
   ptyId: string
@@ -30,6 +31,7 @@ function isVisibleAgent(agent: Agent): boolean {
 export function AgentsPanel() {
   const agents = useAppStore((s) => s.agents)
   const [showOverview, setShowOverview] = useState(true)
+  const [showNamed, setShowNamed] = useState(false)
   const mainView = useAppStore((s) => s.mainView)
   const activePtyId = useAppStore((s) => s.activePtyId)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
@@ -222,61 +224,63 @@ export function AgentsPanel() {
   const showGui = activeAgent?.executionMode === 'gui'
   const showPreparing = activeAgent?.status === 'starting'
   const showTerminal = activeAgent?.executionMode === 'interactive' && !!activeAgent.ptyId
+  const showAgent = !showOverview && !showNamed
 
   return (
     <div className="terminal-panel agents-panel">
-      {visibleAgents.length > 0 && (
-        <div className="terminal-tabs">
-          <button className={`terminal-tab ${showOverview ? 'active' : ''}`} onClick={() => setShowOverview(true)}>Tasks</button>
-          {visibleAgents.map((agent) => (
-            <button
-              key={agent.id}
-              className={`terminal-tab ${!showOverview && activeAgent?.id === agent.id ? 'active' : ''}`}
-              draggable
-              onDragStart={(event) => setReferenceDragData(event.dataTransfer, {
-                kind: 'agent', title: `${agent.cliType} ${agent.id.slice(0, 8)}`,
-                agentId: agent.id, sessionId: agent.ptyId, path: agent.worktreePath,
-                threadId: activeThreadId ?? undefined, projectId: activeProjectId
-              })}
-              onClick={() => {
-                setShowOverview(false)
-                setActiveAgentId(agent.id)
-                if (agent.ptyId) setActivePtyId(agent.ptyId)
+      <div className="terminal-tabs">
+        <button className={`terminal-tab ${showOverview ? 'active' : ''}`} onClick={() => { setShowOverview(true); setShowNamed(false) }}>Tasks</button>
+        <button className={`terminal-tab ${showNamed ? 'active' : ''}`} onClick={() => { setShowNamed(true); setShowOverview(false) }}>Named agents</button>
+        {visibleAgents.map((agent) => (
+          <button
+            key={agent.id}
+            className={`terminal-tab ${showAgent && activeAgent?.id === agent.id ? 'active' : ''}`}
+            draggable
+            onDragStart={(event) => setReferenceDragData(event.dataTransfer, {
+              kind: 'agent', title: `${agent.cliType} ${agent.id.slice(0, 8)}`,
+              agentId: agent.id, sessionId: agent.ptyId, path: agent.worktreePath,
+              threadId: activeThreadId ?? undefined, projectId: activeProjectId
+            })}
+            onClick={() => {
+              setShowOverview(false)
+              setShowNamed(false)
+              setActiveAgentId(agent.id)
+              if (agent.ptyId) setActivePtyId(agent.ptyId)
+            }}
+            title={`${agent.cliType} — ${agent.id}`}
+          >
+            {agent.executionMode === 'gui' ? (
+              <Bot size={13} strokeWidth={2} className="terminal-tab-icon" />
+            ) : (
+              <TerminalSquare size={13} strokeWidth={2} className="terminal-tab-icon" />
+            )}
+            <span className="cli-type">{agent.cliType}</span>
+            {agent.id.slice(0, 8)}
+            <span
+              className="terminal-tab-close"
+              role="button"
+              aria-label={`Stop ${agent.cliType} agent`}
+              title="Stop agent (worktree retained)"
+              aria-disabled={stoppingAgentIds.has(agent.id)}
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                if (!stoppingAgentIds.has(agent.id) && confirmStopAgent(agent)) {
+                  void stopAgent(agent.id)
+                }
               }}
-              title={`${agent.cliType} — ${agent.id}`}
             >
-              {agent.executionMode === 'gui' ? (
-                <Bot size={13} strokeWidth={2} className="terminal-tab-icon" />
-              ) : (
-                <TerminalSquare size={13} strokeWidth={2} className="terminal-tab-icon" />
-              )}
-              <span className="cli-type">{agent.cliType}</span>
-              {agent.id.slice(0, 8)}
-              <span
-                className="terminal-tab-close"
-                role="button"
-                aria-label={`Stop ${agent.cliType} agent`}
-                title="Stop agent (worktree retained)"
-                aria-disabled={stoppingAgentIds.has(agent.id)}
-                onClick={(event) => {
-                  event.preventDefault()
-                  event.stopPropagation()
-                  if (!stoppingAgentIds.has(agent.id) && confirmStopAgent(agent)) {
-                    void stopAgent(agent.id)
-                  }
-                }}
-              >
-                <X size={11} strokeWidth={2} />
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
+              <X size={11} strokeWidth={2} />
+            </span>
+          </button>
+        ))}
+      </div>
       <div
-        className={`terminal-container agents-panel-body${showOverview || showEmpty ? ' terminal-container-empty' : ''}`}
+        className={`terminal-container agents-panel-body${showOverview || showNamed || showEmpty ? ' terminal-container-empty' : ''}`}
       >
         {showOverview && <AgentsTasksView variant="panel" />}
-        {!showOverview && showEmpty && (
+        {showNamed && <NamedAgents key={activeThreadId} threadId={activeThreadId} />}
+        {showAgent && showEmpty && (
           <div className="terminal-empty">
             <p>No agents yet</p>
             <p className="terminal-empty-hint">
@@ -284,17 +288,17 @@ export function AgentsPanel() {
             </p>
           </div>
         )}
-        {!showOverview && showPreparing && activeAgent && (
+        {showAgent && showPreparing && activeAgent && (
           <div className="terminal-empty">
             <p>{activeAgent.startupPhase === 'discovery' ? 'Discovering files…' : 'Preparing agent…'}</p>
             <p className="terminal-empty-hint">{activeAgent.task}</p>
           </div>
         )}
-        {!showOverview && showGui && !showPreparing && activeAgent?.executionMode === 'gui' && (
+        {showAgent && showGui && !showPreparing && activeAgent?.executionMode === 'gui' && (
           <MousseAgentChat key={activeAgent.id} agentId={activeAgent.id} active />
         )}
         <div
-          className={`agents-terminal-host${showTerminal && !showOverview ? '' : ' hidden'}`}
+          className={`agents-terminal-host${showTerminal && showAgent ? '' : ' hidden'}`}
           ref={containerRef}
         />
       </div>
