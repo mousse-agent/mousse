@@ -29,6 +29,11 @@ vi.mock('electron', async () => {
       this.emit('ready-to-show')
     })
     readonly show = vi.fn()
+    // Linux window shaping reads bounds and state on attach.
+    readonly getBounds = () => ({ x: 0, y: 0, width: 1200, height: 800 })
+    readonly setShape = vi.fn()
+    isMaximized() { return false }
+    isFullScreen() { return false }
     constructor(readonly options: unknown) { super(); startup.windows.push(this) }
     isDestroyed() { return false }
     static getAllWindows() { return startup.windows }
