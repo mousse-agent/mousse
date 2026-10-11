@@ -5,9 +5,11 @@ import { ERROR_INFO_CAPABILITY, parseErrorInfo, type ErrorInfo } from '../../sha
 
 import { createConnection, type Socket } from 'net'
 import { randomBytes } from 'crypto'
+import { EnvelopeAssembler } from './envelopeChunks'
 import { FrameDecoder, encodeFrame, FrameDecodeError, FrameTooLargeError } from './framing'
 import { parseEnvelope } from './validators'
 import {
+  MMS_PROTOCOL_CHUNK_CAPABILITY,
   MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS,
   MMS_PROTOCOL_LOGIN_TIMEOUT_MS,
   MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES,
@@ -77,6 +79,7 @@ interface Pending {
 export class LocalMmsClient implements MmsClient {
   private socket: Socket | null = null
   private decoder = new FrameDecoder()
+  private assembler = new EnvelopeAssembler(() => this.onDisconnect(new FrameDecodeError('Envelope transfer timed out')))
   private pending = new Map<string, Pending>()
   private eventHandlers = new Set<(event: ProtocolEvent, delivery?: { replay: boolean }) => void>()
   private connectionEventHandlers = new Set<(event: ProtocolConnectionEvent) => void>()
@@ -194,7 +197,7 @@ export class LocalMmsClient implements MmsClient {
               ownerToken: this.opts.ownerToken,
               clientType: this.opts.clientType ?? 'cli',
               clientBuild: this.opts.clientBuild,
-              requestedCapabilities: this.opts.requestedCapabilities ?? [ERROR_INFO_CAPABILITY]
+              requestedCapabilities: [...new Set([...(this.opts.requestedCapabilities ?? [ERROR_INFO_CAPABILITY]), MMS_PROTOCOL_CHUNK_CAPABILITY])]
             })
           )
         } catch (err) {
@@ -458,8 +461,18 @@ export class LocalMmsClient implements MmsClient {
   }
 
   private handleEnvelope(raw: unknown): void {
-    const env = parseEnvelope(raw)
+    let env = parseEnvelope(raw)
+    if (env?.kind === 'envelope_chunk') {
+      if (!this._hello?.capabilities.includes(MMS_PROTOCOL_CHUNK_CAPABILITY)) throw new FrameDecodeError('Unnegotiated envelope chunk')
+      const complete = this.assembler.accept(env)
+      if (complete === null) return
+      env = parseEnvelope(complete)
+      if (!env || !['res', 'event'].includes(env.kind)) throw new FrameDecodeError('Invalid assembled envelope')
+    } else if (this.assembler.active) {
+      throw new FrameDecodeError('Interrupted envelope transfer')
+    }
     if (!env) {
+      if (raw && typeof raw === 'object' && (raw as { kind?: unknown }).kind === 'envelope_chunk') throw new FrameDecodeError('Malformed envelope chunk')
       this.commands.rejectMalformed(raw)
       return
     }
@@ -495,6 +508,10 @@ export class LocalMmsClient implements MmsClient {
       return
     }
     if (env.kind === 'error') {
+      if (env.code === 'event_too_large') {
+        this.needsResnapshot = true
+        this.onDisconnect(new MmsProtocolError(env.code, env.message, undefined, { category: 'unsupported', retryable: false }))
+      }
       return
     }
   }
@@ -578,6 +595,7 @@ export class LocalMmsClient implements MmsClient {
   }
 
   private teardownSocket(): void {
+    this.assembler.reset()
     if (!this.socket) return
     const s = this.socket
     this.socket = null
