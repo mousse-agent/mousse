@@ -1,10 +1,11 @@
-import { FileText, Link2, Pencil, Plus, RefreshCw, Search, Shield, Upload } from '../../lib/icons'
+import { ExternalLink, X, FileText, Link2, Pencil, Plus, RefreshCw, Search, Shield, Upload } from '../../lib/icons'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { IntegrationPlatformClient, IntegrationPlatformSnapshot } from '../../../shared/integrationPlatform'
 import type { McpServerConfig, SkillDescriptor } from '../../../shared/integrations'
 import { asError, isManagedSource, scopeLabel, snapshotItems } from './integrationUi'
 import { AddSkillDialog, SkillEditorDialog, type TestSkill } from './SkillDialogs'
 import { McpConnectionDialog } from './McpConnectionDialog'
+import { useMcpConnectionChecks, type McpConnectionCheck } from './useMcpConnectionChecks'
 import './integrations.css'
 
 export interface IntegrationsWorkspaceProps {
@@ -30,6 +31,7 @@ function ScopedWorkspace({ client, profileId, projectId, projects = [], initialT
   const [error, setError] = useState<string | null>(null), [query, setQuery] = useState('')
   const [pendingToggle, setPendingToggle] = useState<string | null>(null)
   const [dialog, setDialog] = useState<Dialog>(null)
+  const mcpConnections = useMcpConnectionChecks(client, profileId, projectId, tab === 'mcp' ? snapshot : null)
   const generation = useRef(0)
   const scope = projectId ? 'project' : 'global'
   const load = useCallback(async (refresh = false) => {
@@ -68,7 +70,7 @@ function ScopedWorkspace({ client, profileId, projectId, projects = [], initialT
     <header className="integrations-header">
       {showHeading && <div><h1>Integrations</h1><p>Skills and MCP connections for {projectId ? 'this project in this profile' : 'this profile'}.</p></div>}
       <div className="integrations-header__actions">
-        <button type="button" className="btn btn-sm" data-action="refresh-integrations" disabled={loading || refreshing || Boolean(dialog)} onClick={() => void load(true)}><RefreshCw size={14} /> Refresh</button>
+        <button type="button" className="btn btn-sm" data-action="refresh-integrations" disabled={loading || refreshing || Boolean(dialog)} onClick={() => { mcpConnections.reset(); void load(true) }}><RefreshCw size={14} /> Refresh</button>
         {tab === 'skills' ? <>
           <button type="button" className="btn integration-header-icon" data-action="upload-skill" aria-label="Upload skill" title="Upload skill" onClick={() => setDialog({ kind: 'skill-upload' })}><Upload size={15} /></button>
           <button type="button" className="btn btn-primary" data-action="add-skill" onClick={() => setDialog({ kind: 'skill-create' })}><Plus size={14} /> Add skill</button>
@@ -90,15 +92,16 @@ function ScopedWorkspace({ client, profileId, projectId, projects = [], initialT
       {loading ? <div className="integrations-state" role="status">Loading integrations…</div> : normalized && !(tab === 'skills' ? skills : servers).length ? <div className="integrations-state">No matches for “{query}”.</div>
         : tab === 'skills' && !skills.length ? <div className="integrations-empty"><h2>No skills yet</h2><p>Add or upload a reusable skill.</p></div>
           : tab === 'mcp' && !servers.length ? <div className="integrations-empty"><h2>No MCP connections yet</h2><p>Connect an MCP server.</p></div>
-            : <IntegrationList skills={tab === 'skills' ? skills : []} servers={tab === 'mcp' ? servers : []} pendingToggle={pendingToggle} onEditSkill={(id) => setDialog({ kind: 'skill-edit', id })} onEditMcp={(id) => setDialog({ kind: 'mcp-edit', id })} onToggleSkill={toggleSkill} onToggleMcp={toggleMcp} />}
+            : <IntegrationList checks={mcpConnections.checks} onAuthenticateMcp={(server) => void mcpConnections.authenticate(server)} onCancelMcpAuth={(server) => void mcpConnections.cancel(server)} skills={tab === 'skills' ? skills : []} servers={tab === 'mcp' ? servers : []} pendingToggle={pendingToggle} onEditSkill={(id) => setDialog({ kind: 'skill-edit', id })} onEditMcp={(id) => setDialog({ kind: 'mcp-edit', id })} onToggleSkill={(skill) => void toggleSkill(skill)} onToggleMcp={(server) => void toggleMcp(server)} />}
     </div>
     {dialog?.kind === 'skill-create' || dialog?.kind === 'skill-upload' ? <AddSkillDialog {...common} scope={scope} initialMode={dialog.kind === 'skill-upload' ? 'upload' : 'create'} /> : null}
     {selectedSkill ? <SkillEditorDialog key={selectedSkill.installationId ?? selectedSkill.id} {...common} skill={selectedSkill} onTestSkill={onTestSkill} /> : null}
-    {dialog?.kind === 'mcp-create' || selectedMcp ? <McpConnectionDialog key={selectedMcp?.installationId ?? 'new'} {...common} scope={scope} server={selectedMcp} /> : null}
+    {dialog?.kind === 'mcp-create' || selectedMcp ? <McpConnectionDialog onConnectionChanged={() => { mcpConnections.reset(); void load(true) }} key={selectedMcp?.installationId ?? 'new'} {...common} scope={scope} server={selectedMcp} /> : null}
   </div>
 }
 
-function IntegrationList({ skills, servers, pendingToggle, onEditSkill, onEditMcp, onToggleSkill, onToggleMcp }: {
+function IntegrationList({ checks, onAuthenticateMcp, onCancelMcpAuth, skills, servers, pendingToggle, onEditSkill, onEditMcp, onToggleSkill, onToggleMcp }: {
+  checks: Record<string, McpConnectionCheck>; onAuthenticateMcp: (server: McpServerConfig) => void; onCancelMcpAuth: (server: McpServerConfig) => void
   skills: SkillDescriptor[]; servers: McpServerConfig[]; pendingToggle: string | null
   onEditSkill: (id: string) => void; onEditMcp: (id: string) => void
   onToggleSkill: (skill: SkillDescriptor) => void; onToggleMcp: (server: McpServerConfig) => void
@@ -112,13 +115,16 @@ function IntegrationList({ skills, servers, pendingToggle, onEditSkill, onEditMc
     const id = item.installationId ?? item.id
     const managed = isManagedSource(item.source, item.managed)
     const enabled = row.kind === 'skill' ? row.value.enabled !== false && !row.value.archived : row.value.enabled !== false
+    const connection = row.kind === 'mcp' && enabled && managed ? checks[id] : undefined
+    const needsAuth = connection?.result?.errorCategory === 'auth-required' || connection?.result?.errorCategory === 'unauthorized'
     const description = row.kind === 'skill' ? row.value.description || 'No description provided.' : row.value.transport === 'stdio' ? row.value.command ?? 'Executable' : row.value.url ?? 'No endpoint'
     return <article className={`integration-row${enabled ? '' : ' is-disabled'}`} key={`${row.kind}:${id}`} {...(row.kind === 'skill' ? { 'data-skill-card': id } : { 'data-mcp-card': id })}>
       <div className="integration-row__icon" title={row.kind === 'skill' ? 'Skill' : 'MCP connection'}>{row.kind === 'skill' ? <FileText size={16} /> : <Link2 size={16} />}</div>
-      <div className="integration-row__main"><h2>{item.name}</h2><p>{description}</p>{item.diagnostics?.length ? <p className="integration-diagnostic">{item.diagnostics[0].message}</p> : null}</div>
+      <div className="integration-row__main"><h2>{item.name}</h2><p>{description}</p>{row.kind === 'mcp' && enabled && managed ? <p className="integration-connection-status" role="status" title={connection?.result?.error}>{connection?.phase === 'signing-in' ? connection.result?.error ?? 'Signing in…' : !connection || connection.phase === 'checking' ? 'Checking connection…' : connection.result?.success ? `Connected · ${connection.result.toolCount ?? 0} tools` : needsAuth ? connection.result?.error ?? 'Sign-in required' : connection.result?.error ?? 'Connection failed'}</p> : null}{item.diagnostics?.length ? <p className="integration-diagnostic">{item.diagnostics[0].message}</p> : null}</div>
       <div className="integration-row__actions">
-        {managed ? <button type="button" className="integration-icon-button" aria-label={`Edit ${item.name}`} title="Edit" onClick={() => row.kind === 'skill' ? onEditSkill(id) : onEditMcp(id)}><Pencil size={15} /></button> : null}
-        <button type="button" role="switch" aria-checked={enabled} aria-label={`${enabled ? 'Disable' : 'Enable'} ${item.name}`} title={managed ? (enabled ? 'Disable' : 'Enable') : 'Read-only'} className={`integration-switch${enabled ? ' is-on' : ''}`} disabled={!managed || pendingToggle === id} onClick={() => row.kind === 'skill' ? onToggleSkill(row.value) : onToggleMcp(row.value)}><span /></button>
+        {row.kind === 'mcp' && managed && enabled && (needsAuth || connection?.phase === 'signing-in') ? <button type="button" className="integration-icon-button" aria-label={`${connection?.phase === 'signing-in' ? 'Cancel sign-in for' : 'Sign in to'} ${item.name}`} title={connection?.phase === 'signing-in' ? 'Cancel sign-in' : 'Sign in'} onClick={() => connection?.phase === 'signing-in' ? onCancelMcpAuth(row.value) : onAuthenticateMcp(row.value)}>{connection?.phase === 'signing-in' ? <X size={15} /> : <ExternalLink size={15} />}</button> : null}
+        {managed ? <button type="button" className="integration-icon-button" aria-label={`Edit ${item.name}`} disabled={connection?.phase === 'signing-in'} title="Edit" onClick={() => row.kind === 'skill' ? onEditSkill(id) : onEditMcp(id)}><Pencil size={15} /></button> : null}
+        <button type="button" role="switch" aria-checked={enabled} aria-label={`${enabled ? 'Disable' : 'Enable'} ${item.name}`} title={managed ? (enabled ? 'Disable' : 'Enable') : 'Read-only'} className={`integration-switch${enabled ? ' is-on' : ''}`} disabled={!managed || pendingToggle === id || connection?.phase === 'signing-in'} onClick={() => row.kind === 'skill' ? onToggleSkill(row.value) : onToggleMcp(row.value)}><span /></button>
       </div>
     </article>
   })}</div>

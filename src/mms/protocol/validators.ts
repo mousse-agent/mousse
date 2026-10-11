@@ -63,7 +63,7 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
         Object.keys(raw).some(
           key => !['kind', 'type', 'profileId', 'profileEpoch', 'data'].includes(key)
         ) ||
-        raw.type !== 'bridge.hub.thread' ||
+        (raw.type !== 'bridge.hub.thread' && raw.type !== 'mcp.auth-url') ||
         !isBoundedString(raw.profileId, 128, { nonEmpty: true }) ||
         !Number.isSafeInteger(raw.profileEpoch) ||
         (raw.profileEpoch as number) < 1
@@ -79,7 +79,7 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
       }
       return {
         kind: 'connection_event',
-        type: 'bridge.hub.thread',
+        type: raw.type,
         profileId: raw.profileId,
         profileEpoch: raw.profileEpoch as number,
         data: raw.data

@@ -290,11 +290,12 @@ export class McpManager {
   async authenticateServer(
     serverId: string,
     projectPath?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    openExternal: OpenExternalFn = this.openExternal
   ): Promise<{ success: boolean; error?: string }> {
     try {
       return await this.owned.run('mcp-authenticate', () =>
-        this.authenticateServerOwned(serverId, projectPath, signal)
+        this.authenticateServerOwned(serverId, projectPath, signal, openExternal)
       )
     } catch (err) {
       return { success: false, error: redactSensitiveText(formatError(err)) }
@@ -304,7 +305,8 @@ export class McpManager {
   private async authenticateServerOwned(
     serverId: string,
     projectPath?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    openExternal: OpenExternalFn = this.openExternal
   ): Promise<{ success: boolean; error?: string }> {
     const combined = this.operationSignal(signal)
     const server = await this.resolveServer(serverId, projectPath)
@@ -322,7 +324,7 @@ export class McpManager {
           mcpInstallationId(server),
           serverUrl,
           authConfig,
-          this.openExternal,
+          openExternal,
           {
             oauthDir: this.oauthDir(),
             profileId: this.context.profileId,

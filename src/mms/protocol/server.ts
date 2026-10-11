@@ -33,6 +33,7 @@ import { PROFILES_V1_CAPABILITY } from '../../shared/profiles/types'
 import { BROWSER_ATTACHED_V1_CAPABILITY } from '../../shared/browser/connectionCommands'
 import { ProfileError } from '../../shared/profiles/errors'
 import type { ConnectionCommandRouter } from './connectionCommands'
+import { INTEGRATION_CAPABILITY } from '../../shared/integrationPlatform'
 import { NET_LOCAL_CAPABILITY } from '../../shared/net/local'
 import { writeConnectionEventFrame } from './connectionEventWriter'
 import { MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES } from './types'
@@ -944,7 +945,7 @@ export class MmsProtocolServer {
         clientType: session.clientType,
         binding: resolved.binding,
         capabilities: admittedCapabilities ?? session.capabilities,
-        emitConnectionEvent: (type: 'bridge.hub.thread', data: unknown, signal?: AbortSignal) =>
+        emitConnectionEvent: (type: 'bridge.hub.thread' | 'mcp.auth-url', data: unknown, signal?: AbortSignal) =>
           this.emitConnectionEvent(
             session,
             resolved.binding,
@@ -1169,14 +1170,14 @@ export class MmsProtocolServer {
     session: ClientSession,
     binding: TrustedProfileBinding | undefined,
     lifetime: AbortController,
-    type: 'bridge.hub.thread',
+    type: 'bridge.hub.thread' | 'mcp.auth-url',
     data: unknown,
     signal?: AbortSignal
   ): Promise<void> {
     const valid = (): boolean =>
       !session.closed &&
       session.authenticated &&
-      session.capabilities.has(NET_LOCAL_CAPABILITY) &&
+      session.capabilities.has(type === 'mcp.auth-url' ? INTEGRATION_CAPABILITY : NET_LOCAL_CAPABILITY) &&
       !!binding &&
       session.binding?.profileId === binding.profileId &&
       session.binding.epoch === binding.epoch &&
@@ -1191,7 +1192,7 @@ export class MmsProtocolServer {
         )
       )
     }
-    if (type !== 'bridge.hub.thread') {
+    if (type !== 'bridge.hub.thread' && type !== 'mcp.auth-url') {
       return Promise.reject(new DomainRpcError('invalid_params', 'Unsupported connection event'))
     }
     if (session.connectionEventPending >= 8) {
