@@ -1,6 +1,6 @@
 # Run Engine — engineering spec
 
-Tracking: issue #79. Plan: [run-engine-plan-2026-10-12.md](../run-engine-plan-2026-10-12.md). Background: [catch-up](../catch-up-orchestration-2026-10-12.md), [T3 deep assessment](../t3-orchestrator-v2-deep-assessment-2026-10-12.md), [ideation](../architecture-ideation-2026-10-12.md).
+Tracking: issue #79. Plan: [run-engine-plan-2026-10-12.md](../run-engine-plan-2026-10-12.md). Background: [catch-up](../catch-up-orchestration-2026-10-12.md), [ideation](../architecture-ideation-2026-10-12.md).
 
 This spec is the contract for implementation. If code and spec disagree, fix one and say which.
 

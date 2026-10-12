@@ -116,11 +116,10 @@ about 253 MB in this workload, so it was rejected and not shipped.
 
 ## Phase 2: static-compositor and retention pass
 
-After the initial report, the GUI was given a stricter target and compared with
-T3 Code's renderer-memory work. T3 Code PR #5148 did **not** identify CSS as its
-main renderer OOM cause: it collapsed redundant live context-window events and
-reduced fully hydrated thread subscriptions from ten to three. Mousse had an
-equivalent retention multiplier plus a much heavier visual compositor setup.
+After the initial report, the GUI was given a stricter target. CSS alone was
+**not** the main renderer OOM cause. Redundant live context-window events and too
+many fully hydrated thread subscriptions multiply retained memory. Mousse had that
+retention multiplier plus a much heavier visual compositor setup.
 
 Changes made in this pass:
 
