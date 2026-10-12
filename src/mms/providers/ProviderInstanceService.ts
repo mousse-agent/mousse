@@ -199,6 +199,12 @@ export class ProviderInstanceService {
     const auth = this.options.providerAuth
     if (builtinPiProviders().has(providerId)) return true
     if (auth?.credentials?.listProviderIds().includes(providerId)) return true
+    // The pi loop serves any provider the credential service reports as configured.
+    try {
+      if (auth?.has?.(providerId)) return true
+    } catch {
+      /* fall through to the catalog */
+    }
     try {
       return auth?.models?.getProviders().some((provider) => provider.id === providerId) ?? false
     } catch {

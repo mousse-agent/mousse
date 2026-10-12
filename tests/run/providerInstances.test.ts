@@ -117,7 +117,7 @@ describe('ProviderInstanceService', () => {
       },
       providerAuth: {
         credentials: { listProviderIds: () => credentials },
-        has: (id: string) => id !== 'web-tool:exa',
+        has: (id: string) => credentials.includes(id) && id !== 'web-tool:exa',
         getConfiguredProviders: () => credentials.map((id) => ({ id, label: id, authType: 'api_key' as const })),
         getConfiguredLlmProviders: () => credentials.map((id) => ({ id, label: id, models: [{ id: 'm', label: 'M' }] }))
       }
@@ -184,6 +184,13 @@ describe('ProviderInstanceService', () => {
     expect(instances.overrideFor({ instanceId: 'pi:openai', llmProvider: 'stale', model: 'gpt' })).toEqual({ instanceId: 'pi:openai', llmProvider: 'openai', model: 'gpt' })
     expect(codeOf(() => instances.overrideFor({ llmProvider: 'whatever', model: 'x' }))).toBe('provider_instance_unknown')
     expect(codeOf(() => instances.overrideFor({ instanceId: 'antigravity', model: 'x' }))).toBe('provider_instance_disabled')
+  })
+
+  it('treats a provider the credential service reports as configured as a known pi provider', () => {
+    const instances = new ProviderInstanceService({ providerAuth: { has: (id: string) => id === 'fixture-provider' } })
+    expect(instances.instanceIdForLegacyProvider('fixture-provider')).toBe('pi:fixture-provider')
+    expect(instances.resolve('pi:fixture-provider')).toMatchObject({ entry: { driver: 'pi', enabled: true }, llmProvider: 'fixture-provider' })
+    expect(codeOf(() => instances.instanceIdForLegacyProvider('other-provider'))).toBe('provider_instance_unknown')
   })
 
   it('migrates stored selections on read and leaves unmappable ones for the turn to reject', () => {
