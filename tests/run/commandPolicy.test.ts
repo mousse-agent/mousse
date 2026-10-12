@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { heartbeatToleranceMs, steerStrategy, stopStrategy } from '../../src/mms/run/CommandPolicy'
+import { ANTIGRAVITY_CAPABILITIES } from '../../src/mms/run/adapters/antigravity/AntigravityAdapter'
+import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { ProviderCapabilities } from '../../src/mms/run/adapters/ProviderAdapter'
 import type { RunRecord, RunStatus } from '../../src/mms/run/types'
@@ -46,6 +48,18 @@ describe('steerStrategy', () => {
         'interrupt_restart'
       )
       expect(steerStrategy(caps({ steer: 'queue_only' }), run(status))).toBe('queue')
+    }
+  })
+
+  it('steers the pi loop natively and Claude Subscription and Antigravity by interrupt-and-restart', () => {
+    for (const status of LIVE) {
+      expect(steerStrategy(PI_LOOP_CAPABILITIES, run(status))).toBe('native')
+      expect(steerStrategy(CLAUDE_SUBSCRIPTION_CAPABILITIES, run(status))).toBe('interrupt_restart')
+      expect(steerStrategy(ANTIGRAVITY_CAPABILITIES, run(status))).toBe('interrupt_restart')
+    }
+    for (const caps of [CLAUDE_SUBSCRIPTION_CAPABILITIES, ANTIGRAVITY_CAPABILITIES]) {
+      expect(steerStrategy(caps, run('queued'))).toBe('queue')
+      for (const status of OVER) expect(steerStrategy(caps, run(status))).toBe('late_steer_new_run')
     }
   })
 

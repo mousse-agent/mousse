@@ -26,7 +26,7 @@ export type ClaudeSubscriptionClient = Pick<
 >
 
 export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.freeze({
-  steer: 'native',
+  steer: 'interrupt_restart',
   interrupt: true,
   rollback: 'none',
   fork: 'portable',

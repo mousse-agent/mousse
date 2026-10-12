@@ -331,7 +331,7 @@ export interface TurnResult { text: string; aborted: boolean; usage?; providerRe
 
 ```ts
 export interface ProviderCapabilities {
-  steer: 'native' | 'interrupt_restart' | 'queue_only'    // read by CommandPolicy.steerStrategy
+  steer: 'native' | 'interrupt_restart' | 'queue_only'    // read by CommandPolicy.steerStrategy (see below)
   interrupt: boolean                                       // CommandPolicy.stopStrategy
   rollback: 'native' | 'none'                              // CommandPolicy.undoStrategy (Phase 6)
   fork: 'native' | 'portable'                              // CommandPolicy.forkStrategy (Phase 6)
@@ -341,6 +341,8 @@ export interface ProviderCapabilities {
   mcp: boolean                                             // Phase 5: whether the Mousse MCP server can be attached
 }
 ```
+
+`steer` describes how steer text reaches a live turn. `native`: the text joins the live turn without cancelling in-flight work (a running tool call finishes and the model sees the text at its next step); only the pi loop does this. `interrupt_restart`: the provider delivers it by interrupting the turn and resuming or restarting the session with the text as a new user message, so a tool call in flight is cancelled (Claude Subscription: `query.interrupt()` then resume; Antigravity: `session/cancel` then a new prompt). `queue_only`: the text waits for the turn to end. User steers are delivered the same way whatever the value; the capability decides only whether reconciler rule 4 may push a delegation notice into a live run (§14.3).
 
 Rule: `tests/run/capabilityReaders.test.ts` lists each key with its reader functions (`steer` → `steerStrategy`, `interrupt` → `stopStrategy`, `rollback` → `canUndoNatively`, `fork` → `forkStrategy`, `events` → `heartbeatToleranceMs`, `containment` → `restoreMode`, `historyInjection` → `handoffDelivery`, `mcp` → `mcpAttachable`) and asserts that each reader, defined under `src/mms/run/**` outside `adapters/**`, reads `caps.<key>`, and that some non-test source under `src/` outside `adapters/**` **calls** it (a `name(` call site other than its definition, comment lines excluded). Adding a flag without a called reader fails CI. (T3 declared 68 flags and read 20.) There is no `nativeSubagents` flag: every adapter's delegation goes through Mousse's own `delegate_task` (§14), so nothing would read it.
 
@@ -356,8 +358,8 @@ Pure functions from `(capabilities, runState)` to a decision; the engine and exe
 | Adapter | Wraps | Caps (steer / interrupt / events / containment) |
 |---|---|---|
 | `PiLoopAdapter` | `LlmClient.chat` tool loop | native / yes / rich / strong (we run the tools) |
-| `ClaudeSubscriptionAdapter` | `ClaudeSubscriptionProviderService.chat` | native (drainSteer) / yes (signal) / rich / weak |
-| `AntigravityAdapter` | `AntigravityProviderService.chat` | native / yes / sparse / weak |
+| `ClaudeSubscriptionAdapter` | `ClaudeSubscriptionProviderService.chat` | interrupt_restart (drainSteer, interrupt then resume) / yes (signal) / rich / weak |
+| `AntigravityAdapter` | `AntigravityProviderService.chat` | interrupt_restart (cancel then re-prompt) / yes / sparse / weak |
 
 There is no `terminalQuality` flag: every adapter's `startTurn` settles when its stream closes, and that settlement is the turn's terminal signal, so no code path would read a "stream closed without a terminal event" policy. A hung stream is caught by rule 2's heartbeat window (§12.4).
 
@@ -405,7 +407,7 @@ Deleting a thread cancels what it still has in flight (`RunEngine.cancelThreadWo
 
 ### 14.3 Wake-up (reconciler rule 4)
 
-- Rule 4: for every `inbox` row `pending` whose thread has no active run and no `queued` wake run → enqueue a `turn.start` effect with payload `{ kind: 'wake', inboxIds }` (one wake per thread, batched). If the thread has an active run whose adapter `caps.steer === 'native'` and `wake === 'always'` → enqueue `turn.steer` with the formatted notice; otherwise leave `pending` until the active run ends (the rule fires again). A delivered row records the effect that delivered it (`inbox.delivered_by`, migration 7).
+- Rule 4: for every `inbox` row `pending` whose thread has no active run and no `queued` wake run → enqueue a `turn.start` effect with payload `{ kind: 'wake', inboxIds }` (one wake per thread, batched). If the thread has an active run whose adapter `caps.steer === 'native'` and `wake === 'always'` → enqueue `turn.steer` with the formatted notice; otherwise leave `pending` until the active run ends (the rule fires again) and deliver it as a wake run. `wake: 'always'` means the parent may be told mid-run when that is free, not that its turn may be cut short: on an `interrupt_restart` provider a steer would cancel the parent's in-flight tool call, so those rows wait like `settled_only` ones. A delivered row records the effect that delivered it (`inbox.delivered_by`, migration 7).
 - **Redelivery**: rule 4 (and boot) first returns `delivered` rows to `pending` when their delivering effect ended `failed|cancelled`, or when it is a wake whose run ended other than `completed` (a wake the user stopped excepted); at most 3 times per row, so a delivery that keeps failing cannot loop.
 - **Busy thread**: channel turns are engine runs (a `send` with `source: 'channel'`), so the engine sees them. A wake claimed while the thread is still busy — with a turn the engine does not schedule (a workflow or legacy turn) — stays `queued` and its effect is deferred 5 s (`EffectDeferredError`), so rule 4 never cancels and recreates it in a loop; when another engine turn of the thread waits to start instead, the wake ends `cancelled` with its rows pending again so that turn goes first and rule 4 queues a new wake behind it.
 - The wake turn's prompt is a server-authored notice: "Delegated task X finished: <result head>. Use `task_status` for the full result." Reading via `task_status` marks the inbox row `acknowledged`; if every task in a pending wake is acknowledged before the wake starts, the wake effect is cancelled.
