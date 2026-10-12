@@ -287,6 +287,9 @@ class TurnRun {
   startInFlight = false
   /** The chat returned; late events only settle the turn and reach nobody. */
   private muted = false
+  private readonly questionsDone = new AbortController()
+  /** Ends this run's pending questions: the turn stopped, ended, or lost its process. */
+  readonly questionSignal: AbortSignal
   private readonly completedTurns = new Set<string>()
   private idleWaiters: Array<() => void> = []
   /** Resolves once the run is released: settled on the server, or the process died. */
@@ -301,6 +304,11 @@ class TurnRun {
     private readonly input: CodexChatInput
   ) {
     this.finished = new Promise((done) => (this.finish = done))
+    this.questionSignal = AbortSignal.any([signal, this.questionsDone.signal])
+  }
+
+  cancelQuestions(): void {
+    this.questionsDone.abort(new Error('The Codex turn ended'))
   }
 
   get text(): string {
@@ -317,6 +325,7 @@ class TurnRun {
   }
 
   fail(error: unknown): void {
+    this.cancelQuestions()
     this.settle?.reject(error)
     this.settle = undefined
     this.startInFlight = false
@@ -804,7 +813,7 @@ export class CodexProviderService {
     switch (request.method) {
       case 'item/commandExecution/requestApproval': {
         const approval = request.params as CodexServerRequestMap['item/commandExecution/requestApproval']['params']
-        if (!run || run.signal.aborted) return { decision: 'cancel' } satisfies Result<'item/commandExecution/requestApproval'>
+        if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/commandExecution/requestApproval'>
         if (run.mode === 'plan') return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
         const command = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command ?? 'a command'
         const decision = await this.approve(
@@ -815,7 +824,7 @@ export class CodexProviderService {
       }
       case 'item/fileChange/requestApproval': {
         const approval = request.params as CodexServerRequestMap['item/fileChange/requestApproval']['params']
-        if (!run || run.signal.aborted) return { decision: 'cancel' } satisfies Result<'item/fileChange/requestApproval'>
+        if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/fileChange/requestApproval'>
         if (run.mode === 'plan') return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
         const changes = (run.item(approval.itemId) as { changes?: Array<{ path: string }> } | undefined)?.changes ?? []
         const decision = await this.approve(
@@ -826,7 +835,7 @@ export class CodexProviderService {
       }
       case 'item/tool/requestUserInput': {
         const input = request.params as CodexServerRequestMap['item/tool/requestUserInput']['params']
-        if (!run || run.signal.aborted) throw new Error('No Mousse turn is waiting for this answer')
+        if (!run || run.questionSignal.aborted) throw new Error('No Mousse turn is waiting for this answer')
         const answers = await this.questions.requestAnswers(
           input.questions.map((question) => ({
             id: question.id,
@@ -834,7 +843,7 @@ export class CodexProviderService {
             options: (question.options ?? []).map((option) => ({ id: option.label, label: option.label }))
           })),
           run.mousseThreadId,
-          { signal: run.signal }
+          { signal: run.questionSignal }
         )
         return {
           answers: Object.fromEntries(
@@ -870,12 +879,12 @@ export class CodexProviderService {
           }
         ],
         run.mousseThreadId,
-        { signal: run.signal }
+        { signal: run.questionSignal }
       )
-      if (run.signal.aborted) return 'cancel'
+      if (run.questionSignal.aborted) return 'cancel'
       return answer.permission === 'allow' ? 'accept' : answer.permission === 'allow_session' ? 'acceptForSession' : 'decline'
     } catch {
-      return run.signal.aborted ? 'cancel' : 'decline'
+      return run.questionSignal.aborted ? 'cancel' : 'decline'
     }
   }
 
@@ -1172,6 +1181,7 @@ export class CodexProviderService {
       this.activeThreads.delete(input.threadId)
       // A stopped turn stays registered (for routing) until the server settles it or the process dies.
       run?.mute()
+      run?.cancelQuestions()
       if (run && this.turns.get(run.codexThreadId) === run) {
         const pending = run
         const release = (): void => {

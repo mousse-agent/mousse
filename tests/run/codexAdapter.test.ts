@@ -576,6 +576,26 @@ describe('CodexAdapter', () => {
     expect(retry).toMatchObject({ text: 'ok', threadDisposition: 'reusable' })
   })
 
+  it('withdraws a pending approval question when the app-server dies', async () => {
+    const replay = transport(
+      [
+        ...handshake(),
+        ...threadStart(3),
+        ...turnStart(4, 'hello'),
+        inn({ id: 'srv-1', method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: 'cmd-1', startedAtMs: 0, environmentId: null, command: 'make' } }),
+        cue({ wait: 'question' }),
+        inn({ kind: 'exit', code: 1 })
+      ],
+      async () => {
+        await expect.poll(() => questions.listPendingForThread('thread-1')).toHaveLength(1)
+      }
+    )
+    const codex = service(replay)
+    await expect(new CodexAdapter(() => codex).startTurn(input(), recordingSink(), control(), host())).rejects.toBeInstanceOf(CodexAppServerExitedError)
+    replay.assertDone()
+    expect(questions.listPendingForThread('thread-1')).toEqual([])
+  })
+
   it('never sends a turn to a replacement process before it reports a ChatGPT account', async () => {
     const replay = transport([
       ...handshake(),
