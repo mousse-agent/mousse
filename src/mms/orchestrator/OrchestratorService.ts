@@ -1066,6 +1066,19 @@ export class OrchestratorService extends EventEmitter {
     this.staleRuns.delete(runId)
   }
 
+  /**
+   * Queue items that leave the queue without running (removed, cleared, promoted to steer) end
+   * their run `cancelled`. Only still-queued runs: a claimed item's run may already be starting.
+   */
+  private cancelQueuedRuns(runIds: Array<string | undefined>): void {
+    for (const runId of runIds) {
+      this.markRun(runId, (engine, id) => {
+        if (engine.getRun(id)?.status !== 'queued') return
+        engine.markTerminal(id, 'cancelled', { interruptedBy: 'user' })
+      })
+    }
+  }
+
   /** Pre-upgrade queue items carry no runId; give them one before they run. */
   private async ensureQueueItemRun(item: QueuedMessage): Promise<string | undefined> {
     if (item.runId || !this.runEngine) return item.runId
@@ -1523,6 +1536,7 @@ export class OrchestratorService extends EventEmitter {
       removed = result.removed
     }
     this.emitQueueUpdated(threadId, session.queue)
+    this.cancelQueuedRuns([(removed as QueuedMessage | null)?.runId])
     return removed
   }
 
@@ -1557,17 +1571,25 @@ export class OrchestratorService extends EventEmitter {
       throw new QueueValidationError('No active turn to steer on this thread.')
     }
     let item: QueuedMessage
-    if (this.threadStore) {
-      session.queue = mutateDurableQueue(this.threadStore, threadId, (disk) => {
-        const result = promoteQueuedMessageToSteer(disk, itemId)
+    let promotedRunId: string | undefined
+    // A steer joins the active run, so the promoted item no longer owns a run of its own.
+    const promote = (items: QueuedMessage[]): QueuedMessage[] => {
+      const result = promoteQueuedMessageToSteer(items, itemId)
+      promotedRunId = result.item.runId
+      if (!promotedRunId) {
         item = result.item
         return result.items
-      })
-    } else {
-      const result = promoteQueuedMessageToSteer(session.queue, itemId)
-      session.queue = result.items
-      item = result.item
+      }
+      const { runId: _runId, ...steer } = result.item
+      item = steer
+      return result.items.map((entry) => (entry.id === steer.id ? steer : entry))
     }
+    if (this.threadStore) {
+      session.queue = mutateDurableQueue(this.threadStore, threadId, promote)
+    } else {
+      session.queue = promote(session.queue)
+    }
+    this.cancelQueuedRuns([promotedRunId])
     if (
       !localActive &&
       externalActive &&
@@ -2352,9 +2374,11 @@ export class OrchestratorService extends EventEmitter {
       active.abort.abort()
     }
     if (opts?.clearQueue && id) {
+      let clearedRunIds: Array<string | undefined> = []
       const clear = (items: QueuedMessage[]): QueuedMessage[] => {
         const retained = clearPendingQueue(items)
         const retainedIds = new Set(retained.map((item) => item.id))
+        clearedRunIds = items.filter((item) => !retainedIds.has(item.id)).map((item) => item.runId)
         for (const item of items) {
           if (item.workflowInvocationId && !retainedIds.has(item.id)) {
             if (!this.workflowChat) throw new Error('Workflow queue cancellation is unavailable')
@@ -2370,6 +2394,7 @@ export class OrchestratorService extends EventEmitter {
         session.queue = clear(session.queue)
       }
       this.emitQueueUpdated(id, session.queue)
+      this.cancelQueuedRuns(clearedRunIds)
     }
     this.emit('turn-aborted', { threadId: id ?? undefined })
     return true

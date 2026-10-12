@@ -187,6 +187,58 @@ describe('Run Engine legacy bridge', () => {
     expect(forwarded.map((event) => event.seq)).toEqual(seqs)
   }, 30_000)
 
+  it('cancels queued runs whose items are removed, promoted to steer or cleared', async () => {
+    const thread = store.createThread('cancel')
+    orch.getOrCreateSession(thread.id).projectCwd = projectRepo
+
+    const p1 = orch.send('first', false, { threadId: thread.id, clientRequestId: 'c-1' })
+    await waitFor(() => chatCalls === 1, 10_000, 'first provider call')
+    const [first] = engine.listRuns(thread.id)
+    const queued = []
+    for (const text of ['second', 'third', 'fourth', 'fifth']) {
+      const response = await orch.send(text, false, { threadId: thread.id, clientRequestId: `c-${text}` })
+      expect(response.queued).toBe(true)
+      expect(response.queueItem?.runId).toBe(response.runId)
+      queued.push(response)
+    }
+    const [second, third, fourth, fifth] = queued
+
+    expect(orch.removeQueuedItem(thread.id, second.queueItem!.id)?.runId).toBe(second.runId)
+    expect(engine.getRun(second.runId!)).toMatchObject({
+      status: 'cancelled',
+      outcome: { interruptedBy: 'user' }
+    })
+
+    // A promoted steer joins the active run; its own run is cancelled and the item drops runId.
+    expect(orch.promoteQueueItemToSteer(thread.id, third.queueItem!.id)).toBe(true)
+    expect(engine.getRun(third.runId!)!.status).toBe('cancelled')
+    const steer = orch.getMessageQueue(thread.id).find((item) => item.id === third.queueItem!.id)
+    expect(steer).toMatchObject({ intent: 'steer' })
+    expect(steer?.runId).toBeUndefined()
+
+    expect(orch.abortActiveTurn(thread.id, { clearQueue: true })).toBe(true)
+    await p1
+    for (const run of [fourth, fifth]) {
+      expect(engine.getRun(run.runId!)).toMatchObject({
+        status: 'cancelled',
+        outcome: { interruptedBy: 'user' }
+      })
+    }
+    expect(engine.getRun(first.runId)).toMatchObject({
+      status: 'interrupted',
+      outcome: { interruptedBy: 'user' }
+    })
+    expect(orch.listQueue(thread.id)).toEqual([])
+    expect(engine.listRuns(thread.id).map((run) => run.status)).toEqual([
+      'cancelled',
+      'cancelled',
+      'cancelled',
+      'cancelled',
+      'interrupted'
+    ])
+    expect(chatCalls).toBe(1)
+  }, 30_000)
+
   it('replays a duplicate send without starting another turn', async () => {
     const thread = store.createThread('replay')
     orch.getOrCreateSession(thread.id).projectCwd = projectRepo
