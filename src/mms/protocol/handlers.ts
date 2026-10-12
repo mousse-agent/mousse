@@ -14,13 +14,20 @@ import { lifecycleGit, readDirectLifecycleRef, WorktreeRetirementService } from 
  */
 
 import type { MmsProfileServices } from '../MmsProfileServices'
+import { LocalActionGated, type CommandResult } from '../run/RunEngine'
+import { canUndoNatively } from '../run/policy/featureGates'
+import type { RunOutcome } from '../run/types'
+import { CommandRejection } from '../run/db/RunStoreError'
+import { EFFECT_PAGE_MAX } from '../run/EffectOutbox'
+import { evaluateRestore, restoreDiff, restoreDiffSha, worktreeClaims, type WorkspaceClaim } from '../run/workspace/restoreSafety'
+import type { ThreadAction } from '../../shared/threadActions'
+import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import type { ChatMessage, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
-import { getPiLlmProviders } from '../orchestrator/piProviders'
+import type { ModelOverride } from '../../shared/providerInstances'
 import {
   ACCENT_COLORS,
-  AGENT_TYPES,
   THEME_OPTIONS,
   buildAgentTypesFromCatalogs,
   lastUsedChatModel,
@@ -80,6 +87,11 @@ import { isInstallationMethod } from '../profiles/admission'
 import { ChatReferenceMetadataResolver } from '../data/resolveChatReferenceMetadata'
 import { parseChatReference } from '../../shared/chatReferences'
 
+/** Claude and Codex report their terminal sign-ins from cached live checks; refresh both. */
+async function refreshVendorSignIns(ctx: HandlerContext): Promise<void> {
+  await Promise.all([ctx.mms.claudeSubscription.status(), ctx.mms.codex.status()])
+}
+
 export interface HandlerContext {
   mms: MmsProfileServices
   /** Trusted local-protocol admission context; absent on legacy internal calls. */
@@ -97,6 +109,146 @@ function admittedChatSource(ctx: HandlerContext, fallback: string): string {
   return ctx.connection.clientType === 'gui' ? 'gui' : ctx.connection.clientType === 'cli' ? 'cli' : 'internal'
 }
 
+function rejectUnknownKeys(p: Record<string, unknown>, allowed: readonly string[]): void {
+  for (const key of Object.keys(p)) if (!allowed.includes(key)) throw new DomainRpcError('invalid_params', `${key} is not allowed`)
+}
+
+/**
+ * SPEC §16.3 review confirmation: the SHA-256 of the diff the review response returned. The bare
+ * `reviewed: true` of earlier versions confirmed no particular diff and is refused.
+ */
+function asReviewedDiffSha(p: Record<string, unknown>): string | undefined {
+  if (p.reviewed !== undefined)
+    throw new DomainRpcError('invalid_params', 'reviewed is replaced by reviewedDiffSha: pass the diffSha of the diff you reviewed')
+  const sha = asOptionalString(p.reviewedDiffSha, 64)
+  if (sha !== undefined && !/^[0-9a-f]{64}$/.test(sha)) throw new DomainRpcError('invalid_params', 'reviewedDiffSha must be a SHA-256 hex digest')
+  return sha
+}
+
+/** An idempotency key, when given, is a non-empty string of at most 128 characters (SPEC §6). */
+function asOptionalClientRequestId(value: unknown): string | undefined {
+  const id = asOptionalString(value, 128)
+  if (id !== undefined && id.length < 1) throw new DomainRpcError('invalid_params', 'clientRequestId must be a non-empty string')
+  return id
+}
+
+function asOptionalSendAwaitMode(value: unknown): 'turn' | 'ack' {
+  if (value === undefined) return 'turn'
+  if (value === 'turn' || value === 'ack') return value
+  throw new Error("await must be 'turn' or 'ack'")
+}
+
+/** Engine refusals (SPEC §16) become protocol errors whose code is the refusal reason. */
+async function asRpcRejection<T>(run: () => Promise<T> | T): Promise<T> {
+  try {
+    return await run()
+  } catch (error) {
+    if (error instanceof CommandRejection) throw new DomainRpcError(error.reason, error.message)
+    throw error
+  }
+}
+
+/** What a restore that needs review returns instead of restoring (SPEC §16.3). */
+interface RestoreReview {
+  requiresReview: true
+  diff: string
+  /** SHA-256 of `diff`; a reviewed retry passes it back as `reviewedDiffSha`. */
+  diffSha: string
+  actionId?: string
+}
+
+/**
+ * SPEC §16.3 restore gate for a file-restoring action: refuses (`workspace_shared`) unless the
+ * thread owns its worktree and no other thread's worktree or live working directory overlaps it
+ * (the other threads' workspaces are listed once per evaluation, and only when ownership holds);
+ * for a weak-containment provider, or one whose capabilities are unknown, returns the diff to
+ * review with its SHA-256 and appends `restore.review_required` — unless `reviewedDiffSha` names
+ * exactly the diff a restore would apply now. Null: go ahead.
+ */
+function restoreGate(
+  ctx: HandlerContext,
+  input: { threadId: string; workspace: ThreadWorkspaceMetadata; target: ThreadAction | undefined; kind: 'undo' | 'revert'; reviewedDiffSha?: string }
+): RestoreReview | null {
+  let others: WorkspaceClaim[] | undefined
+  const otherClaims = (): WorkspaceClaim[] => (others ??= [
+    ...worktreeClaims(ctx.mms.threads.listAllThreads().filter((thread) => thread.id !== input.threadId).flatMap((thread) => {
+      try {
+        return [{ threadId: thread.id, threadDirectory: ctx.mms.threads.getThreadDir(thread.id) }]
+      } catch {
+        return []
+      }
+    })),
+    ...ctx.mms.orchestrator.liveWorkspaceClaims(input.threadId)
+  ])
+  const decision = evaluateRestore({
+    threadId: input.threadId,
+    caps: ctx.mms.orchestrator.capabilitiesForThread(input.threadId),
+    metadata: input.workspace,
+    others: otherClaims
+  })
+  if (decision.action === 'refuse') throw new DomainRpcError(decision.reason, decision.message, { conflicts: decision.conflicts })
+  if (decision.action === 'proceed') return null
+  const diff = input.target ? restoreDiff(input.workspace.worktreePath, input.target.endSha, input.target.startSha) : ''
+  const diffSha = restoreDiffSha(diff)
+  if (input.reviewedDiffSha === diffSha) return null
+  ctx.mms.runEngine.store.appendEvent({
+    threadId: input.threadId,
+    type: 'restore.review_required',
+    payload: {
+      kind: input.kind,
+      actionId: input.target?.id ?? null,
+      mode: decision.mode,
+      diffBytes: Buffer.byteLength(diff),
+      diffSha,
+      ...(input.reviewedDiffSha !== undefined ? { staleReview: true } : {})
+    }
+  })
+  return { requiresReview: true, diff, diffSha, ...(input.target ? { actionId: input.target.id } : {}) }
+}
+
+/**
+ * SPEC §16.3: an undo or revert is its own run on the thread (`source: 'undo' | 'revert'`). `gate`
+ * runs under the thread's mutex right before the run is created, so no other run starts between
+ * the restore-safety check and the restore; a review it returns comes back as `{ review }` with no
+ * run. `outcome` is recorded on the completed run.
+ */
+async function localActionRun<T>(
+  ctx: HandlerContext,
+  threadId: string,
+  source: 'undo' | 'revert',
+  action: () => Promise<T>,
+  options: { gate?: () => RestoreReview | null; outcome?: RunOutcome } = {}
+): Promise<{ runId: string; result: T } | { review: RestoreReview }> {
+  const busy = new Error('Wait for active or queued work to finish.')
+  if (ctx.mms.runEngine.getActiveRun(threadId)) throw busy
+  const gate = options.gate
+  try {
+    return await ctx.mms.runEngine.runLocalAction({ threadId, source }, action, {
+      outcome: options.outcome,
+      ...(gate ? {
+        gate: () => {
+          const review = gate()
+          if (review) throw new LocalActionGated(review)
+        }
+      } : {})
+    })
+  } catch (error) {
+    if (error instanceof LocalActionGated) return { review: error.value as RestoreReview }
+    if (error instanceof CommandRejection && error.reason === 'thread_busy') throw busy
+    throw error
+  }
+}
+
+/** Run-targeted stop/steer (SPEC §6): `ignored` is a valid answer, not an error. */
+function runCommandResponse(result: CommandResult, runId: string): { ok: boolean; ignored: boolean; reason?: string; runId: string } {
+  return {
+    ok: result.status === 'accepted',
+    ignored: result.status === 'ignored',
+    ...(result.status !== 'accepted' ? { reason: result.reason } : {}),
+    runId
+  }
+}
+
 async function prepareChatInput(ctx: HandlerContext, threadId: string, input: OrchestratorSendRequest, raw: Record<string, unknown>): Promise<OrchestratorSendInput> {
   if (Object.hasOwn(raw, 'workflowInvocationId')) throw new DomainRpcError('invalid_params', 'Workflow receipt references are server-owned')
   const bridge = ctx.mms.platform?.workflowChat
@@ -107,36 +259,6 @@ async function prepareChatInput(ctx: HandlerContext, threadId: string, input: Or
     return prepared
   }
   return buildSendInput(prepared.content, prepared.mode, prepared.images)
-}
-
-function asAgentAssignment(v: Record<string, unknown>): {
-  cliType: 'mousse' | 'claude-code' | 'codex' | 'opencode' | 'cursor-agents-cli'
-  task: string
-  provider?: string
-  model?: string
-  effort?: string
-} {
-  const allowed = new Set(['threadId', 'cliType', 'task', 'provider', 'model', 'effort'])
-  for (const key of Object.keys(v)) {
-    if (!allowed.has(key)) throw new Error(`${key} is not allowed`)
-  }
-  const cliType = asString(v.cliType, 'cliType', 64)
-  if (!AGENT_TYPES.some((agent) => agent.id === cliType)) {
-    throw new Error('cliType must be a supported agent type')
-  }
-  const provider = asOptionalString(v.provider, 256)
-  const model = asOptionalString(v.model, 512)
-  if ((provider === undefined) !== (model === undefined)) {
-    throw new Error('provider and model must be supplied together')
-  }
-  const effort = asOptionalString(v.effort, 64)
-  return {
-    cliType: cliType as 'mousse' | 'claude-code' | 'codex' | 'opencode' | 'cursor-agents-cli',
-    task: asString(v.task, 'task'),
-    ...(provider ? { provider } : {}),
-    ...(model ? { model } : {}),
-    ...(effort ? { effort } : {})
-  }
 }
 
 function threadLookupContext(ctx: HandlerContext, params: Record<string, unknown>) {
@@ -422,7 +544,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ? ctx.mms.projects.getProject(projectId)?.path
         : undefined
       let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled })
-      const lastUsed = lastUsedChatModel(ctx.mms.settings.get())
+      const lastUsed = ctx.mms.providerInstances.migrate(lastUsedChatModel(ctx.mms.settings.get()))
       if (lastUsed) {
         thread = ctx.mms.threads.updateThreadMeta(thread.id, { modelOverride: lastUsed })
       }
@@ -532,17 +654,24 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const model = p.model
-      let override: { llmProvider: string; model: string } | undefined
+      let override: ModelOverride | undefined
       if (model !== undefined && model !== null) {
         if (!isObject(model)) throw new Error('model must be an object')
-        const llmProvider = asString(model.llmProvider, 'model.llmProvider', 256)
+        // `instanceId` is the selection (SPEC §13.8); the current GUI still sends `llmProvider`.
+        const instanceId = asOptionalString(model.instanceId, 256)
+        // A supplied provider name is validated even when the instance decides the stored value.
+        const llmProvider = instanceId
+          ? (model.llmProvider === undefined ? undefined : asString(model.llmProvider, 'model.llmProvider', 256))
+          : asString(model.llmProvider, 'model.llmProvider', 256)
         const modelId = asString(model.model, 'model.model', 512)
-        if (!llmProvider || !modelId) throw new Error('Model provider and id are required')
-        override = { llmProvider, model: modelId }
+        if ((!instanceId && !llmProvider) || !modelId) throw new Error('Model provider and id are required')
+        // Unknown or disabled instances are rejected here, before anything is stored.
+        override = ctx.mms.providerInstances.overrideFor({ instanceId, llmProvider, model: modelId })
       }
       const next = ctx.mms.orchestrator.setThreadModelOverride(threadId, override)
       if (override) {
-        ctx.mms.settings.set({ provider: override })
+        // The global default keeps the instance, so later default turns resolve the same agent.
+        ctx.mms.settings.set({ provider: { instanceId: override.instanceId, llmProvider: override.llmProvider, model: override.model } })
         ctx.emitEvent?.('settings.changed', { settings: ctx.mms.settings.get() })
       }
       const thread = ctx.mms.threads.getThread(threadId)
@@ -567,6 +696,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'orchestrator.send': {
       const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, [
+        'threadId', 'content', 'forceQueue', 'source', 'mode', 'images', 'requestId', 'workflowInvocationId',
+        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain'
+      ])
       const threadId = asString(p.threadId, 'threadId', 256)
       const content = asString(p.content, 'content')
       const forceQueue = asOptionalBoolean(p.forceQueue, 'forceQueue') === true
@@ -576,25 +709,50 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!ctx.mms.threads.getThread(threadId)) {
         throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       }
+      // Idempotency key (SPEC §6). `requestId` is deliberately not reused: the GUI keeps one per
+      // content hash while a send is in flight, so it would turn a repeated message into a replay.
+      const clientRequestId = asOptionalClientRequestId(p.clientRequestId)
+      // SPEC §12.7: `ack` returns once the send and its turn.start effect are committed.
+      const awaitMode = asOptionalSendAwaitMode(p.await)
+      // SPEC §16.4: "Continue" after a restart; an uncertain run needs `acknowledgeUncertain`.
+      const continuationOfRunId = asOptionalString(p.continuationOfRunId, 256)
+      const acknowledgeUncertain = asOptionalBoolean(p.acknowledgeUncertain, 'acknowledgeUncertain') === true
+      if (p.acknowledgeUncertain !== undefined && !continuationOfRunId)
+        throw new DomainRpcError('invalid_params', 'acknowledgeUncertain applies only with continuationOfRunId')
       ctx.mms.orchestrator.getOrCreateSession(threadId)
       const input = await prepareChatInput(ctx, threadId, { content, mode, images }, p)
       return await ctx.mms.orchestrator.send(input, false, {
         threadId,
         source,
-        forceQueue
+        forceQueue,
+        clientRequestId,
+        awaitMode,
+        ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})
       })
     }
     case 'orchestrator.abort': {
       const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'clearQueue', 'runId', 'clientRequestId'])
       const threadId = asString(p.threadId, 'threadId', 256)
       const clearQueue = asOptionalBoolean(p.clearQueue, 'clearQueue') === true
+      const runId = asOptionalString(p.runId, 256)
+      if (runId) {
+        const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
+        return runCommandResponse(await ctx.mms.orchestrator.abortRun(runId, clientRequestId, threadId), runId)
+      }
       const ok = ctx.mms.orchestrator.abortActiveTurn(threadId, { clearQueue })
       return { ok }
     }
     case 'orchestrator.steer': {
       const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'text', 'runId', 'clientRequestId', 'source'])
       const threadId = asString(p.threadId, 'threadId', 256)
       const text = asString(p.text, 'text')
+      const runId = asOptionalString(p.runId, 256)
+      if (runId) {
+        const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
+        return runCommandResponse(await ctx.mms.orchestrator.steerRun(runId, text, clientRequestId, threadId), runId)
+      }
       // Prefer mid-turn steer; fall back to external enqueue when no local turn.
       const result = ctx.mms.orchestrator.steerThreadOrEnqueueExternal(threadId, text, {
         source: admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol-steer')
@@ -606,6 +764,88 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asOptionalString(p.threadId, 256)
       const ok = ctx.mms.orchestrator.retryLastConnection(threadId)
       return { ok }
+    }
+    case 'runs.list': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'limit'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 200 }) ?? 50
+      return { runs: ctx.mms.runEngine.listRuns(threadId, { limit }) }
+    }
+    case 'runs.get': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['runId'])
+      const runId = asString(p.runId, 'runId', 256)
+      const run = ctx.mms.runEngine.getRun(runId)
+      if (!run) throw new DomainRpcError('run_not_found', 'Run not found', { runId })
+      return { run }
+    }
+    case 'runs.events': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'afterSeq', 'limit'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const afterSeq = asOptionalBoundedInt(p.afterSeq, 'afterSeq', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? 0
+      const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 500 }) ?? 500
+      return {
+        events: ctx.mms.runEngine.listEvents(threadId, { afterSeq, limit }),
+        maxSeq: ctx.mms.runEngine.maxSeq(threadId)
+      }
+    }
+    case 'runs.effects': {
+      // The newest effects of the thread (at most EFFECT_PAGE_MAX), oldest first; `before` pages back.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'limit', 'before'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: EFFECT_PAGE_MAX }) ?? EFFECT_PAGE_MAX
+      const before = asOptionalBoundedInt(p.before, 'before', { min: 1, max: Number.MAX_SAFE_INTEGER })
+      return ctx.mms.runEngine.outbox.pageForThread(threadId, { limit, before })
+    }
+    case 'runs.credentials': {
+      // Mousse MCP credentials minted for the thread's runs (SPEC §15.1); never the token hash.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      return { credentials: ctx.mms.mcpCredentials.listForThread(threadId) }
+    }
+    case 'runs.transfers': {
+      // Fork and merge-back transfers into or out of the thread (SPEC §16.2).
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      return { transfers: ctx.mms.runEngine.transfers.listForThread(threadId) }
+    }
+    case 'runs.handoffs': {
+      // Context handoffs the thread's turns received (SPEC §16.1).
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      return { handoffs: ctx.mms.runEngine.handoffs.listForThread(threadId) }
+    }
+    case 'thread.fork': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['sourceThreadId', 'atRunOrdinal', 'title', 'clientRequestId', 'seedFrom'])
+      const sourceThreadId = asString(p.sourceThreadId, 'sourceThreadId', 256)
+      const atRunOrdinal = p.atRunOrdinal === 'latest_stable'
+        ? 'latest_stable' as const
+        : asOptionalBoundedInt(p.atRunOrdinal, 'atRunOrdinal', { min: 1, max: Number.MAX_SAFE_INTEGER })
+      const title = asOptionalString(p.title, 256)
+      const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
+      if (p.seedFrom !== undefined && p.seedFrom !== 'checkpoint' && p.seedFrom !== 'current_head')
+        throw new DomainRpcError('invalid_params', "seedFrom must be 'checkpoint' or 'current_head'")
+      const seedFrom = p.seedFrom as 'checkpoint' | 'current_head' | undefined
+      if (!ctx.mms.threads.getThread(sourceThreadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: sourceThreadId })
+      const forked = await asRpcRejection(() => ctx.mms.runEngine.forkThread({ sourceThreadId, atRunOrdinal, title, clientRequestId, seedFrom }))
+      if (!forked.replayed) ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
+      return { threadId: forked.threadId, transferId: forked.transferId, replayed: forked.replayed }
+    }
+    case 'thread.mergeBack': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['forkThreadId', 'clientRequestId'])
+      const forkThreadId = asString(p.forkThreadId, 'forkThreadId', 256)
+      const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
+      if (!ctx.mms.threads.getThread(forkThreadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: forkThreadId })
+      const merged = await asRpcRejection(() => ctx.mms.runEngine.mergeBack({ forkThreadId, clientRequestId }))
+      return { transferId: merged.transferId, parentThreadId: merged.parentThreadId, replayed: merged.replayed }
     }
     case 'orchestrator.isTurnActive': {
       // Lightweight turn probe — avoids full thread.snapshot (messages/agents/tasks).
@@ -635,6 +875,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const mode = asOptionalChatMode(p.mode, 'mode')
       const images = asOptionalChatImages(p.images, 'images')
       const source = admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol')
+      ctx.mms.orchestrator.assertQueueOpen(threadId)
       const item = ctx.mms.orchestrator.enqueueForThread(
         threadId,
         await prepareChatInput(ctx, threadId, { content, mode, images }, p),
@@ -784,9 +1025,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
-      const assignment = asAgentAssignment(p)
-      const logs = await ctx.mms.orchestrator.spawnAgentsForThread(threadId, [assignment])
-      return { threadId, logs }
+      // SPEC §14.5: one delegation path. Children are started by a turn's `delegate_task`.
+      throw new DomainRpcError('deprecated', 'agents.spawn is retired; delegate from a turn with delegate_task (or agents.createNamed).', { threadId })
     }
     case 'agents.stop': {
       const p = isObject(params) ? params : {}
@@ -1326,11 +1566,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'settings.getOptions': {
       await ctx.mms.providerAuth.init()
-      const llmProviders = getPiLlmProviders(ctx.mms.providerAuth)
-      const antigravity = ctx.mms.antigravity.llmProvider()
-      if (antigravity) llmProviders.push(antigravity)
-      const claudeSubscription = ctx.mms.claudeSubscription.llmProvider()
-      if (claudeSubscription) llmProviders.push(claudeSubscription)
+      await refreshVendorSignIns(ctx)
+      const llmProviders = ctx.mms.providerInstances.llmProviders()
       const agentTypes = buildAgentTypesFromCatalogs(ctx.mms.providerAuth.getCatalogLlmProviders())
       return {
         options: {
@@ -1342,8 +1579,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
     }
     case 'providers.listConfigured':
-      return { providers: [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)] }
+      // Claude's and Codex's terminal sign-ins are cached live checks; refresh them before listing.
+      await refreshVendorSignIns(ctx)
+      return {
+        providers: ctx.mms.providerInstances.configuredProviders(),
+        // Present while the profile's stored instance map cannot be read (nothing is overwritten).
+        ...(ctx.mms.providerInstances.storeError() ? { instancesError: ctx.mms.providerInstances.storeError() } : {})
+      }
     case 'providers.getUsage': {
+      await ctx.mms.claudeSubscription.status()
       const [usage, claude] = await Promise.all([
         ctx.mms.providerAuth.getUsage(),
         ctx.mms.claudeSubscription.configured()
@@ -1364,15 +1608,23 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.getLoginOptions': {
       const p = isObject(params) ? params : {}
       const authType = asOptionalString(p.authType, 32) as 'api_key' | 'oauth' | undefined
-      return { options: [...ctx.mms.providerAuth.getLoginOptions(authType), ...(authType === 'api_key' || ctx.mms.antigravity.configured() ? [] : [ctx.mms.antigravity.loginOption()]), ...(authType === 'api_key' || ctx.mms.claudeSubscription.configured() ? [] : [ctx.mms.claudeSubscription.loginOption()])] }
+      await refreshVendorSignIns(ctx)
+      return { options: [...ctx.mms.providerAuth.getLoginOptions(authType), ...(authType === 'api_key' || ctx.mms.antigravity.configured() ? [] : [ctx.mms.antigravity.loginOption()]), ...(authType === 'api_key' || ctx.mms.claudeSubscription.configured() ? [] : [ctx.mms.claudeSubscription.loginOption()]), ...(authType === 'api_key' || ctx.mms.codex.configured() ? [] : [ctx.mms.codex.loginOption()])] }
     }
     case 'providers.refreshModels': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
-      if (providerId === 'claude-subscription') await ctx.mms.claudeSubscription.refreshModels(ctx.mms.worktrees.getRepoRoot())
+      if (providerId === 'claude-subscription') {
+        await ctx.mms.claudeSubscription.status()
+        await ctx.mms.claudeSubscription.refreshModels(ctx.mms.worktrees.getRepoRoot())
+      }
       else if (providerId === 'antigravity') await ctx.mms.antigravity.refreshModels(ctx.mms.worktrees.getRepoRoot())
+      else if (providerId === 'codex') {
+        await ctx.mms.codex.status()
+        await ctx.mms.codex.refreshModels()
+      }
       else await ctx.mms.providerAuth.refreshDynamicModels()
-      return { options: [...getPiLlmProviders(ctx.mms.providerAuth), ...[ctx.mms.antigravity.llmProvider(), ctx.mms.claudeSubscription.llmProvider()].filter((provider) => provider !== undefined)] }
+      return { options: ctx.mms.providerInstances.llmProviders() }
     }
     case 'providers.getAmbientInfo': {
       const p = isObject(params) ? params : {}
@@ -1385,7 +1637,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const apiKey = asString(p.apiKey, 'apiKey', 8192)
       await ctx.mms.providerAuth.setApiKey(providerId, apiKey)
       await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
-      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
+      const providers = ctx.mms.providerInstances.configuredProviders()
       ctx.emitEvent?.('providers.changed', { providers })
       return { providers }
     }
@@ -1415,7 +1667,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
       const result = await ctx.mms.providerAuth.verifyAmbientProvider(providerId)
-      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
+      const providers = ctx.mms.providerInstances.configuredProviders()
       if (result?.success) ctx.emitEvent?.('providers.changed', { providers })
       return { result, providers }
     }
@@ -1424,8 +1676,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const providerId = asString(p.providerId, 'providerId', 128)
       if (providerId === 'claude-subscription') await ctx.mms.claudeSubscription.logout()
       else if (providerId === 'antigravity') await ctx.mms.antigravity.logout()
+      // Disconnects Codex in Mousse only; the terminal `codex login` is never logged out.
+      else if (providerId === 'codex') await ctx.mms.codex.logout()
       else await ctx.mms.providerAuth.logout(providerId)
-      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
+      const providers = ctx.mms.providerInstances.configuredProviders()
       ctx.emitEvent?.('providers.changed', { providers })
       return { providers }
     }
@@ -1445,11 +1699,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           ? await ctx.mms.claudeSubscription.login(session, ctx.mms.worktrees.getRepoRoot())
           : providerId === 'antigravity'
           ? await ctx.mms.antigravity.login(session, ctx.mms.worktrees.getRepoRoot())
+          : providerId === 'codex'
+          ? await ctx.mms.codex.login(session, ctx.mms.worktrees.getRepoRoot())
           : await ctx.mms.providerAuth.runOAuthLogin(session, providerId)
         if (result && (result as { success?: boolean }).success !== false) {
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
-        const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
+        const providers = ctx.mms.providerInstances.configuredProviders()
         if (result && (result as { success?: boolean }).success !== false) {
           ctx.emitEvent?.('providers.changed', { providers })
         }
@@ -1479,7 +1735,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (result && (result as { success?: boolean }).success !== false) {
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
-        const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
+        const providers = ctx.mms.providerInstances.configuredProviders()
         if (result && (result as { success?: boolean }).success !== false) {
           ctx.emitEvent?.('providers.changed', { providers })
         }
@@ -1510,6 +1766,30 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const sessionId = asString(p.sessionId, 'sessionId', 256)
       ctx.mms.providerAuth.endSession(sessionId)
       return { ok: true }
+    }
+    case 'providers.claudeStatus': {
+      const p = isObject(params) ? params : {}
+      // `recheck` bypasses the cached `claude auth status` result.
+      const status = await ctx.mms.claudeSubscription.status({ force: p.recheck === true })
+      const providers = ctx.mms.providerInstances.configuredProviders()
+      if (p.recheck === true) ctx.emitEvent?.('providers.changed', { providers })
+      return { status, providers }
+    }
+    case 'providers.codexStatus': {
+      const p = isObject(params) ? params : {}
+      // `recheck` bypasses the cached `account/read` result.
+      const status = await ctx.mms.codex.status({ force: p.recheck === true })
+      const providers = ctx.mms.providerInstances.configuredProviders()
+      if (p.recheck === true) ctx.emitEvent?.('providers.changed', { providers })
+      return { status, providers }
+    }
+    case 'providers.claudeSetLoginPolicy': {
+      const p = isObject(params) ? params : {}
+      if (p.policy !== 'cli' && p.policy !== 'isolated') throw new Error('policy must be cli or isolated')
+      const status = await ctx.mms.claudeSubscription.setLoginPolicy(p.policy)
+      const providers = ctx.mms.providerInstances.configuredProviders()
+      ctx.emitEvent?.('providers.changed', { providers })
+      return { status, providers }
     }
     case 'workspace.getStatus': {
       const p = isObject(params) ? params : {}
@@ -1636,14 +1916,25 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         else ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary!)
       }
       const latest = new ThreadActionService(operation.threadDirectory).latest(branchId)
-      let action
-      if (latest?.scope === 'conversation') action = new ConversationActionService(operation.threadDirectory).apply(branchId, 'undo', operation.currentGeneration, expectedTurnId, validate, restore)
-      else {
+      const reviewedDiffSha = asReviewedDiffSha(p)
+      let gate: (() => RestoreReview | null) | undefined
+      if (latest?.scope !== 'conversation') {
         if (!workspace || workspace.lifecycle !== 'ready') throw new Error('This prompt has no eligible recorded Undo boundary.')
-        action = await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace.worktreePath, undefined, operation.currentGeneration, restore, 'undo', expectedTurnId, validate)
+        // SPEC §16.3: files are restored only in an owned, unshared worktree; weak containment reviews first.
+        gate = () => restoreGate(ctx, { threadId: operation.threadId, workspace, target: latest, kind: 'undo', reviewedDiffSha })
       }
+      // SPEC §13.2: a provider that rolls its own session back would undo natively; none does yet.
+      const caps = ctx.mms.orchestrator.capabilitiesForThread(operation.threadId)
+      const undoStrategy = caps && canUndoNatively(caps) ? 'native_rollback' as const : 'checkpoint' as const
+      const ran = await localActionRun(ctx, operation.threadId, 'undo', async () =>
+        latest?.scope === 'conversation'
+          ? new ConversationActionService(operation.threadDirectory).apply(branchId, 'undo', operation.currentGeneration, expectedTurnId, validate, restore)
+          : await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace!.worktreePath, undefined, operation.currentGeneration, restore, 'undo', expectedTurnId, validate),
+      { gate, outcome: { undoStrategy } })
+      if ('review' in ran) return ran.review
+      const { runId, result: action } = ran
       ctx.emitEvent?.('actions.updated', { threadId: operation.threadId, action }, operation.threadId)
-      return { action }
+      return { action, runId }
     }
     case 'actions.revertCode': {
       const p = isObject(params) ? params : {}
@@ -1651,7 +1942,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const actionId = asString(p.actionId, 'actionId', 256)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
-      return { action: await new CodeRevertService(operation.threadDirectory).revertCode(actionId, workspace.worktreePath, operation.currentGeneration) }
+      const target = new ThreadActionService(operation.threadDirectory).get(actionId)
+      const reviewedDiffSha = asReviewedDiffSha(p)
+      const ran = await localActionRun(ctx, operation.threadId, 'revert', () =>
+        new CodeRevertService(operation.threadDirectory).revertCode(actionId, workspace.worktreePath, operation.currentGeneration),
+      { gate: () => restoreGate(ctx, { threadId: operation.threadId, workspace, target, kind: 'revert', reviewedDiffSha }) })
+      if ('review' in ran) return ran.review
+      const { runId, result: action } = ran
+      return { action, runId }
     }
     case 'actions.redo': {
       const p = isObject(params) ? params : {}

@@ -86,6 +86,13 @@ export interface MousseSettings {
   provider: {
     llmProvider: LlmProviderId
     model: string
+    /**
+     * Provider instance of the default selection. Authoritative when set; a later update that names
+     * only `llmProvider` clears it (see `SettingsStore.set`).
+     */
+    instanceId?: string
+    /** Provider instances (`providers.instances` in the profile config); owned by the daemon. */
+    instances?: Record<string, unknown>
   }
   /** Lightweight model used to name chats. Blank values use the best connected default. */
   title: {
@@ -135,6 +142,8 @@ export interface LlmModelOption {
 
 export interface LlmProviderOption {
   id: LlmProviderId
+  /** Provider instance serving these models; select with `{ instanceId, model }`. */
+  instanceId?: string
   label: string
   models: LlmModelOption[]
 }
@@ -541,18 +550,19 @@ export function resolveSkillModelSettings(
 /** Last composer/chat model. Used as the default for newly created threads. */
 export function lastUsedChatModel(
   settings: Pick<MousseSettings, 'provider'>
-): { llmProvider: string; model: string } | undefined {
+): { instanceId?: string; llmProvider: string; model: string } | undefined {
   const llmProvider = settings.provider.llmProvider?.trim() ?? ''
   const model = settings.provider.model?.trim() ?? ''
   if (!llmProvider || !model) return undefined
-  return { llmProvider, model }
+  const instanceId = settings.provider.instanceId?.trim()
+  return { ...(instanceId ? { instanceId } : {}), llmProvider, model }
 }
 
 export function resolveModelForMode(
   settings: MousseSettings,
   mode: ChatMode,
   connectedProviderIds: Set<string> | string[] = []
-): { llmProvider: string; model: string } {
+): { instanceId?: string; llmProvider: string; model: string } {
   const connected = connectedProviderIds instanceof Set
     ? connectedProviderIds
     : new Set(connectedProviderIds)
@@ -565,10 +575,13 @@ export function resolveModelForMode(
     }
   }
 
+  // The default keeps its provider instance so a turn resolves the instance that was picked.
   const { llmProvider, model } = settings.provider
+  const instanceId = settings.provider.instanceId?.trim()
+  const selection = { ...(instanceId ? { instanceId } : {}), llmProvider, model }
   if (llmProvider && model && connected.has(llmProvider)) {
-    return { llmProvider, model }
+    return selection
   }
 
-  return { llmProvider: settings.provider.llmProvider, model: settings.provider.model }
+  return selection
 }

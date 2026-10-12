@@ -1,3 +1,4 @@
+import type { ModelOverride } from '../../shared/providerInstances'
 import type { ChannelSession } from '../../shared/types'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { ChannelStore } from './ChannelStore'
@@ -7,7 +8,12 @@ import { buildSessionKey } from './types'
 export class ChannelSessionManager {
   constructor(
     private store: ChannelStore,
-    private threadStore: ThreadDataStore
+    private threadStore: ThreadDataStore,
+    /**
+     * Migrate-on-read for a session model (SPEC §13.8): adds the provider instance an older
+     * `llmProvider` maps to, so the next save writes the instance shape. Never throws.
+     */
+    private migrateModel: (override: ModelOverride) => ModelOverride = (override) => override
   ) {}
 
   resolveThread(message: InboundChannelMessage): ChannelSession {
@@ -16,6 +22,7 @@ export class ChannelSessionManager {
     if (existing) {
       const updated: ChannelSession = {
         ...existing,
+        ...(existing.modelOverride ? { modelOverride: this.migrateModel(existing.modelOverride) } : {}),
         chatName: message.chatName ?? existing.chatName,
         userName: message.userName ?? existing.userName,
         lastMessageAt: new Date().toISOString()
@@ -56,7 +63,7 @@ export class ChannelSessionManager {
     if (!existing) return undefined
     const updated: ChannelSession = { ...existing }
     if (override) {
-      updated.modelOverride = override
+      updated.modelOverride = this.migrateModel(override)
     } else {
       delete updated.modelOverride
     }

@@ -1218,6 +1218,30 @@
   color: var(--text-secondary);
 }
 
+.claude-subscription-panel {
+  margin-bottom: 12px;
+}
+
+.claude-login-policy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.claude-subscription-panel .provider-remove-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.claude-panel-action-label {
+  font-size: 12px;
+}
+
 .provider-remove-btn {
   padding: 6px;
   border-radius: 6px;

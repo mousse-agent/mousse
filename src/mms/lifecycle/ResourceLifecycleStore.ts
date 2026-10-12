@@ -182,6 +182,29 @@ export class ResourceLifecycleStore {
     })
   }
 
+  /**
+   * Drops the registration of a task created moments ago that nothing used: its creating command
+   * failed before commit (a delegated child or fork whose run-engine transaction rolled back).
+   * Refuses any task that moved, has operations or a parent. Returns false for an unknown task.
+   */
+  forgetCreatedTask(taskId: string): boolean {
+    identity(taskId)
+    return this.withGate('_registry', () => {
+      this.initialize()
+      return this.withGate(taskId, () => {
+        const record = this.get(taskId)
+        if (!record) return false
+        if (record.state !== 'active' || record.generation !== 1 || record.operations.length || record.locations.length !== 1 || record.parentTaskId)
+          throw new ResourceLifecycleError('stale', 'Only an unused new task can be forgotten')
+        const indexPath = this.locationIndexPath(record.location)
+        assertLifecyclePath(this.root, indexPath)
+        if (existsSync(indexPath)) unlinkSync(indexPath)
+        unlinkSync(this.recordPath(taskId))
+        return true
+      })
+    })
+  }
+
   /** Conservative import of an existing legacy trash-index entry; never moves or deletes data. */
   adoptTrashedTask(input: { taskId: string; originalLocation: string; location: string }): TaskLifecycleRecord {
     identity(input.taskId)

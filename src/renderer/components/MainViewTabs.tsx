@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Bot, FileText, FolderOpen, GitBranch, Globe, Plus, Terminal, X } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
+import { confirmNavigation } from '../services/navigationGuards'
 import { surfaceTabItems, type SurfaceTabItem } from '../lib/surfaces'
 import { SurfaceChoiceList } from './OpenSurfaceMenu'
 
@@ -76,7 +77,9 @@ export function MainViewTabs() {
 
   if (items.length === 0) return null
 
-  const select = (item: SurfaceTabItem) => {
+  const select = async (item: SurfaceTabItem) => {
+    // Leaving the current view may discard an unsaved agent draft.
+    if (item.view !== useAppStore.getState().mainView && !await confirmNavigation()) return
     const store = useAppStore.getState()
     store.setMainView(item.view)
     store.setMainAreaOpen(true)
@@ -138,7 +141,7 @@ export function MainViewTabs() {
               type="button"
               className="main-view-tab-select"
               aria-current={selected ? 'page' : undefined}
-              onClick={() => select(item)}
+              onClick={() => void select(item)}
             >
               <Icon size={14} strokeWidth={2} className="main-view-tab-icon" />
               <span className="main-view-tab-label">{item.label}</span>

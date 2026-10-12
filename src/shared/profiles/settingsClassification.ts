@@ -43,6 +43,16 @@ export const SETTINGS_CLASSIFICATION: readonly SettingsClassificationEntry[] = [
     scope: 'profile',
     notes: 'Default model selection is personal; the catalog remains shared.'
   },
+  {
+    path: 'providers.instances',
+    scope: 'profile',
+    notes: 'Provider instances (which agents this profile can pick) are personal; credentials remain shared.'
+  },
+  {
+    path: 'providers.instancesSeedVersion',
+    scope: 'profile',
+    notes: 'Which seed set the profile instances were last seeded with.'
+  },
   { path: 'agents', scope: 'profile', notes: 'Engine enablement and per-agent model prefs are personal.' },
   { path: 'scheduled', scope: 'profile', notes: 'Job definitions bind their owner at creation.' },
   { path: 'channels', scope: 'profile', notes: 'Channel routing and pairing maps are profile-owned.' }

@@ -19,6 +19,7 @@ export interface EnqueueMessageInput {
   intent?: QueuedMessageIntent
   source?: string
   internal?: boolean
+  runId?: string
 }
 
 export interface ClaimOwnerInput {
@@ -105,7 +106,8 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       state,
       claim,
       source: typeof item.source === 'string' ? item.source : undefined,
-      internal: item.internal === true ? true : undefined
+      internal: item.internal === true ? true : undefined,
+      ...(typeof item.runId === 'string' && item.runId ? { runId: item.runId } : {})
     })
   }
   return sortQueue(out)
@@ -161,7 +163,8 @@ export function enqueueMessage(
     intent: input.intent ?? 'normal',
     state: 'pending',
     source: input.source,
-    internal: input.internal === true ? true : undefined
+    internal: input.internal === true ? true : undefined,
+    ...(input.runId ? { runId: input.runId } : {})
   }
 
   return { items: sortQueue([...items, item]), item }

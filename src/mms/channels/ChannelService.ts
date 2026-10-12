@@ -75,7 +75,7 @@ export class ChannelService extends EventEmitter {
     super()
     this.createAdapter = options?.createAdapter ?? createDefaultAdapter
     this.auth = new ChannelAuth(this.store.getPairingDirectory())
-    this.sessionManager = new ChannelSessionManager(this.store, threadStore)
+    this.sessionManager = new ChannelSessionManager(this.store, threadStore, (override) => orchestrator.migrateModelOverride(override) ?? override)
     this.router = new ChannelRouter(
       this.store,
       this.sessionManager,

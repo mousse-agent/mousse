@@ -1,11 +1,31 @@
-## Outcome
+<!--
+Title: Conventional Commit prefix, then the outcome in plain words.
+Example: fix(chat): switching models keeps the conversation
+Writing guide: docs/team-workflow.md#writing-prs-and-issues
+-->
 
-<!-- Explain what changes and why. Use Closes #123 for completed work or Refs #123 for partial delivery. -->
+## Problem
+
+<!-- One or two sentences: what is broken or missing, as the user sees it.
+For a bug, add the expected behavior and how to reproduce it. -->
+
+## Change
+
+<!-- How this solves the problem. Short paragraphs or bullets.
+Rewrite this section when the approach changes; do not append. -->
+
+## How to review
+
+<!-- Large PRs only; delete otherwise. List the parts, the order to read them,
+and where the risk is. -->
 
 ## Verification
 
-<!-- State checks run and their results, direct acceptance-criteria verification, and checks not run. -->
+<!-- Bullets: what you checked, what you saw, and what you could not check.
+"Tests pass" alone is not evidence. UI changes need before/after screenshots
+uploaded to the PR. -->
 
-## Handoff
+## Notes
 
-<!-- Link the issue's current status/next steps. Keep unfinished work as a draft PR. -->
+<!-- Optional, one or two lines: stacking, rollout or install steps, follow-ups.
+End with Closes #123 for completed work or Refs #123 for partial delivery. -->

@@ -128,6 +128,8 @@ export function openAgentsTasksWindow(
     if (agentsTasksWindow === win) agentsTasksWindow = null
   })
 
+  attachLinuxWindowShape(win)
+
   win.on('ready-to-show', () => {
     win.show()
     applyWindowsRoundedCorners(win)

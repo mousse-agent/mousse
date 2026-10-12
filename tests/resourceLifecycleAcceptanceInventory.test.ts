@@ -87,7 +87,6 @@ describe('Phase 1 public inventory and request identity', () => {
 
   it('retains dirty isolated child bytes and refs while clean task checkout retirement remains reconstructable', async () => {
     const f = await lifecycleHarness()
-    let releaseChild = () => {}
     let workflowRunId: string | undefined
     try {
       const repo = join(f.root, 'repo'); mkdirSync(repo)
@@ -102,37 +101,35 @@ describe('Phase 1 public inventory and request identity', () => {
       const { project } = await f.rpc.request<{ project: { id: string } }>('projects.open', { path: repo })
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'inventory owner', projectId: project.id })
 
-      const llm = (f.services.orchestrator as unknown as { llm: {
-        getSelectedModelContextLimit(): { limit: number }; getContextInputs(): Promise<unknown>; chat(...args: unknown[]): Promise<unknown>
-      } }).llm
-      const contextInputs = { systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: 'resource-lifecycle-inventory' }
-      vi.spyOn(llm, 'getSelectedModelContextLimit').mockReturnValue({ limit: 100_000 })
-      vi.spyOn(llm, 'getContextInputs').mockResolvedValue(contextInputs)
-      const heldChild = new Promise<void>((done) => { releaseChild = done })
-      let childIdentity = ''
-      vi.spyOn(llm, 'chat').mockImplementation(async (...args) => {
-        const options = args[2] as { subagentDiscovery?: { onDeclareFiles(files: string[], reason: string): void } } | undefined
-        if (options?.subagentDiscovery) options.subagentDiscovery.onDeclareFiles(['PRIMARY.txt'], 'deterministic lifecycle fixture')
-        else await heldChild
-        const text = options?.subagentDiscovery ? 'declared fixture file'
-          : 'retained child result\n```mousse-actions\n' + JSON.stringify({ actions: [{ type: 'complete_task', agentIds: [childIdentity], merge: false }] }) + '\n```'
-        return { text, contextInputs, nativeMessages: [], toolEvents: [],
-          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-          modelName: 'fixture', totalResponseTimeMs: 1, totalTokensUsed: 2, tokensPerSecond: 2 }
+      // `agents.spawn` is retired (SPEC §14.5) and answers `deprecated`. Isolated children that
+      // earlier versions spawned still exist on disk, so the legacy child is seeded the way the
+      // spawn path created it: a sparse worktree from the owned task checkout plus its registry row.
+      await expect(f.rpc.request('agents.spawn', { threadId: thread.id, cliType: 'mousse', task: 'Inspect PRIMARY.txt' })).rejects.toThrow(/retired|deprecated/)
+      const owner = f.services.orchestrator as unknown as {
+        getOrCreateSession(threadId: string): { workspace: { workspacePath: string } | null; agents: { create(input: Omit<Agent, 'id' | 'createdAt' | 'updatedAt'>, id?: string): Agent } }
+        withTaskWriter<T>(session: unknown, work: () => Promise<T>): Promise<T>
+        snapshotOwnedParent(session: unknown, label: string): Promise<string>
+        worktrees: { createSelectiveWorktree(id: string, files: string[], repositoryPath: string, base: string): Promise<{ path: string; branch: string }> }
+      }
+      const session = owner.getOrCreateSession(thread.id)
+      const childIdentity = randomUUID()
+      const created = await owner.withTaskWriter(session, async () => {
+        const base = await owner.snapshotOwnedParent(session, 'child-base')
+        return owner.worktrees.createSelectiveWorktree(childIdentity, ['PRIMARY.txt'], session.workspace!.workspacePath, base)
       })
-      const spawned = await f.rpc.request<{ logs: string[] }>('agents.spawn', { threadId: thread.id, cliType: 'mousse', task: 'Inspect PRIMARY.txt and retain your result.' })
+      session.agents.create({ cliType: 'mousse', worktreePath: created.path, branch: created.branch, repositoryRoot: session.workspace!.workspacePath,
+        executionMode: 'gui', status: 'running', task: 'Inspect PRIMARY.txt and retain your result.' } as Omit<Agent, 'id' | 'createdAt' | 'updatedAt'>, childIdentity)
       const agents = (await f.rpc.request<{ agents: Agent[] }>('agents.list', { threadId: thread.id })).agents
-      expect(agents, spawned.logs.join('\n')).toHaveLength(1)
+      expect(agents).toHaveLength(1)
       const child = agents[0]
-      childIdentity = child.id
-      expect(child.status, spawned.logs.join('\n')).toBe('running')
+      expect(child.status).toBe('running')
       expect(resolve(child.worktreePath)).not.toBe(resolve(repo))
       expect(readFileSync(join(child.worktreePath, 'PRIMARY.txt'), 'utf8')).toBe('primary remains unchanged\n')
       await expect(f.rpc.request('threads.trash', { threadId: thread.id })).rejects.toThrow(/active|busy|drain|agent|blocked/i)
       writeFileSync(join(child.worktreePath, 'PRIMARY.txt'), 'retained isolated result\n')
       git(child.worktreePath, 'add', 'PRIMARY.txt'); git(child.worktreePath, 'commit', '-qm', 'deterministic child result')
-      releaseChild()
+      // Stop without merge cancels the legacy child and keeps its worktree and branch.
+      await f.rpc.request('agents.stop', { threadId: thread.id, agentId: child.id, merge: false })
       await vi.waitFor(async () => {
         const current = (await f.rpc.request<{ agents: Agent[] }>('agents.list', { threadId: thread.id })).agents[0]
         expect(current.status, JSON.stringify(f.services.threads.loadThreadData(thread.id).tasks)).toBe('cancelled')
@@ -212,7 +209,6 @@ describe('Phase 1 public inventory and request identity', () => {
       expect(git(repo, 'status', '--porcelain')).toBe('')
       expect(readFileSync(join(repo, 'PRIMARY.txt'), 'utf8')).toBe('primary remains unchanged\n')
     } finally {
-      releaseChild()
       if (workflowRunId) await f.services.platform.workflowRuns.runtime.cancel(workflowRunId, { profileId: f.alice.id }, 'acceptance complete').catch(() => undefined)
       await f.close()
       vi.restoreAllMocks()

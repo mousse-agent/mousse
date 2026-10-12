@@ -30,19 +30,36 @@ export class UserQuestionService extends EventEmitter {
   /** True after this process started; questions never survive process death. */
   readonly survivesDaemonRestart = false
 
+  /**
+   * `options.timeoutMs` overrides the 10-minute default (the Mousse MCP `ask_user` waits up to an
+   * hour); an aborted `options.signal` dismisses the request (its caller's run ended).
+   */
   requestAnswers(
     questions: PendingUserQuestions['questions'],
-    threadId = '__unbound__'
+    threadId = '__unbound__',
+    options: { timeoutMs?: number; signal?: AbortSignal } = {}
   ): Promise<UserQuestionAnswers> {
     if (this.stopped) return Promise.reject(Object.assign(new Error('Profile questions are stopped'), { code: 'profile_draining' }))
+    if (options.signal?.aborted) return Promise.reject(new Error('User did not answer before the run ended.'))
     const requestId = crypto.randomUUID()
 
-    return new Promise<UserQuestionAnswers>((resolve, reject) => {
+    return new Promise<UserQuestionAnswers>((resolveAnswers, rejectAnswers) => {
+      const signal = options.signal
+      const onAbort = (): void => { this.dismiss(requestId) }
+      const resolve = (answers: UserQuestionAnswers): void => {
+        signal?.removeEventListener('abort', onAbort)
+        resolveAnswers(answers)
+      }
+      const reject = (error: Error): void => {
+        signal?.removeEventListener('abort', onAbort)
+        rejectAnswers(error)
+      }
       const timer = setTimeout(() => {
         this.pending.delete(requestId)
         this.emit('cleared', { requestId, threadId })
         reject(new Error('User did not answer in time.'))
-      }, QUESTION_TIMEOUT_MS)
+      }, options.timeoutMs ?? QUESTION_TIMEOUT_MS)
+      signal?.addEventListener('abort', onAbort, { once: true })
 
       this.pending.set(requestId, { threadId, questions, resolve, reject, timer })
       this.emit('pending', {

@@ -28,6 +28,53 @@ Discussion, planning, reviews, and diagnosis alone do not authorize code changes
 - Before resuming, inspect changes on the default branch, related issues, and teammate branches. Reconcile old work and discard duplicate implementation only after verifying what is already accepted; do not destroy unpublished work automatically.
 - Use `Closes #123` only when merging the PR completes the issue; otherwise use `Refs #123`. Keep WIP/review issues open. Status belongs in the handoff and draft/review state; no custom labels are required.
 
+## Writing PRs and issues
+
+Write for a teammate who has not seen the chat or the code. They should understand what changed and why in under a minute. The PR and issue templates in `.github/` follow this section.
+
+### Titles
+
+- PRs use a Conventional Commit prefix, then the outcome in plain words: `fix(chat): switching models keeps the conversation`. Say what changes for the user or the codebase, not which internals moved.
+- Issues name the problem or goal: `Switching models loses the conversation`.
+
+### PR descriptions
+
+- **Problem:** one or two sentences on what is broken or missing, as the user sees it. For a bug, add the expected behavior and how to reproduce it.
+- **Change:** how the PR solves it, in short paragraphs or bullets. Describe the change directly ("Claude sessions now restart when the model changes"). Leave yourself out of most sentences; say "I" only where a decision or check needs an owner.
+- **How to review:** large PRs only. See below.
+- **Verification:** bullets listing what you checked, what you saw, and what you could not check. Name the focused commands. "Tests pass" alone is not evidence. UI changes need before/after screenshots, and a short recording when motion or timing matters. Upload them to the PR; never commit PR-only assets.
+- **Notes:** optional, one or two lines for stacking, rollout or install steps, and follow-ups. End with `Closes #123` or `Refs #123` when an issue exists.
+
+### Keep it current
+
+The description describes the PR as it is now. When the scope or approach changes, rewrite the affected section instead of appending "I also..." paragraphs. Commits and comments hold the history. Post a short comment when a change matters to reviewers who already read the PR.
+
+### Plain words
+
+- Short sentences, one idea per paragraph. Lead with the result.
+- Use the terms in the [glossary](GLOSSARY.md). Explain any other internal term the first time it appears, or replace it with plain words.
+- Leave out build hashes, file counts, and process narration unless a reviewer needs them.
+- Link issues, PRs, commits, and files instead of retelling them.
+
+### Scope and large PRs
+
+One PR delivers one goal, at any size. A large feature such as the Run Engine belongs in one PR when its parts only make sense together. Split out work that does not serve the goal, such as an unrelated bug fix, an adjacent cleanup, or a second feature. Size alone is not a reason to split.
+
+For a large PR:
+
+- Add a **How to review** section listing the parts, the order to read them, and where the risk is.
+- Keep commits in reviewable steps, such as one per phase.
+- Put design reasoning that outlives the PR in a doc and link it instead of copying it into the description.
+
+### Issues
+
+- **Problem:** what is wrong or missing and who it affects. Bugs add the expected behavior and steps to reproduce.
+- **Goal:** the outcome we want, in one sentence.
+- **Done when:** checkboxes of observable results.
+- **Out of scope:** optional; what the issue deliberately leaves out.
+
+Keep the issue body current like a PR description. Decisions, blockers, and handoffs go in comments, written in the same plain style with the point first.
+
 ## Testing scope
 
 Default to focused tests for the changed behavior and directly affected areas. Choose checks that establish the requested behavior and relevant regressions, including a targeted app check when the change warrants it. Run the full test suite only when explicitly requested; implementation, merge, and session-wrap-up requests alone do not authorize a full run.

@@ -53,7 +53,7 @@ try {
         }
       }
       fixture.reset = (thread=null) => {
-        fixture.calls=[];fixture.selectError=false;fixture.createError=false;fixture.toggleError=false;fixture.pendingCreate=false;fixture.modelError=false;fixture.sendError=false;fixture.pendingSend=false;fixture.turnRunning=false;fixture.sendResolved=false;fixture.resumeSend=null;fixture.referenceError=false;fixture.pendingPath=false;
+        fixture.calls=[];fixture.selectError=false;fixture.createError=false;fixture.toggleError=false;fixture.pendingCreate=false;fixture.modelError=false;fixture.sendError=false;fixture.referenceError=false;fixture.pendingPath=false;fixture.pendingSend=false;fixture.turnRunning=false;fixture.sendResolved=false;fixture.resumeSend=null;
         useAppStore.setState({activeThreadId:thread?.id ?? null,threads:thread?[thread]:[],projects,
           profileReady:true,workspaceReady:true,messages:[],loading:false,mainView:'agents',turnStates:{},composerDrafts:{},composerReferences:{},composerWorkspaceDrafts:{},browserElementAttachmentsByThread:{}})
       }

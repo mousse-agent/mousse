@@ -37,6 +37,22 @@ beforeEach(async () => {
 }, 30_000)
 afterEach(async () => { await client?.close(); await server?.stop(); await mms?.stop(); vi.restoreAllMocks(); f?.dispose(); responses.length = 0; captured.length = 0 })
 
+
+/** Text of the latest user message in a provider context. */
+function lastUserText(context: Context): string {
+  const user = [...context.messages].reverse().find((message) => message.role === 'user')
+  if (!user) return ''
+  return typeof user.content === 'string' ? user.content : user.content.map((part) => ('text' in part ? part.text : '')).join('')
+}
+/** Tool results since the latest user message. */
+function toolResultsSinceUser(context: Context) {
+  const index = context.messages.map((message) => message.role).lastIndexOf('user')
+  return context.messages.slice(index + 1).filter((message) => message.role === 'toolResult')
+}
+const toolCall = (id: string, name: string, args: Record<string, unknown>) => providerResponse([{ type: 'toolCall', id, name, arguments: args }], 'toolUse')
+const text = (value: string) => providerResponse([{ type: 'text', text: value }], 'stop')
+const DELEGATION_ID = /Delegated task (delegation:[0-9a-f-]+)/
+
 async function completed(threadId: string, episodeId: string) {
   let value!: { agent: NamedAgentIdentity; episode: AgentEpisode }
   await vi.waitFor(async () => {
@@ -83,26 +99,47 @@ it('executes a named shared writer under the task lease and records code receipt
   expect(f.read(f.repo)).toBe('base\n')
   expect(existsSync(join(mms.threads.getThreadDir(thread.id), 'execution.lease'))).toBe(false)
 }, 30_000)
-it('delegates main to a shared writer and nested writer without reacquiring the physical task lease', async () => {
+// Phase 4 (SPEC §14): create_subagent is a wrapper over delegate_task. The parent no longer
+// blocks inside the tool call: the child is a thread with lineage, its completion is an inbox row,
+// and reconciler rule 4 wakes the parent, which reads the result and integrates the isolated work.
+it('delegates main to an isolated writer thread, wakes main with its result and integrates it', async () => {
   const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Nested writers', project.id)
-  const call = (id: string, name: string, args: Record<string, unknown>) => providerResponse([{ type: 'toolCall', id, name, arguments: args }], 'toolUse')
-  const done = (text: string) => providerResponse([{ type: 'text', text }], 'stop')
-  responses.push(call('create-worker', 'create_subagent', { name: 'Worker', task: 'Delegate and edit', access: 'write' }),
-    call('create-nested', 'create_subagent', { name: 'Nested', task: 'Write value', access: 'write' }),
-    call('nested-write', 'write', { path: 'value.txt', content: 'nested result\n' }), done('Nested done'),
-    call('worker-read', 'read', { path: 'value.txt' }), done('Worker done'),
-    call('main-read', 'read', { path: 'value.txt' }), done('Main done'))
+  const seen: string[] = []
+  vi.mocked(mms.providerAuth.models.streamSimple).mockImplementation((_model, context) => {
+    captured.push(structuredClone(context))
+    const prompt = lastUserText(context), results = toolResultsSinceUser(context)
+    seen.push(`${prompt.slice(0, 24)}#${results.length}`)
+    if (prompt === 'Delegate the change.') return streamOf(results.length ? text('Main delegated') : toolCall('create-worker', 'create_subagent', { name: 'Worker', task: 'Write value', access: 'write' })) as never
+    if (prompt === 'Write value') return streamOf(results.length ? text('Worker done') : toolCall('worker-write', 'write', { path: 'value.txt', content: 'child result\n' })) as never
+    const delegationId = DELEGATION_ID.exec(prompt)?.[1]
+    if (delegationId) {
+      if (results.length === 0) return streamOf(toolCall('main-status', 'task_status', { delegationId })) as never
+      if (results.length === 1) return streamOf(toolCall('main-integrate', 'integrate_delegation', { delegationId })) as never
+      return streamOf(text('Integration requested')) as never
+    }
+    if (prompt.startsWith('Integration of delegated task')) return streamOf(text('Integrated')) as never
+    return streamOf(text('unexpected')) as never
+  })
   const result = await client.request<{ message: string }>('orchestrator.send', { threadId: thread.id, content: 'Delegate the change.', mode: 'agent' })
-  expect(result.message).toBe('Main done')
-  const state = await client.request<{ episodes: AgentEpisode[] }>('agents.listNamed', { threadId: thread.id })
-  expect(state.episodes).toHaveLength(2)
-  expect(state.episodes.every((episode) => episode.state === 'completed')).toBe(true)
-  expect(state.episodes[1].parentEpisodeId).toBe(state.episodes[0].id)
-  expect(new Set(state.episodes.map((episode) => episode.binding.worktreePath)).size).toBe(1)
-  expect(f.read(state.episodes[0].binding.worktreePath)).toBe('nested result\n')
+  expect(result.message).toBe('Main delegated')
+  const [delegation] = mms.orchestrator.listDelegations(thread.id)
+  expect(delegation).toMatchObject({ title: 'Worker' })
+  const child = mms.threads.getThread(delegation.childThreadId)!
+  expect(child.projectId).toBe(project.id)
+  await vi.waitFor(() => {
+    expect(mms.orchestrator.getMessages(thread.id).some((message) => message.role === 'assistant' && message.content === 'Integrated')).toBe(true)
+  }, { timeout: 20_000, interval: 50 })
+  expect(mms.orchestrator.listDelegations(thread.id)[0].status).toBe('acknowledged')
+  const status = captured.flatMap((context) => context.messages).find((message) => message.role === 'toolResult' && message.toolName === 'task_status')
+  expect(JSON.stringify(status)).toContain('Worker done')
+  const childWorkspace = new ThreadWorkspaceManager(mms.threads.getThreadDir(child.id)).load()!
+  const mainWorkspace = new ThreadWorkspaceManager(mms.threads.getThreadDir(thread.id)).load()!
+  expect(childWorkspace.worktreePath).not.toBe(mainWorkspace.worktreePath)
+  expect(f.read(childWorkspace.worktreePath)).toBe('child result\n')
+  expect(f.read(mainWorkspace.worktreePath)).toBe('child result\n')
   expect(f.read(f.repo)).toBe('base\n')
-  expect(JSON.stringify(captured.at(-1)?.messages)).toContain('nested result')
-}, 30_000)
+  expect(seen).toContain('Write value#0')
+}, 45_000)
 it('recalls the same named identity with native context and rejects stale concurrent generations', async () => {
   const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Recall', project.id)
   responses.push(providerResponse([{ type: 'text', text: 'Remember continuity-marker-519' }], 'stop'))
@@ -151,66 +188,83 @@ it('provisions first-use task editor writes and commits only in the owned checko
   expect(f.read(f.repo)).toBe('base\n')
 }, 30_000)
 
-it('waits for every parallel isolated assignment when another batch admission fails', async () => {
+// Phase 4: create_subagents starts every valid assignment as its own child thread and returns at
+// once; a failed admission is reported per item and does not stop the others.
+it('starts every valid parallel assignment without waiting and reports a failed admission', async () => {
   const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Parallel batch', project.id)
   let release!: () => void
   const delayed = new Promise<void>((resolve) => { release = resolve })
-  let entered = 0, mainFinished = false
-  const batch = providerResponse([{ type: 'toolCall', id: 'parallel-batch', name: 'create_subagents', arguments: { agents: [
-    { name: 'invalid/name', task: 'fail admission', workspace: 'isolated' },
-    { name: 'Slow A', task: 'slow-a', workspace: 'isolated' },
-    { name: 'Slow B', task: 'slow-b', workspace: 'isolated' }
-  ] } }], 'toolUse')
-  let calls = 0
+  let entered = 0
   vi.mocked(mms.providerAuth.models.streamSimple).mockImplementation((_model, context) => {
     captured.push(structuredClone(context))
-    if (calls++ === 0) return streamOf(batch) as never
-    if (JSON.stringify(context.messages).includes('slow-a') && !context.messages.some((message) => message.role === 'toolResult') || JSON.stringify(context.messages).includes('slow-b') && !context.messages.some((message) => message.role === 'toolResult')) {
-      entered += 1
-      return { async *[Symbol.asyncIterator]() { await delayed }, result: async () => providerResponse([{ type: 'text', text: 'Isolated finished' }], 'stop') } as never
+    const prompt = lastUserText(context), results = toolResultsSinceUser(context)
+    if (prompt === 'Run parallel agents') {
+      if (results.length) return streamOf(text('Batch started')) as never
+      return streamOf(toolCall('parallel-batch', 'create_subagents', { agents: [
+        { name: 'Empty', task: '   ', workspace: 'isolated' },
+        { name: 'Slow A', task: 'slow-a', workspace: 'isolated' },
+        { name: 'Slow B', task: 'slow-b', workspace: 'isolated' }
+      ] })) as never
     }
-    mainFinished = true
-    return streamOf(providerResponse([{ type: 'text', text: 'Batch settled' }], 'stop')) as never
+    if ((prompt === 'slow-a' || prompt === 'slow-b') && !results.length) {
+      entered += 1
+      return { async *[Symbol.asyncIterator]() { await delayed }, result: async () => text(`${prompt} finished`) } as never
+    }
+    return streamOf(text('Batch settled')) as never
   })
-  const running = client.request<{ message: string }>('orchestrator.send', { threadId: thread.id, content: 'Run parallel agents', mode: 'agent' })
   try {
+    const result = await client.request<{ message: string }>('orchestrator.send', { threadId: thread.id, content: 'Run parallel agents', mode: 'agent' })
+    expect(result.message).toBe('Batch started')
     await vi.waitFor(() => expect(entered).toBe(2), { timeout: 15_000 })
-    expect(mainFinished).toBe(false)
+    const batchResult = captured.flatMap((context) => context.messages).find((message) => message.role === 'toolResult' && message.toolName === 'create_subagents')
+    expect(JSON.stringify(batchResult)).toContain('needs a prompt')
+    const started = mms.orchestrator.listDelegations(thread.id)
+    expect(started.map((entry) => entry.title).sort()).toEqual(['Slow A', 'Slow B'])
+    expect(started.every((entry) => entry.status === 'running')).toBe(true)
     release()
-    expect((await running).message).toBe('Batch settled')
-    const state = await client.request<{ episodes: AgentEpisode[] }>('agents.listNamed', { threadId: thread.id })
-    expect(state.episodes).toHaveLength(2)
-    expect(state.episodes.every((episode) => episode.state === 'completed')).toBe(true)
-    expect(JSON.stringify(captured.at(-1)?.messages)).toContain('rejected')
-  } finally { release(); await running.catch(() => undefined) }
+    await vi.waitFor(() => {
+      expect(mms.orchestrator.listDelegations(thread.id).every((entry) => entry.childRunStatus === 'completed' && entry.status !== 'running')).toBe(true)
+    }, { timeout: 15_000, interval: 50 })
+  } finally { release() }
 }, 45_000)
-it('cancels nested named writers and holds physical ownership until the child callback actually drains', async () => {
+// Phase 4: task_cancel stops a child and everything it delegated, depth-first; a cancelled child
+// cannot publish its late result.
+it('cancels a delegated child and its nested delegation depth-first, aborting the live grandchild', async () => {
   const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Cancel descendants', project.id)
   let release!: () => void, observeAbort!: () => void
   const draining = new Promise<void>((resolve) => { release = resolve })
   const aborted = new Promise<void>((resolve) => { observeAbort = resolve })
-  let calls = 0, nestedEntered = false
+  let nestedEntered = false
   vi.mocked(mms.providerAuth.models.streamSimple).mockImplementation((_model, context, options) => {
     captured.push(structuredClone(context))
-    if (calls++ === 0) return streamOf(providerResponse([{ type: 'toolCall', id: 'nested-cancel', name: 'create_subagent', arguments: { name: 'Nested cancel', task: 'Wait for cancellation', access: 'write' } }], 'toolUse')) as never
-    nestedEntered = true
-    return { async *[Symbol.asyncIterator]() {
-      if (options?.signal?.aborted) observeAbort()
-      else options?.signal?.addEventListener('abort', observeAbort, { once: true })
-      await draining
-    }, result: async () => providerResponse([{ type: 'text', text: 'Drained' }], 'stop') } as never
+    const prompt = lastUserText(context), results = toolResultsSinceUser(context)
+    if (prompt === 'Delegate nested') return streamOf(results.length ? text('Main delegated') : toolCall('main-create', 'create_subagent', { name: 'Parent cancel', task: 'Delegate deeper', access: 'write' })) as never
+    if (prompt === 'Delegate deeper') return streamOf(results.length ? text('Child delegated') : toolCall('child-create', 'create_subagent', { name: 'Nested cancel', task: 'Wait for cancellation', access: 'write' })) as never
+    if (prompt === 'Wait for cancellation' && !results.length) {
+      nestedEntered = true
+      return { async *[Symbol.asyncIterator]() {
+        if (options?.signal?.aborted) observeAbort()
+        else options?.signal?.addEventListener('abort', observeAbort, { once: true })
+        await draining
+      }, result: async () => text('Drained') } as never
+    }
+    return streamOf(text('ok')) as never
   })
-  const admitted = await client.request<{ agent: NamedAgentIdentity }>('agents.createNamed', { threadId: thread.id, name: 'Parent cancel', task: 'Delegate nested', operationId: 'cancel-parent', access: 'write' })
-  let stopped: Promise<unknown> | undefined
   try {
+    await client.request('orchestrator.send', { threadId: thread.id, content: 'Delegate nested', mode: 'agent' })
     await vi.waitFor(() => expect(nestedEntered).toBe(true), { timeout: 15_000 })
-    stopped = client.request('agents.stop', { threadId: thread.id, agentId: admitted.agent.id, merge: false })
+    const [child] = mms.orchestrator.listDelegations(thread.id)
+    const [grandchild] = mms.orchestrator.listDelegations(child.childThreadId)
+    expect(grandchild).toMatchObject({ title: 'Nested cancel', status: 'running' })
+    const cancelled = await mms.orchestrator.cancelDelegation(thread.id, child.delegationId)
+    expect(cancelled.cancelled).toEqual([grandchild.delegationId, child.delegationId])
     await Promise.race([aborted, new Promise((_, reject) => setTimeout(() => reject(new Error('Descendant did not receive cancellation')), 5_000))])
-    expect(existsSync(join(mms.threads.getThreadDir(thread.id), 'execution.lease'))).toBe(true)
-    release(); await stopped
-    await vi.waitFor(() => expect(existsSync(join(mms.threads.getThreadDir(thread.id), 'execution.lease'))).toBe(false))
-    const state = await client.request<{ episodes: AgentEpisode[] }>('agents.listNamed', { threadId: thread.id })
-    expect(state.episodes).toHaveLength(2)
-    expect(state.episodes.every((episode) => ['interrupted', 'failed'].includes(episode.state))).toBe(true)
-  } finally { release(); await stopped?.catch(() => undefined) }
-}, 30_000)
+    release()
+    await vi.waitFor(() => {
+      const [nested] = mms.orchestrator.listDelegations(child.childThreadId)
+      expect(nested.status).toBe('cancelled')
+      expect(['interrupted', 'cancelled']).toContain(nested.childRunStatus)
+    }, { timeout: 15_000, interval: 50 })
+    expect(mms.orchestrator.listDelegations(thread.id)[0].status).toBe('cancelled')
+  } finally { release() }
+}, 45_000)

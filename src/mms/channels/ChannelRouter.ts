@@ -7,6 +7,7 @@ import type {
   ChannelPlatform,
   Project
 } from '../../shared/types'
+import type { ModelOverride } from '../../shared/providerInstances'
 import type { LlmProviderOption } from '../../shared/settings'
 import { applyEffortToModelId, formatEffortLabel } from '../../shared/modelVariants'
 import type { SettingsStore } from '../settings/SettingsStore'
@@ -33,7 +34,7 @@ export interface ChannelTurnRunner {
     threadId: string,
     content: string,
     opts?: {
-      modelOverride?: { llmProvider: string; model: string }
+      modelOverride?: ModelOverride
       signal?: AbortSignal
       drainSteer?: () => string | undefined
       hostIngress?: { platform: ChannelPlatform; chatId: string; messageId: string }

@@ -9,6 +9,9 @@ export function createIsolatedMousseHome(environment: NodeJS.ProcessEnv) {
   // Even an inherited MOUSSE_HOME could refer to a developer's installation.
   // Tests can explicitly select their own fixtures after this setup runs.
   environment.MOUSSE_HOME = home
+  // The default profile reuses the terminal Claude Code sign-in; point it at an empty config so
+  // tests never see the developer's account.
+  environment.CLAUDE_CONFIG_DIR = join(home, 'claude-cli-config')
   return {
     home,
     ensureDefault() {

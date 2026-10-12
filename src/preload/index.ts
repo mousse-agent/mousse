@@ -57,6 +57,9 @@ import type {
 } from '../shared/integrations'
 import type {
   AmbientProviderInfo,
+  ClaudeLoginPolicy,
+  ClaudeSubscriptionStatus,
+  CodexStatus,
   ConfiguredProvider,
   ProviderLoginEvent,
   ProviderLoginOption,
@@ -634,7 +637,7 @@ const api = {
       ipcRenderer.invoke('threads:regenerateTitle', threadId),
     setModel: (
       threadId: string,
-      model?: { llmProvider: string; model: string }
+      model?: { instanceId?: string; llmProvider: string; model: string }
     ): Promise<Thread> => ipcRenderer.invoke('threads:setModel', threadId, model),
     pin: (threadId: string, pinned: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:pin', threadId, pinned),
@@ -780,6 +783,14 @@ const api = {
       ipcRenderer.invoke('providers:verifyAmbient', providerId),
     logout: (providerId: string): Promise<void> =>
       ipcRenderer.invoke('providers:logout', providerId),
+    /** Claude Subscription sign-in state; `recheck` skips the cached `claude auth status`. */
+    claudeStatus: (recheck?: boolean): Promise<ClaudeSubscriptionStatus> =>
+      ipcRenderer.invoke('providers:claudeStatus', recheck),
+    claudeSetLoginPolicy: (policy: ClaudeLoginPolicy): Promise<ClaudeSubscriptionStatus> =>
+      ipcRenderer.invoke('providers:claudeSetLoginPolicy', policy),
+    /** Codex sign-in state; `recheck` skips the cached `account/read`. */
+    codexStatus: (recheck?: boolean): Promise<CodexStatus> =>
+      ipcRenderer.invoke('providers:codexStatus', recheck),
     loginOAuth: (providerId: string): Promise<ProviderLoginResult> =>
       ipcRenderer.invoke('providers:loginOAuth', providerId),
     loginApiKey: (providerId: string): Promise<ProviderLoginResult> =>

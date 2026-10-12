@@ -8,9 +8,20 @@ import { ProviderAuthService } from './providers/ProviderAuthService'
 import { AppletStore } from './applets/AppletStore'
 import { ClaudeSubscriptionProviderService } from './providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { AntigravityProviderService } from './providers/antigravity/AntigravityProviderService'
+import { ProviderInstanceService } from './providers/ProviderInstanceService'
+import { createCodexProviderService, type CodexProviderService } from './run/adapters/codex'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { OrchestratorService } from './orchestrator/OrchestratorService'
+import { ProfileDatabase } from './run/db/ProfileDatabase'
+import { McpCredentials } from './run/mcp/McpCredentials'
+import { MousseMcpServer } from './run/mcp/MousseMcpServer'
+import { createMousseToolRegistry } from './run/mcp/toolRegistry'
+import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
+import type { ThreadEvent } from './run/types'
+import { Reconciler } from './run/Reconciler'
+import { RunEngine } from './run/RunEngine'
+import { RunStore } from './run/RunStore'
 import { ScheduledJobService } from './scheduled/ScheduledJobService'
 import { ScheduledJobStore } from './scheduled/ScheduledJobStore'
 import { ChannelService } from './channels/ChannelService'
@@ -79,6 +90,10 @@ export class MmsProfileServices {
   readonly providerAuth: ProviderAuthService
   readonly antigravity: AntigravityProviderService
   readonly claudeSubscription: ClaudeSubscriptionProviderService
+  /** Codex through `codex app-server`, reusing the terminal `codex login` (never logged out). */
+  readonly codex: CodexProviderService
+  /** Provider instances of this profile: the agents callers pick by `{ instanceId, model }`. */
+  readonly providerInstances: ProviderInstanceService
   readonly projects: ProjectManager
   readonly applets: AppletStore
   readonly threads: ThreadDataStore
@@ -129,6 +144,17 @@ export class MmsProfileServices {
   readonly lineEditStats: LineEditStatsStore
   /** Phase 4 multi-tenant thread runtimes (agents/tasks/PTY ownership). */
   readonly threadRuntimes: ThreadRuntimeManager
+  /** Profile Run Engine (`<profileHome>/run/run.db`); Phase 1 dual-writes beside the orchestrator. */
+  readonly runEngine: RunEngine
+  /** Phase 5 (SPEC §15.1): durable bearer credentials of the Mousse MCP server. */
+  readonly mcpCredentials: McpCredentials
+  /** Phase 5: Mousse's tools for vendor runtimes over MCP Streamable HTTP on 127.0.0.1. */
+  readonly mcpServer: MousseMcpServer
+  private runEffectWorker: EffectWorker | null = null
+  private runReconciler: Reconciler | null = null
+  private daemonHeartbeat: ReturnType<typeof setInterval> | null = null
+  /** Detaches the inbox listener that runs reconciler rule 4 promptly. */
+  private stopInboxWakes: (() => void) | null = null
   /** Daemon-owned pending questions, one instance per profile. */
   readonly questions: UserQuestionService
   readonly modeRegistry: ModeRegistry
@@ -145,6 +171,7 @@ export class MmsProfileServices {
   private readonly ownerHandle: MmsOwnerHandle | null
   private readonly homeDir: string
   private readonly installationHome: string
+  private readonly effectFibres: Partial<EffectWorkerFibres> | undefined
 
   constructor(
     config: MousseConfigStore,
@@ -160,9 +187,15 @@ export class MmsProfileServices {
       allowLegacyProjectData?: boolean
       inheritChannelEnvironment?: boolean
       includeExternalCliConfigs?: boolean
+      /**
+       * Effect worker fibres per lane class (SPEC §12.3). `turn` caps this profile's concurrent
+       * turns (default 8); control fibres keep Stop and steer responsive while turns run.
+       */
+      effectFibres?: Partial<EffectWorkerFibres>
     }
   ) {
     this.config = config
+    this.effectFibres = shared.effectFibres
     this.ownerHandle = ownerHandle
     this.homeDir = homeDir
     this.installationHome = shared.installationHome
@@ -181,7 +214,26 @@ export class MmsProfileServices {
       shared.installationHome,
       this.questions
     )
-    this.claudeSubscription = new ClaudeSubscriptionProviderService(homeDir, this.questions)
+    // The default profile reuses the terminal Claude sign-in unless it already has its own.
+    this.claudeSubscription = new ClaudeSubscriptionProviderService(homeDir, this.questions, {}, {
+      defaultProfile: shared.includeExternalCliConfigs ?? !shared.personal
+    })
+    this.codex = createCodexProviderService(homeDir, this.questions)
+    // Seeded on load; a stored instance is never rewritten.
+    this.providerInstances = new ProviderInstanceService({
+      providerAuth: this.providerAuth,
+      store: {
+        read: () => {
+          const section = config.getProvidersSection()
+          return { instances: section.instances, seedVersion: section.instancesSeedVersion }
+        },
+        write: ({ instances, seedVersion }) => config.updateProvidersSection({ instances, instancesSeedVersion: seedVersion })
+      }
+    })
+      .registerVendor('antigravity', this.antigravity)
+      .registerVendor('claude', this.claudeSubscription)
+      .registerVendor('codex', this.codex)
+    this.providerInstances.list()
     this.integrationContext = shared.personal
       ? {
           profileId: this.profileId,
@@ -256,9 +308,18 @@ export class MmsProfileServices {
     // MMS owns the canonical per-thread transcript and durable message queue for
     // every surface (GUI client, CLI client, channels). Electron never owns MMS.
     this.orchestrator.setThreadStore(this.threads)
+    this.runEngine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: homeDir })) })
+    this.orchestrator.setRunEngine(this.runEngine)
+    this.mcpCredentials = new McpCredentials(this.runEngine.store)
+    this.mcpServer = new MousseMcpServer({
+      credentials: this.mcpCredentials,
+      registry: createMousseToolRegistry({ engine: this.runEngine, host: this.orchestrator.mcpToolHost() })
+    })
     this.orchestrator.setAppletStore(this.applets)
     this.orchestrator.setAntigravityProvider(this.antigravity)
     this.orchestrator.setClaudeSubscriptionProvider(this.claudeSubscription)
+    this.orchestrator.setCodexProvider(this.codex)
+    this.orchestrator.setProviderInstances(this.providerInstances)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()
@@ -651,12 +712,19 @@ export class MmsProfileServices {
     if (this.started) return
     this.started = true
 
+    // Runs the previous daemon left active cannot resume (SPEC §5); settle them before any turn,
+    // and before anything that can send one (H4): scheduled jobs, channels and the network all
+    // start below, so none of their sends can create a run that boot recovery then interrupts.
+    this.orchestrator.recoverRunEngineOnBoot()
+    this.startRunEngineWorkers()
+
     if (this.config.getScheduledSection().enabled) {
       this.scheduled.start()
     }
     await this.channels.startEnabled()
     await this.net.start()
 
+    await this.startMcpServer()
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
     this.threadRuntimes.restoreOnStartup()
     // Questions are memory-only — new process has none; document interrupted semantics.
@@ -757,6 +825,125 @@ export class MmsProfileServices {
     })
   }
 
+  /** Executes `turn.*` effects (SPEC §12.3); null until `start()` has recovered the engine. */
+  get effectWorker(): EffectWorker | null {
+    return this.runEffectWorker
+  }
+
+  /** Repairs stored run/effect state (SPEC §12.4); null until `start()`. */
+  get reconciler(): Reconciler | null {
+    return this.runReconciler
+  }
+
+  /** SPEC §12.5 step 6: effect worker, reconciler and daemon heartbeat, after boot recovery. */
+  private startRunEngineWorkers(): void {
+    const engine = this.runEngine
+    const worker = new EffectWorker({
+      outbox: engine.outbox,
+      executors: this.orchestrator.effectExecutors(),
+      owner: engine.leaseOwner,
+      fibres: this.effectFibres
+    })
+    const reconciler = new Reconciler({
+      store: engine.store,
+      outbox: engine.outbox,
+      tools: engine.tools,
+      capabilitiesFor: (threadId) => this.orchestrator.capabilitiesForThread(threadId),
+      credentials: this.mcpCredentials
+    })
+    this.runEffectWorker = worker
+    this.runReconciler = reconciler
+    worker.start()
+    reconciler.start()
+    // A stored inbox row is the source of truth; its event only makes rule 4 run sooner.
+    let wakePass: ReturnType<typeof setImmediate> | null = null
+    const onInbox = (event: ThreadEvent): void => {
+      if (event.type !== 'inbox.status' || wakePass || this.runReconciler !== reconciler) return
+      wakePass = setImmediate(() => {
+        wakePass = null
+        if (this.runReconciler !== reconciler) return
+        try {
+          reconciler.runOnce()
+        } catch (error) {
+          console.warn('run engine reconciler pass failed', error)
+        }
+      })
+    }
+    engine.on('event', onInbox)
+    this.stopInboxWakes = () => {
+      engine.off('event', onInbox)
+      if (wakePass) clearImmediate(wakePass)
+      wakePass = null
+    }
+    this.orchestrator.attachEffectWorker(worker)
+    this.daemonHeartbeat = setInterval(() => {
+      try {
+        engine.heartbeatDaemon()
+      } catch (error) {
+        console.warn('run engine daemon heartbeat failed', error)
+      }
+    }, 10_000)
+    this.daemonHeartbeat.unref?.()
+  }
+
+  /**
+   * SPEC §15.1: the Mousse MCP server starts after the run engine workers; turns of MCP-capable
+   * adapters then get a credential. A server that cannot bind leaves those turns without Mousse
+   * tools rather than failing the profile.
+   */
+  private async startMcpServer(): Promise<void> {
+    try {
+      await this.mcpServer.start()
+      this.orchestrator.setMcpAttachment(this.mcpServer)
+    } catch (error) {
+      console.warn('Mousse MCP server failed to start; vendor runtimes run without Mousse tools', error)
+    }
+  }
+
+  /**
+   * Stops the reconciler and the worker (in-flight turns abort through their effect signal) and
+   * waits for the orchestrator and every executor to drain. The clean daemon end is not written
+   * here: `finishStop` writes it (`endRunEngineEpoch`) once channels are shut and requests idle.
+   */
+  private async stopRunEngine(): Promise<void> {
+    if (this.daemonHeartbeat) clearInterval(this.daemonHeartbeat)
+    this.daemonHeartbeat = null
+    this.runReconciler?.stop()
+    this.stopInboxWakes?.()
+    this.stopInboxWakes = null
+    // No new credentials; in-flight Mousse tool calls (a blocked ask_user) abort so turns can drain.
+    // Only detach what start() attached; a partially constructed profile has no server.
+    const mcpServer = this.mcpServer as MousseMcpServer | undefined
+    if (mcpServer?.running) this.orchestrator.setMcpAttachment(null)
+    const mcpStopped = mcpServer?.stop().catch((error) => {
+      console.warn('Mousse MCP server stop failed', error)
+    })
+    const workerStopped = this.runEffectWorker?.stop()
+    await this.orchestrator.shutdown()
+    await workerStopped
+    await mcpStopped
+    // Only detach what start() attached; a profile stopped before start() has no worker.
+    if (this.runEffectWorker) this.orchestrator.attachEffectWorker(null)
+    this.runEffectWorker = null
+    this.runReconciler = null
+  }
+
+  /**
+   * H5: the clean `ended_at` of this daemon epoch, written only after every cleanup settled, the
+   * channels shut down, the requests went idle and no owner reports activity, so no live writer
+   * can still touch the run database. A stop that failed to drain leaves the epoch open: the next
+   * boot treats it as a crash, which is the conservative reading.
+   */
+  private endRunEngineEpoch(): void {
+    // Test fixtures stop a partially constructed profile; a missing engine has nothing to end.
+    const engine = this.runEngine as RunEngine | undefined
+    try {
+      engine?.shutdown()
+    } catch (error) {
+      console.warn('run engine epoch end failed', error)
+    }
+  }
+
   private async finishStop(): Promise<void> {
     // Invoke each cleanup in its own promise. Calling the methods while
     // constructing the array would let one synchronous throw prevent every
@@ -767,11 +954,12 @@ export class MmsProfileServices {
       () => this.platform.dispose(),
       () => this.scheduled.shutdown(),
       () => this.channels.shutdown(),
-      () => this.orchestrator.shutdown(),
+      () => this.stopRunEngine(),
       () => this.net.shutdown(),
       () => this.requests.waitForIdle(),
       () => this.antigravity.stop(),
       () => this.claudeSubscription.stop(),
+      () => this.codex.stop(),
       () => this.ptyManager.shutdown(),
       () => this.headlessRunner.shutdown(),
       () => this.mcpManager.shutdown()
@@ -791,7 +979,14 @@ export class MmsProfileServices {
         activity
       })
     }
+    this.endRunEngineEpoch()
     this.config.stopWatching()
+    try {
+      this.orchestrator.setRunEngine(null)
+      this.runEngine.store.db.close()
+    } catch (error) {
+      console.warn('run engine database close failed', error)
+    }
     this.started = false
     this.stopped = true
   }

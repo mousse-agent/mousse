@@ -1,3 +1,4 @@
+import type { ModelOverride } from '../../shared/providerInstances'
 import { createErrorProvider } from '../../shared/errors'
 import {
   existsSync,
@@ -47,10 +48,7 @@ interface ThreadMeta {
   projectId?: string
   createdAt: string
   updatedAt: string
-  modelOverride?: {
-    llmProvider: string
-    model: string
-  }
+  modelOverride?: ModelOverride
   /** Opt-in isolated git worktree. OFF by default; undefined treated as false. */
   worktreeEnabled?: boolean
   order: number
@@ -270,6 +268,23 @@ export class ThreadDataStore extends EventEmitter {
     // GUI/CLI protocol calls, channels, and scheduled jobs.
     this.emit('created', meta)
     return meta
+  }
+
+  /**
+   * Removes a thread `createThread` made moments ago whose creating command failed before anything
+   * used it: its directory, standalone index entry and lifecycle registration. Refuses a thread
+   * that already has messages (that is a real thread; trash it through the lifecycle coordinator).
+   */
+  discardUnusedThread(id: string): void {
+    const meta = this.getThread(id)
+    if (!meta) return
+    const threadDir = this.resolveThreadDir(meta)
+    if (this.readJsonFile<unknown[]>(join(threadDir, 'messages.json'), []).length)
+      throw new Error(`Thread ${id} has messages; only an unused new thread can be discarded`)
+    if (!meta.projectId) this.removeFromStandaloneIndex(id)
+    rmSync(threadDir, { recursive: true, force: true })
+    this.lifecycleStore.forgetCreatedTask(id)
+    this.invalidateListCache()
   }
 
   /** Daemon-owned execution admission: retry/crash recovery keeps one thread and its data. */

@@ -108,7 +108,8 @@ export class ConversationBranchService {
       if (!action.nativeContextBoundary.safeBoundaryProof) throw new Error('The selected turn has no validated native-context boundary.')
       const id = randomUUID()
       const operationId = randomUUID()
-      const branch = `mousse/thread/${action.turnId}/${id}`
+      // Turn ids are Run Engine run ids (`run:thread:<id>:ordinal:<n>`); Git refs cannot contain ':'.
+      const branch = `mousse/thread/${action.turnId.replace(/[^A-Za-z0-9._-]+/g, '-')}/${id}`
       const retainedRef = `refs/mousse/conversation-branches/${id}`
       const codeSha = codeMode === 'current' ? git(workspacePath, ['rev-parse', 'HEAD']) : action.endSha
       this.journal.append({

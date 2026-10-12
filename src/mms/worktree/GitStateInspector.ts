@@ -3,6 +3,9 @@ import { resolve } from 'node:path'
 import simpleGit from 'simple-git'
 import type { RepositoryContext } from './RepositoryContext'
 import type { WorktreeInfo } from './WorktreeManager'
+import { MOUSSE_CONTROL_FILE_PATHS } from './controlFiles'
+
+export { LEGACY_AGENT_PROGRESS_FILE, MOUSSE_CONTROL_FILE_PATHS } from './controlFiles'
 
 export interface WorkerStateInspection {
   ready: boolean
@@ -12,10 +15,7 @@ export interface WorkerStateInspection {
   changedFiles?: string[]
 }
 
-const MOUSSE_CONTROL_FILES = new Set([
-  '.mousse/task-progress.json',
-  '.mousse/materialized-inputs.exclude'
-])
+const MOUSSE_CONTROL_FILES = new Set(MOUSSE_CONTROL_FILE_PATHS)
 
 export function isMousseControlFile(path: string): boolean {
   return MOUSSE_CONTROL_FILES.has(path.replace(/\\/g, '/'))

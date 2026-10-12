@@ -1036,7 +1036,7 @@ export class MousseAgentService extends EventEmitter {
         this.persist(true, session.agentId)
       }
 
-      // Subagent: coding tools + no spawn_agents (prevents recursive agent storms).
+      // Subagent: coding tools only; delegation comes from the host-minted `managedDelegation`.
       let compactionNote: ChatMessage | undefined
       const compactionThreshold = typeof this.llm.getContextCompactionThreshold === 'function'
         ? this.llm.getContextCompactionThreshold('build', {
@@ -1220,18 +1220,6 @@ export class MousseAgentService extends EventEmitter {
       }
 
       for (const action of parsedActions) {
-        if (action.type === 'spawn_agents') {
-          // Subagents must never spawn — that caused endless recursive agents.
-          const note: ChatMessage = {
-            id: uuidv4(),
-            role: 'system',
-            content:
-              '[mousse] Ignored spawn_agents from subagent. This agent implements work directly and cannot spawn further agents.',
-            timestamp: new Date().toISOString()
-          }
-          this.pushMessage(session, note)
-          continue
-        }
         if (action.type === 'complete_task') {
           const summary = displayText || 'Task completed.'
           if (!session.managedAccess) await this.callbacks.completeAgent(agentId, action.merge !== false, summary)

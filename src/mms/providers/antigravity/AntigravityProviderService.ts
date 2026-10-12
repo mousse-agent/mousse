@@ -5,18 +5,28 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { Readable, Transform, Writable } from 'node:stream'
-import { client, methods, ndJsonStream, PROTOCOL_VERSION, type ClientConnection, type NewSessionResponse } from '@agentclientprotocol/sdk'
+import { client, methods, ndJsonStream, PROTOCOL_VERSION, type ClientConnection, type McpServer, type NewSessionResponse } from '@agentclientprotocol/sdk'
 import type { ConfiguredProvider, ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
+import { ANTIGRAVITY_INSTANCE_ID } from '../../../shared/providerInstances'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
+import { acpMcpServers } from '../../run/mcp/attachment'
 import type { LoginSession } from '../LoginSession'
 import { installAntigravity, installedAntigravityBinary, validateManualAntigravityBinary } from './installation'
 
 export const ANTIGRAVITY_PROVIDER_ID = 'antigravity'
-type AcpProcess = { child: ChildProcessWithoutNullStreams; connection: ClientConnection; sessionId?: string; cwd?: string; threadId?: string; onUpdate?: (update: unknown) => void; turnSignal?: AbortSignal }
-type ProfileSettings = { binaryPath?: string; models?: LlmModelOption[]; signedIn?: boolean; sessions?: Record<string, { sessionId: string; cwd: string; historyKey?: string }> }
+type AcpProcess = { child: ChildProcessWithoutNullStreams; connection: ClientConnection; sessionId?: string; cwd?: string; threadId?: string; onUpdate?: (update: unknown) => void; turnSignal?: AbortSignal
+  /** `initialize` advertised `mcpCapabilities.http`; otherwise the Mousse server goes through the stdio bridge. */
+  mcpHttp?: boolean
+  /** Bearer token of the Mousse MCP server the session was opened with (null: none). */
+  mcpToken?: string | null
+  /** Provider instance whose turn opened the session. */
+  instanceId?: string }
+/** `instanceId` is absent on sessions saved before provider instances existed (the default instance). */
+type SavedAcpSession = { sessionId: string; cwd: string; historyKey?: string; instanceId?: string }
+type ProfileSettings = { binaryPath?: string; models?: LlmModelOption[]; signedIn?: boolean; sessions?: Record<string, SavedAcpSession> }
 const AUTH_PREFIX = 'Open the following link to authenticate the ACP server: '
 const BROWSER_MARKER = '__MOUSSE_ANTIGRAVITY_AUTH_URL__'
 const ISOLATED_KEYS = [
@@ -277,6 +287,7 @@ export class AntigravityProviderService {
       clientInfo: { name: 'Mousse', version: '0.1.1' }
     })
     if (response.protocolVersion !== PROTOCOL_VERSION) throw new Error(`Unsupported Antigravity ACP protocol ${response.protocolVersion}`)
+    process.mcpHttp = response.agentCapabilities?.mcpCapabilities?.http === true
   }
 
   private close(process: AcpProcess): void {
@@ -371,13 +382,22 @@ export class AntigravityProviderService {
     this.save()
   }
 
-  async chat(input: { threadId: string; cwd: string; model: string; prompt: string; appletInstructions?: string; history?: string; images?: ChatImageAttachment[]; signal?: AbortSignal; onText: (text: string) => void; drainSteer?: () => string | undefined; onSteer?: (text: string) => void; onTool?: (event: { phase: 'start' | 'complete'; callId: string; title: string; toolName?: string }) => void }): Promise<string> {
+  /**
+   * `mcp` attaches the Mousse MCP server to the ACP session (SPEC §15.2) and `orchestrationInstructions`
+   * goes into the session's first prompt. The token is stable per thread, so a live session is reused
+   * across turns; only a changed token (after a revocation) closes it and resumes with the new one.
+   */
+  async chat(input: { threadId: string; instanceId?: string; cwd: string; model: string; prompt: string; appletInstructions?: string; history?: string; images?: ChatImageAttachment[]; signal?: AbortSignal; mcp?: { url: string; token: string } | null; orchestrationInstructions?: string; onText: (text: string) => void; drainSteer?: () => string | undefined; onSteer?: (text: string) => void; onTool?: (event: { phase: 'start' | 'complete'; callId: string; title: string; toolName?: string }) => void }): Promise<string> {
     input.signal?.throwIfAborted()
     if (!this.configured()) throw new Error('Antigravity is not signed in')
     const historyKey = this.historyKey(input.history ?? '')
-    const saved = this.settings.sessions?.[input.threadId]
+    const instanceId = input.instanceId ?? ANTIGRAVITY_INSTANCE_ID
+    // A native session belongs to the instance that opened it; another instance starts fresh.
+    const stored = this.settings.sessions?.[input.threadId]
+    const saved = stored && (stored.instanceId ?? ANTIGRAVITY_INSTANCE_ID) === instanceId ? stored : undefined
     let active = this.sessions.get(input.threadId)
-    if (active && (active.connection.signal.aborted || active.cwd !== input.cwd || saved?.historyKey !== historyKey)) {
+    const mcpToken = input.mcp?.token ?? null
+    if (active && (active.connection.signal.aborted || active.cwd !== input.cwd || saved?.historyKey !== historyKey || (active.mcpToken ?? null) !== mcpToken || (active.instanceId ?? ANTIGRAVITY_INSTANCE_ID) !== instanceId)) {
       this.close(active)
       this.sessions.delete(input.threadId)
       active = undefined
@@ -385,6 +405,7 @@ export class AntigravityProviderService {
     const freshProcess = !active
     active ??= this.launch()
     active.threadId = input.threadId
+    active.instanceId = instanceId
     active.cwd = input.cwd
     active.turnSignal = input.signal
     const current = active
@@ -404,26 +425,28 @@ export class AntigravityProviderService {
       if (freshProcess) {
         await this.initialize(active, true)
         input.signal?.throwIfAborted()
+        const mcpServers = acpMcpServers(input.mcp, { http: active.mcpHttp === true }) as McpServer[]
+        active.mcpToken = mcpToken
         let session: Pick<NewSessionResponse, 'configOptions'>
         if (saved?.cwd === input.cwd && saved.historyKey === historyKey) {
           try {
-            session = await active.connection.agent.request(methods.agent.session.resume, { sessionId: saved.sessionId, cwd: input.cwd, mcpServers: [] })
+            session = await active.connection.agent.request(methods.agent.session.resume, { sessionId: saved.sessionId, cwd: input.cwd, mcpServers })
             active.sessionId = saved.sessionId
             resumed = true
           } catch (error) {
             input.signal?.throwIfAborted()
             active.connection.signal.throwIfAborted()
-            session = await active.connection.agent.request(methods.agent.session.new, { cwd: input.cwd, mcpServers: [] })
+            session = await active.connection.agent.request(methods.agent.session.new, { cwd: input.cwd, mcpServers })
             active.sessionId = (session as NewSessionResponse).sessionId
           }
         } else {
-          session = await active.connection.agent.request(methods.agent.session.new, { cwd: input.cwd, mcpServers: [] })
+          session = await active.connection.agent.request(methods.agent.session.new, { cwd: input.cwd, mcpServers })
           active.sessionId = (session as NewSessionResponse).sessionId
         }
         input.signal?.throwIfAborted()
         // Until the owning turn commits its updated history, this ACP session is
         // deliberately non-resumable after a crash or a failed/aborted prompt.
-        this.settings.sessions = { ...this.settings.sessions, [input.threadId]: { sessionId: active.sessionId, cwd: input.cwd } }
+        this.settings.sessions = { ...this.settings.sessions, [input.threadId]: { sessionId: active.sessionId, cwd: input.cwd, instanceId } }
         this.save()
         const models = modelOptions(session)
         if (models.length) { this.settings.models = models; this.save() }
@@ -484,7 +507,10 @@ export class AntigravityProviderService {
       const history = !resumed && input.history
         ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
         : ''
-      let prompt = history + (input.appletInstructions ? input.appletInstructions + '\n\nCurrent request:\n' : '') + (input.prompt || '(image attachment)')
+      const orchestration = !resumed && input.orchestrationInstructions
+        ? `<mousse_orchestration_instructions>\n${input.orchestrationInstructions}\n</mousse_orchestration_instructions>\n\n`
+        : ''
+      let prompt = orchestration + history + (input.appletInstructions ? input.appletInstructions + '\n\nCurrent request:\n' : '') + (input.prompt || '(image attachment)')
       let attachments = imageBlocks
       for (;;) {
         input.signal?.throwIfAborted()

@@ -32,9 +32,19 @@ For changes intended to ship:
 - Record material decisions, blockers, changed scope, and the next action on the issue/PR. Link the branch and PR; avoid routine activity logs and repetitive no-change updates.
 - Inspect the diff for credentials, generated junk, and unrelated work before committing. Never use broad staging to absorb someone else's files.
 
+## Write it up
+
+Follow "Writing PRs and issues" in the shared policy whenever you create or edit an issue, PR, or comment:
+
+- Title: Conventional Commit prefix plus the outcome in plain words for PRs; the problem or goal for issues.
+- PR body: Problem, Change, Verification, plus How to review for large PRs and an optional Notes line. Issue body: Problem, Goal, Done when, and optionally Out of scope. Use the templates in `.github/`.
+- Rewrite the body when scope or approach changes. Never append a running log of follow-ups.
+- Use plain words and the terms in `docs/GLOSSARY.md`. Keep build, install, and stacking details in Notes or a comment.
+- One goal per PR, at any size. Split out unrelated fixes and cleanups, not large work that belongs together.
+
 ## Finish shared work
 
-When implementation is ready, run focused checks for the changed behavior and directly affected areas, verify the requested outcome, commit and push the task's changes, and open or update the PR with verification evidence. Run the full test suite only when explicitly requested. Once focused checks pass, do not broaden or repeat testing without a new change, failure, or concrete unresolved concern; keep additional checks focused. Documentation-only changes normally need diff and consistency review, not application tests. When an issue exists, use `Closes #123` for full completion or `Refs #123` for partial delivery and keep it open until completion lands. Keep unfinished shared work in a draft PR. Report the published commit and links. This is ordinary task completion; do not start a session-end menu.
+When implementation is ready, run focused checks for the changed behavior and directly affected areas, verify the requested outcome, commit and push the task's changes, and open or update the PR with verification evidence, written as described in "Write it up". Run the full test suite only when explicitly requested. Once focused checks pass, do not broaden or repeat testing without a new change, failure, or concrete unresolved concern; keep additional checks focused. Documentation-only changes normally need diff and consistency review, not application tests. When an issue exists, use `Closes #123` for full completion or `Refs #123` for partial delivery and keep it open until completion lands. Keep unfinished shared work in a draft PR. Report the published commit and links. This is ordinary task completion; do not start a session-end menu.
 
 When explicitly asked to merge, or when a small, low-risk documentation or communication-guidance change falls under the shared policy's standing authorization, review and merge promptly: verify current-head focused checks and actual GitHub-required checks/reviews/conversations, guard against a changed PR head, merge using an enabled method, confirm issue completion, and clean up only the merged task branch as permitted by the policy. Do not wait for optional full-suite CI as an extra merge gate unless explicitly requested. Do not ask for another confirmation or add an arbitrary wait for changes covered by standing authorization. A request to commit and push alone does not authorize merging other changes.
 
