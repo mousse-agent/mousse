@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events'
 import { DaemonEpoch } from './DaemonEpoch'
 import { fail, RunStoreError } from './db/RunStoreError'
 import { EffectOutbox } from './EffectOutbox'
+import type { RestartNote } from './restartNote'
 import type { RunStore } from './RunStore'
 import { writeTerminalRun, type RunTerminalStatus } from './terminal'
 import { ThreadMutex } from './ThreadMutex'
@@ -62,7 +63,8 @@ const ACTIVE_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
  * receipt in one transaction. The `mark*` hooks are the Phase 1 bridge for the legacy
  * orchestrator: synchronous CAS writes against the epoch this engine last wrote for the run.
  *
- * Events: `event` (ThreadEvent, after every commit), `stop-requested` and `steer-accepted`
+ * Events: `event` (every ThreadEvent appended to the store, including outbox, tool-ledger and
+ * reconciler events, after its commit and in `seq` order), `stop-requested` and `steer-accepted`
  * (`{threadId, runId}`, after the accepting commit).
  */
 export class RunEngine extends EventEmitter {
@@ -94,6 +96,7 @@ export class RunEngine extends EventEmitter {
     this.tools = opts.tools ?? new ToolInvocations(opts.store)
     this.daemonEpochs = new DaemonEpoch(opts.store)
     this.pid = opts.pid ?? process.pid
+    opts.store.onEvent((event) => this.emit('event', event))
   }
 
   /** The epoch opened by `reconcileOnBoot`, or null before boot. */
@@ -172,7 +175,6 @@ export class RunEngine extends EventEmitter {
    */
   reconcileOnBoot(): BootReport {
     this.epochs.clear()
-    const seqBefore = this.globalSeq()
     const report = this.store.db.transaction((): BootReport => {
       const now = this.now()
       const { epoch, previousCrashed } = this.daemonEpochs.begin(this.pid, now)
@@ -227,11 +229,43 @@ export class RunEngine extends EventEmitter {
       return { interrupted, uncertain, epoch }
     })
     this.daemonEpoch = report.epoch
-    const threads = this.store.db
-      .statement('SELECT DISTINCT thread_id FROM thread_events WHERE seq > ? ORDER BY thread_id')
-      .all(seqBefore)
-    for (const row of threads) this.emitEvents(String(row.thread_id), seqBefore)
     return report
+  }
+
+  /**
+   * SPEC §12.5 step 5: the latest `restart.note` of the thread, once. The note is stale when a
+   * `restart.note.delivered` or another run's `starting` status follows it. Taking it appends
+   * `restart.note.delivered`. `currentRunId` is the run that is starting now; its own `starting`
+   * status does not make the note stale.
+   */
+  takeRestartNote(threadId: string, currentRunId?: string): RestartNote | null {
+    return this.store.db.transaction((): RestartNote | null => {
+      const note = this.store.db
+        .statement(
+          `SELECT seq, payload FROM thread_events WHERE thread_id = ? AND type = 'restart.note'
+           ORDER BY seq DESC LIMIT 1`
+        )
+        .get(threadId)
+      if (!note) return null
+      const seq = Number(note.seq)
+      const otherRun = currentRunId === undefined ? '' : 'AND run_id IS NOT ?'
+      const superseded = this.store.db
+        .statement(
+          `SELECT 1 FROM thread_events WHERE thread_id = ? AND seq > ?
+             AND (type = 'restart.note.delivered'
+               OR (type = 'run.status' AND json_extract(payload, '$.status') = 'starting' ${otherRun}))
+           LIMIT 1`
+        )
+        .get(threadId, seq, ...(currentRunId === undefined ? [] : [currentRunId]))
+      if (superseded) return null
+      this.store.appendEvent({
+        threadId,
+        runId: currentRunId ?? null,
+        type: 'restart.note.delivered',
+        payload: { noteSeq: seq }
+      })
+      return JSON.parse(String(note.payload)) as RestartNote
+    })
   }
 
   /** Liveness touch for an executing run (SPEC §12.4 rule 2). */
@@ -295,7 +329,6 @@ export class RunEngine extends EventEmitter {
         return { status: 'rejected', reason: 'stale_write', sequence: store.maxSeq(threadId) }
       throw error
     }
-    this.emitEvents(threadId, seqBefore)
     return result
   }
 
@@ -378,11 +411,9 @@ export class RunEngine extends EventEmitter {
     const expectedEpoch = fresh ? run.epoch : (this.epochs.get(runId) ?? run.epoch)
     if (run.epoch !== expectedEpoch)
       fail('stale_write', `Run ${runId} is at epoch ${run.epoch}, not ${expectedEpoch}.`)
-    const seqBefore = this.store.maxSeq(run.threadId)
     const next = this.store.db.transaction(() => write(run, expectedEpoch))
     if (TERMINAL_RUN_STATUSES.has(next.status)) this.epochs.delete(runId)
     else this.epochs.set(runId, next.epoch)
-    this.emitEvents(run.threadId, seqBefore)
     return next
   }
 
@@ -393,23 +424,6 @@ export class RunEngine extends EventEmitter {
     outcome?: RunOutcome
   ): RunRecord {
     return writeTerminalRun(this.store, run, expectedEpoch, status, outcome, this.now())
-  }
-
-  private globalSeq(): number {
-    const row = this.store.db
-      .statement('SELECT COALESCE(MAX(seq), 0) AS max FROM thread_events')
-      .get()!
-    return Number(row.max)
-  }
-
-  private emitEvents(threadId: string, afterSeq: number): void {
-    for (const event of this.store.listEvents(threadId, { afterSeq })) {
-      try {
-        this.emit('event', event)
-      } catch {
-        /* A listener cannot undo a durable commit. */
-      }
-    }
   }
 }
 

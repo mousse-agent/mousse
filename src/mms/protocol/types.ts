@@ -223,6 +223,7 @@ export const PROTOCOL_METHODS = [
   'runs.list',
   'runs.get',
   'runs.events',
+  'runs.effects',
   'orchestrator.answerQuestions',
   'orchestrator.dismissQuestions',
   'orchestrator.pendingQuestions',

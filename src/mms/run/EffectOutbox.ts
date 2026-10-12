@@ -53,16 +53,22 @@ export class EffectOutbox {
   ) {
     this.kindSpec = { ...EFFECT_KIND_SPEC, ...(options.kindSpec ?? {}) }
     this.now = options.now ?? (() => new Date(store.db.clock()).toISOString())
-    const titleKinds = (Object.keys(this.kindSpec) as EffectKind[]).filter(
-      (kind) => this.kindSpec[kind].lane === 'title'
-    )
-    const inTitle = (alias: string): string =>
-      titleKinds.length
-        ? `${alias}.kind IN (${titleKinds.map((kind) => `'${kind}'`).join(',')})`
-        : '0'
+    const lanes = (['title', 'control'] as const)
+      .map((lane) => ({
+        lane,
+        kinds: (Object.keys(this.kindSpec) as EffectKind[])
+          .filter((kind) => this.kindSpec[kind].lane === lane)
+          .map((kind) => `'${kind}'`)
+      }))
+      .filter(({ kinds }) => kinds.length)
+    const laneOf = (alias: string): string =>
+      `(CASE ${lanes
+        .map(({ lane, kinds }) => `WHEN ${alias}.kind IN (${kinds.join(',')}) THEN '${lane}' `)
+        .join('')}ELSE 'thread' END)`
     // A candidate is claimable only when nothing else in its lane is live: no running row with an
-    // unexpired lease, and no earlier pending row that is already available. Thread lanes ignore
-    // title-lane rows and the title lane ignores thread-lane rows.
+    // unexpired lease, and no earlier pending row that is already available. Each thread has three
+    // lanes: the thread lane (turns and replay-safe work), the control lane (interrupt, steer and
+    // answers, which must reach a live turn) and the title lane.
     this.claimSql = `UPDATE effects SET status = 'running', attempts = attempts + 1,
         lease_owner = :owner, updated_at = :now,
         lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', :now,
@@ -73,7 +79,7 @@ export class EffectOutbox {
           AND NOT EXISTS (
             SELECT 1 FROM effects o
             WHERE o.thread_id = c.thread_id AND o.rowid <> c.rowid
-              AND (${inTitle('o')}) = (${inTitle('c')})
+              AND ${laneOf('o')} = ${laneOf('c')}
               AND ((o.status = 'running' AND o.lease_expires_at > :now)
                 OR (o.status = 'pending' AND o.rowid < c.rowid AND o.available_at <= :now)))
         ORDER BY c.available_at, c.rowid LIMIT 1)

@@ -102,6 +102,12 @@ function rejectUnknownKeys(p: Record<string, unknown>, allowed: readonly string[
   for (const key of Object.keys(p)) if (!allowed.includes(key)) throw new Error(`${key} is not allowed`)
 }
 
+function asOptionalSendAwaitMode(value: unknown): 'turn' | 'ack' {
+  if (value === undefined) return 'turn'
+  if (value === 'turn' || value === 'ack') return value
+  throw new Error("await must be 'turn' or 'ack'")
+}
+
 /** Run-targeted stop/steer (SPEC §6): `ignored` is a valid answer, not an error. */
 function runCommandResponse(result: CommandResult, runId: string): { ok: boolean; ignored: boolean; reason?: string; runId: string } {
   return {
@@ -594,13 +600,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // Idempotency key (SPEC §6). `requestId` is deliberately not reused: the GUI keeps one per
       // content hash while a send is in flight, so it would turn a repeated message into a replay.
       const clientRequestId = asOptionalString(p.clientRequestId, 128)
+      // SPEC §12.7: `ack` returns once the send and its turn.start effect are committed.
+      const awaitMode = asOptionalSendAwaitMode(p.await)
       ctx.mms.orchestrator.getOrCreateSession(threadId)
       const input = await prepareChatInput(ctx, threadId, { content, mode, images }, p)
       return await ctx.mms.orchestrator.send(input, false, {
         threadId,
         source,
         forceQueue,
-        clientRequestId
+        clientRequestId,
+        awaitMode
       })
     }
     case 'orchestrator.abort': {
@@ -661,6 +670,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         events: ctx.mms.runEngine.listEvents(threadId, { afterSeq, limit }),
         maxSeq: ctx.mms.runEngine.maxSeq(threadId)
       }
+    }
+    case 'runs.effects': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      return { effects: ctx.mms.runEngine.outbox.listForThread(threadId) }
     }
     case 'orchestrator.isTurnActive': {
       // Lightweight turn probe — avoids full thread.snapshot (messages/agents/tasks).

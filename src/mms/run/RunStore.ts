@@ -32,8 +32,20 @@ const TERMINAL_PLACEHOLDERS = TERMINAL_LIST.map(() => '?').join(',')
  * Every mutation is transactional: it joins the caller's `db.transaction` or opens its own.
  */
 export class RunStore {
+  private readonly eventListeners = new Set<(event: ThreadEvent) => void>()
+
   constructor(readonly db: ProfileDatabase) {
     db.migrate(RUN_MIGRATIONS)
+  }
+
+  /**
+   * Observes every appended thread event after its transaction commits, in `seq` order. Events
+   * of a rolled-back transaction are never delivered. Covers appends from the engine, the outbox,
+   * the tool ledger and the reconciler alike.
+   */
+  onEvent(listener: (event: ThreadEvent) => void): () => void {
+    this.eventListeners.add(listener)
+    return () => this.eventListeners.delete(listener)
   }
 
   createRun(input: {
@@ -303,18 +315,34 @@ export class RunStore {
     payload: unknown
   }): number {
     return this.db.transaction(() => {
+      const payload = stableStringify(input.payload)
+      const createdAt = this.now()
       const result = this.db
         .statement(
           'INSERT INTO thread_events(thread_id, run_id, type, payload, created_at) VALUES(?, ?, ?, ?, ?)'
         )
-        .run(
-          input.threadId,
-          input.runId ?? null,
-          input.type,
-          stableStringify(input.payload),
-          this.now()
-        )
-      return Number(result.lastInsertRowid)
+        .run(input.threadId, input.runId ?? null, input.type, payload, createdAt)
+      const seq = Number(result.lastInsertRowid)
+      if (this.eventListeners.size) {
+        const event: ThreadEvent = {
+          seq,
+          threadId: input.threadId,
+          runId: input.runId ?? null,
+          type: input.type,
+          payload: JSON.parse(payload) as unknown,
+          createdAt
+        }
+        this.db.afterCommit(() => {
+          for (const listener of this.eventListeners) {
+            try {
+              listener(event)
+            } catch {
+              /* A listener cannot undo a durable commit. */
+            }
+          }
+        })
+      }
+      return seq
     })
   }
 

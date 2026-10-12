@@ -560,6 +560,11 @@ export interface OrchestratorResponse {
   sequence?: number
   /** True when the send repeated an earlier `clientRequestId`; nothing new was started. */
   replayed?: boolean
+  /**
+   * True for an `await: 'ack'` send: the run and its turn.start are committed and the turn's
+   * result arrives through run events (SPEC §12.7).
+   */
+  accepted?: boolean
 }
 
 /** Intent of a durable thread message queue entry. */

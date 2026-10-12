@@ -167,6 +167,17 @@ export interface LlmChatOptions {
   /** Daemon-minted episode capability; never accepted from protocol input. */
   toolAccess?: AgentToolAccess
 
+  /**
+   * Run Engine tool ledger (docs/run-engine/SPEC.md §12.6). `start` runs before a tool executes
+   * and returns the invocation id (undefined skips the ledger for that call); `commit` or
+   * `failed` follows once the outcome is known. Host-supplied; never from protocol input.
+   */
+  toolLedger?: {
+    start(call: ToolCall): string | undefined
+    commit(id: string): void
+    failed(id: string): void
+  }
+
 
   mode?: ChatMode
 
@@ -1332,12 +1343,17 @@ export class LlmClient {
         )
         }
         let result: ToolResultMessage
+        const ledgerId = options.toolLedger?.start(toolCall)
         try {
           result = options.toolAccess
             ? await options.toolAccess.execute(toolCall.name, (toolCall.arguments ?? {}) as Record<string, unknown>, dispatch)
             : await dispatch()
         } catch (error) {
           result = toolResult(toolCall, error instanceof Error ? error.message : String(error), true)
+        }
+        if (ledgerId) {
+          if (result.isError) options.toolLedger?.failed(ledgerId)
+          else options.toolLedger?.commit(ledgerId)
         }
 
         piMessages.push(result)

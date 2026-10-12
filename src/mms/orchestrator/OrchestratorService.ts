@@ -42,7 +42,15 @@ import type { AntigravityProviderService } from '../providers/antigravity/Antigr
 import { v4 as uuidv4 } from 'uuid'
 import type { CommandResult, RunEngine } from '../run/RunEngine'
 import { RunStoreError } from '../run/db/RunStoreError'
-import { TERMINAL_RUN_STATUSES, type ThreadEvent } from '../run/types'
+import type { EffectExecutor, EffectWorker } from '../run/EffectWorker'
+import { stableStringify } from '../run/json'
+import { formatRestartNote } from '../run/restartNote'
+import {
+  TERMINAL_RUN_STATUSES,
+  type EffectKind,
+  type EffectRecord,
+  type ThreadEvent
+} from '../run/types'
 import {
   isDelegationSettledStatus,
   isTerminalAgentStatus,
@@ -86,7 +94,7 @@ import { WorktreeManager } from '../worktree/WorktreeManager'
 import { PtyManager } from '../terminals/PtyManager'
 import { HeadlessAgentRunner } from '../terminals/HeadlessAgentRunner'
 import { MacroEngine } from '../macros/MacroEngine'
-import { LlmClient, parseActions, stripActionBlocks, type StreamingLlmThinkingEvent, type StreamingLlmToolEvent, filterActionsForChatMode, rejectOrchestrationAction } from './LlmClient'
+import { LlmClient, parseActions, stripActionBlocks, type StreamingLlmThinkingEvent, type StreamingLlmToolEvent, type LlmChatOptions, filterActionsForChatMode, rejectOrchestrationAction } from './LlmClient'
 import type { BrowserRuntimePort } from '../../shared/browser/runtime'
 import {
   type BrowserExecutionBinding,
@@ -514,6 +522,73 @@ export async function retryContextOverflowOnce<T>(
   }
 }
 
+export interface OrchestratorSendOptions {
+  threadId?: string
+  source?: string
+  forceQueue?: boolean
+  clientRequestId?: string
+  /**
+   * `turn` (default) resolves with the turn's result; `ack` resolves once the send is committed
+   * and its `turn.start` effect recorded (SPEC §12.7). Only the engine path honours `ack`.
+   */
+  awaitMode?: 'turn' | 'ack'
+}
+
+/** A turn handed to `startTurn`; `runId` is absent when the engine could not record a run. */
+interface TurnStartRequest {
+  runId?: string
+  threadId: string
+  input: OrchestratorSendInput
+  reuseLastUser: boolean
+  displayUserMessage: boolean
+  source?: string
+  queueItemId?: string
+  claimOwnerToken?: string
+  suppressAutoQueueDrain?: boolean
+  /** The caller already set `session.turnAdmitted`; the turn inherits it. */
+  admissionHeld?: boolean
+}
+
+/** Payload of a `turn.start` effect (SPEC §12.2). */
+export interface TurnStartPayload extends TurnStartRequest {
+  runId: string
+}
+
+/** In-process result of a `turn.start` effect, settled by its executor. */
+interface TurnResult {
+  promise: Promise<OrchestratorResponse>
+  resolve: (response: OrchestratorResponse) => void
+  reject: (error: unknown) => void
+  /** Full payload, including image data the durable payload omits. */
+  payload: TurnStartPayload
+  effectId: string | null
+  /** The executor picked the effect up; shutdown no longer abandons it. */
+  started: boolean
+  abandoned: boolean
+}
+
+/** Phases of a live turn that refresh its run heartbeat. */
+const HEARTBEAT_TURN_PHASES: ReadonlySet<TurnPhase> = new Set<TurnPhase>([
+  'queued', 'thinking', 'streaming', 'tool_running', 'awaiting_input', 'finalizing'
+])
+const RUN_HEARTBEAT_THROTTLE_MS = 5_000
+
+/**
+ * The durable copy of a send input. Image data stays in memory: `turn.start` is process-bound,
+ * so the executor always has the in-memory input, and every `effect.status` event repeats the
+ * payload.
+ */
+function durableSendInput(input: OrchestratorSendInput): OrchestratorSendInput {
+  if (typeof input === 'string' || !input.images?.length) return input
+  const { images, ...rest } = input
+  return { ...rest, images: images.map((image) => ({ ...image, data: '' })) }
+}
+
+/** Ledger digest of tool arguments: sha256 of their stable JSON. */
+function toolArgsDigest(args: unknown): string {
+  return sha256Hex(stableStringify(args ?? {}))
+}
+
 export class OrchestratorService extends EventEmitter {
   private appletStore?: AppletStore
   setAppletStore(store: AppletStore): void { this.appletStore = store }
@@ -529,6 +604,9 @@ export class OrchestratorService extends EventEmitter {
 
   beginShutdown(): void {
     this.lifecycle.beginShutdown()
+    for (const [runId, entry] of [...this.turnResults]) {
+      if (!entry.started) this.abandonTurnStart(runId, entry)
+    }
     this.startupDrainPending = []
     this.startupDrainScheduled.clear()
     this.progressMonitor.stopAll()
@@ -679,6 +757,12 @@ export class OrchestratorService extends EventEmitter {
   private runEngineUnsubscribe: (() => void) | null = null
   /** Runs whose bridge write hit a stale epoch; later marks for that turn are skipped. */
   private readonly staleRuns = new Set<string>()
+  /** Phase 2b: the worker that executes `turn.*` effects. Null keeps direct turn starts. */
+  private effectWorker: EffectWorker | null = null
+  /** Pending results of `turn.start` effects, keyed by runId (SPEC §12.7). */
+  private readonly turnResults = new Map<string, TurnResult>()
+  /** Last run heartbeat (ms) per run; throttles `RunEngine.heartbeat` writes. */
+  private readonly runHeartbeats = new Map<string, number>()
   /** Optional multi-tenant runtime manager (Phase 4). */
   private runtimeManager: import('../runtime/ThreadRuntimeManager').ThreadRuntimeManager | null =
     null
@@ -720,8 +804,25 @@ export class OrchestratorService extends EventEmitter {
     if ((phase === 'queued' || phase === 'thinking') && !existing?.startedAt) (state as any).startedAt = now
     if (phase !== 'idle' && !(state as any).startedAt) (state as any).startedAt = existing?.startedAt ?? now
     this.turnStates.set(threadId, state)
+    if (HEARTBEAT_TURN_PHASES.has(phase)) this.heartbeatRun(state.turnId)
+    else if (existing?.turnId) this.runHeartbeats.delete(existing.turnId)
     this.emit('turn-state', state)
     this.runtimeManager?.setActivity(threadId, this.phaseToActivity(phase))
+  }
+
+  /** Liveness touch for an engine run (SPEC §12.4 rule 2), at most once per throttle window. */
+  private heartbeatRun(runId: string | null | undefined): void {
+    const engine = this.runEngine
+    if (!engine || !runId || !runId.startsWith('run:')) return
+    const now = Date.now()
+    const last = this.runHeartbeats.get(runId)
+    if (last !== undefined && now - last < RUN_HEARTBEAT_THROTTLE_MS) return
+    this.runHeartbeats.set(runId, now)
+    try {
+      engine.heartbeat(runId)
+    } catch (error) {
+      console.warn('run engine heartbeat failed', { runId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   getTurnState(threadId: string): TurnState {
@@ -1010,7 +1111,11 @@ export class OrchestratorService extends EventEmitter {
     const target = threadId ?? engine.getRun(runId)?.threadId
     if (!target) return { status: 'ignored', reason: 'run_not_found', runId, sequence: 0 }
     const result = await engine.dispatch({ kind: 'stop', threadId: target, clientRequestId, runId })
-    if (result.status === 'accepted' && !result.replayed) this.abortActiveTurn(target)
+    if (result.status === 'accepted' && !result.replayed) {
+      this.enqueueControlEffect('turn.interrupt', target, runId, { runId, threadId: target }, () => {
+        this.abortActiveTurn(target)
+      })
+    }
     return result
   }
 
@@ -1020,10 +1125,216 @@ export class OrchestratorService extends EventEmitter {
     const target = threadId ?? engine.getRun(runId)?.threadId
     if (!target) return { status: 'ignored', reason: 'run_not_found', runId, sequence: 0 }
     const result = await engine.dispatch({ kind: 'steer', threadId: target, clientRequestId, runId })
-    if (result.status === 'accepted' && !result.replayed && !this.steerThread(target, text)) {
-      console.warn('run engine steer accepted but the legacy turn did not take it', { runId })
+    if (result.status === 'accepted' && !result.replayed) {
+      this.enqueueControlEffect('turn.steer', target, runId, { runId, threadId: target, text }, () => {
+        if (!this.steerThread(target, text)) {
+          console.warn('run engine steer accepted but the legacy turn did not take it', { runId })
+        }
+      })
     }
     return result
+  }
+
+  /**
+   * Phase 2b (SPEC §12.2-§12.3): with a worker attached, turns, interrupts and steers run as
+   * durable effects. The profile attaches the worker after boot recovery and detaches it on stop.
+   */
+  attachEffectWorker(worker: EffectWorker | null): void {
+    this.effectWorker = worker
+  }
+
+  private effectsEnabled(): boolean {
+    return Boolean(this.runEngine && this.effectWorker)
+  }
+
+  /** Executors for the `turn.*` effects; the profile hands them to its `EffectWorker`. */
+  effectExecutors(): Partial<Record<EffectKind, EffectExecutor>> {
+    return {
+      'turn.start': (effect, ctx) => this.executeTurnStartEffect(effect, ctx.signal),
+      'turn.interrupt': async (effect) => this.executeTurnInterruptEffect(effect),
+      'turn.steer': async (effect) => this.executeTurnSteerEffect(effect)
+    }
+  }
+
+  /**
+   * Starts an admitted turn. With effects enabled and a run, the turn becomes a `turn.start`
+   * effect whose result the returned promise carries; otherwise it runs directly. The caller
+   * may hold admission (`admissionHeld`); the effect path always holds it until the executor runs
+   * so a concurrent send still queues.
+   */
+  private startTurn(session: ThreadSession, payload: TurnStartRequest): Promise<OrchestratorResponse> {
+    const direct = (admissionHeld: boolean | undefined): Promise<OrchestratorResponse> => this.runTurnOnSession(
+      session,
+      payload.input,
+      payload.reuseLastUser,
+      payload.displayUserMessage,
+      {
+        source: payload.source,
+        queueItemId: payload.queueItemId,
+        claimOwnerToken: payload.claimOwnerToken,
+        suppressAutoQueueDrain: payload.suppressAutoQueueDrain,
+        runId: payload.runId,
+        admissionHeld
+      }
+    )
+    const runId = payload.runId
+    if (!runId || !this.effectsEnabled()) return direct(payload.admissionHeld)
+    if (!payload.admissionHeld) {
+      // Let the direct path produce its usual "already running" rejection.
+      if (session.turnAdmitted) return direct(false)
+      session.turnAdmitted = true
+    }
+    try {
+      return this.enqueueTurnStart({ ...payload, runId, admissionHeld: true })
+    } catch (error) {
+      console.warn('turn.start effect could not be recorded; running the turn directly', {
+        runId,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      return direct(true)
+    }
+  }
+
+  /**
+   * Records a `turn.start` effect and the in-memory deferred its executor settles. The run's send
+   * already committed; the effect is its own transaction (Phase 2b).
+   */
+  private enqueueTurnStart(payload: TurnStartPayload): Promise<OrchestratorResponse> {
+    const engine = this.requireRunEngine()
+    let resolve!: (response: OrchestratorResponse) => void
+    let reject!: (error: unknown) => void
+    const promise = new Promise<OrchestratorResponse>((done, failed) => {
+      resolve = done
+      reject = failed
+    })
+    // Ack-mode sends never await the result; a rejection must not surface as unhandled.
+    promise.catch(() => undefined)
+    const entry: TurnResult = { promise, resolve, reject, payload, effectId: null, started: false, abandoned: false }
+    this.turnResults.set(payload.runId, entry)
+    try {
+      entry.effectId = engine.outbox.enqueue({
+        threadId: payload.threadId,
+        runId: payload.runId,
+        kind: 'turn.start',
+        payload: { ...payload, input: durableSendInput(payload.input) }
+      }).effectId
+    } catch (error) {
+      this.turnResults.delete(payload.runId)
+      throw error
+    }
+    return promise
+  }
+
+  private async executeTurnStartEffect(effect: EffectRecord, signal: AbortSignal): Promise<void> {
+    const stored = effect.payload as TurnStartPayload
+    const entry = this.turnResults.get(stored.runId)
+    if (entry?.abandoned) return
+    if (entry) entry.started = true
+    // The in-memory payload keeps image data the durable payload omits. Without it the sender is
+    // gone (another orchestrator instance), so this executor does not inherit its admission.
+    const payload = entry?.payload ?? { ...stored, admissionHeld: false }
+    try {
+      const session = this.getOrCreateSession(payload.threadId)
+      const response = await this.runTurnOnSession(
+        session,
+        payload.input,
+        payload.reuseLastUser,
+        payload.displayUserMessage,
+        {
+          source: payload.source,
+          queueItemId: payload.queueItemId,
+          claimOwnerToken: payload.claimOwnerToken,
+          suppressAutoQueueDrain: payload.suppressAutoQueueDrain,
+          runId: payload.runId,
+          admissionHeld: payload.admissionHeld,
+          externalSignal: signal
+        }
+      )
+      entry?.resolve(response)
+    } catch (error) {
+      entry?.reject(error)
+      // An ordinary turn failure is already recorded on the run by the bridge; the effect itself
+      // succeeded. Only a run the bridge could not settle is an infrastructure failure.
+      const run = this.runEngine?.getRun(payload.runId)
+      if (!run || (!TERMINAL_RUN_STATUSES.has(run.status) && run.status !== 'queued')) throw error
+    } finally {
+      if (this.turnResults.get(payload.runId) === entry) this.turnResults.delete(payload.runId)
+    }
+  }
+
+  /**
+   * A `turn.start` the worker never claimed before shutdown: cancel the effect, release the
+   * admission it held and fail the sender. A queue item keeps its claim settlement to the drain's
+   * failure path (its run stays queued with the item); a direct send's run is interrupted.
+   */
+  private abandonTurnStart(runId: string, entry: TurnResult): void {
+    entry.abandoned = true
+    this.turnResults.delete(runId)
+    const { payload } = entry
+    try {
+      if (entry.effectId) this.runEngine?.outbox.cancel(entry.effectId, new Date().toISOString(), 'shutdown')
+    } catch (error) {
+      console.warn('turn.start effect could not be cancelled', { runId, error: error instanceof Error ? error.message : String(error) })
+    }
+    const session = this.boundSession.threadId === payload.threadId ? this.boundSession : this.sessions.get(payload.threadId)
+    if (session && !session.activeTurn) session.turnAdmitted = false
+    if (!payload.queueItemId) {
+      this.markRun(runId, (engine, id) => {
+        if (engine.getRun(id)?.status === 'queued') engine.markTerminal(id, 'interrupted', { interruptedBy: 'daemon_restart' })
+      })
+    }
+    entry.reject(Object.assign(new Error('Profile work is shutting down'), { code: 'profile_draining' }))
+  }
+
+  /** `turn.interrupt`: aborts the run's live turn. A run that is no longer live counts as done. */
+  private executeTurnInterruptEffect(effect: EffectRecord): void {
+    const { runId, threadId } = effect.payload as { runId: string; threadId: string }
+    const run = this.runEngine?.getRun(runId)
+    if (run && TERMINAL_RUN_STATUSES.has(run.status)) return
+    this.abortActiveTurn(threadId)
+  }
+
+  /** `turn.steer`: delivers to the live turn; a steer that missed it becomes a new turn (SPEC §5). */
+  private executeTurnSteerEffect(effect: EffectRecord): void {
+    const { runId, threadId, text } = effect.payload as { runId: string; threadId: string; text: string }
+    const run = this.runEngine?.getRun(runId)
+    if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, text)) return
+    this.enqueueLateSteer(threadId, text)
+  }
+
+  private enqueueLateSteer(threadId: string, text: string): void {
+    const content = text.trim()
+    const session = this.getOrCreateSession(threadId)
+    if (!content || session.deleted) return
+    this.enqueueForThread(
+      threadId,
+      { content, mode: getLastUserChatMode(session.messages) ?? 'agent' },
+      { source: 'steer-late' }
+    )
+    if (session.isTurnRunning()) session.drainAfterSettle = true
+    else this.scheduleQueueDrain(session)
+  }
+
+  /** Enqueues a control effect, or runs `fallback` directly without effects or when the write fails. */
+  private enqueueControlEffect(
+    kind: 'turn.interrupt' | 'turn.steer',
+    threadId: string,
+    runId: string,
+    payload: Record<string, unknown>,
+    fallback: () => void
+  ): void {
+    if (this.effectsEnabled()) {
+      try {
+        this.requireRunEngine().outbox.enqueue({ threadId, runId, kind, payload })
+        return
+      } catch (error) {
+        console.warn(`${kind} effect could not be recorded; applying it directly`, {
+          runId,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+    fallback()
   }
 
   private requireRunEngine(): RunEngine {
@@ -1044,6 +1355,56 @@ export class OrchestratorService extends EventEmitter {
         return
       }
       console.warn('run engine write failed', { runId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** SPEC §12.5 step 5: the first turn after a daemon restart shows what was cut off, once. */
+  private deliverRestartNote(threadId: string, runId: string | undefined): void {
+    const engine = this.runEngine
+    if (!engine || !runId) return
+    try {
+      const note = engine.takeRestartNote(threadId, runId)
+      if (note) this.addSystemMessage(formatRestartNote(note))
+    } catch (error) {
+      console.warn('run engine restart note failed', { runId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * SPEC §12.6 tool ledger for an engine run: `started` before a tool runs, `committed|failed`
+   * after. A ledger failure is logged and never breaks the tool.
+   */
+  private toolLedgerFor(runId: string | undefined): LlmChatOptions['toolLedger'] {
+    const engine = this.runEngine
+    if (!engine || !runId) return undefined
+    const now = (): string => new Date().toISOString()
+    const warn = (step: string, error: unknown): void => {
+      console.warn(`run engine tool ledger ${step} failed`, { runId, error: error instanceof Error ? error.message : String(error) })
+    }
+    return {
+      start: (call) => {
+        try {
+          const attemptId = engine.getRun(runId)?.activeAttemptId
+          if (!attemptId) return undefined
+          return engine.tools.start({
+            invocationId: uuidv4(),
+            runId,
+            attemptId,
+            tool: call.name,
+            argsDigest: toolArgsDigest(call.arguments),
+            now: now()
+          }).invocationId
+        } catch (error) {
+          warn('start', error)
+          return undefined
+        }
+      },
+      commit: (id) => {
+        try { engine.tools.commit(id, now()) } catch (error) { warn('commit', error) }
+      },
+      failed: (id) => {
+        try { engine.tools.failed(id, now()) } catch (error) { warn('failed', error) }
+      }
     }
   }
 
@@ -2563,7 +2924,7 @@ export class OrchestratorService extends EventEmitter {
   async send(
     input: OrchestratorSendInput,
     reuseLastUser = false,
-    opts?: { threadId?: string; source?: string; forceQueue?: boolean; clientRequestId?: string }
+    opts?: OrchestratorSendOptions
   ): Promise<OrchestratorResponse> {
     return this.lifecycle.run('send', () => this.sendOwned(input, reuseLastUser, opts))
   }
@@ -2571,7 +2932,7 @@ export class OrchestratorService extends EventEmitter {
   private async sendOwned(
     input: OrchestratorSendInput,
     reuseLastUser = false,
-    opts?: { threadId?: string; source?: string; forceQueue?: boolean; clientRequestId?: string }
+    opts?: OrchestratorSendOptions
   ): Promise<OrchestratorResponse> {
     const threadId = opts?.threadId ?? this.getBoundThreadId()
     if (!threadId) {
@@ -2599,7 +2960,14 @@ export class OrchestratorService extends EventEmitter {
       })
       if (result.status !== 'accepted') throw new Error(result.reason)
       if (result.replayed) {
-        return { message: '', actions: [], runId: result.runId, sequence: result.sequence, replayed: true }
+        const replayed = { runId: result.runId, sequence: result.sequence, replayed: true }
+        // A replay of a send whose turn is still live waits for the same result (SPEC §12.7).
+        const live = this.turnResults.get(result.runId)
+        const run = live ? this.runEngine.getRun(result.runId) : null
+        if (live && opts?.awaitMode !== 'ack' && run && !TERMINAL_RUN_STATUSES.has(run.status)) {
+          return { ...(await live.promise), ...replayed }
+        }
+        return { message: '', actions: [], ...replayed }
       }
       run = { runId: result.runId, sequence: result.sequence }
     }
@@ -2634,6 +3002,23 @@ export class OrchestratorService extends EventEmitter {
         queueItem: item,
         ...run
       }
+    }
+
+    if (run && this.effectsEnabled()) {
+      // startTurn admits synchronously, right after the busy check, and hands it to the effect.
+      const pending = this.startTurn(session, {
+        runId: run.runId,
+        threadId,
+        input,
+        reuseLastUser,
+        displayUserMessage: opts?.source !== 'wake',
+        source: opts?.source
+      })
+      if (opts?.awaitMode === 'ack') {
+        pending.catch(() => undefined)
+        return { message: '', actions: [], ...run, accepted: true }
+      }
+      return { ...(await pending), ...run }
     }
 
     const response = await this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake', { source: opts?.source, runId: run?.runId })
@@ -3055,6 +3440,7 @@ export class OrchestratorService extends EventEmitter {
       this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome))
     }
     this.markRun(engineRunId, (engine, id) => engine.markStarting(id))
+    this.deliverRestartNote(session.threadId, engineRunId)
     let conversationToolsUsed = false
     let providerProgress = false
     const conversationDirectory = !checkpointEnabled && !reuseLastUser && displayUserMessage && session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
@@ -3400,7 +3786,9 @@ export class OrchestratorService extends EventEmitter {
                 if (session.executionLease) {
                   heartbeatExecutionLease(session.executionLease)
                 }
+                this.heartbeatRun(engineRunId)
               },
+              toolLedger: this.toolLedgerFor(engineRunId),
               onCompaction,
               toolLoopSafety: contextSettings.compactionEnabled
                 ? {
@@ -3947,31 +4335,30 @@ export class OrchestratorService extends EventEmitter {
     }
     const item = claimed as QueuedMessage
     const managedByStartup = opts?.managedByStartup === true
-    const startClaimed = (runId: string | undefined, admissionHeld: boolean): Promise<OrchestratorResponse> => this.runTurnOnSession(
-      session,
-      {
+    const startClaimed = (runId: string | undefined, admissionHeld: boolean): Promise<OrchestratorResponse> => this.startTurn(session, {
+      runId,
+      threadId: session.threadId,
+      input: {
         content: item.content,
         workflowInvocationId: item.workflowInvocationId,
         mode: item.mode,
         images: item.images
       },
-      false,
-      !item.internal,
-      {
-        queueItemId: item.id,
-        claimOwnerToken: claimToken,
-        source: item.source,
-        suppressAutoQueueDrain: managedByStartup,
-        runId,
-        admissionHeld
-      }
-    )
+      reuseLastUser: false,
+      displayUserMessage: !item.internal,
+      queueItemId: item.id,
+      claimOwnerToken: claimToken,
+      source: item.source,
+      suppressAutoQueueDrain: managedByStartup,
+      admissionHeld
+    })
     let started: Promise<OrchestratorResponse>
     if (!item.runId && this.runEngine) {
       // Hold admission across the run-record await so no concurrent send can start a turn.
       session.turnAdmitted = true
       started = this.ensureQueueItemRun(item).then((runId) => startClaimed(runId, true))
     } else {
+      // With effects, startTurn admits the claim now and keeps it admitted until the executor runs.
       started = startClaimed(item.runId, false)
     }
     void started

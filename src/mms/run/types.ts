@@ -113,8 +113,11 @@ export const TERMINAL_EFFECT_STATUSES: ReadonlySet<EffectStatus> = new Set<Effec
 export interface EffectKindSpec {
   class: EffectClass
   timeoutMs: number
-  /** Lane override. Without one the lane is the effect's thread. */
-  lane?: 'title'
+  /**
+   * Lane override. Without one the lane is the effect's thread. `control` effects (interrupt,
+   * steer, answers) must reach a live turn, so they never queue behind the thread's `turn.start`.
+   */
+  lane?: 'title' | 'control'
   /** Defaults to `DEFAULT_EFFECT_MAX_ATTEMPTS`. */
   maxAttempts?: number
 }
@@ -128,10 +131,15 @@ export const DEFAULT_EFFECT_MAX_ATTEMPTS = 5
  * replay-safe kinds use the default retry budget.
  */
 export const EFFECT_KIND_SPEC: Record<EffectKind, EffectKindSpec> = {
-  'turn.start': { class: 'process_bound', timeoutMs: 2 * 60 * 60_000, maxAttempts: 1 },
-  'turn.interrupt': { class: 'process_bound', timeoutMs: 30_000 },
-  'turn.steer': { class: 'process_bound', timeoutMs: 30_000, maxAttempts: 1 },
-  'request.respond': { class: 'process_bound', timeoutMs: 30_000, maxAttempts: 1 },
+  'turn.start': { class: 'process_bound', timeoutMs: 6 * 60 * 60_000, maxAttempts: 1 },
+  'turn.interrupt': { class: 'process_bound', timeoutMs: 30_000, lane: 'control' },
+  'turn.steer': { class: 'process_bound', timeoutMs: 30_000, maxAttempts: 1, lane: 'control' },
+  'request.respond': {
+    class: 'process_bound',
+    timeoutMs: 30_000,
+    maxAttempts: 1,
+    lane: 'control'
+  },
   'checkpoint.capture': { class: 'replay_safe', timeoutMs: 2 * 60_000 },
   'title.generate': { class: 'replay_safe', timeoutMs: 60_000, lane: 'title' },
   'workspace.cleanup': { class: 'replay_safe', timeoutMs: 5 * 60_000 }

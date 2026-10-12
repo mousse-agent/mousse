@@ -12,6 +12,8 @@ import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { OrchestratorService } from './orchestrator/OrchestratorService'
 import { ProfileDatabase } from './run/db/ProfileDatabase'
+import { EffectWorker } from './run/EffectWorker'
+import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import { RunStore } from './run/RunStore'
 import { ScheduledJobService } from './scheduled/ScheduledJobService'
@@ -134,6 +136,9 @@ export class MmsProfileServices {
   readonly threadRuntimes: ThreadRuntimeManager
   /** Profile Run Engine (`<profileHome>/run/run.db`); Phase 1 dual-writes beside the orchestrator. */
   readonly runEngine: RunEngine
+  private runEffectWorker: EffectWorker | null = null
+  private runReconciler: Reconciler | null = null
+  private daemonHeartbeat: ReturnType<typeof setInterval> | null = null
   /** Daemon-owned pending questions, one instance per profile. */
   readonly questions: UserQuestionService
   readonly modeRegistry: ModeRegistry
@@ -666,6 +671,7 @@ export class MmsProfileServices {
 
     // Runs the previous daemon left active cannot resume (SPEC §5); settle them before any turn.
     this.orchestrator.recoverRunEngineOnBoot()
+    this.startRunEngineWorkers()
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
     this.threadRuntimes.restoreOnStartup()
     // Questions are memory-only — new process has none; document interrupted semantics.
@@ -766,6 +772,60 @@ export class MmsProfileServices {
     })
   }
 
+  /** Executes `turn.*` effects (SPEC §12.3); null until `start()` has recovered the engine. */
+  get effectWorker(): EffectWorker | null {
+    return this.runEffectWorker
+  }
+
+  /** Repairs stored run/effect state (SPEC §12.4); null until `start()`. */
+  get reconciler(): Reconciler | null {
+    return this.runReconciler
+  }
+
+  /** SPEC §12.5 step 6: effect worker, reconciler and daemon heartbeat, after boot recovery. */
+  private startRunEngineWorkers(): void {
+    const engine = this.runEngine
+    const worker = new EffectWorker({
+      outbox: engine.outbox,
+      executors: this.orchestrator.effectExecutors(),
+      owner: engine.leaseOwner
+    })
+    const reconciler = new Reconciler({
+      store: engine.store,
+      outbox: engine.outbox,
+      tools: engine.tools
+    })
+    this.runEffectWorker = worker
+    this.runReconciler = reconciler
+    worker.start()
+    reconciler.start()
+    this.orchestrator.attachEffectWorker(worker)
+    this.daemonHeartbeat = setInterval(() => {
+      try {
+        engine.heartbeatDaemon()
+      } catch (error) {
+        console.warn('run engine daemon heartbeat failed', error)
+      }
+    }, 10_000)
+    this.daemonHeartbeat.unref?.()
+  }
+
+  /**
+   * Stops the reconciler and the worker (in-flight turns abort through their effect signal), waits
+   * for the orchestrator to drain, then records a clean daemon end. One sequential cleanup: the
+   * clean `ended_at` must only be written once no turn can still write to the run database.
+   */
+  private async stopRunEngine(): Promise<void> {
+    if (this.daemonHeartbeat) clearInterval(this.daemonHeartbeat)
+    this.daemonHeartbeat = null
+    this.runReconciler?.stop()
+    const workerStopped = this.runEffectWorker?.stop()
+    await this.orchestrator.shutdown()
+    await workerStopped
+    this.orchestrator.attachEffectWorker(null)
+    this.runEngine.shutdown()
+  }
+
   private async finishStop(): Promise<void> {
     // Invoke each cleanup in its own promise. Calling the methods while
     // constructing the array would let one synchronous throw prevent every
@@ -776,7 +836,7 @@ export class MmsProfileServices {
       () => this.platform.dispose(),
       () => this.scheduled.shutdown(),
       () => this.channels.shutdown(),
-      () => this.orchestrator.shutdown(),
+      () => this.stopRunEngine(),
       () => this.net.shutdown(),
       () => this.requests.waitForIdle(),
       () => this.antigravity.stop(),

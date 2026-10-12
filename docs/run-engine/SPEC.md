@@ -236,7 +236,7 @@ CREATE INDEX tool_invocations_run ON tool_invocations(run_id, status);
 
 | kind | class | timeout | what it does |
 |---|---|---|---|
-| `turn.start` | process_bound | 2 h | run the provider turn (legacy `executeTurn` body, later adapters) |
+| `turn.start` | process_bound | 6 h | run the provider turn (legacy `executeTurn` body, later adapters) |
 | `turn.interrupt` | process_bound | 30 s | abort the live turn; "not active" counts as success |
 | `turn.steer` | process_bound | 30 s | deliver steer text to the live turn |
 | `request.respond` | process_bound | 30 s | answer a pending user question / approval |
@@ -249,7 +249,7 @@ CREATE INDEX tool_invocations_run ON tool_invocations(run_id, status);
 ### 12.3 Worker and lanes
 
 - One in-process worker with N=4 fibres (plain async loops). Wake sources: `afterCommit` notify, next `available_at` timer, 30 s safety poll.
-- Claim is one `UPDATE … WHERE effect_id = (SELECT … LIMIT 1) RETURNING *` and is only valid when, for the same thread lane, there is **no `running` row whose lease has not expired** and no earlier `pending` row. `title.generate` is its own lane.
+- Claim is one `UPDATE … WHERE effect_id = (SELECT … LIMIT 1) RETURNING *` and is only valid when, for the same thread lane, there is **no `running` row whose lease has not expired** and no earlier `pending` row. `title.generate` is its own lane, and `turn.interrupt`, `turn.steer` and `request.respond` share a per-thread **control** lane so they reach a live turn instead of queueing behind its long-running `turn.start`.
 - Lease = `timeout_ms + 15 s`. The worker renews the lease every `timeout_ms/3` while executing.
 - Execution is raced against `AbortSignal.timeout(timeout_ms)` and against cancellation. On timeout: `failed` with `last_error='timeout'` if attempts exhausted, else `pending` with backoff `min(30 s, 100 ms·2^(n−1))`.
 - Settlement is CAS on `(effect_id, lease_owner)`; a lost lease aborts the local execution and writes nothing.

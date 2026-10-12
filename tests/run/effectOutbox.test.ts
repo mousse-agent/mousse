@@ -51,7 +51,7 @@ describe('EffectOutbox', () => {
       effectId: `effect:${run.runId}:turn.start:1`,
       status: 'pending',
       class: 'process_bound',
-      timeoutMs: 2 * 60 * 60_000,
+      timeoutMs: 6 * 60 * 60_000,
       maxAttempts: 1,
       attempts: 0,
       availableAt: T0,
@@ -82,7 +82,7 @@ describe('EffectOutbox', () => {
   it('lets an earlier available pending row in the lane block a later one', () => {
     const { outbox } = open()
     const a = outbox.enqueue({ threadId: 't', kind: 'turn.start', availableAt: at(1000) })
-    const b = outbox.enqueue({ threadId: 't', kind: 'turn.steer', availableAt: T0 })
+    const b = outbox.enqueue({ threadId: 't', kind: 'checkpoint.capture', availableAt: T0 })
     // b sorts first by available_at, but a is older in the lane and available, so a goes first.
     expect(outbox.claimNext('1:1', at(2000))!.effectId).toBe(a.effectId)
     expect(outbox.claimNext('1:1', at(2000))).toBeNull()
@@ -92,7 +92,7 @@ describe('EffectOutbox', () => {
   it('does not let an earlier row that is not yet available block the lane', () => {
     const { outbox } = open()
     const later = outbox.enqueue({ threadId: 't', kind: 'turn.start', availableAt: at(5000) })
-    const due = outbox.enqueue({ threadId: 't', kind: 'turn.steer', availableAt: T0 })
+    const due = outbox.enqueue({ threadId: 't', kind: 'checkpoint.capture', availableAt: T0 })
     expect(outbox.claimNext('1:1', at(1000))!.effectId).toBe(due.effectId)
     // Now the running row holds the lane.
     expect(outbox.claimNext('1:1', at(6000))).toBeNull()
@@ -124,15 +124,32 @@ describe('EffectOutbox', () => {
     const turn = outbox.enqueue({ threadId: 't', kind: 'turn.start' })
     const title = outbox.enqueue({ threadId: 't', kind: 'title.generate' })
     const title2 = outbox.enqueue({ threadId: 't', kind: 'title.generate' })
-    const steer = outbox.enqueue({ threadId: 't', kind: 'turn.steer' })
+    const cleanup = outbox.enqueue({ threadId: 't', kind: 'workspace.cleanup' })
     expect(outbox.claimNext('o', T0)!.effectId).toBe(turn.effectId)
     expect(outbox.claimNext('o', T0)!.effectId).toBe(title.effectId)
     // Thread lane is held by the turn; title lane by the first title.
     expect(outbox.claimNext('o', T0)).toBeNull()
     outbox.succeed(turn.effectId, 'o', at(1))
-    expect(outbox.claimNext('o', at(2))!.effectId).toBe(steer.effectId)
+    expect(outbox.claimNext('o', at(2))!.effectId).toBe(cleanup.effectId)
     outbox.succeed(title.effectId, 'o', at(3))
     expect(outbox.claimNext('o', at(4))!.effectId).toBe(title2.effectId)
+  })
+
+  it('runs interrupt, steer and answers in a control lane beside a running turn', () => {
+    const { outbox } = open()
+    const turn = outbox.enqueue({ threadId: 't', kind: 'turn.start' })
+    const interrupt = outbox.enqueue({ threadId: 't', kind: 'turn.interrupt' })
+    const steer = outbox.enqueue({ threadId: 't', kind: 'turn.steer' })
+    const answer = outbox.enqueue({ threadId: 't', kind: 'request.respond' })
+    expect(outbox.claimNext('o', T0)!.effectId).toBe(turn.effectId)
+    // The control lane is FIFO on its own: the turn does not block it.
+    expect(outbox.claimNext('o', T0)!.effectId).toBe(interrupt.effectId)
+    expect(outbox.claimNext('o', T0)).toBeNull()
+    outbox.succeed(interrupt.effectId, 'o', at(1))
+    expect(outbox.claimNext('o', at(2))!.effectId).toBe(steer.effectId)
+    outbox.succeed(steer.effectId, 'o', at(3))
+    expect(outbox.claimNext('o', at(4))!.effectId).toBe(answer.effectId)
+    expect(outbox.get(turn.effectId)!.status).toBe('running')
   })
 
   it('settles by CAS on status and lease owner and writes nothing on a miss', () => {
@@ -222,7 +239,11 @@ describe('EffectOutbox', () => {
   it('cancels process-bound effects and re-queues running replay-safe ones on boot', () => {
     const { outbox } = open()
     const turnRunning = outbox.enqueue({ threadId: 't', kind: 'turn.start' })
-    const steerPending = outbox.enqueue({ threadId: 't', kind: 'turn.steer' })
+    const steerPending = outbox.enqueue({
+      threadId: 't',
+      kind: 'turn.steer',
+      availableAt: at(60_000)
+    })
     const titleRunning = outbox.enqueue({ threadId: 't', kind: 'title.generate' })
     const cleanupPending = outbox.enqueue({
       threadId: 'u',
