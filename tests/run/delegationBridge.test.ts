@@ -32,7 +32,7 @@ type Script = (input: TurnInput, delegation: DelegationToolHost | undefined) => 
 
 /** A pi-shaped adapter whose replies come from a per-turn script with the turn's delegation host. */
 class ScriptedPiAdapter implements ProviderAdapter {
-  readonly id = 'pi'
+  readonly driver = 'pi' as const
   readonly capabilities = PI_LOOP_CAPABILITIES
   readonly turns: TurnInput[] = []
   constructor(private readonly script: Script) {}

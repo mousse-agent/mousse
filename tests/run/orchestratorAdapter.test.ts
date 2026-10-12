@@ -32,7 +32,7 @@ import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
 import { getDefaultSettings } from '../../src/shared/settings'
 
 class FakePiAdapter implements ProviderAdapter {
-  readonly id = 'pi'
+  readonly driver = 'pi' as const
   readonly capabilities = PI_LOOP_CAPABILITIES
   readonly turns: Array<{ input: TurnInput; host: AdapterHost }> = []
 

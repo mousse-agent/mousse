@@ -2,6 +2,8 @@ export type ProviderAuthType = 'api_key' | 'oauth'
 
 export interface ConfiguredProvider {
   id: string
+  /** Provider instance this sign-in serves. */
+  instanceId?: string
   label: string
   authType: ProviderAuthType
   source?: string

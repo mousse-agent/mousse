@@ -9,6 +9,7 @@ import { ProjectManager } from '../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
+import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { AdapterRegistry } from '../../src/mms/run/adapters/AdapterRegistry'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
@@ -55,7 +56,7 @@ export class ScriptedAdapter implements ProviderAdapter {
   failNext: Error | null = null
 
   constructor(
-    readonly id: string,
+    readonly driver: ProviderDriverKind,
     readonly capabilities: ProviderCapabilities,
     private readonly script: Script,
     /** A session id to report in the provider ref (native-fork tests). */
@@ -118,7 +119,7 @@ export const piAdapter = (script: Script, caps: Partial<ProviderCapabilities> = 
 
 /** A Claude-subscription-shaped adapter (`historyInjection: 'prompt'`, weak containment). */
 export const claudeAdapter = (script: Script): ScriptedAdapter =>
-  new ScriptedAdapter('claude-subscription', CLAUDE_SUBSCRIPTION_CAPABILITIES, script)
+  new ScriptedAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, script)
 
 export async function waitFor(cond: () => boolean, label: string, timeoutMs = 10_000): Promise<void> {
   const start = Date.now()

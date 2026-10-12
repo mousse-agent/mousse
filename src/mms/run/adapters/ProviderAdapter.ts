@@ -1,4 +1,5 @@
 import type { AssistantMessage, Message } from '@earendil-works/pi-ai'
+import type { ProviderDriverKind } from '../../../shared/providerInstances'
 import type { ChatImageAttachment, ChatMode } from '../../../shared/types'
 import type {
   LlmChatOptions,
@@ -49,11 +50,18 @@ export interface TurnInput {
   threadId: string
   /** Project working directory; null for a thread without a project. */
   cwd: string | null
-  /** Resolved selection; routes the turn (`AdapterRegistry`) and names the `ProviderRef`. */
+  /** Provider instance the turn runs on (SPEC §13.8); `AdapterRegistry` routed the turn by it. */
+  instanceId: string
+  /** Resolved model of the selection. */
   model: string
+  /**
+   * @deprecated Derived from `instanceId` (the pi-ai provider id of a `pi:<provider>` instance, the
+   * driver's former provider name otherwise). Kept because transcripts, provider refs and the pi
+   * loop still name providers this way; route by `instanceId`.
+   */
   llmProvider: string
   /**
-   * The thread or caller pinned `model`/`llmProvider`. When false the selection is the configured
+   * The thread or caller pinned `model`/`instanceId`. When false the selection is the configured
    * default for `mode`, and an adapter whose runtime resolves its own default (the pi loop's
    * `LlmClient`) is left to do so, exactly as before adapters.
    */
@@ -240,8 +248,8 @@ export interface ModelInfo {
 }
 
 export interface ProviderAdapter {
-  /** `'pi' | 'claude-subscription' | 'antigravity'`; resolved by `AdapterRegistry`. */
-  readonly id: string
+  /** The driver kind this adapter implements; `AdapterRegistry` maps each instance to it. */
+  readonly driver: ProviderDriverKind
   readonly capabilities: ProviderCapabilities
   /** Facts about `model`; adapters whose context Mousse measures itself (the pi loop) omit it. */
   describe?(model: string): ModelInfo

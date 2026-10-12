@@ -16,6 +16,12 @@ export interface MmsConfigSection {
 export interface MousseProvidersConfig {
   llmProvider: string
   model: string
+  /**
+   * Provider instances of this profile, keyed by instance id (SPEC §13.8). Seeded on load by
+   * `ProviderInstanceService`; stored entries are never rewritten. Kept as stored (malformed
+   * entries included) and validated when read.
+   */
+  instances?: Record<string, unknown>
 }
 
 export interface MousseAgentsConfig {

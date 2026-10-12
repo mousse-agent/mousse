@@ -86,6 +86,8 @@ export interface MousseSettings {
   provider: {
     llmProvider: LlmProviderId
     model: string
+    /** Provider instances (`providers.instances` in the profile config); owned by the daemon. */
+    instances?: Record<string, unknown>
   }
   /** Lightweight model used to name chats. Blank values use the best connected default. */
   title: {
@@ -135,6 +137,8 @@ export interface LlmModelOption {
 
 export interface LlmProviderOption {
   id: LlmProviderId
+  /** Provider instance serving these models; select with `{ instanceId, model }`. */
+  instanceId?: string
   label: string
   models: LlmModelOption[]
 }

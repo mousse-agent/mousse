@@ -8,6 +8,7 @@ import { ProviderAuthService } from './providers/ProviderAuthService'
 import { AppletStore } from './applets/AppletStore'
 import { ClaudeSubscriptionProviderService } from './providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { AntigravityProviderService } from './providers/antigravity/AntigravityProviderService'
+import { ProviderInstanceService } from './providers/ProviderInstanceService'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { OrchestratorService } from './orchestrator/OrchestratorService'
@@ -88,6 +89,8 @@ export class MmsProfileServices {
   readonly providerAuth: ProviderAuthService
   readonly antigravity: AntigravityProviderService
   readonly claudeSubscription: ClaudeSubscriptionProviderService
+  /** Provider instances of this profile: the agents callers pick by `{ instanceId, model }`. */
+  readonly providerInstances: ProviderInstanceService
   readonly projects: ProjectManager
   readonly applets: AppletStore
   readonly threads: ThreadDataStore
@@ -212,6 +215,17 @@ export class MmsProfileServices {
     this.claudeSubscription = new ClaudeSubscriptionProviderService(homeDir, this.questions, {}, {
       defaultProfile: shared.includeExternalCliConfigs ?? !shared.personal
     })
+    // Seeded on load; a stored instance is never rewritten.
+    this.providerInstances = new ProviderInstanceService({
+      providerAuth: this.providerAuth,
+      store: {
+        read: () => config.getProvidersSection().instances,
+        write: (instances) => config.updateProvidersSection({ instances })
+      }
+    })
+      .registerVendor('antigravity', this.antigravity)
+      .registerVendor('claude', this.claudeSubscription)
+    this.providerInstances.list()
     this.integrationContext = shared.personal
       ? {
           profileId: this.profileId,
@@ -296,6 +310,7 @@ export class MmsProfileServices {
     this.orchestrator.setAppletStore(this.applets)
     this.orchestrator.setAntigravityProvider(this.antigravity)
     this.orchestrator.setClaudeSubscriptionProvider(this.claudeSubscription)
+    this.orchestrator.setProviderInstances(this.providerInstances)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()

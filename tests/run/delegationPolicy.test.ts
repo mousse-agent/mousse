@@ -20,7 +20,7 @@ import { PI, phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 /** A pi-shaped adapter that records each turn's thread, cwd and tool access, and replies. */
 class PolicyAdapter implements ProviderAdapter {
-  readonly id = 'pi'
+  readonly driver = 'pi' as const
   readonly capabilities = PI_LOOP_CAPABILITIES
   readonly turns: Array<{ threadId: string; cwd: string | null; toolAccess: AdapterHost['tools']['toolAccess'] }> = []
 

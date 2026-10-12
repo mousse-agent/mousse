@@ -1,5 +1,4 @@
 import {
-  CLAUDE_SUBSCRIPTION_PROVIDER_ID,
   type ClaudeSubscriptionChatInput,
   type ClaudeSubscriptionProviderService
 } from '../../../providers/claudeSubscription/ClaudeSubscriptionProviderService'
@@ -46,7 +45,7 @@ export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.fre
  * orchestrator (and its adapter registry) is built.
  */
 export class ClaudeSubscriptionAdapter implements ProviderAdapter {
-  readonly id = CLAUDE_SUBSCRIPTION_PROVIDER_ID
+  readonly driver = 'claude' as const
   readonly capabilities = CLAUDE_SUBSCRIPTION_CAPABILITIES
 
   constructor(private readonly service: () => ClaudeSubscriptionClient | null) {}
@@ -70,7 +69,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     if (!service) throw new Error(`${input.llmProvider} requires a project workspace`)
     const startedAt = Date.now()
     // The SDK session id stays inside the service's saved sessions; the ref names the runtime.
-    const providerRef: ProviderRef = { provider: input.llmProvider, model: input.model }
+    const providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
     const cwd = input.cwd ?? service.standaloneWorkspace(input.threadId)
     let history = host.context.prepareNativeContext(input.llmProvider, input.model)?.nativeHistory ?? input.nativeHistory
@@ -87,6 +86,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     const chatInput = (): ClaudeSubscriptionChatInput => ({
       mode: input.mode === 'plan' ? 'plan' : 'default',
       threadId: input.threadId,
+      instanceId: input.instanceId,
       cwd,
       model: input.model,
       prompt: input.prompt,
@@ -149,7 +149,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     streams.thinking.complete()
     service.commitConversation(input.threadId, host.context.nativeHistoryAfterTurn(text))
     streams.text.complete(text)
-    const contextKey = `${this.id}:${input.model}`
+    const contextKey = `${input.llmProvider}:${input.model}`
     return {
       text,
       aborted: input.signal.aborted,
