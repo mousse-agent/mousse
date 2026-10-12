@@ -1,0 +1,19 @@
+{"kind":"transcript","adapter":"codex","scenario":"plain-turn","boundary":"Codex app-server JSON-RPC on stdio: client messages out; server responses, notifications and requests in","recordedAt":"hand-authored","version":1}
+{"dir":"out","frame":{"id":1,"method":"initialize","params":{"clientInfo":{"name":"mousse","title":"Mousse","version":"0.1.1"},"capabilities":{"experimentalApi":false,"requestAttestation":false}}}}
+{"dir":"in","frame":{"id":1,"result":{"userAgent":"mousse/0.162.1","codexHome":"/home/replay/.codex","platformFamily":"unix","platformOs":"macos"}}}
+{"dir":"out","frame":{"method":"initialized"}}
+{"dir":"out","frame":{"id":2,"method":"account/read","params":{"refreshToken":false}}}
+{"dir":"in","frame":{"id":2,"result":{"account":{"type":"chatgpt","email":"replay@example.com","planType":"plus"},"requiresOpenaiAuth":true}}}
+{"dir":"out","frame":{"id":3,"method":"thread/start","params":{"approvalPolicy":"on-request","sandbox":"workspace-write","model":"gpt-replay-codex"}}}
+{"dir":"in","frame":{"id":3,"result":{"thread":{"id":"thr-replay"},"model":"gpt-replay-codex","cwd":"/replay"}}}
+{"dir":"out","frame":{"id":4,"method":"turn/start","params":{"threadId":"thr-replay","input":[{"type":"text","text":"Say hello","text_elements":[]}],"approvalPolicy":"on-request","sandboxPolicy":{"type":"workspaceWrite","writableRoots":[],"networkAccess":false,"excludeTmpdirEnvVar":false,"excludeSlashTmp":false},"model":"gpt-replay-codex"}}}
+{"dir":"in","frame":{"id":4,"result":{"turn":{"id":"turn-1","status":"inProgress","error":null,"items":[]}}}}
+{"dir":"in","frame":{"method":"turn/started","params":{"threadId":"thr-replay","turn":{"id":"turn-1","status":"inProgress","error":null,"items":[]}}}}
+{"dir":"in","frame":{"method":"item/started","params":{"threadId":"thr-replay","turnId":"turn-1","item":{"type":"userMessage","id":"item-user-1","content":[{"type":"text","text":"Say hello","text_elements":[]}]}}}}
+{"dir":"in","frame":{"method":"item/completed","params":{"threadId":"thr-replay","turnId":"turn-1","item":{"type":"userMessage","id":"item-user-1","content":[{"type":"text","text":"Say hello","text_elements":[]}]}}}}
+{"dir":"in","frame":{"method":"item/started","params":{"threadId":"thr-replay","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"","phase":null}}}}
+{"dir":"in","frame":{"method":"item/agentMessage/delta","params":{"threadId":"thr-replay","turnId":"turn-1","itemId":"msg-1","delta":"Hello"}}}
+{"dir":"in","frame":{"method":"item/agentMessage/delta","params":{"threadId":"thr-replay","turnId":"turn-1","itemId":"msg-1","delta":" from replay"}}}
+{"dir":"in","frame":{"method":"item/completed","params":{"threadId":"thr-replay","turnId":"turn-1","item":{"type":"agentMessage","id":"msg-1","text":"Hello from replay","phase":null}}}}
+{"dir":"in","frame":{"method":"thread/tokenUsage/updated","params":{"threadId":"thr-replay","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":1230,"inputTokens":1200,"cachedInputTokens":800,"cacheWriteInputTokens":0,"outputTokens":30,"reasoningOutputTokens":10},"last":{"totalTokens":1230,"inputTokens":1200,"cachedInputTokens":800,"cacheWriteInputTokens":0,"outputTokens":30,"reasoningOutputTokens":10},"modelContextWindow":272000}}}}
+{"dir":"in","frame":{"method":"turn/completed","params":{"threadId":"thr-replay","turn":{"id":"turn-1","status":"completed","error":null,"items":[]}}}}
