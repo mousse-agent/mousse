@@ -1225,7 +1225,8 @@ function chatgptProvider<T extends { modelProvider?: string }>(response: T): T {
   if (response.modelProvider !== CODEX_MODEL_PROVIDER)
     throw new AppError({
       code: 'codex_provider_not_chatgpt',
-      message: `Codex chose the model provider "${response.modelProvider ?? 'unknown'}" for this thread. Mousse only runs Codex on your ChatGPT sign-in.`,
+      // Static text: the provider name comes from the process and could carry anything.
+      message: 'Codex chose a model provider other than your ChatGPT sign-in; Mousse only runs Codex on it.',
       errorInfo: { category: 'unavailable', retryable: false }
     })
   return response

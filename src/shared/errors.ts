@@ -87,8 +87,14 @@ export function redactErrorText(text: string): string {
  * `Authorization` values, JWTs (ChatGPT access tokens), Mousse MCP bearer tokens (32 random bytes
  * in base64url) and the shapes `redactErrorText` already covers.
  */
-export function redactSecrets(text: string, secrets: Iterable<string> = []): string {
-  let result = text
+export function redactSecrets(text: unknown, secrets: Iterable<string> = []): string {
+  // Protocol values are untrusted: anything that is not a string becomes bounded text, never a throw.
+  let result: string
+  try {
+    result = typeof text === 'string' ? text : text === undefined || text === null ? '' : String(text).slice(0, 4096)
+  } catch {
+    result = ''
+  }
   for (const secret of secrets) if (secret && secret.length >= 8) result = result.split(secret).join('[redacted]')
   return redactErrorText(result)
     .replace(/(authorization["']?\s*[:=]\s*["']?)[^\r\n"',;]+/gi, '$1[redacted]')

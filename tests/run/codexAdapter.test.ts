@@ -16,6 +16,7 @@ import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructi
 import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer } from '../../src/mms/run/testkit/codexAppServerReplay'
 import { parseTranscript, ReplayTransport, type TranscriptFrame } from '../../src/mms/run/testkit/ReplayTransport'
 import type { PendingUserQuestions, UserQuestionAnswers } from '../../src/shared/types'
+import { serializeAppError, type AppError } from '../../src/shared/errors'
 
 // ----- transcript frames (codex app-server JSON-RPC lines) -----------------------------------
 
@@ -332,6 +333,16 @@ describe('CodexAdapter', () => {
       code: 'codex_provider_not_chatgpt'
     })
     replay.assertDone()
+  })
+
+  it('never echoes the model provider the process reported in the refusal', async () => {
+    const canary = 'C'.repeat(21) + '_-' + 'z'.repeat(20)
+    const replay = transport([...handshake(), out({ id: 3, method: 'thread/start', params: threadParams() }), inn({ id: 3, result: threadResult(T, canary) })])
+    const codex = service(replay)
+    const error = await new CodexAdapter(() => codex).startTurn(input(), recordingSink(), control(), host()).catch((caught: unknown) => caught) as AppError
+    expect(error).toMatchObject({ code: 'codex_provider_not_chatgpt' })
+    expect(error.message).not.toContain(canary)
+    expect(JSON.stringify(serializeAppError(error))).not.toContain(canary)
   })
 
   it('attaches the Mousse MCP server through thread config and developer instructions', async () => {
