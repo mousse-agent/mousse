@@ -439,6 +439,20 @@ export class MmsProtocolServer {
       emitToSubscribers(this.ring.push('turn.state', state, state.threadId))
     })
 
+    // Run Engine (SPEC §6): durable thread events and command acknowledgements.
+    onOrch('run-event', (event: { threadId: string }) => {
+      emitToSubscribers(this.ring.push('run.event', event, event.threadId))
+    })
+    onOrch('stop-requested', (payload: { threadId: string; runId: string }) => {
+      emitToSubscribers(this.ring.push('run.stop-requested', payload, payload.threadId))
+    })
+    onOrch('steer-accepted', (payload: { threadId: string; runId: string }) => {
+      emitToSubscribers(this.ring.push('run.steer-accepted', payload, payload.threadId))
+    })
+    onOrch('run-interrupted-on-boot', (payload: { threadId?: string; runId: string }) => {
+      emitToSubscribers(this.ring.push('run.interrupted-on-boot', payload, payload.threadId))
+    })
+
     onOrch('turn-steered', (payload: { threadId: string; text: string }) => {
       emitToSubscribers(
         this.ring.push('turn.steered', { text: payload.text }, payload.threadId)

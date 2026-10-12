@@ -220,6 +220,9 @@ export const PROTOCOL_METHODS = [
   'orchestrator.retry',
   'orchestrator.isTurnActive',
   'orchestrator.contextUsage',
+  'runs.list',
+  'runs.get',
+  'runs.events',
   'orchestrator.answerQuestions',
   'orchestrator.dismissQuestions',
   'orchestrator.pendingQuestions',
@@ -401,6 +404,10 @@ export const PROTOCOL_CAPABILITIES = [
 
 export type ProtocolEventType =
   | 'net.updated'
+  | 'run.event'
+  | 'run.stop-requested'
+  | 'run.steer-accepted'
+  | 'run.interrupted-on-boot'
   | 'projects.updated'
   | 'threads.updated'
   | 'thread.title-generation-failed'

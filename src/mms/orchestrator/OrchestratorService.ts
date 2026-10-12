@@ -40,6 +40,9 @@ import type { ClaudeSubscriptionProviderService } from '../providers/claudeSubsc
 import type { ClaudeSubscriptionMetrics } from '../providers/claudeSubscription/metrics'
 import type { AntigravityProviderService } from '../providers/antigravity/AntigravityProviderService'
 import { v4 as uuidv4 } from 'uuid'
+import type { CommandResult, RunEngine } from '../run/RunEngine'
+import { RunStoreError } from '../run/db/RunStoreError'
+import { TERMINAL_RUN_STATUSES, type ThreadEvent } from '../run/types'
 import {
   isDelegationSettledStatus,
   isTerminalAgentStatus,
@@ -671,6 +674,11 @@ export class OrchestratorService extends EventEmitter {
   >()
   /** Optional thread store for durable queue persistence. */
   private threadStore: ThreadDataStore | null = null
+  /** Optional Run Engine (Phase 1 dual-write bridge). */
+  private runEngine: RunEngine | null = null
+  private runEngineUnsubscribe: (() => void) | null = null
+  /** Runs whose bridge write hit a stale epoch; later marks for that turn are skipped. */
+  private readonly staleRuns = new Set<string>()
   /** Optional multi-tenant runtime manager (Phase 4). */
   private runtimeManager: import('../runtime/ThreadRuntimeManager').ThreadRuntimeManager | null =
     null
@@ -961,6 +969,118 @@ export class OrchestratorService extends EventEmitter {
   /** Optional ThreadDataStore for durable queue + cross-thread persistence. */
   setThreadStore(store: ThreadDataStore | null): void {
     this.threadStore = store
+  }
+
+  /**
+   * Phase 1 Run Engine bridge (docs/run-engine/SPEC.md §5). When set, every send is a durable run
+   * and executeTurn reports its lifecycle through the engine's CAS hooks. Null keeps legacy only.
+   */
+  setRunEngine(engine: RunEngine | null): void {
+    this.runEngineUnsubscribe?.()
+    this.runEngineUnsubscribe = null
+    this.runEngine = engine
+    if (!engine) return
+    const onEvent = (event: ThreadEvent): void => { this.emit('run-event', event) }
+    const onStop = (payload: { threadId: string; runId: string }): void => { this.emit('stop-requested', payload) }
+    const onSteer = (payload: { threadId: string; runId: string }): void => { this.emit('steer-accepted', payload) }
+    engine.on('event', onEvent)
+    engine.on('stop-requested', onStop)
+    engine.on('steer-accepted', onSteer)
+    this.runEngineUnsubscribe = () => {
+      engine.off('event', onEvent)
+      engine.off('stop-requested', onStop)
+      engine.off('steer-accepted', onSteer)
+    }
+  }
+
+  /** Boot reconciliation: runs the previous daemon left active become interrupted. */
+  recoverRunEngineOnBoot(): string[] {
+    const engine = this.runEngine
+    if (!engine) return []
+    const { interrupted } = engine.reconcileOnBoot()
+    for (const runId of interrupted) {
+      this.emit('run-interrupted-on-boot', { threadId: engine.getRun(runId)?.threadId, runId })
+    }
+    return interrupted
+  }
+
+  /** Stop a specific run. Only the thread's active run is aborted; anything else is ignored. */
+  async abortRun(runId: string, clientRequestId: string, threadId?: string): Promise<CommandResult> {
+    const engine = this.requireRunEngine()
+    const target = threadId ?? engine.getRun(runId)?.threadId
+    if (!target) return { status: 'ignored', reason: 'run_not_found', runId, sequence: 0 }
+    const result = await engine.dispatch({ kind: 'stop', threadId: target, clientRequestId, runId })
+    if (result.status === 'accepted' && !result.replayed) this.abortActiveTurn(target)
+    return result
+  }
+
+  /** Steer a specific run. Only the thread's active run receives the text; anything else is ignored. */
+  async steerRun(runId: string, text: string, clientRequestId: string, threadId?: string): Promise<CommandResult> {
+    const engine = this.requireRunEngine()
+    const target = threadId ?? engine.getRun(runId)?.threadId
+    if (!target) return { status: 'ignored', reason: 'run_not_found', runId, sequence: 0 }
+    const result = await engine.dispatch({ kind: 'steer', threadId: target, clientRequestId, runId })
+    if (result.status === 'accepted' && !result.replayed && !this.steerThread(target, text)) {
+      console.warn('run engine steer accepted but the legacy turn did not take it', { runId })
+    }
+    return result
+  }
+
+  private requireRunEngine(): RunEngine {
+    if (!this.runEngine) throw new Error('Run engine is unavailable')
+    return this.runEngine
+  }
+
+  /** Bridge writes never fail a user's turn. A stale epoch stops further writes for that run. */
+  private markRun(runId: string | undefined, write: (engine: RunEngine, runId: string) => void): void {
+    const engine = this.runEngine
+    if (!engine || !runId || this.staleRuns.has(runId)) return
+    try {
+      write(engine, runId)
+    } catch (error) {
+      if (error instanceof RunStoreError && error.code === 'stale_write') {
+        this.staleRuns.add(runId)
+        console.warn('run engine stale write', { runId, error: error.message })
+        return
+      }
+      console.warn('run engine write failed', { runId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * Safety net after a legacy turn returns or throws: a run handed to the turn must end terminal
+   * unless the turn put it back on the queue (lease race / released claim keep the runId).
+   */
+  private settleRunAfterTurn(runId: string | undefined, requeued: boolean, failure: unknown): void {
+    if (!runId) return
+    this.markRun(runId, (engine, id) => {
+      const run = engine.getRun(id)
+      if (!run || TERMINAL_RUN_STATUSES.has(run.status)) return
+      if (run.status === 'queued' && requeued) return
+      if (failure !== undefined) {
+        engine.markTerminal(id, 'failed', { error: failure instanceof Error ? failure.message : String(failure) })
+      } else {
+        engine.markTerminal(id, 'completed')
+      }
+    })
+    this.staleRuns.delete(runId)
+  }
+
+  /** Pre-upgrade queue items carry no runId; give them one before they run. */
+  private async ensureQueueItemRun(item: QueuedMessage): Promise<string | undefined> {
+    if (item.runId || !this.runEngine) return item.runId
+    try {
+      const result = await this.runEngine.dispatch({
+        kind: 'send',
+        threadId: item.threadId,
+        clientRequestId: `queue:${item.id}`,
+        source: item.source ?? 'queue'
+      })
+      return result.status === 'accepted' ? result.runId : undefined
+    } catch (error) {
+      console.warn('run engine could not record a queued item', { queueItemId: item.id, error: error instanceof Error ? error.message : String(error) })
+      return undefined
+    }
   }
 
   setFeatureFlags(flags: MousseFeatureFlags): void {
@@ -1333,7 +1453,7 @@ export class OrchestratorService extends EventEmitter {
   enqueueForThread(
     threadId: string,
     input: OrchestratorSendInput,
-    opts?: { source?: string; intent?: 'normal' | 'steer'; internal?: boolean }
+    opts?: { source?: string; intent?: 'normal' | 'steer'; internal?: boolean; runId?: string }
   ): QueuedMessage {
     if (this.threadStore && !this.threadStore.getThread(threadId)) {
       throw new QueueValidationError(`Thread not found: ${threadId}`)
@@ -1359,7 +1479,8 @@ export class OrchestratorService extends EventEmitter {
           images: request.images,
           intent: opts?.intent ?? 'normal',
           source: opts?.source,
-          internal: opts?.internal
+          internal: opts?.internal,
+          runId: opts?.runId
         })
         item = result.item
         return result.items
@@ -1376,7 +1497,8 @@ export class OrchestratorService extends EventEmitter {
       images: request.images,
       intent: opts?.intent ?? 'normal',
       source: opts?.source,
-      internal: opts?.internal
+      internal: opts?.internal,
+      runId: opts?.runId
     })
     session.queue = result.items
     item = result.item
@@ -2416,7 +2538,7 @@ export class OrchestratorService extends EventEmitter {
   async send(
     input: OrchestratorSendInput,
     reuseLastUser = false,
-    opts?: { threadId?: string; source?: string; forceQueue?: boolean }
+    opts?: { threadId?: string; source?: string; forceQueue?: boolean; clientRequestId?: string }
   ): Promise<OrchestratorResponse> {
     return this.lifecycle.run('send', () => this.sendOwned(input, reuseLastUser, opts))
   }
@@ -2424,7 +2546,7 @@ export class OrchestratorService extends EventEmitter {
   private async sendOwned(
     input: OrchestratorSendInput,
     reuseLastUser = false,
-    opts?: { threadId?: string; source?: string; forceQueue?: boolean }
+    opts?: { threadId?: string; source?: string; forceQueue?: boolean; clientRequestId?: string }
   ): Promise<OrchestratorResponse> {
     const threadId = opts?.threadId ?? this.getBoundThreadId()
     if (!threadId) {
@@ -2439,6 +2561,22 @@ export class OrchestratorService extends EventEmitter {
     const session = this.getOrCreateSession(threadId)
     if (session.deleted) {
       throw new Error(`Thread deleted: ${threadId}`)
+    }
+
+    // The run is durable before any queue/run decision or provider I/O (SPEC §2.1).
+    let run: { runId: string; sequence: number } | undefined
+    if (this.runEngine) {
+      const result = await this.runEngine.dispatch({
+        kind: 'send',
+        threadId,
+        clientRequestId: opts?.clientRequestId ?? uuidv4(),
+        source: opts?.source ?? 'protocol'
+      })
+      if (result.status !== 'accepted') throw new Error(result.reason)
+      if (result.replayed) {
+        return { message: '', actions: [], runId: result.runId, sequence: result.sequence, replayed: true }
+      }
+      run = { runId: result.runId, sequence: result.sequence }
     }
 
     if (!opts?.forceQueue) {
@@ -2463,16 +2601,18 @@ export class OrchestratorService extends EventEmitter {
       })()
 
     if (session.isTurnRunning() || opts?.forceQueue || externalLease) {
-      const item = this.enqueueForThread(threadId, input, { source: opts?.source })
+      const item = this.enqueueForThread(threadId, input, { source: opts?.source, runId: run?.runId })
       return {
         message: '',
         actions: [],
         queued: true,
-        queueItem: item
+        queueItem: item,
+        ...run
       }
     }
 
-    return this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake', { source: opts?.source })
+    const response = await this.runTurnOnSession(session, input, reuseLastUser, opts?.source !== 'wake', { source: opts?.source, runId: run?.runId })
+    return run ? { ...response, ...run } : response
   }
 
   /**
@@ -2543,22 +2683,37 @@ export class OrchestratorService extends EventEmitter {
       onTurnSettled?: (aborted: boolean) => void
       /** The caller already admitted this session (see ThreadSession.turnAdmitted) and hands ownership to this turn. */
       admissionHeld?: boolean
+      /** Run Engine run this turn executes; also used as the turn id. */
+      runId?: string
     }
   ): Promise<OrchestratorResponse> {
     // Admission is synchronous, before any await, so a concurrent send always observes it.
     if (!opts?.admissionHeld) {
       if (session.turnAdmitted) {
         if (opts?.queueItemId) this.releaseSessionClaim(session, opts.queueItemId, opts.claimOwnerToken)
-        throw new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
+        const error = new Error('An orchestrator turn is already running. Use /stop or the stop button first.')
+        // A released claim keeps its runId on the queue item; a direct send's run ends here.
+        if (!opts?.queueItemId) this.settleRunAfterTurn(opts?.runId, false, error)
+        throw error
       }
       session.turnAdmitted = true
     }
+    let turnResponse: OrchestratorResponse | undefined
+    let turnFailure: unknown
     try {
-      return await this.lifecycle.run('turn', () => this.sessionAls
+      turnResponse = await this.lifecycle.run('turn', () => this.sessionAls
         .run(session, () =>
           this.executeTurn(input, reuseLastUser, displayUserMessage, { ...opts, externalSignal: opts?.externalSignal ? AbortSignal.any([opts.externalSignal, this.lifecycle.signal]) : this.lifecycle.signal })
         ))
+      return turnResponse
+    } catch (error) {
+      turnFailure = error ?? new Error('Turn failed')
+      throw error
     } finally {
+      // A queue item that was never accepted stays on the queue and keeps its run queued.
+      const requeued = turnResponse?.queued === true ||
+        (opts?.queueItemId !== undefined && session.queue.some((item) => item.id === opts.queueItemId))
+      this.settleRunAfterTurn(opts?.runId, requeued, turnFailure)
       this.releaseSessionExecutionLease(session)
       session.turnAdmitted = false
       session.abortRequested = false
@@ -2658,6 +2813,7 @@ export class OrchestratorService extends EventEmitter {
       externalDrainSteer?: () => string | undefined
       modelOverride?: { llmProvider: string; model: string }
       onTurnSettled?: (aborted: boolean) => void
+      runId?: string
     }
   ): Promise<OrchestratorResponse> {
     const session = this.session
@@ -2702,7 +2858,7 @@ export class OrchestratorService extends EventEmitter {
               queueItem: released ?? undefined
             }
           }
-          const item = this.enqueueForThread(session.threadId, input, { source: 'lease-race' })
+          const item = this.enqueueForThread(session.threadId, input, { source: 'lease-race', runId: opts?.runId })
           return {
             message: '',
             actions: [],
@@ -2864,7 +3020,16 @@ export class OrchestratorService extends EventEmitter {
     this.lastCompletedAssistantMessageId = null
     this.lastCompletedAssistantContent = ''
 
-    const turnId = uuidv4()
+    const turnId = opts?.runId ?? uuidv4()
+    // Run Engine bridge (SPEC §5): the run id is the turn id; each mark is one CAS write.
+    const engineRunId = this.runEngine ? opts?.runId : undefined
+    let runTerminalMarked = false
+    const markRunTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' }): void => {
+      if (runTerminalMarked) return
+      runTerminalMarked = true
+      this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome))
+    }
+    this.markRun(engineRunId, (engine, id) => engine.markStarting(id))
     let conversationToolsUsed = false
     let providerProgress = false
     const conversationDirectory = !checkpointEnabled && !reuseLastUser && displayUserMessage && session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
@@ -2901,6 +3066,7 @@ export class OrchestratorService extends EventEmitter {
     }
     this.setTurnPhase(session.threadId, 'queued', { turnId })
     this.setTurnPhase(session.threadId, 'thinking', { turnId })
+    this.markRun(engineRunId, (engine, id) => engine.markRunning(id))
     const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed'): Promise<void> => {
       if ((!checkpointEnabled || !turnStartSha || !session.projectCwd) && !conversationDirectory || session.threadId === '__unbound__') return
       const threadDir = this.resolveThreadDir(session.threadId)
@@ -3321,6 +3487,7 @@ export class OrchestratorService extends EventEmitter {
         this.emit('connection-failed', { threadId: session.threadId, error: providerError })
       }
       this.setTurnPhase(session.threadId, 'failed', { error: message, errorDescriptor: providerError })
+      markRunTerminal('failed', { error: message })
       await checkpointTurn('failed')
       this.persist(true)
       const response: OrchestratorResponse = { message, actions: [], error: providerError }
@@ -3358,6 +3525,7 @@ export class OrchestratorService extends EventEmitter {
       this.addSystemMessage('Turn stopped.')
       const response: OrchestratorResponse = { message: partial, actions: [] }
       this.setTurnPhase(session.threadId, 'stopped')
+      markRunTerminal('interrupted', { interruptedBy: 'user' })
       await checkpointTurn('stopped')
       this.persist(true)
       // Cross-channel IPC delivery and an in-flight renderer snapshot can otherwise leave
@@ -3389,9 +3557,11 @@ export class OrchestratorService extends EventEmitter {
         actions: []
       }
       this.setTurnPhase(session.threadId, 'finalizing')
+      this.markRun(engineRunId, (engine, id) => engine.markFinalizing(id))
       await checkpointTurn('completed')
       this.persist(true)
       this.setTurnPhase(session.threadId, 'completed')
+      markRunTerminal('completed')
       this.emit('response', response)
       this.emitThreadMessages(session.threadId, session.messages)
       settleOnce(false)
@@ -3539,12 +3709,17 @@ export class OrchestratorService extends EventEmitter {
     }
     if (executionFailed) {
       this.setTurnPhase(session.threadId, 'failed', { error: 'LLM error' })
+      markRunTerminal('failed', { error: 'LLM error' })
     } else {
       this.setTurnPhase(session.threadId, 'finalizing')
+      this.markRun(engineRunId, (engine, id) => engine.markFinalizing(id))
     }
     await checkpointTurn(executionFailed ? 'failed' : 'completed')
     this.persist(true)
-    if (!executionFailed) this.setTurnPhase(session.threadId, 'completed')
+    if (!executionFailed) {
+      this.setTurnPhase(session.threadId, 'completed')
+      markRunTerminal('completed')
+    }
     this.emit('response', response)
     this.emitThreadMessages(session.threadId, session.messages)
     settleOnce(aborted, executionFailed)
@@ -3747,7 +3922,7 @@ export class OrchestratorService extends EventEmitter {
     }
     const item = claimed as QueuedMessage
     const managedByStartup = opts?.managedByStartup === true
-    void this.runTurnOnSession(
+    const startClaimed = (runId: string | undefined, admissionHeld: boolean): Promise<OrchestratorResponse> => this.runTurnOnSession(
       session,
       {
         content: item.content,
@@ -3761,9 +3936,20 @@ export class OrchestratorService extends EventEmitter {
         queueItemId: item.id,
         claimOwnerToken: claimToken,
         source: item.source,
-        suppressAutoQueueDrain: managedByStartup
+        suppressAutoQueueDrain: managedByStartup,
+        runId,
+        admissionHeld
       }
     )
+    let started: Promise<OrchestratorResponse>
+    if (!item.runId && this.runEngine) {
+      // Hold admission across the run-record await so no concurrent send can start a turn.
+      session.turnAdmitted = true
+      started = this.ensureQueueItemRun(item).then((runId) => startClaimed(runId, true))
+    } else {
+      started = startClaimed(item.runId, false)
+    }
+    void started
       .then(() => {
         settle('ran')
       })

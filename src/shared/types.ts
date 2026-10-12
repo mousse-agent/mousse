@@ -554,6 +554,12 @@ export interface OrchestratorResponse {
   queued?: boolean
   queueItem?: QueuedMessage
   workflowRun?: import('./workflowChat').WorkflowChatRun
+  /** Run Engine run created for this send (docs/run-engine/SPEC.md §6). */
+  runId?: string
+  /** Thread event sequence after the send was recorded. */
+  sequence?: number
+  /** True when the send repeated an earlier `clientRequestId`; nothing new was started. */
+  replayed?: boolean
 }
 
 /** Intent of a durable thread message queue entry. */
@@ -603,6 +609,8 @@ export interface QueuedMessage {
   source?: string
   /** Internal orchestration input: durable and executable, but hidden from queue/transcript UI. */
   internal?: boolean
+  /** Run Engine run this item executes when drained. */
+  runId?: string
 }
 
 export interface ContextUsageCategory {

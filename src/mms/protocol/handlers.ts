@@ -14,6 +14,7 @@ import { lifecycleGit, readDirectLifecycleRef, WorktreeRetirementService } from 
  */
 
 import type { MmsProfileServices } from '../MmsProfileServices'
+import type { CommandResult } from '../run/RunEngine'
 import type { ChatMessage, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
@@ -95,6 +96,20 @@ export interface HandlerContext {
 function admittedChatSource(ctx: HandlerContext, fallback: string): string {
   if (!ctx.connection) return fallback === 'gui' || fallback === 'cli' ? 'internal' : fallback
   return ctx.connection.clientType === 'gui' ? 'gui' : ctx.connection.clientType === 'cli' ? 'cli' : 'internal'
+}
+
+function rejectUnknownKeys(p: Record<string, unknown>, allowed: readonly string[]): void {
+  for (const key of Object.keys(p)) if (!allowed.includes(key)) throw new Error(`${key} is not allowed`)
+}
+
+/** Run-targeted stop/steer (SPEC §6): `ignored` is a valid answer, not an error. */
+function runCommandResponse(result: CommandResult, runId: string): { ok: boolean; ignored: boolean; reason?: string; runId: string } {
+  return {
+    ok: result.status === 'accepted',
+    ignored: result.status === 'ignored',
+    ...(result.status !== 'accepted' ? { reason: result.reason } : {}),
+    runId
+  }
 }
 
 async function prepareChatInput(ctx: HandlerContext, threadId: string, input: OrchestratorSendRequest, raw: Record<string, unknown>): Promise<OrchestratorSendInput> {
@@ -576,18 +591,27 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!ctx.mms.threads.getThread(threadId)) {
         throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       }
+      // Idempotency key (SPEC §6). `requestId` is deliberately not reused: the GUI keeps one per
+      // content hash while a send is in flight, so it would turn a repeated message into a replay.
+      const clientRequestId = asOptionalString(p.clientRequestId, 128)
       ctx.mms.orchestrator.getOrCreateSession(threadId)
       const input = await prepareChatInput(ctx, threadId, { content, mode, images }, p)
       return await ctx.mms.orchestrator.send(input, false, {
         threadId,
         source,
-        forceQueue
+        forceQueue,
+        clientRequestId
       })
     }
     case 'orchestrator.abort': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const clearQueue = asOptionalBoolean(p.clearQueue, 'clearQueue') === true
+      const runId = asOptionalString(p.runId, 256)
+      if (runId) {
+        const clientRequestId = asOptionalString(p.clientRequestId, 128) ?? randomUUID()
+        return runCommandResponse(await ctx.mms.orchestrator.abortRun(runId, clientRequestId, threadId), runId)
+      }
       const ok = ctx.mms.orchestrator.abortActiveTurn(threadId, { clearQueue })
       return { ok }
     }
@@ -595,6 +619,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       const text = asString(p.text, 'text')
+      const runId = asOptionalString(p.runId, 256)
+      if (runId) {
+        const clientRequestId = asOptionalString(p.clientRequestId, 128) ?? randomUUID()
+        return runCommandResponse(await ctx.mms.orchestrator.steerRun(runId, text, clientRequestId, threadId), runId)
+      }
       // Prefer mid-turn steer; fall back to external enqueue when no local turn.
       const result = ctx.mms.orchestrator.steerThreadOrEnqueueExternal(threadId, text, {
         source: admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol-steer')
@@ -606,6 +635,32 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asOptionalString(p.threadId, 256)
       const ok = ctx.mms.orchestrator.retryLastConnection(threadId)
       return { ok }
+    }
+    case 'runs.list': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'limit'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 200 }) ?? 50
+      return { runs: ctx.mms.runEngine.listRuns(threadId, { limit }) }
+    }
+    case 'runs.get': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['runId'])
+      const runId = asString(p.runId, 'runId', 256)
+      const run = ctx.mms.runEngine.getRun(runId)
+      if (!run) throw new DomainRpcError('run_not_found', 'Run not found', { runId })
+      return { run }
+    }
+    case 'runs.events': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'afterSeq', 'limit'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const afterSeq = asOptionalBoundedInt(p.afterSeq, 'afterSeq', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? 0
+      const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 500 }) ?? 500
+      return {
+        events: ctx.mms.runEngine.listEvents(threadId, { afterSeq, limit }),
+        maxSeq: ctx.mms.runEngine.maxSeq(threadId)
+      }
     }
     case 'orchestrator.isTurnActive': {
       // Lightweight turn probe — avoids full thread.snapshot (messages/agents/tasks).

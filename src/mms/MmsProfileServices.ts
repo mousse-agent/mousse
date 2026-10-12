@@ -11,6 +11,9 @@ import { AntigravityProviderService } from './providers/antigravity/AntigravityP
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { OrchestratorService } from './orchestrator/OrchestratorService'
+import { ProfileDatabase } from './run/db/ProfileDatabase'
+import { RunEngine } from './run/RunEngine'
+import { RunStore } from './run/RunStore'
 import { ScheduledJobService } from './scheduled/ScheduledJobService'
 import { ScheduledJobStore } from './scheduled/ScheduledJobStore'
 import { ChannelService } from './channels/ChannelService'
@@ -129,6 +132,8 @@ export class MmsProfileServices {
   readonly lineEditStats: LineEditStatsStore
   /** Phase 4 multi-tenant thread runtimes (agents/tasks/PTY ownership). */
   readonly threadRuntimes: ThreadRuntimeManager
+  /** Profile Run Engine (`<profileHome>/run/run.db`); Phase 1 dual-writes beside the orchestrator. */
+  readonly runEngine: RunEngine
   /** Daemon-owned pending questions, one instance per profile. */
   readonly questions: UserQuestionService
   readonly modeRegistry: ModeRegistry
@@ -256,6 +261,8 @@ export class MmsProfileServices {
     // MMS owns the canonical per-thread transcript and durable message queue for
     // every surface (GUI client, CLI client, channels). Electron never owns MMS.
     this.orchestrator.setThreadStore(this.threads)
+    this.runEngine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: homeDir })) })
+    this.orchestrator.setRunEngine(this.runEngine)
     this.orchestrator.setAppletStore(this.applets)
     this.orchestrator.setAntigravityProvider(this.antigravity)
     this.orchestrator.setClaudeSubscriptionProvider(this.claudeSubscription)
@@ -657,6 +664,8 @@ export class MmsProfileServices {
     await this.channels.startEnabled()
     await this.net.start()
 
+    // Runs the previous daemon left active cannot resume (SPEC §5); settle them before any turn.
+    this.orchestrator.recoverRunEngineOnBoot()
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
     this.threadRuntimes.restoreOnStartup()
     // Questions are memory-only — new process has none; document interrupted semantics.
@@ -792,6 +801,12 @@ export class MmsProfileServices {
       })
     }
     this.config.stopWatching()
+    try {
+      this.orchestrator.setRunEngine(null)
+      this.runEngine.store.db.close()
+    } catch (error) {
+      console.warn('run engine database close failed', error)
+    }
     this.started = false
     this.stopped = true
   }
