@@ -183,7 +183,9 @@ const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
 export class ClaudeSubscriptionProviderService {
   private readonly settingsPath: string
   readonly configDir: string
-  private settings: Settings
+  private settings: Settings = {}
+  /** Set when settings.json exists but cannot be read; blocks migration and every write. */
+  private settingsError?: string
   private stopped = false
   private readonly queries = new Map<string, Query>()
   private readonly readyToCommit = new Set<string>()
@@ -199,7 +201,7 @@ export class ClaudeSubscriptionProviderService {
   /** Bumped when the credential scope changes; stale probes and sessions are discarded. */
   private scope = 0
   private modelDiscoveryStarted = false
-  private policyStored: boolean
+  private policyStored = false
 
   constructor(
     private readonly profileHome: string,
@@ -220,14 +222,30 @@ export class ClaudeSubscriptionProviderService {
       CLAUDE_SUBSCRIPTION_PROVIDER_ID,
       'settings.json'
     )
+    this.loadSettings()
+  }
+  /**
+   * Only a missing file counts as new settings. An unreadable or malformed file could hold a
+   * stored policy, so it is never migrated or overwritten until a Recheck reads it.
+   */
+  private loadSettings(): void {
+    this.settings = {}
+    this.settingsError = undefined
     try {
-      this.settings = JSON.parse(readFileSync(this.settingsPath, 'utf8')) as Settings
-    } catch {
-      this.settings = {}
+      const parsed: unknown = JSON.parse(readFileSync(this.settingsPath, 'utf8'))
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+        throw new Error('not an object')
+      const policy = (parsed as Settings).loginPolicy
+      if (policy !== undefined && policy !== 'cli' && policy !== 'isolated')
+        throw new Error('unknown login policy')
+      this.settings = parsed as Settings
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT')
+        this.settingsError = `Mousse could not read this profile's Claude settings (${this.settingsPath}). Fix or remove the file, then recheck.`
     }
     this.policyStored = this.settings.loginPolicy !== undefined
     // Cases that need no live check resolve immediately; `status()` persists the result.
-    if (!this.policyStored) this.settings.loginPolicy = this.deducePolicy()
+    if (!this.policyStored && !this.settingsError) this.settings.loginPolicy = this.deducePolicy()
   }
   standaloneWorkspace(threadId: string): string {
     const directory = join(this.profileHome, 'providers', CLAUDE_SUBSCRIPTION_PROVIDER_ID, 'workspaces', historyKey(threadId))
@@ -236,6 +254,7 @@ export class ClaudeSubscriptionProviderService {
   }
 
   private save(): void {
+    if (this.settingsError) return
     mkdirSync(this.configDir, { recursive: true, mode: 0o700 })
     atomicWriteJsonSync(this.settingsPath, this.settings)
     if (this.settings.loginPolicy) this.policyStored = true
@@ -335,13 +354,21 @@ export class ClaudeSubscriptionProviderService {
       }
     return { kind: 'signed_in' }
   }
-  private async authenticated(signal?: AbortSignal): Promise<boolean> {
+  /**
+   * Checks the sign-in for one credential scope. The caller passes the environment it captured
+   * with that scope; a result from a scope that has since changed is never trusted.
+   */
+  private async authenticated(
+    signal?: AbortSignal,
+    scope = this.scope,
+    env = this.environment()
+  ): Promise<boolean> {
     const binary = this.binary()
     if (!binary) return false
-    const scope = this.scope
-    const result = await this.probe(binary, this.environment(), signal)
-    if (this.settings.loginPolicy === 'cli' && scope === this.scope)
-      this.cliProbe = { at: Date.now(), result }
+    const cli = this.settings.loginPolicy === 'cli'
+    const result = await this.probe(binary, env, signal)
+    if (scope !== this.scope) return false
+    if (cli) this.cliProbe = { at: Date.now(), result }
     return result.kind === 'signed_in'
   }
   /**
@@ -350,8 +377,17 @@ export class ClaudeSubscriptionProviderService {
    * check leaves the policy unresolved so Mousse never switches accounts silently.
    */
   private async resolvePolicy(binary: string): Promise<ClaudeLoginPolicy | undefined> {
+    if (this.settingsError) return undefined
     let policy = this.settings.loginPolicy
     if (!policy) {
+      const state = this.isolatedConfigState()
+      if (state === 'error') {
+        this.migrationError = {
+          at: Date.now(),
+          message: `Mousse could not read this profile's private Claude config (${this.configDir}). Check its permissions, then recheck.`
+        }
+        return undefined
+      }
       // The isolated dir has content: only a live check can tell whether it holds an account.
       const result = await this.probe(binary, claudeSubscriptionEnvironment(this.configDir))
       if (this.settings.loginPolicy) return this.settings.loginPolicy
@@ -368,18 +404,19 @@ export class ClaudeSubscriptionProviderService {
   }
   private deducePolicy(): ClaudeLoginPolicy | undefined {
     if (!this.defaultProfile || this.settings.signedIn === true) return 'isolated'
-    return this.isolatedConfigPresent() ? undefined : 'cli'
+    return this.isolatedConfigState() === 'absent' ? 'cli' : undefined
   }
-  private isolatedConfigPresent(): boolean {
+  /** Only a missing or empty dir is "no account"; any other error must not pick a policy. */
+  private isolatedConfigState(): 'absent' | 'present' | 'error' {
     try {
-      return readdirSync(this.configDir).length > 0
-    } catch {
-      return false
+      return readdirSync(this.configDir).length > 0 ? 'present' : 'absent'
+    } catch (error) {
+      return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT' ? 'absent' : 'error'
     }
   }
   /** A live check is due: the policy is unresolved, or the terminal sign-in result is stale. */
   private checkDue(): boolean {
-    if (this.stopped) return false
+    if (this.stopped || this.settingsError) return false
     const fresh = (at?: number) => at !== undefined && Date.now() - at < CLAUDE_AUTH_STATUS_TTL_MS
     const policy = this.settings.loginPolicy
     if (policy === undefined) return !fresh(this.migrationError?.at)
@@ -412,6 +449,7 @@ export class ClaudeSubscriptionProviderService {
       await this.probing
       this.cliProbe = undefined
       this.migrationError = undefined
+      if (this.settingsError) this.loadSettings()
     }
     // Persist a policy deduced at load so a later default-profile change cannot flip it.
     if (!this.policyStored && this.settings.loginPolicy && !this.stopped) this.save()
@@ -435,6 +473,7 @@ export class ClaudeSubscriptionProviderService {
       defaultProfile: this.defaultProfile,
       isolatedSignIn: this.settings.signedIn === true
     }
+    if (this.settingsError) return { ...base, state: 'error', message: this.settingsError }
     if (!this.binary())
       return {
         ...base,
@@ -474,12 +513,15 @@ export class ClaudeSubscriptionProviderService {
    */
   async setLoginPolicy(policy: ClaudeLoginPolicy): Promise<ClaudeSubscriptionStatus> {
     if (this.stopped) throw new Error('Claude provider is stopped')
+    if (this.settingsError) throw new Error(this.settingsError)
     if (this.settings.loginPolicy !== policy) {
       this.scope += 1
       this.cliProbe = undefined
       this.migrationError = undefined
       this.settings.sessions = {}
       this.readyToCommit.clear()
+      // Turns and sign-ins in flight belong to the old credential scope.
+      this.abortInFlight()
     }
     this.settings.loginPolicy = policy
     delete this.settings.cliDisconnected
@@ -493,6 +535,7 @@ export class ClaudeSubscriptionProviderService {
     session.abort.signal.addEventListener('abort', cancel, { once: true })
     try {
       if (this.stopped) throw new Error('Claude provider is stopped')
+      if (this.settingsError) throw new Error(this.settingsError)
       const interaction = session.createAuthCallbacks()
       if (!this.binary()) {
         const binary = await interaction.prompt({
@@ -603,11 +646,15 @@ export class ClaudeSubscriptionProviderService {
     if (this.stopped) throw new Error('Claude provider is stopped')
     return sdk.query({ prompt, options })
   }
-  private options(cwd: string, controller: AbortController): Options {
+  private options(
+    cwd: string,
+    controller: AbortController,
+    env: NodeJS.ProcessEnv = this.environment()
+  ): Options {
     return {
       cwd,
       pathToClaudeCodeExecutable: this.binary(),
-      env: this.environment(),
+      env,
       abortController: controller,
       permissionMode: 'default',
       permissionPrompts: 'host',
@@ -730,6 +777,21 @@ export class ClaudeSubscriptionProviderService {
       signal?.removeEventListener('abort', cancel)
     }
   }
+  private signInRequiredMessage(): string {
+    if (this.settings.loginPolicy !== 'cli' || this.settingsError)
+      return 'Connect Claude Subscription in Settings → Providers first.'
+    if (this.settings.cliDisconnected)
+      return 'Claude Subscription is disconnected. Reconnect it in Settings → Providers.'
+    return 'Claude Code in your terminal is not signed in to a Claude subscription. Run `claude auth login` in a terminal, then try again.'
+  }
+  private abortInFlight(): void {
+    for (const controller of this.controllers) controller.abort()
+    for (const threadId of this.activeThreads) this.questions.dismissAllForThread(threadId)
+    for (const session of this.loginSessions) session.abort.abort()
+    for (const query of this.queries.values()) query.close()
+    this.queries.clear()
+    this.readyToCommit.clear()
+  }
   commitConversation(threadId: string, history: string): void {
     if (!this.readyToCommit.delete(threadId)) return
     const saved = this.settings.sessions?.[threadId]
@@ -752,11 +814,13 @@ export class ClaudeSubscriptionProviderService {
       }
       input.signal?.throwIfAborted()
     }
-    if (!this.configured()) throw new AppError({ code: 'claude_subscription_not_connected', message: 'Connect Claude Subscription in Settings → Providers first.', errorInfo: { category: 'unavailable', retryable: false } })
+    if (!this.configured()) throw new AppError({ code: 'claude_subscription_not_connected', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
     if (this.activeThreads.has(input.threadId))
       throw new Error('A Claude turn is already running for this thread')
     this.activeThreads.add(input.threadId)
+    // Sign-in check, environment and resumed session all belong to this one credential scope.
     const scope = this.scope
+    const env = this.environment()
     const controller = new AbortController()
     this.controllers.add(controller)
     let query: Query | undefined
@@ -799,8 +863,11 @@ export class ClaudeSubscriptionProviderService {
       }
     }
     try {
-      if (!(await this.authenticated(controller.signal)))
-        throw new AppError({ code: 'claude_subscription_sign_in_required', message: 'Claude subscription sign-in expired. Reconnect in Settings → Providers.', errorInfo: { category: 'unavailable', retryable: false } })
+      const signedIn = await this.authenticated(controller.signal, scope, env)
+      if (scope !== this.scope)
+        throw new AppError({ code: 'claude_subscription_scope_changed', message: 'The Claude sign-in for this profile changed during the turn. Send the message again.', errorInfo: { category: 'unavailable', retryable: false } })
+      if (!signedIn)
+        throw new AppError({ code: 'claude_subscription_sign_in_required', message: this.settings.loginPolicy === 'cli' ? this.signInRequiredMessage() : 'Claude subscription sign-in expired. Reconnect in Settings → Providers.', errorInfo: { category: 'unavailable', retryable: false } })
       controller.signal.throwIfAborted()
       input.signal?.throwIfAborted()
       controller.signal.throwIfAborted()
@@ -834,7 +901,7 @@ export class ClaudeSubscriptionProviderService {
       const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(selected.effort ?? '')
         ? selected.effort as Options['effort'] : undefined
       const options: Options = {
-        ...this.options(input.cwd, controller),
+        ...this.options(input.cwd, controller, env),
         model: selected.baseId,
         effort,
         resume,
@@ -1113,13 +1180,9 @@ export class ClaudeSubscriptionProviderService {
     else this.settings.signedIn = false
     this.settings.sessions = {}
     this.save()
-    for (const controller of this.controllers) controller.abort()
-    for (const threadId of this.activeThreads) this.questions.dismissAllForThread(threadId)
-    for (const session of this.loginSessions) session.abort.abort()
-    for (const query of this.queries.values()) query.close()
-    this.queries.clear()
-    this.readyToCommit.clear()
-    if (cli) return
+    this.abortInFlight()
+    // Unreadable settings may hide a `cli` policy or a private sign-in; never log out blind.
+    if (cli || this.settingsError) return
     const binary = this.binary()
     if (binary)
       await (this.dependencies.runAuth ?? runAuth)(

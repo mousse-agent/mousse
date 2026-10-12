@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -19,13 +20,15 @@ afterEach(() => {
 
 const SIGNED_IN = JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })
 const SIGNED_OUT = JSON.stringify({ loggedIn: false, authMethod: 'none' })
-type AuthReply = string | Error
+type AuthReply = string | Error | (() => Promise<string>)
 type AuthCall = { args: string[]; env: NodeJS.ProcessEnv }
 
 /** A profile home with a fake `claude` binary; `runAuth` answers per config dir and never spawns. */
 function profile(options: {
   defaultProfile?: boolean
   settings?: Record<string, unknown>
+  /** Written verbatim instead of the generated settings JSON. */
+  rawSettings?: string
   /** Files already present in the profile-private Claude config dir. */
   isolatedFiles?: boolean
   cli?: AuthReply
@@ -50,11 +53,12 @@ function profile(options: {
   const settingsPath = join(directory, 'settings.json')
   writeFileSync(
     settingsPath,
-    JSON.stringify({
-      binaryPath: binary,
-      models: [{ id: 'sonnet', label: 'Sonnet' }],
-      ...options.settings
-    })
+    options.rawSettings ??
+      JSON.stringify({
+        binaryPath: binary,
+        models: [{ id: 'sonnet', label: 'Sonnet' }],
+        ...options.settings
+      })
   )
   const calls: AuthCall[] = []
   const runAuth = vi.fn(async (_binary: string, args: string[], env: NodeJS.ProcessEnv) => {
@@ -63,7 +67,7 @@ function profile(options: {
     const reply =
       env.CLAUDE_CONFIG_DIR === configDir ? (options.isolated ?? SIGNED_OUT) : (options.cli ?? SIGNED_IN)
     if (reply instanceof Error) throw reply
-    return reply
+    return typeof reply === 'function' ? reply() : reply
   })
   const query = vi.fn(options.query ?? (() => fakeQuery()))
   const service = new ClaudeSubscriptionProviderService(
@@ -79,6 +83,7 @@ function profile(options: {
     runAuth,
     query,
     calls,
+    settingsPath,
     stored: () => JSON.parse(readFileSync(settingsPath, 'utf8')) as Record<string, unknown>
   }
 }
@@ -311,5 +316,96 @@ describe('Claude disconnect', () => {
     await service.logout()
     const logout = calls.find((call) => call.args.includes('logout'))
     expect(logout?.env.CLAUDE_CONFIG_DIR).toBe(configDir)
+  })
+})
+
+describe('Claude credential scope', () => {
+  it('rejects a turn whose login policy changed during its sign-in check', async () => {
+    let finishIsolated!: (value: string) => void
+    const result = { type: 'result', subtype: 'success', is_error: false, result: 'hi', session_id: 'x' }
+    const home = mkdtempSync(join(tmpdir(), 'claude-scope-'))
+    homes.push(home)
+    const f = profile({
+      defaultProfile: false,
+      cli: SIGNED_OUT,
+      isolated: () => new Promise<string>((done) => { finishIsolated = done }),
+      settings: {
+        signedIn: true,
+        loginPolicy: 'isolated',
+        sessions: {
+          t: {
+            sessionId: 'isolated-session',
+            cwd: resolve(home),
+            model: 'sonnet',
+            historyKey: createHash('sha256').update('').digest('hex')
+          }
+        }
+      },
+      query: () => fakeQuery([result])
+    })
+    const turn = f.service.chat({ threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: () => {} })
+    const settled = turn.then(() => 'resolved', () => 'rejected')
+    await vi.waitFor(() => expect(f.calls).toHaveLength(1))
+    await f.service.setLoginPolicy('cli')
+    finishIsolated(SIGNED_IN)
+    expect(await settled).toBe('rejected')
+    expect(f.query).not.toHaveBeenCalled()
+    expect(f.stored().sessions).toEqual({})
+  })
+
+  it('tells a signed-out terminal user to run claude auth login', async () => {
+    const { service, home } = profile({ defaultProfile: true, cli: exitOne(SIGNED_OUT) })
+    await expect(
+      service.chat({ threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: () => {} })
+    ).rejects.toThrow(/claude auth login/)
+  })
+})
+
+describe('Claude migration safety', () => {
+  it('an unreadable isolated config dir leaves the policy unresolved until Recheck', async () => {
+    const f = profile({ defaultProfile: true, isolatedFiles: true })
+    chmodSync(f.configDir, 0o000)
+    try {
+      const fresh = new ClaudeSubscriptionProviderService(
+        f.home,
+        new UserQuestionService(),
+        { runAuth: f.runAuth, query: f.query },
+        { defaultProfile: true }
+      )
+      await expect(fresh.status()).resolves.toMatchObject({ loginPolicy: null, state: 'error' })
+      expect(f.stored().loginPolicy).toBeUndefined()
+      expect(f.runAuth).not.toHaveBeenCalled()
+      expect(fresh.configured()).toBe(false)
+      chmodSync(f.configDir, 0o700)
+      // Recheck: the readable dir has no account, so the terminal sign-in is used.
+      await expect(fresh.status({ force: true })).resolves.toMatchObject({ loginPolicy: 'cli' })
+    } finally {
+      chmodSync(f.configDir, 0o700)
+    }
+  })
+
+  it.each([
+    { name: 'malformed', raw: '{"loginPolicy":"isolated"', unreadable: false },
+    { name: 'unreadable', raw: JSON.stringify({ loginPolicy: 'isolated' }), unreadable: true }
+  ])('$name settings are never migrated or overwritten', async ({ raw, unreadable }) => {
+    const f = profile({ defaultProfile: true, rawSettings: raw })
+    if (unreadable) chmodSync(f.settingsPath, 0o000)
+    try {
+      const fresh = new ClaudeSubscriptionProviderService(
+        f.home,
+        new UserQuestionService(),
+        { runAuth: f.runAuth, query: f.query },
+        { defaultProfile: true }
+      )
+      await expect(fresh.status()).resolves.toMatchObject({ loginPolicy: null, state: 'error' })
+      await expect(fresh.setLoginPolicy('cli')).rejects.toThrow(/could not read/)
+      await fresh.logout()
+      expect(fresh.configured()).toBe(false)
+      expect(f.runAuth).not.toHaveBeenCalled()
+      chmodSync(f.settingsPath, 0o600)
+      expect(readFileSync(f.settingsPath, 'utf8')).toBe(raw)
+    } finally {
+      chmodSync(f.settingsPath, 0o600)
+    }
   })
 })
