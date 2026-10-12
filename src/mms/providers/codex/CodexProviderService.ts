@@ -465,7 +465,8 @@ export class CodexProviderService {
   private settings: Settings = {}
   private settingsError?: string
   private stopped = false
-  private app?: { conn: CodexConnection; ready: Promise<CodexConnection> }
+  /** `verified`: this process answered `account/read` with a ChatGPT account. */
+  private app?: { conn: CodexConnection; ready: Promise<CodexConnection>; verified: boolean }
   private probeResult?: { at: number; result: AccountProbe }
   private probing?: Promise<void>
   private modelDiscoveryStarted = false
@@ -567,13 +568,36 @@ export class CodexProviderService {
   private async probe(): Promise<AccountProbe> {
     try {
       const conn = await this.connection()
-      return classifyAccount(await conn.request('account/read', { refreshToken: false }, { timeoutMs: 15_000 }))
+      return await this.readAccount(conn)
     } catch (error) {
       return {
         kind: 'error',
         message: `Codex did not report its sign-in (${error instanceof Error ? error.message : String(error)}). Update the Codex CLI and recheck.`
       }
     }
+  }
+
+  /** `account/read` on `conn`; a ChatGPT answer marks that process as verified. */
+  private async readAccount(conn: CodexConnection, signal?: AbortSignal): Promise<AccountProbe> {
+    const result = classifyAccount(await conn.request('account/read', { refreshToken: false }, { timeoutMs: 15_000, signal }))
+    if (this.app?.conn === conn) this.app.verified = result.kind === 'signed_in'
+    return result
+  }
+
+  /**
+   * The app-server process, once it has itself reported a ChatGPT account. A process that has not
+   * (a replacement after a crash, or one whose account changed) is checked before any thread or
+   * turn reaches it.
+   */
+  private async verifiedConnection(signal: AbortSignal): Promise<CodexConnection> {
+    const conn = await this.connection()
+    signal.throwIfAborted()
+    if (this.app?.conn === conn && this.app.verified) return conn
+    const result = await this.readAccount(conn, signal)
+    this.probeResult = { at: Date.now(), result }
+    if (result.kind !== 'signed_in')
+      throw new AppError({ code: 'codex_not_connected', message: this.signInMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+    return conn
   }
 
   /**
@@ -738,7 +762,7 @@ export class CodexProviderService {
         return conn
       })
     ready.catch(() => conn.close())
-    this.app = { conn, ready }
+    this.app = { conn, ready, verified: false }
     return ready
   }
 
@@ -747,6 +771,8 @@ export class CodexProviderService {
     if (this.app?.conn !== conn) return
     this.app = undefined
     this.loaded.clear()
+    // The next process must prove its own sign-in before it gets a turn.
+    this.probeResult = undefined
     for (const [threadId, run] of [...this.turns]) {
       this.turns.delete(threadId)
       run.fail(reason)
@@ -757,7 +783,10 @@ export class CodexProviderService {
     const account = notificationParams(notification, 'account/updated')
     if (account) {
       // A terminal `codex login --api-key` or logout reaches the shared process; re-check.
-      if (account.authMode !== 'chatgpt') this.probeResult = undefined
+      if (account.authMode !== 'chatgpt') {
+        this.probeResult = undefined
+        if (this.app) this.app.verified = false
+      }
       return
     }
     const threadId = (notification.params as { threadId?: unknown } | undefined)?.threadId
@@ -984,8 +1013,7 @@ export class CodexProviderService {
           throw new Error(`Codex cannot send image ${image.name}; use JPEG, PNG, GIF or WebP under 10 MiB`)
         return { type: 'image', url: `data:${image.mimeType};base64,${image.data}` }
       })
-      const conn = await this.connection()
-      signal.throwIfAborted()
+      const conn = await this.verifiedConnection(signal)
       const thread = await this.openThread(conn, input, signal)
       const codexThreadId = thread.codexThreadId
       // The thread is not resumable until the turn commits its history.

@@ -499,10 +499,10 @@ describe('CodexAdapter', () => {
       ...turnStart(4, 'hello'),
       note('item/agentMessage/delta', { threadId: T, turnId: 'turn-1', itemId: 'msg-1', delta: 'Par' }),
       inn({ kind: 'exit', code: 1 }),
-      // A new process; the sign-in check is still fresh, and the uncommitted thread is not resumed.
-      ...handshake(1, false),
-      ...threadStart(2, threadParams(), 'thr-1'),
-      ...turnStart(3, 'Previous conversation (context only; do not repeat earlier actions):\nprior\n\nCurrent request:\nretry'),
+      // A new process proves its own sign-in first; the uncommitted thread is not resumed.
+      ...handshake(1, true),
+      ...threadStart(3, threadParams(), 'thr-1'),
+      ...turnStart(4, 'Previous conversation (context only; do not repeat earlier actions):\nprior\n\nCurrent request:\nretry'),
       ...message('msg-1', ['ok']),
       completed('completed')
     ])
@@ -514,6 +514,26 @@ describe('CodexAdapter', () => {
     const retry = await adapter.startTurn(input({ prompt: 'retry', nativeHistory: 'prior' }), recordingSink(), control(), host())
     replay.assertDone()
     expect(retry).toMatchObject({ text: 'ok', threadDisposition: 'reusable' })
+  })
+
+  it('never sends a turn to a replacement process before it reports a ChatGPT account', async () => {
+    const replay = transport([
+      ...handshake(),
+      ...threadStart(3),
+      ...turnStart(4, 'hello'),
+      inn({ kind: 'exit', code: 1 }),
+      ...handshake(1, false),
+      out({ id: 2, method: 'account/read', params: { refreshToken: false } }),
+      inn({ id: 2, result: { account: { type: 'apiKey' }, requiresOpenaiAuth: true } })
+    ])
+    const codex = service(replay)
+    const adapter = new CodexAdapter(() => codex)
+    await expect(adapter.startTurn(input(), recordingSink(), control(), host())).rejects.toBeInstanceOf(CodexAppServerExitedError)
+    expect(codex.configured()).toBe(false)
+    await expect(adapter.startTurn(input({ prompt: 'again' }), recordingSink(), control(), host())).rejects.toMatchObject({
+      code: 'codex_not_connected'
+    })
+    replay.assertDone()
   })
 
   it('fails a turn the server reports as failed', async () => {
