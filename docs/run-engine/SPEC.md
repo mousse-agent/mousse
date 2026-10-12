@@ -295,3 +295,82 @@ Every repair appends a `reconcile.<rule>` event. The loop never calls a provider
 - Reconciler unit tests per rule with a seeded store and a fake clock.
 - Worker: timeout fires and lease renewal keeps a long effect alive; lost lease discards a late result.
 - Legacy bridge regression: all Phase 1 tests remain green with the drain timer replaced by rule 5.
+
+## 13. Phase 3 — provider adapters and the capability manifest
+
+Today `executeTurn` branches on `selectedModel.llmProvider` (`antigravity`, `claude-subscription`, else the pi-ai `LlmClient` loop) and each branch has its own compaction, steer, history and metrics handling. Phase 3 puts every provider behind one interface so the engine and the `turn.start` executor never see a provider name (invariant 8; the ratchet enforces it).
+
+### 13.1 Interface (`src/mms/run/adapters/ProviderAdapter.ts`)
+
+```ts
+export interface ProviderAdapter {
+  readonly id: string                               // 'pi' | 'claude-subscription' | 'antigravity' | later 'codex' ...
+  readonly capabilities: ProviderCapabilities        // static; may be refined per model via describe()
+  describe(model: string): Promise<ModelInfo>        // context window, image input, reasoning levels
+  startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl): Promise<TurnResult>
+  steer?(sessionRef: ProviderRef, text: string): Promise<'delivered' | 'not_active'>
+  interrupt(sessionRef: ProviderRef): Promise<'interrupted' | 'not_active'>
+  compact?(sessionRef: ProviderRef): Promise<void>
+  rollback?(sessionRef: ProviderRef, toTurnOrdinal: number): Promise<void>
+  fork?(sessionRef: ProviderRef, atTurnOrdinal: number): Promise<ProviderRef>
+}
+export interface TurnInput { runId; attemptId; threadId; cwd; model; prompt; images?; history: HistoryHandoff; mode: 'agent'|'plan'; tools: ToolHost; signal: AbortSignal }
+export interface TurnSink { text(delta); thinking(delta); toolStart(ev); toolEnd(ev); usage(u); nativeRef(ref: ProviderRef) }
+export interface TurnControl { drainSteer(): string | undefined; heartbeat(): void }
+export interface TurnResult { text: string; aborted: boolean; usage?; providerRef: ProviderRef }
+```
+
+`ToolHost` is Mousse's tool registry (delegation, ask_user, tasks, browser…). In-process loops call it directly; vendor runtimes reach it over the Mousse MCP server (Phase 5). Phase 3 passes it to the pi adapter only; native adapters receive `tools: null` until Phase 5.
+
+### 13.2 Capability manifest — every flag has a reader
+
+```ts
+export interface ProviderCapabilities {
+  steer: 'native' | 'interrupt_restart' | 'queue_only'    // read by CommandPolicy.steerStrategy
+  interrupt: boolean                                       // CommandPolicy.stopStrategy
+  rollback: 'native' | 'none'                              // CommandPolicy.undoStrategy (Phase 6)
+  fork: 'native' | 'portable'                              // CommandPolicy.forkStrategy (Phase 6)
+  nativeSubagents: 'none' | 'observed' | 'managed'         // Delegation (Phase 4)
+  events: 'rich' | 'sparse'                                // Reconciler rule 2 heartbeat tolerance (sparse = 6×)
+  containment: 'strong' | 'weak'                           // CheckpointRestoreSafety (Phase 6): weak → review diff, never auto-restore
+  historyInjection: 'native' | 'prompt'                    // HandoffDelivery (Phase 6)
+  terminalQuality: 'reliable' | 'best_effort'              // Reconciler rule 2: best_effort runs also end on stream close + idle 30 s
+  mcp: boolean                                             // Phase 5: whether the Mousse MCP server can be attached
+}
+```
+
+Rule: `tests/run/capabilityReaders.test.ts` lists each key and asserts, by `rg` over `src/mms/run/**` excluding `adapters/**`, that at least one non-test file reads it. Adding a flag without a reader fails CI. (T3 declared 68 flags and read 20.)
+
+### 13.3 CommandPolicy (`src/mms/run/CommandPolicy.ts`)
+
+Pure functions from `(capabilities, runState)` to a decision; the engine and executors call these instead of branching:
+- `steerStrategy(caps, run)` → `native | interrupt_restart | queue` (and `late_steer_new_run` when the target run is finalizing/terminal).
+- `stopStrategy(caps, run)` → `interrupt | settle_locally` (no live session).
+- `heartbeatToleranceMs(caps)`.
+
+### 13.4 Adapters to build
+
+| Adapter | Wraps | Caps (steer / interrupt / events / containment / terminal) |
+|---|---|---|
+| `PiLoopAdapter` | `LlmClient.chat` tool loop | native / yes / rich / strong (we run the tools) / reliable |
+| `ClaudeSubscriptionAdapter` | `ClaudeSubscriptionProviderService.chat` | native (drainSteer) / yes (signal) / rich / weak / best_effort |
+| `AntigravityAdapter` | `AntigravityProviderService.chat` | native / yes / sparse / weak / best_effort |
+
+Shared builders in `src/mms/run/adapters/shared/` **before** the second adapter: streaming message assembly (text/thinking/tool start-end into `ChatMessage`s), usage recording, native history serialisation (`providers/nativeAgentHistory.ts`), steer draining. The T3 lesson: Claude and Codex adapters each re-implemented these.
+
+### 13.5 `turn.start` executor
+
+`src/mms/run/executors/turnStart.ts` is the Phase 2b executor body refactored to: resolve adapter by `thread.modelOverride.llmProvider` via `AdapterRegistry`, build `TurnInput` (prompt, images, history handoff from `nativeContext`, mode), call `startTurn`, pipe `TurnSink` into the existing transcript/stream emitters, run post-turn actions (`mousse-actions` parsing stays until Phase 4 retires it), and mark terminal. `executeTurn` shrinks to admission + workspace + checkpoint + this call.
+
+### 13.6 Replay test kit (`src/mms/run/testkit/`)
+
+- `ReplayTransport`: an adapter-boundary recorder/replayer. Record mode wraps the real adapter's provider calls and writes `tests/run/fixtures/<scenario>/<adapter>.ndjson` of `{ dir: 'out'|'in', frame }`; replay mode asserts outbound frames structurally and emits inbound ones.
+- Boundary per adapter: pi = the `streamSimple` call/stream chunks; claude-subscription = SDK `query()` messages; antigravity = ACP JSON-RPC frames. Record at the wire where one exists (ACP); otherwise at the SDK call boundary and say so in the fixture header.
+- `tests/run/scenarios/*.ts` each run against every adapter present in the fixture dir: plain turn; steer mid-tool; stop mid-stream; provider error; context-overflow compaction; restart mid-turn (reopen db, `reconcileOnBoot`).
+- Recorder scripts under `scripts/run-record-*.mjs`, run by hand with real credentials; a nightly canary job is tracked separately (#79 follow-up).
+
+### 13.7 Exit criteria
+
+- `rg "llmProvider === '" src/mms/run src/mms/orchestrator/OrchestratorService.ts` → only inside `adapters/`; ratchet baseline lowered to 0 for the orchestrator.
+- All three adapters pass the same scenario set.
+- `capabilityReaders.test.ts` green.
