@@ -1015,6 +1015,7 @@ export class CodexProviderService {
       })
       const conn = await this.verifiedConnection(signal)
       const thread = await this.openThread(conn, input, signal)
+      signal.throwIfAborted()
       const codexThreadId = thread.codexThreadId
       // The thread is not resumable until the turn commits its history.
       this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID } }
@@ -1086,6 +1087,9 @@ export class CodexProviderService {
       let nextInput: UserInput[] = [textInput(preamble + (input.prompt || '(image attachment)')), ...images]
       let lastTurn: CodexTurn | undefined
       for (;;) {
+        // Stop may have landed before this run existed (its handler then had nothing to
+        // interrupt); a turn started now could never be stopped.
+        signal.throwIfAborted()
         current.turnId = undefined
         const completion = current.nextCompletion()
         completion.catch(() => undefined)

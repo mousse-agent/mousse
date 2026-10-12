@@ -462,6 +462,24 @@ describe('CodexAdapter', () => {
     replay.assertDone()
   })
 
+  it('never starts a turn once Stop arrived right after the thread opened', async () => {
+    const controller = new AbortController()
+    const replay = transport([...handshake(), ...threadStart(3)])
+    const codex = service(replay)
+    const sink = recordingSink()
+    // Stop lands when the thread is known but before turn/start is sent.
+    const providerRef = sink.providerRef
+    sink.providerRef = (ref) => {
+      providerRef(ref)
+      if (ref.sessionId && !ref.nativeTurnId) controller.abort(new Error('stopped after thread/start'))
+    }
+    await expect(new CodexAdapter(() => codex).startTurn(input({ signal: controller.signal }), sink, control(), host())).rejects.toThrow(
+      'stopped after thread/start'
+    )
+    await replay.idle()
+    replay.assertDone()
+  })
+
   it('steers the running turn natively, and starts a follow-up turn for a steer that arrives too late', async () => {
     const steers: string[] = []
     const replay = transport(
