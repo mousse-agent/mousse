@@ -122,6 +122,11 @@ export function OrchestratorChat() {
     setComposerDraft(threadId, typeof value === 'function' ? value(current) : value)
   }, [setComposerDraft])
   const [providers, setProviders] = useState<LlmProviderOption[]>([])
+  /** The provider instance serving a listed provider; the daemon maps a bare provider id otherwise. */
+  const instanceSelection = (providerId: string): { instanceId?: string } => {
+    const instanceId = providers.find((provider) => provider.id === providerId)?.instanceId
+    return instanceId ? { instanceId } : {}
+  }
   const [selectedProviderId, setSelectedProviderId] = useState('')
   const [selectedModelId, setSelectedModelId] = useState('')
   const [enabledSkills, setEnabledSkills] = useState<SkillDescriptor[]>([])
@@ -754,6 +759,7 @@ export function OrchestratorChat() {
       // shared settings default used by other threads.
       if (selectedProviderId && selectedModelId) {
         const updated = await window.mousse.threads.setModel(id, {
+          ...instanceSelection(selectedProviderId),
           llmProvider: selectedProviderId,
           model: selectedModelId
         })
@@ -798,6 +804,7 @@ export function OrchestratorChat() {
 
   const handleModelSelect = async (providerId: string, modelId: string) => {
     setModelMenuOpen(false)
+    const instance = instanceSelection(providerId)
     setSelectedProviderId(providerId)
     setSelectedModelId(modelId)
 
@@ -805,7 +812,7 @@ export function OrchestratorChat() {
     // own modelOverride, which is stamped at create time from this value.
     if (!activeThreadId) {
       void window.mousse.settings.set({
-        provider: { llmProvider: providerId, model: modelId }
+        provider: { ...instance, llmProvider: providerId, model: modelId }
       })
       return
     }
@@ -815,12 +822,13 @@ export function OrchestratorChat() {
     if (current) {
       useAppStore.getState().upsertThread({
         ...current,
-        modelOverride: { llmProvider: providerId, model: modelId },
+        modelOverride: { ...instance, llmProvider: providerId, model: modelId },
         updatedAt: new Date().toISOString()
       })
     }
 
     const updated = await window.mousse.threads.setModel(activeThreadId, {
+      ...instance,
       llmProvider: providerId,
       model: modelId
     })

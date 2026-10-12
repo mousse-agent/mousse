@@ -49,7 +49,8 @@ describe('legacy provider mapping', () => {
 
 describe('instance seeding', () => {
   it('seeds the vendor instances and one pi instance per credentialed provider', () => {
-    const { instances, added } = seedProviderInstances(undefined, ['openai'])
+    const { instances, added, seedVersion } = seedProviderInstances(undefined, ['openai'])
+    expect(seedVersion).toBe(1)
     expect(instances).toEqual({
       antigravity: { driver: 'antigravity', enabled: true },
       claude: { driver: 'claude', enabled: true },
@@ -66,7 +67,7 @@ describe('instance seeding', () => {
       'pi:openai': 'malformed but stored',
       custom: { driver: 'pi', enabled: true }
     }
-    const { instances, added } = seedProviderInstances(stored, ['openai', 'openrouter'])
+    const { instances, added } = seedProviderInstances(stored, ['openai', 'openrouter'], 1)
     expect(instances.claude).toEqual({ driver: 'claude', enabled: false, config: { note: 'mine' } })
     expect(instances.codex).toEqual({ driver: 'codex', enabled: false })
     expect(instances['pi:openai']).toBe('malformed but stored')
@@ -77,11 +78,33 @@ describe('instance seeding', () => {
   })
 })
 
+describe('seed versions', () => {
+  it('moves an entry that still holds a superseded seed and leaves changed entries alone', () => {
+    // Version 0 (no marker) seeded Codex disabled; version 1 seeds it enabled.
+    expect(seedProviderInstances({ codex: { driver: 'codex', enabled: false } }, [], undefined)).toMatchObject({
+      instances: { codex: { driver: 'codex', enabled: true } }, upgraded: ['codex'], seedVersion: 1
+    })
+    // Disabled after the marker existed: the user's choice.
+    expect(seedProviderInstances({ codex: { driver: 'codex', enabled: false } }, [], 1)).toMatchObject({
+      instances: { codex: { driver: 'codex', enabled: false } }, upgraded: []
+    })
+    // Not the seed any more (it has config): the user's choice.
+    const configured = { driver: 'codex', enabled: false, config: { profile: 'work' } }
+    expect(seedProviderInstances({ codex: configured }, [], 0).instances.codex).toEqual(configured)
+  })
+})
+
 describe('ProviderInstanceService', () => {
-  const service = (stored?: unknown, credentials: string[] = []) => {
-    const store = { value: stored, writes: 0 }
+  const service = (stored?: unknown, credentials: string[] = [], seedVersion: unknown = 1) => {
+    const store = { value: stored, seedVersion, writes: 0, fail: undefined as Error | undefined }
     const instances = new ProviderInstanceService({
-      store: { read: () => store.value, write: (next) => { store.value = next; store.writes += 1 } },
+      store: {
+        read: () => {
+          if (store.fail) throw store.fail
+          return { instances: store.value, seedVersion: store.seedVersion }
+        },
+        write: (next) => { store.value = next.instances; store.seedVersion = next.seedVersion; store.writes += 1 }
+      },
       providerAuth: {
         credentials: { listProviderIds: () => credentials },
         has: (id: string) => id !== 'web-tool:exa',
@@ -102,6 +125,39 @@ describe('ProviderInstanceService', () => {
     credentials.push('openrouter')
     expect(instances.list()['pi:openrouter']).toEqual({ driver: 'pi', enabled: true })
     expect(store.writes).toBe(2)
+  })
+
+  it('records the seed version with the seeds, and upgrades an unmarked development seed once', () => {
+    const fresh = service(undefined, [], null)
+    fresh.instances.list()
+    expect(fresh.store.seedVersion).toBe(1)
+    expect((fresh.store.value as Record<string, unknown>).codex).toEqual({ driver: 'codex', enabled: true })
+    const old = service({ antigravity: { driver: 'antigravity', enabled: true }, claude: { driver: 'claude', enabled: true }, codex: { driver: 'codex', enabled: false } }, [], null)
+    expect(old.instances.list().codex).toEqual({ driver: 'codex', enabled: true })
+    expect(old.store).toMatchObject({ seedVersion: 1, writes: 1 })
+    old.instances.list()
+    expect(old.store.writes).toBe(1)
+  })
+
+  it('never seeds or writes after a failed read, and keeps the last map it read', () => {
+    const { instances, store } = service({ claude: { driver: 'claude', enabled: false, config: { note: 'mine' } } })
+    expect(instances.list().claude).toEqual({ driver: 'claude', enabled: false, config: { note: 'mine' } })
+    const writes = store.writes
+    store.fail = new Error('settings unreadable')
+    store.value = undefined
+    expect(instances.list().claude).toEqual({ driver: 'claude', enabled: false, config: { note: 'mine' } })
+    expect(codeOf(() => instances.resolve('claude'))).toBe('provider_instance_disabled')
+    expect(store.writes).toBe(writes)
+    expect(instances.storeError()).toBe('settings unreadable')
+    // A profile that was never read successfully still works from in-memory seeds, unsaved.
+    const cold = service(undefined)
+    cold.store.fail = new Error('locked')
+    expect(cold.instances.list().claude).toEqual({ driver: 'claude', enabled: true })
+    expect(cold.store.writes).toBe(0)
+    store.fail = undefined
+    store.value = { claude: { driver: 'claude', enabled: true } }
+    instances.list()
+    expect(instances.storeError()).toBeUndefined()
   })
 
   it('ignores malformed stored entries on read without rewriting them', () => {

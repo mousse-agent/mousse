@@ -1030,7 +1030,8 @@ export class OrchestratorService extends EventEmitter {
       if (ref) {
         try {
           // A session already running on an instance can still be stopped after it was disabled.
-          const { adapter } = this.adapters.resolveSelection({ instanceId: ref.instanceId, llmProvider: ref.provider }, { allowDisabled: true })
+          // A ref of a turn that ran on the unselected default names the bare pi driver.
+          const { adapter } = this.adapters.resolveSelection({ instanceId: ref.instanceId, llmProvider: ref.provider }, { allowDisabled: true, unselectedDefault: true })
           if ((await adapter.interrupt(ref)) === 'interrupted') live = true
         } catch (error) {
           console.warn('adapter interrupt failed', { runId, error: error instanceof Error ? error.message : String(error) })
@@ -1400,8 +1401,8 @@ export class OrchestratorService extends EventEmitter {
   capabilitiesForThread(threadId: string): ProviderCapabilities | null {
     try {
       const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
-      const selected = session?.modelOverride ?? this.threadStore?.getThread(threadId)?.modelOverride ?? this.defaultAgentModel()
-      return this.adapters.resolveSelection(selected, { allowDisabled: true }).adapter.capabilities
+      const explicit = session?.modelOverride ?? this.threadStore?.getThread(threadId)?.modelOverride
+      return this.adapters.resolveSelection(explicit ?? this.defaultAgentModel(), { allowDisabled: true, unselectedDefault: !explicit }).adapter.capabilities
     } catch {
       return null
     }
@@ -2995,7 +2996,7 @@ export class OrchestratorService extends EventEmitter {
       // The gauge never fails: a selection that cannot be resolved is measured like the pi loop's.
       let adapter: ProviderAdapter | undefined
       try {
-        adapter = this.adapters.resolveSelection(selectedModel, { allowDisabled: true }).adapter
+        adapter = this.adapters.resolveSelection(selectedModel, { allowDisabled: true, unselectedDefault: !modelOverride }).adapter
       } catch {
         adapter = undefined
       }
@@ -4355,8 +4356,9 @@ export class OrchestratorService extends EventEmitter {
       this.persist(true)
     }
     try {
-      // Instance id → driver → adapter; an unknown or disabled instance fails the turn here.
-      const instance = this.adapters.resolveSelection(selectedModel)
+      // Instance id → driver → adapter; an unknown or disabled instance, or a blank explicit
+      // override, fails the turn here.
+      const instance = this.adapters.resolveSelection(selectedModel, { unselectedDefault: !(opts?.modelOverride ?? session.modelOverride) })
       const adapter = instance.adapter
       // A transcript-native runtime (the pi loop) is sent Mousse's transcript and tools, so Mousse
       // keeps that transcript within the window before the turn. A prompt-injected runtime owns its

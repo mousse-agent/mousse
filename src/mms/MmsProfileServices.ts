@@ -223,8 +223,11 @@ export class MmsProfileServices {
     this.providerInstances = new ProviderInstanceService({
       providerAuth: this.providerAuth,
       store: {
-        read: () => config.getProvidersSection().instances,
-        write: (instances) => config.updateProvidersSection({ instances })
+        read: () => {
+          const section = config.getProvidersSection()
+          return { instances: section.instances, seedVersion: section.instancesSeedVersion }
+        },
+        write: ({ instances, seedVersion }) => config.updateProvidersSection({ instances, instancesSeedVersion: seedVersion })
       }
     })
       .registerVendor('antigravity', this.antigravity)

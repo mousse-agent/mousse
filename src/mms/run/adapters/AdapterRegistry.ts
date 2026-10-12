@@ -52,12 +52,19 @@ export class AdapterRegistry {
 
   /**
    * `resolve` for a selection that names an instance or, in older records, only an `llmProvider`.
-   * A selection naming nothing at all (no instance, empty provider: no default model configured)
-   * runs on the pi driver, whose loop resolves the configured default itself and reports a missing
-   * one (`TurnInput.modelPinned`). Any name that is given must resolve; nothing else falls back.
+   *
+   * `unselectedDefault`: the selection is the configured default, not an explicit override. Only
+   * then may it name nothing at all (no default model configured): it runs on the pi driver, whose
+   * loop resolves the configured default itself and reports a missing one (`TurnInput.modelPinned`).
+   * Such a turn's provider ref names the bare `pi` driver, which resolves the same way. A blank
+   * explicit override is rejected like any unknown name; nothing else falls back.
    */
-  resolveSelection(selection: Pick<ModelOverride, 'instanceId' | 'llmProvider'>, options: { allowDisabled?: boolean } = {}): ResolvedAdapter {
-    if (!selection.instanceId?.trim() && !selection.llmProvider?.trim()) {
+  resolveSelection(
+    selection: Pick<ModelOverride, 'instanceId' | 'llmProvider'>,
+    options: { allowDisabled?: boolean; unselectedDefault?: boolean } = {}
+  ): ResolvedAdapter {
+    const blank = !selection.instanceId?.trim() && !selection.llmProvider?.trim()
+    if (options.unselectedDefault && (blank || selection.instanceId === PI_DRIVER)) {
       const adapter = this.drivers.get(PI_DRIVER)
       if (!adapter) fail('bad_request', 'No model is selected and no pi loop adapter is registered.')
       return { instanceId: PI_DRIVER, entry: { driver: PI_DRIVER, enabled: true }, llmProvider: '', adapter }

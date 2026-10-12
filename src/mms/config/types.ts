@@ -22,6 +22,8 @@ export interface MousseProvidersConfig {
    * entries included) and validated when read.
    */
   instances?: Record<string, unknown>
+  /** Seed version `instances` was last seeded with (`PROVIDER_INSTANCE_SEED_VERSION`). */
+  instancesSeedVersion?: number
 }
 
 export interface MousseAgentsConfig {

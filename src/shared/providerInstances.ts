@@ -152,14 +152,37 @@ export function readProviderInstances(raw: unknown): ProviderInstanceMap {
 }
 
 /**
+ * Version of the seed set. A profile records the version it was seeded with
+ * (`providers.instancesSeedVersion`), so a later change to a seed can tell an entry that still
+ * holds an earlier seed from one the user changed.
+ * - 0 (no marker): `codex` was seeded `{ driver: 'codex', enabled: false }` during development.
+ * - 1: `codex` is seeded enabled.
+ */
+export const PROVIDER_INSTANCE_SEED_VERSION = 1
+
+/** Entries an earlier seed version wrote, by the version that replaced them. */
+const SUPERSEDED_SEEDS: ReadonlyArray<{ before: number; id: string; seed: ProviderInstanceConfig; next: ProviderInstanceConfig }> = [
+  { before: 1, id: CODEX_INSTANCE_ID, seed: { driver: 'codex', enabled: false }, next: { driver: 'codex', enabled: true } }
+]
+
+function sameEntry(value: unknown, seed: ProviderInstanceConfig): boolean {
+  if (!isProviderInstanceConfig(value)) return false
+  const keys = Object.keys(value)
+  return keys.length === Object.keys(seed).length && value.driver === seed.driver && value.enabled === seed.enabled && value.config === undefined
+}
+
+/**
  * Extends `stored` with every seed it lacks: the vendor instances and `pi:<provider>` for each
- * credentialed pi-ai provider. A stored id is never overwritten, even when its entry is malformed.
- * Returns the raw map to persist and the ids that were added.
+ * credentialed pi-ai provider. A stored id is never overwritten, even when its entry is malformed,
+ * with one exception: an entry that still equals a seed an earlier `seedVersion` wrote is moved to
+ * its replacement (`upgraded`). Returns the raw map and the version to persist.
  */
 export function seedProviderInstances(
   stored: unknown,
-  credentialedPiProviders: Iterable<string>
-): { instances: Record<string, unknown>; added: string[] } {
+  credentialedPiProviders: Iterable<string>,
+  /** The stored marker; absent means the profile predates markers (version 0). */
+  seedVersion?: unknown
+): { instances: Record<string, unknown>; added: string[]; upgraded: string[]; seedVersion: number } {
   const instances: Record<string, unknown> =
     stored && typeof stored === 'object' && !Array.isArray(stored) ? { ...(stored as Record<string, unknown>) } : {}
   const added: string[] = []
@@ -168,7 +191,14 @@ export function seedProviderInstances(
     instances[id] = entry
     added.push(id)
   }
+  const version = typeof seedVersion === 'number' && Number.isInteger(seedVersion) && seedVersion >= 0 ? seedVersion : 0
+  const upgraded: string[] = []
+  for (const change of SUPERSEDED_SEEDS)
+    if (version < change.before && sameEntry(instances[change.id], change.seed)) {
+      instances[change.id] = { ...change.next }
+      upgraded.push(change.id)
+    }
   for (const [id, entry] of VENDOR_SEEDS) seed(id, { ...entry })
   for (const providerId of credentialedPiProviders) if (providerId) seed(piInstanceId(providerId), { driver: 'pi', enabled: true })
-  return { instances, added }
+  return { instances, added, upgraded, seedVersion: Math.max(version, PROVIDER_INSTANCE_SEED_VERSION) }
 }

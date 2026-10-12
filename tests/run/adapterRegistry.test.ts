@@ -20,7 +20,7 @@ const fake = (driver: ProviderDriverKind, configured = true): ProviderAdapter =>
 const instances = (stored?: Record<string, unknown>, credentials: string[] = []) => {
   let value: unknown = stored
   return new ProviderInstanceService({
-    store: { read: () => value, write: (next) => { value = next } },
+    store: { read: () => ({ instances: value, seedVersion: 1 }), write: (next) => { value = next.instances } },
     providerAuth: { credentials: { listProviderIds: () => credentials } }
   })
 }
@@ -90,9 +90,17 @@ describe('AdapterRegistry', () => {
     expect((error as RunStoreError).code).toBe('bad_request')
   })
 
-  it('runs a selection that names nothing on the pi loop, which resolves its own default', () => {
+  it('runs an unselected default that names nothing on the pi loop, which resolves its own default', () => {
     const { registry, adapters } = full()
-    expect(registry.resolveSelection({ llmProvider: '' })).toMatchObject({ instanceId: 'pi', llmProvider: '', adapter: adapters.pi })
+    expect(registry.resolveSelection({ llmProvider: '' }, { unselectedDefault: true })).toMatchObject({ instanceId: 'pi', llmProvider: '', adapter: adapters.pi })
+    // The provider ref such a turn records resolves the same way (Stop).
+    expect(registry.resolveSelection({ instanceId: 'pi', llmProvider: '' }, { unselectedDefault: true }).adapter).toBe(adapters.pi)
+  })
+
+  it('rejects a blank explicit override instead of running it on the pi loop', () => {
+    const { registry } = full()
+    for (const selection of [{ llmProvider: '' }, { instanceId: '', llmProvider: '' }, { instanceId: ' ', llmProvider: ' ' }, { instanceId: 'pi', llmProvider: '' }])
+      expect(codeOf(() => registry.resolveSelection(selection))).toBe('provider_instance_unknown')
   })
 
   it('offers only enabled, signed-in vendor instances as configured providers', () => {

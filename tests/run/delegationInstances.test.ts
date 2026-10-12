@@ -114,7 +114,7 @@ describe('delegate_task by provider instance', () => {
       }
     })
     const claude = new ScriptedAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, async () => 'Reviewed by Claude.')
-    const instances = new ProviderInstanceService({ store: { read: () => stored, write: (next) => { stored = next } } })
+    const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
     orch.setAdapterRegistry(new AdapterRegistry(instances).register(parent).register(claude))
     const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })), pid: 1 })
     orch.setRunEngine(engine)

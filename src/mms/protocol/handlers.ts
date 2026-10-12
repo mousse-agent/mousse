@@ -659,7 +659,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (!isObject(model)) throw new Error('model must be an object')
         // `instanceId` is the selection (SPEC §13.8); the current GUI still sends `llmProvider`.
         const instanceId = asOptionalString(model.instanceId, 256)
-        const llmProvider = instanceId ? undefined : asString(model.llmProvider, 'model.llmProvider', 256)
+        // A supplied provider name is validated even when the instance decides the stored value.
+        const llmProvider = instanceId
+          ? (model.llmProvider === undefined ? undefined : asString(model.llmProvider, 'model.llmProvider', 256))
+          : asString(model.llmProvider, 'model.llmProvider', 256)
         const modelId = asString(model.model, 'model.model', 512)
         if ((!instanceId && !llmProvider) || !modelId) throw new Error('Model provider and id are required')
         // Unknown or disabled instances are rejected here, before anything is stored.
@@ -667,8 +670,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       const next = ctx.mms.orchestrator.setThreadModelOverride(threadId, override)
       if (override) {
-        // The global default stays in the legacy shape; it is mapped whenever it is used.
-        ctx.mms.settings.set({ provider: { llmProvider: override.llmProvider, model: override.model } })
+        // The global default keeps the instance, so later default turns resolve the same agent.
+        ctx.mms.settings.set({ provider: { instanceId: override.instanceId, llmProvider: override.llmProvider, model: override.model } })
         ctx.emitEvent?.('settings.changed', { settings: ctx.mms.settings.get() })
       }
       const thread = ctx.mms.threads.getThread(threadId)
@@ -1578,7 +1581,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.listConfigured':
       // Claude's and Codex's terminal sign-ins are cached live checks; refresh them before listing.
       await refreshVendorSignIns(ctx)
-      return { providers: ctx.mms.providerInstances.configuredProviders() }
+      return {
+        providers: ctx.mms.providerInstances.configuredProviders(),
+        // Present while the profile's stored instance map cannot be read (nothing is overwritten).
+        ...(ctx.mms.providerInstances.storeError() ? { instancesError: ctx.mms.providerInstances.storeError() } : {})
+      }
     case 'providers.getUsage': {
       await ctx.mms.claudeSubscription.status()
       const [usage, claude] = await Promise.all([

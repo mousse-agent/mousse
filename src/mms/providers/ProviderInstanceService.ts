@@ -17,10 +17,16 @@ import {
 import type { LlmProviderOption } from '../../shared/settings'
 import type { ProviderAuthService } from './ProviderAuthService'
 
-/** Where a profile keeps its instance map (`providers.instances` in the profile config). */
+/** What a profile stores: `providers.instances` and `providers.instancesSeedVersion`. */
+export interface StoredProviderInstances {
+  instances?: unknown
+  seedVersion?: unknown
+}
+
+/** Where a profile keeps its instance map. `read` throws when the stored data cannot be read. */
 export interface ProviderInstanceStore {
-  read(): unknown
-  write(instances: Record<string, unknown>): void
+  read(): StoredProviderInstances
+  write(state: { instances: Record<string, unknown>; seedVersion: number }): void
 }
 
 /** What the provider RPCs list for a vendor driver, from that driver's provider service. */
@@ -58,9 +64,11 @@ function builtinPiProviders(): ReadonlySet<string> {
  * map lives in memory (tests, single-process tools).
  */
 export class ProviderInstanceService {
-  private memory: unknown
+  /** Last state read from (or written to) the store; the working copy after a failed read. */
+  private memory: StoredProviderInstances = {}
   private readonly vendors = new Map<ProviderDriverKind, VendorProviderListing>()
   private writeFailed = false
+  private readError?: string
 
   constructor(private readonly options: { store?: ProviderInstanceStore; providerAuth?: PiCatalog } = {}) {}
 
@@ -72,13 +80,21 @@ export class ProviderInstanceService {
 
   /**
    * The effective instance map. Seeds the profile's stored map with any instance it lacks and
-   * persists only when something was added; a stored entry is never rewritten.
+   * persists only when something changed; a stored entry is never rewritten (except a superseded
+   * seed, see `seedProviderInstances`). After a failed read nothing is written: the map comes from
+   * the last successful read, and the error is reported by `storeError()`.
    */
   list(): ProviderInstanceMap {
-    const stored = this.readStored()
-    const { instances, added } = seedProviderInstances(stored, this.credentialedPiProviders())
-    if (added.length) this.writeStored(instances)
-    return readProviderInstances(instances)
+    const { stored, readable } = this.readStored()
+    const seeded = seedProviderInstances(stored.instances, this.credentialedPiProviders(), stored.seedVersion)
+    const changed = seeded.added.length > 0 || seeded.upgraded.length > 0 || stored.seedVersion !== seeded.seedVersion
+    if (changed && readable) this.writeStored({ instances: seeded.instances, seedVersion: seeded.seedVersion })
+    return readProviderInstances(seeded.instances)
+  }
+
+  /** Why the stored instance map could not be read, while that lasts. */
+  storeError(): string | undefined {
+    return this.readError
   }
 
   /**
@@ -201,22 +217,33 @@ export class ProviderInstanceService {
     }
   }
 
-  private readStored(): unknown {
-    if (!this.options.store) return this.memory
+  /**
+   * The stored state, and whether it was actually read. A failed read is never mistaken for an
+   * empty profile: it returns the last successfully read state and must not be written back.
+   */
+  private readStored(): { stored: StoredProviderInstances; readable: boolean } {
+    if (!this.options.store) return { stored: this.memory, readable: true }
     try {
       const stored = this.options.store.read()
+      this.readError = undefined
       // After a failed save, keep the seeds from memory so every read does not retry the write.
-      return this.writeFailed && isRecord(this.memory) ? { ...this.memory, ...(isRecord(stored) ? stored : {}) } : stored
-    } catch {
-      return this.memory
+      if (this.writeFailed && isRecord(this.memory.instances))
+        return { stored: { instances: { ...this.memory.instances, ...(isRecord(stored.instances) ? stored.instances : {}) }, seedVersion: this.memory.seedVersion }, readable: true }
+      this.memory = stored
+      return { stored, readable: true }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (this.readError !== message) console.warn('[providers] could not read provider instances; using the last copy read', message)
+      this.readError = message
+      return { stored: this.memory, readable: false }
     }
   }
 
-  private writeStored(instances: Record<string, unknown>): void {
-    this.memory = instances
+  private writeStored(state: { instances: Record<string, unknown>; seedVersion: number }): void {
+    this.memory = state
     if (!this.options.store) return
     try {
-      this.options.store.write(instances)
+      this.options.store.write(state)
       this.writeFailed = false
     } catch (error) {
       // Seeds are derivable, so a read-only profile keeps working from the in-memory copy.
