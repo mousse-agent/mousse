@@ -367,6 +367,7 @@ export class ClaudeSubscriptionProviderService {
     if (!binary) return false
     const cli = this.settings.loginPolicy === 'cli'
     const result = await this.probe(binary, env, signal)
+    signal?.throwIfAborted()
     if (scope !== this.scope) return false
     if (cli) this.cliProbe = { at: Date.now(), result }
     return result.kind === 'signed_in'
@@ -531,6 +532,17 @@ export class ClaudeSubscriptionProviderService {
   async login(session: LoginSession, cwd: string): Promise<ProviderLoginResult> {
     let child: ChildProcess | undefined
     const cancel = () => child?.kill()
+    const scope = this.scope
+    // After every wait: a cancelled sign-in or a login-policy switch must not spawn or prompt.
+    const checkpoint = () => {
+      session.abort.signal.throwIfAborted()
+      if (scope !== this.scope) throw new Error('The Claude login policy changed during sign-in')
+    }
+    const signedIn = async () => {
+      const result = await this.authenticated(session.abort.signal, scope)
+      checkpoint()
+      return result
+    }
     this.loginSessions.add(session)
     session.abort.signal.addEventListener('abort', cancel, { once: true })
     try {
@@ -547,15 +559,16 @@ export class ClaudeSubscriptionProviderService {
         this.settings.binaryPath = binary
         if (!this.binary()) throw new Error('Claude Code executable is unavailable')
       }
+      checkpoint()
       this.save()
       await this.status()
-      session.abort.signal.throwIfAborted()
+      checkpoint()
       const cli = this.settings.loginPolicy === 'cli'
       if (cli) {
         // The terminal sign-in is managed in the terminal; Mousse never runs `auth login` on it.
         delete this.settings.cliDisconnected
         this.save()
-        while (!(await this.authenticated(session.abort.signal))) {
+        while (!(await signedIn())) {
           const answer = await interaction.prompt({
             type: 'select',
             message:
@@ -565,9 +578,10 @@ export class ClaudeSubscriptionProviderService {
               { id: 'cancel', label: 'Cancel' }
             ]
           })
+          checkpoint()
           if (answer !== 'check') throw new Error('Claude sign-in cancelled')
         }
-      } else if (!(await this.authenticated(session.abort.signal))) {
+      } else if (!(await signedIn())) {
         const binary = this.binary()!
         child = (
           this.dependencies.startLogin ??
@@ -590,8 +604,9 @@ export class ClaudeSubscriptionProviderService {
               { id: 'cancel', label: 'Cancel' }
             ]
           })
+          checkpoint()
           if (answer !== 'check') throw new Error('Claude sign-in cancelled')
-          if (await this.authenticated(session.abort.signal)) break
+          if (await signedIn()) break
           interaction.notify({
             type: 'progress',
             message:
@@ -599,7 +614,7 @@ export class ClaudeSubscriptionProviderService {
           })
         }
       }
-      session.abort.signal.throwIfAborted()
+      checkpoint()
       if (!cli) {
         this.settings.signedIn = true
         // An explicit profile sign-in settles an unresolved policy.

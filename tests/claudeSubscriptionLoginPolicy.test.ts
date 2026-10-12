@@ -10,6 +10,7 @@ import {
   claudeSubscriptionEnvironment
 } from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
+import { LoginSession } from '../src/mms/providers/LoginSession'
 
 const homes: string[] = []
 afterEach(() => {
@@ -351,6 +352,35 @@ describe('Claude credential scope', () => {
     expect(await settled).toBe('rejected')
     expect(f.query).not.toHaveBeenCalled()
     expect(f.stored().sessions).toEqual({})
+  })
+
+  it('stops a profile sign-in when the login policy changes during its check', async () => {
+    let finishIsolated!: (value: string) => void
+    const f = profile({
+      defaultProfile: false,
+      settings: { loginPolicy: 'isolated' },
+      // Ignores the abort signal, like a CLI that finishes after cancellation.
+      isolated: () => new Promise<string>((done) => { finishIsolated = done })
+    })
+    const startLogin = vi.fn()
+    const service = new ClaudeSubscriptionProviderService(
+      f.home,
+      new UserQuestionService(),
+      { runAuth: f.runAuth, query: f.query, startLogin },
+      { defaultProfile: false }
+    )
+    const session = new LoginSession('login')
+    const prompts: unknown[] = []
+    session.on('event', (event) => prompts.push(event))
+    const login = service.login(session, f.home)
+    await vi.waitFor(() => expect(f.calls).toHaveLength(1))
+    await service.setLoginPolicy('cli')
+    finishIsolated(SIGNED_OUT)
+    await expect(login).resolves.toMatchObject({ success: false })
+    expect(startLogin).not.toHaveBeenCalled()
+    expect(prompts.filter((event) => (event as { type: string }).type === 'select')).toEqual([])
+    expect(f.stored()).toMatchObject({ loginPolicy: 'cli' })
+    expect(f.stored().signedIn).toBeUndefined()
   })
 
   it('tells a signed-out terminal user to run claude auth login', async () => {
