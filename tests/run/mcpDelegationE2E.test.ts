@@ -140,7 +140,7 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
       chat: async () => { throw new Error('the scripted adapters replace the pi loop') }
     }
 
-    const seen: { started?: any; firstStatus?: any; broader?: any; wakeStatus?: any; token?: string } = {}
+    const seen: { started?: any; firstStatus?: any; broader?: any; unknown?: any; wakeStatus?: any; token?: string } = {}
     const vendor = new McpVendorAdapter(async (input, mcp) => {
       if (input.prompt === 'Plan the refactor') {
         seen.token = mcp.token
@@ -156,6 +156,13 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
         expect(retried.value.replayed).toBe(true)
         seen.firstStatus = (await callTool(mcp, 'task_status', { delegationId: started.value.delegationId }, 3)).value
         seen.broader = await callTool(mcp, 'delegate_task', { prompt: 'Edit everything', workspace: 'isolated', modeCeiling: 'default' }, 4)
+        // SPEC §13.8: an unknown instance fails the tool call by name; nothing falls back to the pi loop.
+        const raw = await fetch(mcp.url, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${mcp.token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'delegate_task', arguments: { prompt: 'x', instanceId: 'nope', workspace: 'shared', role: 'research', clientRequestId: 'unknown-1' } } })
+        })
+        seen.unknown = (await raw.json() as { result?: { content: Array<{ text: string }>; isError?: boolean } }).result
         return 'Delegated the survey.'
       }
       if (input.prompt.startsWith('Delegated task')) {
@@ -209,6 +216,7 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
     expect(engine.delegations.getLineage(delegation.childThreadId)).toMatchObject({ parentThreadId: parent.id, parentRunId: response.runId, relationship: 'subagent' })
     expect(seen.firstStatus).toMatchObject({ delegationId: delegation.delegationId, childThreadId: delegation.childThreadId, status: 'running' })
     expect(seen.broader.body.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_ceiling_exceeded, data: { reason: 'mousse_ceiling_exceeded' } })
+    expect(seen.unknown).toMatchObject({ isError: true, content: [{ text: expect.stringContaining('"nope"') }] })
     expect(engine.delegations.listForParentThread(parent.id)).toHaveLength(1)
 
     // The pi child ran in plan mode (its ceiling) without an MCP attachment (in-process ToolHost).

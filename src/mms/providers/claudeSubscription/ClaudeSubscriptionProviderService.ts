@@ -999,6 +999,10 @@ export class ClaudeSubscriptionProviderService {
           // the server refuses what the run may not do, so they need no extra prompt.
           if (input.mcp && toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX))
             return { behavior: 'allow', updatedInput: args }
+          // Claude Code defers MCP tool schemas behind ToolSearch, which only loads them; without it
+          // the Mousse tools above are unreachable unless the user approves a prompt every turn.
+          if (input.mcp && toolName === 'ToolSearch')
+            return { behavior: 'allow', updatedInput: args }
           if (
             input.mode === 'plan' &&
             !['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'].includes(toolName)
