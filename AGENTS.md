@@ -4,7 +4,8 @@
 - Exploration and codebase discovery may be delegated to a dedicated explorer subagent.
 - Always use `rg` (ripgrep) for content search, never `grep`.
 - Default to focused tests for the changed behavior and directly affected areas. Run the full test suite only when explicitly requested. After relevant checks pass, do not broaden or repeat testing without a new change, failure, or concrete unresolved concern; any additional testing must remain focused unless a full run is requested.
-- Speak in first person when describing your actions, decisions, and verification, including in GitHub issues, PRs, and comments. Write naturally and directly: "I checked..." or "I merged...". Avoid third-person approval narration such as "Merge authorized by the user" or "The user requested..."; keep comments focused on the work and results.
+- Use first person for your actions, decisions, and verification, including in GitHub issues, PRs, and comments: "I checked..." or "I merged...". Describe the change itself directly ("Sessions now restart when the model changes"), not as a narration of steps. Avoid third-person approval narration such as "Merge authorized by the user" or "The user requested..."; keep comments focused on the work and results.
+- Write issues, PRs, and comments in plain words for a teammate who has not seen the chat. Follow "Writing PRs and issues" in `docs/team-workflow.md` and use the terms in `docs/GLOSSARY.md`.
 
 ## Team workflow
 
