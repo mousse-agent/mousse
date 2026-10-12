@@ -51,9 +51,11 @@ import type { AdapterHost, ProviderAdapter, ProviderCapabilities, ProviderMetric
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { McpCaller, MousseToolHost } from '../run/mcp/toolRegistry'
 import { formatWakeNotice } from '../run/delegation/notice'
-import type { DelegationRequest } from '../run/RunEngine'
+import type { DelegationRequest, ThreadCreation } from '../run/RunEngine'
+import type { HandoffItem } from '../run/handoff/budget'
+import { TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
 import { TranscriptAssembler } from '../run/adapters/shared/TranscriptAssembler'
-import { handoffDelivery, mcpAttachable } from '../run/policy/featureGates'
+import { forkStrategy, handoffDelivery, mcpAttachable } from '../run/policy/featureGates'
 import { isContextOverflowError, retryContextOverflowOnce } from '../run/adapters/shared/retryContextOverflow'
 import {
   TERMINAL_RUN_STATUSES,
@@ -62,6 +64,7 @@ import {
   type EffectKind,
   type EffectRecord,
   type ModeCeiling,
+  type ProviderRef,
   type ThreadEvent,
   type WakeTurnPayload
 } from '../run/types'
@@ -353,7 +356,18 @@ export interface OrchestratorSendOptions {
    * and its `turn.start` effect recorded (SPEC §12.7). Only the engine path honours `ack`.
    */
   awaitMode?: 'turn' | 'ack'
+  /** SPEC §16.4: the interrupted run this send continues (the restart note's "Continue"). */
+  continuationOfRunId?: string
+  /** Required when `continuationOfRunId` names an `uncertain` run. */
+  acknowledgeUncertain?: boolean
 }
+
+/** Send refusals reported with their reason as the error code (SPEC §16.4). */
+const CONTINUATION_REFUSALS: ReadonlySet<string> = new Set([
+  'continuation_not_found',
+  'continuation_source_active',
+  'uncertain_not_acknowledged'
+])
 
 /** A turn handed to `startTurn`; `runId` is absent when the engine could not record a run. */
 interface TurnStartRequest {
@@ -889,10 +903,13 @@ export class OrchestratorService extends EventEmitter {
     this.runEngineUnsubscribe?.()
     this.runEngineUnsubscribe = null
     this.runEngine?.setDelegationHost(null)
+    this.runEngine?.handoffs.setTranscriptSource(null)
     this.runEngine = engine
     if (!engine) return
+    engine.handoffs.setTranscriptSource((threadId) => this.handoffTranscript(threadId))
     engine.setDelegationHost({
-      createChildThread: (request) => this.createChildThread(request),
+      createThread: (creation) =>
+        creation.kind === 'delegation' ? this.createChildThread(creation.request) : this.createForkThread(creation),
       buildChildTurnPayload: ({ childThreadId, childRunId, prompt, request }): TurnStartPayload => ({
         runId: childRunId,
         threadId: childThreadId,
@@ -1044,6 +1061,7 @@ export class OrchestratorService extends EventEmitter {
       tasks: (threadId) => this.getTasksForThread(threadId),
       listQueue: (threadId) => this.listQueue(threadId),
       enqueue: (threadId, input) => {
+        this.assertQueueOpen(threadId)
         const item = this.enqueueForThread(threadId, input, { source: 'mcp' })
         const session = this.getOrCreateSession(threadId)
         if (session.isTurnRunning() || session.turnAdmitted) session.drainAfterSettle = true
@@ -1300,6 +1318,258 @@ export class OrchestratorService extends EventEmitter {
     session.modelOverride = override ? structuredClone(override) : undefined
     if (request.workspace === 'shared') session.sharedWorkspace = this.sharedWorkspaceOf(request.parentThreadId)
     return { threadId: child.id }
+  }
+
+  /**
+   * Engine host callback for `thread.fork` (SPEC §16.2; inside the fork transaction): the fork gets
+   * the source's project, worktree mode and model selection. Its context arrives lazily, with its
+   * first message.
+   */
+  private createForkThread(creation: Extract<ThreadCreation, { kind: 'fork' }>): { threadId: string } {
+    if (!this.threadStore) throw new Error('Thread forks require the thread store')
+    const sourceThread = this.threadStore.getThread(creation.sourceThreadId)
+    if (!sourceThread) throw new Error(`Thread not found: ${creation.sourceThreadId}`)
+    const source = this.getOrCreateSession(creation.sourceThreadId)
+    const title = creation.title?.trim() || `Fork of ${sourceThread.name}`.slice(0, 120)
+    const fork = this.threadStore.createThread(title, sourceThread.projectId, undefined,
+      sourceThread.worktreeEnabled === undefined ? undefined : { worktreeEnabled: sourceThread.worktreeEnabled })
+    const override = source.modelOverride ?? sourceThread.modelOverride
+    if (override) this.threadStore.updateThreadMeta(fork.id, { modelOverride: structuredClone(override) })
+    const session = this.getOrCreateSession(fork.id)
+    session.modelOverride = override ? structuredClone(override) : undefined
+    return { threadId: fork.id }
+  }
+
+  /**
+   * The thread's visible conversation as handoff items (SPEC §16.1), oldest first. Each item carries
+   * the ordinal of the run it belongs to (from the message's `turnId`); messages before the first
+   * known run have none. Markers, notes and hidden inputs are not conversation.
+   */
+  private handoffTranscript(threadId: string): HandoffItem[] {
+    const engine = this.runEngine
+    const items: HandoffItem[] = []
+    let ordinal: number | null = null
+    for (const message of this.getMessagesForPersistence(threadId)) {
+      if (message.turnId) {
+        const run = engine?.getRun(message.turnId)
+        if (run && run.threadId === threadId) ordinal = run.ordinal
+      }
+      if (message.hidden || message.kind || (message.role !== 'user' && message.role !== 'assistant')) continue
+      const text = message.content.trim()
+      if (!text) continue
+      items.push({
+        runOrdinal: ordinal,
+        role: message.role,
+        text,
+        ...(message.images?.length ? { attachments: { images: message.images.length } } : {})
+      })
+    }
+    return items
+  }
+
+  /** The provider reference of the latest run before `runId` on the thread, when one was recorded. */
+  private previousProviderRef(threadId: string, runId: string): ProviderRef | null {
+    const engine = this.runEngine
+    const current = engine?.getRun(runId)
+    if (!engine || !current) return null
+    for (const run of engine.listRuns(threadId)) {
+      if (run.ordinal >= current.ordinal || !run.activeAttemptId) continue
+      const ref = engine.store.getAttempt(run.activeAttemptId)?.providerRef
+      if (ref) return ref
+    }
+    return null
+  }
+
+  /**
+   * SPEC §16.1-§16.2: the handoffs this turn delivers. A pending fork transfer (the fork's first
+   * message) resolves natively when the adapter can branch the source session, otherwise as a
+   * `full_summary` of the source up to the fork point; otherwise a provider change since the
+   * previous turn plans a switch handoff. A pending merge-back adds the fork's delta. Planning
+   * failures are logged and the turn runs with its raw history.
+   */
+  private async planTurnHandoffs(input: {
+    session: ThreadSession
+    runId: string | undefined
+    adapter: ProviderAdapter
+    selection: { llmProvider: string; model: string }
+    previousModel: { provider: string; model: string } | undefined
+    promptRuntime: boolean
+    content: string
+    images: ChatImageAttachment[] | undefined
+    mode: ChatMode
+    modelOverride: ThreadSession['modelOverride']
+  }): Promise<TurnHandoffs | null> {
+    const engine = this.runEngine
+    const runId = input.runId
+    if (!engine || !runId) return null
+    const threadId = input.session.threadId
+    const to: ProviderRef = { provider: input.selection.llmProvider, model: input.selection.model }
+    const caps = input.adapter.capabilities
+    const current = { text: input.content, ...(input.images?.length ? { attachments: { images: input.images.length } } : {}) }
+    const planned: PlannedHandoff[] = []
+    try {
+      const capacity = this.nativeContext.nativeProviderModel
+      const modelWindow = input.promptRuntime
+        ? capacity?.selectedModel === to.model ? capacity?.contextWindow : undefined
+        : this.llm.getSelectedModelContextLimit(input.mode, input.modelOverride).limit
+      const fork = engine.transfers.listPending(threadId, 'fork')[0]
+      if (fork) {
+        const sourceRun = engine.getRun(String(fork.payload.sourceRunId ?? ''))
+        const sourceRef = sourceRun?.activeAttemptId ? engine.store.getAttempt(sourceRun.activeAttemptId)?.providerRef ?? null : null
+        let branched: ProviderRef | null = null
+        if (forkStrategy(caps) === 'native' && sourceRef?.sessionId && sourceRef.provider === to.provider && input.adapter.forkSession) {
+          try {
+            branched = await input.adapter.forkSession(sourceRef, fork.sourceRunOrdinal)
+          } catch (error) {
+            console.warn('native fork failed; using a portable handoff', { runId, error: error instanceof Error ? error.message : String(error) })
+          }
+        }
+        planned.push(branched?.sessionId
+          ? { kind: 'fork', transfer: fork, forkStrategy: 'native', plan: engine.handoffs.plan({ threadId, targetRunId: runId, from: branched, to: { ...to, sessionId: branched.sessionId }, caps }) }
+          : {
+              kind: 'fork',
+              transfer: fork,
+              forkStrategy: 'portable',
+              plan: engine.handoffs.plan({
+                threadId, targetRunId: runId, from: sourceRef, to, caps, current, modelWindow,
+                sourceThreadId: fork.sourceThreadId, strategy: 'full_summary', throughOrdinal: fork.sourceRunOrdinal
+              })
+            })
+      } else if (input.previousModel && input.previousModel.provider !== to.provider) {
+        const from = this.previousProviderRef(threadId, runId) ?? { provider: input.previousModel.provider, model: input.previousModel.model }
+        planned.push({ kind: 'switch', plan: engine.handoffs.plan({ threadId, targetRunId: runId, from, to, caps, current, modelWindow }) })
+      }
+      const merge = engine.pendingMergeBack(threadId)
+      if (merge) {
+        planned.push({
+          kind: 'merge_back',
+          transfer: merge,
+          plan: engine.handoffs.plan({
+            threadId, targetRunId: runId, from: null, to, caps, current, modelWindow,
+            sourceThreadId: merge.sourceThreadId,
+            strategy: 'fork_delta_summary',
+            afterOrdinal: Number(merge.payload.fromOrdinal ?? 1) - 1,
+            throughOrdinal: Number(merge.payload.toOrdinal ?? merge.sourceRunOrdinal),
+            nativeTokens: input.promptRuntime ? 0 : estimateActiveContextTokens(getActiveMessages(this.nativeContext), getCompactionSummary(this.nativeContext))
+          })
+        })
+      }
+    } catch (error) {
+      console.warn('run engine handoff planning failed; the turn keeps its raw history', {
+        runId,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+    return planned.length ? new TurnHandoffs(engine, planned, !input.promptRuntime) : null
+  }
+
+  /**
+   * SPEC §16.2: a fork's first turn provisions the fork's own worktree at the source's code
+   * checkpoint for the fork run, or at the source worktree's current HEAD when that run has none.
+   * The seed is recorded on the fork transfer; failures are recorded and the fork provisions as usual.
+   */
+  private async seedForkWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease']): Promise<void> {
+    const engine = this.runEngine
+    const fork = engine?.transfers.listPending(threadId, 'fork')[0]
+    if (!engine || !fork || fork.payload.seed) return
+    const manager = new ThreadWorkspaceManager(threadDir)
+    let seed: Record<string, unknown>
+    try {
+      if (manager.load()) seed = { kind: 'existing_workspace' }
+      else if (!manager.resolveRepository(projectPath).capability.gitBacked) seed = { kind: 'not_git_backed' }
+      else {
+        const sourceDir = this.resolveThreadDir(fork.sourceThreadId)
+        const sourceRunId = String(fork.payload.sourceRunId ?? '')
+        const checkpoint = sourceDir
+          ? new ThreadActionService(sourceDir).list().find((action) => action.turnId === sourceRunId && action.scope !== 'conversation' && action.state !== 'running' && action.endSha)
+          : undefined
+        const sourceWorkspace = sourceDir ? new ThreadWorkspaceManager(sourceDir).load() : undefined
+        seed = checkpoint
+          ? { kind: 'checkpoint', sha: checkpoint.endSha, actionId: checkpoint.id }
+          : sourceWorkspace?.lifecycle === 'ready'
+            ? { kind: 'source_head', sha: actionGit(sourceWorkspace.worktreePath, ['rev-parse', 'HEAD']) }
+            : { kind: 'primary_head' }
+        await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, typeof seed.sha === 'string' ? seed.sha : undefined)
+      }
+    } catch (error) {
+      seed = { kind: 'failed', error: error instanceof Error ? error.message : String(error) }
+      console.warn('fork workspace seed failed; the fork provisions from the primary checkout', { threadId, error: seed.error })
+    }
+    try {
+      engine.transfers.patchPayload(fork.transferId, { seed })
+    } catch (error) {
+      console.warn('fork seed could not be recorded', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * The transcript markers of this turn's handoffs (SPEC §16.1: "context rebuilt (N of M items)"):
+   * the provider-switch marker gains the handoff artifact; a fork's first message and a merge-back
+   * each get their own marker.
+   */
+  private recordHandoffMarkers(
+    session: ThreadSession,
+    handoffs: TurnHandoffs,
+    switchMarker: ChatMessage | undefined,
+    turnId: string,
+    selection: { llmProvider: string; model: string }
+  ): void {
+    const to = { provider: selection.llmProvider, model: selection.model }
+    for (const entry of handoffs.planned) {
+      const { plan } = entry
+      const artifact = {
+        handoffId: plan.handoffId,
+        strategy: plan.strategy,
+        selectedItems: plan.record.selectedItems,
+        omittedItems: plan.record.omittedItems
+      }
+      if (entry.kind === 'switch') {
+        if (!switchMarker?.contextHandoff) continue
+        switchMarker.contextHandoff = { ...switchMarker.contextHandoff, ...artifact }
+        this.emitMessageUpdated(switchMarker)
+        continue
+      }
+      const from = plan.record.fromRef
+      const sourceName = this.threadStore?.getThread(plan.sourceThreadId)?.name ?? plan.sourceThreadId
+      const marker: ChatMessage = {
+        id: uuidv4(),
+        role: 'assistant',
+        kind: 'context_handoff',
+        content: entry.kind === 'fork' ? `Forked from ${sourceName}` : `Merged back from ${sourceName}`,
+        contextHandoff: {
+          from: { provider: from?.provider ?? to.provider, model: from?.model ?? to.model },
+          to,
+          ...artifact,
+          transfer: entry.kind
+        },
+        timestamp: new Date().toISOString(),
+        turnId
+      }
+      session.messages.push(marker)
+      this.emitMessageAdded(marker)
+    }
+    this.persist(true)
+  }
+
+  /**
+   * Working directories of other threads' live turns (SPEC §16.3 restore safety): a turn running in
+   * a path a restore would rewrite makes that restore unsafe.
+   */
+  liveWorkspaceClaims(excludeThreadId?: string): Array<{ threadId: string; path: string; kind: 'live_cwd' }> {
+    const claims: Array<{ threadId: string; path: string; kind: 'live_cwd' }> = []
+    for (const session of new Set([this.boundSession, ...this.sessions.values()])) {
+      if (session.threadId === excludeThreadId || session.threadId === '__unbound__' || !session.isTurnRunning()) continue
+      const path = session.sharedWorkspace?.path ?? session.projectCwd
+      if (path) claims.push({ threadId: session.threadId, path, kind: 'live_cwd' })
+    }
+    return claims
+  }
+
+  /** SPEC §16.2: queueing on a thread waiting for a merge-back is refused until its next turn consumes it. */
+  assertQueueOpen(threadId: string): void {
+    const pending = this.runEngine?.pendingMergeBack(threadId)
+    if (pending)
+      throw new DomainRpcError('merge_back_pending', `A merge-back from fork ${pending.sourceThreadId} waits for this thread's next turn; send directly to deliver it.`, { transferId: pending.transferId })
   }
 
   /** The delegation tools of one parent run (SPEC §14.2 `ToolHost`). */
@@ -1592,6 +1862,19 @@ export class OrchestratorService extends EventEmitter {
         return
       }
       console.warn('run engine write failed', { runId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** SPEC §16.4: a continuation run opens with the run it continues. */
+  private deliverContinuationNote(runId: string | undefined): void {
+    const engine = this.runEngine
+    if (!engine || !runId) return
+    try {
+      const continued = engine.getRun(runId)?.outcome?.continuationOf
+      const source = continued ? engine.getRun(continued) : null
+      if (source) this.addSystemMessage(`Continuing run ${source.ordinal} after a restart.`)
+    } catch (error) {
+      console.warn('run engine continuation note failed', { runId, error: error instanceof Error ? error.message : String(error) })
     }
   }
 
@@ -1888,6 +2171,10 @@ export class OrchestratorService extends EventEmitter {
   ): ThreadSession['modelOverride'] {
     const session = this.getOrCreateSession(threadId)
     const previousProvider = session.modelOverride?.llmProvider
+    // SPEC §16.1: one provider switch at a time; a pending handoff must be delivered or fail first.
+    const pending = previousProvider !== override?.llmProvider ? this.runEngine?.handoffs.pendingForThread(threadId) : null
+    if (pending)
+      throw new DomainRpcError('handoff_pending', `Thread ${threadId} is still handing its context to ${pending.toRef.provider}; switch providers after that turn.`, { handoffId: pending.handoffId })
     session.modelOverride = override ? structuredClone(override) : undefined
     if (this.threadStore) {
       this.threadStore.updateThreadMeta(threadId, { modelOverride: session.modelOverride })
@@ -3044,6 +3331,9 @@ export class OrchestratorService extends EventEmitter {
       throw new Error(`Thread deleted: ${threadId}`)
     }
 
+    // SPEC §16.2: a send that would queue behind a pending merge-back is refused before it is a run.
+    if (opts?.forceQueue || session.isTurnRunning()) this.assertQueueOpen(threadId)
+
     // The run is durable before any queue/run decision or provider I/O (SPEC §2.1).
     let run: { runId: string; sequence: number } | undefined
     if (this.runEngine) {
@@ -3051,8 +3341,11 @@ export class OrchestratorService extends EventEmitter {
         kind: 'send',
         threadId,
         clientRequestId: opts?.clientRequestId ?? uuidv4(),
-        source: opts?.source ?? 'protocol'
+        source: opts?.source ?? 'protocol',
+        ...(opts?.continuationOfRunId ? { continuationOfRunId: opts.continuationOfRunId, acknowledgeUncertain: opts.acknowledgeUncertain === true } : {})
       })
+      if (result.status === 'rejected' && CONTINUATION_REFUSALS.has(result.reason))
+        throw new DomainRpcError(result.reason, `Cannot continue run ${opts?.continuationOfRunId}: ${result.reason}.`)
       if (result.status !== 'accepted') throw new Error(result.reason)
       if (result.replayed) {
         const replayed = { runId: result.runId, sequence: result.sequence, replayed: true }
@@ -3418,6 +3711,7 @@ export class OrchestratorService extends EventEmitter {
         )
         const threadDir = this.resolveThreadDir(session.threadId)
         if (projectPath && threadDir) {
+          await this.seedForkWorkspace(session.threadId, projectPath, threadDir, opts?.externalSignal, session.executionLease)
           session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath)
             .resolve(request.mode, 'main', opts?.externalSignal, session.executionLease ?? undefined)
           session.projectCwd = session.workspace.projectPath
@@ -3537,6 +3831,7 @@ export class OrchestratorService extends EventEmitter {
     }
     this.markRun(engineRunId, (engine, id) => engine.markStarting(id))
     this.deliverRestartNote(session.threadId, engineRunId)
+    this.deliverContinuationNote(engineRunId)
     let conversationToolsUsed = false
     let providerProgress = false
     const conversationDirectory = !checkpointEnabled && !reuseLastUser && displayUserMessage && session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
@@ -3623,6 +3918,7 @@ export class OrchestratorService extends EventEmitter {
     let providerError: AppErrorShape | undefined
     let failureDiagnostic: Record<string, unknown> | undefined
     let compactionNote: ChatMessage | undefined
+    let switchMarker: ChatMessage | undefined
     const selectedModel = opts?.modelOverride ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
       ...(this.providerAuth.credentials?.listProviderIds() ?? []),
       ...this.adapters.configuredProviderIds()
@@ -3632,6 +3928,8 @@ export class OrchestratorService extends EventEmitter {
       const admittedUser = session.messages.slice(turnPresentationStart).find(message => message.role === 'user' && !message.hidden)
       if (admittedUser) {
         admittedUser.modelSelection = selection
+        // The run this message opened; handoff transcripts group messages by run (SPEC §16.1).
+        if (engineRunId) admittedUser.turnId = turnId
         this.emitMessageUpdated(admittedUser)
         const handoff = contextHandoff(previousModel, selection)
         if (handoff) {
@@ -3640,12 +3938,15 @@ export class OrchestratorService extends EventEmitter {
             timestamp: new Date().toISOString(), turnId }
           session.messages.push(marker)
           this.emitMessageAdded(marker)
+          switchMarker = marker
         }
         this.persist(true)
       }
     }
     // Set once the adapter is resolved; read by the post-turn action parsing below.
     let promptRuntime = false
+    // SPEC §16.1-§16.2: context handed over this turn (provider switch, fork, merge-back).
+    let handoffs: TurnHandoffs | null = null
     const onCompaction = (phase: 'start' | 'complete' | 'unchanged'): void => {
       if (phase === 'start') {
         compactionNote = { id: uuidv4(), role: 'assistant', kind: 'context_compaction',
@@ -3745,6 +4046,12 @@ export class OrchestratorService extends EventEmitter {
           compactTranscript()
         }
       }
+      handoffs = await this.planTurnHandoffs({
+        session, runId: engineRunId, adapter, selection: selectedModel, previousModel, promptRuntime,
+        content: userContent, images, mode, modelOverride
+      })
+      if (handoffs) this.recordHandoffMarkers(session, handoffs, switchMarker, turnId, selectedModel)
+      const activeMessages = getActiveMessages(this.nativeContext)
       const turnInput: TurnInput = {
         runId: engineRunId ?? turnId,
         attemptId: (engineRunId ? this.runEngine?.getRun(engineRunId)?.activeAttemptId : undefined) ?? turnId,
@@ -3754,12 +4061,15 @@ export class OrchestratorService extends EventEmitter {
         llmProvider: selectedModel.llmProvider,
         modelPinned: Boolean(modelOverride),
         mode,
-        prompt: userContent,
-        messages: getActiveMessages(this.nativeContext),
-        contextSummary: getCompactionSummary(this.nativeContext),
+        prompt: handoffs ? handoffs.prompt(userContent) : userContent,
+        messages: handoffs ? handoffs.messages(activeMessages) : activeMessages,
+        // A switch handoff stands in for the transcript, including its compaction memory.
+        contextSummary: handoffs?.replaceHistory ? undefined : getCompactionSummary(this.nativeContext),
         images,
         appletInstructions: this.appletStore ? this.appletCatalogue() : undefined,
-        nativeHistory: promptRuntime ? nativeAgentHistory(this.nativeContext, turnNativeStartBoundary.messageIndex) : undefined,
+        nativeHistory: promptRuntime
+          ? handoffs?.replaceHistory ? '' : nativeAgentHistory(this.nativeContext, turnNativeStartBoundary.messageIndex)
+          : undefined,
         signal: turn.abort.signal
       }
       const turnSink: TurnSink = {
@@ -3774,7 +4084,7 @@ export class OrchestratorService extends EventEmitter {
           // appends or compacts native history. Estimate until the final provider
           // response supplies a new authoritative prompt measurement.
           this.clearLastTurnUsage()
-          this.commitActiveNativeMessages(nativeMessages, checkpoint)
+          this.commitActiveNativeMessages(handoffs && !checkpoint ? handoffs.canonical(nativeMessages) : nativeMessages, checkpoint)
           if (session.drainedExternalSteerIds.size > 0) {
             this.nativeContext = {
               ...this.nativeContext,
@@ -3839,7 +4149,8 @@ export class OrchestratorService extends EventEmitter {
           toolLedger: this.toolLedgerFor(engineRunId)
         },
         context: {
-          toolLoopSafety: contextSettings.compactionEnabled && configuredThreshold !== undefined
+          // In-loop compaction checkpoints index the sent transcript; a switch handoff is not canonical.
+          toolLoopSafety: contextSettings.compactionEnabled && configuredThreshold !== undefined && !handoffs?.replaceHistory
             ? {
                 compactionThresholdTokens: configuredThreshold,
                 compactNativeMessages: (nativeMessages) =>
@@ -3865,7 +4176,8 @@ export class OrchestratorService extends EventEmitter {
             if (!contextSettings.compactionEnabled || threshold === undefined ||
                 !shouldCompactNativeContext(activeTokens, knownLimit ?? threshold, DEFAULT_COMPACTION_RESERVE_TOKENS, threshold)) return null
             onCompaction('start')
-            return compactTranscript() ? compactedContext() : null
+            const recovered = compactTranscript() ? compactedContext() : null
+            return recovered && handoffs?.replaceHistory ? { ...recovered, nativeHistory: '' } : recovered
           },
           nativeHistoryAfterTurn: (text) => {
             commitPromptTurn(text)
@@ -3875,6 +4187,7 @@ export class OrchestratorService extends EventEmitter {
       }
       const result = await adapter.startTurn(turnInput, turnSink, turnControl, adapterHost)
         .finally(() => { if (mcp) this.endMcpTurn(session.threadId) })
+      handoffs?.settle(result.aborted || turn.abort.signal.aborted ? 'aborted' : 'completed')
       assistantText = result.text
       aborted = Boolean(result.aborted)
       responseMetadata = {
@@ -3887,7 +4200,7 @@ export class OrchestratorService extends EventEmitter {
         // No-op when the adapter already committed through `nativeHistoryAfterTurn`.
         commitPromptTurn(result.text)
       } else {
-        this.commitActiveNativeMessages(result.nativeMessages)
+        this.commitActiveNativeMessages(handoffs ? handoffs.canonical(result.nativeMessages) : result.nativeMessages)
         // Provider prompt usage excludes the assistant message it produced.
         this.recordLastTurnUsage({
           input: result.usage.input,
@@ -3902,6 +4215,7 @@ export class OrchestratorService extends EventEmitter {
     } catch (err) {
       const normalized = normalizeAppError(err, 'orchestrator_turn_failed')
       const isAbort = turn.abort.signal.aborted || normalized.errorInfo.category === 'cancelled'
+      handoffs?.settle('failed', err instanceof Error ? err.message : String(err))
       if (!isAbort) failureDiagnostic = errorDiagnostic(normalized, 'orchestrator.chat')
       if (isAbort) {
         aborted = true

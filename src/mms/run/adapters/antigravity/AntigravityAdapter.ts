@@ -124,4 +124,13 @@ export class AntigravityAdapter implements ProviderAdapter {
   async interrupt(_ref: ProviderRef): Promise<'interrupted' | 'not_active'> {
     return 'not_active'
   }
+
+  /**
+   * No native fork yet: ACP has no session fork.
+   * Null makes a fork use the portable `full_summary` handoff (SPEC §16.2); a native fork lands
+   * here once the runtime exposes session branching.
+   */
+  async forkSession(_ref: ProviderRef, _atTurnOrdinal: number): Promise<ProviderRef | null> {
+    return null
+  }
 }

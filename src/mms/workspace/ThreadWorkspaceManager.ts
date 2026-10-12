@@ -99,7 +99,12 @@ export class ThreadWorkspaceManager {
     conversationBranchId: ConversationBranchId,
     projectPath: string,
     signal?: AbortSignal,
-    heldThreadLease?: ThreadLeaseHandle
+    heldThreadLease?: ThreadLeaseHandle,
+    /**
+     * Commit the new worktree starts at instead of the primary checkout's HEAD (a thread fork seeded
+     * from its source's checkpoint, SPEC §16.2). Integration still targets the primary HEAD.
+     */
+    startSha?: string
   ): Promise<ThreadWorkspaceMetadata> {
     const existing = this.load()
     if (existing?.lifecycle === 'ready') return this.verify(existing)
@@ -118,7 +123,8 @@ export class ThreadWorkspaceManager {
       const provisioned = this.load()
       if (provisioned?.lifecycle === 'ready') return this.verify(provisioned)
       if (provisioned) throw new Error(`Workspace provisioning requires recovery: ${provisioned.lifecycle}`)
-      const head = git(repository.primaryCheckoutPath, ['rev-parse', 'HEAD'])
+      const primaryHead = git(repository.primaryCheckoutPath, ['rev-parse', 'HEAD'])
+      const head = startSha ? git(repository.primaryCheckoutPath, ['rev-parse', '--verify', `${startSha}^{commit}`]) : primaryHead
       const branch = `mousse/thread/${threadId}/${conversationBranchId}`
       const retainedRef = `refs/mousse/threads/${threadId}/${conversationBranchId}`
       const worktreePath = join(repository.worktreeBase, 'threads', threadId, conversationBranchId)
@@ -135,7 +141,7 @@ export class ThreadWorkspaceManager {
         workspaceId: `${repository.repositoryId}:${threadId}`,
         generation: 0,
         provenance: { ownerThreadId: threadId },
-        integrationTarget: { checkoutPath: repository.primaryCheckoutPath, baseSha: head },
+        integrationTarget: { checkoutPath: repository.primaryCheckoutPath, baseSha: primaryHead },
         repositoryId: repository.repositoryId,
         conversationBranchId,
         branch,
@@ -155,7 +161,7 @@ export class ThreadWorkspaceManager {
         workspaceId: `${repository.repositoryId}:${threadId}`,
         generation: 0,
         provenance: { ownerThreadId: threadId },
-        integrationTarget: { checkoutPath: repository.primaryCheckoutPath, baseSha: head },
+        integrationTarget: { checkoutPath: repository.primaryCheckoutPath, baseSha: primaryHead },
         repositoryId: repository.repositoryId,
         conversationBranchId,
         branch,

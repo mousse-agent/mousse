@@ -142,4 +142,13 @@ export class PiLoopAdapter implements ProviderAdapter {
   async interrupt(_ref: ProviderRef): Promise<'interrupted' | 'not_active'> {
     return 'not_active'
   }
+
+  /**
+   * No native fork yet: the pi loop keeps no provider session to branch (Mousse owns its transcript).
+   * Null makes a fork use the portable `full_summary` handoff (SPEC §16.2); a native fork lands
+   * here once the runtime exposes session branching.
+   */
+  async forkSession(_ref: ProviderRef, _atTurnOrdinal: number): Promise<ProviderRef | null> {
+    return null
+  }
 }

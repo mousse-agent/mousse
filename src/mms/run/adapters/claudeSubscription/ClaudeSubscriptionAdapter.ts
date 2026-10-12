@@ -179,4 +179,13 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
   async interrupt(_ref: ProviderRef): Promise<'interrupted' | 'not_active'> {
     return 'not_active'
   }
+
+  /**
+   * No native fork yet: the subscription service keeps its SDK session private and offers no branch call.
+   * Null makes a fork use the portable `full_summary` handoff (SPEC §16.2); a native fork lands
+   * here once the runtime exposes session branching.
+   */
+  async forkSession(_ref: ProviderRef, _atTurnOrdinal: number): Promise<ProviderRef | null> {
+    return null
+  }
 }

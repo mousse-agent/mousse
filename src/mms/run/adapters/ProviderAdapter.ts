@@ -246,4 +246,10 @@ export interface ProviderAdapter {
   startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult>
   interrupt(ref: ProviderRef): Promise<'interrupted' | 'not_active'>
   steer?(ref: ProviderRef, text: string): Promise<'delivered' | 'not_active'>
+  /**
+   * SPEC §16.2 native fork: a new provider session branched from `ref` after `atTurnOrdinal`, or
+   * null when the runtime cannot branch it (the fork then falls back to a portable handoff). Only
+   * called when `featureGates.forkStrategy(caps)` is `native` and `ref` names a session.
+   */
+  forkSession?(ref: ProviderRef, atTurnOrdinal: number): Promise<ProviderRef | null>
 }

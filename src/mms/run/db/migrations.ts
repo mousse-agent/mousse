@@ -4,7 +4,8 @@ import type { Migration } from './ProfileDatabase'
  * Run Engine schema. Version 1 is the Phase 1 data model in docs/run-engine/SPEC.md §3; version 2
  * is the Phase 2 outbox, daemon epochs and tool ledger (§12.1) plus `runs.heartbeat_at`; version 3
  * is the Phase 4 delegation model (§14.1): thread lineage, delegations and the inbox; version 4 is
- * the Phase 5 Mousse MCP server (§15.1): bearer credentials and the delegation mode ceiling.
+ * the Phase 5 Mousse MCP server (§15.1): bearer credentials and the delegation mode ceiling;
+ * version 5 is Phase 6 (§16): context handoffs and fork/merge-back transfers.
  */
 export const RUN_MIGRATIONS: readonly Migration[] = [
   {
@@ -181,6 +182,46 @@ CREATE INDEX credentials_thread ON credentials(thread_id, provider);
 
 -- The most a delegated child may do (SPEC 15.1 scoping); NULL for delegations made before Phase 5.
 ALTER TABLE delegations ADD COLUMN mode_ceiling TEXT CHECK(mode_ceiling IN ('plan','default'));
+`
+  },
+  {
+    version: 5,
+    sql: `
+-- What a turn was told about earlier turns when its provider changed (SPEC 16.1). The strategy
+-- list adds 'fork_delta_summary': the merge-back handoff of SPEC 16.2.
+CREATE TABLE context_handoffs(
+  handoff_id    TEXT PRIMARY KEY,
+  thread_id     TEXT NOT NULL,
+  target_run_id TEXT NOT NULL,
+  from_ref      TEXT,                             -- ProviderRef JSON
+  to_ref        TEXT NOT NULL,                    -- ProviderRef JSON
+  strategy      TEXT NOT NULL CHECK(strategy IN ('native_resume','delta','full_summary','fork_delta_summary','legacy_import')),
+  covered_from_ordinal INTEGER,
+  covered_to_ordinal   INTEGER,
+  budget_tokens  INTEGER NOT NULL,
+  selected_items INTEGER NOT NULL,
+  omitted_items  INTEGER NOT NULL,
+  status        TEXT NOT NULL CHECK(status IN ('pending','delivered','failed')),
+  created_at    TEXT NOT NULL,
+  delivered_at  TEXT
+) STRICT;
+CREATE INDEX context_handoffs_thread ON context_handoffs(thread_id, status);
+
+-- Lazy context transfers between threads (SPEC 16.2): a fork's first message and a merge-back
+-- into the fork's parent consume them.
+CREATE TABLE context_transfers(
+  transfer_id   TEXT PRIMARY KEY,
+  type          TEXT NOT NULL CHECK(type IN ('fork','merge_back')),
+  source_thread_id TEXT NOT NULL,
+  target_thread_id TEXT NOT NULL,
+  source_run_ordinal INTEGER NOT NULL,
+  status        TEXT NOT NULL CHECK(status IN ('pending','consumed','superseded','failed')),
+  payload       TEXT NOT NULL,                    -- JSON
+  created_at    TEXT NOT NULL,
+  consumed_at   TEXT
+) STRICT;
+CREATE INDEX context_transfers_target ON context_transfers(target_thread_id, status);
+CREATE INDEX context_transfers_source ON context_transfers(source_thread_id);
 `
   }
 ]

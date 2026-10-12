@@ -466,7 +466,18 @@ export interface ChatMessage {
     | 'context_handoff'
   /** Selection actually admitted for this user turn, independent of composer edits. */
   modelSelection?: { provider: string; model: string }
-  contextHandoff?: { from: { provider: string; model: string }; to: { provider: string; model: string } }
+  contextHandoff?: {
+    from: { provider: string; model: string }
+    to: { provider: string; model: string }
+    /** Run Engine handoff artifact (SPEC §16.1) the turn delivered; absent for a display-only switch. */
+    handoffId?: string
+    strategy?: 'native_resume' | 'delta' | 'full_summary' | 'fork_delta_summary' | 'legacy_import'
+    /** "context rebuilt (N of M items)": N = selected, M = selected + omitted. */
+    selectedItems?: number
+    omittedItems?: number
+    /** Set when the handoff came from a thread transfer (SPEC §16.2). */
+    transfer?: 'fork' | 'merge_back'
+  }
   planCard?: PlanCardMetadata
   thinking?: {
     content: string

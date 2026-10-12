@@ -24,7 +24,10 @@ const PHASE5_TOOLS: Record<string, string> = {
   list_tasks: 'actsAsCaller',
   thread_read: 'reads',
   queue_list: 'reads',
-  queue_enqueue: 'writesThreads'
+  queue_enqueue: 'writesThreads',
+  // Phase 6 (SPEC §16.2).
+  thread_fork: 'startsThreads',
+  thread_merge_back: 'writesThreads'
 }
 
 function fakeHost() {

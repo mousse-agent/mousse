@@ -27,6 +27,8 @@ export interface RunOutcome {
   interruptedBy?: 'user' | 'daemon_restart' | 'provider'
   uncertainReason?: string
   stopRequested?: boolean
+  /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
+  continuationOf?: string
 }
 
 export interface RunRecord {
@@ -270,4 +272,50 @@ export interface WakeTurnPayload {
 
 export function isWakeTurnPayload(payload: unknown): payload is WakeTurnPayload {
   return Boolean(payload) && typeof payload === 'object' && (payload as { kind?: unknown }).kind === 'wake'
+}
+
+// Phase 6: context handoffs and thread transfers (docs/run-engine/SPEC.md §16).
+
+/**
+ * How a turn learns what happened before it (SPEC §16.1): `native_resume` sends nothing (the
+ * provider still holds its session); `delta` sends the runs since the target provider's last turn;
+ * `full_summary` rebuilds the context; `fork_delta_summary` is what a fork did since its fork point
+ * (merge-back, §16.2); `legacy_import` is reserved for threads imported without runs.
+ */
+export type HandoffStrategy = 'native_resume' | 'delta' | 'full_summary' | 'fork_delta_summary' | 'legacy_import'
+
+export type HandoffStatus = 'pending' | 'delivered' | 'failed'
+
+export interface HandoffRecord {
+  handoffId: string
+  threadId: string
+  targetRunId: string
+  fromRef: ProviderRef | null
+  toRef: ProviderRef
+  strategy: HandoffStrategy
+  coveredFromOrdinal: number | null
+  coveredToOrdinal: number | null
+  budgetTokens: number
+  selectedItems: number
+  omittedItems: number
+  status: HandoffStatus
+  createdAt: string
+  deliveredAt: string | null
+}
+
+export type TransferType = 'fork' | 'merge_back'
+
+export type TransferStatus = 'pending' | 'consumed' | 'superseded' | 'failed'
+
+export interface TransferRecord {
+  transferId: string
+  type: TransferType
+  sourceThreadId: string
+  targetThreadId: string
+  /** Fork: the source run the fork starts after. Merge-back: the fork's latest run. */
+  sourceRunOrdinal: number
+  status: TransferStatus
+  payload: Record<string, unknown>
+  createdAt: string
+  consumedAt: string | null
 }

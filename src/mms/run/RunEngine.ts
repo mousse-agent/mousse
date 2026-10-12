@@ -1,9 +1,11 @@
 import { EventEmitter } from 'node:events'
 import { DaemonEpoch } from './DaemonEpoch'
-import { fail, RunStoreError } from './db/RunStoreError'
+import { fail, reject, RunStoreError } from './db/RunStoreError'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
 import { Delegations } from './Delegations'
 import { EffectOutbox } from './EffectOutbox'
+import { HandoffService } from './handoff/HandoffService'
+import { ContextTransfers } from './handoff/Transfers'
 import { Inbox } from './Inbox'
 import type { RestartNote } from './restartNote'
 import type { RunStore } from './RunStore'
@@ -22,7 +24,8 @@ import {
   type RunOutcome,
   type RunRecord,
   type RunStatus,
-  type ThreadEvent
+  type ThreadEvent,
+  type TransferRecord
 } from './types'
 
 export type RunCommand =
@@ -32,6 +35,10 @@ export type RunCommand =
       clientRequestId: string
       source: string
       userMessageId?: string
+      /** SPEC §16.4: the terminal run this send continues; recorded as `outcome.continuationOf`. */
+      continuationOfRunId?: string
+      /** Required with `continuationOfRunId` when that run is `uncertain`. */
+      acknowledgeUncertain?: boolean
     }
   | { kind: 'stop'; threadId: string; clientRequestId: string; runId: string }
   | { kind: 'steer'; threadId: string; clientRequestId: string; runId: string }
@@ -86,13 +93,59 @@ export interface DelegationAccepted {
   replayed: boolean
 }
 
+/** `thread.fork` (SPEC §16.2). */
+export interface ForkThreadRequest {
+  sourceThreadId: string
+  /** The source run the fork starts after; the latest forkable run when absent or `latest_stable`. */
+  atRunOrdinal?: number | 'latest_stable'
+  title?: string
+  /** A retry with the same id replays the first result. */
+  clientRequestId: string
+}
+
+export interface ForkAccepted {
+  threadId: string
+  transferId: string
+  sourceRunId: string
+  replayed: boolean
+}
+
+/** `thread.merge_back` (SPEC §16.2). */
+export interface MergeBackRequest {
+  forkThreadId: string
+  clientRequestId: string
+}
+
+export interface MergeBackAccepted {
+  transferId: string
+  parentThreadId: string
+  replayed: boolean
+}
+
+/** A thread the engine asks its host to create: a delegated child or a fork. */
+export type ThreadCreation =
+  | { kind: 'delegation'; request: DelegationRequest }
+  | { kind: 'fork'; sourceThreadId: string; sourceRunId: string; title?: string }
+
+/** Source runs a fork may start after (SPEC §16.2): never `running` or `uncertain`. */
+export const FORKABLE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
+  'completed',
+  'failed',
+  'interrupted',
+  'cancelled'
+])
+
 /**
- * What the engine needs from the thread owner to start a child (it does not own thread storage or
- * turn payloads). Both callbacks are synchronous and run inside the delegation transaction.
+ * What the engine needs from the thread owner to create threads and child turns (it does not own
+ * thread storage or turn payloads). Both callbacks are synchronous and run inside the engine's
+ * transaction.
  */
 export interface DelegationHost {
-  /** Creates the child thread (project and model selection copied from the parent). */
-  createChildThread(input: DelegationRequest): { threadId: string }
+  /**
+   * Creates a thread: a delegated child (project and model selection copied from the parent or the
+   * request) or a fork (project and model selection copied from the source).
+   */
+  createThread(input: ThreadCreation): { threadId: string }
   /** The `turn.start` payload that runs `prompt` as the child run's turn. */
   buildChildTurnPayload(input: { childThreadId: string; childRunId: string; prompt: string; request: DelegationRequest }): unknown
 }
@@ -125,6 +178,10 @@ export class RunEngine extends EventEmitter {
   readonly daemonEpochs: DaemonEpoch
   readonly inbox: Inbox
   readonly delegations: Delegations
+  /** Context handoffs (SPEC §16.1). */
+  readonly handoffs: HandoffService
+  /** Fork and merge-back transfers (SPEC §16.2). */
+  readonly transfers: ContextTransfers
   private delegationHost: DelegationHost | null = null
   private readonly pid: number
   private daemonEpoch: number | null = null
@@ -147,6 +204,8 @@ export class RunEngine extends EventEmitter {
     this.daemonEpochs = new DaemonEpoch(opts.store)
     this.inbox = new Inbox(opts.store)
     this.delegations = new Delegations(opts.store, this.inbox)
+    this.handoffs = new HandoffService(opts.store)
+    this.transfers = new ContextTransfers(opts.store)
     this.pid = opts.pid ?? process.pid
     opts.store.onEvent((event) => this.emit('event', event))
   }
@@ -384,7 +443,7 @@ export class RunEngine extends EventEmitter {
       if (!parent || parent.threadId !== input.parentThreadId)
         fail('bad_request', `Run ${input.parentRunId} is not a run of thread ${input.parentThreadId}.`)
       if (!input.prompt.trim()) fail('bad_request', 'A delegated task needs a prompt.')
-      const { threadId: childThreadId } = host.createChildThread(input)
+      const { threadId: childThreadId } = host.createThread({ kind: 'delegation', request: input })
       this.delegations.createLineage({
         threadId: childThreadId,
         parentThreadId: input.parentThreadId,
@@ -536,6 +595,159 @@ export class RunEngine extends EventEmitter {
       })
   }
 
+  /**
+   * `thread.fork` (SPEC §16.2), under the source thread's mutex and in one transaction: replay the
+   * receipt, or resolve the source run (forkable statuses only), create the fork thread (host
+   * callback), its `fork` lineage and a `pending` fork transfer. Nothing reaches a provider until
+   * the fork's first message consumes the transfer.
+   */
+  forkThread(input: ForkThreadRequest): Promise<ForkAccepted> {
+    return this.mutex.withLock(input.sourceThreadId, () => this.store.db.transaction((): ForkAccepted => {
+      const receipt = this.store.getReceipt(input.clientRequestId)
+      if (receipt) {
+        if (receipt.threadId !== input.sourceThreadId || receipt.commandKind !== 'thread.fork')
+          fail('conflict', `Request ${input.clientRequestId} belongs to another command.`)
+        const stored = receipt.result as Omit<ForkAccepted, 'replayed'>
+        return { threadId: stored.threadId, transferId: stored.transferId, sourceRunId: stored.sourceRunId, replayed: true }
+      }
+      const host = this.delegationHost
+      if (!host) fail('internal', 'No thread host is attached to the run engine.')
+      const source = this.forkSourceRun(input.sourceThreadId, input.atRunOrdinal)
+      const { threadId } = host.createThread({
+        kind: 'fork',
+        sourceThreadId: input.sourceThreadId,
+        sourceRunId: source.runId,
+        title: input.title
+      })
+      this.delegations.createLineage({
+        threadId,
+        parentThreadId: input.sourceThreadId,
+        parentRunId: source.runId,
+        relationship: 'fork'
+      })
+      const transfer = this.transfers.create({
+        type: 'fork',
+        sourceThreadId: input.sourceThreadId,
+        targetThreadId: threadId,
+        sourceRunOrdinal: source.ordinal,
+        payload: { sourceRunOrdinal: source.ordinal, sourceRunId: source.runId }
+      })
+      const accepted = { threadId, transferId: transfer.transferId, sourceRunId: source.runId }
+      this.store.putReceipt({
+        clientRequestId: input.clientRequestId,
+        threadId: input.sourceThreadId,
+        commandKind: 'thread.fork',
+        status: 'accepted',
+        result: { ...accepted, sequence: this.store.maxSeq(input.sourceThreadId) },
+        createdAt: this.now()
+      })
+      return { ...accepted, replayed: false }
+    }))
+  }
+
+  /**
+   * `thread.merge_back` (SPEC §16.2): only into the fork's direct parent and only when the fork's
+   * latest run `completed`. Older pending merge-backs of the pair are superseded; the new `pending`
+   * transfer covers the fork's runs since the last consumed merge-back. Code is not merged: the
+   * payload carries an integration hint for the explicit integration path (§14.4).
+   */
+  mergeBack(input: MergeBackRequest): Promise<MergeBackAccepted> {
+    return this.mutex.withLock(input.forkThreadId, () => this.store.db.transaction((): MergeBackAccepted => {
+      const receipt = this.store.getReceipt(input.clientRequestId)
+      if (receipt) {
+        if (receipt.threadId !== input.forkThreadId || receipt.commandKind !== 'thread.merge_back')
+          fail('conflict', `Request ${input.clientRequestId} belongs to another command.`)
+        const stored = receipt.result as Omit<MergeBackAccepted, 'replayed'>
+        return { transferId: stored.transferId, parentThreadId: stored.parentThreadId, replayed: true }
+      }
+      const lineage = this.delegations.getLineage(input.forkThreadId)
+      if (!lineage || lineage.relationship !== 'fork')
+        reject('not_a_fork', `Thread ${input.forkThreadId} is not a fork; merge-back goes into a fork's direct parent only.`)
+      const latest = this.store.listRuns(input.forkThreadId, { limit: 1 })[0]
+      if (!latest || latest.status !== 'completed')
+        reject('fork_not_completed', `The fork's latest run is ${latest?.status ?? 'missing'}; merge-back needs a completed run.`)
+      const parentThreadId = lineage.parentThreadId
+      const between = this.transfers.listBetween('merge_back', input.forkThreadId, parentThreadId)
+      const merged = between
+        .filter((transfer) => transfer.status === 'consumed')
+        .reduce((max, transfer) => Math.max(max, Number(transfer.payload.toOrdinal ?? 0)), 0)
+      if (latest.ordinal <= merged)
+        reject('nothing_to_merge', `Runs up to ${merged} of the fork were already merged back.`)
+      for (const transfer of between)
+        if (transfer.status === 'pending')
+          this.transfers.setStatus({ transferId: transfer.transferId, from: 'pending', to: 'superseded' })
+      const transfer = this.transfers.create({
+        type: 'merge_back',
+        sourceThreadId: input.forkThreadId,
+        targetThreadId: parentThreadId,
+        sourceRunOrdinal: latest.ordinal,
+        payload: {
+          forkThreadId: input.forkThreadId,
+          forkPointRunId: lineage.parentRunId,
+          fromOrdinal: merged + 1,
+          toOrdinal: latest.ordinal,
+          // Code integration stays explicit (SPEC §14.4); nothing here touches the parent's files.
+          integration: { kind: 'fork', forkThreadId: input.forkThreadId, through: 'integration_run', merged: false }
+        }
+      })
+      const accepted = { transferId: transfer.transferId, parentThreadId }
+      this.store.putReceipt({
+        clientRequestId: input.clientRequestId,
+        threadId: input.forkThreadId,
+        commandKind: 'thread.merge_back',
+        status: 'accepted',
+        result: { ...accepted, sequence: this.store.maxSeq(input.forkThreadId) },
+        createdAt: this.now()
+      })
+      return { ...accepted, replayed: false }
+    }))
+  }
+
+  /** The thread's pending `merge_back` transfer, or null (SPEC §16.2: queueing is refused meanwhile). */
+  pendingMergeBack(threadId: string): TransferRecord | null {
+    return this.transfers.listPending(threadId, 'merge_back').at(-1) ?? null
+  }
+
+  /**
+   * A synchronous local action as a run (SPEC §16.3: `undo` and `revert`): the run is created and
+   * marked running, `action` runs, and the run ends `completed`, or `failed` when it throws (the
+   * error is rethrown). Refused while the thread has an active run.
+   */
+  async runLocalAction<T>(
+    input: { threadId: string; source: string; clientRequestId?: string },
+    action: (run: RunRecord) => Promise<T>
+  ): Promise<{ runId: string; result: T }> {
+    const created = await this.mutex.withLock(input.threadId, () => this.store.db.transaction(() => {
+      const active = this.store.getActiveRun(input.threadId)
+      if (active) reject('thread_busy', `Thread ${input.threadId} has active run ${active.runId}.`)
+      return this.store.createRun({ threadId: input.threadId, source: input.source, clientRequestId: input.clientRequestId })
+    }))
+    this.markStarting(created.runId)
+    const running = this.markRunning(created.runId)
+    let result: T
+    try {
+      result = await action(running)
+    } catch (error) {
+      this.markTerminal(created.runId, 'failed', { error: error instanceof Error ? error.message : String(error) })
+      throw error
+    }
+    this.markTerminal(created.runId, 'completed')
+    return { runId: created.runId, result }
+  }
+
+  private forkSourceRun(threadId: string, at: ForkThreadRequest['atRunOrdinal']): RunRecord {
+    if (typeof at === 'number') {
+      const run = this.store.listRuns(threadId).find((entry) => entry.ordinal === at)
+      if (!run) reject('run_not_found', `Thread ${threadId} has no run ${at}.`)
+      if (!FORKABLE_RUN_STATUSES.has(run.status))
+        reject('run_not_forkable', `Run ${at} is ${run.status}; forks start after a completed, failed, interrupted or cancelled run.`)
+      return run
+    }
+    const run = this.store.listRuns(threadId).find((entry) => FORKABLE_RUN_STATUSES.has(entry.status))
+    if (!run) reject('no_forkable_run', `Thread ${threadId} has no completed, failed, interrupted or cancelled run to fork.`)
+    return run
+  }
+
   /** Liveness touch for an executing run (SPEC §12.4 rule 2). */
   heartbeat(runId: string): boolean {
     return this.store.touchHeartbeat(runId, this.now())
@@ -602,17 +814,31 @@ export class RunEngine extends EventEmitter {
 
   private commitSend(command: Extract<RunCommand, { kind: 'send' }>): CommandResult {
     const { store } = this
-    return store.db.transaction(() => {
+    return store.db.transaction((): CommandResult => {
+      const refusal = this.continuationRefusal(command)
+      // Not stored: the same `continue:<runId>` request succeeds once the user acknowledges.
+      if (refusal) return { status: 'rejected', reason: refusal, sequence: store.maxSeq(command.threadId) }
       const run = store.createRun({
         threadId: command.threadId,
         source: command.source,
         clientRequestId: command.clientRequestId,
-        userMessageId: command.userMessageId
+        userMessageId: command.userMessageId,
+        ...(command.continuationOfRunId ? { outcome: { continuationOf: command.continuationOfRunId } } : {})
       })
       const sequence = store.maxSeq(command.threadId)
       this.putReceipt(command, 'accepted', { runId: run.runId, sequence })
       return { status: 'accepted', runId: run.runId, sequence, replayed: false }
     })
+  }
+
+  /** SPEC §16.4: a continuation names an ended run of the same thread; `uncertain` needs acknowledgement. */
+  private continuationRefusal(command: Extract<RunCommand, { kind: 'send' }>): string | null {
+    if (!command.continuationOfRunId) return null
+    const source = this.store.getRun(command.continuationOfRunId)
+    if (!source || source.threadId !== command.threadId) return 'continuation_not_found'
+    if (!TERMINAL_RUN_STATUSES.has(source.status)) return 'continuation_source_active'
+    if (source.status === 'uncertain' && !command.acknowledgeUncertain) return 'uncertain_not_acknowledged'
+    return null
   }
 
   private commitControl(command: Extract<RunCommand, { kind: 'stop' | 'steer' }>): CommandResult {

@@ -54,6 +54,7 @@ export class RunStore {
     clientRequestId?: string
     userMessageId?: string
     requestedAt?: string
+    outcome?: RunOutcome
   }): RunRecord {
     return this.db.transaction(() => {
       const max = this.db
@@ -73,7 +74,7 @@ export class RunStore {
         requestedAt: input.requestedAt ?? this.now(),
         startedAt: null,
         completedAt: null,
-        outcome: null,
+        outcome: input.outcome ?? null,
         heartbeatAt: null
       }
       this.db

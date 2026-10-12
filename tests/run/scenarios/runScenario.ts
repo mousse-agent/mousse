@@ -25,7 +25,7 @@ import { replayPiChat } from '../../../src/mms/run/testkit/piChatReplay'
 import { DEFAULT_VOLATILE_KEYS, dropKeys, readTranscript, ReplayTransport } from '../../../src/mms/run/testkit/ReplayTransport'
 import { Reconciler } from '../../../src/mms/run/Reconciler'
 import { replaySdkQuery } from '../../../src/mms/run/testkit/sdkQueryReplay'
-import type { DelegationRecord, EffectKind, EffectRecord, RunRecord } from '../../../src/mms/run/types'
+import type { DelegationRecord, EffectKind, EffectRecord, HandoffRecord, RunRecord, TransferRecord } from '../../../src/mms/run/types'
 import { TaskQueue } from '../../../src/mms/tasks/TaskQueue'
 import { HeadlessAgentRunner } from '../../../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../../../src/mms/terminals/PtyManager'
@@ -56,6 +56,10 @@ export interface ScenarioResult {
   delegations: DelegationRecord[]
   /** Runs of the scenario thread, oldest first. */
   runs: RunRecord[]
+  /** Handoffs the scenario thread received (SPEC §16.1), oldest first. */
+  handoffs: HandoffRecord[]
+  /** Transfers into or out of the scenario thread (SPEC §16.2), oldest first. */
+  transfers: TransferRecord[]
 }
 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g
@@ -171,9 +175,12 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     }
   }
   const questions = new UserQuestionService()
-  if (adapterId === 'pi') {
+  // A scenario may drive turns on several adapters (`before`); each replays from the one transcript.
+  const involved = new Set([adapterId, ...(scenario.before ?? []).map((turn) => turn.adapter)])
+  if (involved.has('pi')) {
     ;(orch as any).llm.chat = replayPiChat(transport).chat
-  } else if (adapterId === 'claude-subscription') {
+  }
+  if (involved.has('claude-subscription')) {
     const binary = join(home, 'claude')
     writeFileSync(binary, '#!/bin/sh\nexit 0\n')
     chmodSync(binary, 0o755)
@@ -186,7 +193,8 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     })
     stops.push(() => service.stop())
     orch.setClaudeSubscriptionProvider(service)
-  } else if (adapterId === 'antigravity') {
+  }
+  if (involved.has('antigravity')) {
     const service = new AntigravityProviderService(home, home, questions)
     // Replace the agent process boundary only; the service's session lifecycle runs for real.
     Object.assign(service as unknown as Record<string, unknown>, {
@@ -206,6 +214,14 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       thread = store.createThread(name, project.id, workspace)
     } else thread = store.createThread(name)
     threadId = thread.id
+    for (const [index, turn] of (scenario.before ?? []).entries()) {
+      const selected = SELECTION[turn.adapter]
+      if (!selected) throw new Error(`No model selection for adapter ${turn.adapter}`)
+      orch.setThreadModelOverride(threadId, selected)
+      await orch.send(turn.prompt, false, { threadId, clientRequestId: `scenario-before-${index}` })
+    }
+    if (scenario.before) orch.setThreadModelOverride(threadId, selection)
+    if (scenario.fork) threadId = (await engine.forkThread({ sourceThreadId: threadId, clientRequestId: 'scenario-fork' })).threadId
     const response = await orch.send(scenario.prompt, false, { threadId, clientRequestId: 'scenario-send' })
     await transport.idle()
     if (scenario.delegates) {
@@ -235,7 +251,9 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       llmMessages: orch.getNativeContext(threadId).messages,
       turnState: orch.getTurnState(threadId),
       delegations: engine.delegations.listForParentThread(threadId),
-      runs: engine.listRuns(threadId).reverse()
+      runs: engine.listRuns(threadId).reverse(),
+      handoffs: engine.handoffs.listForThread(threadId),
+      transfers: engine.transfers.listForThread(threadId)
     }
   } finally {
     await worker.stop()

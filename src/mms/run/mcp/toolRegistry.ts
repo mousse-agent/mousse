@@ -342,5 +342,64 @@ export function createMousseToolRegistry(deps: { engine: RunEngine; host: Mousse
     }
   })
 
+  registry.register({
+    name: 'thread_fork',
+    description: 'Fork a thread into a new thread that starts after one of its finished runs (default: the latest completed, failed, interrupted or cancelled run). The fork gets the conversation up to that run and its own worktree seeded from that run\'s code checkpoint when its first message arrives.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sourceThreadId: { type: 'string', description: 'Defaults to your thread; otherwise a thread of your lineage.' },
+        atRunOrdinal: { type: 'integer', minimum: 1, description: 'The source run to fork after; the latest finished run when omitted.' },
+        title: { type: 'string' },
+        clientRequestId: CLIENT_REQUEST_ID_SCHEMA
+      }
+    },
+    access: 'startsThreads',
+    handler: async (args, ctx) => {
+      const sourceThreadId = args.sourceThreadId === undefined ? ctx.caller.threadId : args.sourceThreadId
+      if (typeof sourceThreadId !== 'string' || !sourceThreadId) throw new Error('sourceThreadId must be a non-empty string')
+      if (sourceThreadId !== ctx.caller.threadId && !isRelated(engine, ctx.caller.threadId, sourceThreadId))
+        throw new McpToolError('mousse_scope_denied', `Thread ${sourceThreadId} is not this thread or one of its lineage.`)
+      const atRunOrdinal = args.atRunOrdinal === undefined ? 'latest_stable' : boundedInt(args.atRunOrdinal, 'atRunOrdinal', 1, Number.MAX_SAFE_INTEGER, 1)
+      if (args.title !== undefined && typeof args.title !== 'string') throw new Error('title must be a string')
+      const forked = await engine.forkThread({
+        sourceThreadId,
+        atRunOrdinal,
+        title: args.title as string | undefined,
+        clientRequestId: `thread_fork:${ctx.caller.runId}:${toolRequestId(args, ctx)}`
+      })
+      return json({ threadId: forked.threadId, transferId: forked.transferId })
+    }
+  })
+
+  registry.register({
+    name: 'thread_merge_back',
+    description: 'From a fork, hand what it did since the fork point to the thread it was forked from. The parent receives a summary on its next turn; code is not merged (integrate it explicitly). Only when the fork\'s latest run completed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        forkThreadId: { type: 'string', description: 'Your thread only (the fork).' },
+        threadId: { type: 'string', description: 'Your thread only.' },
+        clientRequestId: CLIENT_REQUEST_ID_SCHEMA
+      }
+    },
+    access: 'writesThreads',
+    handler: async (args, ctx) => {
+      const forkThreadId = callerThreadOnly({ threadId: args.forkThreadId ?? args.threadId }, ctx.caller)
+      const merged = await engine.mergeBack({
+        forkThreadId,
+        clientRequestId: `thread_merge_back:${ctx.caller.runId}:${toolRequestId(args, ctx)}`
+      })
+      return json({ transferId: merged.transferId, parentThreadId: merged.parentThreadId })
+    }
+  })
+
   return registry
+}
+
+/** The caller's `clientRequestId` when given (a retry), else this call's id. */
+function toolRequestId(args: Record<string, unknown>, ctx: ToolCallContext): string {
+  if (args.clientRequestId === undefined) return ctx.toolCallId
+  if (typeof args.clientRequestId !== 'string' || !args.clientRequestId) throw new Error('clientRequestId must be a non-empty string')
+  return args.clientRequestId
 }

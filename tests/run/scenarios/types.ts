@@ -11,5 +11,13 @@ export interface Scenario {
    * ids minted at run time (thread and delegation uuids) are normalised in outbound frames.
    */
   delegates?: boolean
+  /**
+   * Turns sent before `prompt` on the scenario thread, each pinned to an adapter's model selection
+   * (SPEC §16: a provider switch, a fork source). Their frames come first in the fixture; `prompt`
+   * then runs pinned to the fixture's adapter.
+   */
+  before?: Array<{ adapter: string; prompt: string }>
+  /** Fork the thread after the `before` turns (`thread.fork`, latest stable run) and send `prompt` on the fork. */
+  fork?: boolean
   assert(result: ScenarioResult): void
 }

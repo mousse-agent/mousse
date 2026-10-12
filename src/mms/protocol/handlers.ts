@@ -15,6 +15,10 @@ import { lifecycleGit, readDirectLifecycleRef, WorktreeRetirementService } from 
 
 import type { MmsProfileServices } from '../MmsProfileServices'
 import type { CommandResult } from '../run/RunEngine'
+import { CommandRejection } from '../run/db/RunStoreError'
+import { evaluateRestore, restoreDiff, worktreeClaims, type WorkspaceClaim } from '../run/workspace/restoreSafety'
+import type { ThreadAction } from '../../shared/threadActions'
+import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import type { ChatMessage, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
@@ -105,6 +109,66 @@ function asOptionalSendAwaitMode(value: unknown): 'turn' | 'ack' {
   if (value === undefined) return 'turn'
   if (value === 'turn' || value === 'ack') return value
   throw new Error("await must be 'turn' or 'ack'")
+}
+
+/** Engine refusals (SPEC §16) become protocol errors whose code is the refusal reason. */
+async function asRpcRejection<T>(run: () => Promise<T> | T): Promise<T> {
+  try {
+    return await run()
+  } catch (error) {
+    if (error instanceof CommandRejection) throw new DomainRpcError(error.reason, error.message)
+    throw error
+  }
+}
+
+/**
+ * SPEC §16.3 restore gate for a file-restoring action: refuses (`workspace_shared`) unless the
+ * thread owns its worktree and no other thread's worktree or live working directory overlaps it;
+ * for a weak-containment provider returns the diff to review instead of restoring (unless the
+ * caller already `reviewed` it) and appends `restore.review_required`. Null: go ahead.
+ */
+function restoreGate(
+  ctx: HandlerContext,
+  input: { threadId: string; workspace: ThreadWorkspaceMetadata; target: ThreadAction | undefined; kind: 'undo' | 'revert'; reviewed: boolean }
+): { requiresReview: true; diff: string; actionId?: string } | null {
+  const others: WorkspaceClaim[] = [
+    ...worktreeClaims(ctx.mms.threads.listAllThreads().filter((thread) => thread.id !== input.threadId).flatMap((thread) => {
+      try {
+        return [{ threadId: thread.id, threadDirectory: ctx.mms.threads.getThreadDir(thread.id) }]
+      } catch {
+        return []
+      }
+    })),
+    ...ctx.mms.orchestrator.liveWorkspaceClaims(input.threadId)
+  ]
+  const decision = evaluateRestore({
+    threadId: input.threadId,
+    caps: ctx.mms.orchestrator.capabilitiesForThread(input.threadId),
+    metadata: input.workspace,
+    others,
+    reviewed: input.reviewed
+  })
+  if (decision.action === 'refuse') throw new DomainRpcError(decision.reason, decision.message, { conflicts: decision.conflicts })
+  if (decision.action === 'proceed') return null
+  const diff = input.target ? restoreDiff(input.workspace.worktreePath, input.target.endSha, input.target.startSha) : ''
+  ctx.mms.runEngine.store.appendEvent({
+    threadId: input.threadId,
+    type: 'restore.review_required',
+    payload: { kind: input.kind, actionId: input.target?.id ?? null, mode: decision.mode, diffBytes: Buffer.byteLength(diff) }
+  })
+  return { requiresReview: true, diff, ...(input.target ? { actionId: input.target.id } : {}) }
+}
+
+/** SPEC §16.3: an undo or revert is its own run on the thread (`source: 'undo' | 'revert'`). */
+async function localActionRun<T>(ctx: HandlerContext, threadId: string, source: 'undo' | 'revert', action: () => Promise<T>): Promise<{ runId: string; result: T }> {
+  const busy = new Error('Wait for active or queued work to finish.')
+  if (ctx.mms.runEngine.getActiveRun(threadId)) throw busy
+  try {
+    return await ctx.mms.runEngine.runLocalAction({ threadId, source }, action)
+  } catch (error) {
+    if (error instanceof CommandRejection && error.reason === 'thread_busy') throw busy
+    throw error
+  }
 }
 
 /** Run-targeted stop/steer (SPEC §6): `ignored` is a valid answer, not an error. */
@@ -571,6 +635,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const clientRequestId = asOptionalString(p.clientRequestId, 128)
       // SPEC §12.7: `ack` returns once the send and its turn.start effect are committed.
       const awaitMode = asOptionalSendAwaitMode(p.await)
+      // SPEC §16.4: "Continue" after a restart; an uncertain run needs `acknowledgeUncertain`.
+      const continuationOfRunId = asOptionalString(p.continuationOfRunId, 256)
+      const acknowledgeUncertain = asOptionalBoolean(p.acknowledgeUncertain, 'acknowledgeUncertain') === true
       ctx.mms.orchestrator.getOrCreateSession(threadId)
       const input = await prepareChatInput(ctx, threadId, { content, mode, images }, p)
       return await ctx.mms.orchestrator.send(input, false, {
@@ -578,7 +645,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         source,
         forceQueue,
         clientRequestId,
-        awaitMode
+        awaitMode,
+        ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})
       })
     }
     case 'orchestrator.abort': {
@@ -653,6 +721,43 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       return { credentials: ctx.mms.mcpCredentials.listForThread(threadId) }
     }
+    case 'runs.transfers': {
+      // Fork and merge-back transfers into or out of the thread (SPEC §16.2).
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      return { transfers: ctx.mms.runEngine.transfers.listForThread(threadId) }
+    }
+    case 'runs.handoffs': {
+      // Context handoffs the thread's turns received (SPEC §16.1).
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      return { handoffs: ctx.mms.runEngine.handoffs.listForThread(threadId) }
+    }
+    case 'thread.fork': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['sourceThreadId', 'atRunOrdinal', 'title', 'clientRequestId'])
+      const sourceThreadId = asString(p.sourceThreadId, 'sourceThreadId', 256)
+      const atRunOrdinal = p.atRunOrdinal === 'latest_stable'
+        ? 'latest_stable' as const
+        : asOptionalBoundedInt(p.atRunOrdinal, 'atRunOrdinal', { min: 1, max: Number.MAX_SAFE_INTEGER })
+      const title = asOptionalString(p.title, 256)
+      const clientRequestId = asOptionalString(p.clientRequestId, 128) ?? randomUUID()
+      if (!ctx.mms.threads.getThread(sourceThreadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: sourceThreadId })
+      const forked = await asRpcRejection(() => ctx.mms.runEngine.forkThread({ sourceThreadId, atRunOrdinal, title, clientRequestId }))
+      if (!forked.replayed) ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
+      return { threadId: forked.threadId, transferId: forked.transferId, replayed: forked.replayed }
+    }
+    case 'thread.mergeBack': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['forkThreadId', 'clientRequestId'])
+      const forkThreadId = asString(p.forkThreadId, 'forkThreadId', 256)
+      const clientRequestId = asOptionalString(p.clientRequestId, 128) ?? randomUUID()
+      if (!ctx.mms.threads.getThread(forkThreadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: forkThreadId })
+      const merged = await asRpcRejection(() => ctx.mms.runEngine.mergeBack({ forkThreadId, clientRequestId }))
+      return { transferId: merged.transferId, parentThreadId: merged.parentThreadId, replayed: merged.replayed }
+    }
     case 'orchestrator.isTurnActive': {
       // Lightweight turn probe — avoids full thread.snapshot (messages/agents/tasks).
       const p = isObject(params) ? params : {}
@@ -681,6 +786,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const mode = asOptionalChatMode(p.mode, 'mode')
       const images = asOptionalChatImages(p.images, 'images')
       const source = admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol')
+      ctx.mms.orchestrator.assertQueueOpen(threadId)
       const item = ctx.mms.orchestrator.enqueueForThread(
         threadId,
         await prepareChatInput(ctx, threadId, { content, mode, images }, p),
@@ -1681,14 +1787,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         else ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary!)
       }
       const latest = new ThreadActionService(operation.threadDirectory).latest(branchId)
-      let action
-      if (latest?.scope === 'conversation') action = new ConversationActionService(operation.threadDirectory).apply(branchId, 'undo', operation.currentGeneration, expectedTurnId, validate, restore)
-      else {
+      const reviewed = asOptionalBoolean(p.reviewed, 'reviewed') === true
+      if (latest?.scope !== 'conversation') {
         if (!workspace || workspace.lifecycle !== 'ready') throw new Error('This prompt has no eligible recorded Undo boundary.')
-        action = await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace.worktreePath, undefined, operation.currentGeneration, restore, 'undo', expectedTurnId, validate)
+        // SPEC §16.3: files are restored only in an owned, unshared worktree; weak containment reviews first.
+        const review = restoreGate(ctx, { threadId: operation.threadId, workspace, target: latest, kind: 'undo', reviewed })
+        if (review) return review
       }
+      const { runId, result: action } = await localActionRun(ctx, operation.threadId, 'undo', async () =>
+        latest?.scope === 'conversation'
+          ? new ConversationActionService(operation.threadDirectory).apply(branchId, 'undo', operation.currentGeneration, expectedTurnId, validate, restore)
+          : await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace!.worktreePath, undefined, operation.currentGeneration, restore, 'undo', expectedTurnId, validate))
       ctx.emitEvent?.('actions.updated', { threadId: operation.threadId, action }, operation.threadId)
-      return { action }
+      return { action, runId }
     }
     case 'actions.revertCode': {
       const p = isObject(params) ? params : {}
@@ -1696,7 +1807,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const actionId = asString(p.actionId, 'actionId', 256)
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
-      return { action: await new CodeRevertService(operation.threadDirectory).revertCode(actionId, workspace.worktreePath, operation.currentGeneration) }
+      const target = new ThreadActionService(operation.threadDirectory).get(actionId)
+      const review = restoreGate(ctx, { threadId: operation.threadId, workspace, target, kind: 'revert', reviewed: asOptionalBoolean(p.reviewed, 'reviewed') === true })
+      if (review) return review
+      const { runId, result: action } = await localActionRun(ctx, operation.threadId, 'revert', () =>
+        new CodeRevertService(operation.threadDirectory).revertCode(actionId, workspace.worktreePath, operation.currentGeneration))
+      return { action, runId }
     }
     case 'actions.redo': {
       const p = isObject(params) ? params : {}

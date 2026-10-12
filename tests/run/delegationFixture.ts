@@ -39,8 +39,9 @@ export function delegationFixture(options: { pid?: number; profileHome?: string 
   const requests: DelegationRequest[] = []
   let children = 0
   engine.setDelegationHost({
-    createChildThread: (request) => {
-      requests.push(request)
+    createThread: (input) => {
+      if (input.kind !== 'delegation') throw new Error('the delegation fixture creates child threads only')
+      requests.push(input.request)
       children += 1
       return { threadId: `child-${children}` }
     },
