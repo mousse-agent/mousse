@@ -569,6 +569,8 @@ export class ClaudeSubscriptionProviderService {
         delete this.settings.cliDisconnected
         this.save()
         while (!(await signedIn())) {
+          // Same synchronous segment as the prompt: nothing can cancel in between.
+          checkpoint()
           const answer = await interaction.prompt({
             type: 'select',
             message:
@@ -583,10 +585,16 @@ export class ClaudeSubscriptionProviderService {
         }
       } else if (!(await signedIn())) {
         const binary = this.binary()!
+        checkpoint()
         child = (
           this.dependencies.startLogin ??
           ((path, env) => spawn(path, ['auth', 'login', '--claudeai'], { env, stdio: 'ignore' }))
         )(binary, claudeSubscriptionEnvironment(this.configDir))
+        if (session.abort.signal.aborted || scope !== this.scope) {
+          // The abort listener ran before this child existed; never let it outlive the sign-in.
+          child.kill()
+          checkpoint()
+        }
         this.logins.add(child)
         child.on('error', () => {
           /* terminal fallback below */
@@ -596,6 +604,7 @@ export class ClaudeSubscriptionProviderService {
             ? `$env:CLAUDE_CONFIG_DIR = '${this.configDir.replaceAll("'", "''")}'; & '${binary.replaceAll("'", "''")}' auth login --claudeai`
             : `CLAUDE_CONFIG_DIR=${quote(this.configDir)} ${quote(binary)} auth login --claudeai`
         for (;;) {
+          checkpoint()
           const answer = await interaction.prompt({
             type: 'select',
             message: `Claude Code opens its own browser sign-in. Complete it, then check sign-in. If no browser opens, run this command in a terminal:\n${command}\nMousse does not collect Claude credentials. Claude controls subscription and Agent SDK billing.`,
@@ -607,6 +616,7 @@ export class ClaudeSubscriptionProviderService {
           checkpoint()
           if (answer !== 'check') throw new Error('Claude sign-in cancelled')
           if (await signedIn()) break
+          checkpoint()
           interaction.notify({
             type: 'progress',
             message:

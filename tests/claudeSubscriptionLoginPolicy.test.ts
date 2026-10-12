@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { EventEmitter } from 'node:events'
 import { join, resolve } from 'node:path'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -354,33 +355,69 @@ describe('Claude credential scope', () => {
     expect(f.stored().sessions).toEqual({})
   })
 
-  it('stops a profile sign-in when the login policy changes during its check', async () => {
-    let finishIsolated!: (value: string) => void
-    const f = profile({
-      defaultProfile: false,
-      settings: { loginPolicy: 'isolated' },
-      // Ignores the abort signal, like a CLI that finishes after cancellation.
-      isolated: () => new Promise<string>((done) => { finishIsolated = done })
+  type Path = 'isolated-spawn' | 'cli-prompt' | 'isolated-retry'
+  /**
+   * Holds one `claude auth status` open, releases it signed out, waits `ticks` microtasks and
+   * then switches the login policy, so the switch lands between any two continuations.
+   */
+  async function raceLogin(path: Path, ticks: number) {
+    const cliPolicy = path === 'cli-prompt'
+    const f = profile({ defaultProfile: false, settings: { loginPolicy: cliPolicy ? 'cli' : 'isolated' } })
+    let release: ((value: string) => void) | undefined
+    let armed = false
+    const runAuth = vi.fn(async (_binary: string, args: string[]) => {
+      if (args[1] === 'logout') return ''
+      if (armed && !release) return new Promise<string>((done) => { release = done })
+      return SIGNED_OUT
     })
-    const startLogin = vi.fn()
+    const child = Object.assign(new EventEmitter(), { kill: vi.fn() })
+    let switched = false
+    let spawnedAfterSwitch = false
+    const startLogin = vi.fn(() => {
+      if (switched) spawnedAfterSwitch = true
+      return child as never
+    })
     const service = new ClaudeSubscriptionProviderService(
       f.home,
       new UserQuestionService(),
-      { runAuth: f.runAuth, query: f.query, startLogin },
+      { runAuth, query: f.query, startLogin },
       { defaultProfile: false }
     )
+    if (cliPolicy) await service.status()
     const session = new LoginSession('login')
-    const prompts: unknown[] = []
-    session.on('event', (event) => prompts.push(event))
+    const events: Array<{ type: string }> = []
+    const afterSwitch: Array<{ type: string }> = []
+    session.on('event', (event: { type: string }) => {
+      events.push(event)
+      if (switched) afterSwitch.push(event)
+      // The retry path: answer the first prompt and hold the second status check.
+      if (path === 'isolated-retry' && event.type === 'select' && !armed) {
+        armed = true
+        session.respond({ sessionId: session.sessionId, kind: 'select', value: 'check' })
+      }
+    })
+    if (path !== 'isolated-retry') armed = true
     const login = service.login(session, f.home)
-    await vi.waitFor(() => expect(f.calls).toHaveLength(1))
-    await service.setLoginPolicy('cli')
-    finishIsolated(SIGNED_OUT)
-    await expect(login).resolves.toMatchObject({ success: false })
-    expect(startLogin).not.toHaveBeenCalled()
-    expect(prompts.filter((event) => (event as { type: string }).type === 'select')).toEqual([])
-    expect(f.stored()).toMatchObject({ loginPolicy: 'cli' })
-    expect(f.stored().signedIn).toBeUndefined()
+    await vi.waitFor(() => expect(release).toBeDefined())
+    release!(SIGNED_OUT)
+    for (let tick = 0; tick < ticks; tick += 1) await Promise.resolve()
+    switched = true
+    void service.setLoginPolicy(cliPolicy ? 'isolated' : 'cli')
+    const result = await login
+    return { result, startLogin, child, afterSwitch, spawnedAfterSwitch }
+  }
+
+  it.each(
+    (['isolated-spawn', 'cli-prompt', 'isolated-retry'] as const).flatMap((path) =>
+      Array.from({ length: 16 }, (_, ticks) => ({ path, ticks }))
+    )
+  )('a policy switch $ticks microtasks into the $path check ends the sign-in', async ({ path, ticks }) => {
+    const { result, startLogin, child, afterSwitch, spawnedAfterSwitch } = await raceLogin(path, ticks)
+    expect(result).toMatchObject({ success: false })
+    // No prompt or notification after the switch, no child started after it, none left running.
+    expect(afterSwitch).toEqual([])
+    expect(spawnedAfterSwitch).toBe(false)
+    if (startLogin.mock.calls.length) expect(child.kill).toHaveBeenCalled()
   })
 
   it('tells a signed-out terminal user to run claude auth login', async () => {
