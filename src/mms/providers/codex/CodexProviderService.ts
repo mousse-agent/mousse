@@ -3,8 +3,9 @@ import { accessSync, constants, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join, resolve } from 'node:path'
 import { AppError } from '../../../shared/errors'
+import { CODEX_INSTANCE_ID } from '../../../shared/providerInstances'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
-import type { ConfiguredProvider, ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
+import type { CodexStatus, ConfiguredProvider, ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
@@ -55,6 +56,8 @@ const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 type SavedThread = {
   codexThreadId: string
   cwd: string
+  /** Provider instance that owns the Codex thread; absent means the default `codex` instance. */
+  instanceId?: string
   /** Fingerprint of the canonical history the thread holds; set only after the turn commits. */
   historyKey?: string
 }
@@ -71,14 +74,7 @@ type AccountProbe =
   | { kind: 'signed_out'; message: string }
   | { kind: 'error'; message: string }
 
-export interface CodexStatus {
-  state: 'connected' | 'missing_binary' | 'signed_out' | 'disconnected' | 'error'
-  message?: string
-  /** ISO time of the last live `account/read`. */
-  checkedAt?: string
-  /** ChatGPT plan of the signed-in account. */
-  planType?: string
-}
+export type { CodexStatus }
 
 export type CodexServiceDependencies = {
   /** Starts the app-server process; tests and the replay kit substitute it. */
@@ -110,6 +106,8 @@ export interface CodexTurnUsage {
 
 export type CodexChatInput = {
   threadId: string
+  /** Provider instance running the turn; a saved Codex thread resumes only on the same instance. */
+  instanceId?: string
   cwd: string
   model: string
   prompt: string
@@ -913,7 +911,9 @@ export class CodexProviderService {
       ...(Object.keys(overrides).length ? { config: overrides } : {}),
       ...(input.developerInstructions ? { developerInstructions: input.developerInstructions } : {})
     }
-    const resumable = saved && saved.cwd === cwd && saved.historyKey === historyKey(input.history ?? '')
+    // A Codex thread belongs to the instance that started it; another instance starts fresh.
+    const resumable = saved && (saved.instanceId ?? CODEX_INSTANCE_ID) === (input.instanceId ?? CODEX_INSTANCE_ID) &&
+      saved.cwd === cwd && saved.historyKey === historyKey(input.history ?? '')
     if (resumable) {
       const previous = this.turns.get(saved.codexThreadId)
       if (previous) {
@@ -980,7 +980,7 @@ export class CodexProviderService {
       const thread = await this.openThread(conn, input, signal)
       const codexThreadId = thread.codexThreadId
       // The thread is not resumable until the turn commits its history.
-      this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd) } }
+      this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID } }
       this.save()
       input.onSession?.({ codexThreadId })
       const current = new TurnRun(codexThreadId, input.threadId, input.mode ?? 'default', signal, input)
@@ -1092,7 +1092,7 @@ export class CodexProviderService {
       current.settled()
       current.closeTools()
       if (scope === this.scope) {
-        this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd) } }
+        this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID } }
         this.save()
         this.readyToCommit.add(input.threadId)
       }

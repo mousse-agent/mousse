@@ -14,6 +14,7 @@ import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
 import type { DelegateTaskInput, DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
+import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { AdapterRegistry } from '../../src/mms/run/adapters/AdapterRegistry'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
@@ -82,7 +83,7 @@ describe('delegate_task by provider instance', () => {
   })
 
   /** One daemon whose pi parent sends `request` through `delegate_task` on its first turn. */
-  const daemon = (request: Omit<DelegateTaskInput, 'prompt' | 'workspace'>) => {
+  const daemon = (request: Omit<DelegateTaskInput, 'prompt' | 'workspace'>, stored?: Record<string, unknown>) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-delegation-instances-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
@@ -113,7 +114,8 @@ describe('delegate_task by provider instance', () => {
       }
     })
     const claude = new ScriptedAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, async () => 'Reviewed by Claude.')
-    orch.setAdapterRegistry(new AdapterRegistry().register(parent).register(claude))
+    const instances = new ProviderInstanceService({ store: { read: () => stored, write: (next) => { stored = next } } })
+    orch.setAdapterRegistry(new AdapterRegistry(instances).register(parent).register(claude))
     const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })), pid: 1 })
     orch.setRunEngine(engine)
     engine.reconcileOnBoot()
@@ -156,13 +158,14 @@ describe('delegate_task by provider instance', () => {
   it.each([
     [{ instanceId: 'nope' }, 'provider_instance_unknown'],
     [{ provider: 'nope' }, 'provider_instance_unknown'],
-    [{ instanceId: 'codex' }, 'provider_instance_disabled']
+    [{ instanceId: 'claude' }, 'provider_instance_disabled']
   ] as const)('rejects %o before creating a child thread', async (request, code) => {
-    const d = daemon(request)
+    // The `claude` instance is disabled in this profile; unknown ids fail regardless.
+    const d = daemon(request, { claude: { driver: 'claude', enabled: false } })
     const thread = d.store.createThread('Parent')
     expect((await d.orch.send('Review the module', false, { threadId: thread.id, clientRequestId: 'parent-send' })).message).toBe('Delegation failed.')
     expect(d.outcome.error?.code).toBe(code)
-    expect(d.outcome.error?.message).toMatch(/"(nope|codex)"/)
+    expect(d.outcome.error?.message).toMatch(/"(nope|claude)"/)
     expect(d.engine.delegations.listForParentThread(thread.id)).toEqual([])
     expect(d.store.listAllThreads().map((entry) => entry.id)).toEqual([thread.id])
     expect(d.claude.turns).toEqual([])

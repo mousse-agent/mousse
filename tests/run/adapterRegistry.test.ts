@@ -43,7 +43,7 @@ describe('AdapterRegistry', () => {
   }
 
   it('resolves each seeded instance to the adapter of its driver', () => {
-    const { registry, adapters } = full(instances({ codex: { driver: 'codex', enabled: true } }, ['openai']))
+    const { registry, adapters } = full(instances(undefined, ['openai']))
     expect(registry.resolve('claude')).toMatchObject({ instanceId: 'claude', llmProvider: 'claude-subscription', adapter: adapters.claude })
     expect(registry.resolve('antigravity')).toMatchObject({ llmProvider: 'antigravity', adapter: adapters.antigravity })
     expect(registry.resolve('codex')).toMatchObject({ llmProvider: 'codex', adapter: adapters.codex })
@@ -71,8 +71,7 @@ describe('AdapterRegistry', () => {
   })
 
   it('rejects a disabled instance, but still reaches it to stop running work', () => {
-    const { registry, adapters } = full(instances({ 'pi:openai': { driver: 'pi', enabled: false } }))
-    // Codex is seeded disabled until its adapter ships.
+    const { registry, adapters } = full(instances({ 'pi:openai': { driver: 'pi', enabled: false }, codex: { driver: 'codex', enabled: false } }))
     expect(codeOf(() => registry.resolve('codex'))).toBe('provider_instance_disabled')
     expect(() => registry.resolve('codex')).toThrow(/"codex"/)
     expect(codeOf(() => registry.resolveSelection({ llmProvider: 'openai' }))).toBe('provider_instance_disabled')
@@ -99,7 +98,7 @@ describe('AdapterRegistry', () => {
   it('offers only enabled, signed-in vendor instances as configured providers', () => {
     const registry = new AdapterRegistry(instances({ antigravity: { driver: 'antigravity', enabled: false } }))
       .register(pi()).register(fake('claude')).register(fake('antigravity')).register(fake('codex'))
-    expect(registry.configuredProviderIds()).toEqual(['claude-subscription'])
+    expect(registry.configuredProviderIds()).toEqual(['claude-subscription', 'codex'])
     const signedOut = new AdapterRegistry(instances()).register(pi()).register(fake('claude', false))
     expect(signedOut.configuredProviderIds()).toEqual([])
   })

@@ -22,8 +22,7 @@ import { RunEngine } from '../../../src/mms/run/RunEngine'
 import { RunStore } from '../../../src/mms/run/RunStore'
 import { replayAcpProcess } from '../../../src/mms/run/testkit/acpReplay'
 import { replayCodexAppServer } from '../../../src/mms/run/testkit/codexAppServerReplay'
-import type { AdapterRegistry } from '../../../src/mms/run/adapters/AdapterRegistry'
-import { createCodexProviderService, registerCodexAdapter } from '../../../src/mms/run/adapters/codex'
+import { createCodexProviderService } from '../../../src/mms/run/adapters/codex'
 import { replayPiChat } from '../../../src/mms/run/testkit/piChatReplay'
 import { DEFAULT_VOLATILE_KEYS, dropKeys, readTranscript, ReplayTransport } from '../../../src/mms/run/testkit/ReplayTransport'
 import { Reconciler } from '../../../src/mms/run/Reconciler'
@@ -218,11 +217,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     // Replace the app-server process only; the client, service and adapter run for real.
     const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(transport) })
     stops.push(() => service.stop())
-    // The orchestrator does not register Codex yet; route its llmProvider to the adapter here.
-    const registry = (orch as any).adapters as AdapterRegistry
-    const codex = registerCodexAdapter(registry, () => service)
-    const resolveAdapter = registry.get.bind(registry)
-    registry.get = (llmProvider) => (llmProvider === codex.id ? codex : resolveAdapter(llmProvider))
+    orch.setCodexProvider(service)
   }
 
   try {

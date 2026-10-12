@@ -1,5 +1,4 @@
 import {
-  CODEX_PROVIDER_ID,
   type CodexChatInput,
   type CodexChatResult,
   type CodexProviderService
@@ -53,7 +52,7 @@ export const CODEX_CAPABILITIES: ProviderCapabilities = Object.freeze({
  * orchestrator (and its adapter registry) is built.
  */
 export class CodexAdapter implements ProviderAdapter {
-  readonly id = CODEX_PROVIDER_ID
+  readonly driver = 'codex' as const
   readonly capabilities = CODEX_CAPABILITIES
 
   constructor(private readonly service: () => CodexClient | null) {}
@@ -71,7 +70,7 @@ export class CodexAdapter implements ProviderAdapter {
     const service = this.service()
     if (!service) throw new Error(`${input.llmProvider} is not available in this profile`)
     const startedAt = Date.now()
-    let providerRef: ProviderRef = { provider: input.llmProvider, model: input.model }
+    let providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
     const cwd = input.cwd ?? service.standaloneWorkspace(input.threadId)
     let history = host.context.prepareNativeContext(input.llmProvider, input.model)?.nativeHistory ?? input.nativeHistory
@@ -86,6 +85,7 @@ export class CodexAdapter implements ProviderAdapter {
     const chatInput = (): CodexChatInput => ({
       mode: input.mode === 'plan' ? 'plan' : 'default',
       threadId: input.threadId,
+      instanceId: input.instanceId,
       cwd,
       model: input.model,
       prompt: input.prompt,
@@ -165,7 +165,7 @@ export class CodexAdapter implements ProviderAdapter {
     streams.thinking.complete()
     service.commitConversation(input.threadId, host.context.nativeHistoryAfterTurn(result.text))
     streams.text.complete(result.text)
-    const contextKey = `${this.id}:${input.model}`
+    const contextKey = `${input.llmProvider}:${input.model}`
     return {
       text: result.text,
       aborted: input.signal.aborted,

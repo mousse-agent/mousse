@@ -52,20 +52,25 @@ const LEGACY_PROVIDER_BY_DRIVER: Record<Exclude<ProviderDriverKind, 'pi'>, strin
   codex: 'codex'
 }
 
-/** Legacy vendor `llmProvider` names and the seeded instance that replaces each. */
+/**
+ * Vendor `llmProvider` names (what the GUI's provider lists use as ids) and the seeded instance
+ * each maps to.
+ */
 const LEGACY_VENDOR_INSTANCES: Readonly<Record<string, string>> = {
   'claude-subscription': CLAUDE_INSTANCE_ID,
-  antigravity: ANTIGRAVITY_INSTANCE_ID
+  antigravity: ANTIGRAVITY_INSTANCE_ID,
+  codex: CODEX_INSTANCE_ID
 }
 
 /**
- * Seeded vendor instances, in display order. Codex is seeded disabled so its id is stable before
- * its adapter exists.
+ * Seeded vendor instances, in display order. All are enabled: an enabled instance only means the
+ * profile may pick it. Whether it can run is its service's `configured()` — Codex, for example,
+ * is offered only once the terminal `codex login` is a ChatGPT sign-in.
  */
 const VENDOR_SEEDS: ReadonlyArray<[string, ProviderInstanceConfig]> = [
   [ANTIGRAVITY_INSTANCE_ID, { driver: 'antigravity', enabled: true }],
   [CLAUDE_INSTANCE_ID, { driver: 'claude', enabled: true }],
-  [CODEX_INSTANCE_ID, { driver: 'codex', enabled: false }]
+  [CODEX_INSTANCE_ID, { driver: 'codex', enabled: true }]
 ]
 
 export const PROVIDER_INSTANCE_ERROR_CODES = {
@@ -104,8 +109,9 @@ export function piProviderIdOf(instanceId: string): string | undefined {
 
 /**
  * Maps an `llmProvider` string from before instances existed to its instance id:
- * `claude-subscription` → `claude`, `antigravity` → `antigravity`, a known pi-ai provider `p` →
- * `pi:p`. Anything else throws `provider_instance_unknown`; it never falls back to the pi loop.
+ * `claude-subscription` → `claude`, `antigravity` → `antigravity`, `codex` → `codex`, a known
+ * pi-ai provider `p` → `pi:p`. Anything else throws `provider_instance_unknown`; it never falls
+ * back to the pi loop.
  */
 export function instanceIdForLegacyProvider(llmProvider: string, isKnownPiProvider: (providerId: string) => boolean): string {
   const name = llmProvider.trim()

@@ -59,6 +59,7 @@ import type {
   AmbientProviderInfo,
   ClaudeLoginPolicy,
   ClaudeSubscriptionStatus,
+  CodexStatus,
   ConfiguredProvider,
   ProviderLoginEvent,
   ProviderLoginOption,
@@ -787,6 +788,9 @@ const api = {
       ipcRenderer.invoke('providers:claudeStatus', recheck),
     claudeSetLoginPolicy: (policy: ClaudeLoginPolicy): Promise<ClaudeSubscriptionStatus> =>
       ipcRenderer.invoke('providers:claudeSetLoginPolicy', policy),
+    /** Codex sign-in state; `recheck` skips the cached `account/read`. */
+    codexStatus: (recheck?: boolean): Promise<CodexStatus> =>
+      ipcRenderer.invoke('providers:codexStatus', recheck),
     loginOAuth: (providerId: string): Promise<ProviderLoginResult> =>
       ipcRenderer.invoke('providers:loginOAuth', providerId),
     loginApiKey: (providerId: string): Promise<ProviderLoginResult> =>

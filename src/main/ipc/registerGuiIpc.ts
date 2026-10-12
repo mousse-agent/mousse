@@ -1973,6 +1973,14 @@ export function registerGuiIpc(
     if (recheck === true) broadcast('providers:changed', res.providers)
     return res.status
   })
+  registerHandler('providers:codexStatus', async (_e, recheck?: boolean) => {
+    const res = await guiMms.request<{ status: unknown; providers: unknown[] }>(
+      'providers.codexStatus',
+      { recheck: recheck === true }
+    )
+    if (recheck === true) broadcast('providers:changed', res.providers)
+    return res.status
+  })
   registerHandler('providers:claudeSetLoginPolicy', async (_e, policy: 'cli' | 'isolated') => {
     const res = await guiMms.request<{ status: unknown; providers: unknown[] }>(
       'providers.claudeSetLoginPolicy',

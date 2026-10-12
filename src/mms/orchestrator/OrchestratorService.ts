@@ -50,6 +50,7 @@ import { AdapterRegistry } from '../run/adapters/AdapterRegistry'
 import { PiLoopAdapter } from '../run/adapters/pi/PiLoopAdapter'
 import { ClaudeSubscriptionAdapter } from '../run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { AntigravityAdapter } from '../run/adapters/antigravity/AntigravityAdapter'
+import { CodexAdapter, type CodexClient } from '../run/adapters/codex'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, ProviderMetrics, RecoveredContext, TurnControl, TurnInput, TurnSink } from '../run/adapters/ProviderAdapter'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { McpCaller, MousseToolHost } from '../run/mcp/toolRegistry'
@@ -462,6 +463,9 @@ export class OrchestratorService extends EventEmitter {
   setAppletStore(store: AppletStore): void { this.appletStore = store }
   private claudeSubscription?: ClaudeSubscriptionProviderService
   setClaudeSubscriptionProvider(provider: ClaudeSubscriptionProviderService): void { this.claudeSubscription = provider }
+  private codex?: CodexClient
+  /** The profile's Codex service (`codex` driver); read by the Codex adapter on every turn. */
+  setCodexProvider(provider: CodexClient | null): void { this.codex = provider ?? undefined }
   private antigravity?: AntigravityProviderService
   setAntigravityProvider(provider: AntigravityProviderService): void { this.antigravity = provider }
   private readonly lifecycle = new OwnedWorkBarrier()
@@ -593,6 +597,7 @@ export class OrchestratorService extends EventEmitter {
     .register(new PiLoopAdapter(() => this.llm))
     .register(new ClaudeSubscriptionAdapter(() => this.claudeSubscription ?? null))
     .register(new AntigravityAdapter(() => this.antigravity ?? null))
+    .register(new CodexAdapter(() => this.codex ?? null))
   /** Test seam: replaces the provider adapters (and with them the instance map they resolve against). */
   setAdapterRegistry(registry: AdapterRegistry): void { this.adapters = registry }
   /** The profile's provider instances (stored map, seeds, legacy mapping). */

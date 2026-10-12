@@ -23,6 +23,7 @@ describe('legacy provider mapping', () => {
     const table: Array<[string, string]> = [
       ['claude-subscription', 'claude'],
       ['antigravity', 'antigravity'],
+      ['codex', 'codex'],
       ['openai', 'pi:openai'],
       ['anthropic', 'pi:anthropic'],
       ['openai-codex', 'pi:openai-codex'],
@@ -32,7 +33,7 @@ describe('legacy provider mapping', () => {
   })
 
   it('rejects unknown and empty names with provider_instance_unknown', () => {
-    for (const name of ['whatever', 'codex', 'claude', 'pi:openai', ''])
+    for (const name of ['whatever', 'claude', 'pi:openai', 'codex-cli', ''])
       expect(codeOf(() => instanceIdForLegacyProvider(name, isPi))).toBe('provider_instance_unknown')
     expect(() => instanceIdForLegacyProvider('whatever', isPi)).toThrow(/"whatever"/)
   })
@@ -47,12 +48,12 @@ describe('legacy provider mapping', () => {
 })
 
 describe('instance seeding', () => {
-  it('seeds the vendor instances, Codex disabled, and one pi instance per credentialed provider', () => {
+  it('seeds the vendor instances and one pi instance per credentialed provider', () => {
     const { instances, added } = seedProviderInstances(undefined, ['openai'])
     expect(instances).toEqual({
       antigravity: { driver: 'antigravity', enabled: true },
       claude: { driver: 'claude', enabled: true },
-      codex: { driver: 'codex', enabled: false },
+      codex: { driver: 'codex', enabled: true },
       'pi:openai': { driver: 'pi', enabled: true }
     })
     expect(added).toEqual(['antigravity', 'claude', 'codex', 'pi:openai'])
@@ -61,13 +62,13 @@ describe('instance seeding', () => {
   it('extends a stored map with missing seeds and never overwrites a stored entry', () => {
     const stored = {
       claude: { driver: 'claude', enabled: false, config: { note: 'mine' } },
-      codex: { driver: 'codex', enabled: true },
+      codex: { driver: 'codex', enabled: false },
       'pi:openai': 'malformed but stored',
       custom: { driver: 'pi', enabled: true }
     }
     const { instances, added } = seedProviderInstances(stored, ['openai', 'openrouter'])
     expect(instances.claude).toEqual({ driver: 'claude', enabled: false, config: { note: 'mine' } })
-    expect(instances.codex).toEqual({ driver: 'codex', enabled: true })
+    expect(instances.codex).toEqual({ driver: 'codex', enabled: false })
     expect(instances['pi:openai']).toBe('malformed but stored')
     expect(instances.custom).toEqual({ driver: 'pi', enabled: true })
     expect(added).toEqual(['antigravity', 'pi:openrouter'])

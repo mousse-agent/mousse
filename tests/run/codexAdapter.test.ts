@@ -171,7 +171,7 @@ const sha = (value: string) => createHash('sha256').update(value).digest('hex')
 describe('CodexAdapter', () => {
   it('declares native steer and reports its context', async () => {
     const adapter = new CodexAdapter(() => null)
-    expect(adapter.id).toBe('codex')
+    expect(adapter.driver).toBe('codex')
     expect(adapter.capabilities).toBe(CODEX_CAPABILITIES)
     expect(adapter.capabilities).toEqual({
       steer: 'native',
@@ -262,7 +262,8 @@ describe('CodexAdapter', () => {
     })
     // The turn committed: the Codex thread is saved with the canonical history it now holds.
     const saved = JSON.parse(readFileSync(settingsPath(), 'utf8')) as { threads: Record<string, unknown> }
-    expect(saved.threads['thread-1']).toEqual({ codexThreadId: T, cwd: work, historyKey: sha('history+Hello') })
+    // Bound to the instance that started it (the default `codex` instance here).
+    expect(saved.threads['thread-1']).toEqual({ codexThreadId: T, cwd: work, historyKey: sha('history+Hello'), instanceId: 'codex' })
   })
 
   it('continues the loaded thread, resumes it from a new process, and starts fresh when resume fails', async () => {
