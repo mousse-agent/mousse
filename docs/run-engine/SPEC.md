@@ -374,3 +374,74 @@ Shared builders in `src/mms/run/adapters/shared/` **before** the second adapter:
 - `rg "llmProvider === '" src/mms/run src/mms/orchestrator/OrchestratorService.ts` → only inside `adapters/`; ratchet baseline lowered to 0 for the orchestrator.
 - All three adapters pass the same scenario set.
 - `capabilityReaders.test.ts` green.
+
+## 14. Phase 4 — one delegation path
+
+Three spawn paths exist today: `spawn_agents` text blocks parsed from the reply (completion by polling `.mousse/task-progress.json`), named agents (`create_subagent*` tools, in-process Mousse runtime only, parent blocked inside the tool call), and workflow/definition agents. Phase 4 replaces the first two with one primitive and keeps workflow agents as a caller of it.
+
+### 14.1 Model
+
+- A **child is a thread** with `lineage { parentThreadId, parentRunId, relationship: 'subagent' }` persisted in a new `thread_lineage` table (migration 3). Its runs are ordinary runs on the same engine.
+- A **delegation** row ties the parent run to the child thread: `delegations(delegation_id PK, parent_run_id, parent_thread_id, child_thread_id, child_run_id, provider, model, prompt_digest, wake: 'always'|'settled_only', status: 'running'|'result_available'|'acknowledged'|'cancelled'|'failed', result TEXT, created_at, completed_at)`.
+- **Inbox**: `inbox(inbox_id PK, thread_id, run_id?, kind: 'child_result'|'restart_note'|'reconcile_notice', payload, status: 'pending'|'delivered'|'acknowledged', created_at)`. A child's completion writes one `child_result` row for the parent **in the same transaction** as the child's terminal write (invariant 5: child completion is a stored row). Notifications only speed up discovery.
+- **Publication gate**: a child's result lands only if, in that transaction, the delegation is still `running` and the parent run is non-terminal or `settled_only` is set. A cancelled or superseded child can finish but cannot publish.
+
+### 14.2 Tools (`ToolHost`, Phase 3 §13.1)
+
+```
+delegate_task({ prompt, provider?, model?, role?, workspace: 'isolated'|'shared', wake?: 'always'|'settled_only' }) → { delegationId, childThreadId, childRunId }
+task_status({ delegationId })  → { status, result?, childRunStatus }   // reading a result acknowledges it
+task_cancel({ delegationId })  → stops the child run and its own delegations depth-first
+list_delegations()
+```
+`provider`/`model` default to the parent's. `workspace:'isolated'` allocates a worktree through the existing `WorkspaceResolver` with a lease held by the child run; `shared` is allowed only for read-only roles (execution contract check, §13). Each tool call is a `delegation.*` command with a `clientRequestId` derived from `(parentRunId, toolCallId)` so retries are no-ops.
+
+### 14.3 Wake-up (reconciler rule 4)
+
+- Rule 4: for every `inbox` row `pending` whose thread has no active run → enqueue a `turn.start` effect with payload `{ kind: 'wake', inboxIds }` (one wake per thread, batched). If the thread has an active run whose adapter `caps.steer === 'native'` and `wake === 'always'` → enqueue `turn.steer` with the formatted notice; otherwise leave `pending` until the active run ends (the rule fires again).
+- The wake turn's prompt is a server-authored notice: "Delegated task X finished: <result head>. Use `task_status` for the full result." Reading via `task_status` marks the inbox row `acknowledged`; if every task in a pending wake is acknowledged before the wake starts, the wake effect is cancelled.
+- Child `failed`/`interrupted` also produce a `child_result` (with the failure), so a parent never waits forever.
+
+### 14.4 Integration
+
+`integrate_delegation({ delegationId })` runs the existing `ChildAgentIntegrationService.integrate` as its own `integration` run on the parent thread (a run, so it is undoable and visible). No automatic merging.
+
+### 14.5 Retirements
+
+- Delete `spawn_agents` action parsing, `TaskProgressMonitor`, progress-JSON completion, `delegationBatches`, `agentOwners`, `wakeQueues`/`wakeTimers`, `scheduleOrchestratorWake`.
+- Named-agent tools become thin wrappers over `delegate_task` (`name` maps to a child thread title; `recall` sends a follow-up to the existing child thread).
+- `AgentLifecycleService` transition table: remove `cancelled → running`.
+
+### 14.6 Tests
+
+Replay scenarios: parent delegates to a child on a different adapter; child completes while parent is mid-tool (steer wake) and while parent is idle (new turn wake); parent restarts mid-wait (inbox survives, wake fires after boot); `task_cancel` depth-first; publication gate rejects a late child result after cancel; duplicate `delegate_task` retry returns the same delegation.
+
+## 15. Phase 5 — Mousse MCP server for every provider
+
+Native-agent providers (Claude subscription, Antigravity) receive `mcpServers: {}` / `[]` today; CLI agents receive copies of the user's MCP servers. None can call Mousse's own tools.
+
+### 15.1 Server
+
+- `src/mms/run/mcp/MousseMcpServer.ts`: one in-process MCP server (streamable HTTP on `127.0.0.1`, random port, plus a stdio bridge binary `mousse-cli engine mcp-stdio` for runtimes that only speak stdio). Tools are the `ToolHost` registry from §13.1: `delegate_task`, `task_status`, `task_cancel`, `list_delegations`, `ask_user`, `present_plan`, `create_task`/`update_task`/`list_tasks`, `thread_read`, `queue_*`, later schedule and browser tools.
+- **Credentials**: `credentials(token_hash PK, thread_id, run_id, provider, mode_ceiling, created_at, revoked_at, last_seen_at)` (migration 4; durable, unlike T3's in-memory registry). One token per run attempt, minted when the `turn.start` executor opens the adapter; revoked on terminal; expires after 24 h idle.
+- **Scoping**: a token acts as its run. `delegate_task` children inherit `mode_ceiling` and cannot exceed it; `thread_read` is limited to the caller's thread, its lineage ancestors/descendants, and threads in the same project when the ceiling allows. Writes to unrelated threads are refused (T3 allows them; we do not).
+- Every tool handler declares an access class (`reads | actsAsCaller | writesThreads | startsThreads`); a handler without one fails to register.
+
+### 15.2 Attachment per adapter
+
+| Adapter | How the server is attached |
+|---|---|
+| `PiLoopAdapter` | in-process `ToolHost`, no MCP needed |
+| `ClaudeSubscriptionAdapter` | SDK `mcpServers: { mousse: { type:'http', url, headers:{ Authorization } } }` |
+| `AntigravityAdapter` | ACP `session/new` `mcpServers: [{ name:'mousse', type:'http', url, headers }]`; fall back to the stdio bridge when the agent rejects http |
+| CLI children (claude-code, codex, opencode, cursor) | `AgentConfigManager` materialises a `mousse` entry next to the user's servers, with the token in env |
+
+`caps.mcp === false` adapters show the orchestration tools as unavailable; nothing is emulated.
+
+### 15.3 Prompt guidance
+
+One shared text (`src/mms/run/mcp/instructions.ts`) delivered per adapter (system prompt append for Claude; ACP first-prompt wrapper for Antigravity; developer instructions for Codex children): prefer `delegate_task` for any work on another provider; end the turn after delegating instead of polling; `clientRequestId` rules; never ask for secrets in chat.
+
+### 15.4 Tests
+
+Unit: credential mint/revoke/expiry; ceiling enforcement; access-class registration failure. Integration (replay): a Claude-subscription parent calls `delegate_task` for a pi child and reads the result; a child attempting a write above its ceiling is refused with a reason.
