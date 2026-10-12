@@ -180,3 +180,118 @@ Extract from `src/mms/net/store/database.ts`:
 - Replacing `ThreadDataStore` transcript storage.
 - Removing the 11 existing feature flags (decided separately; tracked in #79 comments).
 - Effect-TS or any new runtime dependency.
+
+## 12. Phase 2 — effects, leases, reconciler, uncertainty
+
+Phase 1 records runs but the legacy loop still performs provider I/O inline. Phase 2 moves every provider-facing action behind a durable **effect** and adds a **reconciler** that keeps stored state and reality in agreement. The reconciler is not optional: it is what T3 lacks (unchecked leases, no timeouts, undetected clean-stream-end).
+
+### 12.1 Tables (migration 2)
+
+```sql
+CREATE TABLE effects(
+  effect_id     TEXT PRIMARY KEY,                 -- effect:<clientRequestId|runId>:<kind>:<n>, deterministic
+  thread_id     TEXT NOT NULL,
+  run_id        TEXT,
+  kind          TEXT NOT NULL,                    -- see 12.2
+  class         TEXT NOT NULL CHECK(class IN ('process_bound','replay_safe')),
+  status        TEXT NOT NULL CHECK(status IN ('pending','running','succeeded','failed','cancelled')),
+  payload       TEXT NOT NULL,
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  max_attempts  INTEGER NOT NULL DEFAULT 5,
+  timeout_ms    INTEGER NOT NULL,                 -- per-effect execution deadline; enforced
+  available_at  TEXT NOT NULL,
+  lease_owner   TEXT,                             -- "<daemonEpoch>:<pid>"
+  lease_expires_at TEXT,                          -- checked on claim AND by the reconciler
+  last_error    TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  completed_at  TEXT
+) STRICT;
+CREATE INDEX effects_claim ON effects(status, available_at, thread_id);
+CREATE INDEX effects_thread ON effects(thread_id, status);
+
+CREATE TABLE daemon_epochs(
+  epoch         INTEGER PRIMARY KEY AUTOINCREMENT,
+  pid           INTEGER NOT NULL,
+  started_at    TEXT NOT NULL,
+  heartbeat_at  TEXT NOT NULL,
+  ended_at      TEXT                               -- set on clean shutdown; NULL after a crash
+) STRICT;
+
+CREATE TABLE tool_invocations(
+  invocation_id TEXT PRIMARY KEY,
+  run_id        TEXT NOT NULL,
+  attempt_id    TEXT NOT NULL,
+  tool          TEXT NOT NULL,
+  idempotent    INTEGER NOT NULL,                 -- 0/1 from the tool registry
+  status        TEXT NOT NULL CHECK(status IN ('started','committed','failed','outcome_unknown')),
+  args_digest   TEXT NOT NULL,
+  started_at    TEXT NOT NULL,
+  completed_at  TEXT
+) STRICT;
+CREATE INDEX tool_invocations_run ON tool_invocations(run_id, status);
+```
+
+### 12.2 Effect kinds and classes
+
+| kind | class | timeout | what it does |
+|---|---|---|---|
+| `turn.start` | process_bound | 2 h | run the provider turn (legacy `executeTurn` body, later adapters) |
+| `turn.interrupt` | process_bound | 30 s | abort the live turn; "not active" counts as success |
+| `turn.steer` | process_bound | 30 s | deliver steer text to the live turn |
+| `request.respond` | process_bound | 30 s | answer a pending user question / approval |
+| `checkpoint.capture` | replay_safe | 2 min | post-turn git checkpoint (when enabled) |
+| `title.generate` | replay_safe | 1 min | thread title (own lane; never blocks turns) |
+| `workspace.cleanup` | replay_safe | 5 min | release leases, remove scratch worktrees |
+
+**process_bound** effects die with the daemon; on boot they are `cancelled` and their run becomes `interrupted`. **replay_safe** effects are re-queued on boot. A kind's class is fixed in code, not per row.
+
+### 12.3 Worker and lanes
+
+- One in-process worker with N=4 fibres (plain async loops). Wake sources: `afterCommit` notify, next `available_at` timer, 30 s safety poll.
+- Claim is one `UPDATE … WHERE effect_id = (SELECT … LIMIT 1) RETURNING *` and is only valid when, for the same thread lane, there is **no `running` row whose lease has not expired** and no earlier `pending` row. `title.generate` is its own lane.
+- Lease = `timeout_ms + 15 s`. The worker renews the lease every `timeout_ms/3` while executing.
+- Execution is raced against `AbortSignal.timeout(timeout_ms)` and against cancellation. On timeout: `failed` with `last_error='timeout'` if attempts exhausted, else `pending` with backoff `min(30 s, 100 ms·2^(n−1))`.
+- Settlement is CAS on `(effect_id, lease_owner)`; a lost lease aborts the local execution and writes nothing.
+
+### 12.4 Reconciler (every 5 s and after every commit)
+
+A single loop; each rule is a pure function of stored state and produces commands/effects. Rules, in order:
+
+1. **Expired lease on a `running` effect** → mark `pending` (or `failed` if attempts exhausted); the stuck fibre's result is discarded by the CAS.
+2. **Run `running|finalizing` with no live effect and no heartbeat for > 2× heartbeat interval** → `interrupted` with `interruptedBy:'provider'`, `outcome.error='no terminal event'`. This catches T3's clean-stream-end-without-terminal.
+3. **Pending `stopRequested` on a run whose `turn.interrupt` effect is terminal but the run is still non-terminal after 10 s** → force `interrupted` (`interruptedBy:'user'`) and emit a warning event.
+4. **Child run terminal while a parent waits** (Phase 4) → wake parent.
+5. **Queued run with no active run on its thread** → enqueue `turn.start` (replaces the legacy drain timer).
+6. **`tool_invocations` at `started` whose run is terminal** → `outcome_unknown`.
+
+Every repair appends a `reconcile.<rule>` event. The loop never calls a provider itself.
+
+### 12.5 Boot
+
+`reconcileOnBoot()` (extends Phase 1):
+1. Insert a new `daemon_epochs` row; find the previous row; if its `ended_at` is NULL the previous daemon crashed.
+2. Cancel all `process_bound` effects in `pending|running` (reason `daemon_restart`).
+3. Re-queue `running` `replay_safe` effects; leave `pending` ones.
+4. Runs in `starting|running|finalizing`:
+   - if the previous epoch ended cleanly → `interrupted`, `interruptedBy:'daemon_restart'`;
+   - if it crashed and the run has any `tool_invocations` at `started` with `idempotent=0` → **`uncertain`**, `uncertainReason:'non_idempotent_tool_in_flight'`, listing the tools; the thread's worktree lease is kept (quarantine) until a user action; all other crashed runs → `interrupted`.
+5. For each affected thread, record a `restart.note` event listing what was cut off. The next turn on that thread prepends a system note; the GUI shows a "Continue" affordance. **Nothing auto-resumes.**
+6. Start the heartbeat (`heartbeat_at` every 10 s) and the reconciler.
+
+### 12.6 Tool idempotency registry
+
+`src/mms/run/tools/idempotency.ts` maps tool name → `idempotent: boolean`. Read-only tools (`read_file`, `list_dir`, `ls`, `git_status`, `git_diff`, `web_search`, `web_fetch`, `browser_observe/find/extract/screenshot/tabs`, `list_tasks`, `list_subagents`) are idempotent. `bash`, `run_command`, `write_file`, `edit_file`, `browser_act/open`, `create_task`, `update_task`, `create_subagent(s)`, `integrate_subagent`, `present_plan`, `ask_user` are not. MCP tools default to **not idempotent** unless the server annotates `readOnlyHint`. `LlmClient.executeToolCall` writes `started` before and `committed|failed` after; an `outcome_unknown` row is rendered back to the model on the next turn as a tool result saying the outcome is unknown and must be verified.
+
+### 12.7 Protocol additions
+
+- `orchestrator.send` returns as soon as the `send` command commits (`runId`, `sequence`); the turn result arrives through events. `MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS` becomes irrelevant; GUI `runSend` stops awaiting the turn.
+- New read: `runs.effects(threadId)`; new events `effect.status`, `reconcile.repair`, `run.uncertain`, `restart.note`.
+- `engine fsck` adds: `effect_lease_expired_unclaimed`, `effect_running_for_dead_epoch`, `run_active_without_effect`, `tool_started_on_terminal_run`.
+
+### 12.8 Tests
+
+- Fault matrix like `tests/platformWorkflowDurabilityMatrix.test.ts`: kill between each pair of steps (`run.created`, `effect.pending`, `effect.running`, provider streaming, `tool.started`, `tool.committed`, `turn terminal`, `effect.succeeded`) by throwing at `checkpoint()` points, reopen, `reconcileOnBoot`, and assert the exact run/effect/tool states.
+- Reconciler unit tests per rule with a seeded store and a fake clock.
+- Worker: timeout fires and lease renewal keeps a long effect alive; lost lease discards a late result.
+- Legacy bridge regression: all Phase 1 tests remain green with the drain timer replaced by rule 5.
