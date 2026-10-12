@@ -109,6 +109,12 @@ export interface ThreadStartResponse {
   cwd: string
 }
 export type ThreadResumeResponse = ThreadStartResponse
+/** Loads the thread from disk into a new thread, with these overrides applied. */
+export type ThreadForkParams = ThreadResumeParams
+export type ThreadForkResponse = ThreadStartResponse
+export interface ThreadUnsubscribeResponse {
+  status: 'notLoaded' | 'notSubscribed' | 'unsubscribed'
+}
 
 export type UserInput =
   | { type: 'text'; text: string; text_elements: unknown[] }
@@ -160,6 +166,8 @@ export interface CodexRequestMap {
   'model/list': { params: ModelListParams; result: ModelListResponse }
   'thread/start': { params: ThreadStartParams; result: ThreadStartResponse }
   'thread/resume': { params: ThreadResumeParams; result: ThreadResumeResponse }
+  'thread/fork': { params: ThreadForkParams; result: ThreadForkResponse }
+  'thread/unsubscribe': { params: { threadId: string }; result: ThreadUnsubscribeResponse }
   'turn/start': { params: TurnStartParams; result: TurnStartResponse }
   'turn/steer': { params: TurnSteerParams; result: TurnSteerResponse }
   'turn/interrupt': { params: TurnInterruptParams; result: TurnInterruptResponse }

@@ -360,6 +360,48 @@ describe('CodexAdapter', () => {
     replay.assertDone()
   })
 
+  it('forks a loaded thread when its MCP attachment changes, so the new token takes effect', async () => {
+    const mcpConfig = (token: string) => ({
+      model_provider: 'openai',
+      'mcp_servers.mousse.url': 'http://127.0.0.1:4000/mcp',
+      'mcp_servers.mousse.http_headers': { Authorization: `Bearer ${token}` },
+      'mcp_servers.mousse.tool_timeout_sec': 3600,
+      'mcp_servers.mousse.default_tools_approval_mode': 'approve'
+    })
+    const developerInstructions = mousseOrchestrationInstructions()
+    const replay = transport([
+      ...handshake(),
+      ...threadStart(3, threadParams({ config: mcpConfig('old'), developerInstructions })),
+      ...turnStart(4, 'hello'),
+      ...message('msg-1', ['one']),
+      completed('completed'),
+      // New token while the thread is still loaded: fork with the new config, release the old thread.
+      out({ id: 5, method: 'thread/fork', params: { threadId: T, excludeTurns: true, ...threadParams({ config: mcpConfig('new'), developerInstructions }) } }),
+      inn({ id: 5, result: threadResult('thr-2') }),
+      out({ id: 6, method: 'thread/unsubscribe', params: { threadId: T } }),
+      inn({ id: 6, result: { status: 'unsubscribed' } }),
+      out({ id: 7, method: 'turn/start', params: { threadId: 'thr-2', input: text('again'), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
+      inn({ id: 7, result: { turn: { id: 'turn-2', status: 'inProgress', error: null } } }),
+      note('item/completed', { threadId: 'thr-2', turnId: 'turn-2', item: { type: 'agentMessage', id: 'msg-2', text: 'two' } }),
+      note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-2', status: 'completed', error: null } }),
+      // Same token again: the forked thread is reused as loaded.
+      out({ id: 8, method: 'turn/start', params: { threadId: 'thr-2', input: text('third'), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
+      inn({ id: 8, result: { turn: { id: 'turn-3', status: 'inProgress', error: null } } }),
+      note('item/completed', { threadId: 'thr-2', turnId: 'turn-3', item: { type: 'agentMessage', id: 'msg-3', text: 'three' } }),
+      note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-3', status: 'completed', error: null } })
+    ])
+    const codex = service(replay)
+    const adapter = new CodexAdapter(() => codex)
+    const attach = (token: string) => host({ url: 'http://127.0.0.1:4000/mcp', token })
+    await adapter.startTurn(input(), recordingSink(), control(), attach('old'))
+    const second = await adapter.startTurn(input({ prompt: 'again', nativeHistory: 'history+one' }), recordingSink(), control(), attach('new'))
+    expect(second).toMatchObject({ text: 'two', threadDisposition: 'reusable', providerRef: { sessionId: 'thr-2' } })
+    await adapter.startTurn(input({ prompt: 'third', nativeHistory: 'history+two' }), recordingSink(), control(), attach('new'))
+    replay.assertDone()
+    const saved = JSON.parse(readFileSync(settingsPath(), 'utf8')) as { threads: Record<string, { codexThreadId: string }> }
+    expect(saved.threads['thread-1'].codexThreadId).toBe('thr-2')
+  })
+
   it('routes command, patch and user-input requests to Mousse questions', async () => {
     const replay = transport([
       ...handshake(),

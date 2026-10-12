@@ -474,7 +474,11 @@ export class CodexProviderService {
   private scope = 0
   /** Running chats by Codex thread id. */
   private readonly turns = new Map<string, TurnRun>()
-  /** Codex threads loaded in the current process, with the MCP token they were opened with. */
+  /**
+   * Codex threads loaded in the current process, with the MCP token and cwd they were opened with.
+   * Only cold opens (start, resume of an unloaded thread, fork) record an entry: Codex applies
+   * config overrides when it loads a thread and ignores them on an already-loaded one.
+   */
   private readonly loaded = new Map<string, { mcpToken: string | null; cwd: string }>()
   private readonly activeThreads = new Set<string>()
   private readonly controllers = new Set<AbortController>()
@@ -963,6 +967,17 @@ export class CodexProviderService {
       const loaded = this.loaded.get(saved.codexThreadId)
       if (loaded && loaded.mcpToken === mcpToken && loaded.cwd === cwd)
         return { codexThreadId: saved.codexThreadId, model: undefined, continued: true, disposition: 'reusable' }
+      if (loaded) {
+        // The attachment (or cwd) changed while the thread is loaded. A resume would keep the old
+        // MCP config, so fork it: Codex loads the history into a new thread with the new config,
+        // and the old thread is released.
+        const forked = chatgptProvider(await conn.request('thread/fork', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
+        this.loaded.delete(saved.codexThreadId)
+        this.loaded.set(forked.thread.id, { mcpToken, cwd })
+        await conn.request('thread/unsubscribe', { threadId: saved.codexThreadId }, { signal, timeoutMs: 5_000 }).catch(() => undefined)
+        signal.throwIfAborted()
+        return { codexThreadId: forked.thread.id, model: forked.model, continued: true, disposition: 'reusable' }
+      }
       try {
         const resumed = chatgptProvider(await conn.request('thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
         this.loaded.set(resumed.thread.id, { mcpToken, cwd })
