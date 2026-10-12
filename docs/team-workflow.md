@@ -40,7 +40,7 @@ Write for a teammate who has not seen the chat or the code. They should understa
 ### PR descriptions
 
 - **Problem:** one or two sentences on what is broken or missing, as the user sees it. For a bug, add the expected behavior and how to reproduce it.
-- **Change:** how the PR solves it, in short paragraphs or bullets. Describe the change directly ("Claude sessions now restart when the model changes"); use "I" for what you did and checked.
+- **Change:** how the PR solves it, in short paragraphs or bullets. Describe the change directly ("Claude sessions now restart when the model changes"). Leave yourself out of most sentences; say "I" only where a decision or check needs an owner.
 - **How to review:** large PRs only. See below.
 - **Verification:** bullets listing what you checked, what you saw, and what you could not check. Name the focused commands. "Tests pass" alone is not evidence. UI changes need before/after screenshots, and a short recording when motion or timing matters. Upload them to the PR; never commit PR-only assets.
 - **Notes:** optional, one or two lines for stacking, rollout or install steps, and follow-ups. End with `Closes #123` or `Refs #123` when an issue exists.
