@@ -1,7 +1,4 @@
-import {
-  ANTIGRAVITY_PROVIDER_ID,
-  type AntigravityProviderService
-} from '../../../providers/antigravity/AntigravityProviderService'
+import type { AntigravityProviderService } from '../../../providers/antigravity/AntigravityProviderService'
 import { mousseOrchestrationInstructions } from '../../mcp/instructions'
 import type { ProviderRef } from '../../types'
 import type {
@@ -40,7 +37,7 @@ export const ANTIGRAVITY_CAPABILITIES: ProviderCapabilities = Object.freeze({
  * orchestrator (and its adapter registry) is built.
  */
 export class AntigravityAdapter implements ProviderAdapter {
-  readonly id = ANTIGRAVITY_PROVIDER_ID
+  readonly driver = 'antigravity' as const
   readonly capabilities = ANTIGRAVITY_CAPABILITIES
 
   constructor(private readonly service: () => AntigravityClient | null) {}
@@ -65,7 +62,7 @@ export class AntigravityAdapter implements ProviderAdapter {
     if (!service || !input.cwd) throw new Error(`${input.llmProvider} requires a project workspace`)
     const startedAt = Date.now()
     // The ACP session id stays inside the service's saved sessions; the ref names the runtime.
-    const providerRef: ProviderRef = { provider: input.llmProvider, model: input.model }
+    const providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
     const streams = promptStreams(sink)
     const progress = (): void => {
@@ -74,6 +71,7 @@ export class AntigravityAdapter implements ProviderAdapter {
     }
     const text = await service.chat({
       threadId: input.threadId,
+      instanceId: input.instanceId,
       cwd: input.cwd,
       model: input.model,
       prompt: input.prompt,
@@ -101,7 +99,7 @@ export class AntigravityAdapter implements ProviderAdapter {
     })
     service.commitConversation(input.threadId, host.context.nativeHistoryAfterTurn(text))
     streams.text.complete(text)
-    const contextKey = `${this.id}:${input.model}`
+    const contextKey = `${input.llmProvider}:${input.model}`
     return {
       text,
       aborted: input.signal.aborted,

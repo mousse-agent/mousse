@@ -23,8 +23,10 @@ it('offers Claude Subscription in the subscription picker and retains it in prov
     vi.spyOn(main.providerAuth, 'setApiKey').mockResolvedValue(undefined)
     vi.spyOn(main.providerAuth, 'refreshDynamicModels').mockResolvedValue(undefined)
     const result = await dispatchMethod(context, 'providers.setApiKey', { providerId: 'anthropic', apiKey: 'test-only-key' })
-    expect(result).toMatchObject({ providers: expect.arrayContaining([configured]) })
-    expect(emitEvent).toHaveBeenCalledWith('providers.changed', expect.objectContaining({ providers: expect.arrayContaining([configured]) }))
+    // Each listed provider names the instance that serves it.
+    const listed = { ...configured, instanceId: 'claude' }
+    expect(result).toMatchObject({ providers: expect.arrayContaining([listed]) })
+    expect(emitEvent).toHaveBeenCalledWith('providers.changed', expect.objectContaining({ providers: expect.arrayContaining([listed]) }))
     const options = await dispatchMethod(context, 'providers.getLoginOptions', { authType: 'oauth' }) as typeof subscriptions
     expect(options.options.some((option) => option.id === 'claude-subscription')).toBe(false)
     main.settings.set({ provider: { llmProvider: 'claude-subscription', model: 'sonnet' } })

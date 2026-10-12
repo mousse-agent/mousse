@@ -25,7 +25,7 @@ import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import type { ChatMessage, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
-import { getPiLlmProviders } from '../orchestrator/piProviders'
+import type { ModelOverride } from '../../shared/providerInstances'
 import {
   ACCENT_COLORS,
   THEME_OPTIONS,
@@ -86,6 +86,11 @@ import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
 import { isInstallationMethod } from '../profiles/admission'
 import { ChatReferenceMetadataResolver } from '../data/resolveChatReferenceMetadata'
 import { parseChatReference } from '../../shared/chatReferences'
+
+/** Claude and Codex report their terminal sign-ins from cached live checks; refresh both. */
+async function refreshVendorSignIns(ctx: HandlerContext): Promise<void> {
+  await Promise.all([ctx.mms.claudeSubscription.status(), ctx.mms.codex.status()])
+}
 
 export interface HandlerContext {
   mms: MmsProfileServices
@@ -539,7 +544,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ? ctx.mms.projects.getProject(projectId)?.path
         : undefined
       let thread = ctx.mms.threads.createThread(name, projectId, projectPath, { worktreeEnabled })
-      const lastUsed = lastUsedChatModel(ctx.mms.settings.get())
+      const lastUsed = ctx.mms.providerInstances.migrate(lastUsedChatModel(ctx.mms.settings.get()))
       if (lastUsed) {
         thread = ctx.mms.threads.updateThreadMeta(thread.id, { modelOverride: lastUsed })
       }
@@ -649,17 +654,24 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       const model = p.model
-      let override: { llmProvider: string; model: string } | undefined
+      let override: ModelOverride | undefined
       if (model !== undefined && model !== null) {
         if (!isObject(model)) throw new Error('model must be an object')
-        const llmProvider = asString(model.llmProvider, 'model.llmProvider', 256)
+        // `instanceId` is the selection (SPEC §13.8); the current GUI still sends `llmProvider`.
+        const instanceId = asOptionalString(model.instanceId, 256)
+        // A supplied provider name is validated even when the instance decides the stored value.
+        const llmProvider = instanceId
+          ? (model.llmProvider === undefined ? undefined : asString(model.llmProvider, 'model.llmProvider', 256))
+          : asString(model.llmProvider, 'model.llmProvider', 256)
         const modelId = asString(model.model, 'model.model', 512)
-        if (!llmProvider || !modelId) throw new Error('Model provider and id are required')
-        override = { llmProvider, model: modelId }
+        if ((!instanceId && !llmProvider) || !modelId) throw new Error('Model provider and id are required')
+        // Unknown or disabled instances are rejected here, before anything is stored.
+        override = ctx.mms.providerInstances.overrideFor({ instanceId, llmProvider, model: modelId })
       }
       const next = ctx.mms.orchestrator.setThreadModelOverride(threadId, override)
       if (override) {
-        ctx.mms.settings.set({ provider: override })
+        // The global default keeps the instance, so later default turns resolve the same agent.
+        ctx.mms.settings.set({ provider: { instanceId: override.instanceId, llmProvider: override.llmProvider, model: override.model } })
         ctx.emitEvent?.('settings.changed', { settings: ctx.mms.settings.get() })
       }
       const thread = ctx.mms.threads.getThread(threadId)
@@ -1554,12 +1566,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'settings.getOptions': {
       await ctx.mms.providerAuth.init()
-      await ctx.mms.claudeSubscription.status()
-      const llmProviders = getPiLlmProviders(ctx.mms.providerAuth)
-      const antigravity = ctx.mms.antigravity.llmProvider()
-      if (antigravity) llmProviders.push(antigravity)
-      const claudeSubscription = ctx.mms.claudeSubscription.llmProvider()
-      if (claudeSubscription) llmProviders.push(claudeSubscription)
+      await refreshVendorSignIns(ctx)
+      const llmProviders = ctx.mms.providerInstances.llmProviders()
       const agentTypes = buildAgentTypesFromCatalogs(ctx.mms.providerAuth.getCatalogLlmProviders())
       return {
         options: {
@@ -1571,9 +1579,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
     }
     case 'providers.listConfigured':
-      // Claude's terminal sign-in is a cached live check; refresh it before listing.
-      await ctx.mms.claudeSubscription.status()
-      return { providers: [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)] }
+      // Claude's and Codex's terminal sign-ins are cached live checks; refresh them before listing.
+      await refreshVendorSignIns(ctx)
+      return {
+        providers: ctx.mms.providerInstances.configuredProviders(),
+        // Present while the profile's stored instance map cannot be read (nothing is overwritten).
+        ...(ctx.mms.providerInstances.storeError() ? { instancesError: ctx.mms.providerInstances.storeError() } : {})
+      }
     case 'providers.getUsage': {
       await ctx.mms.claudeSubscription.status()
       const [usage, claude] = await Promise.all([
@@ -1596,8 +1608,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.getLoginOptions': {
       const p = isObject(params) ? params : {}
       const authType = asOptionalString(p.authType, 32) as 'api_key' | 'oauth' | undefined
-      await ctx.mms.claudeSubscription.status()
-      return { options: [...ctx.mms.providerAuth.getLoginOptions(authType), ...(authType === 'api_key' || ctx.mms.antigravity.configured() ? [] : [ctx.mms.antigravity.loginOption()]), ...(authType === 'api_key' || ctx.mms.claudeSubscription.configured() ? [] : [ctx.mms.claudeSubscription.loginOption()])] }
+      await refreshVendorSignIns(ctx)
+      return { options: [...ctx.mms.providerAuth.getLoginOptions(authType), ...(authType === 'api_key' || ctx.mms.antigravity.configured() ? [] : [ctx.mms.antigravity.loginOption()]), ...(authType === 'api_key' || ctx.mms.claudeSubscription.configured() ? [] : [ctx.mms.claudeSubscription.loginOption()]), ...(authType === 'api_key' || ctx.mms.codex.configured() ? [] : [ctx.mms.codex.loginOption()])] }
     }
     case 'providers.refreshModels': {
       const p = isObject(params) ? params : {}
@@ -1607,8 +1619,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         await ctx.mms.claudeSubscription.refreshModels(ctx.mms.worktrees.getRepoRoot())
       }
       else if (providerId === 'antigravity') await ctx.mms.antigravity.refreshModels(ctx.mms.worktrees.getRepoRoot())
+      else if (providerId === 'codex') {
+        await ctx.mms.codex.status()
+        await ctx.mms.codex.refreshModels()
+      }
       else await ctx.mms.providerAuth.refreshDynamicModels()
-      return { options: [...getPiLlmProviders(ctx.mms.providerAuth), ...[ctx.mms.antigravity.llmProvider(), ctx.mms.claudeSubscription.llmProvider()].filter((provider) => provider !== undefined)] }
+      return { options: ctx.mms.providerInstances.llmProviders() }
     }
     case 'providers.getAmbientInfo': {
       const p = isObject(params) ? params : {}
@@ -1621,7 +1637,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const apiKey = asString(p.apiKey, 'apiKey', 8192)
       await ctx.mms.providerAuth.setApiKey(providerId, apiKey)
       await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
-      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
+      const providers = ctx.mms.providerInstances.configuredProviders()
       ctx.emitEvent?.('providers.changed', { providers })
       return { providers }
     }
@@ -1651,7 +1667,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
       const result = await ctx.mms.providerAuth.verifyAmbientProvider(providerId)
-      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
+      const providers = ctx.mms.providerInstances.configuredProviders()
       if (result?.success) ctx.emitEvent?.('providers.changed', { providers })
       return { result, providers }
     }
@@ -1660,8 +1676,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const providerId = asString(p.providerId, 'providerId', 128)
       if (providerId === 'claude-subscription') await ctx.mms.claudeSubscription.logout()
       else if (providerId === 'antigravity') await ctx.mms.antigravity.logout()
+      // Disconnects Codex in Mousse only; the terminal `codex login` is never logged out.
+      else if (providerId === 'codex') await ctx.mms.codex.logout()
       else await ctx.mms.providerAuth.logout(providerId)
-      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
+      const providers = ctx.mms.providerInstances.configuredProviders()
       ctx.emitEvent?.('providers.changed', { providers })
       return { providers }
     }
@@ -1681,11 +1699,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
           ? await ctx.mms.claudeSubscription.login(session, ctx.mms.worktrees.getRepoRoot())
           : providerId === 'antigravity'
           ? await ctx.mms.antigravity.login(session, ctx.mms.worktrees.getRepoRoot())
+          : providerId === 'codex'
+          ? await ctx.mms.codex.login(session, ctx.mms.worktrees.getRepoRoot())
           : await ctx.mms.providerAuth.runOAuthLogin(session, providerId)
         if (result && (result as { success?: boolean }).success !== false) {
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
-        const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
+        const providers = ctx.mms.providerInstances.configuredProviders()
         if (result && (result as { success?: boolean }).success !== false) {
           ctx.emitEvent?.('providers.changed', { providers })
         }
@@ -1715,7 +1735,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (result && (result as { success?: boolean }).success !== false) {
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
-        const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
+        const providers = ctx.mms.providerInstances.configuredProviders()
         if (result && (result as { success?: boolean }).success !== false) {
           ctx.emitEvent?.('providers.changed', { providers })
         }
@@ -1751,7 +1771,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       // `recheck` bypasses the cached `claude auth status` result.
       const status = await ctx.mms.claudeSubscription.status({ force: p.recheck === true })
-      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
+      const providers = ctx.mms.providerInstances.configuredProviders()
+      if (p.recheck === true) ctx.emitEvent?.('providers.changed', { providers })
+      return { status, providers }
+    }
+    case 'providers.codexStatus': {
+      const p = isObject(params) ? params : {}
+      // `recheck` bypasses the cached `account/read` result.
+      const status = await ctx.mms.codex.status({ force: p.recheck === true })
+      const providers = ctx.mms.providerInstances.configuredProviders()
       if (p.recheck === true) ctx.emitEvent?.('providers.changed', { providers })
       return { status, providers }
     }
@@ -1759,7 +1787,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       if (p.policy !== 'cli' && p.policy !== 'isolated') throw new Error('policy must be cli or isolated')
       const status = await ctx.mms.claudeSubscription.setLoginPolicy(p.policy)
-      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
+      const providers = ctx.mms.providerInstances.configuredProviders()
       ctx.emitEvent?.('providers.changed', { providers })
       return { status, providers }
     }

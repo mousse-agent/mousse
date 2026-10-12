@@ -22,7 +22,7 @@ type HostScript = (input: TurnInput, delegation: DelegationToolHost | undefined)
 
 /** A pi-shaped adapter whose script sees the turn's delegation tools; counts interrupts. */
 class HostAdapter implements ProviderAdapter {
-  readonly id = 'pi'
+  readonly driver = 'pi' as const
   readonly turns: TurnInput[] = []
   interrupts = 0
   constructor(

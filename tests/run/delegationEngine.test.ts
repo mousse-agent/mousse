@@ -11,11 +11,11 @@ describe('RunEngine delegation (SPEC §14.1-§14.2)', () => {
   it('requestDelegation creates the child thread, lineage, child run, row and turn.start in one commit', async () => {
     f = delegationFixture()
     const parent = await f.runningRun('parent')
-    const accepted = await f.delegate(parent.runId, 'call-1', { prompt: 'Write the tests', provider: 'openai', model: 'gpt-x' })
+    const accepted = await f.delegate(parent.runId, 'call-1', { prompt: 'Write the tests', instanceId: 'pi:openai', model: 'gpt-x' })
     expect(accepted).toMatchObject({ childThreadId: 'child-1', replayed: false })
     expect(f.engine.delegations.getLineage('child-1')).toMatchObject({ parentThreadId: 'parent', parentRunId: parent.runId, relationship: 'subagent' })
     expect(f.engine.getRun(accepted.childRunId)).toMatchObject({ threadId: 'child-1', status: 'queued', source: 'delegation', clientRequestId: `delegation:${parent.runId}:call-1:child` })
-    expect(f.engine.delegations.get(accepted.delegationId)).toMatchObject({ status: 'running', provider: 'openai', model: 'gpt-x', parentRunId: parent.runId })
+    expect(f.engine.delegations.get(accepted.delegationId)).toMatchObject({ status: 'running', provider: 'pi:openai', model: 'gpt-x', parentRunId: parent.runId })
     const [effect] = f.outbox.listForRun(accepted.childRunId)
     expect(effect).toMatchObject({ kind: 'turn.start', status: 'pending', threadId: 'child-1' })
     expect(effect.payload).toEqual({ threadId: 'child-1', runId: accepted.childRunId, prompt: 'Write the tests' })

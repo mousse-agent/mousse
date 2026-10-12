@@ -309,7 +309,7 @@ Today `executeTurn` branches on `selectedModel.llmProvider` (`antigravity`, `cla
 
 ```ts
 export interface ProviderAdapter {
-  readonly id: string                               // 'pi' | 'claude-subscription' | 'antigravity' | later 'codex' ...
+  readonly driver: ProviderDriverKind               // 'pi' | 'claude' | 'antigravity' | 'codex'; instances map to it (§13.8)
   readonly capabilities: ProviderCapabilities        // static; may be refined per model via describe()
   describe(model: string): Promise<ModelInfo>        // context window, image input, reasoning levels
   startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl): Promise<TurnResult>
@@ -319,7 +319,7 @@ export interface ProviderAdapter {
   rollback?(sessionRef: ProviderRef, toTurnOrdinal: number): Promise<void>
   fork?(sessionRef: ProviderRef, atTurnOrdinal: number): Promise<ProviderRef>
 }
-export interface TurnInput { runId; attemptId; threadId; cwd; model; prompt; images?; history: HistoryHandoff; mode: 'agent'|'plan'; tools: ToolHost; signal: AbortSignal }
+export interface TurnInput { runId; attemptId; threadId; cwd; instanceId; model; prompt; images?; history: HistoryHandoff; mode: 'agent'|'plan'; tools: ToolHost; signal: AbortSignal }
 export interface TurnSink { text(delta); thinking(delta); toolStart(ev); toolEnd(ev); usage(u); nativeRef(ref: ProviderRef) }
 export interface TurnControl { drainSteer(): string | undefined; heartbeat(): void }
 export interface TurnResult { text: string; aborted: boolean; usage?; providerRef: ProviderRef }
@@ -360,6 +360,7 @@ Pure functions from `(capabilities, runState)` to a decision; the engine and exe
 | `PiLoopAdapter` | `LlmClient.chat` tool loop | native / yes / rich / strong (we run the tools) |
 | `ClaudeSubscriptionAdapter` | `ClaudeSubscriptionProviderService.chat` | interrupt_restart (drainSteer, interrupt then resume) / yes (signal) / rich / weak |
 | `AntigravityAdapter` | `AntigravityProviderService.chat` | interrupt_restart (cancel then re-prompt) / yes / sparse / weak |
+| `CodexAdapter` | `CodexProviderService.chat` over `codex app-server` | native (`turn/steer` joins the running turn) / yes (`turn/interrupt`) / rich / weak |
 
 There is no `terminalQuality` flag: every adapter's `startTurn` settles when its stream closes, and that settlement is the turn's terminal signal, so no code path would read a "stream closed without a terminal event" policy. A hung stream is caught by rule 2's heartbeat window (§12.4).
 
@@ -367,7 +368,7 @@ Shared builders in `src/mms/run/adapters/shared/` **before** the second adapter:
 
 ### 13.5 `turn.start` executor
 
-The executor lives in `src/mms/orchestrator/OrchestratorService.ts`: `effectExecutors()['turn.start']` → `executeTurnStartEffect` (wake and integration payloads branch to `executeWakeEffect` / `executeIntegrationEffect`) → `runTurnOnSession` → `executeTurn`, which resolves the adapter by `thread.modelOverride.llmProvider` via `AdapterRegistry`, builds `TurnInput` (prompt, images, history handoff from `nativeContext`, mode), calls `startTurn`, pipes `TurnSink` into the transcript/stream emitters and marks the run terminal. A separate `executors/turnStart.ts` was not split out: admission, workspace, checkpoint and transcript state are orchestrator-owned. The executor starts only a `queued` run: a claimed effect whose run is no longer queued returns before any workspace or provider work, and a run that cannot be marked `starting` (cancelled meanwhile, or held elsewhere) fails the turn before provider I/O.
+The executor lives in `src/mms/orchestrator/OrchestratorService.ts`: `effectExecutors()['turn.start']` → `executeTurnStartEffect` (wake and integration payloads branch to `executeWakeEffect` / `executeIntegrationEffect`) → `runTurnOnSession` → `executeTurn`, which resolves the adapter by the thread's provider instance (`thread.modelOverride.instanceId`, §13.8) via `AdapterRegistry`, builds `TurnInput` (prompt, images, history handoff from `nativeContext`, mode), calls `startTurn`, pipes `TurnSink` into the transcript/stream emitters and marks the run terminal. A separate `executors/turnStart.ts` was not split out: admission, workspace, checkpoint and transcript state are orchestrator-owned. The executor starts only a `queued` run: a claimed effect whose run is no longer queued returns before any workspace or provider work, and a run that cannot be marked `starting` (cancelled meanwhile, or held elsewhere) fails the turn before provider I/O.
 
 ### 13.6 Replay test kit (`src/mms/run/testkit/`)
 
@@ -381,6 +382,17 @@ The executor lives in `src/mms/orchestrator/OrchestratorService.ts`: `effectExec
 - `rg "llmProvider === '" src/mms/run src/mms/orchestrator/OrchestratorService.ts` → only inside `adapters/`; ratchet baseline lowered to 0 for the orchestrator.
 - All three adapters pass the same scenario set.
 - `capabilityReaders.test.ts` green.
+
+### 13.8 Provider instances
+
+A **driver** is a kind of runtime (`pi`, `claude`, `antigravity`, `codex`); an **instance** is one configured use of a driver with a stable id. Every caller that picks an agent — main chat, `delegate_task`, channel sessions, Bridge dispatch through a thread — selects `ProviderSelection { instanceId, model }` (`src/shared/providerInstances.ts`).
+
+- **Instance map.** Per profile, `providers.instances` in the profile config: `Record<instanceId, { driver, enabled, config? }>`. `ProviderInstanceService` (`src/mms/providers/`) seeds it on load with `antigravity`, `claude`, `codex` and `pi:<provider>` for each credentialed pi-ai provider. Enabled only means the profile may pick an instance; whether it can run is its service's `configured()` (Codex: a ChatGPT sign-in from the terminal `codex login`). The profile also stores `providers.instancesSeedVersion` (1 is the first recorded seed set). An entry is only upgraded when the profile's recorded seed version proves it is the seed: the marker is at least 1 and below the version of the seed change, and the entry still equals the old seed. A profile without a marker is never upgraded. A store that cannot be read is never seeded or written: the service keeps the last map it read and reports the error (`providers.listConfigured` → `instancesError`). A stored entry is never rewritten; seeding only adds missing ids. A `pi:<provider>` id for a known pi-ai provider without an entry resolves as an implicit enabled pi instance (the pi loop reports missing credentials itself).
+- **Resolution.** `AdapterRegistry` holds one adapter per driver and resolves instance id → entry → driver → adapter. An unknown id fails with `provider_instance_unknown`, a disabled one with `provider_instance_disabled`, both naming the id; nothing falls back to the pi loop. Stopping work already running on a disabled instance is still allowed. The one exception is the configured default when it names nothing (no default model configured): it runs on the pi driver so its loop resolves and reports the default as before. A blank explicit override (thread, channel or caller) is rejected like an unknown name.
+- **Legacy names.** Wherever an older `llmProvider` string still arrives (GUI `threads.setModel`, stored thread and channel-session `modelOverride`, `delegate_task`'s `provider`, provider refs of earlier attempts), `instanceIdForLegacyProvider` maps `claude-subscription` → `claude`, `antigravity` → `antigravity`, `codex` → `codex`, a known pi-ai provider `p` → `pi:p`, and rejects anything else with `provider_instance_unknown`. Stored selections are migrated on read and written in the instance shape `{ instanceId, llmProvider, model }` on the next save, and the global default (`providers` in the profile config) keeps the `instanceId` it was picked with until a later default names only a provider; `llmProvider` is derived from the instance and kept only for older readers. `TurnInput.llmProvider` is likewise derived and deprecated.
+- **Native continuations.** `ProviderRef.instanceId` names the instance that owns a provider session. Claude saved sessions record their instance and login policy and resume only when both match (a policy switch already drops them); Antigravity sessions and Codex threads record their instance. Mousse MCP credentials are per thread and instance (§15.1).
+- **Delegation.** `delegate_task` takes `instanceId` (and still accepts `provider`, mapped as above). The host resolves it before the delegation transaction, so an unknown or disabled instance fails the tool call without creating a thread; the delegation row's `provider` column records the instance id. That column is a record, read as stored (older rows hold a provider name); the child is routed by its thread's selection, written when the child thread is created and migrated on read like any other.
+- **Not yet.** One instance per driver in v1, and each driver has one adapter shared by its instances. A driver factory that builds an adapter per instance from its `config`, and a per-instance `status()`, come when a second instance of a driver is needed.
 
 ## 14. Phase 4 — one delegation path
 

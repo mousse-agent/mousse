@@ -1,3 +1,4 @@
+import type { ModelOverride } from '../../shared/providerInstances'
 import { createErrorProvider } from '../../shared/errors'
 import {
   existsSync,
@@ -47,10 +48,7 @@ interface ThreadMeta {
   projectId?: string
   createdAt: string
   updatedAt: string
-  modelOverride?: {
-    llmProvider: string
-    model: string
-  }
+  modelOverride?: ModelOverride
   /** Opt-in isolated git worktree. OFF by default; undefined treated as false. */
   worktreeEnabled?: boolean
   order: number

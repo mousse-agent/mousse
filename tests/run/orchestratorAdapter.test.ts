@@ -32,7 +32,7 @@ import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
 import { getDefaultSettings } from '../../src/shared/settings'
 
 class FakePiAdapter implements ProviderAdapter {
-  readonly id = 'pi'
+  readonly driver = 'pi' as const
   readonly capabilities = PI_LOOP_CAPABILITIES
   readonly turns: Array<{ input: TurnInput; host: AdapterHost }> = []
 
@@ -110,6 +110,21 @@ describe('adapter-based turn.start', () => {
     engine.store.db.close()
     rmSync(home, { recursive: true, force: true })
     delete process.env.MOUSSE_HOME
+  })
+
+  it('rejects a blank stored model override instead of running it on the pi loop', async () => {
+    const thread = store.createThread('blank override')
+    store.updateThreadMeta(thread.id, { modelOverride: { instanceId: '', llmProvider: '', model: '' } })
+    const response = await orch.send('hi', false, { threadId: thread.id, clientRequestId: 'send-blank' })
+    expect(response.message).toContain('provider_instance_unknown')
+    expect(adapter.turns).toHaveLength(0)
+  })
+
+  it('runs an explicit pi instance pinned, with the provider derived from the instance', async () => {
+    const thread = store.createThread('pinned')
+    orch.setThreadModelOverride(thread.id, { llmProvider: 'openai', model: 'gpt-x' })
+    await orch.send('hi', false, { threadId: thread.id, clientRequestId: 'send-pinned' })
+    expect(adapter.turns[0].input).toMatchObject({ instanceId: 'pi:openai', llmProvider: 'openai', model: 'gpt-x', modelPinned: true })
   })
 
   it('runs the turn through the registered adapter and records its provider ref', async () => {

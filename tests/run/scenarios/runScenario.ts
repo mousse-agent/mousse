@@ -21,6 +21,8 @@ import { EffectWorker } from '../../../src/mms/run/EffectWorker'
 import { RunEngine } from '../../../src/mms/run/RunEngine'
 import { RunStore } from '../../../src/mms/run/RunStore'
 import { replayAcpProcess } from '../../../src/mms/run/testkit/acpReplay'
+import { replayCodexAppServer } from '../../../src/mms/run/testkit/codexAppServerReplay'
+import { createCodexProviderService } from '../../../src/mms/run/adapters/codex'
 import { replayPiChat } from '../../../src/mms/run/testkit/piChatReplay'
 import { DEFAULT_VOLATILE_KEYS, dropKeys, readTranscript, ReplayTransport } from '../../../src/mms/run/testkit/ReplayTransport'
 import { Reconciler } from '../../../src/mms/run/Reconciler'
@@ -40,7 +42,8 @@ export const FIXTURES_DIR = join(__dirname, '..', 'fixtures')
 const SELECTION: Record<string, { llmProvider: string; model: string }> = {
   pi: { llmProvider: 'openai', model: 'gpt-replay' },
   'claude-subscription': { llmProvider: 'claude-subscription', model: 'sonnet' },
-  antigravity: { llmProvider: 'antigravity', model: 'replay-model' }
+  antigravity: { llmProvider: 'antigravity', model: 'replay-model' },
+  codex: { llmProvider: 'codex', model: 'gpt-replay-codex' }
 }
 
 export interface ScenarioResult {
@@ -203,6 +206,18 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     })
     stops.push(() => service.stop())
     orch.setAntigravityProvider(service)
+  }
+  if (involved.has('codex')) {
+    const binary = join(home, 'codex')
+    writeFileSync(binary, '#!/bin/sh\nexit 0\n')
+    chmodSync(binary, 0o755)
+    const providerDir = join(home, 'providers', 'codex')
+    mkdirSync(providerDir, { recursive: true })
+    writeFileSync(join(providerDir, 'settings.json'), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-replay-codex', label: 'Replay' }] }))
+    // Replace the app-server process only; the client, service and adapter run for real.
+    const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(transport) })
+    stops.push(() => service.stop())
+    orch.setCodexProvider(service)
   }
 
   try {

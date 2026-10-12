@@ -1,3 +1,4 @@
+import type { ModelOverride } from './providerInstances'
 export type MainView = 'agents' | 'browser' | 'terminal' | 'files' | 'git' | 'documents'
 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
@@ -130,10 +131,8 @@ export interface ChannelSession {
   mousseThreadId: string
   lastMessageAt?: string
   createdAt: string
-  modelOverride?: {
-    llmProvider: string
-    model: string
-  }
+  /** Session model; `instanceId` is absent on sessions saved before provider instances existed. */
+  modelOverride?: ModelOverride
 }
 
 export interface ChannelDirectoryEntry {
@@ -690,11 +689,11 @@ export interface Thread {
   projectId?: string
   createdAt: string
   updatedAt: string
-  /** Explicit model selection for this thread; absent means use global settings. */
-  modelOverride?: {
-    llmProvider: string
-    model: string
-  }
+  /**
+   * Explicit model selection for this thread; absent means use global settings. `instanceId` is
+   * absent on threads saved before provider instances existed.
+   */
+  modelOverride?: ModelOverride
   /**
    * Opt-in isolated git worktree for this thread. OFF by default (undefined/false
    * means run on the primary checkout). Toggleable from the new-chat input bar

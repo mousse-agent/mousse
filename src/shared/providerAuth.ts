@@ -1,7 +1,19 @@
 export type ProviderAuthType = 'api_key' | 'oauth'
 
+/** Codex sign-in state of a profile, from a live `account/read` on the terminal sign-in. */
+export interface CodexStatus {
+  state: 'connected' | 'missing_binary' | 'signed_out' | 'disconnected' | 'error'
+  message?: string
+  /** ISO time of the last live `account/read`. */
+  checkedAt?: string
+  /** ChatGPT plan of the signed-in account. */
+  planType?: string
+}
+
 export interface ConfiguredProvider {
   id: string
+  /** Provider instance this sign-in serves. */
+  instanceId?: string
   label: string
   authType: ProviderAuthType
   source?: string

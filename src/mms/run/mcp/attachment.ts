@@ -103,3 +103,21 @@ export function mousseMcpServerConfig(attachment: McpAttachment): McpServerConfi
     headers: { Authorization: bearerHeader(attachment) }
   }
 }
+
+/**
+ * Codex config overrides attaching the Mousse server (SPEC §15.2): dotted `mcp_servers.mousse.*`
+ * keys, the same keys `codex -c key=value` takes. The Codex adapter sends them as the `config` of
+ * `thread/start` / `thread/resume`, so each thread gets its own run token and the token never
+ * appears in a process argument list. Mousse tools are pre-approved (`approve`): the server itself
+ * scopes every call to the run's credential, as for Claude.
+ */
+export function codexMcpConfigOverrides(attachment: McpAttachment | null | undefined): Record<string, string | number | Record<string, string>> {
+  if (!attachment) return {}
+  const prefix = `mcp_servers.${MOUSSE_MCP_SERVER_NAME}`
+  return {
+    [`${prefix}.url`]: attachment.url,
+    [`${prefix}.http_headers`]: { Authorization: bearerHeader(attachment) },
+    [`${prefix}.tool_timeout_sec`]: MOUSSE_MCP_TOOL_TIMEOUT_MS / 1000,
+    [`${prefix}.default_tools_approval_mode`]: 'approve'
+  }
+}

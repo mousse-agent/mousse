@@ -9,6 +9,7 @@ import { client, methods, ndJsonStream, PROTOCOL_VERSION, type ClientConnection,
 import type { ConfiguredProvider, ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
+import { ANTIGRAVITY_INSTANCE_ID } from '../../../shared/providerInstances'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { acpMcpServers } from '../../run/mcp/attachment'
@@ -20,8 +21,12 @@ type AcpProcess = { child: ChildProcessWithoutNullStreams; connection: ClientCon
   /** `initialize` advertised `mcpCapabilities.http`; otherwise the Mousse server goes through the stdio bridge. */
   mcpHttp?: boolean
   /** Bearer token of the Mousse MCP server the session was opened with (null: none). */
-  mcpToken?: string | null }
-type ProfileSettings = { binaryPath?: string; models?: LlmModelOption[]; signedIn?: boolean; sessions?: Record<string, { sessionId: string; cwd: string; historyKey?: string }> }
+  mcpToken?: string | null
+  /** Provider instance whose turn opened the session. */
+  instanceId?: string }
+/** `instanceId` is absent on sessions saved before provider instances existed (the default instance). */
+type SavedAcpSession = { sessionId: string; cwd: string; historyKey?: string; instanceId?: string }
+type ProfileSettings = { binaryPath?: string; models?: LlmModelOption[]; signedIn?: boolean; sessions?: Record<string, SavedAcpSession> }
 const AUTH_PREFIX = 'Open the following link to authenticate the ACP server: '
 const BROWSER_MARKER = '__MOUSSE_ANTIGRAVITY_AUTH_URL__'
 const ISOLATED_KEYS = [
@@ -382,14 +387,17 @@ export class AntigravityProviderService {
    * goes into the session's first prompt. The token is stable per thread, so a live session is reused
    * across turns; only a changed token (after a revocation) closes it and resumes with the new one.
    */
-  async chat(input: { threadId: string; cwd: string; model: string; prompt: string; appletInstructions?: string; history?: string; images?: ChatImageAttachment[]; signal?: AbortSignal; mcp?: { url: string; token: string } | null; orchestrationInstructions?: string; onText: (text: string) => void; drainSteer?: () => string | undefined; onSteer?: (text: string) => void; onTool?: (event: { phase: 'start' | 'complete'; callId: string; title: string; toolName?: string }) => void }): Promise<string> {
+  async chat(input: { threadId: string; instanceId?: string; cwd: string; model: string; prompt: string; appletInstructions?: string; history?: string; images?: ChatImageAttachment[]; signal?: AbortSignal; mcp?: { url: string; token: string } | null; orchestrationInstructions?: string; onText: (text: string) => void; drainSteer?: () => string | undefined; onSteer?: (text: string) => void; onTool?: (event: { phase: 'start' | 'complete'; callId: string; title: string; toolName?: string }) => void }): Promise<string> {
     input.signal?.throwIfAborted()
     if (!this.configured()) throw new Error('Antigravity is not signed in')
     const historyKey = this.historyKey(input.history ?? '')
-    const saved = this.settings.sessions?.[input.threadId]
+    const instanceId = input.instanceId ?? ANTIGRAVITY_INSTANCE_ID
+    // A native session belongs to the instance that opened it; another instance starts fresh.
+    const stored = this.settings.sessions?.[input.threadId]
+    const saved = stored && (stored.instanceId ?? ANTIGRAVITY_INSTANCE_ID) === instanceId ? stored : undefined
     let active = this.sessions.get(input.threadId)
     const mcpToken = input.mcp?.token ?? null
-    if (active && (active.connection.signal.aborted || active.cwd !== input.cwd || saved?.historyKey !== historyKey || (active.mcpToken ?? null) !== mcpToken)) {
+    if (active && (active.connection.signal.aborted || active.cwd !== input.cwd || saved?.historyKey !== historyKey || (active.mcpToken ?? null) !== mcpToken || (active.instanceId ?? ANTIGRAVITY_INSTANCE_ID) !== instanceId)) {
       this.close(active)
       this.sessions.delete(input.threadId)
       active = undefined
@@ -397,6 +405,7 @@ export class AntigravityProviderService {
     const freshProcess = !active
     active ??= this.launch()
     active.threadId = input.threadId
+    active.instanceId = instanceId
     active.cwd = input.cwd
     active.turnSignal = input.signal
     const current = active
@@ -437,7 +446,7 @@ export class AntigravityProviderService {
         input.signal?.throwIfAborted()
         // Until the owning turn commits its updated history, this ACP session is
         // deliberately non-resumable after a crash or a failed/aborted prompt.
-        this.settings.sessions = { ...this.settings.sessions, [input.threadId]: { sessionId: active.sessionId, cwd: input.cwd } }
+        this.settings.sessions = { ...this.settings.sessions, [input.threadId]: { sessionId: active.sessionId, cwd: input.cwd, instanceId } }
         this.save()
         const models = modelOptions(session)
         if (models.length) { this.settings.models = models; this.save() }

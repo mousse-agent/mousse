@@ -57,7 +57,14 @@ export interface RunRecord {
 }
 
 export interface ProviderRef {
+  /** `llmProvider` name of the turn (derived from the instance; see `TurnInput.llmProvider`). */
   provider: string
+  /**
+   * Provider instance that owns the session (SPEC §13.8). A session is only resumed, interrupted
+   * or forked through this instance; refs recorded before instances existed lack it and are mapped
+   * from `provider`.
+   */
+  instanceId?: string
   model?: string
   sessionId?: string
   nativeTurnId?: string
@@ -260,6 +267,10 @@ export interface DelegationRecord {
   parentThreadId: string
   childThreadId: string
   childRunId: string
+  /**
+   * Provider instance id the child was asked to run on (null: the parent's). Rows written before
+   * provider instances existed hold the legacy `llmProvider` name instead.
+   */
   provider: string | null
   model: string | null
   promptDigest: string

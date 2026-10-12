@@ -108,6 +108,9 @@ export class SettingsStore {
       current as unknown as Record<string, unknown>,
       partial as Partial<Record<string, unknown>>
     ) as unknown as MousseSettings
+    // A default chosen by provider name alone must not keep the instance of an earlier choice.
+    if (partial.provider?.llmProvider !== undefined && partial.provider.instanceId === undefined)
+      merged.provider = { ...merged.provider, instanceId: undefined }
     const normalized = normalizeSettings(merged)
     this.config.applySettingsPatch(normalized)
     return this.get()

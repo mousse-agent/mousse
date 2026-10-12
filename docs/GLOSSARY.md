@@ -11,6 +11,7 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Run:** the saved record of a turn in the Run Engine, with its own ID. Stop, Steer, and Undo act on a run.
 - **Steer:** a message sent to a turn that is still running, to change its direction.
 - **Provider:** the agent backend a thread uses, such as Claude or Codex. Each provider has an adapter that translates its protocol.
+- **Provider instance:** one configured provider a profile can pick, with a stable id such as `claude`, `codex` or `pi:openai`. Every caller chooses an agent by instance id and model.
 - **Agent:** a model working in a thread, including any subagents it starts.
 - **Workflow:** a published sequence of steps that can run from the canvas, chat, CLI, channels, or schedules.
 - **Channel:** an outside chat connection, such as Telegram, Discord, or a webhook, that sends messages to Mousse and gets replies.

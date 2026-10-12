@@ -17,6 +17,7 @@ import { AsyncLocalStorage } from 'async_hooks'
 import { join } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { normalizeContextSettings, resolveContextCompactionTokens, resolveModelForMode } from '../../shared/settings'
+import type { ModelOverride } from '../../shared/providerInstances'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type { WorkflowChatExecutor } from '../platform/MmsWorkflowChatBridge'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
@@ -49,6 +50,7 @@ import { AdapterRegistry } from '../run/adapters/AdapterRegistry'
 import { PiLoopAdapter } from '../run/adapters/pi/PiLoopAdapter'
 import { ClaudeSubscriptionAdapter } from '../run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { AntigravityAdapter } from '../run/adapters/antigravity/AntigravityAdapter'
+import { CodexAdapter, type CodexClient } from '../run/adapters/codex'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, ProviderMetrics, RecoveredContext, TurnControl, TurnInput, TurnSink } from '../run/adapters/ProviderAdapter'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { McpCaller, MousseToolHost } from '../run/mcp/toolRegistry'
@@ -116,6 +118,7 @@ import { computeContextUsage } from './contextUsage'
 import { getToolCallDisplay } from '../../shared/toolCallDisplay'
 import type { SettingsStore } from '../settings/SettingsStore'
 import type { ProviderAuthService } from '../providers/ProviderAuthService'
+import { ProviderInstanceService } from '../providers/ProviderInstanceService'
 import type { McpManager } from '../integrations/mcp/McpManager'
 import type { SkillsRegistry } from '../integrations/skills/SkillsRegistry'
 import type { AgentConfigManager } from '../integrations/agents/AgentConfigManager'
@@ -460,6 +463,9 @@ export class OrchestratorService extends EventEmitter {
   setAppletStore(store: AppletStore): void { this.appletStore = store }
   private claudeSubscription?: ClaudeSubscriptionProviderService
   setClaudeSubscriptionProvider(provider: ClaudeSubscriptionProviderService): void { this.claudeSubscription = provider }
+  private codex?: CodexClient
+  /** The profile's Codex service (`codex` driver); read by the Codex adapter on every turn. */
+  setCodexProvider(provider: CodexClient | null): void { this.codex = provider ?? undefined }
   private antigravity?: AntigravityProviderService
   setAntigravityProvider(provider: AntigravityProviderService): void { this.antigravity = provider }
   private readonly lifecycle = new OwnedWorkBarrier()
@@ -582,13 +588,27 @@ export class OrchestratorService extends EventEmitter {
     })
   }
   private llm: LlmClient
-  /** Provider adapters for `executeTurn` (SPEC §13). The pi loop reads `this.llm` per turn. */
+  /**
+   * Provider adapters for `executeTurn` (SPEC §13), one per driver kind, resolved by provider
+   * instance id (§13.8). The pi loop reads `this.llm` per turn. The constructor gives the registry
+   * an in-memory instance map; the profile installs its stored one with `setProviderInstances`.
+   */
   private adapters = new AdapterRegistry()
     .register(new PiLoopAdapter(() => this.llm))
     .register(new ClaudeSubscriptionAdapter(() => this.claudeSubscription ?? null))
     .register(new AntigravityAdapter(() => this.antigravity ?? null))
-  /** Test seam: replaces the provider adapters. */
+    .register(new CodexAdapter(() => this.codex ?? null))
+  /** Test seam: replaces the provider adapters (and with them the instance map they resolve against). */
   setAdapterRegistry(registry: AdapterRegistry): void { this.adapters = registry }
+  /** The profile's provider instances (stored map, seeds, legacy mapping). */
+  setProviderInstances(instances: ProviderInstanceService): void { this.adapters.setInstances(instances) }
+  /**
+   * Migrate-on-read for a stored model selection: adds the instance id an older `llmProvider`
+   * maps to. Never throws; an unmappable selection fails when a turn resolves it.
+   */
+  migrateModelOverride<T extends ModelOverride>(override: T | undefined): T | undefined {
+    return this.adapters.instances.migrate(override)
+  }
   private readonly questions: UserQuestionService
   private readonly modeRegistry: ModeRegistry
   /** Bound GUI/CLI session (active thread). Concurrent turns use ALS-scoped sessions. */
@@ -811,6 +831,7 @@ export class OrchestratorService extends EventEmitter {
     runtime?: { questions?: UserQuestionService; modeRegistry?: ModeRegistry }
   ) {
     super()
+    this.adapters.setInstances(new ProviderInstanceService({ providerAuth }))
     this.questions = runtime?.questions ?? defaultUserQuestionService
     this.modeRegistry = runtime?.modeRegistry ?? defaultModeRegistry
     // Seed unbound session registries (tests / legacy inject shared instances).
@@ -1008,7 +1029,9 @@ export class OrchestratorService extends EventEmitter {
       const ref = run.activeAttemptId ? engine.store.getAttempt(run.activeAttemptId)?.providerRef ?? null : null
       if (ref) {
         try {
-          const adapter = this.adapters.get(ref.provider)
+          // A session already running on an instance can still be stopped after it was disabled.
+          // A ref of a turn that ran on the unselected default names the bare pi driver.
+          const { adapter } = this.adapters.resolveSelection({ instanceId: ref.instanceId, llmProvider: ref.provider }, { allowDisabled: true, unselectedDefault: true })
           if ((await adapter.interrupt(ref)) === 'interrupted') live = true
         } catch (error) {
           console.warn('adapter interrupt failed', { runId, error: error instanceof Error ? error.message : String(error) })
@@ -1086,10 +1109,11 @@ export class OrchestratorService extends EventEmitter {
    * The thread's MCP credential for the adapter (reused, re-pointed at this run and ceiling) when
    * the adapter can attach the server; null otherwise.
    */
-  private mcpFor(adapter: ProviderAdapter, threadId: string, runId: string | undefined, mode: ChatMode): AdapterHost['mcp'] {
+  private mcpFor(adapter: ProviderAdapter, instanceId: string, threadId: string, runId: string | undefined, mode: ChatMode): AdapterHost['mcp'] {
     if (!runId || !this.mcpAttachment || !this.runEngine || !mcpAttachable(adapter.capabilities)) return null
     try {
-      return this.mcpAttachment.attach({ threadId, runId, provider: adapter.id, modeCeiling: this.modeCeilingFor(threadId, mode) })
+      // One credential per thread and provider instance (SPEC §15.1).
+      return this.mcpAttachment.attach({ threadId, runId, provider: instanceId, modeCeiling: this.modeCeilingFor(threadId, mode) })
     } catch (error) {
       console.warn('Mousse MCP credential could not be minted; the turn runs without Mousse tools', {
         runId,
@@ -1377,18 +1401,18 @@ export class OrchestratorService extends EventEmitter {
   capabilitiesForThread(threadId: string): ProviderCapabilities | null {
     try {
       const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
-      const selected = session?.modelOverride ?? this.threadStore?.getThread(threadId)?.modelOverride ?? this.defaultAgentModel()
-      return this.adapters.get(selected.llmProvider).capabilities
+      const explicit = session?.modelOverride ?? this.threadStore?.getThread(threadId)?.modelOverride
+      return this.adapters.resolveSelection(explicit ?? this.defaultAgentModel(), { allowDisabled: true, unselectedDefault: !explicit }).adapter.capabilities
     } catch {
       return null
     }
   }
 
-  private defaultAgentModel(): { llmProvider: string; model: string } {
-    return resolveModelForMode(this.settingsStore.get(), 'agent', [
+  private defaultAgentModel(): ModelOverride {
+    return this.adapters.instances.migrate(resolveModelForMode(this.settingsStore.get(), 'agent', [
       ...(this.providerAuth.credentials?.listProviderIds() ?? []),
       ...this.adapters.configuredProviderIds()
-    ])
+    ]))
   }
 
   /** The parent's workspace path a `shared` child observes, or null when the parent has none. */
@@ -1408,14 +1432,17 @@ export class OrchestratorService extends EventEmitter {
     if (!parentThread) throw new Error(`Thread not found: ${request.parentThreadId}`)
     const parent = this.getOrCreateSession(request.parentThreadId)
     const title = request.title?.trim() || `Delegated: ${request.prompt.trim().split('\n')[0].slice(0, 60)}`
-    const child = this.threadStore.createThread(title, parentThread.projectId)
-    const inherited = parent.modelOverride ?? undefined
-    const override = request.provider || request.model
-      ? {
-          llmProvider: request.provider ?? (inherited ?? this.defaultAgentModel()).llmProvider,
-          model: request.model ?? (inherited ?? this.defaultAgentModel()).model
-        }
+    const inherited = this.adapters.instances.migrate(parent.modelOverride ?? undefined)
+    const base = (): ModelOverride => inherited ?? this.defaultAgentModel()
+    // The requested instance (already resolved by `delegateTask`) or the parent's. Resolved before the
+    // thread exists, so an unknown instance fails loudly without leaving an orphaned thread.
+    const override = request.instanceId || request.model
+      ? this.adapters.instances.overrideFor({
+          ...(request.instanceId ? { instanceId: request.instanceId } : { instanceId: base().instanceId, llmProvider: base().llmProvider }),
+          model: request.model ?? base().model
+        })
       : inherited
+    const child = this.threadStore.createThread(title, parentThread.projectId)
     if (override) this.threadStore.updateThreadMeta(child.id, { modelOverride: structuredClone(override) })
     const session = this.getOrCreateSession(child.id)
     session.modelOverride = override ? structuredClone(override) : undefined
@@ -1486,7 +1513,7 @@ export class OrchestratorService extends EventEmitter {
     const title = creation.title?.trim() || `Fork of ${sourceThread.name}`.slice(0, 120)
     const fork = this.threadStore.createThread(title, sourceThread.projectId, undefined,
       sourceThread.worktreeEnabled === undefined ? undefined : { worktreeEnabled: sourceThread.worktreeEnabled })
-    const override = source.modelOverride ?? sourceThread.modelOverride
+    const override = this.adapters.instances.migrate(source.modelOverride ?? sourceThread.modelOverride)
     if (override) this.threadStore.updateThreadMeta(fork.id, { modelOverride: structuredClone(override) })
     const session = this.getOrCreateSession(fork.id)
     session.modelOverride = override ? structuredClone(override) : undefined
@@ -1858,12 +1885,18 @@ export class OrchestratorService extends EventEmitter {
     const role = input.role?.trim() || undefined
     if (input.workspace === 'shared' && !(role && SHARED_WORKSPACE_ROLES.has(role)))
       throw new Error('workspace "shared" is allowed only for read-only roles (role "research" or "review"); use workspace "isolated" for work that edits, builds or tests.')
+    // SPEC §13.8: the child names an instance; an older `provider` name is mapped to one. An unknown
+    // or disabled instance fails the tool call here, before any thread is created.
+    const requested = input.instanceId?.trim() || input.provider?.trim()
+    const instanceId = requested
+      ? this.adapters.resolve(input.instanceId?.trim() || this.adapters.instances.instanceIdForLegacyProvider(requested)).instanceId
+      : undefined
     const accepted = await engine.requestDelegation({
       parentThreadId,
       parentRunId,
       clientRequestId: `delegation:${parentRunId}:${call.toolCallId}`,
       prompt: input.prompt,
-      provider: input.provider?.trim() || undefined,
+      instanceId,
       model: input.model?.trim() || undefined,
       role,
       workspace: input.workspace,
@@ -2404,7 +2437,7 @@ export class OrchestratorService extends EventEmitter {
         data.messageQueue,
         data.agents,
         data.tasks,
-        this.threadStore.getThread(threadId)?.modelOverride
+        this.adapters.instances.migrate(this.threadStore.getThread(threadId)?.modelOverride)
       )
       if (this.projectManager) {
         const projectPath = resolveThreadProjectPath(this.projectManager, this.threadStore, threadId)
@@ -2433,17 +2466,23 @@ export class OrchestratorService extends EventEmitter {
     override: ThreadSession['modelOverride'] | undefined
   ): ThreadSession['modelOverride'] {
     const session = this.getOrCreateSession(threadId)
-    const previousProvider = session.modelOverride?.llmProvider
+    // Stored in the instance shape (SPEC §13.8); callers that still pass an `llmProvider` are mapped.
+    const next = this.adapters.instances.migrate(override)
+    const instanceKey = (selection: ModelOverride | undefined) => {
+      const migrated = this.adapters.instances.migrate(selection)
+      return migrated?.instanceId ?? migrated?.llmProvider
+    }
+    const switched = instanceKey(session.modelOverride) !== instanceKey(next)
     // SPEC §16.1: one provider switch at a time; a pending handoff must be delivered or fail first.
-    const pending = previousProvider !== override?.llmProvider ? this.runEngine?.handoffs.pendingForThread(threadId) : null
+    const pending = switched ? this.runEngine?.handoffs.pendingForThread(threadId) : null
     if (pending)
       throw new DomainRpcError('handoff_pending', `Thread ${threadId} is still handing its context to ${pending.toRef.provider}; switch providers after that turn.`, { handoffId: pending.handoffId })
-    session.modelOverride = override ? structuredClone(override) : undefined
+    session.modelOverride = next ? structuredClone(next) : undefined
     if (this.threadStore) {
       this.threadStore.updateThreadMeta(threadId, { modelOverride: session.modelOverride })
     }
-    // SPEC §15.1: a credential belongs to a thread and provider; a provider switch revokes it.
-    if (previousProvider !== session.modelOverride?.llmProvider) this.revokeMcp(threadId)
+    // SPEC §15.1: a credential belongs to a thread and provider instance; a switch revokes it.
+    if (switched) this.revokeMcp(threadId)
     return session.modelOverride
   }
 
@@ -2475,7 +2514,7 @@ export class OrchestratorService extends EventEmitter {
         queue ?? (this.threadStore ? this.threadStore.loadMessageQueue(threadId) : []),
         undefined,
         undefined,
-        this.threadStore?.getThread(threadId)?.modelOverride
+        this.adapters.instances.migrate(this.threadStore?.getThread(threadId)?.modelOverride)
       )
     }
 
@@ -2954,8 +2993,14 @@ export class OrchestratorService extends EventEmitter {
         ...(this.providerAuth.credentials?.listProviderIds() ?? []),
         ...this.adapters.configuredProviderIds()
       ])
-      const adapter = this.adapters.get(selectedModel.llmProvider)
-      if (handoffDelivery(adapter.capabilities) === 'prompt_preamble') {
+      // The gauge never fails: a selection that cannot be resolved is measured like the pi loop's.
+      let adapter: ProviderAdapter | undefined
+      try {
+        adapter = this.adapters.resolveSelection(selectedModel, { allowDisabled: true, unselectedDefault: !modelOverride }).adapter
+      } catch {
+        adapter = undefined
+      }
+      if (adapter && handoffDelivery(adapter.capabilities) === 'prompt_preamble') {
         // Prompt-injected runtimes own their context. Without a reported window, do not display
         // a fabricated Mousse context measurement.
         if (adapter.describe?.(selectedModel.model).contextUsage !== 'reported') {
@@ -3781,7 +3826,7 @@ export class OrchestratorService extends EventEmitter {
       suppressAutoQueueDrain?: boolean
       externalSignal?: AbortSignal
       externalDrainSteer?: () => string | undefined
-      modelOverride?: { llmProvider: string; model: string }
+      modelOverride?: ModelOverride
       onTurnSettled?: (aborted: boolean) => void
       /** The caller already admitted this session (see ThreadSession.turnAdmitted) and hands ownership to this turn. */
       admissionHeld?: boolean
@@ -3913,7 +3958,7 @@ export class OrchestratorService extends EventEmitter {
       suppressAutoQueueDrain?: boolean
       externalSignal?: AbortSignal
       externalDrainSteer?: () => string | undefined
-      modelOverride?: { llmProvider: string; model: string }
+      modelOverride?: ModelOverride
       onTurnSettled?: (aborted: boolean) => void
       runId?: string
     }
@@ -4226,10 +4271,11 @@ export class OrchestratorService extends EventEmitter {
     let failureDiagnostic: Record<string, unknown> | undefined
     let compactionNote: ChatMessage | undefined
     let switchMarker: ChatMessage | undefined
-    const selectedModel = opts?.modelOverride ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
+    // Migrated to the instance shape (SPEC §13.8): `llmProvider` is re-derived from a known instance.
+    const selectedModel = this.adapters.instances.migrate(opts?.modelOverride ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
       ...(this.providerAuth.credentials?.listProviderIds() ?? []),
       ...this.adapters.configuredProviderIds()
-    ])
+    ]))
     if (displayUserMessage && !reuseLastUser) {
       const selection = { provider: selectedModel.llmProvider, model: selectedModel.model }
       const admittedUser = session.messages.slice(turnPresentationStart).find(message => message.role === 'user' && !message.hidden)
@@ -4310,7 +4356,10 @@ export class OrchestratorService extends EventEmitter {
       this.persist(true)
     }
     try {
-      const adapter = this.adapters.get(selectedModel.llmProvider)
+      // Instance id → driver → adapter; an unknown or disabled instance, or a blank explicit
+      // override, fails the turn here.
+      const instance = this.adapters.resolveSelection(selectedModel, { unselectedDefault: !(opts?.modelOverride ?? session.modelOverride) })
+      const adapter = instance.adapter
       // A transcript-native runtime (the pi loop) is sent Mousse's transcript and tools, so Mousse
       // keeps that transcript within the window before the turn. A prompt-injected runtime owns its
       // loop, context and tools and receives prior turns as a prompt preamble.
@@ -4365,7 +4414,8 @@ export class OrchestratorService extends EventEmitter {
         threadId: session.threadId,
         cwd: session.projectCwd ?? null,
         model: selectedModel.model,
-        llmProvider: selectedModel.llmProvider,
+        instanceId: instance.instanceId,
+        llmProvider: instance.llmProvider,
         modelPinned: Boolean(modelOverride),
         mode,
         prompt: handoffs ? handoffs.prompt(userContent) : userContent,
@@ -4441,7 +4491,7 @@ export class OrchestratorService extends EventEmitter {
         },
         heartbeat: () => this.heartbeatRun(engineRunId)
       }
-      const mcp = this.mcpFor(adapter, session.threadId, engineRunId, mode)
+      const mcp = this.mcpFor(adapter, instance.instanceId, session.threadId, engineRunId, mode)
       const adapterHost: AdapterHost = {
         mcp,
         tools: {
@@ -6208,7 +6258,7 @@ export class OrchestratorService extends EventEmitter {
     content: string,
     threadStore: ThreadDataStore,
     opts?: {
-      modelOverride?: { llmProvider: string; model: string }
+      modelOverride?: ModelOverride
       signal?: AbortSignal
       drainSteer?: () => string | undefined
       hostIngress?: ChannelWorkflowHostIngress
@@ -6222,7 +6272,7 @@ export class OrchestratorService extends EventEmitter {
     content: string,
     threadStore: ThreadDataStore,
     opts?: {
-      modelOverride?: { llmProvider: string; model: string }
+      modelOverride?: ModelOverride
       signal?: AbortSignal
       drainSteer?: () => string | undefined
       hostIngress?: ChannelWorkflowHostIngress

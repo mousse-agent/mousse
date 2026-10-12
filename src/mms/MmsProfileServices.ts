@@ -8,6 +8,8 @@ import { ProviderAuthService } from './providers/ProviderAuthService'
 import { AppletStore } from './applets/AppletStore'
 import { ClaudeSubscriptionProviderService } from './providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { AntigravityProviderService } from './providers/antigravity/AntigravityProviderService'
+import { ProviderInstanceService } from './providers/ProviderInstanceService'
+import { createCodexProviderService, type CodexProviderService } from './run/adapters/codex'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { OrchestratorService } from './orchestrator/OrchestratorService'
@@ -88,6 +90,10 @@ export class MmsProfileServices {
   readonly providerAuth: ProviderAuthService
   readonly antigravity: AntigravityProviderService
   readonly claudeSubscription: ClaudeSubscriptionProviderService
+  /** Codex through `codex app-server`, reusing the terminal `codex login` (never logged out). */
+  readonly codex: CodexProviderService
+  /** Provider instances of this profile: the agents callers pick by `{ instanceId, model }`. */
+  readonly providerInstances: ProviderInstanceService
   readonly projects: ProjectManager
   readonly applets: AppletStore
   readonly threads: ThreadDataStore
@@ -212,6 +218,22 @@ export class MmsProfileServices {
     this.claudeSubscription = new ClaudeSubscriptionProviderService(homeDir, this.questions, {}, {
       defaultProfile: shared.includeExternalCliConfigs ?? !shared.personal
     })
+    this.codex = createCodexProviderService(homeDir, this.questions)
+    // Seeded on load; a stored instance is never rewritten.
+    this.providerInstances = new ProviderInstanceService({
+      providerAuth: this.providerAuth,
+      store: {
+        read: () => {
+          const section = config.getProvidersSection()
+          return { instances: section.instances, seedVersion: section.instancesSeedVersion }
+        },
+        write: ({ instances, seedVersion }) => config.updateProvidersSection({ instances, instancesSeedVersion: seedVersion })
+      }
+    })
+      .registerVendor('antigravity', this.antigravity)
+      .registerVendor('claude', this.claudeSubscription)
+      .registerVendor('codex', this.codex)
+    this.providerInstances.list()
     this.integrationContext = shared.personal
       ? {
           profileId: this.profileId,
@@ -296,6 +318,8 @@ export class MmsProfileServices {
     this.orchestrator.setAppletStore(this.applets)
     this.orchestrator.setAntigravityProvider(this.antigravity)
     this.orchestrator.setClaudeSubscriptionProvider(this.claudeSubscription)
+    this.orchestrator.setCodexProvider(this.codex)
+    this.orchestrator.setProviderInstances(this.providerInstances)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()
@@ -935,6 +959,7 @@ export class MmsProfileServices {
       () => this.requests.waitForIdle(),
       () => this.antigravity.stop(),
       () => this.claudeSubscription.stop(),
+      () => this.codex.stop(),
       () => this.ptyManager.shutdown(),
       () => this.headlessRunner.shutdown(),
       () => this.mcpManager.shutdown()

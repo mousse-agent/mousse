@@ -117,7 +117,7 @@ function control(steer?: string): TurnControl & { beats: number } {
 describe('PiLoopAdapter', () => {
   it('declares the pi loop capabilities', () => {
     const adapter = new PiLoopAdapter(() => ({ chat: async () => chatResult() }))
-    expect(adapter.id).toBe('pi')
+    expect(adapter.driver).toBe('pi')
     expect(adapter.capabilities).toEqual({
       steer: 'native',
       interrupt: true,

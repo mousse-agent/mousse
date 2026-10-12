@@ -104,7 +104,8 @@ const PROTOCOL_BACKED_CHANNELS: Record<string, string> = {
   'providers:login:respond': 'providers.loginRespond',
   'providers:login:cancel': 'providers.loginCancel',
   'providers:claudeStatus': 'providers.claudeStatus',
-  'providers:claudeSetLoginPolicy': 'providers.claudeSetLoginPolicy'
+  'providers:claudeSetLoginPolicy': 'providers.claudeSetLoginPolicy',
+  'providers:codexStatus': 'providers.codexStatus'
 }
 
 /** Events bridged from protocol → renderer (preload listener names). */

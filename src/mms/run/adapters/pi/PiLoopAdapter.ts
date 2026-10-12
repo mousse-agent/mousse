@@ -1,7 +1,6 @@
 import type { Message } from '@earendil-works/pi-ai'
 import type { LlmChatResult, LlmClient } from '../../../orchestrator/LlmClient'
 import type { ProviderRef } from '../../types'
-import { PI_ADAPTER_ID } from '../AdapterRegistry'
 import type {
   AdapterHost,
   ProviderAdapter,
@@ -34,7 +33,7 @@ export const PI_LOOP_CAPABILITIES: ProviderCapabilities = Object.freeze({
  * the orchestrator's `LlmClient` after the adapter is built.
  */
 export class PiLoopAdapter implements ProviderAdapter {
-  readonly id = PI_ADAPTER_ID
+  readonly driver = 'pi' as const
   readonly capabilities = PI_LOOP_CAPABILITIES
 
   constructor(private readonly client: () => PiChatClient) {}
@@ -45,7 +44,7 @@ export class PiLoopAdapter implements ProviderAdapter {
     ctl: TurnControl,
     host: AdapterHost
   ): Promise<TurnResult> {
-    const providerRef: ProviderRef = { provider: input.llmProvider, model: input.model }
+    const providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
     // Output or tool side effects make a replay after context overflow unsafe.
     let progressed = false

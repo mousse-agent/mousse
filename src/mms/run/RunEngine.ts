@@ -81,7 +81,11 @@ export interface DelegationRequest {
   /** `delegation:<parentRunId>:<toolCallId>`; a retry replays the first receipt. */
   clientRequestId: string
   prompt: string
-  provider?: string
+  /**
+   * Provider instance the child runs on (SPEC §13.8), already resolved by the host; absent: the
+   * parent's. Recorded in the delegation row's `provider` column.
+   */
+  instanceId?: string
   model?: string
   role?: string
   workspace: 'isolated' | 'shared'
@@ -629,7 +633,7 @@ export class RunEngine extends EventEmitter {
       parentThreadId: input.parentThreadId,
       childThreadId,
       childRunId: child.runId,
-      provider: input.provider,
+      provider: input.instanceId,
       model: input.model,
       prompt: input.prompt,
       wake: input.wake,

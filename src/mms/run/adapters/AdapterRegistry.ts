@@ -1,49 +1,99 @@
+import type { ModelOverride, ProviderDriverKind } from '../../../shared/providerInstances'
+import { ProviderInstanceService, type ResolvedProviderInstance } from '../../providers/ProviderInstanceService'
 import { fail } from '../db/RunStoreError'
 import type { ProviderAdapter } from './ProviderAdapter'
 
-/** Adapter id of the in-process pi-ai tool loop; every pi-ai provider routes here. */
-export const PI_ADAPTER_ID = 'pi'
+/** Driver kind of the in-process pi-ai tool loop; every `pi:<provider>` instance runs on it. */
+export const PI_DRIVER: ProviderDriverKind = 'pi'
 
-/**
- * `llmProvider` values served by a vendor runtime rather than the pi loop. The only place outside
- * an adapter that names providers (SPEC §2 invariant 8).
- */
-const NATIVE_ADAPTER_IDS: ReadonlySet<string> = new Set(['claude-subscription', 'antigravity'])
-
-/** Adapter id serving `llmProvider`. */
-export function adapterIdFor(llmProvider: string): string {
-  return NATIVE_ADAPTER_IDS.has(llmProvider) ? llmProvider : PI_ADAPTER_ID
+/** An instance resolved to the adapter of its driver. */
+export interface ResolvedAdapter extends ResolvedProviderInstance {
+  adapter: ProviderAdapter
 }
 
-/** Resolves the adapter for a thread's `llmProvider` (SPEC §13.5). */
+/**
+ * Resolves the adapter for a provider instance (SPEC §13.5, §13.8): instance id → instance entry
+ * → driver → adapter. An unknown or disabled instance throws `provider_instance_unknown` /
+ * `provider_instance_disabled`; nothing falls back to the pi loop. Adapters are registered once per
+ * driver kind. The driver factory (with the Codex adapter) will build adapters per instance from
+ * the entry's `config`; until then each driver has one adapter shared by its instances.
+ */
 export class AdapterRegistry {
-  private readonly adapters = new Map<string, ProviderAdapter>()
+  private readonly drivers = new Map<ProviderDriverKind, ProviderAdapter>()
 
-  register(adapter: ProviderAdapter): this {
-    if (this.adapters.has(adapter.id)) fail('conflict', `Adapter ${adapter.id} is already registered.`)
-    this.adapters.set(adapter.id, adapter)
+  constructor(private instanceSource: ProviderInstanceService = new ProviderInstanceService()) {}
+
+  /** The profile's instances; the registry resolves ids against them. */
+  get instances(): ProviderInstanceService {
+    return this.instanceSource
+  }
+
+  setInstances(instances: ProviderInstanceService): this {
+    this.instanceSource = instances
     return this
   }
 
-  /** Throws `bad_request` when the adapter serving `llmProvider` is not registered. */
-  get(llmProvider: string): ProviderAdapter {
-    const id = adapterIdFor(llmProvider)
-    const adapter = this.adapters.get(id)
-    if (!adapter) fail('bad_request', `No provider adapter ${id} for ${llmProvider}.`)
-    return adapter
-  }
-
-  list(): ProviderAdapter[] {
-    return [...this.adapters.values()]
+  register(adapter: ProviderAdapter): this {
+    if (this.drivers.has(adapter.driver)) fail('conflict', `An adapter for driver ${adapter.driver} is already registered.`)
+    this.drivers.set(adapter.driver, adapter)
+    return this
   }
 
   /**
-   * `llmProvider` ids of signed-in vendor runtimes, offered alongside credentialed pi-ai providers
-   * when a turn falls back to the configured default model.
+   * The instance and its driver's adapter. Throws the instance errors for an unknown or disabled
+   * id and `bad_request` when no adapter serves the instance's driver.
+   */
+  resolve(instanceId: string, options: { allowDisabled?: boolean } = {}): ResolvedAdapter {
+    const resolved = this.instanceSource.resolve(instanceId, options)
+    const adapter = this.drivers.get(resolved.entry.driver)
+    if (!adapter) fail('bad_request', `No provider adapter for driver ${resolved.entry.driver} (instance ${instanceId}).`)
+    return { ...resolved, adapter }
+  }
+
+  /**
+   * `resolve` for a selection that names an instance or, in older records, only an `llmProvider`.
+   *
+   * `unselectedDefault`: the selection is the configured default, not an explicit override. Only
+   * then may it name nothing at all (no default model configured): it runs on the pi driver, whose
+   * loop resolves the configured default itself and reports a missing one (`TurnInput.modelPinned`).
+   * Such a turn's provider ref names the bare `pi` driver, which resolves the same way. A blank
+   * explicit override is rejected like any unknown name; nothing else falls back.
+   */
+  resolveSelection(
+    selection: Pick<ModelOverride, 'instanceId' | 'llmProvider'>,
+    options: { allowDisabled?: boolean; unselectedDefault?: boolean } = {}
+  ): ResolvedAdapter {
+    const blank = !selection.instanceId?.trim() && !selection.llmProvider?.trim()
+    if (options.unselectedDefault && (blank || selection.instanceId === PI_DRIVER)) {
+      const adapter = this.drivers.get(PI_DRIVER)
+      if (!adapter) fail('bad_request', 'No model is selected and no pi loop adapter is registered.')
+      return { instanceId: PI_DRIVER, entry: { driver: PI_DRIVER, enabled: true }, llmProvider: '', adapter }
+    }
+    return this.resolve(this.instanceSource.instanceIdOf(selection), options)
+  }
+
+  get(instanceId: string): ProviderAdapter {
+    return this.resolve(instanceId).adapter
+  }
+
+  list(): ProviderAdapter[] {
+    return [...this.drivers.values()]
+  }
+
+  /**
+   * `llmProvider` names of enabled vendor instances whose runtime is signed in, offered alongside
+   * credentialed pi-ai providers when a turn falls back to the configured default model.
    */
   configuredProviderIds(): string[] {
-    return this.list()
-      .filter((adapter) => adapter.configured?.() === true)
-      .map((adapter) => adapter.id)
+    const ids: string[] = []
+    for (const instanceId of Object.keys(this.instanceSource.list())) {
+      try {
+        const resolved = this.resolve(instanceId)
+        if (resolved.entry.driver !== PI_DRIVER && resolved.adapter.configured?.() === true) ids.push(resolved.llmProvider)
+      } catch {
+        // Disabled instances and drivers without an adapter offer nothing.
+      }
+    }
+    return ids
   }
 }
