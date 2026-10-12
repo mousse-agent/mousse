@@ -1,3 +1,4 @@
+import { registerAppletIpc } from '../applets/registerAppletIpc'
 import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
 import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
 import { CHAT_METHODS } from '../../shared/chats'
@@ -21,6 +22,7 @@ import { PresentationState } from '../mms/PresentationState'
 import { bootstrapPresentation } from '../mms/bootstrapPresentation'
 export { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { MmsProtocolError } from '../../mms/protocol/client'
+import { guiChatRequestError } from '../mms/requestErrors'
 import type { ProtocolEvent } from '../../mms/protocol'
 import {
   bridgeProtocolEvent,
@@ -50,6 +52,7 @@ import { surfaceToWindowBackground } from '../../shared/accentPalette'
 import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
 import { showCopyMenu } from '../contextMenu'
 import { openExternalSafely } from '../safeExternalUrl'
+import { dispatchMcpAuthBrowser } from '../mcpAuthBrowser'
 import {
   attachWindowStateListeners,
   beginWindowDrag,
@@ -216,6 +219,7 @@ export function registerGuiIpc(
   } = services
   activeGuiMms = guiMms
   registerLinuxWindowResizeIpc(getWindow, getAgentsTasksWindow)
+  registerAppletIpc(registerHandler, guiMms, () => [getWindow(), getAgentsTasksWindow()])
 
   const browserHost = (event: Electron.IpcMainInvokeEvent): AttachedBrowserHost => {
     if (event.senderFrame !== event.sender.mainFrame || !services.attachedBrowserHost) throw new Error('In-app browser automation is unavailable')
@@ -608,9 +612,18 @@ export function registerGuiIpc(
   guiMms.on('window-connection-event', ({ senderId, event }: { senderId: number; event: import('../../mms/protocol/types').ProtocolConnectionEvent }) => {
     const win = BrowserWindow.getAllWindows().find(candidate => candidate.webContents.id === senderId)
     const binding = guiMms.getWindowBindingForSender(senderId)
-    if (!win || win.isDestroyed() || !binding || event.type !== 'bridge.hub.thread' ||
+    if (!win || win.isDestroyed() || !binding ||
       event.profileId !== binding.profileId || event.profileEpoch !== binding.epoch) return
-    win.webContents.send('bridge:thread-part', event.data)
+    if (event.type === 'mcp.auth-url') {
+      void guiMms.runWithSender(win.webContents, () => dispatchMcpAuthBrowser(
+        event,
+        () => win.isDestroyed() ? null : guiMms.getWindowBindingForSender(senderId),
+        target => shell.openExternal(target),
+        (attemptId, opened) => guiMms.request('mcp.authBrowserResult', { attemptId, opened })
+      )).catch(error => console.warn('MCP browser authorization failed', error instanceof Error ? error.message : 'Unknown error'))
+      return
+    }
+    if (event.type === 'bridge.hub.thread') win.webContents.send('bridge:thread-part', event.data)
   })
   guiMms.on('window-event', ({ senderId, event, replay }: { senderId: number; event: ProtocolEvent; replay?: boolean }) => {
     const win = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.id === senderId)
@@ -772,13 +785,14 @@ export function registerGuiIpc(
       }
       return result
     } catch (err) {
-      setThreadActivity(targetThreadId, 'idle')
-      activityTrackerFor().setBusyThreadId(null)
-      const error = err instanceof MmsProtocolError
-        ? knownAppError({ code: err.code, message: err.message, details: err.details, errorInfo: err.errorInfo })
-        : normalizeAppError(err)
+      const error = guiChatRequestError(err)
+      const disconnected = error.code === 'workspace_connection_lost'
+      if (!disconnected) {
+        setThreadActivity(targetThreadId, 'idle')
+        activityTrackerFor().setBusyThreadId(null)
+      }
       console.error('GUI chat request failed', errorDiagnostic(error, 'orchestrator.send'))
-      return { message: '', actions: [], requestAcknowledged: false, error: serializeAppError(error) }
+      return { message: '', actions: [], ...(disconnected ? {} : { requestAcknowledged: false }), error: serializeAppError(error) }
     }
   }
 
@@ -2071,6 +2085,7 @@ export function registerGuiIpc(
     endWindowDrag(win, settings)
   })
   registerHandler('window:close', () => {
+    console.info('[window] Close requested by caption control')
     getWindow()?.close()
   })
   registerHandler('window:isMaximized', () => {

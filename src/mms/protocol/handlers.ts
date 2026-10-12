@@ -1,3 +1,5 @@
+import { validateAppletAppearance } from '../../shared/appletAppearance'
+import { appletJsonBytes, APPLET_STATE_LIMIT } from '../../shared/applets'
 import { ConversationActionService } from '../actions/ConversationActionService'
 import { assertHeldThreadLease, withGitMutationLocks } from '../actions/GitOperationCoordinator'
 import { tryAcquireExecutionLease, heartbeatExecutionLease, releaseExecutionLeaseHandle } from '../queue/ThreadExecutionLease'
@@ -296,6 +298,31 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
   }
   if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
   switch (method) {
+    case 'applets.get':
+    case 'applets.state.get':
+    case 'applets.state.save':
+    case 'applets.export': {
+      if (!isObject(params)) throw new Error('Expected applet request.')
+      if (params.profileId !== undefined && params.profileId !== ctx.mms.profileId) throw new Error('Applet profile binding changed.')
+      const allowed = new Set(['profileId', 'threadId', 'appletId', 'revisionId', ...(method === 'applets.state.save' ? ['state'] : []), ...(method === 'applets.export' ? ['format','appearance'] : [])])
+      if (Object.keys(params).some(key => !allowed.has(key))) throw new Error('Unexpected applet request field.')
+      const threadId = asString(params.threadId, 'threadId', 160)
+      const appletId = asString(params.appletId, 'appletId', 80)
+      const revisionId = asString(params.revisionId, 'revisionId', 80)
+      const messages = ctx.mms.threads.loadThreadData(threadId).messages
+      const visible = messages.some(message => !message.hidden && message.role === 'assistant' && !message.incomplete && !message.streaming && message.presentationParts?.some(part => part.type === 'applet' && part.reference.appletId === appletId && part.reference.revisionId === revisionId))
+      if (!visible) throw new Error('Applet is not available in this conversation.')
+      if (method === 'applets.get') return ctx.mms.applets.load(threadId, appletId, revisionId)
+      if (method === 'applets.state.get') return {state: ctx.mms.applets.loadState(threadId, appletId, revisionId)}
+      if (method === 'applets.state.save') {
+        if (appletJsonBytes(params.state) > APPLET_STATE_LIMIT) throw new Error('Applet state is too large.')
+        ctx.mms.applets.saveState(threadId, appletId, revisionId, params.state)
+        return {saved:true}
+      }
+      if (params.format === 'html') return {content:ctx.mms.applets.exportHtml(threadId, appletId, revisionId, params.appearance===undefined?undefined:validateAppletAppearance(params.appearance))}
+      if (params.format === 'source') return {content:ctx.mms.applets.exportSource(threadId, appletId, revisionId)}
+      throw new Error('Unsupported applet export format.')
+    }
     case 'health':
       return {
         ok: true,
@@ -1302,6 +1329,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const llmProviders = getPiLlmProviders(ctx.mms.providerAuth)
       const antigravity = ctx.mms.antigravity.llmProvider()
       if (antigravity) llmProviders.push(antigravity)
+      const claudeSubscription = ctx.mms.claudeSubscription.llmProvider()
+      if (claudeSubscription) llmProviders.push(claudeSubscription)
       const agentTypes = buildAgentTypesFromCatalogs(ctx.mms.providerAuth.getCatalogLlmProviders())
       return {
         options: {
@@ -1313,9 +1342,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
     }
     case 'providers.listConfigured':
-      return { providers: [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider()].filter((provider) => provider !== undefined)] }
-    case 'providers.getUsage':
-      return ctx.mms.providerAuth.getUsage()
+      return { providers: [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)] }
+    case 'providers.getUsage': {
+      const [usage, claude] = await Promise.all([
+        ctx.mms.providerAuth.getUsage(),
+        ctx.mms.claudeSubscription.configured()
+          ? ctx.mms.claudeSubscription.getUsage(ctx.mms.worktrees.getRepoRoot())
+          : Promise.resolve(undefined)
+      ])
+      return {
+        ...usage,
+        providers: [...usage.providers, ...(claude ? [claude] : [])],
+        fetchedAt: new Date().toISOString()
+      }
+    }
     case 'providers.getSubscriptionUsage': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
@@ -1324,14 +1364,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.getLoginOptions': {
       const p = isObject(params) ? params : {}
       const authType = asOptionalString(p.authType, 32) as 'api_key' | 'oauth' | undefined
-      return { options: [...ctx.mms.providerAuth.getLoginOptions(authType), ...(authType === 'api_key' || ctx.mms.antigravity.configured() ? [] : [ctx.mms.antigravity.loginOption()])] }
+      return { options: [...ctx.mms.providerAuth.getLoginOptions(authType), ...(authType === 'api_key' || ctx.mms.antigravity.configured() ? [] : [ctx.mms.antigravity.loginOption()]), ...(authType === 'api_key' || ctx.mms.claudeSubscription.configured() ? [] : [ctx.mms.claudeSubscription.loginOption()])] }
     }
     case 'providers.refreshModels': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
-      if (providerId === 'antigravity') await ctx.mms.antigravity.refreshModels(ctx.mms.worktrees.getRepoRoot())
+      if (providerId === 'claude-subscription') await ctx.mms.claudeSubscription.refreshModels(ctx.mms.worktrees.getRepoRoot())
+      else if (providerId === 'antigravity') await ctx.mms.antigravity.refreshModels(ctx.mms.worktrees.getRepoRoot())
       else await ctx.mms.providerAuth.refreshDynamicModels()
-      return { options: [...getPiLlmProviders(ctx.mms.providerAuth), ...[ctx.mms.antigravity.llmProvider()].filter((provider) => provider !== undefined)] }
+      return { options: [...getPiLlmProviders(ctx.mms.providerAuth), ...[ctx.mms.antigravity.llmProvider(), ctx.mms.claudeSubscription.llmProvider()].filter((provider) => provider !== undefined)] }
     }
     case 'providers.getAmbientInfo': {
       const p = isObject(params) ? params : {}
@@ -1344,7 +1385,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const apiKey = asString(p.apiKey, 'apiKey', 8192)
       await ctx.mms.providerAuth.setApiKey(providerId, apiKey)
       await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
-      const providers = ctx.mms.providerAuth.getConfiguredProviders()
+      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
       ctx.emitEvent?.('providers.changed', { providers })
       return { providers }
     }
@@ -1374,16 +1415,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
       const result = await ctx.mms.providerAuth.verifyAmbientProvider(providerId)
-      const providers = ctx.mms.providerAuth.getConfiguredProviders()
+      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
       if (result?.success) ctx.emitEvent?.('providers.changed', { providers })
       return { result, providers }
     }
     case 'providers.logout': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
-      if (providerId === 'antigravity') await ctx.mms.antigravity.logout()
+      if (providerId === 'claude-subscription') await ctx.mms.claudeSubscription.logout()
+      else if (providerId === 'antigravity') await ctx.mms.antigravity.logout()
       else await ctx.mms.providerAuth.logout(providerId)
-      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider()].filter((provider) => provider !== undefined)]
+      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
       ctx.emitEvent?.('providers.changed', { providers })
       return { providers }
     }
@@ -1399,13 +1441,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       session.on('event', forward)
       try {
-        const result = providerId === 'antigravity'
+        const result = providerId === 'claude-subscription'
+          ? await ctx.mms.claudeSubscription.login(session, ctx.mms.worktrees.getRepoRoot())
+          : providerId === 'antigravity'
           ? await ctx.mms.antigravity.login(session, ctx.mms.worktrees.getRepoRoot())
           : await ctx.mms.providerAuth.runOAuthLogin(session, providerId)
         if (result && (result as { success?: boolean }).success !== false) {
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
-        const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider()].filter((provider) => provider !== undefined)]
+        const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
         if (result && (result as { success?: boolean }).success !== false) {
           ctx.emitEvent?.('providers.changed', { providers })
         }
@@ -1435,7 +1479,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (result && (result as { success?: boolean }).success !== false) {
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
-        const providers = ctx.mms.providerAuth.getConfiguredProviders()
+        const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
         if (result && (result as { success?: boolean }).success !== false) {
           ctx.emitEvent?.('providers.changed', { providers })
         }

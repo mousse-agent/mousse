@@ -364,6 +364,7 @@ export function ComposerFooter({
         {selectedProviderId !== 'antigravity' && <div className="composer-context-anchor">
           <ContextUsageRing
             percent={contextUsage.percent}
+            capacityKnown={contextUsage.limit > 0}
             onClick={() => onContextOpenChange(!contextOpen)}
             active={contextOpen}
             ref={contextBtnRef}

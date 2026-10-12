@@ -129,6 +129,7 @@ export class GuiMmsController extends EventEmitter {
   readonly homeDir: string
   private client: LocalMmsClient | null = null
   private readonly senderAls = new AsyncLocalStorage<WebContents>()
+  private readonly profileTransitions = new Map<number, number>()
   private readonly windowSessions = new Map<number, WindowSession>()
   private readonly windowSessionOpenings = new Map<number, Promise<WindowSession>>()
   private attachedBrowserHost?: GuiAttachedBrowserHost
@@ -292,23 +293,34 @@ export class GuiMmsController extends EventEmitter {
   }
 
   async request<T = unknown>(method: string, params?: unknown): Promise<T> {
-    const client = await this.clientForCurrentSender()
     const sender = this.senderAls.getStore()
-    if (method === 'profiles.bind' && sender) await this.attachedBrowserHost?.releaseWindow(sender)
-    const result = await client.request<T>(method, params)
-    if (method === 'profiles.bind') {
-      const sender = this.senderAls.getStore()
-      if (sender) {
+    const transition = method === 'profiles.bind' && sender
+    if (transition) {
+      this.profileTransitions.set(sender.id, (this.profileTransitions.get(sender.id) ?? 0) + 1)
+      this.emit('window-profile-changing', {senderId: sender.id})
+    }
+    try {
+      const client = await this.clientForCurrentSender()
+      if (transition) await this.attachedBrowserHost?.releaseWindow(sender)
+      const result = await client.request<T>(method, params)
+      if (transition) {
         const session = this.windowSessions.get(sender.id)
-        const bound = result as unknown as { profile?: { id?: string }; epoch?: number }
+        const bound = result as unknown as {profile?:{id?:string};epoch?:number}
         if (session && bound?.profile?.id && typeof bound.epoch === 'number' && Number.isSafeInteger(bound.epoch)) {
-          session.binding = { profileId: bound.profile.id, epoch: bound.epoch }
+          session.binding = {profileId:bound.profile.id,epoch:bound.epoch}
           await session.client.subscribe(0)
           await this.attachedBrowserHost?.acknowledgeClosed(sender)
         }
       }
+      return result
+    } finally {
+      if (transition) {
+        this.emit('window-profile-changing', {senderId:sender.id})
+        const remaining = (this.profileTransitions.get(sender.id) ?? 1) - 1
+        if (remaining > 0) this.profileTransitions.set(sender.id, remaining)
+        else this.profileTransitions.delete(sender.id)
+      }
     }
-    return result
   }
 
   getWindowBinding(): TrustedProfileBinding | null {
@@ -324,7 +336,7 @@ export class GuiMmsController extends EventEmitter {
 
   getWindowBindingForSender(senderId: number): TrustedProfileBinding | null {
     const session = this.windowSessions.get(senderId)
-    return session?.client.connected ? session.binding : null
+    return !this.profileTransitions.has(senderId) && !session?.closing && session?.client.connected ? session.binding : null
   }
 
   /** Private host requests never reconnect or change the owning window connection. */
@@ -447,6 +459,7 @@ export class GuiMmsController extends EventEmitter {
   }
 
   private async closeWindowSession(senderId: number, session: WindowSession): Promise<void> {
+    this.emit('window-profile-changing', {senderId})
     if (session.closing) return session.closing
     const operation = (async () => {
       await this.attachedBrowserHost?.releaseWindow(session.sender)

@@ -35,6 +35,7 @@ import '../chat/components/agent-elements/agent-ui.css'
 import { prepareComposerThread } from '../lib/createComposerThread'
 import { isThreadStarted } from '../../shared/threadTitle'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
+import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
 import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
 import '../styles/compact-composer.css'
@@ -765,6 +766,12 @@ export function OrchestratorChat() {
     // A skill chip attached in the composer applies to this prompt only —
     // the global chat mode is left untouched.
     clearComposer(false)
+    // Thread preparation is complete. The send promise lasts for the entire
+    // first turn, so it must not keep typing, queueing, or Stop disabled.
+    if (startingBlank) {
+      blankSendPending.current = false
+      setWorkspacePending(false)
+    }
     const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId)
     if (sent === false && stillVisible()) {
       setInput((current) => current === text || !current ? input : current)
@@ -838,6 +845,7 @@ export function OrchestratorChat() {
         ref={inputAreaRef}
         className={`chat-input-area${showQuestions ? ' has-questions' : ''}`}
       >
+        {activeThreadId && <ChatBrowserAccess key={`${profileId}:${activeThreadId}`} threadId={activeThreadId} requireSelectedThread />}
         {emptyThread && <MousseLogoOutline className="chat-empty-logo" />}
         {emptyThread && <h1 className="chat-empty-title">What should we build?</h1>}
         {sendError && <div className="connection-failed-pill" role="alert">{sendError}</div>}

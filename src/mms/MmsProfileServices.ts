@@ -5,6 +5,8 @@ import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
 import { SettingsStore } from './settings/SettingsStore'
 import { ProviderAuthService } from './providers/ProviderAuthService'
+import { AppletStore } from './applets/AppletStore'
+import { ClaudeSubscriptionProviderService } from './providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { AntigravityProviderService } from './providers/antigravity/AntigravityProviderService'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
@@ -76,7 +78,9 @@ export class MmsProfileServices {
   readonly settings: SettingsStore
   readonly providerAuth: ProviderAuthService
   readonly antigravity: AntigravityProviderService
+  readonly claudeSubscription: ClaudeSubscriptionProviderService
   readonly projects: ProjectManager
+  readonly applets: AppletStore
   readonly threads: ThreadDataStore
   readonly lifecycle: ResourceLifecycleCoordinator
   readonly undoRetention: UndoRetentionSweeper
@@ -177,6 +181,7 @@ export class MmsProfileServices {
       shared.installationHome,
       this.questions
     )
+    this.claudeSubscription = new ClaudeSubscriptionProviderService(homeDir, this.questions)
     this.integrationContext = shared.personal
       ? {
           profileId: this.profileId,
@@ -226,6 +231,7 @@ export class MmsProfileServices {
       allowLegacyProjectData: shared.allowLegacyProjectData ?? !shared.personal
     })
     this.threads.setTransactionalStoreEnabled(this.config.get().features.transactionalThreadStore)
+    this.applets = new AppletStore(homeDir, id => this.threads.getThreadDir(id))
     this.projects.setThreadStore(this.threads)
     this.platform = new MmsProfilePlatform(this)
 
@@ -250,7 +256,9 @@ export class MmsProfileServices {
     // MMS owns the canonical per-thread transcript and durable message queue for
     // every surface (GUI client, CLI client, channels). Electron never owns MMS.
     this.orchestrator.setThreadStore(this.threads)
+    this.orchestrator.setAppletStore(this.applets)
     this.orchestrator.setAntigravityProvider(this.antigravity)
+    this.orchestrator.setClaudeSubscriptionProvider(this.claudeSubscription)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()
@@ -763,6 +771,7 @@ export class MmsProfileServices {
       () => this.net.shutdown(),
       () => this.requests.waitForIdle(),
       () => this.antigravity.stop(),
+      () => this.claudeSubscription.stop(),
       () => this.ptyManager.shutdown(),
       () => this.headlessRunner.shutdown(),
       () => this.mcpManager.shutdown()

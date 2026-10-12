@@ -1,3 +1,8 @@
+import { contextHandoff, previousTurnModel } from './contextHandoff'
+import { AppletStore } from '../applets/AppletStore'
+import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
+import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
+import { validateAppletSubmission, type AppletSubmission } from '../../shared/applets'
 import { logDebug } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
 import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
@@ -30,7 +35,9 @@ import { AgentExecutionService } from '../agentDefinitions/AgentExecutionService
 import { createNativeAgentRuntime } from '../agentDefinitions/nativeRuntime'
 import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
 import { EventEmitter } from 'events'
-import { antigravityAssistantMessage, antigravityHistory } from '../providers/antigravity/history'
+import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
+import type { ClaudeSubscriptionProviderService } from '../providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import type { ClaudeSubscriptionMetrics } from '../providers/claudeSubscription/metrics'
 import type { AntigravityProviderService } from '../providers/antigravity/AntigravityProviderService'
 import { v4 as uuidv4 } from 'uuid'
 import {
@@ -505,6 +512,10 @@ export async function retryContextOverflowOnce<T>(
 }
 
 export class OrchestratorService extends EventEmitter {
+  private appletStore?: AppletStore
+  setAppletStore(store: AppletStore): void { this.appletStore = store }
+  private claudeSubscription?: ClaudeSubscriptionProviderService
+  setClaudeSubscriptionProvider(provider: ClaudeSubscriptionProviderService): void { this.claudeSubscription = provider }
   private antigravity?: AntigravityProviderService
   setAntigravityProvider(provider: AntigravityProviderService): void { this.antigravity = provider }
   private readonly lifecycle = new OwnedWorkBarrier()
@@ -1110,6 +1121,7 @@ export class OrchestratorService extends EventEmitter {
     session = new ThreadSession(threadId)
     if (this.threadStore?.getThread(threadId)) {
       const data = this.threadStore.loadThreadData(threadId)
+      this.recoverApplets(threadId, data.messages)
       session.load(
         data.messages,
         data.llmContext ?? migrateLegacyContext(data.messages),
@@ -1183,6 +1195,8 @@ export class OrchestratorService extends EventEmitter {
       )
     }
 
+    this.recoverApplets(threadId, this.boundSession.messages)
+
     if (this.projectManager && this.threadStore) {
       try {
         const projectPath = resolveThreadProjectPath(this.projectManager, this.threadStore, threadId)
@@ -1243,6 +1257,22 @@ export class OrchestratorService extends EventEmitter {
       nativeContext ?? migrateLegacyContext(messages),
       queue
     )
+  }
+
+  /** Reattach only bundles already durably published by this exact completed turn. */
+  private recoverApplets(threadId: string, messages: ChatMessage[]): void {
+    if (!this.appletStore || !this.threadStore) return
+    const recovered = new Map<string, NonNullable<ChatMessage['presentationParts']>>()
+    for (const message of messages) {
+      if (message.role !== 'assistant' || message.presentationParts || !message.turnId || message.incomplete || message.streaming) continue
+      const parts = recoverAppletPresentation(this.appletStore, {threadId,messageId:message.id,turnId:message.turnId,content:message.content})
+      if (parts) { message.presentationParts = parts; recovered.set(message.id, parts) }
+    }
+    if (recovered.size) this.threadStore.mutateThreadData(threadId, current => ({messages: current.messages.map(message => {
+      const parts = recovered.get(message.id)
+      const original = messages.find(candidate => candidate.id === message.id)
+      return parts && !message.presentationParts && message.content === original?.content && message.turnId === original?.turnId ? {...message, presentationParts: parts} : message
+    })}))
   }
 
   getMessages(threadId?: string): ChatMessage[] {
@@ -1616,11 +1646,31 @@ export class OrchestratorService extends EventEmitter {
       const modelOverride = this.session.modelOverride
       const selectedModel = modelOverride ?? resolveModelForMode(this.settingsStore.get(), request.mode, [
         ...(this.providerAuth.credentials?.listProviderIds() ?? []),
-        ...(this.antigravity?.configured() ? ['antigravity'] : [])
+        ...(this.antigravity?.configured() ? ['antigravity'] : []),
+        ...(this.claudeSubscription?.configured() ? ['claude-subscription'] : [])
       ])
+      if (selectedModel.llmProvider === 'claude-subscription') {
+        const key = `claude-subscription:${selectedModel.model}`
+        const stored = this.nativeContext.lastTurnUsage
+        const capacity = this.nativeContext.nativeProviderModel
+        const matches = stored?.modelKey === key && stored.contextRevision === (this.nativeContext.revision ?? 0)
+        const limit = capacity?.selectedModel === selectedModel.model ? capacity.contextWindow ?? 0 : 0
+        const usage = computeContextUsage({
+          messages: getActiveMessages(this.nativeContext), draftInput: request.draftInput,
+          contextLimit: limit, modelName: capacity?.selectedModel === selectedModel.model ? capacity.modelName : selectedModel.model,
+          lastMeasuredInput: matches ? stored.input : null,
+          lastMeasuredCacheRead: matches ? stored.cacheRead : null,
+          lastMeasuredCacheWrite: matches ? stored.cacheWrite : null,
+          measuredAtMessageLength: matches ? stored.measuredAtHistoryLength : 0,
+          summaryText: getCompactionSummary(this.nativeContext),
+          systemPromptText: '', legacyEstimated: this.nativeContext.fidelity === 'legacy-estimated'
+        })
+        const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
+        return { ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed }
+      }
       if (selectedModel.llmProvider === 'antigravity') {
-        // ACP owns its context and does not publish a token window in its model
-        // selector. Do not display a fabricated Mousse context measurement.
+        // Native agents own their context and do not publish a token window.
+        // Do not display a fabricated Mousse context measurement.
         return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model, source: 'estimated', categories: [] }
       }
       const { limit, modelName } = this.llm.getSelectedModelContextLimit(request.mode, modelOverride)
@@ -1710,6 +1760,11 @@ export class OrchestratorService extends EventEmitter {
     const originalRequest = title || lastUser?.content?.trim() || 'Implementation plan'
     this.addPlanCardMessage(originalRequest, markdown)
     if (threadId) this.emitThreadMessages(threadId, this.messages)
+  }
+
+  private appletCatalogue(): string {
+    const references = this.messages.filter(message => !message.hidden).flatMap(message => message.presentationParts ?? []).filter(part => part.type === 'applet').map(part => part.reference)
+    return references.length ? '\nExisting applets in this conversation (use appletId and expectedRevision to revise; latest visible revision per applet):\n' + JSON.stringify([...new Map(references.map(ref => [ref.appletId, ref])).values()].slice(-20)) : ''
   }
 
   private addMessage(
@@ -2693,6 +2748,7 @@ export class OrchestratorService extends EventEmitter {
     const externalEffects = mode === 'agent' || mode === 'build' || typeof mode === 'object'
       ? [{ kind: 'unknown' as const, description: 'Agent tools may affect processes, ignored files, or external services; code undo only restores tracked workspace changes.', reversible: false as const }]
       : []
+    const previousModel = previousTurnModel(session.messages, this.nativeContext)
     const turnPresentationStart = session.messages.length
     const turnNativeStartBoundary = {
       messageIndex: this.nativeContext.messages.length,
@@ -2855,6 +2911,7 @@ export class OrchestratorService extends EventEmitter {
     // Authoritative turn lifecycle boundary (includes queue/background turns).
     this.emit('turn-started', { threadId: session.threadId })
 
+    const stagedApplets: AppletSubmission[] = []
     let assistantText: string
     let aborted = false
     let responseMetadata: ChatMessage['responseMetadata'] | undefined
@@ -2865,9 +2922,29 @@ export class OrchestratorService extends EventEmitter {
     let compactionNote: ChatMessage | undefined
     const selectedModel = opts?.modelOverride ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
       ...(this.providerAuth.credentials?.listProviderIds() ?? []),
-      ...(this.antigravity?.configured() ? ['antigravity'] : [])
+      ...(this.antigravity?.configured() ? ['antigravity'] : []),
+      ...(this.claudeSubscription?.configured() ? ['claude-subscription'] : [])
     ])
+    if (displayUserMessage && !reuseLastUser) {
+      const selection = { provider: selectedModel.llmProvider, model: selectedModel.model }
+      const admittedUser = session.messages.slice(turnPresentationStart).find(message => message.role === 'user' && !message.hidden)
+      if (admittedUser) {
+        admittedUser.modelSelection = selection
+        this.emitMessageUpdated(admittedUser)
+        const handoff = contextHandoff(previousModel, selection)
+        if (handoff) {
+          const marker: ChatMessage = { id: uuidv4(), role: 'assistant', kind: 'context_handoff',
+            content: `${handoff.from.model} → ${handoff.to.model}`, contextHandoff: handoff,
+            timestamp: new Date().toISOString(), turnId }
+          session.messages.push(marker)
+          this.emitMessageAdded(marker)
+        }
+        this.persist(true)
+      }
+    }
     const antigravityTurn = selectedModel.llmProvider === 'antigravity'
+    const claudeSubscriptionTurn = selectedModel.llmProvider === 'claude-subscription'
+    const nativeAgentTurn = antigravityTurn || claudeSubscriptionTurn
     const onCompaction = (phase: 'start' | 'complete' | 'unchanged'): void => {
       if (phase === 'start') {
         compactionNote = { id: uuidv4(), role: 'assistant', kind: 'context_compaction',
@@ -2883,21 +2960,73 @@ export class OrchestratorService extends EventEmitter {
       this.persist(true)
     }
     try {
-      if (antigravityTurn) {
-        if (mode === 'plan') throw new Error('Use Antigravity’s /plan command in a chat turn')
+      if (nativeAgentTurn) {
+        if (antigravityTurn && mode === 'plan') throw new Error('Use Antigravity’s /plan command in a chat turn')
         const model = selectedModel.model
-        if (!this.antigravity || !session.projectCwd) throw new Error('Antigravity requires a project workspace')
+        const nativeProvider = claudeSubscriptionTurn ? this.claudeSubscription : this.antigravity
+        if (!nativeProvider || (antigravityTurn && !session.projectCwd)) throw new Error(`${selectedModel.llmProvider} requires a project workspace`)
+        const nativeCwd = session.projectCwd ?? this.claudeSubscription!.standaloneWorkspace(session.threadId)
+        let claudeMetrics: ClaudeSubscriptionMetrics | undefined
+        const nativeStartedAt = Date.now()
+        if (claudeSubscriptionTurn) {
+          const contextSettings = normalizeContextSettings(this.settingsStore.get().context)
+          const capacity = this.nativeContext.nativeProviderModel
+          const knownLimit = capacity?.selectedModel === model ? capacity.contextWindow : undefined
+          const configuredThreshold = typeof contextSettings.compactionTokens === 'number'
+            ? contextSettings.compactionTokens : knownLimit
+          const previous = session.lastMeasuredContextSignature === `claude-subscription:${model}`
+            ? (session.lastMeasuredInput ?? 0) + (session.lastMeasuredCacheRead ?? 0) + (session.lastMeasuredCacheWrite ?? 0)
+            : 0
+          const activeTokens = Math.max(previous, estimateActiveContextTokens(getActiveMessages(this.nativeContext), getCompactionSummary(this.nativeContext)))
+          // When the SDK has not reported capacity yet, a numeric Mousse threshold
+          // still applies; model-max waits for an actual provider window.
+          if (contextSettings.compactionEnabled && configuredThreshold !== undefined &&
+              shouldCompactNativeContext(activeTokens, knownLimit ?? configuredThreshold, DEFAULT_COMPACTION_RESERVE_TOKENS, configuredThreshold)) {
+            onCompaction('start')
+            const compacted = compactNativeContext(this.nativeContext)
+            if (compacted !== this.nativeContext) {
+              this.nativeContext = compacted
+              this.clearLastTurnUsage()
+              this.persist(true)
+              onCompaction('complete')
+            } else onCompaction('unchanged')
+          }
+        }
         let started = false
-        assistantText = await this.antigravity.chat({
-          threadId: session.threadId, cwd: session.projectCwd, model,
+        let thinkingStarted = false
+        let thinkingText = ''
+        let nativeProviderProgress = false
+        const runNativeChat = () => nativeProvider.chat({
+          ...(claudeSubscriptionTurn ? {
+            mode: mode === 'plan' ? 'plan' as const : 'default' as const,
+            onMetrics: (report: ClaudeSubscriptionMetrics) => {
+              claudeMetrics = report
+              responseMetadata = { modelName: report.realModelName ?? model, totalResponseTimeMs: report.totalResponseTimeMs, tokensUsed: report.totalTokensUsed, tokensPerSecond: report.tokensPerSecond }
+              if (report.usage) this.lineEditStats?.recordUsage({
+                timestamp: new Date().toISOString(), provider: 'claude-subscription',
+                model: report.realModelName ?? model, input: report.usage.input, output: report.usage.output,
+                cacheRead: report.usage.cacheRead, cacheWrite: report.usage.cacheWrite
+              })
+            },
+            onLineEdits: (lines: number) => this.lineEditStats?.record('orchestrator', lines),
+            onThinking: (content: string) => {
+              nativeProviderProgress = true
+              if (!thinkingStarted) { this.handleStreamingThinkingEvent({ phase: 'start', content: '' }); thinkingStarted = true }
+              thinkingText = content
+              this.handleStreamingThinkingEvent({ phase: 'delta', content })
+            }
+          } : {}),
+          threadId: session.threadId, cwd: nativeCwd, model,
           prompt: userContent, images, signal: turn.abort.signal,
-          history: antigravityHistory(this.nativeContext, turnNativeStartBoundary.messageIndex),
+          appletInstructions: this.appletStore ? APPLET_GENERATION_GUIDANCE + this.appletCatalogue() : undefined,
+          history: nativeAgentHistory(this.nativeContext, turnNativeStartBoundary.messageIndex),
           drainSteer: () => {
             const parts = [opts?.externalDrainSteer?.()?.trim(), this.drainSteerForSession(session, turn)?.trim()]
               .filter((part): part is string => Boolean(part))
             return parts.length ? parts.join('\n') : undefined
           },
           onSteer: (content) => {
+            nativeProviderProgress = true
             this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(content))
             this.nativeContext.acceptedSteerItemIds = Array.from(new Set([
               ...(this.nativeContext.acceptedSteerItemIds ?? []), ...session.drainedExternalSteerIds
@@ -2906,10 +3035,12 @@ export class OrchestratorService extends EventEmitter {
             this.acknowledgeDrainedSteers(session)
           },
           onText: (content) => {
+            nativeProviderProgress = true
             if (!started) { this.handleStreamingTextEvent({ phase: 'start', content: '', contentIndex: 0 }); started = true }
             this.handleStreamingTextEvent({ phase: 'delta', content, contentIndex: 0 })
           },
           onTool: (event) => {
+            nativeProviderProgress = true
             conversationToolsUsed = true
             this.handleStreamingToolEvent({
               kind: 'mcp_tool_call', phase: event.phase, callId: event.callId,
@@ -2917,11 +3048,36 @@ export class OrchestratorService extends EventEmitter {
             })
           }
         })
-        this.nativeContext = appendNativeMessage(this.nativeContext, antigravityAssistantMessage(assistantText, model))
+        assistantText = claudeSubscriptionTurn
+          ? await retryContextOverflowOnce(runNativeChat, () => {
+            if (!normalizeContextSettings(this.settingsStore.get().context).compactionEnabled) return false
+            onCompaction('start')
+            const compacted = compactNativeContext(this.nativeContext)
+            if (compacted === this.nativeContext) { onCompaction('unchanged'); return false }
+            this.nativeContext = compacted
+            this.clearLastTurnUsage()
+            this.persist(true)
+            onCompaction('complete')
+            return true
+          }, () => !nativeProviderProgress && !conversationToolsUsed && !turn.abort.signal.aborted)
+          : await runNativeChat()
+        if (thinkingStarted) this.handleStreamingThinkingEvent({ phase: 'complete', content: thinkingText })
+        this.nativeContext = appendNativeMessage(this.nativeContext, nativeAgentAssistantMessage(assistantText, claudeMetrics?.realModelName ?? model, selectedModel.llmProvider, claudeMetrics?.usage))
+        if (claudeSubscriptionTurn && claudeMetrics?.context) {
+          const context = claudeMetrics.context
+          const previousCapacity = this.nativeContext.nativeProviderModel
+          this.nativeContext.nativeProviderModel = { provider: 'claude-subscription', selectedModel: model, modelName: context.modelName ?? claudeMetrics.realModelName ?? model, contextWindow: context.contextWindow ?? (previousCapacity?.selectedModel === model ? previousCapacity.contextWindow : undefined) }
+          this.recordLastTurnUsage({
+            input: context.input, cacheRead: context.cacheRead, cacheWrite: context.cacheWrite,
+            signature: `claude-subscription:${model}`, modelKey: `claude-subscription:${model}`,
+            contextRevision: this.nativeContext.revision ?? 0,
+            measuredAtHistoryLength: Math.max(0, getActiveMessages(this.nativeContext).length - 1)
+          })
+        }
         this.persist(true)
-        this.antigravity.commitConversation(session.threadId, antigravityHistory(this.nativeContext))
+        nativeProvider.commitConversation(session.threadId, nativeAgentHistory(this.nativeContext))
         if (started) this.handleStreamingTextEvent({ phase: 'complete', content: assistantText, contentIndex: 0 })
-        responseMetadata = { modelName: model }
+        responseMetadata ??= { modelName: model, totalResponseTimeMs: Date.now() - nativeStartedAt }
       } else {
       const browserExecution = this.mainBrowserFactory
         ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
@@ -2973,6 +3129,12 @@ export class OrchestratorService extends EventEmitter {
             },
             {
               mode,
+              appletInstructions: this.appletStore ? this.appletCatalogue() : undefined,
+              onPublishApplet: this.appletStore ? (value) => {
+                if (stagedApplets.length >= 3) throw new Error('Only three applets may be published per response.')
+                stagedApplets.push(validateAppletSubmission(value))
+                return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
+              } : undefined,
               llmProvider: modelOverride?.llmProvider,
               model: modelOverride?.model,
               projectPath: session.projectCwd ?? undefined,
@@ -3166,13 +3328,20 @@ export class OrchestratorService extends EventEmitter {
     }
 
     if (mode === 'plan') {
-      const planMarkdown = stripActionBlocks(assistantText) || assistantText.trim() || 'No plan generated.'
+      const planMarkdown = (stripActionBlocks(assistantText) || assistantText.trim() || 'No plan generated.') + stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
       if (this.activeAssistantMessageId) {
         const streamingId = this.activeAssistantMessageId
         this.activeAssistantMessageId = null
         this.removeMessage(streamingId)
       }
       const planMsg = this.addPlanCardMessage(userContent, planMarkdown, responseMetadata)
+      if (this.appletStore && !executionFailed) {
+        planMsg.turnId = turnId
+        this.persist(true)
+        planMsg.presentationParts = publishAppletPresentation(this.appletStore, {threadId:session.threadId,messageId:planMsg.id,turnId,content:planMsg.content})
+        this.persist(true)
+        this.emitMessageUpdated(planMsg)
+      }
       const response: OrchestratorResponse = {
         message: planMsg.content,
         actions: []
@@ -3190,9 +3359,9 @@ export class OrchestratorService extends EventEmitter {
       return response
     }
 
-    const parsedActions = antigravityTurn ? [] : parseActions(assistantText)
+    const parsedActions = nativeAgentTurn ? [] : parseActions(assistantText)
     const actions = filterActionsForChatMode(parsedActions, mode)
-    const displayText = stripActionBlocks(assistantText)
+    const displayText = stripActionBlocks(assistantText) + stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
 
     if (this.activeAssistantMessageId) {
       this.updateStreamingAssistantMessage(
@@ -3218,6 +3387,17 @@ export class OrchestratorService extends EventEmitter {
       )
     } else {
       this.addMessage('assistant', displayText || 'Done.', undefined, responseMetadata)
+    }
+
+    if (this.appletStore && !executionFailed) {
+      const finalMessage = [...session.messages].reverse().find(message => message.role === 'assistant' && !message.kind && message.content === (displayText || 'Done.'))
+      if (finalMessage) {
+        finalMessage.turnId = turnId
+        this.persist(true)
+        finalMessage.presentationParts = publishAppletPresentation(this.appletStore, { threadId: session.threadId, messageId: finalMessage.id, turnId, content: finalMessage.content })
+        this.persist(true)
+        this.emitMessageUpdated(finalMessage)
+      }
     }
 
     for (const action of actions) {

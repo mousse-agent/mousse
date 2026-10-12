@@ -8,11 +8,11 @@ import { IntegrationField as Field, IntegrationModal as Modal, useIntegrationBou
 
 interface Props {
   client: IntegrationPlatformClient; profileId: string; projectId?: string; scope: 'global' | 'project'
-  server?: McpServerConfig; onClose: () => void; onSaved: () => void
+  server?: McpServerConfig; onClose: () => void; onSaved: () => void; onConnectionChanged?: () => void
 }
 interface Feedback { kind: 'success' | 'failure' | 'info'; title: string; message: string; category?: string }
 
-export function McpConnectionDialog({ client, profileId, projectId, scope, server, onClose, onSaved }: Props) {
+export function McpConnectionDialog({ client, profileId, projectId, scope, server, onClose, onSaved, onConnectionChanged }: Props) {
   const [saved, setSaved] = useState<ManagedMcpRecord | null>(null)
   const [draft, setDraft] = useState<McpDraft>(() => draftFromMcp(server))
   const [baseline, setBaseline] = useState(() => JSON.stringify(draftFromMcp(server)))
@@ -109,8 +109,9 @@ export function McpConnectionDialog({ client, profileId, projectId, scope, serve
       if (action === 'begin') {
         const result = await client.beginMcpAuth({ ...identity, installationId })
         if (!boundary.current(ticket) || authTicket !== authGeneration.current) return
+        if (result.success) onConnectionChanged?.()
         setFeedback(result.success
-          ? { kind: 'success', title: 'Signed in', message: 'Authorization completed. Test the connection to refresh its tool count.' }
+          ? { kind: 'success', title: 'Signed in', message: 'Authorization completed. The connection listing is being refreshed.' }
           : { kind: 'failure', title: 'Sign-in failed', message: result.error ?? 'Authorization was not completed.' })
       } else if (action === 'cancel') {
         await client.cancelMcpAuth({ ...identity, installationId })
@@ -118,6 +119,7 @@ export function McpConnectionDialog({ client, profileId, projectId, scope, serve
       } else {
         setBusy(true)
         await client.revokeMcpAuth({ ...identity, installationId })
+        if (boundary.current(ticket) && authTicket === authGeneration.current) onConnectionChanged?.()
         if (boundary.current(ticket) && authTicket === authGeneration.current) setFeedback({ kind: 'info', title: 'Authorization revoked', message: 'Saved authorization was removed.' })
       }
     } catch (cause) {

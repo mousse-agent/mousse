@@ -55,7 +55,8 @@ export function sameMessageSnapshot(a: ChatMessage[], b: ChatMessage[]): boolean
       left.id !== right.id ||
       left.content !== right.content ||
       left.streaming !== right.streaming ||
-      left.kind !== right.kind
+      left.kind !== right.kind ||
+      JSON.stringify(left.presentationParts) !== JSON.stringify(right.presentationParts)
     ) {
       return false
     }
@@ -241,6 +242,7 @@ function newerMessageVersion(current: ChatMessage, incoming: ChatMessage): ChatM
     current.content.length > incoming.content.length &&
     current.content.startsWith(incoming.content)
   ) return current
+  if (current.presentationParts && !incoming.presentationParts && current.content === incoming.content && !incoming.incomplete) return { ...incoming, presentationParts: current.presentationParts }
   return incoming
 }
 

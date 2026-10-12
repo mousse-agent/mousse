@@ -1,3 +1,4 @@
+import { attachLinuxWindowShape } from './linuxWindowShape'
 import { BrowserWindow, screen, shell } from 'electron'
 import { join } from 'path'
 
@@ -120,6 +121,7 @@ export function openAgentsTasksWindow(
     }
   })
 
+  attachLinuxWindowShape(win)
   agentsTasksWindow = win
 
   win.on('closed', () => {

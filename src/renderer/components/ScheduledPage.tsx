@@ -1,24 +1,12 @@
-import { useCallback } from 'react'
-import { ArrowLeft } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import { AutomationsWorkspace } from './AutomationsWorkspace'
-import { confirmNavigation } from '../services/navigationGuards'
 import '../styles/scheduled-panel.css'
 
 export function ScheduledPage() {
   const scheduledOpen = useAppStore((s) => s.scheduledOpen)
-  const setScheduledOpen = useAppStore((s) => s.setScheduledOpen)
-
-  const closeScheduled = useCallback(async () => {
-    if (await confirmNavigation()) setScheduledOpen(false)
-  }, [setScheduledOpen])
-
   return (
-    <div className="scheduled-page overlay-page" hidden={!scheduledOpen}>
-      <header className="overlay-titlebar overlay-page-drag-header">
-        <button type="button" className="overlay-titlebar-back" onClick={() => void closeScheduled()} aria-label="Back">
-          <ArrowLeft size={14} strokeWidth={2} />
-        </button>
+    <div className="scheduled-page" hidden={!scheduledOpen}>
+      <header className="rail-page-header">
         <h1>Automations</h1>
       </header>
       <div className="scheduled-page-body">

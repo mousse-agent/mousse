@@ -1,3 +1,4 @@
+import { attachLinuxWindowShape } from './linuxWindowShape'
 import { app, BrowserWindow, dialog, nativeTheme, session, shell, type WebContents } from 'electron'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -42,7 +43,7 @@ import { attachZoomShortcuts } from './zoomShortcuts'
 import { openExternalSafely } from './safeExternalUrl'
 import { attachDevGuiConsoleCapture, isDevGuiMainEnabled } from './devgui/devGuiMain'
 import { startDevGuiPoller } from './devgui/devGuiPoller'
-import { configureLinuxWindowing, linuxTransparencyOptions } from './linuxRendering'
+import { configureLinuxGraphics, configureLinuxVsync, configureLinuxWindowing, linuxTransparencyOptions } from './linuxRendering'
 
 function configureBrowserPopupPolicy(contents: WebContents, parent: BrowserWindow): void {
   contents.setWindowOpenHandler(({ url }) => {
@@ -108,6 +109,8 @@ if (isCliMode) {
  */
 function startGuiApp(): void {
   if (configureLinuxWindowing(app, process.platform, process.env)) return
+  configureLinuxGraphics(app, process.platform, process.env)
+  configureLinuxVsync(app, process.platform, process.env)
   let mainWindow: BrowserWindow | null = null
   let guiMms: GuiMmsController | null = null
   let attachedBrowserHost: AttachedBrowserHost | undefined
@@ -197,6 +200,9 @@ function startGuiApp(): void {
       }
     })
 
+    attachLinuxWindowShape(mainWindow)
+
+    mainWindow.on('close', () => console.info('[window] Main window close event'))
     mainWindow.on('ready-to-show', () => {
       mainWindow?.show()
       if (settings) refreshWindowChrome(mainWindow, settings)

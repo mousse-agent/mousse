@@ -147,7 +147,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const [connecting, setConnecting] = useState(false)
   const [connectError, setConnectError] = useState<string | null>(null)
   const [providerRefreshError, setProviderRefreshError] = useState<string | null>(null)
-  const [refreshingAntigravity, setRefreshingAntigravity] = useState(false)
+  const [refreshingNativeModels, setRefreshingNativeModels] = useState(false)
   const [loginActive, setLoginActive] = useState(false)
   const [restartRequired, setRestartRequired] = useState(false)
   const [webToolCredentials, setWebToolCredentials] = useState({ exa: false, parallel: false })
@@ -880,18 +880,18 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
                       {provider.source ? ` · ${provider.source}` : ''}
                     </span>
                   </div>
-                  {provider.id === 'antigravity' && (
-                    <button type="button" className="provider-remove-btn" title="Refresh Google account models"
-                      aria-label="Refresh Antigravity models" disabled={refreshingAntigravity}
+                  {['antigravity', 'claude-subscription'].includes(provider.id) && (
+                    <button type="button" className="provider-remove-btn" title={`Refresh ${provider.label} models`}
+                      aria-label={`Refresh ${provider.label} models`} disabled={refreshingNativeModels}
                       onClick={() => {
-                        setRefreshingAntigravity(true)
+                        setRefreshingNativeModels(true)
                         setProviderRefreshError(null)
-                        void window.mousse.providers.refreshModels('antigravity')
+                        void window.mousse.providers.refreshModels(provider.id)
                           .then(() => refreshProviderData())
                           .catch((error: unknown) => setProviderRefreshError(error instanceof Error ? error.message : String(error)))
-                          .finally(() => setRefreshingAntigravity(false))
+                          .finally(() => setRefreshingNativeModels(false))
                       }}>
-                      <RefreshCw size={14} className={refreshingAntigravity ? 'icon-spin' : undefined} />
+                      <RefreshCw size={14} className={refreshingNativeModels ? 'icon-spin' : undefined} />
                     </button>
                   )}
                   <button
@@ -912,8 +912,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
               {addStep === 'provider' && (
                 <>
                   <p className="settings-section-desc">
-                    Choose a provider. API keys, supported subscription logins, and Google’s
-                    Antigravity agent are available here.
+                    Choose a provider. API keys, Claude Subscription, other supported subscription
+                    logins, and Google’s Antigravity agent are available here.
                   </p>
                   <div className="provider-filter-row">
                     <input
@@ -1027,7 +1027,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
                   {selectedProvider.authType === 'oauth' && (
                     <p className="provider-login-hint">
-                      You will be redirected to sign in with your subscription account.
+                      {selectedProvider.id === 'claude-subscription' ? 'Connect through official Claude Code sign-in. Claude manages your account and usage.' : 'You will be redirected to sign in with your subscription account.'}
                     </p>
                   )}
 

@@ -73,13 +73,25 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
     }
   }, [moreOpen])
 
+  const leaveRailPage = () => {
+    setScheduledOpen(false)
+    setChannelsOpen(false)
+  }
+  const navigateRail = async (action: () => void) => {
+    if (!await confirmNavigation()) return
+    leaveRailPage()
+    action()
+  }
+
   const openView = async (view: MainView) => {
-    if ((view !== mainView || sidebarMode !== 'projects') && !await confirmNavigation()) return
+    if ((scheduledOpen || channelsOpen || view !== mainView || sidebarMode !== 'projects') && !await confirmNavigation()) return
+    leaveRailPage()
     openSurface(view)
     setMoreOpen(false)
   }
   const showHome = async () => {
-    if (sidebarMode !== 'projects' && !await confirmNavigation()) return
+    if ((scheduledOpen || channelsOpen || sidebarMode !== 'projects') && !await confirmNavigation()) return
+    leaveRailPage()
     useAppStore.getState().setSidebarMode('projects')
     setThreadsSidebarOpen(true)
     setMainAreaOpen(false)
@@ -98,16 +110,16 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
     <>
       <nav className="navigation-rail" aria-label="Mousse navigation" onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave}>
         {shortcut('Home', House, !overlayOpen && !mainAreaOpen && sidebarMode === 'projects', () => void showHome())}
-        {shortcut('Automations', Workflow, scheduledOpen, () => setScheduledOpen(true))}
-        {shortcut('Channels', Radio, channelsOpen, () => setChannelsOpen(true))}
+        {shortcut('Automations', Workflow, scheduledOpen, () => void navigateRail(() => setScheduledOpen(true)))}
+        {shortcut('Channels', Radio, channelsOpen, () => void navigateRail(() => setChannelsOpen(true)))}
         <button ref={moreRef} type="button" className={`navigation-rail-button${moreOpen ? ' active' : ''}`}
           aria-label="More" title="More" aria-haspopup="menu" aria-expanded={moreOpen}
           aria-controls={moreOpen ? 'navigation-rail-more' : undefined} onClick={() => setMoreOpen(!moreOpen)}>
           <MoreHorizontal size={18} strokeWidth={1.8} aria-hidden="true" />
         </button>
         <div className="navigation-rail-separator" role="separator" />
-        {shortcut('Subscription usage', Gauge, usageOpen, () => useAppStore.getState().setUsageOpen(true))}
-        {shortcut('Settings', Settings, settingsOpen, () => setSettingsOpen(true))}
+        {shortcut('Subscription usage', Gauge, usageOpen, () => void navigateRail(() => useAppStore.getState().setUsageOpen(true)))}
+        {shortcut('Settings', Settings, settingsOpen, () => void navigateRail(() => setSettingsOpen(true)))}
       </nav>
       {moreOpen && <FloatingPortal>
         <div ref={menuRef} id="navigation-rail-more" role="menu" aria-label="More navigation"
@@ -126,6 +138,7 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
       <ThreadSearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} onSelect={(threadId) => {
         void confirmNavigation().then((allowed) => {
           if (!allowed) return
+          leaveRailPage()
           switchToThread(threadId)
           void window.mousse.threads.select(threadId)
           setThreadsSidebarOpen(true)

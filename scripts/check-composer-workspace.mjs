@@ -47,14 +47,15 @@ try {
         },
         queue:{list:async()=>[],onUpdated:subscription},
         orchestrator:{onTurnSteered:subscription,onQuestionsPending:subscription,onQuestionsCleared:subscription,
-          onConnectionFailed:subscription,isTurnActive:async()=>false,getContextUsage:async()=>usage,
-          sendToThread:async(id,request)=>{fixture.calls.push(['send',id,request.content]);return fixture.sendError ? {requestAcknowledged:false,error:{code:'delivery_rejected',message:'Delivery rejected'}} : {queued:false}}
+          onConnectionFailed:subscription,isTurnActive:async()=>Boolean(fixture.turnRunning),getContextUsage:async()=>usage,
+          abort:async(id)=>{fixture.calls.push(['abort',id]);fixture.turnRunning=false},
+          sendToThread:async(id,request)=>{fixture.calls.push(['send',id,request.content]);if(fixture.pendingSend && fixture.turnRunning)return {queued:true};if(fixture.pendingSend){fixture.turnRunning=true;await new Promise(resolve=>fixture.resumeSend=()=>{fixture.sendResolved=true;fixture.turnRunning=false;resolve()})}return fixture.sendError ? {requestAcknowledged:false,error:{code:'delivery_rejected',message:'Delivery rejected'}} : {queued:false}}
         }
       }
       fixture.reset = (thread=null) => {
-        fixture.calls=[];fixture.selectError=false;fixture.createError=false;fixture.toggleError=false;fixture.pendingCreate=false;fixture.modelError=false;fixture.sendError=false;fixture.referenceError=false;fixture.pendingPath=false;
+        fixture.calls=[];fixture.selectError=false;fixture.createError=false;fixture.toggleError=false;fixture.pendingCreate=false;fixture.modelError=false;fixture.sendError=false;fixture.pendingSend=false;fixture.turnRunning=false;fixture.sendResolved=false;fixture.resumeSend=null;fixture.referenceError=false;fixture.pendingPath=false;
         useAppStore.setState({activeThreadId:thread?.id ?? null,threads:thread?[thread]:[],projects,
-          messages:[],loading:false,mainView:'agents',turnStates:{},composerDrafts:{},composerReferences:{},composerWorkspaceDrafts:{},browserElementAttachmentsByThread:{}})
+          profileReady:true,workspaceReady:true,messages:[],loading:false,mainView:'agents',turnStates:{},composerDrafts:{},composerReferences:{},composerWorkspaceDrafts:{},browserElementAttachmentsByThread:{}})
       }
       fixture.reset()
       createRoot(document.getElementById('root')).render(<><MainViewTabs /><OrchestratorChat /></>)
@@ -118,7 +119,7 @@ try {
           assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'')
           assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree").disabled'),true)
           assert.equal(await evaluate('!!document.querySelector(".composer-workspace-toolbar select,.composer-workspace-toolbar input")'),false)
-          assert.equal(await evaluate('!!document.querySelector(".composer-workspace-worktree .lucide-git-branch")'),true)
+          assert.equal(await evaluate('!!document.querySelector(".composer-workspace-worktree svg")'),true)
           await click('.composer-workspace-project')
           assert.equal(await evaluate('document.querySelector(".composer-workspace-menu").parentElement===document.body'),true)
           assert.equal(await evaluate('document.querySelector(".composer-workspace-menu [aria-checked=true]").textContent'),'No project')
@@ -170,6 +171,31 @@ try {
         await evaluate('fixture.store.setState({activeThreadId:"elsewhere",threads:[{id:"elsewhere",name:"Existing",startedAt:"now"}],composerDrafts:{elsewhere:"Other prompt"}});fixture.resumeCreate()');await pause(100)
         assert.equal(await evaluate('fixture.store.getState().activeThreadId'),'elsewhere')
         assert.equal((await calls()).some(c=>c[0]==='send'),false)
+        // A first response may stay pending through a tool call or MCP login. Only
+        // workspace preparation may lock the composer; the running turn must be stoppable.
+        for(const initial of [null,draft]){
+          await evaluate('fixture.reset('+JSON.stringify(initial)+');fixture.pendingSend=true');await pause(100)
+          await prompt('Hold first response');await send()
+          assert.equal(await evaluate('typeof fixture.resumeSend'), 'function')
+          assert.equal(await evaluate('fixture.sendResolved'),false)
+          assert.equal(await evaluate('document.querySelector(".composer-input").disabled'),false)
+          assert.equal(await evaluate('document.querySelector(".composer-action-btn-stop").disabled'),false)
+          await evaluate('document.querySelector(".composer-input").focus()')
+          window.webContents.insertText('Next prompt');await pause(60)
+          assert.equal(await evaluate('document.querySelector(".composer-input").value'),'Next prompt')
+          assert.equal(await evaluate('fixture.store.getState().composerDrafts[fixture.store.getState().activeThreadId]'),'Next prompt')
+          await send()
+          assert.equal((await calls()).filter(c=>c[0]==='send').length,2)
+          assert.equal((await calls()).filter(c=>c[0]==='send')[1][2],'Next prompt')
+          assert.equal(await evaluate('fixture.sendResolved'),false)
+          await prompt('')
+          await click('[aria-label="Stop generation"]')
+          assert.equal((await calls()).filter(c=>c[0]==='abort').length,1)
+          assert.equal((await calls()).find(c=>c[0]==='abort')[1],await evaluate('fixture.store.getState().activeThreadId'))
+          assert.equal(await evaluate('fixture.sendResolved'),false)
+          await evaluate('fixture.resumeSend()');await pause(100)
+        }
+        console.log('PASS: new and existing draft first turns accept native input and Stop before the response resolves; preparation stays locked')
         await evaluate('fixture.reset('+JSON.stringify(draft)+');fixture.selectError=true');await pause(100)
         await prompt('Recover after project change');await choose('b')
         await evaluate('(()=>{const transfer=new DataTransfer();transfer.items.add(new File(["notes"],"notes.txt",{type:"text/plain"}));const input=document.querySelector(".composer-file-input");input.files=transfer.files;input.dispatchEvent(new Event("change",{bubbles:true}))})()');await pause(60)

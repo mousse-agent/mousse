@@ -5,6 +5,9 @@
 
 import type { BrowserWorkerRequest, BrowserWorkerResponse } from '../../shared/browser/types'
 
+export const MMS_PROTOCOL_CHUNK_CAPABILITY = 'envelope-chunks.v1'
+export const MMS_PROTOCOL_CHUNK_BYTES = 256 * 1024
+export const MMS_PROTOCOL_MAX_ENVELOPE_BYTES = 32 * 1024 * 1024
 export const MMS_PROTOCOL_VERSION = 1
 export const MMS_PROTOCOL_MAX_FRAME_BYTES = 4 * 1024 * 1024 // 4 MiB
 export const MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS = 60_000
@@ -110,7 +113,7 @@ export interface ProtocolEvent {
 /** One authenticated socket's live display lane. Never sequenced or replayed. */
 export interface ProtocolConnectionEvent {
   kind: 'connection_event'
-  type: 'bridge.hub.thread'
+  type: 'bridge.hub.thread' | 'mcp.auth-url'
   profileId: string
   profileEpoch: number
   data: unknown
@@ -161,7 +164,16 @@ export interface ProtocolServerCommandCancel {
   registrationEpoch: number
 }
 
+export interface ProtocolEnvelopeChunk {
+  kind: 'envelope_chunk'
+  transferId: string
+  index: number
+  totalBytes: number
+  data: string
+}
+
 export type ProtocolEnvelope =
+  | ProtocolEnvelopeChunk
   | ProtocolHello
   | ProtocolHelloOk
   | ProtocolHelloErr
@@ -179,6 +191,7 @@ export type ProtocolEnvelope =
  * Remote/HTTP is out of scope.
  */
 export const PROTOCOL_METHODS = [
+  'applets.get', 'applets.state.get', 'applets.state.save', 'applets.export',
   'health',
   'capabilities',
   'projects.list',
@@ -364,6 +377,7 @@ export const PROTOCOL_METHODS = [
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number]
 
 export const PROTOCOL_CAPABILITIES = [
+  MMS_PROTOCOL_CHUNK_CAPABILITY,
   'errors.v1',
   'health',
   'projects',

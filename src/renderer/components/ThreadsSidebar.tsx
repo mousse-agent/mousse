@@ -987,6 +987,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             onClick={() => setSidebarView(view)}
           >
             <Icon size={16} strokeWidth={1.8} aria-hidden="true" />
+            {sidebarView === view && <span>{label}</span>}
           </button>
         ))}
       </div>

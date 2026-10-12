@@ -10,8 +10,11 @@ import React, {
 } from "react";
 import type { UIMessage, ChatStatus } from "ai";
 import { cn } from "./utils/cn";
+import { ProviderIcon } from "../../../lib/providerIcons";
+import { inferModelBrand } from "../../../../shared/modelVariants";
 
 import { UserMessage } from "./user-message";
+import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
 import { Markdown } from "./markdown";
 import { ErrorMessage } from "./error-message";
 import type { CustomToolRendererProps } from "./types";
@@ -115,7 +118,8 @@ function getLastAssistantHasContent(messages: UIMessage[]) {
     if (msg?.role !== "assistant") continue;
     return (msg.parts ?? []).some((part) => {
       if (isTextPart(part)) return part.text.trim().length > 0;
-      return isV5ToolPart(part);
+      if (isRecord(part) && part.type === "data-applet-pending") return true;
+      return isV5ToolPart(part) || isAppletPart(part);
     });
   }
   return false;
@@ -1555,6 +1559,17 @@ function AssistantParts({
         continue;
       }
 
+      if (isRecord(part) && part.type === "data-applet-pending") {
+        elems.push(<section className="mousse-applet mousse-applet-pending" key={`${msg.id}-applet-pending-${i}`} role="status" aria-label="Generating applet"><header className="mousse-applet-header"><strong>Generating interactive applet…</strong></header><div className="mousse-applet-preview" style={{ height: 320 }}>Preview appears when the response is complete.</div></section>);
+        i++;
+        continue;
+      }
+      if (isAppletPart(part)) {
+        elems.push(<AppletCard key={`${msg.id}-applet-${part.data.revisionId}`} reference={part.data} />);
+        i++;
+        continue;
+      }
+
       if (isTextPart(part)) {
         const text = part.text;
         if (text) {
@@ -1631,6 +1646,19 @@ function AssistantParts({
     toolRenderers,
   ]);
 
+  const handoff = (msg.metadata as { contextHandoff?: { from: { provider: string; model: string }; to: { provider: string; model: string } } } | undefined)?.contextHandoff;
+  if (handoff) {
+    const iconId = (selection: { provider: string; model: string }) => {
+      const brand = inferModelBrand(selection.model, undefined, selection.provider).brandId;
+      return brand === 'anthropic' || selection.provider === 'claude-subscription' ? 'claude' : brand;
+    };
+    return <div role="status" aria-label={`Context handoff: ${handoff.from.model} to ${handoff.to.model}`}
+      className="flex w-full items-center justify-center gap-2 py-1 text-xs text-muted-foreground">
+      <span className="inline-flex items-center gap-1.5" title={handoff.from.provider}><ProviderIcon providerId={iconId(handoff.from)} size={14} />{handoff.from.model}</span>
+      <span aria-hidden="true">→</span>
+      <span className="inline-flex items-center gap-1.5" title={handoff.to.provider}><ProviderIcon providerId={iconId(handoff.to)} size={14} />{handoff.to.model}</span>
+    </div>;
+  }
   const compactionMetadata = msg.metadata as { compaction?: boolean; compacting?: boolean } | undefined;
   if (compactionMetadata?.compaction) {
     const text = parts.filter(isTextPart).map((part) => part.text).join('');

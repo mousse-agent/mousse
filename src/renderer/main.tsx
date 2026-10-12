@@ -2,8 +2,6 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
 import { SettingsPage } from './components/SettingsPage'
-import { ScheduledPage } from './components/ScheduledPage'
-import { ChannelsPage } from './components/ChannelsPage'
 import { applyAppearance, useTheme } from './hooks/useTheme'
 import { getDefaultSettings } from '../shared/settings'
 import { useAppStore } from './stores/appStore'
@@ -29,8 +27,6 @@ function ProfilePages() {
   return (
     <>
       <SettingsPage />
-      <ScheduledPage />
-      <ChannelsPage />
     </>
   )
 }

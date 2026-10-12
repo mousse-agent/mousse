@@ -199,6 +199,7 @@ describe('explicit profile store roots', () => {
       net: { shutdown: async () => { calls.push('net') } },
       requests: { waitForIdle: async () => { calls.push('requests') } },
       antigravity: { stop: () => { calls.push('antigravity') } },
+      claudeSubscription: { stop: () => { calls.push('claudeSubscription') } },
       ptyManager: { shutdown: async () => { calls.push('pty') } },
       headlessRunner: { shutdown: async () => { calls.push('headless') } },
       mcpManager: { shutdown: async () => { calls.push('mcp') } },
@@ -210,7 +211,7 @@ describe('explicit profile store roots', () => {
       message: 'Failed to drain profile services',
       errors: [expect.objectContaining({ message: `${failed} failed` })]
     })
-    expect(calls).toEqual(['begin', 'undoRetention', 'lifecycle', 'platform', 'scheduled', 'channels', 'orchestrator', 'net', 'requests', 'antigravity', 'pty', 'headless', 'mcp'])
+    expect(calls).toEqual(['begin', 'undoRetention', 'lifecycle', 'platform', 'scheduled', 'channels', 'orchestrator', 'net', 'requests', 'antigravity', 'claudeSubscription', 'pty', 'headless', 'mcp'])
     expect(service.started).toBe(true)
   })
 })

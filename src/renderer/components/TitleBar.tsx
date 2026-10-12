@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { PanelLeft, PanelRightClose, PanelRightOpen } from '../lib/icons'
+import { WindowCloseButton } from './WindowCloseButton'
 import { IconButton } from './IconButton'
 import { QuickActionsButton } from './QuickActionsButton'
 import { useAppStore } from '../stores/appStore'
@@ -82,9 +83,9 @@ export function TitleBar() {
                   : <rect x="2.15" y="2.15" width="7.7" height="7.7" stroke="currentColor" strokeWidth="1.25" />}
               </CaptionIcon>
             </button>
-            <button type="button" className="icon-btn icon-btn-titlebar titlebar-close" title="Close" aria-label="Close" onClick={() => window.mousse.window.close()}>
+            <WindowCloseButton onClose={() => { void window.mousse.window.close() }}>
               <CaptionIcon><path d="M3.1 3.1l5.8 5.8M8.9 3.1L3.1 8.9" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" /></CaptionIcon>
-            </button>
+            </WindowCloseButton>
           </>
         )}
       </div>
