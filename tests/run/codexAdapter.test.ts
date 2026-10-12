@@ -552,6 +552,36 @@ describe('CodexAdapter', () => {
     expect(sink.calls.filter(([name]) => name === 'steerAccepted').map(([, value]) => value)).toEqual(['Focus on tests', 'And lint'])
   })
 
+  it('stops at once while a steer is still unanswered after the turn completed', async () => {
+    const controller = new AbortController()
+    const steers: string[] = []
+    const replay = transport(
+      [
+        ...handshake(),
+        ...threadStart(3),
+        ...turnStart(4, 'hello'),
+        ...message('msg-1', ['Working']),
+        cue({ steer: 'Focus' }),
+        out({ id: 5, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Focus') } }),
+        completed('completed'),
+        // The steer is never answered; Stop must settle without its 60 s timeout or an interrupt.
+        cue({ stop: true })
+      ],
+      (frame) => {
+        if ((frame as { steer?: string }).steer) steers.push((frame as { steer: string }).steer)
+        else controller.abort(new Error('stopped while steering'))
+      }
+    )
+    const codex = service(replay)
+    const startedAt = Date.now()
+    await expect(new CodexAdapter(() => codex).startTurn(input({ signal: controller.signal }), recordingSink(), control(steers), host())).rejects.toThrow(
+      'stopped while steering'
+    )
+    expect(Date.now() - startedAt).toBeLessThan(2_000)
+    await replay.idle()
+    replay.assertDone()
+  })
+
   it('fails the turn when the app-server exits mid-turn and restarts it for the next one', async () => {
     const replay = transport([
       ...handshake(),

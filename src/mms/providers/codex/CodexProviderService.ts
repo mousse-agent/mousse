@@ -337,6 +337,11 @@ class TurnRun {
     this.finish()
   }
 
+  /** The current Codex turn has already settled on the server. */
+  turnCompleted(): boolean {
+    return this.turnId !== undefined && this.completedTurns.has(this.turnId)
+  }
+
   /** No Codex turn of this run is starting or running on the server. */
   isIdle(): boolean {
     return !this.startInFlight && (!this.turnId || this.completedTurns.has(this.turnId))
@@ -930,7 +935,7 @@ export class CodexProviderService {
 
   private sendInterrupt(run: TurnRun): void {
     const conn = this.app?.conn
-    if (!conn || !run.turnId) return
+    if (!conn || !run.turnId || run.turnCompleted()) return
     void conn
       .request('turn/interrupt', { threadId: run.codexThreadId, turnId: run.turnId }, { timeoutMs: INTERRUPT_TIMEOUT_MS })
       .catch(() => {
@@ -1071,7 +1076,7 @@ export class CodexProviderService {
             return
           }
           try {
-            await conn.request('turn/steer', { threadId: codexThreadId, expectedTurnId: current.turnId, input: [textInput(text)] })
+            await conn.request('turn/steer', { threadId: codexThreadId, expectedTurnId: current.turnId, input: [textInput(text)] }, { signal })
           } catch (error) {
             if (!(error instanceof CodexRpcError)) throw error
             undelivered.push(text)
@@ -1141,9 +1146,10 @@ export class CodexProviderService {
         for (const steer of undelivered.splice(0)) deliver(steer)
         lastTurn = await Promise.race([completion, aborted])
         turnOpen = false
-        await steering
+        // Stop must not wait for a steer the server has not answered yet.
+        await Promise.race([steering, aborted])
         collectSteer()
-        await steering
+        await Promise.race([steering, aborted])
         if (lastTurn.status === 'failed')
           throw new Error(lastTurn.error?.message ?? current.lastError ?? 'Codex turn failed')
         if (lastTurn.status === 'interrupted') {
