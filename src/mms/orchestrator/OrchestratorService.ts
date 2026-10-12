@@ -2259,6 +2259,42 @@ export class OrchestratorService extends EventEmitter {
     return session.isTurnRunning() || listPendingQueue(session.queue).length > 0
   }
 
+  /**
+   * Close a turn only after final response persistence and action execution.
+   * During that finalizing window, sends must queue and steers must remain
+   * attached to the active turn instead of racing a concurrent turn.
+   */
+  private settleActiveTurn(
+    session: ThreadSession,
+    turn: NonNullable<ThreadSession['activeTurn']>,
+    aborted: boolean,
+    opts?: { onTurnSettled?: (aborted: boolean) => void },
+    failed = false
+  ): void {
+    const wasAborted = aborted || turn.abort.signal.aborted
+    if (!wasAborted && turn.pendingSteer.length > 0) {
+      const leftover = turn.pendingSteer.join('\n').trim()
+      turn.pendingSteer = []
+      turn.promotedSteerIds = []
+      if (leftover && session.threadId !== '__unbound__' && !session.deleted) {
+        try {
+          this.enqueueForThread(
+            session.threadId,
+            { content: leftover, mode: getLastUserChatMode(session.messages) ?? 'agent' },
+            { source: 'steer-followup', internal: true }
+          )
+        } catch {
+          // Best-effort: settlement must not fail if the follow-up cannot queue.
+        }
+      }
+    }
+    if (session.activeTurn === turn) session.activeTurn = null
+    opts?.onTurnSettled?.(wasAborted)
+    this.emit(wasAborted ? 'turn-interrupted' : failed ? 'turn-failed' : 'turn-completed', {
+      threadId: session.threadId
+    })
+  }
+
   isActiveTurnRunning(threadId?: string): boolean {
     if (threadId) {
       const session =
@@ -3245,8 +3281,16 @@ export class OrchestratorService extends EventEmitter {
       if (compactionNote) onCompaction('unchanged')
       if (turn.abort.signal.aborted) aborted = true
       opts?.externalSignal?.removeEventListener('abort', mirrorExternalAbort)
-      this.activeTurn = null
+      // The turn remains active until post-stream persistence/actions finish.
     }
+
+    let turnSettled = false
+    const settleOnce = (wasAborted: boolean, failed = false): void => {
+      if (turnSettled) return
+      turnSettled = true
+      this.settleActiveTurn(session, turn, wasAborted, opts, failed)
+    }
+    try {
 
     if (this.activeThinkingMessageId) {
       const thinkingMessage = this.messages.find((message) => message.id === this.activeThinkingMessageId)
@@ -3281,8 +3325,7 @@ export class OrchestratorService extends EventEmitter {
       this.persist(true)
       const response: OrchestratorResponse = { message, actions: [], error: providerError }
       this.emit('response', response)
-      opts?.onTurnSettled?.(false)
-      this.emit('turn-failed', { threadId: session.threadId })
+      settleOnce(false, true)
       this.releaseSessionExecutionLease(session)
       if (!suppressAutoQueueDrain) session.drainAfterSettle = true
       return response
@@ -3321,8 +3364,7 @@ export class OrchestratorService extends EventEmitter {
       // the persisted stopped message invisible until the thread is reopened.
       this.emitThreadMessages(session.threadId, session.messages)
       this.emit('response', response)
-      opts?.onTurnSettled?.(true)
-      this.emit('turn-interrupted', { threadId: session.threadId })
+      settleOnce(true)
       // Stop aborts the active turn but retains normal queued messages.
       return response
     }
@@ -3352,8 +3394,7 @@ export class OrchestratorService extends EventEmitter {
       this.setTurnPhase(session.threadId, 'completed')
       this.emit('response', response)
       this.emitThreadMessages(session.threadId, session.messages)
-      opts?.onTurnSettled?.(false)
-      this.emit('turn-completed', { threadId: session.threadId })
+      settleOnce(false)
       this.releaseSessionExecutionLease(session)
       if (!suppressAutoQueueDrain) session.drainAfterSettle = true
       return response
@@ -3506,11 +3547,13 @@ export class OrchestratorService extends EventEmitter {
     if (!executionFailed) this.setTurnPhase(session.threadId, 'completed')
     this.emit('response', response)
     this.emitThreadMessages(session.threadId, session.messages)
-    opts?.onTurnSettled?.(false)
-    this.emit(executionFailed ? 'turn-failed' : 'turn-completed', { threadId: session.threadId })
+    settleOnce(aborted, executionFailed)
     this.releaseSessionExecutionLease(session)
     if (!suppressAutoQueueDrain) session.drainAfterSettle = true
     return response
+    } finally {
+      settleOnce(aborted, connectionFailed || executionFailed)
+    }
   }
 
   /**
