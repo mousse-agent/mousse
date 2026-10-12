@@ -1,4 +1,5 @@
 import { RunStoreError } from './db/RunStoreError'
+import { wakeThreads, type CapabilitiesFor, type WakeReport } from './delegation/wake'
 import type { EffectOutbox } from './EffectOutbox'
 import type { RunStore } from './RunStore'
 import { writeTerminalRun } from './terminal'
@@ -17,6 +18,8 @@ export interface RepairReport {
   staleRuns: string[]
   /** Rule 3: stopped runs forced to `interrupted`. */
   forcedInterrupts: string[]
+  /** Rule 4: threads woken (wake runs, steers) for pending inbox rows, and wakes cancelled. */
+  wakes: WakeReport
   /** Rule 5 (Phase 2b): queued runs given a `turn.start`. Always empty in Phase 2a. */
   queuedStarts: string[]
   /** Rule 6: `started` tool invocations of terminal runs marked `outcome_unknown`. */
@@ -31,8 +34,9 @@ type Row = Record<string, unknown>
  * else is live the reconciler is the authority). Every repair appends a `reconcile.<rule>`
  * event. The reconciler never calls a provider.
  *
- * Implemented: rules 1, 2, 3 and 6. Rule 4 (child wakes parent) is Phase 4; rule 5 (queued run
- * without an active run gets a `turn.start`) is Phase 2b and is a stub here.
+ * Implemented: rules 1, 2, 3, 4 (Phase 4: pending inbox rows wake their thread, see
+ * `delegation/wake.ts`) and 6. Rule 5 (queued run without an active run gets a `turn.start`) is a
+ * stub here.
  */
 export class Reconciler {
   private readonly store: RunStore
@@ -40,6 +44,7 @@ export class Reconciler {
   private readonly tools: ToolInvocations
   private readonly now: () => string
   private readonly heartbeatMs: number
+  private readonly capabilitiesFor: CapabilitiesFor | undefined
   private timer: ReturnType<typeof setInterval> | null = null
 
   constructor(options: {
@@ -48,12 +53,15 @@ export class Reconciler {
     tools: ToolInvocations
     now?: () => string
     heartbeatMs?: number
+    /** Rule 4: capabilities of the adapter serving a thread (steer delivery for wakes). */
+    capabilitiesFor?: CapabilitiesFor
   }) {
     this.store = options.store
     this.outbox = options.outbox
     this.tools = options.tools
     this.now = options.now ?? (() => new Date(options.store.db.clock()).toISOString())
     this.heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS
+    this.capabilitiesFor = options.capabilitiesFor
   }
 
   runOnce(): RepairReport {
@@ -62,6 +70,7 @@ export class Reconciler {
       expiredLeases: this.expiredLeases(now),
       staleRuns: this.staleRuns(now),
       forcedInterrupts: this.forcedInterrupts(now),
+      wakes: wakeThreads(this.store, this.outbox, this.capabilitiesFor, now),
       queuedStarts: this.queuedStarts(now),
       outcomeUnknownTools: this.toolsOnTerminalRuns(now)
     }

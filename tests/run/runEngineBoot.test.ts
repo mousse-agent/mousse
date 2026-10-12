@@ -50,7 +50,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
 
   it('opens epoch 1 on a fresh profile and exposes the lease owner', () => {
     const { engine, boot } = daemon(10)
-    expect(boot).toEqual({ interrupted: [], uncertain: [], epoch: 1 })
+    expect(boot).toEqual({ interrupted: [], uncertain: [], epoch: 1, orphanedChildren: [], recoveredWakes: [] })
     expect(engine.epoch).toBe(1)
     expect(engine.leaseOwner).toBe('1:10')
   })
@@ -62,7 +62,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     first.engine.shutdown()
 
     const second = daemon(20)
-    expect(second.boot).toEqual({ interrupted: [run.runId], uncertain: [], epoch: 2 })
+    expect(second.boot).toEqual({ interrupted: [run.runId], uncertain: [], epoch: 2, orphanedChildren: [], recoveredWakes: [] })
     expect(second.store.getRun(run.runId)).toMatchObject({
       status: 'interrupted',
       outcome: { interruptedBy: 'daemon_restart' }
@@ -78,7 +78,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     // No shutdown(): the daemon crashed.
 
     const second = daemon(20)
-    expect(second.boot).toEqual({ interrupted: [], uncertain: [run.runId], epoch: 2 })
+    expect(second.boot).toEqual({ interrupted: [], uncertain: [run.runId], epoch: 2, orphanedChildren: [], recoveredWakes: [] })
     const after = second.store.getRun(run.runId)!
     expect(after.status).toBe('uncertain')
     expect(after.outcome).toEqual({
@@ -101,7 +101,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     first.engine.tools.commit(committed.invocationId, '2026-10-12T00:00:01.000Z')
 
     const second = daemon(20)
-    expect(second.boot).toEqual({ interrupted: [run.runId], uncertain: [], epoch: 2 })
+    expect(second.boot).toEqual({ interrupted: [run.runId], uncertain: [], epoch: 2, orphanedChildren: [], recoveredWakes: [] })
     expect(second.store.getRun(run.runId)!.outcome).toEqual({ interruptedBy: 'daemon_restart' })
   })
 
@@ -121,7 +121,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     expect(outbox.listRunning()).toHaveLength(3)
 
     const second = daemon(20)
-    expect(second.boot).toEqual({ interrupted: [b.runId], uncertain: [a.runId], epoch: 2 })
+    expect(second.boot).toEqual({ interrupted: [b.runId], uncertain: [a.runId], epoch: 2, orphanedChildren: [], recoveredWakes: [] })
     expect(second.engine.outbox.get(turn.effectId)).toMatchObject({ status: 'cancelled', lastError: 'daemon_restart' })
     expect(second.engine.outbox.get(title.effectId)).toMatchObject({ status: 'pending', leaseOwner: null })
     expect(second.engine.outbox.get(cleanup.effectId)).toMatchObject({ status: 'pending' })

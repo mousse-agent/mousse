@@ -22,9 +22,10 @@ import { RunEngine } from '../../../src/mms/run/RunEngine'
 import { RunStore } from '../../../src/mms/run/RunStore'
 import { replayAcpProcess } from '../../../src/mms/run/testkit/acpReplay'
 import { replayPiChat } from '../../../src/mms/run/testkit/piChatReplay'
-import { readTranscript, ReplayTransport } from '../../../src/mms/run/testkit/ReplayTransport'
+import { DEFAULT_VOLATILE_KEYS, dropKeys, readTranscript, ReplayTransport } from '../../../src/mms/run/testkit/ReplayTransport'
+import { Reconciler } from '../../../src/mms/run/Reconciler'
 import { replaySdkQuery } from '../../../src/mms/run/testkit/sdkQueryReplay'
-import type { EffectKind, EffectRecord, RunRecord } from '../../../src/mms/run/types'
+import type { DelegationRecord, EffectKind, EffectRecord, RunRecord } from '../../../src/mms/run/types'
 import { TaskQueue } from '../../../src/mms/tasks/TaskQueue'
 import { HeadlessAgentRunner } from '../../../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../../../src/mms/terminals/PtyManager'
@@ -51,6 +52,23 @@ export interface ScenarioResult {
   /** Canonical (native) transcript after the turn. */
   llmMessages: Message[]
   turnState: TurnState
+  /** Delegations the scenario thread made (SPEC §14), oldest first. */
+  delegations: DelegationRecord[]
+  /** Runs of the scenario thread, oldest first. */
+  runs: RunRecord[]
+}
+
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g
+
+/** Replaces run-time uuids in every string (delegating scenarios mint threads and delegations). */
+function normalizeIds(frame: unknown): unknown {
+  const walk = (value: unknown): unknown => {
+    if (typeof value === 'string') return value.replace(UUID, '<uuid>')
+    if (Array.isArray(value)) return value.map(walk)
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, walk(entry)]))
+    return value
+  }
+  return walk(dropKeys(DEFAULT_VOLATILE_KEYS)(frame))
 }
 
 /** Adapters with a fixture for `scenario`, by file name. */
@@ -126,6 +144,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       .some((effect) => effect.kind === kind && effect.runId === runId && effect.status === 'succeeded')
   let cues = 0
   const transport = new ReplayTransport(transcript, {
+    ...(scenario.delegates ? { normalize: normalizeIds } : {}),
     onCue: async (cue) => {
       const action = cue as { action?: string; text?: string }
       const run = activeRun()
@@ -189,6 +208,21 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     threadId = thread.id
     const response = await orch.send(scenario.prompt, false, { threadId, clientRequestId: 'scenario-send' })
     await transport.idle()
+    if (scenario.delegates) {
+      // Children and wake turns run after the send returns; rule 4 wakes the parent.
+      const reconciler = new Reconciler({ store: engine.store, outbox: engine.outbox, tools: engine.tools, capabilitiesFor: (id) => orch.capabilitiesForThread(id) })
+      await waitFor(() => {
+        if (transport.error) return true
+        reconciler.runOnce()
+        try {
+          transport.assertDone()
+          return engine.listRuns(threadId).every((run) => ['completed', 'failed', 'interrupted', 'cancelled'].includes(run.status))
+        } catch {
+          return false
+        }
+      }, 'the delegation to settle')
+      await transport.idle()
+    }
     transport.assertDone()
     const run = engine.listRuns(threadId).find((entry) => entry.clientRequestId === 'scenario-send')
     if (!run) throw new Error('The scenario send created no run')
@@ -199,7 +233,9 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       run: engine.getRun(run.runId)!,
       messages: orch.getMessages(threadId),
       llmMessages: orch.getNativeContext(threadId).messages,
-      turnState: orch.getTurnState(threadId)
+      turnState: orch.getTurnState(threadId),
+      delegations: engine.delegations.listForParentThread(threadId),
+      runs: engine.listRuns(threadId).reverse()
     }
   } finally {
     await worker.stop()

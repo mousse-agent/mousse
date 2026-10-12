@@ -39,7 +39,7 @@ export function getSkillIdFromMode(mode: ChatMode): string | undefined {
 }
 
 export function isOrchestrationAction(action: { type: string }): boolean {
-  return action.type === 'spawn_agents' || action.type === 'complete_task'
+  return action.type === 'complete_task'
 }
 
 export function filterActionsForMode<T extends { type: string }>(actions: T[], mode: ChatMode): T[] {

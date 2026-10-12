@@ -184,6 +184,22 @@ export class ReplayTransport {
   }
 
   /**
+   * `send` for a caller that runs concurrently with another (a delegated child's turn next to its
+   * parent's tool call): when the frame is not due yet but an equal outbound frame lies ahead, wait
+   * until the transcript reaches it. A frame with no equal ahead is sent at once and fails as usual.
+   */
+  async sendInOrder(frame: unknown): Promise<void> {
+    const actual = this.normalize(frame)
+    for (;;) {
+      if (this.failure) throw this.failure
+      const ahead = this.transcript.frames.slice(this.cursor)
+      const index = ahead.findIndex((entry) => entry.dir === 'out' && isDeepStrictEqual(this.normalize(entry.frame), actual))
+      if (index <= 0) return this.send(frame)
+      await this.waitForAdvance(`Stalled at frame ${this.cursor + 1}: a concurrent caller waits to send\n${pretty(actual)}`)
+    }
+  }
+
+  /**
    * The next inbound frame. Cue frames run `onCue` on the way. An outbound frame for which
    * `isBoundary` holds ends this exchange (undefined); any other outbound frame belongs to another
    * caller, so the reader waits until it is sent. Undefined at the end of the transcript.

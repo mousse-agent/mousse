@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { getDefaultSettings, AGENT_TYPES } from '../src/shared/settings'
-import { buildOrchestratorSystemPrompt } from '../src/mms/orchestrator/systemPrompt'
+import { buildOrchestratorSystemPrompt, DELEGATION_PROMPT } from '../src/mms/orchestrator/systemPrompt'
 import { MousseAgentService } from '../src/mms/agents/MousseAgentService'
-import { validateSubagentAssignment } from '../src/mms/orchestrator/OrchestratorService'
+import { dispatchDelegationTool, type DelegationToolHost } from '../src/mms/orchestrator/LlmClient'
 
 describe('Mousse agent settings', () => {
   it('lists Mousse first and enabled by default', () => {
@@ -12,43 +12,35 @@ describe('Mousse agent settings', () => {
     expect(settings.agents.headless.mousse).toBe(false)
   })
 
-  it('mentions mousse as preferred spawn target in agent prompt', () => {
-    const prompt = buildOrchestratorSystemPrompt({ mode: 'agent' })
-    expect(prompt).toContain('"cliType": "mousse"')
-    expect(prompt).toContain('preferred')
+  // spawn_agents (cliType assignments) is retired (SPEC §14.5); delegation is delegate_task.
+  it('describes delegation as delegate_task child threads', () => {
+    expect(DELEGATION_PROMPT).toContain('delegate_task')
+    expect(DELEGATION_PROMPT).toContain('child thread')
+    expect(buildOrchestratorSystemPrompt({ mode: 'agent' })).not.toContain('"cliType"')
   })
 
-  it('subagent prompt forbids spawn_agents and requires direct implementation', () => {
+  it('subagent prompt forbids orchestration JSON and makes the final reply the result', () => {
     const prompt = buildOrchestratorSystemPrompt({ mode: 'build', subagent: true })
-    expect(prompt).toContain('Do NOT spawn agents')
-    expect(prompt).toContain('task progress protocol')
-    expect(prompt).toContain('exactly one')
-    expect(prompt).not.toContain('"type": "spawn_agents"')
+    expect(prompt).toContain('Do NOT emit complete_task')
+    expect(prompt).toContain('Your final reply is your result')
+    expect(prompt).not.toContain('task progress protocol')
     expect(prompt).not.toContain('"type": "complete_task"')
   })
 
-  it('defaults Mousse spawn actions to the current connected model', () => {
-    const prompt = buildOrchestratorSystemPrompt({ mode: 'agent' })
-    const spawnExample = prompt.match(/### Spawn agents[\s\S]*?```mousse-actions([\s\S]*?)```/)?.[1]
-
-    expect(spawnExample).toBeDefined()
-    expect(spawnExample).toContain('"cliType": "mousse"')
-    expect(spawnExample).not.toContain('"provider"')
-    expect(spawnExample).not.toContain('"model"')
-    expect(spawnExample).not.toContain('"effort"')
-    expect(prompt).toContain('inherit the current connected provider')
-    expect(prompt).toContain('unless the user explicitly requests an override')
-    expect(prompt).toContain('Never copy example or guessed model identifiers')
+  it('defaults delegated children to the current connected model', () => {
+    expect(DELEGATION_PROMPT).toContain('provider and model default to yours')
+    expect(DELEGATION_PROMPT).toContain('explicitly requests an override')
+    expect(DELEGATION_PROMPT).toContain('Never copy example or guessed model identifiers')
   })
 
-  it('validates subagent assignment overrides without changing legacy assignments', () => {
-    expect(validateSubagentAssignment({ cliType: 'mousse', task: 'Implement the login form component' })).toBeUndefined()
-    expect(validateSubagentAssignment({ cliType: 'mousse', task: 'Implement the login form component', provider: 'openai' }))
-      .toContain('provider and model')
-    expect(validateSubagentAssignment({ cliType: 'codex', task: 'Implement the login form component', effort: 'high' }))
-      .toContain('only supported by Mousse')
-    expect(validateSubagentAssignment({ cliType: 'mousse', task: 'Implement the login form component', effort: 'turbo' }))
-      .toContain('Unknown subagent reasoning effort')
+  it('validates delegate_task overrides before they reach the host', async () => {
+    let received: unknown
+    const host = { delegateTask: async (input: unknown) => { received = input; return {} } } as unknown as DelegationToolHost
+    const call = (args: Record<string, unknown>) => dispatchDelegationTool(host, { type: 'toolCall', id: 'c', name: 'delegate_task', arguments: { prompt: 'Implement the login form component', workspace: 'isolated', ...args } })
+    await expect(call({ provider: '' })).rejects.toThrow('provider must be a non-empty string')
+    await expect(call({ model: 7 })).rejects.toThrow('model must be a non-empty string')
+    await call({ provider: 'openai', model: 'gpt-x' })
+    expect(received).toMatchObject({ provider: 'openai', model: 'gpt-x', workspace: 'isolated' })
   })
 
   it('passes assignment overrides to the Mousse subagent LLM launch', async () => {

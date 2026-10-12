@@ -4,20 +4,6 @@ export type ToolCallDisplay = NonNullable<ChatMessage['toolCall']>
 
 export function getToolCallDisplay(action: OrchestratorAction): ToolCallDisplay {
   switch (action.type) {
-    case 'spawn_agents': {
-      const agentCount = action.agents.length
-      const agentTypes = [...new Set(action.agents.map((agent) => agent.cliType))].join(', ')
-      return {
-        title: `Spawning ${agentCount} agent${agentCount === 1 ? '' : 's'}`,
-        summary: 'Preparing isolated coding sessions for the requested work.',
-        details: [
-          `Requested ${agentCount} agent workspace${agentCount === 1 ? '' : 's'}.`,
-          `Selected ${agentTypes || 'the configured agent type'}.`,
-          'Waiting for validation and session startup to complete.'
-        ],
-        status: 'processing'
-      }
-    }
     case 'complete_task':
       return {
         title: 'Completing active task',
@@ -81,7 +67,6 @@ function isValidAction(action: unknown): action is OrchestratorAction {
   if (!action || typeof action !== 'object') return false
 
   const obj = action as Record<string, unknown>
-  if (obj.type === 'spawn_agents' && Array.isArray(obj.agents)) return true
   if (obj.type === 'complete_task') return true
   if (obj.type === 'message' && typeof obj.content === 'string') return true
   return false

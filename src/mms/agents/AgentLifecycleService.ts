@@ -9,7 +9,7 @@ const TRANSITIONS: Record<AgentStatus, ReadonlySet<AgentStatus>> = {
   conflict: new Set(['merging', 'ready', 'cancelled']),
   completed: new Set(['completed']),
   failed: new Set(['failed', 'running', 'cancelled', 'merging']),
-  cancelled: new Set(['cancelled', 'merging', 'running']),
+  cancelled: new Set(['cancelled', 'merging']),
   interrupted: new Set(['interrupted', 'running', 'cancelled', 'merging'])
 }
 

@@ -519,11 +519,6 @@ export interface SubagentAssignment {
   effort?: string
 }
 
-export interface SpawnAgentAction {
-  type: 'spawn_agents'
-  agents: SubagentAssignment[]
-}
-
 export interface CompleteTaskAction {
   type: 'complete_task'
   /** Explicit targets prevent completion from affecting unrelated active agents. */
@@ -537,7 +532,6 @@ export interface MessageAction {
 }
 
 export type OrchestratorAction =
-  | SpawnAgentAction
   | CompleteTaskAction
   | MessageAction
 

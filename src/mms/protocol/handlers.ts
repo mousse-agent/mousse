@@ -21,7 +21,6 @@ import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../o
 import { getPiLlmProviders } from '../orchestrator/piProviders'
 import {
   ACCENT_COLORS,
-  AGENT_TYPES,
   THEME_OPTIONS,
   buildAgentTypesFromCatalogs,
   lastUsedChatModel,
@@ -128,36 +127,6 @@ async function prepareChatInput(ctx: HandlerContext, threadId: string, input: Or
     return prepared
   }
   return buildSendInput(prepared.content, prepared.mode, prepared.images)
-}
-
-function asAgentAssignment(v: Record<string, unknown>): {
-  cliType: 'mousse' | 'claude-code' | 'codex' | 'opencode' | 'cursor-agents-cli'
-  task: string
-  provider?: string
-  model?: string
-  effort?: string
-} {
-  const allowed = new Set(['threadId', 'cliType', 'task', 'provider', 'model', 'effort'])
-  for (const key of Object.keys(v)) {
-    if (!allowed.has(key)) throw new Error(`${key} is not allowed`)
-  }
-  const cliType = asString(v.cliType, 'cliType', 64)
-  if (!AGENT_TYPES.some((agent) => agent.id === cliType)) {
-    throw new Error('cliType must be a supported agent type')
-  }
-  const provider = asOptionalString(v.provider, 256)
-  const model = asOptionalString(v.model, 512)
-  if ((provider === undefined) !== (model === undefined)) {
-    throw new Error('provider and model must be supplied together')
-  }
-  const effort = asOptionalString(v.effort, 64)
-  return {
-    cliType: cliType as 'mousse' | 'claude-code' | 'codex' | 'opencode' | 'cursor-agents-cli',
-    task: asString(v.task, 'task'),
-    ...(provider ? { provider } : {}),
-    ...(model ? { model } : {}),
-    ...(effort ? { effort } : {})
-  }
 }
 
 function threadLookupContext(ctx: HandlerContext, params: Record<string, unknown>) {
@@ -854,9 +823,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
-      const assignment = asAgentAssignment(p)
-      const logs = await ctx.mms.orchestrator.spawnAgentsForThread(threadId, [assignment])
-      return { threadId, logs }
+      // SPEC §14.5: one delegation path. Children are started by a turn's `delegate_task`.
+      throw new DomainRpcError('deprecated', 'agents.spawn is retired; delegate from a turn with delegate_task (or agents.createNamed).', { threadId })
     }
     case 'agents.stop': {
       const p = isObject(params) ? params : {}

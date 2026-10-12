@@ -6,15 +6,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
 import { MacroEngine } from '../src/mms/macros/MacroEngine'
 import {
-  extractAssignmentFilePaths,
   OrchestratorService,
   requiresMergeCandidateToFinalize,
-  shouldFinalizeAgent,
-  validateDelegationBatch,
-  validateSubagentAssignment
+  shouldFinalizeAgent
 } from '../src/mms/orchestrator/OrchestratorService'
-import { buildOrchestratorSystemPrompt } from '../src/mms/orchestrator/systemPrompt'
-import { TaskProgressMonitor, taskProgressInstructions } from '../src/mms/tasks/TaskProgressMonitor'
+import { buildOrchestratorSystemPrompt, DELEGATION_PROMPT } from '../src/mms/orchestrator/systemPrompt'
+import { isMousseControlFile, LEGACY_AGENT_PROGRESS_FILE } from '../src/mms/worktree/GitStateInspector'
 import { TaskQueue } from '../src/mms/tasks/TaskQueue'
 import { HeadlessAgentRunner } from '../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../src/mms/terminals/PtyManager'
@@ -265,7 +262,8 @@ describe('GUI failure propagation', () => {
     expect(retry).toHaveBeenCalledWith(agent.id)
     expect(agents.get(agent.id)?.status).toBe('running')
     expect(tasks.findByAgentId(agent.id)?.status).toBe('in_progress')
-    expect(tasks.findByAgentId(agent.id)?.progressMessage).toBe('Task started')
+    // No progress monitor overwrites the resume message any more (SPEC §14.5).
+    expect(tasks.findByAgentId(agent.id)?.progressMessage).toBe('Resuming from the last durable Mousse checkpoint.')
   })
 })
 
@@ -310,47 +308,28 @@ describe('headless agent exit handling', () => {
     return agent
   }
 
-  it('fails an agent that exits 0 without reporting completion', () => {
+  // SPEC §14.5 retired the progress-file protocol: an exit is terminal and the file is not read.
+  it('leaves an agent that exits 0 interrupted with its worktree retained, ignoring any progress file', () => {
     const root = makeTempRoot()
     const { agents, tasks, headlessRunner } = createOrchestrator(root)
     const agent = seedHeadless(agents, tasks, root)
     mkdirSync(join(root, '.mousse'), { recursive: true })
-    writeFileSync(join(root, '.mousse', 'task-progress.json'), JSON.stringify({ status: 'working', progress: 10 }))
+    writeFileSync(join(root, LEGACY_AGENT_PROGRESS_FILE), JSON.stringify({ status: 'completed', summary: 'done' }))
 
     headlessRunner.emit('exit', { agentId: agent.id, exitCode: 0 })
 
-    expect(agents.get(agent.id)?.status).toBe('failed')
-    expect(tasks.findByAgentId(agent.id)?.status).toBe('failed')
-    expect(tasks.findByAgentId(agent.id)?.progressMessage).toBe('Headless agent exited without reporting completion.')
+    expect(agents.get(agent.id)?.status).toBe('interrupted')
+    expect(tasks.findByAgentId(agent.id)?.status).toBe('interrupted')
+    expect(tasks.findByAgentId(agent.id)?.progressMessage).toBe('Headless agent exited; its worktree is retained for inspection.')
+    expect(existsSync(root)).toBe(true)
   })
 
-  it('fails an agent that exits 0 when the progress file is missing', () => {
+  it('ignores an exit without a code', () => {
     const root = makeTempRoot()
     const { agents, tasks, headlessRunner } = createOrchestrator(root)
     const agent = seedHeadless(agents, tasks, root)
-
-    headlessRunner.emit('exit', { agentId: agent.id, exitCode: 0 })
-
-    expect(agents.get(agent.id)?.status).toBe('failed')
-  })
-
-  it('applies a terminal report the poller had not observed yet on exit 0', () => {
-    const root = makeTempRoot()
-    const { orchestrator, agents, tasks, headlessRunner } = createOrchestrator(root)
-    const agent = seedHeadless(agents, tasks, root)
-    mkdirSync(join(root, '.mousse'), { recursive: true })
-    writeFileSync(join(root, '.mousse', 'task-progress.json'), JSON.stringify({ status: 'failed', message: 'Could not finish: tests red' }))
-    const ready = vi.spyOn(orchestrator as unknown as { validateAndMarkAgentReady: () => Promise<void> }, 'validateAndMarkAgentReady').mockResolvedValue()
-
-    headlessRunner.emit('exit', { agentId: agent.id, exitCode: 0 })
-    expect(agents.get(agent.id)?.status).toBe('failed')
-    expect(tasks.findByAgentId(agent.id)?.progressMessage).toBe('Could not finish: tests red')
-
-    const second = seedHeadless(agents, tasks, root)
-    writeFileSync(join(root, '.mousse', 'task-progress.json'), JSON.stringify({ status: 'completed', summary: 'done' }))
-    headlessRunner.emit('exit', { agentId: second.id, exitCode: 0 })
-    expect(ready).toHaveBeenCalledTimes(1)
-    expect(agents.get(second.id)?.status).not.toBe('failed')
+    headlessRunner.emit('exit', { agentId: agent.id, exitCode: null })
+    expect(agents.get(agent.id)?.status).toBe('running')
   })
 
   it('still fails on a non-zero exit and ignores settled agents', () => {
@@ -367,167 +346,75 @@ describe('headless agent exit handling', () => {
   })
 })
 
-describe('delegation batch settlement', () => {
-  it('wakes when all batch agents are ready/failed/cancelled/interrupted', async () => {
+describe('legacy agent settlement', () => {
+  // The delegation batch and its timer-driven parent wake are gone (SPEC §14.5): delegated work is
+  // a child thread whose completion is a stored inbox row. Settling a legacy agent changes its
+  // status and wakes nothing.
+  it('settles failed and cancelled legacy agents without a batch wake', async () => {
     const root = makeTempRoot()
     const { orchestrator, agents, tasks } = createOrchestrator(root)
-
-    const a1 = agents.create({
-      cliType: 'mousse',
-      worktreePath: '/a1',
-      branch: 'b1',
-      executionMode: 'gui',
-      status: 'ready',
-      task: 't1'
-    })
-    tasks.create('t1', a1.id)
-    tasks.updateStatus(tasks.findByAgentId(a1.id)!.id, 'completed')
-
-    const a2 = agents.create({
-      cliType: 'mousse',
-      worktreePath: '/a2',
-      branch: 'b2',
-      executionMode: 'gui',
-      status: 'failed',
-      task: 't2'
-    })
-    tasks.create('t2', a2.id)
-    tasks.updateStatus(tasks.findByAgentId(a2.id)!.id, 'failed')
-
-    // Access private batches via reportGuiAgentFailure path after seeding a live batch.
-    // Use handle path: create a third running agent, fail it, and ensure settled statuses qualify.
     expect(isDelegationSettledStatus('ready')).toBe(true)
     expect(isDelegationSettledStatus('failed')).toBe(true)
     expect(isDelegationSettledStatus('cancelled')).toBe(true)
     expect(isDelegationSettledStatus('interrupted')).toBe(true)
+    const first = seedRunningGuiAgent(agents, tasks, { worktreePath: '/batch-1', branch: 'mousse/agent-batch001' })
+    const second = seedRunningGuiAgent(agents, tasks, { worktreePath: '/batch-2', branch: 'mousse/agent-batch002' })
+    const sendSpy = vi.spyOn(orchestrator, 'send').mockResolvedValue({ message: 'ok', actions: [] })
 
-    // Drive a real batch: seed two running agents, then settle both via public APIs.
-    const { orchestrator: orch2, agents: agents2, tasks: tasks2 } = createOrchestrator(root)
-    const first = seedRunningGuiAgent(agents2, tasks2, {
-      worktreePath: '/batch-1',
-      branch: 'mousse/agent-batch001'
-    })
-    const second = seedRunningGuiAgent(agents2, tasks2, {
-      worktreePath: '/batch-2',
-      branch: 'mousse/agent-batch002'
-    })
-
-    // Manually insert a batch the same way spawnAgents does.
-    const batch = new Set([first.agent.id, second.agent.id]);
-    (orch2 as unknown as { delegationBatches: Set<Set<string>> }).delegationBatches.add(batch)
-
-    const sendSpy = vi.spyOn(orch2, 'send').mockResolvedValue({ message: 'ok', actions: [] })
-
-    orch2.reportGuiAgentFailure(first.agent.id, 'first failed')
-    await orch2.stopAgent(second.agent.id, false)
-
-    // Allow the wake timer to fire.
+    orchestrator.reportGuiAgentFailure(first.agent.id, 'first failed')
+    await orchestrator.stopAgent(second.agent.id, false)
     await new Promise((resolve) => setTimeout(resolve, 150))
 
-    expect(agents2.get(first.agent.id)?.status).toBe('failed')
-    expect(agents2.get(second.agent.id)?.status).toBe('cancelled')
-    expect(sendSpy).toHaveBeenCalled()
-    const wakeContent = String(sendSpy.mock.calls[0]?.[0]?.content ?? sendSpy.mock.calls[0]?.[0] ?? '')
-    expect(wakeContent).toMatch(/delegation batch have finished/i)
+    expect(agents.get(first.agent.id)?.status).toBe('failed')
+    expect(agents.get(second.agent.id)?.status).toBe('cancelled')
+    expect(sendSpy).not.toHaveBeenCalled()
+    expect((orchestrator as unknown as Record<string, unknown>).delegationBatches).toBeUndefined()
     sendSpy.mockRestore()
+  })
+
+  it('never resumes a cancelled agent', () => {
+    const root = makeTempRoot()
+    const { orchestrator, agents, tasks } = createOrchestrator(root)
+    const { agent } = seedRunningGuiAgent(agents, tasks)
+    agents.updateStatus(agent.id, 'cancelled')
+    expect(agents.updateStatus(agent.id, 'running')?.status ?? agents.get(agent.id)?.status).toBe('cancelled')
+    expect(orchestrator.getActiveAgents()).toEqual([])
   })
 })
 
 describe('prompt consistency', () => {
-  it('requires a single readiness mechanism and forbids subagent spawn/complete_task', () => {
+  it('has subagents report through their final reply, without a progress file or orchestration JSON', () => {
     const sub = buildOrchestratorSystemPrompt({ mode: 'build', subagent: true })
-    expect(sub).toContain('Do NOT spawn agents')
-    expect(sub).toContain('exactly one')
-    expect(sub).toContain('task progress protocol')
-    expect(sub).toMatch(/status "failed"/i)
-    expect(sub).toMatch(/meaningful phase/i)
-    expect(sub).not.toContain('"type": "spawn_agents"')
+    expect(sub).toContain('Your final reply is your result')
+    expect(sub).toMatch(/On failure, say why/i)
+    expect(sub).not.toMatch(/task progress protocol|progress file/i)
+    expect(sub).not.toContain('spawn_agents')
     expect(sub).not.toContain('"type": "complete_task"')
-
-    const progress = taskProgressInstructions('/tmp/wt/.mousse/task-progress.json')
-    expect(progress).toContain('only readiness signal')
-    expect(progress).toContain('Do not emit spawn_agents or complete_task')
-    expect(progress).toContain('meaningful phase')
-    expect(progress).toContain('"failed"')
   })
 
-  it('instructs the orchestrator about plan body/path, non-overlap, and focused validation', () => {
-    const agent = buildOrchestratorSystemPrompt({ mode: 'agent' })
-    expect(agent).toMatch(/plan\/spec body|readable filesystem path/i)
-    expect(agent).toMatch(/non-overlapping file ownership/i)
-    expect(agent).toMatch(/focused validation/i)
-    expect(agent).toMatch(/bounded tasks/i)
+  it('tells the delegating model to include the plan, acceptance criteria and focused validation', () => {
+    expect(DELEGATION_PROMPT).toMatch(/plan\/spec body or a readable path/i)
+    expect(DELEGATION_PROMPT).toMatch(/acceptance criteria/i)
+    expect(DELEGATION_PROMPT).toMatch(/focused validation/i)
+    expect(DELEGATION_PROMPT).toMatch(/do not wait or poll/i)
   })
 })
 
-describe('assignment validation', () => {
-  it('requires plan body or path when a task refers to a plan', () => {
-    expect(
-      validateSubagentAssignment({
-        cliType: 'mousse',
-        task: 'Implement the plan for auth'
-      })
-    ).toMatch(/plan\/spec/)
-
-    expect(
-      validateSubagentAssignment({
-        cliType: 'mousse',
-        task: 'Implement the plan in docs/auth-plan.md for the login form'
-      })
-    ).toBeUndefined()
-    expect(
-      validateSubagentAssignment({
-        cliType: 'mousse',
-        task: String.raw`Implement the plan at C:\workspace\docs\auth-plan.md for the login form`
-      })
-    ).toBeUndefined()
-
-    const embedded = [
-      'Implement the plan:',
-      '# Auth plan',
-      '1. Add login form',
-      '2. Wire submit handler',
-      'Acceptance criteria: form validates email',
-      'Step 3: add tests for the form'
-    ].join('\n')
-    expect(validateSubagentAssignment({ cliType: 'mousse', task: embedded })).toBeUndefined()
+describe('delegation guidance', () => {
+  it('reserves the shared workspace for read-only roles and isolates writers', () => {
+    expect(DELEGATION_PROMPT).toMatch(/"shared" is only for read-only roles \(role "research" or "review"\)/)
+    expect(DELEGATION_PROMPT).toMatch(/"isolated" gives the child its own worktree/)
   })
 
-  it('rejects unbounded full-suite tasks without focus', () => {
-    expect(
-      validateSubagentAssignment({
-        cliType: 'mousse',
-        task: 'Run the full test suite'
-      })
-    ).toMatch(/unbounded|full-suite|focused/i)
-
-    expect(
-      validateSubagentAssignment({
-        cliType: 'mousse',
-        task: 'After editing src/login.ts, run focused tests for the login form'
-      })
-    ).toBeUndefined()
+  it('requires an explicit integration of isolated results', () => {
+    expect(DELEGATION_PROMPT).toMatch(/integrate_delegation/)
+    expect(DELEGATION_PROMPT).toMatch(/Never claim integration from completion alone/)
   })
 
-  it('detects overlapping file ownership across a batch', () => {
-    expect(extractAssignmentFilePaths('Edit src/a.ts and src/b.ts')).toEqual([
-      'src/a.ts',
-      'src/b.ts'
-    ])
-
-    expect(
-      validateDelegationBatch([
-        { cliType: 'mousse', task: 'Update src/auth/login.ts form' },
-        { cliType: 'mousse', task: 'Refactor src/auth/login.ts validation' }
-      ])
-    ).toMatch(/Overlapping file ownership/)
-
-    expect(
-      validateDelegationBatch([
-        { cliType: 'mousse', task: 'Update src/auth/login.ts form' },
-        { cliType: 'mousse', task: 'Update src/auth/session.ts helpers' }
-      ])
-    ).toBeUndefined()
+  it('keeps the agent-mode prompt free of spawn instructions', () => {
+    const agent = buildOrchestratorSystemPrompt({ mode: 'agent' })
+    expect(agent).not.toContain('spawn_agents')
+    expect(agent).not.toContain('cliType')
   })
 })
 
@@ -579,14 +466,10 @@ describe('orphan worktree detection', () => {
   })
 })
 
-describe('TaskProgressMonitor status set', () => {
-  it('still accepts working/completed/failed progress updates', () => {
-    const root = makeTempRoot()
-    const monitor = new TaskProgressMonitor()
-    const updates: Array<{ status: string }> = []
-    const path = monitor.start('agent-x', root, (update) => updates.push(update))
-    expect(path).toContain('task-progress.json')
-    expect(updates[0]?.status).toBe('working')
-    monitor.stopAll()
+describe('legacy progress file', () => {
+  it('stays a recognised control file so pre-Phase-4 worktrees still validate and reconstruct', () => {
+    expect(LEGACY_AGENT_PROGRESS_FILE).toBe('.mousse/task-progress.json')
+    expect(isMousseControlFile(LEGACY_AGENT_PROGRESS_FILE)).toBe(true)
+    expect(isMousseControlFile('.mousse\\task-progress.json')).toBe(true)
   })
 })

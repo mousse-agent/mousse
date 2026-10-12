@@ -61,6 +61,7 @@ describe('Reconciler', () => {
       expiredLeases: [],
       staleRuns: [],
       forcedInterrupts: [],
+      wakes: { wakes: [], steers: [], cancelled: [] },
       queuedStarts: [],
       outcomeUnknownTools: []
     })

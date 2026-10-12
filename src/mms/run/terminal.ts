@@ -1,3 +1,4 @@
+import { Delegations } from './Delegations'
 import { stableStringify } from './json'
 import type { RunStore } from './RunStore'
 import type { AttemptStatus, RunOutcome, RunRecord } from './types'
@@ -14,6 +15,9 @@ const LIVE_ATTEMPT_STATUSES: ReadonlySet<AttemptStatus> = new Set<AttemptStatus>
  * The outcome is merged into the stored one and a live active attempt mirrors the run status.
  * Attempts have no `uncertain` status: the attempt of an uncertain run was cut off, so it is
  * `interrupted`. Joins the caller's transaction or opens one.
+ *
+ * Publication gate (SPEC §14.1): when the run is a delegated child run, its result (`resultText`
+ * or the failure) and the parent's `child_result` inbox row are written in this transaction.
  */
 export function writeTerminalRun(
   store: RunStore,
@@ -21,7 +25,8 @@ export function writeTerminalRun(
   expectedEpoch: number,
   status: RunTerminalStatus,
   outcome: RunOutcome | undefined,
-  completedAt: string
+  completedAt: string,
+  options: { resultText?: string } = {}
 ): RunRecord {
   return store.db.transaction(() => {
     const merged =
@@ -43,6 +48,7 @@ export function writeTerminalRun(
         status: status === 'uncertain' ? 'interrupted' : status,
         completedAt
       })
+    new Delegations(store).publishResult(next, options.resultText)
     return next
   })
 }

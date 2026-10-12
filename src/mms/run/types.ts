@@ -190,3 +190,76 @@ export interface ToolInvocationRecord {
 
 /** Effect lease owner: `"<daemonEpoch>:<pid>"` (SPEC §12.1). */
 export const leaseOwner = (epoch: number, pid: number): string => `${epoch}:${pid}`
+
+// Phase 4: lineage, delegations and the inbox (docs/run-engine/SPEC.md §14.1).
+
+export type LineageRelationship = 'subagent' | 'fork'
+
+export interface LineageRecord {
+  threadId: string
+  parentThreadId: string
+  parentRunId: string
+  relationship: LineageRelationship
+  createdAt: string
+}
+
+export type DelegationStatus = 'running' | 'result_available' | 'acknowledged' | 'cancelled' | 'failed'
+
+export type DelegationWake = 'always' | 'settled_only'
+
+/** What a child run published: its terminal status and final text or failure. */
+export interface DelegationResult {
+  runStatus: RunStatus
+  text?: string
+  error?: string
+}
+
+export interface DelegationRecord {
+  delegationId: string
+  parentRunId: string
+  parentThreadId: string
+  childThreadId: string
+  childRunId: string
+  provider: string | null
+  model: string | null
+  promptDigest: string
+  wake: DelegationWake
+  status: DelegationStatus
+  result: DelegationResult | null
+  createdAt: string
+  completedAt: string | null
+}
+
+export type InboxKind = 'child_result' | 'restart_note' | 'reconcile_notice'
+
+export type InboxStatus = 'pending' | 'delivered' | 'acknowledged'
+
+export interface InboxRecord {
+  inboxId: string
+  threadId: string
+  runId: string | null
+  kind: InboxKind
+  payload: unknown
+  status: InboxStatus
+  createdAt: string
+}
+
+/** Payload of a `child_result` inbox row. */
+export interface ChildResultPayload {
+  delegationId: string
+  childThreadId: string
+  childRunId: string
+  result: DelegationResult
+}
+
+/** Payload of a `turn.start` effect that wakes a thread for its pending inbox rows (rule 4). */
+export interface WakeTurnPayload {
+  kind: 'wake'
+  threadId: string
+  runId: string
+  inboxIds: string[]
+}
+
+export function isWakeTurnPayload(payload: unknown): payload is WakeTurnPayload {
+  return Boolean(payload) && typeof payload === 'object' && (payload as { kind?: unknown }).kind === 'wake'
+}

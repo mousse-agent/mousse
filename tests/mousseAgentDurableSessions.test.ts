@@ -784,6 +784,8 @@ describe('Mousse durable subagent sessions', () => {
     expect(service.exportSessions()[0]?.warnings).toContain('Token budget is 80% used')
   })
 
+  // spawn_agents is retired (SPEC §14.5): the block is no longer an action, so a durable session
+  // turn that emits it neither spawns nor completes; delegation is the host's delegate_task.
   it('never spawns recursive subagents from a durable session turn', async () => {
     const completeAgent = vi.fn(async () => undefined)
     const llm = {
@@ -799,11 +801,10 @@ describe('Mousse durable subagent sessions', () => {
     }
     const service = new MousseAgentService(llm as never, { completeAgent })
     service.start('agent-no-spawn', 'task', '/tmp')
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await vi.waitFor(() => expect(service.getRunState('agent-no-spawn')).toBe('idle'))
 
-    expect(
-      service.getMessages('agent-no-spawn').some((message) => message.content.includes('Ignored spawn_agents'))
-    ).toBe(true)
+    expect(completeAgent).not.toHaveBeenCalled()
+    expect(service.listSessionIds()).toEqual(['agent-no-spawn'])
   })
 
   it('writes mousse-agent-sessions.json atomically with other thread files', () => {

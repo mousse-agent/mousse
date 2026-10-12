@@ -1,45 +1,58 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
+import type { MacroEngine } from '../src/mms/macros/MacroEngine'
 import {
   buildCompleteTaskFailureWake,
   buildCompleteTaskSuccessWake,
-  isRecoverableNoDiffReadinessFailure,
-  isRecoverableReadinessFailure,
-  isUncommittedReadinessFailure
+  OrchestratorService
 } from '../src/mms/orchestrator/OrchestratorService'
+import { TaskQueue } from '../src/mms/tasks/TaskQueue'
+import { HeadlessAgentRunner } from '../src/mms/terminals/HeadlessAgentRunner'
+import { PtyManager } from '../src/mms/terminals/PtyManager'
+import type { WorktreeManager } from '../src/mms/worktree/WorktreeManager'
+import { getDefaultSettings } from '../src/shared/settings'
+
+/**
+ * The bounded readiness-correction loop (progress-file completion, one retry for uncommitted or
+ * empty work) is retired with the progress-file protocol (SPEC §14.5). A legacy agent's
+ * `complete_task` is now validated once: ready, or failed with the reason.
+ */
+function legacyAgent(inspection: { ready: boolean; reason?: string; commit?: string; changedFiles?: string[] }, declaredFiles?: string[]) {
+  const agents = new AgentRegistry()
+  const tasks = new TaskQueue()
+  const validateAgentReadiness = vi.fn(async () => inspection)
+  const orchestrator = new OrchestratorService(
+    agents, tasks, { validateAgentReadiness } as unknown as WorktreeManager, new PtyManager(), new HeadlessAgentRunner(),
+    { listProviders: () => [] } as unknown as MacroEngine, { get: () => getDefaultSettings() } as never, {} as never
+  )
+  const agent = agents.create({ cliType: 'mousse', worktreePath: '/wt', branch: 'mousse/agent-x', executionMode: 'gui', status: 'running', task: 'Fix it', declaredFiles })
+  tasks.updateStatus(tasks.create(agent.task, agent.id).id, 'in_progress')
+  const complete = () => (orchestrator as unknown as { completeMousseAgent: (id: string, merge: boolean, summary: string) => Promise<void> }).completeMousseAgent(agent.id, true, 'Done')
+  return { agents, tasks, agent, complete, validateAgentReadiness }
+}
 
 describe('readiness recovery helpers', () => {
-  it('recovers once from uncommitted-changes completion races', () => {
-    const error =
-      'Agent left uncommitted changes: subagent-lab/package.json, subagent-lab/src/cli/index.ts'
-    expect(isUncommittedReadinessFailure(error)).toBe(true)
-    expect(isRecoverableReadinessFailure(error, false, 0)).toBe(true)
-    expect(isRecoverableReadinessFailure(error, false, 1)).toBe(false)
-    expect(isRecoverableReadinessFailure(error, true, 0)).toBe(false)
+  it('fails an uncommitted completion at once instead of asking for a correction', async () => {
+    const reason = 'Agent left uncommitted changes: subagent-lab/package.json'
+    const f = legacyAgent({ ready: false, reason })
+    await f.complete()
+    expect(f.validateAgentReadiness).toHaveBeenCalledTimes(1)
+    expect(f.agents.get(f.agent.id)?.status).toBe('failed')
+    expect(f.tasks.findByAgentId(f.agent.id)?.progressMessage).toBe(reason)
   })
 
-  it('recovers once from missing implementation diffs', () => {
-    expect(
-      isRecoverableReadinessFailure(
-        'Agent completed without creating a worker-authored commit.',
-        false,
-        0
-      )
-    ).toBe(true)
-    expect(
-      isRecoverableNoDiffReadinessFailure(
-        'Agent created only empty commits; the branch has no changes.',
-        false,
-        0
-      )
-    ).toBe(true)
-    expect(
-      isRecoverableNoDiffReadinessFailure('Ready commit contains no implementation diff.', false, 0)
-    ).toBe(true)
+  it('marks a validated branch ready for merge', async () => {
+    const f = legacyAgent({ ready: true, commit: 'abc123', changedFiles: ['src/a.ts'] }, ['src/a.ts'])
+    await f.complete()
+    expect(f.agents.get(f.agent.id)?.status).toBe('ready')
+    expect(f.tasks.findByAgentId(f.agent.id)).toMatchObject({ status: 'completed', summary: 'Done' })
   })
 
-  it('does not recover unrelated readiness failures', () => {
-    expect(isRecoverableReadinessFailure('Agent worktree no longer exists.', false, 0)).toBe(false)
-    expect(isUncommittedReadinessFailure('Agent worktree no longer exists.')).toBe(false)
+  it('fails a branch that changed files outside its declaration', async () => {
+    const f = legacyAgent({ ready: true, commit: 'abc123', changedFiles: ['src/a.ts', 'src/b.ts'] }, ['src/a.ts'])
+    await f.complete()
+    expect(f.agents.get(f.agent.id)?.status).toBe('failed')
+    expect(f.tasks.findByAgentId(f.agent.id)?.progressMessage).toMatch(/outside its discovery declaration: src\/b.ts/)
   })
 })
 

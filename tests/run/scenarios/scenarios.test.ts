@@ -10,11 +10,13 @@ import { join } from 'node:path'
 
 const ADAPTERS = ['antigravity', 'claude-subscription', 'pi']
 
+// A scenario may declare a subset of adapters (`delegate-child` is pi-only: vendor runtimes get no
+// ToolHost until Phase 5).
 describe.each(Object.keys(SCENARIOS))('scenario %s', (name) => {
   const adapters = fixtureAdapters(name)
 
   it('has a fixture for every adapter, each naming its boundary', () => {
-    expect(adapters).toEqual(ADAPTERS)
+    expect(adapters).toEqual(SCENARIOS[name].adapters ?? ADAPTERS)
     for (const adapter of adapters) {
       const { header } = readTranscript(join(FIXTURES_DIR, name, `${adapter}.ndjson`))
       expect(header).toMatchObject({ kind: 'transcript', adapter, scenario: name, version: 1 })

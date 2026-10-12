@@ -13,6 +13,7 @@ import { ThreadDataStore } from './data/ThreadDataStore'
 import { OrchestratorService } from './orchestrator/OrchestratorService'
 import { ProfileDatabase } from './run/db/ProfileDatabase'
 import { EffectWorker } from './run/EffectWorker'
+import type { ThreadEvent } from './run/types'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import { RunStore } from './run/RunStore'
@@ -139,6 +140,8 @@ export class MmsProfileServices {
   private runEffectWorker: EffectWorker | null = null
   private runReconciler: Reconciler | null = null
   private daemonHeartbeat: ReturnType<typeof setInterval> | null = null
+  /** Detaches the inbox listener that runs reconciler rule 4 promptly. */
+  private stopInboxWakes: (() => void) | null = null
   /** Daemon-owned pending questions, one instance per profile. */
   readonly questions: UserQuestionService
   readonly modeRegistry: ModeRegistry
@@ -793,12 +796,33 @@ export class MmsProfileServices {
     const reconciler = new Reconciler({
       store: engine.store,
       outbox: engine.outbox,
-      tools: engine.tools
+      tools: engine.tools,
+      capabilitiesFor: (threadId) => this.orchestrator.capabilitiesForThread(threadId)
     })
     this.runEffectWorker = worker
     this.runReconciler = reconciler
     worker.start()
     reconciler.start()
+    // A stored inbox row is the source of truth; its event only makes rule 4 run sooner.
+    let wakePass: ReturnType<typeof setImmediate> | null = null
+    const onInbox = (event: ThreadEvent): void => {
+      if (event.type !== 'inbox.status' || wakePass || this.runReconciler !== reconciler) return
+      wakePass = setImmediate(() => {
+        wakePass = null
+        if (this.runReconciler !== reconciler) return
+        try {
+          reconciler.runOnce()
+        } catch (error) {
+          console.warn('run engine reconciler pass failed', error)
+        }
+      })
+    }
+    engine.on('event', onInbox)
+    this.stopInboxWakes = () => {
+      engine.off('event', onInbox)
+      if (wakePass) clearImmediate(wakePass)
+      wakePass = null
+    }
     this.orchestrator.attachEffectWorker(worker)
     this.daemonHeartbeat = setInterval(() => {
       try {
@@ -819,6 +843,8 @@ export class MmsProfileServices {
     if (this.daemonHeartbeat) clearInterval(this.daemonHeartbeat)
     this.daemonHeartbeat = null
     this.runReconciler?.stop()
+    this.stopInboxWakes?.()
+    this.stopInboxWakes = null
     const workerStopped = this.runEffectWorker?.stop()
     await this.orchestrator.shutdown()
     await workerStopped

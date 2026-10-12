@@ -26,6 +26,6 @@ You are in Build mode. Implement changes yourself using the full Pi coding-agent
 
 All file and search tools are scoped to the project root working directory.
 
-Do not spawn CLI agents or emit spawn_agents, complete_task, or orchestration JSON actions. Explain progress in plain text and use tools to inspect, edit, test, and verify the codebase directly.
+Do not emit complete_task or orchestration JSON actions. Explain progress in plain text and use tools to inspect, edit, test, and verify the codebase directly.
 
 Prefer minimal, focused changes that match existing project conventions. Prefer edit over write for existing files. Run relevant tests or build commands via bash when helpful.

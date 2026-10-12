@@ -45,8 +45,8 @@ describe('chat mode helpers', () => {
   })
 
   it('filters orchestration actions from every mode except agent', () => {
+    // spawn_agents is retired (SPEC §14.5); complete_task is the remaining orchestration action.
     const actions = [
-      { type: 'spawn_agents', agents: [] },
       { type: 'complete_task' },
       { type: 'message', content: 'ok' }
     ] as const
@@ -55,7 +55,7 @@ describe('chat mode helpers', () => {
     expect(filterActionsForMode([...actions], 'build')).toEqual(directMessage)
     expect(filterActionsForMode([...actions], 'plan')).toEqual(directMessage)
     expect(filterActionsForMode([...actions], { type: 'skill', skillId: 'x' })).toEqual(directMessage)
-    expect(filterActionsForChatMode([...actions], 'agent')).toHaveLength(3)
+    expect(filterActionsForChatMode([...actions], 'agent')).toHaveLength(2)
   })
 })
 
@@ -105,10 +105,12 @@ describe('mode-aware prompts and plan output', () => {
     const planPrompt = buildOrchestratorSystemPrompt({ mode: 'plan' })
     const buildPrompt = buildOrchestratorSystemPrompt({ mode: 'build' })
 
-    expect(agentPrompt).toContain('"type": "spawn_agents"')
+    // Delegation is the delegate_task tool family, appended when the turn has the tools.
+    expect(agentPrompt).not.toContain('spawn_agents')
+    expect(agentPrompt).toContain('"type": "complete_task"')
     expect(agentPrompt).toContain('present_plan')
     expect(agentPrompt).toContain('You decide whether to plan')
-    expect(cursorAgentPrompt).not.toContain('"type": "spawn_agents"')
+    expect(cursorAgentPrompt).not.toContain('"type": "complete_task"')
     expect(cursorAgentPrompt).toContain('official Mousse session configuration')
     expect(planPrompt).toContain('ask_user')
     expect(planPrompt).toContain('Do NOT call show_document')
@@ -116,13 +118,13 @@ describe('mode-aware prompts and plan output', () => {
     expect(buildPrompt).toContain('read')
     expect(buildPrompt).toContain('edit')
     expect(buildPrompt).toContain('grep')
-    expect(buildPrompt).toContain('Do not spawn CLI agents')
-    expect(buildPrompt).not.toContain('"type": "spawn_agents"')
+    expect(buildPrompt).toContain('Do not emit complete_task')
+    expect(buildPrompt).not.toContain('"type": "complete_task"')
     const skillPrompt = buildOrchestratorSystemPrompt({
       mode: { type: 'skill', skillId: 'reviewer' }
     })
-    expect(skillPrompt).toContain('Do not spawn CLI agents')
-    expect(skillPrompt).not.toContain('"type": "spawn_agents"')
+    expect(skillPrompt).toContain('Do not emit complete_task')
+    expect(skillPrompt).not.toContain('"type": "complete_task"')
   })
 
   it('prepends project MOUSSE.md instructions when present', async () => {
@@ -181,7 +183,7 @@ describe('mode-aware prompts and plan output', () => {
     const response = `Here is the plan.
 
 \`\`\`mousse-actions
-{ "actions": [ { "type": "spawn_agents", "agents": [] } ] }
+{ "actions": [ { "type": "complete_task", "agentIds": ["agent-1"] } ] }
 \`\`\``
 
     expect(parseActions(response)).toHaveLength(1)
@@ -220,18 +222,13 @@ describe('mode-aware prompts and plan output', () => {
     const nestedTask =
       'Honor this contract:\n```ts\nexport type IssueStatus = \'open\'\n```\nThen implement domain.'
     const response = [
-      'Spawning workers.',
+      'Recording the contract.',
       '',
       '```mousse-actions',
       JSON.stringify({
         actions: [
-          {
-            type: 'spawn_agents',
-            agents: [
-              { cliType: 'mousse', task: nestedTask },
-              { cliType: 'mousse', task: 'Second worker without fences.' }
-            ]
-          }
+          { type: 'message', content: nestedTask },
+          { type: 'message', content: 'Second note without fences.' }
         ]
       }),
       '```',
@@ -240,16 +237,12 @@ describe('mode-aware prompts and plan output', () => {
     ].join('\n')
 
     const actions = parseActions(response)
-    expect(actions).toHaveLength(1)
-    expect(actions[0]).toMatchObject({
-      type: 'spawn_agents',
-      agents: [
-        { cliType: 'mousse', task: nestedTask },
-        { cliType: 'mousse', task: 'Second worker without fences.' }
-      ]
-    })
+    expect(actions).toEqual([
+      { type: 'message', content: nestedTask },
+      { type: 'message', content: 'Second note without fences.' }
+    ])
     expect(stripActionBlocks(response).replace(/\n{2,}/g, '\n\n')).toBe(
-      'Spawning workers.\n\nWaiting for settle.'
+      'Recording the contract.\n\nWaiting for settle.'
     )
   })
 

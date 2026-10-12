@@ -2,7 +2,8 @@ import type { Migration } from './ProfileDatabase'
 
 /**
  * Run Engine schema. Version 1 is the Phase 1 data model in docs/run-engine/SPEC.md §3; version 2
- * is the Phase 2 outbox, daemon epochs and tool ledger (§12.1) plus `runs.heartbeat_at`.
+ * is the Phase 2 outbox, daemon epochs and tool ledger (§12.1) plus `runs.heartbeat_at`; version 3
+ * is the Phase 4 delegation model (§14.1): thread lineage, delegations and the inbox.
  */
 export const RUN_MIGRATIONS: readonly Migration[] = [
   {
@@ -112,6 +113,50 @@ CREATE INDEX tool_invocations_run ON tool_invocations(run_id, status);
 
 -- Liveness for the reconciler (SPEC 12.4 rule 2). Not a status write: no epoch bump, no event.
 ALTER TABLE runs ADD COLUMN heartbeat_at TEXT;
+`
+  },
+  {
+    version: 3,
+    sql: `
+-- A child thread and the run that created it (SPEC 14.1).
+CREATE TABLE thread_lineage(
+  thread_id        TEXT PRIMARY KEY,
+  parent_thread_id TEXT NOT NULL,
+  parent_run_id    TEXT NOT NULL,
+  relationship     TEXT NOT NULL CHECK(relationship IN ('subagent','fork')),
+  created_at       TEXT NOT NULL
+) STRICT;
+
+-- Ties a parent run to one child run on a child thread.
+CREATE TABLE delegations(
+  delegation_id    TEXT PRIMARY KEY,
+  parent_run_id    TEXT NOT NULL,
+  parent_thread_id TEXT NOT NULL,
+  child_thread_id  TEXT NOT NULL,
+  child_run_id     TEXT NOT NULL,
+  provider         TEXT,
+  model            TEXT,
+  prompt_digest    TEXT NOT NULL,
+  wake             TEXT NOT NULL CHECK(wake IN ('always','settled_only')),
+  status           TEXT NOT NULL CHECK(status IN ('running','result_available','acknowledged','cancelled','failed')),
+  result           TEXT,                          -- JSON: {runStatus, text?, error?}
+  created_at       TEXT NOT NULL,
+  completed_at     TEXT
+) STRICT;
+CREATE INDEX delegations_parent_run ON delegations(parent_run_id);
+CREATE INDEX delegations_child_thread ON delegations(child_thread_id);
+
+-- Stored notifications for a thread; a child's result is written with its terminal run write.
+CREATE TABLE inbox(
+  inbox_id   TEXT PRIMARY KEY,
+  thread_id  TEXT NOT NULL,
+  run_id     TEXT,
+  kind       TEXT NOT NULL CHECK(kind IN ('child_result','restart_note','reconcile_notice')),
+  payload    TEXT NOT NULL,
+  status     TEXT NOT NULL CHECK(status IN ('pending','delivered','acknowledged')),
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX inbox_thread_status ON inbox(thread_id, status);
 `
   }
 ]

@@ -18,7 +18,8 @@ export const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'browser_screenshot',
   'browser_tabs',
   'list_tasks',
-  'list_subagents'
+  'list_subagents',
+  'list_delegations'
 ])
 
 /** Tools with side effects. Listed for documentation; any unknown tool is also non-idempotent. */
@@ -34,6 +35,12 @@ export const NON_IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'create_subagent',
   'create_subagents',
   'integrate_subagent',
+  'recall_subagent',
+  // Phase 4 delegation (SPEC §14.2). `task_status` acknowledges a published result.
+  'delegate_task',
+  'task_status',
+  'task_cancel',
+  'integrate_delegation',
   'present_plan',
   'ask_user'
 ])
