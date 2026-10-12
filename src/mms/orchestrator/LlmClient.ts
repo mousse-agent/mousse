@@ -152,6 +152,9 @@ export interface NamedAgentRecallRequest extends Omit<NamedAgentToolRequest, 'na
 /** `delegate_task` arguments (docs/run-engine/SPEC.md §14.2). */
 export interface DelegateTaskInput {
   prompt: string
+  /** Provider instance the child runs on (`claude`, `pi:openai`, ...); defaults to the caller's. */
+  instanceId?: string
+  /** @deprecated Older `llmProvider` name; mapped to an instance id. `instanceId` wins when both are set. */
   provider?: string
   model?: string
   role?: string
@@ -2976,8 +2979,8 @@ function isValidAction(a: unknown): a is OrchestratorAction {
 
 /** Delegation tool schemas (SPEC §14.2) plus the named-agent compatibility wrappers. */
 const DELEGATION_TOOLS: Tool[] = [
-  { name: 'delegate_task', description: 'Start a delegated task on a new child thread and return at once with its delegationId. Mousse wakes you with a notice when it finishes; read the result with task_status. workspace isolated gives the child its own worktree; shared is only for read-only roles (research, review). provider and model default to yours.',
-    parameters: Type.Object({ prompt: Type.String(), provider: Type.Optional(Type.String()), model: Type.Optional(Type.String()), role: Type.Optional(Type.String()),
+  { name: 'delegate_task', description: 'Start a delegated task on a new child thread and return at once with its delegationId. Mousse wakes you with a notice when it finishes; read the result with task_status. workspace isolated gives the child its own worktree; shared is only for read-only roles (research, review). instanceId (the agent to run, such as "claude" or "pi:openai") and model default to yours; provider is the older name form of instanceId.',
+    parameters: Type.Object({ prompt: Type.String(), instanceId: Type.Optional(Type.String()), provider: Type.Optional(Type.String()), model: Type.Optional(Type.String()), role: Type.Optional(Type.String()),
       workspace: Type.Union([Type.Literal('isolated'), Type.Literal('shared')]),
       wake: Type.Optional(Type.Union([Type.Literal('always'), Type.Literal('settled_only')])) }) },
   { name: 'task_status', description: 'Status of a delegated task, with its full result once finished. Reading a result acknowledges it.', parameters: Type.Object({ delegationId: Type.String() }) },
@@ -3023,11 +3026,11 @@ export async function dispatchDelegationTool(host: DelegationToolHost, toolCall:
       const prompt = requireString(args, 'prompt', 'delegate_task requires a prompt')
       if (args.workspace !== 'isolated' && args.workspace !== 'shared') throw new Error('delegate_task requires workspace isolated or shared')
       if (args.wake !== undefined && args.wake !== 'always' && args.wake !== 'settled_only') throw new Error('wake must be always or settled_only')
-      for (const key of ['provider', 'model', 'role'] as const)
+      for (const key of ['instanceId', 'provider', 'model', 'role'] as const)
         if (args[key] !== undefined && (typeof args[key] !== 'string' || !String(args[key]).trim())) throw new Error(`${key} must be a non-empty string`)
       if (args.modeCeiling !== undefined && args.modeCeiling !== 'plan' && args.modeCeiling !== 'default') throw new Error('modeCeiling must be plan or default')
       return host.delegateTask({ prompt, workspace: args.workspace, wake: args.wake as DelegateTaskInput['wake'],
-        provider: args.provider as string | undefined, model: args.model as string | undefined, role: args.role as string | undefined,
+        instanceId: args.instanceId as string | undefined, provider: args.provider as string | undefined, model: args.model as string | undefined, role: args.role as string | undefined,
         ...(args.modeCeiling !== undefined ? { modeCeiling: args.modeCeiling as DelegateTaskInput['modeCeiling'] } : {}) }, call)
     }
     case 'task_status':

@@ -24,7 +24,7 @@ import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase
  * `wait` runs until stopped without committing anything.
  */
 class StoppableAdapter implements ProviderAdapter {
-  readonly id = 'pi'
+  readonly driver = 'pi' as const
   readonly capabilities = PI_LOOP_CAPABILITIES
   readonly turns: Array<Array<{ role: string; content: unknown }>> = []
   waiting = false
@@ -141,7 +141,8 @@ describe('thread fork (SPEC §16.2)', () => {
       type: 'fork', status: 'pending', sourceThreadId: source.id, targetThreadId: forked.threadId, sourceRunOrdinal: 1, payload: { sourceRunOrdinal: 1 }
     })
     expect(d.engine.listRuns(forked.threadId)).toEqual([])
-    expect(d.orch.getThreadModelOverride(forked.threadId)).toEqual(PI)
+    // The fork keeps the source's selection, stored in the instance shape.
+    expect(d.orch.getThreadModelOverride(forked.threadId)).toEqual({ ...PI, instanceId: 'pi:openai' })
   })
 
   it('resolves portably on the first message, in the fork\'s own worktree seeded from the source checkpoint', async () => {
