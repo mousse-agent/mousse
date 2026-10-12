@@ -16,6 +16,7 @@ import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings
 import type { ChatImageAttachment } from '../../../shared/types'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
 import { AppError } from '../../../shared/errors'
+import { CLAUDE_INSTANCE_ID } from '../../../shared/providerInstances'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { CLAUDE_MOUSSE_TOOL_PREFIX, claudeMcpServers } from '../../run/mcp/attachment'
@@ -35,6 +36,10 @@ type SavedSession = {
   model?: string
   historyKey?: string
   usageBaseline?: ClaudeUsageBaseline
+  /** Provider instance that owns the session; absent on sessions saved before instances existed. */
+  instanceId?: string
+  /** Login policy (credential scope) the session was created under; absent on older sessions. */
+  loginPolicy?: ClaudeLoginPolicy
 }
 type Settings = {
   /** A profile-private (isolated) sign-in completed; unused under the `cli` policy. */
@@ -49,6 +54,8 @@ type Settings = {
 }
 export type ClaudeSubscriptionChatInput = {
   threadId: string
+  /** Provider instance running the turn; a saved session resumes only on the same instance. */
+  instanceId?: string
   cwd: string
   model: string
   prompt: string
@@ -178,6 +185,14 @@ function runAuth(
   )
 }
 const historyKey = (history: string) => createHash('sha256').update(history).digest('hex')
+/**
+ * Whether a saved session may be resumed by a turn on `instanceId` under `loginPolicy`. Sessions
+ * saved before instances existed belong to the default `claude` instance, and to the current
+ * policy: a policy switch already drops every saved session (`setLoginPolicy`).
+ */
+function sessionBoundTo(saved: SavedSession, instanceId: string, loginPolicy: ClaudeLoginPolicy | undefined): boolean {
+  return (saved.instanceId ?? CLAUDE_INSTANCE_ID) === instanceId && (saved.loginPolicy === undefined || saved.loginPolicy === loginPolicy)
+}
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
 
 export class ClaudeSubscriptionProviderService {
@@ -857,15 +872,19 @@ export class ClaudeSubscriptionProviderService {
     }
     input.signal?.addEventListener('abort', cancel, { once: true })
     this.readyToCommit.delete(input.threadId)
-    const saved = this.settings.sessions?.[input.threadId]
+    const instanceId = input.instanceId ?? CLAUDE_INSTANCE_ID
+    const loginPolicy = this.settings.loginPolicy
+    // A native session belongs to one instance and one credential scope; anything else starts fresh.
+    const stored = this.settings.sessions?.[input.threadId]
+    const saved = stored && sessionBoundTo(stored, instanceId, loginPolicy) ? stored : undefined
     const resume =
       saved?.cwd === resolve(input.cwd) && saved.model === parseThinkingSuffixFromModelId(input.model).baseId && saved.historyKey === historyKey(input.history ?? '')
         ? saved.sessionId
         : undefined
     const metrics = new ClaudeMetricsCollector(resume, saved?.usageBaseline)
     const editCounter = new ClaudeNativeEditCounter(input.cwd, input.onLineEdits)
-    if (saved) {
-      delete saved.historyKey
+    if (stored) {
+      delete stored.historyKey
       this.save()
     }
     let text = '',
@@ -1160,7 +1179,7 @@ export class ClaudeSubscriptionProviderService {
       if (scope === this.scope) {
         this.settings.sessions = {
           ...this.settings.sessions,
-          [input.threadId]: { sessionId, cwd: resolve(input.cwd), model: selected.baseId, usageBaseline: metrics.snapshot() }
+          [input.threadId]: { sessionId, cwd: resolve(input.cwd), model: selected.baseId, usageBaseline: metrics.snapshot(), instanceId, ...(loginPolicy ? { loginPolicy } : {}) }
         }
         this.save()
         this.readyToCommit.add(input.threadId)
@@ -1185,7 +1204,9 @@ export class ClaudeSubscriptionProviderService {
               ...(current?.sessionId === baseline.sessionId ? current : {}),
               sessionId: baseline.sessionId,
               cwd: resolve(input.cwd),
-              usageBaseline: baseline
+              usageBaseline: baseline,
+              instanceId,
+              ...(loginPolicy ? { loginPolicy } : {})
             }
           }
           this.save()

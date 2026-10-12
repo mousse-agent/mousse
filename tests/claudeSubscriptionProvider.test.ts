@@ -2,6 +2,7 @@ import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
+import { createHash } from 'node:crypto'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -171,6 +172,42 @@ describe('Claude Subscription native provider', () => {
       extraArgs: { 'strict-mcp-config': null }
     })
     expect(JSON.stringify(settings())).not.toContain('secret')
+  })
+  it('resumes a saved session only on the instance and login policy that created it', async () => {
+    const inputs: Array<{ options: Options; prompt: unknown }> = []
+    const { service, home, settings } = fixture((input) => {
+      inputs.push(input)
+      return fakeQuery([result])
+    })
+    await service.chat({ ...chatInput(home), instanceId: 'claude' })
+    expect(settings().sessions.thread).toMatchObject({ sessionId: 'vendor-session', instanceId: 'claude', loginPolicy: 'isolated' })
+    service.commitConversation('thread', 'history')
+    // Another instance never resumes this instance's session.
+    await service.chat({ ...chatInput(home), instanceId: 'claude-work', history: 'history' })
+    expect(inputs[1].options.resume).toBeUndefined()
+    expect(settings().sessions.thread.instanceId).toBe('claude-work')
+
+    // A session saved before instances existed belongs to the default instance and current policy.
+    const directory = join(home, 'providers', 'claude-subscription')
+    const legacy = (session: Record<string, unknown>) =>
+      writeFileSync(join(directory, 'settings.json'), JSON.stringify({ ...settings(), sessions: { thread: session } }))
+    const key = createHash('sha256').update('history').digest('hex')
+    legacy({ sessionId: 'old-session', cwd: home, model: 'sonnet', historyKey: key })
+    const reloaded = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      query: (input) => { inputs.push(input); return fakeQuery([result]) },
+      runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
+    })
+    await reloaded.chat({ ...chatInput(home), history: 'history' })
+    expect(inputs[2].options.resume).toBe('old-session')
+
+    // A session from another credential scope is never resumed.
+    legacy({ sessionId: 'cli-session', cwd: home, model: 'sonnet', historyKey: key, instanceId: 'claude', loginPolicy: 'cli' })
+    const switched = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      query: (input) => { inputs.push(input); return fakeQuery([result]) },
+      runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
+    })
+    await switched.chat({ ...chatInput(home), instanceId: 'claude', history: 'history' })
+    expect(inputs[3].options.resume).toBeUndefined()
   })
   it('asks for permission, rejects dismissal and denies writes in plan mode', async () => {
     let decision: unknown
