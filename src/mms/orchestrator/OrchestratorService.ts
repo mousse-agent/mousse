@@ -1,7 +1,6 @@
 import { contextHandoff, previousTurnModel } from './contextHandoff'
 import { AppletStore } from '../applets/AppletStore'
 import { publishAppletPresentation, recoverAppletPresentation } from '../applets/publishPresentation'
-import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
 import { validateAppletSubmission, type AppletSubmission } from '../../shared/applets'
 import { logDebug } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
@@ -37,7 +36,6 @@ import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/a
 import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
 import type { ClaudeSubscriptionProviderService } from '../providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import type { ClaudeSubscriptionMetrics } from '../providers/claudeSubscription/metrics'
 import type { AntigravityProviderService } from '../providers/antigravity/AntigravityProviderService'
 import { v4 as uuidv4 } from 'uuid'
 import type { CommandResult, RunEngine } from '../run/RunEngine'
@@ -47,7 +45,11 @@ import { stableStringify } from '../run/json'
 import { formatRestartNote } from '../run/restartNote'
 import { AdapterRegistry } from '../run/adapters/AdapterRegistry'
 import { PiLoopAdapter } from '../run/adapters/pi/PiLoopAdapter'
-import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../run/adapters/ProviderAdapter'
+import { ClaudeSubscriptionAdapter } from '../run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
+import { AntigravityAdapter } from '../run/adapters/antigravity/AntigravityAdapter'
+import type { AdapterHost, ProviderMetrics, RecoveredContext, TurnControl, TurnInput, TurnSink } from '../run/adapters/ProviderAdapter'
+import { TranscriptAssembler } from '../run/adapters/shared/TranscriptAssembler'
+import { handoffDelivery } from '../run/policy/featureGates'
 import { isContextOverflowError, retryContextOverflowOnce } from '../run/adapters/shared/retryContextOverflow'
 import {
   TERMINAL_RUN_STATUSES,
@@ -106,7 +108,7 @@ import {
   readHostBrowserRuntime
 } from './browser'
 import { computeContextUsage } from './contextUsage'
-import { getToolCallDisplay, parseProviderToolCall } from '../../shared/toolCallDisplay'
+import { getToolCallDisplay } from '../../shared/toolCallDisplay'
 import type { SettingsStore } from '../settings/SettingsStore'
 import type { ProviderAuthService } from '../providers/ProviderAuthService'
 import type { McpManager } from '../integrations/mcp/McpManager'
@@ -705,7 +707,10 @@ export class OrchestratorService extends EventEmitter {
   }
   private llm: LlmClient
   /** Provider adapters for `executeTurn` (SPEC §13). The pi loop reads `this.llm` per turn. */
-  private adapters = new AdapterRegistry().register(new PiLoopAdapter(() => this.llm))
+  private adapters = new AdapterRegistry()
+    .register(new PiLoopAdapter(() => this.llm))
+    .register(new ClaudeSubscriptionAdapter(() => this.claudeSubscription ?? null))
+    .register(new AntigravityAdapter(() => this.antigravity ?? null))
   /** Test seam: replaces the provider adapters. */
   setAdapterRegistry(registry: AdapterRegistry): void { this.adapters = registry }
   private readonly questions: UserQuestionService
@@ -713,6 +718,7 @@ export class OrchestratorService extends EventEmitter {
   /** Bound GUI/CLI session (active thread). Concurrent turns use ALS-scoped sessions. */
   private boundSession = new ThreadSession('__unbound__')
   private sessions = new Map<string, ThreadSession>()
+  private readonly transcripts = new WeakMap<ThreadSession, TranscriptAssembler>()
   private readonly sessionAls = new AsyncLocalStorage<ThreadSession>()
   private persistFn?: (threadId?: string | null) => void
   /** Per-thread delayed persist timers (concurrent turns must not suppress each other). */
@@ -856,17 +862,6 @@ export class OrchestratorService extends EventEmitter {
     this.session.activeTurn = value
   }
 
-  private get activeToolCallMessageIds(): Map<string, string> {
-    return this.session.activeToolCallMessageIds
-  }
-
-  private get activeThinkingMessageId(): string | null {
-    return this.session.activeThinkingMessageId
-  }
-  private set activeThinkingMessageId(value: string | null) {
-    this.session.activeThinkingMessageId = value
-  }
-
   private get activeAssistantMessageId(): string | null {
     return this.session.activeAssistantMessageId
   }
@@ -877,15 +872,9 @@ export class OrchestratorService extends EventEmitter {
   private get lastCompletedAssistantMessageId(): string | null {
     return this.session.lastCompletedAssistantMessageId
   }
-  private set lastCompletedAssistantMessageId(value: string | null) {
-    this.session.lastCompletedAssistantMessageId = value
-  }
 
   private get lastCompletedAssistantContent(): string {
     return this.session.lastCompletedAssistantContent
-  }
-  private set lastCompletedAssistantContent(value: string) {
-    this.session.lastCompletedAssistantContent = value
   }
 
   private get lastMeasuredInput(): number | null {
@@ -2143,11 +2132,16 @@ export class OrchestratorService extends EventEmitter {
       const modelOverride = this.session.modelOverride
       const selectedModel = modelOverride ?? resolveModelForMode(this.settingsStore.get(), request.mode, [
         ...(this.providerAuth.credentials?.listProviderIds() ?? []),
-        ...(this.antigravity?.configured() ? ['antigravity'] : []),
-        ...(this.claudeSubscription?.configured() ? ['claude-subscription'] : [])
+        ...this.adapters.configuredProviderIds()
       ])
-      if (selectedModel.llmProvider === 'claude-subscription') {
-        const key = `claude-subscription:${selectedModel.model}`
+      const adapter = this.adapters.get(selectedModel.llmProvider)
+      if (handoffDelivery(adapter.capabilities) === 'prompt_preamble') {
+        // Prompt-injected runtimes own their context. Without a reported window, do not display
+        // a fabricated Mousse context measurement.
+        if (adapter.describe?.(selectedModel.model).contextUsage !== 'reported') {
+          return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model, source: 'estimated', categories: [] }
+        }
+        const key = `${selectedModel.llmProvider}:${selectedModel.model}`
         const stored = this.nativeContext.lastTurnUsage
         const capacity = this.nativeContext.nativeProviderModel
         const matches = stored?.modelKey === key && stored.contextRevision === (this.nativeContext.revision ?? 0)
@@ -2164,11 +2158,6 @@ export class OrchestratorService extends EventEmitter {
         })
         const latestResponse = [...this.session.messages].reverse().find((message) => message.responseMetadata?.tokensUsed !== undefined)
         return { ...usage, limit, modelLimit: limit, percent: limit > 0 ? usage.percent : 0, processedTokens: latestResponse?.responseMetadata?.tokensUsed }
-      }
-      if (selectedModel.llmProvider === 'antigravity') {
-        // Native agents own their context and do not publish a token window.
-        // Do not display a fabricated Mousse context measurement.
-        return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model, source: 'estimated', categories: [] }
       }
       const { limit, modelName } = this.llm.getSelectedModelContextLimit(request.mode, modelOverride)
       const contextInputs = await this.llm.getContextInputs(
@@ -2466,24 +2455,6 @@ export class OrchestratorService extends EventEmitter {
     return msg
   }
 
-  private addToolTimelineMessage(
-    kind: NonNullable<ChatMessage['kind']>,
-    toolCall: NonNullable<ChatMessage['toolCall']>
-  ): ChatMessage {
-    const msg: ChatMessage = {
-      id: uuidv4(),
-      role: 'system',
-      kind,
-      content: '',
-      timestamp: new Date().toISOString(),
-      toolCall
-    }
-    this.messages.push(msg)
-    this.emitMessageAdded(msg)
-    this.persist()
-    return msg
-  }
-
   private updateToolTimelineMessage(
     messageId: string,
     toolCall: NonNullable<ChatMessage['toolCall']>,
@@ -2501,36 +2472,36 @@ export class OrchestratorService extends EventEmitter {
     this.persist(immediate)
   }
 
-  private updateThinkingMessage(
-    messageId: string,
-    content: string,
-    status: NonNullable<ChatMessage['thinking']>['status']
-  ): void {
-    const index = this.messages.findIndex((message) => message.id === messageId)
-    if (index === -1) return
-
-    const updated: ChatMessage = {
-      ...this.messages[index],
-      thinking: { content, status }
+  /** The current session's streaming transcript assembler (SPEC §13.4 shared builders). */
+  private get transcript(): TranscriptAssembler {
+    const session = this.session
+    let assembler = this.transcripts.get(session)
+    if (!assembler) {
+      assembler = new TranscriptAssembler(
+        {
+          getMessage: (id) => session.messages.find((message) => message.id === id),
+          addMessage: (message) => {
+            session.messages.push(message)
+          },
+          updateMessage: (message) => {
+            const index = session.messages.findIndex((entry) => entry.id === message.id)
+            if (index !== -1) session.messages[index] = message
+          },
+          removeMessage: (id) => this.removeMessage(id),
+          emitAdded: (message) => this.emitMessageAdded(message),
+          emitUpdated: (message) => this.emitMessageUpdated(message),
+          persist: (force) => this.persist(force),
+          setPhase: (phase, patch) => this.setTurnPhase(session.threadId, phase, patch)
+        },
+        session
+      )
+      this.transcripts.set(session, assembler)
     }
-    this.messages[index] = updated
-    this.emitMessageUpdated(updated)
-    this.persist(status === 'complete')
+    return assembler
   }
 
   private addStreamingAssistantMessage(): ChatMessage {
-    const msg: ChatMessage = {
-      id: uuidv4(),
-      role: 'assistant',
-      content: '',
-      timestamp: new Date().toISOString(),
-      streaming: true
-    }
-    this.messages.push(msg)
-    this.emitMessageAdded(msg)
-    this.persist()
-    this.setTurnPhase(this.session.threadId, 'streaming', { activeMessageId: msg.id })
-    return msg
+    return this.transcript.startAssistant()
   }
 
   private updateStreamingAssistantMessage(
@@ -2540,19 +2511,7 @@ export class OrchestratorService extends EventEmitter {
     responseMetadata?: ChatMessage['responseMetadata'],
     incomplete?: boolean
   ): void {
-    const index = this.messages.findIndex((message) => message.id === messageId)
-    if (index === -1) return
-
-    const updated: ChatMessage = {
-      ...this.messages[index],
-      content,
-      streaming,
-      ...(responseMetadata ? { responseMetadata } : {}),
-      ...(incomplete ? { incomplete: true } : {})
-    }
-    this.messages[index] = updated
-    this.emitMessageUpdated(updated)
-    this.persist(!streaming)
+    this.transcript.updateAssistant(messageId, content, streaming, responseMetadata, incomplete)
   }
 
   private removeMessage(messageId: string): void {
@@ -2564,131 +2523,15 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private handleStreamingTextEvent(event: import('./LlmClient').StreamingLlmTextEvent): void {
-    if (event.phase === 'start') {
-      if (!this.activeAssistantMessageId) {
-        const msg = this.addStreamingAssistantMessage()
-        this.activeAssistantMessageId = msg.id
-      }
-      return
-    }
-
-    if (!this.activeAssistantMessageId) return
-
-    if (event.phase === 'delta') {
-      this.updateStreamingAssistantMessage(
-        this.activeAssistantMessageId,
-        event.content,
-        true
-      )
-      return
-    }
-
-    if (event.phase === 'complete') {
-      const messageId = this.activeAssistantMessageId
-      this.updateStreamingAssistantMessage(messageId, event.content, false)
-      this.lastCompletedAssistantMessageId = messageId
-      this.lastCompletedAssistantContent = event.content
-      this.activeAssistantMessageId = null
-    }
+    this.transcript.text(event)
   }
 
   private handleStreamingThinkingEvent(event: StreamingLlmThinkingEvent): void {
-    if (event.phase === 'start') {
-      const msg = this.addThinkingMessage('', 'processing')
-      this.activeThinkingMessageId = msg.id
-      this.setTurnPhase(this.session.threadId, 'thinking')
-      return
-    }
-
-    if (!this.activeThinkingMessageId) return
-
-    if (event.phase === 'delta') {
-      this.updateThinkingMessage(this.activeThinkingMessageId, event.content, 'processing')
-      return
-    }
-
-    if (event.phase === 'complete') {
-      this.updateThinkingMessage(this.activeThinkingMessageId, event.content, 'complete')
-      this.activeThinkingMessageId = null
-    }
-  }
-
-  private addThinkingMessage(
-    content: string,
-    status: NonNullable<ChatMessage['thinking']>['status']
-  ): ChatMessage {
-    const msg: ChatMessage = {
-      id: uuidv4(),
-      role: 'system',
-      kind: 'thinking',
-      content: '',
-      timestamp: new Date().toISOString(),
-      thinking: { content, status }
-    }
-    this.messages.push(msg)
-    this.emitMessageAdded(msg)
-    this.persist()
-    return msg
+    this.transcript.thinking(event)
   }
 
   private handleStreamingToolEvent(event: StreamingLlmToolEvent): void {
-    const timelineKind =
-      event.kind === 'build_tool_call'
-        ? 'mcp_tool_call'
-        : event.kind === 'build_tool_result'
-          ? 'mcp_tool_result'
-          : event.kind
-
-    if (event.phase === 'start' && event.callId) {
-      const parsed = parseProviderToolCall(event)
-      const msg = this.addToolTimelineMessage(timelineKind, {
-        title: event.title,
-        summary: event.summary,
-        details: event.details,
-        response: event.response,
-        status: 'processing',
-        ...(parsed.toolName ? { toolName: parsed.toolName } : {}),
-        ...(parsed.input ? { input: parsed.input } : {}),
-      })
-      this.activeToolCallMessageIds.set(event.callId, msg.id)
-      this.setTurnPhase(this.session.threadId, 'tool_running')
-      return
-    }
-
-    if (event.phase === 'complete' && event.callId) {
-      const messageId = this.activeToolCallMessageIds.get(event.callId)
-      if (messageId) {
-        const existing = this.messages.find((message) => message.id === messageId)
-        const parsed = parseProviderToolCall(event)
-        this.updateToolTimelineMessage(messageId, {
-          title: event.title,
-          summary: event.summary,
-          details: event.details,
-          response: event.response,
-          status: 'complete',
-          // Preserve start-phase args: complete events carry result text, not args JSON.
-          toolName: parsed.toolName ?? existing?.toolCall?.toolName,
-          input: existing?.toolCall?.input ?? parsed.input,
-        }, true)
-        this.activeToolCallMessageIds.delete(event.callId)
-        if (this.activeToolCallMessageIds.size === 0) {
-          const fallback = this.activeAssistantMessageId ? 'streaming' as TurnPhase : 'thinking' as TurnPhase
-          this.setTurnPhase(this.session.threadId, fallback)
-        }
-        return
-      }
-    }
-
-    const parsedFallback = parseProviderToolCall(event)
-    this.addToolTimelineMessage(timelineKind, {
-      title: event.title,
-      summary: event.summary,
-      details: event.details,
-      response: event.response,
-      status: 'complete',
-      ...(parsedFallback.toolName ? { toolName: parsedFallback.toolName } : {}),
-      ...(parsedFallback.input ? { input: parsedFallback.input } : {}),
-    })
+    this.transcript.tool(event)
   }
 
   // retained for non-GUI callers (CLI/channels)
@@ -3416,11 +3259,7 @@ export class OrchestratorService extends EventEmitter {
       }
       throw err
     }
-    this.activeToolCallMessageIds.clear()
-    this.activeThinkingMessageId = null
-    this.activeAssistantMessageId = null
-    this.lastCompletedAssistantMessageId = null
-    this.lastCompletedAssistantContent = ''
+    this.transcript.reset()
 
     const turnId = opts?.runId ?? uuidv4()
     // Run Engine bridge (SPEC §5): the run id is the turn id; each mark is one CAS write.
@@ -3527,8 +3366,7 @@ export class OrchestratorService extends EventEmitter {
     let compactionNote: ChatMessage | undefined
     const selectedModel = opts?.modelOverride ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
       ...(this.providerAuth.credentials?.listProviderIds() ?? []),
-      ...(this.antigravity?.configured() ? ['antigravity'] : []),
-      ...(this.claudeSubscription?.configured() ? ['claude-subscription'] : [])
+      ...this.adapters.configuredProviderIds()
     ])
     if (displayUserMessage && !reuseLastUser) {
       const selection = { provider: selectedModel.llmProvider, model: selectedModel.model }
@@ -3547,9 +3385,8 @@ export class OrchestratorService extends EventEmitter {
         this.persist(true)
       }
     }
-    const antigravityTurn = selectedModel.llmProvider === 'antigravity'
-    const claudeSubscriptionTurn = selectedModel.llmProvider === 'claude-subscription'
-    const nativeAgentTurn = antigravityTurn || claudeSubscriptionTurn
+    // Set once the adapter is resolved; read by the post-turn action parsing below.
+    let promptRuntime = false
     const onCompaction = (phase: 'start' | 'complete' | 'unchanged'): void => {
       if (phase === 'start') {
         compactionNote = { id: uuidv4(), role: 'assistant', kind: 'context_compaction',
@@ -3564,168 +3401,91 @@ export class OrchestratorService extends EventEmitter {
       }
       this.persist(true)
     }
+    /** Finishes a compaction opened with `onCompaction('start')`; true when the transcript changed. */
+    const compactTranscript = (): boolean => {
+      const compacted = compactNativeContext(this.nativeContext)
+      if (compacted === this.nativeContext) {
+        onCompaction('unchanged')
+        return false
+      }
+      this.nativeContext = compacted
+      this.clearLastTurnUsage()
+      this.persist(true)
+      onCompaction('complete')
+      return true
+    }
+    const compactedContext = (): RecoveredContext => ({
+      messages: getActiveMessages(this.nativeContext),
+      contextSummary: getCompactionSummary(this.nativeContext),
+      nativeHistory: nativeAgentHistory(this.nativeContext, turnNativeStartBoundary.messageIndex)
+    })
+    // Prompt-injected runtimes keep their own transcript; their reply and reported metrics reach
+    // the canonical transcript once, through `commitPromptTurn`.
+    let promptMetrics: ProviderMetrics | undefined
+    let promptTurnCommitted = false
+    const promptContextKey = `${selectedModel.llmProvider}:${selectedModel.model}`
+    const commitPromptTurn = (text: string): void => {
+      if (promptTurnCommitted) return
+      promptTurnCommitted = true
+      const { llmProvider: provider, model } = selectedModel
+      this.nativeContext = appendNativeMessage(this.nativeContext, nativeAgentAssistantMessage(text, promptMetrics?.realModelName ?? model, provider, promptMetrics?.usage))
+      const context = promptMetrics?.context
+      if (context) {
+        const previousCapacity = this.nativeContext.nativeProviderModel
+        this.nativeContext.nativeProviderModel = { provider, selectedModel: model, modelName: context.modelName ?? promptMetrics?.realModelName ?? model, contextWindow: context.contextWindow ?? (previousCapacity?.selectedModel === model ? previousCapacity.contextWindow : undefined) }
+        this.recordLastTurnUsage({
+          input: context.input, cacheRead: context.cacheRead, cacheWrite: context.cacheWrite,
+          signature: promptContextKey, modelKey: promptContextKey,
+          contextRevision: this.nativeContext.revision ?? 0,
+          measuredAtHistoryLength: Math.max(0, getActiveMessages(this.nativeContext).length - 1)
+        })
+      }
+      this.persist(true)
+    }
     try {
-      if (nativeAgentTurn) {
-        if (antigravityTurn && mode === 'plan') throw new Error('Use Antigravity’s /plan command in a chat turn')
-        const model = selectedModel.model
-        const nativeProvider = claudeSubscriptionTurn ? this.claudeSubscription : this.antigravity
-        if (!nativeProvider || (antigravityTurn && !session.projectCwd)) throw new Error(`${selectedModel.llmProvider} requires a project workspace`)
-        const nativeCwd = session.projectCwd ?? this.claudeSubscription!.standaloneWorkspace(session.threadId)
-        let claudeMetrics: ClaudeSubscriptionMetrics | undefined
-        const nativeStartedAt = Date.now()
-        if (claudeSubscriptionTurn) {
-          const contextSettings = normalizeContextSettings(this.settingsStore.get().context)
-          const capacity = this.nativeContext.nativeProviderModel
-          const knownLimit = capacity?.selectedModel === model ? capacity.contextWindow : undefined
-          const configuredThreshold = typeof contextSettings.compactionTokens === 'number'
-            ? contextSettings.compactionTokens : knownLimit
-          const previous = session.lastMeasuredContextSignature === `claude-subscription:${model}`
-            ? (session.lastMeasuredInput ?? 0) + (session.lastMeasuredCacheRead ?? 0) + (session.lastMeasuredCacheWrite ?? 0)
-            : 0
-          const activeTokens = Math.max(previous, estimateActiveContextTokens(getActiveMessages(this.nativeContext), getCompactionSummary(this.nativeContext)))
-          // When the SDK has not reported capacity yet, a numeric Mousse threshold
-          // still applies; model-max waits for an actual provider window.
-          if (contextSettings.compactionEnabled && configuredThreshold !== undefined &&
-              shouldCompactNativeContext(activeTokens, knownLimit ?? configuredThreshold, DEFAULT_COMPACTION_RESERVE_TOKENS, configuredThreshold)) {
-            onCompaction('start')
-            const compacted = compactNativeContext(this.nativeContext)
-            if (compacted !== this.nativeContext) {
-              this.nativeContext = compacted
-              this.clearLastTurnUsage()
-              this.persist(true)
-              onCompaction('complete')
-            } else onCompaction('unchanged')
-          }
-        }
-        let started = false
-        let thinkingStarted = false
-        let thinkingText = ''
-        let nativeProviderProgress = false
-        const runNativeChat = () => nativeProvider.chat({
-          ...(claudeSubscriptionTurn ? {
-            mode: mode === 'plan' ? 'plan' as const : 'default' as const,
-            onMetrics: (report: ClaudeSubscriptionMetrics) => {
-              claudeMetrics = report
-              responseMetadata = { modelName: report.realModelName ?? model, totalResponseTimeMs: report.totalResponseTimeMs, tokensUsed: report.totalTokensUsed, tokensPerSecond: report.tokensPerSecond }
-              if (report.usage) this.lineEditStats?.recordUsage({
-                timestamp: new Date().toISOString(), provider: 'claude-subscription',
-                model: report.realModelName ?? model, input: report.usage.input, output: report.usage.output,
-                cacheRead: report.usage.cacheRead, cacheWrite: report.usage.cacheWrite
-              })
-            },
-            onLineEdits: (lines: number) => this.lineEditStats?.record('orchestrator', lines),
-            onThinking: (content: string) => {
-              nativeProviderProgress = true
-              if (!thinkingStarted) { this.handleStreamingThinkingEvent({ phase: 'start', content: '' }); thinkingStarted = true }
-              thinkingText = content
-              this.handleStreamingThinkingEvent({ phase: 'delta', content })
-            }
-          } : {}),
-          threadId: session.threadId, cwd: nativeCwd, model,
-          prompt: userContent, images, signal: turn.abort.signal,
-          appletInstructions: this.appletStore ? APPLET_GENERATION_GUIDANCE + this.appletCatalogue() : undefined,
-          history: nativeAgentHistory(this.nativeContext, turnNativeStartBoundary.messageIndex),
-          drainSteer: () => {
-            const parts = [opts?.externalDrainSteer?.()?.trim(), this.drainSteerForSession(session, turn)?.trim()]
-              .filter((part): part is string => Boolean(part))
-            return parts.length ? parts.join('\n') : undefined
-          },
-          onSteer: (content) => {
-            nativeProviderProgress = true
-            this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(content))
-            this.nativeContext.acceptedSteerItemIds = Array.from(new Set([
-              ...(this.nativeContext.acceptedSteerItemIds ?? []), ...session.drainedExternalSteerIds
-            ]))
-            this.persist(true)
-            this.acknowledgeDrainedSteers(session)
-          },
-          onText: (content) => {
-            nativeProviderProgress = true
-            if (!started) { this.handleStreamingTextEvent({ phase: 'start', content: '', contentIndex: 0 }); started = true }
-            this.handleStreamingTextEvent({ phase: 'delta', content, contentIndex: 0 })
-          },
-          onTool: (event) => {
-            nativeProviderProgress = true
-            conversationToolsUsed = true
-            this.handleStreamingToolEvent({
-              kind: 'mcp_tool_call', phase: event.phase, callId: event.callId,
-              title: event.title, summary: event.toolName ?? event.title, details: []
-            })
-          }
-        })
-        assistantText = claudeSubscriptionTurn
-          ? await retryContextOverflowOnce(runNativeChat, () => {
-            if (!normalizeContextSettings(this.settingsStore.get().context).compactionEnabled) return false
-            onCompaction('start')
-            const compacted = compactNativeContext(this.nativeContext)
-            if (compacted === this.nativeContext) { onCompaction('unchanged'); return false }
-            this.nativeContext = compacted
-            this.clearLastTurnUsage()
-            this.persist(true)
-            onCompaction('complete')
-            return true
-          }, () => !nativeProviderProgress && !conversationToolsUsed && !turn.abort.signal.aborted)
-          : await runNativeChat()
-        if (thinkingStarted) this.handleStreamingThinkingEvent({ phase: 'complete', content: thinkingText })
-        this.nativeContext = appendNativeMessage(this.nativeContext, nativeAgentAssistantMessage(assistantText, claudeMetrics?.realModelName ?? model, selectedModel.llmProvider, claudeMetrics?.usage))
-        if (claudeSubscriptionTurn && claudeMetrics?.context) {
-          const context = claudeMetrics.context
-          const previousCapacity = this.nativeContext.nativeProviderModel
-          this.nativeContext.nativeProviderModel = { provider: 'claude-subscription', selectedModel: model, modelName: context.modelName ?? claudeMetrics.realModelName ?? model, contextWindow: context.contextWindow ?? (previousCapacity?.selectedModel === model ? previousCapacity.contextWindow : undefined) }
-          this.recordLastTurnUsage({
-            input: context.input, cacheRead: context.cacheRead, cacheWrite: context.cacheWrite,
-            signature: `claude-subscription:${model}`, modelKey: `claude-subscription:${model}`,
-            contextRevision: this.nativeContext.revision ?? 0,
-            measuredAtHistoryLength: Math.max(0, getActiveMessages(this.nativeContext).length - 1)
-          })
-        }
-        this.persist(true)
-        nativeProvider.commitConversation(session.threadId, nativeAgentHistory(this.nativeContext))
-        if (started) this.handleStreamingTextEvent({ phase: 'complete', content: assistantText, contentIndex: 0 })
-        responseMetadata ??= { modelName: model, totalResponseTimeMs: Date.now() - nativeStartedAt }
-      } else {
-      const browserExecution = this.mainBrowserFactory
-        ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
-        : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined
-      const modelOverride = opts?.modelOverride ?? session.modelOverride
-      const { limit } = this.llm.getSelectedModelContextLimit(mode, modelOverride)
-      const contextSettings = normalizeContextSettings(this.settingsStore.get().context)
-      let activeTokens = estimateActiveContextTokens(
-        getActiveMessages(this.nativeContext),
-        getCompactionSummary(this.nativeContext)
-      )
-      try {
-        const contextInputs = await this.llm.getContextInputs(mode, userContent, {
-          ...modelOverride,
-          projectPath: session.projectCwd ?? undefined,
-          browser: browserExecution,
-          contextSummary: getCompactionSummary(this.nativeContext)
-        })
-        activeTokens += Math.ceil(((contextInputs.baseSystemPromptText ?? contextInputs.systemPromptText).length + contextInputs.mcpToolsText.length + contextInputs.otherToolsText.length) / 4)
-      } catch {
-        // Prompt preflight is advisory. The actual chat path owns provider/model
-        // validation and produces the authoritative connection error.
-      }
-      const configuredThreshold = resolveContextCompactionTokens(contextSettings.compactionTokens, limit)
-      if (contextSettings.compactionEnabled && shouldCompactNativeContext(
-        activeTokens,
-        limit,
-        DEFAULT_COMPACTION_RESERVE_TOKENS,
-        configuredThreshold
-      )) {
-        onCompaction('start')
-        await new Promise<void>((resolve) => setTimeout(resolve, 30))
-        const compacted = compactNativeContext(this.nativeContext)
-        if (compacted !== this.nativeContext) {
-          this.nativeContext = compacted
-          this.clearLastTurnUsage()
-          this.persist(true)
-          onCompaction('complete')
-        } else {
-          onCompaction('unchanged')
-        }
-      }
       const adapter = this.adapters.get(selectedModel.llmProvider)
+      // A transcript-native runtime (the pi loop) is sent Mousse's transcript and tools, so Mousse
+      // keeps that transcript within the window before the turn. A prompt-injected runtime owns its
+      // loop, context and tools and receives prior turns as a prompt preamble.
+      promptRuntime = handoffDelivery(adapter.capabilities) === 'prompt_preamble'
+      const modelOverride = opts?.modelOverride ?? session.modelOverride
+      const contextSettings = normalizeContextSettings(this.settingsStore.get().context)
+      const browserExecution = promptRuntime
+        ? undefined
+        : this.mainBrowserFactory
+          ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
+          : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined
+      let configuredThreshold: number | undefined
+      if (!promptRuntime) {
+        const { limit } = this.llm.getSelectedModelContextLimit(mode, modelOverride)
+        let activeTokens = estimateActiveContextTokens(
+          getActiveMessages(this.nativeContext),
+          getCompactionSummary(this.nativeContext)
+        )
+        try {
+          const contextInputs = await this.llm.getContextInputs(mode, userContent, {
+            ...modelOverride,
+            projectPath: session.projectCwd ?? undefined,
+            browser: browserExecution,
+            contextSummary: getCompactionSummary(this.nativeContext)
+          })
+          activeTokens += Math.ceil(((contextInputs.baseSystemPromptText ?? contextInputs.systemPromptText).length + contextInputs.mcpToolsText.length + contextInputs.otherToolsText.length) / 4)
+        } catch {
+          // Prompt preflight is advisory. The actual chat path owns provider/model
+          // validation and produces the authoritative connection error.
+        }
+        configuredThreshold = resolveContextCompactionTokens(contextSettings.compactionTokens, limit)
+        if (contextSettings.compactionEnabled && shouldCompactNativeContext(
+          activeTokens,
+          limit,
+          DEFAULT_COMPACTION_RESERVE_TOKENS,
+          configuredThreshold
+        )) {
+          onCompaction('start')
+          await new Promise<void>((resolve) => setTimeout(resolve, 30))
+          compactTranscript()
+        }
+      }
       const turnInput: TurnInput = {
         runId: engineRunId ?? turnId,
         attemptId: (engineRunId ? this.runEngine?.getRun(engineRunId)?.activeAttemptId : undefined) ?? turnId,
@@ -3735,10 +3495,12 @@ export class OrchestratorService extends EventEmitter {
         llmProvider: selectedModel.llmProvider,
         modelPinned: Boolean(modelOverride),
         mode,
+        prompt: userContent,
         messages: getActiveMessages(this.nativeContext),
         contextSummary: getCompactionSummary(this.nativeContext),
         images,
         appletInstructions: this.appletStore ? this.appletCatalogue() : undefined,
+        nativeHistory: promptRuntime ? nativeAgentHistory(this.nativeContext, turnNativeStartBoundary.messageIndex) : undefined,
         signal: turn.abort.signal
       }
       const turnSink: TurnSink = {
@@ -3772,9 +3534,24 @@ export class OrchestratorService extends EventEmitter {
         compaction: onCompaction,
         retry: (attempt) => this.addSystemMessage(`Retrying provider request (${attempt}/5)…`),
         progress: () => { providerProgress = true },
-        // LlmClient records pi usage itself; recordLastTurnUsage consumes the TurnResult below.
-        usage: () => {},
-        providerRef: (ref) => this.markRun(engineRunId, (engine, id) => { engine.recordProviderRef(id, ref) })
+        // Runtimes that do not record usage themselves; LlmClient records pi usage, and
+        // recordLastTurnUsage consumes the TurnResult below.
+        usage: (usage) => this.lineEditStats?.recordUsage({
+          timestamp: new Date().toISOString(), provider: selectedModel.llmProvider,
+          model: promptMetrics?.realModelName ?? selectedModel.model, input: usage.input, output: usage.output,
+          cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite
+        }),
+        providerRef: (ref) => this.markRun(engineRunId, (engine, id) => { engine.recordProviderRef(id, ref) }),
+        steerAccepted: (text) => {
+          this.nativeContext = appendNativeMessage(this.nativeContext, userMessage(text))
+          this.nativeContext.acceptedSteerItemIds = Array.from(new Set([
+            ...(this.nativeContext.acceptedSteerItemIds ?? []), ...session.drainedExternalSteerIds
+          ]))
+          this.persist(true)
+          this.acknowledgeDrainedSteers(session)
+        },
+        providerMetrics: (metrics) => { promptMetrics = metrics },
+        lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
       }
       const turnControl: TurnControl = {
         drainSteer: () => {
@@ -3799,7 +3576,7 @@ export class OrchestratorService extends EventEmitter {
           toolLedger: this.toolLedgerFor(engineRunId)
         },
         context: {
-          toolLoopSafety: contextSettings.compactionEnabled
+          toolLoopSafety: contextSettings.compactionEnabled && configuredThreshold !== undefined
             ? {
                 compactionThresholdTokens: configuredThreshold,
                 compactNativeMessages: (nativeMessages) =>
@@ -3809,19 +3586,27 @@ export class OrchestratorService extends EventEmitter {
           recoverOverflow: () => {
             if (conversationToolsUsed || providerProgress || !contextSettings.compactionEnabled) return null
             onCompaction('start')
-            const compacted = compactNativeContext(this.nativeContext)
-            if (compacted === this.nativeContext) {
-              onCompaction('unchanged')
-              return null
-            }
-            this.nativeContext = compacted
-            this.clearLastTurnUsage()
-            this.persist(true)
-            onCompaction('complete')
-            return {
-              messages: getActiveMessages(this.nativeContext),
-              contextSummary: getCompactionSummary(this.nativeContext)
-            }
+            return compactTranscript() ? compactedContext() : null
+          },
+          prepareNativeContext: (provider, model) => {
+            const capacity = this.nativeContext.nativeProviderModel
+            const knownLimit = capacity?.selectedModel === model ? capacity.contextWindow : undefined
+            const threshold = typeof contextSettings.compactionTokens === 'number'
+              ? contextSettings.compactionTokens : knownLimit
+            const previous = session.lastMeasuredContextSignature === `${provider}:${model}`
+              ? (session.lastMeasuredInput ?? 0) + (session.lastMeasuredCacheRead ?? 0) + (session.lastMeasuredCacheWrite ?? 0)
+              : 0
+            const activeTokens = Math.max(previous, estimateActiveContextTokens(getActiveMessages(this.nativeContext), getCompactionSummary(this.nativeContext)))
+            // When the runtime has not reported capacity yet, a numeric Mousse threshold
+            // still applies; model-max waits for an actual provider window.
+            if (!contextSettings.compactionEnabled || threshold === undefined ||
+                !shouldCompactNativeContext(activeTokens, knownLimit ?? threshold, DEFAULT_COMPACTION_RESERVE_TOKENS, threshold)) return null
+            onCompaction('start')
+            return compactTranscript() ? compactedContext() : null
+          },
+          nativeHistoryAfterTurn: (text) => {
+            commitPromptTurn(text)
+            return nativeAgentHistory(this.nativeContext)
           }
         }
       }
@@ -3834,17 +3619,21 @@ export class OrchestratorService extends EventEmitter {
         tokensUsed: result.totalTokensUsed,
         tokensPerSecond: result.tokensPerSecond
       }
-      this.commitActiveNativeMessages(result.nativeMessages)
-      // Provider prompt usage excludes the assistant message it produced.
-      this.recordLastTurnUsage({
-        input: result.usage.input,
-        cacheRead: result.usage.cacheRead,
-        cacheWrite: result.usage.cacheWrite,
-        signature: result.contextSignature,
-        measuredAtHistoryLength: Math.max(0, getActiveMessages(this.nativeContext).length - 1),
-        contextRevision: this.nativeContext.revision ?? 0,
-        modelKey: result.contextModelKey
-      })
+      if (promptRuntime) {
+        // No-op when the adapter already committed through `nativeHistoryAfterTurn`.
+        commitPromptTurn(result.text)
+      } else {
+        this.commitActiveNativeMessages(result.nativeMessages)
+        // Provider prompt usage excludes the assistant message it produced.
+        this.recordLastTurnUsage({
+          input: result.usage.input,
+          cacheRead: result.usage.cacheRead,
+          cacheWrite: result.usage.cacheWrite,
+          signature: result.contextSignature,
+          measuredAtHistoryLength: Math.max(0, getActiveMessages(this.nativeContext).length - 1),
+          contextRevision: this.nativeContext.revision ?? 0,
+          modelKey: result.contextModelKey
+        })
       }
     } catch (err) {
       const normalized = normalizeAppError(err, 'orchestrator_turn_failed')
@@ -3877,25 +3666,11 @@ export class OrchestratorService extends EventEmitter {
     }
     try {
 
-    if (this.activeThinkingMessageId) {
-      const thinkingMessage = this.messages.find((message) => message.id === this.activeThinkingMessageId)
-      if (thinkingMessage?.thinking?.status === 'processing') {
-        this.updateThinkingMessage(
-          this.activeThinkingMessageId,
-          thinkingMessage.thinking.content,
-          'complete'
-        )
-      }
-      this.activeThinkingMessageId = null
-    }
+    this.transcript.closeThinking()
 
     if (providerError) {
       console.error('Orchestrator turn failed', failureDiagnostic ?? errorDiagnostic(providerError, 'orchestrator.chat'))
-      if (this.activeAssistantMessageId) {
-        const partial = this.messages.find((message) => message.id === this.activeAssistantMessageId)?.content ?? ''
-        this.updateStreamingAssistantMessage(this.activeAssistantMessageId, partial, false, undefined, true)
-        this.activeAssistantMessageId = null
-      }
+      this.transcript.abandonAssistant(this.transcript.openAssistantContent() ?? '', false)
       const message = `[${providerError.code}] ${providerError.message}`
       this.addSystemMessage(message)
       const failure = this.messages.at(-1)!
@@ -3918,21 +3693,11 @@ export class OrchestratorService extends EventEmitter {
     }
 
     if (aborted) {
-      const streamedPartial = this.activeAssistantMessageId
-        ? this.messages.find((message) => message.id === this.activeAssistantMessageId)?.content
-        : undefined
       const partial =
         stripActionBlocks(assistantText).trim() ||
-        streamedPartial?.trim() ||
+        this.transcript.openAssistantContent()?.trim() ||
         ''
-      if (this.activeAssistantMessageId) {
-        if (partial) {
-          this.updateStreamingAssistantMessage(this.activeAssistantMessageId, partial, false, undefined, true)
-        } else {
-          this.removeMessage(this.activeAssistantMessageId)
-        }
-        this.activeAssistantMessageId = null
-      } else if (partial) {
+      if (!this.transcript.abandonAssistant(partial, true) && partial) {
         const stopped = this.addMessage('assistant', partial)
         const index = this.messages.findIndex((message) => message.id === stopped.id)
         if (index !== -1) {
@@ -3989,7 +3754,8 @@ export class OrchestratorService extends EventEmitter {
       return response
     }
 
-    const parsedActions = nativeAgentTurn ? [] : parseActions(assistantText)
+    // Vendor runtimes act through their own tools; `mousse-actions` blocks are a pi-loop protocol.
+    const parsedActions = promptRuntime ? [] : parseActions(assistantText)
     const actions = filterActionsForChatMode(parsedActions, mode)
     const displayText = stripActionBlocks(assistantText) + stagedApplets.map(source => '\n\n```mousse-applet\n' + JSON.stringify(source) + '\n```').join('')
 

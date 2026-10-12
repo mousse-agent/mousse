@@ -51,6 +51,7 @@ function input(overrides: Partial<TurnInput> = {}): TurnInput {
     llmProvider: 'openai',
     modelPinned: true,
     mode: 'agent',
+    prompt: 'hi',
     messages: [user('hi')],
     contextSummary: 'summary',
     appletInstructions: 'applets',
@@ -76,7 +77,10 @@ function recordingSink(): TurnSink & { calls: Array<[string, unknown]> } {
     retry: record('retry'),
     progress: record('progress'),
     usage: record('usage'),
-    providerRef: record('providerRef')
+    providerRef: record('providerRef'),
+    steerAccepted: record('steerAccepted'),
+    providerMetrics: record('providerMetrics'),
+    lineEdits: record('lineEdits')
   }
 }
 
@@ -92,6 +96,8 @@ function host(overrides: Partial<AdapterHost['context']> = {}): AdapterHost {
     context: {
       toolLoopSafety: { compactionThresholdTokens: 1000, compactNativeMessages: (m) => m },
       recoverOverflow: () => null,
+      prepareNativeContext: () => null,
+      nativeHistoryAfterTurn: () => '',
       ...overrides
     }
   }
@@ -266,7 +272,7 @@ describe('PiLoopAdapter', () => {
           return chatResult()
         }
       }))
-      const recoverOverflow = vi.fn(() => ({ messages: compacted, contextSummary: 'new summary' }))
+      const recoverOverflow = vi.fn(() => ({ messages: compacted, contextSummary: 'new summary', nativeHistory: '' }))
       const result = await adapter.startTurn(input(), recordingSink(), control(), host({ recoverOverflow }))
       expect(result.text).toBe('done')
       expect(recoverOverflow).toHaveBeenCalledTimes(1)
@@ -288,7 +294,7 @@ describe('PiLoopAdapter', () => {
     it('does not replay a call that already made progress or ran a tool', async () => {
       for (const act of ['progress', 'tool'] as const) {
         const failure = overflow()
-        const recoverOverflow = vi.fn(() => ({ messages: [] }))
+        const recoverOverflow = vi.fn(() => ({ messages: [], nativeHistory: '' }))
         const adapter = new PiLoopAdapter(() => ({
           chat: async (_messages, onTool, options = {}) => {
             if (act === 'progress') options.onProviderProgress?.()
@@ -319,7 +325,7 @@ describe('PiLoopAdapter', () => {
         input(),
         recordingSink(),
         control(),
-        host({ recoverOverflow: () => ({ messages: [] }) })
+        host({ recoverOverflow: () => ({ messages: [], nativeHistory: '' }) })
       )
       expect(calls).toBe(2)
     })

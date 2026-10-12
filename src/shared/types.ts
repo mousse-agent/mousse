@@ -865,7 +865,8 @@ export interface NativeLlmContext {
   compaction?: NativeCompactionCheckpoint
   /** Actual model capacity reported by a native provider, retained across compaction. */
   nativeProviderModel?: {
-    provider: 'claude-subscription'
+    /** `llmProvider` of the runtime that reported this capacity. */
+    provider: string
     selectedModel: string
     modelName: string
     contextWindow?: number

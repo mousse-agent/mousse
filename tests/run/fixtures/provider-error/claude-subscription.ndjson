@@ -1,0 +1,4 @@
+{"kind":"transcript","adapter":"claude-subscription","scenario":"provider-error","boundary":"Agent SDK query() seam: request projection out; SDK messages in","recordedAt":"hand-authored","version":1}
+{"dir":"out","frame":{"kind":"query","prompt":[{"role":"user","content":[{"type":"text","text":"Summarise the repository"}]}],"options":{"model":"sonnet","permissionMode":"default","mcpServers":{}}}}
+{"dir":"in","frame":{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Partial"}},"parent_tool_use_id":null,"session_id":"replay-session","uuid":"event-1"}}
+{"dir":"in","frame":{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Upstream overloaded"],"session_id":"replay-session","uuid":"result-1","duration_ms":20,"num_turns":1,"total_cost_usd":0,"usage":{"input_tokens":10,"output_tokens":2},"modelUsage":{}}}

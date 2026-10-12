@@ -36,4 +36,14 @@ export class AdapterRegistry {
   list(): ProviderAdapter[] {
     return [...this.adapters.values()]
   }
+
+  /**
+   * `llmProvider` ids of signed-in vendor runtimes, offered alongside credentialed pi-ai providers
+   * when a turn falls back to the configured default model.
+   */
+  configuredProviderIds(): string[] {
+    return this.list()
+      .filter((adapter) => adapter.configured?.() === true)
+      .map((adapter) => adapter.id)
+  }
 }
