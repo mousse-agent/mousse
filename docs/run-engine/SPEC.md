@@ -126,6 +126,8 @@ queued ──▶ starting ──▶ running ──▶ finalizing ──▶ compl
 ```
 
 - `send` on an idle thread creates `run(queued)` and an `attempt(pending)`, then (Phase 1 only) hands the run to the legacy `OrchestratorService.executeTurn` through an adapter hook. The hook calls `engine.markStarting(runId, epoch)`, `markRunning`, `markFinalizing`, `markTerminal(status, outcome)`. Each is a CAS write; a CAS miss throws `StaleRunWriteError` and the legacy code must stop touching that run.
+- **Active** means `starting|running|finalizing`; at most one per thread. Any number of `queued` runs may wait behind it (SPEC §2.3 applies to active runs only).
+- **Active** means `starting|running|finalizing`; at most one per thread (`RunStore.getActiveRun`). Any number of `queued` runs may wait behind it (`listQueuedRuns`). Invariant 2.3 applies to active runs only.
 - `send` on a busy thread creates `run(queued)` and enqueues into the existing durable `queue.json` with `runId` stored on the `QueuedMessage` (new optional field). When the legacy drain picks it up, it uses the existing `runId` instead of creating a new run.
 - `stop` for the active run: CAS `running→interrupted` is **not** done by the command; the command sets `runs.outcome.stopRequested = true` under CAS (epoch bump) and signals the legacy abort controller. The terminal write comes from the hook when the turn actually ends. This keeps "who wrote the terminal state" single-sourced.
 - Startup: `engine.reconcileOnBoot()` runs before any turn is admitted. Every run in `starting|running|finalizing` becomes `interrupted` with `outcome.interruptedBy = 'daemon_restart'` (Phase 1: we know the legacy loop died with us). Phase 2 introduces `uncertain` for out-of-process providers.
