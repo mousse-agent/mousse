@@ -231,6 +231,16 @@ describe('Claude Subscription native provider', () => {
     expect(decisions[1]).toMatchObject({ behavior: 'deny' })
     expect(asked).toHaveBeenCalledOnce()
   })
+  it('keeps the Mousse server the only MCP server when it is attached (the ToolSearch allow relies on it)', async () => {
+    let options: Options | undefined
+    const { service, home } = fixture((input) => {
+      options = input.options
+      return fakeQuery([result])
+    })
+    await service.chat({ ...chatInput(home), mcp: { url: 'http://127.0.0.1:1/mcp', token: 't'.repeat(43) } })
+    expect(options).toMatchObject({ settingSources: [], extraArgs: { 'strict-mcp-config': null } })
+    expect(Object.keys(options!.mcpServers ?? {})).toEqual(['mousse'])
+  })
   it('asks for permission, rejects dismissal and denies writes in plan mode', async () => {
     let decision: unknown
     const { service, home, questions } = fixture((input) => {

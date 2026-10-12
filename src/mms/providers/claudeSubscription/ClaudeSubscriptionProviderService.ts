@@ -1001,6 +1001,8 @@ export class ClaudeSubscriptionProviderService {
             return { behavior: 'allow', updatedInput: args }
           // Claude Code defers MCP tool schemas behind ToolSearch, which only loads them; without it
           // the Mousse tools above are unreachable unless the user approves a prompt every turn.
+          // Any query is safe because the launch uses `strict-mcp-config` and `settingSources: []`
+          // with the Mousse server as the only MCP server, so no other server's tools can load.
           if (input.mcp && toolName === 'ToolSearch')
             return { behavior: 'allow', updatedInput: args }
           if (

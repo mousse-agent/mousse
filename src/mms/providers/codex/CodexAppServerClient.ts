@@ -10,6 +10,7 @@ import {
   type RequestId,
   type RpcError
 } from './protocol'
+import { redactSecrets } from '../../../shared/errors'
 
 /**
  * JSON-RPC client for `codex app-server` over stdio (see `protocol.ts` for the wire format).
@@ -117,11 +118,15 @@ export class CodexAppServerClient implements CodexConnection {
   malformedLines = 0
   readonly defaultTimeoutMs: number
 
+  /** Known secret values (the Mousse MCP tokens handed to this process), for `redact`. */
+  private readonly secrets: () => Iterable<string>
+
   constructor(
     private readonly process: CodexProcess,
-    options: { defaultTimeoutMs?: number } = {}
+    options: { defaultTimeoutMs?: number; secrets?: () => Iterable<string> } = {}
   ) {
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? 60_000
+    this.secrets = options.secrets ?? (() => [])
     process.stdout.on('data', (chunk: Buffer | string) => this.read(chunk))
     process.stdout.once('end', () => this.terminate('Codex app-server closed its output'))
     process.stderr?.on('data', (chunk: Buffer | string) => {
@@ -142,9 +147,14 @@ export class CodexAppServerClient implements CodexConnection {
     return this.abort.signal
   }
 
-  /** The last few KiB of stderr, for error reports. */
+  /** The last few KiB of stderr, for error reports, with credentials removed. */
   get stderr(): string {
-    return this.stderrTail
+    return this.redact(this.stderrTail)
+  }
+
+  /** Server text (stderr, error responses) can echo credentials; it never leaves this class raw. */
+  private redact(text: string): string {
+    return redactSecrets(text, this.secrets())
   }
 
   request<M extends CodexMethod>(
@@ -262,7 +272,7 @@ export class CodexAppServerClient implements CodexConnection {
     if (message.error && typeof message.error === 'object') {
       const error = message.error as RpcError
       pending.reject(
-        new CodexRpcError(pending.method, Number(error.code), String(error.message ?? 'Codex request failed'), error.data)
+        new CodexRpcError(pending.method, Number(error.code), this.redact(String(error.message ?? 'Codex request failed')), error.data)
       )
     } else pending.resolve(message.result)
   }
@@ -294,7 +304,7 @@ export class CodexAppServerClient implements CodexConnection {
   private terminate(message: string, code: number | null = null, signal: NodeJS.Signals | null = null): void {
     if (this.abort.signal.aborted) return
     const detail = this.stderrTail.trim().split('\n').at(-1)
-    const error = new CodexAppServerExitedError(detail && code ? `${message}: ${detail}` : message, code, signal)
+    const error = new CodexAppServerExitedError(this.redact(detail && code ? `${message}: ${detail}` : message), code, signal)
     this.abort.abort(error)
     for (const [id, pending] of [...this.pending]) {
       this.pending.delete(id)

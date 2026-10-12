@@ -79,18 +79,28 @@ describe('instance seeding', () => {
 })
 
 describe('seed versions', () => {
-  it('moves an entry that still holds a superseded seed and leaves changed entries alone', () => {
-    // Version 0 (no marker) seeded Codex disabled; version 1 seeds it enabled.
+  // A hypothetical future change: version 2 seeds `claude` with a config.
+  const change = { before: 2, id: 'claude', seed: { driver: 'claude' as const, enabled: true }, next: { driver: 'claude' as const, enabled: true, config: { v: 2 } } }
+
+  it('never upgrades an entry without seed provenance', () => {
+    // No marker: a disabled Codex may be the user's choice, so it stays disabled.
     expect(seedProviderInstances({ codex: { driver: 'codex', enabled: false } }, [], undefined)).toMatchObject({
-      instances: { codex: { driver: 'codex', enabled: true } }, upgraded: ['codex'], seedVersion: 1
+      instances: { codex: { driver: 'codex', enabled: false } }, upgraded: [], seedVersion: 1
     })
-    // Disabled after the marker existed: the user's choice.
-    expect(seedProviderInstances({ codex: { driver: 'codex', enabled: false } }, [], 1)).toMatchObject({
-      instances: { codex: { driver: 'codex', enabled: false } }, upgraded: []
+    expect(seedProviderInstances({ claude: { driver: 'claude', enabled: true } }, [], undefined, [change], 2)).toMatchObject({
+      instances: { claude: { driver: 'claude', enabled: true } }, upgraded: []
     })
-    // Not the seed any more (it has config): the user's choice.
-    const configured = { driver: 'codex', enabled: false, config: { profile: 'work' } }
-    expect(seedProviderInstances({ codex: configured }, [], 0).instances.codex).toEqual(configured)
+  })
+
+  it('moves a marked entry that still equals a superseded seed and keeps one the user changed', () => {
+    expect(seedProviderInstances({ claude: { driver: 'claude', enabled: true } }, [], 1, [change], 2)).toMatchObject({
+      instances: { claude: { driver: 'claude', enabled: true, config: { v: 2 } } }, upgraded: ['claude'], seedVersion: 2
+    })
+    expect(seedProviderInstances({ claude: { driver: 'claude', enabled: false } }, [], 1, [change], 2)).toMatchObject({
+      instances: { claude: { driver: 'claude', enabled: false } }, upgraded: []
+    })
+    // Already at the change's version: nothing to move.
+    expect(seedProviderInstances({ claude: { driver: 'claude', enabled: true } }, [], 2, [change], 2).upgraded).toEqual([])
   })
 })
 
@@ -127,13 +137,14 @@ describe('ProviderInstanceService', () => {
     expect(store.writes).toBe(2)
   })
 
-  it('records the seed version with the seeds, and upgrades an unmarked development seed once', () => {
+  it('records the seed version with the seeds and keeps an unmarked disabled Codex disabled', () => {
     const fresh = service(undefined, [], null)
     fresh.instances.list()
     expect(fresh.store.seedVersion).toBe(1)
     expect((fresh.store.value as Record<string, unknown>).codex).toEqual({ driver: 'codex', enabled: true })
     const old = service({ antigravity: { driver: 'antigravity', enabled: true }, claude: { driver: 'claude', enabled: true }, codex: { driver: 'codex', enabled: false } }, [], null)
-    expect(old.instances.list().codex).toEqual({ driver: 'codex', enabled: true })
+    expect(old.instances.list().codex).toEqual({ driver: 'codex', enabled: false })
+    // Only the marker is written; later reads write nothing.
     expect(old.store).toMatchObject({ seedVersion: 1, writes: 1 })
     old.instances.list()
     expect(old.store.writes).toBe(1)

@@ -81,6 +81,21 @@ export function redactErrorText(text: string): string {
     .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[redacted]@')
 }
 
+/**
+ * Removes credentials from text that may become an error, a log line or a status message:
+ * each known `secrets` value (replaced literally), `Bearer`/`Basic` credentials and
+ * `Authorization` values, JWTs (ChatGPT access tokens), Mousse MCP bearer tokens (32 random bytes
+ * in base64url) and the shapes `redactErrorText` already covers.
+ */
+export function redactSecrets(text: string, secrets: Iterable<string> = []): string {
+  let result = text
+  for (const secret of secrets) if (secret && secret.length >= 8) result = result.split(secret).join('[redacted]')
+  return redactErrorText(result)
+    .replace(/(authorization["']?\s*[:=]\s*["']?)[^\r\n"',;]+/gi, '$1[redacted]')
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/g, '[redacted]')
+    .replace(/(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g, '[redacted]')
+}
+
 const ERROR_DETAIL_KEYS = new Set(['supportId', 'operation', 'operationId', 'requestId', 'provider', 'status', 'attempt', 'projectId', 'profileId', 'profileRef', 'taskId', 'threadId', 'runId', 'epoch', 'expectedEpoch', 'actualEpoch', 'expectedRevision', 'actualRevision', 'expectedGeneration', 'actualGeneration', 'capability', 'revision', 'expected', 'actual', 'state', 'path', 'label', 'reason', 'pointer', 'pointers', 'runtimeKind', 'hostBindings', 'workspace', 'projectBound', 'issues', 'diagnostics', 'code', 'severity', 'location', 'field', 'index', 'limit', 'count', 'retryAfterMs'])
 
 /** Explicit safe detail vocabulary. New domain fields need an audited addition. */

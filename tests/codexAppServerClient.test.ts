@@ -130,6 +130,30 @@ describe('CodexAppServerClient', () => {
     expect(() => client.notify('initialized')).not.toThrow()
   })
 
+  it('never puts a credential from stderr or an error response into its errors', async () => {
+    const canary = 'canary-secret-token-value-0123456789'
+    const mcpShaped = 'A'.repeat(20) + '_-' + 'b'.repeat(21)
+    const process = new FakeProcess()
+    const client = new CodexAppServerClient(process, { secrets: () => [canary] })
+    const failing = client.request('account/read', { refreshToken: false })
+    await tick()
+    const id = (process.written.at(-1) as { id: number }).id
+    process.send(JSON.stringify({ id, error: { code: -32000, message: `rejected header Authorization: Bearer ${canary} for ${mcpShaped}` } }) + '\n')
+    const rpc = await failing.catch((caught: unknown) => caught) as Error
+    expect(rpc).toBeInstanceOf(CodexRpcError)
+    expect(rpc.message).not.toContain(canary)
+    expect(rpc.message).not.toContain(mcpShaped)
+    const pending = client.request('turn/start', { threadId: 't', input: [] })
+    process.stderr.write(`mcp: Authorization: Bearer ${canary}\n`)
+    await tick()
+    process.exit(1)
+    const exited = await pending.catch((caught: unknown) => caught) as Error
+    expect(exited).toBeInstanceOf(CodexAppServerExitedError)
+    expect(exited.message).toContain('Codex app-server exited with code 1')
+    expect(exited.message).not.toContain(canary)
+    expect(client.stderr).not.toContain(canary)
+  })
+
   it('treats a closed stdout as the end of the process', async () => {
     const process = new FakeProcess()
     const client = new CodexAppServerClient(process)

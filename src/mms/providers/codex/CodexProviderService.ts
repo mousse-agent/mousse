@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { accessSync, constants, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join, resolve } from 'node:path'
-import { AppError } from '../../../shared/errors'
+import { AppError, redactSecrets } from '../../../shared/errors'
 import { CODEX_INSTANCE_ID } from '../../../shared/providerInstances'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
 import type { CodexStatus, ConfiguredProvider, ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
@@ -497,6 +497,8 @@ export class CodexProviderService {
   private readonly activeThreads = new Set<string>()
   private readonly controllers = new Set<AbortController>()
   private readonly readyToCommit = new Set<string>()
+  /** Mousse MCP tokens handed to Codex; never echoed into errors or status messages. */
+  private readonly secrets = new Set<string>()
 
   constructor(
     private readonly profileHome: string,
@@ -590,7 +592,7 @@ export class CodexProviderService {
     } catch (error) {
       return {
         kind: 'error',
-        message: `Codex did not report its sign-in (${error instanceof Error ? error.message : String(error)}). Update the Codex CLI and recheck.`
+        message: this.redact(`Codex did not report its sign-in (${error instanceof Error ? error.message : String(error)}). Update the Codex CLI and recheck.`)
       }
     }
   }
@@ -708,7 +710,7 @@ export class CodexProviderService {
       checkpoint()
       return { success: true, sessionId: session.sessionId }
     } catch (error) {
-      return { success: false, sessionId: session.sessionId, error: error instanceof Error ? error.message : String(error) }
+      return { success: false, sessionId: session.sessionId, error: this.redact(error instanceof Error ? error.message : String(error)) }
     }
   }
 
@@ -766,7 +768,7 @@ export class CodexProviderService {
     if (!binary) return Promise.reject(new Error('Codex CLI not found. Install the Codex CLI first.'))
     mkdirSync(this.dir, { recursive: true, mode: 0o700 })
     const process = (this.dependencies.launch ?? spawnCodexAppServer)({ binary, args: [], env: codexEnvironment(), cwd: this.dir })
-    const conn = new CodexAppServerClient(process, { defaultTimeoutMs: this.dependencies.requestTimeoutMs })
+    const conn = new CodexAppServerClient(process, { defaultTimeoutMs: this.dependencies.requestTimeoutMs, secrets: () => this.secrets })
     conn.onNotification((notification) => this.route(notification))
     conn.setServerRequestHandler((request) => this.serve(request))
     conn.signal.addEventListener('abort', () => this.lost(conn, conn.signal.reason), { once: true })
@@ -1011,6 +1013,7 @@ export class CodexProviderService {
   }
 
   async chat(input: CodexChatInput): Promise<CodexChatResult> {
+    if (input.mcp?.token) this.secrets.add(input.mcp.token)
     input.signal?.throwIfAborted()
     if (this.activeThreads.has(input.threadId)) throw new Error('A Codex turn is already running for this thread')
     this.activeThreads.add(input.threadId)
@@ -1151,7 +1154,7 @@ export class CodexProviderService {
         collectSteer()
         await Promise.race([steering, aborted])
         if (lastTurn.status === 'failed')
-          throw new Error(lastTurn.error?.message ?? current.lastError ?? 'Codex turn failed')
+          throw new Error(this.redact(lastTurn.error?.message ?? current.lastError ?? 'Codex turn failed'))
         if (lastTurn.status === 'interrupted') {
           signal.throwIfAborted()
           throw new Error('Codex interrupted the turn')
@@ -1201,6 +1204,10 @@ export class CodexProviderService {
           )
       }
     }
+  }
+
+  private redact(text: string): string {
+    return redactSecrets(text, this.secrets)
   }
 
   private signInMessage(): string {

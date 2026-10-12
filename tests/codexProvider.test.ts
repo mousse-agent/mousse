@@ -89,6 +89,28 @@ function create(server: ReturnType<typeof scriptedServer>, settings: Record<stri
   return service
 }
 
+describe('Codex credentials in messages', () => {
+  it('keeps a token printed on stderr during the sign-in check out of the public status', async () => {
+    const canary = 'canary-secret-token-value-0123456789'
+    let exitWith: (() => void) | undefined
+    const server = scriptedServer((message) => {
+      if (message.method === 'account/read') exitWith?.()
+      return undefined
+    })
+    const service = create(server)
+    exitWith = () => {
+      const process = server.processes.at(-1)!
+      ;(process as unknown as { stderr: PassThrough }).stderr.write(`mcp_servers.mousse: Authorization: Bearer ${canary}\n`)
+      setImmediate(() => process.emit('exit', 1, null))
+    }
+    const status = await service.status({ force: true })
+    expect(status.state).toBe('error')
+    expect(status.message).toContain('Codex did not report its sign-in')
+    expect(status.message).not.toContain(canary)
+    expect(JSON.stringify(status)).not.toContain(canary)
+  })
+})
+
 describe('codexEnvironment', () => {
   it('strips API keys and OpenAI routing, keeps the rest, and never sets CODEX_HOME', () => {
     const env = codexEnvironment({
