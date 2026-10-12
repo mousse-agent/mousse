@@ -40,7 +40,7 @@ import type { AntigravityProviderService } from '../providers/antigravity/Antigr
 import { v4 as uuidv4 } from 'uuid'
 import type { CommandResult, RunEngine } from '../run/RunEngine'
 import { RunStoreError } from '../run/db/RunStoreError'
-import type { EffectExecutor, EffectWorker } from '../run/EffectWorker'
+import { WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { stableStringify } from '../run/json'
 import { formatRestartNote } from '../run/restartNote'
 import { AdapterRegistry } from '../run/adapters/AdapterRegistry'
@@ -53,7 +53,7 @@ import type { McpCaller, MousseToolHost } from '../run/mcp/toolRegistry'
 import { formatWakeNotice } from '../run/delegation/notice'
 import type { DelegationRequest, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
-import { TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
+import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
 import { TranscriptAssembler } from '../run/adapters/shared/TranscriptAssembler'
 import { forkStrategy, handoffDelivery, mcpAttachable } from '../run/policy/featureGates'
 import { isContextOverflowError, retryContextOverflowOnce } from '../run/adapters/shared/retryContextOverflow'
@@ -66,6 +66,7 @@ import {
   type ModeCeiling,
   type ProviderRef,
   type ThreadEvent,
+  type TransferRecord,
   type WakeTurnPayload
 } from '../run/types'
 import {
@@ -465,10 +466,16 @@ export class OrchestratorService extends EventEmitter {
     }
     this.startupDrainPending = []
     this.startupDrainScheduled.clear()
-    for (const session of new Set([this.boundSession, ...this.sessions.values()])) session.activeTurn?.abort.abort()
+    // The shutdown reason marks these turns as cut off by a restart, not stopped by a user.
+    for (const session of new Set([this.boundSession, ...this.sessions.values()])) session.activeTurn?.abort.abort(this.lifecycle.signal.reason)
     for (const turn of this.channelTurns.values()) turn.abort.abort()
     this.mousseAgents.beginShutdown()
     this.questions.shutdown()
+  }
+
+  /** A turn abort caused by the profile shutting down (worker stop or lifecycle), not by a user. */
+  private isShutdownAbort(reason: unknown): boolean {
+    return reason instanceof WorkerStoppedError || (this.lifecycle.stopping && reason === this.lifecycle.signal.reason)
   }
 
   async shutdown(timeoutMs = 30_000): Promise<void> {
@@ -910,6 +917,8 @@ export class OrchestratorService extends EventEmitter {
     engine.setDelegationHost({
       createThread: (creation) =>
         creation.kind === 'delegation' ? this.createChildThread(creation.request) : this.createForkThread(creation),
+      deleteThread: (threadId) => this.discardCreatedThread(threadId),
+      readRunResultText: (runId) => this.runResultText(runId),
       buildChildTurnPayload: ({ childThreadId, childRunId, prompt, request }): TurnStartPayload => ({
         runId: childRunId,
         threadId: childThreadId,
@@ -1296,7 +1305,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Engine host callback (inside the delegation transaction; synchronous): the child thread gets the
+   * Engine host callback (before the delegation transaction; synchronous): the child thread gets the
    * parent's project and model selection, or the requested provider/model.
    */
   private createChildThread(request: DelegationRequest): { threadId: string } {
@@ -1321,7 +1330,57 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Engine host callback for `thread.fork` (SPEC §16.2; inside the fork transaction): the fork gets
+   * Engine host callback: the delegation or fork transaction that would have owned `threadId`
+   * failed, so the thread `createThread` just made is removed with its in-memory session.
+   */
+  private discardCreatedThread(threadId: string): void {
+    this.sessions.delete(threadId)
+    this.threadStore?.discardUnusedThread(threadId)
+  }
+
+  /**
+   * Engine host callback (SPEC §14.1): the final assistant reply of `runId` in its thread's
+   * transcript. The run's messages start at its admitted user message (`turnId === runId`) and end
+   * where another run's message begins.
+   */
+  private runResultText(runId: string): string | undefined {
+    const threadId = this.runEngine?.getRun(runId)?.threadId
+    if (!threadId) return undefined
+    const messages = this.getMessagesForPersistence(threadId)
+    const start = messages.findIndex((message) => message.turnId === runId)
+    if (start < 0) return undefined
+    let text: string | undefined
+    for (const message of messages.slice(start)) {
+      if (message.turnId && message.turnId !== runId) break
+      if (message.role !== 'assistant' || message.hidden || (message.kind && message.kind !== 'plan_card')) continue
+      if (message.content.trim()) text = message.content
+    }
+    return text
+  }
+
+  /**
+   * SPEC §14.2: a delegated child keeps the workspace policy its delegation recorded. A session
+   * built from storage (after a restart, or once evicted) reads it back, so a `shared` read-only
+   * child still observes its parent's workspace under `SHARED_READER_POLICY`.
+   */
+  private restoreDelegatedWorkspace(session: ThreadSession): void {
+    const engine = this.runEngine
+    if (!engine || session.sharedWorkspace) return
+    try {
+      const lineage = engine.delegations.getLineage(session.threadId)
+      if (lineage?.relationship !== 'subagent') return
+      const policy = engine.delegations.listForChildThread(session.threadId).filter((delegation) => delegation.workspace).at(-1)
+      if (policy?.workspace === 'shared') session.sharedWorkspace = this.sharedWorkspaceOf(lineage.parentThreadId)
+    } catch (error) {
+      console.warn('delegated workspace policy could not be restored', {
+        threadId: session.threadId,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+
+  /**
+   * Engine host callback for `thread.fork` (SPEC §16.2; before the fork transaction): the fork gets
    * the source's project, worktree mode and model selection. Its context arrives lazily, with its
    * first message.
    */
@@ -1412,7 +1471,11 @@ export class OrchestratorService extends EventEmitter {
       const modelWindow = input.promptRuntime
         ? capacity?.selectedModel === to.model ? capacity?.contextWindow : undefined
         : this.llm.getSelectedModelContextLimit(input.mode, input.modelOverride).limit
-      const fork = engine.transfers.listPending(threadId, 'fork')[0]
+      // A transfer whose history an earlier (aborted) turn already committed is consumed, not resent.
+      const inTranscript = committedTransfers(this.nativeContext.messages)
+      const pendingTransfer = (transfer: TransferRecord | undefined | null): TransferRecord | null =>
+        transfer && !this.consumeCommittedTransfer(transfer, inTranscript, runId) ? transfer : null
+      const fork = pendingTransfer(engine.transfers.listPending(threadId, 'fork')[0])
       if (fork) {
         const sourceRun = engine.getRun(String(fork.payload.sourceRunId ?? ''))
         const sourceRef = sourceRun?.activeAttemptId ? engine.store.getAttempt(sourceRun.activeAttemptId)?.providerRef ?? null : null
@@ -1439,7 +1502,7 @@ export class OrchestratorService extends EventEmitter {
         const from = this.previousProviderRef(threadId, runId) ?? { provider: input.previousModel.provider, model: input.previousModel.model }
         planned.push({ kind: 'switch', plan: engine.handoffs.plan({ threadId, targetRunId: runId, from, to, caps, current, modelWindow }) })
       }
-      const merge = engine.pendingMergeBack(threadId)
+      const merge = pendingTransfer(engine.pendingMergeBack(threadId))
       if (merge) {
         planned.push({
           kind: 'merge_back',
@@ -1461,6 +1524,29 @@ export class OrchestratorService extends EventEmitter {
       })
     }
     return planned.length ? new TurnHandoffs(engine, planned, !input.promptRuntime) : null
+  }
+
+  /**
+   * Idempotent transfer delivery (SPEC §16.2): when the canonical transcript already holds a pending
+   * transfer's marked history (a turn committed it, then the consume write was lost), the transfer
+   * is consumed now instead of injected twice. True when it was.
+   */
+  private consumeCommittedTransfer(transfer: TransferRecord, inTranscript: ReadonlyMap<string, { handoffId: string }>, runId: string): boolean {
+    const marker = inTranscript.get(transfer.transferId)
+    if (!marker) return false
+    const engine = this.requireRunEngine()
+    try {
+      const handoff = engine.handoffs.get(marker.handoffId)
+      engine.transfers.setStatus({
+        transferId: transfer.transferId,
+        from: 'pending',
+        to: 'consumed',
+        payloadPatch: { handoffId: marker.handoffId, consumedBy: handoff?.targetRunId ?? runId, repairedBy: runId }
+      })
+    } catch (error) {
+      console.warn('run engine transfer repair failed', { transferId: transfer.transferId, error: error instanceof Error ? error.message : String(error) })
+    }
+    return true
   }
 
   /**
@@ -1757,25 +1843,46 @@ export class OrchestratorService extends EventEmitter {
     return { delegationId, integrationRunId: result.runId, status: 'queued', note: 'The integration runs after this turn; Mousse notifies you of the outcome.' }
   }
 
+  /**
+   * An `integration` run (SPEC §14.4). Every step after the queued check, the run's own status
+   * marks included, is inside the `try`: any failure ends the run `failed` and the parent learns of
+   * it through an `integration_failed` notice in its inbox, never through a thrown effect.
+   */
   private async executeIntegrationEffect(payload: IntegrationTurnPayload, signal: AbortSignal): Promise<void> {
     const engine = this.requireRunEngine()
     if (engine.getRun(payload.runId)?.status !== 'queued') return
-    const session = this.getOrCreateSession(payload.threadId)
-    engine.markStarting(payload.runId)
-    engine.markRunning(payload.runId)
     let notice: string
+    let failed = false
     try {
+      engine.markStarting(payload.runId)
+      engine.markRunning(payload.runId)
       const record = await this.lifecycle.run('delegation-integration', () =>
         this.integrateDelegationResult(payload.threadId, payload.delegationId, payload.runId, AbortSignal.any([signal, this.lifecycle.signal])))
       notice = `Integration of delegated task ${payload.delegationId} finished: merged ${record.workerHeadSha.slice(0, 12)} as ${record.integrationSha.slice(0, 12)} (${record.changedPaths.length} path(s)).`
       engine.markTerminal(payload.runId, 'completed', undefined, { resultText: notice })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
+      failed = true
       notice = `Integration of delegated task ${payload.delegationId} failed: ${message}`
-      this.markRun(payload.runId, (runs, id) => { runs.markTerminal(id, 'failed', { error: message }) })
+      this.markRun(payload.runId, (runs, id) => {
+        const run = runs.getRun(id)
+        if (run && !TERMINAL_RUN_STATUSES.has(run.status)) runs.markTerminal(id, 'failed', { error: message })
+      })
     }
-    this.sessionAls.run(session, () => this.addSystemMessage(notice))
-    engine.inbox.append({ threadId: payload.threadId, runId: payload.runId, kind: 'reconcile_notice', payload: { text: notice } })
+    try {
+      const session = this.getOrCreateSession(payload.threadId)
+      this.sessionAls.run(session, () => this.addSystemMessage(notice))
+    } catch (error) {
+      console.warn('integration notice could not reach the transcript', { runId: payload.runId, error: error instanceof Error ? error.message : String(error) })
+    }
+    engine.inbox.append({
+      threadId: payload.threadId,
+      runId: payload.runId,
+      kind: 'reconcile_notice',
+      payload: failed
+        ? { type: 'integration_failed', delegationId: payload.delegationId, text: notice }
+        : { type: 'integration_completed', delegationId: payload.delegationId, text: notice }
+    })
   }
 
   private async integrateDelegationResult(parentThreadId: string, delegationId: string, runId: string, signal: AbortSignal) {
@@ -2151,6 +2258,7 @@ export class OrchestratorService extends EventEmitter {
     }
     // Hydrate runtime after session is registered to avoid re-entrant create.
     this.sessions.set(threadId, session)
+    this.restoreDelegatedWorkspace(session)
     if (this.runtimeManager) {
       const rt = this.runtimeManager.getOrHydrate(threadId)
       session.agents = rt.agents
@@ -3824,7 +3932,7 @@ export class OrchestratorService extends EventEmitter {
     const engineRunId = this.runEngine ? opts?.runId : undefined
     let runTerminalMarked = false
     // `resultText` is the turn's final reply; a delegated child run publishes it (SPEC §14.1).
-    const markRunTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' }, resultText?: string): void => {
+    const markRunTerminal = (status: 'completed' | 'interrupted' | 'failed', outcome?: { error?: string; interruptedBy?: 'user' | 'daemon_restart' }, resultText?: string): void => {
       if (runTerminalMarked) return
       runTerminalMarked = true
       this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome, { resultText }))
@@ -3854,7 +3962,8 @@ export class OrchestratorService extends EventEmitter {
     }
     const turnAuthority = session.executionLease ? new TaskWriterAuthority(session.executionLease) : undefined
     const turnWriter = turnAuthority?.issue(turnId, { version: 1, workspace: 'shared', access: 'write' })
-    const mirrorExternalAbort = (): void => turn.abort.abort()
+    // The external signal's reason (a profile shutdown) travels with the abort.
+    const mirrorExternalAbort = (): void => turn.abort.abort(opts?.externalSignal?.reason)
     if (opts?.externalSignal?.aborted) {
       mirrorExternalAbort()
     } else {
@@ -4095,6 +4204,8 @@ export class OrchestratorService extends EventEmitter {
             }
           }
           this.persist(true)
+          // The fork or merge-back history this turn was handed is canonical now (SPEC §16.2).
+          handoffs?.committed()
           this.acknowledgeDrainedSteers(session)
           if (session.executionLease) {
             heartbeatExecutionLease(session.executionLease)
@@ -4201,6 +4312,10 @@ export class OrchestratorService extends EventEmitter {
         commitPromptTurn(result.text)
       } else {
         this.commitActiveNativeMessages(handoffs ? handoffs.canonical(result.nativeMessages) : result.nativeMessages)
+        if (handoffs) {
+          this.persist(true)
+          handoffs.committed()
+        }
         // Provider prompt usage excludes the assistant message it produced.
         this.recordLastTurnUsage({
           input: result.usage.input,
@@ -4284,10 +4399,12 @@ export class OrchestratorService extends EventEmitter {
           this.emitMessageUpdated(updated)
         }
       }
-      this.addSystemMessage('Turn stopped.')
+      // SPEC §12.5: a profile shutdown is a restart, not a user's Stop; the next boot notes it.
+      const restart = this.isShutdownAbort(turn.abort.signal.reason)
+      this.addSystemMessage(restart ? 'Turn interrupted by a Mousse restart.' : 'Turn stopped.')
       const response: OrchestratorResponse = { message: partial, actions: [] }
       this.setTurnPhase(session.threadId, 'stopped')
-      markRunTerminal('interrupted', { interruptedBy: 'user' }, partial)
+      markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : 'user' }, partial)
       await checkpointTurn('stopped')
       this.persist(true)
       // Cross-channel IPC delivery and an in-flight renderer snapshot can otherwise leave

@@ -4,7 +4,9 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { RunStoreError } from '../../src/mms/run/db/RunStoreError'
+import { Reconciler } from '../../src/mms/run/Reconciler'
 import { RunEngine } from '../../src/mms/run/RunEngine'
+
 import { RunStore } from '../../src/mms/run/RunStore'
 import type { ThreadEvent } from '../../src/mms/run/types'
 
@@ -313,5 +315,62 @@ describe('RunEngine', () => {
     expect(store.getRun(b.runId)!.status).toBe('queued')
     expect(events.filter((event) => event.type === 'run.status')).toHaveLength(2)
     expect(rebooted.reconcileOnBoot()).toMatchObject({ interrupted: [], uncertain: [] })
+  })
+})
+
+describe('RunEngine.runLocalAction (SPEC §16.3)', () => {
+  let profileHome: string | undefined
+  let db: ProfileDatabase | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+    if (profileHome) rmSync(profileHome, { recursive: true, force: true })
+    profileHome = undefined
+  })
+
+  /** A real clock: the local action's heartbeat timer and the reconciler race in wall time. */
+  const setup = (heartbeatMs: number) => {
+    profileHome = mkdtempSync(join(tmpdir(), 'mousse-local-action-'))
+    db = new ProfileDatabase({ profileHome })
+    const store = new RunStore(db)
+    const engine = new RunEngine({ store, heartbeatMs })
+    const reconciler = new Reconciler({ store, outbox: engine.outbox, tools: engine.tools, heartbeatMs })
+    return { store, engine, reconciler }
+  }
+
+  it('heartbeats through an action three heartbeat intervals long and completes', async () => {
+    const heartbeatMs = 40
+    const { engine, reconciler } = setup(heartbeatMs)
+    const stale: string[] = []
+    const pass = setInterval(() => stale.push(...reconciler.runOnce().staleRuns), 10)
+    try {
+      const { runId, result } = await engine.runLocalAction({ threadId: 't', source: 'undo' }, async () => {
+        await new Promise((resolve) => setTimeout(resolve, 3 * heartbeatMs))
+        return 'restored'
+      })
+      expect(result).toBe('restored')
+      expect(stale).toEqual([])
+      expect(engine.getRun(runId)!.status).toBe('completed')
+    } finally {
+      clearInterval(pass)
+    }
+  })
+
+  it('keeps a terminal state something else wrote while the action ran', async () => {
+    const { engine } = setup(10_000)
+    const { runId, result } = await engine.runLocalAction({ threadId: 't', source: 'revert' }, async (run) => {
+      engine.markTerminal(run.runId, 'interrupted', { interruptedBy: 'provider', error: 'no terminal event' })
+      return 'done'
+    })
+    expect(result).toBe('done')
+    expect(engine.getRun(runId)).toMatchObject({ status: 'interrupted', outcome: { interruptedBy: 'provider' } })
+    // A failing action whose run already ended still rethrows its own error.
+    await expect(
+      engine.runLocalAction({ threadId: 't', source: 'undo' }, async (run) => {
+        engine.markTerminal(run.runId, 'interrupted', { interruptedBy: 'provider' })
+        throw new Error('git failed')
+      })
+    ).rejects.toThrow('git failed')
   })
 })

@@ -92,7 +92,7 @@ describe('ClaudeSubscriptionAdapter', () => {
     const adapter = new ClaudeSubscriptionAdapter(() => null)
     expect(adapter.id).toBe('claude-subscription')
     expect(adapter.capabilities).toBe(CLAUDE_SUBSCRIPTION_CAPABILITIES)
-    expect(adapter.capabilities).toMatchObject({ steer: 'native', containment: 'weak', historyInjection: 'prompt', terminalQuality: 'best_effort' })
+    expect(adapter.capabilities).toMatchObject({ steer: 'native', containment: 'weak', historyInjection: 'prompt' })
     expect(adapter.describe('sonnet')).toEqual({ contextUsage: 'reported' })
     expect(adapter.configured()).toBe(false)
     expect(await adapter.interrupt({ provider: 'claude-subscription' })).toBe('not_active')

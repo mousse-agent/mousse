@@ -39,21 +39,10 @@ export function stopStrategy(caps: ProviderCapabilities, run: RunRecord | null):
 /** Sparse event streams go quiet for long stretches during a healthy turn. */
 export const SPARSE_EVENTS_HEARTBEAT_FACTOR = 6
 
-/** Reconciler rule 2 tolerance for a run without a heartbeat. */
+/**
+ * The heartbeat interval reconciler rule 2 scales its silence window by: the base interval, or 6×
+ * it for a provider whose event stream is sparse.
+ */
 export function heartbeatToleranceMs(caps: ProviderCapabilities, baseMs: number): number {
   return caps.events === 'sparse' ? baseMs * SPARSE_EVENTS_HEARTBEAT_FACTOR : baseMs
-}
-
-/** Idle time after a closed stream that ends a best-effort run (SPEC §13.2). */
-export const IDLE_CLOSE_TERMINAL_MS = 30_000
-
-export type TerminalPolicy = 'event_only' | 'event_or_idle_close'
-
-/**
- * A reliable provider ends a turn only with a terminal event. A best-effort provider may close
- * its stream without one; a closed stream followed by `IDLE_CLOSE_TERMINAL_MS` of silence also
- * counts as terminal.
- */
-export function terminalPolicy(caps: ProviderCapabilities): TerminalPolicy {
-  return caps.terminalQuality === 'best_effort' ? 'event_or_idle_close' : 'event_only'
 }

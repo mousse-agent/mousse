@@ -16,7 +16,17 @@ describe('formatRestartNote', () => {
     )
   })
 
+  it('mentions queued runs that had not started, with or without an interrupted run', () => {
+    expect(formatRestartNote(note({ queuedRunIds: ['q1'] }))).toBe(
+      'The Mousse daemon restarted during the previous turn. Interrupted: 1 run(s). Queued before the restart: 1 run(s).'
+    )
+    expect(formatRestartNote(note({ runIds: [], queuedRunIds: ['q1', 'q2'] }))).toBe(
+      'The Mousse daemon restarted before this turn started. Queued before the restart: 2 run(s).'
+    )
+  })
+
   it('lists the non-idempotent tools of uncertain runs once each', () => {
+
     const text = formatRestartNote(
       note({
         runIds: ['r1', 'r2'],

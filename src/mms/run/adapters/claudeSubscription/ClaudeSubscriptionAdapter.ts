@@ -34,7 +34,6 @@ export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.fre
   events: 'rich',
   containment: 'weak',
   historyInjection: 'prompt',
-  terminalQuality: 'best_effort',
   mcp: true
 })
 

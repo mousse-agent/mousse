@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { ProviderCapabilities } from '../adapters/ProviderAdapter'
+import { int, json, str, type Row } from '../db/rows'
 import { fail } from '../db/RunStoreError'
 import { stableStringify } from '../json'
 import { handoffDelivery, type HandoffDelivery } from '../policy/featureGates'
@@ -20,8 +21,6 @@ import {
   type HandoffItem,
   type SelectedHandoffItem
 } from './budget'
-
-type Row = Record<string, unknown>
 
 /** The thread owner's transcript of `threadId` as handoff items, oldest first. */
 export type HandoffTranscriptSource = (threadId: string) => HandoffItem[]
@@ -254,14 +253,13 @@ export class HandoffService {
 }
 
 function toHandoff(row: Row): HandoffRecord {
-  const ref = (value: unknown): ProviderRef | null => (typeof value === 'string' ? (JSON.parse(value) as ProviderRef) : null)
-  const int = (value: unknown): number | null => (value === null || value === undefined ? null : Number(value))
   return {
     handoffId: String(row.handoff_id),
     threadId: String(row.thread_id),
     targetRunId: String(row.target_run_id),
-    fromRef: ref(row.from_ref),
-    toRef: ref(row.to_ref)!,
+    fromRef: json<ProviderRef>(row.from_ref),
+    toRef: json<ProviderRef>(row.to_ref)!,
+
     strategy: row.strategy as HandoffStrategy,
     coveredFromOrdinal: int(row.covered_from_ordinal),
     coveredToOrdinal: int(row.covered_to_ordinal),
@@ -270,6 +268,6 @@ function toHandoff(row: Row): HandoffRecord {
     omittedItems: Number(row.omitted_items),
     status: row.status as HandoffStatus,
     createdAt: String(row.created_at),
-    deliveredAt: typeof row.delivered_at === 'string' ? row.delivered_at : null
+    deliveredAt: str(row.delivered_at)
   }
 }

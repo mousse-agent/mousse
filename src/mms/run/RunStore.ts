@@ -1,6 +1,7 @@
 import type { SQLInputValue } from 'node:sqlite'
 import type { ProfileDatabase } from './db/ProfileDatabase'
 import { RUN_MIGRATIONS } from './db/migrations'
+import { json, str, type Row } from './db/rows'
 import { fail } from './db/RunStoreError'
 import { stableStringify } from './json'
 import {
@@ -17,8 +18,6 @@ import {
   type RunStatus,
   type ThreadEvent
 } from './types'
-
-type Row = Record<string, unknown>
 
 export type RunPatch = Partial<
   Pick<RunRecord, 'startedAt' | 'completedAt' | 'outcome' | 'activeAttemptId' | 'userMessageId'>
@@ -225,8 +224,8 @@ export class RunStore {
     return row ? toRun(row) : null
   }
 
-  /** The thread's single non-terminal run, or null. More than one is a `conflict`. */
   /**
+
    * The one run that currently owns the thread's execution (`starting|running|finalizing`).
    * Queued runs wait behind it and are listed by `listQueuedRuns`. More than one active run is
    * an invariant violation (SPEC §2.3) and raises `conflict`.
@@ -268,7 +267,23 @@ export class RunStore {
       .map(toRun)
   }
 
+  /**
+   * Runs a daemon shutdown interrupted (`interrupted`, `interruptedBy: 'daemon_restart'`) that
+   * completed at or after `since`, oldest first (SPEC §12.5: the next boot notes them).
+   */
+  listInterruptedByRestartSince(since: string): RunRecord[] {
+    return this.db
+      .statement(
+        `SELECT * FROM runs WHERE status = 'interrupted' AND completed_at >= ?
+           AND json_extract(outcome, '$.interruptedBy') = 'daemon_restart'
+         ORDER BY thread_id, ordinal`
+      )
+      .all(since)
+      .map(toRun)
+  }
+
   getAttempt(attemptId: string): AttemptRecord | null {
+
     const row = this.db.statement('SELECT * FROM run_attempts WHERE attempt_id = ?').get(attemptId)
     return row ? toAttempt(row) : null
   }
@@ -426,14 +441,6 @@ function jsonOrNull(value: unknown): string | null {
   return value === null || value === undefined ? null : stableStringify(value)
 }
 
-function parseOrNull<T>(value: unknown): T | null {
-  return typeof value === 'string' ? (JSON.parse(value) as T) : null
-}
-
-function str(value: unknown): string | null {
-  return typeof value === 'string' ? value : null
-}
-
 function runParams(record: RunRecord): SQLInputValue[] {
   return [
     record.runId,
@@ -479,7 +486,7 @@ function toRun(row: Row): RunRecord {
     requestedAt: String(row.requested_at),
     startedAt: str(row.started_at),
     completedAt: str(row.completed_at),
-    outcome: parseOrNull<RunOutcome>(row.outcome),
+    outcome: json<RunOutcome>(row.outcome),
     heartbeatAt: str(row.heartbeat_at)
   }
 }
@@ -491,7 +498,7 @@ function toAttempt(row: Row): AttemptRecord {
     ordinal: Number(row.ordinal),
     reason: row.reason as AttemptReason,
     status: row.status as AttemptStatus,
-    providerRef: parseOrNull<ProviderRef>(row.provider_ref),
+    providerRef: json<ProviderRef>(row.provider_ref),
     startedAt: str(row.started_at),
     completedAt: str(row.completed_at)
   }
@@ -503,7 +510,7 @@ function toReceipt(row: Row): ReceiptRecord {
     threadId: String(row.thread_id),
     commandKind: String(row.command_kind),
     status: row.status as ReceiptRecord['status'],
-    result: parseOrNull<unknown>(row.result),
+    result: json<unknown>(row.result),
     createdAt: String(row.created_at)
   }
 }

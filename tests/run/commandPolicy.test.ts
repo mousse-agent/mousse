@@ -1,11 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import {
-  IDLE_CLOSE_TERMINAL_MS,
-  heartbeatToleranceMs,
-  steerStrategy,
-  stopStrategy,
-  terminalPolicy
-} from '../../src/mms/run/CommandPolicy'
+import { heartbeatToleranceMs, steerStrategy, stopStrategy } from '../../src/mms/run/CommandPolicy'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { ProviderCapabilities } from '../../src/mms/run/adapters/ProviderAdapter'
 import type { RunRecord, RunStatus } from '../../src/mms/run/types'
@@ -85,13 +79,5 @@ describe('heartbeatToleranceMs', () => {
   it('keeps the base window for rich events and widens it 6x for sparse ones', () => {
     expect(heartbeatToleranceMs(caps({ events: 'rich' }), 20_000)).toBe(20_000)
     expect(heartbeatToleranceMs(caps({ events: 'sparse' }), 20_000)).toBe(120_000)
-  })
-})
-
-describe('terminalPolicy', () => {
-  it('ends reliable runs on events only and best-effort runs also on idle close', () => {
-    expect(terminalPolicy(caps({ terminalQuality: 'reliable' }))).toBe('event_only')
-    expect(terminalPolicy(caps({ terminalQuality: 'best_effort' }))).toBe('event_or_idle_close')
-    expect(IDLE_CLOSE_TERMINAL_MS).toBe(30_000)
   })
 })

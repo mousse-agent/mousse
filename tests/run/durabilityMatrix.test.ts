@@ -13,7 +13,8 @@ import type { EffectStatus, RunStatus, ToolInvocationStatus } from '../../src/mm
  * SPEC §12.8 fault matrix. One turn runs through every durable step; the daemon is killed by
  * throwing at `transaction.beforeCommit` of one step (that step rolls back, nothing after it
  * runs), the database is reopened by a new daemon, and `reconcileOnBoot()` + `runOnce()` must
- * leave exactly the states in the table.
+ * leave exactly the states in the table. `enqueue-claimed-not-started` is a plain crash after the
+ * claim of a `turn.start` that stored its send: rule 5 enqueues it again.
  */
 const STEPS = [
   'send', // run.created
@@ -30,19 +31,22 @@ const STEPS = [
 type Step = (typeof STEPS)[number]
 
 interface Expected {
-  killAt: Step | null
+  killAt: Step | 'enqueue-claimed-not-started' | null
   tool: string
   run: RunStatus | null
   effect: EffectStatus | null
   invocation: ToolInvocationStatus | null
   boot: 'none' | 'interrupted' | 'uncertain'
+  /** Rule 5 on the stranded queued run (its dead effect stored no send, or one). */
+  queued?: 'cancelled' | 'restarted'
 }
 
 const MATRIX: Expected[] = [
   { killAt: 'send', tool: 'bash', run: null, effect: null, invocation: null, boot: 'none' },
   { killAt: 'enqueue', tool: 'bash', run: 'queued', effect: null, invocation: null, boot: 'none' },
-  { killAt: 'claim', tool: 'bash', run: 'queued', effect: 'cancelled', invocation: null, boot: 'none' },
-  { killAt: 'starting', tool: 'bash', run: 'queued', effect: 'cancelled', invocation: null, boot: 'none' },
+  { killAt: 'claim', tool: 'bash', run: 'cancelled', effect: 'cancelled', invocation: null, boot: 'none', queued: 'cancelled' },
+  { killAt: 'starting', tool: 'bash', run: 'cancelled', effect: 'cancelled', invocation: null, boot: 'none', queued: 'cancelled' },
+  { killAt: 'enqueue-claimed-not-started', tool: 'bash', run: 'queued', effect: 'cancelled', invocation: null, boot: 'none', queued: 'restarted' },
   { killAt: 'running', tool: 'bash', run: 'interrupted', effect: 'cancelled', invocation: null, boot: 'interrupted' },
   { killAt: 'tool.start', tool: 'bash', run: 'interrupted', effect: 'cancelled', invocation: null, boot: 'interrupted' },
   { killAt: 'tool.commit', tool: 'bash', run: 'uncertain', effect: 'cancelled', invocation: 'outcome_unknown', boot: 'uncertain' },
@@ -56,6 +60,8 @@ const MATRIX: Expected[] = [
 const THREAD = 'matrix'
 const RUN_ID = 'run:thread:matrix:ordinal:1'
 const EFFECT_ID = `effect:${RUN_ID}:turn.start:1`
+const RESTARTED_EFFECT_ID = `effect:${RUN_ID}:turn.start:2`
+const SEND = { runId: RUN_ID, threadId: THREAD, input: { content: 'hello', mode: 'agent' } }
 const INVOCATION_ID = 'call-1'
 
 describe('run engine durability matrix', () => {
@@ -93,7 +99,13 @@ describe('run engine durability matrix', () => {
 
     const perform: Record<Step, () => unknown> = {
       send: () => engine.dispatch({ kind: 'send', threadId: THREAD, clientRequestId: 'req-1', source: 'gui' }),
-      enqueue: () => engine.outbox.enqueue({ threadId: THREAD, runId: RUN_ID, kind: 'turn.start' }),
+      enqueue: () =>
+        engine.outbox.enqueue({
+          threadId: THREAD,
+          runId: RUN_ID,
+          kind: 'turn.start',
+          ...(row.queued === 'restarted' ? { payload: SEND } : {})
+        }),
       claim: () => {
         if (!engine.outbox.claimNext(engine.leaseOwner, now())) throw new Error('nothing to claim')
       },
@@ -117,6 +129,8 @@ describe('run engine durability matrix', () => {
     }
 
     for (const step of STEPS) {
+      // A plain crash once the claimed turn.start is running, before the turn starts.
+      if (row.killAt === 'enqueue-claimed-not-started' && step === 'starting') break
       if (step === row.killAt) {
         killNext = true
         await expect(Promise.resolve().then(perform[step])).rejects.toThrow('killed')
@@ -134,7 +148,16 @@ describe('run engine durability matrix', () => {
       outbox: second.engine.outbox,
       tools: second.engine.tools
     })
-    reconciler.runOnce()
+    const repairs = reconciler.runOnce()
+    expect(boot.strandedQueued).toEqual(row.queued ? [RUN_ID] : [])
+    expect(repairs.queuedStarts).toEqual(row.queued === 'restarted' ? [RUN_ID] : [])
+    expect(repairs.strandedCancelled).toEqual(row.queued === 'cancelled' ? [RUN_ID] : [])
+    if (row.queued === 'cancelled')
+      expect(second.store.getRun(RUN_ID)!.outcome).toEqual({ error: 'no turn payload after restart' })
+    // The restarted run gets a fresh turn.start carrying the stored send.
+    expect(second.engine.outbox.get(RESTARTED_EFFECT_ID)).toEqual(
+      row.queued === 'restarted' ? expect.objectContaining({ status: 'pending', payload: SEND }) : null
+    )
 
     expect(boot.epoch).toBe(2)
     expect(boot.interrupted).toEqual(row.boot === 'interrupted' ? [RUN_ID] : [])
@@ -150,7 +173,8 @@ describe('run engine durability matrix', () => {
         error: expect.stringContaining(row.tool)
       })
     const notes = second.store.listEvents(THREAD).filter((event) => event.type === 'restart.note')
-    expect(notes).toHaveLength(row.boot === 'none' ? 0 : 1)
+    expect(notes).toHaveLength(row.boot === 'none' && !row.queued ? 0 : 1)
+    if (row.queued) expect(notes[0].payload).toMatchObject({ runIds: [], queuedRunIds: [RUN_ID] })
     // Recovery leaves no consistency errors behind.
     expect(RunFsck.checkDatabase(second.db).filter((finding) => finding.severity === 'error')).toEqual([])
   })

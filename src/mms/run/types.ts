@@ -85,6 +85,12 @@ export interface ThreadEvent {
   createdAt: string
 }
 
+/**
+ * Sources of local-action runs (SPEC §16.3): `undo` and `revert` run Git mechanics in-process, with
+ * no effect and no provider; they heartbeat while the action runs (reconciler rule 2).
+ */
+export const LOCAL_ACTION_SOURCES: ReadonlySet<string> = new Set(['undo', 'revert'])
+
 export const runId = (threadId: string, ordinal: number): string =>
   `run:thread:${encodeURIComponent(threadId)}:ordinal:${ordinal}`
 
@@ -125,6 +131,25 @@ export interface EffectKindSpec {
 }
 
 export const DEFAULT_EFFECT_MAX_ATTEMPTS = 5
+
+/**
+ * Which worker fibres may claim an effect kind (SPEC §12.3): `turn` fibres run `turn.start` (one
+ * per live turn, so their count caps a profile's concurrent turns), `control` fibres run the
+ * interrupts, steers and answers that must reach a live turn, and `replaySafe` fibres run the
+ * replay-safe kinds. A long turn can therefore never starve a Stop.
+ */
+export type EffectLaneClass = 'turn' | 'control' | 'replaySafe'
+
+const CONTROL_EFFECT_KINDS: ReadonlySet<EffectKind> = new Set<EffectKind>([
+  'turn.interrupt',
+  'turn.steer',
+  'request.respond'
+])
+
+export function effectLaneClass(kind: EffectKind): EffectLaneClass {
+  if (kind === 'turn.start') return 'turn'
+  return CONTROL_EFFECT_KINDS.has(kind) ? 'control' : 'replaySafe'
+}
 
 /**
  * SPEC §12.2. A kind's class is fixed here, never per row. Effects that drive a model turn or
@@ -232,7 +257,13 @@ export interface DelegationRecord {
   completedAt: string | null
   /** The most the child may do (SPEC §15.1); null when the delegation set none. */
   modeCeiling: ModeCeiling | null
+  /** The child's workspace policy (SPEC §14.2); null for a follow-up or a pre-version-6 row. */
+  workspace: DelegationWorkspace | null
+  /** The requested role (`research`, `review`, `implement`, …); null when none was given. */
+  role: string | null
 }
+
+export type DelegationWorkspace = 'isolated' | 'shared'
 
 /**
  * What a run's Mousse MCP credential may do (SPEC §15.1): `plan` is read-only planning (no
@@ -272,6 +303,24 @@ export interface WakeTurnPayload {
 
 export function isWakeTurnPayload(payload: unknown): payload is WakeTurnPayload {
   return Boolean(payload) && typeof payload === 'object' && (payload as { kind?: unknown }).kind === 'wake'
+}
+
+/**
+ * A `turn.start` payload that carries an ordinary send (its `input`), so a queued run whose effect
+ * died can be started again from it (reconciler rule 5). Wake and integration payloads carry no
+ * `input`; a queue item's payload (`queueItemId`) is restarted by the message queue's own recovery.
+ */
+export interface SendTurnPayload {
+  runId: string
+  threadId: string
+  input: unknown
+  queueItemId?: string
+}
+
+export function isSendTurnPayload(payload: unknown): payload is SendTurnPayload {
+  if (!payload || typeof payload !== 'object') return false
+  const value = payload as Record<string, unknown>
+  return typeof value.runId === 'string' && typeof value.threadId === 'string' && value.input !== undefined && value.input !== null
 }
 
 // Phase 6: context handoffs and thread transfers (docs/run-engine/SPEC.md §16).

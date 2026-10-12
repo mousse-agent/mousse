@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto'
+import { str, type Row } from './db/rows'
 import { fail } from './db/RunStoreError'
 import { stableStringify } from './json'
 import type { RunStore } from './RunStore'
 import type { InboxKind, InboxRecord, InboxStatus } from './types'
-
-type Row = Record<string, unknown>
 
 /** Allowed status moves. `delivered -> pending` is boot recovery of a wake that never ran. */
 const TRANSITIONS: Record<InboxStatus, ReadonlySet<InboxStatus>> = {
@@ -169,7 +168,7 @@ function toInbox(row: Row): InboxRecord {
   return {
     inboxId: String(row.inbox_id),
     threadId: String(row.thread_id),
-    runId: typeof row.run_id === 'string' ? row.run_id : null,
+    runId: str(row.run_id),
     kind: row.kind as InboxKind,
     payload: JSON.parse(String(row.payload)) as unknown,
     status: row.status as InboxStatus,

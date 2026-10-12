@@ -1,25 +1,52 @@
 import type { EffectOutbox, EffectSettlement } from './EffectOutbox'
-import type { EffectKind, EffectRecord } from './types'
+import type { EffectKind, EffectLaneClass, EffectRecord } from './types'
 
 export type EffectExecutor = (
   effect: EffectRecord,
   ctx: { signal: AbortSignal; renewLease: () => boolean }
 ) => Promise<void>
 
+/**
+ * Fibres per lane class (SPEC §12.3). `turn` fibres claim only `turn.start` and so cap the
+ * profile's concurrent turns; `control` fibres claim only interrupts, steers and answers, so a
+ * Stop runs however many turns are live; `replaySafe` fibres claim the replay-safe kinds.
+ */
+export interface EffectWorkerFibres {
+  turn: number
+  control: number
+  replaySafe: number
+}
+
+export const DEFAULT_EFFECT_WORKER_FIBRES: Readonly<EffectWorkerFibres> = {
+  turn: 8,
+  control: 2,
+  replaySafe: 2
+}
+
 export interface EffectWorkerOptions {
   outbox: EffectOutbox
   executors: Partial<Record<EffectKind, EffectExecutor>>
   /** Lease owner, `"<daemonEpoch>:<pid>"`. */
   owner: string
-  /** Concurrent fibres. Default 4. */
-  fibres?: number
+  /** Fibres per lane class; missing classes use `DEFAULT_EFFECT_WORKER_FIBRES`. */
+  fibres?: Partial<EffectWorkerFibres>
   now?: () => string
   /** Safety poll. Default 30 s. */
   pollMs?: number
 }
 
-const DEFAULT_FIBRES = 4
 const DEFAULT_POLL_MS = 30_000
+
+/**
+ * The abort reason of every in-flight execution when the worker stops (profile shutdown). The
+ * `turn.start` executor reads it to record the run as cut off by a restart, not stopped by a user.
+ */
+export class WorkerStoppedError extends Error {
+  constructor() {
+    super('worker stopped')
+    this.name = 'WorkerStoppedError'
+  }
+}
 
 class LeaseLostError extends Error {
   constructor() {
@@ -34,9 +61,9 @@ class EffectCancelledError extends Error {
 }
 
 /**
- * In-process effect worker (SPEC §12.3): N async fibres claim from the outbox, execute under a
- * deadline and settle by CAS on the lease. Wake sources: outbox commits (`subscribe`), `notify()`,
- * the next `available_at` and a safety poll.
+ * In-process effect worker (SPEC §12.3): async fibres, grouped by lane class, claim from the
+ * outbox, execute under a deadline and settle by CAS on the lease. Wake sources: outbox commits
+ * (`subscribe`), `notify()`, the next `available_at` and a safety poll.
  *
  * Settlement rules: success → `succeed`; failure → `fail(message)` (`'timeout'` when the deadline
  * fired); `cancelInFlight` → owner-checked `cancel`; a lost lease or `stop()` writes nothing (the
@@ -46,7 +73,7 @@ export class EffectWorker {
   private readonly outbox: EffectOutbox
   private readonly executors: Partial<Record<EffectKind, EffectExecutor>>
   private readonly owner: string
-  private readonly fibres: number
+  private readonly fibres: Readonly<EffectWorkerFibres>
   private readonly now: () => string
   private readonly pollMs: number
   private stopController: AbortController | null = null
@@ -60,7 +87,12 @@ export class EffectWorker {
     this.outbox = options.outbox
     this.executors = options.executors
     this.owner = options.owner
-    this.fibres = Math.max(1, options.fibres ?? DEFAULT_FIBRES)
+    const fibres = { ...DEFAULT_EFFECT_WORKER_FIBRES, ...(options.fibres ?? {}) }
+    this.fibres = {
+      turn: Math.max(1, Math.floor(fibres.turn)),
+      control: Math.max(1, Math.floor(fibres.control)),
+      replaySafe: Math.max(1, Math.floor(fibres.replaySafe))
+    }
     this.now = options.now ?? (() => new Date().toISOString())
     this.pollMs = options.pollMs ?? DEFAULT_POLL_MS
   }
@@ -70,7 +102,15 @@ export class EffectWorker {
     const controller = new AbortController()
     this.stopController = controller
     this.unsubscribe = this.outbox.subscribe(() => this.notify())
-    this.loops = Array.from({ length: this.fibres }, () => this.loop(controller.signal))
+    const lanes = Object.keys(this.fibres) as EffectLaneClass[]
+    this.loops = lanes.flatMap((lane) =>
+      Array.from({ length: this.fibres[lane] }, () => this.loop(controller.signal, [lane]))
+    )
+  }
+
+  /** Fibres per lane class; `turn` is the profile's concurrent-turn cap. */
+  get fibreCounts(): Readonly<EffectWorkerFibres> {
+    return this.fibres
   }
 
   /** Interrupts every fibre (and its in-flight execution) and waits for them to return. */
@@ -80,7 +120,7 @@ export class EffectWorker {
     this.stopController = null
     this.unsubscribe?.()
     this.unsubscribe = null
-    controller.abort(new Error('worker stopped'))
+    controller.abort(new WorkerStoppedError())
     this.notify()
     await Promise.all(this.loops)
     this.loops = []
@@ -106,13 +146,13 @@ export class EffectWorker {
     return this.running.size
   }
 
-  private async loop(signal: AbortSignal): Promise<void> {
+  private async loop(signal: AbortSignal, lanes: readonly EffectLaneClass[]): Promise<void> {
     while (!signal.aborted) {
       const generation = this.generation
       const now = this.now()
       let effect: EffectRecord | null
       try {
-        effect = this.outbox.claimNext(this.owner, now)
+        effect = this.outbox.claimNext(this.owner, now, { lanes })
       } catch (error) {
         console.warn(`[effect-worker] claim failed: ${messageOf(error)}`)
         await this.idle(signal, generation, this.pollMs)

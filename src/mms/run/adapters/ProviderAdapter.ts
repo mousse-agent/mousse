@@ -32,8 +32,6 @@ export interface ProviderCapabilities {
   containment: 'strong' | 'weak'
   /** `featureGates.handoffDelivery` (Phase 6). */
   historyInjection: 'native' | 'prompt'
-  /** `CommandPolicy.terminalPolicy`: best-effort runs also end on stream close + 30 s idle. */
-  terminalQuality: 'reliable' | 'best_effort'
   /** `featureGates.mcpAttachable` (Phase 5). */
   mcp: boolean
 }
@@ -243,6 +241,11 @@ export interface ProviderAdapter {
   describe?(model: string): ModelInfo
   /** The runtime is signed in and installed, so its models can be selected by default. */
   configured?(): boolean
+  /**
+   * Runs one turn. Settling is the turn's terminal signal for every adapter: the vendor runtimes
+   * resolve when their stream closes, so there is no separate "stream closed without a terminal
+   * event" state to time out (a hung stream is caught by reconciler rule 2's heartbeat window).
+   */
   startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult>
   interrupt(ref: ProviderRef): Promise<'interrupted' | 'not_active'>
   steer?(ref: ProviderRef, text: string): Promise<'delivered' | 'not_active'>

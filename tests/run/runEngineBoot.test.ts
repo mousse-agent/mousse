@@ -50,7 +50,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
 
   it('opens epoch 1 on a fresh profile and exposes the lease owner', () => {
     const { engine, boot } = daemon(10)
-    expect(boot).toEqual({ interrupted: [], uncertain: [], epoch: 1, orphanedChildren: [], recoveredWakes: [] })
+    expect(boot).toEqual({ interrupted: [], uncertain: [], epoch: 1, orphanedChildren: [], recoveredWakes: [], strandedQueued: [] })
     expect(engine.epoch).toBe(1)
     expect(engine.leaseOwner).toBe('1:10')
   })
@@ -62,7 +62,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     first.engine.shutdown()
 
     const second = daemon(20)
-    expect(second.boot).toEqual({ interrupted: [run.runId], uncertain: [], epoch: 2, orphanedChildren: [], recoveredWakes: [] })
+    expect(second.boot).toEqual({ interrupted: [run.runId], uncertain: [], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [] })
     expect(second.store.getRun(run.runId)).toMatchObject({
       status: 'interrupted',
       outcome: { interruptedBy: 'daemon_restart' }
@@ -78,7 +78,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     // No shutdown(): the daemon crashed.
 
     const second = daemon(20)
-    expect(second.boot).toEqual({ interrupted: [], uncertain: [run.runId], epoch: 2, orphanedChildren: [], recoveredWakes: [] })
+    expect(second.boot).toEqual({ interrupted: [], uncertain: [run.runId], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [] })
     const after = second.store.getRun(run.runId)!
     expect(after.status).toBe('uncertain')
     expect(after.outcome).toEqual({
@@ -101,7 +101,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     first.engine.tools.commit(committed.invocationId, '2026-10-12T00:00:01.000Z')
 
     const second = daemon(20)
-    expect(second.boot).toEqual({ interrupted: [run.runId], uncertain: [], epoch: 2, orphanedChildren: [], recoveredWakes: [] })
+    expect(second.boot).toEqual({ interrupted: [run.runId], uncertain: [], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [] })
     expect(second.store.getRun(run.runId)!.outcome).toEqual({ interruptedBy: 'daemon_restart' })
   })
 
@@ -121,7 +121,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     expect(outbox.listRunning()).toHaveLength(3)
 
     const second = daemon(20)
-    expect(second.boot).toEqual({ interrupted: [b.runId], uncertain: [a.runId], epoch: 2, orphanedChildren: [], recoveredWakes: [] })
+    expect(second.boot).toEqual({ interrupted: [b.runId], uncertain: [a.runId], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [] })
     expect(second.engine.outbox.get(turn.effectId)).toMatchObject({ status: 'cancelled', lastError: 'daemon_restart' })
     expect(second.engine.outbox.get(title.effectId)).toMatchObject({ status: 'pending', leaseOwner: null })
     expect(second.engine.outbox.get(cleanup.effectId)).toMatchObject({ status: 'pending' })
@@ -151,7 +151,70 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     expect(new Set(second.events.map((event) => event.threadId))).toEqual(new Set(['t1', 't2', 't3']))
   })
 
+  it('lists a queued run whose turn.start died in the restart note (queuedRunIds)', async () => {
+    const first = daemon(10)
+    const sent = await first.engine.dispatch({ kind: 'send', threadId: 't', clientRequestId: 'req-1', source: 'gui' })
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    const send = { runId: sent.runId, threadId: 't', input: 'hello' }
+    first.engine.outbox.enqueue({ threadId: 't', runId: sent.runId, kind: 'turn.start', payload: send })
+    // A run that never had a turn.start (it waits on the message queue) is not stranded.
+    await first.engine.dispatch({ kind: 'send', threadId: 'u', clientRequestId: 'req-2', source: 'queue' })
+    // Crash.
+
+    const second = daemon(20)
+    expect(second.boot.strandedQueued).toEqual([sent.runId])
+    expect(second.store.getRun(sent.runId)!.status).toBe('queued')
+    const notes = second.store.listEvents('t').filter((event) => event.type === 'restart.note')
+    expect(notes.map((event) => event.payload)).toEqual([
+      { epoch: 2, runIds: [], uncertainRunIds: [], cutOffTools: [], queuedRunIds: [sent.runId] }
+    ])
+    expect(second.store.listEvents('u').filter((event) => event.type === 'restart.note')).toEqual([])
+  })
+
+  it('notes a turn the previous daemon interrupted while shutting down, once', async () => {
+    const first = daemon(10)
+    const run = await running(first.engine, 't', 'req-1')
+    // The turn executor recorded the shutdown abort before the epoch closed.
+    first.engine.markTerminal(run.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    // A user's Stop is not a restart.
+    const stopped = await running(first.engine, 's', 'req-s')
+    first.engine.markTerminal(stopped.runId, 'interrupted', { interruptedBy: 'user' })
+    first.engine.shutdown()
+
+    const second = daemon(20)
+    expect(second.boot.interrupted).toEqual([])
+    const notes = (store: RunStore, threadId: string) =>
+      store.listEvents(threadId).filter((event) => event.type === 'restart.note').map((event) => event.payload)
+    expect(notes(second.store, 't')).toEqual([{ epoch: 2, runIds: [run.runId], uncertainRunIds: [], cutOffTools: [] }])
+    expect(notes(second.store, 's')).toEqual([])
+  })
+
+  it('does not note again a run the previous boot interrupted and noted', async () => {
+    const first = daemon(10)
+    const run = await running(first.engine, 't', 'req-1')
+    // Crash: the second boot interrupts the run by daemon_restart (inside its own epoch) and notes it.
+    const second = daemon(20)
+    expect(second.boot.interrupted).toEqual([run.runId])
+    second.engine.shutdown()
+
+    const third = daemon(30)
+    expect(third.store.listEvents('t').filter((event) => event.type === 'restart.note')).toHaveLength(1)
+  })
+
+  it('does not note a shutdown-interrupted turn the thread has moved past', async () => {
+    const first = daemon(10)
+    const run = await running(first.engine, 't', 'req-1')
+    first.engine.markTerminal(run.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    const later = await running(first.engine, 't', 'req-2')
+    first.engine.markTerminal(later.runId, 'completed')
+    first.engine.shutdown()
+
+    const second = daemon(20)
+    expect(second.store.listEvents('t').filter((event) => event.type === 'restart.note')).toEqual([])
+  })
+
   it('touches the run heartbeat without bumping the epoch or writing an event', async () => {
+
     const { engine, store } = daemon(10)
     const run = await running(engine, 't', 'req-1')
     const seq = store.maxSeq('t')

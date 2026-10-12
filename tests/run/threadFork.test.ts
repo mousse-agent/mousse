@@ -7,11 +7,63 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import type { Message } from '@earendil-works/pi-ai'
+import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { CommandRejection } from '../../src/mms/run/db/RunStoreError'
 import type { RunTerminalStatus } from '../../src/mms/run/RunEngine'
 import { ThreadWorkspaceManager } from '../../src/mms/workspace/ThreadWorkspaceManager'
 import { gitFoundationFixture } from '../fixtures/gitFoundation'
-import { PI, phase6Daemon, piAdapter, type Phase6Daemon } from './phase6Fixture'
+import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
+
+/**
+ * A pi-shaped adapter whose turns follow a script of modes: `reply` answers at once; `commit` hands
+ * the transcript it was given back through `sink.nativeMessages` and then runs until stopped;
+ * `wait` runs until stopped without committing anything.
+ */
+class StoppableAdapter implements ProviderAdapter {
+  readonly id = 'pi'
+  readonly capabilities = PI_LOOP_CAPABILITIES
+  readonly turns: Array<Array<{ role: string; content: unknown }>> = []
+  waiting = false
+
+  constructor(private readonly modes: Array<'reply' | 'commit' | 'wait'>) {}
+
+  configured(): boolean {
+    return true
+  }
+
+  async startTurn(input: TurnInput, sink: TurnSink, _ctl: TurnControl, _host: AdapterHost): Promise<TurnResult> {
+    this.turns.push(input.messages.map((message) => ({ role: message.role, content: message.content })))
+    sink.providerRef({ provider: input.llmProvider, model: input.model })
+    const mode = this.modes.shift() ?? 'reply'
+    if (mode !== 'reply') {
+      if (mode === 'commit') sink.nativeMessages([...input.messages])
+      this.waiting = true
+      await new Promise<never>((_resolve, reject) =>
+        input.signal.addEventListener('abort', () => reject(input.signal.reason as Error), { once: true }))
+    }
+    const text = `reply to ${input.prompt}`
+    sink.text({ phase: 'complete', content: text, contentIndex: 0 })
+    const reply = {
+      role: 'assistant', content: [{ type: 'text', text }], api: 'openai-completions', provider: input.llmProvider,
+      model: input.model, stopReason: 'stop', timestamp: Date.now(),
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }
+    } as Message
+    return {
+      text, aborted: false, modelName: 'Scripted', totalResponseTimeMs: 1, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      contextSignature: 'scripted', nativeMessages: [...input.messages, reply], providerRef: { provider: input.llmProvider, model: input.model }
+    }
+  }
+
+  async interrupt(): Promise<'interrupted' | 'not_active'> {
+    return 'not_active'
+  }
+}
+
+const HEADER = '[Context handoff:'
+const headers = (messages: Array<{ content: unknown }>) =>
+  messages.filter((message) => JSON.stringify(message.content).includes(HEADER)).length
 
 describe('thread fork (SPEC §16.2)', () => {
   let home: string | undefined
@@ -144,5 +196,70 @@ describe('thread fork (SPEC §16.2)', () => {
     expect(pi.forkCalls).toEqual([{ ref: { provider: 'openai', model: 'gpt-replay', sessionId: 'session-1' }, atTurnOrdinal: 1 }])
     expect(d.engine.transfers.get(forked.transferId)).toMatchObject({ status: 'consumed', payload: { forkStrategy: 'portable', strategy: 'full_summary' } })
     expect(String(pi.turns.at(-1)!.messages[0].content)).toContain('Start')
+  })
+
+  /** A fork whose first turn is stopped after `mode`, then a second turn that completes. */
+  const stoppedFirstTurn = async (mode: 'commit' | 'wait') => {
+    const adapter = new StoppableAdapter(['reply', mode, 'reply'])
+    const d = (daemon = phase6Daemon(plainHome(), [adapter]))
+    const source = d.store.createThread('Source')
+    d.orch.setThreadModelOverride(source.id, PI)
+    await d.orch.send('Plan the parser', false, { threadId: source.id, clientRequestId: 'src-1' })
+    const forked = await d.engine.forkThread({ sourceThreadId: source.id, clientRequestId: `fork-${mode}` })
+    const first = await d.orch.send('First in the fork', false, { threadId: forked.threadId, clientRequestId: 'fork-1', awaitMode: 'ack' })
+    await waitFor(() => adapter.waiting, 'the first fork turn')
+    await d.orch.abortRun(first.runId!, 'stop-fork-1', forked.threadId)
+    const turnStart = () => d.engine.outbox.listForRun(first.runId!).find((effect) => effect.kind === 'turn.start')
+    await waitFor(() => turnStart()?.status === 'succeeded', 'the stopped turn to settle')
+    expect(d.engine.getRun(first.runId!)).toMatchObject({ status: 'interrupted', outcome: { interruptedBy: 'user' } })
+    const transferAfterStop = d.engine.transfers.get(forked.transferId)!
+    const second = await d.orch.send('Second in the fork', false, { threadId: forked.threadId, clientRequestId: 'fork-2' })
+    return { d, adapter, forked, first, second, transferAfterStop }
+  }
+
+  it('a fork turn stopped after its first commit consumes the transfer; the next turn does not inject it again', async () => {
+    const { d, adapter, forked, first, transferAfterStop } = await stoppedFirstTurn('commit')
+    expect(transferAfterStop).toMatchObject({ status: 'consumed', payload: { consumedBy: first.runId, strategy: 'full_summary' } })
+    expect(headers(adapter.turns[1])).toBe(1)
+    // The second turn sees the history once: from the transcript, not injected again.
+    expect(headers(adapter.turns[2])).toBe(1)
+    expect(headers(d.orch.getNativeContext(forked.threadId).messages)).toBe(1)
+  })
+
+  it('a fork turn stopped before any commit leaves the transfer pending; the next turn injects it once', async () => {
+    const { d, adapter, forked, second, transferAfterStop } = await stoppedFirstTurn('wait')
+    expect(transferAfterStop.status).toBe('pending')
+    expect(headers(adapter.turns[2])).toBe(1)
+    expect(d.engine.transfers.get(forked.transferId)).toMatchObject({ status: 'consumed', payload: { consumedBy: second.runId } })
+    expect(headers(d.orch.getNativeContext(forked.threadId).messages)).toBe(1)
+  })
+
+  it('a pending transfer whose marked history is already in the transcript is consumed, not injected again', async () => {
+    const adapter = new StoppableAdapter(['reply', 'commit', 'reply'])
+    const d = (daemon = phase6Daemon(plainHome(), [adapter]))
+    const source = d.store.createThread('Source')
+    d.orch.setThreadModelOverride(source.id, PI)
+    await d.orch.send('Plan the parser', false, { threadId: source.id, clientRequestId: 'src-1' })
+    const forked = await d.engine.forkThread({ sourceThreadId: source.id, clientRequestId: 'fork-lost' })
+    // The consume write is lost: the transfer stays pending although the history was committed.
+    const setStatus = d.engine.transfers.setStatus.bind(d.engine.transfers)
+    let dropped = false
+    d.engine.transfers.setStatus = (input) => {
+      if (!dropped && input.to === 'consumed') {
+        dropped = true
+        throw new Error('lost write')
+      }
+      return setStatus(input)
+    }
+    const first = await d.orch.send('First in the fork', false, { threadId: forked.threadId, clientRequestId: 'fork-1', awaitMode: 'ack' })
+    await waitFor(() => adapter.waiting, 'the first fork turn')
+    await d.orch.abortRun(first.runId!, 'stop-fork-1', forked.threadId)
+    await waitFor(() => d.engine.outbox.listForRun(first.runId!).find((effect) => effect.kind === 'turn.start')?.status === 'succeeded', 'the stopped turn')
+    expect(dropped).toBe(true)
+    expect(d.engine.transfers.get(forked.transferId)!.status).toBe('pending')
+
+    const second = await d.orch.send('Second in the fork', false, { threadId: forked.threadId, clientRequestId: 'fork-2' })
+    expect(headers(adapter.turns[2])).toBe(1)
+    expect(d.engine.transfers.get(forked.transferId)).toMatchObject({ status: 'consumed', payload: { consumedBy: first.runId, repairedBy: second.runId } })
   })
 })

@@ -28,7 +28,6 @@ export const ANTIGRAVITY_CAPABILITIES: ProviderCapabilities = Object.freeze({
   events: 'sparse',
   containment: 'weak',
   historyInjection: 'prompt',
-  terminalQuality: 'best_effort',
   mcp: true
 })
 

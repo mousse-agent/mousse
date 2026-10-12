@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto'
+import { str, type Row } from '../db/rows'
 import { fail } from '../db/RunStoreError'
 import { stableStringify } from '../json'
 import type { RunStore } from '../RunStore'
 import type { TransferRecord, TransferStatus, TransferType } from '../types'
-
-type Row = Record<string, unknown>
 
 /** Allowed transfer status moves (SPEC §16.2). */
 const TRANSITIONS: Record<TransferStatus, ReadonlySet<TransferStatus>> = {
@@ -166,6 +165,6 @@ function toTransfer(row: Row): TransferRecord {
     status: row.status as TransferStatus,
     payload: JSON.parse(String(row.payload)) as Record<string, unknown>,
     createdAt: String(row.created_at),
-    consumedAt: typeof row.consumed_at === 'string' ? row.consumed_at : null
+    consumedAt: str(row.consumed_at)
   }
 }

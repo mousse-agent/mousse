@@ -1,7 +1,6 @@
+import { str, type Row } from './db/rows'
 import type { RunStore } from './RunStore'
 import type { DaemonEpochRecord } from './types'
-
-type Row = Record<string, unknown>
 
 /**
  * Daemon generations (SPEC §12.1, §12.5). Each boot inserts a row; a clean shutdown sets
@@ -68,6 +67,6 @@ function toEpoch(row: Row): DaemonEpochRecord {
     pid: Number(row.pid),
     startedAt: String(row.started_at),
     heartbeatAt: String(row.heartbeat_at),
-    endedAt: typeof row.ended_at === 'string' ? row.ended_at : null
+    endedAt: str(row.ended_at)
   }
 }

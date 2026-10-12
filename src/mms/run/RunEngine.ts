@@ -7,8 +7,10 @@ import { EffectOutbox } from './EffectOutbox'
 import { HandoffService } from './handoff/HandoffService'
 import { ContextTransfers } from './handoff/Transfers'
 import { Inbox } from './Inbox'
+import { DEFAULT_HEARTBEAT_MS } from './Reconciler'
 import type { RestartNote } from './restartNote'
 import type { RunStore } from './RunStore'
+import { strandedQueuedRuns } from './strandedRuns'
 import { writeTerminalRun, type RunTerminalStatus } from './terminal'
 import { ThreadMutex } from './ThreadMutex'
 import { ToolInvocations } from './ToolInvocations'
@@ -67,6 +69,8 @@ export interface BootReport {
   orphanedChildren: string[]
   /** Queued wake runs whose `turn.start` died; their rows are pending again (rule 4 re-wakes). */
   recoveredWakes: string[]
+  /** Queued runs whose `turn.start` died before they began; reconciler rule 5 settles them. */
+  strandedQueued: string[]
 }
 
 /** A `delegate_task` request (SPEC §14.2), already validated by the tool host. */
@@ -137,8 +141,9 @@ export const FORKABLE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(
 
 /**
  * What the engine needs from the thread owner to create threads and child turns (it does not own
- * thread storage or turn payloads). Both callbacks are synchronous and run inside the engine's
- * transaction.
+ * thread storage, transcripts or turn payloads). Every callback is synchronous. `createThread`
+ * runs before the engine's transaction (thread storage is not the run database); when that
+ * transaction fails the engine calls `deleteThread` to remove the orphan.
  */
 export interface DelegationHost {
   /**
@@ -146,8 +151,12 @@ export interface DelegationHost {
    * request) or a fork (project and model selection copied from the source).
    */
   createThread(input: ThreadCreation): { threadId: string }
-  /** The `turn.start` payload that runs `prompt` as the child run's turn. */
+  /** Removes a thread `createThread` made whose engine rows never committed. Best effort. */
+  deleteThread(threadId: string): void
+  /** The `turn.start` payload that runs `prompt` as the child run's turn (inside the transaction). */
   buildChildTurnPayload(input: { childThreadId: string; childRunId: string; prompt: string; request: DelegationRequest }): unknown
+  /** The final assistant text `runId` left in its thread's transcript, when it has one. */
+  readRunResultText?(runId: string): string | undefined
 }
 
 const ACTIVE_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
@@ -184,6 +193,8 @@ export class RunEngine extends EventEmitter {
   readonly transfers: ContextTransfers
   private delegationHost: DelegationHost | null = null
   private readonly pid: number
+  /** Liveness interval of runs this engine executes itself (local actions; SPEC §12.4 rule 2). */
+  private readonly heartbeatMs: number
   private daemonEpoch: number | null = null
 
   constructor(opts: {
@@ -194,6 +205,8 @@ export class RunEngine extends EventEmitter {
     tools?: ToolInvocations
     /** Process id recorded in `daemon_epochs` and lease owners. Defaults to `process.pid`. */
     pid?: number
+    /** The reconciler's heartbeat interval; local actions touch their run twice per interval. */
+    heartbeatMs?: number
   }) {
     super()
     this.store = opts.store
@@ -207,6 +220,7 @@ export class RunEngine extends EventEmitter {
     this.handoffs = new HandoffService(opts.store)
     this.transfers = new ContextTransfers(opts.store)
     this.pid = opts.pid ?? process.pid
+    this.heartbeatMs = opts.heartbeatMs ?? DEFAULT_HEARTBEAT_MS
     opts.store.onEvent((event) => this.emit('event', event))
   }
 
@@ -313,18 +327,21 @@ export class RunEngine extends EventEmitter {
    * 3. re-queue running replay-safe effects;
    * 4. every active run becomes `uncertain` when the previous daemon crashed while one of the
    *    run's non-idempotent tools was `started`, otherwise `interrupted` by `daemon_restart`;
-   * 5. one `restart.note` event per affected thread. Nothing auto-resumes; queued runs are untouched,
-   *    except delegated child runs and wake runs whose `turn.start` died (SPEC §14.3: a parent
-   *    never waits forever): a queued child run is interrupted and publishes the failure, and a
-   *    queued wake is cancelled with its rows pending again. Interrupted and uncertain child runs
-   *    publish through the terminal write's publication gate.
+   * 5. one `restart.note` event per affected thread. Nothing auto-resumes. A note also covers runs
+   *    the previous daemon's clean shutdown interrupted (`interruptedBy: 'daemon_restart'`, completed
+   *    since that epoch started, not noted yet, no later run started on the thread) and lists
+   *    stranded queued runs (`queuedRunIds`, see `strandedQueuedRuns`; reconciler rule 5 restarts or
+   *    cancels them). Delegated child runs and wake runs whose `turn.start` died are settled here
+   *    (SPEC §14.3: a parent never waits forever): a queued child run is interrupted and publishes
+   *    the failure, and a queued wake is cancelled with its rows pending again. Interrupted and
+   *    uncertain child runs publish through the terminal write's publication gate.
    * Step 6 (heartbeat and reconciler) belongs to the profile that owns the worker (Phase 2b).
    */
   reconcileOnBoot(): BootReport {
     this.epochs.clear()
     const report = this.store.db.transaction((): BootReport => {
       const now = this.now()
-      const { epoch, previousCrashed } = this.daemonEpochs.begin(this.pid, now)
+      const { epoch, previous, previousCrashed } = this.daemonEpochs.begin(this.pid, now)
       const active = this.store
         .listNonTerminalRuns()
         .filter((run) => ACTIVE_STATUSES.has(run.status))
@@ -332,19 +349,14 @@ export class RunEngine extends EventEmitter {
       this.outbox.requeueRunningReplaySafe(now)
       const interrupted: string[] = []
       const uncertain: string[] = []
-      const notes = new Map<
-        string,
-        {
-          runIds: string[]
-          uncertainRunIds: string[]
-          cutOffTools: Array<{
-            runId: string
-            invocationId: string
-            tool: string
-            idempotent: boolean
-          }>
-        }
-      >()
+      const notes = new Map<string, Omit<RestartNote, 'epoch'>>()
+      const noteFor = (threadId: string): Omit<RestartNote, 'epoch'> => {
+        const note = notes.get(threadId) ?? { runIds: [], uncertainRunIds: [], cutOffTools: [] }
+        notes.set(threadId, note)
+        return note
+      }
+      // Runs the previous daemon's shutdown already interrupted have no active row left to find.
+      if (previous) for (const run of this.shutdownInterruptedRuns(previous.startedAt)) noteFor(run.threadId).runIds.push(run.runId)
       for (const run of active) {
         const started = this.tools.listStarted(run.runId)
         const unsafe = previousCrashed ? started.filter((tool) => !tool.idempotent) : []
@@ -359,7 +371,7 @@ export class RunEngine extends EventEmitter {
           this.writeTerminal(run, run.epoch, 'interrupted', { interruptedBy: 'daemon_restart' })
           interrupted.push(run.runId)
         }
-        const note = notes.get(run.threadId) ?? { runIds: [], uncertainRunIds: [], cutOffTools: [] }
+        const note = noteFor(run.threadId)
         note.runIds.push(run.runId)
         if (unsafe.length) note.uncertainRunIds.push(run.runId)
         for (const tool of started)
@@ -369,13 +381,18 @@ export class RunEngine extends EventEmitter {
             tool: tool.tool,
             idempotent: tool.idempotent
           })
-        notes.set(run.threadId, note)
+      }
+      const orphanedChildren = this.settleOrphanedChildren()
+      const recoveredWakes = recoverWakesOnBoot(this.store, this.outbox, now)
+      const strandedQueued: string[] = []
+      for (const { run } of strandedQueuedRuns(this.store, this.outbox)) {
+        const note = noteFor(run.threadId)
+        note.queuedRunIds = [...(note.queuedRunIds ?? []), run.runId]
+        strandedQueued.push(run.runId)
       }
       for (const [threadId, note] of notes)
         this.store.appendEvent({ threadId, type: 'restart.note', payload: { ...note, epoch } })
-      const orphanedChildren = this.settleOrphanedChildren()
-      const recoveredWakes = recoverWakesOnBoot(this.store, this.outbox, now)
-      return { interrupted, uncertain, epoch, orphanedChildren, recoveredWakes }
+      return { interrupted, uncertain, epoch, orphanedChildren, recoveredWakes, strandedQueued }
     })
     this.daemonEpoch = report.epoch
     return report
@@ -423,72 +440,108 @@ export class RunEngine extends EventEmitter {
   }
 
   /**
-   * `delegate_task` (SPEC §14.1-§14.2), under the parent thread's mutex and in one transaction:
-   * replay the receipt of `clientRequestId`, or create the child thread (host callback), its
-   * `subagent` lineage, the child run (`source: 'delegation'`), the `running` delegation row and the
-   * child's `turn.start` effect. A retry with the same `clientRequestId` returns the first result.
+   * `delegate_task` (SPEC §14.1-§14.2), under the parent thread's mutex: replay the receipt of
+   * `clientRequestId`, or create the child thread (host callback, before the transaction) and then,
+   * in one transaction, its `subagent` lineage, the child run (`source: 'delegation'`), the `running`
+   * delegation row (with the requested workspace and role) and the child's `turn.start` effect. A
+   * failed transaction deletes the new thread. A retry with the same `clientRequestId` returns the
+   * first result and creates nothing.
    */
   requestDelegation(input: DelegationRequest): Promise<DelegationAccepted> {
-    return this.mutex.withLock(input.parentThreadId, () => this.store.db.transaction((): DelegationAccepted => {
+    return this.mutex.withLock(input.parentThreadId, () => {
       const host = this.delegationHost
       if (!host) fail('internal', 'No delegation host is attached to the run engine.')
-      const receipt = this.store.getReceipt(input.clientRequestId)
-      if (receipt) {
-        if (receipt.threadId !== input.parentThreadId || receipt.commandKind !== 'delegation.request')
-          fail('conflict', `Request ${input.clientRequestId} belongs to another command.`)
-        const stored = receipt.result as Omit<DelegationAccepted, 'replayed'>
-        return { delegationId: stored.delegationId, childThreadId: stored.childThreadId, childRunId: stored.childRunId, replayed: true }
-      }
+      const replayed = this.replayDelegation(input)
+      if (replayed) return replayed
       const parent = this.store.getRun(input.parentRunId)
       if (!parent || parent.threadId !== input.parentThreadId)
         fail('bad_request', `Run ${input.parentRunId} is not a run of thread ${input.parentThreadId}.`)
       if (!input.prompt.trim()) fail('bad_request', 'A delegated task needs a prompt.')
       const { threadId: childThreadId } = host.createThread({ kind: 'delegation', request: input })
-      this.delegations.createLineage({
-        threadId: childThreadId,
-        parentThreadId: input.parentThreadId,
-        parentRunId: input.parentRunId,
-        relationship: 'subagent'
+      return this.withCreatedThread(host, childThreadId, () =>
+        this.store.db.transaction(() => this.commitDelegation(host, input, childThreadId)))
+    })
+  }
+
+  private replayDelegation(input: DelegationRequest): DelegationAccepted | null {
+    const receipt = this.store.getReceipt(input.clientRequestId)
+    if (!receipt) return null
+    if (receipt.threadId !== input.parentThreadId || receipt.commandKind !== 'delegation.request')
+      fail('conflict', `Request ${input.clientRequestId} belongs to another command.`)
+    const stored = receipt.result as Omit<DelegationAccepted, 'replayed'>
+    return { delegationId: stored.delegationId, childThreadId: stored.childThreadId, childRunId: stored.childRunId, replayed: true }
+  }
+
+  /** Runs `commit`; when it throws, the thread created for it is deleted (best effort) and the error rethrown. */
+  private withCreatedThread<T>(host: DelegationHost, threadId: string, commit: () => T): T {
+    try {
+      return commit()
+    } catch (error) {
+      this.removeThread(host, threadId)
+      throw error
+    }
+  }
+
+  private removeThread(host: DelegationHost, threadId: string): void {
+    try {
+      host.deleteThread(threadId)
+    } catch (error) {
+      console.warn('[run-engine] could not delete an orphaned thread', {
+        threadId,
+        error: error instanceof Error ? error.message : String(error)
       })
-      const child = this.store.createRun({
-        threadId: childThreadId,
-        source: 'delegation',
-        clientRequestId: `${input.clientRequestId}:child`
-      })
-      const delegation = this.delegations.create({
-        parentRunId: input.parentRunId,
-        parentThreadId: input.parentThreadId,
-        childThreadId,
-        childRunId: child.runId,
-        provider: input.provider,
-        model: input.model,
-        prompt: input.prompt,
-        wake: input.wake,
-        modeCeiling: input.modeCeiling
-      })
-      this.outbox.enqueue({
-        threadId: childThreadId,
-        runId: child.runId,
-        kind: 'turn.start',
-        payload: host.buildChildTurnPayload({ childThreadId, childRunId: child.runId, prompt: input.prompt, request: input })
-      })
-      const accepted = { delegationId: delegation.delegationId, childThreadId, childRunId: child.runId }
-      this.store.putReceipt({
-        clientRequestId: input.clientRequestId,
-        threadId: input.parentThreadId,
-        commandKind: 'delegation.request',
-        status: 'accepted',
-        result: { ...accepted, sequence: this.store.maxSeq(input.parentThreadId) },
-        createdAt: this.now()
-      })
-      return { ...accepted, replayed: false }
-    }))
+    }
+  }
+
+  private commitDelegation(host: DelegationHost, input: DelegationRequest, childThreadId: string): DelegationAccepted {
+    this.delegations.createLineage({
+      threadId: childThreadId,
+      parentThreadId: input.parentThreadId,
+      parentRunId: input.parentRunId,
+      relationship: 'subagent'
+    })
+    const child = this.store.createRun({
+      threadId: childThreadId,
+      source: 'delegation',
+      clientRequestId: `${input.clientRequestId}:child`
+    })
+    const delegation = this.delegations.create({
+      parentRunId: input.parentRunId,
+      parentThreadId: input.parentThreadId,
+      childThreadId,
+      childRunId: child.runId,
+      provider: input.provider,
+      model: input.model,
+      prompt: input.prompt,
+      wake: input.wake,
+      modeCeiling: input.modeCeiling,
+      workspace: input.workspace,
+      role: input.role
+    })
+    this.outbox.enqueue({
+      threadId: childThreadId,
+      runId: child.runId,
+      kind: 'turn.start',
+      payload: host.buildChildTurnPayload({ childThreadId, childRunId: child.runId, prompt: input.prompt, request: input })
+    })
+    const accepted = { delegationId: delegation.delegationId, childThreadId, childRunId: child.runId }
+    this.store.putReceipt({
+      clientRequestId: input.clientRequestId,
+      threadId: input.parentThreadId,
+      commandKind: 'delegation.request',
+      status: 'accepted',
+      result: { ...accepted, sequence: this.store.maxSeq(input.parentThreadId) },
+      createdAt: this.now()
+    })
+    this.store.db.checkpoint('delegation.beforeCommit')
+    return { ...accepted, replayed: false }
   }
 
   /**
    * A follow-up delegation on an existing child thread (named-agent `recall`): the child run was
    * created by an ordinary send on the child thread; this ties it to the parent run. A child run
-   * that already ended publishes at once.
+   * that already ended publishes at once, with the final text the host reads from its transcript
+   * (`readRunResultText`).
    */
   recordDelegation(input: {
     parentThreadId: string
@@ -510,8 +563,21 @@ export class RunEngine extends EventEmitter {
         fail('bad_request', `Run ${input.childRunId} is not a run of thread ${input.childThreadId}.`)
       const created = this.delegations.create({ ...input })
       if (!TERMINAL_RUN_STATUSES.has(child.status)) return created
-      return this.delegations.publishResult(child) ?? created
+      return this.delegations.publishResult(child, this.runResultText(child.runId)) ?? created
     })
+  }
+
+  /** The host's view of a run's final assistant text; a failing read publishes without text. */
+  private runResultText(runId: string): string | undefined {
+    try {
+      return this.delegationHost?.readRunResultText?.(runId)
+    } catch (error) {
+      console.warn('[run-engine] could not read a run result', {
+        runId,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      return undefined
+    }
   }
 
   /** `task_status` read: a published result becomes `acknowledged` with its inbox rows. */
@@ -596,20 +662,16 @@ export class RunEngine extends EventEmitter {
   }
 
   /**
-   * `thread.fork` (SPEC §16.2), under the source thread's mutex and in one transaction: replay the
-   * receipt, or resolve the source run (forkable statuses only), create the fork thread (host
-   * callback), its `fork` lineage and a `pending` fork transfer. Nothing reaches a provider until
-   * the fork's first message consumes the transfer.
+   * `thread.fork` (SPEC §16.2), under the source thread's mutex: replay the receipt, or resolve the
+   * source run (forkable statuses only), create the fork thread (host callback, before the
+   * transaction) and then, in one transaction, its `fork` lineage and a `pending` fork transfer. A
+   * failed transaction deletes the new thread. Nothing reaches a provider until the fork's first
+   * message consumes the transfer.
    */
   forkThread(input: ForkThreadRequest): Promise<ForkAccepted> {
-    return this.mutex.withLock(input.sourceThreadId, () => this.store.db.transaction((): ForkAccepted => {
-      const receipt = this.store.getReceipt(input.clientRequestId)
-      if (receipt) {
-        if (receipt.threadId !== input.sourceThreadId || receipt.commandKind !== 'thread.fork')
-          fail('conflict', `Request ${input.clientRequestId} belongs to another command.`)
-        const stored = receipt.result as Omit<ForkAccepted, 'replayed'>
-        return { threadId: stored.threadId, transferId: stored.transferId, sourceRunId: stored.sourceRunId, replayed: true }
-      }
+    return this.mutex.withLock(input.sourceThreadId, () => {
+      const replayed = this.replayFork(input)
+      if (replayed) return replayed
       const host = this.delegationHost
       if (!host) fail('internal', 'No thread host is attached to the run engine.')
       const source = this.forkSourceRun(input.sourceThreadId, input.atRunOrdinal)
@@ -619,30 +681,42 @@ export class RunEngine extends EventEmitter {
         sourceRunId: source.runId,
         title: input.title
       })
-      this.delegations.createLineage({
-        threadId,
-        parentThreadId: input.sourceThreadId,
-        parentRunId: source.runId,
-        relationship: 'fork'
-      })
-      const transfer = this.transfers.create({
-        type: 'fork',
-        sourceThreadId: input.sourceThreadId,
-        targetThreadId: threadId,
-        sourceRunOrdinal: source.ordinal,
-        payload: { sourceRunOrdinal: source.ordinal, sourceRunId: source.runId }
-      })
-      const accepted = { threadId, transferId: transfer.transferId, sourceRunId: source.runId }
-      this.store.putReceipt({
-        clientRequestId: input.clientRequestId,
-        threadId: input.sourceThreadId,
-        commandKind: 'thread.fork',
-        status: 'accepted',
-        result: { ...accepted, sequence: this.store.maxSeq(input.sourceThreadId) },
-        createdAt: this.now()
-      })
-      return { ...accepted, replayed: false }
-    }))
+      return this.withCreatedThread(host, threadId, () => this.store.db.transaction((): ForkAccepted => {
+        this.delegations.createLineage({
+          threadId,
+          parentThreadId: input.sourceThreadId,
+          parentRunId: source.runId,
+          relationship: 'fork'
+        })
+        const transfer = this.transfers.create({
+          type: 'fork',
+          sourceThreadId: input.sourceThreadId,
+          targetThreadId: threadId,
+          sourceRunOrdinal: source.ordinal,
+          payload: { sourceRunOrdinal: source.ordinal, sourceRunId: source.runId }
+        })
+        const accepted = { threadId, transferId: transfer.transferId, sourceRunId: source.runId }
+        this.store.putReceipt({
+          clientRequestId: input.clientRequestId,
+          threadId: input.sourceThreadId,
+          commandKind: 'thread.fork',
+          status: 'accepted',
+          result: { ...accepted, sequence: this.store.maxSeq(input.sourceThreadId) },
+          createdAt: this.now()
+        })
+        this.store.db.checkpoint('fork.beforeCommit')
+        return { ...accepted, replayed: false }
+      }))
+    })
+  }
+
+  private replayFork(input: ForkThreadRequest): ForkAccepted | null {
+    const receipt = this.store.getReceipt(input.clientRequestId)
+    if (!receipt) return null
+    if (receipt.threadId !== input.sourceThreadId || receipt.commandKind !== 'thread.fork')
+      fail('conflict', `Request ${input.clientRequestId} belongs to another command.`)
+    const stored = receipt.result as Omit<ForkAccepted, 'replayed'>
+    return { threadId: stored.threadId, transferId: stored.transferId, sourceRunId: stored.sourceRunId, replayed: true }
   }
 
   /**
@@ -709,9 +783,11 @@ export class RunEngine extends EventEmitter {
   }
 
   /**
-   * A synchronous local action as a run (SPEC §16.3: `undo` and `revert`): the run is created and
-   * marked running, `action` runs, and the run ends `completed`, or `failed` when it throws (the
-   * error is rethrown). Refused while the thread has an active run.
+   * A local action as a run (SPEC §16.3: `undo` and `revert`): the run is created and marked
+   * running, `action` runs while the run heartbeats every half heartbeat interval (it has no effect,
+   * so the heartbeat is what keeps reconciler rule 2 away), and the run ends `completed`, or
+   * `failed` when it throws (the error is rethrown). Refused while the thread has an active run. A
+   * run something else already ended (the reconciler, a stop) keeps that terminal state.
    */
   async runLocalAction<T>(
     input: { threadId: string; source: string; clientRequestId?: string },
@@ -724,15 +800,43 @@ export class RunEngine extends EventEmitter {
     }))
     this.markStarting(created.runId)
     const running = this.markRunning(created.runId)
+    this.touchLocalAction(created.runId)
+    const beat = setInterval(() => this.touchLocalAction(created.runId), Math.max(1, Math.floor(this.heartbeatMs / 2)))
+    beat.unref?.()
     let result: T
     try {
       result = await action(running)
     } catch (error) {
-      this.markTerminal(created.runId, 'failed', { error: error instanceof Error ? error.message : String(error) })
+      clearInterval(beat)
+      this.settleLocalAction(created.runId, 'failed', { error: error instanceof Error ? error.message : String(error) })
       throw error
     }
-    this.markTerminal(created.runId, 'completed')
+    clearInterval(beat)
+    this.settleLocalAction(created.runId, 'completed')
     return { runId: created.runId, result }
+  }
+
+  private touchLocalAction(runId: string): void {
+    try {
+      this.heartbeat(runId)
+    } catch (error) {
+      console.warn('[run-engine] local action heartbeat failed', {
+        runId,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+
+  /** The terminal write of a local action; a run that already ended keeps its stored record. */
+  private settleLocalAction(runId: string, status: RunTerminalStatus, outcome?: RunOutcome): RunRecord {
+    try {
+      return this.markTerminal(runId, status, outcome)
+    } catch (error) {
+      if (!(error instanceof RunStoreError) || (error.code !== 'stale_write' && error.code !== 'bad_request')) throw error
+      console.warn('[run-engine] local action run already ended', { runId, status, error: error.message })
+      this.epochs.delete(runId)
+      return this.store.getRun(runId)!
+    }
   }
 
   private forkSourceRun(threadId: string, at: ForkThreadRequest['atRunOrdinal']): RunRecord {
@@ -919,6 +1023,30 @@ export class RunEngine extends EventEmitter {
     resultText?: string
   ): RunRecord {
     return writeTerminalRun(this.store, run, expectedEpoch, status, outcome, this.now(), { resultText })
+  }
+
+  /**
+   * Boot: turns the previous daemon's shutdown interrupted (`interruptedBy: 'daemon_restart'`,
+   * started, completed since `since`, the previous epoch's start) that no `restart.note` lists yet
+   * and that no later started run on their thread has superseded. A later run still `queued` does
+   * not count: it has not seen the note. Runs that never started (a send abandoned at shutdown, a
+   * child settled by the previous boot) were not cut off mid-turn.
+   */
+  private shutdownInterruptedRuns(since: string): RunRecord[] {
+    return this.store.listInterruptedByRestartSince(since).filter((run) => {
+      if (!run.startedAt) return false
+      const noted = this.store.db
+        .statement(
+          `SELECT 1 FROM thread_events e, json_each(e.payload, '$.runIds') r
+           WHERE e.thread_id = ? AND e.type = 'restart.note' AND r.value = ? LIMIT 1`
+        )
+        .get(run.threadId, run.runId)
+      if (noted) return false
+      const later = this.store.db
+        .statement(`SELECT 1 FROM runs WHERE thread_id = ? AND ordinal > ? AND status <> 'queued' LIMIT 1`)
+        .get(run.threadId, run.ordinal)
+      return !later
+    })
   }
 
   /**

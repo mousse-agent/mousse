@@ -97,7 +97,59 @@ describe('RunEngine delegation (SPEC §14.1-§14.2)', () => {
     expect(() => f!.engine.recordDelegation({ parentThreadId: 'other', parentRunId: parent.runId, childThreadId: 'child-1', childRunId: followUp.runId, prompt: 'x', wake: 'always' })).toThrow('not a subagent')
   })
 
+  it('recordDelegation of a child run that already ended publishes its final transcript text', async () => {
+    f = delegationFixture()
+    const parent = await f.runningRun('parent')
+    const first = await f.delegate(parent.runId, 'call-1')
+    f.finish(first.childRunId, 'first')
+    const followUp = f.store.createRun({ threadId: 'child-1', source: 'delegation' })
+    f.finish(followUp.runId)
+    f.resultTexts.set(followUp.runId, 'the follow-up answer')
+    const recorded = f.engine.recordDelegation({ parentThreadId: 'parent', parentRunId: parent.runId, childThreadId: 'child-1', childRunId: followUp.runId, prompt: 'again', wake: 'always' })
+    expect(recorded).toMatchObject({ status: 'result_available', result: { runStatus: 'completed', text: 'the follow-up answer' } })
+    const notice = f.engine.inbox.listForDelegation(recorded.delegationId)
+    expect(notice.map((row) => (row.payload as { result: { text?: string } }).result.text)).toEqual(['the follow-up answer'])
+  })
+
+  it('records the requested workspace and role on the delegation row', async () => {
+    f = delegationFixture()
+    const parent = await f.runningRun('parent')
+    const shared = await f.delegate(parent.runId, 'call-1', { workspace: 'shared', role: 'research' })
+    expect(f.engine.delegations.get(shared.delegationId)).toMatchObject({ workspace: 'shared', role: 'research' })
+    const isolated = await f.delegate(parent.runId, 'call-2')
+    expect(f.engine.delegations.get(isolated.delegationId)).toMatchObject({ workspace: 'isolated', role: null })
+  })
+
+  it('a delegation whose transaction fails deletes the thread it created; the retry creates one thread', async () => {
+    let failNext = false
+    f = delegationFixture({
+      fault: (point) => {
+        if (failNext && point === 'delegation.beforeCommit') {
+          failNext = false
+          throw new Error('injected')
+        }
+      }
+    })
+    const parent = await f.runningRun('parent')
+    failNext = true
+    await expect(f.delegate(parent.runId, 'call-1')).rejects.toThrow('injected')
+    expect(f.deleted).toEqual(['child-1'])
+    expect([...f.threads]).toEqual([])
+    expect(f.store.getReceipt(`delegation:${parent.runId}:call-1`)).toBeNull()
+    expect(f.engine.delegations.getLineage('child-1')).toBeNull()
+
+    const retried = await f.delegate(parent.runId, 'call-1')
+    expect(retried).toMatchObject({ childThreadId: 'child-2', replayed: false })
+    const replayed = await f.delegate(parent.runId, 'call-1')
+    expect(replayed).toEqual({ ...retried, replayed: true })
+    // The replay creates nothing: one live child thread, one delegation.
+    expect([...f.threads]).toEqual(['child-2'])
+    expect(f.requests).toHaveLength(2)
+    expect(f.engine.delegations.listForParentRun(parent.runId)).toHaveLength(1)
+  })
+
   it('boot: a child cut off at restart publishes its failure, and a wake that never ran is redone', async () => {
+
     f = delegationFixture()
     const home = f.profileHome
     f.engine.reconcileOnBoot()

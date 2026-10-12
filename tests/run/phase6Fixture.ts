@@ -164,12 +164,29 @@ export function phase6Daemon(home: string, adapters: ProviderAdapter[], options:
     orch.setRunEngine(null)
     engine.store.db.close()
   }
+  /**
+   * Ends like a profile stop (`MmsProfileServices.stopRunEngine`): the worker stops, the
+   * orchestrator drains its live turns, then the epoch closes cleanly.
+   */
+  const shutdown = async (): Promise<void> => {
+    if (stopped) return
+    stopped = true
+    const workerStopped = worker.stop()
+    await orch.shutdown()
+    await workerStopped
+    orch.attachEffectWorker(null)
+    engine.shutdown()
+    orch.setRunEngine(null)
+    engine.store.db.close()
+  }
   return {
-    orch, engine, store, projects, boot,
+    orch, engine, store, projects, boot, worker,
     /** Ends like a crash: the daemon epoch stays open. */
     crash: () => halt(false),
-    stop: () => halt(true)
+    stop: () => halt(true),
+    shutdown
   }
+
 }
 
 export type Phase6Daemon = ReturnType<typeof phase6Daemon>

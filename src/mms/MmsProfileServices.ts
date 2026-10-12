@@ -15,7 +15,7 @@ import { ProfileDatabase } from './run/db/ProfileDatabase'
 import { McpCredentials } from './run/mcp/McpCredentials'
 import { MousseMcpServer } from './run/mcp/MousseMcpServer'
 import { createMousseToolRegistry } from './run/mcp/toolRegistry'
-import { EffectWorker } from './run/EffectWorker'
+import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
 import type { ThreadEvent } from './run/types'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
@@ -165,6 +165,7 @@ export class MmsProfileServices {
   private readonly ownerHandle: MmsOwnerHandle | null
   private readonly homeDir: string
   private readonly installationHome: string
+  private readonly effectFibres: Partial<EffectWorkerFibres> | undefined
 
   constructor(
     config: MousseConfigStore,
@@ -180,9 +181,15 @@ export class MmsProfileServices {
       allowLegacyProjectData?: boolean
       inheritChannelEnvironment?: boolean
       includeExternalCliConfigs?: boolean
+      /**
+       * Effect worker fibres per lane class (SPEC §12.3). `turn` caps this profile's concurrent
+       * turns (default 8); control fibres keep Stop and steer responsive while turns run.
+       */
+      effectFibres?: Partial<EffectWorkerFibres>
     }
   ) {
     this.config = config
+    this.effectFibres = shared.effectFibres
     this.ownerHandle = ownerHandle
     this.homeDir = homeDir
     this.installationHome = shared.installationHome
@@ -804,7 +811,8 @@ export class MmsProfileServices {
     const worker = new EffectWorker({
       outbox: engine.outbox,
       executors: this.orchestrator.effectExecutors(),
-      owner: engine.leaseOwner
+      owner: engine.leaseOwner,
+      fibres: this.effectFibres
     })
     const reconciler = new Reconciler({
       store: engine.store,

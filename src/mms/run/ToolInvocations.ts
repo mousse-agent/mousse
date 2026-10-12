@@ -1,9 +1,8 @@
+import { str, type Row } from './db/rows'
 import { fail } from './db/RunStoreError'
 import type { RunStore } from './RunStore'
 import { isIdempotentTool } from './tools/idempotency'
 import type { ToolInvocationRecord, ToolInvocationStatus } from './types'
-
-type Row = Record<string, unknown>
 
 /**
  * Tool-invocation ledger (SPEC §12.1, §12.6). `started` is written before a tool runs and
@@ -149,6 +148,6 @@ function toInvocation(row: Row): ToolInvocationRecord {
     status: row.status as ToolInvocationStatus,
     argsDigest: String(row.args_digest),
     startedAt: String(row.started_at),
-    completedAt: typeof row.completed_at === 'string' ? row.completed_at : null
+    completedAt: str(row.completed_at)
   }
 }

@@ -13,6 +13,7 @@
 import { existsSync, realpathSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { ProfileDatabase } from '../db/ProfileDatabase'
+import type { Row } from '../db/rows'
 import { TERMINAL_RUN_STATUSES } from '../types'
 
 export interface FsckFinding {
@@ -26,8 +27,6 @@ export interface RunFsckOptions {
   /** Root of the profile whose run state is checked (holds the profile database). */
   profileHome: string
 }
-
-type Row = Record<string, unknown>
 
 const TERMINAL = [...TERMINAL_RUN_STATUSES]
 const TERMINAL_SQL = TERMINAL.map((status) => `'${status}'`).join(',')

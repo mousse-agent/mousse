@@ -1,17 +1,18 @@
 import { fail } from './db/RunStoreError'
 import { stableStringify } from './json'
 import type { RunStore } from './RunStore'
+import { str, type Row } from './db/rows'
 import {
   DEFAULT_EFFECT_MAX_ATTEMPTS,
   EFFECT_KIND_SPEC,
+  effectLaneClass,
   type EffectClass,
   type EffectKind,
   type EffectKindSpec,
+  type EffectLaneClass,
   type EffectRecord,
   type EffectStatus
 } from './types'
-
-type Row = Record<string, unknown>
 
 /** Extra lease time beyond the execution deadline (SPEC §12.3). */
 export const EFFECT_LEASE_GRACE_MS = 15_000
@@ -46,6 +47,8 @@ export class EffectOutbox {
   private readonly now: () => string
   private readonly listeners = new Set<() => void>()
   private readonly claimSql: string
+  /** Claim statements restricted to a set of lane classes, keyed by the sorted class list. */
+  private readonly claimSqlByLanes = new Map<string, string>()
 
   constructor(
     readonly store: RunStore,
@@ -75,7 +78,7 @@ export class EffectOutbox {
           '+' || ((timeout_ms + ${EFFECT_LEASE_GRACE_MS}) / 1000.0) || ' seconds')
       WHERE effect_id = (
         SELECT c.effect_id FROM effects c
-        WHERE c.status = 'pending' AND c.available_at <= :now
+        WHERE c.status = 'pending' AND c.available_at <= :now /*lanes*/
           AND NOT EXISTS (
             SELECT 1 FROM effects o
             WHERE o.thread_id = c.thread_id AND o.rowid <> c.rowid
@@ -141,12 +144,39 @@ export class EffectOutbox {
     })
   }
 
-  /** Claims the oldest claimable effect for `owner`, or null. One `UPDATE … RETURNING`. */
-  claimNext(owner: string, now: string): EffectRecord | null {
+  /**
+   * Claims the oldest claimable effect for `owner`, or null. One `UPDATE … RETURNING`. `lanes`
+   * restricts the claim to effect kinds of those lane classes (a worker fibre group, SPEC §12.3);
+   * without it any kind may be claimed.
+   */
+  claimNext(
+    owner: string,
+    now: string,
+    options: { lanes?: readonly EffectLaneClass[] } = {}
+  ): EffectRecord | null {
+    const sql = options.lanes ? this.claimSqlFor(options.lanes) : this.claimSql
+    if (sql === null) return null
     return this.db.transaction(() => {
-      const row = this.db.statement(this.claimSql).get({ owner, now })
+      const row = this.db.statement(sql).get({ owner, now })
       return row ? this.recorded(toEffect(row), false) : null
     })
+  }
+
+  /** The claim statement limited to the kinds of `lanes`; null when no kind belongs to them. */
+  private claimSqlFor(lanes: readonly EffectLaneClass[]): string | null {
+    const key = [...new Set(lanes)].sort().join(',')
+    const cached = this.claimSqlByLanes.get(key)
+    if (cached !== undefined) return cached
+    const kinds = (Object.keys(this.kindSpec) as EffectKind[]).filter((kind) =>
+      lanes.includes(effectLaneClass(kind))
+    )
+    if (!kinds.length) return null
+    const sql = this.claimSql.replace(
+      '/*lanes*/',
+      `AND c.kind IN (${kinds.map((kind) => `'${kind}'`).join(',')})`
+    )
+    this.claimSqlByLanes.set(key, sql)
+    return sql
   }
 
   /** Extends the lease while `owner` still holds a running effect. */
@@ -403,11 +433,8 @@ export class EffectOutbox {
   }
 }
 
-function str(value: unknown): string | null {
-  return typeof value === 'string' ? value : null
-}
-
-export function toEffect(row: Row): EffectRecord {
+export function toEffect
+(row: Row): EffectRecord {
   return {
     effectId: String(row.effect_id),
     threadId: String(row.thread_id),

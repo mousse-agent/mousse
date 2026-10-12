@@ -2,6 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import type { ProviderCapabilities } from '../../src/mms/run/adapters/ProviderAdapter'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox, EFFECT_LEASE_GRACE_MS } from '../../src/mms/run/EffectOutbox'
 import { Reconciler } from '../../src/mms/run/Reconciler'
@@ -23,7 +25,7 @@ describe('Reconciler', () => {
   })
 
   /** One fake clock drives the database, the engine, the outbox and the reconciler. */
-  const setup = (heartbeatMs = 10_000) => {
+  const setup = (heartbeatMs = 10_000, capabilitiesFor?: (threadId: string) => ProviderCapabilities | null) => {
     profileHome = mkdtempSync(join(tmpdir(), 'mousse-reconciler-'))
     let clock = T0
     db = new ProfileDatabase({ profileHome, clock: () => clock })
@@ -32,7 +34,7 @@ describe('Reconciler', () => {
     const outbox = new EffectOutbox(store, { now })
     const tools = new ToolInvocations(store)
     const engine = new RunEngine({ store, outbox, tools, now, pid: 1 })
-    const reconciler = new Reconciler({ store, outbox, tools, now, heartbeatMs })
+    const reconciler = new Reconciler({ store, outbox, tools, now, heartbeatMs, capabilitiesFor })
     return {
       store,
       outbox,
@@ -63,7 +65,9 @@ describe('Reconciler', () => {
       forcedInterrupts: [],
       wakes: { wakes: [], steers: [], cancelled: [] },
       queuedStarts: [],
+      strandedCancelled: [],
       outcomeUnknownTools: []
+
     })
   })
 
@@ -126,6 +130,96 @@ describe('Reconciler', () => {
     advance(2_000)
     expect(reconciler.runOnce().staleRuns).toEqual([run.runId])
     expect(store.getRun(run.runId)!.status).toBe('interrupted')
+  })
+
+  it('rule 2: a sparse-event adapter gets 6x the silence window', async () => {
+    const sparse: ProviderCapabilities = { ...PI_LOOP_CAPABILITIES, events: 'sparse' }
+    const { store, engine, reconciler, advance } = setup(10_000, (threadId) => (threadId === 'sparse' ? sparse : PI_LOOP_CAPABILITIES))
+    const rich = await runningRun(engine, 'rich')
+    const quiet = await runningRun(engine, 'sparse')
+    advance(21_000)
+    expect(reconciler.runOnce().staleRuns).toEqual([rich.runId])
+    advance(98_000)
+    expect(reconciler.runOnce().staleRuns).toEqual([])
+    expect(store.getRun(quiet.runId)!.status).toBe('running')
+    advance(2_000)
+    expect(reconciler.runOnce().staleRuns).toEqual([quiet.runId])
+  })
+
+  it('rule 2: a local action is exempt while its heartbeat is fresh, without consulting capabilities', async () => {
+    let asked = 0
+    const { store, engine, reconciler, advance } = setup(10_000, () => {
+      asked += 1
+      return { ...PI_LOOP_CAPABILITIES, events: 'sparse' }
+    })
+    const undo = store.createRun({ threadId: 't', source: 'undo' })
+    engine.markStarting(undo.runId)
+    engine.markRunning(undo.runId)
+    for (let i = 0; i < 6; i++) {
+      advance(10_000)
+      engine.heartbeat(undo.runId)
+      expect(reconciler.runOnce().staleRuns).toEqual([])
+    }
+    // Its daemon died mid-action: the base window applies, not the adapter's.
+    advance(21_000)
+    expect(reconciler.runOnce().staleRuns).toEqual([undo.runId])
+    expect(asked).toBe(0)
+  })
+
+  it('rule 5: a queued run whose turn.start died is started again from the stored send', async () => {
+    const { store, engine, outbox, reconciler } = setup()
+    const sent = await engine.dispatch({ kind: 'send', threadId: 't', clientRequestId: 'send-1', source: 'gui' })
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    const send = { runId: sent.runId, threadId: 't', input: { content: 'hello', mode: 'agent' }, reuseLastUser: false }
+    const dead = outbox.enqueue({ threadId: 't', runId: sent.runId, kind: 'turn.start', payload: send })
+    outbox.cancelProcessBound('daemon_restart')
+    const report = reconciler.runOnce()
+    expect(report.queuedStarts).toEqual([sent.runId])
+    expect(report.strandedCancelled).toEqual([])
+    const fresh = outbox.listForRun(sent.runId).at(-1)!
+    expect(fresh).toMatchObject({ effectId: `effect:${sent.runId}:turn.start:2`, status: 'pending', payload: send })
+    expect(store.getRun(sent.runId)!.status).toBe('queued')
+    const repair = store.listEvents('t').find((event) => event.type === 'reconcile.restarted_queued_run')!
+    expect(repair.payload).toEqual({ runId: sent.runId, effectId: fresh.effectId, previousEffectId: dead.effectId })
+    // The live effect makes the run no longer stranded.
+    expect(reconciler.runOnce().queuedStarts).toEqual([])
+  })
+
+  it('rule 5: a stranded queued run without a stored send is cancelled', async () => {
+    const { store, engine, outbox, reconciler } = setup()
+    const sent = await engine.dispatch({ kind: 'send', threadId: 't', clientRequestId: 'send-1', source: 'gui' })
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    outbox.enqueue({ threadId: 't', runId: sent.runId, kind: 'turn.start' })
+    outbox.cancelProcessBound('daemon_restart')
+    expect(reconciler.runOnce().strandedCancelled).toEqual([sent.runId])
+    expect(store.getRun(sent.runId)).toMatchObject({ status: 'cancelled', outcome: { error: 'no turn payload after restart' } })
+    expect(types(store)).toContain('reconcile.cancelled_stranded_run')
+  })
+
+  it('rule 5: leaves queue items, runs without a turn.start and runs behind an active run alone', async () => {
+    const { store, engine, outbox, reconciler } = setup()
+    const send = async (threadId: string, key: string) => {
+      const sent = await engine.dispatch({ kind: 'send', threadId, clientRequestId: key, source: 'gui' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      return sent.runId
+    }
+    // A queue item's send: the message queue's recovery drains it.
+    const item = await send('q', 'q-1')
+    outbox.enqueue({ threadId: 'q', runId: item, kind: 'turn.start', payload: { runId: item, threadId: 'q', input: 'hi', queueItemId: 'item-1' } })
+    // A run still waiting on the message queue (no effect yet).
+    const waiting = await send('w', 'w-1')
+    // A run whose dead effect stored a send, behind another thread run that is active.
+    const active = await runningRun(engine, 'busy')
+    const behind = await send('busy', 'busy-2')
+    outbox.enqueue({ threadId: 'busy', runId: behind, kind: 'turn.start', payload: { runId: behind, threadId: 'busy', input: 'later' } })
+    outbox.cancelProcessBound('daemon_restart')
+    const report = reconciler.runOnce()
+    expect(report.queuedStarts).toEqual([])
+    expect(report.strandedCancelled).toEqual([])
+    for (const runId of [item, waiting, behind]) expect(store.getRun(runId)!.status).toBe('queued')
+    // Once the active run ends, the run behind it starts again.
+    engine.markTerminal(active.runId, 'completed')
+    expect(reconciler.runOnce().queuedStarts).toEqual([behind])
   })
 
   it('rule 3: a stopped run with no interrupt effect is forced interrupted after 10 s', async () => {

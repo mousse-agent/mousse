@@ -7,7 +7,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { PI, phase6Daemon, piAdapter, type Phase6Daemon } from './phase6Fixture'
+import { Reconciler } from '../../src/mms/run/Reconciler'
+import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 describe('continue after restart (SPEC §16.4)', () => {
   let home: string | undefined
@@ -86,5 +87,65 @@ describe('continue after restart (SPEC §16.4)', () => {
     const other = d.store.createThread('Other')
     await expect(d.orch.send('Continue', false, { threadId: other.id, clientRequestId: 'x-1', continuationOfRunId: sent.runId }))
       .rejects.toMatchObject({ code: 'continuation_not_found' })
+  })
+
+  it('a profile stop during a turn records a restart, not a Stop, and the next boot notes it', async () => {
+    const dir = setupHome()
+    let started = false
+    // Runs until its signal aborts, like a provider stream cut off by the shutdown.
+    const gated = piAdapter((input) => new Promise<string>((_resolve, reject) => {
+      started = true
+      input.signal.addEventListener('abort', () => reject(input.signal.reason as Error), { once: true })
+    }))
+    const first = phase6Daemon(dir, [gated], { pid: 1 })
+    const thread = first.store.createThread('Shutdown')
+    first.orch.setThreadModelOverride(thread.id, PI)
+    const sent = await first.orch.send('Work slowly', false, { threadId: thread.id, clientRequestId: 'gated-1', awaitMode: 'ack' })
+    await waitFor(() => started, 'the gated turn')
+    await first.shutdown()
+
+    const pi = piAdapter((input) => `after: ${input.prompt}`)
+    const second = phase6Daemon(dir, [pi], { pid: 2 })
+    daemons.push(second)
+    expect(second.boot.interrupted).toEqual([])
+    expect(second.engine.getRun(sent.runId!)).toMatchObject({ status: 'interrupted', outcome: { interruptedBy: 'daemon_restart' } })
+    const systemOf = (d: Phase6Daemon) => d.orch.getMessages(thread.id).filter((message) => message.role === 'system').map((message) => message.content)
+    expect(systemOf(first)).toContain('Turn interrupted by a Mousse restart.')
+    expect(systemOf(first)).not.toContain('Turn stopped.')
+    const notes = second.engine.listEvents(thread.id).filter((event) => event.type === 'restart.note')
+    expect(notes.map((event) => event.payload)).toEqual([{ epoch: 2, runIds: [sent.runId], uncertainRunIds: [], cutOffTools: [] }])
+    // The next turn opens with the note, once.
+    await second.orch.send('Next', false, { threadId: thread.id, clientRequestId: 'next-1' })
+    expect(systemOf(second)).toContain('The Mousse daemon restarted during the previous turn. Interrupted: 1 run(s).')
+  })
+
+  it('a queued send whose turn.start died with the daemon runs after the restart (rule 5)', async () => {
+    const dir = setupHome()
+    const first = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 1 })
+    const thread = first.store.createThread('Stranded')
+    first.orch.setThreadModelOverride(thread.id, PI)
+    // The worker is gone before it claims the send's turn.start; then the daemon crashes.
+    await first.worker.stop()
+    const sent = await first.engine.dispatch({ kind: 'send', threadId: thread.id, clientRequestId: 'stranded-1', source: 'gui' })
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    const input = { content: 'Pick this up', mode: 'agent' }
+    first.engine.outbox.enqueue({
+      threadId: thread.id,
+      runId: sent.runId,
+      kind: 'turn.start',
+      payload: { runId: sent.runId, threadId: thread.id, input, reuseLastUser: false, displayUserMessage: true, source: 'gui' }
+    })
+    await first.crash()
+
+    const pi = piAdapter((turn) => `picked up: ${turn.prompt}`)
+    const second = phase6Daemon(dir, [pi], { pid: 2 })
+    daemons.push(second)
+    expect(second.boot.strandedQueued).toEqual([sent.runId])
+    const reconciler = new Reconciler({ store: second.engine.store, outbox: second.engine.outbox, tools: second.engine.tools })
+    expect(reconciler.runOnce().queuedStarts).toEqual([sent.runId])
+    await waitFor(() => second.engine.getRun(sent.runId)!.status === 'completed', 'the restarted run')
+    expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Pick this up'])
+    const system = second.orch.getMessages(thread.id).filter((message) => message.role === 'system').map((message) => message.content)
+    expect(system).toContain('The Mousse daemon restarted before this turn started. Queued before the restart: 1 run(s).')
   })
 })

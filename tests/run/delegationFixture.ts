@@ -17,12 +17,15 @@ export const QUEUE_ONLY_CAPABILITIES: ProviderCapabilities = { ...PI_LOOP_CAPABI
 
 /**
  * One run database, engine and reconciler on a fake clock, with a delegation host that names child
- * threads `child-<n>` and records the requests it saw. Call `dispose` in `afterEach`.
+ * threads `child-<n>` and records the requests it saw, the threads it holds and the threads it was
+ * asked to delete. `fault` sees every database checkpoint. Call `dispose` in `afterEach`.
  */
-export function delegationFixture(options: { pid?: number; profileHome?: string } = {}) {
+export function delegationFixture(
+  options: { pid?: number; profileHome?: string; fault?: (point: string) => void } = {}
+) {
   const profileHome = options.profileHome ?? mkdtempSync(join(tmpdir(), 'mousse-delegation-'))
   let clock = T0
-  const db = new ProfileDatabase({ profileHome, clock: () => clock })
+  const db = new ProfileDatabase({ profileHome, clock: () => clock, fault: options.fault })
   const store = new RunStore(db)
   const now = () => new Date(clock).toISOString()
   const outbox = new EffectOutbox(store, { now })
@@ -37,15 +40,26 @@ export function delegationFixture(options: { pid?: number; profileHome?: string 
     capabilitiesFor: (threadId) => capabilities.get(threadId) ?? PI_LOOP_CAPABILITIES
   })
   const requests: DelegationRequest[] = []
+  /** Child threads the host holds (created and not deleted). */
+  const threads = new Set<string>()
+  const deleted: string[] = []
+  /** Final texts `readRunResultText` returns, by run id. */
+  const resultTexts = new Map<string, string>()
   let children = 0
   engine.setDelegationHost({
     createThread: (input) => {
       if (input.kind !== 'delegation') throw new Error('the delegation fixture creates child threads only')
       requests.push(input.request)
       children += 1
+      threads.add(`child-${children}`)
       return { threadId: `child-${children}` }
     },
-    buildChildTurnPayload: ({ childThreadId, childRunId, prompt }) => ({ threadId: childThreadId, runId: childRunId, prompt })
+    deleteThread: (threadId) => {
+      threads.delete(threadId)
+      deleted.push(threadId)
+    },
+    buildChildTurnPayload: ({ childThreadId, childRunId, prompt }) => ({ threadId: childThreadId, runId: childRunId, prompt }),
+    readRunResultText: (runId) => resultTexts.get(runId)
   })
 
   /** A parent run in `running` on `threadId`. */
@@ -86,6 +100,9 @@ export function delegationFixture(options: { pid?: number; profileHome?: string 
     reconciler,
     capabilities,
     requests,
+    threads,
+    deleted,
+    resultTexts,
     now,
     advance: (ms: number) => {
       clock += ms

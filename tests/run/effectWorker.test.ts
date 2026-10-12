@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
-import { EffectWorker, type EffectExecutor } from '../../src/mms/run/EffectWorker'
+import { EffectWorker, WorkerStoppedError, type EffectExecutor, type EffectWorkerFibres } from '../../src/mms/run/EffectWorker'
 import { RunStore } from '../../src/mms/run/RunStore'
 import type { EffectKind, EffectRecord } from '../../src/mms/run/types'
 
@@ -38,7 +38,7 @@ describe('EffectWorker', () => {
 
   const setup = (
     executors: Partial<Record<EffectKind, EffectExecutor>>,
-    options: { timeoutMs?: number; fibres?: number; pollMs?: number } = {}
+    options: { timeoutMs?: number; fibres?: number; laneFibres?: Partial<EffectWorkerFibres>; pollMs?: number } = {}
   ) => {
     profileHome = mkdtempSync(join(tmpdir(), 'mousse-worker-'))
     db = new ProfileDatabase({ profileHome })
@@ -52,7 +52,8 @@ describe('EffectWorker', () => {
       outbox,
       executors,
       owner: '1:1',
-      fibres: options.fibres ?? 2,
+      // `turn.steer` runs on the control fibres.
+      fibres: options.laneFibres ?? { control: options.fibres ?? 2 },
       pollMs: options.pollMs ?? 60_000
     })
     workers.push(worker)
@@ -190,7 +191,53 @@ describe('EffectWorker', () => {
     expect(outbox.get(next.effectId)!.status).toBe('pending')
   })
 
+  it('runs a stop while every turn fibre holds a live turn, and caps concurrent turns', async () => {
+    const gate = deferred()
+    const started: string[] = []
+    const interrupted: string[] = []
+    const { outbox, worker } = setup({
+      'turn.start': async (effect) => {
+        started.push(effect.threadId)
+        await gate.promise
+      },
+      'turn.interrupt': async (effect) => {
+        interrupted.push(effect.threadId)
+      }
+    })
+    expect(worker.fibreCounts).toEqual({ turn: 8, control: 2, replaySafe: 2 })
+    worker.start()
+    for (let i = 1; i <= 9; i++) outbox.enqueue({ threadId: `t${i}`, kind: 'turn.start' })
+    await waitFor(() => started.length === 8, 'eight live turns')
+    const stop = outbox.enqueue({ threadId: 't1', kind: 'turn.interrupt' })
+    await waitFor(() => outbox.get(stop.effectId)!.status === 'succeeded', 'the interrupt', 1000)
+    expect(interrupted).toEqual(['t1'])
+    // The ninth turn waits for a turn fibre; control fibres never take it.
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(started).toHaveLength(8)
+    gate.resolve()
+    await waitFor(() => started.length === 9, 'the ninth turn')
+  })
+
+  it('aborts in-flight executions with WorkerStoppedError on stop()', async () => {
+    let reason: unknown
+    const { outbox, worker } = setup({
+      'turn.start': (_effect, ctx) =>
+        new Promise<void>((_resolve, reject) => {
+          ctx.signal.addEventListener('abort', () => {
+            reason = ctx.signal.reason
+            reject(ctx.signal.reason as Error)
+          })
+        })
+    })
+    outbox.enqueue({ threadId: 't', kind: 'turn.start' })
+    worker.start()
+    await waitFor(() => worker.inFlight() === 1, 'in flight')
+    await worker.stop()
+    expect(reason).toBeInstanceOf(WorkerStoppedError)
+  })
+
   it('wakes on notify() and on the next available_at', async () => {
+
     const done: string[] = []
     const { outbox, worker } = setup({
       'turn.steer': async (effect) => {

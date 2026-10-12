@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
+import { str, type Row } from '../db/rows'
 import { fail } from '../db/RunStoreError'
 import type { RunStore } from '../RunStore'
 import type { ModeCeiling } from '../types'
@@ -20,8 +21,6 @@ export interface CredentialRecord {
 
 /** What `runs.credentials` reports: never the hash. */
 export type CredentialSummary = Omit<CredentialRecord, 'tokenHash' | 'threadId'>
-
-type Row = Record<string, unknown>
 
 export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
@@ -191,7 +190,7 @@ function toRecord(row: Row): CredentialRecord {
     provider: String(row.provider),
     modeCeiling: row.mode_ceiling === 'plan' ? 'plan' : 'default',
     createdAt: String(row.created_at),
-    revokedAt: typeof row.revoked_at === 'string' ? row.revoked_at : null,
+    revokedAt: str(row.revoked_at),
     lastSeenAt: String(row.last_seen_at)
   }
 }

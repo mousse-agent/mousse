@@ -248,7 +248,7 @@ CREATE INDEX tool_invocations_run ON tool_invocations(run_id, status);
 
 ### 12.3 Worker and lanes
 
-- One in-process worker with N=4 fibres (plain async loops). Wake sources: `afterCommit` notify, next `available_at` timer, 30 s safety poll.
+- One in-process worker whose fibres (plain async loops) are grouped by lane class: **turn** fibres claim only `turn.start`, **control** fibres claim only `turn.interrupt|turn.steer|request.respond`, **replay-safe** fibres claim only the replay-safe kinds (`EffectOutbox.claimNext(owner, now, { lanes })`). Defaults 8 / 2 / 2 (`EffectWorker` option `fibres`, profile option `effectFibres`). A `turn.start` holds its fibre for the whole turn, so the turn-fibre count is the **per-profile concurrency cap: at most 8 concurrent turns**; a further send waits as a pending `turn.start` until a turn ends. Control fibres never run `turn.start`, so Stop and steer reach live turns however many are running. Wake sources: `afterCommit` notify, next `available_at` timer, 30 s safety poll.
 - Claim is one `UPDATE … WHERE effect_id = (SELECT … LIMIT 1) RETURNING *` and is only valid when, for the same thread lane, there is **no `running` row whose lease has not expired** and no earlier `pending` row. `title.generate` is its own lane, and `turn.interrupt`, `turn.steer` and `request.respond` share a per-thread **control** lane so they reach a live turn instead of queueing behind its long-running `turn.start`.
 - Lease = `timeout_ms + 15 s`. The worker renews the lease every `timeout_ms/3` while executing.
 - Execution is raced against `AbortSignal.timeout(timeout_ms)` and against cancellation. On timeout: `failed` with `last_error='timeout'` if attempts exhausted, else `pending` with backoff `min(30 s, 100 ms·2^(n−1))`.
@@ -259,10 +259,10 @@ CREATE INDEX tool_invocations_run ON tool_invocations(run_id, status);
 A single loop; each rule is a pure function of stored state and produces commands/effects. Rules, in order:
 
 1. **Expired lease on a `running` effect** → mark `pending` (or `failed` if attempts exhausted); the stuck fibre's result is discarded by the CAS.
-2. **Run `running|finalizing` with no live effect and no heartbeat for > 2× heartbeat interval** → `interrupted` with `interruptedBy:'provider'`, `outcome.error='no terminal event'`. This catches T3's clean-stream-end-without-terminal.
+2. **Run `running|finalizing` with no live effect and no heartbeat for > 2× heartbeat interval** (scaled by `CommandPolicy.heartbeatToleranceMs(caps, heartbeatMs)` for the thread's adapter: 6× for `events:'sparse'`) → `interrupted` with `interruptedBy:'provider'`, `outcome.error='no terminal event'`. This catches T3's clean-stream-end-without-terminal. Local-action runs (`source: 'undo'|'revert'`) whose heartbeat is fresh are exempt; they heartbeat while their action runs.
 3. **Pending `stopRequested` on a run whose `turn.interrupt` effect is terminal but the run is still non-terminal after 10 s** → force `interrupted` (`interruptedBy:'user'`) and emit a warning event.
 4. **Child run terminal while a parent waits** (Phase 4) → wake parent.
-5. **Queued run with no active run on its thread** → enqueue `turn.start` (replaces the legacy drain timer).
+5. **Queued run with no active run on its thread whose latest `turn.start` is `cancelled` and none is `pending|running`** (a stranded run: boot cancelled its process-bound effect) → when the dead effect's stored payload carries the send (`input`; image data is not stored, so images arrive empty), enqueue a fresh `turn.start` with it (next effect ordinal) and append `reconcile.restarted_queued_run`; with no payload (a pre-Phase-2b run), end the run `cancelled` with `outcome.error='no turn payload after restart'` and append `reconcile.cancelled_stranded_run`. A queued run that never had a `turn.start` waits on the message queue and is left alone, as are queue-item sends (`queueItemId`, re-drained by the queue's own recovery) and wake or integration payloads (settled at boot).
 6. **`tool_invocations` at `started` whose run is terminal** → `outcome_unknown`.
 
 Every repair appends a `reconcile.<rule>` event. The loop never calls a provider itself.
@@ -276,7 +276,7 @@ Every repair appends a `reconcile.<rule>` event. The loop never calls a provider
 4. Runs in `starting|running|finalizing`:
    - if the previous epoch ended cleanly → `interrupted`, `interruptedBy:'daemon_restart'`;
    - if it crashed and the run has any `tool_invocations` at `started` with `idempotent=0` → **`uncertain`**, `uncertainReason:'non_idempotent_tool_in_flight'`, listing the tools; the thread's worktree lease is kept (quarantine) until a user action; all other crashed runs → `interrupted`.
-5. For each affected thread, record a `restart.note` event listing what was cut off. The next turn on that thread prepends a system note; the GUI shows a "Continue" affordance. **Nothing auto-resumes.**
+5. For each affected thread, record a `restart.note` event listing what was cut off. The next turn on that thread prepends a system note; the GUI shows a "Continue" affordance. **Nothing auto-resumes.** The note also lists runs the previous daemon's clean shutdown already interrupted (a turn aborted by the worker stop or the profile shutdown ends `interrupted` with `interruptedBy:'daemon_restart'` and the transcript line "Turn interrupted by a Mousse restart.", not a user Stop): those that started, completed since the previous epoch's `started_at`, are not in an earlier note, and have no later started run on their thread. Stranded queued runs (rule 5) appear as `queuedRunIds`.
 6. Start the heartbeat (`heartbeat_at` every 10 s) and the reconciler.
 
 ### 12.6 Tool idempotency registry
@@ -334,7 +334,6 @@ export interface ProviderCapabilities {
   events: 'rich' | 'sparse'                                // Reconciler rule 2 heartbeat tolerance (sparse = 6×)
   containment: 'strong' | 'weak'                           // CheckpointRestoreSafety (Phase 6): weak → review diff, never auto-restore
   historyInjection: 'native' | 'prompt'                    // HandoffDelivery (Phase 6)
-  terminalQuality: 'reliable' | 'best_effort'              // Reconciler rule 2: best_effort runs also end on stream close + idle 30 s
   mcp: boolean                                             // Phase 5: whether the Mousse MCP server can be attached
 }
 ```
@@ -350,11 +349,13 @@ Pure functions from `(capabilities, runState)` to a decision; the engine and exe
 
 ### 13.4 Adapters to build
 
-| Adapter | Wraps | Caps (steer / interrupt / events / containment / terminal) |
+| Adapter | Wraps | Caps (steer / interrupt / events / containment) |
 |---|---|---|
-| `PiLoopAdapter` | `LlmClient.chat` tool loop | native / yes / rich / strong (we run the tools) / reliable |
-| `ClaudeSubscriptionAdapter` | `ClaudeSubscriptionProviderService.chat` | native (drainSteer) / yes (signal) / rich / weak / best_effort |
-| `AntigravityAdapter` | `AntigravityProviderService.chat` | native / yes / sparse / weak / best_effort |
+| `PiLoopAdapter` | `LlmClient.chat` tool loop | native / yes / rich / strong (we run the tools) |
+| `ClaudeSubscriptionAdapter` | `ClaudeSubscriptionProviderService.chat` | native (drainSteer) / yes (signal) / rich / weak |
+| `AntigravityAdapter` | `AntigravityProviderService.chat` | native / yes / sparse / weak |
+
+There is no `terminalQuality` flag: every adapter's `startTurn` settles when its stream closes, and that settlement is the turn's terminal signal, so no code path would read a "stream closed without a terminal event" policy. A hung stream is caught by rule 2's heartbeat window (§12.4).
 
 Shared builders in `src/mms/run/adapters/shared/` **before** the second adapter: streaming message assembly (text/thinking/tool start-end into `ChatMessage`s), usage recording, native history serialisation (`providers/nativeAgentHistory.ts`), steer draining. The T3 lesson: Claude and Codex adapters each re-implemented these.
 
@@ -382,7 +383,7 @@ Three spawn paths exist today: `spawn_agents` text blocks parsed from the reply 
 ### 14.1 Model
 
 - A **child is a thread** with `lineage { parentThreadId, parentRunId, relationship: 'subagent' }` persisted in a new `thread_lineage` table (migration 3). Its runs are ordinary runs on the same engine.
-- A **delegation** row ties the parent run to the child thread: `delegations(delegation_id PK, parent_run_id, parent_thread_id, child_thread_id, child_run_id, provider, model, prompt_digest, wake: 'always'|'settled_only', status: 'running'|'result_available'|'acknowledged'|'cancelled'|'failed', result TEXT, created_at, completed_at)`.
+- A **delegation** row ties the parent run to the child thread: `delegations(delegation_id PK, parent_run_id, parent_thread_id, child_thread_id, child_run_id, provider, model, prompt_digest, wake: 'always'|'settled_only', status: 'running'|'result_available'|'acknowledged'|'cancelled'|'failed', result TEXT, created_at, completed_at)`; migration 6 adds `workspace: 'isolated'|'shared'` and `role`, so a child session rebuilt from storage keeps its workspace policy (a `shared` child stays a read-only observer of its parent's workspace).
 - **Inbox**: `inbox(inbox_id PK, thread_id, run_id?, kind: 'child_result'|'restart_note'|'reconcile_notice', payload, status: 'pending'|'delivered'|'acknowledged', created_at)`. A child's completion writes one `child_result` row for the parent **in the same transaction** as the child's terminal write (invariant 5: child completion is a stored row). Notifications only speed up discovery.
 - **Publication gate**: a child's result lands only if, in that transaction, the delegation is still `running` and the parent run is non-terminal or `settled_only` is set. A cancelled or superseded child can finish but cannot publish.
 
@@ -473,6 +474,7 @@ CREATE TABLE context_handoffs(
 
 Existing `actions.fork` creates an in-thread conversation branch. Phase 6 adds a **thread fork**:
 - `thread.fork({ sourceThreadId, atRunOrdinal | 'latest_stable' })` creates a new thread with `thread_lineage(relationship:'fork', parentThreadId, forkRunOrdinal)` and a **pending** `fork` transfer row (`context_transfers`, migration 5). Forkable sources: runs in `completed|failed|interrupted|cancelled`; never `running` or `uncertain`.
+- **Consumed once**: a fork or merge-back transfer is `consumed` (payload `consumedBy: <runId>`) as soon as a commit of the receiving turn's transcript holds its injected history, or when a turn that delivered it otherwise completes; a turn stopped before its first commit leaves it pending. Injected history messages carry a `contextHandoff: { handoffId, transferId }` marker (not content), and a turn that finds a pending transfer's marker already in the transcript consumes it instead of injecting it again.
 - **Lazy**: nothing is sent to a provider until the fork's first message. `featureGates.forkStrategy(caps)` picks `native` (same provider, strong native ref, `fork:'native'`) or `portable` (a `full_summary` handoff from the source up to the fork point). The code checkpoint at the fork ordinal, if one exists, seeds the fork's worktree.
 - **Merge-back** `thread.merge_back({ forkThreadId })` is allowed only into the direct parent and only when the fork's latest run is `completed`. It records a pending `merge_back` transfer; the parent's next turn receives a `fork_delta_summary` handoff (runs on the fork since the fork point). Code integration stays explicit through the existing child-integration path (§14.4). Queueing on a thread with a pending merge-back is refused with a reason until it is consumed.
 

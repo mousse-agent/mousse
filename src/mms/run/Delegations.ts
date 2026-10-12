@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { json, str, type Row } from './db/rows'
 import { fail } from './db/RunStoreError'
 import { Inbox } from './Inbox'
 import { stableStringify } from './json'
@@ -9,13 +10,12 @@ import type {
   DelegationResult,
   DelegationStatus,
   DelegationWake,
+  DelegationWorkspace,
   LineageRecord,
   LineageRelationship,
   ModeCeiling,
   RunRecord
 } from './types'
-
-type Row = Record<string, unknown>
 
 /** Characters of a child's final text kept in its delegation row. */
 export const DELEGATION_RESULT_MAX_CHARS = 64_000
@@ -93,6 +93,8 @@ export class Delegations {
     prompt: string
     wake: DelegationWake
     modeCeiling?: ModeCeiling | null
+    workspace?: DelegationWorkspace | null
+    role?: string | null
   }): DelegationRecord {
     return this.db.transaction(() => {
       const record: DelegationRecord = {
@@ -109,14 +111,16 @@ export class Delegations {
         result: null,
         createdAt: this.now(),
         completedAt: null,
-        modeCeiling: input.modeCeiling ?? null
+        modeCeiling: input.modeCeiling ?? null,
+        workspace: input.workspace ?? null,
+        role: input.role ?? null
       }
       this.db
         .statement(
           `INSERT INTO delegations(delegation_id, parent_run_id, parent_thread_id, child_thread_id,
              child_run_id, provider, model, prompt_digest, wake, status, result, created_at, completed_at,
-             mode_ceiling)
-           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             mode_ceiling, workspace, role)
+           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           record.delegationId,
@@ -132,7 +136,9 @@ export class Delegations {
           null,
           record.createdAt,
           null,
-          record.modeCeiling
+          record.modeCeiling,
+          record.workspace,
+          record.role
         )
       this.recorded(record)
       return record
@@ -285,10 +291,6 @@ export function childResult(run: RunRecord, resultText?: string): DelegationResu
   return { runStatus: run.status, ...(text ? { text } : {}), error }
 }
 
-function str(value: unknown): string | null {
-  return typeof value === 'string' ? value : null
-}
-
 function toLineage(row: Row): LineageRecord {
   return {
     threadId: String(row.thread_id),
@@ -311,9 +313,11 @@ function toDelegation(row: Row): DelegationRecord {
     promptDigest: String(row.prompt_digest),
     wake: row.wake as DelegationWake,
     status: row.status as DelegationStatus,
-    result: typeof row.result === 'string' ? (JSON.parse(row.result) as DelegationResult) : null,
+    result: json<DelegationResult>(row.result),
     createdAt: String(row.created_at),
     completedAt: str(row.completed_at),
-    modeCeiling: row.mode_ceiling === 'plan' || row.mode_ceiling === 'default' ? row.mode_ceiling : null
+    modeCeiling: row.mode_ceiling === 'plan' || row.mode_ceiling === 'default' ? row.mode_ceiling : null,
+    workspace: row.workspace === 'isolated' || row.workspace === 'shared' ? row.workspace : null,
+    role: str(row.role)
   }
 }

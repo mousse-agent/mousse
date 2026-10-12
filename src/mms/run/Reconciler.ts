@@ -1,15 +1,25 @@
+import { heartbeatToleranceMs } from './CommandPolicy'
+import type { Row } from './db/rows'
 import { RunStoreError } from './db/RunStoreError'
 import { wakeThreads, type CapabilitiesFor, type WakeReport } from './delegation/wake'
 import type { EffectOutbox } from './EffectOutbox'
 import type { RunStore } from './RunStore'
+import { strandedQueuedRuns } from './strandedRuns'
 import { writeTerminalRun } from './terminal'
 import type { ToolInvocations } from './ToolInvocations'
-import { TERMINAL_EFFECT_STATUSES, TERMINAL_RUN_STATUSES, type RunRecord } from './types'
+import {
+  LOCAL_ACTION_SOURCES,
+  TERMINAL_EFFECT_STATUSES,
+  TERMINAL_RUN_STATUSES,
+  type RunRecord
+} from './types'
 
 export const DEFAULT_HEARTBEAT_MS = 10_000
 export const DEFAULT_RECONCILE_INTERVAL_MS = 5_000
 /** Rule 3: how long a terminal `turn.interrupt` may leave a stopped run non-terminal. */
 export const FORCED_INTERRUPT_AFTER_MS = 10_000
+/** Rule 5: the error of a stranded queued run whose send cannot be recovered. */
+export const NO_TURN_PAYLOAD_ERROR = 'no turn payload after restart'
 
 export interface RepairReport {
   /** Rule 1: effects whose expired lease was reclaimed. */
@@ -20,15 +30,15 @@ export interface RepairReport {
   forcedInterrupts: string[]
   /** Rule 4: threads woken (wake runs, steers) for pending inbox rows, and wakes cancelled. */
   wakes: WakeReport
-  /** Rule 5 (Phase 2b): queued runs given a `turn.start`. Always empty in Phase 2a. */
+  /** Rule 5: queued runs whose dead `turn.start` was enqueued again from its stored send. */
   queuedStarts: string[]
+  /** Rule 5: stranded queued runs with no send to recover, ended `cancelled`. */
+  strandedCancelled: string[]
   /** Rule 6: `started` tool invocations of terminal runs marked `outcome_unknown`. */
   outcomeUnknownTools: string[]
   /** Phase 5: expired Mousse MCP credentials deleted this pass (absent without a credential store). */
   prunedCredentials?: number
 }
-
-type Row = Record<string, unknown>
 
 /**
  * Keeps stored state and reality in agreement (SPEC §12.4). Each rule reads stored state and
@@ -36,9 +46,8 @@ type Row = Record<string, unknown>
  * else is live the reconciler is the authority). Every repair appends a `reconcile.<rule>`
  * event. The reconciler never calls a provider.
  *
- * Implemented: rules 1, 2, 3, 4 (Phase 4: pending inbox rows wake their thread, see
- * `delegation/wake.ts`) and 6. Rule 5 (queued run without an active run gets a `turn.start`) is a
- * stub here.
+ * Rules 1-6 (rule 4, pending inbox rows waking their thread, lives in `delegation/wake.ts`; rule
+ * 5's candidates come from `strandedRuns.ts`).
  */
 export class Reconciler {
   private readonly store: RunStore
@@ -77,7 +86,7 @@ export class Reconciler {
       staleRuns: this.staleRuns(now),
       forcedInterrupts: this.forcedInterrupts(now),
       wakes: wakeThreads(this.store, this.outbox, this.capabilitiesFor, now),
-      queuedStarts: this.queuedStarts(now),
+      ...this.queuedStarts(now),
       outcomeUnknownTools: this.toolsOnTerminalRuns(now),
       ...(this.credentials ? { prunedCredentials: this.credentials.pruneExpired() } : {})
     }
@@ -121,17 +130,18 @@ export class Reconciler {
 
   /**
    * Rule 2: a `running|finalizing` run with no running effect whose heartbeat (or start) is older
-   * than 2× the heartbeat interval → `interrupted` by `provider`, error `no terminal event`.
+   * than its silence window (`staleAfterMs`) → `interrupted` by `provider`, error
+   * `no terminal event`.
    */
   private staleRuns(now: string): string[] {
-    const cutoff = Date.parse(now) - 2 * this.heartbeatMs
+    const nowMs = Date.parse(now)
     const repaired: string[] = []
     const candidates = this.store
       .listNonTerminalRuns()
       .filter((run) => run.status === 'running' || run.status === 'finalizing')
     for (const run of candidates) {
       const lastSign = run.heartbeatAt ?? run.startedAt ?? run.requestedAt
-      if (Date.parse(lastSign) >= cutoff) continue
+      if (nowMs - Date.parse(lastSign) <= this.staleAfterMs(run)) continue
       if (this.outbox.listForRun(run.runId).some((effect) => effect.status === 'running')) continue
       const done = this.repairRun(run, 'reconcile.stale_run', { lastHeartbeatAt: lastSign }, () =>
         writeTerminalRun(
@@ -191,12 +201,63 @@ export class Reconciler {
   }
 
   /**
-   * Rule 5 stub (Phase 2b): a queued run with no active run on its thread will get a
-   * `turn.start` effect here, replacing the legacy drain timer. Phase 2a leaves queued runs to the
-   * legacy drain, so this does nothing.
+   * Rule 2 window: 2× the heartbeat interval, scaled by `heartbeatToleranceMs` for the adapter that
+   * serves the thread (sparse event streams 6×). A local action (undo, revert) runs no effect and no
+   * provider: it is exempt while its own heartbeat (`RunEngine.runLocalAction`) is fresh, and
+   * interrupted once that heartbeat is older than the base window (its daemon died mid-action).
    */
-  private queuedStarts(_now: string): string[] {
-    return []
+  private staleAfterMs(run: RunRecord): number {
+    if (LOCAL_ACTION_SOURCES.has(run.source)) return 2 * this.heartbeatMs
+    let caps: ReturnType<CapabilitiesFor> = null
+    try {
+      caps = this.capabilitiesFor?.(run.threadId) ?? null
+    } catch {
+      caps = null
+    }
+    return 2 * (caps ? heartbeatToleranceMs(caps, this.heartbeatMs) : this.heartbeatMs)
+  }
+
+  /**
+   * Rule 5: a queued run whose `turn.start` died (boot cancelled it) and whose thread is idle. When
+   * the dead effect stored the send, a fresh `turn.start` (next effect ordinal) is enqueued with that
+   * payload (`reconcile.restarted_queued_run`; image data is not stored, so images arrive empty);
+   * without one (a pre-Phase-2b run) the run ends `cancelled` with `NO_TURN_PAYLOAD_ERROR`
+   * (`reconcile.cancelled_stranded_run`). Queue items and wake or integration runs are left to
+   * their own recovery (`strandedQueuedRuns`).
+   */
+  private queuedStarts(now: string): { queuedStarts: string[]; strandedCancelled: string[] } {
+    const queuedStarts: string[] = []
+    const strandedCancelled: string[] = []
+    for (const { run, effectId, payload } of strandedQueuedRuns(this.store, this.outbox)) {
+      if (payload) {
+        try {
+          this.store.db.transaction(() => {
+            const effect = this.outbox.enqueue({
+              threadId: run.threadId,
+              runId: run.runId,
+              kind: 'turn.start',
+              payload
+            })
+            this.store.appendEvent({
+              threadId: run.threadId,
+              runId: run.runId,
+              type: 'reconcile.restarted_queued_run',
+              payload: { runId: run.runId, effectId: effect.effectId, previousEffectId: effectId }
+            })
+          })
+          queuedStarts.push(run.runId)
+        } catch (error) {
+          if (!(error instanceof RunStoreError) || (error.code !== 'stale_write' && error.code !== 'conflict'))
+            throw error
+        }
+        continue
+      }
+      const done = this.repairRun(run, 'reconcile.cancelled_stranded_run', { effectId }, () =>
+        writeTerminalRun(this.store, run, run.epoch, 'cancelled', { error: NO_TURN_PAYLOAD_ERROR }, now)
+      )
+      if (done) strandedCancelled.push(run.runId)
+    }
+    return { queuedStarts, strandedCancelled }
   }
 
   /** Rule 6: `started` tool invocations whose run is terminal → `outcome_unknown`. */

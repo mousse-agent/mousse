@@ -127,7 +127,6 @@ describe('PiLoopAdapter', () => {
       events: 'rich',
       containment: 'strong',
       historyInjection: 'native',
-      terminalQuality: 'reliable',
       mcp: false
     })
   })

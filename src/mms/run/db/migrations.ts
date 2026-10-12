@@ -5,7 +5,8 @@ import type { Migration } from './ProfileDatabase'
  * is the Phase 2 outbox, daemon epochs and tool ledger (§12.1) plus `runs.heartbeat_at`; version 3
  * is the Phase 4 delegation model (§14.1): thread lineage, delegations and the inbox; version 4 is
  * the Phase 5 Mousse MCP server (§15.1): bearer credentials and the delegation mode ceiling;
- * version 5 is Phase 6 (§16): context handoffs and fork/merge-back transfers.
+ * version 5 is Phase 6 (§16): context handoffs and fork/merge-back transfers; version 6 stores a
+ * delegation's workspace policy and role so a shared read-only child keeps them across restarts.
  */
 export const RUN_MIGRATIONS: readonly Migration[] = [
   {
@@ -222,6 +223,14 @@ CREATE TABLE context_transfers(
 ) STRICT;
 CREATE INDEX context_transfers_target ON context_transfers(target_thread_id, status);
 CREATE INDEX context_transfers_source ON context_transfers(source_thread_id);
+`
+  },
+  {
+    version: 6,
+    sql: `
+-- The child's workspace policy and role (SPEC 14.2); NULL for delegations made before version 6.
+ALTER TABLE delegations ADD COLUMN workspace TEXT CHECK(workspace IN ('isolated','shared'));
+ALTER TABLE delegations ADD COLUMN role TEXT;
 `
   }
 ]

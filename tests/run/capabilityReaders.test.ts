@@ -19,7 +19,6 @@ const CAPABILITY_KEYS = Object.keys({
   events: true,
   containment: true,
   historyInjection: true,
-  terminalQuality: true,
   mcp: true
 } satisfies Record<keyof ProviderCapabilities, true>) as Array<keyof ProviderCapabilities>
 
