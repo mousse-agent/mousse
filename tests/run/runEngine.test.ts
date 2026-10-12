@@ -243,6 +243,47 @@ describe('RunEngine', () => {
     expect(codeOf(() => engine.markRunning(sent.runId))).toBe('stale_write')
   })
 
+  it('records the provider ref on the active attempt without bumping the run epoch', async () => {
+    const { store, engine, events } = open()
+    const sent = await send(engine, 't1', 'req-1')
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    expect(codeOf(() => engine.recordProviderRef(sent.runId, { provider: 'openai' }))).toBe(
+      'bad_request'
+    )
+    engine.markStarting(sent.runId)
+    const running = engine.markRunning(sent.runId)
+    const attempt = engine.recordProviderRef(sent.runId, { provider: 'openai', model: 'gpt' })
+    expect(attempt).toMatchObject({ status: 'running', providerRef: { provider: 'openai', model: 'gpt' } })
+    expect(store.getAttempt(running.activeAttemptId!)?.providerRef).toEqual({
+      provider: 'openai',
+      model: 'gpt'
+    })
+    expect(store.getRun(sent.runId)?.epoch).toBe(running.epoch)
+    expect(events.at(-1)?.type).toBe('attempt.status')
+    // Later marks still CAS against the same epoch.
+    expect(engine.markFinalizing(sent.runId).status).toBe('finalizing')
+    engine.markTerminal(sent.runId, 'completed')
+    expect(codeOf(() => engine.recordProviderRef(sent.runId, { provider: 'openai' }))).toBe(
+      'bad_request'
+    )
+  })
+
+  it('refuses a provider ref when another writer moved the run', async () => {
+    const { store, engine } = open()
+    const sent = await send(engine, 't1', 'req-1')
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    engine.markStarting(sent.runId)
+    const running = engine.markRunning(sent.runId)
+    store.casRunOutcome({
+      runId: sent.runId,
+      expectedEpoch: running.epoch,
+      outcomePatch: { error: 'someone else' }
+    })
+    expect(codeOf(() => engine.recordProviderRef(sent.runId, { provider: 'openai' }))).toBe(
+      'stale_write'
+    )
+  })
+
   it('interrupts active runs on boot and leaves queued runs alone', async () => {
     const { engine } = open()
     const a = await send(engine, 't1', 'req-a')

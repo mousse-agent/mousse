@@ -10,6 +10,8 @@ import { ToolInvocations } from './ToolInvocations'
 import {
   TERMINAL_RUN_STATUSES,
   leaseOwner,
+  type AttemptRecord,
+  type ProviderRef,
   type ReceiptRecord,
   type RunOutcome,
   type RunRecord,
@@ -161,6 +163,30 @@ export class RunEngine extends EventEmitter {
     return this.mark(runId, false, (run, expectedEpoch) =>
       this.writeTerminal(run, expectedEpoch, status, outcome)
     )
+  }
+
+  /**
+   * Records the provider session reference on the run's active attempt (SPEC §13.1). Not a run
+   * status write: the run epoch is checked against the one this engine last wrote, never bumped,
+   * and the attempt keeps its status.
+   */
+  recordProviderRef(runId: string, ref: ProviderRef): AttemptRecord {
+    return this.store.db.transaction(() => {
+      const run = this.store.getRun(runId)
+      if (!run) fail('bad_request', `Unknown run ${runId}.`)
+      if (TERMINAL_RUN_STATUSES.has(run.status))
+        fail('bad_request', `Run ${runId} is ${run.status}; its attempt is closed.`)
+      const expectedEpoch = this.epochs.get(runId) ?? run.epoch
+      if (run.epoch !== expectedEpoch)
+        fail('stale_write', `Run ${runId} is at epoch ${run.epoch}, not ${expectedEpoch}.`)
+      const attempt = run.activeAttemptId ? this.store.getAttempt(run.activeAttemptId) : null
+      if (!attempt) fail('bad_request', `Run ${runId} has no active attempt.`)
+      return this.store.setAttemptStatus({
+        attemptId: attempt.attemptId,
+        status: attempt.status,
+        providerRef: ref
+      })
+    })
   }
 
   /**

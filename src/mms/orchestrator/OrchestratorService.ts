@@ -45,6 +45,10 @@ import { RunStoreError } from '../run/db/RunStoreError'
 import type { EffectExecutor, EffectWorker } from '../run/EffectWorker'
 import { stableStringify } from '../run/json'
 import { formatRestartNote } from '../run/restartNote'
+import { AdapterRegistry } from '../run/adapters/AdapterRegistry'
+import { PiLoopAdapter } from '../run/adapters/pi/PiLoopAdapter'
+import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../run/adapters/ProviderAdapter'
+import { isContextOverflowError, retryContextOverflowOnce } from '../run/adapters/shared/retryContextOverflow'
 import {
   TERMINAL_RUN_STATUSES,
   type EffectKind,
@@ -503,24 +507,8 @@ const namedContextErrors = createErrorProvider({
   agent_context_model_changed: { category: 'conflict', retryable: false, message: 'Saved native context uses a different provider or model. Request fresh context explicitly.' }
 })
 
-export function isContextOverflowError(error: unknown): boolean {
-  if (error && typeof error === 'object' && 'code' in error) return error.code === 'provider_context_overflow'
-  const message = error instanceof Error ? error.message : String(error)
-  return /context(?:_|\s|-)*(?:length|window|limit)|too many tokens|maximum context/i.test(message)
-}
-
-export async function retryContextOverflowOnce<T>(
-  run: () => Promise<T>,
-  compact: () => boolean,
-  canRetry: () => boolean = () => true
-): Promise<T> {
-  try {
-    return await run()
-  } catch (error) {
-    if (!canRetry() || !isContextOverflowError(error) || !compact()) throw error
-    return run()
-  }
-}
+// Owned by the provider adapters (SPEC §13.4); re-exported for existing callers.
+export { isContextOverflowError, retryContextOverflowOnce }
 
 export interface OrchestratorSendOptions {
   threadId?: string
@@ -716,6 +704,10 @@ export class OrchestratorService extends EventEmitter {
     })
   }
   private llm: LlmClient
+  /** Provider adapters for `executeTurn` (SPEC §13). The pi loop reads `this.llm` per turn. */
+  private adapters = new AdapterRegistry().register(new PiLoopAdapter(() => this.llm))
+  /** Test seam: replaces the provider adapters. */
+  setAdapterRegistry(registry: AdapterRegistry): void { this.adapters = registry }
   private readonly questions: UserQuestionService
   private readonly modeRegistry: ModeRegistry
   /** Bound GUI/CLI session (active thread). Concurrent turns use ALS-scoped sessions. */
@@ -3733,93 +3725,107 @@ export class OrchestratorService extends EventEmitter {
           onCompaction('unchanged')
         }
       }
-      const result = await (async () => {
-          const run = () => this.llm.chat(
-            getActiveMessages(this.nativeContext),
-            (event) => {
-              if (event.kind !== 'skill_loaded') conversationToolsUsed = true
-              this.handleStreamingToolEvent(event)
-            },
-            {
-              mode,
-              appletInstructions: this.appletStore ? this.appletCatalogue() : undefined,
-              onPublishApplet: this.appletStore ? (value) => {
-                if (stagedApplets.length >= 3) throw new Error('Only three applets may be published per response.')
-                stagedApplets.push(validateAppletSubmission(value))
-                return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
-              } : undefined,
-              llmProvider: modelOverride?.llmProvider,
-              model: modelOverride?.model,
-              projectPath: session.projectCwd ?? undefined,
-              threadId: session.threadId,
-              browser: browserExecution,
-              delegation: namedParent ? this.namedDelegation(session.threadId, namedParent) : undefined,
-              toolAccess: turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
-              signal: turn.abort.signal,
-              onRetry: (attempt) => this.addSystemMessage(`Retrying provider request (${attempt}/5)…`),
-              onProviderProgress: () => { providerProgress = true },
-              drainSteer: () => {
-                const parts = [
-                  opts?.externalDrainSteer?.()?.trim(),
-                  this.drainSteerForSession(session, turn)?.trim()
-                ].filter((part): part is string => Boolean(part))
-                return parts.length > 0 ? parts.join('\n') : undefined
-              },
-              contextSummary: getCompactionSummary(this.nativeContext),
-              onNativeMessages: (nativeMessages, checkpoint) => {
-                // A completed-turn measurement becomes stale as soon as the live loop
-                // appends or compacts native history. Estimate until the final provider
-                // response supplies a new authoritative prompt measurement.
-                this.clearLastTurnUsage()
-                this.commitActiveNativeMessages(nativeMessages, checkpoint)
-                if (session.drainedExternalSteerIds.size > 0) {
-                  this.nativeContext = {
-                    ...this.nativeContext,
-                    acceptedSteerItemIds: Array.from(new Set([
-                      ...(this.nativeContext.acceptedSteerItemIds ?? []),
-                      ...session.drainedExternalSteerIds
-                    ]))
-                  }
-                }
-                this.persist(true)
-                this.acknowledgeDrainedSteers(session)
-                if (session.executionLease) {
-                  heartbeatExecutionLease(session.executionLease)
-                }
-                this.heartbeatRun(engineRunId)
-              },
-              toolLedger: this.toolLedgerFor(engineRunId),
-              onCompaction,
-              toolLoopSafety: contextSettings.compactionEnabled
-                ? {
-                    compactionThresholdTokens: configuredThreshold,
-                    compactNativeMessages: (nativeMessages) =>
-                      compactMessagesAtSafeBoundary(nativeMessages, undefined, this.nativeContext.compaction)
-                  }
-                : undefined
-            },
-            (event) => {
-              this.handleStreamingThinkingEvent(event)
-            },
-            (event) => {
-              this.handleStreamingTextEvent(event)
+      const adapter = this.adapters.get(selectedModel.llmProvider)
+      const turnInput: TurnInput = {
+        runId: engineRunId ?? turnId,
+        attemptId: (engineRunId ? this.runEngine?.getRun(engineRunId)?.activeAttemptId : undefined) ?? turnId,
+        threadId: session.threadId,
+        cwd: session.projectCwd ?? null,
+        model: selectedModel.model,
+        llmProvider: selectedModel.llmProvider,
+        modelPinned: Boolean(modelOverride),
+        mode,
+        messages: getActiveMessages(this.nativeContext),
+        contextSummary: getCompactionSummary(this.nativeContext),
+        images,
+        appletInstructions: this.appletStore ? this.appletCatalogue() : undefined,
+        signal: turn.abort.signal
+      }
+      const turnSink: TurnSink = {
+        text: (event) => this.handleStreamingTextEvent(event),
+        thinking: (event) => this.handleStreamingThinkingEvent(event),
+        tool: (event) => {
+          if (event.kind !== 'skill_loaded') conversationToolsUsed = true
+          this.handleStreamingToolEvent(event)
+        },
+        nativeMessages: (nativeMessages, checkpoint) => {
+          // A completed-turn measurement becomes stale as soon as the live loop
+          // appends or compacts native history. Estimate until the final provider
+          // response supplies a new authoritative prompt measurement.
+          this.clearLastTurnUsage()
+          this.commitActiveNativeMessages(nativeMessages, checkpoint)
+          if (session.drainedExternalSteerIds.size > 0) {
+            this.nativeContext = {
+              ...this.nativeContext,
+              acceptedSteerItemIds: Array.from(new Set([
+                ...(this.nativeContext.acceptedSteerItemIds ?? []),
+                ...session.drainedExternalSteerIds
+              ]))
             }
-          )
-          return retryContextOverflowOnce(run, () => {
-            if (!contextSettings.compactionEnabled) return false
+          }
+          this.persist(true)
+          this.acknowledgeDrainedSteers(session)
+          if (session.executionLease) {
+            heartbeatExecutionLease(session.executionLease)
+          }
+        },
+        compaction: onCompaction,
+        retry: (attempt) => this.addSystemMessage(`Retrying provider request (${attempt}/5)…`),
+        progress: () => { providerProgress = true },
+        // LlmClient records pi usage itself; recordLastTurnUsage consumes the TurnResult below.
+        usage: () => {},
+        providerRef: (ref) => this.markRun(engineRunId, (engine, id) => { engine.recordProviderRef(id, ref) })
+      }
+      const turnControl: TurnControl = {
+        drainSteer: () => {
+          const parts = [
+            opts?.externalDrainSteer?.()?.trim(),
+            this.drainSteerForSession(session, turn)?.trim()
+          ].filter((part): part is string => Boolean(part))
+          return parts.length > 0 ? parts.join('\n') : undefined
+        },
+        heartbeat: () => this.heartbeatRun(engineRunId)
+      }
+      const adapterHost: AdapterHost = {
+        tools: {
+          onPublishApplet: this.appletStore ? (value) => {
+            if (stagedApplets.length >= 3) throw new Error('Only three applets may be published per response.')
+            stagedApplets.push(validateAppletSubmission(value))
+            return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
+          } : undefined,
+          browser: browserExecution,
+          delegation: namedParent ? this.namedDelegation(session.threadId, namedParent) : undefined,
+          toolAccess: turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
+          toolLedger: this.toolLedgerFor(engineRunId)
+        },
+        context: {
+          toolLoopSafety: contextSettings.compactionEnabled
+            ? {
+                compactionThresholdTokens: configuredThreshold,
+                compactNativeMessages: (nativeMessages) =>
+                  compactMessagesAtSafeBoundary(nativeMessages, undefined, this.nativeContext.compaction)
+              }
+            : undefined,
+          recoverOverflow: () => {
+            if (conversationToolsUsed || providerProgress || !contextSettings.compactionEnabled) return null
             onCompaction('start')
             const compacted = compactNativeContext(this.nativeContext)
             if (compacted === this.nativeContext) {
               onCompaction('unchanged')
-              return false
+              return null
             }
             this.nativeContext = compacted
             this.clearLastTurnUsage()
             this.persist(true)
             onCompaction('complete')
-            return true
-          }, () => !conversationToolsUsed && !providerProgress)
-      })()
+            return {
+              messages: getActiveMessages(this.nativeContext),
+              contextSummary: getCompactionSummary(this.nativeContext)
+            }
+          }
+        }
+      }
+      const result = await adapter.startTurn(turnInput, turnSink, turnControl, adapterHost)
       assistantText = result.text
       aborted = Boolean(result.aborted)
       responseMetadata = {
@@ -3834,10 +3840,10 @@ export class OrchestratorService extends EventEmitter {
         input: result.usage.input,
         cacheRead: result.usage.cacheRead,
         cacheWrite: result.usage.cacheWrite,
-        signature: result.contextInputs.signature,
+        signature: result.contextSignature,
         measuredAtHistoryLength: Math.max(0, getActiveMessages(this.nativeContext).length - 1),
         contextRevision: this.nativeContext.revision ?? 0,
-        modelKey: result.contextInputs.modelKey
+        modelKey: result.contextModelKey
       })
       }
     } catch (err) {
