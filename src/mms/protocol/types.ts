@@ -337,6 +337,8 @@ export const PROTOCOL_METHODS = [
   'providers.loginApiKey',
   'providers.loginRespond',
   'providers.loginCancel',
+  'providers.claudeStatus',
+  'providers.claudeSetLoginPolicy',
   'webTools.getCredentialStatus',
   'webTools.setApiKey',
   'webTools.clearApiKey',

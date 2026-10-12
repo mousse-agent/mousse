@@ -22,6 +22,26 @@ export interface ProviderLoginOption {
   guidedLogin?: boolean
 }
 
+/**
+ * Which Claude Code sign-in a profile's Claude Subscription provider uses: `cli` reuses the
+ * terminal `claude` login (default config dir, or an inherited `CLAUDE_CONFIG_DIR`); `isolated`
+ * keeps a profile-private config dir with its own sign-in.
+ */
+export type ClaudeLoginPolicy = 'cli' | 'isolated'
+
+export interface ClaudeSubscriptionStatus {
+  /** Null while unresolved: the first-run check could not tell which sign-in to use. */
+  loginPolicy: ClaudeLoginPolicy | null
+  /** The default profile is the only one that reuses the terminal sign-in without opting in. */
+  defaultProfile: boolean
+  /** A profile-private sign-in was completed before (kept when the policy is `isolated`). */
+  isolatedSignIn: boolean
+  state: 'connected' | 'missing_binary' | 'signed_out' | 'disconnected' | 'error'
+  message?: string
+  /** ISO time of the last live `claude auth status` check (terminal sign-in only). */
+  checkedAt?: string
+}
+
 export type ProviderLoginEvent =
   | {
       sessionId: string
