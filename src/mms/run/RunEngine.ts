@@ -1,11 +1,14 @@
 import { EventEmitter } from 'node:events'
+import { DaemonEpoch } from './DaemonEpoch'
 import { fail, RunStoreError } from './db/RunStoreError'
-import { stableStringify } from './json'
+import { EffectOutbox } from './EffectOutbox'
 import type { RunStore } from './RunStore'
+import { writeTerminalRun, type RunTerminalStatus } from './terminal'
 import { ThreadMutex } from './ThreadMutex'
+import { ToolInvocations } from './ToolInvocations'
 import {
   TERMINAL_RUN_STATUSES,
-  type AttemptStatus,
+  leaseOwner,
   type ReceiptRecord,
   type RunOutcome,
   type RunRecord,
@@ -36,16 +39,20 @@ export type CommandResult =
       replayed?: boolean
     }
 
-export type RunTerminalStatus = 'completed' | 'interrupted' | 'failed' | 'cancelled'
+export type { RunTerminalStatus } from './terminal'
+
+export interface BootReport {
+  interrupted: string[]
+  /** Runs cut off by a crash while a non-idempotent tool was `started` (SPEC §12.5 step 4). */
+  uncertain: string[]
+  /** The daemon epoch this boot opened. */
+  epoch: number
+}
 
 const ACTIVE_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
   'starting',
   'running',
   'finalizing'
-])
-const LIVE_ATTEMPT_STATUSES: ReadonlySet<AttemptStatus> = new Set<AttemptStatus>([
-  'pending',
-  'running'
 ])
 
 /**
@@ -64,12 +71,40 @@ export class RunEngine extends EventEmitter {
   private readonly now: () => string
   /** Epoch this engine last wrote per non-terminal run; mark hooks CAS against it. */
   private readonly epochs = new Map<string, number>()
+  readonly outbox: EffectOutbox
+  readonly tools: ToolInvocations
+  readonly daemonEpochs: DaemonEpoch
+  private readonly pid: number
+  private daemonEpoch: number | null = null
 
-  constructor(opts: { store: RunStore; mutex?: ThreadMutex; now?: () => string }) {
+  constructor(opts: {
+    store: RunStore
+    mutex?: ThreadMutex
+    now?: () => string
+    outbox?: EffectOutbox
+    tools?: ToolInvocations
+    /** Process id recorded in `daemon_epochs` and lease owners. Defaults to `process.pid`. */
+    pid?: number
+  }) {
     super()
     this.store = opts.store
     this.mutex = opts.mutex ?? new ThreadMutex()
     this.now = opts.now ?? (() => new Date(opts.store.db.clock()).toISOString())
+    this.outbox = opts.outbox ?? new EffectOutbox(opts.store, { now: this.now })
+    this.tools = opts.tools ?? new ToolInvocations(opts.store)
+    this.daemonEpochs = new DaemonEpoch(opts.store)
+    this.pid = opts.pid ?? process.pid
+  }
+
+  /** The epoch opened by `reconcileOnBoot`, or null before boot. */
+  get epoch(): number | null {
+    return this.daemonEpoch
+  }
+
+  /** Effect lease owner for this daemon, `"<epoch>:<pid>"`. Requires `reconcileOnBoot` first. */
+  get leaseOwner(): string {
+    if (this.daemonEpoch === null) fail('internal', 'Run engine has not booted.')
+    return leaseOwner(this.daemonEpoch, this.pid)
   }
 
   dispatch(command: RunCommand, opts?: { expectedSequence?: number }): Promise<CommandResult> {
@@ -126,22 +161,94 @@ export class RunEngine extends EventEmitter {
   }
 
   /**
-   * Phase 1 boot recovery (SPEC §5): the legacy turn loop died with the previous daemon, so every
-   * active run becomes `interrupted` by `daemon_restart`. Queued runs are untouched.
+   * Boot recovery (SPEC §12.5 steps 1-5), one transaction:
+   * 1. open a daemon epoch and learn whether the previous daemon crashed;
+   * 2. cancel process-bound effects in `pending|running` (`daemon_restart`);
+   * 3. re-queue running replay-safe effects;
+   * 4. every active run becomes `uncertain` when the previous daemon crashed while one of the
+   *    run's non-idempotent tools was `started`, otherwise `interrupted` by `daemon_restart`;
+   * 5. one `restart.note` event per affected thread. Nothing auto-resumes; queued runs are untouched.
+   * Step 6 (heartbeat and reconciler) belongs to the profile that owns the worker (Phase 2b).
    */
-  reconcileOnBoot(): { interrupted: string[] } {
+  reconcileOnBoot(): BootReport {
     this.epochs.clear()
-    const active = this.store.listNonTerminalRuns().filter((run) => ACTIVE_STATUSES.has(run.status))
-    if (!active.length) return { interrupted: [] }
-    const seqBefore = new Map<string, number>()
-    for (const run of active)
-      if (!seqBefore.has(run.threadId)) seqBefore.set(run.threadId, this.store.maxSeq(run.threadId))
-    this.store.db.transaction(() => {
-      for (const run of active)
-        this.writeTerminal(run, run.epoch, 'interrupted', { interruptedBy: 'daemon_restart' })
+    const seqBefore = this.globalSeq()
+    const report = this.store.db.transaction((): BootReport => {
+      const now = this.now()
+      const { epoch, previousCrashed } = this.daemonEpochs.begin(this.pid, now)
+      const active = this.store
+        .listNonTerminalRuns()
+        .filter((run) => ACTIVE_STATUSES.has(run.status))
+      this.outbox.cancelProcessBound('daemon_restart', now)
+      this.outbox.requeueRunningReplaySafe(now)
+      const interrupted: string[] = []
+      const uncertain: string[] = []
+      const notes = new Map<
+        string,
+        {
+          runIds: string[]
+          uncertainRunIds: string[]
+          cutOffTools: Array<{
+            runId: string
+            invocationId: string
+            tool: string
+            idempotent: boolean
+          }>
+        }
+      >()
+      for (const run of active) {
+        const started = this.tools.listStarted(run.runId)
+        const unsafe = previousCrashed ? started.filter((tool) => !tool.idempotent) : []
+        if (unsafe.length) {
+          const names = [...new Set(unsafe.map((tool) => tool.tool))]
+          this.writeTerminal(run, run.epoch, 'uncertain', {
+            uncertainReason: 'non_idempotent_tool_in_flight',
+            error: `Non-idempotent tools were in flight when the daemon stopped: ${names.join(', ')}.`
+          })
+          uncertain.push(run.runId)
+        } else {
+          this.writeTerminal(run, run.epoch, 'interrupted', { interruptedBy: 'daemon_restart' })
+          interrupted.push(run.runId)
+        }
+        const note = notes.get(run.threadId) ?? { runIds: [], uncertainRunIds: [], cutOffTools: [] }
+        note.runIds.push(run.runId)
+        if (unsafe.length) note.uncertainRunIds.push(run.runId)
+        for (const tool of started)
+          note.cutOffTools.push({
+            runId: tool.runId,
+            invocationId: tool.invocationId,
+            tool: tool.tool,
+            idempotent: tool.idempotent
+          })
+        notes.set(run.threadId, note)
+      }
+      for (const [threadId, note] of notes)
+        this.store.appendEvent({ threadId, type: 'restart.note', payload: { ...note, epoch } })
+      return { interrupted, uncertain, epoch }
     })
-    for (const [threadId, seq] of seqBefore) this.emitEvents(threadId, seq)
-    return { interrupted: active.map((run) => run.runId) }
+    this.daemonEpoch = report.epoch
+    const threads = this.store.db
+      .statement('SELECT DISTINCT thread_id FROM thread_events WHERE seq > ? ORDER BY thread_id')
+      .all(seqBefore)
+    for (const row of threads) this.emitEvents(String(row.thread_id), seqBefore)
+    return report
+  }
+
+  /** Liveness touch for an executing run (SPEC §12.4 rule 2). */
+  heartbeat(runId: string): boolean {
+    return this.store.touchHeartbeat(runId, this.now())
+  }
+
+  /** Daemon epoch heartbeat (SPEC §12.5 step 6; the timer is owned by the profile). */
+  heartbeatDaemon(): boolean {
+    return this.daemonEpoch !== null && this.daemonEpochs.heartbeat(this.daemonEpoch, this.now())
+  }
+
+  /** Clean shutdown: closes this daemon's epoch so the next boot does not treat it as a crash. */
+  shutdown(): void {
+    if (this.daemonEpoch === null) return
+    this.daemonEpochs.end(this.daemonEpoch, this.now())
+    this.daemonEpoch = null
   }
 
   getRun(runId: string): RunRecord | null {
@@ -285,21 +392,14 @@ export class RunEngine extends EventEmitter {
     status: RunTerminalStatus,
     outcome?: RunOutcome
   ): RunRecord {
-    const completedAt = this.now()
-    const merged =
-      outcome || run.outcome
-        ? (JSON.parse(stableStringify({ ...(run.outcome ?? {}), ...(outcome ?? {}) })) as RunOutcome)
-        : undefined
-    const next = this.store.casRunStatus({
-      runId: run.runId,
-      expectedEpoch,
-      status,
-      patch: { completedAt, ...(merged ? { outcome: merged } : {}) }
-    })
-    const attempt = next.activeAttemptId ? this.store.getAttempt(next.activeAttemptId) : null
-    if (attempt && LIVE_ATTEMPT_STATUSES.has(attempt.status))
-      this.store.setAttemptStatus({ attemptId: attempt.attemptId, status, completedAt })
-    return next
+    return writeTerminalRun(this.store, run, expectedEpoch, status, outcome, this.now())
+  }
+
+  private globalSeq(): number {
+    const row = this.store.db
+      .statement('SELECT COALESCE(MAX(seq), 0) AS max FROM thread_events')
+      .get()!
+    return Number(row.max)
   }
 
   private emitEvents(threadId: string, afterSeq: number): void {

@@ -61,7 +61,8 @@ export class RunStore {
         requestedAt: input.requestedAt ?? this.now(),
         startedAt: null,
         completedAt: null,
-        outcome: null
+        outcome: null,
+        heartbeatAt: null
       }
       this.db
         .statement(
@@ -188,6 +189,21 @@ export class RunStore {
         payload: next
       })
       return next
+    })
+  }
+
+  /**
+   * Records that the executing turn is alive (SPEC §12.4 rule 2). A liveness touch, not a status
+   * write: no epoch bump and no event. Returns false for an unknown or terminal run.
+   */
+  touchHeartbeat(runId: string, now: string): boolean {
+    return this.db.transaction(() => {
+      const result = this.db
+        .statement(
+          `UPDATE runs SET heartbeat_at = ? WHERE run_id = ? AND status NOT IN (${TERMINAL_PLACEHOLDERS})`
+        )
+        .run(now, runId, ...TERMINAL_LIST)
+      return Number(result.changes) === 1
     })
   }
 
@@ -434,7 +450,8 @@ function toRun(row: Row): RunRecord {
     requestedAt: String(row.requested_at),
     startedAt: str(row.started_at),
     completedAt: str(row.completed_at),
-    outcome: parseOrNull<RunOutcome>(row.outcome)
+    outcome: parseOrNull<RunOutcome>(row.outcome),
+    heartbeatAt: str(row.heartbeat_at)
   }
 }
 

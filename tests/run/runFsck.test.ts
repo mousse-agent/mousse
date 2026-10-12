@@ -3,8 +3,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
+import { DaemonEpoch } from '../../src/mms/run/DaemonEpoch'
+import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
 import { RunFsck } from '../../src/mms/run/fsck/RunFsck'
 import { RunStore } from '../../src/mms/run/RunStore'
+import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 
 describe('RunFsck', () => {
   let profileHome: string | undefined
@@ -127,5 +130,68 @@ describe('RunFsck', () => {
     const findings = check()
     expect(findings.map((finding) => finding.code)).toEqual(['multiple_active_runs'])
     expect(findings[0].details).toEqual({ threadId: 't', runIds: [a.runId, b.runId] })
+  })
+
+  // Phase 2 checks (SPEC §12.7). Times far in the past or future keep them independent of the
+  // wall clock that `RunFsck.check()` uses.
+  const PAST = '2000-01-01T00:00:00.000Z'
+  const FUTURE = '2999-01-01T00:00:00.000Z'
+
+  it('effect_lease_expired_unclaimed: running effect whose lease expired', () => {
+    const store = seed()
+    const { epoch } = new DaemonEpoch(store).begin(1, PAST)
+    const outbox = new EffectOutbox(store)
+    const effect = outbox.enqueue({ threadId: 't', kind: 'title.generate', availableAt: PAST })
+    outbox.claimNext(`${epoch}:1`, PAST)
+    const findings = check()
+    expect(findings.map((finding) => finding.code)).toEqual(['effect_lease_expired_unclaimed'])
+    expect(findings[0].details).toMatchObject({ effectId: effect.effectId, leaseOwner: '1:1' })
+  })
+
+  it('effect_running_for_dead_epoch: running effect leased by an older daemon epoch', () => {
+    const store = seed()
+    const epochs = new DaemonEpoch(store)
+    epochs.begin(1, FUTURE)
+    epochs.begin(2, FUTURE)
+    const outbox = new EffectOutbox(store)
+    const dead = outbox.enqueue({ threadId: 't', kind: 'title.generate', availableAt: FUTURE })
+    outbox.enqueue({ threadId: 'u', kind: 'title.generate', availableAt: FUTURE })
+    outbox.claimNext('1:1', FUTURE)
+    outbox.claimNext('2:2', FUTURE)
+    const findings = check()
+    expect(findings.map((finding) => finding.code)).toEqual(['effect_running_for_dead_epoch'])
+    expect(findings[0].details).toMatchObject({ effectId: dead.effectId, currentEpoch: 2 })
+  })
+
+  it('run_active_without_effect: effect-driven active run with no live effect (warning)', () => {
+    const store = seed()
+    const outbox = new EffectOutbox(store)
+    const driven = store.createRun({ threadId: 't', source: 'gui' })
+    store.casRunStatus({ runId: driven.runId, expectedEpoch: 0, status: 'running' })
+    const turn = outbox.enqueue({ threadId: 't', runId: driven.runId, kind: 'turn.start' })
+    outbox.cancel(turn.effectId, PAST, 'gone')
+    // A legacy-driven active run (never had an effect) is not reported in Phase 2a.
+    const legacy = store.createRun({ threadId: 'u', source: 'gui' })
+    store.casRunStatus({ runId: legacy.runId, expectedEpoch: 0, status: 'running' })
+    const findings = check()
+    expect(findings.map((finding) => [finding.code, finding.severity])).toEqual([
+      ['run_active_without_effect', 'warning']
+    ])
+    expect(findings[0].details).toEqual({ runId: driven.runId, threadId: 't', status: 'running' })
+  })
+
+  it('tool_started_on_terminal_run: started tool invocation outlived its run', () => {
+    const store = seed()
+    const run = store.createRun({ threadId: 't', source: 'gui' })
+    const attempt = store.createAttempt({ runId: run.runId, reason: 'initial' })
+    const tools = new ToolInvocations(store)
+    tools.start({ invocationId: 'call-1', runId: run.runId, attemptId: attempt.attemptId, tool: 'bash', argsDigest: 'd', now: PAST })
+    tools.start({ invocationId: 'call-2', runId: run.runId, attemptId: attempt.attemptId, tool: 'bash', argsDigest: 'd', now: PAST })
+    tools.commit('call-2', PAST)
+    store.setAttemptStatus({ attemptId: attempt.attemptId, status: 'interrupted' })
+    store.casRunStatus({ runId: run.runId, expectedEpoch: 0, status: 'interrupted' })
+    const findings = check()
+    expect(findings.map((finding) => finding.code)).toEqual(['tool_started_on_terminal_run'])
+    expect(findings[0].details).toMatchObject({ invocationId: 'call-1', runStatus: 'interrupted' })
   })
 })

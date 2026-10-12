@@ -1,6 +1,9 @@
 import type { Migration } from './ProfileDatabase'
 
-/** Run Engine schema. Version 1 is the Phase 1 data model in docs/run-engine/SPEC.md §3. */
+/**
+ * Run Engine schema. Version 1 is the Phase 1 data model in docs/run-engine/SPEC.md §3; version 2
+ * is the Phase 2 outbox, daemon epochs and tool ledger (§12.1) plus `runs.heartbeat_at`.
+ */
 export const RUN_MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -59,6 +62,56 @@ CREATE TABLE thread_events(
   created_at    TEXT NOT NULL
 ) STRICT;
 CREATE INDEX thread_events_thread_seq ON thread_events(thread_id, seq);
+`
+  },
+  {
+    version: 2,
+    sql: `
+CREATE TABLE effects(
+  effect_id     TEXT PRIMARY KEY,                 -- effect:<clientRequestId|runId>:<kind>:<n>, deterministic
+  thread_id     TEXT NOT NULL,
+  run_id        TEXT,
+  kind          TEXT NOT NULL,                    -- see SPEC 12.2
+  class         TEXT NOT NULL CHECK(class IN ('process_bound','replay_safe')),
+  status        TEXT NOT NULL CHECK(status IN ('pending','running','succeeded','failed','cancelled')),
+  payload       TEXT NOT NULL,
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  max_attempts  INTEGER NOT NULL DEFAULT 5,
+  timeout_ms    INTEGER NOT NULL,                 -- per-effect execution deadline; enforced
+  available_at  TEXT NOT NULL,
+  lease_owner   TEXT,                             -- "<daemonEpoch>:<pid>"
+  lease_expires_at TEXT,                          -- checked on claim AND by the reconciler
+  last_error    TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  completed_at  TEXT
+) STRICT;
+CREATE INDEX effects_claim ON effects(status, available_at, thread_id);
+CREATE INDEX effects_thread ON effects(thread_id, status);
+
+CREATE TABLE daemon_epochs(
+  epoch         INTEGER PRIMARY KEY AUTOINCREMENT,
+  pid           INTEGER NOT NULL,
+  started_at    TEXT NOT NULL,
+  heartbeat_at  TEXT NOT NULL,
+  ended_at      TEXT                               -- set on clean shutdown; NULL after a crash
+) STRICT;
+
+CREATE TABLE tool_invocations(
+  invocation_id TEXT PRIMARY KEY,
+  run_id        TEXT NOT NULL,
+  attempt_id    TEXT NOT NULL,
+  tool          TEXT NOT NULL,
+  idempotent    INTEGER NOT NULL,                 -- 0/1 from the tool registry
+  status        TEXT NOT NULL CHECK(status IN ('started','committed','failed','outcome_unknown')),
+  args_digest   TEXT NOT NULL,
+  started_at    TEXT NOT NULL,
+  completed_at  TEXT
+) STRICT;
+CREATE INDEX tool_invocations_run ON tool_invocations(run_id, status);
+
+-- Liveness for the reconciler (SPEC 12.4 rule 2). Not a status write: no epoch bump, no event.
+ALTER TABLE runs ADD COLUMN heartbeat_at TEXT;
 `
   }
 ]

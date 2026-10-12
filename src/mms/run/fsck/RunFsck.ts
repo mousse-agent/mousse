@@ -4,8 +4,11 @@
  * receipts for unknown runs and more than one active run per thread. See
  * docs/run-engine/SPEC.md §7.
  *
- * Not checked in Phase 1: non-terminal runs from an earlier daemon epoch (no daemon epoch is
- * recorded yet) and in-memory `turnStates` versus `runs` (needs a live daemon).
+ * Phase 2 (schema version 2, SPEC §12.7) adds effect lease, dead-epoch, effect-less active run and
+ * stranded tool-invocation checks.
+ *
+ * Not checked: non-terminal runs from an earlier daemon epoch (runs do not record their epoch)
+ * and in-memory `turnStates` versus `runs` (needs a live daemon).
  */
 import { existsSync, realpathSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -53,12 +56,21 @@ export class RunFsck {
   }
 
   static checkDatabase(db: ProfileDatabase): FsckFinding[] {
-    return [
+    const findings = [
       ...attemptStatusMismatches(db),
       ...danglingActiveAttempts(db),
       ...eventSequenceFindings(db),
       ...receiptsForUnknownRuns(db),
       ...multipleActiveRuns(db)
+    ]
+    if (db.userVersion() < 2) return findings
+    const now = new Date(db.clock()).toISOString()
+    return [
+      ...findings,
+      ...expiredEffectLeases(db, now),
+      ...effectsForDeadEpochs(db),
+      ...activeRunsWithoutEffect(db),
+      ...toolsStartedOnTerminalRuns(db)
     ]
   }
 }
@@ -208,5 +220,104 @@ function multipleActiveRuns(db: ProfileDatabase): FsckFinding[] {
       severity: 'error' as const,
       message: `Thread ${String(row.thread_id)} has ${Number(row.count)} active runs.`,
       details: { threadId: row.thread_id, runIds: String(row.run_ids).split(' ') }
+    }))
+}
+
+/** A running effect whose lease expired and that the reconciler has not reclaimed yet. */
+function expiredEffectLeases(db: ProfileDatabase, now: string): FsckFinding[] {
+  return db
+    .statement(
+      `SELECT effect_id, thread_id, run_id, kind, lease_owner, lease_expires_at FROM effects
+       WHERE status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+       ORDER BY rowid`
+    )
+    .all(now)
+    .map((row: Row) => ({
+      code: 'effect_lease_expired_unclaimed',
+      severity: 'error' as const,
+      message: `Effect ${String(row.effect_id)} is running on a lease that expired at ${String(row.lease_expires_at)}.`,
+      details: {
+        effectId: row.effect_id,
+        threadId: row.thread_id,
+        runId: row.run_id ?? null,
+        kind: row.kind,
+        leaseOwner: row.lease_owner ?? null,
+        leaseExpiresAt: row.lease_expires_at ?? null
+      }
+    }))
+}
+
+/** A running effect leased by a daemon epoch other than the newest one. */
+function effectsForDeadEpochs(db: ProfileDatabase): FsckFinding[] {
+  const current = db.statement('SELECT MAX(epoch) AS epoch FROM daemon_epochs').get()?.epoch
+  const currentEpoch = current === null || current === undefined ? null : Number(current)
+  return db
+    .statement(
+      `SELECT effect_id, thread_id, run_id, kind, lease_owner FROM effects
+       WHERE status = 'running' ORDER BY rowid`
+    )
+    .all()
+    .filter((row: Row) => {
+      const prefix = Number(String(row.lease_owner ?? '').split(':')[0])
+      return currentEpoch === null || !Number.isSafeInteger(prefix) || prefix !== currentEpoch
+    })
+    .map((row: Row) => ({
+      code: 'effect_running_for_dead_epoch',
+      severity: 'error' as const,
+      message: `Effect ${String(row.effect_id)} is running for lease owner ${String(row.lease_owner)}, not daemon epoch ${String(currentEpoch)}.`,
+      details: {
+        effectId: row.effect_id,
+        threadId: row.thread_id,
+        runId: row.run_id ?? null,
+        kind: row.kind,
+        leaseOwner: row.lease_owner ?? null,
+        currentEpoch
+      }
+    }))
+}
+
+/**
+ * An active run driven by effects (it has at least one) with no pending or running effect left.
+ * Runs that never had an effect are legacy-driven during Phase 2a and are not reported.
+ */
+function activeRunsWithoutEffect(db: ProfileDatabase): FsckFinding[] {
+  return db
+    .statement(
+      `SELECT r.run_id, r.thread_id, r.status FROM runs r
+       WHERE r.status IN (${ACTIVE_SQL})
+         AND EXISTS (SELECT 1 FROM effects e WHERE e.run_id = r.run_id)
+         AND NOT EXISTS (
+           SELECT 1 FROM effects e WHERE e.run_id = r.run_id AND e.status IN ('pending','running'))
+       ORDER BY r.run_id`
+    )
+    .all()
+    .map((row: Row) => ({
+      code: 'run_active_without_effect',
+      severity: 'warning' as const,
+      message: `Run ${String(row.run_id)} is ${String(row.status)} but has no pending or running effect.`,
+      details: { runId: row.run_id, threadId: row.thread_id, status: row.status }
+    }))
+}
+
+/** A tool invocation still `started` although its run is terminal (reconciler rule 6 pending). */
+function toolsStartedOnTerminalRuns(db: ProfileDatabase): FsckFinding[] {
+  return db
+    .statement(
+      `SELECT t.invocation_id, t.tool, t.run_id, r.status AS run_status FROM tool_invocations t
+       JOIN runs r ON r.run_id = t.run_id
+       WHERE t.status = 'started' AND r.status IN (${TERMINAL_SQL})
+       ORDER BY t.rowid`
+    )
+    .all()
+    .map((row: Row) => ({
+      code: 'tool_started_on_terminal_run',
+      severity: 'error' as const,
+      message: `Tool ${String(row.tool)} (${String(row.invocation_id)}) is still started but run ${String(row.run_id)} is ${String(row.run_status)}.`,
+      details: {
+        invocationId: row.invocation_id,
+        tool: row.tool,
+        runId: row.run_id,
+        runStatus: row.run_status
+      }
     }))
 }

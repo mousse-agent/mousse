@@ -259,7 +259,10 @@ describe('RunEngine', () => {
     const rebooted = new RunEngine({ store })
     const events: ThreadEvent[] = []
     rebooted.on('event', (event: ThreadEvent) => events.push(event))
-    expect(rebooted.reconcileOnBoot()).toEqual({ interrupted: [a.runId, c.runId] })
+    expect(rebooted.reconcileOnBoot()).toMatchObject({
+      interrupted: [a.runId, c.runId],
+      uncertain: []
+    })
     expect(store.getRun(a.runId)).toMatchObject({
       status: 'interrupted',
       outcome: { interruptedBy: 'daemon_restart' }
@@ -268,6 +271,6 @@ describe('RunEngine', () => {
     expect(store.getRun(c.runId)!.status).toBe('interrupted')
     expect(store.getRun(b.runId)!.status).toBe('queued')
     expect(events.filter((event) => event.type === 'run.status')).toHaveLength(2)
-    expect(rebooted.reconcileOnBoot()).toEqual({ interrupted: [] })
+    expect(rebooted.reconcileOnBoot()).toMatchObject({ interrupted: [], uncertain: [] })
   })
 })
