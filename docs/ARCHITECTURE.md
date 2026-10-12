@@ -101,6 +101,7 @@ Production `src/main/**` never constructs or owns MMS. GUI quit disconnects the 
 - [CONFIGURATION.md](./CONFIGURATION.md) — home dir and config files
 - [STARTUP.md](./STARTUP.md) — autostart install
 - [MMS_PLAN.md](./MMS_PLAN.md) — isolation plan status
+- [run-engine/SPEC.md](./run-engine/SPEC.md) — Run Engine specification
 
 ## Repository-coordinated thread workspaces
 

@@ -1,27 +1,56 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
+import { dispatchDelegationTool, parseActions, type DelegationToolHost } from '../src/mms/orchestrator/LlmClient'
 import {
-  buildSpawnAgentsFailureWake,
-  extractAssignmentInputFilePaths,
   filesOutsideDeclaration,
-  isRecoverableReadinessFailure,
-  isSpawnAgentsFailureLog,
-  resolveSpawnRepositoryPath,
   shouldFinalizeAgent
 } from '../src/mms/orchestrator/OrchestratorService'
 import { getToolCallDisplay } from '../src/shared/toolCallDisplay'
 
+/**
+ * Phase 4 (docs/run-engine/SPEC.md §14.5) retired `spawn_agents`: delegation is the
+ * `delegate_task` tool family and its named wrappers. The cases below that used to assert spawn
+ * batch/progress-file helpers now assert the tool layer that replaced them.
+ */
+function fakeHost() {
+  const calls: Array<{ tool: string; input: unknown; toolCallId?: string }> = []
+  const record = (tool: string) => async (input: unknown, call?: { toolCallId: string }) => {
+    calls.push({ tool, input, toolCallId: call?.toolCallId })
+    return { tool }
+  }
+  const host: DelegationToolHost = {
+    delegateTask: record('delegateTask'),
+    taskStatus: record('taskStatus'),
+    taskCancel: record('taskCancel'),
+    listDelegations: () => ({ tool: 'listDelegations' }),
+    integrateDelegation: record('integrateDelegation'),
+    named: {
+      create: record('named.create'),
+      createBatch: record('named.createBatch'),
+      recall: record('named.recall'),
+      integrate: record('named.integrate'),
+      list: () => ({ tool: 'named.list' })
+    }
+  }
+  return { host, calls }
+}
+
+const call = (name: string, args: Record<string, unknown>, id = 'tool-call-1') =>
+  ({ type: 'toolCall' as const, id, name, arguments: args })
+
 describe('agent spawning', () => {
-  it('allows one bounded correction for files outside the discovery declaration', () => {
-    const error = 'Agent changed files outside its discovery declaration: .gitignore, frames/a.jpg.'
-    expect(isRecoverableReadinessFailure(error, false, 0)).toBe(true)
-    expect(isRecoverableReadinessFailure(error, false, 1)).toBe(false)
+  it('routes delegate_task with the model tool call id so a retried call is the same request', async () => {
+    const { host, calls } = fakeHost()
+    await dispatchDelegationTool(host, call('delegate_task', { prompt: 'Fix the parser', workspace: 'isolated', role: 'implement' }, 'call-42'))
+    expect(calls).toEqual([{ tool: 'delegateTask', toolCallId: 'call-42', input: { prompt: 'Fix the parser', workspace: 'isolated', role: 'implement', wake: undefined, provider: undefined, model: undefined } }])
   })
 
-  it('extracts repository input assets from delegated task text', () => {
-    expect(extractAssignmentInputFilePaths(
-      'Analyze reference/clip.mp4 and write reference/reference-analysis/report.md only.'
-    )).toEqual(['reference/clip.mp4', 'reference/reference-analysis/report.md'])
+  it('rejects delegate_task without a prompt or a valid workspace before reaching the host', async () => {
+    const { host, calls } = fakeHost()
+    await expect(dispatchDelegationTool(host, call('delegate_task', { workspace: 'isolated' }))).rejects.toThrow('prompt')
+    await expect(dispatchDelegationTool(host, call('delegate_task', { prompt: 'x', workspace: 'scratch' }))).rejects.toThrow('workspace')
+    await expect(dispatchDelegationTool(host, call('delegate_task', { prompt: 'x', workspace: 'shared', wake: 'never' }))).rejects.toThrow('wake')
+    expect(calls).toEqual([])
   })
 
   it('rejects completion changes outside the discovery declaration', () => {
@@ -31,12 +60,14 @@ describe('agent spawning', () => {
     )).toEqual(['tests/unapproved.test.ts'])
   })
 
-  it('uses the owning thread repository instead of the packaged daemon launch root', () => {
-    const installRoot = 'C:\\Users\\test\\AppData\\Local\\Programs\\Mousse'
-    const projectRoot = 'C:\\Users\\test\\Documents\\Projects\\launch-new'
-
-    expect(resolveSpawnRepositoryPath(projectRoot, installRoot)).toBe(projectRoot)
-    expect(resolveSpawnRepositoryPath(null, installRoot)).toBe(installRoot)
+  it('keeps the named-agent tools as wrappers over the same host', async () => {
+    const { host, calls } = fakeHost()
+    await dispatchDelegationTool(host, call('create_subagent', { name: 'Reviewer', task: 'Review', access: 'read-only' }))
+    await dispatchDelegationTool(host, call('recall_subagent', { agent: 'Reviewer', task: 'Again' }))
+    await dispatchDelegationTool(host, call('integrate_subagent', { agent: 'Reviewer' }))
+    expect(await dispatchDelegationTool(host, call('list_subagents', {}))).toEqual({ tool: 'named.list' })
+    expect(calls.map((entry) => entry.tool)).toEqual(['named.create', 'named.recall', 'named.integrate'])
+    await expect(dispatchDelegationTool(host, call('create_subagents', { agents: [{ name: 'x' }] }))).rejects.toThrow('names and tasks')
   })
 
   it('uses the reserved spawn id in the agent registry', () => {
@@ -108,40 +139,18 @@ describe('agent spawning', () => {
     expect(shouldFinalizeAgent('interrupted', true)).toBe(true)
   })
 
-  it('does not mistake successful spawn logs that discuss failures for failed acknowledgements', () => {
-    const logs = [
-      '[discovery] Declared 2 edit file(s): Fix failed orchestration/thread binding error handling',
-      '[agent] Spawned Mousse GUI agent abcdef12'
-    ]
-
-    expect(logs.filter(isSpawnAgentsFailureLog)).toEqual([])
-    expect(buildSpawnAgentsFailureWake(logs)).toBeUndefined()
-  })
-
-  it('reports only explicitly failed reservations in mixed or interleaved spawn results', () => {
-    const logs = [
-      '[agent] Spawned Mousse GUI agent success1',
-      '[spawn-failure agent=failed-agent task=failed-task stage=discovery] mousse: connection closed',
-      '[discovery] Declared 1 edit file(s): error recovery implementation',
-      '[agent] Spawned Mousse GUI agent success2'
-    ]
-
-    const wake = buildSpawnAgentsFailureWake(logs)
-    expect(wake).toContain('1 delegated task was not started')
-    expect(wake).toContain('agent=failed-agent task=failed-task')
-    expect(wake).not.toContain('success1')
-    expect(wake).not.toContain('success2')
-    expect(wake).toContain('do not respawn agents that started successfully')
-  })
-
-  it('does not report a spawn as successful before it executes', () => {
-    const display = getToolCallDisplay({
-      type: 'spawn_agents',
-      agents: [{ cliType: 'mousse', task: 'Implement the fix' }]
-    })
-
-    expect(display.title).toBe('Spawning 1 agent')
+  it('no longer executes spawn_agents blocks; complete_task still parses and displays', () => {
+    const reply = '```mousse-actions\n{"actions":[{"type":"spawn_agents","agents":[{"cliType":"mousse","task":"x"}]},{"type":"complete_task","agentIds":["a1"]}]}\n```'
+    const actions = parseActions(reply)
+    expect(actions).toEqual([{ type: 'complete_task', agentIds: ['a1'] }])
+    const display = getToolCallDisplay(actions[0])
+    expect(display.title).toBe('Completing active task')
     expect(display.status).toBe('processing')
-    expect(display.summary).not.toContain('Started')
+  })
+
+  it('spawns nothing from a model reply that still emits the retired action', () => {
+    const spy = vi.fn()
+    for (const action of parseActions('```mousse-actions\n{"type":"spawn_agents","agents":[]}\n```')) spy(action)
+    expect(spy).not.toHaveBeenCalled()
   })
 })

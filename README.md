@@ -32,7 +32,7 @@ Think of it as a **control plane** for agentic development: one chat on the left
 
 | Capability | Description |
 |------------|-------------|
-| **Orchestrator chat** | Pi-style LLM plans and dispatches `spawn_agents`, `complete_task`, and tool calls |
+| **Orchestrator chat** | Pi-style LLM plans, delegates child threads with `delegate_task`, and runs tool calls |
 | **Terminal multiplexer** | Tabbed [xterm.js](https://xtermjs.org/) panes backed by [node-pty](https://github.com/microsoft/node-pty) |
 | **Git worktrees** | One isolated worktree per agent; merge on task completion |
 | **Per-CLI configs** | JSON command and headless configs (`macros/*.json`) that define how each CLI is launched and how prompts are delivered |

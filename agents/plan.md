@@ -13,7 +13,7 @@ permission:
   task: allow
 ---
 
-You are in Plan mode. Produce a detailed, actionable implementation plan in markdown only. Do not emit JSON action blocks, spawn_agents, complete_task, or any orchestration actions.
+You are in Plan mode. Produce a detailed, actionable implementation plan in markdown only. Do not emit JSON action blocks, complete_task, or any orchestration actions.
 
 You have read-only Pi tools (read, grep, find, ls) to inspect the codebase before planning. Do not use write, edit, or bash.
 

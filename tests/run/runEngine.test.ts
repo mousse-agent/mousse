@@ -1,0 +1,411 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
+import { RunStoreError } from '../../src/mms/run/db/RunStoreError'
+import { Reconciler } from '../../src/mms/run/Reconciler'
+import { LocalActionGated, RunEngine } from '../../src/mms/run/RunEngine'
+
+import { RunStore } from '../../src/mms/run/RunStore'
+import type { ThreadEvent } from '../../src/mms/run/types'
+
+function codeOf(work: () => unknown): string | undefined {
+  try {
+    work()
+  } catch (error) {
+    if (error instanceof RunStoreError) return error.code
+    throw error
+  }
+  return undefined
+}
+
+describe('RunEngine', () => {
+  let profileHome: string | undefined
+  const dbs: ProfileDatabase[] = []
+
+  afterEach(() => {
+    for (const db of dbs.splice(0)) db.close()
+    if (profileHome) rmSync(profileHome, { recursive: true, force: true })
+    profileHome = undefined
+  })
+
+  const openDb = (fault?: (point: string) => void): ProfileDatabase => {
+    profileHome ??= mkdtempSync(join(tmpdir(), 'mousse-run-engine-'))
+    let tick = Date.UTC(2026, 9, 12)
+    const db = new ProfileDatabase({ profileHome, clock: () => (tick += 1000), fault })
+    dbs.push(db)
+    return db
+  }
+
+  const open = (fault?: (point: string) => void) => {
+    const store = new RunStore(openDb(fault))
+    const engine = new RunEngine({ store })
+    const events: ThreadEvent[] = []
+    const signals: Array<[string, unknown]> = []
+    engine.on('event', (event: ThreadEvent) => events.push(event))
+    engine.on('stop-requested', (payload) => signals.push(['stop-requested', payload]))
+    engine.on('steer-accepted', (payload) => signals.push(['steer-accepted', payload]))
+    return { store, engine, events, signals }
+  }
+
+  const send = (engine: RunEngine, threadId: string, clientRequestId: string) =>
+    engine.dispatch({ kind: 'send', threadId, clientRequestId, source: 'gui' })
+
+  it('accepts a send as a queued run with a receipt and emits its events', async () => {
+    const { store, engine, events } = open()
+    const result = await send(engine, 't1', 'req-1')
+    expect(result).toEqual({
+      status: 'accepted',
+      runId: 'run:thread:t1:ordinal:1',
+      sequence: 1,
+      replayed: false
+    })
+    expect(store.getRun('run:thread:t1:ordinal:1')).toMatchObject({
+      status: 'queued',
+      source: 'gui',
+      clientRequestId: 'req-1'
+    })
+    expect(store.getReceipt('req-1')).toMatchObject({
+      threadId: 't1',
+      commandKind: 'send',
+      status: 'accepted',
+      result: { runId: 'run:thread:t1:ordinal:1', sequence: 1 }
+    })
+    expect(events.map((event) => [event.seq, event.type])).toEqual([[1, 'run.created']])
+  })
+
+  it('replays a duplicate clientRequestId without writing anything', async () => {
+    const { store, engine, events } = open()
+    const first = await send(engine, 't1', 'req-1')
+    const again = await send(engine, 't1', 'req-1')
+    expect(again).toEqual({ ...first, replayed: true })
+    expect(store.listRuns('t1')).toHaveLength(1)
+    expect(store.maxSeq('t1')).toBe(1)
+    expect(events).toHaveLength(1)
+  })
+
+  it('rejects a clientRequestId reused on another thread without a receipt', async () => {
+    const { store, engine } = open()
+    await send(engine, 't1', 'req-1')
+    const result = await send(engine, 't2', 'req-1')
+    expect(result).toEqual({ status: 'rejected', reason: 'client_request_id_conflict', sequence: 0 })
+    expect(store.getReceipt('req-1')!.threadId).toBe('t1')
+    expect(store.listRuns('t2')).toEqual([])
+  })
+
+  it('rejects a clientRequestId reused for another command kind on the same thread (M10)', async () => {
+    const { store, engine } = open()
+    const sent = await send(engine, 't1', 'req-1')
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    const stop = await engine.dispatch({ kind: 'stop', threadId: 't1', clientRequestId: 'req-1', runId: sent.runId })
+    expect(stop).toMatchObject({ status: 'rejected', reason: 'client_request_id_conflict' })
+    expect(store.getRun(sent.runId)!.outcome?.stopRequested).toBeUndefined()
+    expect(store.getReceipt('req-1')!.commandKind).toBe('send')
+    // The same kind still replays.
+    expect(await send(engine, 't1', 'req-1')).toMatchObject({ status: 'accepted', runId: sent.runId, replayed: true })
+  })
+
+  it('rejects a stale expectedSequence without a receipt', async () => {
+    const { store, engine } = open()
+    await send(engine, 't1', 'req-1')
+    const stale = await engine.dispatch(
+      { kind: 'send', threadId: 't1', clientRequestId: 'req-2', source: 'gui' },
+      { expectedSequence: 0 }
+    )
+    expect(stale).toEqual({ status: 'rejected', reason: 'stale_sequence', sequence: 1 })
+    expect(store.getReceipt('req-2')).toBeNull()
+    const fresh = await engine.dispatch(
+      { kind: 'send', threadId: 't1', clientRequestId: 'req-2', source: 'gui' },
+      { expectedSequence: 1 }
+    )
+    expect(fresh.status).toBe('accepted')
+  })
+
+  it('writes no receipt and no rows when the commit fails', async () => {
+    let failCommit = false
+    const { store, engine } = open((point) => {
+      if (failCommit && point === 'transaction.beforeCommit') throw new Error('injected')
+    })
+    failCommit = true
+    await expect(send(engine, 't1', 'req-1')).rejects.toThrow('injected')
+    failCommit = false
+    expect(store.getReceipt('req-1')).toBeNull()
+    expect(store.listRuns('t1')).toEqual([])
+    expect(store.maxSeq('t1')).toBe(0)
+  })
+
+  it('ignores a stop for a run that is not active and records command.ignored', async () => {
+    const { store, engine, signals } = open()
+    const sent = await send(engine, 't1', 'req-1')
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    const result = await engine.dispatch({
+      kind: 'stop',
+      threadId: 't1',
+      clientRequestId: 'stop-1',
+      runId: sent.runId
+    })
+    expect(result).toEqual({
+      status: 'ignored',
+      reason: 'run_not_active',
+      runId: sent.runId,
+      activeRunId: null,
+      sequence: 2
+    })
+    const ignored = store.listEvents('t1').at(-1)!
+    expect(ignored).toMatchObject({
+      type: 'command.ignored',
+      runId: sent.runId,
+      payload: { kind: 'stop', runId: sent.runId, activeRunId: null, reason: 'run_not_active' }
+    })
+    expect(store.getReceipt('stop-1')!.status).toBe('ignored')
+    expect(signals).toEqual([])
+    const replay = await engine.dispatch({
+      kind: 'stop',
+      threadId: 't1',
+      clientRequestId: 'stop-1',
+      runId: sent.runId
+    })
+    expect(replay).toEqual({ ...result, replayed: true })
+    expect(store.maxSeq('t1')).toBe(2)
+  })
+
+  it('accepts a stop for the active run by flagging stopRequested under CAS', async () => {
+    const { store, engine, signals } = open()
+    const sent = await send(engine, 't1', 'req-1')
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    engine.markStarting(sent.runId)
+    const running = engine.markRunning(sent.runId)
+    const result = await engine.dispatch({
+      kind: 'stop',
+      threadId: 't1',
+      clientRequestId: 'stop-1',
+      runId: sent.runId
+    })
+    expect(result).toMatchObject({ status: 'accepted', runId: sent.runId, replayed: false })
+    const stopped = store.getRun(sent.runId)!
+    expect(stopped.status).toBe('running')
+    expect(stopped.outcome).toEqual({ stopRequested: true })
+    expect(stopped.epoch).toBe(running.epoch + 1)
+    expect(signals).toEqual([['stop-requested', { threadId: 't1', runId: sent.runId }]])
+    // The bridge's own stop does not make its next mark stale.
+    const terminal = engine.markTerminal(sent.runId, 'interrupted', { interruptedBy: 'user' })
+    expect(terminal.outcome).toEqual({ interruptedBy: 'user', stopRequested: true })
+  })
+
+  it('accepts a steer for the active run and emits steer-accepted', async () => {
+    const { engine, signals } = open()
+    const sent = await send(engine, 't1', 'req-1')
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    engine.markStarting(sent.runId)
+    const result = await engine.dispatch({
+      kind: 'steer',
+      threadId: 't1',
+      clientRequestId: 'steer-1',
+      runId: sent.runId
+    })
+    expect(result).toMatchObject({ status: 'accepted', runId: sent.runId })
+    expect(signals).toEqual([['steer-accepted', { threadId: 't1', runId: sent.runId }]])
+  })
+
+  it('advances a run through the mark hooks with run.status events in order', async () => {
+    const { store, engine, events } = open()
+    const sent = await send(engine, 't1', 'req-1')
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    const starting = engine.markStarting(sent.runId)
+    expect(starting.startedAt).not.toBeNull()
+    expect(starting.activeAttemptId).toBe(`attempt:${sent.runId}:1`)
+    engine.markRunning(sent.runId)
+    engine.markFinalizing(sent.runId)
+    const done = engine.markTerminal(sent.runId, 'completed')
+    expect(done).toMatchObject({ status: 'completed', epoch: 4 })
+    expect(done.completedAt).not.toBeNull()
+    expect(store.getAttempt(done.activeAttemptId!)).toMatchObject({
+      reason: 'initial',
+      status: 'completed'
+    })
+    const statuses = events
+      .filter((event) => event.type === 'run.status')
+      .map((event) => (event.payload as { status: string }).status)
+    expect(statuses).toEqual(['starting', 'running', 'finalizing', 'completed'])
+    expect(events.map((event) => event.type)).toEqual([
+      'run.created',
+      'attempt.created',
+      'run.status',
+      'run.status',
+      'attempt.status',
+      'run.status',
+      'run.status',
+      'attempt.status'
+    ])
+    expect(events.map((event) => event.seq)).toEqual(store.listEvents('t1').map((e) => e.seq))
+    // Terminal states are final: a second terminal write is a bad request.
+    expect(codeOf(() => engine.markTerminal(sent.runId, 'failed'))).toBe('bad_request')
+  })
+
+  it('refuses out-of-order marks and writes by another writer as stale', async () => {
+    const { store, engine } = open()
+    const sent = await send(engine, 't1', 'req-1')
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    expect(codeOf(() => engine.markRunning(sent.runId))).toBe('bad_request')
+    const starting = engine.markStarting(sent.runId)
+    store.casRunOutcome({
+      runId: sent.runId,
+      expectedEpoch: starting.epoch,
+      outcomePatch: { error: 'someone else' }
+    })
+    expect(codeOf(() => engine.markRunning(sent.runId))).toBe('stale_write')
+  })
+
+  it('records the provider ref on the active attempt without bumping the run epoch', async () => {
+    const { store, engine, events } = open()
+    const sent = await send(engine, 't1', 'req-1')
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    expect(codeOf(() => engine.recordProviderRef(sent.runId, { provider: 'openai' }))).toBe(
+      'bad_request'
+    )
+    engine.markStarting(sent.runId)
+    const running = engine.markRunning(sent.runId)
+    const attempt = engine.recordProviderRef(sent.runId, { provider: 'openai', model: 'gpt' })
+    expect(attempt).toMatchObject({ status: 'running', providerRef: { provider: 'openai', model: 'gpt' } })
+    expect(store.getAttempt(running.activeAttemptId!)?.providerRef).toEqual({
+      provider: 'openai',
+      model: 'gpt'
+    })
+    expect(store.getRun(sent.runId)?.epoch).toBe(running.epoch)
+    expect(events.at(-1)?.type).toBe('attempt.status')
+    // Later marks still CAS against the same epoch.
+    expect(engine.markFinalizing(sent.runId).status).toBe('finalizing')
+    engine.markTerminal(sent.runId, 'completed')
+    expect(codeOf(() => engine.recordProviderRef(sent.runId, { provider: 'openai' }))).toBe(
+      'bad_request'
+    )
+  })
+
+  it('refuses a provider ref when another writer moved the run', async () => {
+    const { store, engine } = open()
+    const sent = await send(engine, 't1', 'req-1')
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    engine.markStarting(sent.runId)
+    const running = engine.markRunning(sent.runId)
+    store.casRunOutcome({
+      runId: sent.runId,
+      expectedEpoch: running.epoch,
+      outcomePatch: { error: 'someone else' }
+    })
+    expect(codeOf(() => engine.recordProviderRef(sent.runId, { provider: 'openai' }))).toBe(
+      'stale_write'
+    )
+  })
+
+  it('interrupts active runs on boot and leaves queued runs alone', async () => {
+    const { engine } = open()
+    const a = await send(engine, 't1', 'req-a')
+    const b = await send(engine, 't1', 'req-b')
+    const c = await send(engine, 't2', 'req-c')
+    if (a.status !== 'accepted' || b.status !== 'accepted' || c.status !== 'accepted')
+      throw new Error('send rejected')
+    engine.markStarting(a.runId)
+    engine.markRunning(a.runId)
+    engine.markStarting(c.runId)
+
+    // A fresh engine on a fresh connection, as after a daemon restart.
+    const store = new RunStore(openDb())
+    const rebooted = new RunEngine({ store })
+    const events: ThreadEvent[] = []
+    rebooted.on('event', (event: ThreadEvent) => events.push(event))
+    expect(rebooted.reconcileOnBoot()).toMatchObject({
+      interrupted: [a.runId, c.runId],
+      uncertain: []
+    })
+    expect(store.getRun(a.runId)).toMatchObject({
+      status: 'interrupted',
+      outcome: { interruptedBy: 'daemon_restart' }
+    })
+    expect(store.getAttempt(store.getRun(a.runId)!.activeAttemptId!)!.status).toBe('interrupted')
+    expect(store.getRun(c.runId)!.status).toBe('interrupted')
+    expect(store.getRun(b.runId)!.status).toBe('queued')
+    expect(events.filter((event) => event.type === 'run.status')).toHaveLength(2)
+    expect(rebooted.reconcileOnBoot()).toMatchObject({ interrupted: [], uncertain: [] })
+  })
+})
+
+describe('RunEngine.runLocalAction (SPEC §16.3)', () => {
+  let profileHome: string | undefined
+  let db: ProfileDatabase | undefined
+
+  afterEach(() => {
+    db?.close()
+    db = undefined
+    if (profileHome) rmSync(profileHome, { recursive: true, force: true })
+    profileHome = undefined
+  })
+
+  /** A real clock: the local action's heartbeat timer and the reconciler race in wall time. */
+  const setup = (heartbeatMs: number) => {
+    profileHome = mkdtempSync(join(tmpdir(), 'mousse-local-action-'))
+    db = new ProfileDatabase({ profileHome })
+    const store = new RunStore(db)
+    const engine = new RunEngine({ store, heartbeatMs })
+    const reconciler = new Reconciler({ store, outbox: engine.outbox, tools: engine.tools, heartbeatMs })
+    return { store, engine, reconciler }
+  }
+
+  it('heartbeats through an action three heartbeat intervals long and completes', async () => {
+    const heartbeatMs = 40
+    const { engine, reconciler } = setup(heartbeatMs)
+    const stale: string[] = []
+    const pass = setInterval(() => stale.push(...reconciler.runOnce().staleRuns), 10)
+    try {
+      const { runId, result } = await engine.runLocalAction({ threadId: 't', source: 'undo' }, async () => {
+        await new Promise((resolve) => setTimeout(resolve, 3 * heartbeatMs))
+        return 'restored'
+      })
+      expect(result).toBe('restored')
+      expect(stale).toEqual([])
+      expect(engine.getRun(runId)!.status).toBe('completed')
+    } finally {
+      clearInterval(pass)
+    }
+  })
+
+  it('keeps a terminal state something else wrote while the action ran', async () => {
+    const { engine } = setup(10_000)
+    const { runId, result } = await engine.runLocalAction({ threadId: 't', source: 'revert' }, async (run) => {
+      engine.markTerminal(run.runId, 'interrupted', { interruptedBy: 'provider', error: 'no terminal event' })
+      return 'done'
+    })
+    expect(result).toBe('done')
+    expect(engine.getRun(runId)).toMatchObject({ status: 'interrupted', outcome: { interruptedBy: 'provider' } })
+    // A failing action whose run already ended still rethrows its own error.
+    await expect(
+      engine.runLocalAction({ threadId: 't', source: 'undo' }, async (run) => {
+        engine.markTerminal(run.runId, 'interrupted', { interruptedBy: 'provider' })
+        throw new Error('git failed')
+      })
+    ).rejects.toThrow('git failed')
+  })
+
+  it('runs the gate under the thread mutex before the run exists; a gated action creates no run (M6)', async () => {
+    const { engine } = setup(10_000)
+    const order: string[] = []
+    const gated = engine.runLocalAction({ threadId: 't', source: 'undo' }, async () => 'never', {
+      gate: () => {
+        order.push('gate')
+        // A send racing the gate waits for the mutex: it cannot start a run in between.
+        void engine.dispatch({ kind: 'send', threadId: 't', clientRequestId: 'racing-send', source: 'gui' }).then(() => order.push('send'))
+        expect(engine.listRuns('t')).toEqual([])
+        throw new LocalActionGated({ requiresReview: true })
+      }
+    })
+    await expect(gated).rejects.toMatchObject({ value: { requiresReview: true } })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(order).toEqual(['gate', 'send'])
+    expect(engine.listRuns('t').map((run) => run.source)).toEqual(['gui'])
+    // An ungated action records its outcome on the completed run.
+    engine.markStarting(engine.listRuns('t')[0].runId)
+    engine.markTerminal(engine.listRuns('t')[0].runId, 'completed')
+    const { runId } = await engine.runLocalAction({ threadId: 't', source: 'undo' }, async () => 'ok', { gate: () => undefined, outcome: { undoStrategy: 'checkpoint' } })
+    expect(engine.getRun(runId)).toMatchObject({ status: 'completed', outcome: { undoStrategy: 'checkpoint' } })
+  })
+})

@@ -1,0 +1,388 @@
+export type RunStatus =
+  | 'queued'
+  | 'starting'
+  | 'running'
+  | 'finalizing'
+  | 'completed'
+  | 'interrupted'
+  | 'failed'
+  | 'cancelled'
+  | 'uncertain'
+
+export const TERMINAL_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
+  'completed',
+  'interrupted',
+  'failed',
+  'cancelled',
+  'uncertain'
+])
+
+export type AttemptStatus =
+  'pending' | 'running' | 'completed' | 'interrupted' | 'failed' | 'cancelled' | 'superseded'
+
+export type AttemptReason = 'initial' | 'steer_restart' | 'retry' | 'recovery'
+
+export interface RunOutcome {
+  error?: string
+  interruptedBy?: 'user' | 'daemon_restart' | 'provider'
+  uncertainReason?: string
+  stopRequested?: boolean
+  /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
+  continuationOf?: string
+  /**
+   * SPEC §16.3: how an undo run restored the conversation (`featureGates.canUndoNatively`):
+   * `native_rollback` when the provider can roll its own session back, else `checkpoint`.
+   */
+  undoStrategy?: 'native_rollback' | 'checkpoint'
+  /** SPEC §13.3: how a Stop reached the run (`CommandPolicy.stopStrategy`). */
+  stopStrategy?: 'interrupt' | 'settle_locally'
+}
+
+export interface RunRecord {
+  runId: string
+  threadId: string
+  ordinal: number
+  status: RunStatus
+  epoch: number
+  activeAttemptId: string | null
+  source: string
+  clientRequestId: string | null
+  userMessageId: string | null
+  requestedAt: string
+  startedAt: string | null
+  completedAt: string | null
+  outcome: RunOutcome | null
+  /** Last liveness touch by the executing turn (SPEC §12.4 rule 2). Not a status write. */
+  heartbeatAt: string | null
+}
+
+export interface ProviderRef {
+  provider: string
+  model?: string
+  sessionId?: string
+  nativeTurnId?: string
+}
+
+export interface AttemptRecord {
+  attemptId: string
+  runId: string
+  ordinal: number
+  reason: AttemptReason
+  status: AttemptStatus
+  providerRef: ProviderRef | null
+  startedAt: string | null
+  completedAt: string | null
+}
+
+export interface ReceiptRecord {
+  clientRequestId: string
+  threadId: string
+  commandKind: string
+  status: 'accepted' | 'rejected' | 'ignored'
+  result: unknown
+  createdAt: string
+}
+
+export interface ThreadEvent {
+  seq: number
+  threadId: string
+  runId: string | null
+  type: string
+  payload: unknown
+  createdAt: string
+}
+
+/**
+ * Sources of local-action runs (SPEC §16.3): `undo` and `revert` run Git mechanics in-process, with
+ * no effect and no provider; they heartbeat while the action runs (reconciler rule 2).
+ */
+export const LOCAL_ACTION_SOURCES: ReadonlySet<string> = new Set(['undo', 'revert'])
+
+export const runId = (threadId: string, ordinal: number): string =>
+  `run:thread:${encodeURIComponent(threadId)}:ordinal:${ordinal}`
+
+export const attemptId = (runId: string, ordinal: number): string => `attempt:${runId}:${ordinal}`
+
+// Phase 2: effects, daemon epochs and the tool ledger (docs/run-engine/SPEC.md §12).
+
+export type EffectKind =
+  | 'turn.start'
+  | 'turn.interrupt'
+  | 'turn.steer'
+  | 'request.respond'
+  | 'checkpoint.capture'
+  | 'title.generate'
+  | 'workspace.cleanup'
+
+/** `process_bound` effects die with the daemon; `replay_safe` effects are re-queued on boot. */
+export type EffectClass = 'process_bound' | 'replay_safe'
+
+export type EffectStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+
+export const TERMINAL_EFFECT_STATUSES: ReadonlySet<EffectStatus> = new Set<EffectStatus>([
+  'succeeded',
+  'failed',
+  'cancelled'
+])
+
+export interface EffectKindSpec {
+  class: EffectClass
+  timeoutMs: number
+  /**
+   * SPEC §12.2: a kind with no producer yet. Enqueueing one fails at once (`bad_request`); the
+   * worker has no executor for it either.
+   */
+  reserved?: boolean
+  /**
+   * Lane override. Without one the lane is the effect's thread. `control` effects (interrupt,
+   * steer, answers) must reach a live turn, so they never queue behind the thread's `turn.start`.
+   */
+  lane?: 'title' | 'control'
+  /** Defaults to `DEFAULT_EFFECT_MAX_ATTEMPTS`. */
+  maxAttempts?: number
+}
+
+export const DEFAULT_EFFECT_MAX_ATTEMPTS = 5
+
+/**
+ * Which worker fibres may claim an effect kind (SPEC §12.3): `turn` fibres run `turn.start` (one
+ * per live turn, so their count caps a profile's concurrent turns), `control` fibres run the
+ * interrupts, steers and answers that must reach a live turn, and `replaySafe` fibres run the
+ * replay-safe kinds. A long turn can therefore never starve a Stop.
+ */
+export type EffectLaneClass = 'turn' | 'control' | 'replaySafe'
+
+const CONTROL_EFFECT_KINDS: ReadonlySet<EffectKind> = new Set<EffectKind>([
+  'turn.interrupt',
+  'turn.steer',
+  'request.respond'
+])
+
+export function effectLaneClass(kind: EffectKind): EffectLaneClass {
+  if (kind === 'turn.start') return 'turn'
+  return CONTROL_EFFECT_KINDS.has(kind) ? 'control' : 'replaySafe'
+}
+
+/**
+ * SPEC §12.2. A kind's class is fixed here, never per row. Effects that drive a model turn or
+ * deliver user input are never retried automatically: a timed-out `turn.start` must not re-run
+ * the model, and a steer or answer must not be delivered twice. Only `turn.interrupt` and the
+ * replay-safe kinds use the default retry budget.
+ */
+export const EFFECT_KIND_SPEC: Record<EffectKind, EffectKindSpec> = {
+  'turn.start': { class: 'process_bound', timeoutMs: 6 * 60 * 60_000, maxAttempts: 1 },
+  'turn.interrupt': { class: 'process_bound', timeoutMs: 30_000, lane: 'control' },
+  'turn.steer': { class: 'process_bound', timeoutMs: 30_000, maxAttempts: 1, lane: 'control' },
+  'request.respond': {
+    class: 'process_bound',
+    timeoutMs: 30_000,
+    maxAttempts: 1,
+    lane: 'control',
+    reserved: true
+  },
+  'checkpoint.capture': { class: 'replay_safe', timeoutMs: 2 * 60_000, reserved: true },
+  'title.generate': { class: 'replay_safe', timeoutMs: 60_000, lane: 'title', reserved: true },
+  'workspace.cleanup': { class: 'replay_safe', timeoutMs: 5 * 60_000, reserved: true }
+}
+
+export interface EffectRecord {
+  effectId: string
+  threadId: string
+  runId: string | null
+  kind: EffectKind
+  class: EffectClass
+  status: EffectStatus
+  payload: unknown
+  attempts: number
+  maxAttempts: number
+  timeoutMs: number
+  availableAt: string
+  leaseOwner: string | null
+  leaseExpiresAt: string | null
+  lastError: string | null
+  createdAt: string
+  updatedAt: string
+  completedAt: string | null
+}
+
+export interface DaemonEpochRecord {
+  epoch: number
+  pid: number
+  startedAt: string
+  heartbeatAt: string
+  /** Set on clean shutdown; null after a crash (or while the daemon is live). */
+  endedAt: string | null
+}
+
+export type ToolInvocationStatus = 'started' | 'committed' | 'failed' | 'outcome_unknown'
+
+export interface ToolInvocationRecord {
+  invocationId: string
+  runId: string
+  attemptId: string
+  tool: string
+  idempotent: boolean
+  status: ToolInvocationStatus
+  argsDigest: string
+  startedAt: string
+  completedAt: string | null
+}
+
+/** Effect lease owner: `"<daemonEpoch>:<pid>"` (SPEC §12.1). */
+export const leaseOwner = (epoch: number, pid: number): string => `${epoch}:${pid}`
+
+// Phase 4: lineage, delegations and the inbox (docs/run-engine/SPEC.md §14.1).
+
+export type LineageRelationship = 'subagent' | 'fork'
+
+export interface LineageRecord {
+  threadId: string
+  parentThreadId: string
+  parentRunId: string
+  relationship: LineageRelationship
+  createdAt: string
+}
+
+export type DelegationStatus = 'running' | 'result_available' | 'acknowledged' | 'cancelled' | 'failed'
+
+export type DelegationWake = 'always' | 'settled_only'
+
+/** What a child run published: its terminal status and final text or failure. */
+export interface DelegationResult {
+  runStatus: RunStatus
+  text?: string
+  error?: string
+}
+
+export interface DelegationRecord {
+  delegationId: string
+  parentRunId: string
+  parentThreadId: string
+  childThreadId: string
+  childRunId: string
+  provider: string | null
+  model: string | null
+  promptDigest: string
+  wake: DelegationWake
+  status: DelegationStatus
+  result: DelegationResult | null
+  createdAt: string
+  completedAt: string | null
+  /** The most the child may do (SPEC §15.1); null when the delegation set none. */
+  modeCeiling: ModeCeiling | null
+  /** The child's workspace policy (SPEC §14.2); null for a follow-up or a pre-version-6 row. */
+  workspace: DelegationWorkspace | null
+  /** The requested role (`research`, `review`, `implement`, …); null when none was given. */
+  role: string | null
+}
+
+export type DelegationWorkspace = 'isolated' | 'shared'
+
+/**
+ * What a run's Mousse MCP credential may do (SPEC §15.1): `plan` is read-only planning (no
+ * writes, no integration, children stay `plan`); `default` is the thread's ordinary authority.
+ */
+export type ModeCeiling = 'plan' | 'default'
+
+export type InboxKind = 'child_result' | 'restart_note' | 'reconcile_notice'
+
+export type InboxStatus = 'pending' | 'delivered' | 'acknowledged'
+
+export interface InboxRecord {
+  inboxId: string
+  threadId: string
+  runId: string | null
+  kind: InboxKind
+  payload: unknown
+  status: InboxStatus
+  createdAt: string
+  /**
+   * The effect that delivered a `delivered` row (a wake `turn.start` or a `turn.steer`); null while
+   * pending, after acknowledgement of an undelivered row, or for rows delivered before migration 7.
+   */
+  deliveredBy: string | null
+}
+
+/** Payload of a `child_result` inbox row. */
+export interface ChildResultPayload {
+  delegationId: string
+  childThreadId: string
+  childRunId: string
+  result: DelegationResult
+}
+
+/** Payload of a `turn.start` effect that wakes a thread for its pending inbox rows (rule 4). */
+export interface WakeTurnPayload {
+  kind: 'wake'
+  threadId: string
+  runId: string
+  inboxIds: string[]
+}
+
+export function isWakeTurnPayload(payload: unknown): payload is WakeTurnPayload {
+  return Boolean(payload) && typeof payload === 'object' && (payload as { kind?: unknown }).kind === 'wake'
+}
+
+/**
+ * A `turn.start` payload that carries an ordinary send (its `input`), so a queued run whose effect
+ * died can be started again from it (reconciler rule 5). Wake and integration payloads carry no
+ * `input`; a queue item's payload (`queueItemId`) is restarted by the message queue's own recovery.
+ */
+export interface SendTurnPayload {
+  runId: string
+  threadId: string
+  input: unknown
+  queueItemId?: string
+}
+
+export function isSendTurnPayload(payload: unknown): payload is SendTurnPayload {
+  if (!payload || typeof payload !== 'object') return false
+  const value = payload as Record<string, unknown>
+  return typeof value.runId === 'string' && typeof value.threadId === 'string' && value.input !== undefined && value.input !== null
+}
+
+// Phase 6: context handoffs and thread transfers (docs/run-engine/SPEC.md §16).
+
+/**
+ * How a turn learns what happened before it (SPEC §16.1): `native_resume` sends nothing (the
+ * provider still holds its session); `delta` sends the runs since the target provider's last turn;
+ * `full_summary` rebuilds the context; `fork_delta_summary` is what a fork did since its fork point
+ * (merge-back, §16.2); `legacy_import` is reserved for threads imported without runs.
+ */
+export type HandoffStrategy = 'native_resume' | 'delta' | 'full_summary' | 'fork_delta_summary' | 'legacy_import'
+
+export type HandoffStatus = 'pending' | 'delivered' | 'failed'
+
+export interface HandoffRecord {
+  handoffId: string
+  threadId: string
+  targetRunId: string
+  fromRef: ProviderRef | null
+  toRef: ProviderRef
+  strategy: HandoffStrategy
+  coveredFromOrdinal: number | null
+  coveredToOrdinal: number | null
+  budgetTokens: number
+  selectedItems: number
+  omittedItems: number
+  status: HandoffStatus
+  createdAt: string
+  deliveredAt: string | null
+}
+
+export type TransferType = 'fork' | 'merge_back'
+
+export type TransferStatus = 'pending' | 'consumed' | 'superseded' | 'failed'
+
+export interface TransferRecord {
+  transferId: string
+  type: TransferType
+  sourceThreadId: string
+  targetThreadId: string
+  /** Fork: the source run the fork starts after. Merge-back: the fork's latest run. */
+  sourceRunOrdinal: number
+  status: TransferStatus
+  payload: Record<string, unknown>
+  createdAt: string
+  consumedAt: string | null
+}

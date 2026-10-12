@@ -89,7 +89,7 @@ import type { TaskQueue } from '../tasks/TaskQueue'
 import { TaskControlTools } from '../tasks/TaskControlTools'
 import { WebTools } from './WebTools'
 
-import { buildOrchestratorSystemPrompt } from './systemPrompt'
+import { buildOrchestratorSystemPrompt, DELEGATION_PROMPT } from './systemPrompt'
 import type { BrowserRuntimePort } from '../../shared/browser/runtime'
 import {
   type BrowserExecutionBinding,
@@ -139,13 +139,57 @@ export interface LlmMessage {
 
 
 
+/** Named-agent wrapper input (`create_subagent`); `name` becomes the child thread title. */
 export interface NamedAgentToolRequest {
   name: string
   task: string
   workspace?: 'shared' | 'isolated'
   access?: 'read-only' | 'write'
 }
-export interface NamedAgentRecallRequest extends Omit<NamedAgentToolRequest, 'name'> { agent: string; expectedAgentGeneration: number; contextMode?: 'continue' | 'fresh'; resumeResult?: boolean }
+/** Named-agent wrapper input (`recall_subagent`): a follow-up on the named child thread. */
+export interface NamedAgentRecallRequest extends Omit<NamedAgentToolRequest, 'name'> { agent: string; expectedAgentGeneration?: number; contextMode?: 'continue' | 'fresh'; resumeResult?: boolean }
+
+/** `delegate_task` arguments (docs/run-engine/SPEC.md §14.2). */
+export interface DelegateTaskInput {
+  prompt: string
+  provider?: string
+  model?: string
+  role?: string
+  workspace: 'isolated' | 'shared'
+  wake?: 'always' | 'settled_only'
+  /** Child thread title; the named-agent wrappers pass the agent name. */
+  title?: string
+  /**
+   * The most the child may do (SPEC §15.1). Only the Mousse MCP server offers it; the host
+   * defaults it to the caller's ceiling and refuses a broader one.
+   */
+  modeCeiling?: 'plan' | 'default'
+}
+
+/** The model's tool call that invoked a delegation tool; its id derives the clientRequestId. */
+export interface DelegationToolCall {
+  toolCallId: string
+}
+
+/**
+ * Delegation tools (SPEC §14.2, `ToolHost`). Host-minted per turn; never accepted from protocol
+ * input. The named-agent tools are thin wrappers the host builds on `delegateTask`.
+ */
+export interface DelegationToolHost {
+  delegateTask(input: DelegateTaskInput, call: DelegationToolCall): Promise<unknown>
+  taskStatus(input: { delegationId: string }): Promise<unknown> | unknown
+  taskCancel(input: { delegationId: string }): Promise<unknown>
+  listDelegations(): unknown
+  integrateDelegation(input: { delegationId: string }, call: DelegationToolCall): Promise<unknown>
+  named: {
+    create(input: NamedAgentToolRequest, call: DelegationToolCall): Promise<unknown>
+    createBatch(input: NamedAgentToolRequest[], call: DelegationToolCall): Promise<unknown>
+    recall(input: NamedAgentRecallRequest, call: DelegationToolCall): Promise<unknown>
+    integrate(input: { agent: string }, call: DelegationToolCall): Promise<unknown>
+    list(): unknown
+  }
+}
+
 export interface LlmChatOptions {
   appletInstructions?: string
   onPublishApplet?: (source: unknown) => unknown
@@ -156,16 +200,21 @@ export interface LlmChatOptions {
     tools: Tool[]
     executeTool(call: ToolCall, signal?: AbortSignal): Promise<ToolResultMessage>
   }
-  delegation?: {
-    create(input: NamedAgentToolRequest): Promise<unknown>
-    recall(input: NamedAgentRecallRequest): Promise<unknown>
-    createBatch(input: NamedAgentToolRequest[]): Promise<unknown>
-    integrate(input: { agent: string; episodeId: string; expectedResultSha: string; expectedDestinationSha: string }): Promise<unknown>
-    list(): unknown
-  }
+  delegation?: DelegationToolHost
 
   /** Daemon-minted episode capability; never accepted from protocol input. */
   toolAccess?: AgentToolAccess
+
+  /**
+   * Run Engine tool ledger (docs/run-engine/SPEC.md §12.6). `start` runs before a tool executes
+   * and returns the invocation id (undefined skips the ledger for that call); `commit` or
+   * `failed` follows once the outcome is known. Host-supplied; never from protocol input.
+   */
+  toolLedger?: {
+    start(call: ToolCall): string | undefined
+    commit(id: string): void
+    failed(id: string): void
+  }
 
 
   mode?: ChatMode
@@ -179,7 +228,7 @@ export interface LlmChatOptions {
 
   /**
    * When true, the model is a Mousse subagent implementing a delegated task.
-   * Uses coding tools without spawn_agents orchestration instructions.
+   * Uses coding tools without orchestration instructions.
    */
   subagent?: boolean
 
@@ -976,20 +1025,11 @@ export class LlmClient {
       }
     }
     if (options.delegation) {
-      if (trustedAgent) throw new Error('Named delegation requires an explicit supported agent capability grant')
-      systemPrompt = buildOrchestratorSystemPrompt({ mode, providerId: llmProvider, projectPath, skills: enabledSkills, loadedSkills, subagent, namedDelegation: true, modeRegistry: this.modeRegistry })
-      tools.push({ name: 'create_subagent', description: 'Create a named native subagent. Defaults to shared read-only inspection. Write or isolation must be requested explicitly. Waits for this delegated assignment to settle.',
-        parameters: Type.Object({ name: Type.String(), task: Type.String(),
-          workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])),
-          access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])) }) },
-        { name: 'create_subagents', description: 'Run up to eight named agents concurrently in explicitly isolated snapshots. All assignments settle before this call returns. Access defaults to read-only.', parameters: Type.Object({ agents: Type.Array(Type.Object({ name: Type.String(), task: Type.String(), workspace: Type.Literal('isolated'), access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])) }), { minItems: 1, maxItems: 8 }) }) },
-        { name: 'integrate_subagent', description: 'Integrate one completed isolated write result into the task at the explicitly observed destination revision. Shared changes already affect the task. Read-only results cannot integrate.', parameters: Type.Object({ agent: Type.String(), episodeId: Type.String(), expectedResultSha: Type.String(), expectedDestinationSha: Type.String() }) },
-        { name: 'recall_subagent', description: 'Recall a named native agent with durable context against the current task revision. Supply its current contextGeneration. Defaults to shared read-only. Fresh context explicitly rebuilds active context if parent discussion diverged.',
-          parameters: Type.Object({ agent: Type.String(), task: Type.String(), expectedAgentGeneration: Type.Integer({ minimum: 0 }),
-            workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])),
-            access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])),
-            contextMode: Type.Optional(Type.Union([Type.Literal('continue'), Type.Literal('fresh')])), resumeResult: Type.Optional(Type.Boolean()) }) },
-        { name: 'list_subagents', description: 'List named agent identities and immutable episode results belonging to this task.', parameters: Type.Object({}) })
+      if (trustedAgent) throw new Error('Delegation requires an explicit supported agent capability grant')
+      systemPrompt = `${systemPrompt}\n\n${DELEGATION_PROMPT}`
+      tools = [...tools, ...DELEGATION_TOOLS]
+      contextInputs = { ...contextInputs, systemPromptText: systemPrompt,
+        otherToolsText: serializeToolDefinitions(tools.filter((tool) => !mcpTools.some((mcp) => mcp.providerName === tool.name))) }
     }
     if (options.toolAccess) {
       tools = tools.filter((tool) => options.toolAccess!.allows(tool.name))
@@ -1294,26 +1334,8 @@ export class LlmClient {
             try { return toolResult(toolCall, JSON.stringify(options.onPublishApplet(toolCall.arguments)), false) }
             catch (error) { return toolResult(toolCall, error instanceof Error ? error.message : 'Invalid applet.', true) }
           }
-          if (options.delegation && toolCall.name === 'list_subagents') return toolResult(toolCall, JSON.stringify(options.delegation.list()), false)
-          if (options.delegation && toolCall.name === 'create_subagent') {
-            const input = toolCall.arguments as unknown as NamedAgentToolRequest
-            if (!input || typeof input.name !== 'string' || typeof input.task !== 'string') throw new Error('Named subagent requires name and task')
-            return toolResult(toolCall, JSON.stringify(await options.delegation.create(input)), false)
-          }
-          if (options.delegation && toolCall.name === 'create_subagents') {
-            const input = toolCall.arguments as { agents?: NamedAgentToolRequest[] }
-            if (!Array.isArray(input.agents) || input.agents.some((agent) => typeof agent.name !== 'string' || typeof agent.task !== 'string')) throw new Error('Parallel named assignments require names and tasks')
-            return toolResult(toolCall, JSON.stringify(await options.delegation.createBatch(input.agents)), false)
-          }
-          if (options.delegation && toolCall.name === 'integrate_subagent') {
-            const input = toolCall.arguments as { agent: string; episodeId: string; expectedResultSha: string; expectedDestinationSha: string }
-            if ((['agent', 'episodeId', 'expectedResultSha', 'expectedDestinationSha'] as const).some((key) => typeof input[key] !== 'string')) throw new Error('Integration requires a pinned episode result and destination')
-            return toolResult(toolCall, JSON.stringify(await options.delegation.integrate(input)), false)
-          }
-          if (options.delegation && toolCall.name === 'recall_subagent') {
-            const input = toolCall.arguments as unknown as NamedAgentRecallRequest
-            if (!input || typeof input.agent !== 'string' || typeof input.task !== 'string' || !Number.isSafeInteger(input.expectedAgentGeneration) || input.expectedAgentGeneration < 0 || input.contextMode !== undefined && !['continue', 'fresh'].includes(input.contextMode)) throw new Error('Recall requires agent, task and expectedAgentGeneration')
-            return toolResult(toolCall, JSON.stringify(await options.delegation.recall(input)), false)
+          if (options.delegation && DELEGATION_TOOL_NAMES.has(toolCall.name)) {
+            return toolResult(toolCall, JSON.stringify(await dispatchDelegationTool(options.delegation, toolCall)), false)
           }
           return this.executeToolCall(
           toolCall,
@@ -1332,12 +1354,17 @@ export class LlmClient {
         )
         }
         let result: ToolResultMessage
+        const ledgerId = options.toolLedger?.start(toolCall)
         try {
           result = options.toolAccess
             ? await options.toolAccess.execute(toolCall.name, (toolCall.arguments ?? {}) as Record<string, unknown>, dispatch)
             : await dispatch()
         } catch (error) {
           result = toolResult(toolCall, error instanceof Error ? error.message : String(error), true)
+        }
+        if (ledgerId) {
+          if (result.isError) options.toolLedger?.failed(ledgerId)
+          else options.toolLedger?.commit(ledgerId)
         }
 
         piMessages.push(result)
@@ -2885,7 +2912,7 @@ export function filterActionsForChatMode(
     if (desc) {
       const allowed = desc.permission?.['task'] !== 'deny'
       if (allowed) return actions
-      return actions.filter((a) => a.type !== 'spawn_agents' && a.type !== 'complete_task')
+      return actions.filter((a) => a.type !== 'complete_task')
     }
   }
   return filterActionsForMode(actions, mode)
@@ -2900,12 +2927,12 @@ export function rejectOrchestrationAction(action: OrchestratorAction, mode: Chat
     if (desc) {
       const allowed = desc.permission?.['task'] !== 'deny'
       if (allowed) return false
-      return action.type === 'spawn_agents' || action.type === 'complete_task'
+      return action.type === 'complete_task'
     }
   }
   if (allowsOrchestrationActions(mode)) return false
 
-  return action.type === 'spawn_agents' || action.type === 'complete_task'
+  return action.type === 'complete_task'
 
 }
 
@@ -2933,7 +2960,6 @@ function isValidAction(a: unknown): a is OrchestratorAction {
 
   const obj = a as Record<string, unknown>
 
-  if (obj.type === 'spawn_agents' && Array.isArray(obj.agents)) return true
 
   if (
     obj.type === 'complete_task' &&
@@ -2946,4 +2972,90 @@ function isValidAction(a: unknown): a is OrchestratorAction {
 
   return false
 
+}
+
+/** Delegation tool schemas (SPEC §14.2) plus the named-agent compatibility wrappers. */
+const DELEGATION_TOOLS: Tool[] = [
+  { name: 'delegate_task', description: 'Start a delegated task on a new child thread and return at once with its delegationId. Mousse wakes you with a notice when it finishes; read the result with task_status. workspace isolated gives the child its own worktree; shared is only for read-only roles (research, review). provider and model default to yours.',
+    parameters: Type.Object({ prompt: Type.String(), provider: Type.Optional(Type.String()), model: Type.Optional(Type.String()), role: Type.Optional(Type.String()),
+      workspace: Type.Union([Type.Literal('isolated'), Type.Literal('shared')]),
+      wake: Type.Optional(Type.Union([Type.Literal('always'), Type.Literal('settled_only')])) }) },
+  { name: 'task_status', description: 'Status of a delegated task, with its full result once finished. Reading a result acknowledges it.', parameters: Type.Object({ delegationId: Type.String() }) },
+  { name: 'task_cancel', description: 'Cancel a delegated task: stops its child run and everything that child delegated, deepest first.', parameters: Type.Object({ delegationId: Type.String() }) },
+  { name: 'list_delegations', description: 'List the tasks this thread delegated, with their status.', parameters: Type.Object({}) },
+  { name: 'integrate_delegation', description: 'Merge a finished isolated delegated task into this thread workspace. Runs as its own integration run after this turn; you are notified of the outcome.', parameters: Type.Object({ delegationId: Type.String() }) },
+  { name: 'create_subagent', description: 'Named wrapper over delegate_task: starts a child thread titled with the name and returns at once. Defaults to shared read-only research; access write runs in an isolated worktree.',
+    parameters: Type.Object({ name: Type.String(), task: Type.String(),
+      workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])),
+      access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])) }) },
+  { name: 'create_subagents', description: 'Start up to eight named delegated tasks at once (see create_subagent).', parameters: Type.Object({ agents: Type.Array(Type.Object({ name: Type.String(), task: Type.String(), workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])), access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])) }), { minItems: 1, maxItems: 8 }) }) },
+  { name: 'integrate_subagent', description: 'Named wrapper over integrate_delegation for the latest finished task of the named child.', parameters: Type.Object({ agent: Type.String(), episodeId: Type.Optional(Type.String()), expectedResultSha: Type.Optional(Type.String()), expectedDestinationSha: Type.Optional(Type.String()) }) },
+  { name: 'recall_subagent', description: 'Send a follow-up task to an existing named child thread; returns at once and wakes you when it finishes.',
+    parameters: Type.Object({ agent: Type.String(), task: Type.String(), expectedAgentGeneration: Type.Optional(Type.Integer({ minimum: 0 })),
+      workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])),
+      access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])),
+      contextMode: Type.Optional(Type.Union([Type.Literal('continue'), Type.Literal('fresh')])), resumeResult: Type.Optional(Type.Boolean()) }) },
+  { name: 'list_subagents', description: 'Named wrapper over list_delegations.', parameters: Type.Object({}) }
+]
+
+const DELEGATION_TOOL_NAMES: ReadonlySet<string> = new Set(DELEGATION_TOOLS.map((tool) => tool.name))
+
+/** The SPEC §14.2 delegation tools (no named-agent wrappers); the Mousse MCP server lists these. */
+export const CORE_DELEGATION_TOOL_NAMES = ['delegate_task', 'task_status', 'task_cancel', 'list_delegations', 'integrate_delegation'] as const
+
+/** Definitions shared by the pi loop and the Mousse MCP server, so both offer identical schemas. */
+export function delegationToolDefinitions(names: readonly string[] = CORE_DELEGATION_TOOL_NAMES): Tool[] {
+  return DELEGATION_TOOLS.filter((tool) => names.includes(tool.name))
+}
+
+function requireString(input: Record<string, unknown>, key: string, message: string): string {
+  const value = input[key]
+  if (typeof value !== 'string' || !value.trim()) throw new Error(message)
+  return value
+}
+
+/** Runs one delegation tool call against the turn's host (also used by the pi replay kit). */
+export async function dispatchDelegationTool(host: DelegationToolHost, toolCall: ToolCall): Promise<unknown> {
+  const args = (toolCall.arguments ?? {}) as Record<string, unknown>
+  const call: DelegationToolCall = { toolCallId: toolCall.id }
+  switch (toolCall.name) {
+    case 'delegate_task': {
+      const prompt = requireString(args, 'prompt', 'delegate_task requires a prompt')
+      if (args.workspace !== 'isolated' && args.workspace !== 'shared') throw new Error('delegate_task requires workspace isolated or shared')
+      if (args.wake !== undefined && args.wake !== 'always' && args.wake !== 'settled_only') throw new Error('wake must be always or settled_only')
+      for (const key of ['provider', 'model', 'role'] as const)
+        if (args[key] !== undefined && (typeof args[key] !== 'string' || !String(args[key]).trim())) throw new Error(`${key} must be a non-empty string`)
+      if (args.modeCeiling !== undefined && args.modeCeiling !== 'plan' && args.modeCeiling !== 'default') throw new Error('modeCeiling must be plan or default')
+      return host.delegateTask({ prompt, workspace: args.workspace, wake: args.wake as DelegateTaskInput['wake'],
+        provider: args.provider as string | undefined, model: args.model as string | undefined, role: args.role as string | undefined,
+        ...(args.modeCeiling !== undefined ? { modeCeiling: args.modeCeiling as DelegateTaskInput['modeCeiling'] } : {}) }, call)
+    }
+    case 'task_status':
+      return host.taskStatus({ delegationId: requireString(args, 'delegationId', 'task_status requires a delegationId') })
+    case 'task_cancel':
+      return host.taskCancel({ delegationId: requireString(args, 'delegationId', 'task_cancel requires a delegationId') })
+    case 'list_delegations':
+      return host.listDelegations()
+    case 'integrate_delegation':
+      return host.integrateDelegation({ delegationId: requireString(args, 'delegationId', 'integrate_delegation requires a delegationId') }, call)
+    case 'create_subagent': {
+      if (typeof args.name !== 'string' || typeof args.task !== 'string') throw new Error('Named subagent requires name and task')
+      return host.named.create(args as unknown as NamedAgentToolRequest, call)
+    }
+    case 'create_subagents': {
+      const agents = args.agents as NamedAgentToolRequest[] | undefined
+      if (!Array.isArray(agents) || agents.some((agent) => typeof agent?.name !== 'string' || typeof agent?.task !== 'string')) throw new Error('Parallel named assignments require names and tasks')
+      return host.named.createBatch(agents, call)
+    }
+    case 'integrate_subagent':
+      return host.named.integrate({ agent: requireString(args, 'agent', 'Integration requires the agent name') }, call)
+    case 'recall_subagent': {
+      if (typeof args.agent !== 'string' || typeof args.task !== 'string' || args.contextMode !== undefined && !['continue', 'fresh'].includes(String(args.contextMode))) throw new Error('Recall requires agent and task')
+      return host.named.recall(args as unknown as NamedAgentRecallRequest, call)
+    }
+    case 'list_subagents':
+      return host.named.list()
+    default:
+      throw new Error(`Unknown delegation tool ${toolCall.name}`)
+  }
 }

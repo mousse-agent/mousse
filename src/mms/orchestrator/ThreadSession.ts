@@ -53,6 +53,11 @@ export class ThreadSession {
   /** Project cwd for this thread (resolved path; never process.chdir). */
   projectCwd: string | null = null
   workspace: WorkspaceExecutionContext | null = null
+  /**
+   * A delegated child with `workspace: 'shared'` (read-only roles) runs in its parent's workspace
+   * path under read-only tool access instead of provisioning its own (SPEC §14.2).
+   */
+  sharedWorkspace: { path: string; parentThreadId: string } | null = null
   /** Cross-process execution lease held while a main-thread turn runs. */
   executionLease: ThreadLeaseHandle | null = null
   /** Steer item ids already injected this turn (one-time drain). */

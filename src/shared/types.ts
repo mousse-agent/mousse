@@ -466,7 +466,18 @@ export interface ChatMessage {
     | 'context_handoff'
   /** Selection actually admitted for this user turn, independent of composer edits. */
   modelSelection?: { provider: string; model: string }
-  contextHandoff?: { from: { provider: string; model: string }; to: { provider: string; model: string } }
+  contextHandoff?: {
+    from: { provider: string; model: string }
+    to: { provider: string; model: string }
+    /** Run Engine handoff artifact (SPEC §16.1) the turn delivered; absent for a display-only switch. */
+    handoffId?: string
+    strategy?: 'native_resume' | 'delta' | 'full_summary' | 'fork_delta_summary' | 'legacy_import'
+    /** "context rebuilt (N of M items)": N = selected, M = selected + omitted. */
+    selectedItems?: number
+    omittedItems?: number
+    /** Set when the handoff came from a thread transfer (SPEC §16.2). */
+    transfer?: 'fork' | 'merge_back'
+  }
   planCard?: PlanCardMetadata
   thinking?: {
     content: string
@@ -519,11 +530,6 @@ export interface SubagentAssignment {
   effort?: string
 }
 
-export interface SpawnAgentAction {
-  type: 'spawn_agents'
-  agents: SubagentAssignment[]
-}
-
 export interface CompleteTaskAction {
   type: 'complete_task'
   /** Explicit targets prevent completion from affecting unrelated active agents. */
@@ -537,7 +543,6 @@ export interface MessageAction {
 }
 
 export type OrchestratorAction =
-  | SpawnAgentAction
   | CompleteTaskAction
   | MessageAction
 
@@ -554,6 +559,17 @@ export interface OrchestratorResponse {
   queued?: boolean
   queueItem?: QueuedMessage
   workflowRun?: import('./workflowChat').WorkflowChatRun
+  /** Run Engine run created for this send (docs/run-engine/SPEC.md §6). */
+  runId?: string
+  /** Thread event sequence after the send was recorded. */
+  sequence?: number
+  /** True when the send repeated an earlier `clientRequestId`; nothing new was started. */
+  replayed?: boolean
+  /**
+   * True for an `await: 'ack'` send: the run and its turn.start are committed and the turn's
+   * result arrives through run events (SPEC §12.7).
+   */
+  accepted?: boolean
 }
 
 /** Intent of a durable thread message queue entry. */
@@ -603,6 +619,8 @@ export interface QueuedMessage {
   source?: string
   /** Internal orchestration input: durable and executable, but hidden from queue/transcript UI. */
   internal?: boolean
+  /** Run Engine run this item executes when drained. */
+  runId?: string
 }
 
 export interface ContextUsageCategory {
@@ -852,7 +870,8 @@ export interface NativeLlmContext {
   compaction?: NativeCompactionCheckpoint
   /** Actual model capacity reported by a native provider, retained across compaction. */
   nativeProviderModel?: {
-    provider: 'claude-subscription'
+    /** `llmProvider` of the runtime that reported this capacity. */
+    provider: string
     selectedModel: string
     modelName: string
     contextWindow?: number

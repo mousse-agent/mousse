@@ -11,6 +11,7 @@ import { runSchedule } from './commands/schedule'
 import { runWorkflow } from './commands/workflow'
 import { runBrowser } from './commands/browser'
 import { runAgents } from './commands/agents'
+import { runEngine } from './commands/engine'
 import { runChannels } from './commands/channels'
 import { runConfig } from './commands/config'
 import { runService } from './commands/service'
@@ -69,6 +70,9 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
         break
       case 'agents':
         await runAgents(args)
+        break
+      case 'engine':
+        await runEngine(args)
         break
       case 'channels':
         await runChannels(args)

@@ -272,6 +272,23 @@ export class ThreadDataStore extends EventEmitter {
     return meta
   }
 
+  /**
+   * Removes a thread `createThread` made moments ago whose creating command failed before anything
+   * used it: its directory, standalone index entry and lifecycle registration. Refuses a thread
+   * that already has messages (that is a real thread; trash it through the lifecycle coordinator).
+   */
+  discardUnusedThread(id: string): void {
+    const meta = this.getThread(id)
+    if (!meta) return
+    const threadDir = this.resolveThreadDir(meta)
+    if (this.readJsonFile<unknown[]>(join(threadDir, 'messages.json'), []).length)
+      throw new Error(`Thread ${id} has messages; only an unused new thread can be discarded`)
+    if (!meta.projectId) this.removeFromStandaloneIndex(id)
+    rmSync(threadDir, { recursive: true, force: true })
+    this.lifecycleStore.forgetCreatedTask(id)
+    this.invalidateListCache()
+  }
+
   /** Daemon-owned execution admission: retry/crash recovery keeps one thread and its data. */
   ensureExecutionThread(executionKey: string, name: string, projectId?: string, ownership?: { parentTaskId: string; runId?: string }): Thread {
     const project = projectId ? this.projectManager.getProject(projectId) : undefined
