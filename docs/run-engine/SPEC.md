@@ -445,3 +445,46 @@ One shared text (`src/mms/run/mcp/instructions.ts`) delivered per adapter (syste
 ### 15.4 Tests
 
 Unit: credential mint/revoke/expiry; ceiling enforcement; access-class registration failure. Integration (replay): a Claude-subscription parent calls `delegate_task` for a pi child and reads the result; a child attempting a write above its ceiling is refused with a reason.
+
+## 16. Phase 6 — handoff, fork and merge-back, continue after restart
+
+### 16.1 Context handoff as an artifact
+
+Today a provider switch inserts only a display marker (`orchestrator/contextHandoff.ts`). Phase 6 records a `ContextHandoff` row (migration 5):
+
+```sql
+CREATE TABLE context_handoffs(
+  handoff_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, target_run_id TEXT NOT NULL,
+  from_ref TEXT, to_ref TEXT NOT NULL,                    -- ProviderRef JSON
+  strategy TEXT NOT NULL CHECK(strategy IN ('native_resume','delta','full_summary','legacy_import')),
+  covered_from_ordinal INTEGER, covered_to_ordinal INTEGER,
+  budget_tokens INTEGER NOT NULL, selected_items INTEGER NOT NULL, omitted_items INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','delivered','failed')),
+  created_at TEXT NOT NULL, delivered_at TEXT
+) STRICT;
+```
+
+- **Strategy** comes from `featureGates.handoffDelivery(caps)` and the stored refs: same provider with a live native session → `native_resume` (nothing sent); the target provider was used earlier on this thread → `delta` (runs since its last turn); otherwise `full_summary`.
+- **Budget** (`src/mms/run/handoff/budget.ts`): default 16k tokens (`MOUSSE_HANDOFF_TOKEN_CAP`, clamp 1k–64k), 1 byte ≈ 1 token, image 8k / other attachment 4k reservation, window = min(model window, 128k) minus a quarter reserve. Selection order: last user, last assistant, first user, then newest first; whole items only; each text item compacted to ≤240 chars when it does not fit intact; the current user message is never truncated. Omitted history gets a recovery pointer (`thread_read` tool, Phase 5) so the agent can fetch it.
+- **Delivery**: `historyInjection === 'native'` adapters receive structured history (`TurnInput.messages`); others receive it as a `<handoff>` block prepended to the prompt. The marker message in the transcript links to the `handoff_id`; the UI shows "context rebuilt (N of M items)".
+- A `pending` handoff on a thread blocks a second switch until delivered or failed.
+
+### 16.2 Fork into a new thread; merge-back
+
+Existing `actions.fork` creates an in-thread conversation branch. Phase 6 adds a **thread fork**:
+- `thread.fork({ sourceThreadId, atRunOrdinal | 'latest_stable' })` creates a new thread with `thread_lineage(relationship:'fork', parentThreadId, forkRunOrdinal)` and a **pending** `fork` transfer row (`context_transfers`, migration 5). Forkable sources: runs in `completed|failed|interrupted|cancelled`; never `running` or `uncertain`.
+- **Lazy**: nothing is sent to a provider until the fork's first message. `featureGates.forkStrategy(caps)` picks `native` (same provider, strong native ref, `fork:'native'`) or `portable` (a `full_summary` handoff from the source up to the fork point). The code checkpoint at the fork ordinal, if one exists, seeds the fork's worktree.
+- **Merge-back** `thread.merge_back({ forkThreadId })` is allowed only into the direct parent and only when the fork's latest run is `completed`. It records a pending `merge_back` transfer; the parent's next turn receives a `fork_delta_summary` handoff (runs on the fork since the fork point). Code integration stays explicit through the existing child-integration path (§14.4). Queueing on a thread with a pending merge-back is refused with a reason until it is consumed.
+
+### 16.3 Undo and restore safety
+
+- `actions.undoLatest`/`revertCode` keep their Git mechanics but become `undo` runs so they appear in `runs.list` and are themselves recoverable.
+- `featureGates.restoreMode(caps)`: `containment:'weak'` providers never get an automatic file restore; the UI shows the diff and asks. File restore is refused unless the thread owns its worktree and no other thread's worktree or live cwd overlaps it (realpath check), mirroring `CheckpointRestoreSafety`.
+
+### 16.4 Continue after restart
+
+- Boot already writes `restart.note`. Phase 6 adds a `continue` affordance: the note's system message carries `{ runId }`; the GUI shows a "Continue" button that sends `orchestrator.send` with `{ content: 'Continue where you left off.', continuationOfRunId }` and `clientRequestId = continue:<runId>` so a double click is a replay. Never automatic (invariant 10). Not offered for `uncertain` runs until the user acknowledges the listed tools.
+
+### 16.5 Tests
+
+Replay scenarios per adapter: switch provider mid-thread (delta vs full summary, budget hit → compaction, pointer present); fork then first message (native vs portable); merge-back delivers a delta once and refuses a second pending one; undo refused on a shared checkout; continue after restart replays on double click.
