@@ -822,8 +822,13 @@ export class MmsProfileServices {
     const workerStopped = this.runEffectWorker?.stop()
     await this.orchestrator.shutdown()
     await workerStopped
-    this.orchestrator.attachEffectWorker(null)
-    this.runEngine.shutdown()
+    // Only detach what start() attached; a profile stopped before start() has no worker.
+    if (this.runEffectWorker) this.orchestrator.attachEffectWorker(null)
+    this.runEffectWorker = null
+    this.runReconciler = null
+    // Test fixtures stop a partially constructed profile; a missing engine has nothing to end.
+    const engine = this.runEngine as RunEngine | undefined
+    engine?.shutdown()
   }
 
   private async finishStop(): Promise<void> {
