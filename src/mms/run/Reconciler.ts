@@ -20,6 +20,8 @@ export const DEFAULT_RECONCILE_INTERVAL_MS = 5_000
 export const FORCED_INTERRUPT_AFTER_MS = 10_000
 /** Rule 5: the error of a stranded queued run whose send cannot be recovered. */
 export const NO_TURN_PAYLOAD_ERROR = 'no turn payload after restart'
+/** The thread id of reconciler events that belong to no thread (`reconcile.rule_failed`). */
+export const RECONCILER_THREAD_ID = '__reconciler__'
 
 export interface RepairReport {
   /** Rule 1: effects whose expired lease was reclaimed. */
@@ -79,16 +81,42 @@ export class Reconciler {
     this.credentials = options.credentials
   }
 
+  /**
+   * One pass over every rule, in order. A rule that throws does not skip the rest: its report
+   * entry is empty and a `reconcile.rule_failed` event (thread `RECONCILER_THREAD_ID`) names it.
+   */
   runOnce(): RepairReport {
     const now = this.now()
+    const credentials = this.credentials
+    // Rules run in SPEC order; object literal members evaluate left to right.
     return {
-      expiredLeases: this.expiredLeases(now),
-      staleRuns: this.staleRuns(now),
-      forcedInterrupts: this.forcedInterrupts(now),
-      wakes: wakeThreads(this.store, this.outbox, this.capabilitiesFor, now),
-      ...this.queuedStarts(now),
-      outcomeUnknownTools: this.toolsOnTerminalRuns(now),
-      ...(this.credentials ? { prunedCredentials: this.credentials.pruneExpired() } : {})
+      expiredLeases: this.rule('expired_leases', [], () => this.expiredLeases(now)),
+      staleRuns: this.rule('stale_runs', [], () => this.staleRuns(now)),
+      forcedInterrupts: this.rule('forced_interrupts', [], () => this.forcedInterrupts(now)),
+      wakes: this.rule('wakes', { wakes: [], steers: [], cancelled: [], restored: [] }, () =>
+        wakeThreads(this.store, this.outbox, this.capabilitiesFor, now)),
+      ...this.rule('queued_starts', { queuedStarts: [], strandedCancelled: [] }, () => this.queuedStarts(now)),
+      outcomeUnknownTools: this.rule('tools_on_terminal_runs', [], () => this.toolsOnTerminalRuns(now)),
+      ...(credentials ? { prunedCredentials: this.rule('prune_credentials', 0, () => credentials.pruneExpired()) } : {})
+    }
+  }
+
+  private rule<T>(name: string, empty: T, run: () => T): T {
+    try {
+      return run()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(`[reconciler] rule ${name} failed: ${message}`)
+      try {
+        this.store.appendEvent({
+          threadId: RECONCILER_THREAD_ID,
+          type: 'reconcile.rule_failed',
+          payload: { rule: name, error: message }
+        })
+      } catch {
+        /* The database itself is failing; the warning above is all we can leave. */
+      }
+      return empty
     }
   }
 

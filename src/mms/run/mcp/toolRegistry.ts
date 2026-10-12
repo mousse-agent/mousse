@@ -10,7 +10,7 @@ import { PlanModeTools } from '../../orchestrator/PlanModeTools'
 import { TaskControlTools } from '../../tasks/TaskControlTools'
 import { TaskQueue } from '../../tasks/TaskQueue'
 import type { RunEngine } from '../RunEngine'
-import type { ModeCeiling } from '../types'
+import type { DelegationRecord, ModeCeiling, ThreadEvent } from '../types'
 
 /**
  * What a tool may touch (docs/run-engine/SPEC.md §15.1):
@@ -194,6 +194,29 @@ function plainSchema(tool: Tool, extra: Record<string, JsonSchema> = {}): JsonSc
 
 const json = (value: unknown): ToolOutcome => ({ text: JSON.stringify(value) })
 
+/** Event types a lineage thread may read of another thread (M7): run lifecycle and lineage only. */
+function lineageVisible(type: string): boolean {
+  return type.startsWith('run.') || type.startsWith('attempt.') || type === 'command.ignored' || type === 'restart.note' || type === 'thread.lineage'
+}
+
+/**
+ * Another thread's events as a lineage relative sees them (M7): run and attempt lifecycle,
+ * ignored commands, restart notes and the lineage row; plus `delegation.status` rows whose result is shown only to
+ * the delegation's own child (a sibling's result and the parent's other prompts stay private).
+ * Inbox, effect (turn payloads carry prompts), tool and transfer events are left out.
+ */
+function lineageView(events: ThreadEvent[], callerThreadId: string): ThreadEvent[] {
+  const out: ThreadEvent[] = []
+  for (const event of events) {
+    if (lineageVisible(event.type)) out.push(event)
+    else if (event.type === 'delegation.status') {
+      const delegation = event.payload as DelegationRecord
+      out.push(delegation.childThreadId === callerThreadId ? event : { ...event, payload: { ...delegation, result: null } })
+    }
+  }
+  return out
+}
+
 function isRelated(engine: RunEngine, callerThreadId: string, targetThreadId: string): boolean {
   const ancestors = (threadId: string): string[] => {
     const out: string[] = []
@@ -306,7 +329,10 @@ export function createMousseToolRegistry(deps: { engine: RunEngine; host: Mousse
         throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not this thread or one of its lineage.`)
       const afterSeq = boundedInt(args.afterSeq, 'afterSeq', 0, Number.MAX_SAFE_INTEGER, 0)
       const limit = boundedInt(args.limit, 'limit', 1, THREAD_READ_MAX_LIMIT, THREAD_READ_DEFAULT_LIMIT)
-      return json({ threadId, events: engine.listEvents(threadId, { afterSeq, limit }), maxSeq: engine.maxSeq(threadId) })
+      const page = engine.listEvents(threadId, { afterSeq, limit })
+      const events = threadId === ctx.caller.threadId ? page : lineageView(page, ctx.caller.threadId)
+      // `nextAfterSeq` pages on even when a lineage view filtered events out of this page.
+      return json({ threadId, events, maxSeq: engine.maxSeq(threadId), nextAfterSeq: page.at(-1)?.seq ?? afterSeq })
     }
   })
 
@@ -351,6 +377,7 @@ export function createMousseToolRegistry(deps: { engine: RunEngine; host: Mousse
         sourceThreadId: { type: 'string', description: 'Defaults to your thread; otherwise a thread of your lineage.' },
         atRunOrdinal: { type: 'integer', minimum: 1, description: 'The source run to fork after; the latest finished run when omitted.' },
         title: { type: 'string' },
+        seedFrom: { type: 'string', enum: ['checkpoint', 'current_head'], description: 'When the fork point has no code checkpoint the fork is refused (fork_point_unavailable) unless this is current_head: start from the source\'s current code.' },
         clientRequestId: CLIENT_REQUEST_ID_SCHEMA
       }
     },
@@ -362,10 +389,13 @@ export function createMousseToolRegistry(deps: { engine: RunEngine; host: Mousse
         throw new McpToolError('mousse_scope_denied', `Thread ${sourceThreadId} is not this thread or one of its lineage.`)
       const atRunOrdinal = args.atRunOrdinal === undefined ? 'latest_stable' : boundedInt(args.atRunOrdinal, 'atRunOrdinal', 1, Number.MAX_SAFE_INTEGER, 1)
       if (args.title !== undefined && typeof args.title !== 'string') throw new Error('title must be a string')
+      if (args.seedFrom !== undefined && args.seedFrom !== 'checkpoint' && args.seedFrom !== 'current_head')
+        throw new Error("seedFrom must be 'checkpoint' or 'current_head'")
       const forked = await engine.forkThread({
         sourceThreadId,
         atRunOrdinal,
         title: args.title as string | undefined,
+        seedFrom: args.seedFrom as 'checkpoint' | 'current_head' | undefined,
         clientRequestId: `thread_fork:${ctx.caller.runId}:${toolRequestId(args, ctx)}`
       })
       return json({ threadId: forked.threadId, transferId: forked.transferId })

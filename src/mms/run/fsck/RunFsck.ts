@@ -5,7 +5,8 @@
  * docs/run-engine/SPEC.md §7.
  *
  * Phase 2 (schema version 2, SPEC §12.7) adds effect lease, dead-epoch, effect-less active run and
- * stranded tool-invocation checks.
+ * stranded tool-invocation checks, and queued runs nothing will start. Phase 4 (schema version 3)
+ * adds running delegations whose child run already ended.
  *
  * Not checked: non-terminal runs from an earlier daemon epoch (runs do not record their epoch)
  * and in-memory `turnStates` versus `runs` (needs a live daemon).
@@ -26,6 +27,16 @@ export interface FsckFinding {
 export interface RunFsckOptions {
   /** Root of the profile whose run state is checked (holds the profile database). */
   profileHome: string
+  /**
+   * Run ids carried by the thread's durable message queue (`queue.json`), when the caller can read
+   * thread storage. Without it a queued run counts as waiting on the queue unless its `turn.start`
+   * already ended.
+   */
+  queuedRunIds?: (threadId: string) => readonly string[] | null
+}
+
+export interface RunFsckCheckOptions {
+  queuedRunIds?: RunFsckOptions['queuedRunIds']
 }
 
 const TERMINAL = [...TERMINAL_RUN_STATUSES]
@@ -35,9 +46,11 @@ const ACTIVE_SQL = `'starting','running','finalizing'`
 
 export class RunFsck {
   readonly profileHome: string
+  private readonly queuedRunIds: RunFsckOptions['queuedRunIds']
 
   constructor(opts: RunFsckOptions) {
     this.profileHome = opts.profileHome
+    this.queuedRunIds = opts.queuedRunIds
   }
 
   /** Opens the profile database only when it exists; never creates or migrates it. */
@@ -48,13 +61,13 @@ export class RunFsck {
     const db = new ProfileDatabase({ profileHome: this.profileHome })
     try {
       if (db.userVersion() < 1) return []
-      return RunFsck.checkDatabase(db)
+      return RunFsck.checkDatabase(db, { queuedRunIds: this.queuedRunIds })
     } finally {
       db.close()
     }
   }
 
-  static checkDatabase(db: ProfileDatabase): FsckFinding[] {
+  static checkDatabase(db: ProfileDatabase, options: RunFsckCheckOptions = {}): FsckFinding[] {
     const findings = [
       ...attemptStatusMismatches(db),
       ...danglingActiveAttempts(db),
@@ -69,9 +82,96 @@ export class RunFsck {
       ...expiredEffectLeases(db, now),
       ...effectsForDeadEpochs(db),
       ...activeRunsWithoutEffect(db),
-      ...toolsStartedOnTerminalRuns(db)
+      ...toolsStartedOnTerminalRuns(db),
+      ...queuedRunsWithoutEffectOrQueueItem(db, options.queuedRunIds),
+      ...(db.userVersion() >= 3 ? runningDelegationsWithTerminalChild(db) : [])
     ]
   }
+}
+
+/**
+ * A queued run that nothing will start: no `pending|running` `turn.start`, and not on its thread's
+ * message queue. With `queuedRunIds` the queue is read; without it a run whose latest `turn.start`
+ * ended and that is no queue item's (`queueItemId` in its payload) counts, while a run that never
+ * had a `turn.start` is assumed to wait on the queue. Reconciler rule 5 repairs the stranded ones.
+ */
+function queuedRunsWithoutEffectOrQueueItem(
+  db: ProfileDatabase,
+  queuedRunIds: RunFsckOptions['queuedRunIds']
+): FsckFinding[] {
+  const rows = db
+    .statement(
+      `SELECT r.run_id, r.thread_id, r.source,
+         (SELECT e.payload FROM effects e WHERE e.run_id = r.run_id AND e.kind = 'turn.start'
+           ORDER BY e.rowid DESC LIMIT 1) AS latest_payload
+       FROM runs r
+       WHERE r.status = 'queued'
+         AND NOT EXISTS (SELECT 1 FROM effects e WHERE e.run_id = r.run_id AND e.kind = 'turn.start'
+           AND e.status IN ('pending','running'))
+       ORDER BY r.thread_id, r.ordinal`
+    )
+    .all()
+  const queues = new Map<string, ReadonlySet<string> | null>()
+  const onQueue = (threadId: string, runId: string): boolean | null => {
+    if (!queuedRunIds) return null
+    if (!queues.has(threadId)) {
+      let ids: readonly string[] | null = null
+      try {
+        ids = queuedRunIds(threadId)
+      } catch {
+        ids = null
+      }
+      queues.set(threadId, ids ? new Set(ids) : null)
+    }
+    const ids = queues.get(threadId)
+    return ids ? ids.has(runId) : null
+  }
+  const findings: FsckFinding[] = []
+  for (const row of rows) {
+    const runId = String(row.run_id)
+    const threadId = String(row.thread_id)
+    let payload: unknown = null
+    try {
+      payload = typeof row.latest_payload === 'string' ? JSON.parse(row.latest_payload) : null
+    } catch {
+      payload = null
+    }
+    const queueItem = Boolean(payload && typeof payload === 'object' && typeof (payload as Row).queueItemId === 'string')
+    const queued = onQueue(threadId, runId)
+    const stranded = queued === null ? row.latest_payload !== null && row.latest_payload !== undefined && !queueItem : !queued
+    if (!stranded) continue
+    findings.push({
+      code: 'queued_run_without_effect_or_queue_item',
+      severity: 'warning',
+      message: `Run ${runId} is queued but has no pending or running turn.start and is not on its thread's queue.`,
+      details: { runId, threadId, source: row.source, hadTurnStart: row.latest_payload !== null && row.latest_payload !== undefined }
+    })
+  }
+  return findings
+}
+
+/** A delegation still `running` whose child run is terminal: the publication gate missed it. */
+function runningDelegationsWithTerminalChild(db: ProfileDatabase): FsckFinding[] {
+  return db
+    .statement(
+      `SELECT d.delegation_id, d.parent_thread_id, d.child_thread_id, d.child_run_id, r.status AS run_status
+       FROM delegations d JOIN runs r ON r.run_id = d.child_run_id
+       WHERE d.status = 'running' AND r.status IN (${TERMINAL_SQL})
+       ORDER BY d.rowid`
+    )
+    .all()
+    .map((row: Row) => ({
+      code: 'delegation_running_child_terminal',
+      severity: 'error' as const,
+      message: `Delegation ${String(row.delegation_id)} is running but its child run ${String(row.child_run_id)} is ${String(row.run_status)}.`,
+      details: {
+        delegationId: row.delegation_id,
+        parentThreadId: row.parent_thread_id,
+        childThreadId: row.child_thread_id,
+        childRunId: row.child_run_id,
+        runStatus: row.run_status
+      }
+    }))
 }
 
 function attemptStatusMismatches(db: ProfileDatabase): FsckFinding[] {

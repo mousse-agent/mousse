@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
-import { EffectWorker, WorkerStoppedError, type EffectExecutor, type EffectWorkerFibres } from '../../src/mms/run/EffectWorker'
+import { EffectDeferredError, EffectWorker, WorkerStoppedError, type EffectExecutor, type EffectWorkerFibres } from '../../src/mms/run/EffectWorker'
 import { RunStore } from '../../src/mms/run/RunStore'
 import type { EffectKind, EffectRecord } from '../../src/mms/run/types'
 
@@ -78,12 +78,13 @@ describe('EffectWorker', () => {
 
   it('fails a timed-out execution with "timeout" and retries it', async () => {
     let calls = 0
+    const hung = deferred()
     const { outbox, worker } = setup(
       {
         'turn.steer': async () => {
           calls++
           // The first attempt hangs and ignores its signal; the deadline still settles it.
-          if (calls === 1) await new Promise(() => undefined)
+          if (calls === 1) await hung.promise
         }
       },
       { timeoutMs: 50 }
@@ -94,6 +95,29 @@ describe('EffectWorker', () => {
     // Retried after the 100 ms backoff.
     await waitFor(() => outbox.get(effect.effectId)!.status === 'succeeded', 'retry')
     expect(outbox.get(effect.effectId)).toMatchObject({ attempts: 2, lastError: 'timeout' })
+    expect(calls).toBe(2)
+    // The abandoned first attempt is still tracked; stop() waits for it (H5).
+    hung.resolve()
+  })
+
+  it('an executor that defers puts its effect back to pending later, without counting the attempt', async () => {
+    let calls = 0
+    const { outbox, worker } = setup({
+      'turn.steer': async () => {
+        calls++
+        if (calls === 1) throw new EffectDeferredError(80, 'thread_busy')
+      }
+    })
+    const effect = outbox.enqueue({ threadId: 't', kind: 'turn.steer' })
+    worker.start()
+    await waitFor(() => outbox.get(effect.effectId)!.lastError === 'thread_busy', 'deferral')
+    const deferredRow = outbox.get(effect.effectId)!
+    if (deferredRow.status === 'pending') {
+      expect(deferredRow.attempts).toBe(0)
+      expect(Date.parse(deferredRow.availableAt) - Date.parse(deferredRow.updatedAt)).toBe(80)
+    }
+    await waitFor(() => outbox.get(effect.effectId)!.status === 'succeeded', 'the deferred run')
+    expect(outbox.get(effect.effectId)!.attempts).toBe(1)
     expect(calls).toBe(2)
   })
 
@@ -174,15 +198,29 @@ describe('EffectWorker', () => {
     expect(worker.inFlight()).toBe(0)
   })
 
-  it('stop() interrupts fibres, returns, and leaves the in-flight row to recovery', async () => {
+  it('stop() interrupts fibres, waits for in-flight executors to settle, and leaves the row to recovery (H5)', async () => {
+    const release = deferred()
+    let finished = false
     const { outbox, worker } = setup({
-      // Ignores its signal entirely.
-      'turn.steer': () => new Promise<void>(() => undefined)
+      // Ignores its signal until released, then still writes (like a turn unwinding).
+      'turn.steer': async () => {
+        await release.promise
+        finished = true
+      }
     })
     const effect = outbox.enqueue({ threadId: 't', kind: 'turn.steer' })
     worker.start()
     await waitFor(() => worker.inFlight() === 1, 'in flight')
-    await worker.stop()
+    let stopped = false
+    const stopping = worker.stop().then(() => {
+      stopped = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    // The fibre has returned, but the executor promise has not settled: stop() is still waiting.
+    expect(stopped).toBe(false)
+    release.resolve()
+    await stopping
+    expect(finished).toBe(true)
     expect(worker.inFlight()).toBe(0)
     expect(outbox.get(effect.effectId)).toMatchObject({ status: 'running', leaseOwner: '1:1' })
     // A stopped worker claims nothing.

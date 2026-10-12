@@ -57,6 +57,20 @@ describe('HandoffService strategies (SPEC §16.1)', () => {
     expect(fx.engine.listEvents('t').filter((event) => event.type === 'handoff.status')).toHaveLength(1)
   })
 
+  it('reads the thread owner\'s transcript before its write transaction opens (M2)', async () => {
+    fx = delegationFixture()
+    await ranOn('t', 'openai')
+    const run = await target('t')
+    const inTransaction: boolean[] = []
+    fx.engine.handoffs.setTranscriptSource(() => {
+      inTransaction.push(fx!.db.inTransaction)
+      return items
+    })
+    const plan = fx.engine.handoffs.plan({ threadId: 't', targetRunId: run.runId, from: { provider: 'openai' }, to, caps: CLAUDE_SUBSCRIPTION_CAPABILITIES })
+    expect(inTransaction).toEqual([false])
+    expect(plan.record.status).toBe('pending')
+  })
+
   it('delta (the runs since its last turn) when the target provider ran earlier on the thread', async () => {
     fx = delegationFixture()
     await ranOn('t', 'claude-subscription')

@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
+import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
+import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import type { RunRecord, ThreadEvent } from '../../src/mms/run/types'
@@ -24,7 +26,8 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     const db = new ProfileDatabase({ profileHome, clock: () => (tick += 1000) })
     dbs.push(db)
     const store = new RunStore(db)
-    const engine = new RunEngine({ store, pid })
+    // Reserved kinds stand in for replay-safe work here (SPEC §12.2: no producer yet).
+    const engine = new RunEngine({ store, pid, outbox: new EffectOutbox(store, { allowReservedKinds: true }) })
     const events: ThreadEvent[] = []
     engine.on('event', (event: ThreadEvent) => events.push(event))
     const boot = engine.reconcileOnBoot()
@@ -226,5 +229,19 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     engine.markTerminal(run.runId, 'uncertain', { uncertainReason: 'test' })
     expect(engine.heartbeat(run.runId)).toBe(false)
     expect(engine.heartbeatDaemon()).toBe(true)
+  })
+
+  it('revokes every live Mousse MCP credential: the tokens died with the previous daemon (M8)', async () => {
+    const first = daemon(10)
+    const run = await running(first.engine, 't1', 'req-mcp')
+    const credentials = new McpCredentials(first.store)
+    const minted = credentials.mintOrReuse({ threadId: 't1', runId: run.runId, provider: 'claude-subscription', modeCeiling: 'default' })
+    expect(credentials.listForThread('t1')).toMatchObject([{ revokedAt: null }])
+    first.engine.shutdown()
+    const second = daemon(20)
+    const after = new McpCredentials(second.store)
+    expect(after.listForThread('t1')).toHaveLength(1)
+    expect(after.listForThread('t1')[0].revokedAt).not.toBeNull()
+    expect(after.resolve(minted.token)).toBeNull()
   })
 })

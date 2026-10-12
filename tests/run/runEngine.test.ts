@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { RunStoreError } from '../../src/mms/run/db/RunStoreError'
 import { Reconciler } from '../../src/mms/run/Reconciler'
-import { RunEngine } from '../../src/mms/run/RunEngine'
+import { LocalActionGated, RunEngine } from '../../src/mms/run/RunEngine'
 
 import { RunStore } from '../../src/mms/run/RunStore'
 import type { ThreadEvent } from '../../src/mms/run/types'
@@ -92,6 +92,18 @@ describe('RunEngine', () => {
     expect(result).toEqual({ status: 'rejected', reason: 'client_request_id_conflict', sequence: 0 })
     expect(store.getReceipt('req-1')!.threadId).toBe('t1')
     expect(store.listRuns('t2')).toEqual([])
+  })
+
+  it('rejects a clientRequestId reused for another command kind on the same thread (M10)', async () => {
+    const { store, engine } = open()
+    const sent = await send(engine, 't1', 'req-1')
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    const stop = await engine.dispatch({ kind: 'stop', threadId: 't1', clientRequestId: 'req-1', runId: sent.runId })
+    expect(stop).toMatchObject({ status: 'rejected', reason: 'client_request_id_conflict' })
+    expect(store.getRun(sent.runId)!.outcome?.stopRequested).toBeUndefined()
+    expect(store.getReceipt('req-1')!.commandKind).toBe('send')
+    // The same kind still replays.
+    expect(await send(engine, 't1', 'req-1')).toMatchObject({ status: 'accepted', runId: sent.runId, replayed: true })
   })
 
   it('rejects a stale expectedSequence without a receipt', async () => {
@@ -372,5 +384,28 @@ describe('RunEngine.runLocalAction (SPEC §16.3)', () => {
         throw new Error('git failed')
       })
     ).rejects.toThrow('git failed')
+  })
+
+  it('runs the gate under the thread mutex before the run exists; a gated action creates no run (M6)', async () => {
+    const { engine } = setup(10_000)
+    const order: string[] = []
+    const gated = engine.runLocalAction({ threadId: 't', source: 'undo' }, async () => 'never', {
+      gate: () => {
+        order.push('gate')
+        // A send racing the gate waits for the mutex: it cannot start a run in between.
+        void engine.dispatch({ kind: 'send', threadId: 't', clientRequestId: 'racing-send', source: 'gui' }).then(() => order.push('send'))
+        expect(engine.listRuns('t')).toEqual([])
+        throw new LocalActionGated({ requiresReview: true })
+      }
+    })
+    await expect(gated).rejects.toMatchObject({ value: { requiresReview: true } })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(order).toEqual(['gate', 'send'])
+    expect(engine.listRuns('t').map((run) => run.source)).toEqual(['gui'])
+    // An ungated action records its outcome on the completed run.
+    engine.markStarting(engine.listRuns('t')[0].runId)
+    engine.markTerminal(engine.listRuns('t')[0].runId, 'completed')
+    const { runId } = await engine.runLocalAction({ threadId: 't', source: 'undo' }, async () => 'ok', { gate: () => undefined, outcome: { undoStrategy: 'checkpoint' } })
+    expect(engine.getRun(runId)).toMatchObject({ status: 'completed', outcome: { undoStrategy: 'checkpoint' } })
   })
 })

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { DaemonEpoch } from '../../src/mms/run/DaemonEpoch'
+import { Delegations } from '../../src/mms/run/Delegations'
 import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
 import { RunFsck } from '../../src/mms/run/fsck/RunFsck'
 import { RunStore } from '../../src/mms/run/RunStore'
@@ -140,7 +141,7 @@ describe('RunFsck', () => {
   it('effect_lease_expired_unclaimed: running effect whose lease expired', () => {
     const store = seed()
     const { epoch } = new DaemonEpoch(store).begin(1, PAST)
-    const outbox = new EffectOutbox(store)
+    const outbox = new EffectOutbox(store, { allowReservedKinds: true })
     const effect = outbox.enqueue({ threadId: 't', kind: 'title.generate', availableAt: PAST })
     outbox.claimNext(`${epoch}:1`, PAST)
     const findings = check()
@@ -153,7 +154,7 @@ describe('RunFsck', () => {
     const epochs = new DaemonEpoch(store)
     epochs.begin(1, FUTURE)
     epochs.begin(2, FUTURE)
-    const outbox = new EffectOutbox(store)
+    const outbox = new EffectOutbox(store, { allowReservedKinds: true })
     const dead = outbox.enqueue({ threadId: 't', kind: 'title.generate', availableAt: FUTURE })
     outbox.enqueue({ threadId: 'u', kind: 'title.generate', availableAt: FUTURE })
     outbox.claimNext('1:1', FUTURE)
@@ -165,7 +166,7 @@ describe('RunFsck', () => {
 
   it('run_active_without_effect: effect-driven active run with no live effect (warning)', () => {
     const store = seed()
-    const outbox = new EffectOutbox(store)
+    const outbox = new EffectOutbox(store, { allowReservedKinds: true })
     const driven = store.createRun({ threadId: 't', source: 'gui' })
     store.casRunStatus({ runId: driven.runId, expectedEpoch: 0, status: 'running' })
     const turn = outbox.enqueue({ threadId: 't', runId: driven.runId, kind: 'turn.start' })
@@ -193,5 +194,40 @@ describe('RunFsck', () => {
     const findings = check()
     expect(findings.map((finding) => finding.code)).toEqual(['tool_started_on_terminal_run'])
     expect(findings[0].details).toMatchObject({ invocationId: 'call-1', runStatus: 'interrupted' })
+  })
+
+  it('queued_run_without_effect_or_queue_item: a queued run nothing will start (warning)', () => {
+    const store = seed()
+    const outbox = new EffectOutbox(store)
+    // Stranded: its turn.start died and it is not a queue item.
+    const stranded = store.createRun({ threadId: 't', source: 'gui' })
+    const dead = outbox.enqueue({ threadId: 't', runId: stranded.runId, kind: 'turn.start', payload: { runId: stranded.runId, threadId: 't', input: { content: 'x' } } })
+    outbox.cancel(dead.effectId, PAST, 'daemon_restart')
+    // Waiting: a pending turn.start, a queue item's dead turn.start, and a run with no turn.start yet.
+    const pending = store.createRun({ threadId: 'u', source: 'gui' })
+    outbox.enqueue({ threadId: 'u', runId: pending.runId, kind: 'turn.start' })
+    const item = store.createRun({ threadId: 'v', source: 'queue' })
+    const itemStart = outbox.enqueue({ threadId: 'v', runId: item.runId, kind: 'turn.start', payload: { runId: item.runId, threadId: 'v', input: { content: 'x' }, queueItemId: 'q1' } })
+    outbox.cancel(itemStart.effectId, PAST, 'daemon_restart')
+    const queuedOnly = store.createRun({ threadId: 'w', source: 'gui' })
+    const findings = check()
+    expect(findings.map((finding) => [finding.code, finding.severity])).toEqual([['queued_run_without_effect_or_queue_item', 'warning']])
+    expect(findings[0].details).toMatchObject({ runId: stranded.runId, threadId: 't', hadTurnStart: true })
+    // With the queue readable, a run on no queue is reported even without a turn.start.
+    const withQueues = new RunFsck({ profileHome: profileHome!, queuedRunIds: (threadId) => (threadId === 'v' ? [item.runId] : []) }).check()
+    expect(withQueues.filter((finding) => finding.code === 'queued_run_without_effect_or_queue_item').map((finding) => finding.details?.runId))
+      .toEqual([stranded.runId, queuedOnly.runId])
+  })
+
+  it('delegation_running_child_terminal: a running delegation whose child run ended', () => {
+    const store = seed()
+    const child = store.createRun({ threadId: 'child', source: 'delegation' })
+    const delegations = new Delegations(store)
+    const delegation = delegations.create({ parentRunId: 'run:p', parentThreadId: 'p', childThreadId: 'child', childRunId: child.runId, prompt: 'x', wake: 'always' })
+    // Ended without the publication gate (no lineage row): the delegation stays running.
+    store.casRunStatus({ runId: child.runId, expectedEpoch: 0, status: 'failed' })
+    const findings = check()
+    expect(findings.map((finding) => finding.code)).toEqual(['delegation_running_child_terminal'])
+    expect(findings[0].details).toMatchObject({ delegationId: delegation.delegationId, childRunId: child.runId, runStatus: 'failed' })
   })
 })

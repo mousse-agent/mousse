@@ -24,7 +24,6 @@ export const ANTIGRAVITY_CAPABILITIES: ProviderCapabilities = Object.freeze({
   interrupt: true,
   rollback: 'none',
   fork: 'portable',
-  nativeSubagents: 'none',
   events: 'sparse',
   containment: 'weak',
   historyInjection: 'prompt',

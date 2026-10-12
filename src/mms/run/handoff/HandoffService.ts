@@ -83,18 +83,27 @@ export class HandoffService {
     this.transcript = source
   }
 
+  /**
+   * Decides the strategy, selects history and records the `pending` row. The thread owner's
+   * transcript is read before the write transaction opens (M2: no thread-storage I/O inside a run
+   * database transaction); the transaction re-checks the target run.
+   */
   plan(input: HandoffPlanInput): HandoffPlan {
+    const target = this.store.getRun(input.targetRunId)
+    if (!target || target.threadId !== input.threadId)
+      fail('bad_request', `Run ${input.targetRunId} is not a run of thread ${input.threadId}.`)
+    const sourceThreadId = input.sourceThreadId ?? input.threadId
+    const { strategy, afterOrdinal } = this.decide(input, target.ordinal)
+    const transcript = strategy === 'native_resume' ? [] : (this.transcript?.(sourceThreadId) ?? [])
     return this.db.transaction((): HandoffPlan => {
-      const target = this.store.getRun(input.targetRunId)
-      if (!target || target.threadId !== input.threadId)
+      const current = this.store.getRun(input.targetRunId)
+      if (!current || current.threadId !== input.threadId)
         fail('bad_request', `Run ${input.targetRunId} is not a run of thread ${input.threadId}.`)
-      const sourceThreadId = input.sourceThreadId ?? input.threadId
-      const { strategy, afterOrdinal } = this.decide(input, target.ordinal)
       const throughOrdinal = input.throughOrdinal ?? (sourceThreadId === input.threadId ? target.ordinal - 1 : undefined)
       const candidates =
         strategy === 'native_resume'
           ? []
-          : (this.transcript?.(sourceThreadId) ?? []).filter((item) => {
+          : transcript.filter((item) => {
               if (item.current) return false
               if (item.runOrdinal === null) return afterOrdinal === undefined
               if (afterOrdinal !== undefined && item.runOrdinal <= afterOrdinal) return false

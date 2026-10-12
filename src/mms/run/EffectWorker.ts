@@ -1,4 +1,4 @@
-import type { EffectOutbox, EffectSettlement } from './EffectOutbox'
+import { addMs, type EffectOutbox, type EffectSettlement } from './EffectOutbox'
 import type { EffectKind, EffectLaneClass, EffectRecord } from './types'
 
 export type EffectExecutor = (
@@ -48,6 +48,20 @@ export class WorkerStoppedError extends Error {
   }
 }
 
+/**
+ * Thrown by an executor that cannot run its effect yet (its thread is busy with another turn): the
+ * effect goes back to `pending`, available after `delayMs`, and the attempt is not counted.
+ */
+export class EffectDeferredError extends Error {
+  constructor(
+    readonly delayMs: number,
+    readonly reason = 'deferred'
+  ) {
+    super(reason)
+    this.name = 'EffectDeferredError'
+  }
+}
+
 class LeaseLostError extends Error {
   constructor() {
     super('lease lost')
@@ -65,9 +79,11 @@ class EffectCancelledError extends Error {
  * outbox, execute under a deadline and settle by CAS on the lease. Wake sources: outbox commits
  * (`subscribe`), `notify()`, the next `available_at` and a safety poll.
  *
- * Settlement rules: success → `succeed`; failure → `fail(message)` (`'timeout'` when the deadline
- * fired); `cancelInFlight` → owner-checked `cancel`; a lost lease or `stop()` writes nothing (the
- * reconciler or boot recovery owns that row now). A CAS miss on settlement is logged and ignored.
+ * Settlement rules: success → `succeed`; `EffectDeferredError` → `defer` (pending again later);
+ * failure → `fail(message)` (`'timeout'` when the deadline fired); `cancelInFlight` →
+ * owner-checked `cancel`; a lost lease or `stop()` writes nothing (the reconciler or boot recovery
+ * owns that row now). A CAS miss on settlement is logged and ignored. `stop()` returns only after
+ * every executor promise it started has settled, so nothing writes after it.
  */
 export class EffectWorker {
   private readonly outbox: EffectOutbox
@@ -82,6 +98,8 @@ export class EffectWorker {
   private readonly wakers = new Set<() => void>()
   private generation = 0
   private readonly running = new Map<string, AbortController>()
+  /** Executor promises still running, including ones a race already gave up on. */
+  private readonly executing = new Set<Promise<unknown>>()
 
   constructor(options: EffectWorkerOptions) {
     this.outbox = options.outbox
@@ -113,7 +131,11 @@ export class EffectWorker {
     return this.fibres
   }
 
-  /** Interrupts every fibre (and its in-flight execution) and waits for them to return. */
+  /**
+   * Interrupts every fibre and its in-flight execution, then waits for the fibres and for every
+   * executor promise to settle: an aborted executor may still be unwinding (writing its run's
+   * terminal state) after its fibre has moved on.
+   */
   async stop(): Promise<void> {
     const controller = this.stopController
     if (!controller) return
@@ -124,6 +146,7 @@ export class EffectWorker {
     this.notify()
     await Promise.all(this.loops)
     this.loops = []
+    while (this.executing.size) await Promise.allSettled([...this.executing])
   }
 
   /** Wakes idle fibres to claim again. */
@@ -210,16 +233,22 @@ export class EffectWorker {
     }
     const renewer = setInterval(renewLease, Math.max(1, Math.floor(effect.timeoutMs / 3)))
     let error: string | null = null
+    let deferred: EffectDeferredError | null = null
     try {
       const executor = this.executors[effect.kind]
       if (!executor) error = 'no executor'
-      else
-        await raceAbort(
-          Promise.resolve().then(() => executor(effect, { signal, renewLease })),
-          signal
-        )
+      else {
+        const work = Promise.resolve().then(() => executor(effect, { signal, renewLease }))
+        this.executing.add(work)
+        const settled = (): void => {
+          this.executing.delete(work)
+        }
+        void work.then(settled, settled)
+        await raceAbort(work, signal)
+      }
     } catch (cause) {
-      error = timeout.aborted ? 'timeout' : messageOf(cause)
+      if (cause instanceof EffectDeferredError && !signal.aborted) deferred = cause
+      else error = timeout.aborted ? 'timeout' : messageOf(cause)
     } finally {
       clearInterval(renewer)
       this.running.delete(effectId)
@@ -227,7 +256,10 @@ export class EffectWorker {
 
     let settlement: EffectSettlement
     try {
-      if (error === null) settlement = this.outbox.succeed(effectId, this.owner, this.now())
+      if (deferred) {
+        const now = this.now()
+        settlement = this.outbox.defer(effectId, this.owner, now, addMs(now, deferred.delayMs), deferred.reason)
+      } else if (error === null) settlement = this.outbox.succeed(effectId, this.owner, this.now())
       else if (lease.signal.aborted) {
         console.warn(`[effect-worker] lost the lease on ${effectId}; discarding the result`)
         return
@@ -239,7 +271,8 @@ export class EffectWorker {
       console.warn(`[effect-worker] settling ${effectId} failed: ${messageOf(cause)}`)
       return
     }
-    if (!settlement.settled)
+    // A cancel that reached the row first (a Stop or a delegation cancel) already settled it.
+    if (!settlement.settled && !(cancel.signal.aborted && settlement.status === 'cancelled'))
       console.warn(
         `[effect-worker] lost the lease on ${effectId} (now ${String(settlement.status)}); discarding the result`
       )

@@ -6,7 +6,7 @@ import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapte
 import type { ProviderCapabilities } from '../../src/mms/run/adapters/ProviderAdapter'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox, EFFECT_LEASE_GRACE_MS } from '../../src/mms/run/EffectOutbox'
-import { Reconciler } from '../../src/mms/run/Reconciler'
+import { RECONCILER_THREAD_ID, Reconciler } from '../../src/mms/run/Reconciler'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
@@ -63,12 +63,27 @@ describe('Reconciler', () => {
       expiredLeases: [],
       staleRuns: [],
       forcedInterrupts: [],
-      wakes: { wakes: [], steers: [], cancelled: [] },
+      wakes: { wakes: [], steers: [], cancelled: [], restored: [] },
       queuedStarts: [],
       strandedCancelled: [],
       outcomeUnknownTools: []
 
     })
+  })
+
+  it('a rule that throws does not skip the rest; the failure is an event naming the rule (L1)', async () => {
+    const { store, outbox, engine, reconciler, advance } = setup()
+    const run = await runningRun(engine)
+    advance(60_000)
+    outbox.reclaimExpired = () => {
+      throw new Error('disk on fire')
+    }
+    const report = reconciler.runOnce()
+    expect(report.expiredLeases).toEqual([])
+    // Rule 2 still ran after rule 1 failed.
+    expect(report.staleRuns).toEqual([run.runId])
+    const failures = store.listEvents(RECONCILER_THREAD_ID).filter((event) => event.type === 'reconcile.rule_failed')
+    expect(failures.map((event) => event.payload)).toEqual([{ rule: 'expired_leases', error: 'disk on fire' }])
   })
 
   it('rule 1: an expired lease goes back to pending, or failed when attempts are exhausted', () => {

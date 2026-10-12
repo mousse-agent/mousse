@@ -40,7 +40,9 @@ import type { AntigravityProviderService } from '../providers/antigravity/Antigr
 import { v4 as uuidv4 } from 'uuid'
 import type { CommandResult, RunEngine } from '../run/RunEngine'
 import { RunStoreError } from '../run/db/RunStoreError'
-import { WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
+import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
+import { stopStrategy } from '../run/CommandPolicy'
+import { McpToolError } from '../run/mcp/toolRegistry'
 import { stableStringify } from '../run/json'
 import { formatRestartNote } from '../run/restartNote'
 import { AdapterRegistry } from '../run/adapters/AdapterRegistry'
@@ -51,7 +53,7 @@ import type { AdapterHost, ProviderAdapter, ProviderCapabilities, ProviderMetric
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { McpCaller, MousseToolHost } from '../run/mcp/toolRegistry'
 import { formatWakeNotice } from '../run/delegation/notice'
-import type { DelegationRequest, ThreadCreation } from '../run/RunEngine'
+import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
 import { TranscriptAssembler } from '../run/adapters/shared/TranscriptAssembler'
@@ -65,6 +67,7 @@ import {
   type EffectRecord,
   type ModeCeiling,
   type ProviderRef,
+  type RunRecord,
   type ThreadEvent,
   type TransferRecord,
   type WakeTurnPayload
@@ -363,6 +366,12 @@ export interface OrchestratorSendOptions {
   acknowledgeUncertain?: boolean
 }
 
+/**
+ * How long a wake waits when its thread is busy with a turn the engine does not schedule (a
+ * workflow or legacy turn) before it looks again (C4: the wake stays queued instead of looping).
+ */
+export const WAKE_BUSY_DEFER_MS = 5_000
+
 /** Send refusals reported with their reason as the error code (SPEC §16.4). */
 const CONTINUATION_REFUSALS: ReadonlySet<string> = new Set([
   'continuation_not_found',
@@ -593,10 +602,10 @@ export class OrchestratorService extends EventEmitter {
   private mousseAgents: MousseAgentService
   private readonly namedSettlements = new Map<string, Promise<unknown>>()
   private readonly namedCancellations = new Map<string, () => void>()
-  /** In-flight channel turns keyed by mousse thread id. */
+  /** In-flight channel turns keyed by mousse thread id; `runId` once the turn is an engine run. */
   private channelTurns = new Map<
     string,
-    { abort: AbortController; pendingSteer: string[]; promotedSteerIds: string[] }
+    { abort: AbortController; pendingSteer: string[]; promotedSteerIds: string[]; runId?: string }
   >()
   /** Optional thread store for durable queue persistence. */
   private threadStore: ThreadDataStore | null = null
@@ -605,6 +614,8 @@ export class OrchestratorService extends EventEmitter {
   private runEngineUnsubscribe: (() => void) | null = null
   /** Runs whose bridge write hit a stale epoch; later marks for that turn are skipped. */
   private readonly staleRuns = new Set<string>()
+  /** `WAKE_BUSY_DEFER_MS`; tests shorten it. */
+  private readonly wakeBusyDeferMs = WAKE_BUSY_DEFER_MS
   /** Phase 2b: the worker that executes `turn.*` effects. Null keeps direct turn starts. */
   private effectWorker: EffectWorker | null = null
   /** Phase 5: mints a Mousse MCP credential per MCP-capable turn. Null attaches nothing. */
@@ -910,15 +921,18 @@ export class OrchestratorService extends EventEmitter {
     this.runEngineUnsubscribe?.()
     this.runEngineUnsubscribe = null
     this.runEngine?.setDelegationHost(null)
+    this.runEngine?.setInFlightCanceller(null)
     this.runEngine?.handoffs.setTranscriptSource(null)
     this.runEngine = engine
     if (!engine) return
+    this.attachInFlightCanceller()
     engine.handoffs.setTranscriptSource((threadId) => this.handoffTranscript(threadId))
     engine.setDelegationHost({
       createThread: (creation) =>
         creation.kind === 'delegation' ? this.createChildThread(creation.request) : this.createForkThread(creation),
       deleteThread: (threadId) => this.discardCreatedThread(threadId),
       readRunResultText: (runId) => this.runResultText(runId),
+      forkPointSeed: (sourceThreadId, sourceRunId) => this.forkPointSeed(sourceThreadId, sourceRunId),
       buildChildTurnPayload: ({ childThreadId, childRunId, prompt, request }): TurnStartPayload => ({
         runId: childRunId,
         threadId: childThreadId,
@@ -954,18 +968,60 @@ export class OrchestratorService extends EventEmitter {
     return interrupted
   }
 
-  /** Stop a specific run. Only the thread's active run is aborted; anything else is ignored. */
+  /**
+   * Stop a specific run. Only the thread's active run is aborted; anything else is ignored. The
+   * interrupt follows `CommandPolicy.stopStrategy` (`interruptRun`). A replay of an accepted stop
+   * (same `clientRequestId`) enqueues the interrupt again when the run is still active and none is
+   * pending or running (M4).
+   */
   async abortRun(runId: string, clientRequestId: string, threadId?: string): Promise<CommandResult> {
     const engine = this.requireRunEngine()
     const target = threadId ?? engine.getRun(runId)?.threadId
     if (!target) return { status: 'ignored', reason: 'run_not_found', runId, sequence: 0 }
     const result = await engine.dispatch({ kind: 'stop', threadId: target, clientRequestId, runId })
-    if (result.status === 'accepted' && !result.replayed) {
+    if (result.status === 'accepted' && (!result.replayed || engine.needsInterrupt(runId))) {
       this.enqueueControlEffect('turn.interrupt', target, runId, { runId, threadId: target }, () => {
-        this.abortActiveTurn(target)
+        void this.interruptRun(runId, target)
       })
     }
     return result
+  }
+
+  /**
+   * SPEC §13.3 Stop by `CommandPolicy.stopStrategy`: `interrupt` aborts the live turn and asks the
+   * adapter to interrupt its session; `settle_locally` (a provider that cannot be interrupted)
+   * aborts the live turn only. When nothing was live — no in-process turn to abort and the adapter
+   * reports `not_active` — the run is settled here, `interrupted` by the user, instead of waiting
+   * for reconciler rule 3. The strategy is recorded on the run outcome.
+   */
+  private async interruptRun(runId: string, threadId: string): Promise<void> {
+    const engine = this.runEngine
+    const run = engine?.getRun(runId) ?? null
+    if (run && TERMINAL_RUN_STATUSES.has(run.status)) return
+    const caps = this.capabilitiesForThread(threadId)
+    const strategy = caps ? stopStrategy(caps, run) : run ? 'interrupt' : 'noop'
+    const abortedLocally = this.abortActiveTurn(threadId)
+    if (strategy === 'noop' || !engine || !run) return
+    // A turn of this process (live, admitted or unwinding) writes the run's terminal state itself.
+    let live = abortedLocally || this.hasLocalTurn(threadId)
+    if (strategy === 'interrupt') {
+      const ref = run.activeAttemptId ? engine.store.getAttempt(run.activeAttemptId)?.providerRef ?? null : null
+      if (ref) {
+        try {
+          const adapter = this.adapters.get(ref.provider)
+          if ((await adapter.interrupt(ref)) === 'interrupted') live = true
+        } catch (error) {
+          console.warn('adapter interrupt failed', { runId, error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+    }
+    if (live) return
+    console.warn('stop settled locally: nothing live for the run', { runId, strategy })
+    this.markRun(runId, (runs, id) => {
+      const current = runs.getRun(id)
+      if (current && !TERMINAL_RUN_STATUSES.has(current.status))
+        runs.markTerminal(id, 'interrupted', { interruptedBy: 'user', stopStrategy: strategy })
+    })
   }
 
   /** Steer a specific run. Only the thread's active run receives the text; anything else is ignored. */
@@ -990,6 +1046,13 @@ export class OrchestratorService extends EventEmitter {
    */
   attachEffectWorker(worker: EffectWorker | null): void {
     this.effectWorker = worker
+    this.attachInFlightCanceller()
+  }
+
+  /** C2: the engine aborts a claimed `turn.start` (a cancelled child still provisioning) through the worker. */
+  private attachInFlightCanceller(): void {
+    const worker = this.effectWorker
+    this.runEngine?.setInFlightCanceller(worker ? (effectId) => worker.cancelInFlight(effectId) : null)
   }
 
   private effectsEnabled(): boolean {
@@ -1085,7 +1148,7 @@ export class OrchestratorService extends EventEmitter {
   effectExecutors(): Partial<Record<EffectKind, EffectExecutor>> {
     return {
       'turn.start': (effect, ctx) => this.executeTurnStartEffect(effect, ctx.signal),
-      'turn.interrupt': async (effect) => this.executeTurnInterruptEffect(effect),
+      'turn.interrupt': (effect) => this.executeTurnInterruptEffect(effect),
       'turn.steer': async (effect) => this.executeTurnSteerEffect(effect)
     }
   }
@@ -1160,11 +1223,18 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private async executeTurnStartEffect(effect: EffectRecord, signal: AbortSignal): Promise<void> {
-    if (isWakeTurnPayload(effect.payload)) return this.executeWakeEffect(effect.payload, signal)
+    if (isWakeTurnPayload(effect.payload)) return this.executeWakeEffect(effect, effect.payload, signal)
     if (isIntegrationTurnPayload(effect.payload)) return this.executeIntegrationEffect(effect.payload, signal)
     const stored = effect.payload as TurnStartPayload
     const entry = this.turnResults.get(stored.runId)
     if (entry?.abandoned) return
+    // C2: only a queued run starts. One that was cancelled (a delegation cancel, a deleted thread)
+    // or is already being executed never reaches workspace provisioning or the provider.
+    const run = this.runEngine?.getRun(stored.runId)
+    if (run && run.status !== 'queued') {
+      this.skipUnstartableTurn(entry?.payload ?? stored, entry, run)
+      return
+    }
     if (entry) entry.started = true
     // The in-memory payload keeps image data the durable payload omits. Without it the sender is
     // gone (another orchestrator instance), so this executor does not inherit its admission.
@@ -1200,6 +1270,26 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * A claimed `turn.start` whose run is no longer queued: the sender learns it did not start, the
+   * admission its send held is released, and a queue item whose run already ended leaves the queue.
+   */
+  private skipUnstartableTurn(payload: TurnStartPayload, entry: TurnResult | undefined, run: RunRecord): void {
+    if (entry && this.turnResults.get(payload.runId) === entry) this.turnResults.delete(payload.runId)
+    const session = this.boundSession.threadId === payload.threadId ? this.boundSession : this.sessions.get(payload.threadId)
+    if (session && entry?.payload.admissionHeld && !session.activeTurn) {
+      session.turnAdmitted = false
+      session.abortRequested = false
+      if (session.drainAfterSettle) {
+        session.drainAfterSettle = false
+        this.scheduleQueueDrain(session)
+      }
+    }
+    if (session && payload.queueItemId && TERMINAL_RUN_STATUSES.has(run.status))
+      this.completeSessionClaim(session, payload.queueItemId, payload.claimOwnerToken)
+    entry?.reject(new Error(`Run ${payload.runId} is ${run.status}; its turn did not start.`))
+  }
+
+  /**
    * A `turn.start` the worker never claimed before shutdown: cancel the effect, release the
    * admission it held and fail the sender. A queue item keeps its claim settlement to the drain's
    * failure path (its run stays queued with the item); a direct send's run is interrupted.
@@ -1223,12 +1313,16 @@ export class OrchestratorService extends EventEmitter {
     entry.reject(Object.assign(new Error('Profile work is shutting down'), { code: 'profile_draining' }))
   }
 
-  /** `turn.interrupt`: aborts the run's live turn. A run that is no longer live counts as done. */
-  private executeTurnInterruptEffect(effect: EffectRecord): void {
+  /** `turn.interrupt`: stops the run's live turn (`interruptRun`). A run that is no longer live counts as done. */
+  private async executeTurnInterruptEffect(effect: EffectRecord): Promise<void> {
     const { runId, threadId } = effect.payload as { runId: string; threadId: string }
-    const run = this.runEngine?.getRun(runId)
-    if (run && TERMINAL_RUN_STATUSES.has(run.status)) return
-    this.abortActiveTurn(threadId)
+    await this.interruptRun(runId, threadId)
+  }
+
+  /** The thread has a turn in this process: running, admitted (setting up) or a channel turn. */
+  private hasLocalTurn(threadId: string): boolean {
+    const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
+    return Boolean(session?.activeTurn || session?.turnAdmitted || this.channelTurns.has(threadId))
   }
 
   /** `turn.steer`: delivers to the live turn; a steer that missed it becomes a new turn (SPEC §5). */
@@ -1554,6 +1648,19 @@ export class OrchestratorService extends EventEmitter {
    * checkpoint for the fork run, or at the source worktree's current HEAD when that run has none.
    * The seed is recorded on the fork transfer; failures are recorded and the fork provisions as usual.
    */
+  /** The code checkpoint a source run left: its finished, non-conversation thread action. */
+  private forkCheckpoint(sourceDir: string, sourceRunId: string) {
+    return new ThreadActionService(sourceDir).list().find((action) => action.turnId === sourceRunId && action.scope !== 'conversation' && action.state !== 'running' && action.endSha)
+  }
+
+  /** SPEC §16.2 fork point (engine host): a source with a ready workspace needs a checkpoint at the run. */
+  private forkPointSeed(sourceThreadId: string, sourceRunId: string): ForkPointSeed {
+    const sourceDir = this.resolveThreadDir(sourceThreadId)
+    if (!sourceDir) return 'none'
+    if (new ThreadWorkspaceManager(sourceDir).load()?.lifecycle !== 'ready') return 'none'
+    return this.forkCheckpoint(sourceDir, sourceRunId) ? 'checkpoint' : 'missing'
+  }
+
   private async seedForkWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease']): Promise<void> {
     const engine = this.runEngine
     const fork = engine?.transfers.listPending(threadId, 'fork')[0]
@@ -1566,10 +1673,13 @@ export class OrchestratorService extends EventEmitter {
       else {
         const sourceDir = this.resolveThreadDir(fork.sourceThreadId)
         const sourceRunId = String(fork.payload.sourceRunId ?? '')
-        const checkpoint = sourceDir
-          ? new ThreadActionService(sourceDir).list().find((action) => action.turnId === sourceRunId && action.scope !== 'conversation' && action.state !== 'running' && action.endSha)
-          : undefined
+        const checkpoint = sourceDir ? this.forkCheckpoint(sourceDir, sourceRunId) : undefined
         const sourceWorkspace = sourceDir ? new ThreadWorkspaceManager(sourceDir).load() : undefined
+        // M5: the source's current HEAD stands in for a missing checkpoint only when the fork
+        // request accepted it (`seedFrom: 'current_head'`).
+        const headAccepted = fork.payload.seedFrom === 'current_head'
+        if (!checkpoint && sourceWorkspace?.lifecycle === 'ready' && !headAccepted)
+          throw new Error('fork_point_unavailable: the fork point has no code checkpoint and the fork did not accept the current head')
         seed = checkpoint
           ? { kind: 'checkpoint', sha: checkpoint.endSha, actionId: checkpoint.id }
           : sourceWorkspace?.lifecycle === 'ready'
@@ -1658,11 +1768,20 @@ export class OrchestratorService extends EventEmitter {
       throw new DomainRpcError('merge_back_pending', `A merge-back from fork ${pending.sourceThreadId} waits for this thread's next turn; send directly to deliver it.`, { transferId: pending.transferId })
   }
 
-  /** The delegation tools of one parent run (SPEC §14.2 `ToolHost`). */
+  /**
+   * The delegation tools of one parent run (SPEC §14.2 `ToolHost`), shared by the in-process pi
+   * loop and the Mousse MCP server so both enforce the caller's ceiling the same way (SPEC §15.1):
+   * a `plan` caller cannot start a `default` child or integrate (integration writes the workspace).
+   */
   private delegationTools(session: ThreadSession, parentRunId: string, callerCeiling?: ModeCeiling): DelegationToolHost {
     const parentThreadId = session.threadId
     const delegateTask = (input: DelegateTaskInput, call: DelegationToolCall) =>
       this.delegateTask(parentThreadId, parentRunId, input, call, callerCeiling)
+    const integrateDelegation = async (delegationId: string, call: DelegationToolCall) => {
+      if (callerCeiling === 'plan')
+        throw new McpToolError('mousse_ceiling_exceeded', 'Integration writes the workspace; a plan ceiling cannot integrate.')
+      return this.integrateDelegation(parentThreadId, parentRunId, delegationId, call)
+    }
     const listDelegations = () => this.listDelegations(parentThreadId)
     const named = (request: NamedAgentToolRequest): DelegateTaskInput => {
       const write = request.access === 'write'
@@ -1679,7 +1798,7 @@ export class OrchestratorService extends EventEmitter {
       taskStatus: ({ delegationId }) => this.taskStatus(parentThreadId, delegationId),
       taskCancel: ({ delegationId }) => this.taskCancel(parentThreadId, delegationId),
       listDelegations,
-      integrateDelegation: ({ delegationId }, call) => this.integrateDelegation(parentThreadId, parentRunId, delegationId, call),
+      integrateDelegation: ({ delegationId }, call) => integrateDelegation(delegationId, call),
       named: {
         create: async (request, call) => ({ name: request.name, ...(await delegateTask(named(request), call)) }),
         createBatch: async (requests, call) => {
@@ -1722,7 +1841,7 @@ export class OrchestratorService extends EventEmitter {
               (delegation.status === 'result_available' || delegation.status === 'acknowledged'))
             .at(-1)
           if (!finished) throw new Error(`Named agent ${agent} has no finished task to integrate`)
-          return this.integrateDelegation(parentThreadId, parentRunId, finished.delegationId, call)
+          return integrateDelegation(finished.delegationId, call)
         },
         list: listDelegations
       }
@@ -1734,7 +1853,7 @@ export class OrchestratorService extends EventEmitter {
     if (!this.effectsEnabled()) throw new Error('Delegation needs the run engine worker')
     // SPEC §15.1: a child inherits its caller's ceiling and can never exceed it.
     if (callerCeiling === 'plan' && input.modeCeiling === 'default')
-      throw new Error('A plan-ceiling caller cannot start a child with the default ceiling')
+      throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller cannot start a child with the default ceiling.')
     const modeCeiling = input.modeCeiling ?? callerCeiling
     const role = input.role?.trim() || undefined
     if (input.workspace === 'shared' && !(role && SHARED_WORKSPACE_ROLES.has(role)))
@@ -1771,7 +1890,7 @@ export class OrchestratorService extends EventEmitter {
   private taskStatus(parentThreadId: string, delegationId: string) {
     const engine = this.requireRunEngine()
     let delegation = this.ownedDelegation(parentThreadId, delegationId)
-    if (delegation.status === 'result_available') delegation = engine.acknowledgeDelegation(delegationId)
+    if (delegation.status === 'result_available' || delegation.status === 'failed') delegation = engine.acknowledgeDelegation(delegationId)
     return {
       delegationId,
       childThreadId: delegation.childThreadId,
@@ -1921,21 +2040,39 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * A wake turn (reconciler rule 4): an ordinary visible turn whose prompt is the server-authored
-   * notice for the thread's inbox rows. Rows already acknowledged are skipped; when none remain the
-   * wake run ends `cancelled`. A thread busy with another turn gets its rows back as pending so the
-   * reconciler wakes it again later.
+   * notice for the thread's inbox rows. Rows already acknowledged are skipped; when none remain (or
+   * the thread was deleted) the wake run ends `cancelled`. On a busy thread:
+   * - another engine turn of the thread is waiting to start (its `turn.start` pending or claimed):
+   *   the wake ends `cancelled` with its rows pending again, so that turn goes first and rule 4
+   *   queues a new wake behind it;
+   * - otherwise (a turn the engine does not schedule holds the thread) the wake stays `queued` and
+   *   its effect is deferred `WAKE_BUSY_DEFER_MS` (C4: no cancel-and-recreate loop with rule 4,
+   *   which skips threads that already have a queued wake).
    */
-  private async executeWakeEffect(payload: WakeTurnPayload, signal: AbortSignal): Promise<void> {
+  private async executeWakeEffect(effect: EffectRecord, payload: WakeTurnPayload, signal: AbortSignal): Promise<void> {
     const engine = this.requireRunEngine()
     if (engine.getRun(payload.runId)?.status !== 'queued') return
     const rows = engine.inbox.getMany(payload.inboxIds).filter((row) => row.status !== 'acknowledged')
     const session = this.getOrCreateSession(payload.threadId)
-    if (rows.length === 0 || session.deleted || session.turnAdmitted || session.isTurnRunning()) {
+    const cancelWake = (restore: boolean): void => {
       engine.store.db.transaction(() => {
         engine.markTerminal(payload.runId, 'cancelled')
-        if (rows.length && !session.deleted) engine.inbox.markPendingAgain(rows.map((row) => row.inboxId))
+        if (restore && rows.length) engine.inbox.markPendingAgain(rows.map((row) => row.inboxId))
       })
+    }
+    if (rows.length === 0 || session.deleted) {
+      cancelWake(!session.deleted)
       return
+    }
+    if (session.turnAdmitted || session.isTurnRunning() || engine.getActiveRun(payload.threadId)) {
+      const waiting = engine.outbox
+        .listForThread(payload.threadId)
+        .some((other) => other.kind === 'turn.start' && other.effectId !== effect.effectId && (other.status === 'pending' || other.status === 'running'))
+      if (waiting) {
+        cancelWake(true)
+        return
+      }
+      throw new EffectDeferredError(this.wakeBusyDeferMs, 'thread_busy')
     }
     try {
       await this.runTurnOnSession(
@@ -1954,6 +2091,24 @@ export class OrchestratorService extends EventEmitter {
   private requireRunEngine(): RunEngine {
     if (!this.runEngine) throw new Error('Run engine is unavailable')
     return this.runEngine
+  }
+
+  /**
+   * queued -> starting for the turn about to call its provider. Unlike other bridge writes a
+   * failure of any kind throws: the run was cancelled (a delegation cancel, a deleted thread),
+   * already ended or is held elsewhere, so the turn must not run. The run keeps whatever state it
+   * has; the caller's settlement records nothing over a terminal run.
+   */
+  private markRunStarting(runId: string | undefined): void {
+    const engine = this.runEngine
+    if (!engine || !runId) return
+    try {
+      engine.markStarting(runId)
+    } catch (error) {
+      if (error instanceof RunStoreError && error.code === 'stale_write') this.staleRuns.add(runId)
+      const status = engine.getRun(runId)?.status ?? 'missing'
+      throw new Error(`Run ${runId} cannot start (${status}): ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   /** Bridge writes never fail a user's turn. A stale epoch stops further writes for that run. */
@@ -2342,9 +2497,19 @@ export class OrchestratorService extends EventEmitter {
     return this.boundSession.threadId === '__unbound__' ? null : this.boundSession.threadId
   }
 
-  /** Mark thread deleted so pending work will not execute. */
+  /**
+   * Mark thread deleted so pending work will not execute. The run engine cancels what the thread
+   * still has in flight (H7): its delegations and their children depth-first, its queued runs and
+   * wakes with their effects, a stop for its active run; the live turn is aborted here and its MCP
+   * credentials revoked.
+   */
   markThreadDeleted(threadId: string): void {
     this.revokeMcp(threadId)
+    const engine = this.runEngine
+    if (engine)
+      void engine.cancelThreadWork(threadId).catch((error: unknown) => {
+        console.warn('run engine could not cancel a deleted thread\'s work', { threadId, error: error instanceof Error ? error.message : String(error) })
+      })
     const session = this.sessions.get(threadId)
     if (session) {
       session.deleted = true
@@ -3371,7 +3536,8 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Abort an in-flight channel turn for a Mousse thread (Telegram/Discord).
+   * Abort an in-flight channel turn for a Mousse thread (Telegram/Discord). The abort is immediate;
+   * a channel turn that is an engine run also gets its `stop` recorded against that run.
    */
   abortChannelTurn(threadId: string): boolean {
     const turn = this.channelTurns.get(threadId)
@@ -3379,18 +3545,47 @@ export class OrchestratorService extends EventEmitter {
     turn.pendingSteer = []
     turn.promotedSteerIds = []
     turn.abort.abort()
+    this.recordChannelControl('stop', threadId, turn.runId)
     return true
   }
 
   /**
-   * Steer an in-flight channel turn for a Mousse thread.
+   * Steer an in-flight channel turn for a Mousse thread. The text reaches the turn through its own
+   * steer queue; an engine-run channel turn also records the `steer` against its run.
    */
   steerChannelTurn(threadId: string, text: string): boolean {
     const trimmed = text.trim()
     const turn = this.channelTurns.get(threadId)
     if (!trimmed || !turn || turn.abort.signal.aborted) return false
     turn.pendingSteer.push(trimmed)
+    this.recordChannelControl('steer', threadId, turn.runId)
     return true
+  }
+
+  /** Records a channel turn's stop or steer as a command on its run (delivery already happened). */
+  private recordChannelControl(kind: 'stop' | 'steer', threadId: string, runId: string | undefined): void {
+    const engine = this.runEngine
+    if (!engine || !runId) return
+    void engine.dispatch({ kind, threadId, clientRequestId: `channel-${kind}:${uuidv4()}`, runId }).catch((error: unknown) => {
+      console.warn(`channel ${kind} could not be recorded`, { runId, error: error instanceof Error ? error.message : String(error) })
+    })
+  }
+
+  /**
+   * C4: a channel turn is an engine run, created through the same `send` command as any other
+   * (`source: 'channel'`), so rule 4 and the rest of the engine see the thread busy. A run that
+   * cannot be recorded leaves the turn to run without one, like any other bridge write.
+   */
+  private async recordChannelRun(threadId: string): Promise<string | undefined> {
+    const engine = this.runEngine
+    if (!engine) return undefined
+    try {
+      const result = await engine.dispatch({ kind: 'send', threadId, clientRequestId: `channel:${uuidv4()}`, source: 'channel' })
+      return result.status === 'accepted' ? result.runId : undefined
+    } catch (error) {
+      console.warn('run engine could not record a channel turn', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return undefined
+    }
   }
 
   isChannelTurnActive(threadId: string): boolean {
@@ -3454,7 +3649,8 @@ export class OrchestratorService extends EventEmitter {
       })
       if (result.status === 'rejected' && CONTINUATION_REFUSALS.has(result.reason))
         throw new DomainRpcError(result.reason, `Cannot continue run ${opts?.continuationOfRunId}: ${result.reason}.`)
-      if (result.status !== 'accepted') throw new Error(result.reason)
+      // Every refusal surfaces with its reason as the error code (S3), e.g. client_request_id_conflict.
+      if (result.status !== 'accepted') throw new DomainRpcError(result.reason, `Send refused: ${result.reason}.`)
       if (result.replayed) {
         const replayed = { runId: result.runId, sequence: result.sequence, replayed: true }
         // A replay of a send whose turn is still live waits for the same result (SPEC §12.7).
@@ -3937,7 +4133,9 @@ export class OrchestratorService extends EventEmitter {
       runTerminalMarked = true
       this.markRun(engineRunId, (engine, id) => engine.markTerminal(id, status, outcome, { resultText }))
     }
-    this.markRun(engineRunId, (engine, id) => engine.markStarting(id))
+    // C2: a run that cannot be marked starting (cancelled meanwhile, or held by another turn) is
+    // not this turn's to run; it ends here, before any provider I/O.
+    this.markRunStarting(engineRunId)
     this.deliverRestartNote(session.threadId, engineRunId)
     this.deliverContinuationNote(engineRunId)
     let conversationToolsUsed = false
@@ -4253,7 +4451,7 @@ export class OrchestratorService extends EventEmitter {
             return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
           } : undefined,
           browser: browserExecution,
-          delegation: engineRunId && this.effectsEnabled() ? this.delegationTools(session, engineRunId) : undefined,
+          delegation: engineRunId && this.effectsEnabled() ? this.delegationTools(session, engineRunId, this.modeCeilingFor(session.threadId, mode)) : undefined,
           toolAccess: session.sharedWorkspace
             ? createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path)
             : turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
@@ -6031,8 +6229,8 @@ export class OrchestratorService extends EventEmitter {
     }
   ): Promise<BackgroundWorkflowTurnResult> {
     const ownedTurn = !opts?.signal
-    const channelTurn = ownedTurn
-      ? { abort: new AbortController(), pendingSteer: [] as string[], promotedSteerIds: [] as string[] }
+    const channelTurn: { abort: AbortController; pendingSteer: string[]; promotedSteerIds: string[]; runId?: string } | null = ownedTurn
+      ? { abort: new AbortController(), pendingSteer: [], promotedSteerIds: [] }
       : null
     if (channelTurn) this.channelTurns.set(threadId, channelTurn)
 
@@ -6112,6 +6310,8 @@ export class OrchestratorService extends EventEmitter {
         return workflow
       }
       let wasAborted = false
+      const runId = await this.recordChannelRun(threadId)
+      if (channelTurn) channelTurn.runId = runId
       admittedSession = null
       const result = await this.runTurnOnSession(
         session,
@@ -6122,6 +6322,7 @@ export class OrchestratorService extends EventEmitter {
           admissionHeld: true,
           suppressAutoQueueDrain: true,
           externalSignal: signal,
+          runId,
           externalDrainSteer: opts?.drainSteer ?? (channelTurn
             ? () => {
                 if (channelTurn.pendingSteer.length === 0) return undefined

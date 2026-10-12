@@ -25,7 +25,7 @@ describe('EffectOutbox', () => {
     let clock = Date.parse(T0)
     db = new ProfileDatabase({ profileHome, clock: () => clock })
     const store = new RunStore(db)
-    const outbox = new EffectOutbox(store)
+    const outbox = new EffectOutbox(store, { allowReservedKinds: true })
     return {
       store,
       outbox,
@@ -89,14 +89,55 @@ describe('EffectOutbox', () => {
     expect(outbox.get(b.effectId)!.status).toBe('pending')
   })
 
-  it('does not let an earlier row that is not yet available block the lane', () => {
+  it('lets an earlier row that is not yet available (backoff, deferral) block the lane: a lane is FIFO (L2)', () => {
     const { outbox } = open()
     const later = outbox.enqueue({ threadId: 't', kind: 'turn.start', availableAt: at(5000) })
     const due = outbox.enqueue({ threadId: 't', kind: 'checkpoint.capture', availableAt: T0 })
-    expect(outbox.claimNext('1:1', at(1000))!.effectId).toBe(due.effectId)
-    // Now the running row holds the lane.
+    // `due` is available, but the earlier `later` row still waits: nothing in the lane may overtake it.
+    expect(outbox.claimNext('1:1', at(1000))).toBeNull()
+    expect(outbox.get(due.effectId)!.status).toBe('pending')
+    // Another thread's lane is unaffected.
+    const other = outbox.enqueue({ threadId: 'u', kind: 'checkpoint.capture', availableAt: T0 })
+    expect(outbox.claimNext('1:1', at(1000))!.effectId).toBe(other.effectId)
+    // Once the earlier row is due it goes first, then holds the lane while running.
+    expect(outbox.claimNext('1:1', at(6000))!.effectId).toBe(later.effectId)
     expect(outbox.claimNext('1:1', at(6000))).toBeNull()
-    expect(outbox.get(later.effectId)!.status).toBe('pending')
+  })
+
+  it('defer puts a running effect back to pending later without counting the attempt', () => {
+    const { outbox } = open()
+    const turn = outbox.enqueue({ threadId: 't', kind: 'turn.start' })
+    const claimed = outbox.claimNext('1:1', T0)!
+    expect(claimed.attempts).toBe(1)
+    expect(outbox.defer(turn.effectId, '2:2', T0, at(5000), 'thread_busy')).toEqual({ settled: false, status: 'running' })
+    const deferred = outbox.defer(turn.effectId, '1:1', T0, at(5000), 'thread_busy')
+    expect(deferred).toMatchObject({ settled: true, effect: { status: 'pending', attempts: 0, availableAt: at(5000), leaseOwner: null, lastError: 'thread_busy' } })
+    expect(outbox.claimNext('1:1', at(1000))).toBeNull()
+    expect(outbox.claimNext('1:1', at(5000))).toMatchObject({ effectId: turn.effectId, attempts: 1 })
+  })
+
+  it('refuses to enqueue a reserved effect kind (no producer yet, SPEC §12.2)', () => {
+    const { store } = open()
+    const strict = new EffectOutbox(store)
+    for (const kind of ['request.respond', 'checkpoint.capture', 'title.generate', 'workspace.cleanup'] as const)
+      expect(() => strict.enqueue({ threadId: 't', kind })).toThrow(expect.objectContaining({ code: 'bad_request', message: 'reserved effect kind' }))
+    expect(strict.listForThread('t')).toEqual([])
+    expect(strict.enqueue({ threadId: 't', kind: 'turn.interrupt' }).status).toBe('pending')
+  })
+
+  it('pages a thread\'s effects newest first by cursor, oldest first within a page', () => {
+    const { outbox } = open()
+    const ids = Array.from({ length: 5 }, () => outbox.enqueue({ threadId: 't', kind: 'turn.interrupt' }).effectId)
+    outbox.enqueue({ threadId: 'u', kind: 'turn.interrupt' })
+    const newest = outbox.pageForThread('t', { limit: 2 })
+    expect(newest.effects.map((effect) => effect.effectId)).toEqual(ids.slice(3))
+    expect(newest.hasMore).toBe(true)
+    const older = outbox.pageForThread('t', { limit: 2, before: newest.cursor! })
+    expect(older.effects.map((effect) => effect.effectId)).toEqual(ids.slice(1, 3))
+    const oldest = outbox.pageForThread('t', { limit: 2, before: older.cursor! })
+    expect(oldest).toMatchObject({ hasMore: false })
+    expect(oldest.effects.map((effect) => effect.effectId)).toEqual(ids.slice(0, 1))
+    expect(outbox.pageForThread('t', { limit: 10_000 }).effects).toHaveLength(5)
   })
 
   it('blocks a lane on a running row with a live lease but not on an expired one', () => {

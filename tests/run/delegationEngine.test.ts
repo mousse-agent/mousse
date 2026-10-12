@@ -69,8 +69,53 @@ describe('RunEngine delegation (SPEC §14.1-§14.2)', () => {
     f.engine.markTerminal(child.childRunId, 'completed', undefined, { resultText: 'late' })
     expect(f.engine.inbox.listForThread('parent')).toEqual([])
     expect(f.engine.inbox.listForThread('child-1')).toEqual([])
-    // Cancelling again is a no-op.
-    expect(await f.engine.cancelDelegation(child.delegationId)).toEqual([])
+    // Cancelling again repeats only the stops still needed: the runs ended, so nothing new is enqueued.
+    const effects = f.store.db.statement('SELECT COUNT(*) AS n FROM effects').get()!.n
+    expect(await f.engine.cancelDelegation(child.delegationId)).toEqual(cancelled)
+    expect(f.store.db.statement('SELECT COUNT(*) AS n FROM effects').get()!.n).toBe(effects)
+  })
+
+  it('task_cancel is retryable: a cancelled delegation whose child is still live is stopped again (H6, M4)', async () => {
+    f = delegationFixture()
+    const parent = await f.runningRun('parent')
+    const child = await f.delegate(parent.runId, 'call-1')
+    f.engine.markStarting(child.childRunId)
+    f.engine.markRunning(child.childRunId)
+    const grandchild = await f.delegate(child.childRunId, 'call-g')
+    f.engine.markStarting(grandchild.childRunId)
+    f.engine.markRunning(grandchild.childRunId)
+    // A cancel that got as far as the delegation row (a crash or error after it).
+    f.engine.delegations.setStatus({ delegationId: child.delegationId, from: 'running', to: 'cancelled' })
+    expect(await f.engine.cancelDelegation(child.delegationId)).toEqual([grandchild.delegationId, child.delegationId])
+    const interrupts = (runId: string) => f.outbox.listForRun(runId).filter((effect) => effect.kind === 'turn.interrupt')
+    for (const runId of [child.childRunId, grandchild.childRunId]) {
+      expect(f.engine.getRun(runId)!.outcome?.stopRequested).toBe(true)
+      expect(interrupts(runId)).toHaveLength(1)
+    }
+    // The first interrupt ran but the child is still live: a repeated cancel replays its stop
+    // receipt and enqueues a fresh interrupt; while one is pending it adds none.
+    f.outbox.cancel(interrupts(child.childRunId)[0].effectId, f.now(), 'test')
+    await f.engine.cancelDelegation(child.delegationId)
+    expect(interrupts(child.childRunId).map((effect) => effect.status)).toEqual(['cancelled', 'pending'])
+    await f.engine.cancelDelegation(child.delegationId)
+    expect(interrupts(child.childRunId)).toHaveLength(2)
+  })
+
+  it('a child run that ends failed, interrupted, uncertain or cancelled publishes delegation status failed (S4)', async () => {
+    f = delegationFixture()
+    const parent = await f.runningRun('parent')
+    const outcomes = ['failed', 'interrupted', 'uncertain', 'cancelled'] as const
+    for (const [index, status] of outcomes.entries()) {
+      const child = await f.delegate(parent.runId, `call-${index}`)
+      f.engine.markStarting(child.childRunId)
+      f.engine.markRunning(child.childRunId)
+      f.engine.markTerminal(child.childRunId, status, { error: status })
+      expect(f.engine.delegations.get(child.delegationId)).toMatchObject({ status: 'failed', result: { runStatus: status } })
+    }
+    const done = await f.delegate(parent.runId, 'call-ok')
+    f.finish(done.childRunId, 'ok')
+    expect(f.engine.delegations.get(done.delegationId)).toMatchObject({ status: 'result_available', result: { runStatus: 'completed', text: 'ok' } })
+    expect(f.engine.inbox.listPending('parent')).toHaveLength(5)
   })
 
   it('acknowledgeDelegation marks the delegation and its inbox rows acknowledged', async () => {
@@ -167,7 +212,7 @@ describe('RunEngine delegation (SPEC §14.1-§14.2)', () => {
     expect(boot.interrupted).toContain(running.childRunId)
     expect(boot.orphanedChildren).toEqual([queued.childRunId])
     for (const id of [running.delegationId, queued.delegationId])
-      expect(f.engine.delegations.get(id)).toMatchObject({ status: 'result_available', result: { runStatus: 'interrupted' } })
+      expect(f.engine.delegations.get(id)).toMatchObject({ status: 'failed', result: { runStatus: 'interrupted' } })
     expect(f.engine.inbox.listPending('parent')).toHaveLength(2)
 
     // A wake created before the next restart dies with its process-bound effect…

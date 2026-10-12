@@ -15,6 +15,7 @@ import { writeTerminalRun, type RunTerminalStatus } from './terminal'
 import { ThreadMutex } from './ThreadMutex'
 import { ToolInvocations } from './ToolInvocations'
 import {
+  TERMINAL_EFFECT_STATUSES,
   TERMINAL_RUN_STATUSES,
   leaseOwner,
   type AttemptRecord,
@@ -105,6 +106,30 @@ export interface ForkThreadRequest {
   title?: string
   /** A retry with the same id replays the first result. */
   clientRequestId: string
+  /**
+   * Where the fork's worktree comes from when the source has code but no checkpoint at the fork
+   * point: without `current_head` such a fork is refused (`fork_point_unavailable`); with it the
+   * fork starts from the source's current HEAD. Recorded in the transfer payload as `seedFrom`.
+   */
+  seedFrom?: 'checkpoint' | 'current_head'
+}
+
+/**
+ * Whether a fork point has code to seed from (host view, SPEC §16.2): `checkpoint` (a code
+ * checkpoint exists at the source run), `missing` (the source has a workspace but no checkpoint
+ * there) or `none` (the source has no code workspace; nothing to seed).
+ */
+export type ForkPointSeed = 'checkpoint' | 'missing' | 'none'
+
+/**
+ * Thrown by a `runLocalAction` gate to refuse the action without creating a run; `value` is what
+ * the caller returns instead (a restore that needs review, SPEC §16.3).
+ */
+export class LocalActionGated<R = unknown> extends Error {
+  constructor(readonly value: R) {
+    super('local action gated')
+    this.name = 'LocalActionGated'
+  }
 }
 
 export interface ForkAccepted {
@@ -157,6 +182,8 @@ export interface DelegationHost {
   buildChildTurnPayload(input: { childThreadId: string; childRunId: string; prompt: string; request: DelegationRequest }): unknown
   /** The final assistant text `runId` left in its thread's transcript, when it has one. */
   readRunResultText?(runId: string): string | undefined
+  /** Whether the fork point after `sourceRunId` has a code checkpoint (`ForkPointSeed`). */
+  forkPointSeed?(sourceThreadId: string, sourceRunId: string): ForkPointSeed
 }
 
 const ACTIVE_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
@@ -192,6 +219,8 @@ export class RunEngine extends EventEmitter {
   /** Fork and merge-back transfers (SPEC §16.2). */
   readonly transfers: ContextTransfers
   private delegationHost: DelegationHost | null = null
+  /** Aborts the local execution of a claimed effect (the effect worker's `cancelInFlight`). */
+  private inFlightCanceller: ((effectId: string) => boolean) | null = null
   private readonly pid: number
   /** Liveness interval of runs this engine executes itself (local actions; SPEC §12.4 rule 2). */
   private readonly heartbeatMs: number
@@ -324,7 +353,8 @@ export class RunEngine extends EventEmitter {
    * Boot recovery (SPEC §12.5 steps 1-5), one transaction:
    * 1. open a daemon epoch and learn whether the previous daemon crashed;
    * 2. cancel process-bound effects in `pending|running` (`daemon_restart`);
-   * 3. re-queue running replay-safe effects;
+   * 3. re-queue running replay-safe effects; revoke every live Mousse MCP credential row (the
+   *    tokens existed only in the previous daemon's memory, SPEC §15.1);
    * 4. every active run becomes `uncertain` when the previous daemon crashed while one of the
    *    run's non-idempotent tools was `started`, otherwise `interrupted` by `daemon_restart`;
    * 5. one `restart.note` event per affected thread. Nothing auto-resumes. A note also covers runs
@@ -347,6 +377,8 @@ export class RunEngine extends EventEmitter {
         .filter((run) => ACTIVE_STATUSES.has(run.status))
       this.outbox.cancelProcessBound('daemon_restart', now)
       this.outbox.requeueRunningReplaySafe(now)
+      // SPEC §15.1: MCP tokens live only in the previous daemon's memory; their rows are dead.
+      this.store.db.statement('UPDATE credentials SET revoked_at = ? WHERE revoked_at IS NULL').run(now)
       const interrupted: string[] = []
       const uncertain: string[] = []
       const notes = new Map<string, Omit<RestartNote, 'epoch'>>()
@@ -437,6 +469,93 @@ export class RunEngine extends EventEmitter {
   /** The thread owner's callbacks for creating child threads and their turns (SPEC §14). */
   setDelegationHost(host: DelegationHost | null): void {
     this.delegationHost = host
+  }
+
+  /**
+   * The effect worker's `cancelInFlight`, so a cancel can abort a `turn.start` that is already
+   * claimed (provisioning its workspace) before it reaches the provider.
+   */
+  setInFlightCanceller(cancel: ((effectId: string) => boolean) | null): void {
+    this.inFlightCanceller = cancel
+  }
+
+  private cancelInFlight(effectIds: readonly string[]): void {
+    for (const effectId of effectIds) {
+      try {
+        this.inFlightCanceller?.(effectId)
+      } catch (error) {
+        console.warn('[run-engine] could not abort an in-flight effect', {
+          effectId,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+  }
+
+  /**
+   * Ends the queued `run` `cancelled` with every live `turn.start` of it, in one transaction: a
+   * pending one is cancelled; a claimed (`running`) one is cancelled and its local execution
+   * aborted after the commit, so a child still provisioning never reaches its provider.
+   */
+  private cancelQueuedRun(run: RunRecord, reason: string, outcome: RunOutcome): boolean {
+    const claimed: string[] = []
+    const done = this.store.db.transaction(() => {
+      const current = this.store.getRun(run.runId)
+      if (!current || current.status !== 'queued') return false
+      for (const effect of this.outbox.listForRun(run.runId)) {
+        if (effect.kind !== 'turn.start' || TERMINAL_EFFECT_STATUSES.has(effect.status)) continue
+        if (effect.status === 'running') claimed.push(effect.effectId)
+        this.outbox.cancel(effect.effectId, this.now(), reason)
+      }
+      this.writeTerminal(current, current.epoch, 'cancelled', outcome)
+      return true
+    })
+    this.epochs.delete(run.runId)
+    this.cancelInFlight(claimed)
+    return done
+  }
+
+  /**
+   * True when `runId` is still active and no `turn.interrupt` for it is pending or running: a
+   * stop that was accepted (or replayed) must enqueue one (M4: a replay re-enqueues when the first
+   * one already ended without stopping the run).
+   */
+  needsInterrupt(runId: string): boolean {
+    const run = this.store.getRun(runId)
+    if (!run || !ACTIVE_STATUSES.has(run.status)) return false
+    return !this.outbox
+      .listForRun(runId)
+      .some((effect) => effect.kind === 'turn.interrupt' && (effect.status === 'pending' || effect.status === 'running'))
+  }
+
+  /**
+   * Thread deletion (H7): everything the thread still has in flight stops. Its delegations are
+   * cancelled depth-first (children stopped), its queued runs (sends and wakes) end `cancelled`
+   * with their live `turn.start`s, its active run gets a `stop`, and its pending or delivered inbox
+   * rows are acknowledged so rule 4 never wakes it again. The caller revokes its credentials and
+   * aborts its live turn.
+   */
+  async cancelThreadWork(threadId: string): Promise<{ delegations: string[]; runs: string[] }> {
+    const delegations: string[] = []
+    const seen = new Set<string>()
+    for (const delegation of this.delegations.listForParentThread(threadId))
+      await this.cancelTree(delegation.delegationId, delegations, seen)
+    const runs: string[] = []
+    for (const run of this.store.listNonTerminalRuns().filter((entry) => entry.threadId === threadId)) {
+      if (run.status === 'queued') {
+        if (this.cancelQueuedRun(run, 'thread_deleted', { interruptedBy: 'user', error: 'thread deleted' })) runs.push(run.runId)
+        continue
+      }
+      const result = await this.dispatch({ kind: 'stop', threadId, clientRequestId: `thread-deleted:${run.runId}`, runId: run.runId })
+      if (result.status === 'accepted' && this.needsInterrupt(run.runId))
+        this.outbox.enqueue({ threadId, runId: run.runId, kind: 'turn.interrupt', payload: { runId: run.runId, threadId } })
+      runs.push(run.runId)
+    }
+    this.store.db.transaction(() => {
+      const rows = [...this.inbox.listByStatus(threadId, 'pending'), ...this.inbox.listByStatus(threadId, 'delivered')]
+      this.inbox.markAcknowledged(rows.map((row) => row.inboxId))
+    })
+    return { delegations, runs }
   }
 
   /**
@@ -594,10 +713,13 @@ export class RunEngine extends EventEmitter {
   }
 
   /**
-   * `task_cancel` (SPEC §14.2): the delegation becomes `cancelled` (its child can no longer
-   * publish), then the child's own delegations are cancelled depth-first, then the child run is
-   * stopped (a queued run ends `cancelled`; an active run gets a `stop` command and a
-   * `turn.interrupt` effect). Returns every delegation cancelled, deepest first.
+   * `task_cancel` (SPEC §14.2): a `running` or `result_available` delegation becomes `cancelled`
+   * (its child can no longer publish); then, whatever the delegation's status, the child's own
+   * delegations are cancelled depth-first and a child run that is still non-terminal is stopped (a
+   * queued run ends `cancelled` with its `turn.start`, a claimed one aborted in flight; an active
+   * run gets a `stop` command and a `turn.interrupt` effect). Idempotent: cancelling again, or
+   * after a partial failure, repeats the stops that are still needed. Returns the delegations that
+   * are `cancelled`, deepest first.
    */
   async cancelDelegation(delegationId: string): Promise<string[]> {
     const cancelled: string[] = []
@@ -611,7 +733,7 @@ export class RunEngine extends EventEmitter {
     const delegation = this.store.db.transaction(() => {
       const current = this.delegations.get(delegationId)
       if (!current) fail('bad_request', `Unknown delegation ${delegationId}.`)
-      if (current.status !== 'running' && current.status !== 'result_available') return null
+      if (current.status !== 'running' && current.status !== 'result_available') return current
       return this.delegations.setStatus({
         delegationId,
         from: current.status,
@@ -619,12 +741,10 @@ export class RunEngine extends EventEmitter {
         completedAt: current.completedAt ?? this.now()
       })
     })
-    if (!delegation) return
     for (const child of this.delegations.listForParentThread(delegation.childThreadId))
-      if (child.status === 'running' || child.status === 'result_available')
-        await this.cancelTree(child.delegationId, cancelled, seen)
+      await this.cancelTree(child.delegationId, cancelled, seen)
     await this.stopChildRun(delegation)
-    cancelled.push(delegationId)
+    if (delegation.status === 'cancelled') cancelled.push(delegationId)
   }
 
   private hasLiveTurnStart(runId: string): boolean {
@@ -636,23 +756,17 @@ export class RunEngine extends EventEmitter {
   private async stopChildRun(delegation: DelegationRecord): Promise<void> {
     const run = this.store.getRun(delegation.childRunId)
     if (!run || TERMINAL_RUN_STATUSES.has(run.status)) return
-    if (run.status === 'queued') {
-      this.store.db.transaction(() => {
-        for (const effect of this.outbox.listForRun(run.runId))
-          if (effect.kind === 'turn.start' && effect.status === 'pending')
-            this.outbox.cancel(effect.effectId, this.now(), 'delegation_cancelled')
-        this.writeTerminal(run, run.epoch, 'cancelled', { interruptedBy: 'user' })
-      })
-      this.epochs.delete(run.runId)
-      return
-    }
+    if (run.status === 'queued' && this.cancelQueuedRun(run, 'delegation_cancelled', { interruptedBy: 'user' })) return
+    const current = this.store.getRun(run.runId)
+    if (!current || !ACTIVE_STATUSES.has(current.status)) return
     const result = await this.dispatch({
       kind: 'stop',
       threadId: run.threadId,
       clientRequestId: `cancel:${delegation.delegationId}:${run.runId}`,
       runId: run.runId
     })
-    if (result.status === 'accepted' && !result.replayed)
+    // A replayed stop (a repeated or resumed cancel) re-enqueues the interrupt the first one left.
+    if (result.status === 'accepted' && this.needsInterrupt(run.runId))
       this.outbox.enqueue({
         threadId: run.threadId,
         runId: run.runId,
@@ -663,10 +777,12 @@ export class RunEngine extends EventEmitter {
 
   /**
    * `thread.fork` (SPEC §16.2), under the source thread's mutex: replay the receipt, or resolve the
-   * source run (forkable statuses only), create the fork thread (host callback, before the
-   * transaction) and then, in one transaction, its `fork` lineage and a `pending` fork transfer. A
-   * failed transaction deletes the new thread. Nothing reaches a provider until the fork's first
-   * message consumes the transfer.
+   * source run (forkable statuses only), check its fork point has code to seed from (a source with
+   * a workspace but no checkpoint there is refused, `fork_point_unavailable`, unless the caller
+   * accepts `seedFrom: 'current_head'`), create the fork thread (host callback, before the
+   * transaction) and then, in one transaction, its `fork` lineage and a `pending` fork transfer
+   * whose payload records the seed choice (`seedFrom`). A failed transaction deletes the new
+   * thread. Nothing reaches a provider until the fork's first message consumes the transfer.
    */
   forkThread(input: ForkThreadRequest): Promise<ForkAccepted> {
     return this.mutex.withLock(input.sourceThreadId, () => {
@@ -675,6 +791,13 @@ export class RunEngine extends EventEmitter {
       const host = this.delegationHost
       if (!host) fail('internal', 'No thread host is attached to the run engine.')
       const source = this.forkSourceRun(input.sourceThreadId, input.atRunOrdinal)
+      const point = host.forkPointSeed?.(input.sourceThreadId, source.runId) ?? 'none'
+      if (point === 'missing' && input.seedFrom !== 'current_head')
+        reject(
+          'fork_point_unavailable',
+          `Run ${source.ordinal} of thread ${input.sourceThreadId} has no code checkpoint to fork from; pass seedFrom 'current_head' to fork from the source's current code.`
+        )
+      const seedFrom = point === 'missing' ? 'current_head' : point
       const { threadId } = host.createThread({
         kind: 'fork',
         sourceThreadId: input.sourceThreadId,
@@ -693,7 +816,7 @@ export class RunEngine extends EventEmitter {
           sourceThreadId: input.sourceThreadId,
           targetThreadId: threadId,
           sourceRunOrdinal: source.ordinal,
-          payload: { sourceRunOrdinal: source.ordinal, sourceRunId: source.runId }
+          payload: { sourceRunOrdinal: source.ordinal, sourceRunId: source.runId, seedFrom }
         })
         const accepted = { threadId, transferId: transfer.transferId, sourceRunId: source.runId }
         this.store.putReceipt({
@@ -788,16 +911,25 @@ export class RunEngine extends EventEmitter {
    * so the heartbeat is what keeps reconciler rule 2 away), and the run ends `completed`, or
    * `failed` when it throws (the error is rethrown). Refused while the thread has an active run. A
    * run something else already ended (the reconciler, a stop) keeps that terminal state.
+   *
+   * `options.gate` runs under the thread's mutex before the run is created (no other run can start
+   * between the check and the action's run); it may throw `LocalActionGated` to refuse without a
+   * run. `options.outcome` is merged into the completed run's outcome (e.g. the undo strategy).
    */
   async runLocalAction<T>(
     input: { threadId: string; source: string; clientRequestId?: string },
-    action: (run: RunRecord) => Promise<T>
+    action: (run: RunRecord) => Promise<T>,
+    options: { gate?: () => void; outcome?: RunOutcome } = {}
   ): Promise<{ runId: string; result: T }> {
-    const created = await this.mutex.withLock(input.threadId, () => this.store.db.transaction(() => {
-      const active = this.store.getActiveRun(input.threadId)
-      if (active) reject('thread_busy', `Thread ${input.threadId} has active run ${active.runId}.`)
-      return this.store.createRun({ threadId: input.threadId, source: input.source, clientRequestId: input.clientRequestId })
-    }))
+    const created = await this.mutex.withLock(input.threadId, () => {
+      if (this.store.getActiveRun(input.threadId)) reject('thread_busy', `Thread ${input.threadId} has an active run.`)
+      options.gate?.()
+      return this.store.db.transaction(() => {
+        const active = this.store.getActiveRun(input.threadId)
+        if (active) reject('thread_busy', `Thread ${input.threadId} has active run ${active.runId}.`)
+        return this.store.createRun({ threadId: input.threadId, source: input.source, clientRequestId: input.clientRequestId })
+      })
+    })
     this.markStarting(created.runId)
     const running = this.markRunning(created.runId)
     this.touchLocalAction(created.runId)
@@ -812,7 +944,7 @@ export class RunEngine extends EventEmitter {
       throw error
     }
     clearInterval(beat)
-    this.settleLocalAction(created.runId, 'completed')
+    this.settleLocalAction(created.runId, 'completed', options.outcome)
     return { runId: created.runId, result }
   }
 
@@ -894,7 +1026,7 @@ export class RunEngine extends EventEmitter {
     const { threadId, clientRequestId } = command
     const receipt = store.getReceipt(clientRequestId)
     if (receipt) {
-      if (receipt.threadId !== threadId)
+      if (receipt.threadId !== threadId || receipt.commandKind !== command.kind)
         return {
           status: 'rejected',
           reason: 'client_request_id_conflict',

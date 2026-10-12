@@ -21,7 +21,6 @@ export const PI_LOOP_CAPABILITIES: ProviderCapabilities = Object.freeze({
   interrupt: true,
   rollback: 'none',
   fork: 'portable',
-  nativeSubagents: 'managed',
   events: 'rich',
   containment: 'strong',
   historyInjection: 'native',

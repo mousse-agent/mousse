@@ -14,9 +14,12 @@ import { lifecycleGit, readDirectLifecycleRef, WorktreeRetirementService } from 
  */
 
 import type { MmsProfileServices } from '../MmsProfileServices'
-import type { CommandResult } from '../run/RunEngine'
+import { LocalActionGated, type CommandResult } from '../run/RunEngine'
+import { canUndoNatively } from '../run/policy/featureGates'
+import type { RunOutcome } from '../run/types'
 import { CommandRejection } from '../run/db/RunStoreError'
-import { evaluateRestore, restoreDiff, worktreeClaims, type WorkspaceClaim } from '../run/workspace/restoreSafety'
+import { EFFECT_PAGE_MAX } from '../run/EffectOutbox'
+import { evaluateRestore, restoreDiff, restoreDiffSha, worktreeClaims, type WorkspaceClaim } from '../run/workspace/restoreSafety'
 import type { ThreadAction } from '../../shared/threadActions'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import type { ChatMessage, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
@@ -102,7 +105,26 @@ function admittedChatSource(ctx: HandlerContext, fallback: string): string {
 }
 
 function rejectUnknownKeys(p: Record<string, unknown>, allowed: readonly string[]): void {
-  for (const key of Object.keys(p)) if (!allowed.includes(key)) throw new Error(`${key} is not allowed`)
+  for (const key of Object.keys(p)) if (!allowed.includes(key)) throw new DomainRpcError('invalid_params', `${key} is not allowed`)
+}
+
+/**
+ * SPEC §16.3 review confirmation: the SHA-256 of the diff the review response returned. The bare
+ * `reviewed: true` of earlier versions confirmed no particular diff and is refused.
+ */
+function asReviewedDiffSha(p: Record<string, unknown>): string | undefined {
+  if (p.reviewed !== undefined)
+    throw new DomainRpcError('invalid_params', 'reviewed is replaced by reviewedDiffSha: pass the diffSha of the diff you reviewed')
+  const sha = asOptionalString(p.reviewedDiffSha, 64)
+  if (sha !== undefined && !/^[0-9a-f]{64}$/.test(sha)) throw new DomainRpcError('invalid_params', 'reviewedDiffSha must be a SHA-256 hex digest')
+  return sha
+}
+
+/** An idempotency key, when given, is a non-empty string of at most 128 characters (SPEC §6). */
+function asOptionalClientRequestId(value: unknown): string | undefined {
+  const id = asOptionalString(value, 128)
+  if (id !== undefined && id.length < 1) throw new DomainRpcError('invalid_params', 'clientRequestId must be a non-empty string')
+  return id
 }
 
 function asOptionalSendAwaitMode(value: unknown): 'turn' | 'ack' {
@@ -121,17 +143,29 @@ async function asRpcRejection<T>(run: () => Promise<T> | T): Promise<T> {
   }
 }
 
+/** What a restore that needs review returns instead of restoring (SPEC §16.3). */
+interface RestoreReview {
+  requiresReview: true
+  diff: string
+  /** SHA-256 of `diff`; a reviewed retry passes it back as `reviewedDiffSha`. */
+  diffSha: string
+  actionId?: string
+}
+
 /**
  * SPEC §16.3 restore gate for a file-restoring action: refuses (`workspace_shared`) unless the
- * thread owns its worktree and no other thread's worktree or live working directory overlaps it;
- * for a weak-containment provider returns the diff to review instead of restoring (unless the
- * caller already `reviewed` it) and appends `restore.review_required`. Null: go ahead.
+ * thread owns its worktree and no other thread's worktree or live working directory overlaps it
+ * (the other threads' workspaces are listed once per evaluation, and only when ownership holds);
+ * for a weak-containment provider, or one whose capabilities are unknown, returns the diff to
+ * review with its SHA-256 and appends `restore.review_required` — unless `reviewedDiffSha` names
+ * exactly the diff a restore would apply now. Null: go ahead.
  */
 function restoreGate(
   ctx: HandlerContext,
-  input: { threadId: string; workspace: ThreadWorkspaceMetadata; target: ThreadAction | undefined; kind: 'undo' | 'revert'; reviewed: boolean }
-): { requiresReview: true; diff: string; actionId?: string } | null {
-  const others: WorkspaceClaim[] = [
+  input: { threadId: string; workspace: ThreadWorkspaceMetadata; target: ThreadAction | undefined; kind: 'undo' | 'revert'; reviewedDiffSha?: string }
+): RestoreReview | null {
+  let others: WorkspaceClaim[] | undefined
+  const otherClaims = (): WorkspaceClaim[] => (others ??= [
     ...worktreeClaims(ctx.mms.threads.listAllThreads().filter((thread) => thread.id !== input.threadId).flatMap((thread) => {
       try {
         return [{ threadId: thread.id, threadDirectory: ctx.mms.threads.getThreadDir(thread.id) }]
@@ -140,32 +174,61 @@ function restoreGate(
       }
     })),
     ...ctx.mms.orchestrator.liveWorkspaceClaims(input.threadId)
-  ]
+  ])
   const decision = evaluateRestore({
     threadId: input.threadId,
     caps: ctx.mms.orchestrator.capabilitiesForThread(input.threadId),
     metadata: input.workspace,
-    others,
-    reviewed: input.reviewed
+    others: otherClaims
   })
   if (decision.action === 'refuse') throw new DomainRpcError(decision.reason, decision.message, { conflicts: decision.conflicts })
   if (decision.action === 'proceed') return null
   const diff = input.target ? restoreDiff(input.workspace.worktreePath, input.target.endSha, input.target.startSha) : ''
+  const diffSha = restoreDiffSha(diff)
+  if (input.reviewedDiffSha === diffSha) return null
   ctx.mms.runEngine.store.appendEvent({
     threadId: input.threadId,
     type: 'restore.review_required',
-    payload: { kind: input.kind, actionId: input.target?.id ?? null, mode: decision.mode, diffBytes: Buffer.byteLength(diff) }
+    payload: {
+      kind: input.kind,
+      actionId: input.target?.id ?? null,
+      mode: decision.mode,
+      diffBytes: Buffer.byteLength(diff),
+      diffSha,
+      ...(input.reviewedDiffSha !== undefined ? { staleReview: true } : {})
+    }
   })
-  return { requiresReview: true, diff, ...(input.target ? { actionId: input.target.id } : {}) }
+  return { requiresReview: true, diff, diffSha, ...(input.target ? { actionId: input.target.id } : {}) }
 }
 
-/** SPEC §16.3: an undo or revert is its own run on the thread (`source: 'undo' | 'revert'`). */
-async function localActionRun<T>(ctx: HandlerContext, threadId: string, source: 'undo' | 'revert', action: () => Promise<T>): Promise<{ runId: string; result: T }> {
+/**
+ * SPEC §16.3: an undo or revert is its own run on the thread (`source: 'undo' | 'revert'`). `gate`
+ * runs under the thread's mutex right before the run is created, so no other run starts between
+ * the restore-safety check and the restore; a review it returns comes back as `{ review }` with no
+ * run. `outcome` is recorded on the completed run.
+ */
+async function localActionRun<T>(
+  ctx: HandlerContext,
+  threadId: string,
+  source: 'undo' | 'revert',
+  action: () => Promise<T>,
+  options: { gate?: () => RestoreReview | null; outcome?: RunOutcome } = {}
+): Promise<{ runId: string; result: T } | { review: RestoreReview }> {
   const busy = new Error('Wait for active or queued work to finish.')
   if (ctx.mms.runEngine.getActiveRun(threadId)) throw busy
+  const gate = options.gate
   try {
-    return await ctx.mms.runEngine.runLocalAction({ threadId, source }, action)
+    return await ctx.mms.runEngine.runLocalAction({ threadId, source }, action, {
+      outcome: options.outcome,
+      ...(gate ? {
+        gate: () => {
+          const review = gate()
+          if (review) throw new LocalActionGated(review)
+        }
+      } : {})
+    })
   } catch (error) {
+    if (error instanceof LocalActionGated) return { review: error.value as RestoreReview }
     if (error instanceof CommandRejection && error.reason === 'thread_busy') throw busy
     throw error
   }
@@ -621,6 +684,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'orchestrator.send': {
       const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, [
+        'threadId', 'content', 'forceQueue', 'source', 'mode', 'images', 'requestId', 'workflowInvocationId',
+        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain'
+      ])
       const threadId = asString(p.threadId, 'threadId', 256)
       const content = asString(p.content, 'content')
       const forceQueue = asOptionalBoolean(p.forceQueue, 'forceQueue') === true
@@ -632,12 +699,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       // Idempotency key (SPEC §6). `requestId` is deliberately not reused: the GUI keeps one per
       // content hash while a send is in flight, so it would turn a repeated message into a replay.
-      const clientRequestId = asOptionalString(p.clientRequestId, 128)
+      const clientRequestId = asOptionalClientRequestId(p.clientRequestId)
       // SPEC §12.7: `ack` returns once the send and its turn.start effect are committed.
       const awaitMode = asOptionalSendAwaitMode(p.await)
       // SPEC §16.4: "Continue" after a restart; an uncertain run needs `acknowledgeUncertain`.
       const continuationOfRunId = asOptionalString(p.continuationOfRunId, 256)
       const acknowledgeUncertain = asOptionalBoolean(p.acknowledgeUncertain, 'acknowledgeUncertain') === true
+      if (p.acknowledgeUncertain !== undefined && !continuationOfRunId)
+        throw new DomainRpcError('invalid_params', 'acknowledgeUncertain applies only with continuationOfRunId')
       ctx.mms.orchestrator.getOrCreateSession(threadId)
       const input = await prepareChatInput(ctx, threadId, { content, mode, images }, p)
       return await ctx.mms.orchestrator.send(input, false, {
@@ -651,11 +720,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'orchestrator.abort': {
       const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'clearQueue', 'runId', 'clientRequestId'])
       const threadId = asString(p.threadId, 'threadId', 256)
       const clearQueue = asOptionalBoolean(p.clearQueue, 'clearQueue') === true
       const runId = asOptionalString(p.runId, 256)
       if (runId) {
-        const clientRequestId = asOptionalString(p.clientRequestId, 128) ?? randomUUID()
+        const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
         return runCommandResponse(await ctx.mms.orchestrator.abortRun(runId, clientRequestId, threadId), runId)
       }
       const ok = ctx.mms.orchestrator.abortActiveTurn(threadId, { clearQueue })
@@ -663,11 +733,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'orchestrator.steer': {
       const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'text', 'runId', 'clientRequestId', 'source'])
       const threadId = asString(p.threadId, 'threadId', 256)
       const text = asString(p.text, 'text')
       const runId = asOptionalString(p.runId, 256)
       if (runId) {
-        const clientRequestId = asOptionalString(p.clientRequestId, 128) ?? randomUUID()
+        const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
         return runCommandResponse(await ctx.mms.orchestrator.steerRun(runId, text, clientRequestId, threadId), runId)
       }
       // Prefer mid-turn steer; fall back to external enqueue when no local turn.
@@ -709,10 +780,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
     }
     case 'runs.effects': {
+      // The newest effects of the thread (at most EFFECT_PAGE_MAX), oldest first; `before` pages back.
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['threadId'])
+      rejectUnknownKeys(p, ['threadId', 'limit', 'before'])
       const threadId = asString(p.threadId, 'threadId', 256)
-      return { effects: ctx.mms.runEngine.outbox.listForThread(threadId) }
+      const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: EFFECT_PAGE_MAX }) ?? EFFECT_PAGE_MAX
+      const before = asOptionalBoundedInt(p.before, 'before', { min: 1, max: Number.MAX_SAFE_INTEGER })
+      return ctx.mms.runEngine.outbox.pageForThread(threadId, { limit, before })
     }
     case 'runs.credentials': {
       // Mousse MCP credentials minted for the thread's runs (SPEC §15.1); never the token hash.
@@ -737,15 +811,18 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'thread.fork': {
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['sourceThreadId', 'atRunOrdinal', 'title', 'clientRequestId'])
+      rejectUnknownKeys(p, ['sourceThreadId', 'atRunOrdinal', 'title', 'clientRequestId', 'seedFrom'])
       const sourceThreadId = asString(p.sourceThreadId, 'sourceThreadId', 256)
       const atRunOrdinal = p.atRunOrdinal === 'latest_stable'
         ? 'latest_stable' as const
         : asOptionalBoundedInt(p.atRunOrdinal, 'atRunOrdinal', { min: 1, max: Number.MAX_SAFE_INTEGER })
       const title = asOptionalString(p.title, 256)
-      const clientRequestId = asOptionalString(p.clientRequestId, 128) ?? randomUUID()
+      const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
+      if (p.seedFrom !== undefined && p.seedFrom !== 'checkpoint' && p.seedFrom !== 'current_head')
+        throw new DomainRpcError('invalid_params', "seedFrom must be 'checkpoint' or 'current_head'")
+      const seedFrom = p.seedFrom as 'checkpoint' | 'current_head' | undefined
       if (!ctx.mms.threads.getThread(sourceThreadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: sourceThreadId })
-      const forked = await asRpcRejection(() => ctx.mms.runEngine.forkThread({ sourceThreadId, atRunOrdinal, title, clientRequestId }))
+      const forked = await asRpcRejection(() => ctx.mms.runEngine.forkThread({ sourceThreadId, atRunOrdinal, title, clientRequestId, seedFrom }))
       if (!forked.replayed) ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
       return { threadId: forked.threadId, transferId: forked.transferId, replayed: forked.replayed }
     }
@@ -753,7 +830,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['forkThreadId', 'clientRequestId'])
       const forkThreadId = asString(p.forkThreadId, 'forkThreadId', 256)
-      const clientRequestId = asOptionalString(p.clientRequestId, 128) ?? randomUUID()
+      const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
       if (!ctx.mms.threads.getThread(forkThreadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: forkThreadId })
       const merged = await asRpcRejection(() => ctx.mms.runEngine.mergeBack({ forkThreadId, clientRequestId }))
       return { transferId: merged.transferId, parentThreadId: merged.parentThreadId, replayed: merged.replayed }
@@ -1787,17 +1864,23 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         else ctx.mms.orchestrator.restoreConversationBoundary(operation.threadId, target.presentationMessageStart, target.nativeContextStartBoundary!)
       }
       const latest = new ThreadActionService(operation.threadDirectory).latest(branchId)
-      const reviewed = asOptionalBoolean(p.reviewed, 'reviewed') === true
+      const reviewedDiffSha = asReviewedDiffSha(p)
+      let gate: (() => RestoreReview | null) | undefined
       if (latest?.scope !== 'conversation') {
         if (!workspace || workspace.lifecycle !== 'ready') throw new Error('This prompt has no eligible recorded Undo boundary.')
         // SPEC §16.3: files are restored only in an owned, unshared worktree; weak containment reviews first.
-        const review = restoreGate(ctx, { threadId: operation.threadId, workspace, target: latest, kind: 'undo', reviewed })
-        if (review) return review
+        gate = () => restoreGate(ctx, { threadId: operation.threadId, workspace, target: latest, kind: 'undo', reviewedDiffSha })
       }
-      const { runId, result: action } = await localActionRun(ctx, operation.threadId, 'undo', async () =>
+      // SPEC §13.2: a provider that rolls its own session back would undo natively; none does yet.
+      const caps = ctx.mms.orchestrator.capabilitiesForThread(operation.threadId)
+      const undoStrategy = caps && canUndoNatively(caps) ? 'native_rollback' as const : 'checkpoint' as const
+      const ran = await localActionRun(ctx, operation.threadId, 'undo', async () =>
         latest?.scope === 'conversation'
           ? new ConversationActionService(operation.threadDirectory).apply(branchId, 'undo', operation.currentGeneration, expectedTurnId, validate, restore)
-          : await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace!.worktreePath, undefined, operation.currentGeneration, restore, 'undo', expectedTurnId, validate))
+          : await new UndoService(operation.threadDirectory).undoLatest(branchId, workspace!.worktreePath, undefined, operation.currentGeneration, restore, 'undo', expectedTurnId, validate),
+      { gate, outcome: { undoStrategy } })
+      if ('review' in ran) return ran.review
+      const { runId, result: action } = ran
       ctx.emitEvent?.('actions.updated', { threadId: operation.threadId, action }, operation.threadId)
       return { action, runId }
     }
@@ -1808,10 +1891,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const workspace = new ThreadWorkspaceManager(operation.threadDirectory).load()
       if (!workspace || workspace.lifecycle !== 'ready') throw new Error('Thread workspace is not ready')
       const target = new ThreadActionService(operation.threadDirectory).get(actionId)
-      const review = restoreGate(ctx, { threadId: operation.threadId, workspace, target, kind: 'revert', reviewed: asOptionalBoolean(p.reviewed, 'reviewed') === true })
-      if (review) return review
-      const { runId, result: action } = await localActionRun(ctx, operation.threadId, 'revert', () =>
-        new CodeRevertService(operation.threadDirectory).revertCode(actionId, workspace.worktreePath, operation.currentGeneration))
+      const reviewedDiffSha = asReviewedDiffSha(p)
+      const ran = await localActionRun(ctx, operation.threadId, 'revert', () =>
+        new CodeRevertService(operation.threadDirectory).revertCode(actionId, workspace.worktreePath, operation.currentGeneration),
+      { gate: () => restoreGate(ctx, { threadId: operation.threadId, workspace, target, kind: 'revert', reviewedDiffSha }) })
+      if ('review' in ran) return ran.review
+      const { runId, result: action } = ran
       return { action, runId }
     }
     case 'actions.redo': {

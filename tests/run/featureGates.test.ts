@@ -3,7 +3,6 @@ import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapte
 import type { ProviderCapabilities } from '../../src/mms/run/adapters/ProviderAdapter'
 import {
   canUndoNatively,
-  delegationMode,
   forkStrategy,
   handoffDelivery,
   mcpAttachable,
@@ -24,12 +23,6 @@ describe('feature gates', () => {
   it('forkStrategy reads fork', () => {
     expect(forkStrategy(caps({ fork: 'native' }))).toBe('native')
     expect(forkStrategy(caps({ fork: 'portable' }))).toBe('portable')
-  })
-
-  it('delegationMode reads nativeSubagents', () => {
-    expect(delegationMode(caps({ nativeSubagents: 'managed' }))).toBe('managed_children')
-    expect(delegationMode(caps({ nativeSubagents: 'observed' }))).toBe('mirror_native')
-    expect(delegationMode(caps({ nativeSubagents: 'none' }))).toBe('delegate_task_only')
   })
 
   it('restoreMode reads containment', () => {

@@ -26,7 +26,12 @@ export interface EffectOutboxOptions {
   /** Test-only override of the §12.2 table (e.g. a short timeout). Merged over the defaults. */
   kindSpec?: Partial<Record<EffectKind, EffectKindSpec>>
   now?: () => string
+  /** Test-only: lets reserved kinds (SPEC §12.2, no producer yet) be enqueued to exercise lanes. */
+  allowReservedKinds?: boolean
 }
+
+/** Newest effects `runs.effects` returns per page. */
+export const EFFECT_PAGE_MAX = 200
 
 /** `min(30 s, 100 ms·2^(attempts−1))` (SPEC §12.3). */
 export function effectBackoffMs(attempts: number): number {
@@ -45,6 +50,7 @@ export function addMs(iso: string, ms: number): string {
 export class EffectOutbox {
   readonly kindSpec: Readonly<Record<EffectKind, EffectKindSpec>>
   private readonly now: () => string
+  private readonly allowReservedKinds: boolean
   private readonly listeners = new Set<() => void>()
   private readonly claimSql: string
   /** Claim statements restricted to a set of lane classes, keyed by the sorted class list. */
@@ -56,6 +62,7 @@ export class EffectOutbox {
   ) {
     this.kindSpec = { ...EFFECT_KIND_SPEC, ...(options.kindSpec ?? {}) }
     this.now = options.now ?? (() => new Date(store.db.clock()).toISOString())
+    this.allowReservedKinds = options.allowReservedKinds === true
     const lanes = (['title', 'control'] as const)
       .map((lane) => ({
         lane,
@@ -69,9 +76,10 @@ export class EffectOutbox {
         .map(({ lane, kinds }) => `WHEN ${alias}.kind IN (${kinds.join(',')}) THEN '${lane}' `)
         .join('')}ELSE 'thread' END)`
     // A candidate is claimable only when nothing else in its lane is live: no running row with an
-    // unexpired lease, and no earlier pending row that is already available. Each thread has three
-    // lanes: the thread lane (turns and replay-safe work), the control lane (interrupt, steer and
-    // answers, which must reach a live turn) and the title lane.
+    // unexpired lease, and no earlier pending row, even one waiting out a backoff or a deferral
+    // (SPEC §12.3: a lane is FIFO). Each thread has three lanes: the thread lane (turns and
+    // replay-safe work), the control lane (interrupt, steer and answers, which must reach a live
+    // turn) and the title lane.
     this.claimSql = `UPDATE effects SET status = 'running', attempts = attempts + 1,
         lease_owner = :owner, updated_at = :now,
         lease_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', :now,
@@ -84,7 +92,7 @@ export class EffectOutbox {
             WHERE o.thread_id = c.thread_id AND o.rowid <> c.rowid
               AND ${laneOf('o')} = ${laneOf('c')}
               AND ((o.status = 'running' AND o.lease_expires_at > :now)
-                OR (o.status = 'pending' AND o.rowid < c.rowid AND o.available_at <= :now)))
+                OR (o.status = 'pending' AND o.rowid < c.rowid)))
         ORDER BY c.available_at, c.rowid LIMIT 1)
       RETURNING *`
   }
@@ -104,7 +112,8 @@ export class EffectOutbox {
   /**
    * Inserts a pending effect. The default id is deterministic,
    * `effect:<runId|threadId>:<kind>:<n>` with n = existing effects of that kind for the run (or
-   * run-less thread) + 1. An existing id is left untouched and returned (no event).
+   * run-less thread) + 1. An existing id is left untouched and returned (no event). A reserved kind
+   * (SPEC §12.2: no producer and no executor yet) is refused with `bad_request`.
    */
   enqueue(input: {
     effectId?: string
@@ -115,6 +124,7 @@ export class EffectOutbox {
     availableAt?: string
   }): EffectRecord {
     const spec = this.specFor(input.kind)
+    if (spec.reserved && !this.allowReservedKinds) fail('bad_request', 'reserved effect kind')
     return this.db.transaction(() => {
       const runId = input.runId ?? null
       const effectId = input.effectId ?? this.nextEffectId(input.threadId, runId, input.kind)
@@ -222,6 +232,30 @@ export class EffectOutbox {
   }
 
   /**
+   * A running effect its executor could not run yet (the thread is busy): `pending` again at
+   * `availableAt`, lease released, the attempt not counted. Settlement CAS like `succeed`.
+   */
+  defer(effectId: string, owner: string, now: string, availableAt: string, reason: string): EffectSettlement {
+    return this.db.transaction(() => {
+      const current = this.get(effectId)
+      if (!current || current.status !== 'running' || current.leaseOwner !== owner)
+        return { settled: false, status: current?.status ?? null }
+      return {
+        settled: true,
+        effect: this.write(current, {
+          status: 'pending',
+          attempts: Math.max(0, current.attempts - 1),
+          availableAt,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          lastError: reason,
+          updatedAt: now
+        })
+      }
+    })
+  }
+
+  /**
    * Cancels a pending or running effect. Without `owner` there is no lease check (a Stop or
    * boot); with it the cancel is a settlement CAS like `succeed`.
    */
@@ -249,6 +283,31 @@ export class EffectOutbox {
           .all(threadId, options.status)
       : this.db.statement('SELECT * FROM effects WHERE thread_id = ? ORDER BY rowid').all(threadId)
     return rows.map(toEffect)
+  }
+
+  /**
+   * One page of the thread's effects, oldest first: the newest `limit` (at most `EFFECT_PAGE_MAX`)
+   * with a cursor below `before`. `cursor` is the oldest returned row's position; pass it as
+   * `before` for the previous page. `hasMore` says whether older rows exist.
+   */
+  pageForThread(
+    threadId: string,
+    options: { limit?: number; before?: number } = {}
+  ): { effects: EffectRecord[]; cursor: number | null; hasMore: boolean } {
+    const limit = Math.max(1, Math.min(EFFECT_PAGE_MAX, Math.floor(options.limit ?? EFFECT_PAGE_MAX)))
+    const rows = this.db
+      .statement(
+        `SELECT rowid AS cursor, * FROM effects WHERE thread_id = ? AND rowid < ?
+         ORDER BY rowid DESC LIMIT ?`
+      )
+      .all(threadId, options.before ?? Number.MAX_SAFE_INTEGER, limit + 1)
+    const hasMore = rows.length > limit
+    const page = rows.slice(0, limit).reverse()
+    return {
+      effects: page.map(toEffect),
+      cursor: page.length ? Number(page[0].cursor) : null,
+      hasMore
+    }
   }
 
   /** Oldest first. */
@@ -384,6 +443,7 @@ export class EffectOutbox {
       Pick<
         EffectRecord,
         | 'status'
+        | 'attempts'
         | 'availableAt'
         | 'leaseOwner'
         | 'leaseExpiresAt'
@@ -396,12 +456,13 @@ export class EffectOutbox {
     const next: EffectRecord = { ...current, ...patch }
     const result = this.db
       .statement(
-        `UPDATE effects SET status = ?, available_at = ?, lease_owner = ?, lease_expires_at = ?,
-           last_error = ?, updated_at = ?, completed_at = ?
+        `UPDATE effects SET status = ?, attempts = ?, available_at = ?, lease_owner = ?,
+           lease_expires_at = ?, last_error = ?, updated_at = ?, completed_at = ?
          WHERE effect_id = ? AND status = ? AND lease_owner IS ?`
       )
       .run(
         next.status,
+        next.attempts,
         next.availableAt,
         next.leaseOwner,
         next.leaseExpiresAt,

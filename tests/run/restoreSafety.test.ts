@@ -14,7 +14,7 @@ import { MmsProtocolServer } from '../../src/mms/protocol/server'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { RunRecord } from '../../src/mms/run/types'
-import { evaluateRestore, pathsOverlap } from '../../src/mms/run/workspace/restoreSafety'
+import { evaluateRestore, pathsOverlap, restoreDiffSha } from '../../src/mms/run/workspace/restoreSafety'
 import { WorkspaceResolver } from '../../src/mms/workspace/WorkspaceResolver'
 import type { ThreadWorkspaceMetadata } from '../../src/shared/workspace'
 import { actionOptions, gitFoundationFixture } from '../fixtures/gitFoundation'
@@ -41,7 +41,7 @@ describe('evaluateRestore (SPEC §16.3)', () => {
     expect(evaluateRestore({ threadId: 't1', caps: CLAUDE_SUBSCRIPTION_CAPABILITIES, metadata: owned, others: [] })).toEqual({ action: 'review', mode: 'review_diff' })
     expect(evaluateRestore({ threadId: 't1', caps: CLAUDE_SUBSCRIPTION_CAPABILITIES, metadata: owned, others: [], reviewed: true })).toEqual({ action: 'proceed', mode: 'review_diff' })
     expect(evaluateRestore({ threadId: 't1', caps: PI_LOOP_CAPABILITIES, metadata: owned, others: [] })).toEqual({ action: 'proceed', mode: 'auto' })
-    expect(evaluateRestore({ threadId: 't1', caps: null, metadata: owned, others: [] })).toEqual({ action: 'proceed', mode: 'auto' })
+    expect(evaluateRestore({ threadId: 't1', caps: null, metadata: owned, others: [] })).toEqual({ action: 'review', mode: 'review_diff' })
   })
 
   it('refuses workspace_shared when the thread does not own the worktree or another thread overlaps it by realpath', () => {
@@ -111,21 +111,38 @@ describe('undo and revert through the protocol (SPEC §16.3)', () => {
   it('weak containment returns the diff to review, restores nothing, and restores as an undo run once reviewed', async () => {
     const { thread, workspace, action } = await threadWithAction('weak')
     mms.orchestrator.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'sonnet' })
-    const review = await client.request<{ requiresReview: boolean; diff: string; actionId: string }>('actions.undoLatest', { threadId: thread.id })
+    const review = await client.request<{ requiresReview: boolean; diff: string; diffSha: string; actionId: string }>('actions.undoLatest', { threadId: thread.id })
     expect(review).toMatchObject({ requiresReview: true, actionId: action.id })
+    expect(review.diffSha).toBe(restoreDiffSha(review.diff))
     expect(review.diff).toContain('-agent code')
     expect(review.diff).toContain('+base')
     expect(f.read(workspace)).toBe('agent code\n')
     expect(await runs(thread.id)).toEqual([])
     const events = mms.runEngine.listEvents(thread.id).filter((event) => event.type === 'restore.review_required')
-    expect(events.map((event) => event.payload)).toMatchObject([{ kind: 'undo', actionId: action.id, mode: 'review_diff' }])
+    expect(events.map((event) => event.payload)).toMatchObject([{ kind: 'undo', actionId: action.id, mode: 'review_diff', diffSha: review.diffSha }])
 
     const revertReview = await client.request<{ requiresReview: boolean }>('actions.revertCode', { threadId: thread.id, actionId: action.id })
     expect(revertReview.requiresReview).toBe(true)
 
-    const undone = await client.request<{ action: { id: string }; runId: string }>('actions.undoLatest', { threadId: thread.id, reviewed: true })
+    // The bare `reviewed: true` names no diff and is refused; a sha of another diff gets a fresh review.
+    await expect(client.request('actions.undoLatest', { threadId: thread.id, reviewed: true })).rejects.toMatchObject({ code: 'invalid_params' })
+    const stale = await client.request<{ requiresReview: boolean }>('actions.undoLatest', { threadId: thread.id, reviewedDiffSha: restoreDiffSha('another diff') })
+    expect(stale.requiresReview).toBe(true)
+    expect(f.read(workspace)).toBe('agent code\n')
+
+    const undone = await client.request<{ action: { id: string }; runId: string }>('actions.undoLatest', { threadId: thread.id, reviewedDiffSha: review.diffSha })
     expect(f.read(workspace)).toBe('base\n')
-    expect(await runs(thread.id)).toMatchObject([{ runId: undone.runId, source: 'undo', status: 'completed' }])
+    // S2: the undo run records how it restored (no adapter rolls back natively today).
+    expect(await runs(thread.id)).toMatchObject([{ runId: undone.runId, source: 'undo', status: 'completed', outcome: { undoStrategy: 'checkpoint' } }])
+  }, 30_000)
+
+  it('unknown capabilities fail closed: the diff is reviewed first (M6)', async () => {
+    const { thread, workspace } = await threadWithAction('unknown')
+    vi.spyOn(mms.orchestrator, 'capabilitiesForThread').mockReturnValue(null)
+    const review = await client.request<{ requiresReview: boolean; diffSha: string }>('actions.undoLatest', { threadId: thread.id })
+    expect(review.requiresReview).toBe(true)
+    expect(f.read(workspace)).toBe('agent code\n')
+    expect(await runs(thread.id)).toEqual([])
   }, 30_000)
 
   it('strong containment restores automatically; undo and revert are runs; a failure ends the run failed', async () => {

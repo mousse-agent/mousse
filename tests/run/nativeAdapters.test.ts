@@ -222,7 +222,7 @@ describe('AntigravityAdapter', () => {
     const adapter = new AntigravityAdapter(() => service)
     expect(adapter.id).toBe('antigravity')
     expect(adapter.capabilities).toBe(ANTIGRAVITY_CAPABILITIES)
-    expect(adapter.capabilities).toMatchObject({ events: 'sparse', nativeSubagents: 'none', historyInjection: 'prompt' })
+    expect(adapter.capabilities).toMatchObject({ events: 'sparse', historyInjection: 'prompt' })
     expect(adapter.describe('m')).toEqual({ contextUsage: 'none' })
     expect(adapter.configured()).toBe(true)
     const turn = { llmProvider: 'antigravity', model: 'm' }

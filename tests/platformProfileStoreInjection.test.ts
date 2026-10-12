@@ -14,6 +14,9 @@ import { ChannelAuth } from '../src/mms/channels/ChannelAuth'
 import { ScheduledJobStore, readTickerHeartbeat, recordTickerHeartbeat } from '../src/mms/scheduled/ScheduledJobStore'
 import { LineEditStatsStore } from '../src/mms/stats/LineEditStatsStore'
 import { MmsProfileServices } from '../src/mms/MmsProfileServices'
+import { ProfileDatabase } from '../src/mms/run/db/ProfileDatabase'
+import { RunEngine } from '../src/mms/run/RunEngine'
+import { RunStore } from '../src/mms/run/RunStore'
 
 const fixture = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-profile-injection-'))
 let sequence = 0
@@ -213,5 +216,102 @@ describe('explicit profile store roots', () => {
     })
     expect(calls).toEqual(['begin', 'undoRetention', 'lifecycle', 'platform', 'scheduled', 'channels', 'orchestrator', 'net', 'requests', 'antigravity', 'claudeSubscription', 'pty', 'headless', 'mcp'])
     expect(service.started).toBe(true)
+  })
+
+  /** A profile mock for `finishStop`; `failing` makes one cleanup throw. */
+  const stoppingProfile = (calls: string[], failing?: string) =>
+    Object.assign(Object.create(MmsProfileServices.prototype) as object, {
+      stopped: false,
+      started: true,
+      stopOperation: undefined as Promise<void> | undefined,
+      profileId: 'profile-fixture',
+      beginShutdown: () => { calls.push('begin') },
+      undoRetention: { stop: async () => { calls.push('undoRetention') } },
+      lifecycle: { cleanup: { stop: async () => { calls.push('lifecycle') } } },
+      platform: { dispose: async () => { calls.push('platform') } },
+      scheduled: { shutdown: () => { calls.push('scheduled') } },
+      // Channels and requests settle late: the clean epoch end must still come after them.
+      channels: { shutdown: async () => { await new Promise((resolve) => setTimeout(resolve, 20)); calls.push('channels done'); if (failing === 'channels') throw new Error('channels failed') } },
+      orchestrator: { shutdown: async () => { calls.push('orchestrator') }, setRunEngine: () => { calls.push('detach') } },
+      net: { shutdown: async () => { calls.push('net') } },
+      requests: { waitForIdle: async () => { await new Promise((resolve) => setTimeout(resolve, 10)); calls.push('requests idle') } },
+      antigravity: { stop: () => { calls.push('antigravity') } },
+      claudeSubscription: { stop: () => { calls.push('claudeSubscription') } },
+      ptyManager: { shutdown: async () => { calls.push('pty') } },
+      headlessRunner: { shutdown: async () => { calls.push('headless') } },
+      mcpManager: { shutdown: async () => { calls.push('mcp') } },
+      config: { stopWatching: () => { calls.push('config') } },
+      runEngine: { shutdown: () => { calls.push('epoch ended') }, store: { db: { close: () => { calls.push('db closed') } } } },
+      getOwnedActivity: () => ({ platform: 0, scheduled: 0, channels: 0, orchestrator: 0, net: 0, requests: 0, ptys: 0, headless: 0, mcp: 0 })
+    })
+
+  it('writes the clean daemon end only after channels shut down and requests went idle (H5)', async () => {
+    const calls: string[] = []
+    const service = stoppingProfile(calls)
+    const stop = MmsProfileServices.prototype.stop as (this: typeof service) => Promise<void>
+    await stop.call(service)
+    expect(calls.indexOf('epoch ended')).toBeGreaterThan(calls.indexOf('channels done'))
+    expect(calls.indexOf('epoch ended')).toBeGreaterThan(calls.indexOf('requests idle'))
+    expect(calls.indexOf('epoch ended')).toBeGreaterThan(calls.indexOf('orchestrator'))
+    expect(calls.slice(-4)).toEqual(['epoch ended', 'config', 'detach', 'db closed'])
+  })
+
+  it('leaves the daemon epoch open when a cleanup fails (the next boot reads it as a crash) (H5)', async () => {
+    const calls: string[] = []
+    const service = stoppingProfile(calls, 'channels')
+    const stop = MmsProfileServices.prototype.stop as (this: typeof service) => Promise<void>
+    await expect(stop.call(service)).rejects.toMatchObject({ message: 'Failed to drain profile services' })
+    expect(calls).not.toContain('epoch ended')
+  })
+})
+
+describe('profile start order (H4)', () => {
+  it('recovers the run engine before scheduled jobs, channels or the network can send a turn', async () => {
+    const profileHome = home('start-order')
+    const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome })) })
+    const calls: string[] = []
+    let channelRunId = ''
+    const service = Object.assign(Object.create(MmsProfileServices.prototype) as object, {
+      started: false,
+      requests: { assertAccepting: () => undefined },
+      config: { getScheduledSection: () => ({ enabled: true }) },
+      scheduled: { start: () => { calls.push('scheduled') }, listJobs: () => [], getStatus: () => ({}) },
+      channels: {
+        // A channel delivers a message as soon as it starts: its turn is a run that starts at once.
+        startEnabled: async () => {
+          const sent = await engine.dispatch({ kind: 'send', threadId: 'channel-thread', clientRequestId: 'channel-msg', source: 'channel' })
+          if (sent.status !== 'accepted') throw new Error('send rejected')
+          channelRunId = sent.runId
+          engine.markStarting(sent.runId)
+          engine.markRunning(sent.runId)
+          calls.push('channels')
+        },
+        getSnapshot: () => ({})
+      },
+      net: { start: async () => { calls.push('net') } },
+      orchestrator: {
+        recoverRunEngineOnBoot: () => { engine.reconcileOnBoot(); calls.push('recover') },
+        scheduleStartupQueueRecovery: () => undefined
+      },
+      startRunEngineWorkers: () => { calls.push('workers') },
+      startMcpServer: async () => undefined,
+      threadRuntimes: { restoreOnStartup: () => undefined },
+      questions: { markInterruptedByDaemonRestart: () => undefined },
+      platform: { workflowRuns: { startRecovery: async () => undefined } },
+      undoRetention: { start: () => undefined },
+      lifecycle: { cleanup: { start: () => undefined } },
+      events: { emit: () => undefined },
+      projects: { listProjects: () => [] },
+      threads: { listAllThreads: () => [] }
+    })
+    try {
+      const startOwned = (MmsProfileServices.prototype as unknown as { startOwned: (this: typeof service) => Promise<void> }).startOwned
+      await startOwned.call(service)
+      expect(calls).toEqual(['recover', 'workers', 'scheduled', 'channels', 'net'])
+      // Boot recovery ran first, so the channel's live run was not interrupted as a leftover.
+      expect(engine.getRun(channelRunId)!.status).toBe('running')
+    } finally {
+      engine.store.db.close()
+    }
   })
 })

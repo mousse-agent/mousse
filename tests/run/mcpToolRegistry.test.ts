@@ -120,6 +120,37 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     expect(badLimit.isError).toBe(true)
   })
 
+  it('thread_read of a lineage thread shows run lifecycle only, and a delegation result only to its own child (M7)', async () => {
+    const { fx, registry, run, caller } = await setup()
+    const mine = await fx.delegate(run.runId, 'call-mine', { prompt: 'parent prompt for me' })
+    const sibling = await fx.delegate(run.runId, 'call-sibling', { prompt: 'parent prompt for the sibling' })
+    fx.finish(sibling.childRunId, 'sibling secret result')
+    fx.engine.markStarting(mine.childRunId)
+    fx.engine.markRunning(mine.childRunId)
+    const childCaller: McpCaller = { ...caller, threadId: mine.childThreadId, runId: mine.childRunId }
+    const read = JSON.parse((await registry.call('thread_read', { threadId: 'parent' }, {
+      caller: childCaller, toolCallId: 'mcp:read', signal: new AbortController().signal
+    })).text) as { events: Array<{ type: string; payload: Record<string, unknown> }>; nextAfterSeq: number; maxSeq: number }
+    const types = new Set(read.events.map((event) => event.type))
+    expect(types.has('run.status')).toBe(true)
+    for (const hidden of ['inbox.status', 'effect.status', 'tool.status', 'transfer.status'])
+      expect(types.has(hidden)).toBe(false)
+    const text = JSON.stringify(read.events)
+    expect(text).not.toContain('sibling secret result')
+    expect(text).not.toContain('parent prompt for')
+    const delegationEvents = read.events.filter((event) => event.type === 'delegation.status')
+    expect(delegationEvents.filter((event) => event.payload.childThreadId === sibling.childThreadId).every((event) => event.payload.result === null)).toBe(true)
+    expect(read.nextAfterSeq).toBeGreaterThan(0)
+    // The caller's own child result is visible to it once it is published.
+    fx.finish(mine.childRunId, 'my own result')
+    const next = await fx.runningRun(mine.childThreadId)
+    const own = await registry.call('thread_read', { threadId: 'parent' }, {
+      caller: { ...childCaller, runId: next.runId }, toolCallId: 'mcp:read-2', signal: new AbortController().signal
+    })
+    expect(own.text).toContain('my own result')
+    expect(own.text).not.toContain('sibling secret result')
+  })
+
   it('assertLiveCaller: the call acts as the thread\'s active run; none gives mousse_caller_not_live', async () => {
     const { fx, registry, run, ctx, host, delegation } = await setup()
     // The credential still names an older run; the call acts as the active one.

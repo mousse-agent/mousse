@@ -7,6 +7,7 @@ import { Inbox } from '../Inbox'
 import type { RunStore } from '../RunStore'
 import { writeTerminalRun } from '../terminal'
 import {
+  TERMINAL_RUN_STATUSES,
   isWakeTurnPayload,
   type ChildResultPayload,
   type EffectRecord,
@@ -25,6 +26,8 @@ export interface WakeReport {
   steers: string[]
   /** Pending wakes cancelled because every row was acknowledged before they started. */
   cancelled: string[]
+  /** Delivered rows whose delivery failed or was cut off, pending again (`restoreUndeliveredRows`). */
+  restored: string[]
 }
 
 /** Pending (unclaimed) wake `turn.start` effects, optionally for one thread. */
@@ -40,7 +43,10 @@ export function pendingWakeEffects(store: RunStore, threadId?: string): EffectRe
 /**
  * SPEC §14.3: a pending wake whose rows were all acknowledged (`task_status`) before it started is
  * cancelled and its run ends `cancelled`. Each cancellation is one transaction with its
- * `reconcile.wake_cancelled` event.
+ * `reconcile.wake_cancelled` event. Inside a caller's transaction (a `task_status` read) the
+ * cancellation joins it: the effect and run statuses are checked first, so nothing in it throws a
+ * storage error the caller would have to catch (a caught error inside a nested transaction still
+ * dooms the outer one).
  */
 export function cancelAcknowledgedWakes(
   store: RunStore,
@@ -54,21 +60,25 @@ export function cancelAcknowledgedWakes(
     const payload = effect.payload as WakeTurnPayload
     const rows = inbox.getMany(payload.inboxIds)
     if (rows.length === 0 || rows.some((row) => row.status !== 'acknowledged')) continue
-    try {
-      store.db.transaction(() => {
-        const settled = outbox.cancel(effect.effectId, now, 'acknowledged_before_wake')
-        if (!settled.settled) return
-        const run = store.getRun(payload.runId)
-        if (run?.status === 'queued')
-          writeTerminalRun(store, run, run.epoch, 'cancelled', undefined, now)
-        store.appendEvent({
-          threadId: effect.threadId,
-          runId: payload.runId,
-          type: 'reconcile.wake_cancelled',
-          payload: { effectId: effect.effectId, runId: payload.runId, inboxIds: payload.inboxIds }
-        })
-        cancelled.push(payload.runId)
+    const cancelOne = (): void => {
+      if (outbox.get(effect.effectId)?.status !== 'pending') return
+      outbox.cancel(effect.effectId, now, 'acknowledged_before_wake')
+      const run = store.getRun(payload.runId)
+      if (run?.status === 'queued') writeTerminalRun(store, run, run.epoch, 'cancelled', undefined, now)
+      store.appendEvent({
+        threadId: effect.threadId,
+        runId: payload.runId,
+        type: 'reconcile.wake_cancelled',
+        payload: { effectId: effect.effectId, runId: payload.runId, inboxIds: payload.inboxIds }
       })
+      cancelled.push(payload.runId)
+    }
+    if (store.db.inTransaction) {
+      cancelOne()
+      continue
+    }
+    try {
+      store.db.transaction(cancelOne)
     } catch (error) {
       if (!(error instanceof RunStoreError) || (error.code !== 'stale_write' && error.code !== 'bad_request'))
         throw error
@@ -77,12 +87,55 @@ export function cancelAcknowledgedWakes(
   return cancelled
 }
 
+/** The thread has a wake run waiting to start (its `turn.start` pending, deferred or claimed). */
+function hasQueuedWake(store: RunStore, threadId: string): boolean {
+  return Boolean(
+    store.db
+      .statement(`SELECT 1 FROM runs WHERE thread_id = ? AND status = 'queued' AND source = 'wake' LIMIT 1`)
+      .get(threadId)
+  )
+}
+
+/** Times a row may go back to pending after a failed or cut-off delivery before it stays delivered. */
+export const MAX_INBOX_REDELIVERIES = 3
+
 /**
- * Reconciler rule 4 (SPEC §12.4, §14.3). For every thread with `pending` inbox rows:
- * - no active run and no wake already waiting → one `wake` run with a `turn.start` effect for all
- *   of the thread's pending rows, which become `delivered`;
+ * SPEC §14.3 ("a parent never waits forever"): `delivered` rows whose delivery did not happen go
+ * back to `pending` so rule 4 delivers them again. A row is returned when the effect that delivered
+ * it (`deliveredBy`) ended `failed` or `cancelled`, or when that effect is a wake `turn.start` whose
+ * wake run ended other than `completed` — except a wake the user stopped (they saw it start and
+ * chose to stop it). A row returns at most `MAX_INBOX_REDELIVERIES` times, so a delivery that keeps
+ * failing cannot loop. Joins the caller's transaction.
+ */
+export function restoreUndeliveredRows(store: RunStore, outbox: EffectOutbox): string[] {
+  const inbox = new Inbox(store)
+  const restored: string[] = []
+  for (const row of inbox.listDeliveredWithEffect()) {
+    const effect = outbox.get(row.deliveredBy!)
+    if (!effect || !undelivered(store, effect)) continue
+    if (inbox.pendingCount(row.inboxId, row.threadId) > MAX_INBOX_REDELIVERIES) continue
+    inbox.markPendingAgain([row.inboxId])
+    restored.push(row.inboxId)
+  }
+  return restored
+}
+
+function undelivered(store: RunStore, effect: EffectRecord): boolean {
+  if (effect.status === 'failed' || effect.status === 'cancelled') return true
+  if (effect.kind !== 'turn.start' || !isWakeTurnPayload(effect.payload)) return false
+  const run = store.getRun(effect.payload.runId)
+  if (!run || !TERMINAL_RUN_STATUSES.has(run.status) || run.status === 'completed') return false
+  return run.outcome?.interruptedBy !== 'user'
+}
+
+/**
+ * Reconciler rule 4 (SPEC §12.4, §14.3). First, rows whose delivery failed or was cut off return
+ * to pending (`restoreUndeliveredRows`). Then, for every thread with `pending` inbox rows:
+ * - no active run and no wake run already queued (its `turn.start` pending, deferred while the
+ *   thread is busy, or claimed) → one `wake` run with a `turn.start` effect for all of the
+ *   thread's pending rows, which become `delivered` by that effect;
  * - an active run that takes native steer, while every row wants `wake: 'always'` → one
- *   `turn.steer` with the formatted notice, rows `delivered`;
+ *   `turn.steer` with the formatted notice, rows `delivered` by that steer;
  * - otherwise the rows stay pending and the rule fires again on a later pass.
  * Pending wakes whose rows were all acknowledged first are cancelled.
  */
@@ -94,7 +147,8 @@ export function wakeThreads(
 ): WakeReport {
   const inbox = new Inbox(store)
   const delegations = new Delegations(store, inbox)
-  const report: WakeReport = { wakes: [], steers: [], cancelled: cancelAcknowledgedWakes(store, outbox, now) }
+  const restored = store.db.transaction(() => restoreUndeliveredRows(store, outbox))
+  const report: WakeReport = { wakes: [], steers: [], cancelled: cancelAcknowledgedWakes(store, outbox, now), restored }
   for (const threadId of inbox.listThreadsWithPending()) {
     try {
       store.db.transaction(() => {
@@ -102,7 +156,7 @@ export function wakeThreads(
         if (rows.length === 0) return
         const active = store.getActiveRun(threadId)
         if (!active) {
-          if (pendingWakeEffects(store, threadId).length) return
+          if (hasQueuedWake(store, threadId)) return
           const run = store.createRun({ threadId, source: 'wake', clientRequestId: `wake:${rows[0].inboxId}` })
           const payload: WakeTurnPayload = {
             kind: 'wake',
@@ -110,8 +164,8 @@ export function wakeThreads(
             runId: run.runId,
             inboxIds: rows.map((row) => row.inboxId)
           }
-          outbox.enqueue({ threadId, runId: run.runId, kind: 'turn.start', payload })
-          inbox.markDelivered(payload.inboxIds)
+          const wake = outbox.enqueue({ threadId, runId: run.runId, kind: 'turn.start', payload })
+          inbox.markDelivered(payload.inboxIds, wake.effectId)
           store.appendEvent({ threadId, runId: run.runId, type: 'reconcile.wake', payload })
           report.wakes.push(run.runId)
           return
@@ -126,7 +180,7 @@ export function wakeThreads(
           kind: 'turn.steer',
           payload: { runId: active.runId, threadId, text, inboxIds: rows.map((row) => row.inboxId) }
         })
-        inbox.markDelivered(rows.map((row) => row.inboxId))
+        inbox.markDelivered(rows.map((row) => row.inboxId), effect.effectId)
         store.appendEvent({
           threadId,
           runId: active.runId,
@@ -153,7 +207,9 @@ function wantsSteer(row: InboxRecord, delegations: Delegations): boolean {
 /**
  * Boot recovery for wakes (SPEC §14.3, "a parent never waits forever"): a queued wake run whose
  * `turn.start` died with the previous daemon is cancelled and its delivered rows become pending
- * again, so rule 4 wakes the thread after boot. Joins the caller's transaction.
+ * again, and rows a `turn.steer` (or a cut-off wake run) delivered that never arrived are returned
+ * too (`restoreUndeliveredRows`), so rule 4 wakes the thread after boot. Joins the caller's
+ * transaction.
  */
 export function recoverWakesOnBoot(store: RunStore, outbox: EffectOutbox, now: string): string[] {
   const inbox = new Inbox(store)
@@ -169,5 +225,6 @@ export function recoverWakesOnBoot(store: RunStore, outbox: EffectOutbox, now: s
     inbox.markPendingAgain(ids)
     recovered.push(run.runId)
   }
+  restoreUndeliveredRows(store, outbox)
   return recovered
 }

@@ -30,7 +30,6 @@ export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.fre
   interrupt: true,
   rollback: 'none',
   fork: 'portable',
-  nativeSubagents: 'observed',
   events: 'rich',
   containment: 'weak',
   historyInjection: 'prompt',

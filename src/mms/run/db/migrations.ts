@@ -232,5 +232,13 @@ CREATE INDEX context_transfers_source ON context_transfers(source_thread_id);
 ALTER TABLE delegations ADD COLUMN workspace TEXT CHECK(workspace IN ('isolated','shared'));
 ALTER TABLE delegations ADD COLUMN role TEXT;
 `
+  },
+  {
+    version: 7,
+    sql: `
+-- The effect that delivered an inbox row (a wake turn.start or a turn.steer, SPEC 14.3), so a row
+-- whose delivery failed or was cut off can go back to pending. NULL for older delivered rows.
+ALTER TABLE inbox ADD COLUMN delivered_by TEXT;
+`
   }
 ]

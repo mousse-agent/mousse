@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import { tryGit } from '../../actions/git'
@@ -51,18 +52,19 @@ export function ownsWorktree(threadId: string, metadata: ThreadWorkspaceMetadata
 }
 
 /**
- * The decision for one restore. `reviewed` is the user's confirmation after seeing the diff; it lifts
- * the review step but never the ownership check. Unknown capabilities restore automatically, as
- * before Phase 6.
+ * The decision for one restore. `reviewed` is the user's confirmation of the exact diff they saw
+ * (the caller compares `restoreDiffSha`); it lifts the review step but never the ownership check.
+ * Unknown capabilities fail closed: the diff is reviewed first. `others` may be a function, read
+ * at most once and only when the ownership check passes.
  */
 export function evaluateRestore(input: {
   threadId: string
   caps: ProviderCapabilities | null
   metadata: ThreadWorkspaceMetadata | undefined
-  others: WorkspaceClaim[]
+  others: WorkspaceClaim[] | (() => WorkspaceClaim[])
   reviewed?: boolean
 }): RestoreDecision {
-  const mode = input.caps ? restoreMode(input.caps) : 'auto'
+  const mode = input.caps ? restoreMode(input.caps) : 'review_diff'
   if (!ownsWorktree(input.threadId, input.metadata))
     return {
       action: 'refuse',
@@ -71,7 +73,8 @@ export function evaluateRestore(input: {
       conflicts: []
     }
   const worktree = input.metadata.worktreePath
-  const conflicts = input.others.filter((claim) => claim.threadId !== input.threadId && pathsOverlap(claim.path, worktree))
+  const others = typeof input.others === 'function' ? input.others() : input.others
+  const conflicts = others.filter((claim) => claim.threadId !== input.threadId && pathsOverlap(claim.path, worktree))
   if (conflicts.length)
     return {
       action: 'refuse',
@@ -98,6 +101,11 @@ export function worktreeClaims(threads: Array<{ threadId: string; threadDirector
 }
 
 export const RESTORE_DIFF_MAX_CHARS = 200_000
+
+/** The SHA-256 of a review diff; a reviewed restore names it (`reviewedDiffSha`). */
+export function restoreDiffSha(diff: string): string {
+  return createHash('sha256').update(diff).digest('hex')
+}
 
 /** What restoring `from` → `to` would change in the worktree (`git diff from to`), bounded. */
 export function restoreDiff(worktreePath: string, from: string, to: string): string {

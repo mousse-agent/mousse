@@ -123,7 +123,6 @@ describe('PiLoopAdapter', () => {
       interrupt: true,
       rollback: 'none',
       fork: 'portable',
-      nativeSubagents: 'managed',
       events: 'rich',
       containment: 'strong',
       historyInjection: 'native',

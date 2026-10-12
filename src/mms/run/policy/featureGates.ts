@@ -18,20 +18,6 @@ export function forkStrategy(caps: ProviderCapabilities): ForkStrategy {
 }
 
 /**
- * Phase 4 delegation.
- * - `managed_children`: subagents are Mousse child threads the loop starts and controls.
- * - `mirror_native`: the provider runs its own subagents; Mousse records them read-only.
- * - `delegate_task_only`: the provider has no subagents; delegation goes through Mousse's tools.
- */
-export type DelegationMode = 'managed_children' | 'mirror_native' | 'delegate_task_only'
-
-export function delegationMode(caps: ProviderCapabilities): DelegationMode {
-  if (caps.nativeSubagents === 'managed') return 'managed_children'
-  if (caps.nativeSubagents === 'observed') return 'mirror_native'
-  return 'delegate_task_only'
-}
-
-/**
  * Phase 6 checkpoint restore. Strong containment (Mousse ran every tool) restores automatically;
  * weak containment may have touched files Mousse did not see, so the user reviews the diff.
  */

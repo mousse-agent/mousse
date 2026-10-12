@@ -218,7 +218,8 @@ export class Delegations {
   /**
    * Publication gate (SPEC §14.1), called inside a run's terminal write. When `run` is the child
    * run of a delegation on a `subagent` child thread and that delegation is still `running`, the
-   * delegation becomes `result_available` with the run's final text (or failure) and one
+   * delegation becomes `result_available` (child `completed`) or `failed` (child `failed`,
+   * `interrupted`, `uncertain` or `cancelled`) with the run's final text or failure, and one
    * `child_result` inbox row is written for the parent thread, in the same transaction. A cancelled
    * delegation publishes nothing: a late child can finish but not publish. Never throws for a run
    * that is not a delegated child.
@@ -235,7 +236,7 @@ export class Delegations {
       const next = this.setStatus({
         delegationId: delegation.delegationId,
         from: 'running',
-        to: 'result_available',
+        to: run.status === 'completed' ? 'result_available' : 'failed',
         result,
         completedAt: now
       })

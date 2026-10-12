@@ -685,15 +685,18 @@ export class MmsProfileServices {
     if (this.started) return
     this.started = true
 
+    // Runs the previous daemon left active cannot resume (SPEC §5); settle them before any turn,
+    // and before anything that can send one (H4): scheduled jobs, channels and the network all
+    // start below, so none of their sends can create a run that boot recovery then interrupts.
+    this.orchestrator.recoverRunEngineOnBoot()
+    this.startRunEngineWorkers()
+
     if (this.config.getScheduledSection().enabled) {
       this.scheduled.start()
     }
     await this.channels.startEnabled()
     await this.net.start()
 
-    // Runs the previous daemon left active cannot resume (SPEC §5); settle them before any turn.
-    this.orchestrator.recoverRunEngineOnBoot()
-    this.startRunEngineWorkers()
     await this.startMcpServer()
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
     this.threadRuntimes.restoreOnStartup()
@@ -871,9 +874,9 @@ export class MmsProfileServices {
   }
 
   /**
-   * Stops the reconciler and the worker (in-flight turns abort through their effect signal), waits
-   * for the orchestrator to drain, then records a clean daemon end. One sequential cleanup: the
-   * clean `ended_at` must only be written once no turn can still write to the run database.
+   * Stops the reconciler and the worker (in-flight turns abort through their effect signal) and
+   * waits for the orchestrator and every executor to drain. The clean daemon end is not written
+   * here: `finishStop` writes it (`endRunEngineEpoch`) once channels are shut and requests idle.
    */
   private async stopRunEngine(): Promise<void> {
     if (this.daemonHeartbeat) clearInterval(this.daemonHeartbeat)
@@ -896,9 +899,22 @@ export class MmsProfileServices {
     if (this.runEffectWorker) this.orchestrator.attachEffectWorker(null)
     this.runEffectWorker = null
     this.runReconciler = null
+  }
+
+  /**
+   * H5: the clean `ended_at` of this daemon epoch, written only after every cleanup settled, the
+   * channels shut down, the requests went idle and no owner reports activity, so no live writer
+   * can still touch the run database. A stop that failed to drain leaves the epoch open: the next
+   * boot treats it as a crash, which is the conservative reading.
+   */
+  private endRunEngineEpoch(): void {
     // Test fixtures stop a partially constructed profile; a missing engine has nothing to end.
     const engine = this.runEngine as RunEngine | undefined
-    engine?.shutdown()
+    try {
+      engine?.shutdown()
+    } catch (error) {
+      console.warn('run engine epoch end failed', error)
+    }
   }
 
   private async finishStop(): Promise<void> {
@@ -935,6 +951,7 @@ export class MmsProfileServices {
         activity
       })
     }
+    this.endRunEngineEpoch()
     this.config.stopWatching()
     try {
       this.orchestrator.setRunEngine(null)

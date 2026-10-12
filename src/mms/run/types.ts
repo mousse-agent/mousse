@@ -29,6 +29,13 @@ export interface RunOutcome {
   stopRequested?: boolean
   /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
   continuationOf?: string
+  /**
+   * SPEC §16.3: how an undo run restored the conversation (`featureGates.canUndoNatively`):
+   * `native_rollback` when the provider can roll its own session back, else `checkpoint`.
+   */
+  undoStrategy?: 'native_rollback' | 'checkpoint'
+  /** SPEC §13.3: how a Stop reached the run (`CommandPolicy.stopStrategy`). */
+  stopStrategy?: 'interrupt' | 'settle_locally'
 }
 
 export interface RunRecord {
@@ -122,6 +129,11 @@ export interface EffectKindSpec {
   class: EffectClass
   timeoutMs: number
   /**
+   * SPEC §12.2: a kind with no producer yet. Enqueueing one fails at once (`bad_request`); the
+   * worker has no executor for it either.
+   */
+  reserved?: boolean
+  /**
    * Lane override. Without one the lane is the effect's thread. `control` effects (interrupt,
    * steer, answers) must reach a live turn, so they never queue behind the thread's `turn.start`.
    */
@@ -165,11 +177,12 @@ export const EFFECT_KIND_SPEC: Record<EffectKind, EffectKindSpec> = {
     class: 'process_bound',
     timeoutMs: 30_000,
     maxAttempts: 1,
-    lane: 'control'
+    lane: 'control',
+    reserved: true
   },
-  'checkpoint.capture': { class: 'replay_safe', timeoutMs: 2 * 60_000 },
-  'title.generate': { class: 'replay_safe', timeoutMs: 60_000, lane: 'title' },
-  'workspace.cleanup': { class: 'replay_safe', timeoutMs: 5 * 60_000 }
+  'checkpoint.capture': { class: 'replay_safe', timeoutMs: 2 * 60_000, reserved: true },
+  'title.generate': { class: 'replay_safe', timeoutMs: 60_000, lane: 'title', reserved: true },
+  'workspace.cleanup': { class: 'replay_safe', timeoutMs: 5 * 60_000, reserved: true }
 }
 
 export interface EffectRecord {
@@ -283,6 +296,11 @@ export interface InboxRecord {
   payload: unknown
   status: InboxStatus
   createdAt: string
+  /**
+   * The effect that delivered a `delivered` row (a wake `turn.start` or a `turn.steer`); null while
+   * pending, after acknowledgement of an undelivered row, or for rows delivered before migration 7.
+   */
+  deliveredBy: string | null
 }
 
 /** Payload of a `child_result` inbox row. */

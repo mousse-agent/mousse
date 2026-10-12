@@ -24,8 +24,6 @@ export interface ProviderCapabilities {
   rollback: 'native' | 'none'
   /** `featureGates.forkStrategy` (Phase 6). */
   fork: 'native' | 'portable'
-  /** `featureGates.delegationMode` (Phase 4). */
-  nativeSubagents: 'none' | 'observed' | 'managed'
   /** `CommandPolicy.heartbeatToleranceMs`: sparse event streams get 6x the heartbeat window. */
   events: 'rich' | 'sparse'
   /** `featureGates.restoreMode` (Phase 6): weak containment never auto-restores. */

@@ -11,7 +11,9 @@ import type { Message } from '@earendil-works/pi-ai'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { CommandRejection } from '../../src/mms/run/db/RunStoreError'
-import type { RunTerminalStatus } from '../../src/mms/run/RunEngine'
+import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
+import { RunEngine, type ForkPointSeed, type RunTerminalStatus } from '../../src/mms/run/RunEngine'
+import { RunStore } from '../../src/mms/run/RunStore'
 import { ThreadWorkspaceManager } from '../../src/mms/workspace/ThreadWorkspaceManager'
 import { gitFoundationFixture } from '../fixtures/gitFoundation'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
@@ -261,5 +263,59 @@ describe('thread fork (SPEC §16.2)', () => {
     const second = await d.orch.send('Second in the fork', false, { threadId: forked.threadId, clientRequestId: 'fork-2' })
     expect(headers(adapter.turns[2])).toBe(1)
     expect(d.engine.transfers.get(forked.transferId)).toMatchObject({ status: 'consumed', payload: { consumedBy: first.runId, repairedBy: second.runId } })
+  })
+})
+
+describe('fork point seeding (M5)', () => {
+  let profileHome: string | undefined
+  afterEach(() => {
+    if (profileHome) rmSync(profileHome, { recursive: true, force: true })
+    profileHome = undefined
+  })
+
+  const engineWith = (seed: ForkPointSeed) => {
+    profileHome = mkdtempSync(join(tmpdir(), 'mousse-fork-seed-'))
+    const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome })) })
+    let forks = 0
+    const created: string[] = []
+    engine.setDelegationHost({
+      createThread: () => {
+        forks += 1
+        created.push(`fork-${forks}`)
+        return { threadId: `fork-${forks}` }
+      },
+      deleteThread: () => undefined,
+      buildChildTurnPayload: () => null,
+      forkPointSeed: () => seed
+    })
+    return { engine, created }
+  }
+
+  const completedRun = async (engine: RunEngine) => {
+    const sent = await engine.dispatch({ kind: 'send', threadId: 'source', clientRequestId: 'source-1', source: 'gui' })
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    engine.markStarting(sent.runId)
+    engine.markRunning(sent.runId)
+    engine.markTerminal(sent.runId, 'completed')
+  }
+
+  it('refuses fork_point_unavailable without a checkpoint; seedFrom current_head forks and records it', async () => {
+    const { engine, created } = engineWith('missing')
+    await completedRun(engine)
+    const refused = await engine.forkThread({ sourceThreadId: 'source', clientRequestId: 'fork-a' }).catch((error: unknown) => error)
+    expect(refused).toBeInstanceOf(CommandRejection)
+    expect((refused as CommandRejection).reason).toBe('fork_point_unavailable')
+    expect(created).toEqual([])
+    const forked = await engine.forkThread({ sourceThreadId: 'source', clientRequestId: 'fork-b', seedFrom: 'current_head' })
+    expect(engine.transfers.get(forked.transferId)!.payload).toMatchObject({ seedFrom: 'current_head' })
+    engine.store.db.close()
+  })
+
+  it('records the checkpoint (or no code at all) as the seed when the fork point has one', async () => {
+    const { engine } = engineWith('checkpoint')
+    await completedRun(engine)
+    const forked = await engine.forkThread({ sourceThreadId: 'source', clientRequestId: 'fork-c' })
+    expect(engine.transfers.get(forked.transferId)!.payload).toMatchObject({ seedFrom: 'checkpoint' })
+    engine.store.db.close()
   })
 })

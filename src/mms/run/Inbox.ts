@@ -5,7 +5,7 @@ import { stableStringify } from './json'
 import type { RunStore } from './RunStore'
 import type { InboxKind, InboxRecord, InboxStatus } from './types'
 
-/** Allowed status moves. `delivered -> pending` is boot recovery of a wake that never ran. */
+/** Allowed status moves. `delivered -> pending` returns a row whose delivery failed or was cut off. */
 const TRANSITIONS: Record<InboxStatus, ReadonlySet<InboxStatus>> = {
   pending: new Set<InboxStatus>(['delivered', 'acknowledged']),
   delivered: new Set<InboxStatus>(['acknowledged', 'pending']),
@@ -36,7 +36,8 @@ export class Inbox {
         kind: input.kind,
         payload: JSON.parse(stableStringify(input.payload ?? null)) as unknown,
         status: 'pending',
-        createdAt: this.now()
+        createdAt: this.now(),
+        deliveredBy: null
       }
       this.db
         .statement(
@@ -111,9 +112,34 @@ export class Inbox {
       .map(toInbox)
   }
 
-  /** pending -> delivered. Rows already past `pending` are left alone. */
-  markDelivered(ids: readonly string[]): InboxRecord[] {
-    return this.move(ids, 'delivered', ['pending'])
+  /**
+   * pending -> delivered by `deliveredBy` (the wake `turn.start` or `turn.steer` effect carrying the
+   * rows), so a failed or cut-off delivery can return them to pending. Rows already past `pending`
+   * are left alone.
+   */
+  markDelivered(ids: readonly string[], deliveredBy: string | null = null): InboxRecord[] {
+    return this.move(ids, 'delivered', ['pending'], deliveredBy)
+  }
+
+  /** Delivered rows that name the effect that delivered them, oldest first. */
+  listDeliveredWithEffect(): InboxRecord[] {
+    return this.db
+      .statement(
+        `SELECT * FROM inbox WHERE status = 'delivered' AND delivered_by IS NOT NULL ORDER BY created_at, rowid`
+      )
+      .all()
+      .map(toInbox)
+  }
+
+  /** How many times the row has been `pending` (its first write included). */
+  pendingCount(inboxId: string, threadId: string): number {
+    const row = this.db
+      .statement(
+        `SELECT COUNT(*) AS n FROM thread_events WHERE thread_id = ? AND type = 'inbox.status'
+           AND json_extract(payload, '$.inboxId') = ? AND json_extract(payload, '$.status') = 'pending'`
+      )
+      .get(threadId, inboxId)
+    return Number(row?.n ?? 0)
   }
 
   /** pending|delivered -> acknowledged. */
@@ -121,24 +147,26 @@ export class Inbox {
     return this.move(ids, 'acknowledged', ['pending', 'delivered'])
   }
 
-  /** delivered -> pending: a wake that was cut off before it ran (boot recovery). */
+  /** delivered -> pending: a delivery that failed or was cut off before it ran. */
   markPendingAgain(ids: readonly string[]): InboxRecord[] {
-    return this.move(ids, 'pending', ['delivered'])
+    return this.move(ids, 'pending', ['delivered'], null)
   }
 
-  private move(ids: readonly string[], to: InboxStatus, from: InboxStatus[]): InboxRecord[] {
+  /** `deliveredBy`: the delivering effect to store; undefined keeps the stored one. */
+  private move(ids: readonly string[], to: InboxStatus, from: InboxStatus[], deliveredBy?: string | null): InboxRecord[] {
     return this.db.transaction(() => {
       const moved: InboxRecord[] = []
       for (const id of ids) {
         const current = this.get(id)
         if (!current) fail('bad_request', `Unknown inbox row ${id}.`)
         if (!from.includes(current.status) || !TRANSITIONS[current.status].has(to)) continue
+        const by = deliveredBy === undefined ? current.deliveredBy : deliveredBy
         const result = this.db
-          .statement('UPDATE inbox SET status = ? WHERE inbox_id = ? AND status = ?')
-          .run(to, id, current.status)
+          .statement('UPDATE inbox SET status = ?, delivered_by = ? WHERE inbox_id = ? AND status = ?')
+          .run(to, by, id, current.status)
         if (Number(result.changes) !== 1)
           fail('stale_write', `Inbox row ${id} changed while it was being updated.`)
-        const next = { ...current, status: to }
+        const next = { ...current, status: to, deliveredBy: by }
         this.recorded(next)
         moved.push(next)
       }
@@ -172,6 +200,7 @@ function toInbox(row: Row): InboxRecord {
     kind: row.kind as InboxKind,
     payload: JSON.parse(String(row.payload)) as unknown,
     status: row.status as InboxStatus,
-    createdAt: String(row.created_at)
+    createdAt: String(row.created_at),
+    deliveredBy: str(row.delivered_by)
   }
 }
