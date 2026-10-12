@@ -420,6 +420,16 @@ describe('Claude credential scope', () => {
     if (startLogin.mock.calls.length) expect(child.kill).toHaveBeenCalled()
   })
 
+  it('does not ask for the Claude binary on an already cancelled sign-in', async () => {
+    const f = profile({ defaultProfile: false, binary: false })
+    const session = new LoginSession('login')
+    const events: unknown[] = []
+    session.on('event', (event) => events.push(event))
+    session.abort.abort()
+    await expect(f.service.login(session, f.home)).resolves.toMatchObject({ success: false })
+    expect(events).toEqual([])
+  })
+
   it('tells a signed-out terminal user to run claude auth login', async () => {
     const { service, home } = profile({ defaultProfile: true, cli: exitOne(SIGNED_OUT) })
     await expect(

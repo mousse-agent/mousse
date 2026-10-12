@@ -550,6 +550,7 @@ export class ClaudeSubscriptionProviderService {
       if (this.settingsError) throw new Error(this.settingsError)
       const interaction = session.createAuthCallbacks()
       if (!this.binary()) {
+        checkpoint()
         const binary = await interaction.prompt({
           type: 'text',
           message: 'Install the official Claude Code CLI, then enter its absolute executable path',
