@@ -3,7 +3,8 @@ import type { Migration } from './ProfileDatabase'
 /**
  * Run Engine schema. Version 1 is the Phase 1 data model in docs/run-engine/SPEC.md §3; version 2
  * is the Phase 2 outbox, daemon epochs and tool ledger (§12.1) plus `runs.heartbeat_at`; version 3
- * is the Phase 4 delegation model (§14.1): thread lineage, delegations and the inbox.
+ * is the Phase 4 delegation model (§14.1): thread lineage, delegations and the inbox; version 4 is
+ * the Phase 5 Mousse MCP server (§15.1): bearer credentials and the delegation mode ceiling.
  */
 export const RUN_MIGRATIONS: readonly Migration[] = [
   {
@@ -157,6 +158,29 @@ CREATE TABLE inbox(
   created_at TEXT NOT NULL
 ) STRICT;
 CREATE INDEX inbox_thread_status ON inbox(thread_id, status);
+`
+  },
+  {
+    version: 4,
+    sql: `
+-- Bearer tokens of the Mousse MCP server (SPEC 15.1): one live row per (thread, provider), reused
+-- across the thread's turns; run_id and mode_ceiling follow its latest turn. Only the SHA-256 of
+-- the token is stored; the token itself exists in memory and in the provider runtime's config.
+CREATE TABLE credentials(
+  token_hash    TEXT PRIMARY KEY,
+  thread_id     TEXT NOT NULL,
+  run_id        TEXT NOT NULL,
+  provider      TEXT NOT NULL,
+  mode_ceiling  TEXT NOT NULL CHECK(mode_ceiling IN ('plan','default')),
+  created_at    TEXT NOT NULL,
+  revoked_at    TEXT,
+  last_seen_at  TEXT NOT NULL
+) STRICT;
+CREATE INDEX credentials_run ON credentials(run_id);
+CREATE INDEX credentials_thread ON credentials(thread_id, provider);
+
+-- The most a delegated child may do (SPEC 15.1 scoping); NULL for delegations made before Phase 5.
+ALTER TABLE delegations ADD COLUMN mode_ceiling TEXT CHECK(mode_ceiling IN ('plan','default'));
 `
   }
 ]

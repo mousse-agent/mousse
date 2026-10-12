@@ -11,6 +11,7 @@ import type {
   DelegationWake,
   LineageRecord,
   LineageRelationship,
+  ModeCeiling,
   RunRecord
 } from './types'
 
@@ -91,6 +92,7 @@ export class Delegations {
     model?: string | null
     prompt: string
     wake: DelegationWake
+    modeCeiling?: ModeCeiling | null
   }): DelegationRecord {
     return this.db.transaction(() => {
       const record: DelegationRecord = {
@@ -106,13 +108,15 @@ export class Delegations {
         status: 'running',
         result: null,
         createdAt: this.now(),
-        completedAt: null
+        completedAt: null,
+        modeCeiling: input.modeCeiling ?? null
       }
       this.db
         .statement(
           `INSERT INTO delegations(delegation_id, parent_run_id, parent_thread_id, child_thread_id,
-             child_run_id, provider, model, prompt_digest, wake, status, result, created_at, completed_at)
-           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             child_run_id, provider, model, prompt_digest, wake, status, result, created_at, completed_at,
+             mode_ceiling)
+           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           record.delegationId,
@@ -127,7 +131,8 @@ export class Delegations {
           record.status,
           null,
           record.createdAt,
-          null
+          null,
+          record.modeCeiling
         )
       this.recorded(record)
       return record
@@ -308,6 +313,7 @@ function toDelegation(row: Row): DelegationRecord {
     status: row.status as DelegationStatus,
     result: typeof row.result === 'string' ? (JSON.parse(row.result) as DelegationResult) : null,
     createdAt: String(row.created_at),
-    completedAt: str(row.completed_at)
+    completedAt: str(row.completed_at),
+    modeCeiling: row.mode_ceiling === 'plan' || row.mode_ceiling === 'default' ? row.mode_ceiling : null
   }
 }

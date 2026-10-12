@@ -47,11 +47,13 @@ import { AdapterRegistry } from '../run/adapters/AdapterRegistry'
 import { PiLoopAdapter } from '../run/adapters/pi/PiLoopAdapter'
 import { ClaudeSubscriptionAdapter } from '../run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { AntigravityAdapter } from '../run/adapters/antigravity/AntigravityAdapter'
-import type { AdapterHost, ProviderCapabilities, ProviderMetrics, RecoveredContext, TurnControl, TurnInput, TurnSink } from '../run/adapters/ProviderAdapter'
+import type { AdapterHost, ProviderAdapter, ProviderCapabilities, ProviderMetrics, RecoveredContext, TurnControl, TurnInput, TurnSink } from '../run/adapters/ProviderAdapter'
+import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
+import type { McpCaller, MousseToolHost } from '../run/mcp/toolRegistry'
 import { formatWakeNotice } from '../run/delegation/notice'
 import type { DelegationRequest } from '../run/RunEngine'
 import { TranscriptAssembler } from '../run/adapters/shared/TranscriptAssembler'
-import { handoffDelivery } from '../run/policy/featureGates'
+import { handoffDelivery, mcpAttachable } from '../run/policy/featureGates'
 import { isContextOverflowError, retryContextOverflowOnce } from '../run/adapters/shared/retryContextOverflow'
 import {
   TERMINAL_RUN_STATUSES,
@@ -59,6 +61,7 @@ import {
   type DelegationRecord,
   type EffectKind,
   type EffectRecord,
+  type ModeCeiling,
   type ThreadEvent,
   type WakeTurnPayload
 } from '../run/types'
@@ -583,6 +586,8 @@ export class OrchestratorService extends EventEmitter {
   private readonly staleRuns = new Set<string>()
   /** Phase 2b: the worker that executes `turn.*` effects. Null keeps direct turn starts. */
   private effectWorker: EffectWorker | null = null
+  /** Phase 5: mints a Mousse MCP credential per MCP-capable turn. Null attaches nothing. */
+  private mcpAttachment: McpAttachmentProvider | null = null
   /** Pending results of `turn.start` effects, keyed by runId (SPEC §12.7). */
   private readonly turnResults = new Map<string, TurnResult>()
   /** Last run heartbeat (ms) per run; throttles `RunEngine.heartbeat` writes. */
@@ -891,7 +896,8 @@ export class OrchestratorService extends EventEmitter {
       buildChildTurnPayload: ({ childThreadId, childRunId, prompt, request }): TurnStartPayload => ({
         runId: childRunId,
         threadId: childThreadId,
-        input: { content: prompt, mode: 'agent' },
+        // A plan-ceiling child plans only (SPEC §15.1).
+        input: { content: prompt, mode: request.modeCeiling === 'plan' ? 'plan' : 'agent' },
         reuseLastUser: false,
         displayUserMessage: true,
         source: 'delegation',
@@ -962,6 +968,90 @@ export class OrchestratorService extends EventEmitter {
 
   private effectsEnabled(): boolean {
     return Boolean(this.runEngine && this.effectWorker)
+  }
+
+  /**
+   * Phase 5 (SPEC §15.2): the profile's Mousse MCP server. Each turn of an MCP-capable adapter gets
+   * its thread's credential for that provider (`AdapterHost.mcp`), stable across turns so the
+   * runtime's session and MCP configuration stay the same; deleting the thread or switching its
+   * provider revokes it.
+   */
+  setMcpAttachment(provider: McpAttachmentProvider | null): void {
+    this.mcpAttachment = provider
+  }
+
+  /**
+   * The credential ceiling of a run on `threadId`: `plan` for a plan-mode turn, and never above the
+   * ceiling the thread's latest delegation gave it (a delegated child inherits its parent's).
+   */
+  private modeCeilingFor(threadId: string, mode: ChatMode): ModeCeiling {
+    if (mode === 'plan') return 'plan'
+    try {
+      return this.runEngine?.delegations.listForChildThread(threadId).at(-1)?.modeCeiling === 'plan' ? 'plan' : 'default'
+    } catch {
+      return 'plan'
+    }
+  }
+
+  /**
+   * The thread's MCP credential for the adapter (reused, re-pointed at this run and ceiling) when
+   * the adapter can attach the server; null otherwise.
+   */
+  private mcpFor(adapter: ProviderAdapter, threadId: string, runId: string | undefined, mode: ChatMode): AdapterHost['mcp'] {
+    if (!runId || !this.mcpAttachment || !this.runEngine || !mcpAttachable(adapter.capabilities)) return null
+    try {
+      return this.mcpAttachment.attach({ threadId, runId, provider: adapter.id, modeCeiling: this.modeCeilingFor(threadId, mode) })
+    } catch (error) {
+      console.warn('Mousse MCP credential could not be minted; the turn runs without Mousse tools', {
+        runId,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      return null
+    }
+  }
+
+  /** The thread's turn ended: its in-flight Mousse tool calls abort; the credential stays. */
+  private endMcpTurn(threadId: string): void {
+    try {
+      this.mcpAttachment?.turnEnded(threadId)
+    } catch (error) {
+      console.warn('Mousse MCP turn end failed', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** Revokes the thread's Mousse MCP credentials (thread deleted, provider switched). */
+  private revokeMcp(threadId: string): void {
+    try {
+      this.mcpAttachment?.revokeThread(threadId)
+    } catch (error) {
+      console.warn('Mousse MCP credentials could not be revoked', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * What the Mousse MCP server's tools need from the thread owner (SPEC §15.1). Every call acts as
+   * the credential's caller: its thread's session, run and mode ceiling.
+   */
+  mcpToolHost(): MousseToolHost {
+    return {
+      delegation: (caller: McpCaller) =>
+        this.delegationTools(this.getOrCreateSession(caller.threadId), caller.runId, caller.modeCeiling),
+      askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
+      presentPlan: (threadId, payload) => {
+        const session = this.getOrCreateSession(threadId)
+        this.sessionAls.run(session, () => this.presentPlanCard(payload, threadId))
+      },
+      tasks: (threadId) => this.getTasksForThread(threadId),
+      listQueue: (threadId) => this.listQueue(threadId),
+      enqueue: (threadId, input) => {
+        const item = this.enqueueForThread(threadId, input, { source: 'mcp' })
+        const session = this.getOrCreateSession(threadId)
+        if (session.isTurnRunning() || session.turnAdmitted) session.drainAfterSettle = true
+        else this.scheduleQueueDrain(session)
+        return item
+      },
+      toolLedger: (runId) => this.toolLedgerFor(runId)
+    }
   }
 
   /** Executors for the `turn.*` effects; the profile hands them to its `EffectWorker`. */
@@ -1213,10 +1303,10 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** The delegation tools of one parent run (SPEC §14.2 `ToolHost`). */
-  private delegationTools(session: ThreadSession, parentRunId: string): DelegationToolHost {
+  private delegationTools(session: ThreadSession, parentRunId: string, callerCeiling?: ModeCeiling): DelegationToolHost {
     const parentThreadId = session.threadId
     const delegateTask = (input: DelegateTaskInput, call: DelegationToolCall) =>
-      this.delegateTask(parentThreadId, parentRunId, input, call)
+      this.delegateTask(parentThreadId, parentRunId, input, call, callerCeiling)
     const listDelegations = () => this.listDelegations(parentThreadId)
     const named = (request: NamedAgentToolRequest): DelegateTaskInput => {
       const write = request.access === 'write'
@@ -1251,7 +1341,7 @@ export class OrchestratorService extends EventEmitter {
         },
         recall: async (request, call) => {
           const child = this.namedChild(parentThreadId, request.agent)
-          const response = await this.send({ content: request.task, mode: 'agent' }, false, {
+          const response = await this.send({ content: request.task, mode: callerCeiling === 'plan' ? 'plan' : 'agent' }, false, {
             threadId: child.threadId,
             source: 'delegation',
             clientRequestId: `recall:${parentRunId}:${call.toolCallId}`,
@@ -1264,7 +1354,8 @@ export class OrchestratorService extends EventEmitter {
             childThreadId: child.threadId,
             childRunId: response.runId,
             prompt: request.task,
-            wake: 'always'
+            wake: 'always',
+            ...(callerCeiling ? { modeCeiling: callerCeiling } : {})
           })
           return { name: request.agent, delegationId: delegation.delegationId, childThreadId: child.threadId, childRunId: response.runId, status: delegation.status }
         },
@@ -1282,9 +1373,13 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  private async delegateTask(parentThreadId: string, parentRunId: string, input: DelegateTaskInput, call: DelegationToolCall) {
+  private async delegateTask(parentThreadId: string, parentRunId: string, input: DelegateTaskInput, call: DelegationToolCall, callerCeiling?: ModeCeiling) {
     const engine = this.requireRunEngine()
     if (!this.effectsEnabled()) throw new Error('Delegation needs the run engine worker')
+    // SPEC §15.1: a child inherits its caller's ceiling and can never exceed it.
+    if (callerCeiling === 'plan' && input.modeCeiling === 'default')
+      throw new Error('A plan-ceiling caller cannot start a child with the default ceiling')
+    const modeCeiling = input.modeCeiling ?? callerCeiling
     const role = input.role?.trim() || undefined
     if (input.workspace === 'shared' && !(role && SHARED_WORKSPACE_ROLES.has(role)))
       throw new Error('workspace "shared" is allowed only for read-only roles (role "research" or "review"); use workspace "isolated" for work that edits, builds or tests.')
@@ -1298,7 +1393,8 @@ export class OrchestratorService extends EventEmitter {
       role,
       workspace: input.workspace,
       wake: input.wake ?? 'always',
-      title: input.title
+      title: input.title,
+      ...(modeCeiling ? { modeCeiling } : {})
     })
     return {
       delegationId: accepted.delegationId,
@@ -1791,10 +1887,13 @@ export class OrchestratorService extends EventEmitter {
     override: ThreadSession['modelOverride'] | undefined
   ): ThreadSession['modelOverride'] {
     const session = this.getOrCreateSession(threadId)
+    const previousProvider = session.modelOverride?.llmProvider
     session.modelOverride = override ? structuredClone(override) : undefined
     if (this.threadStore) {
       this.threadStore.updateThreadMeta(threadId, { modelOverride: session.modelOverride })
     }
+    // SPEC §15.1: a credential belongs to a thread and provider; a provider switch revokes it.
+    if (previousProvider !== session.modelOverride?.llmProvider) this.revokeMcp(threadId)
     return session.modelOverride
   }
 
@@ -1850,6 +1949,7 @@ export class OrchestratorService extends EventEmitter {
 
   /** Mark thread deleted so pending work will not execute. */
   markThreadDeleted(threadId: string): void {
+    this.revokeMcp(threadId)
     const session = this.sessions.get(threadId)
     if (session) {
       session.deleted = true
@@ -3722,7 +3822,9 @@ export class OrchestratorService extends EventEmitter {
         },
         heartbeat: () => this.heartbeatRun(engineRunId)
       }
+      const mcp = this.mcpFor(adapter, session.threadId, engineRunId, mode)
       const adapterHost: AdapterHost = {
+        mcp,
         tools: {
           onPublishApplet: this.appletStore ? (value) => {
             if (stagedApplets.length >= 3) throw new Error('Only three applets may be published per response.')
@@ -3772,6 +3874,7 @@ export class OrchestratorService extends EventEmitter {
         }
       }
       const result = await adapter.startTurn(turnInput, turnSink, turnControl, adapterHost)
+        .finally(() => { if (mcp) this.endMcpTurn(session.threadId) })
       assistantText = result.text
       aborted = Boolean(result.aborted)
       responseMetadata = {

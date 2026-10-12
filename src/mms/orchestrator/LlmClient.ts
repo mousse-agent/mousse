@@ -159,6 +159,11 @@ export interface DelegateTaskInput {
   wake?: 'always' | 'settled_only'
   /** Child thread title; the named-agent wrappers pass the agent name. */
   title?: string
+  /**
+   * The most the child may do (SPEC §15.1). Only the Mousse MCP server offers it; the host
+   * defaults it to the caller's ceiling and refuses a broader one.
+   */
+  modeCeiling?: 'plan' | 'default'
 }
 
 /** The model's tool call that invoked a delegation tool; its id derives the clientRequestId. */
@@ -2995,6 +3000,14 @@ const DELEGATION_TOOLS: Tool[] = [
 
 const DELEGATION_TOOL_NAMES: ReadonlySet<string> = new Set(DELEGATION_TOOLS.map((tool) => tool.name))
 
+/** The SPEC §14.2 delegation tools (no named-agent wrappers); the Mousse MCP server lists these. */
+export const CORE_DELEGATION_TOOL_NAMES = ['delegate_task', 'task_status', 'task_cancel', 'list_delegations', 'integrate_delegation'] as const
+
+/** Definitions shared by the pi loop and the Mousse MCP server, so both offer identical schemas. */
+export function delegationToolDefinitions(names: readonly string[] = CORE_DELEGATION_TOOL_NAMES): Tool[] {
+  return DELEGATION_TOOLS.filter((tool) => names.includes(tool.name))
+}
+
 function requireString(input: Record<string, unknown>, key: string, message: string): string {
   const value = input[key]
   if (typeof value !== 'string' || !value.trim()) throw new Error(message)
@@ -3012,8 +3025,10 @@ export async function dispatchDelegationTool(host: DelegationToolHost, toolCall:
       if (args.wake !== undefined && args.wake !== 'always' && args.wake !== 'settled_only') throw new Error('wake must be always or settled_only')
       for (const key of ['provider', 'model', 'role'] as const)
         if (args[key] !== undefined && (typeof args[key] !== 'string' || !String(args[key]).trim())) throw new Error(`${key} must be a non-empty string`)
+      if (args.modeCeiling !== undefined && args.modeCeiling !== 'plan' && args.modeCeiling !== 'default') throw new Error('modeCeiling must be plan or default')
       return host.delegateTask({ prompt, workspace: args.workspace, wake: args.wake as DelegateTaskInput['wake'],
-        provider: args.provider as string | undefined, model: args.model as string | undefined, role: args.role as string | undefined }, call)
+        provider: args.provider as string | undefined, model: args.model as string | undefined, role: args.role as string | undefined,
+        ...(args.modeCeiling !== undefined ? { modeCeiling: args.modeCeiling as DelegateTaskInput['modeCeiling'] } : {}) }, call)
     }
     case 'task_status':
       return host.taskStatus({ delegationId: requireString(args, 'delegationId', 'task_status requires a delegationId') })

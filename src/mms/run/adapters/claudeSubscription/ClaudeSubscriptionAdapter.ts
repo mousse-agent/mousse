@@ -4,6 +4,7 @@ import {
   type ClaudeSubscriptionProviderService
 } from '../../../providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import type { ClaudeSubscriptionMetrics } from '../../../providers/claudeSubscription/metrics'
+import { mousseOrchestrationInstructions } from '../../mcp/instructions'
 import type { ProviderRef } from '../../types'
 import type {
   AdapterHost,
@@ -95,6 +96,10 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       signal: input.signal,
       appletInstructions: withAppletGuidance(input.appletInstructions),
       history,
+      // SPEC §15.2: the Mousse MCP server over HTTP with this run's bearer token, and the shared
+      // orchestration guidance appended to the system prompt.
+      mcp: host.mcp ?? null,
+      systemPromptAppend: host.mcp ? mousseOrchestrationInstructions() : undefined,
       drainSteer: () => ctl.drainSteer(),
       onSteer: (text) => {
         progress()

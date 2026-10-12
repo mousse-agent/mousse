@@ -16,6 +16,7 @@ import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
 import { AppError } from '../../../shared/errors'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
+import { CLAUDE_MOUSSE_TOOL_PREFIX, claudeMcpServers } from '../../run/mcp/attachment'
 import type { LoginSession } from '../LoginSession'
 import {
   ClaudeMetricsCollector,
@@ -49,6 +50,10 @@ export type ClaudeSubscriptionChatInput = {
   images?: ChatImageAttachment[]
   signal?: AbortSignal
   mode?: 'plan' | 'default'
+  /** The Mousse MCP server for this run (SPEC §15.2); null attaches no server. */
+  mcp?: { url: string; token: string } | null
+  /** Text appended to the (otherwise empty) SDK system prompt. */
+  systemPromptAppend?: string
   onText: (text: string) => void
   onThinking?: (text: string) => void
   onMetrics?: (report: ClaudeSubscriptionMetrics) => void
@@ -565,6 +570,9 @@ export class ClaudeSubscriptionProviderService {
         effort,
         resume,
         permissionMode: input.mode ?? 'default',
+        mcpServers: claudeMcpServers(input.mcp),
+        // The SDK's default system prompt is empty; appending to it is setting it.
+        ...(input.systemPromptAppend ? { systemPrompt: input.systemPromptAppend } : {}),
         // Ask hooks ensure ambient rules cannot silently approve writes or shell calls.
         hooks: {
           PreToolUse: [
@@ -606,6 +614,10 @@ export class ClaudeSubscriptionProviderService {
         canUseTool: async (toolName, args, context) => {
           if (controller.signal.aborted || context.signal.aborted)
             return { behavior: 'deny', message: 'Turn cancelled' }
+          // Mousse's own tools are scoped by the run's credential (mode ceiling, caller thread);
+          // the server refuses what the run may not do, so they need no extra prompt.
+          if (input.mcp && toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX))
+            return { behavior: 'allow', updatedInput: args }
           if (
             input.mode === 'plan' &&
             !['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'].includes(toolName)

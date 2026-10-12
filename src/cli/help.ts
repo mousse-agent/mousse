@@ -142,9 +142,13 @@ Mousse subagent overrides:
 
 export const ENGINE_HELP = `Usage:
   mousse-cli [--profile <id|slug>] engine fsck [--json]
+  mousse-cli engine mcp-stdio --url <http://127.0.0.1:port/mcp> [--token <token>]
 
 fsck reads the selected profile's run state from disk (no daemon connection) and
 lists inconsistencies. Exits 1 when any finding has severity error.
+
+mcp-stdio relays a stdio MCP client to the daemon's Mousse MCP server. The bearer
+token is read from MOUSSE_MCP_TOKEN unless --token is given.
 `
 
 export const THREAD_ACTION_HELP = `Usage:

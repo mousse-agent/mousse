@@ -24,6 +24,8 @@ export interface RepairReport {
   queuedStarts: string[]
   /** Rule 6: `started` tool invocations of terminal runs marked `outcome_unknown`. */
   outcomeUnknownTools: string[]
+  /** Phase 5: expired Mousse MCP credentials deleted this pass (absent without a credential store). */
+  prunedCredentials?: number
 }
 
 type Row = Record<string, unknown>
@@ -45,6 +47,7 @@ export class Reconciler {
   private readonly now: () => string
   private readonly heartbeatMs: number
   private readonly capabilitiesFor: CapabilitiesFor | undefined
+  private readonly credentials: { pruneExpired(): number } | undefined
   private timer: ReturnType<typeof setInterval> | null = null
 
   constructor(options: {
@@ -55,6 +58,8 @@ export class Reconciler {
     heartbeatMs?: number
     /** Rule 4: capabilities of the adapter serving a thread (steer delivery for wakes). */
     capabilitiesFor?: CapabilitiesFor
+    /** Phase 5: Mousse MCP credentials, pruned once per pass (SPEC §15.1, 24 h idle expiry). */
+    credentials?: { pruneExpired(): number }
   }) {
     this.store = options.store
     this.outbox = options.outbox
@@ -62,6 +67,7 @@ export class Reconciler {
     this.now = options.now ?? (() => new Date(options.store.db.clock()).toISOString())
     this.heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS
     this.capabilitiesFor = options.capabilitiesFor
+    this.credentials = options.credentials
   }
 
   runOnce(): RepairReport {
@@ -72,7 +78,8 @@ export class Reconciler {
       forcedInterrupts: this.forcedInterrupts(now),
       wakes: wakeThreads(this.store, this.outbox, this.capabilitiesFor, now),
       queuedStarts: this.queuedStarts(now),
-      outcomeUnknownTools: this.toolsOnTerminalRuns(now)
+      outcomeUnknownTools: this.toolsOnTerminalRuns(now),
+      ...(this.credentials ? { prunedCredentials: this.credentials.pruneExpired() } : {})
     }
   }
 

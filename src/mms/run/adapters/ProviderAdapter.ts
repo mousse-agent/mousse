@@ -172,8 +172,8 @@ export interface TurnResult {
 
 /**
  * Mousse tools an in-process loop calls directly (SPEC §13.1 `ToolHost`). Vendor runtimes reach
- * them over the Mousse MCP server in Phase 5 and receive no `ToolHost` until then. Every field is
- * minted by the daemon for this turn; none comes from protocol input.
+ * the same tools over the Mousse MCP server (`AdapterHost.mcp`, SPEC §15). Every field is minted
+ * by the daemon for this turn; none comes from protocol input.
  */
 export type ToolHost = Pick<
   LlmChatOptions,
@@ -195,6 +195,12 @@ export interface RecoveredContext {
  */
 export interface AdapterHost {
   tools: ToolHost
+  /**
+   * The Mousse MCP server and this run's bearer token (SPEC §15.2), minted by the `turn.start`
+   * executor when the adapter's `caps.mcp` is true and revoked when the turn ends. Absent or null:
+   * attach nothing, so the orchestration tools are simply not offered.
+   */
+  mcp?: { url: string; token: string } | null
   context: {
     /** Safe-boundary compaction inside a long tool loop; absent when compaction is disabled. */
     toolLoopSafety?: ToolLoopSafetyOptions

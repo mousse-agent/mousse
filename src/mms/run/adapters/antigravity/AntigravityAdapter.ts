@@ -2,6 +2,7 @@ import {
   ANTIGRAVITY_PROVIDER_ID,
   type AntigravityProviderService
 } from '../../../providers/antigravity/AntigravityProviderService'
+import { mousseOrchestrationInstructions } from '../../mcp/instructions'
 import type { ProviderRef } from '../../types'
 import type {
   AdapterHost,
@@ -82,6 +83,10 @@ export class AntigravityAdapter implements ProviderAdapter {
       signal: input.signal,
       appletInstructions: withAppletGuidance(input.appletInstructions),
       history: input.nativeHistory,
+      // SPEC §15.2: the Mousse MCP server in the ACP session (HTTP, or the stdio bridge when the
+      // agent does not advertise HTTP) and the shared guidance in the session's first prompt.
+      mcp: host.mcp ?? null,
+      orchestrationInstructions: host.mcp ? mousseOrchestrationInstructions() : undefined,
       drainSteer: () => ctl.drainSteer(),
       onSteer: (steer) => {
         progress()

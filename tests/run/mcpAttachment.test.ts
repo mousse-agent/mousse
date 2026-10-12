@@ -1,0 +1,248 @@
+/**
+ * Phase 5 attachment per adapter (docs/run-engine/SPEC.md §15.2): Claude's SDK `mcpServers`, the
+ * ACP `session/new|resume` `mcpServers` (HTTP or the stdio bridge), and CLI children's materialised
+ * `mousse` entry. Nothing is attached without `AdapterHost.mcp`.
+ */
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
+import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AgentConfigManager } from '../../src/mms/integrations/agents/AgentConfigManager'
+import type { McpRegistry } from '../../src/mms/integrations/mcp/McpRegistry'
+import type { SkillsRegistry } from '../../src/mms/integrations/skills/SkillsRegistry'
+import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
+import { AntigravityProviderService } from '../../src/mms/providers/antigravity/AntigravityProviderService'
+import {
+  ClaudeSubscriptionProviderService,
+  type ClaudeSubscriptionChatInput
+} from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import { AntigravityAdapter, type AntigravityClient } from '../../src/mms/run/adapters/antigravity/AntigravityAdapter'
+import { ClaudeSubscriptionAdapter, type ClaudeSubscriptionClient } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
+import type { AdapterHost, TurnInput, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
+import { acpMcpServers, claudeMcpServers, MOUSSE_MCP_TOKEN_ENV } from '../../src/mms/run/mcp/attachment'
+import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
+import type { SettingsStore } from '../../src/mms/settings/SettingsStore'
+
+const MCP = { url: 'http://127.0.0.1:4567/mcp', token: 'tok-secret' }
+const homes: string[] = []
+afterEach(() => {
+  for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
+})
+const tempHome = (prefix: string): string => {
+  const home = mkdtempSync(join(tmpdir(), prefix))
+  homes.push(home)
+  return home
+}
+
+const sink = (): TurnSink => new Proxy({} as TurnSink, { get: () => () => undefined })
+const host = (mcp: AdapterHost['mcp']): AdapterHost => ({
+  mcp,
+  tools: {},
+  context: { recoverOverflow: () => null, prepareNativeContext: () => null, nativeHistoryAfterTurn: (text) => text }
+})
+const input = (overrides: Partial<TurnInput> = {}): TurnInput => ({
+  runId: 'run-1', attemptId: 'a-1', threadId: 'thread-1', cwd: '/work', model: 'sonnet', llmProvider: 'claude-subscription',
+  modelPinned: true, mode: 'agent', prompt: 'hello', messages: [], signal: new AbortController().signal, ...overrides
+})
+const control = { drainSteer: () => undefined, heartbeat: () => undefined }
+
+describe('Claude subscription attachment', () => {
+  it('the adapter passes the server and the guidance only when host.mcp is set', async () => {
+    const seen: ClaudeSubscriptionChatInput[] = []
+    const client: ClaudeSubscriptionClient = {
+      chat: vi.fn(async (chat: ClaudeSubscriptionChatInput) => { seen.push(chat); return 'ok' }),
+      commitConversation: vi.fn(),
+      standaloneWorkspace: () => '/standalone',
+      configured: () => true
+    }
+    const adapter = new ClaudeSubscriptionAdapter(() => client)
+    await adapter.startTurn(input(), sink(), control, host(MCP))
+    await adapter.startTurn(input(), sink(), control, host(null))
+    await adapter.startTurn(input(), sink(), control, { ...host(null), mcp: undefined })
+    expect(seen[0]).toMatchObject({ mcp: MCP, systemPromptAppend: mousseOrchestrationInstructions() })
+    for (const chat of seen.slice(1)) {
+      expect(chat.mcp).toBeNull()
+      expect(chat.systemPromptAppend).toBeUndefined()
+    }
+  })
+
+  const service = (query: (input: { options: Options; prompt: unknown }) => Query) => {
+    const home = tempHome('mousse-mcp-claude-')
+    const binary = join(home, 'claude')
+    writeFileSync(binary, 'fixture')
+    chmodSync(binary, 0o755)
+    const directory = join(home, 'providers', 'claude-subscription')
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(join(directory, 'settings.json'), JSON.stringify({ signedIn: true, binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
+    const questions = new UserQuestionService()
+    const runAuth = vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
+    return { home, questions, service: new ClaudeSubscriptionProviderService(home, questions, { query, runAuth }) }
+  }
+  /** A query that asks for a Mousse tool permission mid-turn, then finishes. */
+  const decisions: unknown[] = []
+  const finished = (options: Options) => Object.assign((async function* () {
+    decisions.push(await options.canUseTool?.('mcp__mousse__delegate_task', { prompt: 'x' }, { signal: new AbortController().signal } as never))
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', session_id: 's' }
+  })(), { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
+
+  it('the service builds mcpServers.mousse with the bearer header, the system prompt, and allows Mousse tools without a prompt', async () => {
+    const options: Options[] = []
+    const { home, questions, service: claude } = service(({ options: o }) => { options.push(o); return finished(o) })
+    const ask = vi.spyOn(questions, 'requestAnswers')
+    questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }))
+    await claude.chat({ threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: MCP, systemPromptAppend: 'GUIDE' })
+    await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn() })
+    expect(options[0].mcpServers).toEqual({
+      mousse: { type: 'http', url: MCP.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 }
+    })
+    expect(options[0].systemPrompt).toBe('GUIDE')
+    expect(options[0].extraArgs).toMatchObject({ 'strict-mcp-config': null })
+    expect(decisions[0]).toMatchObject({ behavior: 'allow' })
+    expect(ask).toHaveBeenCalledTimes(1)
+    // Without the server the same name is an ordinary tool and goes to the user.
+    expect(ask.mock.calls[0][0][0].prompt).toMatch(/mcp__mousse__delegate_task/)
+    expect(decisions[1]).toMatchObject({ behavior: 'deny' })
+    expect(options[1].mcpServers).toEqual({})
+    expect(options[1].systemPrompt).toBeUndefined()
+    expect(claudeMcpServers(null)).toEqual({})
+  })
+})
+
+type Sent = { method: string; params: Record<string, unknown> }
+
+/** A fake ACP agent process; `http` is what its initialize advertises. */
+function fakeAcp(http: boolean, sent: Sent[]) {
+  return () => {
+    const abort = new AbortController()
+    return {
+      child: { exitCode: 0, signalCode: null, kill: () => true },
+      connection: {
+        signal: abort.signal,
+        close: () => abort.abort(new Error('closed')),
+        agent: {
+          request: async (method: string, params: Record<string, unknown>) => {
+            sent.push({ method, params })
+            if (method === 'initialize') return { protocolVersion: PROTOCOL_VERSION, agentCapabilities: { mcpCapabilities: { http } } }
+            if (method === 'session/new' || method === 'session/resume')
+              return { sessionId: 'acp-session', configOptions: [{ id: 'model', name: 'Model', type: 'select', currentValue: 'm1', options: [{ value: 'm1', name: 'M1' }] }] }
+            if (method === 'session/prompt') return { stopReason: 'end_turn' }
+            return {}
+          },
+          notify: async () => undefined
+        }
+      }
+    }
+  }
+}
+
+describe('Antigravity attachment', () => {
+  it('the adapter passes the server and the guidance only when host.mcp is set', async () => {
+    const seen: Array<Parameters<AntigravityClient['chat']>[0]> = []
+    const client: AntigravityClient = { chat: vi.fn(async (chat) => { seen.push(chat); return 'ok' }), commitConversation: vi.fn(), configured: () => true }
+    const adapter = new AntigravityAdapter(() => client)
+    await adapter.startTurn(input({ llmProvider: 'antigravity' }), sink(), control, host(MCP))
+    await adapter.startTurn(input({ llmProvider: 'antigravity' }), sink(), control, host(null))
+    expect(seen[0]).toMatchObject({ mcp: MCP, orchestrationInstructions: mousseOrchestrationInstructions() })
+    expect(seen[1].mcp).toBeNull()
+    expect(seen[1].orchestrationInstructions).toBeUndefined()
+  })
+
+  const service = (http: boolean, sent: Sent[]) => {
+    const home = tempHome('mousse-mcp-acp-')
+    const workspace = join(home, 'workspace')
+    mkdirSync(workspace)
+    const antigravity = new AntigravityProviderService(home, home, new UserQuestionService())
+    Object.assign(antigravity as unknown as Record<string, unknown>, { configured: () => true, launch: fakeAcp(http, sent) })
+    return { antigravity, workspace }
+  }
+  const prompts = (sent: Sent[]) => sent.filter((frame) => frame.method === 'session/prompt')
+    .map((frame) => ((frame.params.prompt as Array<{ text: string }>)[0]).text)
+
+  it('attaches an http server when the agent advertises http, with the guidance in the first prompt only', async () => {
+    const sent: Sent[] = []
+    const { antigravity, workspace } = service(true, sent)
+    const chat = { threadId: 't', cwd: workspace, model: 'm1', onText: vi.fn() }
+    await antigravity.chat({ ...chat, prompt: 'first', mcp: MCP, orchestrationInstructions: 'GUIDE' })
+    const created = sent.find((frame) => frame.method === 'session/new')!
+    expect(created.params.mcpServers).toEqual([{ name: 'mousse', type: 'http', url: MCP.url, headers: [{ name: 'Authorization', value: 'Bearer tok-secret' }] }])
+    expect(prompts(sent)[0]).toBe('<mousse_orchestration_instructions>\nGUIDE\n</mousse_orchestration_instructions>\n\nfirst')
+
+    // After a revocation the thread's token changes: the session is reopened (resumed) with the new
+    // one; the guidance is not repeated.
+    antigravity.commitConversation('t', 'history-1')
+    sent.length = 0
+    await antigravity.chat({ ...chat, prompt: 'second', history: 'history-1', mcp: { ...MCP, token: 'tok-2' }, orchestrationInstructions: 'GUIDE' })
+    const resumed = sent.find((frame) => frame.method === 'session/resume')!
+    expect(resumed.params.mcpServers).toEqual([{ name: 'mousse', type: 'http', url: MCP.url, headers: [{ name: 'Authorization', value: 'Bearer tok-2' }] }])
+    expect(prompts(sent)).toEqual(['second'])
+    await antigravity.stop()
+  })
+
+  it('reuses the live agent process and ACP session across turns while the thread token is stable', async () => {
+    const sent: Sent[] = []
+    const { antigravity, workspace } = service(true, sent)
+    const launch = vi.fn(fakeAcp(true, sent))
+    Object.assign(antigravity as unknown as Record<string, unknown>, { launch })
+    const chat = { threadId: 't', cwd: workspace, model: 'm1', onText: vi.fn(), mcp: MCP, orchestrationInstructions: 'GUIDE' }
+    await antigravity.chat({ ...chat, prompt: 'first' })
+    antigravity.commitConversation('t', 'history-1')
+    await antigravity.chat({ ...chat, prompt: 'second', history: 'history-1' })
+    expect(launch).toHaveBeenCalledTimes(1)
+    expect(sent.filter((frame) => frame.method === 'initialize')).toHaveLength(1)
+    expect(sent.filter((frame) => frame.method === 'session/new' || frame.method === 'session/resume')).toHaveLength(1)
+    expect(prompts(sent)).toEqual(['<mousse_orchestration_instructions>\nGUIDE\n</mousse_orchestration_instructions>\n\nfirst', 'second'])
+    await antigravity.stop()
+  })
+
+  it('falls back to the stdio bridge when the agent does not advertise http; the token stays out of argv', async () => {
+    const sent: Sent[] = []
+    const { antigravity, workspace } = service(false, sent)
+    await antigravity.chat({ threadId: 't', cwd: workspace, model: 'm1', prompt: 'go', onText: vi.fn(), mcp: MCP })
+    const [server] = sent.find((frame) => frame.method === 'session/new')!.params.mcpServers as Array<{ name: string; command: string; args: string[]; env: Array<{ name: string; value: string }> }>
+    expect(server.name).toBe('mousse')
+    expect(server.args.slice(-4)).toEqual(['engine', 'mcp-stdio', '--url', MCP.url])
+    expect(server.args).not.toContain(MCP.token)
+    expect(server.env).toContainEqual({ name: MOUSSE_MCP_TOKEN_ENV, value: MCP.token })
+    await antigravity.stop()
+  })
+
+  it('attaches nothing without host.mcp', async () => {
+    const sent: Sent[] = []
+    const { antigravity, workspace } = service(true, sent)
+    await antigravity.chat({ threadId: 't', cwd: workspace, model: 'm1', prompt: 'plain', onText: vi.fn() })
+    expect(sent.find((frame) => frame.method === 'session/new')!.params.mcpServers).toEqual([])
+    expect(prompts(sent)).toEqual(['plain'])
+    expect(acpMcpServers(null, { http: true })).toEqual([])
+    await antigravity.stop()
+  })
+})
+
+describe('CLI children (AgentConfigManager)', () => {
+  const manager = (mcpEnabled = false) => new AgentConfigManager(
+    { discover: async () => ({ servers: [], sources: [], diagnostics: [] }) } as unknown as McpRegistry,
+    { discover: async () => ({ skills: [], sources: [], diagnostics: [] }) } as unknown as SkillsRegistry,
+    { get: () => ({ integrations: { mcp: { enabled: mcpEnabled, enableForAgents: {} }, skills: { enabled: false, enableForAgents: {} } } }) } as unknown as SettingsStore
+  )
+
+  it('materialises a mousse http entry with the token moved into env, and removes it on cleanup', async () => {
+    const root = tempHome('mousse-mcp-cli-')
+    const worktree = join(root, 'worktree')
+    mkdirSync(worktree)
+    const configs = manager()
+    const result = await configs.prepare('agent-1', 'claude-code', worktree, root, undefined, { mousse: MCP })
+    const written = readFileSync(join(worktree, '.mcp.json'), 'utf8')
+    expect(written).not.toContain(MCP.token)
+    const entry = JSON.parse(written).mcpServers.mousse
+    expect(entry).toMatchObject({ url: MCP.url, transport: 'http' })
+    const reference = /^\$\{env:(\w+)\}$/.exec(entry.headers.Authorization)!
+    expect(result.env[reference[1]]).toBe('Bearer tok-secret')
+    await configs.cleanup('agent-1')
+    expect(() => readFileSync(join(worktree, '.mcp.json'), 'utf8')).toThrow()
+
+    const none = await manager().prepare('agent-2', 'claude-code', worktree, root)
+    expect(none.generatedFiles).toEqual([])
+    expect(() => readFileSync(join(worktree, '.mcp.json'), 'utf8')).toThrow()
+  })
+})

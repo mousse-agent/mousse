@@ -19,7 +19,10 @@ export const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'browser_tabs',
   'list_tasks',
   'list_subagents',
-  'list_delegations'
+  'list_delegations',
+  // Phase 5 Mousse MCP server (SPEC §15.1).
+  'thread_read',
+  'queue_list'
 ])
 
 /** Tools with side effects. Listed for documentation; any unknown tool is also non-idempotent. */
@@ -42,7 +45,8 @@ export const NON_IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'task_cancel',
   'integrate_delegation',
   'present_plan',
-  'ask_user'
+  'ask_user',
+  'queue_enqueue'
 ])
 
 /**

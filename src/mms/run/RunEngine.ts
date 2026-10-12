@@ -16,6 +16,7 @@ import {
   type AttemptRecord,
   type DelegationRecord,
   type DelegationWake,
+  type ModeCeiling,
   type ProviderRef,
   type ReceiptRecord,
   type RunOutcome,
@@ -74,6 +75,8 @@ export interface DelegationRequest {
   workspace: 'isolated' | 'shared'
   wake: DelegationWake
   title?: string
+  /** The most the child may do (SPEC §15.1); the caller has already checked it against its own. */
+  modeCeiling?: ModeCeiling
 }
 
 export interface DelegationAccepted {
@@ -401,7 +404,8 @@ export class RunEngine extends EventEmitter {
         provider: input.provider,
         model: input.model,
         prompt: input.prompt,
-        wake: input.wake
+        wake: input.wake,
+        modeCeiling: input.modeCeiling
       })
       this.outbox.enqueue({
         threadId: childThreadId,
@@ -434,6 +438,7 @@ export class RunEngine extends EventEmitter {
     childRunId: string
     prompt: string
     wake: DelegationWake
+    modeCeiling?: ModeCeiling
   }): DelegationRecord {
     return this.store.db.transaction(() => {
       const lineage = this.delegations.getLineage(input.childThreadId)

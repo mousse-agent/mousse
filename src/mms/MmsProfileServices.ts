@@ -12,6 +12,9 @@ import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { OrchestratorService } from './orchestrator/OrchestratorService'
 import { ProfileDatabase } from './run/db/ProfileDatabase'
+import { McpCredentials } from './run/mcp/McpCredentials'
+import { MousseMcpServer } from './run/mcp/MousseMcpServer'
+import { createMousseToolRegistry } from './run/mcp/toolRegistry'
 import { EffectWorker } from './run/EffectWorker'
 import type { ThreadEvent } from './run/types'
 import { Reconciler } from './run/Reconciler'
@@ -137,6 +140,10 @@ export class MmsProfileServices {
   readonly threadRuntimes: ThreadRuntimeManager
   /** Profile Run Engine (`<profileHome>/run/run.db`); Phase 1 dual-writes beside the orchestrator. */
   readonly runEngine: RunEngine
+  /** Phase 5 (SPEC §15.1): durable bearer credentials of the Mousse MCP server. */
+  readonly mcpCredentials: McpCredentials
+  /** Phase 5: Mousse's tools for vendor runtimes over MCP Streamable HTTP on 127.0.0.1. */
+  readonly mcpServer: MousseMcpServer
   private runEffectWorker: EffectWorker | null = null
   private runReconciler: Reconciler | null = null
   private daemonHeartbeat: ReturnType<typeof setInterval> | null = null
@@ -271,6 +278,11 @@ export class MmsProfileServices {
     this.orchestrator.setThreadStore(this.threads)
     this.runEngine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: homeDir })) })
     this.orchestrator.setRunEngine(this.runEngine)
+    this.mcpCredentials = new McpCredentials(this.runEngine.store)
+    this.mcpServer = new MousseMcpServer({
+      credentials: this.mcpCredentials,
+      registry: createMousseToolRegistry({ engine: this.runEngine, host: this.orchestrator.mcpToolHost() })
+    })
     this.orchestrator.setAppletStore(this.applets)
     this.orchestrator.setAntigravityProvider(this.antigravity)
     this.orchestrator.setClaudeSubscriptionProvider(this.claudeSubscription)
@@ -675,6 +687,7 @@ export class MmsProfileServices {
     // Runs the previous daemon left active cannot resume (SPEC §5); settle them before any turn.
     this.orchestrator.recoverRunEngineOnBoot()
     this.startRunEngineWorkers()
+    await this.startMcpServer()
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
     this.threadRuntimes.restoreOnStartup()
     // Questions are memory-only — new process has none; document interrupted semantics.
@@ -797,7 +810,8 @@ export class MmsProfileServices {
       store: engine.store,
       outbox: engine.outbox,
       tools: engine.tools,
-      capabilitiesFor: (threadId) => this.orchestrator.capabilitiesForThread(threadId)
+      capabilitiesFor: (threadId) => this.orchestrator.capabilitiesForThread(threadId),
+      credentials: this.mcpCredentials
     })
     this.runEffectWorker = worker
     this.runReconciler = reconciler
@@ -835,6 +849,20 @@ export class MmsProfileServices {
   }
 
   /**
+   * SPEC §15.1: the Mousse MCP server starts after the run engine workers; turns of MCP-capable
+   * adapters then get a credential. A server that cannot bind leaves those turns without Mousse
+   * tools rather than failing the profile.
+   */
+  private async startMcpServer(): Promise<void> {
+    try {
+      await this.mcpServer.start()
+      this.orchestrator.setMcpAttachment(this.mcpServer)
+    } catch (error) {
+      console.warn('Mousse MCP server failed to start; vendor runtimes run without Mousse tools', error)
+    }
+  }
+
+  /**
    * Stops the reconciler and the worker (in-flight turns abort through their effect signal), waits
    * for the orchestrator to drain, then records a clean daemon end. One sequential cleanup: the
    * clean `ended_at` must only be written once no turn can still write to the run database.
@@ -845,9 +873,17 @@ export class MmsProfileServices {
     this.runReconciler?.stop()
     this.stopInboxWakes?.()
     this.stopInboxWakes = null
+    // No new credentials; in-flight Mousse tool calls (a blocked ask_user) abort so turns can drain.
+    // Only detach what start() attached; a partially constructed profile has no server.
+    const mcpServer = this.mcpServer as MousseMcpServer | undefined
+    if (mcpServer?.running) this.orchestrator.setMcpAttachment(null)
+    const mcpStopped = mcpServer?.stop().catch((error) => {
+      console.warn('Mousse MCP server stop failed', error)
+    })
     const workerStopped = this.runEffectWorker?.stop()
     await this.orchestrator.shutdown()
     await workerStopped
+    await mcpStopped
     // Only detach what start() attached; a profile stopped before start() has no worker.
     if (this.runEffectWorker) this.orchestrator.attachEffectWorker(null)
     this.runEffectWorker = null

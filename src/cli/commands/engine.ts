@@ -6,6 +6,8 @@ import { ENGINE_HELP } from '../help'
 import { createInstallationPaths } from '../../mms/profiles/paths'
 import { ProfileManager } from '../../mms/profiles/ProfileManager'
 import { RunFsck, type FsckFinding } from '../../mms/run/fsck/RunFsck'
+import { MOUSSE_MCP_TOKEN_ENV } from '../../mms/run/mcp/attachment'
+import { runStdioBridge } from '../../mms/run/mcp/stdioBridge'
 
 /**
  * Local Run Engine maintenance commands. These read the profile's run state directly from disk
@@ -31,6 +33,18 @@ export async function runEngine(args: ParsedArgs): Promise<void> {
         ])
       })
       if (findings.some((finding) => finding.severity === 'error')) process.exitCode = 1
+      break
+    }
+    case 'mcp-stdio': {
+      // Relays a stdio MCP client to the daemon's Mousse MCP server (SPEC §15.1). stdout carries
+      // JSON-RPC only; the token comes from the environment (or --token) and is never printed.
+      const url = args.flags.get('url')
+      const tokenFlag = args.flags.get('token')
+      const token = typeof tokenFlag === 'string' ? tokenFlag : process.env[MOUSSE_MCP_TOKEN_ENV]
+      if (typeof url !== 'string' || !/^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d+\//.test(url))
+        throw new Error('engine mcp-stdio requires --url http://127.0.0.1:<port>/mcp')
+      if (!token) throw new Error(`engine mcp-stdio requires --token or ${MOUSSE_MCP_TOKEN_ENV}`)
+      await runStdioBridge({ url, token, input: process.stdin, output: process.stdout })
       break
     }
     default:

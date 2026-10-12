@@ -224,6 +224,7 @@ export const PROTOCOL_METHODS = [
   'runs.get',
   'runs.events',
   'runs.effects',
+  'runs.credentials',
   'orchestrator.answerQuestions',
   'orchestrator.dismissQuestions',
   'orchestrator.pendingQuestions',

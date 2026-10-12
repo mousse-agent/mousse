@@ -228,7 +228,15 @@ export interface DelegationRecord {
   result: DelegationResult | null
   createdAt: string
   completedAt: string | null
+  /** The most the child may do (SPEC §15.1); null when the delegation set none. */
+  modeCeiling: ModeCeiling | null
 }
+
+/**
+ * What a run's Mousse MCP credential may do (SPEC §15.1): `plan` is read-only planning (no
+ * writes, no integration, children stay `plan`); `default` is the thread's ordinary authority.
+ */
+export type ModeCeiling = 'plan' | 'default'
 
 export type InboxKind = 'child_result' | 'restart_note' | 'reconcile_notice'
 

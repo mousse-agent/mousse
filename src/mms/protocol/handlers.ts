@@ -646,6 +646,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       return { effects: ctx.mms.runEngine.outbox.listForThread(threadId) }
     }
+    case 'runs.credentials': {
+      // Mousse MCP credentials minted for the thread's runs (SPEC §15.1); never the token hash.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      return { credentials: ctx.mms.mcpCredentials.listForThread(threadId) }
+    }
     case 'orchestrator.isTurnActive': {
       // Lightweight turn probe — avoids full thread.snapshot (messages/agents/tasks).
       const p = isObject(params) ? params : {}
