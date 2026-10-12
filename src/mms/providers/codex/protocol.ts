@@ -84,6 +84,8 @@ export type ThreadConfig = Record<string, JsonValue>
 
 export interface ThreadStartParams {
   model?: string | null
+  /** Model provider id; overrides `model_provider` from any config layer. */
+  modelProvider?: string | null
   cwd?: string | null
   approvalPolicy?: AskForApproval | null
   sandbox?: SandboxMode | null
@@ -102,6 +104,8 @@ export interface ThreadStartResponse {
   thread: CodexThread
   /** The model the thread resolved (the config default when none was requested). */
   model: string
+  /** The model provider the thread resolved; its credentials pay for the turns. */
+  modelProvider: string
   cwd: string
 }
 export type ThreadResumeResponse = ThreadStartResponse

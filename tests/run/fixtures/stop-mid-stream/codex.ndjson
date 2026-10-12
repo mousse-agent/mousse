@@ -4,8 +4,8 @@
 {"dir":"out","frame":{"method":"initialized"}}
 {"dir":"out","frame":{"id":2,"method":"account/read","params":{"refreshToken":false}}}
 {"dir":"in","frame":{"id":2,"result":{"account":{"type":"chatgpt","email":"replay@example.com","planType":"plus"},"requiresOpenaiAuth":true}}}
-{"dir":"out","frame":{"id":3,"method":"thread/start","params":{"approvalPolicy":"on-request","sandbox":"workspace-write","model":"gpt-replay-codex"}}}
-{"dir":"in","frame":{"id":3,"result":{"thread":{"id":"thr-replay"},"model":"gpt-replay-codex","cwd":"/replay"}}}
+{"dir":"out","frame":{"id":3,"method":"thread/start","params":{"approvalPolicy":"on-request","sandbox":"workspace-write","model":"gpt-replay-codex","modelProvider":"openai","config":{"model_provider":"openai"}}}}
+{"dir":"in","frame":{"id":3,"result":{"thread":{"id":"thr-replay"},"model":"gpt-replay-codex","modelProvider":"openai","cwd":"/replay"}}}
 {"dir":"out","frame":{"id":4,"method":"turn/start","params":{"threadId":"thr-replay","input":[{"type":"text","text":"Write a long essay","text_elements":[]}],"approvalPolicy":"on-request","sandboxPolicy":{"type":"workspaceWrite","writableRoots":[],"networkAccess":false,"excludeTmpdirEnvVar":false,"excludeSlashTmp":false},"model":"gpt-replay-codex"}}}
 {"dir":"in","frame":{"id":4,"result":{"turn":{"id":"turn-1","status":"inProgress","error":null,"items":[]}}}}
 {"dir":"in","frame":{"method":"turn/started","params":{"threadId":"thr-replay","turn":{"id":"turn-1","status":"inProgress","error":null,"items":[]}}}}

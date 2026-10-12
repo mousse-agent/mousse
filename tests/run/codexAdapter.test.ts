@@ -41,10 +41,18 @@ function handshake(firstId = 1, probe = true): TranscriptFrame[] {
   ]
 }
 
-const threadParams = (extra: Record<string, unknown> = {}) => ({ approvalPolicy: 'on-request', sandbox: 'workspace-write', model: 'gpt-x', ...extra })
+const threadParams = (extra: Record<string, unknown> = {}) => ({
+  approvalPolicy: 'on-request',
+  sandbox: 'workspace-write',
+  model: 'gpt-x',
+  modelProvider: 'openai',
+  config: { model_provider: 'openai' },
+  ...extra
+})
+const threadResult = (thread = T, modelProvider = 'openai') => ({ thread: { id: thread }, model: 'gpt-x', modelProvider, cwd: '/w' })
 
 function threadStart(id: number, params = threadParams(), thread = T): TranscriptFrame[] {
-  return [out({ id, method: 'thread/start', params }), inn({ id, result: { thread: { id: thread }, model: 'gpt-x', cwd: '/w' } })]
+  return [out({ id, method: 'thread/start', params }), inn({ id, result: threadResult(thread) })]
 }
 
 function turnStart(id: number, prompt: string, turn = 'turn-1', extra: Record<string, unknown> = {}): TranscriptFrame[] {
@@ -282,7 +290,7 @@ describe('CodexAdapter', () => {
     const resumed = transport([
       ...handshake(),
       out({ id: 3, method: 'thread/resume', params: { threadId: T, excludeTurns: true, ...threadParams() } }),
-      inn({ id: 3, result: { thread: { id: T }, model: 'gpt-x', cwd: '/w' } }),
+      inn({ id: 3, result: threadResult() }),
       ...turnStart(4, 'third', 'turn-3'),
       ...message('msg-3', ['three'], 'turn-3'),
       completed('completed', 'turn-3')
@@ -300,7 +308,7 @@ describe('CodexAdapter', () => {
       out({ id: 3, method: 'thread/resume', params: { threadId: T, excludeTurns: true, ...threadParams() } }),
       inn({ id: 3, error: { code: -32600, message: `no rollout found for thread id ${T}` } }),
       out({ id: 4, method: 'thread/start', params: threadParams() }),
-      inn({ id: 4, result: { thread: { id: 'thr-2' }, model: 'gpt-x', cwd: '/w' } }),
+      inn({ id: 4, result: threadResult('thr-2') }),
       out({ id: 5, method: 'turn/start', params: { threadId: 'thr-2', input: text('Previous conversation (context only; do not repeat earlier actions):\nhistory+three\n\nCurrent request:\nfourth'), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
       inn({ id: 5, result: { turn: { id: 'turn-4', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-4', item: { type: 'agentMessage', id: 'msg-4', text: 'four' } }),
@@ -315,6 +323,17 @@ describe('CodexAdapter', () => {
     expect(saved.threads['thread-1'].codexThreadId).toBe('thr-2')
   })
 
+  it('pins the ChatGPT provider and refuses a thread that resolves to another one', async () => {
+    // A user or workspace config with a custom `model_provider` would change the effective
+    // provider; the pin overrides it, and a thread that still reports another provider never runs.
+    const replay = transport([...handshake(), out({ id: 3, method: 'thread/start', params: threadParams() }), inn({ id: 3, result: threadResult(T, 'custom') })])
+    const codex = service(replay)
+    await expect(new CodexAdapter(() => codex).startTurn(input(), recordingSink(), control(), host())).rejects.toMatchObject({
+      code: 'codex_provider_not_chatgpt'
+    })
+    replay.assertDone()
+  })
+
   it('attaches the Mousse MCP server through thread config and developer instructions', async () => {
     const mcp = { url: 'http://127.0.0.1:4000/mcp', token: 'run-token' }
     const replay = transport([
@@ -323,6 +342,7 @@ describe('CodexAdapter', () => {
         3,
         threadParams({
           config: {
+            model_provider: 'openai',
             'mcp_servers.mousse.url': mcp.url,
             'mcp_servers.mousse.http_headers': { Authorization: 'Bearer run-token' },
             'mcp_servers.mousse.tool_timeout_sec': 3600,

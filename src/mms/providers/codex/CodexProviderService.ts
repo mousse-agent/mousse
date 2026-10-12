@@ -45,6 +45,13 @@ export const CODEX_DEFAULT_MODEL_ID = 'default'
 export const CODEX_FALLBACK_MODELS: LlmModelOption[] = [
   { id: CODEX_DEFAULT_MODEL_ID, label: 'Codex default (from your Codex config)' }
 ]
+/**
+ * Codex's built-in provider for OpenAI models, which uses the ChatGPT sign-in. Codex refuses to let
+ * any config layer redefine it (`model_providers` cannot contain built-in ids), so pinning it per
+ * thread keeps custom providers from user or workspace config, with their `env_key` or static
+ * credentials, out of Mousse turns.
+ */
+export const CODEX_MODEL_PROVIDER = 'openai'
 const CLIENT_VERSION = '0.1.1'
 const INTERRUPT_TIMEOUT_MS = 5_000
 /** A stopped turn must settle on the server before the thread takes a new one. */
@@ -908,7 +915,9 @@ export class CodexProviderService {
       approvalPolicy: 'on-request' as const,
       sandbox: input.mode === 'plan' ? ('read-only' as const) : ('workspace-write' as const),
       ...(baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}),
-      ...(Object.keys(overrides).length ? { config: overrides } : {}),
+      // Pinned twice: the request field and the config layer above user and workspace config.
+      modelProvider: CODEX_MODEL_PROVIDER,
+      config: { ...overrides, model_provider: CODEX_MODEL_PROVIDER },
       ...(input.developerInstructions ? { developerInstructions: input.developerInstructions } : {})
     }
     // A Codex thread belongs to the instance that started it; another instance starts fresh.
@@ -926,19 +935,19 @@ export class CodexProviderService {
       if (loaded && loaded.mcpToken === mcpToken && loaded.cwd === cwd)
         return { codexThreadId: saved.codexThreadId, model: undefined, continued: true, disposition: 'reusable' }
       try {
-        const resumed = await conn.request('thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal })
+        const resumed = chatgptProvider(await conn.request('thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
         this.loaded.set(resumed.thread.id, { mcpToken, cwd })
         return { codexThreadId: resumed.thread.id, model: resumed.model, continued: true, disposition: 'reusable' }
       } catch (error) {
         signal.throwIfAborted()
         conn.signal.throwIfAborted()
         if (!(error instanceof CodexRpcError)) throw error
-        const fresh = await conn.request('thread/start', params, { signal })
+        const fresh = chatgptProvider(await conn.request('thread/start', params, { signal }))
         this.loaded.set(fresh.thread.id, { mcpToken, cwd })
         return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, disposition: 'broken' }
       }
     }
-    const fresh = await conn.request('thread/start', params, { signal })
+    const fresh = chatgptProvider(await conn.request('thread/start', params, { signal }))
     this.loaded.set(fresh.thread.id, { mcpToken, cwd })
     return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, disposition: 'reusable' }
   }
@@ -1139,6 +1148,17 @@ export class CodexProviderService {
       ? probe.message
       : 'Codex in your terminal is not signed in. Run `codex login` in a terminal, then try again.'
   }
+}
+
+/** Refuses a thread whose effective provider is not the ChatGPT-backed built-in one. */
+function chatgptProvider<T extends { modelProvider?: string }>(response: T): T {
+  if (response.modelProvider !== CODEX_MODEL_PROVIDER)
+    throw new AppError({
+      code: 'codex_provider_not_chatgpt',
+      message: `Codex chose the model provider "${response.modelProvider ?? 'unknown'}" for this thread. Mousse only runs Codex on your ChatGPT sign-in.`,
+      errorInfo: { category: 'unavailable', retryable: false }
+    })
+  return response
 }
 
 function textInput(text: string): UserInput {
