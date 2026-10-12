@@ -26,7 +26,7 @@ Open or update a draft PR. Keep the issue open, record the handoff below, and id
 
 ### Ready for review
 
-Open or update a non-draft PR with the outcome, verification evidence, and `Closes #123` for work that fully completes that issue. Use `Refs #123` for partial delivery. Keep the issue open until completion lands.
+Open or update a non-draft PR written as described in "Writing PRs and issues" in the shared policy, with verification evidence and `Closes #123` for work that fully completes that issue. Use `Refs #123` for partial delivery. Keep the issue open until completion lands.
 
 ### Ready to merge
 
