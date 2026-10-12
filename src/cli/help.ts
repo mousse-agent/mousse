@@ -16,6 +16,7 @@ Usage:
   mousse-cli workflow <subcommand>           Run and inspect durable workflows
   mousse-cli browser <status|install|cancel> Manage browser automation setup
   mousse-cli agents <subcommand>             Spawn/list/stop background CLI agents
+  mousse-cli engine fsck                     Check Run Engine state for inconsistencies
   mousse-cli channels <subcommand>           Channel setup (Telegram, Discord, Webhook)
   mousse-cli config <subcommand>             Read/write ~/.mousse/mousse.conf
   mousse-cli service <subcommand>            MMS daemon control and startup install
@@ -139,6 +140,13 @@ Mousse subagent overrides:
   --effort <level>              Reasoning effort: off, minimal, low, medium, high, xhigh, or max
 `
 
+export const ENGINE_HELP = `Usage:
+  mousse-cli [--profile <id|slug>] engine fsck [--json]
+
+fsck reads the selected profile's run state from disk (no daemon connection) and
+lists inconsistencies. Exits 1 when any finding has severity error.
+`
+
 export const THREAD_ACTION_HELP = `Usage:
   mousse-cli workspace --session <thread>
   mousse-cli publish --session <thread> --target <branch>
@@ -206,6 +214,8 @@ export function commandHelp(command: string): string | null {
       return SCHEDULE_HELP
     case 'agents':
       return AGENTS_HELP
+    case 'engine':
+      return ENGINE_HELP
     case 'channels':
       return CHANNELS_HELP
     case 'config':
