@@ -26,7 +26,7 @@ const INSTALLATION_METHODS = new Set([
 // The pi-ai credential service remains shared between profile service instances.
 const PROFILE_PROVIDER_METHODS = new Set([
   'providers.listConfigured', 'providers.getLoginOptions', 'providers.refreshModels',
-  'providers.loginOAuth', 'providers.logout'
+  'providers.loginOAuth', 'providers.logout', 'providers.claudeStatus', 'providers.claudeSetLoginPolicy'
 ])
 
 export function isInstallationMethod(method: string): boolean {

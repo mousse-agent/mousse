@@ -1554,6 +1554,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'settings.getOptions': {
       await ctx.mms.providerAuth.init()
+      await ctx.mms.claudeSubscription.status()
       const llmProviders = getPiLlmProviders(ctx.mms.providerAuth)
       const antigravity = ctx.mms.antigravity.llmProvider()
       if (antigravity) llmProviders.push(antigravity)
@@ -1570,8 +1571,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
     }
     case 'providers.listConfigured':
+      // Claude's terminal sign-in is a cached live check; refresh it before listing.
+      await ctx.mms.claudeSubscription.status()
       return { providers: [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)] }
     case 'providers.getUsage': {
+      await ctx.mms.claudeSubscription.status()
       const [usage, claude] = await Promise.all([
         ctx.mms.providerAuth.getUsage(),
         ctx.mms.claudeSubscription.configured()
@@ -1592,12 +1596,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.getLoginOptions': {
       const p = isObject(params) ? params : {}
       const authType = asOptionalString(p.authType, 32) as 'api_key' | 'oauth' | undefined
+      await ctx.mms.claudeSubscription.status()
       return { options: [...ctx.mms.providerAuth.getLoginOptions(authType), ...(authType === 'api_key' || ctx.mms.antigravity.configured() ? [] : [ctx.mms.antigravity.loginOption()]), ...(authType === 'api_key' || ctx.mms.claudeSubscription.configured() ? [] : [ctx.mms.claudeSubscription.loginOption()])] }
     }
     case 'providers.refreshModels': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
-      if (providerId === 'claude-subscription') await ctx.mms.claudeSubscription.refreshModels(ctx.mms.worktrees.getRepoRoot())
+      if (providerId === 'claude-subscription') {
+        await ctx.mms.claudeSubscription.status()
+        await ctx.mms.claudeSubscription.refreshModels(ctx.mms.worktrees.getRepoRoot())
+      }
       else if (providerId === 'antigravity') await ctx.mms.antigravity.refreshModels(ctx.mms.worktrees.getRepoRoot())
       else await ctx.mms.providerAuth.refreshDynamicModels()
       return { options: [...getPiLlmProviders(ctx.mms.providerAuth), ...[ctx.mms.antigravity.llmProvider(), ctx.mms.claudeSubscription.llmProvider()].filter((provider) => provider !== undefined)] }
@@ -1738,6 +1746,22 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const sessionId = asString(p.sessionId, 'sessionId', 256)
       ctx.mms.providerAuth.endSession(sessionId)
       return { ok: true }
+    }
+    case 'providers.claudeStatus': {
+      const p = isObject(params) ? params : {}
+      // `recheck` bypasses the cached `claude auth status` result.
+      const status = await ctx.mms.claudeSubscription.status({ force: p.recheck === true })
+      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
+      if (p.recheck === true) ctx.emitEvent?.('providers.changed', { providers })
+      return { status, providers }
+    }
+    case 'providers.claudeSetLoginPolicy': {
+      const p = isObject(params) ? params : {}
+      if (p.policy !== 'cli' && p.policy !== 'isolated') throw new Error('policy must be cli or isolated')
+      const status = await ctx.mms.claudeSubscription.setLoginPolicy(p.policy)
+      const providers = [...ctx.mms.providerAuth.getConfiguredProviders(), ...[ctx.mms.antigravity.configuredProvider(), ctx.mms.claudeSubscription.configuredProvider()].filter((provider) => provider !== undefined)]
+      ctx.emitEvent?.('providers.changed', { providers })
+      return { status, providers }
     }
     case 'workspace.getStatus': {
       const p = isObject(params) ? params : {}

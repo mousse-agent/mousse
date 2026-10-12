@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto'
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
-import { accessSync, constants, mkdirSync, readFileSync } from 'node:fs'
+import { accessSync, constants, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join, resolve } from 'node:path'
 import type { Options, Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type {
+  ClaudeLoginPolicy,
+  ClaudeSubscriptionStatus,
   ConfiguredProvider,
   ProviderLoginOption,
   ProviderLoginResult,
@@ -35,7 +37,12 @@ type SavedSession = {
   usageBaseline?: ClaudeUsageBaseline
 }
 type Settings = {
+  /** A profile-private (isolated) sign-in completed; unused under the `cli` policy. */
   signedIn?: boolean
+  /** Unset until resolved once; a stored value is never rewritten by migration. */
+  loginPolicy?: ClaudeLoginPolicy
+  /** Disconnected in Mousse under the `cli` policy; the terminal sign-in stays intact. */
+  cliDisconnected?: boolean
   binaryPath?: string
   models?: LlmModelOption[]
   sessions?: Record<string, SavedSession>
@@ -77,13 +84,37 @@ type Dependencies = {
   ) => Promise<string>
   startLogin?: (binary: string, env: NodeJS.ProcessEnv) => ChildProcess
 }
+export type ClaudeSubscriptionServiceOptions = {
+  /**
+   * The installation's default profile. Without a stored policy it reuses the terminal sign-in
+   * unless it already has a profile-private one; other profiles stay isolated until opted in.
+   */
+  defaultProfile?: boolean
+}
+type AuthProbe =
+  | { kind: 'signed_in' }
+  | { kind: 'signed_out'; message: string }
+  | { kind: 'error'; message: string }
 
-/** Each profile authenticates through the unmodified CLI. Mousse never reads its token files. */
+/** How long a live `claude auth status` result stands before it is checked again. */
+export const CLAUDE_AUTH_STATUS_TTL_MS = 5 * 60_000
+const FALLBACK_MODELS: LlmModelOption[] = ['sonnet', 'opus', 'haiku'].map((id) => ({
+  id,
+  label: `Claude ${id[0].toUpperCase()}${id.slice(1)}`
+}))
+
+/**
+ * Each profile authenticates through the unmodified CLI. Mousse never reads its token files.
+ * `configDir` selects a profile-private config dir; `undefined` reuses the terminal sign-in and
+ * keeps an inherited `CLAUDE_CONFIG_DIR`. API keys, tokens and cloud routing are always removed so
+ * a turn can never fall back to API billing.
+ */
 export function claudeSubscriptionEnvironment(
-  configDir: string,
+  configDir: string | undefined,
   source: NodeJS.ProcessEnv = process.env
 ): NodeJS.ProcessEnv {
   const env = { ...source }
+  const inheritedConfigDir = source.CLAUDE_CONFIG_DIR
   for (const key of Object.keys(env)) {
     if (
       /^(ANTHROPIC_|CLAUDE_CODE_OAUTH_TOKEN|CLAUDE_CODE_USE_|CLAUDE_CODE_API_KEY_HELPER|CLAUDE_CODE_CUSTOM_MODEL|AWS_|AMAZON_|GOOGLE_|GCLOUD_|CLOUDSDK_|AZURE_|VERTEX_|BEDROCK_)/.test(
@@ -93,7 +124,8 @@ export function claudeSubscriptionEnvironment(
     )
       delete env[key]
   }
-  env.CLAUDE_CONFIG_DIR = configDir
+  if (configDir !== undefined) env.CLAUDE_CONFIG_DIR = configDir
+  else if (inheritedConfigDir) env.CLAUDE_CONFIG_DIR = inheritedConfigDir
   return env
 }
 
@@ -130,10 +162,14 @@ function runAuth(
       (error, stdout) => {
         if (error)
           reject(
-            new Error(
-              signal?.aborted
-                ? 'Claude sign-in cancelled'
-                : 'Claude Code authentication command failed. Install or update the official Claude Code CLI.'
+            // `claude auth status` exits non-zero when signed out but still prints its JSON.
+            Object.assign(
+              new Error(
+                signal?.aborted
+                  ? 'Claude sign-in cancelled'
+                  : 'Claude Code authentication command failed. Install or update the official Claude Code CLI.'
+              ),
+              { stdout: typeof stdout === 'string' ? stdout : undefined }
             )
           )
         else resolveResult(stdout)
@@ -155,12 +191,23 @@ export class ClaudeSubscriptionProviderService {
   private readonly loginSessions = new Set<LoginSession>()
   private readonly controllers = new Set<AbortController>()
   private readonly activeThreads = new Set<string>()
+  private readonly defaultProfile: boolean
+  /** Last live terminal sign-in check; only meaningful under the `cli` policy. */
+  private cliProbe?: { at: number; result: AuthProbe }
+  private migrationError?: { at: number; message: string }
+  private probing?: Promise<void>
+  /** Bumped when the credential scope changes; stale probes and sessions are discarded. */
+  private scope = 0
+  private modelDiscoveryStarted = false
+  private policyStored: boolean
 
   constructor(
     private readonly profileHome: string,
     private readonly questions: UserQuestionService,
-    private readonly dependencies: Dependencies = {}
+    private readonly dependencies: Dependencies = {},
+    options: ClaudeSubscriptionServiceOptions = {}
   ) {
+    this.defaultProfile = options.defaultProfile === true
     this.configDir = join(
       profileHome,
       'providers',
@@ -178,6 +225,9 @@ export class ClaudeSubscriptionProviderService {
     } catch {
       this.settings = {}
     }
+    this.policyStored = this.settings.loginPolicy !== undefined
+    // Cases that need no live check resolve immediately; `status()` persists the result.
+    if (!this.policyStored) this.settings.loginPolicy = this.deducePolicy()
   }
   standaloneWorkspace(threadId: string): string {
     const directory = join(this.profileHome, 'providers', CLAUDE_SUBSCRIPTION_PROVIDER_ID, 'workspaces', historyKey(threadId))
@@ -188,6 +238,7 @@ export class ClaudeSubscriptionProviderService {
   private save(): void {
     mkdirSync(this.configDir, { recursive: true, mode: 0o700 })
     atomicWriteJsonSync(this.settingsPath, this.settings)
+    if (this.settings.loginPolicy) this.policyStored = true
   }
   private binary(): string | undefined {
     const selected = this.settings.binaryPath
@@ -200,8 +251,23 @@ export class ClaudeSubscriptionProviderService {
       return undefined
     }
   }
+  /** Policy-selected environment; an unresolved policy uses the isolated dir (never active). */
+  private environment(): NodeJS.ProcessEnv {
+    return claudeSubscriptionEnvironment(
+      this.settings.loginPolicy === 'cli' ? undefined : this.configDir
+    )
+  }
+  /**
+   * Synchronous view for routing and listings. Under `cli` it reflects the last live
+   * `claude auth status` check (see `status()`), never the saved `signedIn` flag.
+   */
   configured(): boolean {
-    return !this.stopped && Boolean(this.settings.signedIn && this.binary())
+    if (this.stopped || !this.binary()) return false
+    if (this.settings.loginPolicy === 'isolated') return this.settings.signedIn === true
+    if (this.settings.loginPolicy !== 'cli' || this.settings.cliDisconnected) return false
+    // Refresh a stale result in the background; the first check comes from `status()`.
+    if (this.cliProbe && this.checkDue()) void this.status()
+    return this.cliProbe?.result.kind === 'signed_in'
   }
   configuredProvider(): ConfiguredProvider | undefined {
     return this.configured()
@@ -224,30 +290,201 @@ export class ClaudeSubscriptionProviderService {
     }
   }
   llmProvider(): LlmProviderOption | undefined {
-    return this.configured() && this.settings.models?.length
-      ? {
-          id: CLAUDE_SUBSCRIPTION_PROVIDER_ID,
-          label: 'Claude Subscription',
-          models: this.settings.models
-        }
+    if (!this.configured()) return undefined
+    // The terminal sign-in needs no Mousse sign-in step; offer the CLI aliases until discovery runs.
+    const models = this.settings.models?.length
+      ? this.settings.models
+      : this.settings.loginPolicy === 'cli'
+        ? FALLBACK_MODELS
+        : undefined
+    return models
+      ? { id: CLAUDE_SUBSCRIPTION_PROVIDER_ID, label: 'Claude Subscription', models }
       : undefined
+  }
+  private async probe(
+    binary: string,
+    env: NodeJS.ProcessEnv,
+    signal?: AbortSignal
+  ): Promise<AuthProbe> {
+    const unreadable: AuthProbe = {
+      kind: 'error',
+      message: 'Claude Code did not report its sign-in status. Update the Claude Code CLI and recheck.'
+    }
+    let output: string
+    try {
+      output = await (this.dependencies.runAuth ?? runAuth)(binary, ['auth', 'status'], env, signal)
+    } catch (error) {
+      signal?.throwIfAborted()
+      const stdout = (error as { stdout?: unknown } | undefined)?.stdout
+      if (typeof stdout !== 'string' || !stdout.trim()) return unreadable
+      output = stdout
+    }
+    let status: { loggedIn?: unknown; authMethod?: unknown }
+    try {
+      status = JSON.parse(output) as typeof status
+    } catch {
+      return unreadable
+    }
+    if (typeof status?.loggedIn !== 'boolean') return unreadable
+    if (!status.loggedIn) return { kind: 'signed_out', message: 'Claude Code is not signed in.' }
+    // API-key, console and cloud sign-ins would bill outside the subscription.
+    if (status.authMethod !== 'claude.ai')
+      return {
+        kind: 'signed_out',
+        message: 'Claude Code is signed in without a Claude subscription account.'
+      }
+    return { kind: 'signed_in' }
   }
   private async authenticated(signal?: AbortSignal): Promise<boolean> {
     const binary = this.binary()
     if (!binary) return false
+    const scope = this.scope
+    const result = await this.probe(binary, this.environment(), signal)
+    if (this.settings.loginPolicy === 'cli' && scope === this.scope)
+      this.cliProbe = { at: Date.now(), result }
+    return result.kind === 'signed_in'
+  }
+  /**
+   * Migration for profiles without a stored policy. The default profile reuses the terminal
+   * sign-in unless it already has a profile-private one; other profiles stay isolated. A failed
+   * check leaves the policy unresolved so Mousse never switches accounts silently.
+   */
+  private async resolvePolicy(binary: string): Promise<ClaudeLoginPolicy | undefined> {
+    let policy = this.settings.loginPolicy
+    if (!policy) {
+      // The isolated dir has content: only a live check can tell whether it holds an account.
+      const result = await this.probe(binary, claudeSubscriptionEnvironment(this.configDir))
+      if (this.settings.loginPolicy) return this.settings.loginPolicy
+      if (result.kind === 'error') {
+        this.migrationError = { at: Date.now(), message: result.message }
+        return undefined
+      }
+      policy = result.kind === 'signed_in' ? 'isolated' : 'cli'
+      this.settings.loginPolicy = policy
+    }
+    this.migrationError = undefined
+    if (!this.policyStored) this.save()
+    return policy
+  }
+  private deducePolicy(): ClaudeLoginPolicy | undefined {
+    if (!this.defaultProfile || this.settings.signedIn === true) return 'isolated'
+    return this.isolatedConfigPresent() ? undefined : 'cli'
+  }
+  private isolatedConfigPresent(): boolean {
     try {
-      const output = await (this.dependencies.runAuth ?? runAuth)(
-        binary,
-        ['auth', 'status'],
-        claudeSubscriptionEnvironment(this.configDir),
-        signal
-      )
-      const status = JSON.parse(output) as { loggedIn?: boolean; authMethod?: string }
-      return status.loggedIn === true && status.authMethod === 'claude.ai'
+      return readdirSync(this.configDir).length > 0
     } catch {
-      signal?.throwIfAborted()
       return false
     }
+  }
+  /** A live check is due: the policy is unresolved, or the terminal sign-in result is stale. */
+  private checkDue(): boolean {
+    if (this.stopped) return false
+    const fresh = (at?: number) => at !== undefined && Date.now() - at < CLAUDE_AUTH_STATUS_TTL_MS
+    const policy = this.settings.loginPolicy
+    if (policy === undefined) return !fresh(this.migrationError?.at)
+    return policy === 'cli' && !this.settings.cliDisconnected && !fresh(this.cliProbe?.at)
+  }
+  private async refreshStatus(): Promise<void> {
+    const binary = this.binary()
+    if (!binary || this.stopped) return
+    const scope = this.scope
+    const policy = await this.resolvePolicy(binary)
+    if (policy !== 'cli' || this.settings.cliDisconnected || scope !== this.scope) return
+    const result = await this.probe(binary, claudeSubscriptionEnvironment(undefined))
+    if (scope !== this.scope || this.stopped) return
+    this.cliProbe = { at: Date.now(), result }
+    if (result.kind === 'signed_in' && !this.settings.models?.length && !this.modelDiscoveryStarted) {
+      this.modelDiscoveryStarted = true
+      void this.refreshModels(join(this.profileHome, 'providers', CLAUDE_SUBSCRIPTION_PROVIDER_ID)).catch(
+        () => {
+          /* the CLI aliases stay available */
+        }
+      )
+    }
+  }
+  /**
+   * Resolves the login policy and, under `cli`, runs a live `claude auth status` when the cached
+   * result is missing, older than five minutes, or `force` (Recheck) is set.
+   */
+  async status(options: { force?: boolean } = {}): Promise<ClaudeSubscriptionStatus> {
+    if (options.force) {
+      await this.probing
+      this.cliProbe = undefined
+      this.migrationError = undefined
+    }
+    // Persist a policy deduced at load so a later default-profile change cannot flip it.
+    if (!this.policyStored && this.settings.loginPolicy && !this.stopped) this.save()
+    if (this.checkDue()) {
+      this.probing ??= this.refreshStatus()
+        .catch(() => {
+          if (!this.settings.loginPolicy)
+            this.migrationError = { at: Date.now(), message: 'Mousse could not check the Claude sign-in.' }
+        })
+        .finally(() => {
+          this.probing = undefined
+        })
+      await this.probing
+    }
+    return this.snapshot()
+  }
+  private snapshot(): ClaudeSubscriptionStatus {
+    const policy = this.settings.loginPolicy ?? null
+    const base = {
+      loginPolicy: policy,
+      defaultProfile: this.defaultProfile,
+      isolatedSignIn: this.settings.signedIn === true
+    }
+    if (!this.binary())
+      return {
+        ...base,
+        state: 'missing_binary',
+        message: 'Claude Code CLI not found. Install the official Claude Code CLI, then recheck.'
+      }
+    if (policy === null)
+      return {
+        ...base,
+        state: 'error',
+        message: this.migrationError?.message ?? 'Mousse has not checked the Claude sign-in yet.'
+      }
+    if (policy === 'isolated')
+      return this.settings.signedIn
+        ? { ...base, state: 'connected' }
+        : {
+            ...base,
+            state: 'signed_out',
+            message: 'This profile has no Claude sign-in of its own. Add Claude Subscription to sign in.'
+          }
+    if (this.settings.cliDisconnected)
+      return {
+        ...base,
+        state: 'disconnected',
+        message: 'Disconnected in Mousse. The Claude sign-in in your terminal is unchanged.'
+      }
+    const probe = this.cliProbe
+    if (!probe)
+      return { ...base, state: 'error', message: 'Mousse has not checked the Claude sign-in yet.' }
+    const checkedAt = new Date(probe.at).toISOString()
+    if (probe.result.kind === 'signed_in') return { ...base, state: 'connected', checkedAt }
+    return { ...base, state: probe.result.kind, message: probe.result.message, checkedAt }
+  }
+  /**
+   * Switches which Claude sign-in this profile uses. Saved native sessions belong to the old
+   * config dir, so they are dropped; the terminal sign-in itself is never changed.
+   */
+  async setLoginPolicy(policy: ClaudeLoginPolicy): Promise<ClaudeSubscriptionStatus> {
+    if (this.stopped) throw new Error('Claude provider is stopped')
+    if (this.settings.loginPolicy !== policy) {
+      this.scope += 1
+      this.cliProbe = undefined
+      this.migrationError = undefined
+      this.settings.sessions = {}
+      this.readyToCommit.clear()
+    }
+    this.settings.loginPolicy = policy
+    delete this.settings.cliDisconnected
+    this.save()
+    return this.status({ force: true })
   }
   async login(session: LoginSession, cwd: string): Promise<ProviderLoginResult> {
     let child: ChildProcess | undefined
@@ -268,7 +505,26 @@ export class ClaudeSubscriptionProviderService {
         if (!this.binary()) throw new Error('Claude Code executable is unavailable')
       }
       this.save()
-      if (!(await this.authenticated(session.abort.signal))) {
+      await this.status()
+      session.abort.signal.throwIfAborted()
+      const cli = this.settings.loginPolicy === 'cli'
+      if (cli) {
+        // The terminal sign-in is managed in the terminal; Mousse never runs `auth login` on it.
+        delete this.settings.cliDisconnected
+        this.save()
+        while (!(await this.authenticated(session.abort.signal))) {
+          const answer = await interaction.prompt({
+            type: 'select',
+            message:
+              'This profile uses the Claude sign-in from your terminal, which is not signed in to a Claude subscription. Run `claude auth login` in a terminal, then check sign-in. It shares that account and its usage limits.',
+            options: [
+              { id: 'check', label: 'Check sign-in' },
+              { id: 'cancel', label: 'Cancel' }
+            ]
+          })
+          if (answer !== 'check') throw new Error('Claude sign-in cancelled')
+        }
+      } else if (!(await this.authenticated(session.abort.signal))) {
         const binary = this.binary()!
         child = (
           this.dependencies.startLogin ??
@@ -301,18 +557,18 @@ export class ClaudeSubscriptionProviderService {
         }
       }
       session.abort.signal.throwIfAborted()
-      this.settings.signedIn = true
+      if (!cli) {
+        this.settings.signedIn = true
+        // An explicit profile sign-in settles an unresolved policy.
+        this.settings.loginPolicy ??= 'isolated'
+      }
       this.save()
       try {
         await this.refreshModels(cwd, session.abort.signal)
       } catch {
         session.abort.signal.throwIfAborted()
         if (this.stopped) throw new Error('Claude provider is stopped')
-        if (!this.settings.models?.length)
-          this.settings.models = ['sonnet', 'opus', 'haiku'].map((id) => ({
-            id,
-            label: `Claude ${id[0].toUpperCase()}${id.slice(1)}`
-          }))
+        if (!this.settings.models?.length) this.settings.models = FALLBACK_MODELS
         this.save()
         interaction.notify({
           type: 'progress',
@@ -351,7 +607,7 @@ export class ClaudeSubscriptionProviderService {
     return {
       cwd,
       pathToClaudeCodeExecutable: this.binary(),
-      env: claudeSubscriptionEnvironment(this.configDir),
+      env: this.environment(),
       abortController: controller,
       permissionMode: 'default',
       permissionPrompts: 'host',
@@ -484,10 +740,23 @@ export class ClaudeSubscriptionProviderService {
   }
   async chat(input: ClaudeSubscriptionChatInput): Promise<string> {
     input.signal?.throwIfAborted()
+    if (this.checkDue()) {
+      // Reserve the thread while the sign-in check runs so a second turn cannot slip in.
+      if (this.activeThreads.has(input.threadId))
+        throw new Error('A Claude turn is already running for this thread')
+      this.activeThreads.add(input.threadId)
+      try {
+        await this.status()
+      } finally {
+        this.activeThreads.delete(input.threadId)
+      }
+      input.signal?.throwIfAborted()
+    }
     if (!this.configured()) throw new AppError({ code: 'claude_subscription_not_connected', message: 'Connect Claude Subscription in Settings → Providers first.', errorInfo: { category: 'unavailable', retryable: false } })
     if (this.activeThreads.has(input.threadId))
       throw new Error('A Claude turn is already running for this thread')
     this.activeThreads.add(input.threadId)
+    const scope = this.scope
     const controller = new AbortController()
     this.controllers.add(controller)
     let query: Query | undefined
@@ -794,12 +1063,15 @@ export class ClaudeSubscriptionProviderService {
       input.signal?.throwIfAborted()
       controller.signal.throwIfAborted()
       if (!success || !sessionId) throw new Error('Claude Code ended before completing the turn')
-      this.settings.sessions = {
-        ...this.settings.sessions,
-        [input.threadId]: { sessionId, cwd: resolve(input.cwd), model: selected.baseId, usageBaseline: metrics.snapshot() }
+      // A login-policy switch mid-turn moves the config dir; this session cannot be resumed there.
+      if (scope === this.scope) {
+        this.settings.sessions = {
+          ...this.settings.sessions,
+          [input.threadId]: { sessionId, cwd: resolve(input.cwd), model: selected.baseId, usageBaseline: metrics.snapshot() }
+        }
+        this.save()
+        this.readyToCommit.add(input.threadId)
       }
-      this.save()
-      this.readyToCommit.add(input.threadId)
       return text
     } finally {
       controller.abort()
@@ -812,7 +1084,7 @@ export class ClaudeSubscriptionProviderService {
       const report = metrics.report()
       try {
         const baseline = metrics.snapshot()
-        if (baseline && this.settings.signedIn && !this.stopped) {
+        if (baseline && scope === this.scope && this.configured()) {
           const current = this.settings.sessions?.[input.threadId]
           this.settings.sessions = {
             ...this.settings.sessions,
@@ -831,8 +1103,14 @@ export class ClaudeSubscriptionProviderService {
       for (const [callId, title] of tools) input.onTool?.({ phase: 'complete', callId, title })
     }
   }
+  /**
+   * Disconnects this profile. Under `cli` only Mousse-side state is cleared: the terminal sign-in
+   * is shared with the user's own `claude`, so `claude auth logout` never runs for it.
+   */
   async logout(): Promise<void> {
-    this.settings.signedIn = false
+    const cli = this.settings.loginPolicy === 'cli'
+    if (cli) this.settings.cliDisconnected = true
+    else this.settings.signedIn = false
     this.settings.sessions = {}
     this.save()
     for (const controller of this.controllers) controller.abort()
@@ -841,6 +1119,7 @@ export class ClaudeSubscriptionProviderService {
     for (const query of this.queries.values()) query.close()
     this.queries.clear()
     this.readyToCommit.clear()
+    if (cli) return
     const binary = this.binary()
     if (binary)
       await (this.dependencies.runAuth ?? runAuth)(

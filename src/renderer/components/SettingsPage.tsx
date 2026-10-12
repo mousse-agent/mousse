@@ -18,6 +18,7 @@ import type { McpConfigSourceDescriptor, McpServerConfig, SkillsRegistrySnapshot
 import { MOUSSE_BUILTIN_TOOLS } from '../../shared/integrations'
 import { useAppStore } from '../stores/appStore'
 import { ProviderLoginModal } from './ProviderLoginModal'
+import { ClaudeSubscriptionPanel } from './ClaudeSubscriptionPanel'
 import { ModelFamilySettingsFields } from './ModelFamilySettingsFields'
 import { ProfileSection } from './ProfileSection'
 import { NetDevicesSection } from './NetDevicesSection'
@@ -857,6 +858,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
               Add provider
             </button>
           </div>
+
+          <ClaudeSubscriptionPanel />
 
           {configuredProviders.length === 0 ? (
             <div className="provider-empty-state">

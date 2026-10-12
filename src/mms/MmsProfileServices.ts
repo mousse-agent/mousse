@@ -208,7 +208,10 @@ export class MmsProfileServices {
       shared.installationHome,
       this.questions
     )
-    this.claudeSubscription = new ClaudeSubscriptionProviderService(homeDir, this.questions)
+    // The default profile reuses the terminal Claude sign-in unless it already has its own.
+    this.claudeSubscription = new ClaudeSubscriptionProviderService(homeDir, this.questions, {}, {
+      defaultProfile: shared.includeExternalCliConfigs ?? !shared.personal
+    })
     this.integrationContext = shared.personal
       ? {
           profileId: this.profileId,

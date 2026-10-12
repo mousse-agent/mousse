@@ -7,7 +7,7 @@ function fixture(configured: boolean, claudeUsage: ProviderUsage) {
   const existing = { id: 'openai-codex', label: 'Codex', status: 'available', windows: [{ id: 'five_hour', label: '5-hour', remainingPercent: 80 }] }
   const context = { mms: {
     providerAuth: { getUsage: vi.fn(async () => ({ providers: [existing], fetchedAt: 'old' })) },
-    claudeSubscription: { configured: () => configured, getUsage },
+    claudeSubscription: { configured: () => configured, getUsage, status: async () => ({}) },
     worktrees: { getRepoRoot: () => '/trusted/workspace' }
   }, globalSequence: () => 0 } as unknown as HandlerContext
   return { context, getUsage, existing }

@@ -1965,6 +1965,22 @@ export function registerGuiIpc(
     })
     broadcast('providers:changed', res.providers)
   })
+  registerHandler('providers:claudeStatus', async (_e, recheck?: boolean) => {
+    const res = await guiMms.request<{ status: unknown; providers: unknown[] }>(
+      'providers.claudeStatus',
+      { recheck: recheck === true }
+    )
+    if (recheck === true) broadcast('providers:changed', res.providers)
+    return res.status
+  })
+  registerHandler('providers:claudeSetLoginPolicy', async (_e, policy: 'cli' | 'isolated') => {
+    const res = await guiMms.request<{ status: unknown; providers: unknown[] }>(
+      'providers.claudeSetLoginPolicy',
+      { policy }
+    )
+    broadcast('providers:changed', res.providers)
+    return res.status
+  })
   registerHandler('providers:login:respond', async (_e, response: ProviderLoginResponse) => {
     await guiMms.request('providers.loginRespond', {
       sessionId: response.sessionId,

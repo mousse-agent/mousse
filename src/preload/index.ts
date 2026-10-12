@@ -57,6 +57,8 @@ import type {
 } from '../shared/integrations'
 import type {
   AmbientProviderInfo,
+  ClaudeLoginPolicy,
+  ClaudeSubscriptionStatus,
   ConfiguredProvider,
   ProviderLoginEvent,
   ProviderLoginOption,
@@ -780,6 +782,11 @@ const api = {
       ipcRenderer.invoke('providers:verifyAmbient', providerId),
     logout: (providerId: string): Promise<void> =>
       ipcRenderer.invoke('providers:logout', providerId),
+    /** Claude Subscription sign-in state; `recheck` skips the cached `claude auth status`. */
+    claudeStatus: (recheck?: boolean): Promise<ClaudeSubscriptionStatus> =>
+      ipcRenderer.invoke('providers:claudeStatus', recheck),
+    claudeSetLoginPolicy: (policy: ClaudeLoginPolicy): Promise<ClaudeSubscriptionStatus> =>
+      ipcRenderer.invoke('providers:claudeSetLoginPolicy', policy),
     loginOAuth: (providerId: string): Promise<ProviderLoginResult> =>
       ipcRenderer.invoke('providers:loginOAuth', providerId),
     loginApiKey: (providerId: string): Promise<ProviderLoginResult> =>
