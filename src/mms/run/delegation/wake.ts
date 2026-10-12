@@ -136,7 +136,10 @@ function undelivered(store: RunStore, effect: EffectRecord): boolean {
  *   thread's pending rows, which become `delivered` by that effect;
  * - an active run that takes native steer, while every row wants `wake: 'always'` → one
  *   `turn.steer` with the formatted notice, rows `delivered` by that steer;
- * - otherwise the rows stay pending and the rule fires again on a later pass.
+ * - otherwise the rows stay pending and the rule fires again on a later pass. This includes an
+ *   active run whose provider steers by `interrupt_restart`: a notice is never worth cancelling
+ *   the parent's in-flight tool call, so even `wake: 'always'` rows wait for the run to end and
+ *   arrive as a wake run.
  * Pending wakes whose rows were all acknowledged first are cancelled.
  */
 export function wakeThreads(
@@ -171,6 +174,7 @@ export function wakeThreads(
           return
         }
         const caps = capabilitiesFor?.(threadId) ?? null
+        // Only native steer joins the live turn without cancelling in-flight work.
         if (!caps || steerStrategy(caps, active) !== 'native') return
         if (!rows.every((row) => wantsSteer(row, delegations))) return
         const text = formatWakeNotice(rows)

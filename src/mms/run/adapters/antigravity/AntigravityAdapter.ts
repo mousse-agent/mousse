@@ -20,7 +20,7 @@ import { promptStreams, runtimeToolEvent, withAppletGuidance } from '../shared/p
 export type AntigravityClient = Pick<AntigravityProviderService, 'chat' | 'commitConversation' | 'configured'>
 
 export const ANTIGRAVITY_CAPABILITIES: ProviderCapabilities = Object.freeze({
-  steer: 'native',
+  steer: 'interrupt_restart',
   interrupt: true,
   rollback: 'none',
   fork: 'portable',

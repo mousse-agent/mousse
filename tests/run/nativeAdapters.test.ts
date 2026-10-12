@@ -92,7 +92,7 @@ describe('ClaudeSubscriptionAdapter', () => {
     const adapter = new ClaudeSubscriptionAdapter(() => null)
     expect(adapter.id).toBe('claude-subscription')
     expect(adapter.capabilities).toBe(CLAUDE_SUBSCRIPTION_CAPABILITIES)
-    expect(adapter.capabilities).toMatchObject({ steer: 'native', containment: 'weak', historyInjection: 'prompt' })
+    expect(adapter.capabilities).toMatchObject({ steer: 'interrupt_restart', interrupt: true, containment: 'weak', historyInjection: 'prompt' })
     expect(adapter.describe('sonnet')).toEqual({ contextUsage: 'reported' })
     expect(adapter.configured()).toBe(false)
     expect(await adapter.interrupt({ provider: 'claude-subscription' })).toBe('not_active')
@@ -222,7 +222,7 @@ describe('AntigravityAdapter', () => {
     const adapter = new AntigravityAdapter(() => service)
     expect(adapter.id).toBe('antigravity')
     expect(adapter.capabilities).toBe(ANTIGRAVITY_CAPABILITIES)
-    expect(adapter.capabilities).toMatchObject({ events: 'sparse', historyInjection: 'prompt' })
+    expect(adapter.capabilities).toMatchObject({ steer: 'interrupt_restart', interrupt: true, events: 'sparse', historyInjection: 'prompt' })
     expect(adapter.describe('m')).toEqual({ contextUsage: 'none' })
     expect(adapter.configured()).toBe(true)
     const turn = { llmProvider: 'antigravity', model: 'm' }

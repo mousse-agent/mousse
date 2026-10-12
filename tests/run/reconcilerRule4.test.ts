@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { ANTIGRAVITY_CAPABILITIES } from '../../src/mms/run/adapters/antigravity/AntigravityAdapter'
+import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
+import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { WakeTurnPayload } from '../../src/mms/run/types'
 import { delegationFixture, QUEUE_ONLY_CAPABILITIES, type DelegationFixture } from './delegationFixture'
 
@@ -58,6 +61,39 @@ describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () 
     f.engine.markTerminal(parent.runId, 'completed')
     expect(f.reconciler.runOnce().wakes.wakes).toHaveLength(1)
   })
+
+  it('active pi-loop parent: a notice row is steered into the live run', async () => {
+    const { f, parent } = await childFinished({ parentStaysActive: true })
+    f.capabilities.set('parent', PI_LOOP_CAPABILITIES)
+    f.engine.inbox.append({ threadId: 'parent', kind: 'reconcile_notice', payload: { text: 'heads up' } })
+    const report = f.reconciler.runOnce().wakes
+    expect(report.wakes).toEqual([])
+    expect(report.steers).toHaveLength(1)
+    expect(f.outbox.get(report.steers[0])).toMatchObject({ kind: 'turn.steer', runId: parent.runId })
+    expect(f.engine.inbox.listPending('parent')).toEqual([])
+  })
+
+  for (const [name, caps] of [
+    ['Claude Subscription', CLAUDE_SUBSCRIPTION_CAPABILITIES],
+    ['Antigravity', ANTIGRAVITY_CAPABILITIES]
+  ] as const) {
+    it(`active ${name} parent (interrupt_restart): no steer cuts the turn; rows wait for a wake run`, async () => {
+      // wake: 'always' result plus a notice row: neither may interrupt the live turn.
+      const { f, parent } = await childFinished({ parentStaysActive: true, wake: 'always' })
+      f.capabilities.set('parent', caps)
+      f.engine.inbox.append({ threadId: 'parent', kind: 'reconcile_notice', payload: { text: 'heads up' } })
+      for (let pass = 0; pass < 2; pass++)
+        expect(f.reconciler.runOnce().wakes).toEqual({ wakes: [], steers: [], cancelled: [], restored: [] })
+      expect(f.outbox.listForThread('parent').filter((effect) => effect.kind === 'turn.steer')).toEqual([])
+      expect(f.engine.inbox.listPending('parent')).toHaveLength(2)
+      f.engine.markTerminal(parent.runId, 'completed')
+      const wakeRunId = f.reconciler.runOnce().wakes.wakes[0]
+      expect(f.engine.getRun(wakeRunId)).toMatchObject({ threadId: 'parent', status: 'queued', source: 'wake' })
+      const payload = f.outbox.listForRun(wakeRunId)[0].payload as WakeTurnPayload
+      expect(payload.inboxIds).toHaveLength(2)
+      expect(f.engine.inbox.listPending('parent')).toEqual([])
+    })
+  }
 
   it('settled_only delegations never steer a live run', async () => {
     const { f, parent } = await childFinished({ parentStaysActive: true, wake: 'settled_only' })

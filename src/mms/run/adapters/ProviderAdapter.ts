@@ -16,7 +16,15 @@ import type { ProviderRef } from '../types'
  * `capabilityReaders` test fails when a key gains no reader.
  */
 export interface ProviderCapabilities {
-  /** `CommandPolicy.steerStrategy`. */
+  /**
+   * How steer text reaches a live turn; read by `CommandPolicy.steerStrategy`.
+   * - `native`: the text joins the live turn without cancelling in-flight work (a running tool
+   *   call finishes; the model sees the text at its next step). Only this lets reconciler rule 4
+   *   deliver a delegation notice into a live run (SPEC §14.3).
+   * - `interrupt_restart`: delivered by interrupting the turn and resuming or restarting the
+   *   session with the text as a new user message; a tool call in flight is cancelled.
+   * - `queue_only`: the text waits for the turn to end.
+   */
   steer: 'native' | 'interrupt_restart' | 'queue_only'
   /** `CommandPolicy.stopStrategy`. */
   interrupt: boolean
