@@ -37,6 +37,7 @@ import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/a
 import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
 import type { ClaudeSubscriptionProviderService } from '../providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import type { ClaudeIntegrationSource } from '../providers/claudeSubscription/integrations'
 import type { AntigravityProviderService } from '../providers/antigravity/AntigravityProviderService'
 import { v4 as uuidv4 } from 'uuid'
 import type { CommandResult, RunEngine } from '../run/RunEngine'
@@ -462,7 +463,11 @@ export class OrchestratorService extends EventEmitter {
   private appletStore?: AppletStore
   setAppletStore(store: AppletStore): void { this.appletStore = store }
   private claudeSubscription?: ClaudeSubscriptionProviderService
-  setClaudeSubscriptionProvider(provider: ClaudeSubscriptionProviderService): void { this.claudeSubscription = provider }
+  private claudeIntegrations?: ClaudeIntegrationSource
+  setClaudeSubscriptionProvider(provider: ClaudeSubscriptionProviderService, integrations?: ClaudeIntegrationSource): void {
+    this.claudeSubscription = provider
+    this.claudeIntegrations = integrations
+  }
   private codex?: CodexClient
   /** The profile's Codex service (`codex` driver); read by the Codex adapter on every turn. */
   setCodexProvider(provider: CodexClient | null): void { this.codex = provider ?? undefined }
@@ -595,7 +600,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private adapters = new AdapterRegistry()
     .register(new PiLoopAdapter(() => this.llm))
-    .register(new ClaudeSubscriptionAdapter(() => this.claudeSubscription ?? null))
+    .register(new ClaudeSubscriptionAdapter(() => this.claudeSubscription ?? null, () => this.claudeIntegrations ?? null))
     .register(new AntigravityAdapter(() => this.antigravity ?? null))
     .register(new CodexAdapter(() => this.codex ?? null))
   /** Test seam: replaces the provider adapters (and with them the instance map they resolve against). */
