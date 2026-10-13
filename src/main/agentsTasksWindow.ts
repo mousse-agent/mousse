@@ -121,6 +121,7 @@ export function openAgentsTasksWindow(
     }
   })
 
+  attachLinuxWindowShape(win)
   agentsTasksWindow = win
 
   win.on('closed', () => {

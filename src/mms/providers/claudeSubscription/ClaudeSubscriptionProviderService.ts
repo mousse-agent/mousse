@@ -945,16 +945,19 @@ export class ClaudeSubscriptionProviderService {
       const selected = parseThinkingSuffixFromModelId(input.model)
       const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(selected.effort ?? '')
         ? selected.effort as Options['effort'] : undefined
+      const planTurn = input.mode === 'plan'
       const options: Options = {
         ...this.options(input.cwd, controller, env),
         model: selected.baseId,
         effort,
         resume,
-        permissionMode: input.mode ?? 'default',
+        // Agent turns run unattended in the thread workspace, like Mousse's other agents.
+        ...(planTurn
+          ? { permissionMode: 'plan' as const }
+          : { permissionMode: 'bypassPermissions' as const, allowDangerouslySkipPermissions: true }),
         mcpServers: claudeMcpServers(input.mcp),
         // The SDK's default system prompt is empty; appending to it is setting it.
         ...(input.systemPromptAppend ? { systemPrompt: input.systemPromptAppend } : {}),
-        // Ask hooks ensure ambient rules cannot silently approve writes or shell calls.
         hooks: {
           PreToolUse: [
             {
@@ -962,9 +965,10 @@ export class ClaudeSubscriptionProviderService {
                 async (event) => {
                   if (event.hook_event_name === 'PreToolUse')
                     await editCounter.start(event.tool_use_id, event.tool_name, event.tool_input)
-                  return {
-                    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' }
-                  }
+                  // Plan turns route every call through canUseTool so its read-only allowlist holds.
+                  return planTurn
+                    ? { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' } }
+                    : {}
                 }
               ]
             }
@@ -1006,7 +1010,7 @@ export class ClaudeSubscriptionProviderService {
           if (input.mcp && toolName === 'ToolSearch')
             return { behavior: 'allow', updatedInput: args }
           if (
-            input.mode === 'plan' &&
+            planTurn &&
             !['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'].includes(toolName)
           )
             return {
@@ -1059,6 +1063,8 @@ export class ClaudeSubscriptionProviderService {
                 }
               }
             }
+            if (planTurn) return { behavior: 'allow', updatedInput: args }
+            // Only calls Claude Code refuses to auto-approve even in bypass mode arrive here.
             const answer = await this.questions.requestAnswers(
               [
                 {

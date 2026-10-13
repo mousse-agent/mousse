@@ -229,6 +229,13 @@ html[data-theme='high-contrast'] {
 }
 
 .app .threads-sidebar-tab.active {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: auto;
+  padding: 0 10px;
+  white-space: nowrap;
   background: var(--ui-raised);
   box-shadow: inset 0 0 0 1px var(--ui-line-strong), 0 1px 3px rgba(0, 0, 0, 0.2);
 }
@@ -1155,7 +1162,8 @@ html .chat-avatar[class*='chat-color-']:not(.group),
     to bottom,
     transparent 0,
     #000 28px,
-    #000 max(28px, calc(100% - 16px)),
+    #000 max(28px, calc(100% - var(--chat-composer-stack, 160px) - 32px)),
+    transparent max(28px, calc(100% - var(--chat-composer-stack, 160px) + 24px)),
     transparent 100%
   );
   -webkit-mask-image: var(--transcript-mask);

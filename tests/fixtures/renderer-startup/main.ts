@@ -52,19 +52,30 @@ async function main() {
       })()`))
     }
     const overlays = []
+    const railPages = []
     // Opening another page must replace the previous page, even if it was open.
     for (const page of ['settings', 'scheduled', 'channels']) {
       await execute(`qa.overlay(${JSON.stringify(page)},true)`)
-      await until(`document.querySelector('.app').inert && !document.querySelector('.${page === 'scheduled' ? 'scheduled' : page}-page').hidden`)
-      overlays.push(await execute(`(() => {
-        const workspace=document.querySelector('.app'),page=document.querySelector('.overlay-page:not([hidden])');
-        return {workspaceVisibility:getComputedStyle(workspace).visibility,workspaceInert:workspace.inert,workspaceSize:{width:workspace.offsetWidth,height:workspace.offsetHeight},visiblePages:document.querySelectorAll('.overlay-page:not([hidden])').length,headerBackground:getComputedStyle(page.querySelector('.overlay-titlebar')).backgroundColor,workspaceRetained:retainedWorkspace===document.querySelector('.startup-transcript')};
-      })()`))
+      const visiblePages = `document.querySelectorAll('.settings-page:not([hidden]),.scheduled-page:not([hidden]),.channels-page:not([hidden])').length`
+      if (page === 'settings') {
+        await until(`document.querySelector('.app').inert && !document.querySelector('.settings-page').hidden`)
+        overlays.push(await execute(`(() => {
+          const workspace=document.querySelector('.app'),page=document.querySelector('.overlay-page:not([hidden])');
+          return {workspaceVisibility:getComputedStyle(workspace).visibility,workspaceInert:workspace.inert,workspaceSize:{width:workspace.offsetWidth,height:workspace.offsetHeight},visiblePages:${visiblePages},headerBackground:getComputedStyle(page.querySelector('.overlay-titlebar')).backgroundColor,workspaceRetained:retainedWorkspace===document.querySelector('.startup-transcript')};
+        })()`))
+      } else {
+        // Rail pages replace the workspace inside the shell; the chrome and navigation stay live.
+        await until(`!document.querySelector('.app').inert && !document.querySelector('.${page}-page').hidden`)
+        railPages.push(await execute(`(() => {
+          const app=document.querySelector('.app'),page=document.querySelector('.${page}-page');
+          return {appVisibility:getComputedStyle(app).visibility,appInert:app.inert,insideShell:app.contains(page),workspaceDisplay:getComputedStyle(document.querySelector('.app-workspace')).display,navigationVisible:getComputedStyle(document.querySelector('.navigation-rail')).display!=='none',visiblePages:${visiblePages},workspaceRetained:retainedWorkspace===document.querySelector('.startup-transcript')};
+        })()`))
+      }
     }
     await execute('qa.overlay("channels",false)')
-    await until('!document.querySelector(".app").inert')
+    await until('!document.querySelector(".app").inert && getComputedStyle(document.querySelector(".app-workspace")).display !== "none"')
     const restored = await execute('({visibility:getComputedStyle(document.querySelector(".app")).visibility,inert:document.querySelector(".app").inert,retained:retainedWorkspace===document.querySelector(".startup-transcript")})')
-    writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ before, failed, after, hydrated, acrylic, overlays, restored, workspaceSize, rendererErrors }))
+    writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ before, failed, after, hydrated, acrylic, overlays, railPages, restored, workspaceSize, rendererErrors }))
   } finally { window.destroy() }
   app.exit(0)
 }

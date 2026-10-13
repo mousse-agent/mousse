@@ -119,7 +119,7 @@ try {
           assert.equal(await evaluate('document.querySelector(".composer-workspace-project").dataset.projectId'),'')
           assert.equal(await evaluate('document.querySelector(".composer-workspace-worktree").disabled'),true)
           assert.equal(await evaluate('!!document.querySelector(".composer-workspace-toolbar select,.composer-workspace-toolbar input")'),false)
-          assert.equal(await evaluate('!!document.querySelector(".composer-workspace-worktree .lucide-git-branch")'),true)
+          assert.equal(await evaluate('!!document.querySelector(".composer-workspace-worktree svg")'),true)
           await click('.composer-workspace-project')
           assert.equal(await evaluate('document.querySelector(".composer-workspace-menu").parentElement===document.body'),true)
           assert.equal(await evaluate('document.querySelector(".composer-workspace-menu [aria-checked=true]").textContent'),'No project')

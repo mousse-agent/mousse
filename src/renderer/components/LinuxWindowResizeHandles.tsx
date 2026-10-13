@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom'
 import { useCallback, useEffect, useRef, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { WINDOW_RESIZE_BORDER, WINDOW_RESIZE_CORNER, WINDOW_RESIZE_EDGES, type WindowResizeEdge } from '../../shared/windowResize'
 import '../styles/linux-window.css'
@@ -38,9 +39,9 @@ export function LinuxWindowResizeHandles() {
     })
   }
   const endPointer = (event: ReactPointerEvent<HTMLDivElement>) => { if (gesture.current?.pointerId === event.pointerId) stop() }
-  return <div className="linux-window-resize-handles" aria-hidden="true" style={{ '--window-resize-border': `${WINDOW_RESIZE_BORDER}px`, '--window-resize-corner': `${WINDOW_RESIZE_CORNER}px` } as CSSProperties}>
+  return createPortal(<div className="linux-window-resize-handles" aria-hidden="true" style={{ '--window-resize-border': `${WINDOW_RESIZE_BORDER}px`, '--window-resize-corner': `${WINDOW_RESIZE_CORNER}px` } as CSSProperties}>
     {WINDOW_RESIZE_EDGES.map((edge) => <div key={edge} data-resize-edge={edge} className={`linux-window-resize-handle resize-${edge}`}
       onPointerDown={(event) => down(edge, event)} onPointerMove={move}
       onPointerUp={endPointer} onPointerCancel={endPointer} onLostPointerCapture={endPointer} />)}
-  </div>
+  </div>, document.body)
 }

@@ -167,7 +167,8 @@ describe('Claude Subscription native provider', () => {
     await service.chat({ ...chatInput(home), history: 'edited history' })
     expect(inputs[2].options.resume).toBeUndefined()
     expect(inputs[0].options).toMatchObject({
-      permissionMode: 'default',
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
       settingSources: [],
       extraArgs: { 'strict-mcp-config': null }
     })
@@ -241,12 +242,15 @@ describe('Claude Subscription native provider', () => {
     expect(options).toMatchObject({ settingSources: [], extraArgs: { 'strict-mcp-config': null } })
     expect(Object.keys(options!.mcpServers ?? {})).toEqual(['mousse'])
   })
-  it('asks for permission, rejects dismissal and denies writes in plan mode', async () => {
+  it('asks only for calls bypass mode escalates and keeps plan mode read-only without prompts', async () => {
     let decision: unknown
+    let tool = 'Bash'
+    const inputs: Options[] = []
     const { service, home, questions } = fixture((input) => {
+      inputs.push(input.options)
       const q = fakeQuery()
       q[Symbol.asyncIterator] = async function* () {
-        decision = await input.options.canUseTool!('Bash', { command: 'rm file' }, {
+        decision = await input.options.canUseTool!(tool, { command: 'rm file' }, {
           signal: new AbortController().signal,
           toolUseID: 'tool'
         } as never)
@@ -254,16 +258,25 @@ describe('Claude Subscription native provider', () => {
       }
       return q
     })
-    questions.on('pending', ({ requestId }) =>
+    const asked = vi.fn()
+    questions.on('pending', ({ requestId }) => {
+      asked()
       questions.submitAnswers(requestId, { permission: 'reject' })
-    )
+    })
     await service.chat(chatInput(home))
     expect(decision).toMatchObject({ behavior: 'deny' })
+    expect(asked).toHaveBeenCalledOnce()
     await service.chat({ ...chatInput(home), mode: 'plan' })
     expect(decision).toMatchObject({
       behavior: 'deny',
       message: expect.stringContaining('planning only')
     })
+    tool = 'Read'
+    await service.chat({ ...chatInput(home), mode: 'plan' })
+    expect(decision).toMatchObject({ behavior: 'allow' })
+    expect(asked).toHaveBeenCalledOnce()
+    expect(inputs[2].permissionMode).toBe('plan')
+    expect(inputs[2].allowDangerouslySkipPermissions).toBeUndefined()
   })
   it('bridges Claude AskUserQuestion answers into vendor tool input', async () => {
     let decision: unknown
@@ -541,7 +554,34 @@ it('reports available SDK usage on failure and caller abort without committing h
   expect(aborted.settings().sessions.thread.historyKey).toBeUndefined()
 })
 
-it('keeps ask permissions while recording successful official file edits only once', async () => {
+it('forces host review of every call only in plan mode', async () => {
+  const decisions: unknown[] = []
+  const { service, home } = fixture(({ options }) => {
+    const q = fakeQuery()
+    q[Symbol.asyncIterator] = async function* () {
+      decisions.push(
+        await options.hooks!.PreToolUse![0].hooks[0](
+          {
+            hook_event_name: 'PreToolUse',
+            tool_use_id: 'native-read',
+            tool_name: 'Read',
+            tool_input: { file_path: 'package.json' }
+          } as never,
+          'native-read',
+          { signal: new AbortController().signal }
+        )
+      )
+      yield result as never
+    }
+    return q
+  })
+  await service.chat(chatInput(home))
+  await service.chat({ ...chatInput(home), mode: 'plan' })
+  expect(decisions[0]).toEqual({})
+  expect(decisions[1]).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } })
+})
+
+it('records successful official file edits only once without asking', async () => {
   const { service, home } = fixture(({ options }) => {
     const q = fakeQuery()
     q[Symbol.asyncIterator] = async function* () {
@@ -555,7 +595,7 @@ it('keeps ask permissions while recording successful official file edits only on
       }
       expect(
         await pre(event as never, 'native-write', { signal: new AbortController().signal })
-      ).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } })
+      ).toEqual({})
       writeFileSync(join(home, 'written'), 'one\ntwo')
       await post({ ...event, hook_event_name: 'PostToolUse' } as never, 'native-write', {
         signal: new AbortController().signal

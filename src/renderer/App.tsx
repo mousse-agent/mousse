@@ -12,6 +12,8 @@ import { KeepMounted } from './components/KeepMounted'
 
 import { ThreadsSidebar } from './components/ThreadsSidebar'
 import { SlidingThreadsPane } from './components/SlidingThreadsPane'
+import { ScheduledPage } from './components/ScheduledPage'
+import { ChannelsPage } from './components/ChannelsPage'
 import { NavigationRail } from './components/NavigationRail'
 import { WorkspaceLoading } from './components/WorkspaceLoading'
 
@@ -51,7 +53,8 @@ export default function App() {
   const sidebarWidth = useAppStore((s) => s.sidebarWidth)
   const profileId = useAppStore((s) => s.profileId)
   const profileReady = useAppStore((s) => s.profileReady)
-  const overlayOpen = useAppStore((s) => s.settingsOpen || s.scheduledOpen || s.channelsOpen)
+  const overlayOpen = useAppStore((s) => s.settingsOpen)
+  const railPageOpen = useAppStore((s) => s.scheduledOpen || s.channelsOpen)
   const workspaceReady = useAppStore((s) => s.workspaceReady)
   const sidebarMode = useAppStore((s) => s.sidebarMode)
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
@@ -489,6 +492,11 @@ export default function App() {
           onMouseLeave={!threadsSidebarOpen ? scheduleThreadsPeekClose : undefined}
         />
 
+        {profileReady && <>
+          <ScheduledPage />
+          <ChannelsPage />
+        </>}
+        <div className="app-workspace" style={{ display: railPageOpen ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
         {!profileReady && <WorkspaceLoading
           error={bootstrapError}
           onRetry={() => setBootstrapAttempt((attempt) => attempt + 1)}
@@ -567,6 +575,7 @@ export default function App() {
           <MainViewPanel />
         </KeepMounted>
         </>}
+        </div>
 
       </div>
 
