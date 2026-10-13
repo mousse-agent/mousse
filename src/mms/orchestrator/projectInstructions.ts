@@ -13,9 +13,13 @@ export function readProjectAgentInstructions(projectPath?: string): string | und
   }
 }
 
-export function appendProjectAgentInstructions(systemPrompt: string, projectPath?: string): string {
+/** The labeled AGENTS.md block for a system prompt, or undefined when the project has none. */
+export function projectAgentInstructionsSection(projectPath?: string): string | undefined {
   const instructions = readProjectAgentInstructions(projectPath)
-  return instructions
-    ? `${systemPrompt}\n\n## Project instructions (AGENTS.md)\n${instructions}`
-    : systemPrompt
+  return instructions ? `## Project instructions (AGENTS.md)\n${instructions}` : undefined
+}
+
+export function appendProjectAgentInstructions(systemPrompt: string, projectPath?: string): string {
+  const section = projectAgentInstructionsSection(projectPath)
+  return section ? `${systemPrompt}\n\n${section}` : systemPrompt
 }
