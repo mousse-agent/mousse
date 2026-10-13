@@ -2,6 +2,7 @@ import {
   type ClaudeSubscriptionChatInput,
   type ClaudeSubscriptionProviderService
 } from '../../../providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import type { ClaudeIntegrationSource, ClaudeTurnIntegrations } from '../../../providers/claudeSubscription/integrations'
 import type { ClaudeSubscriptionMetrics } from '../../../providers/claudeSubscription/metrics'
 import { projectAgentInstructionsSection } from '../../../orchestrator/projectInstructions'
 import { mousseOrchestrationInstructions } from '../../mcp/instructions'
@@ -49,7 +50,11 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
   readonly driver = 'claude' as const
   readonly capabilities = CLAUDE_SUBSCRIPTION_CAPABILITIES
 
-  constructor(private readonly service: () => ClaudeSubscriptionClient | null) {}
+  constructor(
+    private readonly service: () => ClaudeSubscriptionClient | null,
+    /** The user's Mousse MCP servers and skills; read per turn, like the service. */
+    private readonly integrations: () => ClaudeIntegrationSource | null = () => null
+  ) {}
 
   /** Claude reports its context window and prompt usage after each turn. */
   describe(_model: string): ModelInfo {
@@ -75,6 +80,15 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     const cwd = input.cwd ?? service.standaloneWorkspace(input.threadId)
     let history = host.context.prepareNativeContext(input.llmProvider, input.model)?.nativeHistory ?? input.nativeHistory
     const streams = promptStreams(sink)
+    // Resolved once per turn so a retry after context overflow runs with the same servers and skills.
+    let integrations: ClaudeTurnIntegrations | undefined
+    try {
+      integrations = await this.integrations()?.resolve(input.cwd ?? undefined)
+    } catch (error) {
+      // The user's integrations are optional; a broken registry cannot block the turn.
+      console.warn(`[claude-subscription] integrations unavailable: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    for (const warning of integrations?.warnings ?? []) console.warn(`[claude-subscription] ${warning}`)
     let metrics: ClaudeSubscriptionMetrics | undefined
     // Output, an accepted steer or a tool makes a replay after context overflow unsafe.
     let progressed = false
@@ -104,6 +118,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
         host.mcp ? mousseOrchestrationInstructions() : undefined,
         projectAgentInstructionsSection(input.cwd ?? undefined)
       ].filter(Boolean).join('\n\n') || undefined,
+      integrations,
       drainSteer: () => ctl.drainSteer(),
       onSteer: (text) => {
         progress()

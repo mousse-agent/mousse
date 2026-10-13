@@ -28,6 +28,7 @@ import {
   type ClaudeUsageBaseline
 } from './metrics'
 import { parseClaudeSubscriptionUsage } from './usage'
+import { claudeMcpToolBlocked, type ClaudeTurnIntegrations } from './integrations'
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
 type SavedSession = {
@@ -68,6 +69,8 @@ export type ClaudeSubscriptionChatInput = {
   mcp?: { url: string; token: string } | null
   /** Text appended to the (otherwise empty) SDK system prompt. */
   systemPromptAppend?: string
+  /** The MCP servers and skills the user enabled in Mousse; absent attaches none. */
+  integrations?: ClaudeTurnIntegrations
   onText: (text: string) => void
   onThinking?: (text: string) => void
   onMetrics?: (report: ClaudeSubscriptionMetrics) => void
@@ -861,7 +864,9 @@ export class ClaudeSubscriptionProviderService {
     this.activeThreads.add(input.threadId)
     // Sign-in check, environment and resumed session all belong to this one credential scope.
     const scope = this.scope
-    const env = this.environment()
+    const integrations = input.integrations
+    // User MCP servers reference their secrets as `${VAR}`; the values ride in Claude's environment.
+    const env = { ...this.environment(), ...integrations?.env }
     const controller = new AbortController()
     this.controllers.add(controller)
     let query: Query | undefined
@@ -955,7 +960,10 @@ export class ClaudeSubscriptionProviderService {
         ...(planTurn
           ? { permissionMode: 'plan' as const }
           : { permissionMode: 'bypassPermissions' as const, allowDangerouslySkipPermissions: true }),
-        mcpServers: claudeMcpServers(input.mcp),
+        // The Mousse server keeps its name: user servers are spread first.
+        mcpServers: { ...integrations?.mcpServers, ...claudeMcpServers(input.mcp) },
+        // Skills reach Claude as a local plugin because the launch reads no setting sources.
+        ...(integrations?.pluginPath ? { plugins: [{ type: 'local' as const, path: integrations.pluginPath }] } : {}),
         // The SDK's default system prompt is empty; appending to it is setting it.
         ...(input.systemPromptAppend ? { systemPrompt: input.systemPromptAppend } : {}),
         hooks: {
@@ -963,6 +971,16 @@ export class ClaudeSubscriptionProviderService {
             {
               hooks: [
                 async (event) => {
+                  // Hooks run in every permission mode, so the user's per-server tool limits hold
+                  // on unattended turns too.
+                  if (event.hook_event_name === 'PreToolUse' && claudeMcpToolBlocked(integrations?.toolRules, event.tool_name))
+                    return {
+                      hookSpecificOutput: {
+                        hookEventName: 'PreToolUse',
+                        permissionDecision: 'deny',
+                        permissionDecisionReason: 'This tool is turned off for this MCP server in Mousse.'
+                      }
+                    }
                   if (event.hook_event_name === 'PreToolUse')
                     await editCounter.start(event.tool_use_id, event.tool_name, event.tool_input)
                   // Plan turns route every call through canUseTool so its read-only allowlist holds.
@@ -1005,8 +1023,8 @@ export class ClaudeSubscriptionProviderService {
             return { behavior: 'allow', updatedInput: args }
           // Claude Code defers MCP tool schemas behind ToolSearch, which only loads them; without it
           // the Mousse tools above are unreachable unless the user approves a prompt every turn.
-          // Any query is safe because the launch uses `strict-mcp-config` and `settingSources: []`
-          // with the Mousse server as the only MCP server, so no other server's tools can load.
+          // Any query is safe because the launch uses `strict-mcp-config` and `settingSources: []`:
+          // only the Mousse server and the servers the user enabled in Mousse can load.
           if (input.mcp && toolName === 'ToolSearch')
             return { behavior: 'allow', updatedInput: args }
           if (

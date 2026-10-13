@@ -95,6 +95,30 @@ describe('Claude subscription attachment', () => {
     expect(seen[3]).toMatchObject({ cwd: standalone, systemPromptAppend: undefined })
   })
 
+  it('the adapter resolves the user\'s MCP servers and skills for the turn\'s project', async () => {
+    const seen: ClaudeSubscriptionChatInput[] = []
+    const client: ClaudeSubscriptionClient = {
+      chat: vi.fn(async (chat: ClaudeSubscriptionChatInput) => { seen.push(chat); return 'ok' }),
+      commitConversation: vi.fn(),
+      standaloneWorkspace: () => '/standalone',
+      configured: () => true
+    }
+    const integrations = { mcpServers: { files: { type: 'stdio' as const, command: 'files-mcp' } }, env: {}, toolRules: {}, pluginPath: '/plugin', warnings: [] }
+    const resolve = vi.fn(async (_projectPath?: string) => integrations)
+    const adapter = new ClaudeSubscriptionAdapter(() => client, () => ({ resolve }))
+    await adapter.startTurn(input({ cwd: '/project' }), sink(), control, host(MCP))
+    await adapter.startTurn(input({ cwd: null }), sink(), control, host(null))
+    expect(resolve.mock.calls).toEqual([['/project'], [undefined]])
+    expect(seen.map((chat) => chat.integrations)).toEqual([integrations, integrations])
+    // A failing registry does not block the turn.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const failing = new ClaudeSubscriptionAdapter(() => client, () => ({ resolve: async () => { throw new Error('registry down') } }))
+    await failing.startTurn(input(), sink(), control, host(null))
+    expect(seen[2].integrations).toBeUndefined()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('registry down'))
+    warn.mockRestore()
+  })
+
   const service = (query: (input: { options: Options; prompt: unknown }) => Query) => {
     const home = tempHome('mousse-mcp-claude-')
     const binary = join(home, 'claude')
@@ -134,6 +158,42 @@ describe('Claude subscription attachment', () => {
     expect(options[1].mcpServers).toEqual({})
     expect(options[1].systemPrompt).toBeUndefined()
     expect(claudeMcpServers(null)).toEqual({})
+  })
+
+  it('the service launches Claude with the user\'s MCP servers, their secrets, the skills plugin and tool limits', async () => {
+    const options: Options[] = []
+    const { home, questions, service: claude } = service(({ options: o }) => { options.push(o); return finished(o) })
+    questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }))
+    await claude.chat({
+      threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: MCP,
+      integrations: {
+        mcpServers: {
+          files: { type: 'stdio', command: 'files-mcp', env: { API_KEY: '${MOUSSE_MCP_VALUE_0}' } },
+          mousse: { type: 'stdio', command: 'impostor' }
+        },
+        env: { MOUSSE_MCP_VALUE_0: 'resolved-key' },
+        toolRules: { mcp__files__: { enabled: ['read'] } },
+        pluginPath: '/generated/plugin',
+        warnings: []
+      }
+    })
+    await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn() })
+    expect(options[0].mcpServers).toEqual({
+      files: { type: 'stdio', command: 'files-mcp', env: { API_KEY: '${MOUSSE_MCP_VALUE_0}' } },
+      mousse: { type: 'http', url: MCP.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 }
+    })
+    expect(options[0].env).toMatchObject({ MOUSSE_MCP_VALUE_0: 'resolved-key' })
+    expect(options[0].plugins).toEqual([{ type: 'local', path: '/generated/plugin' }])
+    expect(options[0]).toMatchObject({ settingSources: [], extraArgs: { 'strict-mcp-config': null } })
+    const hook = options[0].hooks!.PreToolUse![0].hooks[0]
+    const call = (tool_name: string) => hook(
+      { hook_event_name: 'PreToolUse', tool_name, tool_input: {}, tool_use_id: 'u' } as never, 'u', { signal: new AbortController().signal }
+    )
+    expect(await call('mcp__files__write')).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } })
+    expect(await call('mcp__files__read')).toEqual({})
+    expect(options[1].mcpServers).toEqual({})
+    expect(options[1].plugins).toBeUndefined()
+    expect(options[1].env).not.toHaveProperty('MOUSSE_MCP_VALUE_0')
   })
 })
 
