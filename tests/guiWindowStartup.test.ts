@@ -79,7 +79,7 @@ vi.mock('../src/main/applicationMenu', () => ({ setupApplicationMenu: vi.fn() })
 vi.mock('../src/main/zoomShortcuts', () => ({ attachZoomShortcuts: vi.fn() }))
 vi.mock('../src/main/devgui/devGuiMain', () => ({ isDevGuiMainEnabled: () => false }))
 vi.mock('../src/main/devgui/devGuiPoller', () => ({ startDevGuiPoller: vi.fn() }))
-vi.mock('../src/main/linuxRendering', () => ({ configureLinuxWindowing: () => false, linuxTransparencyOptions: () => ({}) }))
+vi.mock('../src/main/linuxRendering', () => ({ configureLinuxGraphics: () => false, configureLinuxVsync: () => false, configureLinuxWindowing: () => false, linuxTransparencyOptions: () => ({}) }))
 
 it('loads and shows only the real main window while MMS readiness remains withheld', async () => {
   await import('../src/main/index')

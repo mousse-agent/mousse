@@ -69,6 +69,11 @@ it('paints the real shell and retryable skeleton before trusted binding, then pr
       expect(page.headerBackground).toBe('rgba(0, 0, 0, 0)')
       expect(page.workspaceRetained).toBe(true)
     }
+    expect(report.overlays).toHaveLength(1)
+    expect(report.railPages).toHaveLength(2)
+    for (const page of report.railPages) {
+      expect(page).toEqual({ appVisibility: 'visible', appInert: false, insideShell: true, workspaceDisplay: 'none', navigationVisible: true, visiblePages: 1, workspaceRetained: true })
+    }
     expect(report.restored).toEqual({ visibility: 'visible', inert: false, retained: true })
   } finally {
     if (child?.pid && child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited?.catch(() => undefined) }
