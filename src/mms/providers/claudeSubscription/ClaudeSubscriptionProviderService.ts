@@ -28,7 +28,7 @@ import {
   type ClaudeUsageBaseline
 } from './metrics'
 import { parseClaudeSubscriptionUsage } from './usage'
-import { claudeMcpToolBlocked, type ClaudeTurnIntegrations } from './integrations'
+import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
 type SavedSession = {
@@ -961,7 +961,12 @@ export class ClaudeSubscriptionProviderService {
           ? { permissionMode: 'plan' as const }
           : { permissionMode: 'bypassPermissions' as const, allowDangerouslySkipPermissions: true }),
         // The Mousse server keeps its name: user servers are spread first.
-        mcpServers: { ...integrations?.mcpServers, ...claudeMcpServers(input.mcp) },
+        mcpServers: {
+          ...integrations?.mcpServers,
+          // Servers that sign in with OAuth run in this process and call Mousse's own connection.
+          ...Object.fromEntries(Object.entries(integrations?.proxiedServers ?? {}).map(([name, proxied]) => [name, claudeProxiedMcpServer(name, proxied)])),
+          ...claudeMcpServers(input.mcp)
+        },
         // Skills reach Claude as a local plugin because the launch reads no setting sources.
         ...(integrations?.pluginPath ? { plugins: [{ type: 'local' as const, path: integrations.pluginPath }] } : {}),
         // The SDK's default system prompt is empty; appending to it is setting it.

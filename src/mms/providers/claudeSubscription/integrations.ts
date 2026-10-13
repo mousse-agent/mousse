@@ -1,9 +1,14 @@
 import { existsSync } from 'node:fs'
 import { cp, lstat, mkdir, readdir, rename, rm, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
+import { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import type { McpServerConfig, MousseIntegrationsSettings, SkillDescriptor } from '../../../shared/integrations'
+import type { McpToolCallResult } from '../../../shared/integrations/results'
 import type { IntegrationActor } from '../../../shared/integrations/actor'
 import { resolveEffectiveMcpServers, resolveEffectiveSkills } from '../../integrations/catalog/EffectiveIntegrationResolver'
+import type { McpManager } from '../../integrations/mcp/McpManager'
 import type { McpRegistry } from '../../integrations/mcp/McpRegistry'
 import { shortHash } from '../../integrations/revision'
 import type { IntegrationSecretAdapter } from '../../integrations/secrets'
@@ -18,9 +23,20 @@ export type ClaudeUserMcpServer =
 /** Per-server tool limits, keyed by the `mcp__<server>__` prefix Claude gives that server's tools. */
 export type ClaudeMcpToolRules = Record<string, { enabled?: string[]; denied?: string[] }>
 
+/**
+ * A server Claude reaches through Mousse's own connection. Used for servers that sign in with
+ * OAuth: Mousse holds and refreshes that session, and Claude has no way to take it over.
+ */
+export interface ClaudeProxiedMcpServer {
+  tools: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>
+  call(toolName: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolCallResult>
+}
+
 /** What one Claude turn gets from the user's Mousse integrations. */
 export interface ClaudeTurnIntegrations {
   mcpServers: Record<string, ClaudeUserMcpServer>
+  /** Servers Mousse stays connected to on Claude's behalf, by the name Claude sees. */
+  proxiedServers: Record<string, ClaudeProxiedMcpServer>
   /** Resolved secret values the `${VAR}` references in `mcpServers` point at. */
   env: Record<string, string>
   toolRules: ClaudeMcpToolRules
@@ -50,6 +66,36 @@ export function claudeMcpToolBlocked(rules: ClaudeMcpToolRules | undefined, tool
   return false
 }
 
+/** The in-process server the Claude Agent SDK runs for a proxied server; its tools call Mousse. */
+export function claudeProxiedMcpServer(name: string, proxied: ClaudeProxiedMcpServer): McpSdkServerConfigWithInstance {
+  const server = new Server({ name, version: '1.0.0' }, { capabilities: { tools: {} } })
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: proxied.tools.map((tool) => ({
+      name: tool.name,
+      ...(tool.description ? { description: tool.description } : {}),
+      inputSchema: { type: 'object' as const, ...tool.inputSchema }
+    }))
+  }))
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    try {
+      const result = await proxied.call(request.params.name, request.params.arguments ?? {}, extra.signal)
+      return {
+        isError: result.isError,
+        content: [
+          { type: 'text' as const, text: result.text },
+          ...result.content.flatMap((block) => block.type === 'image' && block.data
+            ? [{ type: 'image' as const, data: block.data, mimeType: block.mimeType }]
+            : [])
+        ]
+      }
+    } catch (error) {
+      return { isError: true, content: [{ type: 'text' as const, text: message(error) }] }
+    }
+  })
+  // The SDK only connects a transport to the instance, which the low-level server supports too.
+  return { type: 'sdk', name, instance: server as unknown as McpSdkServerConfigWithInstance['instance'] }
+}
+
 /**
  * Resolves the MCP servers and skills the user enabled in Mousse for the main agent into what the
  * Claude Agent SDK takes. The SDK launches with `settingSources: []` and `strict-mcp-config`, so
@@ -58,6 +104,8 @@ export function claudeMcpToolBlocked(rules: ClaudeMcpToolRules | undefined, tool
 export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
   constructor(private readonly deps: {
     mcpRegistry: Pick<McpRegistry, 'discover'>
+    /** Mousse's live MCP connections; without it OAuth servers are left out. */
+    mcpManager?: Pick<McpManager, 'getEnabledToolsForServer' | 'callTool'>
     skillsRegistry: Pick<SkillsRegistry, 'discover'>
     settings: { get(): { integrations: MousseIntegrationsSettings } }
     secrets: IntegrationSecretAdapter
@@ -69,11 +117,11 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
     const settings = this.deps.settings.get().integrations
     // A Claude Subscription thread is the main agent, as on every other chat provider.
     const actor: IntegrationActor = { kind: 'main' }
-    const result: ClaudeTurnIntegrations = { mcpServers: {}, env: {}, toolRules: {}, warnings: [] }
+    const result: ClaudeTurnIntegrations = { mcpServers: {}, proxiedServers: {}, env: {}, toolRules: {}, warnings: [] }
 
     try {
       const snapshot = await this.deps.mcpRegistry.discover({ projectPath, redactSecrets: false })
-      this.addServers(resolveEffectiveMcpServers({ servers: snapshot.servers, settings: settings.mcp, actor }), result)
+      await this.addServers(resolveEffectiveMcpServers({ servers: snapshot.servers, settings: settings.mcp, actor }), result, projectPath, actor)
     } catch (error) {
       result.warnings.push(`MCP servers were not attached: ${message(error)}`)
     }
@@ -88,7 +136,12 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
     return result
   }
 
-  private addServers(servers: McpServerConfig[], result: ClaudeTurnIntegrations): void {
+  private async addServers(
+    servers: McpServerConfig[],
+    result: ClaudeTurnIntegrations,
+    projectPath: string | undefined,
+    actor: IntegrationActor
+  ): Promise<void> {
     const used = new Set<string>([MOUSSE_MCP_SERVER_NAME])
     let variable = 0
     // Secrets travel in the environment: the SDK puts the server list on Claude's command line.
@@ -102,9 +155,17 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
       })
       return entries.length > 0 ? Object.fromEntries(entries) : undefined
     }
+    // Claude builds tool names from the server name, so keep it to the characters it preserves.
+    const claim = (server: McpServerConfig): string => {
+      const base = server.name.replace(/[^A-Za-z0-9_-]/g, '_') || 'server'
+      const name = used.has(base) ? `${base}_${shortHash(server.installationId ?? server.id)}` : base
+      used.add(name)
+      return name
+    }
     for (const server of servers) {
       if (server.authMode === 'oauth') {
-        result.warnings.push(`MCP server ${server.name} signs in with OAuth through Mousse, which Claude cannot reuse.`)
+        const proxied = await this.proxy(server, projectPath, actor, result.warnings)
+        if (proxied) result.proxiedServers[claim(server)] = proxied
         continue
       }
       if (server.status === 'missing-env' || (server.missingEnvVars?.length ?? 0) > 0) {
@@ -127,16 +188,52 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
         const headers = indirect(server.headers)
         entry = { type: server.transport, url: server.url, ...(headers ? { headers } : {}) }
       }
-      // Claude builds tool names from the server name, so keep it to the characters it preserves.
-      const base = server.name.replace(/[^A-Za-z0-9_-]/g, '_') || 'server'
-      const name = used.has(base) ? `${base}_${shortHash(server.installationId ?? server.id)}` : base
-      used.add(name)
+      const name = claim(server)
       result.mcpServers[name] = entry
       if (server.enabledTools?.length || server.deniedTools?.length)
         result.toolRules[`mcp__${name}__`] = {
           ...(server.enabledTools?.length ? { enabled: server.enabledTools } : {}),
           ...(server.deniedTools?.length ? { denied: server.deniedTools } : {})
         }
+    }
+  }
+
+  /** Lists an OAuth server's tools over Mousse's signed-in connection and routes calls back to it. */
+  private async proxy(
+    server: McpServerConfig,
+    projectPath: string | undefined,
+    actor: IntegrationActor,
+    warnings: string[]
+  ): Promise<ClaudeProxiedMcpServer | undefined> {
+    const manager = this.deps.mcpManager
+    if (!manager) {
+      warnings.push(`MCP server ${server.name} signs in with OAuth through Mousse, which is not available here.`)
+      return undefined
+    }
+    try {
+      // Listing never opens a browser: a server that is not signed in fails here instead.
+      const tools = await manager.getEnabledToolsForServer(server.installationId ?? server.id, projectPath, actor)
+      if (tools.length === 0) {
+        warnings.push(`MCP server ${server.name} has no tools enabled.`)
+        return undefined
+      }
+      const providerNames = new Map(tools.map((tool) => [tool.toolName, tool.providerName]))
+      return {
+        tools: tools.map((tool) => ({
+          name: tool.toolName,
+          ...(tool.description ? { description: tool.description } : {}),
+          ...(tool.inputSchema ? { inputSchema: tool.inputSchema } : {})
+        })),
+        // The manager checks the user's settings again on every call, so a tool turned off mid-turn stops working.
+        call: (toolName, args, signal) => {
+          const providerName = providerNames.get(toolName)
+          if (!providerName) throw new Error(`Unknown tool: ${toolName}`)
+          return manager.callTool(providerName, args, projectPath, signal, actor)
+        }
+      }
+    } catch (error) {
+      warnings.push(`MCP server ${server.name} was not attached: ${message(error)}`)
+      return undefined
     }
   }
 

@@ -103,7 +103,7 @@ describe('Claude subscription attachment', () => {
       standaloneWorkspace: () => '/standalone',
       configured: () => true
     }
-    const integrations = { mcpServers: { files: { type: 'stdio' as const, command: 'files-mcp' } }, env: {}, toolRules: {}, pluginPath: '/plugin', warnings: [] }
+    const integrations = { mcpServers: { files: { type: 'stdio' as const, command: 'files-mcp' } }, proxiedServers: {}, env: {}, toolRules: {}, pluginPath: '/plugin', warnings: [] }
     const resolve = vi.fn(async (_projectPath?: string) => integrations)
     const adapter = new ClaudeSubscriptionAdapter(() => client, () => ({ resolve }))
     await adapter.startTurn(input({ cwd: '/project' }), sink(), control, host(MCP))
@@ -171,6 +171,7 @@ describe('Claude subscription attachment', () => {
           files: { type: 'stdio', command: 'files-mcp', env: { API_KEY: '${MOUSSE_MCP_VALUE_0}' } },
           mousse: { type: 'stdio', command: 'impostor' }
         },
+        proxiedServers: { linear: { tools: [{ name: 'get' }], call: vi.fn() }, mousse: { tools: [], call: vi.fn() } },
         env: { MOUSSE_MCP_VALUE_0: 'resolved-key' },
         toolRules: { mcp__files__: { enabled: ['read'] } },
         pluginPath: '/generated/plugin',
@@ -180,6 +181,7 @@ describe('Claude subscription attachment', () => {
     await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn() })
     expect(options[0].mcpServers).toEqual({
       files: { type: 'stdio', command: 'files-mcp', env: { API_KEY: '${MOUSSE_MCP_VALUE_0}' } },
+      linear: { type: 'sdk', name: 'linear', instance: expect.anything() },
       mousse: { type: 'http', url: MCP.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 }
     })
     expect(options[0].env).toMatchObject({ MOUSSE_MCP_VALUE_0: 'resolved-key' })

@@ -1,11 +1,16 @@
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
-import type { McpServerConfig, MousseIntegrationsSettings, SkillDescriptor } from '../src/shared/integrations'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import type { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { McpServerConfig, McpToolDescriptor, MousseIntegrationsSettings, SkillDescriptor } from '../src/shared/integrations'
+import type { McpToolCallResult } from '../src/shared/integrations/results'
 import {
   ClaudeIntegrationResolver,
-  claudeMcpToolBlocked
+  claudeMcpToolBlocked,
+  claudeProxiedMcpServer
 } from '../src/mms/providers/claudeSubscription/integrations'
 
 const roots: string[] = []
@@ -33,6 +38,7 @@ function resolver(options: {
   skills?: SkillDescriptor[]
   mainAgent?: boolean
   pluginRoot?: string
+  mcpManager?: ConstructorParameters<typeof ClaudeIntegrationResolver>[0]['mcpManager']
 }) {
   const agents = { mousse: true, 'claude-code': true, codex: true, opencode: true, 'cursor-agents-cli': true }
   const integrations = {
@@ -47,6 +53,7 @@ function resolver(options: {
     pluginRoot,
     resolver: new ClaudeIntegrationResolver({
       mcpRegistry: { discover: async ({ projectPath } = {}) => { seen.push(projectPath); return { servers: options.servers ?? [], sources: [], diagnostics: [] } } },
+      ...(options.mcpManager ? { mcpManager: options.mcpManager } : {}),
       skillsRegistry: { discover: async () => ({ skills: options.skills ?? [], sources: [], diagnostics: [] }) },
       settings: { get: () => ({ integrations }) },
       secrets: { resolveEnv: (value) => value.replace('${secret:KEY}', 'resolved-key').replace('${env:MISSING}', '') },
@@ -78,7 +85,6 @@ describe('Claude Subscription integrations', () => {
   it('leaves out servers Claude cannot run and never takes the Mousse server name', async () => {
     const { resolver: claude } = resolver({ servers: [
       server({ id: 'user-mousse', name: 'mousse', command: 'other' }),
-      server({ name: 'oauth', transport: 'http', url: 'https://example.test/oauth', authMode: 'oauth' }),
       server({ name: 'unset', command: 'x', status: 'missing-env', missingEnvVars: ['TOKEN'] }),
       server({ name: 'broken', transport: 'http' }),
       server({ name: 'off', command: 'x', enabled: false })
@@ -86,7 +92,6 @@ describe('Claude Subscription integrations', () => {
     const result = await claude.resolve()
     expect(Object.keys(result.mcpServers)).toEqual([expect.stringMatching(/^mousse_[0-9a-f]{8}$/)])
     expect(result.warnings).toEqual([
-      expect.stringContaining('oauth signs in with OAuth'),
       expect.stringContaining('unset is missing environment: TOKEN'),
       expect.stringContaining('broken has no URL')
     ])
@@ -112,7 +117,72 @@ describe('Claude Subscription integrations', () => {
   it('attaches nothing when integrations are off for the main agent', async () => {
     const root = temp()
     const { resolver: claude } = resolver({ mainAgent: false, servers: [server({ name: 'files', command: 'x' })], skills: [skill(root, 'review')] })
-    expect(await claude.resolve()).toEqual({ mcpServers: {}, env: {}, toolRules: {}, warnings: [] })
+    expect(await claude.resolve()).toEqual({ mcpServers: {}, proxiedServers: {}, env: {}, toolRules: {}, warnings: [] })
+  })
+
+  it('reaches a server that signs in with OAuth through Mousse\'s own connection', async () => {
+    const actor = { kind: 'main' }
+    const tool = (toolName: string): McpToolDescriptor => ({
+      id: `linear/${toolName}`, serverId: 'linear', serverName: 'linear', toolName, providerName: `mcp__linear__${toolName}__abc`,
+      description: `${toolName} an issue`, inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+      outputSchema: { type: 'object' }
+    })
+    const called: McpToolCallResult = {
+      text: 'ISSUE-1: fix it', isError: false,
+      content: [{ type: 'text', text: 'ISSUE-1: fix it' }, { type: 'image', mimeType: 'image/png', data: 'aGk=' }, { type: 'image', mimeType: 'image/png', bytes: 9_000_000 }],
+      provenance: { profileId: 'p', serverId: 'linear', installationId: 'install-1', configRevision: 'r', toolName: 'get', providerName: 'mcp__linear__get__abc' }
+    }
+    const mcpManager = {
+      getEnabledToolsForServer: vi.fn(async (serverId: string) => {
+        if (serverId === 'signed-out') throw new Error('MCP server "notion" requires OAuth. Use "Connect" in Settings to sign in.')
+        return serverId === 'install-1' ? [tool('get'), tool('search')] : []
+      }),
+      callTool: vi.fn(async (providerName: string) => {
+        if (providerName.includes('search')) throw new Error('upstream is down')
+        return called
+      })
+    }
+    const { resolver: claude } = resolver({ mcpManager, servers: [
+      server({ id: 'linear', installationId: 'install-1', name: 'linear', transport: 'http', url: 'https://example.test/mcp', authMode: 'oauth', headers: { Authorization: 'never sent to Claude' } }),
+      server({ id: 'signed-out', name: 'notion', transport: 'http', url: 'https://example.test/notion', authMode: 'oauth' }),
+      server({ id: 'empty', name: 'empty', transport: 'http', url: 'https://example.test/empty', authMode: 'oauth' })
+    ] })
+    const result = await claude.resolve('/project')
+    expect(result.mcpServers).toEqual({})
+    expect(result.env).toEqual({})
+    expect(Object.keys(result.proxiedServers)).toEqual(['linear'])
+    expect(mcpManager.getEnabledToolsForServer).toHaveBeenCalledWith('install-1', '/project', actor)
+    expect(result.warnings).toEqual([
+      expect.stringContaining('notion was not attached: MCP server "notion" requires OAuth'),
+      expect.stringContaining('empty has no tools enabled')
+    ])
+
+    // Claude talks to the in-process server the SDK is given; its calls land on Mousse's manager.
+    const config = claudeProxiedMcpServer('linear', result.proxiedServers.linear)
+    expect(config).toMatchObject({ type: 'sdk', name: 'linear' })
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await (config.instance as unknown as Server).connect(serverSide)
+    const client = new Client({ name: 'claude', version: '1.0.0' })
+    await client.connect(clientSide)
+    expect((await client.listTools()).tools).toEqual([
+      { name: 'get', description: 'get an issue', inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
+      { name: 'search', description: 'search an issue', inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } }
+    ])
+    expect(await client.callTool({ name: 'get', arguments: { id: 'ISSUE-1' } })).toMatchObject({
+      isError: false,
+      content: [{ type: 'text', text: 'ISSUE-1: fix it' }, { type: 'image', data: 'aGk=', mimeType: 'image/png' }]
+    })
+    expect(mcpManager.callTool).toHaveBeenCalledWith('mcp__linear__get__abc', { id: 'ISSUE-1' }, '/project', expect.any(AbortSignal), actor)
+    expect(await client.callTool({ name: 'search', arguments: { id: 'x' } })).toMatchObject({ isError: true, content: [{ type: 'text', text: 'upstream is down' }] })
+    expect(await client.callTool({ name: 'delete', arguments: {} })).toMatchObject({ isError: true, content: [{ type: 'text', text: 'Unknown tool: delete' }] })
+    await client.close()
+  })
+
+  it('leaves an OAuth server out when Mousse\'s connections are not available', async () => {
+    const { resolver: claude } = resolver({ servers: [server({ name: 'oauth', transport: 'http', url: 'https://example.test/oauth', authMode: 'oauth' })] })
+    const result = await claude.resolve()
+    expect(result.proxiedServers).toEqual({})
+    expect(result.warnings).toEqual([expect.stringContaining('oauth signs in with OAuth through Mousse')])
   })
 
   it('packages enabled skills as a Claude plugin and reuses it until a skill changes', async () => {

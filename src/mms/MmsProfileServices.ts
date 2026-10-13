@@ -320,6 +320,7 @@ export class MmsProfileServices {
     this.orchestrator.setAntigravityProvider(this.antigravity)
     this.orchestrator.setClaudeSubscriptionProvider(this.claudeSubscription, new ClaudeIntegrationResolver({
       mcpRegistry: this.mcpRegistry,
+      mcpManager: this.mcpManager,
       skillsRegistry: this.skillsRegistry,
       settings: this.settings,
       secrets: this.integrationContext.secrets,
