@@ -22,7 +22,8 @@ and where the risk is. -->
 ## Verification
 
 <!-- Bullets: what you checked, what you saw, and what you could not check.
-"Tests pass" alone is not evidence. UI changes need before/after screenshots
+For a code change, include the local `npm test` result (files and tests passed) for the
+published commit. "Tests pass" alone is not evidence. UI changes need before/after screenshots
 uploaded to the PR. -->
 
 ## Notes
