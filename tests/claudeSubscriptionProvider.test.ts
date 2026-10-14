@@ -445,6 +445,25 @@ describe('Claude Subscription native provider', () => {
       messages.push(message)
     expect(messages[0].message.content).toBe('new guidance')
   })
+  it('resumes a steer when the SDK throws after the interrupted error result', async () => {
+    const queries: Query[] = []
+    const { service, home } = fixture(() => {
+      const q = fakeQuery([result])
+      if (!queries.length) {
+        q[Symbol.asyncIterator] = async function* () {
+          yield { type: 'system', subtype: 'init', session_id: 'vendor-session' } as never
+          await new Promise((resolve) => setTimeout(resolve, 120))
+          yield { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['interrupted'], session_id: 'vendor-session' } as never
+          throw new Error('Claude Code returned an error result: interrupted')
+        }
+      }
+      queries.push(q)
+      return q
+    })
+    const drainSteer = vi.fn().mockReturnValueOnce('new guidance').mockReturnValue(undefined)
+    expect(await service.chat({ ...chatInput(home), drainSteer })).toBe('hello')
+    expect(queries).toHaveLength(2)
+  })
   it('keeps nested agent text and thinking out of the main reply', async () => {
     const { service, home } = fixture(() => fakeQuery([
       { type: 'stream_event', parent_tool_use_id: 'nested', session_id: 'vendor-session', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'nested secret answer' } } },
