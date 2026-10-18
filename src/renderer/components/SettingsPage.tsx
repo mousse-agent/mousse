@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
-import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Palette, Plug, Plus, Radio, RefreshCw, Server, Sparkles, Trash2, User, Wrench } from '../lib/icons'
+import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Palette, Plug, Plus, Radio, RefreshCw, Server, Sparkles, Trash2, User, VolumeHigh, Wrench } from '../lib/icons'
 import type {
   AgentTypeId,
   MousseSettings,
@@ -22,6 +22,7 @@ import { ClaudeSubscriptionPanel } from './ClaudeSubscriptionPanel'
 import { CodexStatusPanel } from './CodexStatusPanel'
 import { ModelFamilySettingsFields } from './ModelFamilySettingsFields'
 import { ProfileSection } from './ProfileSection'
+import { ReadAloudSettings } from '../readAloud/ReadAloudSettings'
 import { NetDevicesSection } from './NetDevicesSection'
 import { StorageSettings } from './StorageSettings'
 import { IntegrationsWorkspace } from './integrations'
@@ -1212,6 +1213,14 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
               )}
             </>
           )}
+
+          <SectionHeading
+            icon={VolumeHigh}
+            title="Read Aloud Model"
+            className="settings-subsection-heading"
+            description="The voice used by the read aloud button under each message. Provider models need a configured provider; local models run on this computer."
+          />
+          <ReadAloudSettings />
         </section>
           )}
 

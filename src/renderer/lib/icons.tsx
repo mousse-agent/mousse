@@ -126,6 +126,7 @@ import UserCircleIcon from '@hugeicons/core-free-icons/UserCircleIcon'
 import UserGroupIcon from '@hugeicons/core-free-icons/UserGroupIcon'
 import UserIcon from '@hugeicons/core-free-icons/UserIcon'
 import ViewIcon from '@hugeicons/core-free-icons/ViewIcon'
+import VolumeHighIcon from '@hugeicons/core-free-icons/VolumeHighIcon'
 import WebhookIcon from '@hugeicons/core-free-icons/WebhookIcon'
 import WorkflowSquare01Icon from '@hugeicons/core-free-icons/WorkflowSquare01Icon'
 import Wrench01Icon from '@hugeicons/core-free-icons/Wrench01Icon'
@@ -286,6 +287,7 @@ export const Logout = /* @__PURE__ */ createIcon('Logout', Logout01Icon)
 export const MessageQuestion = /* @__PURE__ */ createIcon('MessageQuestion', BubbleChatQuestionIcon)
 export const Image = /* @__PURE__ */ createIcon('Image', Image01Icon)
 export const Stop = /* @__PURE__ */ createIcon('Stop', StopIcon)
+export const VolumeHigh = /* @__PURE__ */ createIcon('VolumeHigh', VolumeHighIcon)
 export const ArchiveRestore = /* @__PURE__ */ createIcon('ArchiveRestore', ArchiveRestoreIcon)
 export const Clean = /* @__PURE__ */ createIcon('Clean', CleanIcon)
 export const Cookie = /* @__PURE__ */ createIcon('Cookie', CookieIcon)
