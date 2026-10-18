@@ -41,6 +41,7 @@ import {
 import { PromptUndoButton } from "../../../components/PromptUndoControls";
 import { TurnEditSummary } from "./turn-edit-summary";
 import { SpiralLoader } from "./spiral-loader";
+import { ReadAloudButton, useIsReadingAloud } from "../../../readAloud/ReadAloudButton";
 import { useVisiblePromptIds } from "./use-visible-prompt-ids";
 import "../../../styles/prompt-visibility.css";
 
@@ -469,6 +470,7 @@ function MessageToolbar({
   onCopied,
   undoMessageId,
   metadata,
+  speechKey,
 }: {
   text?: string;
   timestamp?: string;
@@ -479,11 +481,14 @@ function MessageToolbar({
   onCopied?: () => void;
   undoMessageId?: string;
   metadata?: ResponseMetadata;
+  /** Identifies the message for read aloud; the button shows only with text. */
+  speechKey?: string;
 }) {
   const [metadataOpen, setMetadataOpen] = useState(false);
+  const reading = useIsReadingAloud(speechKey);
   // Keep the toolbar interactive while the popup is open — otherwise the
   // hover-gated opacity hides the popup the moment the cursor leaves.
-  const visible = isVisible || metadataOpen;
+  const visible = isVisible || metadataOpen || reading;
   return (
     <div
       className={cn(
@@ -498,6 +503,7 @@ function MessageToolbar({
     >
       {timestamp && <span>{timestamp}</span>}
       {undoMessageId && <PromptUndoButton messageId={undoMessageId} />}
+      {text && speechKey && <ReadAloudButton speechKey={speechKey} markdown={text} />}
       {text && <CopyButton text={text} onCopied={onCopied} />}
       {metadata && (
         <span onPointerDown={(event) => event.stopPropagation()}>
@@ -1276,6 +1282,7 @@ export const MessageList = memo(function MessageList({
                             alignClass="justify-end"
                             onCopied={() => markCopied(userCopyKey)}
                             undoMessageId={turn.userMsg.id}
+                            speechKey={userCopyKey}
                           />
                         )}
                       </div>
@@ -1431,6 +1438,7 @@ export const MessageList = memo(function MessageList({
                             alignClass="justify-start"
                             onCopied={() => markCopied(copyKey)}
                             metadata={turnMetadata}
+                            speechKey={copyKey}
                           />
                         ) : activeCopyId === copyKey ? (
                           <MessageToolbar
@@ -1441,6 +1449,7 @@ export const MessageList = memo(function MessageList({
                             alignClass="justify-start"
                             onCopied={() => markCopied(copyKey)}
                             metadata={turnMetadata}
+                            speechKey={copyKey}
                           />
                         ) : null}
                       </div>
