@@ -2466,6 +2466,18 @@ html.platform-darwin .titlebar-left {
   animation: composer-recording-pulse 1.5s ease-in-out infinite;
 }
 
+.composer-attachment-pill-transcribing {
+  color: var(--text-secondary);
+}
+
+.composer-transcribing-spin {
+  animation: composer-transcribing-spin 0.9s linear infinite;
+}
+
+@keyframes composer-transcribing-spin {
+  to { transform: rotate(360deg); }
+}
+
 .composer-attachment-remove {
   display: inline-flex;
   align-items: center;

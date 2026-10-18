@@ -76,6 +76,7 @@
   },
   "devDependencies": {
     "@fluentui/react-icons": "^2.0.334",
+    "@huggingface/transformers": "3.8.1",
     "@monaco-editor/react": "^4.7.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^24.13.5",

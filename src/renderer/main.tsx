@@ -6,6 +6,7 @@ import { applyAppearance, useTheme } from './hooks/useTheme'
 import { getDefaultSettings } from '../shared/settings'
 import { useAppStore } from './stores/appStore'
 import { AppTooltip } from './components/AppTooltip'
+import { DictationHost } from './dictation/DictationModal'
 import { ReadAloudHost } from './readAloud/ReadAloudModal'
 import './styles/global.css'
 import './styles/compact-shell.css'
@@ -39,6 +40,7 @@ function Root() {
       <App />
       {profileReady && <ProfilePages />}
       {profileReady && <ReadAloudHost />}
+      {profileReady && <DictationHost />}
       <AppTooltip />
     </>
   )
