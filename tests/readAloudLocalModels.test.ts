@@ -4,7 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { LocalTtsModelManager } from '../src/main/readAloud/localTtsModels'
+import { LocalModelManager } from '../src/main/localModels/LocalModelManager'
 import { localTtsFileUrl, type LocalTtsModel, type LocalTtsModelStatus } from '../src/shared/readAloud'
 
 const sha = (data: Uint8Array | string): string => createHash('sha256').update(data).digest('hex')
@@ -58,12 +58,12 @@ function listFiles(dir: string): string[] {
   )
 }
 
-describe('LocalTtsModelManager', () => {
+describe('LocalModelManager with a text-to-speech manifest', () => {
   it('downloads, verifies, marks complete, and serves manifest files', async () => {
     const model = fakeModel()
     const rootDir = tempRoot()
     const events: LocalTtsModelStatus[] = []
-    const manager = new LocalTtsModelManager({
+    const manager = new LocalModelManager({
       rootDir,
       models: [model],
       fetchImpl: servedFetch(model, { 'config.json': CONFIG, 'onnx/model.onnx': WEIGHTS }),
@@ -94,7 +94,7 @@ describe('LocalTtsModelManager', () => {
   it('reports an error and keeps no final file when the checksum does not match', async () => {
     const model = fakeModel({ weightsSha: sha('something else') })
     const rootDir = tempRoot()
-    const manager = new LocalTtsModelManager({
+    const manager = new LocalModelManager({
       rootDir,
       models: [model],
       fetchImpl: servedFetch(model, { 'config.json': CONFIG, 'onnx/model.onnx': WEIGHTS })
@@ -111,7 +111,7 @@ describe('LocalTtsModelManager', () => {
 
   it('reports an error when the server sends the wrong number of bytes', async () => {
     const model = fakeModel()
-    const manager = new LocalTtsModelManager({
+    const manager = new LocalModelManager({
       rootDir: tempRoot(),
       models: [model],
       fetchImpl: servedFetch(model, { 'config.json': CONFIG, 'onnx/model.onnx': WEIGHTS.slice(0, 100) })
@@ -136,7 +136,7 @@ describe('LocalTtsModelManager', () => {
       })
       return new Response(stream)
     }) as typeof fetch
-    const manager = new LocalTtsModelManager({ rootDir, models: [model], fetchImpl: stallingFetch })
+    const manager = new LocalModelManager({ rootDir, models: [model], fetchImpl: stallingFetch })
     const pending = manager.download('kokoro-82m')
     await reachedBody
     manager.cancel('kokoro-82m')
@@ -154,7 +154,7 @@ describe('LocalTtsModelManager', () => {
     await writeFile(join(dir, 'onnx', 'model.onnx'), new Uint8Array(WEIGHTS.byteLength))
     const requested: string[] = []
     const inner = servedFetch(model, { 'config.json': CONFIG, 'onnx/model.onnx': WEIGHTS })
-    const manager = new LocalTtsModelManager({
+    const manager = new LocalModelManager({
       rootDir,
       models: [model],
       fetchImpl: ((input, init) => { requested.push(String(input)); return inner(input, init) }) as typeof fetch
@@ -172,14 +172,14 @@ describe('LocalTtsModelManager', () => {
     await writeFile(join(dir, 'config.json'), CONFIG)
     await writeFile(join(dir, 'onnx', 'model.onnx'), WEIGHTS.slice(0, 10))
     await writeFile(join(dir, '.complete'), '{}')
-    const manager = new LocalTtsModelManager({ rootDir, models: [model] })
+    const manager = new LocalModelManager({ rootDir, models: [model] })
     expect((await manager.status('kokoro-82m')).state).toEqual({ status: 'not-downloaded' })
   })
 
   it('only reads manifest files from a downloaded model', async () => {
     const model = fakeModel()
     const rootDir = tempRoot()
-    const manager = new LocalTtsModelManager({
+    const manager = new LocalModelManager({
       rootDir,
       models: [model],
       fetchImpl: servedFetch(model, { 'config.json': CONFIG, 'onnx/model.onnx': WEIGHTS })
@@ -189,7 +189,7 @@ describe('LocalTtsModelManager', () => {
     for (const bad of ['../abc123/config.json', '../../secret', '/etc/passwd', 'onnx/../config.json', '.complete', 'missing.bin', '']) {
       await expect(manager.readFile('kokoro-82m', bad)).rejects.toThrow(/no file named/)
     }
-    await expect(manager.readFile('nope', 'config.json')).rejects.toThrow(/Unknown text-to-speech model/)
+    await expect(manager.readFile('nope', 'config.json')).rejects.toThrow(/Unknown local model/)
     expect(Buffer.from(await manager.readFile('kokoro-82m', 'config.json')).equals(Buffer.from(CONFIG))).toBe(true)
   })
 
@@ -197,7 +197,7 @@ describe('LocalTtsModelManager', () => {
     const model = fakeModel()
     const rootDir = tempRoot()
     const events: LocalTtsModelStatus[] = []
-    const manager = new LocalTtsModelManager({
+    const manager = new LocalModelManager({
       rootDir,
       models: [model],
       fetchImpl: servedFetch(model, { 'config.json': CONFIG, 'onnx/model.onnx': WEIGHTS }),
@@ -214,7 +214,7 @@ describe('LocalTtsModelManager', () => {
     expect(existsSync(join(rootDir, 'other-model.txt'))).toBe(true)
     expect((await manager.status('kokoro-82m')).state).toEqual({ status: 'not-downloaded' })
     await expect(manager.readFile('kokoro-82m', 'config.json')).rejects.toThrow(/not downloaded/)
-    await expect(manager.delete('nope')).rejects.toThrow(/Unknown text-to-speech model/)
+    await expect(manager.delete('nope')).rejects.toThrow(/Unknown local model/)
   })
 
   it('cancels a running download when the model is deleted', async () => {
@@ -232,7 +232,7 @@ describe('LocalTtsModelManager', () => {
       })
       return new Response(stream)
     }) as typeof fetch
-    const manager = new LocalTtsModelManager({ rootDir, models: [model], fetchImpl: stallingFetch })
+    const manager = new LocalModelManager({ rootDir, models: [model], fetchImpl: stallingFetch })
     const pending = manager.download('kokoro-82m')
     await reachedBody
     expect((await manager.delete('kokoro-82m')).state).toEqual({ status: 'not-downloaded' })
@@ -241,8 +241,8 @@ describe('LocalTtsModelManager', () => {
   })
 
   it('rejects unknown model ids', () => {
-    const manager = new LocalTtsModelManager({ rootDir: tempRoot(), models: [fakeModel()] })
-    expect(() => manager.download('nope')).toThrow(/Unknown text-to-speech model/)
-    expect(() => manager.cancel('nope')).toThrow(/Unknown text-to-speech model/)
+    const manager = new LocalModelManager({ rootDir: tempRoot(), models: [fakeModel()] })
+    expect(() => manager.download('nope')).toThrow(/Unknown local model/)
+    expect(() => manager.cancel('nope')).toThrow(/Unknown local model/)
   })
 })

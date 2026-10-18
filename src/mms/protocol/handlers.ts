@@ -20,6 +20,7 @@ import type { RunOutcome } from '../run/types'
 import { CommandRejection } from '../run/db/RunStoreError'
 import { EFFECT_PAGE_MAX } from '../run/EffectOutbox'
 import { evaluateRestore, restoreDiff, restoreDiffSha, worktreeClaims, type WorkspaceClaim } from '../run/workspace/restoreSafety'
+import { PROVIDER_STT_MAX_BYTES } from '../../shared/dictation'
 import { PROVIDER_TTS_MAX_CHARS } from '../../shared/readAloud'
 import type { ThreadAction } from '../../shared/threadActions'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
@@ -1613,6 +1614,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const text = asString(p.text, 'text', PROVIDER_TTS_MAX_CHARS)
       const { audio, mimeType } = await ctx.mms.providerAuth.synthesizeSpeech({ providerId, modelId, text })
       return { audioBase64: Buffer.from(audio).toString('base64'), mimeType }
+    }
+    case 'providers.transcribeAudio': {
+      const p = isObject(params) ? params : {}
+      const providerId = asString(p.providerId, 'providerId', 128)
+      const modelId = asString(p.modelId, 'modelId', 256)
+      const mimeType = asString(p.mimeType, 'mimeType', 128)
+      if (!mimeType.startsWith('audio/')) throw new Error('mimeType must be an audio type')
+      if (typeof p.audioBase64 !== 'string') throw new Error('audioBase64 must be a string')
+      const audio = Buffer.from(p.audioBase64, 'base64')
+      if (audio.byteLength === 0) throw new Error('The recording is empty')
+      if (audio.byteLength > PROVIDER_STT_MAX_BYTES) {
+        throw new Error(`The recording is too long to transcribe with ${ctx.mms.providerAuth.getProviderDisplayName(providerId)}. Record a shorter message.`)
+      }
+      const { text } = await ctx.mms.providerAuth.transcribeAudio({ providerId, modelId, audio, mimeType })
+      return { text }
     }
     case 'providers.getLoginOptions': {
       const p = isObject(params) ? params : {}
