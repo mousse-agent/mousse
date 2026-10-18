@@ -272,6 +272,24 @@ describe('CodexProviderService', () => {
     expect(server.methods().filter((method) => method?.startsWith('account/login'))).toEqual([])
   })
 
+  it('closes the idle process, keeps Codex listed, and starts a new one on the next use', async () => {
+    const server = scriptedServer((message) => (message.method === 'account/read' ? chatgpt : { result: { data: [], nextCursor: null } }))
+    mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
+    writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }] }))
+    const service = new CodexProviderService(home, questions, { launch: server.launch, idleCloseMs: 20 })
+    services.push(service)
+    await service.status()
+    expect(server.processes[0].signalCode).toBeNull()
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(server.processes[0].signalCode).toBe('SIGTERM')
+    expect(service.configured()).toBe(true)
+    expect(service.llmProvider()?.models).toEqual([{ id: 'gpt-x', label: 'GPT X' }])
+
+    expect(await service.status({ force: true })).toMatchObject({ state: 'connected' })
+    expect(server.launches).toHaveLength(2)
+    expect(server.processes[1].signalCode).toBeNull()
+  })
+
   it('reports a missing binary without starting anything', async () => {
     const server = scriptedServer(() => chatgpt)
     const service = new CodexProviderService(home, questions, { launch: server.launch, findBinary: () => undefined })
