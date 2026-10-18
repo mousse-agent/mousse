@@ -8,8 +8,16 @@ interface Pending {
   reject: (error: Error) => void
 }
 
+/**
+ * The loaded model holds WebAssembly memory that is only returned when the worker ends, so the
+ * worker is shut down when dictation has been idle for a while. Loading it again takes about a second.
+ */
+const IDLE_DISPOSE_MS = 30_000
+
 let worker: Worker | null = null
 let lastRequestId = 0
+let activeTranscriptions = 0
+let idleTimer: ReturnType<typeof setTimeout> | null = null
 const pending = new Map<number, Pending>()
 
 function failAll(error: Error): void {
@@ -39,8 +47,22 @@ function ensureWorker(): Worker {
   return created
 }
 
-/** Drops the loaded model, e.g. after its files were deleted. */
+function cancelIdleDispose(): void {
+  if (idleTimer) clearTimeout(idleTimer)
+  idleTimer = null
+}
+
+function scheduleIdleDispose(): void {
+  cancelIdleDispose()
+  idleTimer = setTimeout(() => {
+    idleTimer = null
+    if (activeTranscriptions === 0) disposeLocalEngine()
+  }, IDLE_DISPOSE_MS)
+}
+
+/** Drops the loaded model, e.g. after its files were deleted or when it has been idle. */
 export function disposeLocalEngine(): void {
+  cancelIdleDispose()
   worker?.terminate()
   worker = null
   failAll(new Error('The local speech engine was stopped'))
@@ -59,13 +81,20 @@ function transcribeSegment(samples: Float32Array): Promise<string> {
 
 /** Transcribes a recording with the local Moonshine model, one segment at a time. */
 export async function transcribeWithLocalModel(recording: Blob): Promise<string> {
-  const samples = await decodeRecording(recording, MOONSHINE_BASE.sampleRate)
-  const minSamples = Math.ceil(MIN_SEGMENT_SECONDS * MOONSHINE_BASE.sampleRate)
-  const parts: string[] = []
-  for (const segment of splitIntoSegments(samples, MOONSHINE_BASE.sampleRate, MOONSHINE_BASE.maxSegmentSeconds)) {
-    if (segment.length < minSamples) continue
-    const text = await transcribeSegment(segment)
-    if (text) parts.push(text)
+  cancelIdleDispose()
+  activeTranscriptions++
+  try {
+    const samples = await decodeRecording(recording, MOONSHINE_BASE.sampleRate)
+    const minSamples = Math.ceil(MIN_SEGMENT_SECONDS * MOONSHINE_BASE.sampleRate)
+    const parts: string[] = []
+    for (const segment of splitIntoSegments(samples, MOONSHINE_BASE.sampleRate, MOONSHINE_BASE.maxSegmentSeconds)) {
+      if (segment.length < minSamples) continue
+      const text = await transcribeSegment(segment)
+      if (text) parts.push(text)
+    }
+    return parts.join(' ')
+  } finally {
+    activeTranscriptions--
+    if (activeTranscriptions === 0) scheduleIdleDispose()
   }
-  return parts.join(' ')
 }
