@@ -20,6 +20,7 @@ import type { RunOutcome } from '../run/types'
 import { CommandRejection } from '../run/db/RunStoreError'
 import { EFFECT_PAGE_MAX } from '../run/EffectOutbox'
 import { evaluateRestore, restoreDiff, restoreDiffSha, worktreeClaims, type WorkspaceClaim } from '../run/workspace/restoreSafety'
+import { PROVIDER_TTS_MAX_CHARS } from '../../shared/readAloud'
 import type { ThreadAction } from '../../shared/threadActions'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 import type { ChatMessage, NativeLlmContext, OrchestratorSendInput, OrchestratorSendRequest } from '../../shared/types'
@@ -1604,6 +1605,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
       return { usage: await ctx.mms.providerAuth.getSubscriptionUsage(providerId) }
+    }
+    case 'providers.synthesizeSpeech': {
+      const p = isObject(params) ? params : {}
+      const providerId = asString(p.providerId, 'providerId', 128)
+      const modelId = asString(p.modelId, 'modelId', 256)
+      const text = asString(p.text, 'text', PROVIDER_TTS_MAX_CHARS)
+      const { audio, mimeType } = await ctx.mms.providerAuth.synthesizeSpeech({ providerId, modelId, text })
+      return { audioBase64: Buffer.from(audio).toString('base64'), mimeType }
     }
     case 'providers.getLoginOptions': {
       const p = isObject(params) ? params : {}

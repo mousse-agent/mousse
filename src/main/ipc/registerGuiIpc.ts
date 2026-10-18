@@ -37,6 +37,8 @@ import { domainObject } from '../../mms/protocol/domainRegistry'
 import { profileBrowserPartition } from '../browser/browserPolicy'
 import { ThreadActivityTracker } from '../data/ThreadActivityTracker'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
+import type { ProviderSpeechRequest, ProviderSpeechResult } from '../../shared/readAloud'
+import { LocalTtsModelManager } from '../readAloud/localTtsModels'
 import type { PlatformRequestMethod, PlatformResponse } from '../../shared/platform'
 import { WORKFLOW_RUN_METHODS } from '../../shared/workflowRunPlatform'
 import { BROWSER_GUI_METHODS } from '../../shared/browser/host'
@@ -1937,6 +1939,31 @@ export function registerGuiIpc(
     })
     broadcast('providers:changed', res.providers)
   })
+
+  // Read aloud. Local model state is installation-wide, so every window hears about it.
+  const localTtsModels = new LocalTtsModelManager({
+    onStatus: (status) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send('readAloud:localModelStatus', status)
+      }
+    }
+  })
+  registerHandler('readAloud:localModels', () => localTtsModels.list())
+  registerHandler('readAloud:downloadLocalModel', (_e, modelId: string) => localTtsModels.download(modelId))
+  registerHandler('readAloud:cancelLocalModelDownload', (_e, modelId: string) => localTtsModels.cancel(modelId))
+  registerHandler('readAloud:deleteLocalModel', (_e, modelId: string) => localTtsModels.delete(modelId))
+  registerHandler('readAloud:readLocalModelFile', (_e, modelId: string, path: string) =>
+    localTtsModels.readFile(modelId, path)
+  )
+  registerHandler('readAloud:synthesizeWithProvider', async (_e, request: ProviderSpeechRequest): Promise<ProviderSpeechResult> => {
+    const res = await guiMms.request<{ audioBase64: string; mimeType: string }>('providers.synthesizeSpeech', {
+      providerId: request?.providerId,
+      modelId: request?.modelId,
+      text: request?.text
+    })
+    return { audio: Buffer.from(res.audioBase64, 'base64'), mimeType: res.mimeType }
+  })
+
   registerHandler('webTools:getCredentialStatus', async () => {
     const res = await guiMms.request<{ credentials: { exa: boolean; parallel: boolean } }>(
       'webTools.getCredentialStatus'
