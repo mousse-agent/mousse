@@ -11,9 +11,16 @@ import { splitSpeechChunks } from './speechText'
 const POOL_SIZE = 2
 /** Short segments keep the wait before the first audio low. */
 const SEGMENT_CHARS = 120
+/**
+ * A loaded worker holds about 500 MB of WebAssembly memory that is only returned when the worker
+ * ends, so the pool is shut down shortly after the last playback.
+ */
+const IDLE_DISPOSE_MS = 15_000
 
 let pool: Worker[] = []
 let lastRequestId = 0
+let activeSessions = 0
+let idleTimer: ReturnType<typeof setTimeout> | null = null
 
 function send(target: Worker, message: KokoroWorkerRequest, transfer: Transferable[] = []): void {
   target.postMessage(message, transfer)
@@ -38,13 +45,28 @@ function createWorker(): Worker {
   return created
 }
 
-function ensurePool(): Worker[] {
-  if (pool.length === 0) pool = Array.from({ length: POOL_SIZE }, createWorker)
-  return pool
+/** Starts workers up to `size`; a one-segment message needs only one. */
+function ensurePool(size: number): Worker[] {
+  while (pool.length < size) pool.push(createWorker())
+  return pool.slice(0, size)
 }
 
-/** Drops the loaded model, e.g. after its files were deleted. */
+function cancelIdleDispose(): void {
+  if (idleTimer) clearTimeout(idleTimer)
+  idleTimer = null
+}
+
+function scheduleIdleDispose(): void {
+  cancelIdleDispose()
+  idleTimer = setTimeout(() => {
+    idleTimer = null
+    if (activeSessions === 0) disposeLocalEngine()
+  }, IDLE_DISPOSE_MS)
+}
+
+/** Drops the loaded model, e.g. after its files were deleted or when it has been idle. */
 export function disposeLocalEngine(): void {
+  cancelIdleDispose()
   for (const worker of pool) worker.terminate()
   pool = []
 }
@@ -61,7 +83,9 @@ export function speakWithLocalModel(text: string, { signal, onPlaying }: SpeakOp
     if (signal.aborted) return resolve()
     const segments = splitSpeechChunks(text, SEGMENT_CHARS)
     if (segments.length === 0) return resolve()
-    const workers = ensurePool()
+    cancelIdleDispose()
+    activeSessions++
+    const workers = ensurePool(Math.min(POOL_SIZE, segments.length))
     const context = new AudioContext()
     void context.resume().catch(() => undefined)
     const states: SegmentState[] = segments.map(() => ({ chunks: [], scheduled: 0, done: false }))
@@ -77,6 +101,8 @@ export function speakWithLocalModel(text: string, { signal, onPlaying }: SpeakOp
     const settle = (error?: Error): void => {
       if (settled) return
       settled = true
+      activeSessions--
+      if (activeSessions === 0) scheduleIdleDispose()
       for (const worker of workers) {
         worker.removeEventListener('message', onMessage)
         worker.removeEventListener('error', onWorkerError)
