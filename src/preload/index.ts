@@ -822,6 +822,9 @@ const api = {
       ipcRenderer.invoke('readAloud:downloadLocalModel', modelId),
     cancelLocalModelDownload: (modelId: LocalTtsModelId): Promise<void> =>
       ipcRenderer.invoke('readAloud:cancelLocalModelDownload', modelId),
+    /** Removes a downloaded local model's files; resolves with its new (not-downloaded) state. */
+    deleteLocalModel: (modelId: LocalTtsModelId): Promise<LocalTtsModelStatus> =>
+      ipcRenderer.invoke('readAloud:deleteLocalModel', modelId),
     /** Bytes of one file of a downloaded local model. */
     readLocalModelFile: (modelId: LocalTtsModelId, path: string): Promise<Uint8Array> =>
       ipcRenderer.invoke('readAloud:readLocalModelFile', modelId, path),
