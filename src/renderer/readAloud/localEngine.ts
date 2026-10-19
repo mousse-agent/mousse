@@ -16,9 +16,10 @@ const POOL_SIZE = 2
 const LOOKAHEAD_SEGMENTS = 8
 /**
  * A loaded worker holds about 500 MB of WebAssembly memory that is only returned when the worker
- * ends, so the pool is shut down shortly after the last playback.
+ * ends, so the pool is shut down after the last playback. The delay is long enough that reading
+ * the next paragraph does not pay for loading the model again.
  */
-const IDLE_DISPOSE_MS = 15_000
+const IDLE_DISPOSE_MS = 5 * 60_000
 
 let pool: Worker[] = []
 let lastRequestId = 0
