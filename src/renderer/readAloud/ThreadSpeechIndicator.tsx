@@ -10,6 +10,7 @@ export function useSpeakingThreadId(): string | null {
 /** Pause or resume button and sound wave shown in the threads sidebar beside the speaking thread. */
 export function ThreadSpeechIndicator() {
   const paused = useReadAloudStore((state) => state.status === 'paused')
+  const levels = useReadAloudStore((state) => state.levels)
   const togglePause = useReadAloudStore((state) => state.togglePause)
   const label = paused ? 'Resume reading aloud' : 'Pause reading aloud'
   return (
@@ -26,7 +27,7 @@ export function ThreadSpeechIndicator() {
       >
         {paused ? <Play size={11} strokeWidth={2.2} aria-hidden="true" /> : <Pause size={11} strokeWidth={2.2} aria-hidden="true" />}
       </button>
-      <SpeechWave paused={paused} />
+      <SpeechWave levels={levels} paused={paused} />
     </span>
   )
 }

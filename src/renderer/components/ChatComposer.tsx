@@ -478,7 +478,7 @@ export function ChatComposer({
                 aria-label={`Recording ${formatDuration(recordingDuration)}`}
               >
                 <Mic size={12} strokeWidth={2} />
-                <SpeechWave />
+                <SpeechWave levels={dictation.levels} />
                 <span>{formatDuration(recordingDuration)}</span>
               </div>
             )}

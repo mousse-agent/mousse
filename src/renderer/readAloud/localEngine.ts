@@ -2,6 +2,7 @@ import { KOKORO_82M } from '../../shared/readAloud'
 import type { KokoroWorkerEvent, KokoroWorkerRequest } from './kokoroWorker'
 import { CLIP_GAP_SECONDS, MAX_START_DELAY_SECONDS, startDelaySeconds, trimSilence, type SegmentTiming } from './localPlayback'
 import type { SpeakOptions } from './playback'
+import { createLevelMeter } from '../speech/audioLevels'
 import { serveModelFiles } from '../speechModels/pageSupport'
 import { splitSpeechSegments } from './speechText'
 
@@ -67,7 +68,7 @@ interface SegmentState extends SegmentTiming {
 const seconds = (): number => performance.now() / 1000
 
 /** Speaks `text` with the local Kokoro model. Resolves when playback ends or is aborted. */
-export function speakWithLocalModel(text: string, { signal, onPlaying, voice, speed, pause }: SpeakOptions): Promise<void> {
+export function speakWithLocalModel(text: string, { signal, onPlaying, voice, speed, pause, onLevels }: SpeakOptions): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) return resolve()
     const segments = splitSpeechSegments(text)
@@ -78,6 +79,9 @@ export function speakWithLocalModel(text: string, { signal, onPlaying, voice, sp
     const context = new AudioContext()
     if (pause.paused) void context.suspend().catch(() => undefined)
     else void context.resume().catch(() => undefined)
+    const meter = createLevelMeter(context)
+    meter.analyser.connect(context.destination)
+    onLevels(meter.levels)
     const states: SegmentState[] = segments.map((segment) => ({ chars: segment.length }))
     const inFlight = new Map<number, { index: number; worker: Worker }>()
     const busy = new Set<Worker>()
@@ -141,7 +145,7 @@ export function speakWithLocalModel(text: string, { signal, onPlaying, voice, sp
       buffer.copyToChannel(audio.samples as Float32Array<ArrayBuffer>, 0)
       const source = context.createBufferSource()
       source.buffer = buffer
-      source.connect(context.destination)
+      source.connect(meter.analyser)
       const startAt = Math.max(nextStart, context.currentTime + 0.05)
       nextStart = startAt + buffer.duration + CLIP_GAP_SECONDS
       sources.add(source)

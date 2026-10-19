@@ -4,21 +4,29 @@ import {
   providerTtsVoices,
   type ReadAloudSelection
 } from '../../shared/readAloud'
+import { Play, Stop } from '../lib/icons'
 import { useReadAloudStore } from '../readAloud/readAloudStore'
 import { useAppStore } from '../stores/appStore'
 import { SPEECH_SPEEDS, useSpeechPreferences, voiceFor } from './speechPreferences'
+import { VoiceCarousel, type VoiceOption } from './VoiceCarousel'
 import '../styles/speech.css'
 
 const PREVIEW_KEY = 'speech-settings-preview'
 const PREVIEW_TEXT =
   'This is how messages sound when they are read aloud. You can change the voice and the speed at any time.'
 
-function voiceOptions(selection: ReadAloudSelection): { id: string; label: string }[] {
-  if (selection.source === 'local') return [...(findLocalTtsModel(selection.modelId)?.voices ?? [])]
-  return providerTtsVoices(selection.providerId, selection.modelId).map((voice) => ({
-    id: voice,
-    label: voice
-  }))
+function voiceOptions(selection: ReadAloudSelection): VoiceOption[] {
+  if (selection.source === 'local') {
+    // Kokoro labels read "Heart, American female".
+    return (findLocalTtsModel(selection.modelId)?.voices ?? []).map((voice, index) => {
+      const [name, detail = ''] = voice.label.split(', ')
+      return { id: voice.id, name, detail, index }
+    })
+  }
+  return providerTtsVoices(selection.providerId, selection.modelId).map((voice) => {
+    const name = voice.replace(/-PlayAI$/, '')
+    return { id: voice, name: name.charAt(0).toUpperCase() + name.slice(1), detail: '' }
+  })
 }
 
 const formatSpeed = (speed: number): string => `${speed}×`
@@ -34,7 +42,11 @@ export function ReadAloudSpeechSettings() {
   const previewError = useReadAloudStore((state) =>
     state.error?.key === PREVIEW_KEY ? state.error.message : null
   )
+  const previewLevels = useReadAloudStore((state) =>
+    state.activeKey === PREVIEW_KEY ? state.levels : null
+  )
   const toggle = useReadAloudStore((state) => state.toggle)
+  const stop = useReadAloudStore((state) => state.stop)
   const preferences = useSpeechPreferences((state) => state.preferences)
   const syncPreferences = useSpeechPreferences((state) => state.syncProfile)
   const setSpeed = useSpeechPreferences((state) => state.setSpeed)
@@ -47,6 +59,17 @@ export function ReadAloudSpeechSettings() {
 
   const voices = selection ? voiceOptions(selection) : []
   const voice = selection ? voiceFor(preferences, selection) : undefined
+  const playSample = (): void => toggle(PREVIEW_KEY, PREVIEW_TEXT, { inThread: false })
+
+  const chooseVoice = (voiceId: string): void => {
+    if (!selection) return
+    setVoice(selection, voiceId)
+    // A sample that is playing switches to the new voice.
+    if (previewing) {
+      stop()
+      playSample()
+    }
+  }
 
   return (
     <>
@@ -78,40 +101,38 @@ export function ReadAloudSpeechSettings() {
 
         <div className="registry-control-row speech-setting">
           <div className="registry-control-text">
-            <label className="registry-control-label" htmlFor="speech-voice">
+            <span className="registry-control-label" id="speech-voice-label">
               Voice
-            </label>
+            </span>
             <span className="registry-control-hint">
               {selection
                 ? `Voices of ${selection.label}. Each read aloud model keeps its own choice.`
                 : 'Choose a read aloud model under Models to pick its voice.'}
             </span>
           </div>
-          <div className="speech-voice-controls">
-            <select
-              id="speech-voice"
-              className="settings-select"
-              value={voice ?? ''}
-              disabled={!selection || voices.length === 0}
-              onChange={(event) => selection && setVoice(selection, event.target.value)}
-            >
-              {!selection && <option value="">No model selected</option>}
-              {voices.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              className="btn btn-sm"
-              disabled={!selection}
-              title={previewError ?? undefined}
-              onClick={() => toggle(PREVIEW_KEY, PREVIEW_TEXT, { inThread: false })}
-            >
-              {previewing ? 'Stop' : 'Play sample'}
-            </button>
-          </div>
+          {voices.length > 0 && (
+            <VoiceCarousel
+              voices={voices}
+              value={voice}
+              onSelect={chooseVoice}
+              label="Read aloud voice"
+              levels={previewLevels}
+            />
+          )}
+          <button
+            type="button"
+            className="btn btn-sm speech-sample-button"
+            disabled={!selection}
+            title={previewError ?? undefined}
+            onClick={playSample}
+          >
+            {previewing ? (
+              <Stop size={12} strokeWidth={2} aria-hidden="true" />
+            ) : (
+              <Play size={12} strokeWidth={2} aria-hidden="true" />
+            )}
+            {previewing ? 'Stop sample' : 'Play sample'}
+          </button>
         </div>
       </div>
       {previewError && (

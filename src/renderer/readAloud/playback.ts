@@ -1,3 +1,5 @@
+import type { AudioLevels } from '../speech/audioLevels'
+
 /** Pause state shared by the read aloud store and the engine that is playing. */
 export class PauseGate {
   private readonly listeners = new Set<(paused: boolean) => void>()
@@ -45,4 +47,6 @@ export interface SpeakOptions {
   /** Read for each piece of audio, so a change in Settings applies from the next piece. */
   speed: () => number
   pause: PauseGate
+  /** Receives the loudness of the audio as it plays, for the sound wave. */
+  onLevels: (levels: AudioLevels) => void
 }

@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import type { LocalTtsModelId, LocalTtsModelStatus, ReadAloudSelection } from '../../shared/readAloud'
 import { useAppStore } from '../stores/appStore'
+import { ipcErrorMessage } from '../utils/voiceErrors'
+import type { AudioLevels } from '../speech/audioLevels'
 import { currentSpeechPreferences, voiceFor } from '../speech/speechPreferences'
 import { disposeLocalEngine, speakWithLocalModel } from './localEngine'
 import { PauseGate, type SpeakOptions } from './playback'
@@ -27,6 +29,8 @@ interface ReadAloudState {
   /** Thread the speaking message belongs to, for the indicator in the threads sidebar. */
   threadId: string | null
   status: ReadAloudStatus
+  /** Loudness of the audio that is playing, for the sound wave. */
+  levels: AudioLevels | null
   error: { key: string; message: string } | null
   selection: ReadAloudSelection | null
   selectionProfileId: string | null
@@ -64,7 +68,7 @@ export const useReadAloudStore = create<ReadAloudState>((set, get) => {
   const endSession = (): void => {
     session?.controller.abort()
     session = null
-    set({ activeKey: null, threadId: null, status: 'idle' })
+    set({ activeKey: null, threadId: null, status: 'idle', levels: null })
   }
 
   const start = ({ key, text, threadId }: PendingRead, selection: ReadAloudSelection): void => {
@@ -79,7 +83,10 @@ export const useReadAloudStore = create<ReadAloudState>((set, get) => {
       },
       voice: voiceFor(currentSpeechPreferences(), selection),
       speed: () => currentSpeechPreferences().speed,
-      pause: mine.pause
+      pause: mine.pause,
+      onLevels: (levels) => {
+        if (session === mine) set({ levels })
+      }
     }
     const run =
       selection.source === 'local'
@@ -87,12 +94,12 @@ export const useReadAloudStore = create<ReadAloudState>((set, get) => {
         : speakWithProvider(selection.providerId, selection.modelId, text, options)
     run
       .catch((error: unknown) => {
-        if (session === mine) showError(key, error instanceof Error ? error.message : String(error))
+        if (session === mine) showError(key, ipcErrorMessage(error) || 'Read aloud failed')
       })
       .finally(() => {
         if (session !== mine) return
         session = null
-        set({ activeKey: null, threadId: null, status: 'idle' })
+        set({ activeKey: null, threadId: null, status: 'idle', levels: null })
       })
   }
 
@@ -100,6 +107,7 @@ export const useReadAloudStore = create<ReadAloudState>((set, get) => {
     activeKey: null,
     threadId: null,
     status: 'idle',
+    levels: null,
     error: null,
     selection: null,
     selectionProfileId: null,

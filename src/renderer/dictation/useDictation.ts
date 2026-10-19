@@ -5,6 +5,7 @@ import { normalizeTranscriptionError, normalizeVoiceError } from '../utils/voice
 import { currentSpeechPreferences } from '../speech/speechPreferences'
 import { useDictationStore } from './dictationStore'
 import { openMicrophone, type Microphone } from './microphone'
+import type { AudioLevels } from '../speech/audioLevels'
 import { transcribeRecording } from './transcribe'
 
 const NOTICE_VISIBLE_MS = 4000
@@ -39,6 +40,7 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
   const [recordingPending, setRecordingPending] = useState(false)
   const [transcribing, setTranscribing] = useState(false)
   const [recordingDuration, setRecordingDuration] = useState(0)
+  const [levels, setLevels] = useState<AudioLevels | null>(null)
   const [error, setError] = useState<AppErrorShape>()
   const [notice, setNotice] = useState<string | null>(null)
 
@@ -116,6 +118,7 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
       recordingChunksRef.current = []
       if (captureMounted.current && ticket === captureTicket.current) {
         setIsRecording(false)
+        setLevels(null)
         setError(normalizeVoiceError(failure))
       }
     }
@@ -127,6 +130,8 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
         return
       }
       captureMicrophone.current = microphone
+      const { levels: recordingLevels } = microphone
+      setLevels(() => recordingLevels)
       const recorder = new MediaRecorder(microphone.stream)
       recordingChunksRef.current = []
       mediaRecorderRef.current = recorder
@@ -141,6 +146,7 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
         mediaRecorderRef.current = null
         if (!captureMounted.current || ticket !== captureTicket.current) return
         setIsRecording(false)
+        setLevels(null)
         void transcribe(new Blob(recordingChunksRef.current, { type: recorder.mimeType || 'audio/webm' }), ticket)
       }
       recordingStartRef.current = Date.now()
@@ -181,6 +187,8 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
     recordingPending,
     transcribing,
     recordingDuration,
+    /** Loudness of the recording while it runs, for the sound wave. */
+    levels,
     error,
     dismissError: () => setError(undefined),
     notice,
