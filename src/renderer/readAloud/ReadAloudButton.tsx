@@ -34,7 +34,7 @@ export function ReadAloudButton({ speechKey, markdown }: { speechKey: string; ma
     >
       {status === 'loading' ? (
         <Loader2 className={cn(iconClass, 'animate-spin')} />
-      ) : status === 'playing' ? (
+      ) : status === 'playing' || status === 'paused' ? (
         <Stop className={iconClass} />
       ) : (
         <VolumeHigh className={iconClass} />

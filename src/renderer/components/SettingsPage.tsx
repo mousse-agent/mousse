@@ -24,6 +24,7 @@ import { ModelFamilySettingsFields } from './ModelFamilySettingsFields'
 import { ProfileSection } from './ProfileSection'
 import { DictationSettings } from '../dictation/DictationSettings'
 import { ReadAloudSettings } from '../readAloud/ReadAloudSettings'
+import { DictationSpeechSettings, ReadAloudSpeechSettings } from '../speech/SpeechSettings'
 import { NetDevicesSection } from './NetDevicesSection'
 import { StorageSettings } from './StorageSettings'
 import { IntegrationsWorkspace } from './integrations'
@@ -107,6 +108,7 @@ const SETTINGS_SECTIONS = [
   { id: 'storage', label: 'Storage & trash', icon: Trash2 },
   { id: 'providers', label: 'Providers', icon: Plug },
   { id: 'orchestrator', label: 'Models', icon: Cpu },
+  { id: 'speech', label: 'Speech', icon: VolumeHigh },
   { id: 'tools', label: 'Tools', icon: Wrench },
   { id: 'integrations', label: 'Skills & MCP', icon: Sparkles },
   { id: 'skills', label: 'Skill defaults', icon: Sparkles },
@@ -1230,6 +1232,25 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
             description="The speech-to-text model used by the microphone button in the message box. Provider models need a configured provider; local models run on this computer."
           />
           <DictationSettings />
+        </section>
+          )}
+
+          {activeSection === 'speech' && (
+        <section id="speech" className="settings-section">
+          <SectionHeading
+            icon={VolumeHigh}
+            title="Read Aloud"
+            description="How messages sound when the read aloud button under a message plays them."
+          />
+          <ReadAloudSpeechSettings />
+
+          <SectionHeading
+            icon={Mic}
+            title="Dictation"
+            className="settings-subsection-heading"
+            description="How the microphone button in the message box records."
+          />
+          <DictationSpeechSettings />
         </section>
           )}
 

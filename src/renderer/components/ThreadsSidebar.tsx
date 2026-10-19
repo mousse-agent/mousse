@@ -22,6 +22,7 @@ import {
 } from './ThreadsContextMenu'
 
 import { ThreadHoverCard } from './ThreadHoverCard'
+import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadSpeechIndicator'
 import { ThreadSearchDialog } from './ThreadSearchDialog'
 
 import '../styles/threads-sidebar.css'
@@ -303,6 +304,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const agentThreadIds = useMemo(() => new Set(agentChats.map((chat) => chat.threadId)), [agentChats])
 
   const activeThreadId = useAppStore((s) => s.activeThreadId)
+  const speakingThreadId = useSpeakingThreadId()
   const centerAgentId = useAppStore((s) => s.centerAgentId)
   const setCenterAgentId = useAppStore((s) => s.setCenterAgentId)
 
@@ -788,7 +790,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         ref={anchorRef}
 
-        className="threads-sidebar-thread-container"
+        className={`threads-sidebar-thread-container${speakingThreadId === thread.id ? ' speaking' : ''}`}
 
         onMouseEnter={onMouseEnter}
 
@@ -914,6 +916,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         )}
 
       </button>
+
+      {speakingThreadId === thread.id && <ThreadSpeechIndicator />}
 
       {!isRenaming && (
         <span className="threads-sidebar-thread-actions">

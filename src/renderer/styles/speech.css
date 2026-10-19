@@ -1,0 +1,123 @@
+.speech-wave {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 12px;
+  flex-shrink: 0;
+  color: currentColor;
+}
+
+.speech-wave-bar {
+  width: 2px;
+  height: 100%;
+  border-radius: 1px;
+  background: currentColor;
+  transform: scaleY(0.35);
+  transform-origin: center;
+  animation: speech-wave-bounce 0.9s ease-in-out infinite;
+}
+
+.speech-wave-bar:nth-child(2) {
+  animation-delay: -0.6s;
+}
+
+.speech-wave-bar:nth-child(3) {
+  animation-delay: -0.3s;
+}
+
+.speech-wave-bar:nth-child(4) {
+  animation-delay: -0.75s;
+}
+
+.speech-wave.paused .speech-wave-bar {
+  animation-play-state: paused;
+}
+
+@keyframes speech-wave-bounce {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .speech-wave-bar {
+    animation: none;
+    transform: scaleY(0.6);
+  }
+}
+
+/* Threads sidebar: the thread whose message is being read aloud. */
+.threads-sidebar-speech {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--accent);
+  transform: translateY(-50%);
+}
+
+.threads-sidebar-thread-container:has(.threads-sidebar-card) .threads-sidebar-speech {
+  top: 9px;
+  transform: none;
+}
+
+.threads-sidebar-speech-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  transition: background 0.15s, color 0.15s;
+}
+
+.threads-sidebar-speech-toggle:hover,
+.threads-sidebar-speech-toggle:focus-visible {
+  color: var(--text-primary);
+  background: var(--ui-pressed, rgba(127, 127, 127, 0.18));
+}
+
+/* Room for the indicator: the row's content and the hover actions sit left of it. */
+.app .threads-sidebar-thread-container.speaking .threads-sidebar-thread {
+  padding-right: 44px;
+}
+
+.app .threads-sidebar-thread-container.speaking .threads-sidebar-thread-actions {
+  right: 42px;
+}
+
+/* Settings, Speech. */
+.speech-voice-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.speech-voice-controls .settings-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.speech-settings-error {
+  margin: 0;
+  color: var(--error, #f87171);
+  font-size: 12px;
+}
+
+/* A setting whose control needs the full width sits under its label. */
+.registry-control-row.speech-setting {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.registry-control-row.speech-setting .files-view-toggle {
+  align-self: flex-start;
+}

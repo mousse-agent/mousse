@@ -1,21 +1,31 @@
 import { create } from 'zustand'
 import type { LocalTtsModelId, LocalTtsModelStatus, ReadAloudSelection } from '../../shared/readAloud'
 import { useAppStore } from '../stores/appStore'
+import { currentSpeechPreferences, voiceFor } from '../speech/speechPreferences'
 import { disposeLocalEngine, speakWithLocalModel } from './localEngine'
-import { speakWithProvider, type SpeakOptions } from './providerEngine'
+import { PauseGate, type SpeakOptions } from './playback'
+import { speakWithProvider } from './providerEngine'
 import { loadReadAloudSelection, saveReadAloudSelection } from './selection'
 import { markdownToSpeechText } from './speechText'
 
-export type ReadAloudStatus = 'idle' | 'loading' | 'playing'
+export type ReadAloudStatus = 'idle' | 'loading' | 'playing' | 'paused'
 
 interface PendingRead {
   key: string
   text: string
+  threadId: string | null
+}
+
+export interface ReadAloudOptions {
+  /** False for audio that belongs to no thread, like the sample in Settings. Defaults to true. */
+  inThread?: boolean
 }
 
 interface ReadAloudState {
   /** Message that is loading or playing; only one message speaks at a time. */
   activeKey: string | null
+  /** Thread the speaking message belongs to, for the indicator in the threads sidebar. */
+  threadId: string | null
   status: ReadAloudStatus
   error: { key: string; message: string } | null
   selection: ReadAloudSelection | null
@@ -24,8 +34,10 @@ interface ReadAloudState {
   /** The message to read once the user confirms a model in the picker. */
   pending: PendingRead | null
   syncProfile: (profileId: string) => void
-  toggle: (key: string, markdown: string) => void
+  toggle: (key: string, markdown: string, options?: ReadAloudOptions) => void
   stop: () => void
+  /** Pauses or resumes the message that is playing. */
+  togglePause: () => void
   openPicker: () => void
   closePicker: () => void
   confirmPicker: (selection: ReadAloudSelection) => void
@@ -35,7 +47,7 @@ interface ReadAloudState {
 
 const ERROR_VISIBLE_MS = 6000
 
-let session: { id: number; controller: AbortController } | null = null
+let session: { id: number; controller: AbortController; pause: PauseGate } | null = null
 let lastSessionId = 0
 let errorTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -52,19 +64,22 @@ export const useReadAloudStore = create<ReadAloudState>((set, get) => {
   const endSession = (): void => {
     session?.controller.abort()
     session = null
-    set({ activeKey: null, status: 'idle' })
+    set({ activeKey: null, threadId: null, status: 'idle' })
   }
 
-  const start = (key: string, text: string, selection: ReadAloudSelection): void => {
+  const start = ({ key, text, threadId }: PendingRead, selection: ReadAloudSelection): void => {
     endSession()
-    const mine = { id: ++lastSessionId, controller: new AbortController() }
+    const mine = { id: ++lastSessionId, controller: new AbortController(), pause: new PauseGate() }
     session = mine
-    set({ activeKey: key, status: 'loading', error: null })
+    set({ activeKey: key, threadId, status: 'loading', error: null })
     const options: SpeakOptions = {
       signal: mine.controller.signal,
       onPlaying: () => {
-        if (session === mine) set({ status: 'playing' })
-      }
+        if (session === mine) set({ status: mine.pause.paused ? 'paused' : 'playing' })
+      },
+      voice: voiceFor(currentSpeechPreferences(), selection),
+      speed: () => currentSpeechPreferences().speed,
+      pause: mine.pause
     }
     const run =
       selection.source === 'local'
@@ -77,12 +92,13 @@ export const useReadAloudStore = create<ReadAloudState>((set, get) => {
       .finally(() => {
         if (session !== mine) return
         session = null
-        set({ activeKey: null, status: 'idle' })
+        set({ activeKey: null, threadId: null, status: 'idle' })
       })
   }
 
   return {
     activeKey: null,
+    threadId: null,
     status: 'idle',
     error: null,
     selection: null,
@@ -96,7 +112,7 @@ export const useReadAloudStore = create<ReadAloudState>((set, get) => {
       set({ selectionProfileId: profileId, selection: loadReadAloudSelection(profileId), pickerOpen: false, pending: null })
     },
 
-    toggle: (key, markdown) => {
+    toggle: (key, markdown, options) => {
       const state = get()
       if (state.activeKey === key && state.status !== 'idle') {
         endSession()
@@ -109,16 +125,25 @@ export const useReadAloudStore = create<ReadAloudState>((set, get) => {
         showError(key, 'There is nothing to read aloud in this message')
         return
       }
+      const read: PendingRead = { key, text, threadId: options?.inThread === false ? null : useAppStore.getState().activeThreadId }
       const { selection } = get()
       if (!selection) {
         endSession()
-        set({ pickerOpen: true, pending: { key, text } })
+        set({ pickerOpen: true, pending: read })
         return
       }
-      start(key, text, selection)
+      start(read, selection)
     },
 
     stop: endSession,
+
+    togglePause: () => {
+      const { status } = get()
+      if (!session || (status !== 'playing' && status !== 'paused')) return
+      const paused = status === 'playing'
+      session.pause.set(paused)
+      set({ status: paused ? 'paused' : 'playing' })
+    },
 
     openPicker: () => {
       get().syncProfile(useAppStore.getState().profileId)
@@ -131,7 +156,7 @@ export const useReadAloudStore = create<ReadAloudState>((set, get) => {
       const { pending } = get()
       get().setSelection(selection)
       set({ pickerOpen: false, pending: null })
-      if (pending) start(pending.key, pending.text, selection)
+      if (pending) start(pending, selection)
     },
 
     setSelection: (selection) => {
