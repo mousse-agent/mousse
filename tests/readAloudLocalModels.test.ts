@@ -246,3 +246,61 @@ describe('LocalModelManager with a text-to-speech manifest', () => {
     expect(() => manager.cancel('nope')).toThrow(/Unknown local model/)
   })
 })
+
+describe('LocalModelManager optional files', () => {
+  const VOICE = new Uint8Array(700).map((_, index) => (index * 7) % 256)
+
+  function modelWithVoice(voiceSha = sha(VOICE)): LocalTtsModel {
+    const base = fakeModel()
+    return { ...base, files: [...base.files, { path: 'voices/extra.bin', size: VOICE.byteLength, sha256: voiceSha, optional: true }] }
+  }
+
+  async function installWithoutVoice(rootDir: string, model: LocalTtsModel): Promise<void> {
+    const dir = join(rootDir, model.id, model.revision)
+    await mkdir(join(dir, 'onnx'), { recursive: true })
+    await writeFile(join(dir, 'config.json'), CONFIG)
+    await writeFile(join(dir, 'onnx/model.onnx'), WEIGHTS)
+    await writeFile(join(dir, '.complete'), '{}')
+  }
+
+  it('counts a download without its optional files as downloaded and fetches them on first read', async () => {
+    const model = modelWithVoice()
+    const rootDir = tempRoot()
+    await installWithoutVoice(rootDir, model)
+    const requested: string[] = []
+    const served = servedFetch(model, { 'voices/extra.bin': VOICE })
+    const manager = new LocalModelManager({
+      rootDir,
+      models: [model],
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        requested.push(String(input))
+        return served(input, init)
+      }) as typeof fetch
+    })
+    expect((await manager.status('kokoro-82m')).state).toEqual({ status: 'downloaded' })
+
+    const [first, second] = await Promise.all([
+      manager.readFile('kokoro-82m', 'voices/extra.bin'),
+      manager.readFile('kokoro-82m', 'voices/extra.bin')
+    ])
+    expect(Buffer.from(first)).toEqual(Buffer.from(VOICE))
+    expect(Buffer.from(second)).toEqual(Buffer.from(VOICE))
+    await manager.readFile('kokoro-82m', 'voices/extra.bin')
+    expect(requested).toEqual([localTtsFileUrl(model, 'voices/extra.bin')])
+  })
+
+  it('rejects an optional file that fails verification and keeps nothing of it', async () => {
+    const model = modelWithVoice('0'.repeat(64))
+    const rootDir = tempRoot()
+    await installWithoutVoice(rootDir, model)
+    const manager = new LocalModelManager({ rootDir, models: [model], fetchImpl: servedFetch(model, { 'voices/extra.bin': VOICE }) })
+    await expect(manager.readFile('kokoro-82m', 'voices/extra.bin')).rejects.toThrow(/failed verification.*voices\/extra\.bin/)
+    expect(listFiles(join(rootDir, model.id)).some((path) => path.includes('extra.bin'))).toBe(false)
+  })
+
+  it('says how to fix a model that is not downloaded', async () => {
+    const model = modelWithVoice()
+    const manager = new LocalModelManager({ rootDir: tempRoot(), models: [model], fetchImpl: servedFetch(model, {}) })
+    await expect(manager.readFile('kokoro-82m', 'config.json')).rejects.toThrow('Fake is not downloaded. Download it under Settings, Models.')
+  })
+})

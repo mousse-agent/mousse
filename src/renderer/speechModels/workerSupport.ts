@@ -60,12 +60,10 @@ export function setupLocalModelWorker({ repo, files, post }: LocalModelWorkerOpt
     if (!match) return realFetch(input, init)
     const path = decodeURIComponent(match[1])
     if (!filePaths.has(path)) return new Response(null, { status: 404 })
-    try {
-      const bytes = await requestFile(path)
-      return new Response(bytes, { status: 200, headers: { 'Content-Length': String(bytes.byteLength) } })
-    } catch {
-      return new Response(null, { status: 404 })
-    }
+    // A failure is thrown rather than answered with a 404: libraries turn a 404 into "Could not
+    // locate file", or read the error page as data, and the real reason (not downloaded) is lost.
+    const bytes = await requestFile(path)
+    return new Response(bytes, { status: 200, headers: { 'Content-Length': String(bytes.byteLength) } })
   }
 
   env.allowLocalModels = false

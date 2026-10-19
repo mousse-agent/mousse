@@ -1,3 +1,4 @@
+import { ipcErrorMessage } from '../utils/voiceErrors'
 import type { ModelFileRequest, ModelFileResponse } from './workerSupport'
 
 /**
@@ -14,7 +15,7 @@ export function serveModelFiles(worker: Worker, readFile: (path: string) => Prom
       const buffer = (exact ? bytes.buffer : bytes.slice().buffer) as ArrayBuffer
       reply({ type: 'file-response', reqId, bytes: buffer }, [buffer])
     } catch (error) {
-      reply({ type: 'file-response', reqId, error: error instanceof Error ? error.message : String(error) })
+      reply({ type: 'file-response', reqId, error: ipcErrorMessage(error) || 'Model file unavailable' })
     }
   }
 
