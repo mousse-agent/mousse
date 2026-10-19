@@ -1,7 +1,7 @@
-import { MOONSHINE_BASE } from '../../shared/dictation'
+import { findLocalSttModel, type LocalSttModel, type LocalSttModelId } from '../../shared/dictation'
 import { serveModelFiles } from '../speechModels/pageSupport'
 import { MIN_SEGMENT_SECONDS, decodeRecording, splitIntoSegments } from './audio'
-import type { MoonshineWorkerEvent, MoonshineWorkerRequest } from './moonshineWorker'
+import type { LocalSttWorkerEvent, LocalSttWorkerRequest } from './workerProtocol'
 
 interface Pending {
   resolve: (text: string) => void
@@ -14,7 +14,8 @@ interface Pending {
  */
 const IDLE_DISPOSE_MS = 30_000
 
-let worker: Worker | null = null
+/** One worker at a time, for the model that was used last. */
+let worker: { modelId: LocalSttModelId; worker: Worker } | null = null
 let lastRequestId = 0
 let activeTranscriptions = 0
 let idleTimer: ReturnType<typeof setTimeout> | null = null
@@ -25,11 +26,18 @@ function failAll(error: Error): void {
   pending.clear()
 }
 
-function ensureWorker(): Worker {
-  if (worker) return worker
-  const created = new Worker(new URL('./moonshineWorker.ts', import.meta.url), { type: 'module' })
-  serveModelFiles(created, (path) => window.mousse.dictation.readLocalModelFile(MOONSHINE_BASE.id, path))
-  created.addEventListener('message', (event: MessageEvent<MoonshineWorkerEvent>) => {
+function createWorker(model: LocalSttModel): Worker {
+  return model.runtime === 'nemo-transducer'
+    ? new Worker(new URL('./parakeetWorker.ts', import.meta.url), { type: 'module' })
+    : new Worker(new URL('./moonshineWorker.ts', import.meta.url), { type: 'module' })
+}
+
+function ensureWorker(model: LocalSttModel): Worker {
+  if (worker?.modelId === model.id) return worker.worker
+  disposeLocalEngine()
+  const created = createWorker(model)
+  serveModelFiles(created, (path) => window.mousse.dictation.readLocalModelFile(model.id, path))
+  created.addEventListener('message', (event: MessageEvent<LocalSttWorkerEvent>) => {
     const message = event.data
     if (message.type !== 'result' && message.type !== 'error') return
     const request = pending.get(message.id)
@@ -39,11 +47,11 @@ function ensureWorker(): Worker {
     else request.reject(new Error(message.message))
   })
   created.addEventListener('error', (event) => {
-    if (worker === created) worker = null
+    if (worker?.worker === created) worker = null
     created.terminate()
     failAll(new Error(event.message || 'The local speech engine stopped unexpectedly'))
   })
-  worker = created
+  worker = { modelId: model.id, worker: created }
   return created
 }
 
@@ -63,33 +71,37 @@ function scheduleIdleDispose(): void {
 /** Drops the loaded model, e.g. after its files were deleted or when it has been idle. */
 export function disposeLocalEngine(): void {
   cancelIdleDispose()
-  worker?.terminate()
+  worker?.worker.terminate()
   worker = null
   failAll(new Error('The local speech engine was stopped'))
 }
 
-function transcribeSegment(samples: Float32Array): Promise<string> {
+function transcribeSegment(model: LocalSttModel, samples: Float32Array): Promise<string> {
   return new Promise((resolve, reject) => {
+    // Before the request is registered: switching models stops the old worker and fails its requests.
+    const target = ensureWorker(model)
     const id = ++lastRequestId
     pending.set(id, { resolve, reject })
     // Copy: segments are views of one large buffer, and transferring would detach all of it.
     const copy = samples.slice()
-    const request: MoonshineWorkerRequest = { type: 'transcribe', id, samples: copy }
-    ensureWorker().postMessage(request, [copy.buffer])
+    const request: LocalSttWorkerRequest = { type: 'transcribe', id, samples: copy }
+    target.postMessage(request, [copy.buffer])
   })
 }
 
-/** Transcribes a recording with the local Moonshine model, one segment at a time. */
-export async function transcribeWithLocalModel(recording: Blob): Promise<string> {
+/** Transcribes a recording with a local model, one segment at a time. */
+export async function transcribeWithLocalModel(modelId: LocalSttModelId, recording: Blob): Promise<string> {
+  const model = findLocalSttModel(modelId)
+  if (!model) throw new Error(`Unknown local dictation model: ${modelId}`)
   cancelIdleDispose()
   activeTranscriptions++
   try {
-    const samples = await decodeRecording(recording, MOONSHINE_BASE.sampleRate)
-    const minSamples = Math.ceil(MIN_SEGMENT_SECONDS * MOONSHINE_BASE.sampleRate)
+    const samples = await decodeRecording(recording, model.sampleRate)
+    const minSamples = Math.ceil(MIN_SEGMENT_SECONDS * model.sampleRate)
     const parts: string[] = []
-    for (const segment of splitIntoSegments(samples, MOONSHINE_BASE.sampleRate, MOONSHINE_BASE.maxSegmentSeconds)) {
+    for (const segment of splitIntoSegments(samples, model.sampleRate, model.maxSegmentSeconds)) {
       if (segment.length < minSamples) continue
-      const text = await transcribeSegment(segment)
+      const text = await transcribeSegment(model, segment)
       if (text) parts.push(text)
     }
     return parts.join(' ')

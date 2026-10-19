@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import type { AppErrorShape } from '../../shared/errors'
 import { useAppStore } from '../stores/appStore'
 import { normalizeTranscriptionError, normalizeVoiceError } from '../utils/voiceErrors'
+import { currentSpeechPreferences } from '../speech/speechPreferences'
 import { useDictationStore } from './dictationStore'
+import { openMicrophone, type Microphone } from './microphone'
 import { transcribeRecording } from './transcribe'
 
 const NOTICE_VISIBLE_MS = 4000
@@ -28,7 +30,7 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
   const captureTicket = useRef(0)
   const capturePending = useRef(false)
   const captureMounted = useRef(true)
-  const captureStream = useRef<MediaStream | null>(null)
+  const captureMicrophone = useRef<Microphone | null>(null)
   const onTranscriptRef = useRef(onTranscript)
   const startRef = useRef<() => void>(() => undefined)
   onTranscriptRef.current = onTranscript
@@ -54,7 +56,7 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
         recorder.ondataavailable = null
         if (recorder.state === 'recording') recorder.stop()
       }
-      captureStream.current?.getTracks().forEach((track) => track.stop())
+      captureMicrophone.current?.stop()
     }
   }, [])
 
@@ -98,7 +100,7 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
     setRecordingPending(true)
     setError(undefined)
     setNotice(null)
-    let stream: MediaStream | undefined
+    let microphone: Microphone | undefined
     const fail = (failure: unknown) => {
       stopRecordingTimer()
       const recorder = mediaRecorderRef.current
@@ -108,8 +110,8 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
         recorder.ondataavailable = null
         if (recorder.state === 'recording') recorder.stop()
       }
-      stream?.getTracks().forEach((track) => track.stop())
-      captureStream.current = null
+      microphone?.stop()
+      captureMicrophone.current = null
       mediaRecorderRef.current = null
       recordingChunksRef.current = []
       if (captureMounted.current && ticket === captureTicket.current) {
@@ -119,13 +121,13 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
     }
     try {
       if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') throw new DOMException('Unavailable', 'NotSupportedError')
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      microphone = await openMicrophone({ reduceNoise: currentSpeechPreferences().reduceNoise })
       if (!captureMounted.current || ticket !== captureTicket.current) {
-        stream.getTracks().forEach((track) => track.stop())
+        microphone.stop()
         return
       }
-      captureStream.current = stream
-      const recorder = new MediaRecorder(stream)
+      captureMicrophone.current = microphone
+      const recorder = new MediaRecorder(microphone.stream)
       recordingChunksRef.current = []
       mediaRecorderRef.current = recorder
       recorder.ondataavailable = (event) => {
@@ -134,8 +136,8 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
       recorder.onerror = (event) => fail(event)
       recorder.onstop = () => {
         stopRecordingTimer()
-        stream?.getTracks().forEach((track) => track.stop())
-        captureStream.current = null
+        microphone?.stop()
+        captureMicrophone.current = null
         mediaRecorderRef.current = null
         if (!captureMounted.current || ticket !== captureTicket.current) return
         setIsRecording(false)

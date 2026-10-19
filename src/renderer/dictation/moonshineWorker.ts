@@ -1,19 +1,11 @@
 import { pipeline } from '@huggingface/transformers'
 import { MOONSHINE_BASE } from '../../shared/dictation'
-import { setupLocalModelWorker, type ModelFileRequest, type ModelFileResponse } from '../speechModels/workerSupport'
-
-/** Messages from the page to the worker. */
-export type MoonshineWorkerRequest = { type: 'transcribe'; id: number; samples: Float32Array } | ModelFileResponse
-
-/** Messages from the worker to the page. */
-export type MoonshineWorkerEvent =
-  | ModelFileRequest
-  | { type: 'result'; id: number; text: string }
-  | { type: 'error'; id: number; message: string }
+import { setupLocalModelWorker } from '../speechModels/workerSupport'
+import type { LocalSttWorkerEvent, LocalSttWorkerRequest } from './workerProtocol'
 
 type Recognizer = (audio: Float32Array) => Promise<{ text: string } | Array<{ text: string }>>
 
-const post = (event: MoonshineWorkerEvent): void => {
+const post = (event: LocalSttWorkerEvent): void => {
   ;(self as unknown as Worker).postMessage(event)
 }
 
@@ -49,7 +41,7 @@ async function transcribe(id: number, samples: Float32Array): Promise<void> {
   }
 }
 
-self.addEventListener('message', (event: MessageEvent<MoonshineWorkerRequest>) => {
+self.addEventListener('message', (event: MessageEvent<LocalSttWorkerRequest>) => {
   const message = event.data
   if (support.handleMessage(message)) return
   if (message.type === 'transcribe') queue = queue.then(() => transcribe(message.id, message.samples))

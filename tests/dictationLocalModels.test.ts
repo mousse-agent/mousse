@@ -20,6 +20,7 @@ const model: LocalSttModel = {
   homepage: 'https://example.test',
   repo: 'org/fake-stt',
   revision: 'rev1',
+  runtime: 'transformers',
   dtype: { encoder_model: 'q8' },
   sampleRate: 16000,
   maxSegmentSeconds: 30,
