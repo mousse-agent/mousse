@@ -66,6 +66,8 @@ export default defineConfig({
   },
   renderer: {
     root: resolve(__dirname, 'src/renderer'),
+    // The Mousse Plus service this build signs in to (src/renderer/lib/plusSignIn.ts).
+    define: { __MOUSSE_PLUS_ORIGIN__: JSON.stringify(process.env.MOUSSE_PLUS_ORIGIN ?? '') },
     resolve: {
       alias: [
         // Read aloud runs Kokoro on the CPU WebAssembly build only; the default entry bundles the
