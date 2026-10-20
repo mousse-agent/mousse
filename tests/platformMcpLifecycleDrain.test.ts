@@ -349,7 +349,10 @@ describe('injected deterministic timeout races', () => {
 })
 
 describe('OAuth callback and local HTTP I/O during shutdown', () => {
-  it('closes the local callback listener and does not leave a session write after drain', async () => {
+  it('closes the local callback listener and does not leave a session write after drain', async (ctx) => {
+    // The callback port is a product contract. When another process already holds it, the
+    // test cannot own it and would only time out; say so instead.
+    if (await isPortOpen(8791)) ctx.skip('port 8791 is already held by another process')
     const redirected = deferred()
     const { server, url } = await listen((req, res) => {
       const path = req.url ?? ''
@@ -441,7 +444,10 @@ describe('OAuth callback and local HTTP I/O during shutdown', () => {
     expect(requests).toBeGreaterThan(0)
   })
 
-  it('owns callback port 8791 before auth and rejects a colliding profile without opening its redirect', async () => {
+  it('owns callback port 8791 before auth and rejects a colliding profile without opening its redirect', async (ctx) => {
+    // The callback port is a product contract. When another process already holds it, the
+    // test cannot own it and would only time out; say so instead.
+    if (await isPortOpen(8791)) ctx.skip('port 8791 is already held by another process')
     const firstRedirect = deferred()
     let secondRedirects = 0
     const { url } = await listen((req, res) => {
