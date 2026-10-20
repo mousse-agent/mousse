@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
+import { ERROR_INFO_CAPABILITY } from '../src/shared/errors'
+import type { LifecyclePurgePreview, TrashRetentionPolicy } from '../src/shared/resourceLifecycle'
 import type { Thread } from '../src/shared/types'
 import type { WorkflowRunView } from '../src/shared/workflowRunPlatform'
 import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
 import { lifecycleApprovalWorkflow, lifecycleHarness } from './fixtures/resource-lifecycle-harness'
 
-describe('Phase 1 lifecycle public protocol acceptance', () => {
+describe('lifecycle public protocol acceptance', () => {
   it('threads.delete preserves opaque data, requires reviewed purge admission and restores the same identity', async () => {
     const method = 'threads.delete'
     const f = await lifecycleHarness()
@@ -32,6 +34,47 @@ describe('Phase 1 lifecycle public protocol acceptance', () => {
       expect(readFileSync(join(path, 'sole-copy-unknown.bin'))).toEqual(bytes)
       expect(f.services.threadRuntimes.get(thread.id)?.activity ?? 'idle').toBe('idle')
       expect(f.services.threads.loadThreadData(thread.id).messages).toEqual([])
+    } finally { await f.close() }
+  })
+
+  it('threads.purge honours a sole-copy discard only from a gui client; a cli client is refused', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      const { thread } = await gui.request<{ thread: Thread }>('threads.create', { name: 'sole copy scratch' })
+      const path = f.services.threads.getThreadDir(thread.id)
+      mkdirSync(join(path, 'terminal-workspace'), { recursive: true })
+      writeFileSync(join(path, 'terminal-workspace', 'sole-copy.txt'), 'retained output')
+      writeFileSync(join(path, 'terminal-workspace.json'), JSON.stringify({ schemaVersion: 1, kind: 'task-terminal-scratch', threadId: thread.id, workspaceRelativePath: 'terminal-workspace' }))
+      await gui.request('threads.trash', { threadId: thread.id })
+      const { preview } = await cli.request<{ preview: LifecyclePurgePreview }>('threads.purge', { threadId: thread.id, preview: true })
+      expect(preview.items.some((item) => item.discardRequired)).toBe(true)
+      const request = { threadId: thread.id, operationId: 'human-gate', expectedGeneration: preview.generation, previewDigest: preview.digest, discard: true }
+      await expect(cli.request('threads.purge', request)).rejects.toMatchObject({ code: 'resource_purge_discard_required', errorInfo: { category: 'denied' } })
+      const kept = f.services.threads.lifecycleStore.require(thread.id)
+      expect(kept.state).toBe('trashed')
+      expect(readFileSync(join(kept.location, 'terminal-workspace', 'sole-copy.txt'), 'utf8')).toBe('retained output')
+      await gui.request('threads.purge', request)
+      expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('purged')
+      expect(existsSync(kept.location)).toBe(false)
+    } finally { await f.close() }
+  })
+
+  it('threads.configureTrash saves a validated policy for a gui client and refuses a cli client', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const gui = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY])
+      const cli = await f.connect(f.alice.id, [ERROR_INFO_CAPABILITY], 'cli')
+      const saved = await gui.request<{ policy: TrashRetentionPolicy }>('threads.configureTrash', { graceDays: 7, automaticPurge: true })
+      expect(saved.policy).toEqual({ schemaVersion: 1, graceDays: 7, automaticPurge: true })
+      // The refusal reaches the client as a generic handler error; what matters is that the policy stays as the human set it.
+      await expect(cli.request('threads.configureTrash', { graceDays: 1, automaticPurge: false })).rejects.toMatchObject({ code: 'handler_error' })
+      // Which policies are valid is decided in ResourcePurgeService.configure (resourceTrashPolicy.test.ts).
+      await expect(gui.request('threads.configureTrash', { graceDays: 7 })).rejects.toThrow()
+      await expect(gui.request('threads.configureTrash', { graceDays: 0, automaticPurge: true })).rejects.toThrow()
+      const inventory = await cli.request<{ trashPolicy: TrashRetentionPolicy }>('threads.inventory', {})
+      expect(inventory.trashPolicy).toEqual({ schemaVersion: 1, graceDays: 7, automaticPurge: true })
     } finally { await f.close() }
   })
 

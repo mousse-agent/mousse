@@ -5,7 +5,7 @@ import type { Thread } from '../src/shared/types'
 import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
 import { enqueueMessage } from '../src/mms/queue/ThreadMessageQueue'
 
-describe('Phase 1 durable authority failure acceptance', () => {
+describe('durable authority failure acceptance', () => {
   it('preserves queued input when inventory rejects trash, then cancels replay only on successful trash', async () => {
     const f = await lifecycleHarness()
     let corruptPath: string | undefined
@@ -51,7 +51,9 @@ describe('Phase 1 durable authority failure acceptance', () => {
     }
   })
 
-  it.each(['corrupt-record', 'future-record', 'future-manifest'])('%s fails closed before lifecycle or ordinary metadata mutations', async (kind) => {
+  // What each kind of damage is detected as is decided in ResourceLifecycleStore (resourceLifecycleStore.test.ts);
+  // this proves the daemon refuses every mutating request while authority is unreadable.
+  it('an unreadable lifecycle record fails closed before lifecycle or ordinary metadata mutations', async () => {
     const f = await lifecycleHarness()
     let damagedPath: string | undefined
     let original: Buffer | undefined
@@ -59,13 +61,10 @@ describe('Phase 1 durable authority failure acceptance', () => {
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'protected authority' })
       const path = f.services.threads.getThreadDir(thread.id)
       writeFileSync(join(path, 'sole-copy.txt'), 'never discard this')
-      damagedPath = kind === 'future-manifest'
-        ? join(f.home, 'profiles', f.alice.id, 'lifecycle', 'manifest.json')
-        : join(f.home, 'profiles', f.alice.id, 'lifecycle', 'tasks', `${thread.id}.json`)
+      damagedPath = join(f.home, 'profiles', f.alice.id, 'lifecycle', 'tasks', `${thread.id}.json`)
       expect(existsSync(damagedPath)).toBe(true)
       original = readFileSync(damagedPath)
-      if (kind === 'corrupt-record') writeFileSync(damagedPath, '{truncated')
-      else writeFileSync(damagedPath, JSON.stringify({ ...JSON.parse(original.toString()), schemaVersion: 999, minimumWriterVersion: 999 }))
+      writeFileSync(damagedPath, '{truncated')
       const beforeMeta = readFileSync(join(path, 'meta.json'))
       for (const method of ['threads.delete', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.rename']) {
         await expect(f.rpc.request(method, { threadId: thread.id, name: 'must never be written' })).rejects.toThrow()

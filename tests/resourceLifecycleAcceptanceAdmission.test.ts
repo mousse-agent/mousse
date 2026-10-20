@@ -9,7 +9,7 @@ import {
 } from '../src/mms/queue/ThreadExecutionLease'
 import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
 
-describe('Phase 1 stale producer acceptance', () => {
+describe('stale producer acceptance', () => {
   it.each([false, true])('rejects an already queued lease across trash (restore=%s) without recreating the old path', async (restore) => {
     const f = await lifecycleHarness()
     let lease: ThreadLeaseHandle | undefined

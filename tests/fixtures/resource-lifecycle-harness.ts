@@ -27,8 +27,8 @@ export async function lifecycleHarness(options: { prepareProfile?: (profileHome:
   const server = new MmsProtocolServer({ mms: main, ownerToken, commandRouter: main.browserCommandRouter })
   const endpoint = await server.start()
   const clients: LocalMmsClient[] = []
-  const connect = async (profile = alice.id, additionalCapabilities: string[] = []) => {
-    const client = new LocalMmsClient({ homeDir: home, endpoint, ownerToken, clientType: 'gui',
+  const connect = async (profile = alice.id, additionalCapabilities: string[] = [], clientType: 'gui' | 'cli' = 'gui') => {
+    const client = new LocalMmsClient({ homeDir: home, endpoint, ownerToken, clientType,
       requestedCapabilities: ['profiles-v1', 'workflows.definitions.v1', 'workflowRuns.v1', ...additionalCapabilities] })
     clients.push(client)
     await client.connect()

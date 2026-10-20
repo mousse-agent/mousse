@@ -66,6 +66,17 @@ describe('stable task lifecycle storage and admission', () => {
     expect(() => new ResourceLifecycleStore({ profileId: 'profile-a', profileHome: home })).toThrow('manifest missing')
   })
 
+  it('refuses a manifest written by a newer writer or for another profile', () => {
+    const { home, store, make } = fixture(); make('task')
+    const path = join(store.root, 'manifest.json'), saved = readFileSync(path, 'utf8')
+    for (const change of [{ schemaVersion: 999 }, { minimumWriterVersion: 999 }, { profileId: 'someone-else' }]) {
+      writeFileSync(path, JSON.stringify({ ...JSON.parse(saved), ...change }))
+      expect(() => new ResourceLifecycleStore({ profileId: 'profile-a', profileHome: home }), JSON.stringify(change)).toThrow('Lifecycle storage requires a')
+    }
+    writeFileSync(path, saved)
+    expect(() => new ResourceLifecycleStore({ profileId: 'profile-a', profileHome: home })).not.toThrow()
+  })
+
   it('rejects linked storage paths even when the link stays inside the owned root', () => {
     const { home, store } = fixture()
     const root = join(home, 'thread-data'); mkdirSync(join(root, 'real'), { recursive: true })
@@ -123,6 +134,73 @@ describe('stable task lifecycle storage and admission', () => {
     const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {} })
     expect((await coordinator.restore({ taskId: 'legacy', operationId: 'restore' })).state).toBe('active')
     expect(existsSync(location)).toBe(false); expect(existsSync(join(originalLocation, 'meta.json'))).toBe(true)
+  })
+
+  describe('legacy trash adoption refuses every ambiguous source', () => {
+    function legacy(taskId = 'legacy') {
+      const f = fixture()
+      const originalLocation = join(f.home, 'thread-data', 'standalone', taskId)
+      const location = join(f.home, 'trash', 'threads', `${taskId}-old`)
+      mkdirSync(location, { recursive: true }); writeFileSync(join(location, 'meta.json'), JSON.stringify({ id: taskId }))
+      const entry = { threadId: taskId, originalPath: originalLocation, trashPath: location, tombstonedAt: '2026-01-01T00:00:00Z' }
+      const writeIndex = (value: unknown) => writeFileSync(join(f.home, 'trash', 'threads', 'index.json'), JSON.stringify(value))
+      writeIndex([entry])
+      return { ...f, taskId, originalLocation, location, entry, writeIndex, adopt: () => f.store.adoptTrashedTask({ taskId, originalLocation, location }) }
+    }
+    const refused = (message: string) => expect.objectContaining({ code: 'ambiguous', message: expect.stringContaining(message) })
+
+    it('refuses a trash location outside the legacy trash container', () => {
+      const f = legacy()
+      const outside = join(f.home, 'thread-data', 'standalone', 'elsewhere')
+      mkdirSync(outside, { recursive: true }); writeFileSync(join(outside, 'meta.json'), JSON.stringify({ id: f.taskId }))
+      f.writeIndex([{ ...f.entry, trashPath: outside }])
+      expect(() => f.store.adoptTrashedTask({ taskId: f.taskId, originalLocation: f.originalLocation, location: outside })).toThrow(refused('outside its owned container'))
+      expect(f.store.get(f.taskId)).toBeUndefined()
+    })
+
+    it('refuses an index that is not a collection', () => {
+      const f = legacy(); f.writeIndex({ threadId: f.taskId })
+      expect(f.adopt).toThrow(refused('not a collection'))
+      expect(f.store.get(f.taskId)).toBeUndefined()
+    })
+
+    it.each([
+      ['no entry names the task', (f: ReturnType<typeof legacy>) => f.writeIndex([])],
+      ['two live entries name the task', (f: ReturnType<typeof legacy>) => f.writeIndex([f.entry, { ...f.entry }])],
+      ['the only entry was already restored', (f: ReturnType<typeof legacy>) => f.writeIndex([{ ...f.entry, restoredAt: '2026-01-02T00:00:00Z' }])],
+      ['the entry names a different trash path', (f: ReturnType<typeof legacy>) => f.writeIndex([{ ...f.entry, trashPath: join(f.home, 'trash', 'threads', 'other-old') }])],
+      ['the entry names a different original path', (f: ReturnType<typeof legacy>) => f.writeIndex([{ ...f.entry, originalPath: join(f.home, 'thread-data', 'standalone', 'other') }])],
+      ['the entry has no paths', (f: ReturnType<typeof legacy>) => f.writeIndex([{ threadId: f.taskId }])]
+    ])('refuses when %s', (_title, break_) => {
+      const f = legacy(); break_(f)
+      expect(f.adopt).toThrow(refused('no unique source ownership'))
+      expect(f.store.get(f.taskId)).toBeUndefined()
+    })
+
+    it('refuses when the original location is occupied or already owned', () => {
+      const occupied = legacy()
+      mkdirSync(occupied.originalLocation, { recursive: true })
+      expect(occupied.adopt).toThrow(refused('occupied or owned'))
+      const owned = legacy()
+      owned.store.registerTask({ taskId: 'squatter', location: owned.originalLocation, creating: true })
+      expect(owned.adopt).toThrow(refused('occupied or owned'))
+      expect(owned.store.get(owned.taskId)).toBeUndefined()
+    })
+
+    it('refuses metadata that names another task', () => {
+      const f = legacy(); writeFileSync(join(f.location, 'meta.json'), JSON.stringify({ id: 'someone-else' }))
+      expect(f.adopt).toThrow(refused('metadata identity does not match'))
+      expect(f.store.get(f.taskId)).toBeUndefined()
+    })
+
+    it('returns an equal trashed record unchanged and refuses a conflicting authority', () => {
+      const f = legacy()
+      const first = f.adopt()
+      expect(f.adopt()).toEqual(first)
+      const conflicting = legacy('conflict')
+      conflicting.store.registerTask({ taskId: 'conflict', location: conflicting.originalLocation, creating: true })
+      expect(conflicting.adopt).toThrow(refused('conflicts with lifecycle authority'))
+    })
   })
 
   it('routes hot-path writes without enumerating a thousand retained task records', () => {
