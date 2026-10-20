@@ -4,7 +4,7 @@ This guide describes the implemented product paths. The [architecture](../../age
 
 ## Profiles
 
-Use the profile selector in the app header to create or switch profiles. Each profile owns its threads, projects, Plus account, preferences, agents, workflows, integrations, schedules, channels, browser storage, and renderer workspace. Provider connections, provider credentials, and the model catalog remain shared by the installation. Model selections and favorites are personal preferences.
+Use the profile selector in the app header to create or switch profiles. Each profile owns its threads, projects, Mousse ID account, preferences, agents, workflows, integrations, schedules, channels, browser storage, and renderer workspace. Provider connections, provider credentials, and the model catalog remain shared by the installation. Model selections and favorites are personal preferences.
 
 Switching profiles changes the window's authenticated binding. Other profiles can continue background work. Archiving/removing a profile first stops and drains its owned work; unsuccessful cleanup retains ownership so the operation can be retried. Removal moves the owned profile root into installation trash. Shared repositories are retained.
 
@@ -74,4 +74,4 @@ The supported production path uses Mousse's bounded generic browser tools. Provi
 
 ## Verification boundaries
 
-Reviewed Windows/local fixtures exercise real Electron guests, the framed daemon protocol, native model-loop integration with a scripted provider, real managed Chromium, profile isolation, workflow durability, and process cleanup. Linux evidence separately covers Node CLI/native behavior and AppImage construction. These tests do not prove live provider quality, live Plus/OAuth/channel interoperability, or untested operating-system/package combinations. See the current ledger and individual review reports for exact passing commands and remaining checks.
+Reviewed Windows/local fixtures exercise real Electron guests, the framed daemon protocol, native model-loop integration with a scripted provider, real managed Chromium, profile isolation, workflow durability, and process cleanup. Linux evidence separately covers Node CLI/native behavior and AppImage construction. These tests do not prove live provider quality, live Mousse ID/OAuth/channel interoperability, or untested operating-system/package combinations. See the current ledger and individual review reports for exact passing commands and remaining checks.

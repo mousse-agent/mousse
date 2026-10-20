@@ -40,7 +40,7 @@ export const NET_HELP = `Usage:
   mousse-cli net transports
   mousse-cli net transport configure <id> --settings-file <path> [--disable]
 
-Plus bind explicitly signs an account/service-bound challenge with this
+Mousse ID (net plus) bind explicitly signs an account/service-bound challenge with this
 profile's protected unlocked root. Connect uses a recent one-shot account
 credential, then stores only its connector in the encrypted profile keystore.
 The account-token file must be private (0600), regular and owned by this user.

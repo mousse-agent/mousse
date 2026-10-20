@@ -131,9 +131,9 @@ async function fixture(grantExtras: Record<string, unknown> = {}) {
   return { service, calls, mailbox, reject, connectorToken, publicConfiguration }
 }
 
-describe('Mousse Plus phone mailbox', () => {
+describe('Mousse ID phone mailbox', () => {
   it('shows display-only account details from the grant and lets a cancelled sign-in restart', async () => {
-    const p = await fixture({ email: 'ada@example.test', plan: 'Plus' })
+    const p = await fixture({ email: 'ada@example.test', plan: 'Pro', monetization: true })
     await p.service.beginLogin(p.publicConfiguration, 'Desk', true)
     await expect(p.service.beginLogin(p.publicConfiguration, 'Desk', true)).rejects.toMatchObject({
       code: 'conflict'
@@ -141,11 +141,19 @@ describe('Mousse Plus phone mailbox', () => {
     p.service.cancelLogin()
     const pending = await p.service.beginLogin(p.publicConfiguration, 'Desk', true)
     const status = await p.service.finishLogin(pending.id)
-    expect(status).toMatchObject({ connected: true, email: 'ada@example.test', plan: 'Plus' })
+    expect(status).toMatchObject({ connected: true, email: 'ada@example.test', plan: 'Pro' })
+  })
+
+  it('hides the plan unless the service reports monetization', async () => {
+    const p = await fixture({ email: 'ada@example.test', plan: 'Pro' })
+    const pending = await p.service.beginLogin(p.publicConfiguration, 'Desk', false)
+    const status = await p.service.finishLogin(pending.id)
+    expect(status).toMatchObject({ connected: true, email: 'ada@example.test' })
+    expect(status).not.toHaveProperty('plan')
   })
 
   it('ignores malformed account details', async () => {
-    const p = await fixture({ email: 'x\u0000y', plan: 42 })
+    const p = await fixture({ email: 'x\u0000y', plan: 42, monetization: true })
     const pending = await p.service.beginLogin(p.publicConfiguration, 'Desk', false)
     const status = await p.service.finishLogin(pending.id)
     expect(status.connected).toBe(true)

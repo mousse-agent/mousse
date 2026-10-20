@@ -22,9 +22,9 @@ Provider credentials are intentionally installation-shared: a stored credential 
 
 Provider subscription quota endpoints report the upstream account's aggregate window. The product has no truthful facility to divide that external account-global quota between profiles, so this review does not claim per-profile subscription-quota attribution. The locally measured turn accounting required for profile attribution exists and is isolated.
 
-### E2E07: Plus/control logout isolation
+### E2E07: Mousse ID/control logout isolation
 
-A and B hold distinct encrypted Plus/control credentials and device-enrollment tokens while retaining one installation provider credential store. Logging out A clears only A's control credentials and enrollment. B remains enrolled with its original account and device token, and the shared provider credential remains readable through B.
+A and B hold distinct encrypted Mousse ID/control credentials and device-enrollment tokens while retaining one installation provider credential store. Logging out A clears only A's control credentials and enrollment. B remains enrolled with its original account and device token, and the shared provider credential remains readable through B.
 
 ## Evidence
 
@@ -34,4 +34,4 @@ A and B hold distinct encrypted Plus/control credentials and device-enrollment t
 
 ## Limits
 
-The LLM result, attached-browser executor, Plus credentials, and provider credential are fixture data. No live model, browser, account, relay, quota endpoint, or external network is used. E2E06 qualifies repository serialization through the production cross-process lease in one process; the lease's separate cross-process cases remain covered by `repositoryIdentityLease.test.ts`.
+The LLM result, attached-browser executor, Mousse ID credentials, and provider credential are fixture data. No live model, browser, account, relay, quota endpoint, or external network is used. E2E06 qualifies repository serialization through the production cross-process lease in one process; the lease's separate cross-process cases remain covered by `repositoryIdentityLease.test.ts`.

@@ -18,7 +18,7 @@ Concrete C1 contract and implemented modules under the owned paths:
 - `ProfileManager` with atomic `installation.json` + `profile.json`, create/list/get/update/archive/restore, revision conflicts, path ownership, and immutable `ProfileRuntime` / `ProfileScopedAccess`.
 - Profile bind increments a per-manager epoch and never writes `process.env.MOUSSE_HOME` or an installation-wide current-profile file.
 - Shared provider/auth paths stay installation-scoped (`auth.json`, `providers/`, repository leases, browser binaries). Personal settings/catalogs/control/channels/scheduled/thread-data use the profile root.
-- `ProfileMigrationService`: dry-run inventory, resumable journal, staged copy with count/hash validation, mousse.conf split that preserves unknown keys, Git worktree retain-by-default, and Plus credential decrypt-at-old-path / re-encrypt-at-live-destination (never a `credentials.enc` byte-copy). Credentials are applied only after the Default root is promoted to `profiles/<id>/` because ControlStore key derivation includes the control directory path.
+- `ProfileMigrationService`: dry-run inventory, resumable journal, staged copy with count/hash validation, mousse.conf split that preserves unknown keys, Git worktree retain-by-default, and Mousse ID credential decrypt-at-old-path / re-encrypt-at-live-destination (never a `credentials.enc` byte-copy). Credentials are applied only after the Default root is promoted to `profiles/<id>/` because ControlStore key derivation includes the control directory path.
 
 ## Changed paths
 
@@ -70,7 +70,7 @@ Covered: A/B identity/paths/CRUD/revision conflicts; shared `auth.json`; invalid
 - No protocol `profiles.bind`, event filtering, handshake capability, or renderer switcher (P03).
 - Archive/restore exist; trash/delete/pause/background ingress isolation is P04.
 - Git worktrees are retained at the legacy physical path with an ownership record. A Git-aware move/repair adapter can be injected later; the default adapter will not byte-move registered worktrees.
-- Device identity vs Plus account split remains P03. Default receives the migrated control store as the compatibility target.
+- Device identity vs Mousse ID account split remains P03. Default receives the migrated control store as the compatibility target.
 - Browser partition lifecycle stays with the existing `persist:mousse-browser` until P03 hands it to WG7.
 - Multi-profile enablement must stay gated until G2 (protocol + store injection + A/B service tests).
 

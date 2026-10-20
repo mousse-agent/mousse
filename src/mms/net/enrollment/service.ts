@@ -47,7 +47,7 @@ export interface NodeInviteInput {
   caps?: NodeCapability[]
   /**
    * Base64url SHA-256 of the joiner's transport public key. When set, only that key can redeem
-   * the invite (phones that enroll through Mousse Plus announce it ahead of time).
+   * the invite (phones that enroll through Mousse ID announce it ahead of time).
    */
   joinerTransportFingerprint?: string
 }

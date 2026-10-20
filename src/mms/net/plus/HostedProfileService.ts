@@ -354,6 +354,7 @@ export class HostedProfileService {
       expiresAt: number
       email?: unknown
       plan?: unknown
+      monetization?: unknown
     }>(transaction.configuration, `/v1/net/login/${id}/exchange`, {
       pollToken: transaction.pollToken,
       codeVerifier: transaction.verifier,
@@ -372,7 +373,8 @@ export class HostedProfileService {
     if (transaction.bindRoot) await this.bind(selected, grant.accessToken)
     else this.configure(selected)
     const email = displayText(grant.email, 320),
-      plan = displayText(grant.plan, 64),
+      // No paid plans yet: a plan name is kept only when the service says monetization is on.
+      plan = grant.monetization === true ? displayText(grant.plan, 64) : undefined,
       stored = this.read()
     if (stored && (email || plan)) {
       stored.account = { ...(email ? { email } : {}), ...(plan ? { plan } : {}) }

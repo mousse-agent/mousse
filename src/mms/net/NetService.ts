@@ -129,7 +129,7 @@ const defaults = (): NetConfiguration => ({
 })
 
 /** One profile owns its keys, ledger, listeners and sessions. Local IPC never takes a profile path. */
-/** How often a signed-in authority checks Mousse Plus for phones asking to join. */
+/** How often a signed-in authority checks Mousse ID for phones asking to join. */
 const PLUS_ENROLLMENT_POLL_MS = 15000
 export class NetService {
   private readonly clock: Clock
@@ -803,7 +803,7 @@ export class NetService {
       return value
     })
   }
-  /** An invite whose sealed copy never reached Plus cannot be redeemed by anyone; drop it. */
+  /** An invite whose sealed copy never reached Mousse ID cannot be redeemed by anyone; drop it. */
   private revokeUnsentInvite(invite: InviteId, error: unknown): void {
     if (error instanceof NetError && error.code === 'outcome_uncertain') return
     try {
@@ -851,7 +851,7 @@ export class NetService {
       this.enrollmentPoll = undefined
       void this.refreshEnrollmentRequests()
         .catch(() => {
-          // Plus may be unreachable or predate the mailbox; keep the last list and retry.
+          // Mousse ID may be unreachable or predate the mailbox; keep the last list and retry.
         })
         .finally(() => this.armEnrollmentPoll())
     }, delayMs)

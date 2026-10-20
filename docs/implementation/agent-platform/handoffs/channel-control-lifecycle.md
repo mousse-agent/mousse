@@ -1,6 +1,6 @@
 # Channel and control awaited shutdown
 
-This checkpoint adds a permanent, awaited shutdown path for one profile's channel and Plus/control work. Ordinary disconnect/stop UI behavior stays reversible. Profile archive/removal integration remains root work; this does not close P04.
+This checkpoint adds a permanent, awaited shutdown path for one profile's channel and Mousse ID/control work. Ordinary disconnect/stop UI behavior stays reversible. Profile archive/removal integration remains root work; this does not close P04.
 
 ## APIs
 
@@ -27,7 +27,7 @@ Late inbound, connect, `sendTest`, login, pairing, config mutation, and new exec
 - `npx tsc --noEmit -p tsconfig.node.json` then `npx tsc --noEmit -p tsconfig.web.json` passed.
 - `npm run build:cli` passed.
 
-Fixtures use actual `ChannelRouter` / `ChannelService` / `MmsControlService`, a controlled local adapter/runner, a hanging executor, `RemoteSessionDispatcher`, mocked fetch that ignores abort, and owned loopback HTTP (webhook + enrollment). No live channel, Plus account, provider, or credentials.
+Fixtures use actual `ChannelRouter` / `ChannelService` / `MmsControlService`, a controlled local adapter/runner, a hanging executor, `RemoteSessionDispatcher`, mocked fetch that ignores abort, and owned loopback HTTP (webhook + enrollment). No live channel, Mousse ID account, provider, or credentials.
 
 Covered: ignored-abort wait after cancel, no post-drain send/credential write, queued inbound suppression, cross-profile isolation, timeout then retry, simultaneous shutdown callers, reversible `stopAll`/`stop` vs permanent `shutdown`, late relay frames ignored, dispatcher send suppressed after close.
 
@@ -35,4 +35,4 @@ Covered: ignored-abort wait after cancel, no post-drain send/credential write, q
 
 Root still needs to call `channels.beginShutdown()` / `control.beginShutdown()` from profile disposal before the first await, wait `shutdown({ timeoutMs })`, surface `getActiveCount()` to `ProfileHost.previewRemove`, and wrap personal dispatch methods in the existing `OwnedWorkBarrier`. Do not use `stopAll()` / `control.stop()` as the archive/remove path.
 
-Out of scope here: orchestrator/native-agent binding (already a separate prerequisite), scheduler, protocol RPC admission, process trees, workflows, browser, MMS/ProfileHost wiring, live Telegram/Discord/Plus servers, and OS/TCP completion of Discord gateway or relay sockets. `RelayClient.waitForIdle()` waits tracked admission/lease promises; it does not claim kernel socket close from clearing `ws`.
+Out of scope here: orchestrator/native-agent binding (already a separate prerequisite), scheduler, protocol RPC admission, process trees, workflows, browser, MMS/ProfileHost wiring, live Telegram/Discord/Mousse ID servers, and OS/TCP completion of Discord gateway or relay sockets. `RelayClient.waitForIdle()` waits tracked admission/lease promises; it does not claim kernel socket close from clearing `ws`.

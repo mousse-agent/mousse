@@ -1,6 +1,6 @@
 {
   "format": "mousse-net-plus-enrollment-v1",
-  "description": "Public deterministic vectors for phone enrollment through Mousse Plus (docs/net/protocol.md, \"Phone enrollment through Mousse Plus\"). Keys and nonces are fixed test values; production code MUST use fresh random keys and nonces. Binary values are base64url without padding. X25519 keys are raw 32-byte values; ChaCha20-Poly1305 is the IETF 12-byte-nonce variant with the 16-byte tag appended.",
+  "description": "Public deterministic vectors for phone enrollment through Mousse ID (docs/net/protocol.md, \"Phone enrollment through Mousse ID\"). Keys and nonces are fixed test values; production code MUST use fresh random keys and nonces. Binary values are base64url without padding. X25519 keys are raw 32-byte values; ChaCha20-Poly1305 is the IETF 12-byte-nonce variant with the 16-byte tag appended.",
   "invite": "mj1_eyJ2IjoxLCJub3RlIjoiVGVzdCB2ZWN0b3IgcGxhaW50ZXh0LiBSZWFsIGludml0ZXMgY2FycnkgYSBzaWduZWQgYXV0aG9yaXphdGlvbiBhbmQgYSAzMi1ieXRlIHRva2VuLiJ9",
   "requestSeal": {
     "requestId": "enr_01HZXTESTREQUEST0000000000",

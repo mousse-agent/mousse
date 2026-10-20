@@ -7,7 +7,7 @@
 - Reviewed merge: `cfc77cbdbdd315e78a1413637f73bfa2e687b794`
 - Backend implementation in that history: `5a6305144f143af1a92344bb4ea41693e5fa5a6e`
 - Backend handoff head: `6ce4a68a873878b2eb92433c8ea71ec9f55ff78b`
-- This pass reviewed the MCP/Skills backend and integration domain bridge. The Plus and Agent-domain ancestors remain separate review work.
+- This pass reviewed the MCP/Skills backend and integration domain bridge. The Mousse ID and Agent-domain ancestors remain separate review work.
 
 ## Findings fixed
 
@@ -29,7 +29,7 @@
 - Skill package files and managed state are separate filesystem commits. The implementation now validates state before package mutation and makes replacement rollback-safe, but a later state-write failure can still leave a newly created package for discovery/reconciliation.
 - The Codex TOML reader remains its documented bounded subset.
 - Full MMS/preload/IPC/profile composition, Integrations UI, I04 CLI materialization, Git URL import, and streaming packages above the protocol caps remain production wiring or later feature work.
-- Plus authentication and Agent domain behavior present in the merged ancestry were intentionally not reviewed in this pass.
+- Mousse ID authentication and Agent domain behavior present in the merged ancestry were intentionally not reviewed in this pass.
 
 ## Verification
 

@@ -75,7 +75,7 @@ describe('Mousse ID sign-in polling', () => {
   })
 })
 
-describe('Mousse Plus origin', () => {
+describe('Mousse ID origin', () => {
   it('accepts https and loopback http origins only', () => {
     expect(normalizePlusOrigin(' https://plus.example.test/ ')).toBe('https://plus.example.test')
     expect(normalizePlusOrigin('http://127.0.0.1:8787')).toBe('http://127.0.0.1:8787')

@@ -18,4 +18,6 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Mousse Net:** networking between Mousse installations. It covers Bridge and Spaces.
 - **Bridge:** one person controlling agents on several of their own machines from one place.
 - **Space:** a group chat for a project. Members add their own bots, which run on the owner's machine with the owner's keys.
+- **Mousse ID:** the optional account service. Signing in lets a person reach their computers from a phone and relays connections without seeing their content. It was called Mousse Plus; code and wire names such as `net.plus.*` and `plus-relay` keep the old name. There are no paid plans.
+- **Leaf node:** a device, such as a phone, that joins a user's devices but cannot invite or revoke others.
 - **Primary checkout:** the first entry in `git worktree list`, normally the copy the user runs and reads.

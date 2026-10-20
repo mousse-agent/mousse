@@ -151,7 +151,7 @@ The current remote event ring is useful for transport reconnection, but is not a
 
 Add a remote collaboration client below the Electron UI boundary, reusing the current control protocol where compatible. Keep connection/host identity attached to every request and subscription. A remote room must not use local file, browser or terminal IPC accidentally. The first milestone can qualify two authenticated clients in a local fixture; the release gate requires two actual machines over the supported remote path.
 
-Current relay code references the separate Mousse Plus/control system. That server and the external client implementation are not present in this checkout. Inspect their matching versions and prove pairing, reconnect and room grant behavior before committing to a release date. Do not build a second remote HTTP stack solely because an older draft spec exists.
+Current relay code references the separate Mousse ID/control system. That server and the external client implementation are not present in this checkout. Inspect their matching versions and prove pairing, reconnect and room grant behavior before committing to a release date. Do not build a second remote HTTP stack solely because an older draft spec exists.
 
 When the host is offline, clients show disconnected state and retain unsent drafts. A request is “accepted” only after host persistence acknowledges it. The first release does not promise execution or cloud-backed room synchronization while the host is off.
 

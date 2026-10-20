@@ -486,7 +486,7 @@ All tests under `tests/net/**`, run focused.
 | Dependencies understated | §5–6: P4 needs P1+P2; private streams (P5-C) precede P6; P6-A before P6-B |
 | Exit criteria overclaim | Acceptance boundaries defined; real-binary and packaged qualification required |
 | Hand-written Noise | Replaced by `node:tls` TLS 1.3 with key pinning (spike passed) |
-| Segment-file fallback, Plus stub, SSH bootstrap, Funnel, live migration | Cut |
+| Segment-file fallback, Mousse ID stub, SSH bootstrap, Funnel, live migration | Cut |
 | Wrong seam list, test location, safeStorage claim | §4.1, §8, §4.2 corrected |
 
 ## 12. Changes from draft 2 (second-round review edits)

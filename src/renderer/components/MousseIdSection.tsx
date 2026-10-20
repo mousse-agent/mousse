@@ -4,7 +4,7 @@ import type { NetStatus, PlusEnrollmentOffer, PlusEnrollmentRequestView } from '
 import type { PlatformRequestMethod } from '../../shared/platform'
 import { qrSvgPath } from '../lib/plusQr'
 import {
-  DEFAULT_PLUS_ORIGIN,
+  DEFAULT_MOUSSE_ID_ORIGIN,
   formatCountdown,
   normalizePlusOrigin,
   PLUS_ORIGIN_OVERRIDE_KEY,
@@ -97,7 +97,7 @@ export function MousseIdSection({
     }
   }, [])
 
-  // The daemon polls the Plus mailbox; this only reads its cache.
+  // The daemon polls the Mousse ID mailbox; this only reads its cache.
   useEffect(() => {
     if (!canEnroll) {
       setRequests([])
@@ -219,7 +219,7 @@ export function MousseIdSection({
 
       {!plus?.connected && !login && (
         !origin ? (
-          <p role="status">No Mousse Plus service is set for this build. Enter one under Advanced to sign in.</p>
+          <p role="status">No Mousse ID service is set for this build. Enter one under Advanced to sign in.</p>
         ) : !ready ? (
           <p role="status">
             {!status?.self ? 'Create a network identity above first.' : !status.enabled ? 'Enable networking for this profile first.' : status.keystore !== 'unlocked' ? 'Unlock this profile first.' : 'Protect network keys with a passphrase first.'}
@@ -278,8 +278,8 @@ export function MousseIdSection({
       <details className="net-addon">
         <summary>Advanced</summary>
         <label>
-          Mousse Plus service
-          <input value={override} onChange={(e) => saveOverride(e.target.value)} placeholder={DEFAULT_PLUS_ORIGIN || 'https://plus.example'} spellCheck={false} />
+          Mousse ID service
+          <input value={override} onChange={(e) => saveOverride(e.target.value)} placeholder={DEFAULT_MOUSSE_ID_ORIGIN || 'https://plus.example'} spellCheck={false} />
         </label>
         <p>{overrideInvalid ? 'Enter an https:// address (http:// only for this computer).' : origin ? `Signing in to ${origin}.` : 'No service set.'}</p>
       </details>

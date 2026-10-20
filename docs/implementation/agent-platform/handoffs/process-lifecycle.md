@@ -71,7 +71,7 @@ Headless Windows `ChildProcess.kill()` is skipped when a PID is recorded, becaus
 ## What this does not do
 
 - Does **not** mark P04 or profile isolation/deletion complete.
-- Does not stop scheduler, channels, Plus/control, workflow/browser runs, or questions. Root owns those barriers.
+- Does not stop scheduler, channels, Mousse ID/control, workflow/browser runs, or questions. Root owns those barriers.
 - Does not change orchestrator thread-switch, `killByThreadId`, or public `kill`/`killAll` signatures.
 - Test-only `adoptTransportForTests` / injected `spawn` / `spawnPty` / `treeSignaler` must not be used in production composition.
 

@@ -71,7 +71,7 @@ export interface NetStatus {
   peers: Array<{ node: NodeId; state: 'connecting' | 'open' | 'closed'; error?: NetErrorCode }>
   error?: NetErrorCode
 }
-/** A phone asking to join through Mousse Plus, as `net.plus.enrollment.requests` returns it. */
+/** A phone asking to join through Mousse ID, as `net.plus.enrollment.requests` returns it. */
 export interface PlusEnrollmentRequestView {
   id: string
   deviceName: string
@@ -80,7 +80,7 @@ export interface PlusEnrollmentRequestView {
   transportFingerprint: string
   createdAt: number
   expiresAt: number
-  /** Six digits the phone also shows; computed locally, never by Plus. */
+  /** Six digits the phone also shows; computed locally, never by Mousse ID. */
   matchCode: string
 }
 export interface PlusEnrollmentOffer {

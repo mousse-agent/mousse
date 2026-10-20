@@ -1,11 +1,12 @@
-declare const __MOUSSE_PLUS_ORIGIN__: string | undefined
+declare const __MOUSSE_ID_ORIGIN__: string | undefined
 
 /**
- * The Mousse Plus service this build signs in to. Set at build time with the
- * `MOUSSE_PLUS_ORIGIN` environment value; empty when the build has none.
+ * The Mousse ID service this build signs in to. Set at build time with the
+ * `MOUSSE_ID_ORIGIN` environment value (`MOUSSE_PLUS_ORIGIN` is still read as a fallback);
+ * empty when the build has none.
  */
-export const DEFAULT_PLUS_ORIGIN: string =
-  typeof __MOUSSE_PLUS_ORIGIN__ === 'string' ? __MOUSSE_PLUS_ORIGIN__.trim() : ''
+export const DEFAULT_MOUSSE_ID_ORIGIN: string =
+  typeof __MOUSSE_ID_ORIGIN__ === 'string' ? __MOUSSE_ID_ORIGIN__.trim() : ''
 
 /** localStorage key for the origin set under Advanced in settings. */
 export const PLUS_ORIGIN_OVERRIDE_KEY = 'mousse.plus.originOverride'
@@ -28,7 +29,7 @@ export function normalizePlusOrigin(value: string): string | undefined {
 }
 
 /** The override wins when it is valid; otherwise the build default. Empty when neither is set. */
-export function resolvePlusOrigin(override: string | null | undefined, fallback = DEFAULT_PLUS_ORIGIN): string {
+export function resolvePlusOrigin(override: string | null | undefined, fallback = DEFAULT_MOUSSE_ID_ORIGIN): string {
   return normalizePlusOrigin(override ?? '') ?? normalizePlusOrigin(fallback) ?? ''
 }
 

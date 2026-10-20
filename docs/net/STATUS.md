@@ -24,7 +24,7 @@ integration, and both newly affected protocol cases on Chats and UI.
 I inspected lifecycle screenshots, retained mutation fences, and preserved the
 primary checkout's four local changes. I did not run a full suite locally or
 claim corrected Linux/Windows CI, resolve the separate startup profile diagnostics,
-or replace the sensitive teammate review. The optional Plus blocker remains.
+or replace the sensitive teammate review. The optional Mousse ID blocker remains.
 
 ## Baseline fixture corrections, 2026-10-04
 
@@ -45,7 +45,7 @@ master; the combined draft #61 contained the earlier correction. The subsequent
 independent verification and correction are recorded above. I have not called
 the current complete application suite green.
 
-I also reviewed optional Plus #60 against its actual companion server. Its
+I also reviewed optional Mousse ID #60 against its actual companion server. Its
 one-hour GUI device invitation exceeds the hosted ten-minute limit and leaves a
 rejected rendezvous pending, blocking renewal even after restart. I recorded the
 controlled reproduction on that existing PR and preserved its owner's branch.

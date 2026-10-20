@@ -13,14 +13,14 @@ import { NetError } from '../../../shared/net'
 import { decodeBase64, publicKeyFromRaw, rawPublicKey } from '../identity/crypto'
 
 /**
- * Sealing of `mj1_` invites for phones that enroll through Mousse Plus (contract §5,
- * docs/net/protocol.md "Phone enrollment through Mousse Plus"). Plus only ever stores the
+ * Sealing of `mj1_` invites for phones that enroll through Mousse ID (contract §5,
+ * docs/net/protocol.md "Phone enrollment through Mousse ID"). Mousse ID only ever stores the
  * resulting ciphertext. Frozen vectors: test-vectors/net/plus/enrollment-seal.json.
  */
 export const ENROLL_SEAL_INFO = 'mousse-net/enroll-seal/v1'
 export const ENROLL_OFFER_AAD = 'mousse-net/enroll-offer/v1'
 export const ENROLL_MATCH_DOMAIN = 'mousse-net/enroll-match/v1'
-/** Plus rejects sealed invites above this size. */
+/** Mousse ID rejects sealed invites above this size. */
 export const SEALED_INVITE_MAX_BYTES = 16 * 1024
 const NONCE = 12,
   TAG = 16,
@@ -140,7 +140,7 @@ export function openOfferSeal(sealedInvite: string, key: Uint8Array): string {
   return open(key, bytes.subarray(0, NONCE), bytes.subarray(NONCE), ENROLL_OFFER_AAD).toString('utf8')
 }
 
-/** Six digits both screens show so a person can spot a swapped key. Plus never computes it. */
+/** Six digits both screens show so a person can spot a swapped key. Mousse ID never computes it. */
 export function enrollmentMatchCode(boxPublicKey: string, transportFingerprint: string): string {
   const hash = createHash('sha256')
     .update(Buffer.from(ENROLL_MATCH_DOMAIN, 'utf8'))
