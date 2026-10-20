@@ -33,3 +33,4 @@
 .profile-sidebar-text > span { color: var(--text-secondary); font-size: 11px; }
 .profile-switcher.profile-sidebar-loading { padding: 14px 9px; color: var(--text-secondary); font-size: 12px; }
 .profile-switcher-sidebar > button:not(.profile-sidebar-trigger) { padding: 8px; font-size: 12px; }
+.mousse-id-avatar-empty { background: color-mix(in srgb, var(--text-secondary) 18%, transparent) !important; color: var(--text-secondary); }

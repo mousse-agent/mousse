@@ -20,13 +20,13 @@ async function main() {
     for (let index = 0; index < 100; index++) { if (await execute<boolean>(code)) return; await delay(20) }
     throw new Error(`Footer condition timed out: ${code}; ${JSON.stringify(await execute('({errors:footerQa.errors,text:document.body.innerText})'))}`)
   }
-  const inspect = `({profile:footerQa.profile(),name:document.querySelector('.profile-sidebar-text strong')?.textContent,avatar:document.querySelector('.profile-sidebar-trigger img')?.getAttribute('src'),loading:!!document.querySelector('.profile-sidebar-loading'),errors:footerQa.errors})`
+  const inspect = `({profile:footerQa.profile(),name:document.querySelector('.profile-sidebar-profile')?.textContent,avatar:document.querySelector('.profile-sidebar-trigger img')?.getAttribute('src'),loading:!!document.querySelector('.profile-sidebar-loading'),errors:footerQa.errors})`
   try {
     await window.loadFile(join(directory, 'index.html'))
     await until("!!document.querySelector('.profile-sidebar-loading') && footerQa.requests.length>=2")
     const loading = await execute(inspect)
     await execute("footerQa.release('prf_alpha')")
-    await until("document.querySelector('.profile-sidebar-text strong')?.textContent==='Adithya'")
+    await until("document.querySelector('.profile-sidebar-profile')?.textContent==='Adithya'")
     const first = await execute(inspect)
     await execute('footerQa.refresh()')
     await until("footerQa.requests.some(row=>row.profile==='prf_alpha')")
@@ -38,15 +38,15 @@ async function main() {
     await delay(60)
     const afterLate = await execute(inspect)
     await execute("footerQa.release('prf_beta')")
-    await until("document.querySelector('.profile-sidebar-text strong')?.textContent==='Studio'")
+    await until("document.querySelector('.profile-sidebar-profile')?.textContent==='Studio'")
     const switched = await execute(inspect)
     // Switch from another control while this footer's metadata is withheld.
     // Customize must still target its displayed active profile, not old current.
     await execute('footerQa.externalSwitch()')
-    await until("document.querySelector('.profile-sidebar-text strong')?.textContent==='Adithya' && footerQa.requests.some(row=>row.profile==='prf_alpha')")
+    await until("document.querySelector('.profile-sidebar-profile')?.textContent==='Adithya' && footerQa.requests.some(row=>row.profile==='prf_alpha')")
     await execute("document.querySelector('.profile-sidebar-trigger').click()")
-    await until("!!document.querySelector('.profile-menu-row')")
-    await execute("document.querySelector('.profile-menu-row').click()")
+    await until("[...document.querySelectorAll('.profile-menu-row')].some(row=>row.textContent==='Customize profile')")
+    await execute("[...document.querySelectorAll('.profile-menu-row')].find(row=>row.textContent==='Customize profile').click()")
     await until("!!document.querySelector('[aria-label=\"Profile name\"]')")
     await execute(`(()=>{
       const input=document.querySelector('[aria-label="Profile name"]');
@@ -55,7 +55,7 @@ async function main() {
     })()`)
     await until("!document.querySelector('[aria-label=\"Save profile name\"]').disabled")
     await execute("document.querySelector('[aria-label=\"Save profile name\"]').click()")
-    await until("footerQa.updates.length===1 && document.querySelector('.profile-sidebar-text strong')?.textContent==='Adithya local'")
+    await until("footerQa.updates.length===1 && document.querySelector('.profile-sidebar-profile')?.textContent==='Adithya local'")
     const updates = await execute('footerQa.updates')
     const headings = await execute("[...document.querySelectorAll('.chat-section-heading h2')].map(node=>({text:node.textContent,transform:getComputedStyle(node).textTransform,spacing:getComputedStyle(node).letterSpacing}))")
     const binds = await execute('footerQa.binds')

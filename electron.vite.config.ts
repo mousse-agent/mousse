@@ -68,7 +68,7 @@ export default defineConfig({
     root: resolve(__dirname, 'src/renderer'),
     // The Mousse ID service this build signs in to (src/renderer/lib/plusSignIn.ts).
     define: {
-      __MOUSSE_ID_ORIGIN__: JSON.stringify(process.env.MOUSSE_ID_ORIGIN || process.env.MOUSSE_PLUS_ORIGIN || '')
+      __MOUSSE_ID_ORIGIN__: JSON.stringify(process.env.MOUSSE_ID_ORIGIN || process.env.MOUSSE_PLUS_ORIGIN || 'https://api.mousse.work')
     },
     resolve: {
       alias: [

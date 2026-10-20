@@ -876,6 +876,15 @@ const api = {
       return () => ipcRenderer.removeListener('app:navigateMainView', handler)
     }
   },
+  mousseId: {
+    /** Runtime service origin from `MOUSSE_ID_ORIGIN`; empty when unset. */
+    config: (): Promise<{ origin: string }> => ipcRenderer.invoke('mousseId:config'),
+    /** Starts a one-shot loopback listener for the approval page to return to. */
+    startCallback: (): Promise<{ id: string; url: string }> => ipcRenderer.invoke('mousseId:callback.start'),
+    waitCallback: (id: string): Promise<'approved' | 'denied' | 'cancelled' | 'expired'> =>
+      ipcRenderer.invoke('mousseId:callback.wait', id),
+    cancelCallback: (id: string): Promise<void> => ipcRenderer.invoke('mousseId:callback.cancel', id)
+  },
   profiles: {
     list: (): Promise<{ defaultProfileId: string; profiles: ProfilePublicDto[] }> =>
       ipcRenderer.invoke('profiles:list'),

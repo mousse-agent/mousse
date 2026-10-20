@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, ChevronRight, ChevronUp, Pencil, Plus, UserCircle, Users } from '../../lib/icons'
+import { Check, ChevronRight, ChevronUp, Logout, Pencil, Plus, Settings, UserCircle, Users } from '../../lib/icons'
 import type { ProfilePublicDto } from '../../../shared/profiles/types'
 import { confirmNavigation } from '../../services/navigationGuards'
 import { migrateLegacyProfilePreferences } from '../../lib/profilePreferences'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
 import { useAppStore } from '../../stores/appStore'
+import { mousseIdName, useMousseId } from '../../stores/mousseIdStore'
+import { openSettingsSection } from '../../lib/settingsNavigation'
+import { MousseIdAvatar } from '../MousseIdAvatar'
 import './profile-sidebar-footer.css'
 
 interface ProfileSwitcherProps {
@@ -33,6 +36,9 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
   const floating = rail || sidebar
   const profileId = useAppStore((state) => state.profileId)
   const observedProfileId = sidebar ? profileId : undefined
+  // The sidebar footer doubles as the Mousse ID account control.
+  const account = useMousseId(sidebar)
+  const signedIn = !!account.plus?.connected
   const menuStyle = useFloatingPosition({
     open: open && floating, anchorRef: triggerRef, contentRef: menuRef, placement: sidebar ? 'above-start' : 'right-start',
     deps: [editing, showCreate, profiles.length, error]
@@ -209,8 +215,43 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
     </span>
   )
 
+  const openAccount = () => {
+    setOpen(false)
+    openSettingsSection('account')
+  }
+
+  const signIn = async () => {
+    setOpen(false)
+    const result = await account.signIn()
+    // Setup steps and the service address live in Account settings.
+    if (result !== 'started') openSettingsSection('account')
+  }
+
+  const accountMenu = sidebar && <div className="profile-menu-section profile-menu-account">
+    {signedIn ? (
+      <div className="profile-current-card">
+        <MousseIdAvatar plus={account.plus} large />
+        <strong>{mousseIdName(account.plus)}</strong>
+        {account.plus?.email && <span>{account.plus.email}</span>}
+      </div>
+    ) : (
+      <button className="profile-menu-row" type="button" role="menuitem" disabled={account.busy && !account.pending} onClick={() => account.pending ? openAccount() : void signIn()}>
+        <UserCircle size={16} /><span>{account.pending ? 'Signing in…' : 'Sign in with Mousse ID'}</span>
+      </button>
+    )}
+    <button className="profile-menu-row" type="button" role="menuitem" onClick={openAccount}>
+      <Settings size={16} /><span>Account settings</span>
+    </button>
+    {account.plus?.configured && (
+      <button className="profile-menu-row" type="button" role="menuitem" disabled={account.busy} onClick={() => { setOpen(false); void account.signOut() }}>
+        <Logout size={16} /><span>Sign out</span>
+      </button>
+    )}
+  </div>
+
   const menu = open && <div ref={menuRef} className={`profile-menu${floating ? ' profile-menu-rail' : ''}`}
     style={floating ? menuStyle : undefined} role="menu" aria-label="Profiles">
+        {accountMenu}
         <div className="profile-current-card">
           {avatar(selected, true)}
           <strong>{selected.displayName}</strong>
@@ -255,11 +296,15 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
   return (
     <div ref={rootRef} className={`profile-switcher${rail ? ' profile-switcher-rail' : ''}${sidebar ? ' profile-switcher-sidebar' : ''}`} data-profile-id={selected.id}>
       <button ref={triggerRef} className={sidebar ? 'profile-sidebar-trigger' : rail ? `navigation-rail-button${open ? ' active' : ''}` : 'profile-menu-trigger'}
-        type="button" aria-label={sidebar ? `Mousse profile: ${selected.displayName}` : 'Profiles'} title={sidebar ? selected.displayName : 'Profiles'} aria-haspopup="menu" aria-expanded={open}
+        type="button" aria-label={sidebar ? `${signedIn ? `Mousse ID: ${mousseIdName(account.plus)}` : 'Sign in'}, Mousse profile: ${selected.displayName}` : 'Profiles'}
+        title={sidebar ? (signedIn ? account.plus?.email ?? mousseIdName(account.plus) : selected.displayName) : 'Profiles'} aria-haspopup="menu" aria-expanded={open}
         onClick={() => setOpen((value) => !value)}>
         {sidebar ? <>
-          {avatar(selected)}
-          <span className="profile-sidebar-text"><strong>{selected.displayName}</strong><span>Mousse profile</span></span>
+          {signedIn ? <MousseIdAvatar plus={account.plus} /> : avatar(selected)}
+          <span className="profile-sidebar-text">
+            <strong>{signedIn ? mousseIdName(account.plus) : account.pending ? 'Signing in…' : 'Sign in'}</strong>
+            <span className="profile-sidebar-profile">{selected.displayName}</span>
+          </span>
           <ChevronUp size={16} aria-hidden="true" />
         </> : <UserCircle size={rail ? 18 : 16} strokeWidth={rail ? 1.8 : undefined} aria-hidden="true" />}
       </button>

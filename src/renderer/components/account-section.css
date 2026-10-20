@@ -1,0 +1,16 @@
+.account-section { display: flex; flex-direction: column; gap: 16px; }
+.account-card { display: flex; align-items: center; gap: 14px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in srgb, var(--text-secondary) 4%, transparent); }
+.account-card .profile-avatar-large { width: 48px; height: 48px; font-size: 19px; }
+.account-card-text { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
+.account-card-text strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 600; }
+.account-card-text span { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.account-card-text span:empty { display: none; }
+.account-card-actions { display: flex; flex-shrink: 0; gap: 8px; }
+.account-pending { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 12px; }
+.account-pending p { flex-basis: 100%; margin: 0; color: var(--text-secondary); }
+.account-pending a { color: var(--accent); }
+.account-note { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
+.account-link { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; }
+.account-advanced summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
+.account-advanced label { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; font-size: 12px; }
+.account-advanced p { margin: 6px 0 0; color: var(--text-secondary); font-size: 11px; }

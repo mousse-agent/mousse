@@ -1,43 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { PlusConfiguration, PlusStatus } from '../../mms/net/plus/contracts'
+import type { PlusStatus } from '../../mms/net/plus/contracts'
 import type { NetStatus, PlusEnrollmentOffer, PlusEnrollmentRequestView } from '../../shared/net'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import { qrSvgPath } from '../lib/plusQr'
-import {
-  DEFAULT_MOUSSE_ID_ORIGIN,
-  formatCountdown,
-  normalizePlusOrigin,
-  PLUS_ORIGIN_OVERRIDE_KEY,
-  pollPlusSignIn,
-  PlusSignInError,
-  resolvePlusOrigin,
-  secondsLeft
-} from '../lib/plusSignIn'
-
-interface PendingLogin {
-  id: string
-  userCode: string
-  verificationUri: string
-  expiresAt: number
-  pollIntervalMs?: number
-}
-interface DeviceSummary {
-  node: string
-  name: string
-  self: boolean
-  revoked: boolean
-}
+import { formatCountdown, secondsLeft } from '../lib/plusSignIn'
+import { mousseIdName } from '../stores/mousseIdStore'
 
 const request = <T,>(method: PlatformRequestMethod, params: unknown = {}) =>
   window.mousse.platformRequest.request<T>(method, params)
 const message = (cause: unknown) => String((cause as Error | null)?.message ?? cause)
-const readOverride = () => {
-  try {
-    return localStorage.getItem(PLUS_ORIGIN_OVERRIDE_KEY) ?? ''
-  } catch {
-    return ''
-  }
-}
 
 function useNow(active: boolean) {
   const [now, setNow] = useState(Date.now())
@@ -60,31 +31,24 @@ function QrCode({ text }: { text: string }) {
   )
 }
 
-/** Mousse ID sign-in, phone codes and phone requests (issue #98). */
+/** Mousse ID phone codes and phone requests (issue #98). Sign-in lives under Settings → Account. */
 export function MousseIdSection({
   status,
   plus,
-  devices,
-  deviceName,
-  onChanged
+  onChanged,
+  onOpenAccount
 }: {
   status?: NetStatus
   plus?: PlusStatus
-  devices: DeviceSummary[]
-  deviceName: string
   onChanged: () => Promise<void>
+  onOpenAccount: () => void
 }) {
-  const [override, setOverride] = useState(readOverride)
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('')
-  const [login, setLogin] = useState<PendingLogin>()
   const [offer, setOffer] = useState<PlusEnrollmentOffer>()
   const [requests, setRequests] = useState<PlusEnrollmentRequestView[]>([])
-  const signIn = useRef<AbortController | undefined>(undefined),
-    alive = useRef(true)
-  const now = useNow(!!login || !!offer)
-  const origin = resolvePlusOrigin(override)
-  const overrideInvalid = !!override.trim() && !normalizePlusOrigin(override)
+  const alive = useRef(true)
+  const now = useNow(!!offer)
   const ready = !!status?.enabled && !!status.self && status.keystore === 'unlocked' && !!status.protected
   const authority = !!status?.self?.isAuthority
   const canEnroll = ready && authority && !!plus?.connected
@@ -93,7 +57,6 @@ export function MousseIdSection({
     alive.current = true
     return () => {
       alive.current = false
-      signIn.current?.abort()
     }
   }, [])
 
@@ -128,43 +91,10 @@ export function MousseIdSection({
     try {
       await work()
     } catch (cause) {
-      if (alive.current && !(cause instanceof PlusSignInError && cause.code === 'cancelled')) setError(message(cause))
+      if (alive.current) setError(message(cause))
     } finally {
       if (alive.current) setBusy(false)
     }
-  }
-
-  const beginSignIn = () =>
-    run(async () => {
-      const configuration = await request<Omit<PlusConfiguration, 'accountId'>>('net.plus.discover', { apiOrigin: origin })
-      const pending = await request<PendingLogin>('net.plus.login.begin', {
-        configuration,
-        deviceName: deviceName.trim() || 'My device',
-        bindRoot: authority
-      })
-      if (!alive.current) return
-      const controller = new AbortController()
-      signIn.current = controller
-      setLogin(pending)
-      // The main process opens new windows in the system browser.
-      window.open(pending.verificationUri, '_blank', 'noopener,noreferrer')
-      try {
-        await pollPlusSignIn(() => request<PlusStatus>('net.plus.login.finish', { id: pending.id }), {
-          intervalMs: pending.pollIntervalMs ?? 2000,
-          expiresAt: pending.expiresAt,
-          signal: controller.signal
-        })
-        if (alive.current) await onChanged()
-      } finally {
-        if (signIn.current === controller) signIn.current = undefined
-        if (alive.current) setLogin(undefined)
-      }
-    })
-
-  const cancelSignIn = () => {
-    signIn.current?.abort()
-    setLogin(undefined)
-    void request('net.plus.login.cancel').catch(() => undefined)
   }
 
   const addPhone = () =>
@@ -181,66 +111,17 @@ export function MousseIdSection({
       if (approve) await onChanged()
     })
 
-  const saveOverride = (value: string) => {
-    setOverride(value)
-    try {
-      if (value.trim()) localStorage.setItem(PLUS_ORIGIN_OVERRIDE_KEY, value.trim())
-      else localStorage.removeItem(PLUS_ORIGIN_OVERRIDE_KEY)
-    } catch {
-      // Storage can be unavailable; the value still applies to this window.
-    }
-  }
-
-  let host: string | undefined
-  try {
-    host = plus?.audience ? new URL(plus.audience).host : undefined
-  } catch {
-    host = undefined
-  }
-  const listed = devices.filter((device) => !device.revoked)
-
   return (
     <section className="net-plus">
-      <h3>Mousse ID · optional</h3>
+      <h3>Mousse ID</h3>
       {error && <p role="alert" className="chat-error">{error}</p>}
 
-      {plus?.connected ? (
-        <div className="net-plus-account">
-          <p>
-            Signed in{plus.email ? <> as <strong>{plus.email}</strong></> : plus.accountId && <> · account {plus.accountId}</>}
-            {plus.plan && <> · {plus.plan}</>}
-            {host && <> · {host}</>}
-          </p>
-          {!!listed.length && <p>Devices: {listed.map((device) => device.name + (device.self ? ' (this device)' : '')).join(', ')}</p>}
-        </div>
-      ) : (
-        <p>{plus?.configured ? 'Mousse ID selected · disconnected.' : 'Use Mousse locally without an account, or sign in to reach this computer from your phone.'}</p>
-      )}
-
-      {!plus?.connected && !login && (
-        !origin ? (
-          <p role="status">No Mousse ID service is set for this build. Enter one under Advanced to sign in.</p>
-        ) : !ready ? (
-          <p role="status">
-            {!status?.self ? 'Create a network identity above first.' : !status.enabled ? 'Enable networking for this profile first.' : status.keystore !== 'unlocked' ? 'Unlock this profile first.' : 'Protect network keys with a passphrase first.'}
-          </p>
-        ) : (
-          <>
-            <button type="button" disabled={busy} onClick={() => void beginSignIn()}>Sign in with Mousse ID</button>
-            {authority && <p>Signing in links this profile’s network identity to the account you approve.</p>}
-          </>
-        )
-      )}
-
-      {login && (
-        <div role="status" className="net-plus-login">
-          <p>
-            Approve code <strong>{login.userCode}</strong> in your browser. Waiting · {formatCountdown(secondsLeft(login.expiresAt, now))} left.
-          </p>
-          <a href={login.verificationUri} target="_blank" rel="noreferrer">Open the approval page again</a>
-          <button type="button" onClick={cancelSignIn}>Cancel</button>
-        </div>
-      )}
+      <p>
+        {plus?.connected
+          ? <>Signed in as <strong>{plus.email ?? mousseIdName(plus)}</strong>. {authority ? 'Add phones to reach this computer from them.' : 'Phones can be added from the device that owns this identity.'}</>
+          : 'Sign in to Mousse ID to add phones.'}{' '}
+        <button type="button" className="account-link" onClick={onOpenAccount}>Account settings</button>
+      </p>
 
       {canEnroll && (
         <div className="net-plus-phones">
@@ -269,20 +150,6 @@ export function MousseIdSection({
         </div>
       )}
 
-      {plus?.configured && (
-        <button type="button" disabled={busy || !status?.enabled} onClick={() => void run(async () => { await request('net.plus.disconnect'); await onChanged() })}>
-          Sign out of Mousse ID for this profile
-        </button>
-      )}
-
-      <details className="net-addon">
-        <summary>Advanced</summary>
-        <label>
-          Mousse ID service
-          <input value={override} onChange={(e) => saveOverride(e.target.value)} placeholder={DEFAULT_MOUSSE_ID_ORIGIN || 'https://plus.example'} spellCheck={false} />
-        </label>
-        <p>{overrideInvalid ? 'Enter an https:// address (http:// only for this computer).' : origin ? `Signing in to ${origin}.` : 'No service set.'}</p>
-      </details>
     </section>
   )
 }

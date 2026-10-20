@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
-import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Mic, Palette, Plug, Plus, Radio, RefreshCw, Server, Sparkles, Trash2, User, VolumeHigh, Wrench } from '../lib/icons'
+import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Mic, Palette, Plug, Plus, Radio, RefreshCw, Server, Sparkles, Trash2, User, UserCircle, VolumeHigh, Wrench } from '../lib/icons'
 import type {
   AgentTypeId,
   MousseSettings,
@@ -26,6 +26,8 @@ import { DictationSettings } from '../dictation/DictationSettings'
 import { ReadAloudSettings } from '../readAloud/ReadAloudSettings'
 import { DictationSpeechSettings, ReadAloudSpeechSettings } from '../speech/SpeechSettings'
 import { NetDevicesSection } from './NetDevicesSection'
+import { AccountSection } from './AccountSection'
+import { takePendingSettingsSection } from '../lib/settingsNavigation'
 import { StorageSettings } from './StorageSettings'
 import { IntegrationsWorkspace } from './integrations'
 import { createIntegrationPlatformClient } from '../services/integrationPlatformClient'
@@ -101,6 +103,7 @@ function SectionHeading({
 }
 
 const SETTINGS_SECTIONS = [
+  { id: 'account', label: 'Account', icon: UserCircle },
   { id: 'profile', label: 'Profile', icon: User },
   { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'notifications', label: 'Notifications', icon: Bell },
@@ -119,6 +122,9 @@ const SETTINGS_SECTIONS = [
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id']
 
 const VISIBLE_SETTINGS_SECTIONS = SETTINGS_SECTIONS
+
+const settingsSectionId = (value: unknown): SettingsSectionId | undefined =>
+  SETTINGS_SECTIONS.find((section) => section.id === value)?.id
 
 export function SettingsPage() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
@@ -161,10 +167,14 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const [savingWebTool, setSavingWebTool] = useState<'exa' | 'parallel' | null>(null)
 
   const [activeSection, setActiveSection] = useState<SettingsSectionId>(() =>
-    window.location.hash === '#settings-context-compaction' ? 'context' : 'profile')
+    window.location.hash === '#settings-context-compaction' ? 'context' : settingsSectionId(takePendingSettingsSection()) ?? 'account')
   useEffect(() => {
     const openSection = (event: Event) => {
-      if ((event as CustomEvent).detail === 'context') setActiveSection('context')
+      const section = settingsSectionId((event as CustomEvent).detail)
+      if (section) {
+        takePendingSettingsSection()
+        setActiveSection(section)
+      }
     }
     window.addEventListener('mousse:settings-section', openSection)
     return () => window.removeEventListener('mousse:settings-section', openSection)
@@ -698,6 +708,12 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
             </label>
             <IntegrationsWorkspace client={integrationClient} profileId={profileId} projectId={integrationProject || undefined} projects={projects} showHeading={false} />
           </section>}
+          {activeSection === 'account' && (
+          <section id="account" className="settings-section">
+            <AccountSection onOpenDevices={() => setActiveSection('connections')} />
+          </section>
+          )}
+
           {activeSection === 'profile' && (
           <section id="profile" className="settings-section">
             <ProfileSection settings={settings} onUpdate={updateSettings} />

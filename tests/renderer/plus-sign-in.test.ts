@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
+  createWakeableSleep,
   formatCountdown,
   normalizePlusOrigin,
   pollPlusSignIn,
   resolvePlusOrigin,
-  secondsLeft
+  secondsLeft,
+  withSignInCallback
 } from '../../src/renderer/lib/plusSignIn'
 
 function clock() {
@@ -103,5 +105,35 @@ describe('phone QR code', () => {
     const { size, path } = qrSvgPath(url)
     expect((size - 8 - 17) % 4).toBe(0)
     expect(path).toMatch(/^M4 4h1v1h-1z/)
+  })
+})
+
+describe('sign-in callback', () => {
+  it('adds the loopback callback to the approval link', () => {
+    const link = withSignInCallback('https://mousse.work/net-approve?code=ABCD-EFGH', 'http://127.0.0.1:4100/mousse-id/callback/abc')
+    const url = new URL(link)
+    expect(url.searchParams.get('code')).toBe('ABCD-EFGH')
+    expect(url.searchParams.get('callback')).toBe('http://127.0.0.1:4100/mousse-id/callback/abc')
+    expect(withSignInCallback('https://mousse.work/net-approve', undefined)).toBe('https://mousse.work/net-approve')
+  })
+
+  it('wakes a running wait early, and the next wait when none is running', async () => {
+    const { sleep, wake } = createWakeableSleep()
+    const signal = new AbortController().signal
+    const started = Date.now()
+    const waiting = sleep(60_000, signal)
+    wake()
+    await waiting
+    wake()
+    await sleep(60_000, signal)
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
+  it('rejects a wait as cancelled when aborted', async () => {
+    const { sleep } = createWakeableSleep()
+    const controller = new AbortController()
+    const waiting = sleep(60_000, controller.signal)
+    controller.abort()
+    await expect(waiting).rejects.toMatchObject({ code: 'cancelled' })
   })
 })

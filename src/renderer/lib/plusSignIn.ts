@@ -1,12 +1,16 @@
 declare const __MOUSSE_ID_ORIGIN__: string | undefined
 
+/** The hosted Mousse ID service used when nothing else is set. */
+export const PRODUCTION_MOUSSE_ID_ORIGIN = 'https://api.mousse.work'
+
 /**
  * The Mousse ID service this build signs in to. Set at build time with the
  * `MOUSSE_ID_ORIGIN` environment value (`MOUSSE_PLUS_ORIGIN` is still read as a fallback);
- * empty when the build has none.
+ * the hosted service otherwise. The main process can also pass a runtime value from the
+ * same environment variable, which wins over this one.
  */
 export const DEFAULT_MOUSSE_ID_ORIGIN: string =
-  typeof __MOUSSE_ID_ORIGIN__ === 'string' ? __MOUSSE_ID_ORIGIN__.trim() : ''
+  (typeof __MOUSSE_ID_ORIGIN__ === 'string' ? __MOUSSE_ID_ORIGIN__.trim() : '') || PRODUCTION_MOUSSE_ID_ORIGIN
 
 /** localStorage key for the origin set under Advanced in settings. */
 export const PLUS_ORIGIN_OVERRIDE_KEY = 'mousse.plus.originOverride'
@@ -28,9 +32,24 @@ export function normalizePlusOrigin(value: string): string | undefined {
   return url.origin
 }
 
-/** The override wins when it is valid; otherwise the build default. Empty when neither is set. */
+/** The override wins when it is valid; otherwise the fallback. Empty when neither is usable. */
 export function resolvePlusOrigin(override: string | null | undefined, fallback = DEFAULT_MOUSSE_ID_ORIGIN): string {
   return normalizePlusOrigin(override ?? '') ?? normalizePlusOrigin(fallback) ?? ''
+}
+
+/**
+ * Adds the loopback address the approval page sends the browser back to once the
+ * sign-in is approved or denied. The page only follows loopback callbacks.
+ */
+export function withSignInCallback(verificationUri: string, callbackUrl: string | undefined): string {
+  if (!callbackUrl) return verificationUri
+  try {
+    const url = new URL(verificationUri)
+    url.searchParams.set('callback', callbackUrl)
+    return url.toString()
+  } catch {
+    return verificationUri
+  }
 }
 
 /** Error codes that mean "not approved yet, ask again later". */
@@ -66,6 +85,47 @@ const abortableSleep = (ms: number, signal: AbortSignal) =>
     }
     signal.addEventListener('abort', stop, { once: true })
   })
+
+/**
+ * A poll sleep that `wake()` cuts short, used when the browser calls back. A wake that
+ * lands while no sleep is running makes the next sleep return at once.
+ */
+export function createWakeableSleep(): { sleep: (ms: number, signal: AbortSignal) => Promise<void>; wake: () => void } {
+  let early = false
+  let cut: (() => void) | undefined
+  const sleep = (ms: number, signal: AbortSignal) => {
+    if (early && !signal.aborted) {
+      early = false
+      return Promise.resolve()
+    }
+    return new Promise<void>((resolve, reject) => {
+      const done = () => {
+        clearTimeout(timer)
+        signal.removeEventListener('abort', stop)
+        cut = undefined
+      }
+      const stop = () => {
+        done()
+        reject(new PlusSignInError('cancelled', 'Sign-in cancelled.'))
+      }
+      const timer = setTimeout(() => {
+        done()
+        resolve()
+      }, ms)
+      cut = () => {
+        done()
+        resolve()
+      }
+      if (signal.aborted) stop()
+      else signal.addEventListener('abort', stop, { once: true })
+    })
+  }
+  const wake = () => {
+    if (cut) cut()
+    else early = true
+  }
+  return { sleep, wake }
+}
 
 /**
  * Calls `finish` until the browser approval lands. "Not approved yet" answers back off
