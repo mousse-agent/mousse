@@ -32,6 +32,7 @@ import { PtyManager } from '../../src/mms/terminals/PtyManager'
 import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
 import { getDefaultSettings } from '../../src/shared/settings'
 
+// Skipped unless MOUSSE_LIVE_PROVIDERS=1: it signs in with the real Claude Code and Codex CLIs and costs a few turns.
 const live = process.env.MOUSSE_LIVE_PROVIDERS === '1'
 const scratch = process.env.MOUSSE_LIVE_SCRATCH ?? ''
 
@@ -60,9 +61,10 @@ describe.skipIf(!live)('live: Claude and Codex delegate to each other over the M
     const isolatedClaudeConfig = process.env.CLAUDE_CONFIG_DIR
     if (process.env.MOUSSE_LIVE_CLAUDE_CONFIG_DIR) process.env.CLAUDE_CONFIG_DIR = process.env.MOUSSE_LIVE_CLAUDE_CONFIG_DIR
     else delete process.env.CLAUDE_CONFIG_DIR
-    const codexBinary = process.env.MOUSSE_CODEX_BINARY ?? '/Users/avarniclabs/.local/bin/codex'
-    mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
-    writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: codexBinary }))
+    if (process.env.MOUSSE_CODEX_BINARY) {
+      mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
+      writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: process.env.MOUSSE_CODEX_BINARY }))
+    }
     if (process.env.MOUSSE_CLAUDE_BINARY) {
       mkdirSync(join(home, 'providers', 'claude-subscription'), { recursive: true })
       writeFileSync(join(home, 'providers', 'claude-subscription', 'settings.json'), JSON.stringify({ binaryPath: process.env.MOUSSE_CLAUDE_BINARY }))
