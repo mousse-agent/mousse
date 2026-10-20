@@ -164,6 +164,27 @@ describe('owned-path containment', () => {
     }
   })
 
+  it('rejects an escaping link reached by climbing out of a not-yet-created folder', () => {
+    const root = tempRoot()
+    const outside = join(root, '..', 'outside')
+    mkdirSync(outside)
+    if (!link(outside, join(root, 'escape'))) return
+    // Spelled with `/` so `join` cannot collapse `missing/..` before the check.
+    const candidate = `${root}/missing/../escape/file`
+
+    expect(isPathInsideRoot(root, candidate)).toBe(false)
+    expect(() => assertOwnedPath(root, candidate)).toThrow(ProfilePathError)
+  })
+
+  it.skipIf(process.platform === 'win32')('treats a backslash as part of a file name off Windows', () => {
+    const root = tempRoot()
+    const sibling = `${root}\\outside/file`
+    const child = join(root, 'a\\b')
+
+    expect(() => assertOwnedPath(root, sibling)).toThrow(ProfilePathError)
+    expect(assertOwnedPath(root, child)).toBe(child)
+  })
+
   it('resolves a dangling symlink that stays inside the root to its target', () => {
     const root = tempRoot()
     if (!link(join(root, 'missing'), join(root, 'link'))) return

@@ -4,6 +4,8 @@ import { ProfileIdentityError, ProfilePathError } from '../../shared/profiles/er
 import { canonicalizeProfileId, isProfileId } from '../../shared/profiles/ids'
 
 const MAX_LINK_HOPS = 40
+// A backslash is an ordinary file name character off Windows.
+const SEPARATORS = sep === '\\' ? /[\\/]+/ : /\/+/
 
 function isSymbolicLink(path: string): boolean {
   try {
@@ -23,7 +25,7 @@ function isSymbolicLink(path: string): boolean {
  */
 function realLocation(absolute: string, hops: number): string {
   const { root } = parse(absolute)
-  const parts = absolute.slice(root.length).split(/[\\/]+/).filter(Boolean)
+  const parts = absolute.slice(root.length).split(SEPARATORS).filter(Boolean)
   for (let depth = parts.length; depth >= 0; depth--) {
     let real: string
     try {
@@ -33,7 +35,13 @@ function realLocation(absolute: string, hops: number): string {
     }
     if (depth === parts.length) return real
     const next = join(real, parts[depth])
-    if (!isSymbolicLink(next)) return join(real, ...parts.slice(depth))
+    if (!isSymbolicLink(next)) {
+      const tail = parts.slice(depth)
+      const joined = join(real, ...tail)
+      // `..` after a missing folder cancels it and can expose existing entries,
+      // links included, so resolve the shortened path again. It has no `..` left.
+      return tail.includes('..') ? realLocation(joined, hops) : joined
+    }
     if (hops >= MAX_LINK_HOPS) {
       throw new ProfilePathError('Path has too many levels of symbolic links', { path: absolute })
     }
