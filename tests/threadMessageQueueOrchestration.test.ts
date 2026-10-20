@@ -547,7 +547,10 @@ describe('OrchestratorService concurrent threads and queue', () => {
     })
   })
 
-  it('startup drain concurrency bound holds across multi-message threads', async () => {
+  // Twelve real orchestrator turns run two at a time with thread-file persistence after each,
+  // so this test is bound by throughput, not by a race: about 6 s alone and 15 s inside a full
+  // run on a loaded machine. The assertion on the concurrency bound stays exact.
+  it('startup drain concurrency bound holds across multi-message threads', { timeout: 60_000 }, async () => {
     // Several eligible threads each with multiple pending normals — internal auto-drain
     // must not stack turns on top of the startup pump (bound = 2).
     const messagesPerThread = 3
@@ -642,7 +645,7 @@ describe('OrchestratorService concurrent threads and queue', () => {
         }
         expect(accepted).toBe(totalMessages)
       },
-      { timeout: 15_000 }
+      { timeout: 45_000 }
     )
 
     // STARTUP_QUEUE_DRAIN_CONCURRENCY is 2 — never exceeded even with multi-item chains.
