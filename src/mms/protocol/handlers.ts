@@ -1612,7 +1612,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const providerId = asString(p.providerId, 'providerId', 128)
       const modelId = asString(p.modelId, 'modelId', 256)
       const text = asString(p.text, 'text', PROVIDER_TTS_MAX_CHARS)
-      const { audio, mimeType } = await ctx.mms.providerAuth.synthesizeSpeech({ providerId, modelId, text })
+      const voice = p.voice === undefined ? undefined : asString(p.voice, 'voice', 128)
+      const { audio, mimeType } = await ctx.mms.providerAuth.synthesizeSpeech({ providerId, modelId, text, voice })
       return { audioBase64: Buffer.from(audio).toString('base64'), mimeType }
     }
     case 'providers.transcribeAudio': {

@@ -100,15 +100,19 @@ export function markdownToSpeechText(markdown: string): string {
   return paragraphs.join('\n\n')
 }
 
-/** Splits text into pieces of at most `maxChars`, preferring paragraph, then sentence, then word boundaries. */
-export function splitSpeechChunks(text: string, maxChars: number): string[] {
-  const limit = Math.max(1, Math.floor(maxChars))
+/**
+ * Splits text into pieces of at most `maxChars`, preferring paragraph, then sentence, then word
+ * boundaries. `maxChars` may be a function of the piece's index, so pieces can grow.
+ */
+export function splitSpeechChunks(text: string, maxChars: number | ((index: number) => number)): string[] {
+  const limitAt = (index: number): number => Math.max(1, Math.floor(typeof maxChars === 'number' ? maxChars : maxChars(index)))
+  const smallest = typeof maxChars === 'number' ? limitAt(0) : Math.min(limitAt(0), limitAt(1))
   const pieces: string[] = []
   for (const paragraph of text.split(/\n{2,}/)) {
     const trimmed = paragraph.trim()
     if (!trimmed) continue
     const sentences = trimmed.match(/[^.!?]+(?:[.!?]+["')\]]*|$)\s*/g) ?? [trimmed]
-    for (const sentence of sentences) pieces.push(...splitLongPiece(sentence.trim(), limit))
+    for (const sentence of sentences) pieces.push(...splitLongPiece(sentence.trim(), smallest))
     pieces.push('\n\n')
   }
   pieces.pop()
@@ -121,7 +125,7 @@ export function splitSpeechChunks(text: string, maxChars: number): string[] {
       continue
     }
     const joined = current ? (current.endsWith('\n\n') ? current + piece : `${current} ${piece}`) : piece
-    if (joined.length <= limit) {
+    if (joined.length <= limitAt(chunks.length)) {
       current = joined
       continue
     }
@@ -130,6 +134,25 @@ export function splitSpeechChunks(text: string, maxChars: number): string[] {
   }
   if (current.trim()) chunks.push(current.trim())
   return chunks
+}
+
+/** The first local segment is short so audio starts soon; later ones grow to this size. */
+export const FIRST_SEGMENT_CHARS = 100
+export const MAX_SEGMENT_CHARS = 220
+const SEGMENT_GROWTH = 1.25
+
+/**
+ * Cuts text into the segments a local model voices one at a time. Each segment is spoken in one
+ * pass, so paragraph breaks inside it become sentence ends instead of newlines.
+ */
+export function splitSpeechSegments(text: string): string[] {
+  const limit = (index: number): number => Math.min(MAX_SEGMENT_CHARS, FIRST_SEGMENT_CHARS * SEGMENT_GROWTH ** index)
+  return splitSpeechChunks(text, limit).map((chunk) =>
+    chunk
+      .split(/\n{2,}/)
+      .map((paragraph) => endWithPunctuation(paragraph.trim()))
+      .join(' ')
+  )
 }
 
 function splitLongPiece(piece: string, limit: number): string[] {

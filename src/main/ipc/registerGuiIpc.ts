@@ -1967,7 +1967,8 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ audioBase64: string; mimeType: string }>('providers.synthesizeSpeech', {
       providerId: request?.providerId,
       modelId: request?.modelId,
-      text: request?.text
+      text: request?.text,
+      voice: request?.voice
     })
     return { audio: Buffer.from(res.audioBase64, 'base64'), mimeType: res.mimeType }
   })

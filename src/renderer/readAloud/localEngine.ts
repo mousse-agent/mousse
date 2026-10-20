@@ -1,30 +1,33 @@
 import { KOKORO_82M } from '../../shared/readAloud'
 import type { KokoroWorkerEvent, KokoroWorkerRequest } from './kokoroWorker'
-import type { SpeakOptions } from './providerEngine'
+import { CLIP_GAP_SECONDS, MAX_START_DELAY_SECONDS, startDelaySeconds, trimSilence, type SegmentTiming } from './localPlayback'
+import type { SpeakOptions } from './playback'
+import { createLevelMeter } from '../speech/audioLevels'
 import { serveModelFiles } from '../speechModels/pageSupport'
-import { splitSpeechChunks } from './speechText'
+import { splitSpeechSegments } from './speechText'
 
 /**
  * Kokoro runs on single-threaded WebAssembly (the window is not cross-origin isolated), where one
- * worker produces audio at about 0.7x real time. Two workers synthesizing consecutive segments in
+ * worker produces audio at about 0.7x real time. Two workers voicing consecutive segments in
  * parallel stay ahead of playback.
  */
 const POOL_SIZE = 2
-/** Short segments keep the wait before the first audio low. */
-const SEGMENT_CHARS = 120
+/** Segments voiced ahead of the one playing; each holds a few seconds of audio. */
+const LOOKAHEAD_SEGMENTS = 8
 /**
  * A loaded worker holds about 500 MB of WebAssembly memory that is only returned when the worker
- * ends, so the pool is shut down shortly after the last playback.
+ * ends, so the pool is shut down after the last playback. The delay is long enough that reading
+ * the next paragraph does not pay for loading the model again.
  */
-const IDLE_DISPOSE_MS = 15_000
+const IDLE_DISPOSE_MS = 5 * 60_000
 
 let pool: Worker[] = []
 let lastRequestId = 0
 let activeSessions = 0
 let idleTimer: ReturnType<typeof setTimeout> | null = null
 
-function send(target: Worker, message: KokoroWorkerRequest, transfer: Transferable[] = []): void {
-  target.postMessage(message, transfer)
+function send(target: Worker, message: KokoroWorkerRequest): void {
+  target.postMessage(message)
 }
 
 function createWorker(): Worker {
@@ -59,24 +62,28 @@ export function disposeLocalEngine(): void {
   pool = []
 }
 
-interface SegmentState {
-  chunks: { samples: Float32Array; sampleRate: number }[]
-  scheduled: number
-  done: boolean
+interface SegmentState extends SegmentTiming {
+  audio?: { samples: Float32Array; sampleRate: number }
 }
 
+const seconds = (): number => performance.now() / 1000
+
 /** Speaks `text` with the local Kokoro model. Resolves when playback ends or is aborted. */
-export function speakWithLocalModel(text: string, { signal, onPlaying }: SpeakOptions): Promise<void> {
+export function speakWithLocalModel(text: string, { signal, onPlaying, voice, speed, pause, onLevels }: SpeakOptions): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) return resolve()
-    const segments = splitSpeechChunks(text, SEGMENT_CHARS)
+    const segments = splitSpeechSegments(text)
     if (segments.length === 0) return resolve()
     cancelIdleDispose()
     activeSessions++
     const workers = ensurePool(Math.min(POOL_SIZE, segments.length))
     const context = new AudioContext()
-    void context.resume().catch(() => undefined)
-    const states: SegmentState[] = segments.map(() => ({ chunks: [], scheduled: 0, done: false }))
+    if (pause.paused) void context.suspend().catch(() => undefined)
+    else void context.resume().catch(() => undefined)
+    const meter = createLevelMeter(context)
+    meter.analyser.connect(context.destination)
+    onLevels(meter.levels)
+    const states: SegmentState[] = segments.map((segment) => ({ chars: segment.length }))
     const inFlight = new Map<number, { index: number; worker: Worker }>()
     const busy = new Set<Worker>()
     const sources = new Set<AudioBufferSourceNode>()
@@ -84,13 +91,21 @@ export function speakWithLocalModel(text: string, { signal, onPlaying }: SpeakOp
     let nextPlay = 0
     let nextStart = 0
     let started = false
+    let firstReadyAt: number | null = null
+    let startTimer: ReturnType<typeof setTimeout> | null = null
     let settled = false
+
+    const unsubscribePause = pause.subscribe((paused) => {
+      void (paused ? context.suspend() : context.resume()).catch(() => undefined)
+    })
 
     const settle = (error?: Error): void => {
       if (settled) return
       settled = true
       activeSessions--
       if (activeSessions === 0) scheduleIdleDispose()
+      if (startTimer) clearTimeout(startTimer)
+      unsubscribePause()
       for (const worker of workers) {
         worker.removeEventListener('message', onMessage)
         worker.removeEventListener('error', onWorkerError)
@@ -112,27 +127,28 @@ export function speakWithLocalModel(text: string, { signal, onPlaying }: SpeakOp
       else resolve()
     }
 
-    // Keep at most one segment per worker waiting beyond the one that is playing.
     const dispatch = (): void => {
       for (const worker of workers) {
-        if (nextDispatch >= segments.length || nextDispatch - nextPlay > workers.length) return
+        if (nextDispatch >= segments.length || nextDispatch - nextPlay > LOOKAHEAD_SEGMENTS) return
         if (busy.has(worker)) continue
         const id = ++lastRequestId
         busy.add(worker)
         inFlight.set(id, { index: nextDispatch, worker })
-        send(worker, { type: 'speak', id, text: segments[nextDispatch] })
+        states[nextDispatch].startedAt = seconds()
+        send(worker, { type: 'speak', id, text: segments[nextDispatch], voice: voice ?? KOKORO_82M.defaultVoice, speed: speed() })
         nextDispatch++
       }
     }
 
-    const schedule = (chunk: { samples: Float32Array; sampleRate: number }): void => {
-      const buffer = context.createBuffer(1, chunk.samples.length, chunk.sampleRate)
-      buffer.copyToChannel(chunk.samples as Float32Array<ArrayBuffer>, 0)
+    const schedule = (audio: { samples: Float32Array; sampleRate: number }): void => {
+      if (audio.samples.length === 0) return
+      const buffer = context.createBuffer(1, audio.samples.length, audio.sampleRate)
+      buffer.copyToChannel(audio.samples as Float32Array<ArrayBuffer>, 0)
       const source = context.createBufferSource()
       source.buffer = buffer
-      source.connect(context.destination)
+      source.connect(meter.analyser)
       const startAt = Math.max(nextStart, context.currentTime + 0.05)
-      nextStart = startAt + buffer.duration
+      nextStart = startAt + buffer.duration + CLIP_GAP_SECONDS
       sources.add(source)
       source.onended = () => {
         sources.delete(source)
@@ -145,13 +161,31 @@ export function speakWithLocalModel(text: string, { signal, onPlaying }: SpeakOp
       }
     }
 
+    // Holds the first clip until synthesis is far enough ahead that no later segment arrives late.
+    const readyToStart = (): boolean => {
+      if (started || nextPlay > 0) return true
+      if (!states[0].audio) return false
+      const now = seconds()
+      firstReadyAt ??= now
+      const delay = Math.min(startDelaySeconds(states, workers.length, now), MAX_START_DELAY_SECONDS - (now - firstReadyAt))
+      if (delay <= 0.05) return true
+      if (!startTimer) {
+        startTimer = setTimeout(() => {
+          startTimer = null
+          drain()
+        }, delay * 1000)
+      }
+      return false
+    }
+
     // Schedules finished audio in segment order and ends once the last segment has played.
     const drain = (): void => {
+      if (settled || !readyToStart()) return
       while (nextPlay < states.length) {
         const state = states[nextPlay]
-        while (state.scheduled < state.chunks.length) schedule(state.chunks[state.scheduled++])
-        if (!state.done) break
-        state.chunks = []
+        if (!state.audio) break
+        schedule(state.audio)
+        state.audio = undefined
         nextPlay++
         dispatch()
       }
@@ -163,19 +197,18 @@ export function speakWithLocalModel(text: string, { signal, onPlaying }: SpeakOp
       if (message.type === 'file-request') return
       const request = inFlight.get(message.id)
       if (!request) return
+      inFlight.delete(message.id)
+      busy.delete(request.worker)
       if (message.type === 'error') {
         settle(new Error(message.message))
         return
       }
       const state = states[request.index]
-      if (message.type === 'audio') {
-        state.chunks.push({ samples: message.samples, sampleRate: message.sampleRate })
-      } else {
-        state.done = true
-        inFlight.delete(message.id)
-        busy.delete(request.worker)
-        dispatch()
-      }
+      const samples = trimSilence(message.samples, message.sampleRate)
+      state.audio = { samples, sampleRate: message.sampleRate }
+      state.finishedAt = seconds()
+      state.seconds = samples.length / message.sampleRate + CLIP_GAP_SECONDS
+      dispatch()
       drain()
     }
     const onWorkerError = (event: ErrorEvent): void => {

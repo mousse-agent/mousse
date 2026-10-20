@@ -1,4 +1,6 @@
 /// <reference types="vite/client" />
+// onnxruntime-web ships its typings outside its package exports.
+/// <reference path="../../node_modules/onnxruntime-web/types.d.ts" />
 
 import type React from 'react'
 

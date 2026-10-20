@@ -93,6 +93,16 @@ describe('ProviderAuthService.synthesizeSpeech', () => {
     })
   })
 
+  it('uses the chosen voice when the model has it, and the default otherwise', async () => {
+    await withService(async (service) => {
+      await service.setApiKey('openai', 'sk-openai-test')
+      const { calls, fetchImpl } = recordingFetch(() => new Response(AUDIO))
+      await service.synthesizeSpeech({ providerId: 'openai', modelId: 'gpt-4o-mini-tts', text: 'Hi', voice: 'marin' }, fetchImpl)
+      await service.synthesizeSpeech({ providerId: 'openai', modelId: 'tts-1', text: 'Hi', voice: 'marin' }, fetchImpl)
+      expect(calls.map((call) => JSON.parse(String(call.init.body)).voice)).toEqual(['marin', 'alloy'])
+    })
+  })
+
   it('picks the Groq voice by model prefix', async () => {
     await withService(async (service) => {
       await service.setApiKey('groq', 'gsk-test')

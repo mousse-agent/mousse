@@ -9,6 +9,11 @@ export interface LocalModelFile {
   path: string
   size: number
   sha256: string
+  /**
+   * Not needed for the model to count as downloaded, such as an extra voice. A full download
+   * includes it; otherwise it is fetched and verified the first time it is read.
+   */
+  optional?: boolean
 }
 
 export interface LocalModelManifest {

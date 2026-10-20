@@ -16,10 +16,15 @@ export function normalizeVoiceError(error: unknown) {
 /** Electron prefixes errors thrown in the main process with the channel name. */
 const IPC_ERROR_PREFIX = /^Error invoking remote method '[^']*':\s*(?:\w*Error:\s*)?/
 
+/** The message of an error, without the prefix Electron adds to errors from the main process. */
+export function ipcErrorMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : typeof error === 'string' ? error : ''
+  return raw.replace(IPC_ERROR_PREFIX, '').trim()
+}
+
 /** A recording that could not be turned into text: names the cause so the user knows what to change. */
 export function normalizeTranscriptionError(error: unknown) {
-  const raw = error instanceof Error ? error.message : typeof error === 'string' ? error : ''
-  const cause = raw.replace(IPC_ERROR_PREFIX, '').trim()
+  const cause = ipcErrorMessage(error)
   return knownAppError(
     { code: 'voice_transcription_failed', message: cause ? `Dictation failed: ${cause}` : 'Dictation failed. Check the dictation model under Settings, Models, then try again.' },
     { category: 'unavailable', retryable: true }

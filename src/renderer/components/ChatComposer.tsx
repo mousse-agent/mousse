@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Loader2, Mic, X } from '../lib/icons'
+import { SpeechWave } from '../speech/SpeechWave'
 import type { LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
@@ -471,9 +472,14 @@ export function ChatComposer({
         <div className="composer-attachments">
           <div className="composer-attachments-scroll">
             {isRecording && (
-              <div className="composer-attachment-pill composer-attachment-pill-recording">
+              <div
+                className="composer-attachment-pill composer-attachment-pill-recording"
+                role="status"
+                aria-label={`Recording ${formatDuration(recordingDuration)}`}
+              >
                 <Mic size={12} strokeWidth={2} />
-                <span>Recording {formatDuration(recordingDuration)}</span>
+                <SpeechWave levels={dictation.levels} />
+                <span>{formatDuration(recordingDuration)}</span>
               </div>
             )}
             {transcribing && (

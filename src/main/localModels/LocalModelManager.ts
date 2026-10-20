@@ -46,6 +46,8 @@ export class LocalModelManager<M extends LocalModelManifest> {
   private readonly onStatus?: (status: StatusOf<M>) => void
   private readonly progressIntervalMs: number
   private readonly active = new Map<string, ActiveDownload<M>>()
+  /** Optional files being fetched on first read, by model directory and path. */
+  private readonly fetching = new Map<string, Promise<void>>()
   private readonly lastState = new Map<string, LocalModelState>()
 
   constructor(options: LocalModelManagerOptions<M>) {
@@ -125,7 +127,10 @@ export class LocalModelManager<M extends LocalModelManifest> {
     const model = this.requireModel(modelId)
     const file = typeof path === 'string' ? model.files.find((entry) => entry.path === path) : undefined
     if (!file) throw new Error(`${model.label} has no file named ${JSON.stringify(path)}`)
-    if (!(await this.isInstalled(model))) throw new Error(`${model.label} is not downloaded`)
+    if (!(await this.isInstalled(model))) {
+      throw new Error(`${model.label} is not downloaded. Download it under Settings, Models.`)
+    }
+    if (file.optional) await this.fetchOptionalFile(model, file)
     const bytes = await readFile(join(this.modelDir(model), file.path))
     if (bytes.byteLength !== file.size) throw new Error(`${model.label} file ${file.path} is damaged. Download the model again.`)
     return bytes
@@ -141,9 +146,28 @@ export class LocalModelManager<M extends LocalModelManifest> {
     const dir = this.modelDir(model)
     if (!(await fileSize(join(dir, COMPLETE_MARKER)).then((size) => size !== undefined))) return false
     for (const file of model.files) {
-      if ((await fileSize(join(dir, file.path))) !== file.size) return false
+      if (!file.optional && (await fileSize(join(dir, file.path))) !== file.size) return false
     }
     return true
+  }
+
+  /** Downloads and verifies an optional file that an earlier, smaller download did not include. */
+  private async fetchOptionalFile(model: M, file: LocalModelFile): Promise<void> {
+    const finalPath = join(this.modelDir(model), file.path)
+    if ((await fileSize(finalPath)) === file.size) return
+    const running = this.fetching.get(finalPath)
+    if (running) return running
+    const fetching = (async () => {
+      await mkdir(dirname(finalPath), { recursive: true })
+      try {
+        await this.downloadFile(model, file, finalPath, new AbortController().signal, () => undefined)
+      } catch (error) {
+        await rm(`${finalPath}.part`, { force: true }).catch(() => undefined)
+        throw new Error(`${describeFailure(error)} (${model.label}, ${file.path})`)
+      }
+    })().finally(() => this.fetching.delete(finalPath))
+    this.fetching.set(finalPath, fetching)
+    return fetching
   }
 
   private publish(model: M, state: LocalModelState): StatusOf<M> {

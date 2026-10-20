@@ -19,7 +19,7 @@ import {
   type ProviderTranscriptionRequest,
   type ProviderTranscriptionResult
 } from '../../shared/dictation'
-import { isTtsModelId, providerTtsVoice, type ProviderSpeechRequest, type ProviderSpeechResult } from '../../shared/readAloud'
+import { isTtsModelId, resolveProviderTtsVoice, type ProviderSpeechRequest, type ProviderSpeechResult } from '../../shared/readAloud'
 import { getMousseHomeDir } from '../data/paths'
 import {
   CLAUDE_PROVIDER_ID,
@@ -559,7 +559,7 @@ export class ProviderAuthService {
   async synthesizeSpeech(request: ProviderSpeechRequest, fetchImpl?: typeof fetch): Promise<ProviderSpeechResult> {
     const { providerId, modelId, text } = request
     const label = this.getProviderDisplayName(providerId)
-    const voice = isTtsModelId(modelId) ? providerTtsVoice(providerId, modelId) : undefined
+    const voice = isTtsModelId(modelId) ? resolveProviderTtsVoice(providerId, modelId, request.voice) : undefined
     if (!voice) throw new Error(`${label} has no supported text-to-speech voice for ${modelId}`)
     const models = this.models.getModels(providerId)
     const baseUrl = (models.find((model) => model.id === modelId) ?? models[0])?.baseUrl
