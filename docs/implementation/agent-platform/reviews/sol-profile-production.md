@@ -42,7 +42,7 @@ The Electron fixture proves two trusted bindings without path disclosure; forged
 ## Remaining qualification and wiring
 
 - The full packaged application route, visible profile switcher, dirty-editor decision flow, window theme rendering, and operating-system notification behavior are not exercised by this backend/preload fixture. The separate simulated profile preview does not close those gates.
-- Provider credentials are intentionally installation-shared, while profile Plus/account grants are personal. The focused auth suites cover cancellation and persistence contracts; no live account login was used here.
+- Provider credentials are intentionally installation-shared, while profile Mousse ID/account grants are personal. The focused auth suites cover cancellation and persistence contracts; no live account login was used here.
 - Project-scoped managed MCP/SKILL write ownership needs the queued I04 audit: two profiles selecting the same repository currently target the same `.mousse` project paths. Trusted discovery can be shared, but grants and secrets must remain personal.
 - Browser B03 worker packaging/takeover and a simultaneous multi-window visible browser surface remain separate work. This pass verifies trusted partition selection and cookie isolation in real Electron sessions.
 - Settings/Integrations production UI composition and the app route commit being developed in core were outside this pass and remain separately reviewable.

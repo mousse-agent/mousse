@@ -41,6 +41,16 @@ export interface EnrollmentServiceOptions {
   routes(): Signed
   fault?(point: 'enroll.beforeCommit' | 'join.beforeCommit'): void
 }
+export interface NodeInviteInput {
+  ttlMs?: number
+  name?: string
+  caps?: NodeCapability[]
+  /**
+   * Base64url SHA-256 of the joiner's transport public key. When set, only that key can redeem
+   * the invite (phones that enroll through Mousse ID announce it ahead of time).
+   */
+  joinerTransportFingerprint?: string
+}
 export interface NodeInviteAuthorization {
   v: 1
   kind: 'nodeInvite'
@@ -306,6 +316,10 @@ export class EnrollmentService {
   private secret(invite: InviteId): string {
     return `enrollment/${invite}/proof`
   }
+  /** Optional SHA-256 fingerprint of the only transport key allowed to redeem an invite. */
+  private joinerPin(invite: InviteId): string {
+    return `enrollment/${invite}/joiner`
+  }
   private protected(): boolean {
     const keys = this.options.keys
     return (
@@ -400,7 +414,7 @@ export class EnrollmentService {
       )
       .run(text)
   }
-  private createInvite(input: { ttlMs?: number; name?: string; caps?: NodeCapability[] }): {
+  private createInvite(input: NodeInviteInput): {
     token: Buffer
     authorization: NodeInviteAuthorization
   } {
@@ -414,6 +428,8 @@ export class EnrollmentService {
       throw new NetError('bad_request')
     caps(granted)
     if (input.name !== undefined) name(input.name)
+    if (input.joinerTransportFingerprint !== undefined)
+      decodeBase64(input.joinerTransportFingerprint, 32)
     const roster = identity.roster()!,
       rootKey = identity.pinnedRootKey(self.user)!,
       current = verifyDocument<Roster>(roster, rootKey, 'roster'),
@@ -453,7 +469,8 @@ export class EnrollmentService {
   }
   private persistInvite(
     authorization: NodeInviteAuthorization,
-    token: Buffer
+    token: Buffer,
+    joinerTransportFingerprint?: string
   ): { text: string; invite: InviteId; expiresAt: number } {
     const { identity, keys, db, clock } = this.options,
       { invite, expiresAt } = authorization
@@ -472,6 +489,8 @@ export class EnrollmentService {
     if (Buffer.byteLength(text) > 64 * 1024) throw new NetError('too_large')
     const proof = invitationProofKey(token, 'node')
     try {
+      if (joinerTransportFingerprint !== undefined)
+        keys.putSecret(this.joinerPin(invite), decodeBase64(joinerTransportFingerprint, 32))
       keys.putSecret(this.secret(invite), proof)
     } finally {
       proof.fill(0)
@@ -488,20 +507,20 @@ export class EnrollmentService {
     })
     return { text, invite, expiresAt }
   }
-  issueNodeInvite(input: { ttlMs?: number; name?: string; caps?: NodeCapability[] } = {}): {
+  issueNodeInvite(input: NodeInviteInput = {}): {
     text: string
     invite: InviteId
     expiresAt: number
   } {
     const { token, authorization } = this.createInvite(input)
     try {
-      return this.persistInvite(authorization, token)
+      return this.persistInvite(authorization, token, input.joinerTransportFingerprint)
     } finally {
       token.fill(0)
     }
   }
   async issueNodeInviteWithRendezvous(
-    input: { ttlMs?: number; name?: string; caps?: NodeCapability[] },
+    input: NodeInviteInput,
     prepare: (expiresAt: number) => Promise<RelayRendezvous>
   ): Promise<{ text: string; invite: InviteId; expiresAt: number }> {
     const { token, authorization } = this.createInvite(input)
@@ -517,7 +536,11 @@ export class EnrollmentService {
         ),
         authorization.node
       )
-      return this.persistInvite({ ...authorization, rendezvous }, token)
+      return this.persistInvite(
+        { ...authorization, rendezvous },
+        token,
+        input.joinerTransportFingerprint
+      )
     } finally {
       token.fill(0)
     }
@@ -728,6 +751,12 @@ export class EnrollmentService {
     encodeMessage(request)
     if (!identity.self()?.isAuthority) throw new NetError('forbidden')
     if (!equal(decodeBase64(request.keys.transport), decodeBase64(channel.peerTransportKey)))
+      throw new NetError('peer_key_mismatch')
+    const pin = keys.getSecret(this.joinerPin(request.invite))
+    if (
+      pin &&
+      !equal(decodeBase64(fingerprint(decodeBase64(request.keys.transport)), 32), Buffer.from(pin))
+    )
       throw new NetError('peer_key_mismatch')
     const key = keys.getSecret(this.secret(request.invite))
     if (!key) return invalid()

@@ -73,7 +73,7 @@ export function inventoryLegacyHome(installation: InstallationPaths): LegacyHome
     fileEntry('.data', join(home, '.data'), 'profile', 'Legacy standalone thread data.', 'thread-data/standalone'),
     fileEntry('scheduled/', join(home, 'scheduled'), 'profile', 'Scheduler runtime and history.', 'scheduled'),
     fileEntry('channels/', join(home, 'channels'), 'profile', 'Channel sessions, directory, and pairing.', 'channels'),
-    fileEntry('control/', join(home, 'control'), 'profile', 'Plus/control stores. Credentials are re-encrypted, not byte-copied.', 'control'),
+    fileEntry('control/', join(home, 'control'), 'profile', 'Mousse ID/control stores. Credentials are re-encrypted, not byte-copied.', 'control'),
     fileEntry('mcp-oauth/', join(home, 'mcp-oauth'), 'profile', 'Integration OAuth sessions.', 'mcp-oauth'),
     fileEntry('agent-configs/', join(home, 'agent-configs'), 'profile', 'Generated agent configs.', 'agent-configs'),
     fileEntry('browser/', join(home, 'browser'), 'profile', 'Legacy browser storage is assigned to Default only.', 'browser'),

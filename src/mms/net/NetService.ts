@@ -1,12 +1,20 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import type { RelayRendezvous } from './relay/protocol'
-import { HostedProfileService } from './plus/HostedProfileService'
+import { HostedProfileService, type PlusEnrollmentRequest } from './plus/HostedProfileService'
+import {
+  enrollmentJoinUrl,
+  enrollmentMatchCode,
+  sealInviteForOffer,
+  sealInviteForRequest
+} from './plus/enrollmentSeal'
+import type { NodeInviteInput } from './enrollment/service'
 import type { PlusConfiguration } from './plus/contracts'
 import { DEFAULT_NET_FEATURE_FLAGS, type NetFeatureFlags } from '../../shared/featureFlags'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 import type {
+  InviteId,
   NodeDelegation,
   NodeId,
   PresenceMessage,
@@ -121,6 +129,8 @@ const defaults = (): NetConfiguration => ({
 })
 
 /** One profile owns its keys, ledger, listeners and sessions. Local IPC never takes a profile path. */
+/** How often a signed-in authority checks Mousse ID for phones asking to join. */
+const PLUS_ENROLLMENT_POLL_MS = 15000
 export class NetService {
   private readonly clock: Clock
   private state?: NetRuntime
@@ -348,6 +358,11 @@ export class NetService {
         transports: this.status().transports ?? []
       }
     if (method === 'bridge.nodes') return this.nodes()
+    if (method === 'net.plus.login.cancel') {
+      this.hostedProfile?.cancelLogin()
+      return { cancelled: true }
+    }
+    if (method === 'net.plus.enrollment.requests') return this.plusEnrollmentList()
     if (method === 'net.authority.status') {
       const journal = this.requireEnrolled().identity.authorityTransferState()
       return journal
@@ -434,9 +449,62 @@ export class NetService {
           await this.activate()
           if (this.plusRenewal) clearTimeout(this.plusRenewal)
           this.plusRenewal = undefined
+          this.stopEnrollmentPoll()
           await this.hostedService().revoke()
           this.hostedService().clear()
           return { configured: false, connected: false }
+        }
+        case 'net.plus.enrollment.approve': {
+          const id = String(params.id),
+            request =
+              this.enrollmentRequests.find((row) => row.id === id) ??
+              (await this.refreshEnrollmentRequests()).find((row) => row.id === id)
+          if (!request || request.expiresAt <= this.clock.now())
+            throw new NetError('invite_invalid', 'This phone request has expired or was withdrawn.')
+          const invite = await this.issueRendezvousInvite({
+            name: request.deviceName,
+            joinerTransportFingerprint: request.transportFingerprint
+          })
+          try {
+            await this.hostedService().approveEnrollmentRequest(
+              id,
+              sealInviteForRequest(invite.text, request.boxPublicKey, id)
+            )
+          } catch (error) {
+            this.revokeUnsentInvite(invite.invite, error)
+            throw error
+          }
+          this.setEnrollmentRequests(this.enrollmentRequests.filter((row) => row.id !== id))
+          return { approved: true, inviteId: invite.invite, expiresAt: invite.expiresAt }
+        }
+        case 'net.plus.enrollment.deny': {
+          const id = String(params.id)
+          await this.hostedService().denyEnrollmentRequest(id)
+          this.setEnrollmentRequests(this.enrollmentRequests.filter((row) => row.id !== id))
+          return { denied: true }
+        }
+        case 'net.plus.enrollment.offer': {
+          if (!this.hostedService().status().connected) throw new NetError('not_enrolled')
+          const invite = await this.issueRendezvousInvite(
+              params.name === undefined ? {} : { name: String(params.name) }
+            ),
+            key = randomBytes(32)
+          try {
+            const offer = await this.hostedService().enrollmentOffer(
+              sealInviteForOffer(invite.text, key)
+            )
+            return {
+              offerId: offer.id,
+              url: enrollmentJoinUrl(offer.apiOrigin, offer.id, key),
+              inviteId: invite.invite,
+              expiresAt: Math.min(offer.expiresAt, invite.expiresAt)
+            }
+          } catch (error) {
+            this.revokeUnsentInvite(invite.invite, error)
+            throw error
+          } finally {
+            key.fill(0)
+          }
         }
         case 'net.transport.configure': {
           const rt = this.requireEnrolled(),
@@ -515,11 +583,7 @@ export class NetService {
           const runtime = this.requireEnrolled()
           if (!this.routes) await this.activate()
           const invite = this.transport?.hasRelayListener()
-            ? await runtime.enrollment.issueNodeInviteWithRendezvous(params, async (expiresAt) => {
-                const value = await this.transport!.prepareEnrollmentRendezvous(expiresAt)
-                if (!value) throw new NetError('route_unreachable')
-                return value
-              })
+            ? await this.issueRendezvousInvite(params)
             : runtime.enrollment.issueNodeInvite(params)
           return { invite: invite.text, inviteId: invite.invite, expiresAt: invite.expiresAt }
         }
@@ -687,7 +751,9 @@ export class NetService {
   private plusAbortBound = false
   private plusRenewal?: ReturnType<typeof setTimeout>
   private armPlusRenewal(): void {
-    if (this.plusRenewal || this.shutdownSignal.signal.aborted) return
+    if (this.shutdownSignal.signal.aborted) return
+    this.armEnrollmentPoll(1000)
+    if (this.plusRenewal) return
     const status = this.hostedService().status()
     if (!status.configured || !status.registrationId) return
     this.plusRenewal = setTimeout(
@@ -722,6 +788,99 @@ export class NetService {
         },
         { once: true }
       )
+    }
+  }
+  /** Invites that a phone redeems over a relay rendezvous; the only route a phone can dial. */
+  private async issueRendezvousInvite(
+    input: NodeInviteInput
+  ): Promise<{ text: string; invite: InviteId; expiresAt: number }> {
+    const runtime = this.requireEnrolled()
+    if (!this.routes) await this.activate()
+    if (!this.transport?.hasRelayListener()) throw new NetError('route_unreachable')
+    return runtime.enrollment.issueNodeInviteWithRendezvous(input, async (expiresAt) => {
+      const value = await this.transport!.prepareEnrollmentRendezvous(expiresAt)
+      if (!value) throw new NetError('route_unreachable')
+      return value
+    })
+  }
+  /** An invite whose sealed copy never reached Mousse ID cannot be redeemed by anyone; drop it. */
+  private revokeUnsentInvite(invite: InviteId, error: unknown): void {
+    if (error instanceof NetError && error.code === 'outcome_uncertain') return
+    try {
+      this.requireEnrolled().enrollment.revokeInvite(invite)
+    } catch {
+      // The invite still expires on its own.
+    }
+  }
+  private enrollmentRequests: PlusEnrollmentRequest[] = []
+  private enrollmentPoll?: ReturnType<typeof setTimeout>
+  private enrollmentAbortBound = false
+  private plusEnrollmentEligible(): boolean {
+    try {
+      return (
+        !this.stopped &&
+        !this.disabled &&
+        !this.shutdownSignal.signal.aborted &&
+        !!this.state?.identity.self()?.isAuthority &&
+        this.state.keys.state() === 'unlocked' &&
+        this.state.keys.encryptedAtRest() &&
+        this.hostedService().status().connected
+      )
+    } catch {
+      return false
+    }
+  }
+  private setEnrollmentRequests(next: PlusEnrollmentRequest[]): void {
+    const changed =
+      next.length !== this.enrollmentRequests.length ||
+      next.some((row, index) => row.id !== this.enrollmentRequests[index]?.id)
+    this.enrollmentRequests = next
+    if (changed) this.emit()
+  }
+  private async refreshEnrollmentRequests(): Promise<PlusEnrollmentRequest[]> {
+    if (!this.plusEnrollmentEligible()) {
+      this.setEnrollmentRequests([])
+      return []
+    }
+    this.setEnrollmentRequests(await this.hostedService().enrollmentRequests())
+    return this.enrollmentRequests
+  }
+  private armEnrollmentPoll(delayMs = PLUS_ENROLLMENT_POLL_MS): void {
+    if (this.enrollmentPoll || !this.plusEnrollmentEligible()) return
+    this.enrollmentPoll = setTimeout(() => {
+      this.enrollmentPoll = undefined
+      void this.refreshEnrollmentRequests()
+        .catch(() => {
+          // Mousse ID may be unreachable or predate the mailbox; keep the last list and retry.
+        })
+        .finally(() => this.armEnrollmentPoll())
+    }, delayMs)
+    this.enrollmentPoll.unref?.()
+    if (!this.enrollmentAbortBound) {
+      this.enrollmentAbortBound = true
+      this.shutdownSignal.signal.addEventListener('abort', () => this.stopEnrollmentPoll(), {
+        once: true
+      })
+    }
+  }
+  private stopEnrollmentPoll(): void {
+    if (this.enrollmentPoll) clearTimeout(this.enrollmentPoll)
+    this.enrollmentPoll = undefined
+    this.enrollmentRequests = []
+  }
+  private plusEnrollmentList(): {
+    requests: Array<PlusEnrollmentRequest & { matchCode: string }>
+  } {
+    if (!this.plusEnrollmentEligible()) return { requests: [] }
+    this.armEnrollmentPoll(0)
+    const now = this.clock.now()
+    return {
+      requests: this.enrollmentRequests
+        .filter((row) => row.expiresAt > now)
+        .map((row) => ({
+          ...row,
+          matchCode: enrollmentMatchCode(row.boxPublicKey, row.transportFingerprint)
+        }))
     }
   }
   private hostedProfile?: HostedProfileService

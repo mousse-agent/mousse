@@ -183,7 +183,7 @@ export const PATH_OWNERSHIP_RULES: readonly PathOwnershipRule[] = [
     scope: 'profile',
     relativePath: 'control',
     preservedDuringMigration: false,
-    notes: 'Plus credentials must be decrypted at the old control dir and re-encrypted at the destination.'
+    notes: 'Mousse ID credentials must be decrypted at the old control dir and re-encrypted at the destination.'
   },
   {
     logicalName: 'mcp-oauth/',

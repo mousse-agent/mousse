@@ -12,7 +12,7 @@ export function createPlusRelayAddon(
     manifest: {
       id: 'plus-relay',
       kind: 'transport',
-      displayName: 'Mousse Plus',
+      displayName: 'Mousse ID',
       traits: { canListen: true, canDial: true, readsPlaintext: true, needsAccount: true },
       settingsSchema: {
         type: 'object',
@@ -27,7 +27,7 @@ export function createPlusRelayAddon(
         {
           title: 'Connect your Mousse ID',
           detail:
-            'Use the profile’s daemon CLI to bind your protected Net identity and explicitly connect Plus. Pinned peer TLS keeps content private from the relay.'
+            'Use the profile’s daemon CLI to bind your protected Net identity and explicitly connect Mousse ID. Pinned peer TLS keeps content private from the relay.'
         }
       ]
     },

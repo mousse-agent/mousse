@@ -6,7 +6,7 @@ Implement the [Agents, Workflows, Profiles, Integrations, and Browser Use archit
 
 The plan is for implementation work, not permission to execute arbitrary user workflows or publish a release. The two planning documents do not create implementation worktrees, change application behavior, or deploy anything. The coding phase starts from a coordinator-recorded integration baseline.
 
-The inspected baseline is **205fab2d3799b347f8709a32b4352933d68d83e0** with existing working-tree changes. Source files, not older architecture prose alone, establish the baseline. The current package requires Node **>=22.19.0**. Existing source supports daemon-owned execution, local clients, threads/worktrees, integrations, scheduling/channels, and Plus/control, but not the proposed workflow engine or profile ownership.
+The inspected baseline is **205fab2d3799b347f8709a32b4352933d68d83e0** with existing working-tree changes. Source files, not older architecture prose alone, establish the baseline. The current package requires Node **>=22.19.0**. Existing source supports daemon-owned execution, local clients, threads/worktrees, integrations, scheduling/channels, and Mousse ID/control, but not the proposed workflow engine or profile ownership.
 
 Navigation: [Workgroups/worktrees](#2-workgroups-and-worktree-topology) · [Contracts/gates](#3-contract-first-milestones) · [Work packages](#4-bounded-work-packages) · [Parallel schedule](#5-three-worker-parallel-execution-schedule) · [Testing](#6-acceptance-and-testing-strategy) · [AI handoffs](#7-coordination-artifacts-and-worker-instructions) · [Merge/cleanup](#8-merge-queue-conflict-handling-and-worktree-lifecycle) · [Risks](#9-risks-and-explicit-contingency-paths) · [Traceability](#10-requirement-to-package-traceability) · [Release checklist](#11-final-release-candidate-checklist).
 
@@ -16,7 +16,7 @@ The final release must satisfy AW-01 through AW-06, PR-01/PR-02, IN-01, and BR-0
 
 - App and CLI run the same revision-pinned workflow through **/name**, including stored executable scripts, user agents, branching, loops, parallel joins, durable waits, and recovery.
 - Agents and Workflows have the specified library/editor experiences; the agent prompt reuses the extracted Source/Preview Markdown editor and the liquid glass orb has fixed-left/scrolling-right desktop layout.
-- All personal resources and background activity are profile-scoped, including Plus/control, browser storage, caches, events, integrations, and drafts; providers/models remain shared.
+- All personal resources and background activity are profile-scoped, including Mousse ID/control, browser storage, caches, events, integrations, and drafts; providers/models remain shared.
 - A user can create/upload a Skill or connect an MCP server and immediately use the exact enabled integration from the main agent and supported child agents.
 - Mousse's own browser worker passes executor, model-adapter, isolation, recovery, and packaging gates in app and CLI.
 
@@ -120,7 +120,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Baseline typecheck failed' }
 
 The variable is per worker process. This development isolation does not justify switching a production daemon's MOUSSE_HOME to select a profile.
 
-Do not use the user's normal **~/.mousse**, real Plus account, production bot token, ordinary browser profile, or primary coding repository as a test fixture. Create disposable fixture repositories under that worker's runtime/test area. Mock providers are the default for automated tests; live provider evaluations are a separately budgeted test job with dedicated credentials.
+Do not use the user's normal **~/.mousse**, real Mousse ID account, production bot token, ordinary browser profile, or primary coding repository as a test fixture. Create disposable fixture repositories under that worker's runtime/test area. Mock providers are the default for automated tests; live provider evaluations are a separately budgeted test job with dedicated credentials.
 
 The current dev script supports MOUSSE_HOME, but no dedicated per-worktree GUI port/userData setting is established by this plan. WG0 must implement and verify those overrides in F03 before concurrent GUI sessions. Until then, allow only one GUI development session at a time; daemon/unit work can remain parallel. Isolate Electron userData/localStorage as well as MMS home or profile-switch tests will interfere across worktrees.
 
@@ -154,7 +154,7 @@ A contract is frozen when a concrete type/schema file, fixture vector, validatio
 | G4 Creation UX | Editors and Add flows work end to end | Agent orb/editor, core workflow canvas/source, skill creation/upload, anonymous/OAuth/stdio MCP journeys. |
 | G5 Browser alpha | Mousse-owned executors work with generic model tools | Agent operates an existing live in-app tab; same-tab watch/takeover/resume; managed CLI/scheduled continuity; structure/vision, refs, verified actions, and isolation on both backends. |
 | G6 Full automation | Full workflow catalog and background recovery | Loops/joins/subworkflow/waits/errors, typed schedules/channels, browser nodes, crash and unknown-effect handling. |
-| G7 Release candidate | Supported-platform product passes cross-feature gates | Packaged Windows/Linux evidence, Plus/profile compatibility, browser task metrics, no release-blocking defects. |
+| G7 Release candidate | Supported-platform product passes cross-feature gates | Packaged Windows/Linux evidence, Mousse ID/profile compatibility, browser task metrics, no release-blocking defects. |
 
 G2 is a prerequisite to turning on multiple profiles for users. Workers can develop under a single-profile adapter before G2, but no feature merges a new global personal-state cache.
 
@@ -173,7 +173,7 @@ flowchart TD
   B1["B01: managed browser/transport"]
   B2["B02-B03: observations/actions/recovery"]
   M["M01-M03: browser tools/adapters/viewer"]
-  P3["P03-P04: switch, Plus/control, full migration audit"]
+  P3["P03-P04: switch, Mousse ID/control, full migration audit"]
   Q["Q01-Q04: end-to-end qualification"]
   F --> P
   F --> A
@@ -262,17 +262,17 @@ Each package has a concrete deliverable and a downstream handoff. “Review read
 - Implement dry-run inventory, Default creation, staged copy/re-encryption, verification, manifest commit, and resumable migration journal.
 - Map real legacy paths, including **thread-data/standalone**, **thread-data/repositories**, legacy project **.mousse/.data**, control, scheduled runtime, integration OAuth, and browser partition data.
 - Treat Git worktrees with Git-aware move/repair or retain an explicitly owned legacy path; verify registrations and cleanliness.
-- Decrypt Plus credentials at the old location and re-encrypt for the new storage namespace before retiring the source: current ControlStore key derivation includes its control directory path, so copying credentials.enc to a new directory can make it unreadable.
+- Decrypt Mousse ID credentials at the old location and re-encrypt for the new storage namespace before retiring the source: current ControlStore key derivation includes its control directory path, so copying credentials.enc to a new directory can make it unreadable.
 - Implement profile ID/resource ownership checks in domain stores; WG0 wires protocol filtering and handshake.
 - **Evidence:** crash at every migration boundary, disk-full, repeated migration, unknown config fields, bad credentials, and old-client behavior.
 - **Handoff:** G2 migration fixtures, rollback instructions, exact authoritative path map.
 
-**P03 — Switcher, renderer state, and Plus/control ownership**
+**P03 — Switcher, renderer state, and Mousse ID/control ownership**
 
 - Build create/switch/edit/archive profile UX, immutable connection binding, selection epoch, draft flush, cache reset, rehydration, and snapshot/subscription handoff.
 - Namespace appStore persistence, modelFavorites, quickActions, panel sizing, theme state, and editor drafts; update auxiliary AgentsTasks window.
 - Assign legacy webview and WebContentsView storage only to Default and then transfer BrowserPanel ownership to WG7.
-- Split physical installation/device identity from Plus account credentials, profile registration/grants, pairings, and relay sessions. Verify the actual hosted/self-hosted server contract; add a capability gate or explicit re-pairing path when required.
+- Split physical installation/device identity from Mousse ID account credentials, profile registration/grants, pairings, and relay sessions. Verify the actual hosted/self-hosted server contract; add a capability gate or explicit re-pairing path when required.
 - Remove implicit production fallback credentials/transactions in desktop and CLI authentication. Validate server responses, preserve failed/offline status, and require actual enrollment acknowledgment before reporting enrollment; mock success uses an injected test adapter or explicit development-only mode.
 - **Depends on:** P01/P02, F02, C7. **Evidence:** A→B switch during late events, pending approvals, active terminal/browser, failed switch, logout, and duplicate account identities.
 - **Handoff:** profile browser-partition adapter and source-file ownership transfer to WG7.
@@ -512,7 +512,7 @@ Each package has a concrete deliverable and a downstream handoff. “Review read
 **Q04 — Packaged acceptance and operator documentation**
 
 - Test Windows desktop/CLI and Linux desktop/headless artifacts from the same candidate SHA, including clean install, upgrade/migration, missing browser, offline mode, native dependencies, and service startup/shutdown.
-- Test profile-scoped Plus/control through the available server contract. If external compatibility is unavailable, document the exact blocked capability and keep it disabled; local profile work can still proceed.
+- Test profile-scoped Mousse ID/control through the available server contract. If external compatibility is unavailable, document the exact blocked capability and keep it disabled; local profile work can still proceed.
 - Update existing ARCHITECTURE, CONFIGURATION, CLI, STARTUP, and relevant troubleshooting documents to describe shipped behavior. Do not overwrite this design with unverified “complete” claims.
 - Provide installation/migration recovery instructions, privacy/retention controls, browser diagnostics, model support matrix, and release notes.
 - **Exit:** G7 candidate evidence; coordinator approves code integration and obtains any separately required release publication approval.
@@ -525,7 +525,7 @@ The schedule below is dependency-driven. A wave ends when its required handoffs 
 |---|---|---|---|---|
 | 0: baseline and seams | WG2 U01 shared Markdown editor | WG8 Q01 fixture/harness bootstrap | WG5 I01 regression reproductions only | F00/F01 contracts, F02 extraction/dependencies, F03 isolation; G0/G1. |
 | 1: foundational engines | WG1 P01/P02 profile paths and staged migration | WG3 W01 format/compiler/registry | WG6 B01 managed browser/transport | Merge small path/contracts commits early; C1/C3/C6 fixtures stable. |
-| 2: core services | WG1 P03 switcher/Plus and browser partition handoff | WG3 W02 engine/scripts/approvals | WG5 I01 fixes + I02/I03 managed Add flows | Protocol binding/filtering wired; G2 evidence; core run APIs integrated. |
+| 2: core services | WG1 P03 switcher/Mousse ID and browser partition handoff | WG3 W02 engine/scripts/approvals | WG5 I01 fixes + I02/I03 managed Add flows | Protocol binding/filtering wired; G2 evidence; core run APIs integrated. |
 | 3: creation and actuation | WG2 A01/A02 definitions/library/orb | WG4 V01 canvas against compiler/runtime fixtures | WG6 B02/B03 perception/actions | Integrate actual Agent/Tool runners into W02; G3 runtime prerequisites and G4 UI review. |
 | 4: product integration | WG3 W03 commands/full graph control | WG7 M01/M02 browser tools/viewer | WG5 I04 CLI/native qualification | Wire slash paths/model dispatcher and pass G3; generic browser alpha G5. |
 | 5: automation breadth | WG3 W04 schedules/channels/browser/recovery | WG4 V02/V03 source/full catalog/debugger | WG2 A03 delegation/CLI execution | Integrated G4/G6 scope; run targeted combined tests after each merge. |
@@ -570,7 +570,7 @@ Do not merge a UI toggle that exposes an unimplemented backend. Hide it behind a
 | Agents | agentSpawning, subagentModelSettings, mousseAgentDurableSessions, agentLifecycleStatus | Definition/run separation, pinned revisions, capability-specific settings, delegation budgets, active-run UI continuity. |
 | UI/editor | fileEditor, modelVariants, modelEfforts, appearanceSettings, browserTabs, chatModes, slashCommandPopoverStyles | Interactive Source/Preview, split layout/orb controls, source/canvas roundtrip, draft conflicts, profile switch with late events. |
 | Integrations | integrations, fileCredentialStoreSecurity | Native roots, refresh invalidation, anonymous/OAuth/stdio, explicit actor grants, cancellation, rich result content, secure CRUD/import. |
-| Scheduler/channels/control | scheduledJobs, channels, cliSessionCommands, controlStorage, controlAuth, controlMmsIntegration | Typed context, trigger dedup, per-profile Plus/account grants, channel routing, restart/approval waits. |
+| Scheduler/channels/control | scheduledJobs, channels, cliSessionCommands, controlStorage, controlAuth, controlMmsIntegration | Typed context, trigger dedup, per-profile Mousse ID/account grants, channel routing, restart/approval waits. |
 | Tools/worktrees | toolPathSafety, toolLoopSafety, worktreeReadiness, worktreeCompletion, workspaceGc | Script staging/process control, graph budgets, unknown effects, no unsafe cleanup, explicit compensation. |
 
 These are existing filename stems under **tests/**, not new test commands or proof that the future feature is already covered. New proposed files should use clear domain prefixes and live where F03/Q01 configure their runner.
@@ -768,7 +768,7 @@ Runtime homes may contain test diagnostics and browser state. Their cleanup is a
 | Existing uncommitted code differs from pinned baseline | F00 | Record/include through reviewed commits; do not silently overwrite or omit required fixes. |
 | Profile refactor touches many global stores/singletons | P01 plus source inventory | Land path/context seams first; keep user multi-profile enablement gated until G2. |
 | Control credentials stop decrypting after relocation | P02 | Decrypt with old path binding and re-encrypt in staging; verify readback before manifest commit. |
-| Plus server lacks profile/account multiplexing contract | P03/Q04 | Preserve local profile functionality; disable unsupported concurrent remote binding and specify needed server change/re-pairing. |
+| Mousse ID server lacks profile/account multiplexing contract | P03/Q04 | Preserve local profile functionality; disable unsupported concurrent remote binding and specify needed server change/re-pairing. |
 | Native SDK lacks current browser schema support | M03 | Certify B1/B2 generic tools where supported; keep native tier unavailable until adapter/SDK is verified. |
 | CDP/OOPIF behavior differs by Chromium build | B01/B02 | Pin builds, capability probe, fixture-test; show limited capability rather than reusing stale refs. |
 | Browser binary increases installer complexity | B04/Q04 | Verified managed download plus documented offline package path; test CLI and GUI separately. |
@@ -801,7 +801,7 @@ The coordinator may reorder independent packages and split oversized work. Chang
 ## 11. Final release-candidate checklist
 
 - [ ] All requirement IDs above have linked implementation commits and passing acceptance evidence.
-- [ ] Existing active-agent, thread/worktree/undo, provider, scheduler/channel, and Plus/control behavior is preserved or explicitly migrated.
+- [ ] Existing active-agent, thread/worktree/undo, provider, scheduler/channel, and Mousse ID/control behavior is preserved or explicitly migrated.
 - [ ] New profile selection never mutates an installation-wide execution home/current-profile variable.
 - [ ] Shared credentials/catalog and personal defaults/accounts are classified consistently in service, protocol, UI, export, and migration.
 - [ ] Workflow graph/source/files agree; required code and approval nodes cannot be skipped by model interpretation.

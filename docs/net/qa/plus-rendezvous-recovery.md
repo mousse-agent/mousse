@@ -1,6 +1,6 @@
 # Hosted device invitation rejection and recovery
 
-I reproduced the one-hour Devices invitation failure with native Plus head
+I reproduced the one-hour Devices invitation failure with native Mousse ID head
 `29d5bc269385c05da92c4fc787de40c2ce60f351` and the actual companion
 `36bee27ec9f485a838a3206a4d5c91d3d58e114c`. The companion rejects rendezvous
 expiry beyond ten minutes. Native enrollment requires exact equality between
@@ -136,6 +136,6 @@ explicit disconnect recovers the tested states; lost revocation acknowledgement
 remains blocked as described above.
 The outer-enrollment retry failure above also remains unresolved. I do not
 claim production account login, production TLS, database, paid-provider, or
-platform rollout qualification. The optional Plus feature and combined candidate remain draft
+platform rollout qualification. The optional Mousse ID feature and combined candidate remain draft
 pending the other human teammate's sensitive review. I left the other
 teammate's source PR #60 untouched.

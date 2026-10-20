@@ -241,3 +241,44 @@ WireError is `{code,message,retryable,cause?}` with a cause array outermost firs
 The exhaustive stable codes are: unsupported_version, incompatible_peer, upgrade_required, downgrade_unsupported, bad_request, too_large, bad_signature, bad_delegation, peer_key_mismatch, revoked, not_enrolled, not_member, forbidden, invite_invalid, roster_conflict, conflict, stream_unknown, snapshot_required, meta_stale, space_frozen, rate_limited, quota_exceeded, storage_full, storage_corrupt, keystore_locked, keystore_missing, clock_skew, route_unreachable, peer_offline, deadline_exceeded, cancelled, budget_exhausted, profile_unsupported, repo_not_bound, outcome_uncertain, internal. The exact categories/default messages/retryability are in `errors.ts`.
 
 Schema/codec fixtures and focused tests establish encoding and rejection behavior only. They do not establish a working distributed session or a security-qualified runtime; P0 independent review and P1 integration gates remain required.
+
+## 10. Phone enrollment through Mousse ID
+
+A phone joins as a leaf node of the same user. It receives an ordinary `mj1_` node invite from the user authority and redeems it with the enrollment exchange in §8. Mousse ID only carries sealed invites and relays bytes. It never sees an invite, a proof key or a match code. There is no account-level shortcut: after enrollment, the authority's RPC dispatcher still requires the caller's node to belong to the same user, at a current epoch, with the needed capability (`src/mms/net/sync/rpcDispatcher.ts` `authorize`). The Mousse ID HTTP contract is in the Mousse ID repository's phone contract. Frozen vectors for everything below are in `test-vectors/net/plus/enrollment-seal.json`, implemented in `src/mms/net/plus/enrollmentSeal.ts`.
+
+**Phone invites need a relay rendezvous.** The desktop issues phone invites only with a Mousse ID relay rendezvous (`route_unreachable` without a relay listener). The rendezvous ticket inside the invite lets the phone dial the authority through the relay as registration `rendezvous_` + base64url(SHA-256(ticket)), generation 1.
+
+**Request path (phone asks, desktop approves).** The phone posts an enrollment request to Mousse ID with its device name, a fresh X25519 `boxPublicKey` and its `transportFingerprint` (base64url SHA-256 of its P-256 SPKI DER). The authority's daemon polls the mailbox every 15 seconds while it is connected to Mousse ID. Settings show each request with its device name and match code. On Approve, the daemon:
+
+1. issues a node invite named after the device, pinned to the requested transport fingerprint;
+2. seals the invite to `boxPublicKey` for that request ID;
+3. posts it to the request's approve route. If posting fails, the unsent invite is revoked.
+
+Deny posts to the deny route.
+
+**Request seal.** The sender generates an ephemeral X25519 key `e`. Let `box` be the 32-byte raw `boxPublicKey`.
+
+- `shared = X25519(e, box)`
+- `key = HKDF-SHA256(ikm=shared, salt=ePub || box, info=UTF8('mousse-net/enroll-seal/v1'), length=32)`
+- `sealed = ChaCha20-Poly1305(key, nonce12, invite UTF-8, aad=UTF8('mousse-net/enroll-seal/v1:' || requestId))`
+
+The posted `sealedInvite` is base64url of `ePub32 || nonce12 || ciphertext || tag16`. A different request ID, box key or any flipped byte fails to open.
+
+**Offer path (QR code).** Add phone issues the same kind of invite with no pin. It draws a fresh 32-byte key `K` and seals the invite as base64url of `nonce12 || ChaCha20-Poly1305(K, nonce12, invite, aad=UTF8('mousse-net/enroll-offer/v1'))`. It posts the result as an enrollment offer, which returns `{id, expiresAt}`. The QR code carries `mousse://net/join?v=1&plus=<Mousse ID origin>&offer=<offer id>&key=<base64url K>`. `K` never leaves the QR code and is zeroed after sealing. The code expires at the earlier of the offer and the invite expiry, and the client rejects offers that claim more than 15 minutes. Sealed invites are at most 16 KiB.
+
+**Match code.** Both screens show `SHA-256(UTF8('mousse-net/enroll-match/v1') || 0x00 || box32 || 0x00 || UTF8(transportFingerprint))`, read as uint32 big-endian, mod 1,000,000, zero-padded to six digits. The person approves only when the codes agree, so a swapped box key or fingerprint is visible. Mousse ID never computes it.
+
+**Transport pin.** A pinned invite stores the expected joiner fingerprint as the keystore secret `enrollment/<inviteId>/joiner`. `redeemNode` compares it, in constant time, with SHA-256 of the presented certificate SPKI right after the existing key check. A mismatch returns `peer_key_mismatch` and leaves the invite unused, so a relay or mailbox that substitutes its own key cannot enroll it.
+
+**Redeeming the invite.** The phone:
+
+1. parses the `mj1_` invite and validates its rendezvous;
+2. authenticates to the relay as a dialer for the rendezvous registration and waits for `paired`;
+3. runs inner TLS 1.3 with its self-signed P-256 client certificate, pinning the server SPKI to the delegation's `keys.transport`, with no resumption;
+4. opens the mux (§3) and exchanges hello and helloAck;
+5. sends `enroll.request` with the exporter-bound proof from §8 (`EXPORTER-mousse-net-enroll`, 32 bytes, empty context);
+6. verifies `enroll.result` against the inviter pin, then stores the delegation and roster.
+
+Default phone capabilities are read, chat and write.
+
+**Refresh.** Node delegations last 7 days (§9). The authority renews delegations near expiry every hour and sends the new roster as `rosterUpdate` on open sessions. A phone that does not connect at least once a week must enroll again.

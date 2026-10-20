@@ -1,0 +1,107 @@
+import { describe, expect, it } from 'vitest'
+import {
+  formatCountdown,
+  normalizePlusOrigin,
+  pollPlusSignIn,
+  resolvePlusOrigin,
+  secondsLeft
+} from '../../src/renderer/lib/plusSignIn'
+
+function clock() {
+  let time = 1_000_000
+  const waits: number[] = []
+  return {
+    now: () => time,
+    waits,
+    sleep: async (ms: number, signal: AbortSignal) => {
+      if (signal.aborted) throw Object.assign(new Error('aborted'), { code: 'cancelled' })
+      waits.push(ms)
+      time += ms
+    }
+  }
+}
+const pending = () => Promise.reject({ code: 'peer_offline', message: 'Approve first' })
+
+describe('Mousse ID sign-in polling', () => {
+  it('waits with backoff until the approval lands', async () => {
+    const c = clock()
+    let calls = 0
+    const result = await pollPlusSignIn(
+      () => (++calls < 5 ? pending() : Promise.resolve('connected')),
+      { intervalMs: 1000, expiresAt: c.now() + 600_000, signal: new AbortController().signal, maxIntervalMs: 3000, ...c }
+    )
+    expect(result).toBe('connected')
+    expect(c.waits).toEqual([1000, 1500, 2250, 3000])
+  })
+
+  it('stops at expiry and on cancel', async () => {
+    const c = clock()
+    await expect(
+      pollPlusSignIn(pending, { intervalMs: 1000, expiresAt: c.now() + 2500, signal: new AbortController().signal, ...c })
+    ).rejects.toMatchObject({ code: 'expired' })
+    expect(c.waits).toEqual([1000, 1500])
+    const controller = new AbortController()
+    let calls = 0
+    await expect(
+      pollPlusSignIn(
+        () => {
+          if (++calls === 2) controller.abort()
+          return pending()
+        },
+        { intervalMs: 1000, expiresAt: c.now() + 600_000, signal: controller.signal, ...c }
+      )
+    ).rejects.toMatchObject({ code: 'cancelled' })
+    expect(calls).toBe(2)
+  })
+
+  it('ends on a real failure', async () => {
+    const c = clock()
+    await expect(
+      pollPlusSignIn(() => Promise.reject({ code: 'forbidden' }), {
+        intervalMs: 1000,
+        expiresAt: c.now() + 600_000,
+        signal: new AbortController().signal,
+        ...c
+      })
+    ).rejects.toMatchObject({ code: 'forbidden' })
+    expect(c.waits).toEqual([])
+  })
+
+  it('aborts a real sleep promptly', async () => {
+    const controller = new AbortController()
+    const run = pollPlusSignIn(pending, { intervalMs: 60_000, expiresAt: Date.now() + 600_000, signal: controller.signal })
+    setTimeout(() => controller.abort(), 10)
+    await expect(run).rejects.toMatchObject({ code: 'cancelled' })
+  })
+})
+
+describe('Mousse ID origin', () => {
+  it('accepts https and loopback http origins only', () => {
+    expect(normalizePlusOrigin(' https://plus.example.test/ ')).toBe('https://plus.example.test')
+    expect(normalizePlusOrigin('http://127.0.0.1:8787')).toBe('http://127.0.0.1:8787')
+    for (const bad of ['', 'plus.example.test', 'http://plus.example.test', 'https://u:p@x.test', 'https://x.test/path', 'https://x.test/?a=1'])
+      expect(normalizePlusOrigin(bad)).toBeUndefined()
+  })
+
+  it('prefers a valid override, then the build default, else nothing', () => {
+    expect(resolvePlusOrigin('https://mine.test', 'https://default.test')).toBe('https://mine.test')
+    expect(resolvePlusOrigin('nonsense', 'https://default.test')).toBe('https://default.test')
+    expect(resolvePlusOrigin(null, '')).toBe('')
+  })
+
+  it('formats the countdown', () => {
+    expect(secondsLeft(10_500, 1000)).toBe(10)
+    expect(secondsLeft(0, 1000)).toBe(0)
+    expect(formatCountdown(605)).toBe('10:05')
+  })
+})
+
+describe('phone QR code', () => {
+  it('draws a QR code with a quiet zone for a join URL', async () => {
+    const { qrSvgPath } = await import('../../src/renderer/lib/plusQr')
+    const url = 'mousse://net/join?v=1&plus=https%3A%2F%2Fplus.example.test&offer=off_01HZXTESTOFFER00000000000&key=' + 'A'.repeat(43)
+    const { size, path } = qrSvgPath(url)
+    expect((size - 8 - 17) % 4).toBe(0)
+    expect(path).toMatch(/^M4 4h1v1h-1z/)
+  })
+})

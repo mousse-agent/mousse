@@ -22,7 +22,7 @@ Profile creation is transactional: a generated root is removed if layout or mani
 
 Root must call the lifecycle owner before `ProfileHost.disposeProfile`, archive, or remove completes:
 
-- stop scheduler ticks, channel ingress, Plus/control relay sessions, workflow/agent/browser runs, headless workers, PTYs, and pending personal questions for the target profile;
+- stop scheduler ticks, channel ingress, Mousse ID/control relay sessions, workflow/agent/browser runs, headless workers, PTYs, and pending personal questions for the target profile;
 - wait for cancellation/termination and mark non-cancelable external effects recovery-required before the owned root can move;
 - expose active-work counts to `ProfileHost.previewRemove` and reject destructive removal while work remains;
 - restart the still-active runtime if archive/remove loses a revision race or rollback restores the index;
@@ -30,7 +30,7 @@ Root must call the lifecycle owner before `ProfileHost.disposeProfile`, archive,
 
 The profile layer does not own `MmsProfileServices`, orchestrator, workflow, browser, protocol, or UI composition. Root should pass these lifecycle hooks through its composition seam rather than adding process-global current-profile state.
 
-Same-repository projects are intentionally independent profile records pointing at the same filesystem path. Repository identity and mutation leases remain installation-scoped, so concurrent profile mutations use the shared lease while project metadata, threads, agents, workflows, schedules, channels, Plus credentials, and browser storage remain under each profile root.
+Same-repository projects are intentionally independent profile records pointing at the same filesystem path. Repository identity and mutation leases remain installation-scoped, so concurrent profile mutations use the shared lease while project metadata, threads, agents, workflows, schedules, channels, Mousse ID credentials, and browser storage remain under each profile root.
 
 ## Evidence
 
@@ -38,4 +38,4 @@ Same-repository projects are intentionally independent profile records pointing 
 - `npx vitest run tests/platformProfileRuntime.test.ts --maxWorkers=2 --minWorkers=1` — production profile composition, event routing, deletion, same-repository project separation, and interrupted deletion recovery pass.
 - `npm run typecheck` — passed.
 
-These fixtures use temporary local homes, fake credentials, and local filesystem/process state. They do not qualify live Plus accounts, hosted channels, or external provider interoperability.
+These fixtures use temporary local homes, fake credentials, and local filesystem/process state. They do not qualify live Mousse ID accounts, hosted channels, or external provider interoperability.

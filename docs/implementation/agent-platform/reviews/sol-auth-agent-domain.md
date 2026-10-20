@@ -1,11 +1,11 @@
-# Sol review: Plus authentication and Agent definition domain
+# Sol review: Mousse ID authentication and Agent definition domain
 
 ## Reviewed range
 
 - Integration base: `dff32f4a7f8873a8e03f208eb554f4f1558860ef`
 - Merged core head: `48c56e646f1c5cbfba93a3c30bbb59dba7387657`
 - Reviewed merge: `5acc1bb3bba7fb60b40424536b551d920584b04f`
-- Plus authentication implementation: `677c97b1ed238b0f48254f27bc9e35a1a6f04eea`
+- Mousse ID authentication implementation: `677c97b1ed238b0f48254f27bc9e35a1a6f04eea`
 - Agent definition domain implementation: `0b4a7fee035b7578cf805e028d6f0a282c7d86bd`
 - Workflow definition/command and canvas changes are present only as merge ancestry and remain separate review passes.
 

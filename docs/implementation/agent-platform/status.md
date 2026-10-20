@@ -28,7 +28,7 @@ The feature source candidate is `3fc2f1c`; subsequent commits through `40a8866` 
 
 TypeScript and the full Electron/main/preload/renderer + CLI build pass with the upgraded dependencies, including after startup fix `5e45d1e`. The independent compatibility run also passed 40 native/Agent/workflow/CLI tests. All five previously failed full-suite files subsequently passed together (50 tests); this does not rewrite the historical failed full-suite result. The final original-checkout combined suite passed: **211 files, 1,528 tests passed, 1 skipped, zero failures or unhandled errors**, exit 0 in 409.45 seconds (`npm test -- --maxWorkers=4`, preserving the user's 20-second test timeout). The one skipped case is POSIX-only process termination on Windows. The initial Windows package exposed invalid highlight.js external subpaths before CLI dispatch; root fixed the build normalization in `5e45d1e`, Sol reviewed it, and both TypeScript projects, the full app/CLI rebuild, generated-import regression, and actual Electron worker packaging regression passed (2 files / 2 tests). The corrected Windows package passes CLI `--help`, `--version`, and `service status` with exit 0 and empty stderr under an isolated home; the service remains stopped and uninstalled. [The reviewed package report](reviews/final-windows-package.md) records the official ASAR streams repack, exact preservation of all 211 unpacked files, archive digest, and limits. Root also verified the corrected development bundle starts under the real Electron runtime and reports `mousse-cli 0.1.1`. No daemon lifecycle or installed-upgrade claim is inferred from these smoke checks.
 
-The Agent Editor, workflow editor, integration editor, browser viewer, and real profile/preload UI runners passed; root inspected the Orb and canvas screenshots. Supported generic browser tools are implemented. Provider-native computer adapters remain experimental, OS sandbox execution remains unavailable, and Try Run uses scratch workspaces. Packaged Linux, live Plus/OAuth/channel interoperability, live-provider browser quality, and full install/upgrade matrices remain qualification limits. This delivery is not a claim that G7 release certification is complete.
+The Agent Editor, workflow editor, integration editor, browser viewer, and real profile/preload UI runners passed; root inspected the Orb and canvas screenshots. Supported generic browser tools are implemented. Provider-native computer adapters remain experimental, OS sandbox execution remains unavailable, and Try Run uses scratch workspaces. Packaged Linux, live Mousse ID/OAuth/channel interoperability, live-provider browser quality, and full install/upgrade matrices remain qualification limits. This delivery is not a claim that G7 release certification is complete.
 
 ## Earlier checkpoint — September 11, 2026, 15:15 IST
 
@@ -44,7 +44,7 @@ Root `091e266` makes model favorites and quick actions profile-owned, remounts t
 
 Remaining active owners: Sol child in `agents` reviews/fixes Grok background ingress `d680e2d`, especially stable channel identities, durable waiting schedule occurrences, observation cancellation, and transcript leases. Sol profile in `browser` reviews root preferences. Grok in `process-lifecycle` qualifies the original user's upgraded dependency versions against the implementation. Sol foundation completed the real workflow/browser composition. No verified Grok subscription limit occurred. Root continues integration and original-checkout reconciliation; all Orb implementation remains root-owned.
 
-The original checkout is still unchanged except the delivered documents. Its seven pre-existing/previously delivered overlay files have byte snapshots and hashes under sibling `orchestration/original-overlay-20260911`; a three-way package proposal and offline lockfile resolution preserve the user's dependency upgrades. Final source transfer is prepared but not executed. Required next steps are the remaining reviewed merges, dependency compatibility, a final combined regression run, and safe original-checkout transfer. Packaged Windows/Linux, live Plus/OAuth/channel services, and paid-provider/browser-quality qualification remain unclaimed.
+The original checkout is still unchanged except the delivered documents. Its seven pre-existing/previously delivered overlay files have byte snapshots and hashes under sibling `orchestration/original-overlay-20260911`; a three-way package proposal and offline lockfile resolution preserve the user's dependency upgrades. Final source transfer is prepared but not executed. Required next steps are the remaining reviewed merges, dependency compatibility, a final combined regression run, and safe original-checkout transfer. Packaged Windows/Linux, live Mousse ID/OAuth/channel services, and paid-provider/browser-quality qualification remain unclaimed.
 
 ## Earlier checkpoint — September 11, 2026, 14:35 IST
 
@@ -96,7 +96,7 @@ The older initial-wave tables below are historical. Current implementation estim
 | Orb | Root implementation and `c1867e6` layout correction; 11 renderer checks; Sol reviewed | Full visible app route qualification; root mounted route in `c67f3e9` |
 | Agent definitions + editor | Grok `c17a486` / `6e7d66c`; Sol `79cd26f`; 28 real Electron/Monaco checks, 42 focused tests | Root mounted profile-bound route in `c67f3e9`; real native/CLI execution/history remains |
 | Profile foundations | Grok `c6bc83f`; root `91e5bbe` / `50e3434`; Sol `2391a9a` | Sol `eb2b887` production routing/binding fixes merged; 63 focused tests and 7 real two-window preload checks. Full visible app/migration/account audit remains |
-| Plus authentication | Root `677c97b`; Sol `b46eb90` fixed enrollment-token admission; 59 auth/domain tests + 8 control vectors | Actual server interoperability and refresh lifecycle qualification |
+| Mousse ID authentication | Root `677c97b`; Sol `b46eb90` fixed enrollment-token admission; 59 auth/domain tests + 8 control vectors | Actual server interoperability and refresh lifecycle qualification |
 | Workflow format | Grok `06e2f5e`; Sol `cd6868d` | Preserve integrity fixes while merging runtime |
 | Workflow engine | Sol `d097ceb` reviewed runtime/admission merged in core `8e9fd65`; production coordinator review `df4f29b` merged in `b78343d` | W02 nested recovery candidate `0423d96` under Sol review; full production adapters and slash ingress remain |
 | MCP/Skills backend | Sol I04 `c05de1d` and Settings UI `40097d3` reviewed and merged in core `34fe920`; combined 13 production/integration tests pass | Actual installed CLI consumption and full production Settings/OAuth qualification remain |
@@ -196,7 +196,7 @@ The coordinator temporarily assigns initial domain schema authorship to each sol
 - [ ] F04 integration/release candidate
 - [ ] P01 paths/runtimes
 - [ ] P02 migration
-- [ ] P03 switcher/Plus/control
+- [ ] P03 switcher/Mousse ID/control
 - [ ] P04 isolation/deletion/background audit
 - [ ] U01 Markdown editor
 - [ ] A01 definitions/resolver

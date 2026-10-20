@@ -21,7 +21,7 @@ Disposition: accepted for the profile-owned P02 migration and deletion-recovery 
 - `npx vitest run tests/platformProfiles.contract.test.ts tests/platformProfiles.paths.test.ts tests/platformProfiles.manager.test.ts tests/platformProfiles.migration.test.ts tests/platformProfileStoreInjection.test.ts tests/platformProfileRuntime.test.ts tests/platformProfileAuth.test.ts --maxWorkers=2 --minWorkers=1` — 7 files, 52 tests passed.
 - `npm run typecheck` — both node and web TypeScript projects passed.
 - Added restart/fault evidence for the post-rename/pre-journal promotion window, rollback and rerun, malformed manifest preservation, non-prefix journal rejection, missing-root deletion refusal, profile-directory reparse escape, and complete new-profile OAuth/generated-config layout.
-- Existing evidence continues to cover legacy `settings.json` and browser copy, path-bound control credential re-encryption/readback, committed rollback acknowledgement, crash before/after commit, same-repository per-profile project records, shared provider-auth identity, profile-owned settings/runtime stores, event routing, and truthful profile-scoped Plus auth.
+- Existing evidence continues to cover legacy `settings.json` and browser copy, path-bound control credential re-encryption/readback, committed rollback acknowledgement, crash before/after commit, same-repository per-profile project records, shared provider-auth identity, profile-owned settings/runtime stores, event routing, and truthful profile-scoped Mousse ID auth.
 
 No build was needed because this slice changes TypeScript source/tests and no generated build artifact. Tests use temporary local homes, fixture credentials, filesystem state, and loopback/local process composition only.
 

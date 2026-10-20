@@ -4,7 +4,7 @@ Mousse is a **local multi-agent orchestrator**: a daemon-owned MMS (Mousse Main 
 
 ## Agent platform and profile ownership
 
-One installation daemon hosts profile-owned service graphs. Threads, projects, Plus/control accounts, schedules, channels, integrations, Agent definitions, workflow revisions/runs, browser storage, and preferences belong to a profile. Provider credentials and the model catalog remain installation-wide. GUI/CLI connections bind to a profile before personal operations; switching a window does not stop other profiles' background work. Archive/removal drains owned work before moving data and retains failed owners for retry.
+One installation daemon hosts profile-owned service graphs. Threads, projects, Mousse ID/control accounts, schedules, channels, integrations, Agent definitions, workflow revisions/runs, browser storage, and preferences belong to a profile. Provider credentials and the model catalog remain installation-wide. GUI/CLI connections bind to a profile before personal operations; switching a window does not stop other profiles' background work. Archive/removal drains owned work before moving data and retains failed owners for retry.
 
 Published workflows compile into durable executions shared by canvas, chat slash commands, CLI, channels, and schedules. Admission pins revisions and policy; approvals, input waits, child execution, and uncertain effects survive recovery. Agent/Instruction, scripts, project tools, MCP, Skills, and browser nodes use the profile's real runtime adapters.
 

@@ -14,7 +14,7 @@ The package map records implementation ownership and reviewed evidence. The comp
 | E2E04 script/condition/parallel Agents/join/artifact | `358136c`, `platformWorkflowCrossFeature.test.ts`; [workspace review](reviews/sol-workflow-workspace-correction.md) at `da11a17`. Real script CWD, separate registered Git worktrees, exact Agent prompts, ordered output, durable artifact, clean primary repository. Provider I/O is scripted; native project tools are real. |
 | E2E05 profile switch during activity | `2b415db`, `platformProfileCrossFeature.test.ts`; [review](reviews/sol-e2e05-07-profile-composition.md). Real profile services/bindings and late-event fencing; local fixture browser/provider actors. |
 | E2E06 shared repository/provider | Same compound fixture proves separate personal ownership, one cross-profile mutation lease, and attributed provider use. |
-| E2E07 Plus logout isolation | Same compound fixture proves A-only revocation with B/shared-provider state retained; the Plus service is a local contract fixture. |
+| E2E07 Mousse ID logout isolation | Same compound fixture proves A-only revocation with B/shared-provider state retained; the Mousse ID service is a local contract fixture. |
 | E2E08 Skill and three MCP transports | `d12b6ff`, `platformIntegrationCrossFeature.test.ts`, Sol accepted 1/1: actual anonymous/OAuth HTTP and stdio calls for main/child actor scopes, exact Skill bytes, schema restrictions, and live revocation. OAuth tokens are preseeded; this is scripted actor dispatch, not live model/OAuth enrollment. |
 | E2E09 form with takeover/resume | `dffba45`, `platformMainBrowserE2E.test.ts`; [review](reviews/sol-e2e09-browser-handoff.md). Same actual Electron guest, preserved cookie, stale-ref rejection, renewed lease, real form POST, no managed fallback. |
 | E2E10 kill daemon after effect | `5432d0d`, `platformWorkflowDaemonCrash.test.ts`, Sol accepted 1/1. SIGKILL actual built Node daemon after script append; restart same home, retain pinned run, recover unknown-effect, never duplicate marker. Must run with current rebuilt CLI in final suite. |
@@ -75,7 +75,7 @@ Q03 is required. The [reviewed evaluation harness](reviews/sol-browser-evaluatio
 |---|---|---|---|---|
 | P01 | implemented/reviewed | `src/mms/profiles/{paths,ProfileHost,ProfileRuntime,ProfileManager}.ts`, `MmsProfileServices.ts`, store injection | `reviews/sol-profile-production.md` (63 focused tests; `npm run test:profile-production` 7 two-window preload checks); `tests/platformProfiles.paths.test.ts`, `platformProfileStoreInjection.test.ts` | Shared providers/catalog remain installation-owned (`SharedAgentModelLookup`, provider auth). No missing path injection. |
 | P02 | implemented/reviewed | `src/mms/profiles/migration/**` | `reviews/sol-profile-recovery.md` — 7 files / 52 tests (`platformProfiles.contract/paths/manager/migration`, store injection, runtime, auth) | Packaged upgrade/live-account migration is Q04. Git worktrees retained with explicit ownership by design. |
-| P03 | implemented/reviewed | Profile switcher, browser partitions, profile workspace, profile-keyed favorites/quick actions, Plus auth | `sol-profile-production.md`; `sol-auth-agent-domain.md`; `sol-browser-panel-lifetime.md`; `sol-profile-preferences-preview.md` | Plus refresh-token interoperability and visible packaged journeys are qualification. |
+| P03 | implemented/reviewed | Profile switcher, browser partitions, profile workspace, profile-keyed favorites/quick actions, Mousse ID auth | `sol-profile-production.md`; `sol-auth-agent-domain.md`; `sol-browser-panel-lifetime.md`; `sol-profile-preferences-preview.md` | Mousse ID refresh-token interoperability and visible packaged journeys are qualification. |
 | P04 | implemented/reviewed | `MmsProfileServices.beginShutdown` / `getOwnedActivity`, `ProfileHost.previewRemove`, retryable archive/remove drain | Lifecycle reviews plus `sol-profile-preferences-preview.md` | Live Discord/Telegram/relay TCP teardown and combined packaged isolation remain qualification. |
 
 ### WG2 editor and agents
@@ -138,7 +138,7 @@ Q03 is required. The [reviewed evaluation harness](reviews/sol-browser-evaluatio
 | Q01 | implemented/reviewed | `tests/fixtures/agent-platform/**`, `tests/fixtures/browser/**`, isolated Electron scripts (`test:orb`, `test:agent-editor`, `test:workflow-editor`, `test:profile-production`) | Those scripts and domain tests | Not a live-model harness. Sufficient for component gates. |
 | Q02 | implemented; combined qualification active | Real MMS/Electron compound fixtures listed above | E2E03-12 accepted; E2E01/02 final verification | Current-source combined suite and remaining editor compound checks. |
 | Q03 | implemented harness; qualification incomplete | `scripts/evaluation/browser/**`, `tests/fixtures/browser/evaluation/**` | `9969523`, 16 focused tests, full-catalog report; `sol-browser-evaluation.md` | Live-model quality, actual external benchmark environment, visual model ablations, stable confidence/performance targets. Required gate, not optional. |
-| Q04 | partial qualification | Portable Windows/Linux qualification harnesses and operator docs | Windows directory package 17/17; Linux Node/native/migration plus both AppImage builds | Current-source artifact matrix, Linux certified Chrome and packaged Electron PTY, installer/upgrade, live Plus contract interoperability. |
+| Q04 | partial qualification | Portable Windows/Linux qualification harnesses and operator docs | Windows directory package 17/17; Linux Node/native/migration plus both AppImage builds | Current-source artifact matrix, Linux certified Chrome and packaged Electron PTY, installer/upgrade, live Mousse ID contract interoperability. |
 
 ## User-original required vs optional/experimental vs qualification
 
@@ -148,14 +148,14 @@ Q03 is required. The [reviewed evaluation harness](reviews/sol-browser-evaluatio
 
 **Optional / experimental / fail-closed (do not expand scope):** OS sandboxed scripts; M03 provider-native adapters; persistent native-agent browser workspaces; vision/B2 coordinate tools as a second loop; macOS advertised packaging; workflow marketplace/cloud runner; live external CLI grant fidelity beyond capability reports.
 
-**Release qualification (not missing product source):** packaged app, live Plus/OAuth/channel servers, two-instance GUI, visible headed OS input, final combined E2E-01..12 run, Linux install matrix, operator doc refresh.
+**Release qualification (not missing product source):** packaged app, live Mousse ID/OAuth/channel servers, two-instance GUI, visible headed OS input, final combined E2E-01..12 run, Linux install matrix, operator doc refresh.
 
 ## Remaining work and product boundaries
 
 1. Finish E2E01/02 compound editor verification and the current original-checkout combined typecheck/build/suite. Review source corrections before merging them.
 2. Refresh current-source Windows package evidence. Linux evidence currently proves Node CLI/native behavior and AppImage construction; certified Linux Chrome, packaged Electron daemon/native ABI, installation/upgrade, and visible desktop acceptance remain unqualified.
 3. Q03 requires model/environment qualification beyond local scripted executor conformance. Preserve unsupported rows and complete failure traces. Provider-native adapters remain Experimental; local fixture results must never become a live-model certification claim.
-4. Live Plus/OAuth/channel compatibility must use the actual available server/account contract. Local fixtures establish isolation and lifecycle behavior, not remote interoperability.
+4. Live Mousse ID/OAuth/channel compatibility must use the actual available server/account contract. Local fixtures establish isolation and lifecycle behavior, not remote interoperability.
 
 The editor Try Run uses a scratch workspace; selecting arbitrary projects and public fine-grained preview cancellation remain unavailable. Sandboxed scripts fail closed because no OS sandbox backend is installed. Persistent Agent memory and third-party CLI grant fidelity beyond capability reports remain explicit limits. Native workflow Agent nodes now use real isolated Git worktrees when mutating; this is distinct from editor Try Run.
 

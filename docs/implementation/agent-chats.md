@@ -8,7 +8,7 @@ I added Projects and Chats as renderer modes. Search and New chat sit below the 
 
 I route explicit @slugs only to group members. Unmentioned user messages start with the first agent; agents can hand off by mentioning another member. I preserve speaker identity and history in actual provider context, deduplicate response targets, and stop circular handoffs after at most eight distinct agent responses. A user can send another message to continue. Cancellation retains ownership until the provider settles; interrupted runs recover visibly after restart.
 
-The current implementation admits published native Mousse agents, with thread or disabled memory. Unsupported external CLI runtimes remain visible but unavailable rather than executing through an unrelated runtime. Groups allow up to sixteen agents. The current user is a person participant with identity `self`; the domain reserves person identities for future Mousse Plus, while the current admission/UI creates agent-only groups plus the owner.
+The current implementation admits published native Mousse agents, with thread or disabled memory. Unsupported external CLI runtimes remain visible but unavailable rather than executing through an unrelated runtime. Groups allow up to sixteen agents. The current user is a person participant with identity `self`; the domain reserves person identities for future Mousse ID, while the current admission/UI creates agent-only groups plus the owner.
 
 ## Device scope
 

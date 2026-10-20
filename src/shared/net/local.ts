@@ -16,6 +16,11 @@ export const NET_LOCAL_METHODS = [
   'net.plus.bind',
   'net.plus.connect',
   'net.plus.disconnect',
+  'net.plus.login.cancel',
+  'net.plus.enrollment.requests',
+  'net.plus.enrollment.approve',
+  'net.plus.enrollment.deny',
+  'net.plus.enrollment.offer',
   'net.transport.list',
   'net.transport.configure',
   'net.init',
@@ -65,6 +70,25 @@ export interface NetStatus {
   routes: Route[]
   peers: Array<{ node: NodeId; state: 'connecting' | 'open' | 'closed'; error?: NetErrorCode }>
   error?: NetErrorCode
+}
+/** A phone asking to join through Mousse ID, as `net.plus.enrollment.requests` returns it. */
+export interface PlusEnrollmentRequestView {
+  id: string
+  deviceName: string
+  kind: 'phone' | 'computer'
+  boxPublicKey: string
+  transportFingerprint: string
+  createdAt: number
+  expiresAt: number
+  /** Six digits the phone also shows; computed locally, never by Mousse ID. */
+  matchCode: string
+}
+export interface PlusEnrollmentOffer {
+  offerId: string
+  /** `mousse://net/join?...` payload for the QR code. Contains the one-time key. */
+  url: string
+  inviteId: string
+  expiresAt: number
 }
 export interface NetDoctor {
   ok: boolean

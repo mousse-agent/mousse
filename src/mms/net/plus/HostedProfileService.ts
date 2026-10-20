@@ -22,12 +22,65 @@ interface Stored {
   connectorToken?: string
   deferredRoute?: Stored['pending']
   managedSpaceRoutes?: Record<string, { user: UserId; expiresAt: number }>
+  /** Display-only account details from the sign-in grant. Never used for authorization. */
+  account?: { email?: string; plan?: string }
   pending?: {
     ticket?: string
     purpose: ChallengeStatement['purpose']
     intent: unknown
     body: Record<string, unknown>
   }
+}
+/** A pending phone enrollment request targeting this node (contract §3). */
+export interface PlusEnrollmentRequest {
+  id: string
+  deviceName: string
+  kind: 'phone' | 'computer'
+  boxPublicKey: string
+  transportFingerprint: string
+  createdAt: number
+  expiresAt: number
+}
+const MAILBOX_ID = /^[A-Za-z0-9_-]{1,128}$/
+function checkedEnrollmentRequest(value: unknown, now: number): PlusEnrollmentRequest | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return
+  const row = value as Record<string, unknown>
+  if (
+    typeof row.id !== 'string' ||
+    !MAILBOX_ID.test(row.id) ||
+    typeof row.deviceName !== 'string' ||
+    !row.deviceName.trim() ||
+    Array.from(row.deviceName).length > 64 ||
+    /[\u0000-\u001f\u007f]/.test(row.deviceName) ||
+    (row.kind !== 'phone' && row.kind !== 'computer') ||
+    typeof row.boxPublicKey !== 'string' ||
+    !/^[A-Za-z0-9_-]{43}$/.test(row.boxPublicKey) ||
+    Buffer.from(row.boxPublicKey, 'base64url').length !== 32 ||
+    typeof row.transportFingerprint !== 'string' ||
+    !/^[A-Za-z0-9_-]{43}$/.test(row.transportFingerprint) ||
+    Buffer.from(row.transportFingerprint, 'base64url').length !== 32 ||
+    !Number.isSafeInteger(row.createdAt) ||
+    !Number.isSafeInteger(row.expiresAt) ||
+    (row.expiresAt as number) <= now
+  )
+    return
+  return {
+    id: row.id,
+    deviceName: row.deviceName,
+    kind: row.kind,
+    boxPublicKey: row.boxPublicKey,
+    transportFingerprint: row.transportFingerprint,
+    createdAt: row.createdAt as number,
+    expiresAt: row.expiresAt as number
+  }
+}
+function displayText(value: unknown, max: number): string | undefined {
+  return typeof value === 'string' &&
+    value.trim() &&
+    Array.from(value).length <= max &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+    ? value
+    : undefined
 }
 export interface HostedProfileOptions {
   keys: FileKeyStore
@@ -299,6 +352,9 @@ export class HostedProfileService {
       accessToken: string
       accountId: string
       expiresAt: number
+      email?: unknown
+      plan?: unknown
+      monetization?: unknown
     }>(transaction.configuration, `/v1/net/login/${id}/exchange`, {
       pollToken: transaction.pollToken,
       codeVerifier: transaction.verifier,
@@ -316,7 +372,19 @@ export class HostedProfileService {
     const selected = { ...transaction.configuration, accountId: grant.accountId }
     if (transaction.bindRoot) await this.bind(selected, grant.accessToken)
     else this.configure(selected)
+    const email = displayText(grant.email, 320),
+      // No paid plans yet: a plan name is kept only when the service says monetization is on.
+      plan = grant.monetization === true ? displayText(grant.plan, 64) : undefined,
+      stored = this.read()
+    if (stored && (email || plan)) {
+      stored.account = { ...(email ? { email } : {}), ...(plan ? { plan } : {}) }
+      this.save(stored)
+    }
     return this.connect(grant.accessToken)
+  }
+  /** Drops the pending sign-in so a cancelled attempt does not block a new one. */
+  cancelLogin(): void {
+    this.login = undefined
   }
   private guard(): void {
     if (this.options.signal.aborted) throw new NetError('cancelled')
@@ -345,6 +413,8 @@ export class HostedProfileService {
           connected: !!stored.registration && stored.registration.expiresAt > this.now(),
           accountId: stored.configuration.accountId,
           audience: stored.configuration.audience,
+          ...(stored.account?.email ? { email: stored.account.email } : {}),
+          ...(stored.account?.plan ? { plan: stored.account.plan } : {}),
           ...(stored.registration
             ? {
                 registrationId: stored.registration.id,
@@ -358,20 +428,32 @@ export class HostedProfileService {
   private now(): number {
     return this.options.now?.() ?? Date.now()
   }
-  private async post<T>(
+  private post<T>(
     configuration: PlusConfiguration,
     path: string,
     token: string,
     body: unknown
+  ): Promise<T> {
+    return this.request<T>('POST', configuration, path, token, body)
+  }
+  private async request<T>(
+    method: 'GET' | 'POST',
+    configuration: PlusConfiguration,
+    path: string,
+    token: string,
+    body?: unknown
   ): Promise<T> {
     this.guard()
     if (!token || token.length > 16384 || /[\r\n]/.test(token)) throw new NetError('bad_request')
     let response: Response
     try {
       response = await (this.options.fetch ?? fetch)(configuration.apiOrigin + path, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify(body),
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          ...(method === 'POST' ? { 'content-type': 'application/json' } : {})
+        },
+        ...(method === 'POST' ? { body: JSON.stringify(body ?? {}) } : {}),
         signal: AbortSignal.any([this.options.signal, AbortSignal.timeout(10000)]),
         redirect: 'error'
       })
@@ -408,14 +490,26 @@ export class HostedProfileService {
       }
       if (rejected) throw new RejectedRendezvous()
     }
-    if (!response.ok)
+    if (!response.ok) {
+      // Enrollment mailbox (contract §3): 404 unknown, 410 expired, 409 already decided,
+      // 429 too many active offers.
+      if (path.includes('/enrollment-')) {
+        if (response.status === 404 || response.status === 410)
+          throw new NetError('invite_invalid', 'This phone request is no longer pending.')
+        if (response.status === 429)
+          throw new NetError('quota_exceeded', 'Too many phone codes are active. Wait for one to expire.')
+      }
       throw new NetError(
         response.status === 401 || response.status === 403
           ? 'forbidden'
           : response.status === 409
             ? 'conflict'
-            : 'route_unreachable'
+            : response.status === 429
+              ? 'rate_limited'
+              : 'route_unreachable'
       )
+    }
+    if (response.status === 204) return undefined as T
     try {
       return JSON.parse(text) as T
     } catch {
@@ -629,6 +723,67 @@ export class HostedProfileService {
     delete stored.deferredRoute
     this.save(stored)
     return this.status()
+  }
+  private connector(): { stored: Stored; registrationId: string; token: string } {
+    const stored = this.read()
+    if (!stored?.registration || !stored.connectorToken) throw new NetError('not_enrolled')
+    return { stored, registrationId: stored.registration.id, token: stored.connectorToken }
+  }
+  /** Pending phone requests targeting this node (contract §3). Malformed rows are dropped. */
+  async enrollmentRequests(): Promise<PlusEnrollmentRequest[]> {
+    const { stored, registrationId, token } = this.connector()
+    const result = await this.request<{ requests?: unknown }>(
+      'GET',
+      stored.configuration,
+      `/v1/net/registrations/${registrationId}/enrollment-requests`,
+      token
+    )
+    if (!result || !Array.isArray(result.requests)) throw new NetError('bad_request')
+    const now = this.now()
+    return result.requests
+      .slice(0, 32)
+      .map((row) => checkedEnrollmentRequest(row, now))
+      .filter((row): row is PlusEnrollmentRequest => !!row)
+  }
+  async approveEnrollmentRequest(id: string, sealedInvite: string): Promise<void> {
+    if (!MAILBOX_ID.test(id)) throw new NetError('bad_request')
+    const { stored, registrationId, token } = this.connector()
+    await this.post(
+      stored.configuration,
+      `/v1/net/registrations/${registrationId}/enrollment-requests/${id}/approve`,
+      token,
+      { sealedInvite }
+    )
+  }
+  async denyEnrollmentRequest(id: string): Promise<void> {
+    if (!MAILBOX_ID.test(id)) throw new NetError('bad_request')
+    const { stored, registrationId, token } = this.connector()
+    await this.post(
+      stored.configuration,
+      `/v1/net/registrations/${registrationId}/enrollment-requests/${id}/deny`,
+      token,
+      {}
+    )
+  }
+  /** Posts an offer sealed with the QR-code key (contract §4). */
+  async enrollmentOffer(sealedInvite: string): Promise<{ id: string; expiresAt: number; apiOrigin: string }> {
+    const { stored, registrationId, token } = this.connector()
+    const offer = await this.post<{ id?: unknown; expiresAt?: unknown }>(
+      stored.configuration,
+      `/v1/net/registrations/${registrationId}/enrollment-offers`,
+      token,
+      { sealedInvite }
+    )
+    if (
+      !offer ||
+      typeof offer.id !== 'string' ||
+      !MAILBOX_ID.test(offer.id) ||
+      !Number.isSafeInteger(offer.expiresAt) ||
+      (offer.expiresAt as number) <= this.now() ||
+      (offer.expiresAt as number) > this.now() + 15 * 60000
+    )
+      throw new NetError('forbidden')
+    return { id: offer.id, expiresAt: offer.expiresAt as number, apiOrigin: stored.configuration.apiOrigin }
   }
   configure(configuration: PlusConfiguration): PlusStatus {
     configuration = checkedPlusConfiguration(configuration)

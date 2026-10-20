@@ -1,0 +1,49 @@
+{
+  "format": "mousse-net-plus-enrollment-v1",
+  "description": "Public deterministic vectors for phone enrollment through Mousse ID (docs/net/protocol.md, \"Phone enrollment through Mousse ID\"). Keys and nonces are fixed test values; production code MUST use fresh random keys and nonces. Binary values are base64url without padding. X25519 keys are raw 32-byte values; ChaCha20-Poly1305 is the IETF 12-byte-nonce variant with the 16-byte tag appended.",
+  "invite": "mj1_eyJ2IjoxLCJub3RlIjoiVGVzdCB2ZWN0b3IgcGxhaW50ZXh0LiBSZWFsIGludml0ZXMgY2FycnkgYSBzaWduZWQgYXV0aG9yaXphdGlvbiBhbmQgYSAzMi1ieXRlIHRva2VuLiJ9",
+  "requestSeal": {
+    "requestId": "enr_01HZXTESTREQUEST0000000000",
+    "boxPrivateKey": "EBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8",
+    "boxPublicKey": "2J47rXlDfb7Z-ENBgwT0YP8Fx_6B_kqVd6gEy5Nn_2Y",
+    "ephemeralPrivateKey": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8",
+    "ephemeralPublicKey": "eaYx7t4b-cmPEgMs3q3Q56B5OY_HhriMyEbsia-FpRo",
+    "sharedSecret": "C3SA2qt86JJqryCOMO-JyEA_fQCqPbBCj5FOrQXIXgk",
+    "hkdfSalt": "eaYx7t4b-cmPEgMs3q3Q56B5OY_HhriMyEbsia-FpRrYnjuteUN9vtn4Q0GDBPRg_wXH_oH-SpV3qATLk2f_Zg",
+    "hkdfInfo": "mousse-net/enroll-seal/v1",
+    "key": "rnQaMi8F8z6P1U-cGQbfzRMfFNJYC28lhywufvmZXWg",
+    "nonce": "cHFyc3R1dnd4eXp7",
+    "aad": "mousse-net/enroll-seal/v1:enr_01HZXTESTREQUEST0000000000",
+    "sealedInvite": "eaYx7t4b-cmPEgMs3q3Q56B5OY_HhriMyEbsia-FpRpwcXJzdHV2d3h5enuLnMMw7KUtSTeGY-CQktwo9pOkeIXa37ufYa38xGTxmRigMfcRMhW5aKdW9-0fZUUHpIB4cF9fVTeCIVoLlWyfOYZ-DH7Pm-trSZZhLKrmEqh4qZ4aAr-nQYuSgwF3JKZBDI0x7Ckijx33ES96bPT_AIp74c6_XQA7imVHzi32e6Vxt-69l7C51wg0aDagoJcquXYmm54VC3rodJ8",
+    "layout": "ephemeralPublicKey(32) || nonce(12) || ciphertext || tag(16)"
+  },
+  "offerSeal": {
+    "key": "oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8",
+    "nonce": "0NHS09TV1tfY2drb",
+    "aad": "mousse-net/enroll-offer/v1",
+    "sealedInvite": "0NHS09TV1tfY2drbs4P7eeVTnLiD3hLDScNgxAtF6lTbmtGl1wsYjXLrUVbDrECwIk3C5DMkhEbhltpjZx2SoSxKPpEhtu1eDpjYioOSv1ykFTcRhHXNi7uDfpXhzVFDqfqY_sJu-TxE_jVD3X04L2FXRcMQSmjmaOrjRasz1rMGTdZmdo7ZGgkIFB4m3j4-xMyzrrHM6WU9F3ye662R2oxn6NpLPhyR",
+    "layout": "nonce(12) || ciphertext || tag(16)",
+    "plusOrigin": "https://plus.example.test",
+    "offerId": "off_01HZXTESTOFFER00000000000",
+    "joinUrl": "mousse://net/join?v=1&plus=https%3A%2F%2Fplus.example.test&offer=off_01HZXTESTOFFER00000000000&key=oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8"
+  },
+  "matchCode": {
+    "boxPublicKey": "2J47rXlDfb7Z-ENBgwT0YP8Fx_6B_kqVd6gEy5Nn_2Y",
+    "transportFingerprint": "34sHn2baQMlLADM3UxdghiGiT61sD9TWjjm_MofmXkw",
+    "hashInput": "UTF8(\"mousse-net/enroll-match/v1\") || 0x00 || boxPublicKey(32 raw bytes) || 0x00 || UTF8(transportFingerprint)",
+    "hash": "nC1edVj38zlBiNnPoLXbilnJ0BBC17ImWuFWm1tCvRs",
+    "matchCode": "218997"
+  },
+  "rejections": [
+    {
+      "case": "request seal with a different requestId",
+      "requestId": "enr_01HZXOTHERREQUEST000000000",
+      "expected": "authentication failure"
+    },
+    {
+      "case": "offer seal opened with the request-seal aad",
+      "aad": "mousse-net/enroll-seal/v1:enr_01HZXTESTREQUEST0000000000",
+      "expected": "authentication failure"
+    }
+  ]
+}

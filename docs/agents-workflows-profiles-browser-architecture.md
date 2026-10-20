@@ -20,7 +20,7 @@ Navigation: [Current architecture](#2-current-architecture-and-verified-gaps) ·
 | AW-04 | Agents and Workflows subtabs | The Agents workspace has exactly these two library subtabs and retains access to existing active-agent views. |
 | AW-05 | Rich Agent Editor | Desktop editor has a fixed left half with a liquid glass orb and palette arrows; the right half scrolls and contains Source/Preview prompt editing, model selection, and the settings in section 5. |
 | AW-06 | Visual Workflow Editor | Users create, inspect, edit, validate, run, and debug typed node graphs with agents, code, conditions, functions, and the node catalog in section 7. |
-| PR-01 | Multiple profiles | Threads, projects, Plus identity, preferences, channels, schedules, workflows, and agents have independent ownership and visibility. |
+| PR-01 | Multiple profiles | Threads, projects, Mousse ID identity, preferences, channels, schedules, workflows, and agents have independent ownership and visibility. |
 | PR-02 | Shared providers and models | Provider connections, model catalog, and provider credential configuration remain installation-scoped; profile model selections and favorites remain personal. |
 | IN-01 | Dependable Skills and MCP | Add/create/upload/connect flows work end to end, with accurate enablement, diagnostics, invocation, and profile isolation. |
 | BR-01 | Browser use from scratch | Mousse owns perception, references, execution, recovery, policy, traces, and model adapters; supported models can use the browser in app and CLI. |
@@ -32,7 +32,7 @@ The first full release targets Windows and Linux, matching the existing distribu
 
 “From scratch” means implementing the browser agent machinery and browser-control abstraction in Mousse. Chromium and its Chrome DevTools Protocol (CDP) remain the rendering and transport foundation. Browser Use, Stagehand, Skyvern, and Playwright MCP are research references and possible evaluation baselines, not production browser-agent dependencies. Playwright may be a development-only UI/evaluation dependency.
 
-This feature does not require a workflow marketplace, cloud workflow runner, new billing service, or training a foundation model. Existing Mousse Plus connectivity is extended to carry profile ownership; a new remote-control plane is outside scope.
+This feature does not require a workflow marketplace, cloud workflow runner, new billing service, or training a foundation model. Existing Mousse ID connectivity is extended to carry profile ownership; a new remote-control plane is outside scope.
 
 ## 2. Current architecture and verified gaps
 
@@ -48,7 +48,7 @@ Mousse is an Electron/React/TypeScript application with an Electron-free Mousse 
 | Config and paths | [MousseConfigStore.ts](../src/mms/config/MousseConfigStore.ts), [SettingsStore.ts](../src/mms/settings/SettingsStore.ts), [paths.ts](../src/mms/data/paths.ts) | Current home/config access is installation-oriented. Inject immutable profile paths rather than changing process environment on a switch. |
 | Execution and integrations | [LlmClient.ts](../src/mms/orchestrator/LlmClient.ts), [McpManager.ts](../src/mms/integrations/mcp/McpManager.ts), [SkillsRegistry.ts](../src/mms/integrations/skills/SkillsRegistry.ts) | Reuse the tool loop and adapters, but make actor and profile context explicit. |
 | Git/thread recovery | [existing architecture](ARCHITECTURE.md), [thread undo design](thread-undo-architecture.md), existing workspace/lease tests | Workflow effects participate in durable thread history and repository locks; external effects are not falsely described as Git-undoable. |
-| Plus/control | [control storage](../src/mms/control/storage/controlStore.ts), [CLI login](../src/cli/commands/login.ts), [CLI logout](../src/cli/commands/logout.ts), [ConnectionsSection.tsx](../src/renderer/components/ConnectionsSection.tsx) | Plus auth, grants, pairings, and remote commands require profile ownership too. Older “local-only” architecture prose does not describe all current control functionality. |
+| Mousse ID/control | [control storage](../src/mms/control/storage/controlStore.ts), [CLI login](../src/cli/commands/login.ts), [CLI logout](../src/cli/commands/logout.ts), [ConnectionsSection.tsx](../src/renderer/components/ConnectionsSection.tsx) | Mousse ID auth, grants, pairings, and remote commands require profile ownership too. Older “local-only” architecture prose does not describe all current control functionality. |
 
 The current package manifest specifies Node **>=22.19.0**, React 19, Electron 43, TypeScript, Zustand, Monaco, and the MCP SDK. The older README prerequisite of Node 18 is not the implementation baseline. There is no workflow engine or node editor dependency in the inspected source/manifest.
 
@@ -79,7 +79,7 @@ These findings are specific implementation work, not an assertion that every MCP
 6. BrowserPanel hardcodes **persist:mousse-browser**. Cookies, storage, and browser cleanup must become profile-specific across both browser implementations.
 7. **mousse-workspace-state**, model favorites, quick actions, and sidebar widths use global renderer persistence. In-memory snapshots and late events likewise lack profile identity.
 8. Existing pending user questions have restart limitations. Durable workflow approvals cannot inherit an in-memory-only implementation and claim resumability.
-9. Plus authentication has development fallback paths that can synthesize account credentials or a login transaction after an unsuccessful server exchange, while status can infer enrollment from token presence. See [desktopPkce.ts](../src/mms/control/auth/desktopPkce.ts), [cliHeadless.ts](../src/mms/control/auth/cliHeadless.ts), and [MmsControlService.ts](../src/mms/control/MmsControlService.ts). Production failures must remain failures; mock success belongs only in an injected test adapter or an explicit development-only mode.
+9. Mousse ID authentication has development fallback paths that can synthesize account credentials or a login transaction after an unsuccessful server exchange, while status can infer enrollment from token presence. See [desktopPkce.ts](../src/mms/control/auth/desktopPkce.ts), [cliHeadless.ts](../src/mms/control/auth/cliHeadless.ts), and [MmsControlService.ts](../src/mms/control/MmsControlService.ts). Production failures must remain failures; mock success belongs only in an injected test adapter or an explicit development-only mode.
 
 ## 3. System design and ownership
 
@@ -89,7 +89,7 @@ These findings are specific implementation work, not an assertion that every MCP
 flowchart TD
   GUI["Electron app: editors, browser viewer, run panels"]
   CLI["CLI: chat, workflow commands, diagnostics"]
-  CONTROL["Existing Plus/control ingress"]
+  CONTROL["Existing Mousse ID/control ingress"]
   PROTOCOL["MMS protocol and validated dispatch"]
   HOST["InstallationHost"]
   SHARED["Shared provider catalog, provider credentials, repository locks"]
@@ -201,7 +201,7 @@ These paths are proposed ownership seams. Extract small adapters from existing l
 | Provider API keys and provider subscription OAuth | Installation | Shared provider connection by explicit product policy. Renderer sees only connection status and masked identifiers. |
 | Preferred provider/model, effort, favorites | Profile | Personal selection points into shared catalog; choosing a default does not change another profile. |
 | Provider rate-limit pool | Installation | Attribute consumption by profile; shared credentials imply shared provider quota. A profile budget is not a separate upstream quota. |
-| Mousse Plus account, refresh tokens, device grants, pairings | Profile | Separate from provider subscriptions. Logout or revocation affects the selected profile's account and grants. |
+| Mousse ID account, refresh tokens, device grants, pairings | Profile | Separate from provider subscriptions. Logout or revocation affects the selected profile's account and grants. |
 | Threads, messages, queues, tasks, agent runs, usage history | Profile | All IDs are resolved within profile ownership before reads, subscriptions, or mutations. |
 | Projects and recent paths | Profile | Two profiles may independently register the same filesystem repository. Project listings are not shared. |
 | Repository identity and mutation leases | Installation | The same Git common directory must still share a lock across profiles. No transcript or personal project metadata belongs here. |
@@ -243,7 +243,7 @@ MOUSSE_HOME/
       mcp.json                   Mousse-owned server definitions
       state/                     connection diagnostics and installation metadata
     secrets/                     profile credential references/encrypted records
-    control/                     Plus/self-hosted control credentials and grants
+    control/                     Mousse ID/self-hosted control credentials and grants
     scheduled/                   runtime state and execution history
     channels/                    routing, pairing, inbox/outbox state
     browser/<workspaceId>/       persistent Chromium user data where selected
@@ -262,7 +262,7 @@ Profiles prevent accidental mixing through Mousse interfaces. They are not a san
 
 ### 4.3 Profile lifecycle and selection
 
-**Create:** ask for name, optional avatar/color, and optional appearance seed. Generate a UUID and initialize empty profile stores atomically. Do not copy chats, Plus tokens, browser cookies, integrations, or schedules. Shared providers/models are immediately available.
+**Create:** ask for name, optional avatar/color, and optional appearance seed. Generate a UUID and initialize empty profile stores atomically. Do not copy chats, Mousse ID tokens, browser cookies, integrations, or schedules. Shared providers/models are immediately available.
 
 **Select:** each GUI window has one selected profile and a monotonically increasing selection epoch. CLI uses **--profile <slug-or-id>**, then a profile-specific client preference, then a persisted default. Once a command starts, its profile is fixed. A request for a non-existent or ambiguous slug fails before creating a thread.
 
@@ -280,7 +280,7 @@ Event envelopes contain profile ID, stream kind, sequence, and object revision. 
 
 Legacy clients may use the migrated Default profile only while the installation remains in single-profile compatibility mode. Once multiple profiles are enabled, a client that cannot negotiate profile binding gets an explicit upgrade-required error. It must not accidentally receive the last GUI-selected profile.
 
-Plus/self-hosted control grants must bind to a profile, account, device, and allowed operations. Existing unscoped grants migrate only to Default or require re-pairing if ownership cannot be established. Multiple profiles can share physical device identity while using distinct account registration/grant records. Server compatibility must be checked before enabling simultaneous multi-account relay connections; never multiplex accounts through an unscoped legacy session.
+Mousse ID/self-hosted control grants must bind to a profile, account, device, and allowed operations. Existing unscoped grants migrate only to Default or require re-pairing if ownership cannot be established. Multiple profiles can share physical device identity while using distinct account registration/grant records. Server compatibility must be checked before enabling simultaneous multi-account relay connections; never multiplex accounts through an unscoped legacy session.
 
 Remove implicit production mock-success fallbacks in account exchange/enrollment. Validate server-returned account/token responses, track enrollment acknowledgment separately from local token presence, and report failed/offline authentication truthfully. Tests use an explicit mock adapter; an unreachable hosted service cannot become a fabricated connected profile.
 
@@ -292,7 +292,7 @@ Migration is an installation-wide transaction:
 2. Inventory actual legacy files, browser partitions, control storage, repository/worktree metadata, renderer persistence keys, and credentials. Record version, hashes, sizes, and original locations.
 3. Create a Default profile UUID and a staging destination. Copy data into the new layout, preserving IDs, journals, timestamps, permission metadata, and Git worktree registration.
 4. Repoint workspace metadata carefully. Registered Git worktrees cannot simply be moved as ordinary directories: use a supported Git move/repair sequence under the repository lease or retain their legacy physical location with an explicit profile ownership record until migration is proven.
-5. Split config through a reviewed field classification map. Keep provider auth installation-scoped. Move Plus/channel/MCP identity state into Default. Current ControlStore encryption derives its key partly from the control-directory path: decrypt Plus credentials using the original store, re-encrypt under the destination namespace in staging, and verify readback before retiring the source. Byte-copying credentials.enc into a new directory is insufficient. Apply equivalent handling to every location-bound encrypted record. Unknown fields are preserved and reported, not discarded.
+5. Split config through a reviewed field classification map. Keep provider auth installation-scoped. Move Mousse ID/channel/MCP identity state into Default. Current ControlStore encryption derives its key partly from the control-directory path: decrypt Mousse ID credentials using the original store, re-encrypt under the destination namespace in staging, and verify readback before retiring the source. Byte-copying credentials.enc into a new directory is insufficient. Apply equivalent handling to every location-bound encrypted record. Unknown fields are preserved and reported, not discarded.
 6. Validate project/thread/run counts, transcript hashes, queue contents, scheduled definitions, credential reference resolvability, browser storage ownership, and repository status.
 7. Publish one installation manifest selecting schema v2 and Default. Use same-filesystem temporary files, atomic rename, and durability primitives appropriate to the platform. An absent committed manifest means staged data is not authoritative.
 8. Restart services against injected profile paths. Only Default imports the old renderer keys, once. Existing browser storage is assigned to Default, never copied to every profile.
@@ -1105,7 +1105,7 @@ Use semantic-only, screenshot-only, and hybrid ablations to establish whether th
 | E2E-04 | Run script → condition → two agents → join → artifact | Script bytes executed directly; branches isolated; deterministic output order; run trace complete. |
 | E2E-05 | Switch A to B during chat/workflow/browser activity | B sees only B data; A continues with A grants; late A responses/events are discarded. |
 | E2E-06 | A and B use same repository and shared provider | Personal projects/threads isolated; one repository mutation lock; shared provider quota correctly attributed. |
-| E2E-07 | A logs out of Plus while B is connected | Only A's account/control grants revoked; provider credentials and B account remain usable. |
+| E2E-07 | A logs out of Mousse ID while B is connected | Only A's account/control grants revoked; provider credentials and B account remain usable. |
 | E2E-08 | Add skill and anonymous/OAuth/stdio MCP, invoke from main and child | Exact enabled installation and actor grants apply at schema publication and execution. |
 | E2E-09 | Browser agent completes a form with takeover and resume | Human/agent input never races; resume uses fresh refs; final state verified. |
 | E2E-10 | Kill daemon after external action dispatch, before result journal | Recovery marks unknown effect and never blindly repeats the action. |
@@ -1122,7 +1122,7 @@ Log correlation IDs spanning profile, thread, workflow run, node attempt, tool c
 
 ### 11.3 Release phases
 
-**Foundation:** establish contracts, path injection, profile-aware dispatch, shared editor extraction, and integration regression fixes behind internal flags. **Private alpha:** enable agents, core workflows, Add Skill/MCP flows, and managed browser fixtures in a Default profile. **Multi-profile beta:** migration, stale-event defenses, Plus/control routing, background execution, and browser isolation pass together. **General release:** the full node catalog, GUI/CLI parity, supported browser adapters, recovery, packaging, and cross-feature gates pass.
+**Foundation:** establish contracts, path injection, profile-aware dispatch, shared editor extraction, and integration regression fixes behind internal flags. **Private alpha:** enable agents, core workflows, Add Skill/MCP flows, and managed browser fixtures in a Default profile. **Multi-profile beta:** migration, stale-event defenses, Mousse ID/control routing, background execution, and browser isolation pass together. **General release:** the full node catalog, GUI/CLI parity, supported browser adapters, recovery, packaging, and cross-feature gates pass.
 
 Feature flags can hide incomplete UI or disable new execution. They cannot permit schema-incompatible clients, bypass profile checks, silently downgrade sandbox requirements, or disable effect journaling. Maintain independent emergency switches for browser action execution and MCP invocation that stop new calls while preserving recovery state.
 
@@ -1133,7 +1133,7 @@ Feature flags can hide incomplete UI or disable new execution. They cannot permi
 | Runtime owner | Existing MMS daemon with installation/profile composition | Per-window agents would split history, scheduling, credentials, and recovery. |
 | Profile routing | Immutable per-request/run context and connection binding | Mutable MOUSSE_HOME/current-profile globals race background work. |
 | Providers | Shared catalog and credentials; personal selections | Duplicating provider credentials contradicts the requested sharing model. |
-| Plus identity | Profile-owned account/grants with compatibility gate | Reusing one unscoped control session leaks account authority. |
+| Mousse ID identity | Profile-owned account/grants with compatibility gate | Reusing one unscoped control session leaks account authority. |
 | Workflow format | JSON manifest + assets + lock + editor metadata | YAML-only and UI-library serialization introduce avoidable ambiguity/coupling. |
 | Runtime semantics | Compiled control/data graph with explicit loops | Letting a model “interpret” a graph cannot guarantee script/approval execution order. |
 | Code | Direct subprocess execution with honest trust/sandbox mode | In-process eval and Node vm do not provide the required isolation. |
@@ -1143,7 +1143,7 @@ Feature flags can hide incomplete UI or disable new execution. They cannot permi
 | Native model support | Versioned adapters plus conformance | A blanket provider/model allowlist becomes stale and hides SDK limitations. |
 | Modes | Preserve, profile-scope, optional copy to definitions | Automatically treating all existing Markdown modes as agents/workflows changes behavior. |
 
-Implementation must validate four items before their corresponding gates: the exact Plus server contract for multi-account/device grants; platform browser packaging/pipe transport; real sandbox adapters and headless secret storage; and exact installed SDK support for native browser/computer-use schemas. The specified fallback is explicit unavailability or a supported generic browser tier, not silently weakened guarantees.
+Implementation must validate four items before their corresponding gates: the exact Mousse ID server contract for multi-account/device grants; platform browser packaging/pipe transport; real sandbox adapters and headless secret storage; and exact installed SDK support for native browser/computer-use schemas. The specified fallback is explicit unavailability or a supported generic browser tier, not silently weakened guarantees.
 
 No vendor benchmark was rerun for this document. The research establishes design patterns and a measurement plan, while release claims require the evaluation evidence above.
 

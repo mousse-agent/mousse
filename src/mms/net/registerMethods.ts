@@ -22,6 +22,11 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.plus.bind': ['configuration', 'accountToken'],
   'net.plus.connect': ['accountToken'],
   'net.plus.disconnect': [],
+  'net.plus.login.cancel': [],
+  'net.plus.enrollment.requests': [],
+  'net.plus.enrollment.approve': ['id'],
+  'net.plus.enrollment.deny': ['id'],
+  'net.plus.enrollment.offer': ['name'],
   'net.transport.list': [],
   'net.transport.configure': ['id', 'enabled', 'settings'],
   'net.init': ['name', 'listen', 'host', 'port', 'passphrase'],
@@ -63,6 +68,11 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
     (typeof params.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(params.id))
   )
     throw new DomainRpcError('invalid_params', 'A pending login identity is required')
+  if (
+    ['net.plus.enrollment.approve', 'net.plus.enrollment.deny'].includes(method) &&
+    (typeof params.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(params.id))
+  )
+    throw new DomainRpcError('invalid_params', 'An enrollment request identity is required')
   if (
     ['net.plus.login.begin', 'net.plus.configure'].includes(method) &&
     (!params.configuration ||

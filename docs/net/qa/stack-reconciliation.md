@@ -117,7 +117,7 @@ The UI command selected `tests/net/spaces/private/replicaAuthorization.test.ts`,
 `tests/net/rollback/ipc.test.ts`. Each used
 `node node_modules/vitest/vitest.mjs run <selected files> --maxWorkers=1`.
 
-I preserved this stack locally while the separate hosted Plus proposal is
+I preserved this stack locally while the separate hosted Mousse ID proposal is
 compared. I did not integrate draft #60, push the reconciled Chats/UI branches,
 close the source PRs, or merge default. Partner draft #60 is based on the prior
 #52 head; any agreed downstream integration must use the reviewed updated #52
