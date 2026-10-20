@@ -10,6 +10,9 @@ export interface PlusStatus {
   configured: boolean
   connected: boolean
   accountId?: string
+  /** Display-only, from the sign-in grant when Plus sends it. */
+  email?: string
+  plan?: string
   audience?: string
   expiresAt?: number
   registrationId?: string
