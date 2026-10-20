@@ -1103,64 +1103,69 @@ export class ClaudeSubscriptionProviderService {
         const turnTextLength = text.length
         query = await this.createQuery(nextPrompt, options)
         this.queries.set(input.threadId, query)
-        for await (const message of query) {
-          metrics.observe(message)
-          controller.signal.throwIfAborted()
-          sessionId = message.session_id || sessionId
-          if (message.type === 'stream_event') {
-            const event = message.event
-            if (event.type === 'content_block_delta' && !message.parent_tool_use_id) {
-              if (event.delta.type === 'text_delta') {
-                text += event.delta.text
+        try {
+          for await (const message of query) {
+            metrics.observe(message)
+            controller.signal.throwIfAborted()
+            sessionId = message.session_id || sessionId
+            if (message.type === 'stream_event') {
+              const event = message.event
+              if (event.type === 'content_block_delta' && !message.parent_tool_use_id) {
+                if (event.delta.type === 'text_delta') {
+                  text += event.delta.text
+                  input.onText(text)
+                }
+                if (event.delta.type === 'thinking_delta') {
+                  thinking += event.delta.thinking
+                  input.onThinking?.(thinking)
+                }
+              }
+              if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
+                tools.set(event.content_block.id, event.content_block.name)
+                input.onTool?.({
+                  phase: 'start',
+                  callId: event.content_block.id,
+                  title: event.content_block.name,
+                  toolName: event.content_block.name
+                })
+              }
+            }
+            if (message.type === 'user' && Array.isArray(message.message.content))
+              for (const block of message.message.content) {
+                if (block.type === 'tool_result' && tools.has(block.tool_use_id)) {
+                  input.onTool?.({
+                    phase: 'complete',
+                    callId: block.tool_use_id,
+                    title: tools.get(block.tool_use_id)!
+                  })
+                  tools.delete(block.tool_use_id)
+                }
+              }
+            if (message.type === 'result') {
+              if (
+                (message.subtype !== 'success' || message.is_error) &&
+                !(interruptRequested && steers.length)
+              ) {
+                const failure = 'errors' in message ? message.errors.join('\n') : 'Claude Code turn failed'
+                if (/Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh/i.test(failure)) {
+                  throw new AppError({
+                    code: 'claude_subscription_auth_refresh_busy',
+                    message: 'Claude is refreshing your subscription sign-in. Your conversation is saved. Wait a minute and send your message again; if this continues, reconnect Claude Subscription in Settings → Providers.',
+                    errorInfo: { category: 'unavailable', retryable: true }
+                  })
+                }
+                throw new Error(failure)
+              }
+              if (text.length === turnTextLength && 'result' in message) {
+                text += message.result
                 input.onText(text)
               }
-              if (event.delta.type === 'thinking_delta') {
-                thinking += event.delta.thinking
-                input.onThinking?.(thinking)
-              }
-            }
-            if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
-              tools.set(event.content_block.id, event.content_block.name)
-              input.onTool?.({
-                phase: 'start',
-                callId: event.content_block.id,
-                title: event.content_block.name,
-                toolName: event.content_block.name
-              })
+              success = true
             }
           }
-          if (message.type === 'user' && Array.isArray(message.message.content))
-            for (const block of message.message.content) {
-              if (block.type === 'tool_result' && tools.has(block.tool_use_id)) {
-                input.onTool?.({
-                  phase: 'complete',
-                  callId: block.tool_use_id,
-                  title: tools.get(block.tool_use_id)!
-                })
-                tools.delete(block.tool_use_id)
-              }
-            }
-          if (message.type === 'result') {
-            if (
-              (message.subtype !== 'success' || message.is_error) &&
-              !(interruptRequested && steers.length)
-            ) {
-              const failure = 'errors' in message ? message.errors.join('\n') : 'Claude Code turn failed'
-              if (/Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh/i.test(failure)) {
-                throw new AppError({
-                  code: 'claude_subscription_auth_refresh_busy',
-                  message: 'Claude is refreshing your subscription sign-in. Your conversation is saved. Wait a minute and send your message again; if this continues, reconnect Claude Subscription in Settings → Providers.',
-                  errorInfo: { category: 'unavailable', retryable: true }
-                })
-              }
-              throw new Error(failure)
-            }
-            if (text.length === turnTextLength && 'result' in message) {
-              text += message.result
-              input.onText(text)
-            }
-            success = true
-          }
+        } catch (error) {
+          // The SDK throws after the error result an interrupt produces; a steer resumes from here.
+          if (!(interruptRequested && steers.length) || controller.signal.aborted) throw error
         }
         const completed = query
         query = undefined
