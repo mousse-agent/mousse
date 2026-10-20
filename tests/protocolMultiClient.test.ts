@@ -1,0 +1,188 @@
+import { mkdtempSync, realpathSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { MousseMainService } from '../src/mms/MousseMainService'
+import { MmsProtocolServer } from '../src/mms/protocol/server'
+import { LocalMmsClient } from '../src/mms/protocol/client'
+import type { ProtocolEvent } from '../src/mms/protocol/types'
+import { readStopRequest } from '../src/cli/mmsRuntime'
+
+/**
+ * Several clients of one daemon: settings, scheduled jobs, channels, skills and MCP
+ * snapshots are daemon-owned and survive any single client disconnecting.
+ */
+describe('daemon protocol across clients', () => {
+  let home: string
+  let mms: MousseMainService
+  let server: MmsProtocolServer
+  let ownerToken: string
+  let endpoint: string
+
+  beforeEach(async () => {
+    home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-protocol-clients-'))
+    process.env.MOUSSE_HOME = home
+    mms = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
+    await mms.start()
+    ownerToken = mms.getOwnerLease()!.owner.token
+    server = new MmsProtocolServer({ mms, ownerToken, version: 'test' })
+    endpoint = await server.start()
+  })
+
+  afterEach(async () => {
+    await server.stop()
+    await mms.stop()
+    rmSync(home, { recursive: true, force: true })
+    delete process.env.MOUSSE_HOME
+  })
+
+  async function connect(type: 'gui' | 'cli' | 'test' = 'test'): Promise<LocalMmsClient> {
+    const c = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: type })
+    await c.connect()
+    return c
+  }
+
+  it('GUI and CLI clients share the same daemon settings and jobs', async () => {
+    const gui = await connect('gui')
+    const cli = await connect('cli')
+    await gui.request('settings.set', { partial: { profile: { username: 'shared' } } })
+    const fromCli = await cli.request<{ settings: { profile: { username: string } } }>('settings.get')
+    expect(fromCli.settings.profile.username).toBe('shared')
+
+    const job = await cli.request<{ job: { id: string } }>('scheduled.create', {
+      input: { name: 'shared-job', prompt: 'x', schedule: { kind: 'interval', minutes: 45 } }
+    })
+    const list = await gui.request<{ jobs: { id: string }[] }>('scheduled.list')
+    expect(list.jobs.some((j) => j.id === job.job.id)).toBe(true)
+    await gui.close()
+    expect(mms.scheduled.listJobs().some((j) => j.id === job.job.id)).toBe(true)
+    await cli.close()
+  })
+
+  it('scheduler CRUD works over the protocol without a GUI client', async () => {
+    const c = await connect('cli')
+    const created = await c.request<{ job: { id: string; name: string; enabled: boolean } }>('scheduled.create', {
+      input: { name: 'nightly', prompt: 'run tests', schedule: { kind: 'interval', minutes: 60 } }
+    })
+    expect(created.job.name).toBe('nightly')
+    const list = await c.request<{ jobs: { id: string }[] }>('scheduled.list')
+    expect(list.jobs.some((j) => j.id === created.job.id)).toBe(true)
+
+    await c.request('scheduled.pause', { id: created.job.id, reason: 'test' })
+    const paused = await c.request<{ job: { enabled: boolean; state: string } }>('scheduled.get', { id: created.job.id })
+    expect(paused.job.enabled).toBe(false)
+    expect(paused.job.state).toBe('paused')
+
+    await c.request('scheduled.resume', { id: created.job.id })
+    await c.request('scheduled.run', { id: created.job.id })
+
+    await c.request('scheduled.delete', { id: created.job.id })
+    const after = await c.request<{ jobs: { id: string }[] }>('scheduled.list')
+    expect(after.jobs.some((j) => j.id === created.job.id)).toBe(false)
+    await c.close()
+  })
+
+  it('rejects a scheduled.create carrying an own-property pollution key', async () => {
+    const c = await connect()
+    await expect(
+      c.request('scheduled.create', {
+        input: JSON.parse(JSON.stringify({
+          name: 'bad',
+          prompt: 'x',
+          schedule: { kind: 'interval', minutes: 5 },
+          constructor: { prototype: { polluted: true } }
+        }))
+      })
+    ).rejects.toThrow()
+    await c.close()
+  })
+
+  it('a forced-queue send survives the sending client disconnecting', async () => {
+    const gui = await connect('gui')
+    const created = await gui.request<{ thread: { id: string } }>('threads.create', { name: 'fault-thread' })
+    const threadId = created.thread.id
+    await gui.request('orchestrator.send', { threadId, content: 'hello fault', source: 'gui', forceQueue: true })
+    await gui.close()
+
+    const cli = await connect('cli')
+    const snap = await cli.request<{ messages: { content?: string }[]; queue: unknown[] }>('thread.snapshot', { threadId })
+    const texts = (snap.messages ?? []).map((m) => m.content).join(' ')
+    expect(texts.includes('hello fault') || (Array.isArray(snap.queue) && snap.queue.length > 0)).toBe(true)
+    await cli.close()
+  })
+
+  it('settings.changed events reach subscribers', async () => {
+    const a = await connect()
+    const b = await connect()
+    await a.subscribe(0)
+    await b.subscribe(0)
+
+    const seen: ProtocolEvent[] = []
+    const unsub = b.onEvent((ev) => {
+      if (ev.type === 'settings.changed') seen.push(ev)
+    })
+    await a.request('settings.set', { partial: { profile: { username: 'event-user' } } })
+    await new Promise((r) => setTimeout(r, 300))
+    expect(seen.length).toBeGreaterThanOrEqual(1)
+    const data = seen[0].data as { settings?: { profile?: { username?: string } } }
+    expect(data?.settings?.profile?.username).toBe('event-user')
+    unsub()
+    await a.close()
+    await b.close()
+  })
+
+  it('channel snapshot and activity answer after a client disconnects', async () => {
+    const c = await connect()
+    const snap1 = await c.request<{ snapshot: { platforms?: unknown } }>('channels.getSnapshot')
+    expect(snap1.snapshot).toBeTruthy()
+    await c.close()
+
+    const c2 = await connect()
+    const snap2 = await c2.request<{ snapshot: unknown }>('channels.getSnapshot')
+    expect(snap2.snapshot).toBeTruthy()
+    const activity = await c2.request<{ activity: unknown[] }>('channels.getActivity', { limit: 10 })
+    expect(Array.isArray(activity.activity)).toBe(true)
+    await c2.close()
+  })
+
+  it('settings, channel, skills and MCP snapshots round-trip', async () => {
+    const c = await connect()
+    const cfg = await c.request<{ config: unknown }>('channels.getConfig')
+    expect(cfg.config).toBeTruthy()
+    const skills = await c.request<{ snapshot: unknown }>('skills.list', {})
+    expect(skills.snapshot).toBeTruthy()
+    const mcp = await c.request<{ servers: unknown[] }>('mcp.listServers', {})
+    expect(Array.isArray(mcp.servers)).toBe(true)
+    const sources = await c.request<{ sources: unknown[] }>('mcp.getConfigSources', {})
+    expect(Array.isArray(sources.sources)).toBe(true)
+    const intent = await c.request<{ intent: { kind: string } }>('mcp.openConfigIntent', { scope: 'global' })
+    expect(intent.intent.kind).toBe('open-mcp-config')
+    const skillIntent = await c.request<{ intent: { kind: string } }>('skills.openFolderIntent', { scope: 'global' })
+    expect(skillIntent.intent.kind).toBe('open-skills-folder')
+    await c.close()
+  })
+
+  it('providers.listConfigured and settings.getOptions are daemon-backed', async () => {
+    const c = await connect()
+    const providers = await c.request<{ providers: unknown[] }>('providers.listConfigured')
+    expect(Array.isArray(providers.providers)).toBe(true)
+    const options = await c.request<{ options: { themes: unknown[]; llmProviders: unknown[] } }>('settings.getOptions')
+    expect(Array.isArray(options.options.themes)).toBe(true)
+    expect(Array.isArray(options.options.llmProviders)).toBe(true)
+    await c.close()
+  })
+
+  it('daemon.shutdown writes a stop request fenced by the owner token', async () => {
+    const c = await connect()
+    await c.request('daemon.shutdown', { reason: 'test' })
+    expect(readStopRequest(home)?.token).toBe(ownerToken)
+    await c.close()
+  })
+
+  it('health does not leak the owner token', async () => {
+    const c = await connect()
+    const health = await c.request<Record<string, unknown>>('health')
+    expect(JSON.stringify(health)).not.toContain(ownerToken)
+    await c.close()
+  })
+})

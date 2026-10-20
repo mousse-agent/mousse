@@ -513,7 +513,7 @@ describe('real stdio child and grandchild drain', () => {
     expect(supportsOwnedMcpTree('aix')).toBe(false)
   })
 
-  it('kills the exact spawned stdio tree and stops heartbeat writes', { timeout: 20_000 }, async () => {
+  it.runIf(supportsOwnedMcpTree())('kills the exact spawned stdio tree and stops heartbeat writes', { timeout: 20_000 }, async () => {
     const root = ownedRoot()
     const heartbeat = ownedFile(root, 'heartbeat.log')
     const profile = ownedFile(root, 'profile.bin')

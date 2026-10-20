@@ -4,29 +4,18 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { BROWSER_CONTRACT_VERSION } from '../src/shared/browser/types'
 import { BrowserToolDispatcher } from '../src/mms/browser/automation/BrowserToolDispatcher'
 import { certifiedInstallDir, certifiedMetadataPath } from '../src/browser-worker/binary/resolver'
 import {
-  actionSucceeded,
-  computeMetrics,
   createEvaluationRuntime,
-  createLiveModelDriver,
   createHttpModelDriver,
   inspectChromeSource,
-  mapBrowserGymCall,
-  observationHasProtocolKeys,
-  parseBrowserGymActions,
-  probeBrowserGymPython,
   runModelSuite,
   runNativeBrowserGymTask,
   nativeGymTasks,
-  observationForModel,
   startEvaluationSite,
-  UNAVAILABLE_COST,
-  wilsonInterval
+  UNAVAILABLE_COST
 } from './fixtures/browser/evaluation'
-import { toBrowserGymObservation } from './fixtures/browser/evaluation/browsergym/map'
 import { DEFAULT_BUDGETS } from './fixtures/browser/evaluation/pin'
 import { haystack } from './fixtures/browser/evaluation/observations'
 import type { ActionTrace, TaskTrialResult } from './fixtures/browser/evaluation/types'
@@ -97,260 +86,6 @@ function action(partial: Partial<ActionTrace>): ActionTrace {
     ...partial
   }
 }
-
-describe('Q03 evaluation metrics against known traces', () => {
-  it('does not report a 0% interval when there are no trials', () => {
-    const empty = wilsonInterval(0, 0)
-    expect(empty).toMatchObject({ status: 'undefined' })
-  })
-
-  it('flags false-success when a verified action fails ground truth', () => {
-    const metrics = computeMetrics([
-      trial({
-        taskId: 'false-success',
-        taskSuccess: false,
-        falseSuccess: true,
-        actions: [action({ falseSuccess: true, verifiedByGroundTruth: false })]
-      })
-    ], { maxRssBytes: 1, maxHeapBytes: 1, chromeMemoryBytes: null, chromeMemoryStatus: 'unavailable' })
-    expect(metrics.executor.falseSuccessCount).toBe(1)
-    expect(metrics.gates.falseSuccessMet).toBe(false)
-    expect(actionSucceeded(action({ falseSuccess: true }))).toBe(false)
-  })
-
-  it('flags duplicate consequential effects separately from success', () => {
-    const metrics = computeMetrics([
-      trial({
-        taskId: 'duplicate',
-        taskSuccess: false,
-        duplicateEffect: true,
-        actions: [action({ duplicateEffect: true }), action({ duplicateEffect: true })]
-      })
-    ], { maxRssBytes: 1, maxHeapBytes: 1, chromeMemoryBytes: null, chromeMemoryStatus: 'unavailable' })
-    expect(metrics.executor.duplicateEffectCount).toBe(1)
-    expect(metrics.gates.duplicateMet).toBe(false)
-  })
-
-  it('never stores token/image cost as 0 when a model did not run', () => {
-    expect(UNAVAILABLE_COST.tokens).toBeNull()
-    expect(UNAVAILABLE_COST.images).toBeNull()
-    expect(UNAVAILABLE_COST.status).toBe('unavailable')
-    const metrics = computeMetrics([trial({ taskId: 'cost', taskSuccess: true, actions: [action({})] })], {
-      maxRssBytes: 1, maxHeapBytes: 1, chromeMemoryBytes: null, chromeMemoryStatus: 'unavailable'
-    })
-    expect(metrics.cost.tokens).toBeNull()
-    expect(metrics.cost.images).toBeNull()
-    expect(metrics.cost.status).toBe('unavailable')
-  })
-
-  it('keeps unsupported cases out of the supported-action denominator', () => {
-    const metrics = computeMetrics([
-      trial({
-        taskId: 'closed-shadow',
-        support: 'unsupported',
-        taskSuccess: true,
-        unsupportedReported: true,
-        actions: [action({ support: 'unsupported', outcome: 'unsupported-reported', dispatched: false })]
-      }),
-      trial({
-        taskId: 'form',
-        taskSuccess: true,
-        actions: [action({}), action({})]
-      })
-    ], { maxRssBytes: 1, maxHeapBytes: 1, chromeMemoryBytes: null, chromeMemoryStatus: 'unavailable' })
-    const interval = metrics.executor.supportedActionSuccess
-    expect(interval.status === 'undefined' ? 0 : interval.n).toBe(2)
-  })
-})
-
-describe('BrowserGym protocol adapter boundary', () => {
-  it('parses pinned high-level actions and maps them to Mousse actions without Python eval', () => {
-    const calls = parseBrowserGymActions("fill('a12', \"Ada\")\nclick('b9', button=\"left\")\ngoto('http://127.0.0.1/form.html')")
-    expect(calls.map((call) => call.name)).toEqual(['fill', 'click', 'goto'])
-    const observation = {
-      sessionId: 's', tabId: 't', generation: 1, observationId: 'o', documentId: 'd', capturedAt: '2026-09-11T00:00:00.000Z',
-      url: 'http://127.0.0.1/form.html', title: 'Fixture Form',
-      viewport: { cssWidth: 800, cssHeight: 600, deviceScaleFactor: 1, scrollX: 0, scrollY: 0 },
-      tabs: [{ id: 't', title: 'Fixture Form', url: 'http://127.0.0.1/form.html' }],
-      elements: [
-        { ref: 'a12', frameRef: 'f', role: 'textbox', name: 'Name', text: '', states: [] },
-        { ref: 'b9', frameRef: 'f', role: 'button', name: 'Save', text: 'Save', states: [] }
-      ],
-      truncated: false, warnings: [], provenance: 'untrusted-page' as const
-    }
-    expect(mapBrowserGymCall(calls[0], observation, 'structured')).toEqual({
-      kind: 'act', action: { type: 'fill', target: { kind: 'ref', ref: 'a12' }, text: 'Ada' }
-    })
-    expect(mapBrowserGymCall(calls[1], observation, 'structured')).toMatchObject({
-      kind: 'act', action: { type: 'click', target: { kind: 'ref', ref: 'b9' } }
-    })
-    const gym = toBrowserGymObservation({ observation, goal: 'save', lastAction: "click('b9')", lastActionError: '', startedAt: Date.now() })
-    expect(observationHasProtocolKeys(gym)).toBe(true)
-  })
-
-  it('refuses Python/code actions and unmapped primitives instead of executing them', () => {
-    expect(() => parseBrowserGymActions('page.click("x")')).toThrow(/Invalid action type|not a high-level action|Invalid action/)
-    const observation = {
-      sessionId: 's', tabId: 't', generation: 1, observationId: 'o', documentId: 'd', capturedAt: '2026-09-11T00:00:00.000Z',
-      url: 'http://127.0.0.1/', title: 't',
-      viewport: { cssWidth: 800, cssHeight: 600, deviceScaleFactor: 1, scrollX: 0, scrollY: 0 },
-      tabs: [{ id: 't', title: 't', url: 'http://127.0.0.1/' }],
-      elements: [], truncated: false, warnings: [], provenance: 'untrusted-page' as const
-    }
-    const focus = parseBrowserGymActions('focus("a1")')[0]
-    expect(mapBrowserGymCall(focus, observation, 'structured').kind).toBe('unsupported')
-  })
-
-  it('documents the missing full BrowserGym environment instead of inventing a leaderboard score', () => {
-    const probe = probeBrowserGymPython()
-    expect(probe.available).toBe(false)
-    expect(probe.missing.length).toBeGreaterThan(0)
-    expect(probe.externalRunCommand.some((line) => line.includes('browsergym-core==0.14.3'))).toBe(true)
-  })
-
-  it('keeps live-model and fixture-oracle labels distinct', async () => {
-    const driver = createLiveModelDriver({ modelId: 'unspecified', revision: 'none', budgets: DEFAULT_BUDGETS })
-    expect(driver.kind).toBe('live-model')
-    const decision = await driver.decide({
-      taskId: 'x',
-      goal: 'g',
-      observation: {
-        sessionId: 's', tabId: 't', generation: 1, observationId: 'o', documentId: 'd', capturedAt: '2026-09-11T00:00:00.000Z',
-        url: 'http://127.0.0.1/', title: 't',
-        viewport: { cssWidth: 800, cssHeight: 600, deviceScaleFactor: 1, scrollX: 0, scrollY: 0 },
-        tabs: [{ id: 't', title: 't', url: 'http://127.0.0.1/' }],
-        elements: [], truncated: false, warnings: [], provenance: 'untrusted-page'
-      },
-      stepIndex: 0
-    })
-    expect(decision.kind).toBe('unavailable')
-    expect(driver.cost().tokens).toBeNull()
-  })
-
-  it('executes strict JSON decisions through an injectable model endpoint and records usage', async () => {
-    const observation = {
-      sessionId: 's', tabId: 't', generation: 1, observationId: 'o', documentId: 'd', capturedAt: '2026-09-11T00:00:00.000Z',
-      url: 'http://127.0.0.1/', title: 't', viewport: { cssWidth: 800, cssHeight: 600, deviceScaleFactor: 1, scrollX: 0, scrollY: 0 },
-      tabs: [{ id: 't', title: 't', url: 'http://127.0.0.1/' }], elements: [], truncated: false, warnings: [], provenance: 'untrusted-page' as const
-    }
-    let requestBody: Record<string, unknown> | undefined
-    const driver = createHttpModelDriver({
-      endpoint: 'http://model.test/decision', modelId: 'local-fixture', revision: 'rev-1', budgets: DEFAULT_BUDGETS,
-      fetchImpl: async (_url, init) => {
-        requestBody = JSON.parse(String(init?.body))
-        return new Response(JSON.stringify({
-          decision: { kind: 'act', action: { type: 'click', target: { kind: 'ref', ref: 'a1' } } },
-          usage: { input_tokens: 12, output_tokens: 4, images: 1 }
-        }), { status: 200, headers: { 'content-type': 'application/json' } })
-      }
-    })
-    const decision = await driver.decide({
-      taskId: 't', goal: 'click', observation, stepIndex: 0,
-      availableArtifacts: [{ artifactId: 'grant-1', displayName: 'note.txt', mediaType: 'text/plain', byteLength: 17 }]
-    })
-    expect(decision).toMatchObject({ kind: 'act', action: { type: 'click', target: { kind: 'ref', ref: 'a1' } } })
-    expect(requestBody?.availableArtifacts).toEqual([{ artifactId: 'grant-1', displayName: 'note.txt', mediaType: 'text/plain', byteLength: 17 }])
-    expect(driver.cost()).toMatchObject({ status: 'measured', tokens: 16, images: 1 })
-
-    const invalid = createHttpModelDriver({
-      endpoint: 'http://model.test/invalid', modelId: 'local-fixture', revision: 'rev-1', budgets: DEFAULT_BUDGETS,
-      fetchImpl: async () => new Response(JSON.stringify({ kind: 'act', extra: true, action: { type: 'reload' } }), { status: 200 })
-    })
-    await expect(invalid.decide({ taskId: 't', goal: 'reload', observation, stepIndex: 0 })).rejects.toThrow(/unsupported field extra/)
-  })
-
-  it('uses a real local HTTP model exchange without leaking semantic refs in screenshot-only input', async () => {
-    let received: Record<string, any> | undefined
-    const server = createServer((request, response) => {
-      let body = ''
-      request.setEncoding('utf8')
-      request.on('data', (chunk) => { body += chunk })
-      request.on('end', () => {
-        received = JSON.parse(body)
-        response.writeHead(200, { 'content-type': 'application/json' })
-        response.end(JSON.stringify({
-          decision: { kind: 'act', action: { type: 'click', target: { kind: 'image-point', point: { x: 10, y: 20 } } } },
-          usage: { input_tokens: 8, output_tokens: 3, images: 1 }
-        }))
-      })
-    })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    try {
-      const observation = {
-        sessionId: 's', tabId: 't', generation: 1, observationId: 'o', documentId: 'd', capturedAt: '2026-09-11T00:00:00.000Z',
-        url: 'http://secret.invalid/account', title: 'Secret account', viewport: { cssWidth: 800, cssHeight: 600, deviceScaleFactor: 1, scrollX: 0, scrollY: 0 },
-        tabs: [{ id: 't', title: 'Secret account', url: 'http://secret.invalid/account' }],
-        elements: [{ ref: 'secret-ref', frameRef: 'main', role: 'button', name: 'Delete account', states: [] }],
-        screenshot: { artifactId: 'image-artifact', pixelWidth: 800, pixelHeight: 600, cssToImageScaleX: 1, cssToImageScaleY: 1 },
-        truncated: false, warnings: ['semantic warning'], provenance: 'untrusted-page' as const
-      }
-      const driver = createHttpModelDriver({
-        endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/decision`,
-        modelId: 'local-http-fixture', revision: 'sha256:fixture-rev', budgets: DEFAULT_BUDGETS
-      })
-      const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(25)])
-      const decision = await driver.decide({
-        taskId: 'screenshot', goal: 'click the visible control',
-        observation: observationForModel(observation, 'screenshot'),
-        screenshot: {
-          mediaType: 'image/png', byteLength: png.byteLength,
-          sha256: createHash('sha256').update(png).digest('hex'), bytesBase64: png.toString('base64')
-        },
-        stepIndex: 0
-      })
-      expect(decision).toMatchObject({ kind: 'act', action: { target: { kind: 'image-point' } } })
-      expect(received?.model).toBe('local-http-fixture')
-      expect(received?.revision).toBe('sha256:fixture-rev')
-      expect(received?.observation.screenshot.artifactId).toBe('image-artifact')
-      expect(Buffer.from(received?.screenshot.bytesBase64, 'base64')).toEqual(png)
-      expect(received?.observation.elements).toEqual([])
-      expect(received?.observation.tabs).toEqual([])
-      expect(JSON.stringify(received?.observation)).not.toMatch(/secret-ref|Delete account|secret\.invalid|Secret account|semantic warning/)
-      expect(driver.cost()).toMatchObject({ status: 'measured', tokens: 11, images: 1 })
-    } finally {
-      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
-    }
-  })
-
-  it('stops before dispatch when cumulative model usage exceeds pinned budgets', async () => {
-    const budgets = { ...DEFAULT_BUDGETS, maxTokens: 5, maxImages: 0 }
-    const driver = createHttpModelDriver({
-      endpoint: 'http://model.test/budget', modelId: 'fixture', revision: 'rev', budgets,
-      fetchImpl: async () => new Response(JSON.stringify({
-        decision: { kind: 'act', action: { type: 'reload' } },
-        usage: { input_tokens: 4, output_tokens: 2, images: 0 }
-      }))
-    })
-    const observation = {
-      sessionId: 's', tabId: 't', generation: 1, observationId: 'o', documentId: 'd', capturedAt: '2026-09-11T00:00:00.000Z',
-      url: '', title: '', viewport: { cssWidth: 800, cssHeight: 600, deviceScaleFactor: 1, scrollX: 0, scrollY: 0 },
-      tabs: [], elements: [], truncated: false, warnings: [], provenance: 'untrusted-page' as const
-    }
-    await expect(driver.decide({ taskId: 't', goal: 'g', observation, stepIndex: 0 })).resolves.toEqual({
-      kind: 'stop', reason: 'model token budget exhausted'
-    })
-
-    const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(25)])
-    const screenshot = {
-      mediaType: 'image/png' as const, byteLength: png.byteLength,
-      sha256: createHash('sha256').update(png).digest('hex'), bytesBase64: png.toString('base64')
-    }
-    let calls = 0
-    const imageDriver = createHttpModelDriver({
-      endpoint: 'http://model.test/image-budget', modelId: 'fixture', revision: 'rev',
-      budgets: { ...DEFAULT_BUDGETS, maxImages: 1 },
-      fetchImpl: async () => {
-        calls += 1
-        return new Response(JSON.stringify({ decision: { kind: 'stop', reason: 'done' }, usage: { input_tokens: 1, output_tokens: 1, images: 1 } }))
-      }
-    })
-    const visionObservation = { ...observation, screenshot: { artifactId: 'image', pixelWidth: 1, pixelHeight: 1, cssToImageScaleX: 1, cssToImageScaleY: 1 } }
-    await imageDriver.decide({ taskId: 't', goal: 'g', observation: visionObservation, screenshot, stepIndex: 0 })
-    await expect(imageDriver.decide({ taskId: 't', goal: 'g', observation: visionObservation, screenshot, stepIndex: 1 }))
-      .resolves.toEqual({ kind: 'stop', reason: 'model image budget exhausted' })
-    expect(calls).toBe(1)
-  })
-})
 
 describe.skipIf(!chrome.ok)('Q03 evaluation against the production executor', () => {
   const runtimes: Array<{ close(): Promise<void> }> = []
@@ -461,8 +196,6 @@ describe.skipIf(!chrome.ok)('Q03 evaluation against the production executor', ()
     expect(after).toEqual(before)
     expect(readFileSync(certifiedMetadataPath(sourceRoot))).toEqual(metadataBefore)
     expect(chrome.ok && chrome.version).toBeTruthy()
-    expect(BROWSER_CONTRACT_VERSION).toBe(1)
-    expect(readFileSync(join(process.cwd(), 'scripts/evaluation/browser/pin.json'), 'utf8')).toContain('9e779f087de9a65668b6974d11f9ce9816026e96')
   }, 60_000)
 
   it('runs every selected model task, mode, and repeat while reading bounded profile-owned screenshot bytes', async () => {

@@ -69,15 +69,4 @@ export class ThreadTrashService {
     return { records, diagnostics }
   }
 
-  trash(_threadId: string, _originalPath: string): never {
-    throw new Error('Thread trash requires the lifecycle coordinator')
-  }
-
-  restore(_threadId: string): never {
-    throw new Error('Thread restore requires the lifecycle coordinator')
-  }
-
-  purge(_threadId: string): never {
-    throw new Error('Permanent purge is unavailable in lifecycle Phase 1')
-  }
 }
