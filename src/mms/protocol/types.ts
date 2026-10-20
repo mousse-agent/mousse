@@ -328,6 +328,7 @@ export const PROTOCOL_METHODS = [
   'providers.getUsage',
   'providers.getSubscriptionUsage',
   'providers.synthesizeSpeech',
+  'providers.transcribeAudio',
   'providers.getLoginOptions',
   'providers.refreshModels',
   'providers.getAmbientInfo',

@@ -37,8 +37,14 @@ import { domainObject } from '../../mms/protocol/domainRegistry'
 import { profileBrowserPartition } from '../browser/browserPolicy'
 import { ThreadActivityTracker } from '../data/ThreadActivityTracker'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
-import type { ProviderSpeechRequest, ProviderSpeechResult } from '../../shared/readAloud'
-import { LocalTtsModelManager } from '../readAloud/localTtsModels'
+import { LOCAL_TTS_MODELS, type ProviderSpeechRequest, type ProviderSpeechResult } from '../../shared/readAloud'
+import {
+  LOCAL_STT_MODELS,
+  PROVIDER_STT_MAX_BYTES,
+  type ProviderTranscriptionRequest,
+  type ProviderTranscriptionResult
+} from '../../shared/dictation'
+import { LocalModelManager, defaultLocalModelsRoot } from '../localModels/LocalModelManager'
 import type { PlatformRequestMethod, PlatformResponse } from '../../shared/platform'
 import { WORKFLOW_RUN_METHODS } from '../../shared/workflowRunPlatform'
 import { BROWSER_GUI_METHODS } from '../../shared/browser/host'
@@ -1941,7 +1947,9 @@ export function registerGuiIpc(
   })
 
   // Read aloud. Local model state is installation-wide, so every window hears about it.
-  const localTtsModels = new LocalTtsModelManager({
+  const localTtsModels = new LocalModelManager({
+    rootDir: defaultLocalModelsRoot('tts'),
+    models: LOCAL_TTS_MODELS,
     onStatus: (status) => {
       for (const win of BrowserWindow.getAllWindows()) {
         if (!win.isDestroyed()) win.webContents.send('readAloud:localModelStatus', status)
@@ -1963,6 +1971,39 @@ export function registerGuiIpc(
     })
     return { audio: Buffer.from(res.audioBase64, 'base64'), mimeType: res.mimeType }
   })
+
+  // Dictation. Same installation-wide model state as read aloud, for speech-to-text.
+  const localSttModels = new LocalModelManager({
+    rootDir: defaultLocalModelsRoot('stt'),
+    models: LOCAL_STT_MODELS,
+    onStatus: (status) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send('dictation:localModelStatus', status)
+      }
+    }
+  })
+  registerHandler('dictation:localModels', () => localSttModels.list())
+  registerHandler('dictation:downloadLocalModel', (_e, modelId: string) => localSttModels.download(modelId))
+  registerHandler('dictation:cancelLocalModelDownload', (_e, modelId: string) => localSttModels.cancel(modelId))
+  registerHandler('dictation:deleteLocalModel', (_e, modelId: string) => localSttModels.delete(modelId))
+  registerHandler('dictation:readLocalModelFile', (_e, modelId: string, path: string) =>
+    localSttModels.readFile(modelId, path)
+  )
+  registerHandler(
+    'dictation:transcribeWithProvider',
+    async (_e, request: ProviderTranscriptionRequest): Promise<ProviderTranscriptionResult> => {
+      const audio = request?.audio
+      if (!(audio instanceof Uint8Array)) throw new Error('No recording to transcribe')
+      if (audio.byteLength > PROVIDER_STT_MAX_BYTES) throw new Error('The recording is too long to transcribe with this provider. Record a shorter message.')
+      const res = await guiMms.request<{ text: string }>('providers.transcribeAudio', {
+        providerId: request.providerId,
+        modelId: request.modelId,
+        mimeType: request.mimeType,
+        audioBase64: Buffer.from(audio.buffer, audio.byteOffset, audio.byteLength).toString('base64')
+      })
+      return { text: res.text }
+    }
+  )
 
   registerHandler('webTools:getCredentialStatus', async () => {
     const res = await guiMms.request<{ credentials: { exa: boolean; parallel: boolean } }>(

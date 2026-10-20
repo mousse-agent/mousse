@@ -1,6 +1,7 @@
 import { KOKORO_82M } from '../../shared/readAloud'
 import type { KokoroWorkerEvent, KokoroWorkerRequest } from './kokoroWorker'
 import type { SpeakOptions } from './providerEngine'
+import { serveModelFiles } from '../speechModels/pageSupport'
 import { splitSpeechChunks } from './speechText'
 
 /**
@@ -26,22 +27,9 @@ function send(target: Worker, message: KokoroWorkerRequest, transfer: Transferab
   target.postMessage(message, transfer)
 }
 
-async function answerFileRequest(target: Worker, reqId: number, path: string): Promise<void> {
-  try {
-    const bytes = await window.mousse.readAloud.readLocalModelFile(KOKORO_82M.id, path)
-    const exact = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-    const buffer = (exact ? bytes.buffer : bytes.slice().buffer) as ArrayBuffer
-    send(target, { type: 'file-response', reqId, bytes: buffer }, [buffer])
-  } catch (error) {
-    send(target, { type: 'file-response', reqId, error: error instanceof Error ? error.message : String(error) })
-  }
-}
-
 function createWorker(): Worker {
   const created = new Worker(new URL('./kokoroWorker.ts', import.meta.url), { type: 'module' })
-  created.addEventListener('message', (event: MessageEvent<KokoroWorkerEvent>) => {
-    if (event.data.type === 'file-request') void answerFileRequest(created, event.data.reqId, event.data.path)
-  })
+  serveModelFiles(created, (path) => window.mousse.readAloud.readLocalModelFile(KOKORO_82M.id, path))
   return created
 }
 

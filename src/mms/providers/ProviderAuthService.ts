@@ -13,6 +13,12 @@ import type {
   ProvidersUsageResponse,
   ProviderUsageWindow
 } from '../../shared/providerAuth'
+import {
+  isSttModelId,
+  providerSupportsStt,
+  type ProviderTranscriptionRequest,
+  type ProviderTranscriptionResult
+} from '../../shared/dictation'
 import { isTtsModelId, providerTtsVoice, type ProviderSpeechRequest, type ProviderSpeechResult } from '../../shared/readAloud'
 import { getMousseHomeDir } from '../data/paths'
 import {
@@ -32,6 +38,7 @@ import { PiCatalogOverlay } from './piCatalogOverlay'
 import { enhanceOpenAiCodexProvider } from './openAiCodexModelFetch'
 import { getProviderDisplayName as getProductProviderDisplayName } from './providerMetadata'
 import { requestOpenAiSpeech } from './providerSpeech'
+import { requestOpenAiTranscription } from './providerTranscription'
 import { fetchGrokCreditsViaGrpc, grokCliBillingHeaders } from './xaiBilling'
 
 const AMBIENT_PROVIDERS: Record<string, AmbientProviderInfo> = {
@@ -560,6 +567,21 @@ export class ProviderAuthService {
     const apiKey = this.getStoredApiKey(providerId)
     if (!apiKey) throw new Error(`${label} is not signed in. Add its API key in Settings.`)
     return requestOpenAiSpeech({ baseUrl, apiKey, model: modelId, voice, text, providerLabel: label, fetchImpl })
+  }
+
+  /** Transcribes a recording with a provider's OpenAI-compatible speech-to-text model. */
+  async transcribeAudio(request: ProviderTranscriptionRequest, fetchImpl?: typeof fetch): Promise<ProviderTranscriptionResult> {
+    const { providerId, modelId, audio, mimeType } = request
+    const label = this.getProviderDisplayName(providerId)
+    if (!providerSupportsStt(providerId) || !isSttModelId(modelId)) {
+      throw new Error(`${label} has no supported speech-to-text model named ${modelId}`)
+    }
+    const models = this.models.getModels(providerId)
+    const baseUrl = (models.find((model) => model.id === modelId) ?? models[0])?.baseUrl
+    if (!baseUrl) throw new Error(`${label} has no known API address for speech-to-text`)
+    const apiKey = this.getStoredApiKey(providerId)
+    if (!apiKey) throw new Error(`${label} is not signed in. Add its API key in Settings.`)
+    return requestOpenAiTranscription({ baseUrl, apiKey, model: modelId, audio, mimeType, providerLabel: label, fetchImpl })
   }
 
   /** Stored API key with env fallback (e.g. OPENCODE_API_KEY for OpenCode Go). */

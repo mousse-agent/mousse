@@ -78,6 +78,8 @@ export interface ComposerFooterProps {
   canSend?: boolean
   isRecording?: boolean
   recordingPending?: boolean
+  /** A recording is being turned into text; the microphone and send buttons wait. */
+  transcribing?: boolean
   onSend?: () => void
   onStop?: () => void
   onStartRecording?: () => void
@@ -112,6 +114,7 @@ export function ComposerFooter({
   canSend = false,
   isRecording = false,
   recordingPending = false,
+  transcribing = false,
   onSend,
   onStop,
   onStartRecording,
@@ -435,9 +438,9 @@ export function ComposerFooter({
             className="composer-action-btn"
             title="Voice input"
             aria-label="Voice input"
-            aria-busy={recordingPending}
+            aria-busy={recordingPending || transcribing}
             onClick={handleActionClick}
-            disabled={disabled || recordingPending}
+            disabled={disabled || recordingPending || transcribing}
           >
             <Mic size={16} strokeWidth={2} />
           </button>

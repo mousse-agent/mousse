@@ -1,7 +1,5 @@
-import { normalizeVoiceError } from '../utils/voiceErrors'
-import type { AppErrorShape } from '../../shared/errors'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Mic, X } from '../lib/icons'
+import { Loader2, Mic, X } from '../lib/icons'
 import type { LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
@@ -26,6 +24,8 @@ import { collectImageFilesFromDataTransfer } from '../utils/imageAttachments'
 import type { ChatReference } from '../../shared/chatReferences'
 import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseReferenceDragData } from '../../shared/chatReferences'
 import { ChatReferencePill } from './ReferencePill'
+import { insertTranscript } from '../dictation/insertTranscript'
+import { useDictation } from '../dictation/useDictation'
 
 export interface AttachedFile {
   id: string
@@ -123,10 +123,6 @@ export function ChatComposer({
   disableSkillsPicker
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const recordingChunksRef = useRef<Blob[]>([])
-  const recordingTimerRef = useRef<number | null>(null)
-  const recordingStartRef = useRef<number>(0)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
   const resizeDraft = useCallback(() => {
     const inputElement = composerInputRef.current
@@ -152,17 +148,28 @@ export function ChatComposer({
   }, [resizeDraft])
 
   const suggestionRefs = useRef(new Map<number, HTMLButtonElement>())
-  const [isRecording, setIsRecording] = useState(false)
-  const [recordingPending, setRecordingPending] = useState(false)
-  const [recordingError, setRecordingError] = useState<AppErrorShape>()
-  const captureTicket = useRef(0)
-  const capturePending = useRef(false)
-  const captureMounted = useRef(true)
-  const captureStream = useRef<MediaStream | null>(null)
-  const [pendingReferences, setPendingReferences] = useState(0)
-  const [recordingDuration, setRecordingDuration] = useState(0)
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
   const [selectedSuggestion, setSelectedSuggestion] = useState(0)
+  const inputValueRef = useRef(input)
+  inputValueRef.current = input
+  // Dictated text goes where the caret is when the transcript arrives, then the box gets focus.
+  const insertDictation = (text: string) => {
+    const node = composerInputRef.current
+    const current = node?.value ?? inputValueRef.current
+    const inserted = insertTranscript(current, node?.selectionStart ?? current.length, node?.selectionEnd ?? current.length, text)
+    setSuggestionsDismissed(false)
+    setSelectedSuggestion(0)
+    onInputChange(inserted.value)
+    requestAnimationFrame(() => {
+      const target = composerInputRef.current
+      if (!target) return
+      target.focus()
+      target.setSelectionRange(inserted.caret, inserted.caret)
+    })
+  }
+  const dictation = useDictation({ disabled, loading, onTranscript: insertDictation })
+  const { isRecording, recordingPending, transcribing, recordingDuration } = dictation
+  const [pendingReferences, setPendingReferences] = useState(0)
   // Subagent composers (hideModePicker) never switch the global chat mode:
   // `/skills` stays literal text so it is sent to the agent as a prompt.
   const skillsPickerDisabled = disableSkillsPicker ?? hideModePicker
@@ -190,6 +197,7 @@ export function ChatComposer({
     (trimmedInput.length > 0 || hasAttachments) &&
     !isRecording &&
     !recordingPending &&
+    !transcribing &&
     pendingReferences === 0 &&
     !disabled &&
     skillsPickerQuery === null
@@ -206,23 +214,6 @@ export function ChatComposer({
       suggestionRefs.current.get(selectedSuggestion)?.scrollIntoView({ block: 'nearest' })
     }
   }, [selectedSuggestion, showSuggestions, showSkillsPicker])
-
-  useEffect(() => {
-    captureMounted.current = true
-    return () => {
-      captureMounted.current = false
-      captureTicket.current += 1
-      if (recordingTimerRef.current) window.clearInterval(recordingTimerRef.current)
-      const recorder = mediaRecorderRef.current
-      if (recorder) {
-        recorder.onstop = null
-        recorder.onerror = null
-        recorder.ondataavailable = null
-        if (recorder.state === 'recording') recorder.stop()
-      }
-      captureStream.current?.getTracks().forEach((track) => track.stop())
-    }
-  }, [])
 
   const addFiles = useCallback(
     (files: File[]) => {
@@ -279,86 +270,6 @@ export function ChatComposer({
       imagePasteKey.current.consumed = true
     }
     addFiles(images)
-  }
-
-  const stopRecordingTimer = () => {
-    if (recordingTimerRef.current) {
-      window.clearInterval(recordingTimerRef.current)
-      recordingTimerRef.current = null
-    }
-  }
-
-  const startRecording = async () => {
-    if (loading || isRecording || disabled || capturePending.current) return
-    const ticket = ++captureTicket.current
-    capturePending.current = true
-    setRecordingPending(true)
-    setRecordingError(undefined)
-    let stream: MediaStream | undefined
-    const fail = (error: unknown) => {
-      stopRecordingTimer()
-      const recorder = mediaRecorderRef.current
-      if (recorder) {
-        recorder.onstop = null
-        recorder.onerror = null
-        recorder.ondataavailable = null
-        if (recorder.state === 'recording') recorder.stop()
-      }
-      stream?.getTracks().forEach((track) => track.stop())
-      captureStream.current = null
-      mediaRecorderRef.current = null
-      recordingChunksRef.current = []
-      if (captureMounted.current && ticket === captureTicket.current) {
-        setIsRecording(false)
-        setRecordingError(normalizeVoiceError(error))
-      }
-    }
-    try {
-      if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') throw new DOMException('Unavailable', 'NotSupportedError')
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      if (!captureMounted.current || ticket !== captureTicket.current) {
-        stream.getTracks().forEach((track) => track.stop())
-        return
-      }
-      captureStream.current = stream
-      const recorder = new MediaRecorder(stream)
-      recordingChunksRef.current = []
-      mediaRecorderRef.current = recorder
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) recordingChunksRef.current.push(event.data)
-      }
-      recorder.onerror = (event) => fail(event)
-      recorder.onstop = () => {
-        stopRecordingTimer()
-        stream?.getTracks().forEach((track) => track.stop())
-        captureStream.current = null
-        mediaRecorderRef.current = null
-        if (!captureMounted.current || ticket !== captureTicket.current) return
-        setIsRecording(false)
-        const blob = new Blob(recordingChunksRef.current, { type: recorder.mimeType || 'audio/webm' })
-        const duration = Math.max(1, Math.floor((Date.now() - recordingStartRef.current) / 1000))
-        const url = URL.createObjectURL(blob)
-        onVoiceMessagesChange([...voiceMessages, { id: crypto.randomUUID(), blob, duration, url }])
-      }
-      recordingStartRef.current = Date.now()
-      setRecordingDuration(0)
-      recorder.start()
-      setIsRecording(true)
-      recordingTimerRef.current = window.setInterval(() => setRecordingDuration(Math.floor((Date.now() - recordingStartRef.current) / 1000)), 200)
-    } catch (error) {
-      fail(error)
-    } finally {
-      if (ticket === captureTicket.current) {
-        capturePending.current = false
-        if (captureMounted.current) setRecordingPending(false)
-      }
-    }
-  }
-
-  const stopRecording = () => {
-    if (mediaRecorderRef.current?.state === 'recording') {
-      mediaRecorderRef.current.stop()
-    }
   }
 
   const applySuggestion = (command: ChannelCommandDef) => {
@@ -556,13 +467,19 @@ export function ChatComposer({
   return (
     <div className="composer" onDragOver={handleDragOver} onDrop={handleDrop}>
       {pendingReferences > 0 && <div className="composer-attachments" role="status">Attaching reference…</div>}
-      {(hasAttachments || isRecording) && (
+      {(hasAttachments || isRecording || transcribing) && (
         <div className="composer-attachments">
           <div className="composer-attachments-scroll">
             {isRecording && (
               <div className="composer-attachment-pill composer-attachment-pill-recording">
                 <Mic size={12} strokeWidth={2} />
                 <span>Recording {formatDuration(recordingDuration)}</span>
+              </div>
+            )}
+            {transcribing && (
+              <div className="composer-attachment-pill composer-attachment-pill-transcribing" role="status">
+                <Loader2 size={12} strokeWidth={2} className="composer-transcribing-spin" />
+                <span>Transcribing…</span>
               </div>
             )}
             {attachedFiles.map(({ id, file, previewUrl }) => (
@@ -722,10 +639,11 @@ export function ChatComposer({
       />
 
       {recordingPending && <p role="status">Requesting microphone access…</p>}
-      {recordingError && <div className="composer-recording-error" role="alert">
-        <p>{recordingError.message}</p>
-        <button type="button" className="btn btn-ghost btn-sm" disabled={loading || disabled || recordingPending} onClick={() => void startRecording()}>Retry microphone</button>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setRecordingError(undefined)}>Dismiss</button>
+      {dictation.notice && <p role="status">{dictation.notice}</p>}
+      {dictation.error && <div className="composer-recording-error" role="alert">
+        <p>{dictation.error.message}</p>
+        <button type="button" className="btn btn-ghost btn-sm" disabled={loading || disabled || recordingPending || transcribing} onClick={dictation.start}>Retry microphone</button>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={dictation.dismissError}>Dismiss</button>
       </div>}
       <ComposerFooter
         chatMode={chatMode}
@@ -751,10 +669,11 @@ export function ChatComposer({
         canSend={canSend}
         isRecording={isRecording}
         recordingPending={recordingPending}
+        transcribing={transcribing}
         onSend={submit}
         onStop={handleStop}
-        onStartRecording={() => void startRecording()}
-        onStopRecording={stopRecording}
+        onStartRecording={dictation.start}
+        onStopRecording={dictation.stop}
         hideModePicker={hideModePicker}
         allowAttachWhileLoading
       />

@@ -1,3 +1,4 @@
+import { localModelBytes, localModelFileUrl, type LocalModelFile, type LocalModelManifest, type LocalModelState, type LocalModelStatus } from './localModels'
 import type { LlmProviderOption } from './settings'
 
 /**
@@ -17,29 +18,13 @@ export type ReadAloudSelection =
 
 export type LocalTtsModelId = 'kokoro-82m'
 
-export interface LocalTtsModelFile {
-  /** Path inside the Hugging Face repository, e.g. `onnx/model_quantized.onnx`. */
-  path: string
-  size: number
-  sha256: string
-}
+export type LocalTtsModelFile = LocalModelFile
 
-export interface LocalTtsModel {
+export interface LocalTtsModel extends LocalModelManifest {
   id: LocalTtsModelId
-  label: string
-  description: string
-  parameters: string
-  license: string
-  /** Model card shown to the user. */
-  homepage: string
-  /** Hugging Face repository the files are downloaded from. */
-  repo: string
-  /** Pinned commit of `repo`, so every download gets the same verified bytes. */
-  revision: string
   /** transformers.js dtype that selects the ONNX file in `files`. */
   dtype: 'q8'
   defaultVoice: string
-  files: readonly LocalTtsModelFile[]
 }
 
 /**
@@ -72,24 +57,13 @@ export function findLocalTtsModel(modelId: string): LocalTtsModel | undefined {
   return LOCAL_TTS_MODELS.find((model) => model.id === modelId)
 }
 
-export function localTtsFileUrl(model: LocalTtsModel, path: string): string {
-  return `https://huggingface.co/${model.repo}/resolve/${model.revision}/${path}`
-}
+export const localTtsFileUrl: (model: LocalTtsModel, path: string) => string = localModelFileUrl
 
-export function localTtsModelBytes(model: LocalTtsModel): number {
-  return model.files.reduce((total, file) => total + file.size, 0)
-}
+export const localTtsModelBytes: (model: LocalTtsModel) => number = localModelBytes
 
-export type LocalTtsModelState =
-  | { status: 'not-downloaded' }
-  | { status: 'downloading'; receivedBytes: number; totalBytes: number }
-  | { status: 'downloaded' }
-  | { status: 'error'; message: string }
+export type LocalTtsModelState = LocalModelState
 
-export interface LocalTtsModelStatus {
-  modelId: LocalTtsModelId
-  state: LocalTtsModelState
-}
+export type LocalTtsModelStatus = LocalModelStatus<LocalTtsModelId>
 
 // ---------------------------------------------------------------------------------------------
 // Provider models

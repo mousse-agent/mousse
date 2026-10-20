@@ -58,6 +58,10 @@ const INTERRUPT_TIMEOUT_MS = 5_000
 const PREVIOUS_TURN_SETTLE_MS = 10_000
 /** How long a stopped turn's routing is kept while the server settles it. */
 const STOPPED_TURN_RELEASE_MS = 30_000
+/** The app-server process is closed once it has been unused this long after a turn... */
+export const CODEX_IDLE_CLOSE_MS = 60_000
+/** ...or after a sign-in check or model listing that started it. */
+export const CODEX_CHECK_CLOSE_MS = 5_000
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 
 type SavedThread = {
@@ -90,6 +94,8 @@ export type CodexServiceDependencies = {
   findBinary?: () => string | undefined
   /** Default per-request timeout (initialize, account/read, thread/start ...). */
   requestTimeoutMs?: number
+  /** Overrides both idle-close delays (tests). */
+  idleCloseMs?: number
 }
 
 export interface CodexToolEvent {
@@ -468,8 +474,8 @@ class TurnRun {
 
 /**
  * Codex as a Mousse provider through `codex app-server`, reusing the terminal sign-in
- * (`~/.codex`). One app-server process per profile, started on first use and again after it
- * exits. Each Mousse thread maps to a Codex thread, resumed while the canonical history it holds
+ * (`~/.codex`). One app-server process per profile, started on first use and closed when idle
+ * (about 70 MB that would otherwise stay resident for the whole session). Each Mousse thread maps to a Codex thread, resumed while the canonical history it holds
  * matches; command, patch and user-input requests go to Mousse's question service. Disconnect
  * only clears Mousse's state: `account/logout` is never sent, so the terminal sign-in survives.
  */
@@ -484,6 +490,9 @@ export class CodexProviderService {
   private probeResult?: { at: number; result: AccountProbe }
   private probing?: Promise<void>
   private modelDiscoveryStarted = false
+  /** Model listings in flight; they keep the process open. */
+  private listing = 0
+  private idleClose?: { timer: ReturnType<typeof setTimeout>; at: number }
   /** Bumped by disconnect; a turn from an older scope does not save its thread. */
   private scope = 0
   /** Running chats by Codex thread id. */
@@ -642,6 +651,7 @@ export class CodexProviderService {
         }
       })().finally(() => {
         this.probing = undefined
+        this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
       })
       await this.probing
     }
@@ -716,23 +726,29 @@ export class CodexProviderService {
 
   /** Lists the account's models (`model/list`, every page) and stores them for the picker. */
   async refreshModels(): Promise<LlmModelOption[]> {
-    const conn = await this.connection()
-    const models: LlmModelOption[] = []
-    let cursor: string | null = null
-    for (let page = 0; page < 10; page += 1) {
-      const response: ModelListResponse = await conn.request('model/list', cursor ? { cursor } : {})
-      for (const model of response.data) {
-        if (model.hidden) continue
-        const efforts = model.supportedReasoningEfforts.map((effort) => effort.reasoningEffort).filter((effort) => EFFORTS.has(effort))
-        models.push({ id: model.id, label: model.displayName || model.id, ...(efforts.length ? { efforts } : {}) })
+    this.listing += 1
+    try {
+      const conn = await this.connection()
+      const models: LlmModelOption[] = []
+      let cursor: string | null = null
+      for (let page = 0; page < 10; page += 1) {
+        const response: ModelListResponse = await conn.request('model/list', cursor ? { cursor } : {})
+        for (const model of response.data) {
+          if (model.hidden) continue
+          const efforts = model.supportedReasoningEfforts.map((effort) => effort.reasoningEffort).filter((effort) => EFFORTS.has(effort))
+          models.push({ id: model.id, label: model.displayName || model.id, ...(efforts.length ? { efforts } : {}) })
+        }
+        cursor = response.nextCursor
+        if (!cursor) break
       }
-      cursor = response.nextCursor
-      if (!cursor) break
+      if (!models.length) throw new Error('Codex returned no models')
+      this.settings.models = models
+      this.save()
+      return models
+    } finally {
+      this.listing -= 1
+      this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
     }
-    if (!models.length) throw new Error('Codex returned no models')
-    this.settings.models = models
-    this.save()
-    return models
   }
 
   /** Disconnects this profile in Mousse only; the terminal sign-in is never logged out. */
@@ -748,6 +764,8 @@ export class CodexProviderService {
 
   stop(): void {
     this.stopped = true
+    if (this.idleClose) clearTimeout(this.idleClose.timer)
+    this.idleClose = undefined
     this.abortInFlight()
     this.app?.conn.close()
   }
@@ -784,6 +802,33 @@ export class CodexProviderService {
     ready.catch(() => conn.close())
     this.app = { conn, ready, verified: false }
     return ready
+  }
+
+  /**
+   * Closes the process `delay` ms from now unless something is using it then; an earlier close
+   * already scheduled is pushed back, never brought forward. The cached sign-in check survives,
+   * so Codex stays listed; the next process proves its own sign-in before it gets a turn.
+   */
+  private closeWhenIdle(delay: number): void {
+    if (!this.app || this.stopped) return
+    const at = Date.now() + (this.dependencies.idleCloseMs ?? delay)
+    if (this.idleClose && this.idleClose.at >= at) return
+    if (this.idleClose) clearTimeout(this.idleClose.timer)
+    const timer = setTimeout(() => {
+      this.idleClose = undefined
+      const app = this.app
+      if (!app) return
+      if (this.probing || this.listing || this.activeThreads.size || this.turns.size) {
+        this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
+        return
+      }
+      // Detached first, so `lost` treats the exit as expected and keeps the sign-in result.
+      this.app = undefined
+      this.loaded.clear()
+      app.conn.close()
+    }, at - Date.now())
+    timer.unref?.()
+    this.idleClose = { timer, at }
   }
 
   /** The process is gone: every chat on it fails; the next use starts a new one. */
@@ -1188,6 +1233,7 @@ export class CodexProviderService {
       input.signal?.removeEventListener('abort', forward)
       this.controllers.delete(controller)
       this.activeThreads.delete(input.threadId)
+      this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
       // A stopped turn stays registered (for routing) until the server settles it or the process dies.
       run?.mute()
       run?.cancelQuestions()

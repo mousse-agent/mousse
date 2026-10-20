@@ -4,79 +4,81 @@ import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/prom
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import {
-  LOCAL_TTS_MODELS,
-  localTtsFileUrl,
-  localTtsModelBytes,
-  type LocalTtsModel,
-  type LocalTtsModelFile,
-  type LocalTtsModelState,
-  type LocalTtsModelStatus
-} from '../../shared/readAloud'
+  localModelBytes,
+  localModelFileUrl,
+  type LocalModelFile,
+  type LocalModelManifest,
+  type LocalModelState,
+  type LocalModelStatus
+} from '../../shared/localModels'
 
 const COMPLETE_MARKER = '.complete'
 const PROGRESS_INTERVAL_MS = 250
 
-export interface LocalTtsModelManagerOptions {
-  /** Directory that holds one folder per model id. Defaults to `<MOUSSE_HOME>/models/tts`. */
-  rootDir?: string
-  models?: readonly LocalTtsModel[]
+export interface LocalModelManagerOptions<M extends LocalModelManifest> {
+  /** Directory that holds one folder per model id. See `defaultLocalModelsRoot`. */
+  rootDir: string
+  models: readonly M[]
   fetchImpl?: typeof fetch
-  onStatus?: (status: LocalTtsModelStatus) => void
+  onStatus?: (status: StatusOf<M>) => void
   progressIntervalMs?: number
 }
 
-interface ActiveDownload {
+type StatusOf<M extends LocalModelManifest> = LocalModelStatus<M['id']>
+
+interface ActiveDownload<M extends LocalModelManifest> {
   controller: AbortController
-  promise: Promise<LocalTtsModelStatus>
+  promise: Promise<StatusOf<M>>
   cancelled: boolean
 }
 
 class DownloadVerificationError extends Error {}
 
-export function defaultLocalTtsRoot(): string {
-  return join(process.env.MOUSSE_HOME ?? join(homedir(), '.mousse'), 'models', 'tts')
+/** `<MOUSSE_HOME or ~/.mousse>/models/<kind>`: text-to-speech and speech-to-text weights live apart. */
+export function defaultLocalModelsRoot(kind: 'tts' | 'stt'): string {
+  return join(process.env.MOUSSE_HOME ?? join(homedir(), '.mousse'), 'models', kind)
 }
 
-export class LocalTtsModelManager {
+export class LocalModelManager<M extends LocalModelManifest> {
   private readonly rootDir: string
-  private readonly models: readonly LocalTtsModel[]
+  private readonly models: readonly M[]
   private readonly fetchImpl: typeof fetch
-  private readonly onStatus?: (status: LocalTtsModelStatus) => void
+  private readonly onStatus?: (status: StatusOf<M>) => void
   private readonly progressIntervalMs: number
-  private readonly active = new Map<string, ActiveDownload>()
-  private readonly lastState = new Map<string, LocalTtsModelState>()
+  private readonly active = new Map<string, ActiveDownload<M>>()
+  private readonly lastState = new Map<string, LocalModelState>()
 
-  constructor(options: LocalTtsModelManagerOptions = {}) {
-    this.rootDir = options.rootDir ?? defaultLocalTtsRoot()
-    this.models = options.models ?? LOCAL_TTS_MODELS
+  constructor(options: LocalModelManagerOptions<M>) {
+    this.rootDir = options.rootDir
+    this.models = options.models
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init))
     this.onStatus = options.onStatus
     this.progressIntervalMs = options.progressIntervalMs ?? PROGRESS_INTERVAL_MS
   }
 
-  modelDir(model: LocalTtsModel): string {
+  modelDir(model: M): string {
     return join(this.rootDir, model.id, model.revision)
   }
 
-  async list(): Promise<LocalTtsModelStatus[]> {
+  async list(): Promise<StatusOf<M>[]> {
     return Promise.all(this.models.map((model) => this.status(model.id)))
   }
 
-  async status(modelId: string): Promise<LocalTtsModelStatus> {
+  async status(modelId: string): Promise<StatusOf<M>> {
     const model = this.requireModel(modelId)
     const current = this.lastState.get(model.id)
     if (this.active.has(model.id) && current?.status === 'downloading') return { modelId: model.id, state: current }
     if (current?.status === 'error') return { modelId: model.id, state: current }
-    const state: LocalTtsModelState = (await this.isInstalled(model)) ? { status: 'downloaded' } : { status: 'not-downloaded' }
+    const state: LocalModelState = (await this.isInstalled(model)) ? { status: 'downloaded' } : { status: 'not-downloaded' }
     return { modelId: model.id, state }
   }
 
-  download(modelId: string): Promise<LocalTtsModelStatus> {
+  download(modelId: string): Promise<StatusOf<M>> {
     const model = this.requireModel(modelId)
     const existing = this.active.get(model.id)
     if (existing) return existing.promise
     const controller = new AbortController()
-    const entry: ActiveDownload = { controller, cancelled: false, promise: undefined as unknown as Promise<LocalTtsModelStatus> }
+    const entry: ActiveDownload<M> = { controller, cancelled: false, promise: undefined as unknown as Promise<StatusOf<M>> }
     this.active.set(model.id, entry)
     entry.promise = this.run(model, entry).finally(() => {
       if (this.active.get(model.id) === entry) this.active.delete(model.id)
@@ -92,7 +94,7 @@ export class LocalTtsModelManager {
   }
 
   /** Cancels a running download, then removes everything stored for the model. */
-  async delete(modelId: string): Promise<LocalTtsModelStatus> {
+  async delete(modelId: string): Promise<StatusOf<M>> {
     const model = this.requireModel(modelId)
     const entry = this.active.get(model.id)
     if (entry) {
@@ -129,13 +131,13 @@ export class LocalTtsModelManager {
     return bytes
   }
 
-  private requireModel(modelId: string): LocalTtsModel {
+  private requireModel(modelId: string): M {
     const model = this.models.find((entry) => entry.id === modelId)
-    if (!model) throw new Error(`Unknown text-to-speech model: ${String(modelId)}`)
+    if (!model) throw new Error(`Unknown local model: ${String(modelId)}`)
     return model
   }
 
-  private async isInstalled(model: LocalTtsModel): Promise<boolean> {
+  private async isInstalled(model: M): Promise<boolean> {
     const dir = this.modelDir(model)
     if (!(await fileSize(join(dir, COMPLETE_MARKER)).then((size) => size !== undefined))) return false
     for (const file of model.files) {
@@ -144,16 +146,16 @@ export class LocalTtsModelManager {
     return true
   }
 
-  private publish(model: LocalTtsModel, state: LocalTtsModelState): LocalTtsModelStatus {
+  private publish(model: M, state: LocalModelState): StatusOf<M> {
     this.lastState.set(model.id, state)
-    const status: LocalTtsModelStatus = { modelId: model.id, state }
+    const status: StatusOf<M> = { modelId: model.id, state }
     this.onStatus?.(status)
     return status
   }
 
-  private async run(model: LocalTtsModel, entry: ActiveDownload): Promise<LocalTtsModelStatus> {
+  private async run(model: M, entry: ActiveDownload<M>): Promise<StatusOf<M>> {
     const dir = this.modelDir(model)
-    const totalBytes = localTtsModelBytes(model)
+    const totalBytes = localModelBytes(model)
     const signal = entry.controller.signal
     let receivedBytes = 0
     let lastEmit = 0
@@ -191,21 +193,21 @@ export class LocalTtsModelManager {
     }
   }
 
-  private async hasVerifiedFile(path: string, file: LocalTtsModelFile): Promise<boolean> {
+  private async hasVerifiedFile(path: string, file: LocalModelFile): Promise<boolean> {
     if ((await fileSize(path)) !== file.size) return false
     return (await hashFile(path)) === file.sha256
   }
 
   private async downloadFile(
-    model: LocalTtsModel,
-    file: LocalTtsModelFile,
+    model: M,
+    file: LocalModelFile,
     finalPath: string,
     signal: AbortSignal,
     onBytes: (bytes: number) => void
   ): Promise<void> {
     const partPath = `${finalPath}.part`
     await rm(partPath, { force: true })
-    const response = await this.fetchImpl(localTtsFileUrl(model, file.path), { signal })
+    const response = await this.fetchImpl(localModelFileUrl(model, file.path), { signal })
     if (!response.ok || !response.body) throw new DownloadVerificationError(`Download of ${file.path} failed with HTTP ${response.status}`)
     const reader = response.body.getReader()
     const hash = createHash('sha256')
@@ -232,7 +234,7 @@ export class LocalTtsModelManager {
     await rename(partPath, finalPath)
   }
 
-  private async removePartFiles(dir: string, model: LocalTtsModel): Promise<void> {
+  private async removePartFiles(dir: string, model: M): Promise<void> {
     await Promise.all(model.files.map((file) => rm(join(dir, `${file.path}.part`), { force: true }).catch(() => undefined)))
   }
 }

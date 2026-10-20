@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import type { BridgeDisplayPart } from '../shared/bridge'
 import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
+import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
 import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity, NamedAgentRequest, NamedAgentRecallRequest, NamedAgentIntegrationRequest, NamedAgentIntegrationReview } from '../shared/agentEpisodes'
 import type {
@@ -835,6 +836,29 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, status: LocalTtsModelStatus) => cb(status)
       ipcRenderer.on('readAloud:localModelStatus', handler)
       return () => ipcRenderer.removeListener('readAloud:localModelStatus', handler)
+    }
+  },
+  dictation: {
+    /** Download state of every local speech-to-text model. */
+    localModels: (): Promise<LocalSttModelStatus[]> => ipcRenderer.invoke('dictation:localModels'),
+    /** Downloads a local model from Hugging Face; resolves with its final state. */
+    downloadLocalModel: (modelId: LocalSttModelId): Promise<LocalSttModelStatus> =>
+      ipcRenderer.invoke('dictation:downloadLocalModel', modelId),
+    cancelLocalModelDownload: (modelId: LocalSttModelId): Promise<void> =>
+      ipcRenderer.invoke('dictation:cancelLocalModelDownload', modelId),
+    /** Removes a downloaded local model's files; resolves with its new (not-downloaded) state. */
+    deleteLocalModel: (modelId: LocalSttModelId): Promise<LocalSttModelStatus> =>
+      ipcRenderer.invoke('dictation:deleteLocalModel', modelId),
+    /** Bytes of one file of a downloaded local model. */
+    readLocalModelFile: (modelId: LocalSttModelId, path: string): Promise<Uint8Array> =>
+      ipcRenderer.invoke('dictation:readLocalModelFile', modelId, path),
+    /** Transcript of at most PROVIDER_STT_MAX_BYTES of recorded audio, made with a provider's model. */
+    transcribeWithProvider: (request: ProviderTranscriptionRequest): Promise<ProviderTranscriptionResult> =>
+      ipcRenderer.invoke('dictation:transcribeWithProvider', request),
+    onLocalModelStatus: (cb: (status: LocalSttModelStatus) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, status: LocalSttModelStatus) => cb(status)
+      ipcRenderer.on('dictation:localModelStatus', handler)
+      return () => ipcRenderer.removeListener('dictation:localModelStatus', handler)
     }
   },
   app: {
