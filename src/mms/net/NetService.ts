@@ -450,7 +450,9 @@ export class NetService {
           if (this.plusRenewal) clearTimeout(this.plusRenewal)
           this.plusRenewal = undefined
           this.stopEnrollmentPoll()
-          await this.hostedService().revoke()
+          // The relay lease expires on its own; a backend that no longer knows it
+          // must not stop this computer from signing out.
+          await this.hostedService().revoke().catch(() => undefined)
           this.hostedService().clear()
           return { configured: false, connected: false }
         }

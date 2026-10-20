@@ -913,13 +913,18 @@ export class HostedProfileService {
   async revoke(): Promise<void> {
     const stored = this.read()
     if (!stored?.registration || !stored.connectorToken) return
-    await this.post(
-      stored.configuration,
-      `/v1/net/registrations/${stored.registration.id}/revoke`,
-      stored.connectorToken,
-      { generation: stored.registration.generation }
-    )
-    this.clear()
+    try {
+      await this.post(
+        stored.configuration,
+        `/v1/net/registrations/${stored.registration.id}/revoke`,
+        stored.connectorToken,
+        { generation: stored.registration.generation }
+      )
+    } finally {
+      // Signing out is local first: a server that no longer knows this
+      // registration (e.g. a replaced backend) must not keep stale credentials here.
+      this.clear()
+    }
   }
   registration(audience: string): { registrationId: string; generation: number } {
     const stored = this.read()
