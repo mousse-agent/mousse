@@ -35,7 +35,7 @@ describe('Devices loading', () => {
   }
   const ready = {
     'net.status': async () => ({ enabled: true, self: { node: 'n' }, keystore: 'unlocked', routes: [], peers: [] }),
-    'net.transport.list': async () => ({ manifests: [{ id: 'direct' }] }),
+    'net.transport.list': async () => ({ manifests: [{ id: 'direct' }, { id: 'plus-relay' }] }),
     'bridge.nodes': async () => ({ nodes: [{ node: 'n', name: 'This computer' }] })
   }
 
@@ -44,6 +44,7 @@ describe('Devices loading', () => {
     const result = await readDevices(false)
     expect(request.mock.calls.map(([method]) => method)).not.toContain('net.plus.status')
     expect(result.hosted).toBeUndefined()
+    expect(result.addons.manifests.map((row) => row.id)).toEqual(['direct'])
     expect(result.nodes).toHaveLength(1)
   })
 
@@ -51,7 +52,7 @@ describe('Devices loading', () => {
     stub({ ...ready, 'net.plus.status': async () => Promise.reject(new Error('unavailable')) })
     const result = await readDevices(true)
     expect(result.hosted).toBeUndefined()
-    expect(result.addons.manifests).toHaveLength(1)
+    expect(result.addons.manifests.map((row) => row.id)).toEqual(['direct', 'plus-relay'])
     expect(result.nodes).toHaveLength(1)
   })
 

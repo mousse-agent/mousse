@@ -25,9 +25,13 @@ export async function readDevices(withMousseId: boolean) {
   const hosted = withMousseId
     ? await request<PlusStatus>('net.plus.status', {}).catch(() => undefined)
     : undefined
-  const addons = current.enabled
+  const listed = current.enabled
     ? await request<{ manifests: TransportManifest[] }>('net.transport.list', {})
     : { manifests: [] }
+  // The hosted relay add-on is Mousse ID too; it is offered only with the service.
+  const addons = withMousseId
+    ? listed
+    : { manifests: listed.manifests.filter((manifest) => manifest.id !== 'plus-relay') }
   const nodes =
     current.enabled && current.self && current.keystore === 'unlocked'
       ? (await request<{ nodes: Device[] }>('bridge.nodes', {})).nodes
