@@ -188,4 +188,119 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     const failed = await registry.call('update_task', { id: '' }, ctx())
     expect(failed.isError).toBe(true)
   })
+
+  describe('tool ledger (SPEC §12.6)', () => {
+    const ledgerFor = () => {
+      const rows: string[] = []
+      const ledger = {
+        start: vi.fn((call: { id: string; name: string }) => { rows.push(`start:${call.name}:${call.id}`); return `inv:${call.id}` }),
+        commit: vi.fn((id: string) => { rows.push(`commit:${id}`) }),
+        failed: vi.fn((id: string) => { rows.push(`failed:${id}`) })
+      }
+      const forRun = vi.fn((_runId: string) => ledger)
+      return { rows, ledger, forRun }
+    }
+    const caller: McpCaller = { threadId: 't', runId: 'run:stale', provider: 'p', modeCeiling: 'default' }
+    const call = (registry: ToolRegistry, name: string, args: Record<string, unknown> = {}, id = 'call-1') =>
+      registry.call(name, args, { caller, toolCallId: id, signal: new AbortController().signal })
+
+    it('writes start then commit for a result, failed for an error result and for a throw, under the active run', async () => {
+      const { rows, forRun } = ledgerFor()
+      const registry = new ToolRegistry({ activeRunId: () => 'run:active', toolLedger: forRun })
+      registry.register({ name: 'ok', description: '', inputSchema: { type: 'object' }, access: 'reads', handler: () => ({ text: 'fine' }) })
+      registry.register({ name: 'soft', description: '', inputSchema: { type: 'object' }, access: 'reads', handler: () => ({ text: 'no', isError: true }) })
+      registry.register({ name: 'throws', description: '', inputSchema: { type: 'object' }, access: 'reads', handler: () => { throw new Error('boom') } })
+      registry.register({ name: 'refuses', description: '', inputSchema: { type: 'object' }, access: 'reads', handler: () => { throw new McpToolError('mousse_scope_denied', 'no') } })
+      await call(registry, 'ok', { a: 1 }, 'c1')
+      await call(registry, 'soft', {}, 'c2')
+      expect(await call(registry, 'throws', {}, 'c3')).toEqual({ text: 'boom', isError: true })
+      await expect(call(registry, 'refuses', {}, 'c4')).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+      expect(rows).toEqual([
+        'start:ok:c1', 'commit:inv:c1',
+        'start:soft:c2', 'failed:inv:c2',
+        'start:throws:c3', 'failed:inv:c3',
+        'start:refuses:c4', 'failed:inv:c4'
+      ])
+      expect(forRun).toHaveBeenCalledWith('run:active')
+      expect(forRun).not.toHaveBeenCalledWith('run:stale')
+    })
+
+    it('records the call arguments, and writes no row for a call refused before it starts', async () => {
+      const { rows, ledger, forRun } = ledgerFor()
+      let active: string | null = 'run:active'
+      const registry = new ToolRegistry({ activeRunId: () => active, toolLedger: forRun })
+      registry.register({ name: 'write', description: '', inputSchema: { type: 'object' }, access: 'writesThreads', handler: () => ({ text: 'ok' }) })
+      registry.register({ name: 'spawn', description: '', inputSchema: { type: 'object' }, access: 'startsThreads', handler: () => ({ text: 'ok' }) })
+      await call(registry, 'write', { text: 'x' })
+      expect(ledger.start).toHaveBeenCalledWith({ type: 'toolCall', id: 'call-1', name: 'write', arguments: { text: 'x' } })
+      rows.length = 0
+      await expect(call(registry, 'missing')).rejects.toMatchObject({ code: 'mousse_unknown_tool' })
+      await expect(call(registry, 'write', { threadId: 'other' })).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+      await expect(registry.call('spawn', {}, { caller: { ...caller, modeCeiling: 'plan' }, toolCallId: 'c', signal: new AbortController().signal })).rejects.toMatchObject({ code: 'mousse_ceiling_exceeded' })
+      active = null
+      await expect(call(registry, 'write')).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
+      expect(rows).toEqual([])
+    })
+  })
+
+  describe('thread_fork and thread_merge_back (SPEC §16.2)', () => {
+    /** A finished child run on `child-1`, so `parent` has a lineage thread to fork. */
+    const withFinishedChild = async (modeCeiling: McpCaller['modeCeiling'] = 'default') => {
+      const s = await setup(modeCeiling)
+      const child = await s.fx.delegate(s.run.runId, 'call-child')
+      s.fx.finish(child.childRunId, 'child answer')
+      return { ...s, child }
+    }
+
+    it('thread_fork refuses a plan ceiling and a thread outside the caller lineage, creating nothing', async () => {
+      const plan = await withFinishedChild('plan')
+      await expect(plan.registry.call('thread_fork', { sourceThreadId: 'child-1' }, plan.ctx())).rejects.toMatchObject({ code: 'mousse_ceiling_exceeded' })
+      expect([...plan.fx.threads]).toEqual(['child-1'])
+      fx?.dispose()
+      const open = await withFinishedChild()
+      await open.fx.runningRun('stranger')
+      await expect(open.registry.call('thread_fork', { sourceThreadId: 'stranger' }, open.ctx())).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+      expect([...open.fx.threads]).toEqual(['child-1'])
+    })
+
+    it('thread_fork forks a lineage thread, and a retry with the same clientRequestId returns the same fork', async () => {
+      const { fx, registry, ctx, run } = await withFinishedChild()
+      const first = JSON.parse((await registry.call('thread_fork', { sourceThreadId: 'child-1', clientRequestId: 'try-b' }, ctx({ toolCallId: 'mcp:1' }))).text) as { threadId: string; transferId: string }
+      const retry = JSON.parse((await registry.call('thread_fork', { sourceThreadId: 'child-1', clientRequestId: 'try-b' }, ctx({ toolCallId: 'mcp:2' }))).text)
+      expect(retry).toEqual(first)
+      expect(fx.store.getReceipt(`thread_fork:${run.runId}:try-b`)).toMatchObject({ commandKind: 'thread.fork', status: 'accepted' })
+      expect(fx.engine.delegations.getLineage(first.threadId)).toMatchObject({ parentThreadId: 'child-1', relationship: 'fork' })
+      // Without a clientRequestId each call is its own action.
+      const second = JSON.parse((await registry.call('thread_fork', { sourceThreadId: 'child-1' }, ctx({ toolCallId: 'mcp:3' }))).text)
+      const third = JSON.parse((await registry.call('thread_fork', { sourceThreadId: 'child-1' }, ctx({ toolCallId: 'mcp:4' }))).text)
+      expect(new Set([first.threadId, second.threadId, third.threadId]).size).toBe(3)
+      expect(fx.store.getReceipt(`thread_fork:${run.runId}:mcp:3`)).not.toBeNull()
+    })
+
+    it.each([
+      [{ atRunOrdinal: 0 }, /atRunOrdinal/],
+      [{ title: 5 }, /title must be a string/],
+      [{ seedFrom: 'tomorrow' }, /seedFrom must be/],
+      [{ clientRequestId: '' }, /clientRequestId must be a non-empty string/]
+    ])('thread_fork reports invalid input %j as a tool error', async (args, message) => {
+      const { registry, ctx, fx } = await withFinishedChild()
+      const outcome = await registry.call('thread_fork', { sourceThreadId: 'child-1', ...args }, ctx())
+      expect(outcome).toMatchObject({ isError: true, text: expect.stringMatching(message) })
+      expect([...fx.threads]).toEqual(['child-1'])
+    })
+
+    it('thread_merge_back acts for the caller\'s own fork only, and derives its clientRequestId from the run and call', async () => {
+      const { fx, registry, ctx, run } = await setup()
+      const mergeBack = vi.spyOn(fx.engine, 'mergeBack')
+      await expect(registry.call('thread_merge_back', { forkThreadId: 'someone-else' }, ctx())).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+      await expect(registry.call('thread_merge_back', { threadId: 'someone-else' }, ctx())).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+      expect(mergeBack).not.toHaveBeenCalled()
+      // `parent` is not a fork, so the engine refuses; the request id shows what the tool sent.
+      const derived = await registry.call('thread_merge_back', {}, ctx({ toolCallId: 'mcp:merge' }))
+      expect(derived.isError).toBe(true)
+      expect(mergeBack).toHaveBeenLastCalledWith({ forkThreadId: 'parent', clientRequestId: `thread_merge_back:${run.runId}:mcp:merge` })
+      await registry.call('thread_merge_back', { forkThreadId: 'parent', clientRequestId: 'retry-1' }, ctx({ toolCallId: 'mcp:other' }))
+      expect(mergeBack).toHaveBeenLastCalledWith({ forkThreadId: 'parent', clientRequestId: `thread_merge_back:${run.runId}:retry-1` })
+    })
+  })
 })

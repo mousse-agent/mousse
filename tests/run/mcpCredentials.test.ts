@@ -42,6 +42,17 @@ describe('McpCredentials (SPEC §15.1)', () => {
     expect(credentials.resolve(minted.tokenHash)).toBeNull()
   })
 
+  it('refuses a mode ceiling other than plan or default, minting nothing and leaving a reusable credential as it was', () => {
+    const { db, credentials } = setup()
+    const bad = { threadId: 't1', runId: 'r1', provider: 'p', modeCeiling: 'bypass' as never }
+    expect(() => credentials.mint(bad)).toThrow('modeCeiling must be plan or default.')
+    expect(db.database.prepare('SELECT * FROM credentials').all()).toEqual([])
+    const kept = credentials.mintOrReuse({ threadId: 't1', runId: 'r1', provider: 'p', modeCeiling: 'plan' })
+    expect(() => credentials.mintOrReuse({ ...bad, runId: 'r2' })).toThrow('modeCeiling must be plan or default.')
+    expect(db.database.prepare('SELECT * FROM credentials').all()).toHaveLength(1)
+    expect(credentials.resolve(kept.token)).toMatchObject({ runId: 'r1', modeCeiling: 'plan' })
+  })
+
   it('revokes by run and by thread', () => {
     const { credentials } = setup()
     const a = credentials.mint({ threadId: 't1', runId: 'r1', provider: 'p', modeCeiling: 'plan' })

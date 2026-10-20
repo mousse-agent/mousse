@@ -47,6 +47,7 @@ function input(overrides: Partial<TurnInput> = {}): TurnInput {
     attemptId: 'attempt-1',
     threadId: 'thread-1',
     cwd: '/work',
+    instanceId: 'pi:openai',
     model: 'gpt',
     llmProvider: 'openai',
     modelPinned: true,
@@ -202,7 +203,7 @@ describe('PiLoopAdapter', () => {
       'retry',
       'progress'
     ])
-    expect(sink.calls[0][1]).toEqual({ provider: 'openai', model: 'gpt' })
+    expect(sink.calls[0][1]).toEqual({ provider: 'openai', instanceId: 'pi:openai', model: 'gpt' })
     expect(sink.calls[4][1]).toEqual([native, undefined])
     expect(sink.calls[6][1]).toBe(2)
     expect(ctl.beats).toBe(7)
@@ -226,7 +227,7 @@ describe('PiLoopAdapter', () => {
       contextSignature: 'sig',
       contextModelKey: 'openai:gpt',
       nativeMessages: native,
-      providerRef: { provider: 'openai', model: 'gpt' }
+      providerRef: { provider: 'openai', instanceId: 'pi:openai', model: 'gpt' }
     })
   })
 

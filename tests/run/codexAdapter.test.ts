@@ -117,6 +117,7 @@ function input(overrides: Partial<TurnInput> = {}): TurnInput {
     attemptId: 'attempt-1',
     threadId: 'thread-1',
     cwd: work,
+    instanceId: 'codex',
     model: 'gpt-x',
     llmProvider: 'codex',
     modelPinned: true,
@@ -232,13 +233,13 @@ describe('CodexAdapter', () => {
       usage: { input: 400, output: 30, cacheRead: 800, cacheWrite: 0 },
       contextSignature: 'codex:gpt-x',
       nativeMessages: [],
-      providerRef: { provider: 'codex', model: 'gpt-x', sessionId: T, nativeTurnId: 'turn-1' }
+      providerRef: { provider: 'codex', instanceId: 'codex', model: 'gpt-x', sessionId: T, nativeTurnId: 'turn-1' }
     })
     const refs = sink.calls.filter(([name]) => name === 'providerRef').map(([, ref]) => ref)
     expect(refs).toEqual([
-      { provider: 'codex', model: 'gpt-x' },
-      { provider: 'codex', model: 'gpt-x', sessionId: T },
-      { provider: 'codex', model: 'gpt-x', sessionId: T, nativeTurnId: 'turn-1' }
+      { provider: 'codex', instanceId: 'codex', model: 'gpt-x' },
+      { provider: 'codex', instanceId: 'codex', model: 'gpt-x', sessionId: T },
+      { provider: 'codex', instanceId: 'codex', model: 'gpt-x', sessionId: T, nativeTurnId: 'turn-1' }
     ])
     const tools = sink.calls.filter(([name]) => name === 'tool').map(([, event]) => event)
     expect(tools).toEqual([

@@ -43,7 +43,7 @@ const host = (mcp: AdapterHost['mcp']): AdapterHost => ({
   context: { recoverOverflow: () => null, prepareNativeContext: () => null, nativeHistoryAfterTurn: (text) => text }
 })
 const input = (overrides: Partial<TurnInput> = {}): TurnInput => ({
-  runId: 'run-1', attemptId: 'a-1', threadId: 'thread-1', cwd: '/work', model: 'sonnet', llmProvider: 'claude-subscription',
+  runId: 'run-1', attemptId: 'a-1', threadId: 'thread-1', cwd: '/work', instanceId: 'claude-subscription', model: 'sonnet', llmProvider: 'claude-subscription',
   modelPinned: true, mode: 'agent', prompt: 'hello', messages: [], signal: new AbortController().signal, ...overrides
 })
 const control = { drainSteer: () => undefined, heartbeat: () => undefined }
