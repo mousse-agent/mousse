@@ -488,14 +488,25 @@ export class HostedProfileService {
       }
       if (rejected) throw new RejectedRendezvous()
     }
-    if (!response.ok)
+    if (!response.ok) {
+      // Enrollment mailbox (contract §3): 404 unknown, 410 expired, 409 already decided,
+      // 429 too many active offers.
+      if (path.includes('/enrollment-')) {
+        if (response.status === 404 || response.status === 410)
+          throw new NetError('invite_invalid', 'This phone request is no longer pending.')
+        if (response.status === 429)
+          throw new NetError('quota_exceeded', 'Too many phone codes are active. Wait for one to expire.')
+      }
       throw new NetError(
         response.status === 401 || response.status === 403
           ? 'forbidden'
           : response.status === 409
             ? 'conflict'
-            : 'route_unreachable'
+            : response.status === 429
+              ? 'rate_limited'
+              : 'route_unreachable'
       )
+    }
     if (response.status === 204) return undefined as T
     try {
       return JSON.parse(text) as T

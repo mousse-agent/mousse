@@ -44,7 +44,8 @@ async function fixture(grantExtras: Record<string, unknown> = {}) {
     hello = rt.enrollment.localHello(),
     connectorToken = 'PROFILE_ONLY_CONNECTOR_SECRET_'.repeat(3),
     calls: Array<{ method: string; path: string; auth: string | null; body: any }> = [],
-    mailbox: unknown[] = []
+    mailbox: unknown[] = [],
+    reject: { status?: number } = {}
   const fakeFetch: typeof fetch = async (url, input) => {
     const path = new URL(String(url)).pathname,
       method = input?.method ?? 'GET',
@@ -107,6 +108,8 @@ async function fixture(grantExtras: Record<string, unknown> = {}) {
       })
     if (path === '/v1/net/registrations/registration-one/enrollment-requests')
       return Response.json({ requests: mailbox })
+    if (reject.status && /\/enrollment-(requests\/[^/]+\/(approve|deny)|offers)$/.test(path))
+      return Response.json({ error: { code: 'rejected' } }, { status: reject.status })
     if (/\/enrollment-requests\/[^/]+\/(approve|deny)$/.test(path))
       return new Response(null, { status: 204 })
     if (path === '/v1/net/registrations/registration-one/enrollment-offers')
@@ -125,7 +128,7 @@ async function fixture(grantExtras: Record<string, unknown> = {}) {
     })
   })
   const { accountId: _account, ...publicConfiguration } = configuration
-  return { service, calls, mailbox, connectorToken, publicConfiguration }
+  return { service, calls, mailbox, reject, connectorToken, publicConfiguration }
 }
 
 describe('Mousse Plus phone mailbox', () => {
@@ -195,6 +198,26 @@ describe('Mousse Plus phone mailbox', () => {
       ]
     ])
     expect(mailboxCalls.every((row) => row.auth === `Bearer ${p.connectorToken}`)).toBe(true)
+  })
+
+  it('maps decided, expired and over-quota mailbox answers', async () => {
+    const p = await fixture()
+    const pending = await p.service.beginLogin(p.publicConfiguration, 'Desk', true)
+    await p.service.finishLogin(pending.id)
+    for (const [status, code] of [
+      [404, 'invite_invalid'],
+      [410, 'invite_invalid'],
+      [409, 'conflict']
+    ] as const) {
+      p.reject.status = status
+      await expect(p.service.approveEnrollmentRequest('req-one', 'sealed')).rejects.toMatchObject({
+        code
+      })
+    }
+    p.reject.status = 429
+    await expect(p.service.enrollmentOffer('sealed-offer')).rejects.toMatchObject({
+      code: 'quota_exceeded'
+    })
   })
 
   it('requires a registration before touching the mailbox', async () => {
