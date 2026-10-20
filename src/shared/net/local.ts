@@ -71,6 +71,27 @@ export interface NetStatus {
   peers: Array<{ node: NodeId; state: 'connecting' | 'open' | 'closed'; error?: NetErrorCode }>
   error?: NetErrorCode
 }
+/** One Mousse ID service binding for this computer, as `net.plus.configure` takes it. */
+export interface PlusConfiguration {
+  apiOrigin: string
+  audience: string
+  installationId: string
+  accountId: string
+  gatewayId: string
+}
+/** `net.plus.status`. Not configured (and never connected) when the Mousse ID module is absent. */
+export interface PlusStatus {
+  configured: boolean
+  connected: boolean
+  accountId?: string
+  /** Display-only, from the sign-in grant when Mousse ID sends it. */
+  email?: string
+  plan?: string
+  audience?: string
+  expiresAt?: number
+  registrationId?: string
+  generation?: number
+}
 /** A phone asking to join through Mousse ID, as `net.plus.enrollment.requests` returns it. */
 export interface PlusEnrollmentRequestView {
   id: string

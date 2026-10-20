@@ -1,14 +1,17 @@
-import type { PlusStatus } from '../../mms/net/plus/contracts'
+import type { PlusStatus } from '../../shared/net/local'
 import { useEffect, useRef, useState } from 'react'
 import { Monitor, RefreshCw } from '../lib/icons'
 import { RemoteDeviceThreads } from './RemoteDeviceThreads'
 import { MousseIdSection } from './MousseIdSection'
-import type { NetDoctor, NetStatus, NodeCapability, NodeId } from '../../shared/net'
+import { openSettingsSection } from '../lib/settingsNavigation'
+import { mousseIdAvailable, useMousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
+import { readDevices, type Device } from '../lib/netDevices'
+import type { NetDoctor, NetStatus } from '../../shared/net'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 
-interface Device { node: NodeId; name: string; caps: NodeCapability[]; keyEpoch: number; expiresAt: number; self: boolean; revoked: boolean; state: 'connecting' | 'open' | 'closed' }
 export function NetDevicesSection() {
+  const accountAvailable = useMousseIdAvailable()
   const [plus, setPlus] = useState<PlusStatus>()
   const alive = useRef(true), generation = useRef(0)
   const [status, setStatus] = useState<NetStatus>(), [devices, setDevices] = useState<Device[]>([]), [manifests, setManifests] = useState<TransportManifest[]>([])
@@ -16,10 +19,7 @@ export function NetDevicesSection() {
   const [relayAddress, setRelayAddress] = useState(''), [named, setNamed] = useState(false), [tunnelId, setTunnelId] = useState(''), [hostname, setHostname] = useState(''), [credentialsFile, setCredentialsFile] = useState('')
   const reload = async () => {
     const owner = ++generation.current
-    const current = await window.mousse.platformRequest.request<NetStatus>('net.status', {})
-    const hosted = await window.mousse.platformRequest.request<PlusStatus>('net.plus.status', {})
-    const addons = current.enabled ? await window.mousse.platformRequest.request<{ manifests: TransportManifest[] }>('net.transport.list', {}) : { manifests: [] }
-    const nodes = current.enabled && current.self && current.keystore === 'unlocked' ? (await window.mousse.platformRequest.request<{ nodes: Device[] }>('bridge.nodes', {})).nodes : []
+    const { current, hosted, addons, nodes } = await readDevices(mousseIdAvailable(useMousseIdStore.getState()))
     if (alive.current && owner === generation.current) { setPlus(hosted); setStatus(current); setManifests(addons.manifests); setDevices(nodes) }
   }
   useEffect(() => {
@@ -30,10 +30,7 @@ export function NetDevicesSection() {
       running = true
       try {
         const owner = ++generation.current
-        const current = await window.mousse.platformRequest.request<NetStatus>('net.status', {})
-        const hosted = await window.mousse.platformRequest.request<PlusStatus>('net.plus.status', {})
-        const addons = current.enabled ? await window.mousse.platformRequest.request<{ manifests: TransportManifest[] }>('net.transport.list', {}) : { manifests: [] }
-        const nodes = current.enabled && current.self && current.keystore === 'unlocked' ? (await window.mousse.platformRequest.request<{ nodes: Device[] }>('bridge.nodes', {})).nodes : []
+        const { current, hosted, addons, nodes } = await readDevices(mousseIdAvailable(useMousseIdStore.getState()))
         if (active && owner === generation.current) { setPlus(hosted); setStatus(current); setManifests(addons.manifests); setDevices(nodes) }
       } catch (cause) { if (active) { setDevices([]); setManifests([]); setError(String((cause as Error)?.message ?? cause)) } }
       finally { running = false }
@@ -58,7 +55,7 @@ export function NetDevicesSection() {
     {status?.self && (!status.protected || status.keystore === 'locked') && <fieldset disabled={busy || !!status.restartRequired}><legend>{status.keystore === 'locked' ? 'Unlock this profile' : 'Protect network keys'}</legend><label>Passphrase<input type="password" value={passphrase} onChange={e => setPassphrase(e.target.value)} autoComplete={status.keystore === 'locked' ? 'current-password' : 'new-password'} /></label><button type="button" disabled={!passphrase} onClick={() => void action(status.keystore === 'locked' ? 'net.unlock' : 'net.protect', { passphrase })}>{status.keystore === 'locked' ? 'Unlock' : 'Protect keys'}</button></fieldset>}
     {!!devices.length && <section><h3>My devices</h3>{devices.map(device => <div className="net-device-row" key={device.node}><Monitor size={16} /><div><strong>{device.name}{device.self && ' · This device'}</strong><span>{device.revoked ? 'Revoked' : device.state === 'open' || device.self ? 'Online' : device.state === 'connecting' ? 'Connecting' : 'Offline'} · {device.caps.join(', ')}</span></div>{!device.self && !device.revoked && status?.self?.isAuthority && <button type="button" disabled={busy} onClick={() => void action('bridge.revoke', { node: device.node })}>Revoke</button>}</div>)}{status?.self?.isAuthority && <button type="button" disabled={busy || status.keystore !== 'unlocked' || !status.protected} onClick={() => void action('bridge.invite', { name: 'New device' }, value => setInvite((value as { invite: string }).invite))}>Invite another device</button>}{invite && <label>Device invitation · share privately<textarea readOnly value={invite} onFocus={e => e.currentTarget.select()} aria-label="Device invitation" /></label>}</section>}
     {!!devices.length && <RemoteDeviceThreads devices={devices} />}
-    <MousseIdSection status={status} plus={plus} devices={devices} deviceName={name} onChanged={() => reload().catch(() => undefined)} />
+    {accountAvailable && <MousseIdSection status={status} plus={plus} onChanged={() => reload().catch(() => undefined)} onOpenAccount={() => openSettingsSection('account')} />}
     {doctor && <section><h3>Connection checks</h3>{doctor.checks.map(check => <p key={check.name}>{check.ok ? 'Ready' : 'Needs attention'} · {check.message}{check.code && ` (${check.code})`}</p>)}</section>}
     {status?.routes.length ? <section><h3>Advertised routes</h3>{status.routes.map(route => <p key={route.transport + route.address}><strong>{route.transport}</strong> <code>{route.address}</code></p>)}</section> : status?.enabled && status.self && <p>No advertised route. Enable an add-on to accept connections.</p>}
     {status?.enabled && status.self && status.keystore === 'unlocked' && <section><h3>Connection add-ons</h3>{manifests.map(manifest => {

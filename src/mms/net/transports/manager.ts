@@ -1,5 +1,3 @@
-import { HostedRelayTransport } from '../plus/wire/client'
-import { ticketHash } from '../relay/protocol'
 import type { Duplex } from 'node:stream'
 import { isIP } from 'node:net'
 import type {
@@ -11,9 +9,8 @@ import type {
   InboundInfo
 } from '../contracts'
 import { NetError, type Route } from '../../../shared/net'
-import { canonicalAudience } from '../plus/wire/protocol'
-import { createPlusRelayAddon } from './plusRelay'
-import type { HostedProfileService } from '../plus/HostedProfileService'
+import { HOSTED_RELAY_TRANSPORT, canonicalHostedRelayAudience } from '../relay/hostedAudience'
+import type { HostedRelayTransports } from '../hosted'
 import { DirectTransport } from './direct'
 import { PreauthAdmission, inboundPrincipal } from './admission'
 import { TransportRegistry, type TransportConfiguration } from './registry'
@@ -79,7 +76,8 @@ export class ProfileTransports {
       onChanged?(): void
       relayRendezvous?: RelayRendezvous
       addons?: TransportAddon[]
-      hosted?(): HostedProfileService
+      /** Mousse ID relay carriers; without them hosted relay routes are refused. */
+      hosted?: HostedRelayTransports
     }
   ) {
     this.admission = new PreauthAdmission(options.clock)
@@ -89,7 +87,7 @@ export class ProfileTransports {
       tailscaleAddon,
       cloudflaredAddon,
       createRelayAddon(options.identity, this.admission),
-      ...(options.hosted ? [createPlusRelayAddon(options.identity, options.hosted)] : []),
+      ...(options.hosted ? [options.hosted.addon(options.identity)] : []),
       ...(options.addons ?? [])
     ])
       this.registry.register(addon)
@@ -112,8 +110,8 @@ export class ProfileTransports {
       if (settings.advertiseHost !== undefined && !isIP(settings.advertiseHost))
         throw new NetError('bad_request')
     }
-    if (checked.id === 'plus-relay')
-      canonicalAudience((checked.settings as { address: string }).address)
+    if (checked.id === HOSTED_RELAY_TRANSPORT)
+      canonicalHostedRelayAudience((checked.settings as { address: string }).address)
     if (checked.id === 'relay') {
       const address = relayUrl((checked.settings as { address: string }).address)
       if (address.search) throw new NetError('bad_request')
@@ -200,9 +198,7 @@ export class ProfileTransports {
       'direct',
       'cloudflared',
       'relay',
-      ...(this.options.hosted || this.options.relayRendezvous?.transport === 'plus-relay'
-        ? ['plus-relay']
-        : [])
+      ...(this.options.hosted ? [HOSTED_RELAY_TRANSPORT] : [])
     ].map(
       (id) =>
         ({
@@ -237,29 +233,21 @@ export class ProfileTransports {
   async dial(route: Route, signal: AbortSignal): Promise<Duplex> {
     if (this.stopping) throw new NetError('cancelled')
     let raw: Duplex
-    if (route.transport === 'plus-relay') {
-      if (!this.options.hosted && this.options.relayRendezvous?.transport !== 'plus-relay')
-        throw new NetError('forbidden')
+    if (route.transport === HOSTED_RELAY_TRANSPORT) {
+      const hosted = this.options.hosted
+      if (!hosted) throw new NetError('forbidden')
       const url = new URL(route.address)
       url.search = ''
       const rv = this.options.relayRendezvous
       const transport: Transport =
-        rv?.transport === 'plus-relay'
-          ? new HostedRelayTransport({
-              id: 'plus-relay',
-              audience: url.toString(),
-              identity: this.options.identity,
-              enrollment: rv,
-              registration: () => ({
-                ...(this.options.hosted?.().status().connected
-                  ? this.options.hosted().registration(url.toString())
-                  : { registrationId: 'rendezvous_' + ticketHash(rv.ticket), generation: 1 })
-              })
-            })
-          : createPlusRelayAddon(this.options.identity, this.options.hosted!).create(
-              { address: url.toString() },
-              { clock: this.options.clock, profileDir: this.options.profileDir }
-            )
+        rv?.transport === HOSTED_RELAY_TRANSPORT
+          ? hosted.rendezvousTransport(this.options.identity, url.toString(), rv)
+          : hosted
+              .addon(this.options.identity)
+              .create(
+                { address: url.toString() },
+                { clock: this.options.clock, profileDir: this.options.profileDir }
+              )
       try {
         await transport.provision()
         raw = await transport.dial(route, signal)
@@ -315,11 +303,10 @@ export class ProfileTransports {
     const relay = this.registry.transports().find((transport) => transport.id === 'relay')
     if (
       (!relay || !relay.status().routes.length) &&
-      this.registry
-        .transports()
-        .some((transport) => transport.id === 'plus-relay' && transport.status().routes.length)
+      this.options.hosted &&
+      this.hasPlusRelayListener()
     )
-      return this.options.hosted!().rendezvous(expiresAt, 'enrollment')
+      return this.options.hosted.prepareRendezvous(expiresAt, 'enrollment')
     if (!relay || !relay.status().routes.length) return undefined
     return (relay as RelayTransport).prepareEnrollmentRendezvous({ expiresAt })
   }

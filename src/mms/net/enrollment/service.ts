@@ -1,4 +1,4 @@
-import { canonicalAudience } from '../plus/wire/protocol'
+import { canonicalHostedRelayAudience } from '../relay/hostedAudience'
 import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import type {
@@ -273,7 +273,7 @@ function validateRendezvous(
   decodeBase64(value.ticket, 32)
   const address =
     value.transport === 'plus-relay'
-      ? new URL(canonicalAudience(value.relay))
+      ? new URL(canonicalHostedRelayAudience(value.relay))
       : relayUrl(value.relay)
   if (address.search || address.toString() !== value.relay) return invalid()
   if (
@@ -289,7 +289,7 @@ function validateRendezvous(
       )
         return false
       endpoint.search = ''
-      if (value.transport === 'plus-relay') canonicalAudience(endpoint.toString())
+      if (value.transport === 'plus-relay') canonicalHostedRelayAudience(endpoint.toString())
       return target === node && endpoint.toString() === value.relay
     })
   )

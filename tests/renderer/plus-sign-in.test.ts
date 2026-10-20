@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest'
+import type { NetStatus } from '../../src/shared/net'
 import {
+  createWakeableSleep,
   formatCountdown,
+  mousseIdPreparation,
+  mousseIdSetupStep,
   normalizePlusOrigin,
   pollPlusSignIn,
   resolvePlusOrigin,
-  secondsLeft
+  secondsLeft,
+  signInErrorMessage,
+  withSignInCallback
 } from '../../src/renderer/lib/plusSignIn'
 
 function clock() {
@@ -103,5 +109,68 @@ describe('phone QR code', () => {
     const { size, path } = qrSvgPath(url)
     expect((size - 8 - 17) % 4).toBe(0)
     expect(path).toMatch(/^M4 4h1v1h-1z/)
+  })
+})
+
+describe('sign-in callback', () => {
+  it('adds the loopback callback to the approval link', () => {
+    const link = withSignInCallback('https://mousse.work/net-approve?code=ABCD-EFGH', 'http://127.0.0.1:4100/mousse-id/callback/abc')
+    const url = new URL(link)
+    expect(url.searchParams.get('code')).toBe('ABCD-EFGH')
+    expect(url.searchParams.get('callback')).toBe('http://127.0.0.1:4100/mousse-id/callback/abc')
+    expect(withSignInCallback('https://mousse.work/net-approve', undefined)).toBe('https://mousse.work/net-approve')
+  })
+
+  it('wakes a running wait early, and the next wait when none is running', async () => {
+    const { sleep, wake } = createWakeableSleep()
+    const signal = new AbortController().signal
+    const started = Date.now()
+    const waiting = sleep(60_000, signal)
+    wake()
+    await waiting
+    wake()
+    await sleep(60_000, signal)
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
+  it('rejects a wait as cancelled when aborted', async () => {
+    const { sleep } = createWakeableSleep()
+    const controller = new AbortController()
+    const waiting = sleep(60_000, controller.signal)
+    controller.abort()
+    await expect(waiting).rejects.toMatchObject({ code: 'cancelled' })
+  })
+})
+
+describe('sign-in errors', () => {
+  const origin = 'https://api.mousse.work'
+
+  it('names the service when it cannot be reached or refuses', () => {
+    expect(signInErrorMessage({ code: 'route_unreachable', message: 'No route to the peer is reachable.' }, origin))
+      .toBe('Can’t reach Mousse ID at api.mousse.work. Check your internet connection and try again.')
+    expect(signInErrorMessage({ code: 'forbidden' }, origin)).toContain('api.mousse.work didn’t accept')
+  })
+
+  it('points to the setup step when the keystore is locked', () => {
+    const net = { enabled: true, self: {}, keystore: 'locked', protected: true } as never
+    expect(signInErrorMessage({ code: 'keystore_locked' }, origin, net)).toBe(mousseIdSetupStep(net))
+    expect(mousseIdSetupStep(undefined)).toBe('Create a network identity under Devices first.')
+  })
+
+  it('keeps other messages as they are', () => {
+    expect(signInErrorMessage(new Error('Something else'), origin)).toBe('Something else')
+  })
+})
+
+describe('networking preparation', () => {
+  const base = { enabled: true, keystore: 'unlocked', protected: true, routes: [], peers: [],
+    self: { node: 'n', user: 'u', isAuthority: true } } as unknown as NetStatus
+  it('sets up networking itself unless the profile is locked', () => {
+    expect(mousseIdPreparation(base)).toBe('ready')
+    expect(mousseIdPreparation(undefined)).toBe('automatic')
+    expect(mousseIdPreparation({ ...base, self: undefined, enabled: false, keystore: 'missing' })).toBe('automatic')
+    expect(mousseIdPreparation({ ...base, enabled: false })).toBe('automatic')
+    expect(mousseIdPreparation({ ...base, protected: false })).toBe('automatic')
+    expect(mousseIdPreparation({ ...base, keystore: 'locked' })).toBe('manual')
   })
 })

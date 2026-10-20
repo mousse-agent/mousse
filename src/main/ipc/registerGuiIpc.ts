@@ -61,6 +61,7 @@ import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
 import { showCopyMenu } from '../contextMenu'
 import { openExternalSafely } from '../safeExternalUrl'
 import { dispatchMcpAuthBrowser } from '../mcpAuthBrowser'
+import { MousseIdCallbacks, runtimeMousseIdOrigin } from '../mousseIdCallback'
 import {
   attachWindowStateListeners,
   beginWindowDrag,
@@ -159,6 +160,8 @@ class PlatformRequestError extends AppError {
     this.name = 'PlatformRequestError'
   }
 }
+
+let mousseIdCallbacks: MousseIdCallbacks | undefined
 
 function registerHandler(
   channel: string,
@@ -1669,6 +1672,24 @@ export function registerGuiIpc(
     }
     return undefined
   }
+
+  // Mousse ID sign-in runs in the system browser and calls back over loopback.
+  mousseIdCallbacks?.dispose()
+  mousseIdCallbacks = new MousseIdCallbacks(() => {
+    const window = getWindow()
+    if (!window || window.isDestroyed()) return
+    if (window.isMinimized()) window.restore()
+    window.show()
+    window.focus()
+  })
+  const callbackId = (raw: unknown): string => {
+    if (typeof raw !== 'string' || !/^[A-Za-z0-9_-]{16,64}$/.test(raw)) throw new Error('Invalid Mousse ID callback id')
+    return raw
+  }
+  registerHandler('mousseId:config', () => ({ origin: runtimeMousseIdOrigin() }))
+  registerHandler('mousseId:callback.start', () => mousseIdCallbacks!.start())
+  registerHandler('mousseId:callback.wait', (_event, id: unknown) => mousseIdCallbacks!.wait(callbackId(id)))
+  registerHandler('mousseId:callback.cancel', (_event, id: unknown) => { mousseIdCallbacks!.cancel(callbackId(id)) })
 
   registerHandler('app:getInfo', () => ({
     platform: process.platform,

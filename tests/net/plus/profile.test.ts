@@ -24,6 +24,7 @@ async function fixture(
     now?: () => number
     routeOffline?: boolean
     rendezvousReply?: () => Response | Promise<Response>
+    revokeStatus?: number
   } = {}
 ) {
   const p = await profile({ protect: !options.plain }),
@@ -78,6 +79,8 @@ async function fixture(
     }
     if (path === '/v1/net/registrations')
       return Response.json({ registration, connectorToken, relayAudience: configuration.audience })
+    if (path.endsWith('/revoke') && options.revokeStatus)
+      return Response.json({ error: { code: 'UNAUTHORIZED' } }, { status: options.revokeStatus })
     if (path.endsWith('/renew'))
       return Response.json({ ...registration, expiresAt: (options.now?.() ?? Date.now()) + 60000 })
     if (path === '/v1/net/routes' && options.routeOffline) return Response.json({}, { status: 503 })
@@ -117,6 +120,14 @@ it('binds exact account root proof, keeps account bearer one-shot, and renews/re
   expect(p.bodies.at(-2).body.registrationId).toBe('registration-one')
   await p.service.revoke()
   expect(p.service.status()).toEqual({ configured: false, connected: false })
+})
+it('forgets local hosted credentials even when the server no longer knows the registration', async () => {
+  const p = await fixture({ revokeStatus: 401 })
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  await expect(p.service.revoke()).rejects.toBeDefined()
+  expect(p.service.status()).toEqual({ configured: false, connected: false })
+  expect(p.rt.keys.getSecret('plus/connector')).toBeFalsy()
 })
 it.each([{ member: true }, { plain: true }])(
   'rejects a member/account session or unprotected store as binding authority (%j)',

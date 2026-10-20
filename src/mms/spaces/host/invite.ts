@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { RelayRendezvous } from '../../net/relay/protocol'
-import { canonicalAudience } from '../../net/plus/wire/protocol'
+import { canonicalHostedRelayAudience } from '../../net/relay/hostedAudience'
 import type { IdentityService, SecureChannel } from '../../net/contracts'
 import { decodeBase64, verifyDocument } from '../../net/identity/crypto'
 import { canonicalJson, parseProtocolJson, encodeMessage } from '../../net/sync/codec'
@@ -126,7 +126,7 @@ export function parseSpaceInvite(text: string): ParsedSpaceInvite {
         !rv ||
         Object.keys(rv).sort().join(',') !== 'expiresAt,relay,ticket,transport' ||
         rv.transport !== 'plus-relay' ||
-        canonicalAudience(rv.relay) !== rv.relay ||
+        canonicalHostedRelayAudience(rv.relay) !== rv.relay ||
         !/^[A-Za-z0-9_-]{43}$/.test(rv.ticket) ||
         !Number.isSafeInteger(rv.expiresAt) ||
         rv.expiresAt > authorization.expiresAt ||

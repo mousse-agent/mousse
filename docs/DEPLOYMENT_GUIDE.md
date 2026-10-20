@@ -18,6 +18,9 @@ credentials, approval codes, signing material, or machine-specific API keys.
 5. Do not package `.mousse/`, `.mousse-worktrees/`, `.env*`, logs, build
    scratch directories, provider credential stores, or the daemon owner token.
 6. Inspect the final packaged archive, not only the source tree, before upload.
+7. Official releases set `MOUSSE_ID_ORIGIN=https://api.mousse.work` in the build
+   environment. A build without it has no Mousse ID: the Account section,
+   sidebar sign-in and phone pairing are hidden. That is the open-source default.
 
 ## Windows unsigned build
 
@@ -27,6 +30,7 @@ From a clean Windows worktree at the release commit:
 npm ci
 npm run typecheck
 npm test
+$env:MOUSSE_ID_ORIGIN = 'https://api.mousse.work'
 npm run dist:win
 ```
 
@@ -48,7 +52,7 @@ nvm use 22.19.0
 npm ci
 npm run typecheck
 npm test
-npm run dist:linux
+MOUSSE_ID_ORIGIN=https://api.mousse.work npm run dist:linux
 ```
 
 Expected GUI artifact: `release/Mousse-<version>.AppImage`.  
