@@ -7,6 +7,7 @@ import { SettingsStore } from './settings/SettingsStore'
 import { ProviderAuthService } from './providers/ProviderAuthService'
 import { AppletStore } from './applets/AppletStore'
 import { ClaudeSubscriptionProviderService } from './providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import { ClaudeIntegrationResolver } from './providers/claudeSubscription/integrations'
 import { AntigravityProviderService } from './providers/antigravity/AntigravityProviderService'
 import { ProviderInstanceService } from './providers/ProviderInstanceService'
 import { createCodexProviderService, type CodexProviderService } from './run/adapters/codex'
@@ -317,7 +318,14 @@ export class MmsProfileServices {
     })
     this.orchestrator.setAppletStore(this.applets)
     this.orchestrator.setAntigravityProvider(this.antigravity)
-    this.orchestrator.setClaudeSubscriptionProvider(this.claudeSubscription)
+    this.orchestrator.setClaudeSubscriptionProvider(this.claudeSubscription, new ClaudeIntegrationResolver({
+      mcpRegistry: this.mcpRegistry,
+      mcpManager: this.mcpManager,
+      skillsRegistry: this.skillsRegistry,
+      settings: this.settings,
+      secrets: this.integrationContext.secrets,
+      pluginRoot: join(homeDir, 'providers', 'claude-subscription', 'skill-plugins')
+    }))
     this.orchestrator.setCodexProvider(this.codex)
     this.orchestrator.setProviderInstances(this.providerInstances)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
