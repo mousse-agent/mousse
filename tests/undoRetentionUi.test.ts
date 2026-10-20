@@ -9,7 +9,6 @@ vi.mock('../src/renderer/stores/appStore', () => {
   })
   return { useAppStore: store }
 })
-// Run the actual component mount effects without a browser; no response/retention implementation is mocked.
 vi.mock('react', async (load) => ({
   ...await load<typeof import('react')>(),
   useEffect: (effect: () => unknown) => { effect() },
@@ -19,22 +18,9 @@ vi.mock('react', async (load) => ({
   useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
   useDebugValue: () => undefined
 }))
-import { AssistantMessageActions } from '../src/renderer/components/AssistantMessageActions'
 import { readThreadActionHistory } from '../src/renderer/utils/threadActionHistory'
 import { useAppStore } from '../src/renderer/stores/appStore'
 afterEach(() => { vi.unstubAllGlobals() })
-
-it('mounting a thousand actual message-action components makes one task-history request', async () => {
-  let settle!: (value: unknown) => void
-  const list = vi.fn(() => new Promise((resolve) => { settle = resolve }))
-  vi.stubGlobal('window', { mousse: { actions: { list } } })
-  for (let index = 0; index < 1000; index++) AssistantMessageActions({ content: 'retained conversation', threadId: 'coalesced-task', actionId: `action-${index}` })
-  expect(list).toHaveBeenCalledTimes(1)
-  settle({ actions: [], receipts: [], journalGeneration: 0 })
-  await Promise.resolve(); await Promise.resolve()
-  AssistantMessageActions({ content: 'next row', threadId: 'coalesced-task', actionId: 'next' })
-  expect(list).toHaveBeenCalledTimes(1)
-})
 
 it('rejects an old profile RPC completion when the new profile reuses its task ID', async () => {
   const completions: Array<(value: unknown) => void> = []

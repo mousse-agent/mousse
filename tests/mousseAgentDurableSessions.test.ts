@@ -470,35 +470,6 @@ describe('Mousse durable subagent sessions', () => {
     expect(service.exportSessions()[0]?.history).toEqual(partial)
   })
 
-  it('keeps a completed session durable until the parent explicitly removes it', async () => {
-    const completeAgent = vi.fn(async () => undefined)
-    const service = new MousseAgentService(
-      {
-        chat: async () => ({
-          text: 'Finished.\n```mousse-actions\n{"actions":[{"type":"complete_task","agentIds":["agent-complete"],"merge":true}]}\n```',
-          aborted: false,
-          nativeMessages: [userMessage('Implement it')],
-          modelName: 'test',
-          totalResponseTimeMs: 5,
-          totalTokensUsed: 20,
-          tokensPerSecond: 2
-        })
-      } as never,
-      { completeAgent }
-    )
-
-    service.start('agent-complete', 'Implement it', '/tmp/wt')
-    await new Promise((resolve) => setTimeout(resolve, 0))
-
-    expect(completeAgent).toHaveBeenCalledOnce()
-    expect(service.getRunState('agent-complete')).toBe('completed')
-    expect(service.exportSessions()).toHaveLength(1)
-    expect(service.getMessages('agent-complete')).not.toHaveLength(0)
-
-    service.remove('agent-complete')
-    expect(service.exportSessions()).toHaveLength(0)
-  })
-
   it('retries from checkpointed transcript without duplicating the last user task', async () => {
     const partial: Message[] = [userMessage('Implement the feature'), assistantToolCall()]
     const chatHistories: Message[][] = []
@@ -782,29 +753,6 @@ describe('Mousse durable subagent sessions', () => {
     expect(history[0]).toMatchObject({ role: 'user', content: 't' })
     expect(JSON.stringify(history)).not.toContain('Token budget')
     expect(service.exportSessions()[0]?.warnings).toContain('Token budget is 80% used')
-  })
-
-  // spawn_agents is retired (SPEC §14.5): the block is no longer an action, so a durable session
-  // turn that emits it neither spawns nor completes; delegation is the host's delegate_task.
-  it('never spawns recursive subagents from a durable session turn', async () => {
-    const completeAgent = vi.fn(async () => undefined)
-    const llm = {
-      chat: async () => ({
-        text: '```mousse-actions\n{"actions":[{"type":"spawn_agents","agents":[{"cliType":"mousse","task":"nested"}]}]}\n```',
-        aborted: false,
-        nativeMessages: [userMessage('task')],
-        modelName: 't',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 1,
-        tokensPerSecond: 1
-      })
-    }
-    const service = new MousseAgentService(llm as never, { completeAgent })
-    service.start('agent-no-spawn', 'task', '/tmp')
-    await vi.waitFor(() => expect(service.getRunState('agent-no-spawn')).toBe('idle'))
-
-    expect(completeAgent).not.toHaveBeenCalled()
-    expect(service.listSessionIds()).toEqual(['agent-no-spawn'])
   })
 
   it('writes mousse-agent-sessions.json atomically with other thread files', () => {

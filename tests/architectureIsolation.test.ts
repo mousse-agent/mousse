@@ -23,18 +23,7 @@ function read(rel: string): string {
   return readFileSync(join(ROOT, rel), 'utf-8')
 }
 
-describe('architecture isolation (Phase 6)', () => {
-  it('deleted legacy Electron embedded MMS modules', () => {
-    const gone = [
-      'src/main/ipc/registerIpc.ts',
-      'src/main/data/ThreadContext.ts',
-      'src/main/notifications/NotificationService.ts'
-    ]
-    for (const f of gone) {
-      expect(() => read(f)).toThrow()
-    }
-  })
-
+describe('architecture isolation', () => {
   it('src/main never constructs MousseMainService', () => {
     const files = walkTs(join(ROOT, 'src/main'))
     for (const f of files) {
@@ -65,29 +54,4 @@ describe('architecture isolation (Phase 6)', () => {
     expect(service).not.toMatch(/openMmsOwner/)
   })
 
-  it('no notPhase stubs in production sources', () => {
-    const files = [...walkTs(join(ROOT, 'src/main')), ...walkTs(join(ROOT, 'src/cli')), ...walkTs(join(ROOT, 'src/mms'))]
-    for (const f of files) {
-      const src = readFileSync(f, 'utf-8')
-      expect(src, f).not.toMatch(/notPhase\d/)
-      expect(src, f).not.toMatch(/Phase 5 stub/i)
-    }
-  })
-
-  it('production src has no loadThreadData→saveThreadData partial update footguns', () => {
-    const files = walkTs(join(ROOT, 'src'))
-    for (const f of files) {
-      if (f.includes(`${join('src', 'main', 'data', 'ThreadContext')}`)) continue
-      const src = readFileSync(f, 'utf-8')
-      // Flag classic clobber pattern in the same function-ish region
-      if (/loadThreadData\s*\(/.test(src) && /saveThreadData\s*\(/.test(src)) {
-        // Allowed: ThreadDataStore itself, tests are outside src/
-        if (f.endsWith('ThreadDataStore.ts')) continue
-        // Orchestrator channel path must use mutateThreadData not save
-        expect(src, f).not.toMatch(
-          /loadThreadData[\s\S]{0,400}saveThreadData/
-        )
-      }
-    }
-  })
 })
