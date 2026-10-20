@@ -13,25 +13,23 @@ import {
 import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
-import { afterAll, beforeAll, expect, it } from 'vitest'
+import { beforeAll, expect, it } from 'vitest'
 import { newId } from '../../../../src/shared/net'
 
-import { buildTestCli } from '../../helpers/build'
+import { productBuild } from '../../../support/build'
 
-let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
 let entry: string
 let cliEntry: string
 
 beforeAll(async () => {
   if (!['darwin', 'linux'].includes(process.platform)) return
-  fixture = await buildTestCli({ nativeReader: true })
-  cliEntry = fixture.entry
-  entry = await fixture.buildEntry(
+  const product = await productBuild({ nativeReader: true })
+  cliEntry = product.entry
+  entry = await product.buildEntry(
     'scripts/net/qa/native-reader-daemon.ts',
     'net-qa/native-reader-daemon.js'
   )
-}, 60000)
-afterAll(() => fixture?.cleanup())
+}, 120000)
 const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds))
 async function wait<T>(get: () => T | undefined, label: string, timeout = 40000): Promise<T> {
   const end = Date.now() + timeout

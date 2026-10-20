@@ -1,48 +1,40 @@
-import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, readFileSync, realpathSync, rmSync, mkdirSync } from 'node:fs'
+import { readFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
-import { afterAll, beforeAll, expect, it } from 'vitest'
+import { beforeAll, expect, it } from 'vitest'
 import { MousseMainService } from '../../../../src/mms/MousseMainService'
 import { FileKeyStore } from '../../../../src/mms/net/identity'
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
-import { buildTestCli } from '../../helpers/build'
+import { productBuild } from '../../../support/build'
+import { runCli, startDaemon, type Daemon } from '../../../support/daemon'
+import { ownedTemp } from '../../../support/tmp'
 
-let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
 let entry: string
 let faultEntry: string
 
 beforeAll(async () => {
   if (process.platform === 'win32') return
-  fixture = await buildTestCli()
-  entry = fixture.entry
-  faultEntry = await fixture.buildEntry(
+  const product = await productBuild()
+  entry = product.entry
+  faultEntry = await product.buildEntry(
     'tests/net/spaces/archive/daemon-entry.ts',
     'cli/archive-qa.js'
   )
-}, 60000)
-afterAll(() => fixture?.cleanup())
+}, 120000)
 
 const hash = (value: Uint8Array) => createHash('sha256').update(value).digest('hex')
-async function stop(child: ChildProcess) {
-  if (child.exitCode !== null || child.signalCode !== null) return
-  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
-  child.kill('SIGKILL')
-  await exited
-}
 it.skipIf(process.platform === 'win32')(
   'moves a public/private Space through two emitted daemons, physical prepared-bundle death, route refresh and exact-original activation',
   async () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'archive-daemons-'))),
+    const temp = ownedTemp('archive-daemons-'),
+      root = temp.path,
       homes = [join(root, 'source'), join(root, 'target')],
-      children: ChildProcess[] = [],
+      daemons: Daemon[] = [],
       passphrases = ['archive-source-protected', 'archive-target-protected']
     for (const home of homes) mkdirSync(home)
-    let logs = '',
-      seed: MousseMainService | undefined,
-      probe: MousseMainService | undefined
+    const logs = () => daemons.map((daemon) => daemon.output).join('\n')
+    let seed: MousseMainService | undefined, probe: MousseMainService | undefined
     const profile = (home: string) =>
       join(
         home,
@@ -64,82 +56,46 @@ it.skipIf(process.platform === 'win32')(
         await new Promise((resolve) => setTimeout(resolve, 25))
       }
     }
-    const cli = (home: string, args: string[], input?: string) =>
-      new Promise<{ code: number | null; value: any; out: string; error: string }>(
-        (resolve, reject) => {
-          const child = spawn(process.execPath, [entry, '--home', home, '--json', ...args], {
-            stdio: ['pipe', 'pipe', 'pipe'],
-            env: { ...process.env, MOUSSE_HOME: home, NO_COLOR: '1' }
-          })
-          children.push(child)
-          let out = '',
-            error = ''
-          const timer = setTimeout(() => {
-            child.kill('SIGKILL')
-            reject(Error('Archive emitted CLI timed out'))
-          }, 40000)
-          child.stdout!.on('data', (bytes) => {
-            out += bytes
-          })
-          child.stderr!.on('data', (bytes) => {
-            error += bytes
-          })
-          child.on('error', (reason) => {
-            clearTimeout(timer)
-            reject(reason)
-          })
-          child.on('exit', (code) => {
-            clearTimeout(timer)
-            let value
-            try {
-              value = JSON.parse(code === 0 ? out : error)
-            } catch {}
-            resolve({ code, value, out, error })
-          })
-          child.stdin!.end(input)
-        }
-      )
+    const cli = async (
+      home: string,
+      args: string[],
+      input?: string
+    ): Promise<{ code: number | null; value: any; out: string; error: string }> => {
+      const result = await runCli({
+        entry,
+        home,
+        args: ['--json', ...args],
+        input,
+        timeout: 40000,
+        label: 'Archive emitted CLI'
+      })
+      let value
+      try {
+        value = JSON.parse(result.code === 0 ? result.stdout : result.stderr)
+      } catch {}
+      return { code: result.code, value, out: result.stdout, error: result.stderr }
+    }
     const ok = async (home: string, args: string[], input?: string) => {
       const result = await cli(home, args, input)
-      expect(result.code, args.join(' ') + '\n' + result.error + '\n' + logs).toBe(0)
+      expect(result.code, args.join(' ') + '\n' + result.error + '\n' + logs()).toBe(0)
       return result.value
     }
     const launch = async (home: string, fault = false) => {
-      const child = spawn(
-        process.execPath,
-        [fault ? faultEntry : entry, '--home', home, 'service', 'run'],
-        {
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: {
-            ...process.env,
-            MOUSSE_HOME: home,
-            NO_COLOR: '1',
-            ...(fault
-              ? {
-                  MOUSSE_ARCHIVE_QA_ROOT: root,
-                  MOUSSE_ARCHIVE_QA_FAULT: 'spaces.archive.private.bundleDurable'
-                }
-              : {})
-          }
-        }
-      )
-      children.push(child)
-      child.stdout!.on('data', (bytes) => {
-        logs = (logs + bytes).slice(-16000)
+      const daemon = await startDaemon({
+        entry: fault ? faultEntry : entry,
+        home,
+        readiness: 'runtime',
+        logBytes: 16000,
+        label: 'Task-owned archive daemon',
+        env: fault
+          ? {
+              MOUSSE_ARCHIVE_QA_ROOT: root,
+              MOUSSE_ARCHIVE_QA_FAULT: 'spaces.archive.private.bundleDurable'
+            }
+          : {}
       })
-      child.stderr!.on('data', (bytes) => {
-        logs = (logs + bytes).slice(-16000)
-      })
-      await until(() => {
-        if (child.exitCode !== null || child.signalCode !== null)
-          throw Error('Task-owned archive daemon exited: ' + logs)
-        try {
-          return JSON.parse(readFileSync(join(home, 'mms.runtime.json'), 'utf8')).pid === child.pid
-        } catch {
-          return false
-        }
-      }, 40000)
-      return child
+      daemons.push(daemon)
+      return daemon
     }
     try {
       seed = await MousseMainService.create({
@@ -203,8 +159,8 @@ it.skipIf(process.platform === 'win32')(
       expect((await ok(homes[0], ['net', 'authority', 'transfer', joined.node])).phase).toBe(
         'activated'
       )
-      await stop(source)
-      await stop(target)
+      await source.kill()
+      await target.kill()
       target = await launch(homes[1], true)
       await ok(homes[1], ['net', 'unlock'], passphrases[1])
       const imported = await ok(homes[1], ['spaces', 'import', directory, '--archive-mode', 'move'])
@@ -231,7 +187,7 @@ it.skipIf(process.platform === 'win32')(
       ).toBe(3)
       const crashed = await cli(homes[1], ['spaces', 'activate', space.space])
       expect(crashed.code).not.toBe(0)
-      await until(() => target.signalCode === 'SIGKILL')
+      await until(() => target.child.signalCode === 'SIGKILL')
       expect(JSON.parse(readFileSync(join(root, 'physical-fault.json'), 'utf8'))).toEqual({
         point: 'spaces.archive.private.bundleDurable'
       })
@@ -285,7 +241,7 @@ it.skipIf(process.platform === 'win32')(
       expect(
         (await ok(homes[1], ['spaces', 'post', channel, 'After emitted move'])).position
       ).toEqual({ epoch: 2, seq: 1 })
-      await stop(target)
+      await target.kill()
       probe = await MousseMainService.create({
         homeDir: homes[1],
         repoRoot: root,
@@ -347,14 +303,14 @@ it.skipIf(process.platform === 'win32')(
       expect(
         (await ok(homes[1], ['spaces', 'archive-status', space.space])).operation
       ).toMatchObject({ state: 'activeNew', epoch: 3 })
-      expect(logs).not.toContain(passphrases[0])
-      expect(logs).not.toContain(passphrases[1])
-      expect(logs).not.toContain('Private old plaintext must never export')
+      expect(logs()).not.toContain(passphrases[0])
+      expect(logs()).not.toContain(passphrases[1])
+      expect(logs()).not.toContain('Private old plaintext must never export')
     } finally {
       if (seed) await seed.stop()
       if (probe) await probe.stop()
-      await Promise.all(children.map(stop))
-      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+      await Promise.all(daemons.map((daemon) => daemon.kill()))
+      await temp.close()
     }
   },
   150000

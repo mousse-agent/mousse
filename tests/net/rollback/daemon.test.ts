@@ -1,98 +1,59 @@
-import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterAll, beforeAll, expect, it } from 'vitest'
-import { buildTestCli } from '../helpers/build'
+import { beforeAll, expect, it } from 'vitest'
+import { productBuild } from '../../support/build'
+import { runCli, startDaemon, type Daemon } from '../../support/daemon'
+import { ownedTemp } from '../../support/tmp'
 
-let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
 let entry: string
 beforeAll(async () => {
-  fixture = await buildTestCli()
-  entry = fixture.entry
+  entry = (await productBuild()).entry
 }, 120000)
-afterAll(() => fixture?.cleanup())
-async function until(probe: () => boolean, timeout = 20000): Promise<void> {
-  const deadline = Date.now() + timeout
-  do {
-    if (probe()) return
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  } while (Date.now() < deadline)
-  throw new Error('Owned rollback daemon did not become ready')
-}
 it.skipIf(process.platform === 'win32')(
   'routes emitted production CLI rollback and preserves original public history across actual daemon restart',
   async () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'net-rollback-daemon-'))),
+    const temp = ownedTemp('net-rollback-daemon-'),
+      root = temp.path,
       home = join(root, 'home'),
-      children: ChildProcess[] = []
-    const env = { ...process.env, MOUSSE_HOME: home, MOUSSE_REPO_ROOT: root, NO_COLOR: '1' }
-    const cli = (args: string[], input?: string) =>
-      new Promise<{ code: number | null; data: any }>((resolveResult, reject) => {
-        const child = spawn(process.execPath, [entry, '--home', home, '--json', ...args], {
-          env,
-          stdio: ['pipe', 'pipe', 'pipe']
-        })
-        children.push(child)
-        let output = '',
-          errors = ''
-        const timer = setTimeout(() => {
-          child.kill('SIGKILL')
-          reject(new Error('Owned rollback CLI deadline exceeded'))
-        }, 20000)
-        child.stdout!.on('data', (bytes) => {
-          output += bytes
-        })
-        child.stderr!.on('data', (bytes) => {
-          errors += bytes
-        })
-        child.once('error', (error) => {
-          clearTimeout(timer)
-          reject(error)
-        })
-        child.once('exit', (code) => {
-          clearTimeout(timer)
-          try {
-            resolveResult({ code, data: JSON.parse(code === 0 ? output : errors) })
-          } catch {
-            reject(new Error('Rollback CLI did not return JSON: ' + errors.slice(-1000)))
-          }
-        })
-        child.stdin!.end(input)
+      daemons: Daemon[] = []
+    const cli = async (
+      args: string[],
+      input?: string
+    ): Promise<{ code: number | null; data: any }> => {
+      const result = await runCli({
+        entry,
+        home,
+        args: ['--json', ...args],
+        input,
+        env: { MOUSSE_REPO_ROOT: root },
+        label: 'Owned rollback CLI'
       })
+      try {
+        return {
+          code: result.code,
+          data: JSON.parse(result.code === 0 ? result.stdout : result.stderr)
+        }
+      } catch {
+        throw new Error('Rollback CLI did not return JSON: ' + result.stderr.slice(-1000))
+      }
+    }
     const ok = async (args: string[], input?: string) => {
       const result = await cli(args, input)
       expect(result.code).toBe(0)
       return result.data
     }
-    const launch = async () => {
-      const child = spawn(process.execPath, [entry, '--home', home, 'service', 'run'], {
-        env,
-        stdio: ['ignore', 'pipe', 'pipe']
+    const launch = async (): Promise<Daemon> => {
+      const daemon = await startDaemon({
+        entry,
+        home,
+        repoRoot: root,
+        readiness: 'runtime',
+        timeout: 20000,
+        label: 'Owned rollback daemon'
       })
-      children.push(child)
-      child.stdout!.on('data', () => {})
-      child.stderr!.on('data', () => {})
-      await until(() => {
-        try {
-          return JSON.parse(readFileSync(join(home, 'mms.runtime.json'), 'utf8')).pid === child.pid
-        } catch {
-          return false
-        }
-      })
-      return child
-    }
-    const stop = async (child: ChildProcess) => {
-      if (child.exitCode !== null || child.signalCode !== null) return
-      const ended = new Promise<void>((resolveStop) => child.once('exit', () => resolveStop()))
-      child.kill('SIGTERM')
-      const timer = setTimeout(() => child.kill('SIGKILL'), 5000)
-      try {
-        await ended
-      } finally {
-        clearTimeout(timer)
-      }
+      daemons.push(daemon)
+      return daemon
     }
     const profile = () =>
       join(
@@ -139,7 +100,7 @@ it.skipIf(process.platform === 'win32')(
       expect(await ok(['net', 'status'])).toMatchObject({ enabled: false, restartRequired: true })
       expect(await cli(['net', 'doctor'])).toMatchObject({ code: 1, data: { code: 'disabled' } })
       expect(originals()).toEqual(before)
-      await stop(daemon)
+      await daemon.stop()
       daemon = await launch()
       expect(await ok(['net', 'status'])).toMatchObject({
         enabled: false,
@@ -164,8 +125,8 @@ it.skipIf(process.platform === 'win32')(
       expect(tail.records[0].envelope.body).toEqual({ text: 'original CLI message' })
       expect(originals()).toEqual(before)
     } finally {
-      for (const child of children.reverse()) await stop(child)
-      rmSync(root, { recursive: true, force: true })
+      for (const daemon of daemons.reverse()) await daemon.stop()
+      await temp.close()
     }
   },
   60000

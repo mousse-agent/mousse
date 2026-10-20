@@ -1,11 +1,10 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdtemp, mkdir, writeFile, readFile, realpath, rm, stat, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, realpath, rm, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { devNull, tmpdir } from 'node:os'
 import { fork } from 'node:child_process'
 import { once } from 'node:events'
-import { build } from 'esbuild'
 import { newId, NetError, type RpcArtifactRef } from '../../../../src/shared/net'
 import type { ResolvedAgentDefinition } from '../../../../src/shared/agents/types'
 import { NetDatabase } from '../../../../src/mms/net/store/database'
@@ -27,6 +26,7 @@ import { inputRef, resultRef } from '../../../../src/mms/bridge/dispatch/bundle'
 import { authenticatedRemote } from './http-fixture'
 import { FakeClock } from '../../harness/FakeClock'
 import type { Clock } from '../../../../src/mms/net/contracts'
+import { sharedBuild } from '../../../support/build'
 
 const roots: string[] = [],
   databases: NetDatabase[] = []
@@ -753,11 +753,9 @@ it.each(['preparing', 'running'] as const)(
   async (phase) => {
     const f = await fixture()
     await f.service.bindRepository(f.request.repoId, f.repo)
-    const worker = join(f.root, 'worker.mjs')
-    await symlink(await realpath('node_modules'), join(f.root, 'node_modules'))
-    await build({
+    const worker = await sharedBuild({
       entryPoints: ['tests/net/bridge/dispatch/crash-worker.ts'],
-      outfile: worker,
+      outfile: 'bridge-dispatch-crash-worker.mjs',
       bundle: true,
       packages: 'external',
       platform: 'node',

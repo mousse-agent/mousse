@@ -1,27 +1,21 @@
-import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest'
-import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { afterEach, beforeAll, expect, it, vi } from 'vitest'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { tmpdir } from 'node:os'
-import { fileURLToPath } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
-import { build } from 'esbuild'
 import { cleanup, linkedTaskFixture, profile } from './helpers'
 import { newId, type NodeDelegation, type Roster } from '../../../src/shared/net'
 import { validateChatParams } from '../../../src/mms/chats/registerMethods'
 import { parseProtocolJson } from '../../../src/mms/net/sync/codec'
 import type { DispatchResultBody } from '../../../src/mms/bridge/dispatch'
 import type { Mux } from '../../../src/mms/net/contracts'
+import { cliChild } from '../../support/build'
 
 afterEach(async()=>{for(const close of cleanup.splice(0).reverse())await close()})
-let executable:string,readExecutable:string,buildRoot:string
+let executable:string,readExecutable:string
 beforeAll(async()=>{
-  buildRoot=realpathSync(mkdtempSync(join(tmpdir(),'chats-device-build-')));symlinkSync(resolve('node_modules'),join(buildRoot,'node_modules'),'dir');executable=join(buildRoot,'child.mjs')
-  const {getCliBuildOptions}=await import('../../../scripts/build-cli.mjs')
-  await build({...getCliBuildOptions(process.cwd()),entryPoints:[fileURLToPath(new URL('./crash-child.ts',import.meta.url))],outfile:executable,sourcemap:false,logLevel:'silent'})
-  readExecutable=join(buildRoot,'read-child.mjs')
-  await build({...getCliBuildOptions(process.cwd()),entryPoints:[fileURLToPath(new URL('./tasks-read-child.ts',import.meta.url))],outfile:readExecutable,sourcemap:false,logLevel:'silent'})
-})
-afterAll(()=>rmSync(buildRoot,{recursive:true,force:true}))
+  executable=await cliChild('tests/net/chats/crash-child.ts','chats-crash-child')
+  readExecutable=await cliChild('tests/net/chats/tasks-read-child.ts','chats-tasks-read-child')
+},120_000)
 
 it('rediscovers a SIGKILL-committed prepared task without input and never queries or dispatches it from read APIs',async()=>{
   const f=await linkedTaskFixture();writeFileSync(join(f.caller.home,'chats-crash-task.json'),JSON.stringify(f.selection));await f.caller.services.stop()

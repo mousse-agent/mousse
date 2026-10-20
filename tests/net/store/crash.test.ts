@@ -1,28 +1,16 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
-import { buildSync } from 'esbuild'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { SqliteNetStore } from '../../../src/mms/net/store'
 import { profile } from './helpers'
+import { crashChild } from '../../support/build'
 
 const roots: string[] = []
 let executable: string
-beforeAll(() => {
-  const directory = profile()
-  roots.push(directory)
-  executable = join(directory, 'crash-child.cjs')
-  buildSync({
-    entryPoints: [fileURLToPath(new URL('./crash-child.ts', import.meta.url))],
-    outfile: executable,
-    bundle: true,
-    platform: 'node',
-    format: 'cjs',
-    target: 'node24',
-    logLevel: 'silent'
-  })
-})
+beforeAll(async () => {
+  executable = await crashChild('tests/net/store/crash-child.ts', { target: 'node24' })
+}, 120_000)
 afterAll(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true })
 })

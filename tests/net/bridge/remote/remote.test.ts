@@ -2,9 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { connect } from 'node:net'
-import { fileURLToPath } from 'node:url'
-import { build } from 'esbuild'
-import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { MousseMainService } from '../../../../src/mms/MousseMainService'
@@ -37,6 +35,7 @@ import {
   type Roster
 } from '../../../../src/shared/net'
 import { memoryPair } from '../../harness/MemoryTransport'
+import { cliChild } from '../../../support/build'
 
 const resources: Array<() => void | Promise<void>> = [],
   paths: string[] = []
@@ -365,20 +364,7 @@ describe('P3 real MMS remote Bridge', () => {
   it('records an actual child SIGKILL after a real thread effect as uncertain and never recreates the thread', async () => {
     const p = await setup()
     await p.mms.stop()
-    const binary = join(p.home, 'bridge-crash-child.mjs')
-    symlinkSync(
-      fileURLToPath(new URL('../../../../node_modules', import.meta.url)),
-      join(p.home, 'node_modules')
-    )
-    const { getCliBuildOptions } = await import(
-      fileURLToPath(new URL('../../../../scripts/build-cli.mjs', import.meta.url))
-    )
-    await build({
-      ...getCliBuildOptions(fileURLToPath(new URL('../../../../', import.meta.url))),
-      entryPoints: [fileURLToPath(new URL('./crash-child.ts', import.meta.url))],
-      outfile: binary,
-      sourcemap: false
-    })
+    const binary = await cliChild('tests/net/bridge/remote/crash-child.ts', 'bridge-crash-child')
     const child = spawn(process.execPath, [binary, p.home], { stdio: ['ignore', 'pipe', 'pipe'] }),
       exited = once(child, 'exit')
     let diagnostic = ''

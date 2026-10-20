@@ -1,11 +1,17 @@
-import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
-import { expect, it } from 'vitest'
+import { join } from 'node:path'
+import { beforeAll, expect, it } from 'vitest'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import type { WorkflowRunView } from '../src/shared/workflowRunPlatform'
+import { productBuild } from './support/build'
+import { startDaemon, type Daemon } from './support/daemon'
+
+let entry = ''
+beforeAll(async () => {
+  entry = (await productBuild()).entry
+}, 120_000)
 
 async function until<T>(probe: () => T | Promise<T>, ready: (value: T) => boolean, timeoutMs = 15000): Promise<T> {
   const deadline = Date.now() + timeoutMs
@@ -18,40 +24,20 @@ async function until<T>(probe: () => T | Promise<T>, ready: (value: T) => boolea
   throw new Error('Timed out waiting for daemon crash fixture state: ' + JSON.stringify(value))
 }
 
-async function killAndJoin(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return
-  const exited = new Promise<void>((done) => child.once('exit', () => done()))
-  child.kill('SIGKILL')
-  await exited
-}
-
 it('E2E10 kills the actual MMS daemon after script dispatch and recovers without repeating the effect', async () => {
   const root = mkdtempSync(join(tmpdir(), 'mousse-daemon-crash-'))
   const home = join(root, 'home'), marker = join(root, 'dispatch.txt'), scriptPidPath = join(root, 'script.pid')
-  const children: ChildProcess[] = []
+  const daemons: Daemon[] = []
   let rpc: LocalMmsClient | undefined
   const launch = async () => {
-    let output = ''
-    const child = spawn(process.execPath, [resolve('out/cli/index.js'), '--home', home, 'service', 'run'], {
-      cwd: process.cwd(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, MOUSSE_HOME: home, MOUSSE_REPO_ROOT: root, NO_COLOR: '1' }
-    })
-    children.push(child)
-    child.stdout?.on('data', (chunk) => { output = (output + String(chunk)).slice(-8000) })
-    child.stderr?.on('data', (chunk) => { output = (output + String(chunk)).slice(-8000) })
-    const owner = await until(() => {
-      if (child.exitCode !== null || child.signalCode !== null) throw new Error('Daemon exited before ready: ' + output)
-      try {
-        const runtime = JSON.parse(readFileSync(join(home, 'mms.runtime.json'), 'utf8'))
-        const record = JSON.parse(readFileSync(join(home, 'mms.owner.json'), 'utf8'))
-        return runtime.pid === child.pid && record.pid === child.pid ? record : undefined
-      } catch { return undefined }
-    }, Boolean, 40000).catch((error) => { throw new Error(String(error) + '\n' + output) })
+    const daemon = await startDaemon({ entry, home, repoRoot: root, label: 'Daemon' })
+    daemons.push(daemon)
+    const owner = daemon.owner!
     rpc = new LocalMmsClient({ homeDir: home, endpoint: owner.endpoint, ownerToken: owner.token, clientType: 'gui', requestedCapabilities: ['profiles-v1', 'workflows.definitions.v1', 'workflowRuns.v1'] })
     await rpc.connect()
     const profiles = await rpc.request<{ defaultProfileId: string }>('profiles.list', {})
     await rpc.request('profiles.bind', { profile: profiles.defaultProfileId })
-    return { child, profileId: profiles.defaultProfileId }
+    return { daemon, profileId: profiles.defaultProfileId }
   }
   try {
     const first = await launch()
@@ -82,7 +68,7 @@ it('E2E10 kills the actual MMS daemon after script dispatch and recovers without
     await until(() => existsSync(marker), Boolean)
     expect((await get()).state).toBe('running')
     await rpc!.close(); rpc = undefined
-    await killAndJoin(first.child)
+    await first.daemon.kill()
     const second = await launch()
     expect(second.profileId).toBe(first.profileId)
     const recovered = await until(get, (view) => ['unknown-effect', 'failed', 'succeeded'].includes(view.state))
@@ -96,7 +82,7 @@ it('E2E10 kills the actual MMS daemon after script dispatch and recovers without
     expect(readFileSync(marker, 'utf8')).toBe('dispatch\n')
   } finally {
     await rpc?.close()
-    await Promise.all(children.map(killAndJoin))
+    await Promise.all(daemons.map((daemon) => daemon.kill()))
     if (existsSync(scriptPidPath)) {
       const pid = Number(readFileSync(scriptPidPath, 'utf8'))
       if (Number.isSafeInteger(pid) && pid > 0) { try { process.kill(pid, 'SIGKILL') } catch { /* already joined by the daemon supervisor */ } }

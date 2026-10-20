@@ -1,126 +1,66 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterAll, beforeAll, expect, it } from 'vitest'
+import { beforeAll, expect, it } from 'vitest'
 import { connectDaemonClient } from '../../../src/cli/daemonClient'
 import { newId } from '../../../src/shared/net'
 import { ThreadDataStore } from '../../../src/mms/data/ThreadDataStore'
 import { ProjectManager } from '../../../src/mms/data/ProjectManager'
 
-import { buildTestCli } from '../helpers/build'
+import { stop } from '../helpers/process'
+import { productBuild } from '../../support/build'
+import { runCli, startDaemon, until, type Daemon } from '../../support/daemon'
+import { ownedTemp } from '../../support/tmp'
 
-let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
 let entry: string
 
 beforeAll(async () => {
-  fixture = await buildTestCli()
-  entry = fixture.entry
-}, 60000)
-afterAll(() => fixture?.cleanup())
-async function until<T>(
-  probe: () => T | Promise<T>,
-  ready: (value: T) => boolean,
-  timeout = 20000
-): Promise<T> {
-  const deadline = Date.now() + timeout
-  do {
-    const value = await probe()
-    if (ready(value)) return value
-    await new Promise((resolve) => setTimeout(resolve, 40))
-  } while (Date.now() < deadline)
-  throw new Error('Actual Bridge daemon fixture timed out')
-}
-async function stop(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return
-  const done = new Promise<void>((resolve) => child.once('exit', () => resolve()))
-  child.kill('SIGKILL')
-  await done
-}
+  entry = (await productBuild()).entry
+}, 120000)
 
 it.skipIf(process.platform === 'win32')(
   'runs the actual Bridge CLI across two daemon processes with chunked attach, target-local rename and durable result recovery after both restarts',
   async () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'bridge-daemons-'))),
+    const temp = ownedTemp('bridge-daemons-'),
+      root = temp.path,
       homes = [join(root, 'a'), join(root, 'b')],
+      daemons: Daemon[] = [],
       children: ChildProcess[] = []
     const launch = async (home: string) => {
-      let output = ''
-      const child = spawn(process.execPath, [entry, '--home', home, 'service', 'run'], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, MOUSSE_HOME: home, MOUSSE_REPO_ROOT: root, NO_COLOR: '1' }
+      const daemon = await startDaemon({
+        entry,
+        home,
+        repoRoot: root,
+        readiness: 'runtime',
+        label: 'Bridge daemon'
       })
-      children.push(child)
-      child.stdout!.on('data', (bytes) => {
-        output = (output + bytes).slice(-8000)
-      })
-      child.stderr!.on('data', (bytes) => {
-        output = (output + bytes).slice(-8000)
-      })
-      await until(
-        () => {
-          if (child.exitCode !== null || child.signalCode !== null)
-            throw new Error('Bridge daemon exited: ' + output)
-          try {
-            return (
-              JSON.parse(readFileSync(join(home, 'mms.runtime.json'), 'utf8')).pid === child.pid
-            )
-          } catch {
-            return false
-          }
-        },
-        Boolean,
-        40000
-      )
-      return child
+      daemons.push(daemon)
+      return daemon
     }
-    const cli = (home: string, args: string[], input?: string): Promise<any> =>
-      new Promise((resolve, reject) => {
-        const child = spawn(process.execPath, [entry, '--home', home, '--json', ...args], {
-          stdio: ['pipe', 'pipe', 'pipe'],
-          env: { ...process.env, MOUSSE_HOME: home, NO_COLOR: '1' }
-        })
-        children.push(child)
-        let out = '',
-          error = ''
-        const timer = setTimeout(() => {
-          child.kill('SIGKILL')
-          reject(new Error('Actual Bridge CLI timed out'))
-        }, 20000)
-        child.stdout!.on('data', (bytes) => {
-          out += bytes
-        })
-        child.stderr!.on('data', (bytes) => {
-          error += bytes
-        })
-        child.on('error', (reason) => {
-          clearTimeout(timer)
-          reject(reason)
-        })
-        child.on('exit', (code) => {
-          clearTimeout(timer)
-          if (code !== 0) return reject(new Error('Bridge CLI failed: ' + error.slice(-4000)))
-          try {
-            resolve(
-              args[0] === 'bridge' && args[1] === 'requests'
-                ? out
-                    .trim()
-                    .split('\n')
-                    .filter(Boolean)
-                    .map((line) => JSON.parse(line))
-                : JSON.parse(out)
-            )
-          } catch {
-            reject(
-              new Error(
-                `Bridge CLI ${args.slice(0, 2).join(' ')} returned invalid JSON (${Buffer.byteLength(out)} output bytes)`
-              )
-            )
-          }
-        })
-        child.stdin!.end(input)
+    const cli = async (home: string, args: string[], input?: string): Promise<any> => {
+      const result = await runCli({
+        entry,
+        home,
+        args: ['--json', ...args],
+        input,
+        label: 'Actual Bridge CLI'
       })
+      if (result.code !== 0) throw new Error('Bridge CLI failed: ' + result.stderr.slice(-4000))
+      try {
+        return args[0] === 'bridge' && args[1] === 'requests'
+          ? result.stdout
+              .trim()
+              .split('\n')
+              .filter(Boolean)
+              .map((line) => JSON.parse(line))
+          : JSON.parse(result.stdout)
+      } catch {
+        throw new Error(
+          `Bridge CLI ${args.slice(0, 2).join(' ')} returned invalid JSON (${Buffer.byteLength(result.stdout)} output bytes)`
+        )
+      }
+    }
     const mutations = () => {
       const id = JSON.parse(
         readFileSync(join(homes[0], 'installation.json'), 'utf8')
@@ -230,8 +170,8 @@ it.skipIf(process.platform === 'win32')(
       const before = mutations()
       expect(before).toHaveLength(1)
       expect(before[0].state).toBe('completed')
-      await stop(a)
-      await stop(b)
+      await a.kill()
+      await b.kill()
       a = await launch(homes[0])
       b = await launch(homes[1])
       await cli(homes[0], ['net', 'unlock'], 'target-protection')
@@ -248,8 +188,8 @@ it.skipIf(process.platform === 'win32')(
       ).toBe(true)
       expect(mutations()).toEqual(before)
     } finally {
-      await Promise.all(children.map(stop))
-      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+      await Promise.all([...daemons.map((daemon) => daemon.kill()), ...children.map(stop)])
+      await temp.close()
     }
   },
   120000

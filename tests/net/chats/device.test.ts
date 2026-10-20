@@ -1,22 +1,17 @@
-import { afterAll, afterEach, beforeAll, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { afterEach, beforeAll, expect, it } from 'vitest'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { tmpdir } from 'node:os'
-import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
-import { build } from 'esbuild'
 import { cleanup, linkedTaskFixture, profile } from './helpers'
 import { newId, type NodeDelegation, type Roster } from '../../../src/shared/net'
 import { validateChatParams } from '../../../src/mms/chats/registerMethods'
+import { cliChild } from '../../support/build'
 
 afterEach(async()=>{for(const close of cleanup.splice(0).reverse())await close()})
-let executable:string,buildRoot:string
+let executable:string
 beforeAll(async()=>{
-  buildRoot=realpathSync(mkdtempSync(join(tmpdir(),'chats-device-build-')));symlinkSync(resolve('node_modules'),join(buildRoot,'node_modules'),'dir');executable=join(buildRoot,'child.mjs')
-  const {getCliBuildOptions}=await import('../../../scripts/build-cli.mjs')
-  await build({...getCliBuildOptions(process.cwd()),entryPoints:[fileURLToPath(new URL('./crash-child.ts',import.meta.url))],outfile:executable,sourcemap:false,logLevel:'silent'})
-})
-afterAll(()=>rmSync(buildRoot,{recursive:true,force:true}))
+  executable=await cliChild('tests/net/chats/crash-child.ts','chats-crash-child')
+},120_000)
 
 it('prepares a chat-bound device task then executes exactly once in the actual target Native thread/worktree over same-user TLS',async()=>{
   const f=await linkedTaskFixture();await f.target.services.bridge.dispatch.bindRepository(f.selection.input.repoId,f.repo)

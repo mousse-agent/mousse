@@ -2,20 +2,17 @@ import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { afterAll, afterEach, beforeAll, expect, it } from 'vitest'
-import { buildTestCli } from '../helpers/build'
+import { afterEach, beforeAll, expect, it } from 'vitest'
+import { productBuild } from '../../support/build'
 import { newId } from '../../../src/shared/net/ids'
 import { prepareRelayCommand } from '../../../src/cli/commands/relay'
 import { parseArgs } from '../../../src/cli/parseArgs'
 import { endpoint, identity } from '../relay/endpoints'
 
-let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
 let entry: string
 beforeAll(async () => {
-  fixture = await buildTestCli()
-  entry = fixture.entry
+  entry = (await productBuild()).entry
 }, 120000)
-afterAll(() => fixture?.cleanup())
 
 const cleanup: Array<() => Promise<unknown> | void> = []
 afterEach(async () => {

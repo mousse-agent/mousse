@@ -3,9 +3,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { connect } from 'node:net'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { writeFileSync } from 'node:fs'
-import { buildSync } from 'esbuild'
 import { openSecureChannel } from '../../../../src/mms/net/link/secureChannel'
 import { fingerprint } from '../../../../src/mms/net/link/selfSignedCert'
 import { createMux } from '../../../../src/mms/net/link/mux'
@@ -14,6 +12,7 @@ import { parseSpaceInvite, spaceJoinRequest } from '../../../../src/mms/spaces/h
 import { systemClock } from '../../../../src/mms/net/clock'
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
 import { profile, cleanup, disposers, peer, trust } from './helpers'
+import { crashChild } from '../../../support/build'
 afterEach(cleanup)
 describe('actual TCP TLS host process kill and recovery', () => {
   for (const mode of ['before', 'after'])
@@ -22,16 +21,7 @@ describe('actual TCP TLS host process kill and recovery', () => {
         b = await profile(systemClock as any, 'Member'),
         space = a.host.create({ name: 'Process' }),
         invite = parseSpaceInvite(a.host.invite(space.space).text),
-        executable = join(a.path, 'space-crash-child.cjs')
-      buildSync({
-        entryPoints: [fileURLToPath(new URL('./crash-child.ts', import.meta.url))],
-        outfile: executable,
-        bundle: true,
-        platform: 'node',
-        format: 'cjs',
-        target: 'node24',
-        logLevel: 'silent'
-      })
+        executable = await crashChild('tests/net/spaces/host/crash-child.ts', { target: 'node24' })
       a.store.close()
       a.db.close()
       async function child(childMode: string) {
@@ -149,17 +139,10 @@ describe('actual TCP TLS host process kill and recovery', () => {
         records = reader.next(1024 * 1024, 64).records
       reader.close()
       replica.store.createStream(descriptor, 1)
-      const executable = join(replica.path, 'snapshot-crash-child.cjs'),
+      const executable = await crashChild('tests/net/spaces/host/crash-child.ts', {
+          target: 'node24'
+        }),
         input = join(replica.path, 'snapshot-input.json')
-      buildSync({
-        entryPoints: [fileURLToPath(new URL('./crash-child.ts', import.meta.url))],
-        outfile: executable,
-        bundle: true,
-        platform: 'node',
-        format: 'cjs',
-        target: 'node24',
-        logLevel: 'silent'
-      })
       writeFileSync(
         input,
         JSON.stringify({

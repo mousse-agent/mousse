@@ -11,6 +11,7 @@ const PROCESS_MARKERS = [
   /electron|chromium|puppeteer|playwright/i,
   /fixtures\/(gitFoundation|resource-lifecycle-qualification)/,
   /\/(ownedTemp|terminateChild|http-fixture|pin|environment)'/,
+  /\/support\/(build|daemon)'/,
   /buildNativeReader/
 ]
 const PROCESS_PATHS = [/^tests\/net\/chats\//]

@@ -1,100 +1,39 @@
-import { fork, spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { fork, type ChildProcess } from 'node:child_process'
+import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterAll, beforeAll, expect, it } from 'vitest'
+import { beforeAll, expect, it } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
 import type { NetStatus } from '../../../src/shared/net/local'
 
-import { buildTestCli } from '../helpers/build'
-import { stop, until } from '../helpers/process'
+import { stop } from '../helpers/process'
+import { productBuild } from '../../support/build'
+import { cliJson, startDaemon, until, type Daemon } from '../../support/daemon'
+import { ownedTemp } from '../../support/tmp'
 
-let buildFixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
 let entry: string, responseEntry: string
 beforeAll(async () => {
-  buildFixture = await buildTestCli()
-  entry = buildFixture.entry
-  responseEntry = await buildFixture.buildEntry(
+  const product = await productBuild()
+  entry = product.entry
+  responseEntry = await product.buildEntry(
     'tests/net/cli/authority-response-child.ts',
     'cli/authority-response.js'
   )
-}, 60_000)
-afterAll(() => buildFixture?.cleanup())
+}, 120_000)
 it.skipIf(process.platform === 'win32')(
   'recovers a lost CLI authority-transfer response through original daemon receipts after both restarts and imports the encrypted recovery file',
   async () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'net-daemon-'))),
+    const temp = ownedTemp('net-daemon-'),
+      root = temp.path,
       homes = [join(root, 'a'), join(root, 'b')],
+      daemons: Daemon[] = [],
       children: ChildProcess[] = []
-    const launch = async (home: string): Promise<ChildProcess> => {
-      let output = ''
-      const child = spawn(process.execPath, [entry, '--home', home, 'service', 'run'], {
-        cwd: process.cwd(),
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, MOUSSE_HOME: home, MOUSSE_REPO_ROOT: root, NO_COLOR: '1' }
-      })
-      children.push(child)
-      child.stdout!.on('data', (b) => {
-        output = (output + String(b)).slice(-8000)
-      })
-      child.stderr!.on('data', (b) => {
-        output = (output + String(b)).slice(-8000)
-      })
-      await until(
-        () => {
-          if (child.exitCode !== null || child.signalCode !== null)
-            throw new Error('Daemon exited before readiness: ' + output)
-          try {
-            return (
-              JSON.parse(readFileSync(join(home, 'mms.runtime.json'), 'utf8')).pid === child.pid &&
-              JSON.parse(readFileSync(join(home, 'mms.owner.json'), 'utf8')).pid === child.pid
-            )
-          } catch {
-            return false
-          }
-        },
-        Boolean,
-        40000
-      )
-      return child
+    const launch = async (home: string): Promise<Daemon> => {
+      const daemon = await startDaemon({ entry, home, repoRoot: root, label: 'Network daemon' })
+      daemons.push(daemon)
+      return daemon
     }
     const cli = (home: string, args: string[], input?: string): Promise<any> =>
-      new Promise((resolve, reject) => {
-        const child = spawn(process.execPath, [entry, '--home', home, '--json', ...args], {
-          stdio: ['pipe', 'pipe', 'pipe'],
-          env: { ...process.env, MOUSSE_HOME: home, NO_COLOR: '1' }
-        })
-        children.push(child)
-        let out = '',
-          error = ''
-        const timer = setTimeout(() => {
-          child.kill('SIGKILL')
-          reject(new Error('Network CLI timed out'))
-        }, 20000)
-        child.stdout!.on('data', (b) => {
-          out += String(b)
-        })
-        child.stderr!.on('data', (b) => {
-          error += String(b)
-        })
-        child.on('error', (e) => {
-          clearTimeout(timer)
-          reject(e)
-        })
-        child.on('exit', (code) => {
-          clearTimeout(timer)
-          if (code !== 0) {
-            reject(new Error('Network CLI failed: ' + error.slice(-4000)))
-            return
-          }
-          try {
-            resolve(JSON.parse(out))
-          } catch {
-            reject(new Error('Network CLI returned invalid JSON'))
-          }
-        })
-        child.stdin!.end(input)
-      })
+      cliJson({ entry, home, args: ['--json', ...args], input, label: 'Network CLI' })
     const profile = (home: string) =>
       join(
         home,
@@ -210,8 +149,8 @@ it.skipIf(process.platform === 'win32')(
       )
       expect((await cli(homes[0], ['net', 'status'])).self.isAuthority).toBe(false)
       expect((await cli(homes[1], ['net', 'status'])).self.isAuthority).toBe(true)
-      await stop(a)
-      await stop(b)
+      await a.kill()
+      await b.kill()
       a = await launch(homes[0])
       b = await launch(homes[1])
       expect((await cli(homes[0], ['net', 'status'])).keystore).toBe('locked')
@@ -229,7 +168,7 @@ it.skipIf(process.platform === 'win32')(
         phase: 'finalized',
         transfer: ids[0].transfer
       })
-      await stop(b)
+      await b.kill()
       expect(
         await cli(
           homes[0],
@@ -242,8 +181,8 @@ it.skipIf(process.platform === 'win32')(
       expect(recovered.recoveryEpoch).toBeGreaterThan(before.recoveryEpoch)
       expect(delivery()).toEqual(ids)
     } finally {
-      await Promise.all(children.map(stop))
-      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+      await Promise.all([...daemons.map((daemon) => daemon.kill()), ...children.map(stop)])
+      await temp.close()
     }
   },
   120000

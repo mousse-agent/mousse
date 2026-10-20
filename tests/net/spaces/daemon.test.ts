@@ -1,118 +1,41 @@
-import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, beforeAll, expect, it } from 'vitest'
+import { beforeAll, expect, it } from 'vitest'
 import type { SpaceLocalDelivery, SpaceLocalTail } from '../../../src/shared/spaces/local'
 
-import { buildTestCli } from '../helpers/build'
+import { productBuild } from '../../support/build'
+import { cliJson, startDaemon, until as waitUntil, type Daemon } from '../../support/daemon'
+import { ownedTemp } from '../../support/tmp'
 
-let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
 let entry: string
 
 beforeAll(async () => {
-  fixture = await buildTestCli()
-  entry = fixture.entry
-}, 60000)
-afterAll(() => fixture?.cleanup())
-async function until<T>(
-  probe: () => T | Promise<T>,
-  ready: (value: T) => boolean,
-  timeout = 30000
-): Promise<T> {
-  const deadline = Date.now() + timeout
-  do {
-    const value = await probe()
-    if (ready(value)) return value
-    await new Promise((resolve) => setTimeout(resolve, 50))
-  } while (Date.now() < deadline)
-  throw new Error('Space daemon qualification timed out')
-}
-async function kill(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return
-  const done = new Promise<void>((resolve) => child.once('exit', () => resolve()))
-  child.kill('SIGKILL')
-  await done
-}
+  entry = (await productBuild()).entry
+}, 120000)
+const until = <T>(probe: () => T | Promise<T>, ready: (value: T) => boolean, timeout = 30000) =>
+  waitUntil(probe, ready, timeout, 'Space daemon qualification timed out')
 it('holds a three-daemon public conversation through each SIGKILL restart, preserving sent originals once and pending-author FIFO', async () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'spaces-daemon-'))),
+  const temp = ownedTemp('spaces-daemon-'),
+    root = temp.path,
     homes = ['a', 'b', 'c'].map((name) => join(root, name)),
-    children: ChildProcess[] = [],
+    started: Daemon[] = [],
     authored: Array<{ author: number; delivery: SpaceLocalDelivery; text: string }> = [],
     passphrase = 'actual-space-daemon-protection'
-  const launch = async (home: string): Promise<ChildProcess> => {
-    let output = ''
-    const child = spawn(process.execPath, [entry, '--home', home, 'service', 'run'], {
-      cwd: process.cwd(),
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, MOUSSE_HOME: home, MOUSSE_REPO_ROOT: root, NO_COLOR: '1' }
-    })
-    children.push(child)
-    child.stdout!.on('data', (bytes) => {
-      output = (output + String(bytes)).slice(-8000)
-    })
-    child.stderr!.on('data', (bytes) => {
-      output = (output + String(bytes)).slice(-8000)
-    })
-    await until(
-      () => {
-        if (child.exitCode !== null || child.signalCode !== null)
-          throw new Error('Space daemon exited before readiness: ' + output)
-        try {
-          return (
-            JSON.parse(readFileSync(join(home, 'mms.runtime.json'), 'utf8')).pid === child.pid &&
-            JSON.parse(readFileSync(join(home, 'mms.owner.json'), 'utf8')).pid === child.pid
-          )
-        } catch {
-          return false
-        }
-      },
-      Boolean,
-      40000
-    )
-    return child
+  const launch = async (home: string): Promise<Daemon> => {
+    const daemon = await startDaemon({ entry, home, repoRoot: root, label: 'Space daemon' })
+    started.push(daemon)
+    return daemon
   }
   const cli = (author: number, args: string[], input?: string): Promise<any> =>
-    new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [entry, '--home', homes[author], '--json', ...args], {
-        cwd: process.cwd(),
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, MOUSSE_HOME: homes[author], MOUSSE_REPO_ROOT: root, NO_COLOR: '1' }
-      })
-      children.push(child)
-      let output = '',
-        error = ''
-      const timer = setTimeout(() => {
-        child.kill('SIGKILL')
-        reject(new Error('Space CLI timed out: ' + args.slice(0, 2).join(' ')))
-      }, 30000)
-      child.stdout!.on('data', (bytes) => {
-        output += String(bytes)
-      })
-      child.stderr!.on('data', (bytes) => {
-        error += String(bytes)
-      })
-      child.on('error', (cause) => {
-        clearTimeout(timer)
-        reject(cause)
-      })
-      child.on('exit', (code) => {
-        clearTimeout(timer)
-        if (code !== 0) {
-          reject(
-            new Error('Space CLI failed ' + args.slice(0, 2).join(' ') + ': ' + error.slice(-4000))
-          )
-          return
-        }
-        try {
-          resolve(JSON.parse(output))
-        } catch {
-          reject(new Error('Space CLI returned invalid JSON: ' + output.slice(-4000)))
-        }
-      })
-      child.stdin!.end(input)
+    cliJson({
+      entry,
+      home: homes[author],
+      args: ['--json', ...args],
+      input,
+      env: { MOUSSE_REPO_ROOT: root },
+      timeout: 30000,
+      label: 'Space CLI'
     })
-  let daemons: ChildProcess[] = [],
+  let daemons: Daemon[] = [],
     space = '',
     stream = ''
   const post = async (author: number, text: string): Promise<SpaceLocalDelivery> => {
@@ -157,8 +80,8 @@ it('holds a three-daemon public conversation through each SIGKILL restart, prese
     for (let author = 0; author < 3; author++)
       expect((await post(author, `initial-${author}`)).state).toBe('sent')
     // Kill/restart the authority first. Both independent members retain pending originals.
-    await kill(daemons[0])
-    expect(daemons[0].signalCode).toBe('SIGKILL')
+    await daemons[0].kill()
+    expect(daemons[0].child.signalCode).toBe('SIGKILL')
     for (const author of [1, 2])
       await until(
         () => cli(author, ['spaces', 'list']),
@@ -171,14 +94,14 @@ it('holds a three-daemon public conversation through each SIGKILL restart, prese
     for (const record of authored) await delivered(record)
     // Kill/restart each member in turn; sent events continue while its replica is absent.
     for (const author of [1, 2]) {
-      await kill(daemons[author])
-      expect(daemons[author].signalCode).toBe('SIGKILL')
+      await daemons[author].kill()
+      expect(daemons[author].child.signalCode).toBe('SIGKILL')
       for (const sender of [0, 1, 2].filter((sender) => sender !== author))
         expect((await post(sender, `while-${author}-offline-from-${sender}`)).state).toBe('sent')
       await restart(author)
     }
     // Also kill a pending author while the host is absent: its durable FIFO survives two restarts.
-    await kill(daemons[0])
+    await daemons[0].kill()
     await until(
       () => cli(1, ['spaces', 'list']),
       (value) => value.spaces[0].offline === true
@@ -187,7 +110,7 @@ it('holds a three-daemon public conversation through each SIGKILL restart, prese
       pendingB = await post(1, 'pending-author two')
     expect(pendingA.state).toBe('pending')
     expect(pendingB.state).toBe('pending')
-    await kill(daemons[1])
+    await daemons[1].kill()
     await restart(1)
     const pendingC = await post(1, 'pending-author three')
     expect(pendingC.state).toBe('pending')
@@ -224,7 +147,7 @@ it('holds a three-daemon public conversation through each SIGKILL restart, prese
     expect(new Set(self.map((value) => value.self.user)).size).toBe(3)
     expect(new Set(self.map((value) => value.self.node)).size).toBe(3)
   } finally {
-    await Promise.all(children.map(kill))
-    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    await Promise.all(started.map((daemon) => daemon.kill()))
+    await temp.close()
   }
 }, 180000)

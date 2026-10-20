@@ -1,11 +1,17 @@
-import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { expect, it } from 'vitest'
+import { beforeAll, expect, it } from 'vitest'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import type { Thread } from '../src/shared/types'
+import { productBuild } from './support/build'
+import { startDaemon, type Daemon } from './support/daemon'
+
+let entry = ''
+beforeAll(async () => {
+  entry = (await productBuild()).entry
+}, 120_000)
 
 async function until<T>(probe: () => T | Promise<T>, ready: (value: T) => boolean, timeoutMs = 15_000): Promise<T> {
   const deadline = Date.now() + timeoutMs
@@ -18,41 +24,24 @@ async function until<T>(probe: () => T | Promise<T>, ready: (value: T) => boolea
   throw new Error('Lifecycle daemon state did not arrive: ' + JSON.stringify(value!))
 }
 
-async function killAndJoin(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return
-  const exited = new Promise<void>((done) => child.once('exit', () => done()))
-  child.kill('SIGKILL')
-  await exited
-}
-
 it('recovers actual daemon crashes immediately after trash AND restore rename, preserving bytes and idle admission', async () => {
   const root = mkdtempSync(join(tmpdir(), 'resource-lifecycle-daemon-'))
   const home = join(root, 'home'), control = join(root, 'fault.json'), marker = join(root, 'renamed.json')
-  const children: ChildProcess[] = []
+  const daemons: Daemon[] = []
   let rpc: LocalMmsClient | undefined
   const launch = async () => {
-    let output = ''
-    const child = spawn(process.execPath, ['--import', pathToFileURL(resolve('tests/fixtures/resource-lifecycle-crash-preload.mjs')).href,
-      resolve('out/cli/index.js'), '--home', home, 'service', 'run'], {
-      cwd: process.cwd(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, MOUSSE_HOME: home, MOUSSE_REPO_ROOT: root, RESOURCE_LIFECYCLE_CRASH_CONTROL: control, NO_COLOR: '1' }
+    const daemon = await startDaemon({
+      entry, home, repoRoot: root, label: 'Lifecycle daemon',
+      nodeArgs: ['--import', pathToFileURL(resolve('tests/fixtures/resource-lifecycle-crash-preload.mjs')).href],
+      env: { RESOURCE_LIFECYCLE_CRASH_CONTROL: control }
     })
-    children.push(child)
-    child.stdout?.on('data', (chunk) => { output = (output + String(chunk)).slice(-8000) })
-    child.stderr?.on('data', (chunk) => { output = (output + String(chunk)).slice(-8000) })
-    const owner = await until(() => {
-      if (child.exitCode !== null || child.signalCode !== null) throw new Error('Lifecycle daemon exited: ' + output)
-      try {
-        const runtime = JSON.parse(readFileSync(join(home, 'mms.runtime.json'), 'utf8'))
-        const record = JSON.parse(readFileSync(join(home, 'mms.owner.json'), 'utf8'))
-        return runtime.pid === child.pid && record.pid === child.pid ? record : undefined
-      } catch { return undefined }
-    }, Boolean, 40_000).catch((error) => { throw new Error(String(error) + '\n' + output) })
+    daemons.push(daemon)
+    const owner = daemon.owner!
     rpc = new LocalMmsClient({ homeDir: home, endpoint: owner.endpoint, ownerToken: owner.token, clientType: 'gui', requestedCapabilities: ['profiles-v1'] })
     await rpc.connect()
     const { defaultProfileId } = await rpc.request<{ defaultProfileId: string }>('profiles.list', {})
     await rpc.request('profiles.bind', { profile: defaultProfileId })
-    return { child, profileId: defaultProfileId }
+    return { daemon, profileId: defaultProfileId }
   }
   try {
     const first = await launch()
@@ -67,7 +56,7 @@ it('recovers actual daemon crashes immediately after trash AND restore rename, p
     writeFileSync(join(original, 'sole-copy.bin'), payload)
     writeFileSync(control, JSON.stringify({ from: original, marker }))
     await rpc!.request('threads.trash', { threadId: thread.id }).catch(() => undefined)
-    await until(() => first.child.exitCode !== null || first.child.signalCode !== null, Boolean)
+    await until(() => first.daemon.done, Boolean)
     expect(existsSync(marker), 'fault must actually intercept the completed rename').toBe(true)
     const moved = JSON.parse(readFileSync(marker, 'utf8'))
     expect(readFileSync(join(moved.to, 'sole-copy.bin'))).toEqual(payload)
@@ -87,7 +76,7 @@ it('recovers actual daemon crashes immediately after trash AND restore rename, p
     rmSync(marker)
     writeFileSync(control, JSON.stringify({ to: original, marker }))
     await rpc!.request('threads.restore', { threadId: thread.id }).catch(() => undefined)
-    await until(() => second.child.exitCode !== null || second.child.signalCode !== null, Boolean)
+    await until(() => second.daemon.done, Boolean)
     expect(existsSync(marker), 'restore must reach its rename boundary').toBe(true)
     expect(readFileSync(join(original, 'sole-copy.bin'))).toEqual(payload)
     await rpc!.close(); rpc = undefined
@@ -105,7 +94,7 @@ it('recovers actual daemon crashes immediately after trash AND restore rename, p
     expect((await rpc!.request<{ thread: Thread }>('threads.get', { threadId: thread.id })).thread.name).toBe('fresh write after recovery')
   } finally {
     await rpc?.close()
-    await Promise.all(children.map(killAndJoin))
+    await Promise.all(daemons.map((daemon) => daemon.kill()))
     if (!basename(root).startsWith('resource-lifecycle-daemon-')) throw new Error('Unsafe fixture cleanup')
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }

@@ -8,13 +8,11 @@ import { ProviderAuthService } from '../../../src/mms/providers/ProviderAuthServ
 import { LegacyControlCredentials } from '../../../src/mms/profiles/migration/LegacyControlCredentials'
 import { FIXTURE_CONTROL_CREDENTIALS } from '../../../src/shared/profiles'
 import { writeOriginalControlCredentials } from '../../fixtures/agent-platform/migration-crash/legacyCredentials'
-import { buildTestCli } from '../helpers/build'
+import { productBuild } from '../../support/build'
 
 const roots: string[] = []
-const builds: Array<() => void> = []
 afterEach(() => {
   vi.restoreAllMocks()
-  for (const cleanup of builds.splice(0)) cleanup()
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 5 })
 })
 function temporary(): string {
@@ -69,9 +67,7 @@ describe('retired Control backend files', () => {
   }, 30_000)
 
   it('retired CLI commands fail before daemon creation or credential changes', async () => {
-    const built = await buildTestCli()
-    builds.push(built.cleanup)
-    const bundle = built.entry
+    const bundle = (await productBuild()).entry
     const root = temporary(),
       home = join(root, 'home')
     mkdirSync(home)
