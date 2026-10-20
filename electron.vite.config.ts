@@ -66,6 +66,17 @@ export default defineConfig({
   },
   renderer: {
     root: resolve(__dirname, 'src/renderer'),
+    resolve: {
+      alias: [
+        // Read aloud runs Kokoro on the CPU WebAssembly build only; the default entry bundles the
+        // 21 MB WebGPU build that is never used.
+        { find: /^onnxruntime-web$/, replacement: 'onnxruntime-web/wasm' },
+        // The package exports do not expose dist/*; the worker imports the runtime files as assets.
+        { find: '@onnxruntime-web-dist', replacement: resolve(__dirname, 'node_modules/onnxruntime-web/dist') }
+      ]
+    },
+    // Module workers can import dynamically, which needs ES output instead of IIFE.
+    worker: { format: 'es' },
     server: { host: '127.0.0.1', port: rendererPort, strictPort: true },
     build: {
       rollupOptions: {

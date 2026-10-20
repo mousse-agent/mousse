@@ -2,6 +2,7 @@ import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import type { BridgeDisplayPart } from '../shared/bridge'
+import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { WindowResizeEdge } from '../shared/windowResize'
 import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity, NamedAgentRequest, NamedAgentRecallRequest, NamedAgentIntegrationRequest, NamedAgentIntegrationReview } from '../shared/agentEpisodes'
 import type {
@@ -811,6 +812,29 @@ const api = {
         cb(providers)
       ipcRenderer.on('providers:changed', handler)
       return () => ipcRenderer.removeListener('providers:changed', handler)
+    }
+  },
+  readAloud: {
+    /** Download state of every local text-to-speech model. */
+    localModels: (): Promise<LocalTtsModelStatus[]> => ipcRenderer.invoke('readAloud:localModels'),
+    /** Downloads a local model from Hugging Face; resolves with its final state. */
+    downloadLocalModel: (modelId: LocalTtsModelId): Promise<LocalTtsModelStatus> =>
+      ipcRenderer.invoke('readAloud:downloadLocalModel', modelId),
+    cancelLocalModelDownload: (modelId: LocalTtsModelId): Promise<void> =>
+      ipcRenderer.invoke('readAloud:cancelLocalModelDownload', modelId),
+    /** Removes a downloaded local model's files; resolves with its new (not-downloaded) state. */
+    deleteLocalModel: (modelId: LocalTtsModelId): Promise<LocalTtsModelStatus> =>
+      ipcRenderer.invoke('readAloud:deleteLocalModel', modelId),
+    /** Bytes of one file of a downloaded local model. */
+    readLocalModelFile: (modelId: LocalTtsModelId, path: string): Promise<Uint8Array> =>
+      ipcRenderer.invoke('readAloud:readLocalModelFile', modelId, path),
+    /** Speech audio for at most PROVIDER_TTS_MAX_CHARS characters, made with a provider's TTS model. */
+    synthesizeWithProvider: (request: ProviderSpeechRequest): Promise<ProviderSpeechResult> =>
+      ipcRenderer.invoke('readAloud:synthesizeWithProvider', request),
+    onLocalModelStatus: (cb: (status: LocalTtsModelStatus) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, status: LocalTtsModelStatus) => cb(status)
+      ipcRenderer.on('readAloud:localModelStatus', handler)
+      return () => ipcRenderer.removeListener('readAloud:localModelStatus', handler)
     }
   },
   app: {

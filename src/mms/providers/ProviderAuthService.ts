@@ -13,6 +13,7 @@ import type {
   ProvidersUsageResponse,
   ProviderUsageWindow
 } from '../../shared/providerAuth'
+import { isTtsModelId, providerTtsVoice, type ProviderSpeechRequest, type ProviderSpeechResult } from '../../shared/readAloud'
 import { getMousseHomeDir } from '../data/paths'
 import {
   CLAUDE_PROVIDER_ID,
@@ -30,6 +31,7 @@ import { enhanceProvidersWithOpenAiCompatibleFetch } from './openAiCompatibleMod
 import { PiCatalogOverlay } from './piCatalogOverlay'
 import { enhanceOpenAiCodexProvider } from './openAiCodexModelFetch'
 import { getProviderDisplayName as getProductProviderDisplayName } from './providerMetadata'
+import { requestOpenAiSpeech } from './providerSpeech'
 import { fetchGrokCreditsViaGrpc, grokCliBillingHeaders } from './xaiBilling'
 
 const AMBIENT_PROVIDERS: Record<string, AmbientProviderInfo> = {
@@ -544,6 +546,20 @@ export class ProviderAuthService {
       return `${window.label}: ${usedPercent}% used${reset}`
     })
     return [`${label} usage:`, ...lines.map((line) => `- ${line}`)].join('\n')
+  }
+
+  /** Speaks text with a provider's OpenAI-compatible text-to-speech model. */
+  async synthesizeSpeech(request: ProviderSpeechRequest, fetchImpl?: typeof fetch): Promise<ProviderSpeechResult> {
+    const { providerId, modelId, text } = request
+    const label = this.getProviderDisplayName(providerId)
+    const voice = isTtsModelId(modelId) ? providerTtsVoice(providerId, modelId) : undefined
+    if (!voice) throw new Error(`${label} has no supported text-to-speech voice for ${modelId}`)
+    const models = this.models.getModels(providerId)
+    const baseUrl = (models.find((model) => model.id === modelId) ?? models[0])?.baseUrl
+    if (!baseUrl) throw new Error(`${label} has no known API address for text-to-speech`)
+    const apiKey = this.getStoredApiKey(providerId)
+    if (!apiKey) throw new Error(`${label} is not signed in. Add its API key in Settings.`)
+    return requestOpenAiSpeech({ baseUrl, apiKey, model: modelId, voice, text, providerLabel: label, fetchImpl })
   }
 
   /** Stored API key with env fallback (e.g. OPENCODE_API_KEY for OpenCode Go). */
