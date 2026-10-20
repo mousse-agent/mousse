@@ -142,23 +142,33 @@ describe('owned-path containment', () => {
   it('rejects a dangling symlink that leads outside the root, directly or through another link', () => {
     const root = tempRoot()
     const outside = join(root, '..', 'outside')
+    mkdirSync(join(outside, 'dir'), { recursive: true })
     // direct -> outside/missing
     // indirect -> root/via/missing, where via -> outside/missing
     if (!link(join(outside, 'missing'), join(root, 'direct'))) return
     if (!link(join(outside, 'missing'), join(root, 'via'))) return
     if (!link(join(root, 'via', 'missing'), join(root, 'indirect'))) return
+    const names = ['direct', 'indirect']
+    // climb -> root/up/../missing, where up -> outside/dir. The filesystem follows
+    // `up` before `..`, so the target is outside/missing. Junctions store a
+    // normalized absolute target, so this fixture only exists off Windows.
+    if (process.platform !== 'win32') {
+      link(join(outside, 'dir'), join(root, 'up'))
+      symlinkSync(`${root}/up/../missing`, join(root, 'climb'))
+      names.push('climb')
+    }
 
-    for (const name of ['direct', 'indirect']) {
+    for (const name of names) {
       expect(() => assertOwnedPath(root, join(root, name, 'child'))).toThrow(ProfilePathError)
       expect(() => joinOwnedPath(root, name, 'child')).toThrow(ProfilePathError)
     }
   })
 
-  it('accepts a dangling symlink whose target stays inside the root', () => {
+  it('resolves a dangling symlink that stays inside the root to its target', () => {
     const root = tempRoot()
     if (!link(join(root, 'missing'), join(root, 'link'))) return
 
-    expect(assertOwnedPath(root, join(root, 'link', 'child'))).toBe(join(root, 'link', 'child'))
+    expect(assertOwnedPath(root, join(root, 'link', 'child'))).toBe(join(root, 'missing', 'child'))
   })
 
   it('rejects a symlink cycle under the root', () => {
