@@ -180,13 +180,6 @@ export interface TurnResult {
    */
   nativeMessages: Message[]
   providerRef: ProviderRef
-  /**
-   * Whether the provider's native thread can be continued next turn. `broken`: the saved native
-   * thread could not be resumed (Codex `thread/resume` failed), so this turn ran on a fresh native
-   * thread with the history injected as a prompt; the old native thread is abandoned. Absent for
-   * runtimes that do not keep a native thread Mousse resumes.
-   */
-  threadDisposition?: 'reusable' | 'broken'
 }
 
 /**

@@ -232,8 +232,7 @@ describe('CodexAdapter', () => {
       usage: { input: 400, output: 30, cacheRead: 800, cacheWrite: 0 },
       contextSignature: 'codex:gpt-x',
       nativeMessages: [],
-      providerRef: { provider: 'codex', model: 'gpt-x', sessionId: T, nativeTurnId: 'turn-1' },
-      threadDisposition: 'reusable'
+      providerRef: { provider: 'codex', model: 'gpt-x', sessionId: T, nativeTurnId: 'turn-1' }
     })
     const refs = sink.calls.filter(([name]) => name === 'providerRef').map(([, ref]) => ref)
     expect(refs).toEqual([
@@ -281,7 +280,7 @@ describe('CodexAdapter', () => {
     await adapter.startTurn(input(), recordingSink(), control(), host())
     const second = await adapter.startTurn(input({ prompt: 'again', nativeHistory: 'history+one' }), recordingSink(), control(), host())
     first.assertDone()
-    expect(second).toMatchObject({ text: 'two', threadDisposition: 'reusable' })
+    expect(second).toMatchObject({ text: 'two' })
     codex.stop()
 
     // New process: `thread/resume` with the saved id, no history preamble.
@@ -297,10 +296,10 @@ describe('CodexAdapter', () => {
     services.push(reopened)
     const third = await new CodexAdapter(() => reopened).startTurn(input({ prompt: 'third', nativeHistory: 'history+two' }), recordingSink(), control(), host())
     resumed.assertDone()
-    expect(third).toMatchObject({ text: 'three', threadDisposition: 'reusable', providerRef: { sessionId: T } })
+    expect(third).toMatchObject({ text: 'three', providerRef: { sessionId: T } })
     reopened.stop()
 
-    // Resume fails: a fresh thread, the history as a preamble, and `broken`.
+    // Resume fails: a fresh thread and the history as a preamble; the new thread replaces the saved one.
     const broken = transport([
       ...handshake(),
       out({ id: 3, method: 'thread/resume', params: { threadId: T, excludeTurns: true, ...threadParams() } }),
@@ -316,7 +315,7 @@ describe('CodexAdapter', () => {
     services.push(recovering)
     const fourth = await new CodexAdapter(() => recovering).startTurn(input({ prompt: 'fourth', nativeHistory: 'history+three' }), recordingSink(), control(), host())
     broken.assertDone()
-    expect(fourth).toMatchObject({ text: 'four', threadDisposition: 'broken', providerRef: { sessionId: 'thr-2', nativeTurnId: 'turn-4' } })
+    expect(fourth).toMatchObject({ text: 'four', providerRef: { sessionId: 'thr-2', nativeTurnId: 'turn-4' } })
     const saved = JSON.parse(readFileSync(settingsPath(), 'utf8')) as { threads: Record<string, { codexThreadId: string }> }
     expect(saved.threads['thread-1'].codexThreadId).toBe('thr-2')
   })
@@ -403,7 +402,7 @@ describe('CodexAdapter', () => {
     const attach = (token: string) => host({ url: 'http://127.0.0.1:4000/mcp', token })
     await adapter.startTurn(input(), recordingSink(), control(), attach('old'))
     const second = await adapter.startTurn(input({ prompt: 'again', nativeHistory: 'history+one' }), recordingSink(), control(), attach('new'))
-    expect(second).toMatchObject({ text: 'two', threadDisposition: 'reusable', providerRef: { sessionId: 'thr-2' } })
+    expect(second).toMatchObject({ text: 'two', providerRef: { sessionId: 'thr-2' } })
     await adapter.startTurn(input({ prompt: 'third', nativeHistory: 'history+two' }), recordingSink(), control(), attach('new'))
     replay.assertDone()
     const saved = JSON.parse(readFileSync(settingsPath(), 'utf8')) as { threads: Record<string, { codexThreadId: string }> }
@@ -611,7 +610,7 @@ describe('CodexAdapter', () => {
     await expect(failure).rejects.toThrow('Codex app-server exited with code 1')
     const retry = await adapter.startTurn(input({ prompt: 'retry', nativeHistory: 'prior' }), recordingSink(), control(), host())
     replay.assertDone()
-    expect(retry).toMatchObject({ text: 'ok', threadDisposition: 'reusable' })
+    expect(retry).toMatchObject({ text: 'ok' })
   })
 
   it('withdraws a pending approval question when the app-server dies', async () => {
