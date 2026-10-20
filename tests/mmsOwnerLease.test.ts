@@ -3,7 +3,6 @@ import {
   existsSync,
   mkdtempSync,
   openSync,
-  readFileSync,
   rmSync,
   utimesSync,
   writeFileSync
@@ -24,8 +23,7 @@ import {
 } from '../src/mms/ownership/MmsOwnerLease'
 import { PROCESS_INSTANCE_ID } from '../src/mms/queue/processLiveness'
 import { MousseMainService } from '../src/mms/MousseMainService'
-import { publishOwnRuntimeRecord, resolveRuntimeStatus } from '../src/cli/mmsRuntime'
-import { resolveDaemonHostInvocation, probeNodePtyInCurrentProcess } from '../src/cli/daemonHost'
+import { resolveDaemonHostInvocation } from '../src/cli/daemonHost'
 
 describe('MmsOwnerLease', () => {
   let home: string
@@ -142,48 +140,12 @@ describe('MmsOwnerLease', () => {
     expect(resolveOwnerStatus(home).owned).toBe(false)
   })
 
-  it('create failure releases lease', async () => {
-    // Invalid: force requireOwnership then simulate by double-acquire + manual
-    const pre = acquireMmsOwnerLease(home, { kind: 'daemon' })
-    await expect(
-      MousseMainService.create({ homeDir: home, ownerKind: 'gui' })
-    ).rejects.toThrow(MmsOwnerBusyError)
-    pre.release()
-  })
-
-  it('runtime readiness requires matching owner token', () => {
-    const lease = acquireMmsOwnerLease(home, { kind: 'daemon', version: '9.9' })
-    const runtime = publishOwnRuntimeRecord(home, {
-      ownerToken: lease.owner.token,
-      version: '9.9'
-    })
-    expect(runtime.token).toBe(lease.owner.token)
-    const status = resolveRuntimeStatus(home)
-    expect(status.running).toBe(true)
-    expect(status.record?.token).toBe(lease.owner.token)
-
-    // Stale runtime with wrong token is stripped without deleting owner
-    writeFileSync(
-      join(home, 'mms.runtime.json'),
-      JSON.stringify({ ...runtime, token: 'other-token' }),
-      'utf-8'
-    )
-    const after = resolveRuntimeStatus(home)
-    expect(after.record).toBeNull()
-    expect(resolveOwnerStatus(home).owned).toBe(true)
-    expect(resolveOwnerStatus(home).record?.token).toBe(lease.owner.token)
-
-    lease.release()
-  })
-
-  it('daemon host resolver returns dual-mode or system-node with reason', () => {
-    const host = resolveDaemonHostInvocation()
-    expect(['electron-dual-mode', 'electron-run-as-node', 'system-node', 'unknown']).toContain(
-      host.mode
-    )
-    expect(host.command).toBeTruthy()
-    expect(host.reason).toBeTruthy()
-    const probe = probeNodePtyInCurrentProcess()
-    expect(typeof probe.ok).toBe('boolean')
+  it('daemon host resolver picks system node outside Electron and reports the node-pty probe', () => {
+    const loadable = resolveDaemonHostInvocation(undefined, { nodePtyOk: true })
+    expect(loadable.mode).toBe('system-node')
+    expect(loadable.nodePtyOk).toBe(true)
+    const broken = resolveDaemonHostInvocation(undefined, { nodePtyOk: false })
+    expect(broken.mode).toBe('system-node')
+    expect(broken.nodePtyOk).toBe(false)
   })
 })

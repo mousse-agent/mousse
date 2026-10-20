@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createCipheriv, createDecipheriv, randomBytes, X509Certificate } from 'node:crypto'
 import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
@@ -21,6 +21,21 @@ function profile(): string {
 afterEach(() => {
   for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
+let childExecutable: string, childBuildDir: string
+beforeAll(() => {
+  childBuildDir = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-keys-child-')))
+  childExecutable = join(childBuildDir, 'keyStore-child.cjs')
+  buildSync({
+    entryPoints: [fileURLToPath(new URL('./keyStore-child.ts', import.meta.url))],
+    outfile: childExecutable,
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node24',
+    logLevel: 'silent'
+  })
+})
+afterAll(() => rmSync(childBuildDir, { recursive: true, force: true }))
 const noVault: SecretCodec = { canEncrypt: () => false, encrypt: () => null, decrypt: () => null }
 function vault() {
   const key = randomBytes(32)
@@ -165,18 +180,8 @@ describe('FileKeyStore real key files and restart', () => {
   })
 
   it('recovers an owner-bearing write lock after actual child SIGKILL', () => {
-    const dir = profile(),
-      executable = join(dir, 'keyStore-child.cjs')
-    buildSync({
-      entryPoints: [fileURLToPath(new URL('./keyStore-child.ts', import.meta.url))],
-      outfile: executable,
-      bundle: true,
-      platform: 'node',
-      format: 'cjs',
-      target: 'node24',
-      logLevel: 'silent'
-    })
-    const child = spawnSync(process.execPath, [executable, dir, 'kill'], {
+    const dir = profile()
+    const child = spawnSync(process.execPath, [childExecutable, dir, 'kill'], {
       timeout: 10000,
       encoding: 'utf8'
     })
@@ -192,19 +197,9 @@ describe('FileKeyStore real key files and restart', () => {
     ).toBe('durable')
   })
 
-  it('never bypasses a live child owner, then recovers after its real SIGKILL', async () => {
-    const dir = profile(),
-      executable = join(dir, 'keyStore-child.cjs')
-    buildSync({
-      entryPoints: [fileURLToPath(new URL('./keyStore-child.ts', import.meta.url))],
-      outfile: executable,
-      bundle: true,
-      platform: 'node',
-      format: 'cjs',
-      target: 'node24',
-      logLevel: 'silent'
-    })
-    const child = spawn(process.execPath, [executable, dir, 'hold'], {
+  it('never bypasses a live child owner', async () => {
+    const dir = profile()
+    const child = spawn(process.execPath, [childExecutable, dir, 'hold'], {
       stdio: ['ignore', 'pipe', 'pipe']
     })
     const exited = once(child, 'exit')
@@ -227,9 +222,6 @@ describe('FileKeyStore real key files and restart', () => {
       child.kill('SIGKILL')
       await exited
     }
-    const reopened = new FileKeyStore(dir, { codec: noVault })
-    reopened.putSecret('afterKill', Buffer.from('allowed'))
-    expect(Buffer.from(reopened.getSecret('afterKill')!).toString()).toBe('allowed')
   })
 
   it('rejects symlinked key directory and stale concurrent writers, preserving the winner', async () => {

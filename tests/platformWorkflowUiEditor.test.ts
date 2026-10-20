@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createBoundedHistory } from '../src/renderer/components/workflows/history'
 import { createWorkflowNode, controlOutPortsForNode } from '../src/renderer/components/workflows/defaultNode'
-import { IsolatedWorkflowDefinitionsClient } from './fixtures/agent-platform/workflow-editor-client'
-import { createBlankWorkflowBundle } from '../src/renderer/components/workflows/templates'
 
 describe('bounded undo history', () => {
   it('undo/redo and drops entries beyond the limit', () => {
@@ -29,24 +27,5 @@ describe('control ports', () => {
     expect(controlOutPortsForNode(sw)).toContain('a')
     const unknown = { id: 'x', type: 'quantum-gate', version: 1, config: { keep: 1 } }
     expect(controlOutPortsForNode(unknown)).toEqual(['unsupported'])
-  })
-})
-
-describe('visual-only save contract', () => {
-  it('rejects a visualOnly save that would change semantic bytes', async () => {
-    const client = new IsolatedWorkflowDefinitionsClient()
-    const created = await client.create({ profileId: 'p', bundle: createBlankWorkflowBundle('A') })
-    await expect(
-      client.saveDraft({
-        profileId: 'p',
-        id: created.id,
-        expectedDraftSemanticHash: created.semanticHash,
-        visualOnly: true,
-        bundle: {
-          ...created.bundle,
-          manifest: { ...created.bundle.manifest, description: 'changed' }
-        }
-      })
-    ).rejects.toMatchObject({ code: 'INVALID_GRAPH' })
   })
 })

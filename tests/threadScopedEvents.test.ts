@@ -16,8 +16,6 @@ import { RunEngine } from '../src/mms/run/RunEngine'
 import { RunStore } from '../src/mms/run/RunStore'
 import { getDefaultSettings } from '../src/shared/settings'
 import type { ChatMessage } from '../src/shared/types'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 
 function createOrchestrator(home: string, store: ThreadDataStore): OrchestratorService {
   process.env.MOUSSE_HOME = home
@@ -370,53 +368,5 @@ describe('thread-scoped orchestrator conversation events', () => {
     expect(completeTask).toHaveBeenCalledWith(['remote-agent'], true)
     expect(adds.some((event) => event.message.kind === 'tool_call')).toBe(true)
     expect(orch.getMessages(thread.id).some((message) => message.content === 'from Telegram')).toBe(true)
-  })
-})
-
-describe('queued messages UI wiring', () => {
-  it('registers QueuedMessages styles attached above the composer', () => {
-    const css = readFileSync(resolve(process.cwd(), 'src/renderer/styles/app.css'), 'utf8')
-    expect(css).toMatch(/\.queued-messages\s*\{/)
-    expect(css).toMatch(/\.queued-messages-row\s*\{/)
-    expect(css).toMatch(/chat-input-area:has\(\.queued-messages\)\s+\.composer/)
-  })
-
-  it('OrchestratorChat mounts QueuedMessages and uses sendToThread / turn-state', () => {
-    const source = readFileSync(
-      resolve(process.cwd(), 'src/renderer/components/OrchestratorChat.tsx'),
-      'utf8'
-    )
-    expect(source).toMatch(/import\s+\{\s*QueuedMessages\s*\}/)
-    expect(source).toMatch(/<QueuedMessages/)
-    expect(source).toMatch(/sendToThread/)
-    expect(source).toMatch(/turnState|turnStates|isResponseActive/)
-    expect(source).toMatch(/abort\(activeThreadId/)
-    expect(source).toMatch(/steer\([^,]+,\s*activeThreadId/)
-  })
-
-  it('ChatComposer allows ordinary send while loading (queue path)', () => {
-    const source = readFileSync(
-      resolve(process.cwd(), 'src/renderer/components/ChatComposer.tsx'),
-      'utf8'
-    )
-    expect(source).not.toMatch(/\(\!loading\s*\|\|\s*isControlWhileLoading\)/)
-    expect(source).toMatch(/stack on the per-thread queue/)
-  })
-
-  it('App filters thread-scoped conversation events by selected thread', () => {
-    const source = readFileSync(resolve(process.cwd(), 'src/renderer/App.tsx'), 'utf8')
-    expect(source).toMatch(/onThreadMessage/)
-    expect(source).toMatch(/onThreadMessageUpdated/)
-    expect(source).toMatch(/onThreadMessages/)
-    expect(source).toMatch(/isSelectedThread/)
-    expect(source).not.toMatch(/orchestrator\.onMessage\(/)
-  })
-
-  it('App keeps the thread list synchronized without stale fetch overwrites', () => {
-    const source = readFileSync(resolve(process.cwd(), 'src/renderer/App.tsx'), 'utf8')
-    expect(source).toMatch(/threads\.onUpdated\(applyThreadList\)/)
-    expect(source).toMatch(/requestedAtRevision === threadListRevision/)
-    expect(source).toMatch(/THREAD_LIST_RECONCILE_MS/)
-    expect(source).toMatch(/channels\.onActivity\(\(\) => void refreshThreads\(\)\)/)
   })
 })

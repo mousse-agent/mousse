@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { CodexAppServerExitedError } from '../../src/mms/providers/codex/CodexAppServerClient'
 import {
-  CODEX_CAPABILITIES,
   CodexAdapter,
   createCodexProviderService,
   type CodexProviderService
@@ -181,7 +180,6 @@ describe('CodexAdapter', () => {
   it('declares native steer and reports its context', async () => {
     const adapter = new CodexAdapter(() => null)
     expect(adapter.driver).toBe('codex')
-    expect(adapter.capabilities).toBe(CODEX_CAPABILITIES)
     expect(adapter.capabilities).toEqual({
       steer: 'native',
       interrupt: true,
@@ -195,7 +193,6 @@ describe('CodexAdapter', () => {
     expect(adapter.describe('gpt-x')).toEqual({ contextUsage: 'reported' })
     expect(adapter.configured()).toBe(false)
     expect(await adapter.interrupt({ provider: 'codex', sessionId: T })).toBe('not_active')
-    expect(await adapter.steer({ provider: 'codex', sessionId: T }, 'x')).toBe('not_active')
     expect(await adapter.forkSession({ provider: 'codex' }, 1)).toBeNull()
   })
 

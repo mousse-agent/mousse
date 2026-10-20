@@ -150,50 +150,21 @@ describe('delegation bridge (SPEC §14)', () => {
     return 'Three modules: run, agents, orchestrator.'
   }
 
-  it('parent delegates, the child runs on its own thread, its result wakes the parent, task_status acknowledges', async () => {
-    const dir = setupHome()
-    const state: { delegationId?: string; status?: unknown; parentThreadId?: string } = {}
-    const d = daemon(dir, script(state), 1)
-    stops.push(d.stop)
-    const parent = d.store.createThread('Parent')
-    state.parentThreadId = parent.id
-
-    const response = await d.orch.send('Count the modules', false, { threadId: parent.id, clientRequestId: 'parent-send' })
-    expect(response.message).toBe('Delegated the count.')
-    const delegation = d.engine.delegations.get(state.delegationId!)!
-    expect(delegation).toBeTruthy()
-    const childThreadId = delegation.childThreadId
-    expect(childThreadId).not.toBe(parent.id)
-    expect(d.store.getThread(childThreadId)?.name).toBe('Delegated: List the modules')
-    expect(d.engine.delegations.getLineage(childThreadId)).toMatchObject({ parentThreadId: parent.id, relationship: 'subagent', parentRunId: response.runId })
-
-    // The child's turn runs as its own run on its own thread and publishes to the parent's inbox.
-    await waitFor(() => d.engine.getRun(delegation.childRunId)?.status === 'completed', 'the child run')
-    expect(d.adapter.turns.find((turn) => turn.threadId === childThreadId)?.prompt).toBe('List the modules')
-    expect(d.engine.delegations.get(delegation.delegationId)).toMatchObject({ status: 'result_available', result: { runStatus: 'completed', text: 'Three modules: run, agents, orchestrator.' } })
-    expect(d.engine.inbox.listPending(parent.id)).toHaveLength(1)
-
-    // Rule 4 wakes the idle parent with an ordinary visible turn.
-    const wakeRunId = d.reconciler.runOnce().wakes.wakes[0]
-    expect(wakeRunId).toBeTruthy()
-    await waitFor(() => d.engine.getRun(wakeRunId)?.status === 'completed', 'the wake run')
-    expect(d.engine.getRun(wakeRunId)!.source).toBe('wake')
-    const notice = `Delegated task ${delegation.delegationId} finished: Three modules: run, agents, orchestrator.. Use task_status for the full result.`
-    expect(d.orch.getMessages(parent.id).some((message) => message.role === 'user' && message.content === notice)).toBe(true)
-    expect(state.status).toMatchObject({ status: 'acknowledged', childRunStatus: 'completed', result: { text: 'Three modules: run, agents, orchestrator.' } })
-    expect(d.engine.delegations.get(delegation.delegationId)!.status).toBe('acknowledged')
-    expect(d.engine.inbox.listForThread(parent.id).map((row) => row.status)).toEqual(['acknowledged'])
-  }, 30_000)
-
   it('a restart between child completion and the wake still wakes the parent after boot', async () => {
     const dir = setupHome()
     const state: { delegationId?: string; status?: unknown; parentThreadId?: string } = {}
     const first = daemon(dir, script(state), 1)
     const parent = first.store.createThread('Parent')
     state.parentThreadId = parent.id
-    await first.orch.send('Count the modules', false, { threadId: parent.id, clientRequestId: 'parent-send' })
+    const response = await first.orch.send('Count the modules', false, { threadId: parent.id, clientRequestId: 'parent-send' })
     const delegation = first.engine.delegations.get(state.delegationId!)!
+    const childThreadId = delegation.childThreadId
+    expect(childThreadId).not.toBe(parent.id)
+    expect(first.store.getThread(childThreadId)?.name).toBe('Delegated: List the modules')
+    expect(first.engine.delegations.getLineage(childThreadId)).toMatchObject({ parentThreadId: parent.id, relationship: 'subagent', parentRunId: response.runId })
+    // The child's turn runs as its own run on its own thread and publishes to the parent's inbox.
     await waitFor(() => first.engine.getRun(delegation.childRunId)?.status === 'completed', 'the child run')
+    expect(first.adapter.turns.find((turn) => turn.threadId === childThreadId)?.prompt).toBe('List the modules')
     expect(first.engine.inbox.listPending(parent.id)).toHaveLength(1)
     await first.crash()
 
@@ -204,6 +175,7 @@ describe('delegation bridge (SPEC §14)', () => {
     await waitFor(() => second.engine.getRun(wakeRunId)?.status === 'completed', 'the wake run after boot')
     expect(state.status).toMatchObject({ status: 'acknowledged' })
     expect(second.engine.delegations.get(delegation.delegationId)!.status).toBe('acknowledged')
+    expect(second.engine.inbox.listForThread(parent.id).map((row) => row.status)).toEqual(['acknowledged'])
   }, 30_000)
 
   it('rejects a shared workspace for a role that writes', async () => {

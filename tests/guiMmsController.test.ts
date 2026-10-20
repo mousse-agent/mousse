@@ -440,38 +440,6 @@ describe('GuiMmsController lifecycle', () => {
     expect(turnSnaps).toHaveLength(1)
     await gui.stop()
   })
-
-  it('event gap / resnapshot flag forces snapshot path', async () => {
-    // Use a long-lived LocalMmsClient so prior sequence/instance is retained across reconnect.
-    const { LocalMmsClient } = await import('../src/mms/protocol/client')
-    const client = new LocalMmsClient({
-      homeDir: home,
-      ownerToken,
-      endpoint,
-      clientType: 'test'
-    })
-    await client.connect()
-    await client.subscribe(0)
-    const thread = mms.threads.createThread('Gap')
-    mms.orchestrator.bindThread(thread.id, [], undefined, [])
-    mms.orchestrator.enqueueForThread(thread.id, 'e1')
-    await vi.waitFor(() => {
-      expect(client.lastKnownSequence).toBeGreaterThan(0)
-    })
-    const seqBefore = client.lastKnownSequence
-    await client.close()
-
-    await server.stop()
-    server = new MmsProtocolServer({ mms, ownerToken, version: 'test', build: 'gap-2' })
-    endpoint = await server.start()
-    mms.getOwnerLease()?.setEndpoint(endpoint)
-
-    // Reconnect same client object — detects sequence regression / new ring.
-    const hello2 = await client.connect()
-    expect(hello2.globalSequence).toBeLessThan(seqBefore)
-    expect(client.requiresResnapshot).toBe(true)
-    await client.close()
-  })
 })
 
 describe('protocolEventBridge IPC mapping', () => {

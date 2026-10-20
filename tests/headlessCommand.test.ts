@@ -76,9 +76,8 @@ describe('headlessCommand', () => {
     expect(command).toContain('Review changes')
   })
 
-  it('defaults headless enabled per agent type', () => {
-    expect(isHeadlessEnabledForAgent('claude-code', undefined)).toBe(true)
-    expect(isHeadlessEnabledForAgent('codex', { codex: false } as never)).toBe(false)
+  it('never runs the built-in mousse agent headless, even when settings enable it', () => {
+    expect(isHeadlessEnabledForAgent('mousse', { mousse: true } as never)).toBe(false)
   })
 
   it('appends interactive permission bypass flags', () => {

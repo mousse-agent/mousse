@@ -1,8 +1,61 @@
-import { existsSync, lstatSync, realpathSync } from 'node:fs'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { lstatSync, readlinkSync, realpathSync } from 'node:fs'
+import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { ProfileIdentityError, ProfilePathError } from '../../shared/profiles/errors'
 import { canonicalizeProfileId, isProfileId } from '../../shared/profiles/ids'
 
+const MAX_LINK_HOPS = 40
+// A backslash is an ordinary file name character off Windows.
+const SEPARATORS = sep === '\\' ? /[\\/]+/ : /\/+/
+
+function isSymbolicLink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The location the filesystem would use for `absolute`, including paths that do
+ * not exist yet. The deepest existing prefix goes through realpath, which also
+ * expands platform aliases (macOS /var -> /private/var, Windows 8.3 short names).
+ * A dangling link is followed to its target, because writing through it creates
+ * that target. Link targets are spliced in unnormalized, so `link/..` climbs from
+ * where the link points, as the filesystem does, not from where the link sits.
+ */
+function realLocation(absolute: string, hops: number): string {
+  const { root } = parse(absolute)
+  const parts = absolute.slice(root.length).split(SEPARATORS).filter(Boolean)
+  for (let depth = parts.length; depth >= 0; depth--) {
+    let real: string
+    try {
+      real = realpathSync.native(root + parts.slice(0, depth).join(sep))
+    } catch {
+      continue
+    }
+    if (depth === parts.length) return real
+    const next = join(real, parts[depth])
+    if (!isSymbolicLink(next)) {
+      const tail = parts.slice(depth)
+      const joined = join(real, ...tail)
+      // `..` after a missing folder cancels it and can expose existing entries,
+      // links included, so resolve the shortened path again. It has no `..` left.
+      return tail.includes('..') ? realLocation(joined, hops) : joined
+    }
+    if (hops >= MAX_LINK_HOPS) {
+      throw new ProfilePathError('Path has too many levels of symbolic links', { path: absolute })
+    }
+    const target = readlinkSync(next)
+    const base = isAbsolute(target) ? target : real + sep + target
+    return realLocation([base, ...parts.slice(depth + 1)].join(sep), hops + 1)
+  }
+  return resolve(absolute)
+}
+
+/**
+ * Containment checks compare both sides in this form, so a path is judged by
+ * where it lands rather than by how its ancestors are spelled.
+ */
 export function canonicalizeAbsolutePath(input: string): string {
   if (typeof input !== 'string' || input.trim() === '') {
     throw new ProfilePathError('Path must be a non-empty string')
@@ -10,15 +63,16 @@ export function canonicalizeAbsolutePath(input: string): string {
   if (input.includes('\0')) {
     throw new ProfilePathError('Path contains a NUL byte', { path: input })
   }
-  const resolved = resolve(input)
-  if (!isAbsolute(resolved)) {
+  const absolute = isAbsolute(input) ? input : resolve(input)
+  if (!isAbsolute(absolute)) {
     throw new ProfilePathError('Path must resolve to an absolute location', { path: input })
   }
-  try {
-    return realpathSync.native(resolved)
-  } catch {
-    return resolved
-  }
+  return realLocation(absolute, 0)
+}
+
+function isContained(rootPath: string, candidatePath: string): boolean {
+  const rel = relative(rootPath, candidatePath)
+  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`))
 }
 
 export function pathKey(path: string): string {
@@ -31,18 +85,7 @@ export function pathsEqual(a: string, b: string): boolean {
 }
 
 export function isPathInsideRoot(root: string, candidate: string): boolean {
-  const rootPath = canonicalizeAbsolutePath(root)
-  let candidatePath = resolve(candidate)
-  try {
-    candidatePath = realpathSync.native(candidatePath)
-  } catch {
-    /* destination may not exist yet */
-  }
-  const rel = relative(rootPath, candidatePath)
-  if (rel === '') return true
-  if (isAbsolute(rel)) return false
-  if (rel.startsWith('..')) return false
-  return true
+  return isContained(canonicalizeAbsolutePath(root), canonicalizeAbsolutePath(candidate))
 }
 
 function assertNoTraversalSegments(segments: string[]): void {
@@ -62,42 +105,14 @@ function assertNoTraversalSegments(segments: string[]): void {
   }
 }
 
-function assertSymlinkChainStaysInside(root: string, candidate: string): void {
-  const rootPath = canonicalizeAbsolutePath(root)
-  const resolvedCandidate = resolve(candidate)
-  const rel = relative(rootPath, resolvedCandidate)
-  if (rel === '') return
-  if (isAbsolute(rel) || rel.startsWith('..')) {
-    throw new ProfilePathError('Resolved path escapes the owned root', { root: rootPath, path: resolvedCandidate })
-  }
-  let current = rootPath
-  for (const segment of rel.split(/[/\\]/)) {
-    if (!segment || segment === '.') continue
-    current = join(current, segment)
-    if (!existsSync(current)) return
-    const stat = lstatSync(current)
-    if (stat.isSymbolicLink()) {
-      const real = realpathSync.native(current)
-      if (!isPathInsideRoot(rootPath, real)) {
-        throw new ProfilePathError('Refusing symlink that escapes the owned root', {
-          root: rootPath,
-          path: current,
-          real
-        })
-      }
-      current = real
-    }
-  }
-}
-
 export function joinOwnedPath(root: string, ...segments: string[]): string {
   assertNoTraversalSegments(segments)
   const rootPath = canonicalizeAbsolutePath(root)
   const joined = join(rootPath, ...segments)
-  if (!isPathInsideRoot(rootPath, joined)) {
-    throw new ProfilePathError('Resolved path escapes the owned root', { root: rootPath, path: joined })
+  const real = canonicalizeAbsolutePath(joined)
+  if (!isContained(rootPath, real)) {
+    throw new ProfilePathError('Resolved path escapes the owned root', { root: rootPath, path: joined, real })
   }
-  assertSymlinkChainStaysInside(rootPath, joined)
   return joined
 }
 
@@ -106,12 +121,11 @@ export function assertOwnedPath(root: string, candidate: string, label = 'path')
     throw new ProfilePathError(`${label} contains a NUL byte`, { path: candidate })
   }
   const rootPath = canonicalizeAbsolutePath(root)
-  const resolved = resolve(candidate)
-  if (!isPathInsideRoot(rootPath, resolved)) {
-    throw new ProfilePathError(`${label} is outside the owned root`, { root: rootPath, path: resolved })
+  const real = canonicalizeAbsolutePath(candidate)
+  if (!isContained(rootPath, real)) {
+    throw new ProfilePathError(`${label} is outside the owned root`, { root: rootPath, path: candidate, real })
   }
-  assertSymlinkChainStaysInside(rootPath, resolved)
-  return existsSync(resolved) ? canonicalizeAbsolutePath(resolved) : resolved
+  return real
 }
 
 export function assertProfileId(value: string): ReturnType<typeof canonicalizeProfileId> {

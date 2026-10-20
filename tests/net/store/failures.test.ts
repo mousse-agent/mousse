@@ -58,6 +58,11 @@ describe('storage failure and migration boundaries', () => {
       expect(() => store.streams.applyFromAuthority(f.descriptor.id, [f.record(1)])).toThrowError(
         expect.objectContaining({ code: 'storage_corrupt' })
       )
+      expect(store.streams.cursor(f.descriptor.id).seq).toBe(0)
+      expect(() => store.executions.admit(f.key(), 'a'.repeat(64), 1)).toThrowError(
+        expect.objectContaining({ code: 'storage_corrupt' })
+      )
+      expect(store.database.prepare('SELECT count(*) AS n FROM net_executions').get()!.n).toBe(0)
       expect(() =>
         identity.issueNodeDelegation({
           node: newId('node'),
@@ -87,32 +92,9 @@ describe('storage failure and migration boundaries', () => {
       }
       store.close()
       expect(() => open(path)).toThrowError(expect.objectContaining({ code: 'storage_corrupt' }))
+      expect(readdirSync(join(path, 'net'))).toContain('storage-corrupt-fence')
     }
   )
-  it('fences all writes after runtime corruption and persists the fence through reopen', () => {
-    const path = fresh()
-    const f = fixture()
-    let armed = false
-    const store = open(path, {
-      fault(point) {
-        if (armed && point === 'streams.apply.beforeCursorCommit')
-          throw new NetError('storage_corrupt')
-      }
-    })
-    store.streams.createStream(f.descriptor, 1)
-    armed = true
-    expect(() => store.streams.applyFromAuthority(f.descriptor.id, [f.record(1)])).toThrowError(
-      expect.objectContaining({ code: 'storage_corrupt' })
-    )
-    expect(store.streams.cursor(f.descriptor.id).seq).toBe(0)
-    expect(() => store.executions.admit(f.key(), 'a'.repeat(64), 1)).toThrowError(
-      expect.objectContaining({ code: 'storage_corrupt' })
-    )
-    expect(store.database.prepare('SELECT count(*) AS n FROM net_executions').get()!.n).toBe(0)
-    store.close()
-    expect(() => open(path)).toThrowError(expect.objectContaining({ code: 'storage_corrupt' }))
-    expect(readdirSync(join(path, 'net'))).toContain('storage-corrupt-fence')
-  })
   it('rolls back on storage_full and keeps the profile read-only until reopen', () => {
     const path = fresh()
     const f = fixture()

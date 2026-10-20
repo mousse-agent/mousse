@@ -293,31 +293,6 @@ describe('mousseToUIMessages standardize layer', () => {
     expect(merged.input.thought).toBe('Considering edge cases')
   })
 
-  it('keeps a streaming Thought merged row pending', () => {
-    const out = mousseToUIMessages([
-      {
-        id: 't1',
-        role: 'system',
-        content: '',
-        timestamp: '2026-01-01T00:00:00.000Z',
-        kind: 'thinking',
-        thinking: { content: 'Hmm', status: 'complete' },
-      },
-      {
-        id: 't2',
-        role: 'system',
-        content: '',
-        timestamp: '2026-01-01T00:00:00.000Z',
-        kind: 'thinking',
-        thinking: { content: '', status: 'processing' },
-      },
-    ])
-    expect(out).toHaveLength(1)
-    expect(
-      (out[0].parts[0] as unknown as Record<string, unknown>).state
-    ).toBe('input-available')
-  })
-
   it('settles a merged Thought row when the latest segment completes', () => {
     // Live path: complete thought, then a processing segment that later
     // finishes. The intermediate merge must not leave the row stuck pending.
@@ -367,6 +342,7 @@ describe('mousseToUIMessages standardize layer', () => {
         thinking: { content: 'Still…', status: 'processing' },
       },
     ])
+    expect(pending).toHaveLength(1)
     expect(
       (pending[0].parts[0] as unknown as Record<string, unknown>).state,
     ).toBe('input-available')

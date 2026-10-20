@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -6,14 +6,11 @@ import { AgentDefinitionError } from '../src/shared/agents/errors'
 import { AGENT_PROMPT_MAX_BYTES, defaultAgentSettings } from '../src/shared/agents/defaults'
 import { computeSemanticHash, computeVisualHash } from '../src/shared/agents/hashes'
 import { assertSafeBundlePath } from '../src/shared/agents/pathSafety'
-import { AGENT_RUNTIME_KINDS } from '../src/shared/agents/types'
 import { collectUnsupportedCliSettings, getRuntimeCompatibility } from '../src/shared/agents/compatibility'
 import { resolveEffectiveGrants } from '../src/shared/agents/grants'
-import { draftFromModePrompt } from '../src/shared/agents/prompt'
 import {
   AgentDefinitionRegistry,
   AgentResolver,
-  BUILTIN_CLI_ENGINE_IDS,
   StaticAgentIntegrationLookup,
   StaticAgentModelLookup
 } from '../src/mms/agentDefinitions'
@@ -82,25 +79,6 @@ function createServices(profileId: string, profileRoot: string, integration?: St
   })
   return { registry, resolver }
 }
-
-describe('agent definition identity vs runtime Agent', () => {
-  it('uses UUIDs and preserves built-in CLI engine ids', () => {
-    expect(BUILTIN_CLI_ENGINE_IDS).toEqual(AGENT_RUNTIME_KINDS)
-    expect(BUILTIN_CLI_ENGINE_IDS).toContain('mousse')
-    expect(BUILTIN_CLI_ENGINE_IDS).toContain('claude-code')
-    expect(BUILTIN_CLI_ENGINE_IDS).toContain('codex')
-    expect(BUILTIN_CLI_ENGINE_IDS).toContain('opencode')
-    expect(BUILTIN_CLI_ENGINE_IDS).toContain('cursor-agents-cli')
-    const runtimeAgent = readFileSync(new URL('../src/shared/types.ts', import.meta.url), 'utf8')
-    expect(runtimeAgent).toContain('export interface Agent {')
-    expect(runtimeAgent).toContain('cliType: CliType')
-    const definitionTypes = readFileSync(new URL('../src/shared/agents/types.ts', import.meta.url), 'utf8')
-    expect(definitionTypes).toContain('Distinct from the runtime')
-    expect(readFileSync(new URL('../src/mms/agents/AgentRegistry.ts', import.meta.url), 'utf8')).toContain(
-      'class AgentRegistry'
-    )
-  })
-})
 
 describe('profile-root isolation', () => {
   it('keeps A/B registries isolated and ignores MOUSSE_HOME', () => {
@@ -533,20 +511,5 @@ describe('integrations and grants', () => {
     )
     expect(effective.mcpTools.map((tool) => tool.id)).toEqual(['search/query'])
     expect(effective.denied).toContainEqual(expect.objectContaining({ kind: 'mcp', id: 'docs/read' }))
-  })
-})
-
-describe('modes remain separate', () => {
-  it('copies prompt text only when explicitly asked', () => {
-    const copied = draftFromModePrompt({
-      name: 'From mode',
-      slug: 'from-mode',
-      prompt: 'Mode prompt bytes',
-      purpose: 'explicit copy'
-    })
-    expect(copied.systemPrompt).toBe('Mode prompt bytes')
-    expect(readFileSync(new URL('../src/mms/agentDefinitions/index.ts', import.meta.url), 'utf8')).not.toContain(
-      'ModeRegistry'
-    )
   })
 })

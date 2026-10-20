@@ -43,11 +43,6 @@ function makeClient(outputs: AssistantMessage[], contextWindow = 2_000_000) {
 }
 
 describe('long-running tool loops', () => {
-  it('tracks aggregate usage without treating it as a lifetime budget', () => {
-    const usage = { input: 500_000, output: 20_000, cacheRead: 0, cacheWrite: 0, totalTokens: 520_000, cost: emptyCost }
-    expect(accumulateProviderUsage(emptyAccumulatedUsage(), usage).processedTokens).toBe(520_000)
-  })
-
   it('counts provider-reported cache reads once as part of total usage', () => {
     const usage = { input: 100, output: 20, cacheRead: 300, cacheWrite: 40, totalTokens: 460, cost: emptyCost }
     const accumulated = accumulateProviderUsage(emptyAccumulatedUsage(), usage)

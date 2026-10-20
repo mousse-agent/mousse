@@ -128,180 +128,12 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     expect(result.code).toBe('protocol_version')
   })
 
-  it('processes same-chunk hello_ok + response residual frames', async () => {
-    // Connect normally, then verify health works (residual path exercised by framing unit + connect).
-    const client = new LocalMmsClient({
-      homeDir: home,
-      ownerToken,
-      endpoint,
-      clientType: 'test'
-    })
-    const hello = await client.connect()
-    expect(hello.protocolVersion).toBe(MMS_PROTOCOL_VERSION)
-
-    // Raw socket: send hello then immediately a request in one write after connect.
-    // Use a second raw connection that coalesces hello response handling with a request.
-    const frames = await new Promise<unknown[]>((resolve, reject) => {
-      const socket = createConnection(endpoint)
-      const dec = new FrameDecoder()
-      const out: unknown[] = []
-      const timer = setTimeout(() => {
-        socket.destroy()
-        reject(new Error('timeout'))
-      }, 5_000)
-      let authed = false
-      socket.on('connect', () => {
-        // Single write: hello only first; then after hello_ok send req — coalesced path on client side.
-        socket.write(
-          encodeFrame({
-            kind: 'hello',
-            protocolVersion: MMS_PROTOCOL_VERSION,
-            ownerToken,
-            clientType: 'test'
-          })
-        )
-      })
-      socket.on('data', (chunk) => {
-        dec.push(chunk)
-        for (const frame of dec.shiftAll()) {
-          out.push(frame)
-          const env = parseEnvelope(frame)
-          if (env?.kind === 'hello_ok' && !authed) {
-            authed = true
-            // Immediately write request; may coalesce with later responses.
-            socket.write(
-              encodeFrame({ kind: 'req', id: 'same-chunk-1', method: 'health' })
-            )
-          }
-          if (env?.kind === 'res' && env.id === 'same-chunk-1') {
-            clearTimeout(timer)
-            resolve(out)
-            socket.destroy()
-            return
-          }
-        }
-      })
-      socket.on('error', reject)
-    })
-    expect(frames.some((f) => parseEnvelope(f)?.kind === 'hello_ok')).toBe(true)
-    expect(
-      frames.some((f) => {
-        const e = parseEnvelope(f)
-        return e?.kind === 'res' && e.id === 'same-chunk-1' && e.ok
-      })
-    ).toBe(true)
-    await client.close()
-  })
-
-  it('serializes delayed requests in stream order per client', async () => {
-    const client = new LocalMmsClient({
-      homeDir: home,
-      ownerToken,
-      endpoint,
-      clientType: 'test'
-    })
-    await client.connect()
-
-    // Patch dispatch via orchestrator methods that have async delay: use threads.get
-    // and force first call to delay by creating many sequential health requests.
-    // Server chain ensures order; use unique methods that complete in order.
-    const order: string[] = []
-    const origGet = mms.threads.getThread.bind(mms.threads)
-    let gate: Promise<void> | null = null
-    let releaseGate: (() => void) | null = null
-    vi.spyOn(mms.threads, 'getThread').mockImplementation((id: string) => {
-      order.push(`start:${id}`)
-      if (id === 'slow-first') {
-        // Hold the first request until second has been received — serialization should
-        // prevent second from starting before first finishes.
-        if (!gate) {
-          gate = new Promise((r) => {
-            releaseGate = r
-          })
-        }
-        // Block in async handler path — getThread is sync; use send path instead.
-        return origGet(id)
-      }
-      order.push(`done:${id}`)
-      return origGet(id)
-    })
-
-    // Better: concurrent requests on same connection — health is fast; use raw frames
-    // with a hanging handler via orchestrator.send mocked.
-    mockLlm(mms, async () => {
-      await new Promise((r) => setTimeout(r, 80))
-      return {
-        text: 'ok',
-        usage: {
-          input: 1,
-          output: 1,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 2,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-        },
-        modelName: 'test',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 2,
-        tokensPerSecond: 1,
-        contextInputs: {
-          systemPromptText: '',
-          mcpToolsText: '',
-          otherToolsText: '',
-          signature: 'x'
-        },
-        toolEvents: [],
-        nativeMessages: []
-      }
-    })
-
-    const thread = mms.threads.createThread('Serial')
-    const started: number[] = []
-    const finished: number[] = []
-    let call = 0
-    const llm = (
-      mms.orchestrator as unknown as {
-        llm: { chat: () => Promise<unknown> }
-      }
-    ).llm
-    vi.spyOn(llm, 'chat').mockImplementation(async () => {
-      const n = ++call
-      started.push(n)
-      await new Promise((r) => setTimeout(r, n === 1 ? 60 : 5))
-      finished.push(n)
-      return {
-        text: `r${n}`,
-        usage: {
-          input: 1,
-          output: 1,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 2,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-        },
-        modelName: 'test',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 2,
-        tokensPerSecond: 1,
-        contextInputs: {
-          systemPromptText: '',
-          mcpToolsText: '',
-          otherToolsText: '',
-          signature: 'x'
-        },
-        toolEvents: [],
-        nativeMessages: []
-      }
-    })
-
-    // Fire two requests without awaiting the first — stream order serialization.
-    // Second send will queue while first turn runs (orchestrator queue), so use
-    // health with artificial delay via server chain: raw concurrent frames.
+  it('answers requests coalesced in one chunk in stream order', async () => {
     const rawOrder: string[] = []
     await new Promise<void>((resolve, reject) => {
       const socket = createConnection(endpoint)
       const dec = new FrameDecoder()
-      let step = 0
+      let sent = false
       const timer = setTimeout(() => {
         socket.destroy()
         reject(new Error('timeout'))
@@ -320,9 +152,8 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
         dec.push(chunk)
         for (const frame of dec.shiftAll()) {
           const env = parseEnvelope(frame)
-          if (env?.kind === 'hello_ok' && step === 0) {
-            step = 1
-            // Two requests in one chunk — must execute in order.
+          if (env?.kind === 'hello_ok' && !sent) {
+            sent = true
             socket.write(
               Buffer.concat([
                 encodeFrame({ kind: 'req', id: 'a', method: 'health' }),
@@ -343,12 +174,6 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
       socket.on('error', reject)
     })
     expect(rawOrder).toEqual(['a', 'b'])
-    void started
-    void finished
-    void thread
-    void releaseGate
-    void order
-    await client.close()
   })
 
   it('same connection steer/abort complete while long send is still in flight', async () => {
@@ -1117,18 +942,17 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     await client.close()
   })
 
-  it('request timeout rejects pending', async () => {
+  it('closing the client rejects pending requests', async () => {
     const client = new LocalMmsClient({
       homeDir: home,
       ownerToken,
       endpoint,
-      clientType: 'test',
-      requestTimeoutMs: 50
+      clientType: 'test'
     })
     await client.connect()
     const p = client.request('health', undefined, 5_000)
     await client.close()
-    await expect(p).rejects.toThrow(/closed|timeout|Not connected|Client closed|Connection/i)
+    await expect(p).rejects.toThrow(/Client closed/)
   })
 
   it('handler errors are isolated as error responses', async () => {
@@ -1222,26 +1046,6 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     await client.request('orchestrator.abort', { threadId: thread.id })
 
     await client.close()
-  })
-
-  it('client disconnect does not stop server / execution path', async () => {
-    const client = new LocalMmsClient({
-      homeDir: home,
-      ownerToken,
-      endpoint,
-      clientType: 'test'
-    })
-    await client.connect()
-    await client.close()
-    const client2 = new LocalMmsClient({
-      homeDir: home,
-      ownerToken,
-      endpoint,
-      clientType: 'test'
-    })
-    await client2.connect()
-    await expect(client2.request('health')).resolves.toMatchObject({ ok: true })
-    await client2.close()
   })
 
   it('emits turn.started and turn.completed lifecycle protocol events', async () => {

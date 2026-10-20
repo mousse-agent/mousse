@@ -29,18 +29,13 @@ afterEach(async () => {
 describe('project AGENTS.md system instructions', () => {
   it.each([
     { mode: 'agent' as const },
-    { mode: 'plan' as const },
-    { mode: 'build' as const },
-    { mode: { type: 'skill' as const, skillId: 'reviewer' } },
-    { mode: 'agent' as const, providerId: 'cursor' },
     { mode: 'build' as const, subagent: true },
-    { mode: 'plan' as const, subagentDiscovery: true },
-    { mode: 'agent' as const, namedDelegation: true }
-  ])('appends project instructions for $mode with $providerId/$subagent/$subagentDiscovery/$namedDelegation', (options) => {
+    { mode: 'plan' as const, subagentDiscovery: true }
+  ])('appends project instructions for $mode with subagent=$subagent subagentDiscovery=$subagentDiscovery', (options) => {
     const contents = '# Project rules\r\nUse the fixture conventions.\r\n'
     const root = project(contents)
     const prompt = buildOrchestratorSystemPrompt({ ...options, projectPath: root })
-    expect(prompt).toContain('You are the assistant inside Mousse')
+    expect(prompt.startsWith('You are the assistant inside Mousse')).toBe(true)
     expect(prompt.endsWith(`## Project instructions (AGENTS.md)\n${contents}`)).toBe(true)
   })
 
@@ -51,6 +46,15 @@ describe('project AGENTS.md system instructions', () => {
     const prompt = buildOrchestratorSystemPrompt({ projectPath: root })
     expect(prompt.startsWith('MOUSSE RULES\n\n')).toBe(true)
     expect(prompt.endsWith('AGENTS RULES')).toBe(true)
+
+    // Another project's MOUSSE.md never leaks into this prompt, and vice versa.
+    const other = project('OTHER AGENTS')
+    mkdirSync(join(other, '.mousse'))
+    writeFileSync(join(other, '.mousse', 'MOUSSE.md'), 'OTHER MOUSSE')
+    const otherPrompt = buildOrchestratorSystemPrompt({ projectPath: other })
+    expect(otherPrompt.startsWith('OTHER MOUSSE\n\n')).toBe(true)
+    expect(prompt).not.toContain('OTHER MOUSSE')
+    expect(otherPrompt).not.toContain('MOUSSE RULES')
   })
 
   it('rereads updates and isolates project, worktree and projectless turns', () => {

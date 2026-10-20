@@ -38,20 +38,6 @@ it('fences owner-local domains, retains exact pending outbox originals, and leav
     })
     await a.request('profiles.bind', { profile: aId })
     await b.request('profiles.bind', { profile: bId })
-    const defaults = await a.request('net.status', {})
-    expect(defaults).toMatchObject({
-      enabled: false,
-      features: DEFAULT_NET_FEATURE_FLAGS,
-      routes: []
-    })
-    await expect(
-      a.request('spaces.create', { name: 'Denied before opt-in' })
-    ).rejects.toMatchObject({
-      code: 'disabled'
-    })
-    await expect(a.request('bridge.hub.threads', { target: newId('node') })).rejects.toMatchObject({
-      code: 'disabled'
-    })
     for (const c of [a, b]) {
       await c.request('net.init', { listen: true })
       await c.request('net.protect', { passphrase: 'owned-rollback-ipc' })

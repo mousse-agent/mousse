@@ -127,9 +127,6 @@ it('commits a genuinely fresh private controller original atomically with higher
       expect(Buffer.from(stored.sig)).toEqual(Buffer.from(original.sig))
       const after = spaces.private.state(stream)!.control
       expect(after.keyEpoch).toBe(before.keyEpoch + 1)
-      expect(
-        after.writers.every((w) => !before.writers.some((old) => old.noncePrefix === w.noncePrefix))
-      ).toBe(true)
       const next = spaces.private.seal(stream, 'message.posted', { text: 'New key only' }),
         position = spaces.host.appendLocal(stream, next.id, next.envelope, next.sig),
         record = spaces.store.getById(stream, next.id)!

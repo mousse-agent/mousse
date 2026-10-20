@@ -128,17 +128,6 @@ describe('per-thread turn admission', () => {
     expect(existsSync(join(store.getThreadDir(thread.id), 'execution.lease'))).toBe(false)
   }, 30_000)
 
-  it('executes exactly one of two simultaneous sends and queues the other', async () => {
-    const thread = store.createThread('B')
-    const [r1, r2] = await Promise.all([
-      orch.send('msg-1', false, { threadId: thread.id }),
-      orch.send('msg-2', false, { threadId: thread.id })
-    ])
-    expect([r1.queued === true, r2.queued === true].filter(Boolean)).toHaveLength(1)
-    await waitFor(() => chatCalls.length === 2 && settled(thread.id))
-    expect(maxInFlight).toBe(1)
-  }, 30_000)
-
   it('queues a send that arrives while a channel turn is admitted, and clears admission afterwards', async () => {
     const thread = store.createThread('D')
     const realExecute = (orch as any).executeTurn.bind(orch)

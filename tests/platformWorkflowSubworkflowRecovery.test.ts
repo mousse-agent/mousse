@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { build } from 'esbuild'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import type { ExecutionPolicyLayer } from '../src/shared/execution/types'
 import { CancellationRegistry } from '../src/mms/execution/CancellationRegistry'
 import { ExecutionPolicyService } from '../src/mms/execution/ExecutionPolicyService'
@@ -19,6 +19,18 @@ const INSTALL: ExecutionPolicyLayer = {
   allowedCapabilities: ['model.invoke', 'human.input', 'human.approval'],
   allowedEffects: ['pure', 'read', 'write', 'external', 'unknown']
 }
+
+let crashEntry = ''
+let crashBuildDir = ''
+beforeAll(async () => {
+  crashBuildDir = mkdtempSync(join(tmpdir(), 'mousse-crash-fixture-'))
+  crashEntry = join(crashBuildDir, 'workflow-runtime-crash-child.cjs')
+  await build({
+    entryPoints: [join(process.cwd(), 'tests', 'fixtures', 'workflow-runtime-crash-child.ts')],
+    bundle: true, platform: 'node', format: 'cjs', outfile: crashEntry, sourcemap: false
+  })
+}, 60_000)
+afterAll(() => rmSync(crashBuildDir, { recursive: true, force: true }))
 
 afterEach(() => {
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true })
@@ -270,9 +282,7 @@ describe('durable child workflow recovery', () => {
   it.each(['input', 'approval', 'timer', 'unknown'] as const)('survives killing the actual workflow host while child %s is waiting', async (kind) => {
     const value = await setup(kind)
     const marker = join(value.profileRoot, `${kind}-process.ndjson`)
-    const fixture = join(process.cwd(), 'tests', 'fixtures', 'workflow-runtime-crash-child.ts')
-    const entry = join(value.profileRoot, `workflow-runtime-subworkflow-${kind}.cjs`)
-    await build({ entryPoints: [fixture], bundle: true, platform: 'node', format: 'cjs', outfile: entry, sourcemap: false })
+    const entry = crashEntry
     const children: ChildProcess[] = []
     const waitForExit = (child: ChildProcess, timeoutMs = 5000) => new Promise<number | null>((resolve, reject) => {
       if (child.exitCode !== null || child.signalCode !== null) { resolve(child.exitCode); return }

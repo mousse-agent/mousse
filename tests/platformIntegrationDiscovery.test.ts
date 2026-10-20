@@ -1,11 +1,12 @@
-import { mkdir, rm, writeFile } from 'fs/promises'
+import { realpathSync } from 'fs'
+import { mkdir, rm, symlink, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { describe, expect, it } from 'vitest'
 import { SkillsRegistry } from '../src/mms/integrations/skills/SkillsRegistry'
 import { McpRegistry } from '../src/mms/integrations/mcp/McpRegistry'
 import { SkillLifecycleService } from '../src/mms/integrations/skills/SkillLifecycleService'
 import { getMcpTarget, getSkillTargets } from '../src/mms/integrations/agents/AgentConfigManager'
-import { getProjectMousseMcpConfigPath, getProjectMousseSkillRoot } from '../src/mms/integrations/nativePaths'
+import { getNativeSkillRoots, getProjectMousseMcpConfigPath, getProjectMousseSkillRoot } from '../src/mms/integrations/nativePaths'
 import { createLegacySingleProfileContext } from '../src/mms/integrations/profileContext'
 import { parseCodexMcpServersToml } from '../src/mms/integrations/mcp/McpRegistry'
 import { tomlSubsetDiagnostics } from '../src/mms/integrations/mcp/tomlDiagnostics'
@@ -38,6 +39,26 @@ describe('I01 native discovery alignment', () => {
       expect(server?.configPath?.replace(/\\/g, '/')).toContain('.mousse/mcp.json')
       expect(server?.installationId).toBeTruthy()
       expect(server?.configRevision).toMatch(/^[a-f0-9]{64}$/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('lists the skills folder of a project opened through a symlink before the folder exists', async () => {
+    const { root, project, context } = await makeTempProfile()
+    try {
+      const alias = join(root, 'project-alias')
+      try {
+        await symlink(project, alias, process.platform === 'win32' ? 'junction' : 'dir')
+      } catch {
+        return
+      }
+
+      expect(getNativeSkillRoots(context, alias)).toContainEqual(expect.objectContaining({
+        scope: 'project',
+        managed: false,
+        path: join(realpathSync.native(project), '.mousse', 'skills')
+      }))
     } finally {
       await rm(root, { recursive: true, force: true })
     }

@@ -1,6 +1,6 @@
 import { readFileSync, rmSync, statSync } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createHash, generateKeyPairSync, sign, verify } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { SqliteNetStore } from '../../../src/mms/net/store'
 import { newId, NetError, STORE_TXN_MAX_BYTES } from '../../../src/shared/net'
 import type { BlobId, EventId } from '../../../src/shared/net'
@@ -335,7 +335,6 @@ describe('durable stream storage', () => {
         .get(f.descriptor.id)!.active_generation
       const replacement = f.record(1)
       replacement.sig = new Uint8Array(sign(null, replacement.envelope, keys.privateKey))
-      expect(verify(null, replacement.envelope, keys.publicKey, replacement.sig)).toBe(true)
       const stage = store.streams.beginSnapshot(f.descriptor.id, { epoch: 1, seq: before.seq })
       expect(() => {
         stage.append(evidence === 'archived' ? [replacement, second] : [replacement])

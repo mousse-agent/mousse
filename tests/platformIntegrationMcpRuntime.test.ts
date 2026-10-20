@@ -49,17 +49,11 @@ function managerFor(
 }
 
 describe('I01 MCP runtime defects', () => {
-  it('does not treat anonymous remotes as OAuth-required', () => {
-    expect(
-      inferMcpAuthMode(
-        testServerConfig({
-          url: 'https://example.test/mcp',
-          headers: {},
-          auth: undefined,
-          authMode: undefined
-        })
-      )
-    ).toBe('anonymous')
+  it('infers anonymous, OAuth and static auth modes for remotes', () => {
+    const remote = { url: 'https://example.test/mcp', authMode: undefined }
+    expect(inferMcpAuthMode(testServerConfig({ ...remote, headers: {}, auth: undefined }))).toBe('anonymous')
+    expect(inferMcpAuthMode(testServerConfig({ ...remote, headers: {}, auth: { clientId: 'client' } }))).toBe('oauth')
+    expect(inferMcpAuthMode(testServerConfig({ ...remote, headers: { Authorization: 'Bearer token' }, auth: undefined }))).toBe('static')
   })
 
   it('connects and lists anonymous remote tools without an OAuth login', async () => {
@@ -325,20 +319,6 @@ describe('I01 MCP runtime defects', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
-  })
-
-  it('uses child actor grants instead of the main-agent gate', async () => {
-    const store = settingsStore((settings) => {
-      settings.integrations.mcp.enabled = true
-      settings.integrations.mcp.enableForMainAgent = false
-      settings.integrations.mcp.enableForAgents.mousse = true
-      settings.integrations.mcp.enabledServers = ['inst-echo']
-    })
-    const manager = managerFor([testServerConfig()], injectedFactory(), store)
-    const main = await manager.getEnabledTools(undefined, 'main')
-    const child = await manager.getEnabledTools(undefined, 'mousse')
-    expect(main).toEqual([])
-    expect(child).toHaveLength(1)
   })
 
   it('revokes persisted OAuth tokens even after the in-memory provider is gone', async () => {

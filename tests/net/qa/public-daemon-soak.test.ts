@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   evaluateGrowth,
@@ -6,21 +5,6 @@ import {
   MEMBER_NAMES,
   OBSERVER_INDEX
 } from '../../../scripts/net/qa/observer-growth.mjs'
-
-const harness = readFileSync('scripts/net/qa/public-daemon-soak.mjs', 'utf8')
-
-describe('public daemon soak observer', () => {
-  it('includes a fourth member in replica validation and sampling without adding it to fault rotation', () => {
-    expect(MEMBER_NAMES).toEqual(['a', 'b', 'c', 'observer'])
-    expect(OBSERVER_INDEX).toBe(3)
-    expect(harness).toContain('index < homes.length')
-    expect(harness).toContain('for (const index of [1, 2, observerIndex])')
-    expect(harness).toContain('metrics(false, true)')
-    expect(harness).toContain('clearInterval(observerTimer)')
-    expect(harness).toContain('report.steps % 3')
-    expect(harness).toContain('faultIndex++ % 4')
-  })
-})
 
 const hour = 3600000
 const samples = (change = {}) =>

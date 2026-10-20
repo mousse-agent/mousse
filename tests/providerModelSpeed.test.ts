@@ -21,9 +21,10 @@ describe('Cursor model endpoint speed in the renderer catalog', () => {
     expect(catalog.models.some(model => !getCursorModelMetadata(model.id)?.supportsFast)).toBe(true)
     for (const model of catalog.models) {
       const metadata = getCursorModelMetadata(model.id)!
-      expect(model.speed).toBe(metadata.supportsFast
-        ? (metadata.fastOverride ?? metadata.defaultFast) ? 'fast' : 'slow'
-        : undefined)
+      // A speed is exported only for models with Fast support, and an explicit endpoint suffix wins.
+      expect(model.speed !== undefined).toBe(Boolean(metadata.supportsFast))
+      if (model.id.endsWith(':fast')) expect(model.speed).toBe('fast')
+      if (model.id.endsWith(':slow')) expect(model.speed).toBe('slow')
     }
   })
 })

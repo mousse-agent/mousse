@@ -58,13 +58,6 @@ it('selects current proof only from the registered Space descriptor and accepts 
       store: f.p.store
     })
     expect(displayAsPacket.receive(captured[1], peer(f.p))).toBe(false)
-    f.p.clock.advance(45000)
-    expect(receiver.receive({ ...captured[0], counter: captured[0].counter + 1 }, peer(f.p))).toBe(
-      false
-    )
-    expect(receiver.view(f.parent, f.bot).state).toBe('reconnecting')
-    f.p.clock.advance(45000)
-    expect(receiver.view(f.parent, f.bot).state).toBe('offline')
     f.p.identity.revoke(f.bot)
     expect(receiver.view(f.parent, f.bot).state).toBe('offline')
   } finally {

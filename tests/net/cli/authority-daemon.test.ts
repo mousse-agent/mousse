@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import type { NetStatus } from '../../../src/shared/net/local'
 
 import { buildTestCli } from '../helpers/build'
+import { stop, until } from '../helpers/process'
 
 let buildFixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
 let entry: string, responseEntry: string
@@ -19,25 +20,6 @@ beforeAll(async () => {
   )
 }, 60_000)
 afterAll(() => buildFixture?.cleanup())
-async function until<T>(
-  probe: () => Promise<T> | T,
-  ready: (value: T) => boolean,
-  timeout = 20000
-): Promise<T> {
-  const deadline = Date.now() + timeout
-  do {
-    const value = await probe()
-    if (ready(value)) return value
-    await new Promise((resolve) => setTimeout(resolve, 40))
-  } while (Date.now() < deadline)
-  throw new Error('Network daemon fixture timed out')
-}
-async function stop(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return
-  const done = new Promise<void>((resolve) => child.once('exit', () => resolve()))
-  child.kill('SIGKILL')
-  await done
-}
 it.skipIf(process.platform === 'win32')(
   'recovers a lost CLI authority-transfer response through original daemon receipts after both restarts and imports the encrypted recovery file',
   async () => {

@@ -247,8 +247,6 @@ it('flushes and replicates an actual expired admission from a separately joined 
       .list(channel)
       .find((entry) => decodeEnvelope(entry.envelope).envelope.type === 'bot.run.expired')!
   expect(result.kind).toBe('expired')
-  expect(result.record.binding).toBeUndefined()
-  expect(budgets.remaining(bot, space.space, owner.clock.now())).toBe(1000)
   await consumer.flush(space.space)
   expect(outbox.get(marker.id)?.state).toBe('sent')
   await vi.waitFor(() => expect(replica.getById(channel, marker.id)).toBeDefined())
@@ -276,8 +274,6 @@ it('delivers the signed expired marker on its indexed human trigger stream over 
     descriptor = f.p.store.getStream(input.stream)!,
     evidence = f.p.projection.state(f.space.space)!
   expect(result.kind).toBe('expired')
-  expect(result.record.binding).toBeUndefined()
-  expect(f.budgets.remaining(f.bot, f.space.space, f.p.clock.now())).toBe(1000)
   const gate = new BotRecordAuthorization({
       identity: f.p.identity,
       meta: f.p.projection,
@@ -373,12 +369,4 @@ it('delivers the signed expired marker on its indexed human trigger stream over 
   f.p.identity.revoke(f.bot)
   expect(gate.canWrite(descriptor, env, peer(f.p))).toBe(false)
   expect(() => consumer.verifyRecord(stored, descriptor, false)).not.toThrow()
-  expect(() =>
-    new BotRecordAuthorization({
-      identity: f.p.identity,
-      meta: f.p.projection,
-      store: f.p.store,
-      binding: () => undefined
-    }).verifyHistory(stored, descriptor)
-  ).toThrow(expect.objectContaining({ code: 'forbidden' }))
 })

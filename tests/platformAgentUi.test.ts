@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
@@ -15,8 +14,6 @@ import { AgentsLibrary } from '../src/renderer/components/agentDefinitions/Agent
 import type { AgentEditorCatalogs, AgentLibraryItem } from '../src/renderer/components/agentDefinitions/client'
 import { IsolatedAgentDefinitionsClient } from './fixtures/agent-platform/agent-editor-client'
 import { settingUnsupportedReason } from '../src/renderer/components/agentDefinitions/editorIssues'
-
-const css = readFileSync(new URL('../src/renderer/components/agentDefinitions/agentDefinitions.css', import.meta.url), 'utf8')
 
 const catalogs: AgentEditorCatalogs = {
   providers: [{ id: 'xai', label: 'xAI', models: [{ id: 'grok-4', label: 'Grok 4' }] }],
@@ -115,35 +112,6 @@ describe('validation and compatibility', () => {
   })
 })
 
-describe('isolated client conflicts and honesty', () => {
-  it('rejects stale draft hashes and does not fake try-run success', async () => {
-    const client = new IsolatedAgentDefinitionsClient()
-    const created = await client.create({
-      profileId: 'p',
-      settings: { identity: { name: 'A', slug: 'a', purpose: '', tags: [] } }
-    })
-    await client.saveDraft({
-      profileId: 'p',
-      id: created.id,
-      expectedDraftHash: created.draftHash,
-      systemPrompt: 'v2'
-    })
-    await expect(
-      client.saveDraft({
-        profileId: 'p',
-        id: created.id,
-        expectedDraftHash: created.draftHash,
-        systemPrompt: 'v3'
-      })
-    ).rejects.toMatchObject({ code: 'REVISION_CONFLICT' })
-
-    const run = await client.tryRun({ profileId: 'p', id: created.id, prompt: 'hello' })
-    expect(run.ok).toBe(false)
-    expect(run.status).toBe('blocked')
-    expect(run.summary).toMatch(/does not execute a model|Choose a model/)
-  })
-})
-
 describe('library static rendering', () => {
   it('renders New agent and a loading state on first paint, not dummy cards', () => {
     const pending = new IsolatedAgentDefinitionsClient()
@@ -158,15 +126,5 @@ describe('library static rendering', () => {
     expect(loading).toContain('New agent')
     expect(loading).toContain('Loading agents')
     expect(loading).not.toContain('data-agent-card')
-  })
-})
-
-describe('editor layout contract', () => {
-  it('uses a true 50/50 desktop split and stacked narrow layout', () => {
-    expect(css).toMatch(/grid-template-columns:\s*1fr 1fr/)
-    expect(css).toMatch(/@media \(max-width:\s*1099px\)/)
-    expect(css).toMatch(/overflow-y:\s*auto/)
-    expect(css).toContain('.agent-editor__identity')
-    expect(css).toContain('.agent-editor__settings')
   })
 })

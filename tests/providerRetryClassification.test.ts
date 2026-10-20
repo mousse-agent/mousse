@@ -24,6 +24,7 @@ describe('provider error classification', () => {
     [{ code: 'ECONNRESET', message: 'read reset' }, 'provider_unavailable'],
     [new Error('WebSocket error'), 'provider_unavailable'],
     [new Error('fetch failed'), 'provider_unavailable'],
+    [new Error('Codex error: An error occurred while processing your request. You can retry your request. Please include the request ID be0fccad-64fb-411a-885b-d79ba7239230.'), 'provider_unavailable'],
     [{ statusCode: 408, message: 'request elapsed' }, 'provider_timeout'],
     [{ code: 'ETIMEDOUT', message: 'request elapsed' }, 'provider_timeout']
   ])('recognizes supported transient evidence %j', (error, code) => {

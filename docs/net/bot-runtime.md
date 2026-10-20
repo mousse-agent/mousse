@@ -89,4 +89,4 @@ An unreachable old node cannot supply a stop acknowledgement. Automatic activati
 
 ## Conformance
 
-`test-vectors/net/admission/cases.json` freezes bounded admission and failure decisions. P0 loader checks validate the fixture catalogue only; P1/P6 MUST execute those inputs against real modules, inject every transaction/crash boundary, and establish the expected row/receipt/model-call counts. Qualification additionally needs real runtime negative tests for forbidden tools, path traversal/symlink swap, context/session leakage, budget races, cancellation and provider accounting. P0's documents/fixtures do not claim those runtime tests pass.
+Admission and failure decisions are exercised against the real admission service in `tests/net/bots/admission/`, with injected transaction and crash boundaries and asserted row/receipt/model-call counts. Qualification additionally needs real runtime negative tests for forbidden tools, path traversal/symlink swap, context/session leakage, budget races, cancellation and provider accounting. P0's documents/fixtures do not claim those runtime tests pass.

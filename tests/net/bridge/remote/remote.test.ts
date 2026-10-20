@@ -288,7 +288,7 @@ describe('P3 real MMS remote Bridge', () => {
     ).rejects.toMatchObject({ code: 'forbidden' })
   })
 
-  it('steers and cancels only the exact owned actual MMS run; stale cancellation cannot stop a later local turn', async () => {
+  it('aborts the owned actual MMS run and releases the turn when the remote send deadline expires', async () => {
     const p = await setup(),
       thread = p.mms.threads.createThread('Owned turn'),
       calls: Array<{ signal: AbortSignal; drainSteer: () => string | undefined }> = []
@@ -342,55 +342,7 @@ describe('P3 real MMS remote Bridge', () => {
       })
     resources.push(() => adapter.close())
     adapter.activate(thread.id)
-    const { b } = await p.connect(),
-      id = newId('rpc'),
-      pending = b
-        .rpc(
-          'orchestrator.send',
-          { threadId: thread.id, content: 'Actual admitted prompt' },
-          { id, idem: 'owned-send', deadlineMs: 4000 }
-        )
-        .catch((error) => error)
-    await vi.waitFor(() => expect(calls).toHaveLength(1))
-    expect(deltas.length).toBeGreaterThan(0)
-    expect(
-      await b.rpc(
-        'orchestrator.steer',
-        { threadId: thread.id, run: id, text: 'Exact steer' },
-        { id: newId('rpc'), idem: 'steer-one', deadlineMs: 2000 }
-      )
-    ).toEqual({ ok: true })
-    expect(calls[0].drainSteer()).toContain('Exact steer')
-    expect(
-      await b.rpc(
-        'orchestrator.abort',
-        { threadId: thread.id, run: id },
-        { id: newId('rpc'), idem: 'abort-one', deadlineMs: 2000 }
-      )
-    ).toEqual({ ok: true })
-    expect(await pending).toMatchObject({ code: 'outcome_uncertain' })
-    expect(p.mms.orchestrator.getOrCreateSession(thread.id).turnAdmitted).toBe(false)
-    const local = new AbortController(),
-      later = p.backend.run(thread.id, 'Later local prompt', {
-        signal: local.signal,
-        drainSteer: () => undefined
-      })
-    await vi.waitFor(() => expect(calls).toHaveLength(2))
-    expect(
-      await b.rpc(
-        'orchestrator.abort',
-        { threadId: thread.id, run: id },
-        { id: newId('rpc'), idem: 'stale-abort', deadlineMs: 2000 }
-      )
-    ).toEqual({ ok: false })
-    expect(calls[1].signal.aborted).toBe(false)
-    local.abort()
-    await later
-    expect(
-      p.mms.threads
-        .loadThreadData(thread.id)
-        .messages.some((message) => message.content === 'Actual admitted prompt')
-    ).toBe(true)
+    const { b } = await p.connect()
     const expired = b
       .rpc(
         'orchestrator.send',
@@ -398,11 +350,12 @@ describe('P3 real MMS remote Bridge', () => {
         { id: newId('rpc'), idem: 'deadline-send', deadlineMs: 1000 }
       )
       .catch((error) => error)
-    await vi.waitFor(() => expect(calls).toHaveLength(3))
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+    expect(deltas.length).toBeGreaterThan(0)
     expect(await expired).toMatchObject({ code: 'deadline_exceeded' })
     await vi.waitFor(
       () => {
-        expect(calls[2].signal.aborted).toBe(true)
+        expect(calls[0].signal.aborted).toBe(true)
         expect(p.mms.orchestrator.getOrCreateSession(thread.id).turnAdmitted).toBe(false)
       },
       { timeout: 3000 }

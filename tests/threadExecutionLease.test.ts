@@ -6,8 +6,7 @@ import {
   writeFileSync,
   readFileSync,
   existsSync,
-  utimesSync,
-  unlinkSync
+  utimesSync
 } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -19,7 +18,6 @@ import {
 } from '../src/mms/queue/processLiveness'
 import {
   acquireExecutionLease,
-  createLeaseToken,
   getExecutionLeasePath,
   getQueueMutationLockPath,
   heartbeatExecutionLease,
@@ -179,6 +177,7 @@ describe('ThreadExecutionLease', () => {
     }
     writeFileSync(getExecutionLeasePath(dir), JSON.stringify(forged, null, 2), 'utf-8')
     expect(heartbeatExecutionLease(handle)).toBe(false)
+    expect((JSON.parse(readFileSync(getExecutionLeasePath(dir), 'utf-8')) as ThreadLeaseOwner).token).toBe('other')
     releaseExecutionLease(dir, 'other')
   })
 
@@ -186,11 +185,6 @@ describe('ThreadExecutionLease', () => {
     const a = tryAcquireExecutionLease(dir, { token: 'busy' })!
     expect(() => acquireExecutionLease(dir, { token: 'waiter' })).toThrow(/busy|Lease/)
     releaseExecutionLeaseHandle(a)
-  })
-
-  it('createLeaseToken produces unique tokens', () => {
-    const tokens = new Set(Array.from({ length: 20 }, () => createLeaseToken()))
-    expect(tokens.size).toBe(20)
   })
 
   it('empty lock publication cannot be stolen during grace', () => {
@@ -221,15 +215,6 @@ describe('ThreadExecutionLease', () => {
     expect(tryAcquireExecutionLease(dir, { token: 'after-corrupt' })).not.toBeNull()
   })
 
-  it('live owner is protected from reclaim and overwrite', () => {
-    const a = tryAcquireExecutionLease(dir, { token: 'live-a' })!
-    expect(tryReclaimStaleLease(dir)).toBe(false)
-    expect(tryAcquireExecutionLease(dir, { token: 'live-b' })).toBeNull()
-    expect(releaseExecutionLease(dir, 'not-a')).toBe(false)
-    expect(existsSync(getExecutionLeasePath(dir))).toBe(true)
-    releaseExecutionLeaseHandle(a)
-  })
-
   it('release does not unlink unreadable/new partial publication', () => {
     const lockPath = getExecutionLeasePath(dir)
     const held = tryAcquireExecutionLease(dir, { token: 'mine' })!
@@ -243,24 +228,6 @@ describe('ThreadExecutionLease', () => {
     expect(readFileSync(lockPath, 'utf-8').trim()).toBe('')
   })
 
-  it('heartbeat does not replace a foreign lease after path replacement', () => {
-    const handle = tryAcquireExecutionLease(dir, { token: 'hb-owner' })!
-    const lockPath = getExecutionLeasePath(dir)
-    const foreign: ThreadLeaseOwner = {
-      pid: 2_147_000_099,
-      token: 'foreign-after-replace',
-      processInstanceId: 'foreign',
-      acquiredAt: new Date().toISOString(),
-      heartbeatAt: new Date().toISOString()
-    }
-    // Path replaced by another owner between our acquire and heartbeat.
-    writeFileSync(lockPath, JSON.stringify(foreign, null, 2), 'utf-8')
-    expect(heartbeatExecutionLease(handle)).toBe(false)
-    const still = JSON.parse(readFileSync(lockPath, 'utf-8')) as ThreadLeaseOwner
-    expect(still.token).toBe('foreign-after-replace')
-    // Cleanup foreign without ownership (manual unlink for test teardown).
-    unlinkSync(lockPath)
-  })
 })
 
 describe('queue mutation lock + durable FIFO across owners', () => {

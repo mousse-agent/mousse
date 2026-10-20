@@ -340,3 +340,32 @@ it('journals cancellation while offline so a reconnect cannot execute a previous
   await expect(f.hub().submit(id)).rejects.toMatchObject({ code: 'outcome_uncertain' })
   expect(f.mms.threads.listAllThreads()).toHaveLength(0)
 })
+
+it('delivers the previously failing 5 MiB actual MMS source snapshot over TLS after bounded document parsing', async () => {
+  const f = await fixture(),
+    thread = f.mms.threads.createThread('Large parser reproduction'),
+    message = {
+      id: 'large',
+      role: 'assistant' as const,
+      content: 'x'.repeat(5 * 1024 * 1024),
+      timestamp: new Date().toISOString()
+    }
+  f.mms.threads.mutateThreadData(thread.id, () => ({ messages: [message] }))
+  f.mms.orchestrator.getOrCreateSession(thread.id).messages = [message]
+  const adapter = f.makeAdapter()
+  await f.connect(adapter.store)
+  const updates: unknown[] = [],
+    errors: string[] = []
+  await f.hub().attach(
+    { nodeId: f.targetNode, entityId: thread.id },
+    (value) => updates.push(value),
+    (code) => errors.push(code)
+  )
+  // Delivery, not speed, is under test: a 5 MiB snapshot over TLS is slow on small CI runners.
+  await vi.waitFor(() => expect(updates).toHaveLength(1), { timeout: 30000 })
+  expect(updates[0]).toMatchObject({
+    kind: 'snapshot',
+    value: { messages: [{ content: message.content }] }
+  })
+  expect(errors).toEqual([])
+}, 60000)

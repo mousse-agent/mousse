@@ -701,6 +701,12 @@ it('holds concurrent and repeated close calls behind the real provider drain and
         .get(record.id)!.spent
     ).toBe(10)
   )
+  // Provider settlement alone does not release the held uncertain slot.
+  expect(
+    f.p.db.database
+      .prepare('SELECT active FROM net_bot_admission_slots WHERE execution=?')
+      .get(record.id)!.active
+  ).toBe(1)
   const restarted = new BotProfileService(f.bots.options)
   disposers.push(() => restarted.close())
   await restarted.close()

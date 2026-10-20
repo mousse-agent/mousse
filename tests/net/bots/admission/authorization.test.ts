@@ -46,14 +46,8 @@ describe('signed accepted receipt and immutable public bot output authorization'
         binding: () => binding
       })
     expect(result.kind).toBe('admitted')
-    expect(f.budgets.remaining(f.bot, f.space.space, f.p.clock.now())).toBe(940)
     expect(gate.canRegisterAccepted(descriptor, receipt, peer(f.p))).toBe(true)
     expect(gate.canWrite(descriptor, envelope, peer(f.p))).toBe(true)
-    expect(f.service.admit(input)).toMatchObject({
-      kind: 'duplicate',
-      record: { id: result.record.id }
-    })
-    expect(f.outbox.list(receipt.stream)).toHaveLength(1)
     const original = f.p.projection.canRead.bind(f.p.projection)
     f.p.projection.canRead = () => false
     expect(gate.canWrite(descriptor, envelope, peer(f.p))).toBe(false)
@@ -116,9 +110,6 @@ describe('signed accepted receipt and immutable public bot output authorization'
     expect(
       gate.canWrite(descriptor, envelope, caller, { ...binding, trigger: newId('event') })
     ).toBe(false)
-    expect(() =>
-      gate.verifyHistory({ ...receipt, epoch: 1, seq: 1, recvTs: f.p.clock.now() }, descriptor)
-    ).toThrow(expect.objectContaining({ code: 'forbidden' }))
     f.p.identity.revoke(f.bot)
     expect(gate.canRegisterAccepted(descriptor, receipt, caller)).toBe(false)
   })

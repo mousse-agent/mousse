@@ -57,18 +57,16 @@ describe('Reconciler', () => {
 
   const types = (store: RunStore, threadId = 't') => store.listEvents(threadId).map((event) => event.type)
 
-  it('reports nothing on a quiet store', () => {
-    const { reconciler } = setup()
-    expect(reconciler.runOnce()).toEqual({
-      expiredLeases: [],
-      staleRuns: [],
-      forcedInterrupts: [],
-      wakes: { wakes: [], steers: [], cancelled: [], restored: [] },
-      queuedStarts: [],
-      strandedCancelled: [],
-      outcomeUnknownTools: []
-
-    })
+  it('leaves a healthy running run alone and writes nothing', async () => {
+    const { store, engine, reconciler } = setup()
+    const run = await runningRun(engine)
+    const seq = store.maxSeq('t')
+    const report = reconciler.runOnce()
+    expect(
+      [report.expiredLeases, report.staleRuns, report.forcedInterrupts, report.queuedStarts, report.strandedCancelled, report.outcomeUnknownTools]
+    ).toEqual([[], [], [], [], [], []])
+    expect(store.getRun(run.runId)!.status).toBe('running')
+    expect(store.maxSeq('t')).toBe(seq)
   })
 
   it('a rule that throws does not skip the rest; the failure is an event naming the rule (L1)', async () => {
@@ -302,5 +300,12 @@ describe('Reconciler', () => {
     await new Promise((resolve) => setTimeout(resolve, 50))
     reconciler.stop()
     expect(outbox.get(effect.effectId)!.status).toBe('pending')
+
+    // After stop() a lease that expires is left alone: no further pass runs.
+    advance(60_000)
+    expect(outbox.claimNext('1:1', now())?.effectId).toBe(effect.effectId)
+    advance(60_000)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(outbox.get(effect.effectId)!.status).toBe('running')
   })
 })

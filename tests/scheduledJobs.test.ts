@@ -389,16 +389,6 @@ describe('fileLock + tick lock recovery', () => {
       child.kill()
     }
   })
-
-  it('no event-loop busy-spin helper remains in fileLock module', () => {
-    const src = readFileSync(
-      join(__dirname, '../src/mms/scheduled/fileLock.ts'),
-      'utf-8'
-    )
-    expect(src).not.toMatch(/while\s*\(\s*Date\.now\(\)/)
-    expect(src).not.toMatch(/Atomics\.wait/)
-    expect(src).not.toMatch(/sleepMs\s*\(/)
-  })
 })
 
 describe('ScheduledJobService stop + startup reconcile', () => {

@@ -561,7 +561,6 @@ export class SpaceLocalService {
     }
     for (const space of spaces) {
       if (this.jobs.size >= 4) break
-      if (this.joining.has(space)) continue
       if (this.archiveFences.has(space) || !this.profile.canStartSpaceWork(space)) continue
       // A join owns admission and the initial meta connection. A resume tick
       // must not replace that in-flight connection and cancel the local request.

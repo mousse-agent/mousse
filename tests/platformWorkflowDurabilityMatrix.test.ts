@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { build } from 'esbuild'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { ExecutionPolicyLayer } from '../src/shared/execution/types'
 import { CancellationRegistry } from '../src/mms/execution/CancellationRegistry'
 import { ExecutionPolicyService } from '../src/mms/execution/ExecutionPolicyService'
@@ -25,6 +25,18 @@ function root(prefix: string): string {
   roots.push(value)
   return value
 }
+
+let crashEntry = ''
+let crashBuildDir = ''
+beforeAll(async () => {
+  crashBuildDir = mkdtempSync(join(tmpdir(), 'mousse-crash-fixture-'))
+  crashEntry = join(crashBuildDir, 'workflow-runtime-crash-child.cjs')
+  await build({
+    entryPoints: [join(process.cwd(), 'tests', 'fixtures', 'workflow-runtime-crash-child.ts')],
+    bundle: true, platform: 'node', format: 'cjs', outfile: crashEntry, sourcemap: false
+  })
+}, 60_000)
+afterAll(() => rmSync(crashBuildDir, { recursive: true, force: true }))
 
 afterEach(() => {
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true })
@@ -132,20 +144,7 @@ describe('workflow durability matrix', () => {
     }
   })
 
-  it('records after-result recovery, bounded parallel overlap, and all-success/collect-results failure settlement', async () => {
-    const value = await setup('parallel', 'collect-results')
-    let active = 0; let maxActive = 0; let calls = 0; let aborted = 0
-    const run = new WorkflowRunService({
-      profileId: 'matrix', profileRoot: value.profileRoot, registry: value.registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
-      adapters: { agent: { kind: 'agent', async invoke(request) { calls += 1; active += 1; maxActive = Math.max(maxActive, active); await new Promise((resolve) => setTimeout(resolve, 10)); if (request.signal.aborted) aborted += 1; active -= 1; return { output: { ok: true } } } } }
-    })
-    const snap = await start(run, value)
-    expect(snap.manifest.state).toBe('succeeded')
-    expect(maxActive).toBe(2)
-    expect(calls).toBe(2)
-    expect(aborted).toBe(0)
-    expect((snap.result as any)?.results).toHaveLength(2)
-
+  it('settles a failing parallel branch under collect-results and all-success policies', async () => {
     const collectFailureValue = await setup('parallel', 'collect-results')
     const collectDraft = collectFailureValue.registry.get(collectFailureValue.definitionId)!
     const collectParallel = (collectDraft.bundle.manifest as any).nodes.find((node: any) => node.id === 'parallel')
@@ -708,9 +707,7 @@ describe('workflow durability matrix', () => {
   it('kills and restarts the actual workflow child process without replaying a nested external effect', async () => {
     const value = await setup('foreach')
     const marker = join(value.profileRoot, 'dispatch-marker.ndjson')
-    const fixture = join(process.cwd(), 'tests', 'fixtures', 'workflow-runtime-crash-child.ts')
-    const entry = join(value.profileRoot, 'workflow-runtime-crash-child.cjs')
-    await build({ entryPoints: [fixture], bundle: true, platform: 'node', format: 'cjs', outfile: entry, sourcemap: false })
+    const entry = crashEntry
     const children: ChildProcess[] = []
     const waitForExit = (child: ChildProcess, timeoutMs = 5000) => new Promise<number | null>((resolve, reject) => {
       if (child.exitCode !== null || child.signalCode !== null) { resolve(child.exitCode); return }
@@ -775,9 +772,7 @@ describe('workflow durability matrix', () => {
   it.each(['afterNestedResult', 'afterNestedCheckpoint'] as const)('kills and resumes a real child at the nested %s boundary without redispatch', async (fault) => {
     const value = await setup('foreach')
     const marker = join(value.profileRoot, `nested-${fault}.ndjson`)
-    const fixture = join(process.cwd(), 'tests', 'fixtures', 'workflow-runtime-crash-child.ts')
-    const entry = join(value.profileRoot, `workflow-runtime-${fault}.cjs`)
-    await build({ entryPoints: [fixture], bundle: true, platform: 'node', format: 'cjs', outfile: entry, sourcemap: false })
+    const entry = crashEntry
     const children: ChildProcess[] = []
     const waitForExit = (child: ChildProcess, timeoutMs = 5000) => new Promise<number | null>((resolve, reject) => {
       if (child.exitCode !== null || child.signalCode !== null) { resolve(child.exitCode); return }
@@ -841,9 +836,7 @@ describe('workflow durability matrix', () => {
     parent.edges = [{ from: 'start', port: 'next', to: 'sub' }, { from: 'sub', port: 'success', to: 'end' }]
     const parentSaved = registry.saveDraft({ bundle: { manifest: parent, assets: [] } })
     const parentPublished = registry.publish({ definitionId: parentSaved.definitionId, expectedDraftSemanticHash: parentSaved.semanticHash, expectedHeadRevisionId: null })
-    const fixture = join(process.cwd(), 'tests', 'fixtures', 'workflow-runtime-crash-child.ts')
-    const entry = join(profileRoot, 'workflow-runtime-parent-cancel.cjs')
-    await build({ entryPoints: [fixture], bundle: true, platform: 'node', format: 'cjs', outfile: entry, sourcemap: false })
+    const entry = crashEntry
     const childProcess = spawn(process.execPath, [entry], {
       env: { ...process.env, MATRIX_PROFILE_ROOT: profileRoot, MATRIX_MODE: 'run', MATRIX_RUN_ID: '', MATRIX_MARKER: join(profileRoot, 'cancel.ndjson'), MATRIX_DEFINITION_ID: parentPublished.definitionId, MATRIX_REVISION_ID: parentPublished.head?.revisionId ?? '' },
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true

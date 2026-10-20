@@ -12,11 +12,16 @@ import { lifecycleGit as git, WorktreeRetirementService } from '../src/mms/lifec
 const roots: string[] = []
 const releases: Array<() => unknown> = []
 afterEach(() => { for (const release of releases.splice(0)) release(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
-async function fixture(sparse = false) {
+async function fixture(sparse = false, crlf = false) {
   const root = mkdtempSync(join(tmpdir(), 'mousse-retire-')); roots.push(root)
   const repo = join(root, 'repo'); mkdirSync(repo)
   git(repo, ['init']); git(repo, ['config', 'user.email', 'test@example.com']); git(repo, ['config', 'user.name', 'Test'])
   writeFileSync(join(repo, 'a.txt'), 'first\n'); writeFileSync(join(repo, 'b.txt'), 'second\n'); git(repo, ['add', '.']); git(repo, ['commit', '-m', 'base'])
+  if (crlf) {
+    git(repo, ['config', 'core.autocrlf', 'false'])
+    writeFileSync(join(repo, '.gitattributes'), 'value.txt text eol=crlf\n'); writeFileSync(join(repo, 'value.txt'), 'first\nsecond\n')
+    git(repo, ['add', '.']); git(repo, ['commit', '-m', 'explicit checkout line endings'])
+  }
   const home = join(root, 'profile'), task = join(home, 'thread-data', 'task'); mkdirSync(task, { recursive: true })
   writeFileSync(join(task, 'meta.json'), JSON.stringify({ id: 'task' }))
   const store = new ResourceLifecycleStore({ profileId: 'test', profileHome: home }); store.registerTask({ taskId: 'task', location: task })
@@ -99,4 +104,45 @@ test('direct retirement preserves a checkout still referenced by another task', 
   f.store.registerTask({ taskId: 'peer', location: peer })
   expect(() => f.service.retire(f.path)).toThrow(/Another task/)
   expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('first\n')
+})
+
+test('retains Git-clean mixed line endings that checkout cannot reconstruct byte for byte', async () => {
+  const f = await fixture(false, true)
+  const path = join(f.worktree, 'value.txt')
+  const soleCopy = Buffer.from('first\r\nsecond\n')
+  writeFileSync(path, soleCopy)
+  // Refresh the index stat cache through an ordinary user staging operation;
+  // the normalized blob remains identical to HEAD and creates no staged diff.
+  git(f.worktree, ['add', 'value.txt'])
+  expect(git(f.worktree, ['diff', '--cached', '--name-only'])).toBe('')
+  expect(git(f.worktree, ['status', '--porcelain'])).toBe('')
+  expect(git(f.worktree, ['hash-object', '--stdin-paths'], JSON.stringify(path.replaceAll('\\', '/')) + '\n'))
+    .toBe(git(f.worktree, ['rev-parse', 'HEAD:value.txt']))
+  expect(() => f.service.prepare(f.input), 'Clean-filter equivalence cannot authorize loss of the original materialized bytes').toThrow(/reconstruct.*exact|materialized/i)
+  expect(readFileSync(path)).toEqual(soleCopy)
+})
+
+test('retires canonical CRLF materialization and reconstructs exactly the same bytes after service restart', async () => {
+  const f = await fixture(false, true)
+  const original = readFileSync(join(f.worktree, 'value.txt'))
+  expect(original).toEqual(Buffer.from('first\r\nsecond\r\n'))
+  const primaryHead = git(f.repo, ['rev-parse', 'HEAD'])
+  f.service.prepare(f.input); f.service.retire(f.path)
+  expect(existsSync(f.worktree)).toBe(false)
+  const restarted = new WorktreeRetirementService(new ResourceLifecycleStore({ profileId: 'test', profileHome: f.home }), f.ownership)
+  restarted.reconstruct(f.path)
+  expect(readFileSync(join(f.worktree, 'value.txt'))).toEqual(original)
+  expect(git(f.repo, ['rev-parse', 'HEAD'])).toBe(primaryHead)
+})
+
+test('refuses a reconstruction pin redirected to a primary branch before updating retained results', async () => {
+  const f = await fixture(false, true)
+  const manifest = f.service.prepare(f.input)
+  const primary = git(f.repo, ['symbolic-ref', 'HEAD']), original = git(f.repo, ['rev-parse', primary])
+  writeFileSync(join(f.worktree, 'value.txt'), 'new child result\r\n')
+  git(f.worktree, ['add', 'value.txt']); git(f.worktree, ['commit', '-qm', 'new child result'])
+  git(f.repo, ['symbolic-ref', manifest.resultRef, primary])
+  expect(() => f.service.prepare(f.input)).toThrow(/symbolic|pin|reference/i)
+  expect(git(f.repo, ['rev-parse', primary])).toBe(original)
+  expect(git(f.repo, ['symbolic-ref', manifest.resultRef])).toBe(primary)
 })

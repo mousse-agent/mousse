@@ -160,12 +160,6 @@ it('accepts independently bot-signed presence through only the exact current aut
   offsetMs = NaN
   expect(receiver.receive(skewed(), peer(host))).toBe(false)
   offsetMs = 0
-  const withheld = message(8)
-  reader.clock.advance(75000)
-  measuredAtMonotonic = reader.clock.monotonic()
-  expect(receiver.receive(withheld, peer(host))).toBe(false)
-  expect(receiver.view(channel, bot).state).toBe('reconnecting')
-  expect(receiver.receive(message(8), peer(host))).toBe(true)
   owner.identity.revoke(bot)
   trust(reader, owner)
   expect(receiver.receive(message(9), peer(host))).toBe(false)

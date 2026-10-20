@@ -1,11 +1,14 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { INVALID_PROFILE_IDS } from '../src/shared/profiles'
 import {
+  assertOwnedPath,
+  canonicalizeAbsolutePath,
   createInstallationPaths,
   createProfilePaths,
+  isPathInsideRoot,
   joinOwnedPath
 } from '../src/mms/profiles'
 import { ProfilePathError } from '../src/shared/profiles/errors'
@@ -17,6 +20,24 @@ function tempHome(): string {
   tempDirs.push(dir)
   mkdirSync(join(dir, 'home'), { recursive: true })
   return join(dir, 'home')
+}
+
+/** Canonical base, so the only links in a fixture are the ones the test creates. */
+function tempRoot(): string {
+  const dir = mkdtempSync(join(realpathSync.native(tmpdir()), 'mousse-owned-paths-'))
+  tempDirs.push(dir)
+  mkdirSync(join(dir, 'root'))
+  return join(dir, 'root')
+}
+
+/** Returns false when the platform cannot create the link, so the caller can skip. */
+function link(target: string, path: string): boolean {
+  try {
+    symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir')
+    return true
+  } catch {
+    return false
+  }
 }
 
 afterEach(() => {
@@ -90,5 +111,92 @@ describe('InstallationPaths and ProfilePaths', () => {
       installation,
       '7f1d3a2c-4b90-4e11-a8c3-0d5e6f7a8b9c'
     )).toThrow(ProfilePathError)
+  })
+})
+
+describe('owned-path containment', () => {
+  it('accepts a not-yet-created path under a root reached through a symlink', () => {
+    const base = join(tempRoot(), '..')
+    const realProject = join(base, 'real', 'project')
+    mkdirSync(realProject, { recursive: true })
+    if (!link(join(base, 'real'), join(base, 'alias'))) return
+    const aliasProject = join(base, 'alias', 'project')
+    const candidate = join(aliasProject, '.mousse', 'skills')
+    const canonical = join(realProject, '.mousse', 'skills')
+
+    expect(canonicalizeAbsolutePath(candidate)).toBe(canonical)
+    for (const root of [aliasProject, realProject]) {
+      expect(isPathInsideRoot(root, candidate)).toBe(true)
+      expect(assertOwnedPath(root, candidate)).toBe(canonical)
+    }
+  })
+
+  it('accepts a child whose name starts with two dots', () => {
+    const root = tempRoot()
+    const candidate = join(root, '..cache', 'child')
+
+    expect(isPathInsideRoot(root, candidate)).toBe(true)
+    expect(assertOwnedPath(root, candidate)).toBe(candidate)
+  })
+
+  it('rejects a dangling symlink that leads outside the root, directly or through another link', () => {
+    const root = tempRoot()
+    const outside = join(root, '..', 'outside')
+    mkdirSync(join(outside, 'dir'), { recursive: true })
+    // direct -> outside/missing
+    // indirect -> root/via/missing, where via -> outside/missing
+    if (!link(join(outside, 'missing'), join(root, 'direct'))) return
+    if (!link(join(outside, 'missing'), join(root, 'via'))) return
+    if (!link(join(root, 'via', 'missing'), join(root, 'indirect'))) return
+    const names = ['direct', 'indirect']
+    // climb -> root/up/../missing, where up -> outside/dir. The filesystem follows
+    // `up` before `..`, so the target is outside/missing. Junctions store a
+    // normalized absolute target, so this fixture only exists off Windows.
+    if (process.platform !== 'win32') {
+      link(join(outside, 'dir'), join(root, 'up'))
+      symlinkSync(`${root}/up/../missing`, join(root, 'climb'))
+      names.push('climb')
+    }
+
+    for (const name of names) {
+      expect(() => assertOwnedPath(root, join(root, name, 'child'))).toThrow(ProfilePathError)
+      expect(() => joinOwnedPath(root, name, 'child')).toThrow(ProfilePathError)
+    }
+  })
+
+  it('rejects an escaping link reached by climbing out of a not-yet-created folder', () => {
+    const root = tempRoot()
+    const outside = join(root, '..', 'outside')
+    mkdirSync(outside)
+    if (!link(outside, join(root, 'escape'))) return
+    // Spelled with `/` so `join` cannot collapse `missing/..` before the check.
+    const candidate = `${root}/missing/../escape/file`
+
+    expect(isPathInsideRoot(root, candidate)).toBe(false)
+    expect(() => assertOwnedPath(root, candidate)).toThrow(ProfilePathError)
+  })
+
+  it.skipIf(process.platform === 'win32')('treats a backslash as part of a file name off Windows', () => {
+    const root = tempRoot()
+    const sibling = `${root}\\outside/file`
+    const child = join(root, 'a\\b')
+
+    expect(() => assertOwnedPath(root, sibling)).toThrow(ProfilePathError)
+    expect(assertOwnedPath(root, child)).toBe(child)
+  })
+
+  it('resolves a dangling symlink that stays inside the root to its target', () => {
+    const root = tempRoot()
+    if (!link(join(root, 'missing'), join(root, 'link'))) return
+
+    expect(assertOwnedPath(root, join(root, 'link', 'child'))).toBe(join(root, 'missing', 'child'))
+  })
+
+  it('rejects a symlink cycle under the root', () => {
+    const root = tempRoot()
+    if (!link(join(root, 'b'), join(root, 'a'))) return
+    if (!link(join(root, 'a'), join(root, 'b'))) return
+
+    expect(() => assertOwnedPath(root, join(root, 'a', 'child'))).toThrow(ProfilePathError)
   })
 })

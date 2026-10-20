@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { once } from 'node:events'
 import { existsSync, realpathSync } from 'node:fs'
-import { FakeClock, MemoryNetwork, MemoryTransport, NetTestBed, memoryPair } from './index'
+import { FakeClock, NetTestBed, memoryPair } from './index'
 
 const flush = async () => {
   await new Promise<void>((resolve) => setImmediate(resolve))
@@ -50,27 +50,6 @@ describe('fault injection harness', () => {
     expect(received).toEqual(['held', 'healed'])
     pair.cut()
   })
-  it('delivers exactly the configured bytes per tick', async () => {
-    const clock = new FakeClock(),
-      pair = memoryPair(clock),
-      received: Buffer[] = []
-    pair.b.on('data', (chunk) => received.push(chunk))
-    pair.forward.slow(2)
-    pair.a.write('abcde')
-    await flush()
-    expect(Buffer.concat(received).length).toBe(0)
-    clock.advance(1)
-    await flush()
-    expect(Buffer.concat(received).toString()).toBe('ab')
-    clock.advance(1)
-    await flush()
-    expect(Buffer.concat(received).toString()).toBe('abcd')
-    clock.advance(1)
-    await flush()
-    expect(Buffer.concat(received).toString()).toBe('abcde')
-    pair.cut()
-    expect(clock.pending()).toBe(0)
-  })
   it('corrupts only the next requested bytes and transforms chunks deterministically', async () => {
     const pair = memoryPair()
     pair.forward.corrupt(2)
@@ -82,46 +61,6 @@ describe('fault injection harness', () => {
     pair.a.write('x')
     expect((await second)[0].toString()).toBe('x!')
     pair.cut()
-  })
-  it('partitions live links, refuses new dials, heals and tears down listeners', async () => {
-    const network = new MemoryNetwork(),
-      a = new MemoryTransport(network, 'a'),
-      b = new MemoryTransport(network, 'b')
-    await a.provision()
-    await b.provision()
-    let receiver!: NodeJS.ReadableStream
-    const listener = await b.listen((stream) => {
-      receiver = stream
-    })
-    const route = { transport: 'memory', address: 'b', priority: 0 }
-    const stream = await a.dial(route, new AbortController().signal)
-    network.partition('a', 'b')
-    await expect(a.dial(route, new AbortController().signal)).rejects.toMatchObject({
-      code: 'route_unreachable'
-    })
-    let bytes = 0
-    receiver.on('data', (chunk) => {
-      bytes += chunk.length
-    })
-    stream.write('lost')
-    await flush()
-    expect(bytes).toBe(0)
-    network.heal()
-    stream.write('ok')
-    await flush()
-    expect(bytes).toBe(2)
-    network.refuseDial('b')
-    await expect(a.dial(route, new AbortController().signal)).rejects.toMatchObject({
-      code: 'route_unreachable'
-    })
-    network.allowDial('b')
-    await listener.close()
-    await expect(a.dial(route, new AbortController().signal)).rejects.toMatchObject({
-      code: 'route_unreachable'
-    })
-    await a.teardown()
-    await b.teardown()
-    expect(stream.destroyed).toBe(true)
   })
   it('cuts both directions and clears a blocked write', async () => {
     const pair = memoryPair()

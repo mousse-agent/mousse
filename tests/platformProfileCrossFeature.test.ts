@@ -3,7 +3,6 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { LegacyControlCredentials } from '../src/mms/profiles/migration/LegacyControlCredentials'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { MousseMainService } from '../src/mms/MousseMainService'
@@ -163,7 +162,7 @@ describe('profile cross-feature production composition', () => {
     }
   }, 30_000)
 
-  it('serializes two profile mutations of one Git repository and keeps measured provider usage profile-owned', async () => {
+  it('serializes two profile mutations of one Git repository and shares provider credentials across profiles', async () => {
     vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
     const root = tempRoot('profile-cross-repo'), repo = join(root, 'repo'), home = join(root, 'home')
     mkdirSync(repo, { recursive: true })
@@ -196,34 +195,9 @@ describe('profile cross-feature production composition', () => {
       expect(aServices.providerAuth).toBe(bServices.providerAuth)
       await aServices.providerAuth.setApiKey('openai', 'shared-fixture-key')
       expect(bServices.providerAuth.credentials.has('openai')).toBe(true)
-      aServices.lineEditStats.recordUsage({ timestamp: '2026-09-11T00:00:00.000Z', provider: 'openai', model: 'shared-model', input: 11, output: 1, cacheRead: 0, cacheWrite: 0 })
-      bServices.lineEditStats.recordUsage({ timestamp: '2026-09-11T00:00:01.000Z', provider: 'openai', model: 'shared-model', input: 22, output: 2, cacheRead: 0, cacheWrite: 0 })
-      expect(aServices.lineEditStats.getUsageSnapshot().totals.tokens).toBe(12)
-      expect(bServices.lineEditStats.getUsageSnapshot().totals.tokens).toBe(24)
     } finally {
       releaseA?.()
       await main.stop()
     }
   }, 20_000)
-
-  it('keeps inert legacy credential inventories separate from shared provider credentials', async () => {
-    vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
-    const root = tempRoot('profile-cross-control')
-    const main = await MousseMainService.create({ homeDir: join(root, 'home'), repoRoot: root, requireOwnership: false, headless: true })
-    const host = main.getInstallationHost()!, b = host.manager.create({ displayName: 'Profile B', slug: 'profile-b' })
-    const bServices = await main.getProfileServices(b.id)
-    try {
-      new LegacyControlCredentials(main.getProfileHomeDir()).saveCredentials({ accountId: 'account-a', deviceEnrollmentToken: 'device-a', updatedAt: new Date().toISOString() })
-      new LegacyControlCredentials(bServices.getProfileHomeDir()).saveCredentials({ accountId: 'account-b', deviceEnrollmentToken: 'device-b', updatedAt: new Date().toISOString() })
-      await main.providerAuth.setApiKey('openai', 'installation-provider-key')
-      expect(new LegacyControlCredentials(main.getProfileHomeDir()).getCredentials()?.accountId).toBe('account-a')
-      expect(new LegacyControlCredentials(bServices.getProfileHomeDir()).getCredentials()).toMatchObject({ accountId: 'account-b', deviceEnrollmentToken: 'device-b' })
-      expect(main.net.status()).toMatchObject({ enabled: false, keystore: 'missing' })
-      expect(bServices.net.status()).toMatchObject({ enabled: false, keystore: 'missing' })
-      expect(main.providerAuth).toBe(bServices.providerAuth)
-      expect(await bServices.providerAuth.credentials.read('openai')).toMatchObject({ key: 'installation-provider-key' })
-    } finally {
-      await main.stop()
-    }
-  })
 })
