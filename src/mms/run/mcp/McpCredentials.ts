@@ -36,7 +36,7 @@ export function hashToken(token: string): string {
  * Only the SHA-256 is stored. The token itself is kept in this process's memory so it can be
  * handed out again; after a daemon restart the stored row cannot be reused (its token is gone),
  * so boot (`RunEngine.reconcileOnBoot`) revokes every live row and the next turn mints a fresh
- * one. Unlike T3's in-memory registry the rows survive a restart and stay auditable.
+ * one. Unlike an in-memory registry, the rows survive a restart and stay auditable.
  */
 export class McpCredentials {
   /** Tokens minted by this process, by hash; the database never holds them. */

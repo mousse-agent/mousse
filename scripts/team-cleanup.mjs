@@ -103,10 +103,14 @@ export function teamCleanup({
     if (APP_MANAGED_PATH.test(tree.path)) return 'managed by the Mousse app';
     if (tree.locked) return 'locked';
     if (tree.prunable) return 'missing directory';
-    if (!targeted && now - lastUsed(tree.path) < recentMs) return 'used recently';
+    // A dirty tree is reported as such even when it was also used recently: that is the
+    // reason that matters to whoever reads the list, and it does not depend on timing.
     const status = git(['status', '--porcelain=v1', '--untracked-files=all'], true, tree.path);
     if (status === null) return 'status unavailable';
     if (status) return 'uncommitted changes';
+    // A file touched after this run began has a negative idle time; it is recent, never "never".
+    const idle = Math.max(0, now - lastUsed(tree.path));
+    if (!targeted && idle < recentMs) return 'used recently';
     return null;
   }
 

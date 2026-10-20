@@ -18,6 +18,7 @@ import { INTEGRATION_CAPABILITY } from '../src/shared/integrationPlatform'
 import type { HandlerContext } from '../src/mms/protocol/handlers'
 import type { ManagedMcpRecord, ManagedSkillRecord, SkillEditorDto } from '../src/shared/integrations/lifecycle'
 import { getManagedMcpConfigPath, getManagedSkillRoot, getManagedSkillStatePath } from '../src/mms/integrations/nativePaths'
+import { supportsOwnedMcpTree } from '../src/mms/integrations/mcp/ownedProcessTree'
 
 const roots: string[] = [], managers: McpManager[] = []
 function service(profileId: string): IntegrationDomainServices {
@@ -204,7 +205,8 @@ describe('managed integration domain methods', () => {
     registration.dispose()
   })
 
-  it('connects a real fixture MCP server and returns truthful missing-server results', async () => {
+  // Owned MCP process trees are a Windows and Linux feature; see supportsOwnedMcpTree.
+  it.runIf(supportsOwnedMcpTree())('connects a real fixture MCP server and returns truthful missing-server results', async () => {
     const { a, call } = fixture()
     const created = await call<ManagedMcpRecord>('mcp.create', {
       name: 'fixture-stdio', transport: 'stdio', command: process.execPath,
