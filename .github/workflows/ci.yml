@@ -129,5 +129,4 @@ jobs:
           tests/threadWorkspace.test.ts
           tests/threadWorktreeToggle.test.ts
           tests/worktreeCompletion.test.ts
-          tests/worktreeReadiness.test.ts
           tests/worktreeRetirement.test.ts

@@ -10,7 +10,7 @@ npx vite --config tests/fixtures/repository-upgrades/vite.config.ts
 
 Open `http://127.0.0.1:5193/tests/fixtures/repository-upgrades/preview.html`. The fixture exposes `window.upgradeProbes` for controlled failures and observed calls.
 
-I verified these scenarios through the T3 collaborative preview:
+I verified these scenarios in the collaborative browser preview:
 
 - With `mediaMode='denied'`, Voice input shows microphone-permission feedback; Retry microphone invokes another request, and Dismiss clears the alert.
 - With `mediaMode='missing'`, the feedback explains that a microphone is required. With `mediaMode='capture'`, recorder construction fails and the acquired track stops.
@@ -24,4 +24,4 @@ I verified these scenarios through the T3 collaborative preview:
 
 The fixture counts active intervals as well as tracks, recorder stops, inventory calls, and concurrent inventory requests. I observed zero active intervals after either component unmounted.
 
-I could not verify the hidden-document branch in the T3 preview because its `document.hidden` getter was nonconfigurable. I also could not retrieve screenshots after reload because the preview snapshot tool failed; DOM inspection and interaction remained available. These are verification limits, not evidence of application failures.
+I could not verify the hidden-document branch in the preview because its `document.hidden` getter was nonconfigurable. I also could not retrieve screenshots after reload because the preview snapshot tool failed; DOM inspection and interaction remained available. These are verification limits, not evidence of application failures.

@@ -18,6 +18,7 @@ import { defaultIntegrationActor } from '../src/shared/integrations/actor'
 import { getManagedMcpConfigPath, getManagedMcpOAuthDir } from '../src/mms/integrations/nativePaths'
 import { existsSync } from 'fs'
 import { FileMcpOAuthProvider, hasMcpOAuthTokens } from '../src/mms/integrations/mcp/McpOAuthProvider'
+import { supportsOwnedMcpTree } from '../src/mms/integrations/mcp/ownedProcessTree'
 
 function managerFor(
   servers: ReturnType<typeof testServerConfig>[],
@@ -266,7 +267,8 @@ describe('I01 MCP runtime defects', () => {
     expect(failed.text).toContain('nope')
   })
 
-  it('calls the stdio fixture server for list/call content and cancellation', { timeout: 20_000 }, async () => {
+  // Owned MCP process trees are a Windows and Linux feature; see supportsOwnedMcpTree.
+  it.runIf(supportsOwnedMcpTree())('calls the stdio fixture server for list/call content and cancellation', { timeout: 20_000 }, async () => {
     const fixture = fileURLToPath(
       new URL('./fixtures/agent-platform/integrations/mcp-fixture-server.mjs', import.meta.url)
     )
