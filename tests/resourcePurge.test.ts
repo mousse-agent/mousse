@@ -1,16 +1,16 @@
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
-import { lifecycleGit as git } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { lifecycleGit as git, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { createHash } from 'node:crypto'
 
 const roots: string[] = []
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 function fixture(options: { git?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mousse-purge-')); roots.push(root)
   const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true })
@@ -97,4 +97,26 @@ test.each(['try-agent', 'terminal'])('nested %s scratch propagates sole-copy dis
   expect(readFileSync(join(movedContainer, kind === 'terminal' ? 'terminal-workspace' : 'workspace', 'sole-copy.txt'), 'utf8')).toBe('retained output')
   await f.coordinator.purge({ ...request, human: true, discard: true })
   expect(existsSync(movedContainer)).toBe(false)
+})
+
+test('retireTrashed removes a clean exclusive checkout and clears an earlier blocked reason', async () => {
+  const f = fixture({ git: true }); await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  f.store.update('task', (record) => { record.blockedReason = 'earlier failure' })
+  await f.coordinator.cleanup.retireTrashed('task')
+  expect(existsSync(f.worktree)).toBe(false)
+  expect(f.store.require('task')).toMatchObject({ state: 'trashed' }); expect(f.store.require('task').blockedReason).toBeUndefined()
+})
+test('retireTrashed keeps a checkout holding sole-copy changes and records why', async () => {
+  const f = fixture({ git: true }); writeFileSync(join(f.worktree, 'secret.txt'), 'only copy')
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  await f.coordinator.cleanup.retireTrashed('task')
+  expect(readFileSync(join(f.worktree, 'secret.txt'), 'utf8')).toBe('only copy')
+  expect(f.store.require('task').blockedReason).toMatch(/^Checkout retained: /)
+})
+test('retireTrashed keeps the checkout and reports the cause when the exact retirement fails', async () => {
+  const f = fixture({ git: true }); await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  vi.spyOn(WorktreeRetirementService.prototype, 'retire').mockImplementation(() => { throw new Error('Workspace HEAD changed') })
+  await f.coordinator.cleanup.retireTrashed('task')
+  expect(existsSync(join(f.worktree, 'a.txt'))).toBe(true)
+  expect(f.store.require('task').blockedReason).toBe('Checkout retained: Workspace HEAD changed')
 })

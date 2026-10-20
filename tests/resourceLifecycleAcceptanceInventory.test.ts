@@ -15,7 +15,7 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
-describe('Phase 1 public inventory and request identity', () => {
+describe('public inventory and request identity', () => {
   it('reports an unverifiable legacy child location without treating a user directory as owned cleanup material', async () => {
     const f = await lifecycleHarness()
     try {
@@ -55,7 +55,7 @@ describe('Phase 1 public inventory and request identity', () => {
     } finally { await f.close() }
   })
 
-  it('rejects stale generations and duplicate operation IDs without moving a restored task twice', async () => {
+  it('carries expectedGeneration and operationId through the protocol: an exact replay returns the first receipt, a stale generation is refused', async () => {
     const f = await lifecycleHarness()
     try {
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'generation contract' })
@@ -65,23 +65,15 @@ describe('Phase 1 public inventory and request identity', () => {
       const request = { threadId: thread.id, operationId, expectedGeneration: before.lifecycle.generation }
       const first = await f.rpc.request<{ lifecycle: TaskLifecycleRecord; operationResult: LifecycleOperationResult }>('threads.trash', request)
       expect(first.operationResult).toMatchObject({ operationId, kind: 'trash', state: 'trashed' })
-      // A replay returns its original immutable receipt and never appends a
-      // second operation, even after a later restore changes current state.
+      // A replay returns its original immutable receipt and never appends a second operation.
       const duplicate = await f.rpc.request<{ operationResult: LifecycleOperationResult }>('threads.trash', request)
       expect(duplicate.operationResult).toEqual(first.operationResult)
       const trashed = await f.rpc.request<{ lifecycle: TaskLifecycleRecord }>('threads.inventory', { threadId: thread.id })
       expect(trashed.lifecycle.operations.filter((operation) => operation.id === operationId)).toHaveLength(1)
+      // A request built from the old generation is refused; the rule and the replay-after-restore
+      // behaviour are decided in ResourceLifecycleCoordinator (resourceLifecycleCoordinator.test.ts).
       await expect(f.rpc.request('threads.restore', { ...request, operationId: randomUUID() })).rejects.toThrow(/stale|generation/i)
-      await f.rpc.request('threads.restore', { threadId: thread.id, operationId: randomUUID(), expectedGeneration: trashed.lifecycle.generation })
-      await expect(f.rpc.request('threads.trash', { ...request, operationId: randomUUID() })).rejects.toThrow(/stale|generation/i)
-      const replay = await f.rpc.request<{ lifecycle: TaskLifecycleRecord; operationResult: LifecycleOperationResult }>('threads.trash', request)
-      expect(replay.lifecycle.state).toBe('active')
-      expect(replay.operationResult).toEqual(first.operationResult)
-      expect(existsSync(join(path, 'meta.json'))).toBe(true)
-      const after = await f.rpc.request<{ lifecycle: TaskLifecycleRecord }>('threads.inventory', { threadId: thread.id })
-      expect(after.lifecycle.state).toBe('active')
-      expect(after.lifecycle.generation).toBeGreaterThan(trashed.lifecycle.generation)
-      expect(after.lifecycle.operations.filter((operation) => operation.id === operationId)).toHaveLength(1)
+      expect(existsSync(join(path, 'meta.json'))).toBe(false)
     } finally { await f.close() }
   })
 

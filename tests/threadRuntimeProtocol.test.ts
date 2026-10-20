@@ -1,5 +1,5 @@
 /**
- * Phase 4: multi-tenant thread runtimes, PTY isolation, questions, delete fence.
+ * Thread runtimes over the protocol: multi-tenant isolation, PTY replay, questions and daemon restart.
  */
 
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
@@ -10,7 +10,7 @@ import { MousseMainService } from '../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 
-describe('Phase 4 ThreadRuntime + protocol', () => {
+describe('ThreadRuntime over the protocol', () => {
   let home: string
   let mms: MousseMainService
   let server: MmsProtocolServer

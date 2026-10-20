@@ -177,8 +177,7 @@ export class CodexAdapter implements ProviderAdapter {
       contextSignature: contextKey,
       contextModelKey: contextKey,
       nativeMessages: [],
-      providerRef: { ...providerRef, sessionId: result.codexThreadId, nativeTurnId: result.turnId },
-      threadDisposition: result.threadDisposition
+      providerRef: { ...providerRef, sessionId: result.codexThreadId, nativeTurnId: result.turnId }
     }
   }
 

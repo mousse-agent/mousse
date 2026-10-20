@@ -10,30 +10,8 @@ import { join } from 'path'
 import { describe, expect, it, afterEach, beforeEach } from 'vitest'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
-import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
-import { TaskQueue } from '../src/mms/tasks/TaskQueue'
-import { WorktreeManager } from '../src/mms/worktree/WorktreeManager'
-import { PtyManager } from '../src/mms/terminals/PtyManager'
-import { HeadlessAgentRunner } from '../src/mms/terminals/HeadlessAgentRunner'
-import type { MacroEngine } from '../src/mms/macros/MacroEngine'
 import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
-import { getDefaultSettings } from '../src/shared/settings'
-
-function createOrchestrator(home: string, store: ThreadDataStore): OrchestratorService {
-  process.env.MOUSSE_HOME = home
-  const orch = new OrchestratorService(
-    new AgentRegistry(),
-    new TaskQueue(),
-    new WorktreeManager(home),
-    new PtyManager(),
-    new HeadlessAgentRunner(),
-    { listProviders: () => [] } as unknown as MacroEngine,
-    { get: () => getDefaultSettings() } as never,
-    {} as never
-  )
-  orch.setThreadStore(store)
-  return orch
-}
+import { createOrchestrator } from './run/phase6Fixture'
 
 async function waitFor(cond: () => boolean, timeoutMs: number, label: string): Promise<void> {
   const start = Date.now()

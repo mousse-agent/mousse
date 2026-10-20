@@ -20,6 +20,7 @@ function input(overrides: Partial<TurnInput> = {}): TurnInput {
     attemptId: 'attempt-1',
     threadId: 'thread-1',
     cwd: '/work',
+    instanceId: 'claude-subscription',
     model: 'sonnet',
     llmProvider: 'claude-subscription',
     modelPinned: false,
@@ -179,7 +180,7 @@ describe('ClaudeSubscriptionAdapter', () => {
       contextSignature: 'claude-subscription:sonnet',
       contextModelKey: 'claude-subscription:sonnet',
       nativeMessages: [],
-      providerRef: { provider: 'claude-subscription', model: 'sonnet' }
+      providerRef: { provider: 'claude-subscription', instanceId: 'claude-subscription', model: 'sonnet' }
     })
   })
 
@@ -221,7 +222,7 @@ describe('AntigravityAdapter', () => {
     expect(adapter.capabilities).toMatchObject({ steer: 'interrupt_restart', interrupt: true, events: 'sparse', historyInjection: 'prompt' })
     expect(adapter.describe('m')).toEqual({ contextUsage: 'none' })
     expect(adapter.configured()).toBe(true)
-    const turn = { llmProvider: 'antigravity', model: 'm' }
+    const turn = { instanceId: 'antigravity', llmProvider: 'antigravity', model: 'm' }
     await expect(adapter.startTurn(input({ ...turn, mode: 'plan' }), recordingSink(), control(), host())).rejects.toThrow(
       'Use Antigravity’s /plan command in a chat turn'
     )
@@ -241,7 +242,7 @@ describe('AntigravityAdapter', () => {
     const sink = recordingSink()
     const turnHost = host()
     const result = await new AntigravityAdapter(() => service).startTurn(
-      input({ llmProvider: 'antigravity', model: 'm' }),
+      input({ instanceId: 'antigravity', llmProvider: 'antigravity', model: 'm' }),
       sink,
       control(),
       turnHost
@@ -259,7 +260,8 @@ describe('AntigravityAdapter', () => {
       'complete'
     ])
     expect(service.commitConversation).toHaveBeenCalledWith('thread-1', 'history+ACP says hi')
-    expect(result).toMatchObject({ text: 'ACP says hi', modelName: 'm', contextSignature: 'antigravity:m', nativeMessages: [] })
+    expect(result).toMatchObject({ text: 'ACP says hi', modelName: 'm', contextSignature: 'antigravity:m', nativeMessages: [], providerRef: { provider: 'antigravity', instanceId: 'antigravity', model: 'm' } })
+    expect(sink.calls.find(([name]) => name === 'providerRef')?.[1]).toEqual({ provider: 'antigravity', instanceId: 'antigravity', model: 'm' })
     expect(result.totalTokensUsed).toBeUndefined()
     expect(typeof result.totalResponseTimeMs).toBe('number')
   })

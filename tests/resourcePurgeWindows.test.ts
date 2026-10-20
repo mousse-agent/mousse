@@ -7,6 +7,7 @@ import type { LifecyclePurgePreview } from '../src/shared/resourceLifecycle'
 import type { Thread } from '../src/shared/types'
 import { lifecycleHarness } from './fixtures/resource-lifecycle-harness'
 
+// Windows only: a sharing violation from a real open handle does not exist on other platforms (the Windows CI job runs this).
 it.skipIf(process.platform !== 'win32')('keeps Windows sharing violations pending and retries the frozen purge after the real handle closes', async () => {
   const f = await lifecycleHarness()
   let lock: ChildProcessWithoutNullStreams | undefined

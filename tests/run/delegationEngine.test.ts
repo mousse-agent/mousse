@@ -142,6 +142,30 @@ describe('RunEngine delegation (SPEC §14.1-§14.2)', () => {
     expect(() => f!.engine.recordDelegation({ parentThreadId: 'other', parentRunId: parent.runId, childThreadId: 'child-1', childRunId: followUp.runId, prompt: 'x', wake: 'always' })).toThrow('not a subagent')
   })
 
+  it('recordDelegation of a run that is already recorded returns that delegation without a second row or notice', async () => {
+    f = delegationFixture()
+    const parent = await f.runningRun('parent')
+    const first = await f.delegate(parent.runId, 'call-1')
+    f.finish(first.childRunId, 'first')
+    const followUp = f.store.createRun({ threadId: 'child-1', source: 'delegation' })
+    const input = { parentThreadId: 'parent', parentRunId: parent.runId, childThreadId: 'child-1', childRunId: followUp.runId, prompt: 'again', wake: 'always' as const }
+    const recorded = f.engine.recordDelegation(input)
+    const delegations = f.engine.delegations.listForParentRun(parent.runId).length
+    const notices = f.engine.inbox.listPending('parent').length
+    expect(f.engine.recordDelegation(input)).toEqual(recorded)
+    expect(f.engine.delegations.listForParentRun(parent.runId)).toHaveLength(delegations)
+    expect(f.engine.inbox.listPending('parent')).toHaveLength(notices)
+  })
+
+  it('recordDelegation refuses a run that belongs to another thread', async () => {
+    f = delegationFixture()
+    const parent = await f.runningRun('parent')
+    await f.delegate(parent.runId, 'call-1')
+    const stranger = f.store.createRun({ threadId: 'unrelated', source: 'delegation' })
+    expect(() => f!.engine.recordDelegation({ parentThreadId: 'parent', parentRunId: parent.runId, childThreadId: 'child-1', childRunId: stranger.runId, prompt: 'x', wake: 'always' })).toThrow('is not a run of thread child-1')
+    expect(f.engine.delegations.getByChildRun(stranger.runId)).toBeNull()
+  })
+
   it('recordDelegation of a child run that already ended publishes its final transcript text', async () => {
     f = delegationFixture()
     const parent = await f.runningRun('parent')
@@ -191,6 +215,33 @@ describe('RunEngine delegation (SPEC §14.1-§14.2)', () => {
     expect([...f.threads]).toEqual(['child-2'])
     expect(f.requests).toHaveLength(2)
     expect(f.engine.delegations.listForParentRun(parent.runId)).toHaveLength(1)
+  })
+
+  it('a fork whose transaction fails deletes the thread it created; the retry creates one fork', async () => {
+    let failNext = false
+    f = delegationFixture({
+      fault: (point) => {
+        if (failNext && point === 'fork.beforeCommit') {
+          failNext = false
+          throw new Error('injected')
+        }
+      }
+    })
+    const source = await f.runningRun('source')
+    f.finish(source.runId, 'source answer')
+    const request = { sourceThreadId: 'source', atRunOrdinal: 1, clientRequestId: 'fork-1' }
+    failNext = true
+    await expect(f.engine.forkThread(request)).rejects.toThrow('injected')
+    expect(f.deleted).toEqual(['fork-1'])
+    expect([...f.threads]).toEqual([])
+    expect(f.store.getReceipt('fork-1')).toBeNull()
+    expect(f.engine.delegations.getLineage('fork-1')).toBeNull()
+
+    const retried = await f.engine.forkThread(request)
+    expect(retried).toMatchObject({ threadId: 'fork-2', replayed: false })
+    expect(await f.engine.forkThread(request)).toEqual({ ...retried, replayed: true })
+    expect([...f.threads]).toEqual(['fork-2'])
+    expect(f.engine.delegations.getLineage('fork-2')).toMatchObject({ parentThreadId: 'source', relationship: 'fork' })
   })
 
   it('boot: a child cut off at restart publishes its failure, and a wake that never ran is redone', async () => {

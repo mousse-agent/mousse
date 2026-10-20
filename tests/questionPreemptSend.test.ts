@@ -5,48 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
+import { createOrchestrator } from './run/phase6Fixture'
 import {
   formatQuestionAnswersMessage,
   formatQuestionDismissMessage
 } from '../src/mms/orchestrator/OrchestratorService'
 import { userQuestionService } from '../src/mms/orchestrator/UserQuestionService'
-import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
-import { TaskQueue } from '../src/mms/tasks/TaskQueue'
-import { WorktreeManager } from '../src/mms/worktree/WorktreeManager'
-import { PtyManager } from '../src/mms/terminals/PtyManager'
-import { HeadlessAgentRunner } from '../src/mms/terminals/HeadlessAgentRunner'
-import { MacroEngine } from '../src/mms/macros/MacroEngine'
-import { getDefaultSettings } from '../src/shared/settings'
-
-function createOrchestrator(home: string, store: ThreadDataStore): OrchestratorService {
-  process.env.MOUSSE_HOME = home
-  const agents = new AgentRegistry()
-  const tasks = new TaskQueue()
-  const worktrees = new WorktreeManager(home)
-  const pty = new PtyManager()
-  const headless = new HeadlessAgentRunner()
-  const macros = {
-    listProviders: () => ['mousse'],
-    isHeadlessEnabled: () => false,
-    getHeadlessShellCommand: () => 'echo',
-    getCliCommand: () => 'echo',
-    runPtyMacro: async () => ({ log: [] as string[] })
-  } as unknown as MacroEngine
-  const settingsStore = { getSettings: () => getDefaultSettings(), get: () => getDefaultSettings() }
-  const providerAuth = { getConnectedProviders: () => [] }
-  const orch = new OrchestratorService(
-    agents,
-    tasks,
-    worktrees,
-    pty,
-    headless,
-    macros,
-    settingsStore as never,
-    providerAuth as never
-  )
-  orch.setThreadStore(store)
-  return orch
-}
 
 describe('send preempts pending questions instead of queueing', () => {
   let home: string

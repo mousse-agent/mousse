@@ -111,11 +111,7 @@ describe('EffectWorker', () => {
     const effect = outbox.enqueue({ threadId: 't', kind: 'turn.steer' })
     worker.start()
     await waitFor(() => outbox.get(effect.effectId)!.lastError === 'thread_busy', 'deferral')
-    const deferredRow = outbox.get(effect.effectId)!
-    if (deferredRow.status === 'pending') {
-      expect(deferredRow.attempts).toBe(0)
-      expect(Date.parse(deferredRow.availableAt) - Date.parse(deferredRow.updatedAt)).toBe(80)
-    }
+    // The row rules (back to pending, attempt not counted, available later) are EffectOutbox.defer's (effectOutbox.test.ts).
     await waitFor(() => outbox.get(effect.effectId)!.status === 'succeeded', 'the deferred run')
     expect(outbox.get(effect.effectId)!.attempts).toBe(1)
     expect(calls).toBe(2)
@@ -272,6 +268,18 @@ describe('EffectWorker', () => {
     await waitFor(() => worker.inFlight() === 1, 'in flight')
     await worker.stop()
     expect(reason).toBeInstanceOf(WorkerStoppedError)
+  })
+
+  it('survives a failing claim: logs it, idles for the poll interval and claims again', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const seen: string[] = []
+    const { outbox, worker } = setup({ 'turn.steer': async (effect) => { seen.push(effect.effectId) } }, { pollMs: 20 })
+    vi.spyOn(outbox, 'claimNext').mockImplementationOnce(() => { throw new Error('database is locked') })
+    const effect = outbox.enqueue({ threadId: 't', kind: 'turn.steer' })
+    worker.start()
+    await waitFor(() => outbox.get(effect.effectId)!.status === 'succeeded', 'recovery after the failed claim')
+    expect(warn).toHaveBeenCalledWith('[effect-worker] claim failed: database is locked')
+    expect(seen).toEqual([effect.effectId])
   })
 
   it('wakes on notify() and on the next available_at', async () => {

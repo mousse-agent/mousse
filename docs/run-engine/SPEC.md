@@ -161,7 +161,7 @@ Extract from `src/mms/net/store/database.ts`:
 ## 9. Testing
 
 - Every new module has unit tests in `tests/run/`.
-- Phase 1 integration test (`tests/run/engineLegacyBridge.test.ts`): wire a real `OrchestratorService` with a fake `streamSimple` (reuse the `streamOf()` helper pattern from `tests/steer.test.ts`), send a message, assert a `runs` row goes `queued→starting→running→finalizing→completed`, assert `stop` with the completed `runId` returns `ignored`, assert a duplicate `clientRequestId` replays.
+- Phase 1 integration test (`tests/run/orchestratorRunEngine.test.ts`): wire a real `OrchestratorService` with a fake `streamSimple` (reuse the `streamOf()` helper pattern from `tests/steer.test.ts`), send a message, assert a `runs` row goes `queued→starting→running→finalizing→completed`, assert `stop` with the completed `runId` returns `ignored`, assert a duplicate `clientRequestId` replays.
 - Fault test: inject `checkpoint('transaction.beforeCommit')` to throw and assert no receipt and no partial rows.
 - Boot test: write a `running` run, construct a fresh engine, `reconcileOnBoot`, assert `interrupted`.
 - Use `TMPDIR=/private/tmp npx vitest run tests/run` locally (Node 24.18 on this machine; package wants ≥24.20).

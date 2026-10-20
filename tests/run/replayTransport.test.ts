@@ -105,6 +105,47 @@ describe('ReplayTransport', () => {
     replay.assertDone()
   })
 
+  describe('sendInOrder', () => {
+    const frames = (): TranscriptFrame[] => [
+      { dir: 'out', frame: { call: 'parent' } },
+      { dir: 'in', frame: { reply: 'parent' } },
+      { dir: 'out', frame: { call: 'child' } },
+      { dir: 'in', frame: { reply: 'child' } }
+    ]
+
+    it('sends a frame that is due at once', async () => {
+      const replay = new ReplayTransport(transcript(frames()))
+      await replay.sendInOrder({ call: 'parent' })
+      expect(await replay.receive()).toEqual({ reply: 'parent' })
+    })
+
+    it('holds a frame that lies ahead until the transcript reaches it', async () => {
+      const replay = new ReplayTransport(transcript(frames()), { stallMs: 1_000 })
+      const order: string[] = []
+      const child = replay.sendInOrder({ call: 'child' }).then(() => order.push('child sent'))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(order).toEqual([])
+      replay.send({ call: 'parent' })
+      await replay.receive((frame) => (frame as { call?: string }).call === 'child')
+      await child
+      expect(order).toEqual(['child sent'])
+      expect(await replay.receive()).toEqual({ reply: 'child' })
+      replay.assertDone()
+    })
+
+    it('sends a frame the transcript never expects at once, so it fails like send', async () => {
+      const replay = new ReplayTransport(transcript(frames()))
+      await expect(replay.sendInOrder({ call: 'stranger' })).rejects.toBeInstanceOf(ReplayMismatchError)
+      expect(replay.error).toBeInstanceOf(ReplayMismatchError)
+      await expect(replay.sendInOrder({ call: 'parent' })).rejects.toBeInstanceOf(ReplayMismatchError)
+    })
+
+    it('fails with a stall report when the frames before it are never sent', async () => {
+      const replay = new ReplayTransport(transcript(frames()), { stallMs: 30 })
+      await expect(replay.sendInOrder({ call: 'child' })).rejects.toThrow(/Stalled at frame 1: a concurrent caller waits to send/)
+    })
+  })
+
   it('fails a reader stalled on an outbound frame nobody sends', async () => {
     const replay = new ReplayTransport(transcript([{ dir: 'out', frame: { kind: 'interrupt' } }]), { stallMs: 20 })
     await expect(replay.receive()).rejects.toThrow(/Stalled at frame 1/)

@@ -17,7 +17,7 @@ export const QUEUE_ONLY_CAPABILITIES: ProviderCapabilities = { ...PI_LOOP_CAPABI
 
 /**
  * One run database, engine and reconciler on a fake clock, with a delegation host that names child
- * threads `child-<n>` and records the requests it saw, the threads it holds and the threads it was
+ * threads `child-<n>` (forks `fork-<n>`) and records the requests it saw, the threads it holds and the threads it was
  * asked to delete. `fault` sees every database checkpoint. Call `dispose` in `afterEach`.
  */
 export function delegationFixture(
@@ -48,11 +48,11 @@ export function delegationFixture(
   let children = 0
   engine.setDelegationHost({
     createThread: (input) => {
-      if (input.kind !== 'delegation') throw new Error('the delegation fixture creates child threads only')
-      requests.push(input.request)
+      if (input.kind === 'delegation') requests.push(input.request)
       children += 1
-      threads.add(`child-${children}`)
-      return { threadId: `child-${children}` }
+      const threadId = `${input.kind === 'fork' ? 'fork' : 'child'}-${children}`
+      threads.add(threadId)
+      return { threadId }
     },
     deleteThread: (threadId) => {
       threads.delete(threadId)

@@ -1,11 +1,9 @@
 /**
- * Phase 1 bridge (docs/run-engine/SPEC.md §5, §9): a real OrchestratorService dual-writes every
- * turn into the Run Engine. Sends become durable runs, run-targeted stop only touches the
- * active run, queued sends carry their runId through the durable queue, and a duplicate
- * clientRequestId replays without starting a turn.
- *
- * Phase 2b (§12): the engine runs with an effect worker and reconciler wired like the profile,
- * so turns, interrupts and steers execute as `turn.*` effects.
+ * A real OrchestratorService over the Run Engine (docs/run-engine/SPEC.md §5, §9, §12). Sends become
+ * durable runs, run-targeted stop only touches the active run, queued sends carry their runId
+ * through the durable queue, and a duplicate clientRequestId replays without starting a turn.
+ * The engine runs with an effect worker and reconciler wired like the profile, so turns,
+ * interrupts and steers execute as `turn.*` effects.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -83,7 +81,7 @@ async function waitFor(cond: () => boolean, timeoutMs: number, label: string): P
   }
 }
 
-describe('Run Engine legacy bridge', () => {
+describe('OrchestratorService over the Run Engine', () => {
   let home: string
   let projectRepo: string
   let store: ThreadDataStore

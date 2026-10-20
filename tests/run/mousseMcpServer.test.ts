@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import { runStdioBridge } from '../../src/mms/run/mcp/stdioBridge'
-import { createMousseToolRegistry, type MousseToolHost } from '../../src/mms/run/mcp/toolRegistry'
+import { createMousseToolRegistry, ToolRegistry, type MousseToolHost } from '../../src/mms/run/mcp/toolRegistry'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
 import { PassThrough } from 'node:stream'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
@@ -142,5 +142,100 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     const { server, run } = await setup()
     await server.stop()
     expect(server.attach({ threadId: 'thread-a', runId: run.runId, provider: 'p', modeCeiling: 'default' })).toBeNull()
+  })
+
+  it('maps transport failures to HTTP statuses and a refused tool to its JSON-RPC code', async () => {
+    const { server, attachment } = await setup()
+    const post = (body: string, path = '/mcp') => fetch(`${server.url.replace(/\/mcp$/, '')}${path}`, {
+      method: 'POST', body,
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: `Bearer ${attachment.token}` }
+    })
+    expect((await post('{}', '/elsewhere')).status).toBe(404)
+    const malformed = await post('{not json')
+    expect(malformed.status).toBe(400)
+    expect((await malformed.json()).error.code).toBe(-32700)
+    const oversized = await post(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping', padding: 'x'.repeat(4 * 1024 * 1024 + 1) }))
+    expect(oversized.status).toBe(400)
+    expect((await oversized.json()).error.message).toMatch(/request body too large/)
+
+    const unknown = await rpc(server.url, attachment.token, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'no_such_tool', arguments: {} } })
+    // The codes are the wire contract provider runtimes see, so they are pinned literally (-32601 is JSON-RPC's method-not-found).
+    expect(unknown.body.error).toMatchObject({ code: -32601, data: { reason: 'mousse_unknown_tool' } })
+    // A tool that fails on its own input is a tool result the model can read, not a protocol error.
+    const invalid = await rpc(server.url, attachment.token, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'update_task', arguments: { id: '' } } })
+    expect(invalid.body.error).toBeUndefined()
+    expect(invalid.body.result.isError).toBe(true)
+
+    server.revokeThread('thread-a')
+    const plan = server.attach({ threadId: 'thread-a', runId: fx!.store.getActiveRun('thread-a')!.runId, provider: 'p', modeCeiling: 'plan' })!
+    const ceiling = await rpc(server.url, plan.token, { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'thread_fork', arguments: {} } })
+    expect(ceiling.body.error).toMatchObject({ code: -32004, data: { reason: 'mousse_ceiling_exceeded' } })
+  })
+
+  describe('in-flight tool calls', () => {
+    /** Threads a and b each hold a live run and a `hang` tool that waits for its abort signal. */
+    const hanging = async () => {
+      fx = delegationFixture()
+      await fx.runningRun('thread-a'); await fx.runningRun('thread-b')
+      const started: string[] = [], reasons = new Map<string, string>()
+      const registry = new ToolRegistry({ activeRunId: (threadId) => fx!.store.getActiveRun(threadId)?.runId ?? null })
+      registry.register({
+        name: 'hang', description: 'waits for its abort signal', inputSchema: { type: 'object' }, access: 'actsAsCaller',
+        handler: (_args, ctx) => new Promise((resolve) => {
+          started.push(ctx.caller.threadId)
+          ctx.signal.addEventListener('abort', () => { reasons.set(ctx.caller.threadId, String((ctx.signal.reason as Error)?.message)); resolve({ text: 'aborted' }) }, { once: true })
+        })
+      })
+      server = new MousseMcpServer({ credentials: new McpCredentials(fx.store), registry })
+      await server.start()
+      const attach = (threadId: string) => server!.attach({ threadId, runId: fx!.store.getActiveRun(threadId)!.runId, provider: 'p', modeCeiling: 'default' })!
+      const callHang = (token: string, signal?: AbortSignal) => fetch(server!.url, {
+        method: 'POST', signal,
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'hang', arguments: {} } })
+      })
+      return { a: attach('thread-a'), b: attach('thread-b'), started, reasons, callHang }
+    }
+
+    it.each([
+      ['turnEnded', (s: MousseMcpServer) => s.turnEnded('thread-a'), 'The turn of thread thread-a ended'],
+      ['revokeThread', (s: MousseMcpServer) => s.revokeThread('thread-a'), 'Thread thread-a credentials were revoked']
+    ])('%s aborts that thread\'s in-flight call and no other thread\'s', async (_name, end, reason) => {
+      const { a, b, started, reasons, callHang } = await hanging()
+      const first = callHang(a.token), other = callHang(b.token)
+      await vi.waitFor(() => expect(started.sort()).toEqual(['thread-a', 'thread-b']))
+      end(server!)
+      await first.then((response) => response.text())
+      expect(reasons.get('thread-a')).toBe(reason)
+      expect(reasons.has('thread-b')).toBe(false)
+      server!.turnEnded('thread-b')
+      await other.then((response) => response.text())
+      expect(reasons.get('thread-b')).toBe('The turn of thread thread-b ended')
+    })
+
+    it('turnEnded keeps the credential for the next turn', async () => {
+      const { a, started, callHang } = await hanging()
+      const pending = callHang(a.token)
+      await vi.waitFor(() => expect(started).toEqual(['thread-a']))
+      server!.turnEnded('thread-a')
+      await pending.then((response) => response.text())
+      const list = await rpc(server!.url, a.token, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
+      expect(list.status).toBe(200)
+    })
+
+    it('stop aborts every in-flight call, and a closed client connection aborts its own call', async () => {
+      const { a, b, started, reasons, callHang } = await hanging()
+      const closing = new AbortController()
+      const dropped = callHang(a.token, closing.signal).catch(() => undefined)
+      await vi.waitFor(() => expect(started).toEqual(['thread-a']))
+      closing.abort()
+      await dropped
+      await vi.waitFor(() => expect(reasons.has('thread-a')).toBe(true))
+      const surviving = callHang(b.token).catch(() => undefined)
+      await vi.waitFor(() => expect(started).toEqual(['thread-a', 'thread-b']))
+      await server!.stop()
+      await surviving
+      expect(reasons.get('thread-b')).toBe('The Mousse MCP server stopped')
+    })
   })
 })

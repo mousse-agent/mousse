@@ -152,11 +152,6 @@ export interface CodexChatResult {
   turnId: string
   /** The model Codex ran (resolves `default`). */
   model: string
-  /**
-   * `broken`: the saved Codex thread could not be resumed, so this turn ran on a fresh thread with
-   * the history injected as a prompt. `reusable`: the thread can be resumed next turn.
-   */
-  threadDisposition: 'reusable' | 'broken'
   usage?: CodexTurnUsage
 }
 
@@ -998,7 +993,7 @@ export class CodexProviderService {
     conn: CodexConnection,
     input: CodexChatInput,
     signal: AbortSignal
-  ): Promise<{ codexThreadId: string; model: string | undefined; continued: boolean; disposition: 'reusable' | 'broken' }> {
+  ): Promise<{ codexThreadId: string; model: string | undefined; continued: boolean }> {
     const cwd = resolve(input.cwd)
     const saved = this.settings.threads?.[input.threadId]
     const mcpToken = input.mcp?.token ?? null
@@ -1027,7 +1022,7 @@ export class CodexProviderService {
       }
       const loaded = this.loaded.get(saved.codexThreadId)
       if (loaded && loaded.mcpToken === mcpToken && loaded.cwd === cwd)
-        return { codexThreadId: saved.codexThreadId, model: undefined, continued: true, disposition: 'reusable' }
+        return { codexThreadId: saved.codexThreadId, model: undefined, continued: true }
       if (loaded) {
         // The attachment (or cwd) changed while the thread is loaded. A resume would keep the old
         // MCP config, so fork it: Codex loads the history into a new thread with the new config,
@@ -1037,24 +1032,24 @@ export class CodexProviderService {
         this.loaded.set(forked.thread.id, { mcpToken, cwd })
         await conn.request('thread/unsubscribe', { threadId: saved.codexThreadId }, { signal, timeoutMs: 5_000 }).catch(() => undefined)
         signal.throwIfAborted()
-        return { codexThreadId: forked.thread.id, model: forked.model, continued: true, disposition: 'reusable' }
+        return { codexThreadId: forked.thread.id, model: forked.model, continued: true }
       }
       try {
         const resumed = chatgptProvider(await conn.request('thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
         this.loaded.set(resumed.thread.id, { mcpToken, cwd })
-        return { codexThreadId: resumed.thread.id, model: resumed.model, continued: true, disposition: 'reusable' }
+        return { codexThreadId: resumed.thread.id, model: resumed.model, continued: true }
       } catch (error) {
         signal.throwIfAborted()
         conn.signal.throwIfAborted()
         if (!(error instanceof CodexRpcError)) throw error
         const fresh = chatgptProvider(await conn.request('thread/start', params, { signal }))
         this.loaded.set(fresh.thread.id, { mcpToken, cwd })
-        return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, disposition: 'broken' }
+        return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false }
       }
     }
     const fresh = chatgptProvider(await conn.request('thread/start', params, { signal }))
     this.loaded.set(fresh.thread.id, { mcpToken, cwd })
-    return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, disposition: 'reusable' }
+    return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false }
   }
 
   async chat(input: CodexChatInput): Promise<CodexChatResult> {
@@ -1220,7 +1215,6 @@ export class CodexProviderService {
         codexThreadId,
         turnId: lastTurn.id,
         model: thread.model ?? baseId,
-        threadDisposition: thread.disposition,
         usage: current.usage()
       }
     } catch (error) {

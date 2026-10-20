@@ -84,10 +84,7 @@ describe('continue after restart (SPEC §16.4)', () => {
     const acknowledged = await d.orch.send('Continue where you left off.', false, { ...options, acknowledgeUncertain: true })
     expect(d.engine.getRun(acknowledged.runId!)).toMatchObject({ status: 'completed', outcome: { continuationOf: sent.runId } })
 
-    // A continuation must name an ended run of the same thread.
-    const other = d.store.createThread('Other')
-    await expect(d.orch.send('Continue', false, { threadId: other.id, clientRequestId: 'x-1', continuationOfRunId: sent.runId }))
-      .rejects.toMatchObject({ code: 'continuation_not_found' })
+    // Which runs a continuation may name is decided in RunEngine (runEngine.test.ts) and mapped to a code by the protocol (runProtocolValidation.test.ts).
   })
 
   it('a profile stop during a turn records a restart, not a Stop, and the next boot notes it', async () => {
