@@ -35,8 +35,24 @@ const shared = {
   testTimeout: 20_000
 } as const
 
+// Changes to these affect every test, so `--changed`, `related` and scripts/test-select.mjs run everything.
+const FULL_RUN_TRIGGERS = [
+  '**/tests/setup/**',
+  '**/tests/support/**',
+  '**/tests/fixtures/**',
+  '**/tests/test-dependencies.json',
+  '**/vitest.config.*',
+  '**/vite.config.*',
+  '**/electron.vite.config.*',
+  '**/package.json',
+  '**/package-lock.json',
+  '**/tsconfig*.json',
+  '**/scripts/test-select.mjs'
+]
+
 export default defineConfig({
   test: {
+    forceRerunTriggers: FULL_RUN_TRIGGERS,
     projects: [
       {
         test: {

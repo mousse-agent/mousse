@@ -77,7 +77,7 @@ Keep the issue body current like a PR description. Decisions, blockers, and hand
 
 ## Testing scope
 
-While working, default to focused tests for the changed behavior and directly affected areas. Choose checks that establish the requested behavior and relevant regressions, including a targeted app check when the change warrants it.
+While working, default to focused tests for the changed behavior and directly affected areas. `npm run test:changed` runs the tests related to the working tree and `npm run test:plan` shows that selection without running it; see `docs/testing.md` for how related tests are chosen and which tests must stay. Choose checks that establish the requested behavior and relevant regressions, including a targeted app check when the change warrants it.
 
 The full test suite runs locally, once, before a PR is opened. For a code change, run `npm test` on the commit you will publish and open the PR only when it passes. Local hardware is faster than the hosted runners, so the local run is the real gate and hosted CI stays basic. If the suite fails, fix it or keep the work on its pushed task branch without a PR. A failure that looks unrelated or flaky still blocks the PR until it is shown to fail on the default branch too; the PR then names it. Rerun the suite after later commits that change code, and state the result in the PR's Verification section.
 

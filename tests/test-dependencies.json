@@ -1,0 +1,50 @@
+{
+  "comment": "Runtime edges the import graph cannot see: tests that spawn built output, read data files or drive Electron. `when` matches changed repo paths; `run` names test files, `projects` names whole vitest projects. Keep rules to implicit edges only; ordinary imports are selected by the graph.",
+  "rules": [
+    {
+      "name": "cli, main, preload and build inputs reach every spawned process",
+      "when": ["src/cli/**", "src/main/**", "src/preload/**", "scripts/build*", "scripts/after-pack*", "scripts/prepare-package*", "scripts/ensure-*", "scripts/cached-build*", "scripts/start.mjs", "electron-builder*.yml", "build/**", "resources/**"],
+      "projects": ["process"]
+    },
+    {
+      "name": "daemon composition reaches every spawned or booted daemon",
+      "when": ["src/mms/MousseMainService.ts", "src/mms/MmsProfileServices.ts", "src/mms/MmsOptions.ts", "src/mms/installation/**", "src/mms/profiles/**"],
+      "projects": ["process"]
+    },
+    {
+      "name": "browser worker and its contracts",
+      "when": ["src/browser-worker/**", "src/shared/browser/**", "src/mms/browser/**"],
+      "run": ["tests/platformBrowser*.test.ts", "tests/platformManagedBrowserDrain.test.ts", "tests/platformMainBrowserE2E.test.ts", "tests/platformScheduledBrowserE2E.test.ts", "tests/platformElectronAttachedBrowser.test.ts", "tests/browserWindowsSandboxPermissions.test.ts"]
+    },
+    {
+      "name": "run engine, orchestrator and MCP reach the run and MCP process contracts",
+      "when": ["src/mms/run/**", "src/mms/orchestrator/**", "src/mms/integrations/mcp/**", "src/shared/run/**"],
+      "run": ["tests/run/**/*.test.ts", "tests/platformMcpLifecycleDrain.test.ts", "tests/platformIntegrationMcpRuntime.test.ts", "tests/mousseAgentDurableSessions.test.ts"]
+    },
+    {
+      "name": "network, bridge, bots, spaces and chats reach the bundled net daemons and crash children",
+      "when": ["src/mms/net/**", "src/mms/bridge/**", "src/mms/bots/**", "src/mms/spaces/**", "src/mms/chats/**", "src/shared/net/**", "src/shared/bridge/**", "src/shared/bots/**", "src/shared/spaces/**", "scripts/net/**"],
+      "run": ["tests/net/**/*.test.ts"]
+    },
+    {
+      "name": "workflows and lifecycle reach their daemon crash and CLI contracts",
+      "when": ["src/mms/workflows/**", "src/mms/lifecycle/**", "src/mms/data/**", "src/shared/workflows*", "src/shared/workflow*/**"],
+      "run": ["tests/platformWorkflow*.test.ts", "tests/resourceLifecycle*.test.ts", "tests/resourcePurge*.test.ts", "tests/gitFoundation*.test.ts", "tests/chatUndoFullShell.test.ts"]
+    },
+    {
+      "name": "renderer sources, styles and assets reach the Electron fixture tests",
+      "when": ["src/renderer/**", "src/shared/**/*.css"],
+      "run": ["tests/renderer/**/*.test.ts", "tests/platformEditorCrossFeature.test.ts", "tests/promptMarkers.test.ts", "tests/net/chats/gui-*.test.ts", "tests/net/bridge/gui-electron-display.test.ts", "tests/platformMainBundleImports.test.ts", "tests/*Css*.test.ts", "tests/*css*.test.ts"]
+    },
+    {
+      "name": "protocol test vectors are read from disk",
+      "when": ["test-vectors/**"],
+      "run": ["tests/net/plus/enrollment-seal.test.ts", "tests/net/identity/privateStreamKeys.test.ts", "tests/net/protocol/codec.test.ts", "tests/net/spaces/private/service.test.ts", "tests/net/spaces/host/invites.test.ts", "tests/net/spaces/host/meta.test.ts"]
+    },
+    {
+      "name": "team workflow scripts have their own node:test files",
+      "when": ["scripts/team-status.mjs", "scripts/team-cleanup.mjs", "scripts/team-*.test.mjs"],
+      "run": ["tests/teamWorkflowScripts.test.ts"]
+    }
+  ]
+}
