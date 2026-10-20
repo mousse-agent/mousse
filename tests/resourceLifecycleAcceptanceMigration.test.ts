@@ -33,6 +33,7 @@ it('restores a pre-Phase1 trashed thread after profile startup without requiring
     expect((await f.rpc.request<{ threads: Thread[] }>('threads.list', {})).threads.filter((thread) => thread.id === threadId)).toHaveLength(1)
     await f.rpc.request('threads.rename', { threadId, name: 'restored legacy task accepts fresh writes' })
     expect((await f.rpc.request<{ thread: Thread }>('threads.get', { threadId })).thread.name).toBe('restored legacy task accepts fresh writes')
+    expect((await f.rpc.request<{ migrationDiagnostics: unknown[] }>('threads.inventory', {})).migrationDiagnostics).toEqual([])
   } finally { await f.close() }
 })
 

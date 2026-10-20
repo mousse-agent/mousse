@@ -239,27 +239,6 @@ describe('structured workflow CLI', () => {
     } finally { await f.close() }
   }, 30_000)
 
-  it('executes the built explicit chat command through the same slash resolver and wait exit codes', async () => {
-    const f = await fixture()
-    try {
-      const content = bundle()
-      content.manifest.inputSchema = { type: 'object', properties: { count: { type: 'integer' } }, required: ['count'] }
-      const published = await f.publish(content)
-      const { thread } = await f.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'CLI slash' })
-      const args = ['--home', f.homeDir, '--profile', f.alice.id, '--session', thread.id, '--json', '--print', 'chat']
-      const result = await cli([...args, '/' + published.slug + ' --count 12'])
-      expect(result.stderr).toBe(''); expect(result.code).toBe(0)
-      expect(result.events[0].kind).toBe('accepted')
-      expect(result.events.at(-1)?.run).toMatchObject({ state: 'succeeded', result: { count: 12 } })
-      const invalid = await cli([...args, '/' + published.slug + ' --count nope'])
-      expect(invalid.code).toBe(2)
-      const override = await cli([...args, '--provider', 'must-not-change', '/' + published.slug + ' --count 2'])
-      expect(override.code).toBe(2); expect(override.stderr).toContain('overrides are not supported')
-      const services = await f.main.getProfileServices(f.alice.id)
-      expect(await services.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).toHaveLength(1)
-    } finally { await f.close() }
-  }, 60_000)
-
   it('keeps an identical slash invocation equivalent through GUI chat and the built CLI', async () => {
     const f = await fixture()
     const gui = new LocalMmsClient({
@@ -359,6 +338,18 @@ describe('structured workflow CLI', () => {
       expect(invalidCli.code).toBe(2)
       const cliValidation = JSON.parse(invalidCli.stderr.trim()) as { error: string }
       expect(cliValidation.error).toContain((guiValidation as Error).message)
+      const override = await cli([
+        '--home', f.homeDir,
+        '--profile', f.alice.id,
+        '--session', cliThread.id,
+        '--provider', 'must-not-change',
+        '--json',
+        '--print',
+        'chat',
+        command
+      ])
+      expect(override.code).toBe(2)
+      expect(override.stderr).toContain('overrides are not supported')
       expect(await services.platform.workflowRuns.runtime.list({ profileId: f.alice.id })).toHaveLength(2)
     } finally {
       await gui.close()

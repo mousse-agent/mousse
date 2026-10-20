@@ -40,10 +40,8 @@ describe('validateStagedQuickAction', () => {
 })
 
 describe('QuickActionTools', () => {
-  it('exposes a create_quick_action definition', () => {
+  it('claims only its own tool name', () => {
     const { tools } = makeTools(true)
-    const defs = tools.getToolDefinitions()
-    expect(defs.map((d) => d.name)).toEqual(['create_quick_action'])
     expect(tools.isQuickActionTool('create_quick_action')).toBe(true)
     expect(tools.isQuickActionTool('ask_user')).toBe(false)
   })

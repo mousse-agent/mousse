@@ -27,7 +27,6 @@ describe('WorkflowJsonSchemaValidator (Ajv2020 subset)', () => {
       files: ['a']
     })
     expect(data.ok).toBe(true)
-    expect(data.diagnostics.some((d) => d.message.includes('Ajv2020')) || data.ok).toBe(true)
   })
 
   it('emits exact diagnostics for restricted keywords, remote refs, recursion, and prototype keys', () => {

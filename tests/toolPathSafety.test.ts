@@ -15,9 +15,7 @@ import {
 import { PiCodingTools } from '../src/mms/orchestrator/PiCodingTools'
 
 describe('toolPathSafety', () => {
-  it('normalizes Git Bash and WSL drive paths on Windows', () => {
-    if (process.platform !== 'win32') return
-
+  it.skipIf(process.platform !== 'win32')('normalizes Git Bash and WSL drive paths on Windows', () => {
     expect(normalizeOsPath('/c/Users/bubbl/project/file.ts')).toBe(
       'C:\\Users\\bubbl\\project\\file.ts'
     )
@@ -25,9 +23,7 @@ describe('toolPathSafety', () => {
     expect(normalizeOsPath('subagent-lab/package.json')).toBe('subagent-lab/package.json')
   })
 
-  it('resolves Git Bash absolute paths into the real worktree instead of C:\\c\\...', () => {
-    if (process.platform !== 'win32') return
-
+  it.skipIf(process.platform !== 'win32')('resolves Git Bash absolute paths into the real worktree instead of C:\\c\\...', () => {
     const cwd = 'C:\\Users\\bubbl\\.mousse\\repositories\\demo\\worktrees\\agents\\abc'
     const gitBashPath =
       '/c/Users/bubbl/.mousse/repositories/demo/worktrees/agents/abc/subagent-lab/package.json'
@@ -61,9 +57,7 @@ describe('toolPathSafety', () => {
     expect(clampBashTimeoutSeconds(99999)).toBe(MAX_BASH_TIMEOUT_SECONDS)
   })
 
-  it('sanitizes write args and refuses escapes outside cwd', () => {
-    if (process.platform !== 'win32') return
-
+  it.skipIf(process.platform !== 'win32')('sanitizes write args and refuses escapes outside cwd', () => {
     const cwd = 'C:\\Users\\bubbl\\project'
     const ok = sanitizeToolArgs(
       'write',
@@ -99,9 +93,7 @@ describe('PiCodingTools path safety integration', () => {
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
   })
 
-  it('writes Git Bash absolute paths into the worktree cwd, not C:\\c\\...', async () => {
-    if (process.platform !== 'win32') return
-
+  it.skipIf(process.platform !== 'win32')('writes Git Bash absolute paths into the worktree cwd, not C:\\c\\...', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mousse-path-safety-'))
     roots.push(root)
     const tools = new PiCodingTools()

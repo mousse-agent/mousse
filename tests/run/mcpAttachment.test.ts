@@ -49,26 +49,7 @@ const input = (overrides: Partial<TurnInput> = {}): TurnInput => ({
 const control = { drainSteer: () => undefined, heartbeat: () => undefined }
 
 describe('Claude subscription attachment', () => {
-  it('the adapter passes the server and the guidance only when host.mcp is set', async () => {
-    const seen: ClaudeSubscriptionChatInput[] = []
-    const client: ClaudeSubscriptionClient = {
-      chat: vi.fn(async (chat: ClaudeSubscriptionChatInput) => { seen.push(chat); return 'ok' }),
-      commitConversation: vi.fn(),
-      standaloneWorkspace: () => '/standalone',
-      configured: () => true
-    }
-    const adapter = new ClaudeSubscriptionAdapter(() => client)
-    await adapter.startTurn(input(), sink(), control, host(MCP))
-    await adapter.startTurn(input(), sink(), control, host(null))
-    await adapter.startTurn(input(), sink(), control, { ...host(null), mcp: undefined })
-    expect(seen[0]).toMatchObject({ mcp: MCP, systemPromptAppend: mousseOrchestrationInstructions() })
-    for (const chat of seen.slice(1)) {
-      expect(chat.mcp).toBeNull()
-      expect(chat.systemPromptAppend).toBeUndefined()
-    }
-  })
-
-  it('the adapter appends the project AGENTS.md to the system prompt, rereading it each turn', async () => {
+  it('the Claude adapter passes the server only when host.mcp is set and appends the project AGENTS.md to the system prompt, rereading it each turn', async () => {
     const seen: ClaudeSubscriptionChatInput[] = []
     const standalone = tempHome('mousse-claude-standalone-')
     writeFileSync(join(standalone, 'AGENTS.md'), 'STANDALONE RULES')
@@ -85,7 +66,10 @@ describe('Claude subscription attachment', () => {
     writeFileSync(join(project, 'AGENTS.md'), 'UPDATED RULES')
     await adapter.startTurn(input({ cwd: project }), sink(), control, host(null))
     await adapter.startTurn(input({ cwd: tempHome('mousse-claude-bare-') }), sink(), control, host(null))
-    await adapter.startTurn(input({ cwd: null }), sink(), control, host(null))
+    await adapter.startTurn(input({ cwd: null }), sink(), control, { ...host(null), mcp: undefined })
+    // The server is passed through only when host.mcp is set.
+    expect(seen[0].mcp).toEqual(MCP)
+    for (const chat of seen.slice(1)) expect(chat.mcp).toBeNull()
     expect(seen[0].systemPromptAppend).toBe(
       `${mousseOrchestrationInstructions()}\n\n## Project instructions (AGENTS.md)\nPROJECT RULES`
     )
@@ -149,7 +133,7 @@ describe('Claude subscription attachment', () => {
       mousse: { type: 'http', url: MCP.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 }
     })
     expect(options[0].systemPrompt).toBe('GUIDE')
-    expect(options[0].extraArgs).toMatchObject({ 'strict-mcp-config': null })
+    expect(options[0]).toMatchObject({ settingSources: [], extraArgs: { 'strict-mcp-config': null } })
     expect(decisions[0]).toMatchObject({ behavior: 'allow' })
     expect(ask).toHaveBeenCalledTimes(1)
     // Without the server the same name is an ordinary tool and goes to the user.
@@ -227,7 +211,7 @@ function fakeAcp(http: boolean, sent: Sent[]) {
 }
 
 describe('Antigravity attachment', () => {
-  it('the adapter passes the server and the guidance only when host.mcp is set', async () => {
+  it('the Antigravity adapter passes the server and the guidance only when host.mcp is set', async () => {
     const seen: Array<Parameters<AntigravityClient['chat']>[0]> = []
     const client: AntigravityClient = { chat: vi.fn(async (chat) => { seen.push(chat); return 'ok' }), commitConversation: vi.fn(), configured: () => true }
     const adapter = new AntigravityAdapter(() => client)

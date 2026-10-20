@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it } from 'vitest'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import {
@@ -117,43 +116,5 @@ describe('embedded browser authentication policy', () => {
     expect(isAllowedBrowserPopupUrl('http://localhost:3000/login')).toBe(true)
     expect(isAllowedBrowserPopupUrl('file:///tmp/secret')).toBe(false)
     expect(isAllowedBrowserPopupUrl('javascript:alert(1)')).toBe(false)
-  })
-})
-
-describe('browser panel empty toolbar and menu layering', () => {
-  const panelSource = readFileSync(
-    new URL('../src/renderer/components/BrowserPanel.tsx', import.meta.url),
-    'utf8'
-  )
-  const appStyles = readFileSync(new URL('../src/renderer/styles/app.css', import.meta.url), 'utf8')
-
-  it('does not auto-seed a tab when the browser pane becomes active', () => {
-    expect(panelSource).not.toMatch(/ensureTab\s*\(/)
-    expect(panelSource).not.toMatch(/ensureBrowserTab/)
-  })
-
-  it('renders the address toolbar only when visible tabs exist', () => {
-    expect(panelSource).toMatch(/hasVisibleTabs/)
-    expect(panelSource).toMatch(/browser-empty-state/)
-    expect(panelSource).toMatch(/hasVisibleTabs\s*\?\s*\([\s\S]*browser-toolbar/)
-  })
-
-  it('preserves native popup navigation and keeps every thread guest mounted', () => {
-    expect(panelSource).toMatch(/allowpopups/)
-    expect(panelSource).not.toMatch(/addEventListener\(['"]new-window['"]/)
-    expect(panelSource).toMatch(/All guests stay mounted/)
-    expect(panelSource).toMatch(/tabs\.map\(\(tab\)/)
-    expect(panelSource).toMatch(/KeepMounted active=\{hasVisibleTabs\} preserveLayout/)
-  })
-
-  it('portals the three-dot menu with fixed floating positioning above the webview', () => {
-    expect(panelSource).toMatch(/FloatingPortal/)
-    expect(panelSource).toMatch(/useFloatingPosition/)
-    expect(panelSource).toMatch(/browser-menu-floating/)
-    expect(panelSource).toMatch(/browser-menu-backdrop/)
-    expect(panelSource).toMatch(/onPointerDown=\{\(\) => setMenuOpen\(false\)\}/)
-    expect(appStyles).toMatch(/\.browser-menu-floating\s*\{[\s\S]*?z-index:\s*var\(--z-floating/)
-    expect(appStyles).toMatch(/\.browser-menu-backdrop\s*\{[\s\S]*?position:\s*fixed[\s\S]*?inset:\s*0/)
-    expect(appStyles).not.toMatch(/\.browser-panel-menu-open\s+\.browser-webview/)
   })
 })

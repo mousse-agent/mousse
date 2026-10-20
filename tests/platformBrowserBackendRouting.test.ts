@@ -76,16 +76,13 @@ describe('host-selected browser backend routing', () => {
     expect(managed.call).not.toHaveBeenCalled()
   })
 
-  it('rejects cross-profile, storage substitution, and model-supplied target fields before dispatch', async () => {
+  it('rejects cross-profile, storage substitution, and conflicting target fields before dispatch', async () => {
     const managed = backend('managed-chromium'), attached = backend('electron-attached')
     const router = new BrowserBackendRouter({ profileId, managed, attached })
     const open = request('session.open', { backend: 'electron-attached', uiTabId: 'existing_tab' })
     expect(await router.call({ ...open, profileId: 'another_profile' })).toMatchObject({ error: { code: 'profile_mismatch' } })
     expect(await router.call({ ...open, params: { ...open.params, persistent: true } })).toMatchObject({ error: { code: 'invalid_action' } })
     expect(await router.call(request('session.open', { backend: 'managed-chromium', uiTabId: 'existing_tab' }))).toMatchObject({ error: { code: 'invalid_action' } })
-    const tools = new BrowserToolDispatcher({ sessions: await manager(router) })
-    const output = await tools.invoke('browser_open', { uiTabId: 'model_selected', backend: 'managed-chromium' }, { ...context(), target: { backend: 'electron-attached', uiTabId: 'existing_tab' } })
-    expect(output.ok).toBe(false)
     expect(managed.call).not.toHaveBeenCalled()
     expect(attached.call).not.toHaveBeenCalled()
   })

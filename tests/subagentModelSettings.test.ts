@@ -3,7 +3,6 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
-import { getDefaultSettings } from '../src/shared/settings'
 
 const homes: string[] = []
 
@@ -13,12 +12,6 @@ afterEach(async () => {
 })
 
 describe('Mousse subagent model settings', () => {
-  it('inherits the main model by default', () => {
-    const settings = getDefaultSettings()
-    expect(settings.agents.llmProvider.mousse).toBe('')
-    expect(settings.agents.model.mousse).toBe('')
-  })
-
   it('persists the selected provider and model in mousse.conf', async () => {
     const home = await mkdtemp(join(tmpdir(), 'mousse-subagent-settings-'))
     homes.push(home)

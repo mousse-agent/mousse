@@ -363,12 +363,10 @@ describe('legacy agent settlement', () => {
 
     orchestrator.reportGuiAgentFailure(first.agent.id, 'first failed')
     await orchestrator.stopAgent(second.agent.id, false)
-    await new Promise((resolve) => setTimeout(resolve, 150))
 
     expect(agents.get(first.agent.id)?.status).toBe('failed')
     expect(agents.get(second.agent.id)?.status).toBe('cancelled')
     expect(sendSpy).not.toHaveBeenCalled()
-    expect((orchestrator as unknown as Record<string, unknown>).delegationBatches).toBeUndefined()
     sendSpy.mockRestore()
   })
 
@@ -385,6 +383,7 @@ describe('legacy agent settlement', () => {
 describe('prompt consistency', () => {
   it('has subagents report through their final reply, without a progress file or orchestration JSON', () => {
     const sub = buildOrchestratorSystemPrompt({ mode: 'build', subagent: true })
+    expect(sub).toContain('Do NOT emit complete_task')
     expect(sub).toContain('Your final reply is your result')
     expect(sub).toMatch(/On failure, say why/i)
     expect(sub).not.toMatch(/task progress protocol|progress file/i)
@@ -471,5 +470,6 @@ describe('legacy progress file', () => {
     expect(LEGACY_AGENT_PROGRESS_FILE).toBe('.mousse/task-progress.json')
     expect(isMousseControlFile(LEGACY_AGENT_PROGRESS_FILE)).toBe(true)
     expect(isMousseControlFile('.mousse\\task-progress.json')).toBe(true)
+    expect(isMousseControlFile('src/task-progress.json')).toBe(false)
   })
 })

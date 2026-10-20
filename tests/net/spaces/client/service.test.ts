@@ -315,9 +315,7 @@ describe('P5 member real TLS admission, replica and durable sender', () => {
       expect.objectContaining({ code: 'too_large' })
     )
     const env = decodeEnvelope(f.outbox.due(f.channel)[0].envelope).envelope
-    expect(env.auth).toEqual(
-      f.member.projection.position(f.space.space) && { metaEpoch: 1, metaSeq: 3 }
-    )
+    expect(env.auth).toEqual({ metaEpoch: 1, metaSeq: 3 })
   })
 })
 

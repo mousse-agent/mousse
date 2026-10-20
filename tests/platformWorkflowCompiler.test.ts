@@ -40,13 +40,23 @@ describe('workflow compiler', () => {
     expect(compiled.diagnostics.filter((d) => d.severity === 'error')).toEqual([])
     expect(compiled.runnable).toBe(true)
     expect(compiled.slug).toBe('summarize_files')
+    expect(loaded.bundle.manifest.instructionsFile).toBe('instructions.md')
+    const assetPaths = loaded.bundle.assets.map((asset) => asset.relativePath)
+    expect(assetPaths).toContain('scripts/collect.mjs')
+    expect(assetPaths).toContain('instructions.md')
+    expect(loaded.bundle.editor?.schemaVersion).toBe(1)
+    const script = readFileSync(join(EXAMPLE_DIR, 'scripts/collect.mjs'), 'utf8')
+    expect(script).toContain('MOUSSE_INPUT_DIR')
     const collect = compiled.graph.nodes.find((node) => node.id === 'collect')
+    expect(collect?.type).toBe('script')
     expect(collect?.config.fileInputs).toEqual([
-      expect.objectContaining({
+      {
         pointer: '/files',
         source: 'thread-workspace',
-        rewrite: 'relative-staged-paths'
-      })
+        destination: 'input-dir',
+        rewrite: 'relative-staged-paths',
+        maxTotalBytes: 200000
+      }
     ])
   })
 

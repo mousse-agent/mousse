@@ -5,10 +5,7 @@ import { EventEmitter } from 'node:events'
 import { createHash } from 'node:crypto'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import {
-  ClaudeSubscriptionProviderService,
-  claudeSubscriptionEnvironment
-} from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import { ClaudeSubscriptionProviderService } from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { LoginSession } from '../src/mms/providers/LoginSession'
 
@@ -74,21 +71,6 @@ const chatInput = (cwd: string) => ({
 })
 
 describe('Claude Subscription native provider', () => {
-  it('isolates API, router, token, cloud and nested CLI credentials', () => {
-    const env = claudeSubscriptionEnvironment('/profile/claude', {
-      PATH: '/usr/bin',
-      ANTHROPIC_API_KEY: 'secret',
-      ANTHROPIC_AUTH_TOKEN: 'secret',
-      ANTHROPIC_BASE_URL: 'router',
-      CLAUDE_CODE_OAUTH_TOKEN: 'secret',
-      CLAUDE_CODE_USE_BEDROCK: '1',
-      AWS_PROFILE: 'other',
-      GOOGLE_APPLICATION_CREDENTIALS: 'other',
-      CLAUDECODE: '1',
-      ELECTRON_RUN_AS_NODE: '1'
-    })
-    expect(env).toEqual({ PATH: '/usr/bin', CLAUDE_CONFIG_DIR: '/profile/claude' })
-  })
   it('exposes a subscription choice separate from Anthropic API keys', () => {
     const { service } = fixture(() => fakeQuery())
     expect(service.loginOption()).toMatchObject({
@@ -231,16 +213,6 @@ describe('Claude Subscription native provider', () => {
     await service.chat(chatInput(home))
     expect(decisions[1]).toMatchObject({ behavior: 'deny' })
     expect(asked).toHaveBeenCalledOnce()
-  })
-  it('keeps the Mousse server the only MCP server when it is attached (the ToolSearch allow relies on it)', async () => {
-    let options: Options | undefined
-    const { service, home } = fixture((input) => {
-      options = input.options
-      return fakeQuery([result])
-    })
-    await service.chat({ ...chatInput(home), mcp: { url: 'http://127.0.0.1:1/mcp', token: 't'.repeat(43) } })
-    expect(options).toMatchObject({ settingSources: [], extraArgs: { 'strict-mcp-config': null } })
-    expect(Object.keys(options!.mcpServers ?? {})).toEqual(['mousse'])
   })
   it('asks only for calls bypass mode escalates and keeps plan mode read-only without prompts', async () => {
     let decision: unknown

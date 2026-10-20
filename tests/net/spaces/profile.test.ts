@@ -35,31 +35,11 @@ function profile() {
     }
   }
 }
-it('constructs without enrollment and joins a foreign Space through actual composed direct TLS', async () => {
-  const host = profile(),
-    member = profile()
-  expect(member.net.runtime().identity.self()).toBeUndefined()
-  for (const p of [host, member]) {
-    await p.net.request('net.init', { listen: true })
-    await p.net.request('net.protect', { passphrase: 'composition-protection' })
-  }
-  const space = host.spaces.host.create({ name: 'Composed Space' }),
-    channel = host.spaces.host.createChannel(space.space, 'general')
-  await member.spaces.client.join(
-    member.spaces.client.prepareJoin(host.spaces.host.invite(space.space).text)
-  )
-  await member.spaces.client.connect(space.space)
-  await member.spaces.client.subscribe(channel)
-  const event = member.spaces.client.post(channel, 'actual composed message')
-  await member.spaces.client.flush(space.space)
-  expect(member.net.runtime().outbox.get(event)?.state).toBe('sent')
-  expect(host.spaces.store.getById(channel, event)).toBeDefined()
-}, 10000)
-
 it('imports a third profile without pre-pinning earlier members and verifies their original public history', async () => {
   const host = profile(),
     member = profile(),
     fresh = profile()
+  expect(member.net.runtime().identity.self()).toBeUndefined()
   for (const p of [host, member, fresh]) {
     await p.net.request('net.init', { listen: true })
     await p.net.request('net.protect', { passphrase: 'composition-protection' })
@@ -82,6 +62,7 @@ it('imports a third profile without pre-pinning earlier members and verifies the
   )
   const event = member.spaces.client.post(channel, 'history from an independent member')
   await member.spaces.client.flush(space.space)
+  expect(member.net.runtime().outbox.get(event)?.state).toBe('sent')
   const earlier = member.net.runtime().identity.self()!.user
   expect(fresh.net.runtime().identity.pinnedRootKey(earlier)).toBeUndefined()
   await fresh.spaces.client.join(

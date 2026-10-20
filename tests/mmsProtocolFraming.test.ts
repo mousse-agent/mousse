@@ -7,7 +7,6 @@ import {
 } from '../src/mms/protocol/framing'
 import { MMS_PROTOCOL_MAX_FRAME_BYTES } from '../src/mms/protocol/types'
 import { hashHomeForEndpoint, resolveLocalEndpoint, windowsNamedPipePath } from '../src/mms/protocol/endpoint'
-import { canonicalizeHome } from '../src/mms/ownership/MmsOwnerLease'
 
 describe('protocol framing', () => {
   it('encodes and decodes a single frame', () => {
@@ -64,11 +63,8 @@ describe('protocol framing', () => {
 describe('endpoint derivation', () => {
   it('derives stable hash from canonical home', () => {
     const h1 = hashHomeForEndpoint('/tmp/foo')
-    const h2 = hashHomeForEndpoint('/tmp/foo/../foo')
-    // resolve may differ by platform; same canonicalize should match
-    expect(hashHomeForEndpoint(canonicalizeHome('/tmp/foo'))).toBe(
-      hashHomeForEndpoint(canonicalizeHome('/tmp/foo'))
-    )
+    expect(hashHomeForEndpoint('/tmp/foo/../foo')).toBe(h1)
+    expect(hashHomeForEndpoint('/tmp/bar')).not.toBe(h1)
     expect(h1).toHaveLength(32)
     expect(windowsNamedPipePath('/tmp/x')).toMatch(/^\\\\\.\\pipe\\mousse-mms-/)
   })

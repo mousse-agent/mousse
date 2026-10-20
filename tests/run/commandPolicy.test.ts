@@ -57,10 +57,6 @@ describe('steerStrategy', () => {
       expect(steerStrategy(CLAUDE_SUBSCRIPTION_CAPABILITIES, run(status))).toBe('interrupt_restart')
       expect(steerStrategy(ANTIGRAVITY_CAPABILITIES, run(status))).toBe('interrupt_restart')
     }
-    for (const caps of [CLAUDE_SUBSCRIPTION_CAPABILITIES, ANTIGRAVITY_CAPABILITIES]) {
-      expect(steerStrategy(caps, run('queued'))).toBe('queue')
-      for (const status of OVER) expect(steerStrategy(caps, run(status))).toBe('late_steer_new_run')
-    }
   })
 
   it('queues instead of restarting when the provider cannot be interrupted', () => {

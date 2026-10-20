@@ -9,6 +9,7 @@ import { ProjectManager } from '../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
+import type { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { AdapterRegistry } from '../../src/mms/run/adapters/AdapterRegistry'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
@@ -130,7 +131,7 @@ export async function waitFor(cond: () => boolean, label: string, timeoutMs = 10
 }
 
 /** One daemon over `home`: orchestrator, engine and effect worker with the given adapters. */
-export function phase6Daemon(home: string, adapters: ProviderAdapter[], options: { pid?: number } = {}) {
+export function phase6Daemon(home: string, adapters: ProviderAdapter[], options: { pid?: number; instances?: ProviderInstanceService } = {}) {
   const projects = new ProjectManager()
   const store = new ThreadDataStore(projects)
   const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...PI } }
@@ -146,7 +147,7 @@ export function phase6Daemon(home: string, adapters: ProviderAdapter[], options:
     generateTitle: async () => 'Scripted',
     chat: async () => { throw new Error('the scripted adapter replaces the pi loop') }
   }
-  const registry = new AdapterRegistry()
+  const registry = new AdapterRegistry(options.instances)
   for (const adapter of adapters) registry.register(adapter)
   orch.setAdapterRegistry(registry)
   const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })), pid: options.pid ?? 1 })

@@ -123,7 +123,7 @@ describe('signed materialization of frozen meta oracles', () => {
       },
       1
     )
-    const nextDelegation = a.identity.issueNodeDelegation({
+    a.identity.issueNodeDelegation({
       node: peer(nextHost).node,
       keys: nextHost.keys.nodeKeys(),
       name: 'New host',
@@ -235,7 +235,6 @@ describe('signed materialization of frozen meta oracles', () => {
     expect(a.projection.violations(space.space)).toHaveLength(
       oracle.sequences[0].steps.filter((s: any) => s.expected.violation).length
     )
-    expect(nextDelegation).toHaveProperty('payload')
   })
   it('stages complete signed history incrementally with constant bounded carry and atomic activation; rejects incomplete/unknown snapshots', async () => {
     const source = await profile(),

@@ -129,7 +129,8 @@ it('keeps a periodic heartbeat slot when immediate meta probes overlap held pong
   }
 }, 10000)
 it('does not qualify a valid meta reply or a pong delayed beyond the actual RTT bound', async () => {
-  const { host, session, space } = await connected()
+  const clock = new FakeClock(Date.now()),
+    { host, session, space } = await connected(clock)
   const sources = [...(host.net as unknown as { sessions: Set<NetSyncSession> }).sessions]
   let release!: () => void, entered!: () => void
   const held = new Promise<void>((resolve) => {
@@ -154,7 +155,7 @@ it('does not qualify a valid meta reply or a pong delayed beyond the actual RTT 
     await started
     expect(head.seq).toBeGreaterThan(0)
     expect(session.clockEstimate()).toBeUndefined()
-    await new Promise((resolve) => setTimeout(resolve, 5100))
+    clock.advance(5100)
     release()
     await Promise.allSettled(sources.flatMap((source) => source.activeTasks()))
     await vi.waitFor(() =>

@@ -9,14 +9,11 @@ describe('getReasoningStreamOptions', () => {
     })
   })
 
-  it('keeps Claude requests on its native thinking stream', () => {
+  it('keeps Claude requests on its native thinking stream and adds the thread cache affinity when given', () => {
     expect(getReasoningStreamOptions('anthropic-messages', 'high')).toEqual({
       reasoning: 'high',
       signal: undefined
     })
-  })
-
-  it('includes the thread cache affinity in provider stream options', () => {
     expect(getReasoningStreamOptions('anthropic-messages', 'high', undefined, 'cache-key')).toEqual({
       reasoning: 'high',
       signal: undefined,

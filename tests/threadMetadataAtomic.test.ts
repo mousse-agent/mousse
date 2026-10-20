@@ -63,11 +63,4 @@ describe('ThreadDataStore atomic metadata', () => {
     const messages = JSON.parse(readFileSync(join(dir, 'messages.json'), 'utf-8')) as unknown[]
     expect(messages).toHaveLength(1)
   })
-
-  it('standalone index is rewritten atomically', () => {
-    store.createThread('A')
-    store.createThread('B')
-    const listed = store.listThreads()
-    expect(listed.length).toBeGreaterThanOrEqual(2)
-  })
 })

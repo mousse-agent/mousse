@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import type { ExecutionContext, ExecutionPolicySnapshot } from '../src/shared/execution/types'
 import type { BrowserObservation, BrowserSessionRecord } from '../src/shared/browser/types'
@@ -143,7 +142,7 @@ describe.skipIf(!chrome.ok)('managed browser viewer takeover', () => {
     expect((await viewer.history({ sessionId: session.id })).map((entry) => entry.kind)).toEqual(expect.arrayContaining(['control', 'observed']))
   }, 120_000)
 
-  it('keeps two profile viewers partitioned and exposes human facing takeover controls in the renderer', async () => {
+  it('keeps two profile viewers partitioned', async () => {
     const bundle = await createInProcessBroker()
     brokers.push(bundle.broker)
     const profileARoot = await mkdtemp(join(tmpdir(), 'mousse-viewer-a-'))
@@ -157,14 +156,6 @@ describe.skipIf(!chrome.ok)('managed browser viewer takeover', () => {
     const viewerB = new BrowserViewerService({ sessions: managerB, context: context(PROFILE_B, 'run-b') })
     expect((await viewerA.snapshot()).session?.profileId).toBe(PROFILE_A)
     expect((await viewerB.snapshot()).session).toBeUndefined()
-    const source = readFileSync(resolve('src/renderer/components/browserAutomation/BrowserAutomationViewer.tsx'), 'utf8')
-    expect(source).toContain('Take control')
-    expect(source).toContain('Resume agent')
-    expect(source).toContain('Close')
     await viewerA.close({ sessionId: session.id })
   }, 120_000)
-})
-
-if (!chrome.ok) describe('managed browser viewer blocker', () => {
-  it('reports the real browser fixture blocker', () => expect(chrome.ok).toBe(false))
 })

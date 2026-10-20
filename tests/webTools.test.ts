@@ -10,10 +10,6 @@ const mcpResponse = (text = 'Result') => new Response(JSON.stringify({ result: {
 })
 
 describe('WebTools', () => {
-  it('exposes search and fetch schemas', () => {
-    expect(new WebTools(credentials()).getToolDefinitions().map((tool) => tool.name)).toEqual(['web_search', 'web_fetch'])
-  })
-
   it('uses the Exa MCP endpoint and never includes its key in output', async () => {
     const fetcher = vi.fn(async () => mcpResponse())
     const tools = new WebTools(credentials({ 'web-tool:exa': { type: 'api_key', key: 'secret-exa' } }), fetcher as never)

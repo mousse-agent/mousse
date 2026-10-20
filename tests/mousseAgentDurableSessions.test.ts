@@ -754,40 +754,4 @@ describe('Mousse durable subagent sessions', () => {
     expect(JSON.stringify(history)).not.toContain('Token budget')
     expect(service.exportSessions()[0]?.warnings).toContain('Token budget is 80% used')
   })
-
-  it('writes mousse-agent-sessions.json atomically with other thread files', () => {
-    const previousHome = process.env.MOUSSE_HOME
-    const root = mkdtempSync(join(tmpdir(), 'mousse-agent-atomic-'))
-    process.env.MOUSSE_HOME = join(root, 'home')
-    try {
-      const projects = new ProjectManager()
-      const store = new ThreadDataStore(projects)
-      projects.setThreadStore(store)
-      const thread = store.createThread('atomic')
-      store.saveThreadData(thread.id, {
-        messages: [],
-        agents: [],
-        tasks: [],
-        mousseAgentSessions: [
-          {
-            version: 1,
-            agentId: 'a',
-            worktreePath: '/w',
-            task: 't',
-            assignment: {},
-            messages: [],
-            history: [],
-            runState: 'idle',
-            updatedAt: new Date().toISOString()
-          }
-        ]
-      })
-      const raw = readFileSync(join(store.getThreadDir(thread.id), 'mousse-agent-sessions.json'), 'utf-8')
-      expect(JSON.parse(raw)[0].agentId).toBe('a')
-    } finally {
-      if (previousHome === undefined) delete process.env.MOUSSE_HOME
-      else process.env.MOUSSE_HOME = previousHome
-      rmSync(root, { recursive: true, force: true })
-    }
-  })
 })

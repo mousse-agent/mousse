@@ -1,9 +1,6 @@
 import { expect, it } from 'vitest'
 import { parseArgs } from '../../../../src/cli/parseArgs'
-import {
-  prepareSpaceArchiveCommand,
-  executeSpaceArchiveCommand
-} from '../../../../src/cli/commands/spaceArchive'
+import { prepareSpaceArchiveCommand } from '../../../../src/cli/commands/spaceArchive'
 import { commandHelp } from '../../../../src/cli/help'
 import { validateSpaceArchive } from '../../../../src/mms/spaces/archive/registerMethods'
 import { newId } from '../../../../src/shared/net'
@@ -46,22 +43,4 @@ it('routes actual parsed archive commands and validates bounded local-only DTOs 
     { path: '/tmp', mode: 'restore', recovery: { qualified: true } }
   ])
     expect(() => validateSpaceArchive('spaces.archive.import', fields)).toThrow()
-})
-it('forwards only validated catalog params and emits the actual durable phase', async () => {
-  const request = prepareSpaceArchiveCommand(parseArgs(['spaces', 'activate', space])),
-    calls: unknown[] = [],
-    output: unknown[] = [],
-    receipt = { space, state: 'importedFrozen', digest: 'a'.repeat(64) }
-  await executeSpaceArchiveCommand(
-    request,
-    {
-      request: async <T>(method: string, params: unknown) => {
-        calls.push({ method, params })
-        return receipt as T
-      }
-    },
-    (value) => output.push(value)
-  )
-  expect(calls).toEqual([{ method: 'spaces.archive.activate', params: { space } }])
-  expect(output).toEqual([receipt])
 })

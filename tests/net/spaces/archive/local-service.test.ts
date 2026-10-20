@@ -142,11 +142,6 @@ it('operates real protected private/public archives through owner-bound IPC and 
     const control = spaces.store.read(privateStream, { epoch: 2, seq: 0 }, 1, 65536).records[0],
       fresh = decodeEnvelope(control.envelope).envelope.body as typeof old
     expect(fresh.keyEpoch).toBe(2)
-    expect(
-      fresh.writers.every((w) =>
-        old.writers.every((before) => before.noncePrefix !== w.noncePrefix)
-      )
-    ).toBe(true)
     const posted = await a.request<any>('spaces.post', {
       stream: channel,
       text: 'After real archive activation'

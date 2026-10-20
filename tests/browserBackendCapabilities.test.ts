@@ -90,7 +90,7 @@ describe('host-owned browser backend capability reporting', () => {
     const root = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-browser-capabilities-')); roots.push(root)
     const managed = backendPort('managed-chromium'), attached = backendPort('electron-attached')
     const sessions = new BrowserSessionManager({ profileId, profileRoot: root, broker: new BrowserBackendRouter({ profileId, managed, attached }) })
-    const result = await new BrowserToolDispatcher({ sessions }).invoke('browser_open', { backend: 'managed-chromium', capabilities: { uploads: true } }, context('electron-attached'))
+    const result = await new BrowserToolDispatcher({ sessions }).invoke('browser_open', { backend: 'managed-chromium', uiTabId: 'model_selected', capabilities: { uploads: true } }, context('electron-attached'))
     expect(result).toMatchObject({ ok: false, error: { code: 'invalid_action' } })
     expect(managed.call).not.toHaveBeenCalled()
     expect(attached.call).not.toHaveBeenCalled()

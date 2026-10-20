@@ -51,41 +51,23 @@ it.each(['EPERM', 'EINVAL'])(
   }
 )
 
-it.each(['EPERM', 'EINVAL', 'EIO', 'ENOSPC', 'EACCES', 'ENOENT'])(
-  'preserves directory failures outside Windows (%s)',
-  (code) => {
-    platform('linux')
-    const error = failure(code)
-    vi.mocked(openSync).mockImplementationOnce(() => {
-      throw error
-    })
-    expect(() => syncDirectory('owned-directory')).toThrow(error)
-    expect(closeSync).not.toHaveBeenCalled()
-    vi.mocked(fsyncSync).mockImplementationOnce(() => {
-      throw error
-    })
-    expect(() => syncDirectory('owned-directory')).toThrow(error)
-    expect(closeSync).toHaveBeenCalledExactlyOnceWith(17)
-  }
-)
-
-it.each(['EIO', 'ENOSPC', 'EACCES', 'ENOENT'])(
-  'preserves unexpected Windows directory failures (%s)',
-  (code) => {
-    platform('win32')
-    const error = failure(code)
-    vi.mocked(openSync).mockImplementationOnce(() => {
-      throw error
-    })
-    expect(() => syncDirectory('owned-directory')).toThrow(error)
-    expect(closeSync).not.toHaveBeenCalled()
-    vi.mocked(fsyncSync).mockImplementationOnce(() => {
-      throw error
-    })
-    expect(() => syncDirectory('owned-directory')).toThrow(error)
-    expect(closeSync).toHaveBeenCalledExactlyOnceWith(17)
-  }
-)
+it.each([
+  ...['EPERM', 'EINVAL', 'EIO', 'ENOSPC', 'EACCES', 'ENOENT'].map((code) => ['linux', code] as const),
+  ...['EIO', 'ENOSPC', 'EACCES', 'ENOENT'].map((code) => ['win32', code] as const)
+])('preserves unexpected directory failures on %s (%s)', (os, code) => {
+  platform(os)
+  const error = failure(code)
+  vi.mocked(openSync).mockImplementationOnce(() => {
+    throw error
+  })
+  expect(() => syncDirectory('owned-directory')).toThrow(error)
+  expect(closeSync).not.toHaveBeenCalled()
+  vi.mocked(fsyncSync).mockImplementationOnce(() => {
+    throw error
+  })
+  expect(() => syncDirectory('owned-directory')).toThrow(error)
+  expect(closeSync).toHaveBeenCalledExactlyOnceWith(17)
+})
 
 it('never treats a descriptor-close failure as unsupported directory flushing', () => {
   platform('win32')

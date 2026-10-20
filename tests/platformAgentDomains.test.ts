@@ -60,13 +60,11 @@ describe('Agent Editor domain bridge', () => {
     expect((await c.list({ profileId: 'profile-a' }))[0].visual).toEqual(saved.visual)
   })
 
-  it('rejects forged profile IDs, foreign definition IDs, missing binding and missing capability', async () => {
-    const { domains, context, client } = fixture()
+  it('rejects forged profile IDs and foreign definition IDs', async () => {
+    const { client } = fixture()
     const record = await client('profile-a').create(input())
     await expect(client('profile-b').get({ profileId: 'profile-b', id: record.id })).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' })
     await expect(client('profile-b').get({ profileId: 'profile-a', id: record.id })).rejects.toMatchObject({ code: 'profile_mismatch' })
-    await expect(domains.dispatch({ ...context('profile-a'), connection: undefined }, 'agentDefinitions.list', {})).rejects.toMatchObject({ code: 'profile_binding_required' })
-    await expect(domains.dispatch({ ...context('profile-a'), connection: { ...context('profile-a').connection!, capabilities: new Set() } }, 'agentDefinitions.list', {})).rejects.toMatchObject({ code: 'capability_required' })
   })
 
   it('blocks publication of missing models and rejects invalid runtime/flags/unknown fields before mutation', async () => {

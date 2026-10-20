@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -6,10 +6,9 @@ import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { ThreadGenerationStore } from '../src/mms/data/ThreadGenerationStore'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
-import { atomicWriteJsonSync } from '../src/mms/data/AtomicFs'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { captureThreadLifecyclePath } from '../src/mms/queue/ThreadLifecycleAdmission'
-import { settleThreadMutationOwnership, withQueueMutationLock, withThreadDataMutationLock } from '../src/mms/queue/ThreadExecutionLease'
+import { settleThreadMutationOwnership } from '../src/mms/queue/ThreadExecutionLease'
 
 const homes: string[] = []
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }) })
@@ -51,35 +50,6 @@ describe('managed thread lifecycle integration', () => {
     } finally { await f.close() }
   })
 
-  it('adopts and restores exact legacy trash without moving data during discovery', async () => {
-    const f = fixture(), id = 'legacy-thread'
-    const originalPath = join(f.home, 'thread-data', 'standalone', id)
-    const trashPath = join(f.home, 'trash', 'threads', 'legacy-trash')
-    mkdirSync(trashPath, { recursive: true })
-    writeFileSync(join(trashPath, 'meta.json'), JSON.stringify({ id, name: 'Legacy', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), order: 0 }))
-    writeFileSync(join(trashPath, 'messages.json'), '[]')
-    writeFileSync(join(f.home, 'trash', 'threads', 'index.json'), JSON.stringify([{ threadId: id, originalPath, trashPath, tombstonedAt: new Date().toISOString() }]))
-    const upgraded = open(f.home)
-    expect(upgraded.threads.refreshLegacyTrash()).toEqual([])
-    expect(upgraded.threads.lifecycleStore.require(id).state).toBe('trashed')
-    expect(existsSync(trashPath)).toBe(true)
-    expect(existsSync(originalPath)).toBe(false)
-    await upgraded.coordinator.restore({ taskId: id, operationId: 'restore-legacy' })
-    expect(upgraded.threads.getThread(id)?.name).toBe('Legacy')
-    expect(open(f.home).threads.refreshLegacyTrash()).toEqual([])
-  })
-
-  it('reports malformed legacy trash and blocks lifecycle mutations without deleting it', () => {
-    const f = fixture(), root = join(f.home, 'trash', 'threads')
-    mkdirSync(root, { recursive: true })
-    const index = join(root, 'index.json'), bytes = '{malformed'
-    writeFileSync(index, bytes)
-    const upgraded = open(f.home)
-    expect(upgraded.threads.refreshLegacyTrash()).toHaveLength(1)
-    expect(() => upgraded.threads.assertLifecycleMutationAvailable()).toThrow('migration is blocked')
-    expect(readFileSync(index, 'utf8')).toBe(bytes)
-  })
-
   it('rejects deterministic execution-thread recreation after restart, then restores its original data', async () => {
     const f = fixture()
     const thread = f.threads.ensureExecutionThread('scheduled-key', 'Scheduled')
@@ -102,16 +72,6 @@ describe('managed thread lifecycle integration', () => {
     expect(() => generations.publish({ messages: [], agents: [], tasks: [], queue: [] }, 0)).toThrow(/generation|changed/i)
     expect(() => journal.append({ operationId: 'stale', operationType: 'test', state: 'planned' })).toThrow(/generation|changed/i)
     expect(existsSync(join(path, 'generations'))).toBe(false)
-  })
-
-  it('rejects old queue/data/atomic paths without recreating moved directories', async () => {
-    const f = fixture(), thread = f.threads.createThread('Old paths')
-    const path = f.threads.getThreadDir(thread.id)
-    await f.coordinator.trash({ taskId: thread.id, operationId: 'trash' })
-    expect(() => withQueueMutationLock(path, () => undefined)).toThrow()
-    expect(() => withThreadDataMutationLock(path, () => undefined)).toThrow()
-    expect(() => atomicWriteJsonSync(join(path, 'messages.json'), [])).toThrow()
-    expect(existsSync(path)).toBe(false)
   })
 
   it('invalidates a captured child admission when only its parent moves', async () => {

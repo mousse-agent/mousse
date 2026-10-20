@@ -75,6 +75,12 @@ describe('chat Markdown list rendering', () => {
     expect(markup).not.toContain('javascript:')
   })
 
+  it('keeps ordinary https links external and non-opener', () => {
+    const markup = render('[Documentation](https://example.com)')
+    expect(markup).toContain('href="https://example.com')
+    expect(markup).toContain('rel="noopener noreferrer"')
+  })
+
   it('renders inline code compactly without the roomy default pill', () => {
     const markup = render('- item with (`abc123`) code')
 

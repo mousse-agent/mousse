@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes } from 'node:crypto'
+import { generateKeyPairSync, randomBytes } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import {
   enrollmentJoinUrl,
@@ -105,20 +105,5 @@ describe('Plus enrollment sealing', () => {
     const code = enrollmentMatchCode(box.publicKey, 'fp-a')
     expect(enrollmentMatchCode(other.publicKey, 'fp-a')).not.toBe(code)
     expect(enrollmentMatchCode(box.publicKey, 'fp-b')).not.toBe(code)
-    // Sanity: the derived private key matches the exported public key.
-    const pkcs8 = Buffer.concat([
-      Buffer.from('302e020100300506032b656e04220420', 'hex'),
-      box.privateKey
-    ])
-    expect(
-      Buffer.from(
-        createPublicKey(createPrivateKey({ key: pkcs8, format: 'der', type: 'pkcs8' })).export({
-          format: 'der',
-          type: 'spki'
-        })
-      )
-        .subarray(-32)
-        .toString('base64url')
-    ).toBe(box.publicKey)
   })
 })

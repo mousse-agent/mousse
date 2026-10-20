@@ -1,8 +1,7 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { LocalMmsClient } from '../src/mms/protocol/client'
 import {
   encodeFrame,
   FrameDecoder,
@@ -76,38 +75,5 @@ describe('Windows package qualification helpers', () => {
       workRoot: 'D:\\q04'
     })
     expect(() => parseRunnerArgs(['--unknown'])).toThrow(/Unknown argument/)
-  })
-
-  it('uses the production LocalMmsClient as the source fixture client', () => {
-    expect(typeof LocalMmsClient).toBe('function')
-    expect(typeof LocalMmsClient.prototype.connect).toBe('function')
-    expect(typeof LocalMmsClient.prototype.request).toBe('function')
-    const entry = readFileSync(
-      join(process.cwd(), 'scripts/qualification/windows/source-client-entry.ts'),
-      'utf8'
-    )
-    expect(entry).toContain("from '../../../src/mms/protocol/client'")
-    expect(entry).toContain('LocalMmsClient')
-  })
-})
-
-describe('Windows package qualification runner', () => {
-  it('is a reusable node entry that writes machine-readable evidence', () => {
-    const run = readFileSync(join(process.cwd(), 'scripts/qualification/windows/run.mjs'), 'utf8')
-    expect(run).toContain('runWindowsPackageQualification')
-    expect(run).toContain('--package')
-    expect(run).toContain('--work-root')
-    expect(run).not.toContain('service install')
-    expect(run).not.toContain('browser install')
-    const lib = readFileSync(
-      join(process.cwd(), 'scripts/qualification/windows/windowsPackageQualification.mjs'),
-      'utf8'
-    )
-    expect(lib).toContain('pty.create')
-    expect(lib).toContain('profiles.create')
-    expect(lib).toContain("'browser', 'status'")
-    expect(lib).not.toMatch(/service',\s*'install'/)
-    expect(lib).toContain('allowExactPidKill')
-    writeFileSync(join(tempRoot(), 'marker.txt'), 'ok')
   })
 })

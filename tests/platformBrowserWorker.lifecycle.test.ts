@@ -140,12 +140,3 @@ describe.skipIf(!chrome.ok)('managed Chromium lifecycle', () => {
     await first.broker.close()
   }, 120_000)
 })
-
-if (!chrome.ok) {
-  describe('managed Chromium lifecycle blocker', () => {
-    it('records the exact Chrome launch blocker without claiming B01/B02 qualification', () => {
-      expect(chrome.ok).toBe(false)
-      expect((chrome as { message: string }).message.length).toBeGreaterThan(0)
-    })
-  })
-}

@@ -29,6 +29,7 @@ import {
 } from '../src/cli/mmsRuntime'
 import {
   acquireMmsOwnerLease,
+  resolveOwnerStatus,
   type MmsOwnerHandle
 } from '../src/mms/ownership/MmsOwnerLease'
 import { PROCESS_INSTANCE_ID } from '../src/mms/queue/processLiveness'
@@ -129,40 +130,46 @@ describe('mmsRuntime readiness (secondary to owner lease)', () => {
     expect(record?.token).toBe(lease.owner.token)
   })
 
-  it('pollUntilRuntimeStopped reports replacement without claiming no MMS running', async () => {
-    publishOwnRuntimeRecord(home, { ownerToken: lease.owner.token })
-    // Simulate readiness replaced under same owner re-publish (same token) — use different token via raw write
-    let n = 0
+  it('pollUntilRuntimeStopped reports a replacement owner with a different token', async () => {
     const originalToken = lease.owner.token
+    publishOwnRuntimeRecord(home, { ownerToken: originalToken })
+    let clock = 0
+    let n = 0
     const result = await pollUntilRuntimeStopped(home, originalToken, {
       timeoutMs: 500,
       intervalMs: 10,
+      now: () => clock,
       sleep: async () => {
+        clock += 10
         n += 1
         if (n === 1) {
-          writeFileSync(
-            getMmsRuntimePath(home),
-            JSON.stringify({
-              pid: process.pid,
-              processInstanceId: PROCESS_INSTANCE_ID,
-              token: 'replacement-runtime',
-              home: canonicalizeHome(home),
-              startedAt: new Date().toISOString(),
-              readyAt: new Date().toISOString()
-            }),
-            'utf-8'
-          )
+          removeOwnRuntimeRecord(home, originalToken)
+          lease.release()
+          lease = acquireMmsOwnerLease(home, { kind: 'daemon' })
+          publishOwnRuntimeRecord(home, { ownerToken: lease.owner.token })
         }
       }
     })
-    // resolveRuntimeStatus strips mismatched runtime; owner still live → may report stopped readiness
-    // or replaced depending on timing. At least not a false "no owner" conflict.
-    expect(['stopped', 'replaced', 'timeout']).toContain(result.kind)
+    expect(result.kind).toBe('replaced')
+    if (result.kind === 'replaced') {
+      expect(result.record.token).toBe(lease.owner.token)
+      expect(result.record.token).not.toBe(originalToken)
+    }
   })
 
-  it('canonicalizes home paths consistently', () => {
-    const a = canonicalizeHome(home)
-    const b = canonicalizeHome(join(home, '.'))
-    expect(a).toBe(b)
+  it('resolveRuntimeStatus strips a runtime with a foreign token and keeps the owner', () => {
+    const runtime = publishOwnRuntimeRecord(home, { ownerToken: lease.owner.token })
+    expect(resolveRuntimeStatus(home).running).toBe(true)
+    expect(resolveRuntimeStatus(home).record?.token).toBe(lease.owner.token)
+
+    writeFileSync(
+      getMmsRuntimePath(home),
+      JSON.stringify({ ...runtime, token: 'other-token' }),
+      'utf-8'
+    )
+    expect(resolveRuntimeStatus(home).record).toBeNull()
+    const owner = resolveOwnerStatus(home)
+    expect(owner.owned).toBe(true)
+    expect(owner.record?.token).toBe(lease.owner.token)
   })
 })

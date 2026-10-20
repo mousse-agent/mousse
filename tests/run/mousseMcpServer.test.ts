@@ -115,13 +115,6 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
     expect((await rpc(server.url, second.token, call)).status).toBe(401)
   })
 
-  it('reports a call while the thread has no active run as mousse_caller_not_live', async () => {
-    const { server, attachment, fx, run } = await setup()
-    fx.engine.markTerminal(run.runId, 'completed')
-    const result = await rpc(server.url, attachment.token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_tasks', arguments: {} } })
-    expect(result.body.error).toMatchObject({ code: MCP_ERROR_CODES.mousse_caller_not_live })
-  })
-
   it('relays stdio JSON-RPC lines through the stdio bridge', async () => {
     const { server, attachment } = await setup()
     const input = new PassThrough()

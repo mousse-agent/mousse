@@ -2,6 +2,7 @@ import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { Thread } from '../src/shared/types'
+import { atomicWriteJsonSync } from '../src/mms/data/AtomicFs'
 import {
   acquireExecutionLease, releaseExecutionLeaseHandle, waitAcquireExecutionLease,
   withQueueMutationLock, withThreadDataMutationLock, type ThreadLeaseHandle
@@ -56,6 +57,7 @@ describe('Phase 1 stale producer acceptance', () => {
       const staleWrite = () => { called = true; writeFileSync(join(path, 'late-output.txt'), 'late effect') }
       expect(() => withThreadDataMutationLock(path, staleWrite)).toThrow()
       expect(() => withQueueMutationLock(path, staleWrite)).toThrow()
+      expect(() => atomicWriteJsonSync(join(path, 'messages.json'), [])).toThrow()
       expect(called).toBe(false)
       expect(existsSync(path)).toBe(false)
       await f.rpc.request('threads.restore', { threadId: thread.id })

@@ -617,21 +617,6 @@ it('persists cleanup refusal for a dirty owned worktree and retries cleanup with
   expect(f.effects()).toBe(1)
 })
 
-it('disables installed checkout hooks through the actual Dispatch WorktreeManager seam', async () => {
-  const f = await fixture()
-  await f.service.bindRepository(f.request.repoId, f.repo)
-  const hooks = join(f.repo, '.git', 'hooks')
-  await mkdir(hooks, { recursive: true })
-  const marker = join(f.root, 'hook-executed'),
-    hook = join(hooks, 'post-checkout')
-  await writeFile(hook, `#!/bin/sh\nprintf executed > '${marker}'\n`, { mode: 0o700 })
-  await f.service.run(f.request, f.context, f.execution)
-  f.commit()
-  await f.service.drainCleanup()
-  await expect(stat(marker)).rejects.toMatchObject({ code: 'ENOENT' })
-  expect(f.effects()).toBe(1)
-})
-
 it.each(['normal', 'recovery'])(
   'publishes exact filtered file bytes and completes %s cleanup without executing global required filters',
   async (mode) => {

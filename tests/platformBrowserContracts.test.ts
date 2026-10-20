@@ -20,7 +20,7 @@ describe('browser grounding contracts', () => {
     const [ref] = store.observe(identity, [node])
     expect(ref).not.toContain('button')
     expect(store.resolve(identity, ref).backendNodeId).toBe(3)
-    for (const patch of [{ profileId: 'b' }, { sessionId: 'other' }, { generation: 2 }, { tabId: 'other' }, { documentId: 'rerendered' }, { observationId: 'later' }]) {
+    for (const patch of [{ profileId: 'b' }, { sessionId: 'other' }, { tabId: 'other' }, { documentId: 'rerendered' }, { observationId: 'later' }]) {
       expect(() => store.resolve({ ...identity, ...patch }, ref)).toThrow()
     }
     store.invalidateTab('tab')

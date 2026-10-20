@@ -8,28 +8,14 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { AgentRegistry } from '../../src/mms/agents/AgentRegistry'
-import { ProjectManager } from '../../src/mms/data/ProjectManager'
-import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
-import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
-import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
-import { AdapterRegistry } from '../../src/mms/run/adapters/AdapterRegistry'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
-import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
-import { EffectWorker } from '../../src/mms/run/EffectWorker'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import { createMousseToolRegistry } from '../../src/mms/run/mcp/toolRegistry'
 import { Reconciler } from '../../src/mms/run/Reconciler'
-import { RunEngine } from '../../src/mms/run/RunEngine'
-import { RunStore } from '../../src/mms/run/RunStore'
-import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
-import { HeadlessAgentRunner } from '../../src/mms/terminals/HeadlessAgentRunner'
-import { PtyManager } from '../../src/mms/terminals/PtyManager'
-import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
-import { getDefaultSettings } from '../../src/shared/settings'
+import { phase6Daemon, waitFor } from './phase6Fixture'
 
 type Mcp = NonNullable<AdapterHost['mcp']>
 
@@ -99,14 +85,6 @@ class ChildPiAdapter implements ProviderAdapter {
   }
 }
 
-async function waitFor(cond: () => boolean, label: string, timeoutMs = 10_000): Promise<void> {
-  const start = Date.now()
-  while (!cond()) {
-    if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${label}`)
-    await new Promise((resolve) => setTimeout(resolve, 10))
-  }
-}
-
 describe('Mousse MCP delegation end to end (SPEC §15)', () => {
   let home: string | undefined
   let previousHome: string | undefined
@@ -124,22 +102,6 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
     home = mkdtempSync(join(tmpdir(), 'mousse-mcp-e2e-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
-    const projects = new ProjectManager()
-    const store = new ThreadDataStore(projects)
-    const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, llmProvider: 'openai', model: 'gpt-replay' } }
-    const orch = new OrchestratorService(
-      new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(), new HeadlessAgentRunner(),
-      { listProviders: () => [] } as unknown as MacroEngine, { get: () => settings } as never, {} as never,
-      undefined, undefined, undefined, undefined, undefined, undefined, projects
-    )
-    orch.setThreadStore(store)
-    ;(orch as any).llm = {
-      getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'scripted' }),
-      getContextInputs: async () => ({ systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: 'scripted' }),
-      generateTitle: async () => 'Scripted',
-      chat: async () => { throw new Error('the scripted adapters replace the pi loop') }
-    }
-
     const seen: { started?: any; firstStatus?: any; broader?: any; unknown?: any; wakeStatus?: any; token?: string } = {}
     const vendor = new McpVendorAdapter(async (input, mcp) => {
       if (input.prompt === 'Plan the refactor') {
@@ -172,13 +134,7 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
       return 'unexpected turn'
     })
     const child = new ChildPiAdapter()
-    orch.setAdapterRegistry(new AdapterRegistry().register(vendor).register(child))
-    const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })), pid: 1 })
-    orch.setRunEngine(engine)
-    engine.reconcileOnBoot()
-    const worker = new EffectWorker({ outbox: engine.outbox, executors: orch.effectExecutors(), owner: engine.leaseOwner })
-    worker.start()
-    orch.attachEffectWorker(worker)
+    const { orch, engine, store, stop } = phase6Daemon(home, [vendor, child])
     const credentials = new McpCredentials(engine.store)
     const server = new MousseMcpServer({ credentials, registry: createMousseToolRegistry({ engine, host: orch.mcpToolHost() }) })
     await server.start()
@@ -187,11 +143,7 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
     stops.push(async () => {
       orch.setMcpAttachment(null)
       await server.stop()
-      await worker.stop()
-      orch.attachEffectWorker(null)
-      engine.shutdown()
-      orch.setRunEngine(null)
-      engine.store.db.close()
+      await stop()
     })
 
     const parent = store.createThread('Parent')

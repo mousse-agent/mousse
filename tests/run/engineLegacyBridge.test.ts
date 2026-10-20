@@ -19,6 +19,7 @@ import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorServ
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectWorker } from '../../src/mms/run/EffectWorker'
 import { Reconciler } from '../../src/mms/run/Reconciler'
+import { formatRestartNote } from '../../src/mms/run/restartNote'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import type { EffectKind, EffectRecord, ThreadEvent } from '../../src/mms/run/types'
@@ -457,19 +458,14 @@ describe('Run Engine legacy bridge', () => {
     const thread = store.createThread('restart-note')
     orch.getOrCreateSession(thread.id).projectCwd = projectRepo
     releaseFirst()
-    engine.store.appendEvent({
-      threadId: thread.id,
-      type: 'restart.note',
-      payload: {
-        runIds: ['run:old'],
-        uncertainRunIds: ['run:old'],
-        cutOffTools: [{ runId: 'run:old', invocationId: 'inv-1', tool: 'bash', idempotent: false }],
-        epoch: 1
-      }
-    })
-    const note =
-      'The Mousse daemon restarted during the previous turn. Interrupted: 1 run(s). ' +
-      'These tool calls may have run without a recorded result; verify before repeating: bash.'
+    const payload = {
+      runIds: ['run:old'],
+      uncertainRunIds: ['run:old'],
+      cutOffTools: [{ runId: 'run:old', invocationId: 'inv-1', tool: 'bash', idempotent: false }],
+      epoch: 1
+    }
+    engine.store.appendEvent({ threadId: thread.id, type: 'restart.note', payload })
+    const note = formatRestartNote(payload)
     const first = await orch.send('after restart', false, { threadId: thread.id, clientRequestId: 'n-1' })
     await orch.send('and again', false, { threadId: thread.id, clientRequestId: 'n-2' })
     const notes = orch.getMessages(thread.id).filter((message) => message.content === note)
