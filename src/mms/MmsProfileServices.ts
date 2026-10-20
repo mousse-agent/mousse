@@ -52,6 +52,7 @@ import {
   type IntegrationRuntimeContext
 } from './integrations/profileContext'
 import { NetService } from './net/NetService'
+import { mousseIdNetModule } from './net/plus'
 import { BridgeProfileService } from './bridge/BridgeProfileService'
 import { ChatNetworkBindingService } from './chats/network/ChatNetworkBindingService'
 import type { SpaceProfileService } from './spaces/SpaceProfileService'
@@ -377,6 +378,7 @@ export class MmsProfileServices {
 
     this.net = new NetService({
       profileDir: this.homeDir,
+      hosted: mousseIdNetModule,
       onChanged: (status) => this.events.emit({ channel: 'net:updated', data: status }),
       composeRuntime: (runtime) => {
         this.bridgeService = new BridgeProfileService({

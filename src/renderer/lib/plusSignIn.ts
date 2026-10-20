@@ -2,17 +2,14 @@ import type { NetStatus } from '../../shared/net'
 
 declare const __MOUSSE_ID_ORIGIN__: string | undefined
 
-/** The hosted Mousse ID service used when nothing else is set. */
-export const PRODUCTION_MOUSSE_ID_ORIGIN = 'https://api.mousse.work'
-
 /**
  * The Mousse ID service this build signs in to. Set at build time with the
- * `MOUSSE_ID_ORIGIN` environment value (`MOUSSE_PLUS_ORIGIN` is still read as a fallback);
- * the hosted service otherwise. The main process can also pass a runtime value from the
- * same environment variable, which wins over this one.
+ * `MOUSSE_ID_ORIGIN` environment value (`MOUSSE_PLUS_ORIGIN` is still read as a fallback).
+ * Empty in builds that set neither, which then show no Mousse ID UI. The main process can
+ * also pass a runtime value from the same environment variable, which wins over this one.
  */
 export const DEFAULT_MOUSSE_ID_ORIGIN: string =
-  (typeof __MOUSSE_ID_ORIGIN__ === 'string' ? __MOUSSE_ID_ORIGIN__.trim() : '') || PRODUCTION_MOUSSE_ID_ORIGIN
+  typeof __MOUSSE_ID_ORIGIN__ === 'string' ? __MOUSSE_ID_ORIGIN__.trim() : ''
 
 /** Returns a normalized origin, or undefined when the value is not a usable service address. */
 export function normalizePlusOrigin(value: string): string | undefined {

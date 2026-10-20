@@ -182,3 +182,5 @@ Report security issues privately via GitHub Security Advisories rather than publ
 ## License
 
 [MIT](LICENSE)
+
+Mousse ID, the optional hosted account and relay service, is run separately. This repository contains only its MIT client. Builds made without `MOUSSE_ID_ORIGIN` leave it out of the interface, and the rest of Mousse works without it.

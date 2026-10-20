@@ -1,4 +1,4 @@
-import type { PlusStatus } from '../../mms/net/plus/contracts'
+import type { PlusStatus } from '../../shared/net/local'
 import { UserCircle } from '../lib/icons'
 import { mousseIdName } from '../stores/mousseIdStore'
 

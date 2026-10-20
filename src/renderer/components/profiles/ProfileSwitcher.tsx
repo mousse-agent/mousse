@@ -5,7 +5,7 @@ import { confirmNavigation } from '../../services/navigationGuards'
 import { migrateLegacyProfilePreferences } from '../../lib/profilePreferences'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
 import { useAppStore } from '../../stores/appStore'
-import { mousseIdName, useMousseId } from '../../stores/mousseIdStore'
+import { mousseIdName, useMousseId, useMousseIdAvailable } from '../../stores/mousseIdStore'
 import { openSettingsSection } from '../../lib/settingsNavigation'
 import { MousseIdAvatar } from '../MousseIdAvatar'
 import './profile-sidebar-footer.css'
@@ -36,9 +36,11 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
   const floating = rail || sidebar
   const profileId = useAppStore((state) => state.profileId)
   const observedProfileId = sidebar ? profileId : undefined
-  // The sidebar footer doubles as the Mousse ID account control.
-  const account = useMousseId(sidebar)
-  const signedIn = !!account.plus?.connected
+  // With a Mousse ID service the sidebar footer doubles as the account control.
+  const accountAvailable = useMousseIdAvailable()
+  const withAccount = sidebar && accountAvailable
+  const account = useMousseId(withAccount)
+  const signedIn = withAccount && !!account.plus?.connected
   const menuStyle = useFloatingPosition({
     open: open && floating, anchorRef: triggerRef, contentRef: menuRef, placement: sidebar ? 'above-start' : 'right-start',
     deps: [editing, showCreate, profiles.length, error]
@@ -228,7 +230,7 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
     if (result === 'needs-setup') openSettingsSection('connections')
   }
 
-  const accountMenu = sidebar && <div className="profile-menu-section profile-menu-account">
+  const accountMenu = withAccount && <div className="profile-menu-section profile-menu-account">
     {signedIn ? (
       <div className="profile-current-card">
         <MousseIdAvatar plus={account.plus} large />
@@ -297,15 +299,19 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
   return (
     <div ref={rootRef} className={`profile-switcher${rail ? ' profile-switcher-rail' : ''}${sidebar ? ' profile-switcher-sidebar' : ''}`} data-profile-id={selected.id}>
       <button ref={triggerRef} className={sidebar ? 'profile-sidebar-trigger' : rail ? `navigation-rail-button${open ? ' active' : ''}` : 'profile-menu-trigger'}
-        type="button" aria-label={sidebar ? `${signedIn ? `Mousse ID: ${mousseIdName(account.plus)}` : 'Sign in'}, Mousse profile: ${selected.displayName}` : 'Profiles'}
-        title={sidebar ? (signedIn ? account.plus?.email ?? mousseIdName(account.plus) : selected.displayName) : 'Profiles'} aria-haspopup="menu" aria-expanded={open}
+        type="button" aria-label={withAccount ? `${signedIn ? `Mousse ID: ${mousseIdName(account.plus)}` : 'Sign in'}, Mousse profile: ${selected.displayName}` : sidebar ? `Mousse profile: ${selected.displayName}` : 'Profiles'}
+        title={withAccount ? (signedIn ? account.plus?.email ?? mousseIdName(account.plus) : selected.displayName) : sidebar ? selected.displayName : 'Profiles'} aria-haspopup="menu" aria-expanded={open}
         onClick={() => setOpen((value) => !value)}>
-        {sidebar ? <>
+        {withAccount ? <>
           {signedIn ? <MousseIdAvatar plus={account.plus} /> : avatar(selected)}
           <span className="profile-sidebar-text">
             <strong>{signedIn ? mousseIdName(account.plus) : account.pending ? 'Signing in…' : 'Sign in'}</strong>
             <span className="profile-sidebar-profile">{selected.displayName}</span>
           </span>
+          <ChevronUp size={16} aria-hidden="true" />
+        </> : sidebar ? <>
+          {avatar(selected)}
+          <span className="profile-sidebar-text"><strong className="profile-sidebar-profile">{selected.displayName}</strong><span>Mousse profile</span></span>
           <ChevronUp size={16} aria-hidden="true" />
         </> : <UserCircle size={rail ? 18 : 16} strokeWidth={rail ? 1.8 : undefined} aria-hidden="true" />}
       </button>

@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { create } from 'zustand'
-import type { PlusConfiguration, PlusStatus } from '../../mms/net/plus/contracts'
+import type { PlusConfiguration, PlusStatus } from '../../shared/net/local'
 import type { NetStatus } from '../../shared/net'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import {
@@ -50,9 +50,16 @@ const errorCode = (cause: unknown) => (cause as { code?: unknown } | null)?.code
 
 export { mousseIdPreparation, mousseIdSetupStep, signInErrorMessage }
 
-/** The service this window signs in to: runtime `MOUSSE_ID_ORIGIN`, then the build default. */
+/** The service this window signs in to: runtime `MOUSSE_ID_ORIGIN`, then the build value. */
 export const mousseIdOrigin = (state: Pick<MousseIdState, 'runtimeOrigin'>): string =>
   resolvePlusOrigin(state.runtimeOrigin, DEFAULT_MOUSSE_ID_ORIGIN)
+
+/**
+ * Mousse ID exists in this window only when a service address is set, at build time or with
+ * `MOUSSE_ID_ORIGIN` at launch. Without one, no account UI is shown and no account status is read.
+ */
+export const mousseIdAvailable = (state: Pick<MousseIdState, 'runtimeOrigin'>): boolean =>
+  mousseIdOrigin(state) !== ''
 
 /** Name shown for a signed-in account. Mousse ID has no display name yet, so it comes from the email. */
 export function mousseIdName(plus?: PlusStatus): string {
@@ -62,7 +69,15 @@ export function mousseIdName(plus?: PlusStatus): string {
 
 let current: { controller: AbortController; callbackId?: string } | undefined
 let refreshing: { profileId: string; promise: Promise<void> } | undefined
-let runtimeOriginLoaded = false
+let runtimeOriginLoad: Promise<void> | undefined
+
+/** Reads the launch-time `MOUSSE_ID_ORIGIN` from the main process once per window. */
+function loadRuntimeOrigin(): Promise<void> {
+  return (runtimeOriginLoad ??= (async () => {
+    const config = await window.mousse.mousseId?.config().catch(() => undefined)
+    if (config?.origin) useMousseIdStore.setState({ runtimeOrigin: config.origin })
+  })())
+}
 
 /** Creates the network identity, turns networking on and protects keys with the OS keychain as needed. */
 async function prepareNetworking(net: NetStatus | undefined, name: string): Promise<NetStatus> {
@@ -98,14 +113,10 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
     entry.promise = (async () => {
       await Promise.resolve()
       try {
-        if (!runtimeOriginLoaded) {
-          runtimeOriginLoaded = true
-          const config = await window.mousse.mousseId?.config().catch(() => undefined)
-          if (config?.origin) set({ runtimeOrigin: config.origin })
-        }
+        await loadRuntimeOrigin()
         const [net, plus] = await Promise.all([
           request<NetStatus>('net.status'),
-          request<PlusStatus>('net.plus.status')
+          mousseIdAvailable(get()) ? request<PlusStatus>('net.plus.status') : undefined
         ])
         if (useAppStore.getState().profileId === profileId) set({ net, plus, loaded: true })
       } catch {
@@ -219,6 +230,15 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
     }
   }
 }))
+
+/** True when this window has a Mousse ID service; see {@link mousseIdAvailable}. */
+export function useMousseIdAvailable(): boolean {
+  const available = useMousseIdStore(mousseIdAvailable)
+  useEffect(() => {
+    void loadRuntimeOrigin()
+  }, [])
+  return available
+}
 
 /** Keeps the Mousse ID status fresh while a component that shows it is mounted. */
 export function useMousseId(enabled = true): MousseIdState {

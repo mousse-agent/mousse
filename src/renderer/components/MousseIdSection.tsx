@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { PlusStatus } from '../../mms/net/plus/contracts'
+import type { PlusStatus } from '../../shared/net/local'
 import type { NetStatus, PlusEnrollmentOffer, PlusEnrollmentRequestView } from '../../shared/net'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import { qrSvgPath } from '../lib/plusQr'

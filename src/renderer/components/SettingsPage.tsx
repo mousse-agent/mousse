@@ -27,6 +27,7 @@ import { ReadAloudSettings } from '../readAloud/ReadAloudSettings'
 import { DictationSpeechSettings, ReadAloudSpeechSettings } from '../speech/SpeechSettings'
 import { NetDevicesSection } from './NetDevicesSection'
 import { AccountSection } from './AccountSection'
+import { useMousseIdAvailable } from '../stores/mousseIdStore'
 import { takePendingSettingsSection } from '../lib/settingsNavigation'
 import { StorageSettings } from './StorageSettings'
 import { IntegrationsWorkspace } from './integrations'
@@ -166,8 +167,11 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const [webToolKeys, setWebToolKeys] = useState({ exa: '', parallel: '' })
   const [savingWebTool, setSavingWebTool] = useState<'exa' | 'parallel' | null>(null)
 
-  const [activeSection, setActiveSection] = useState<SettingsSectionId>(() =>
+  const accountAvailable = useMousseIdAvailable()
+  const [selectedSection, setActiveSection] = useState<SettingsSectionId>(() =>
     window.location.hash === '#settings-context-compaction' ? 'context' : settingsSectionId(takePendingSettingsSection()) ?? 'account')
+  // Account holds Mousse ID only; builds without a Mousse ID service open on Profile instead.
+  const activeSection: SettingsSectionId = selectedSection === 'account' && !accountAvailable ? 'profile' : selectedSection
   useEffect(() => {
     const openSection = (event: Event) => {
       const section = settingsSectionId((event as CustomEvent).detail)
@@ -646,7 +650,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
       <div className="settings-body">
         <nav className="settings-nav" aria-label="Settings sections">
-          {VISIBLE_SETTINGS_SECTIONS.map((section) => {
+          {VISIBLE_SETTINGS_SECTIONS.filter((section) => section.id !== 'account' || accountAvailable).map((section) => {
             const Icon = section.icon
             const active = activeSection === section.id
             return (

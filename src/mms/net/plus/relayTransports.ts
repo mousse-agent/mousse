@@ -1,9 +1,40 @@
-import type { TransportAddon, Transport, Clock } from '../contracts'
-import { HostedRelayTransport } from '../plus/wire/client'
-import { canonicalAudience } from '../plus/wire/protocol'
+import type { TransportAddon, Transport } from '../contracts'
+import type { HostedRelayTransports } from '../hosted'
+import { HostedRelayTransport } from './wire/client'
+import { canonicalAudience } from './wire/protocol'
 import { NetError, isNetErrorCode } from '../../../shared/net'
-import type { RelayIdentity } from '../relay/protocol'
-import type { HostedProfileService } from '../plus/HostedProfileService'
+import { ticketHash, type RelayIdentity, type RelayRendezvous } from '../relay/protocol'
+import type { HostedProfileService } from './HostedProfileService'
+
+/** Hosted relay carriers backed by this profile's Mousse ID account. */
+export function createHostedRelayTransports(
+  hosted: () => HostedProfileService
+): HostedRelayTransports {
+  return {
+    addon: (identity) => createPlusRelayAddon(identity, hosted),
+    rendezvousTransport: (identity, audience, rendezvous) =>
+      new HostedRelayTransport({
+        id: 'plus-relay',
+        audience,
+        identity,
+        enrollment: rendezvous,
+        registration: () => {
+          // A joiner that is not signed in redeems the ticket under a one-time registration.
+          let service: HostedProfileService | undefined
+          try {
+            service = hosted()
+          } catch {
+            service = undefined
+          }
+          return service?.status().connected
+            ? service.registration(audience)
+            : { registrationId: 'rendezvous_' + ticketHash(rendezvous.ticket), generation: 1 }
+        }
+      }),
+    prepareRendezvous: (expiresAt, purpose) => hosted().rendezvous(expiresAt, purpose)
+  }
+}
+
 export function createPlusRelayAddon(
   identity: () => RelayIdentity,
   hosted: () => HostedProfileService
@@ -61,3 +92,5 @@ export function createPlusRelayAddon(
     }
   }
 }
+
+export type { RelayRendezvous }

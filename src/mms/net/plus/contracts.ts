@@ -1,23 +1,5 @@
 import type { Signed } from '../../../shared/net'
-export interface PlusConfiguration {
-  apiOrigin: string
-  audience: string
-  installationId: string
-  accountId: string
-  gatewayId: string
-}
-export interface PlusStatus {
-  configured: boolean
-  connected: boolean
-  accountId?: string
-  /** Display-only, from the sign-in grant when Mousse ID sends it. */
-  email?: string
-  plan?: string
-  audience?: string
-  expiresAt?: number
-  registrationId?: string
-  generation?: number
-}
+export type { PlusConfiguration, PlusStatus } from '../../../shared/net/local'
 export interface ChallengeStatement {
   v: 1
   domain: 'mousse-plus/net-control/v1'
