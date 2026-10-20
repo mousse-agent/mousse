@@ -15,7 +15,7 @@ For shared work, if the user only says "end session," briefly offer WIP handoff,
 
 - Run `node scripts/team-status.mjs --fetch` from the repository root. Identify this task's issue, branch, PR, diff, and relevant checks. Inspect unexpected changes and resolve ownership ambiguity before staging them.
 - Review the task diff; stage explicit paths or hunks. Preserve unrelated edits. If there is no useful change, report that fact; create no empty commit or PR and delete nothing automatically.
-- Use focused checks for the changed behavior and directly affected areas, and verify acceptance criteria directly. Run the full test suite only when explicitly requested; session wrap-up alone is not such a request. Reuse passing verification for unchanged code instead of repeating it. Documentation-only changes normally need diff and consistency review, not application tests. State failures and checks not run. WIP may be published without passing checks; it must not be presented as ready to merge.
+- Use focused checks for the changed behavior and directly affected areas, and verify acceptance criteria directly. Session wrap-up alone is not a reason to run the full test suite; it is run before a PR is opened, as described in the shared policy. Reuse passing verification for unchanged code instead of repeating it. Documentation-only changes normally need diff and consistency review, not application tests. State failures and checks not run. WIP that fails the suite may be pushed to its task branch without a PR; it must not be presented as ready to merge.
 - Commit useful task changes, push the task branch, and verify the published commit. Reuse an existing PR rather than opening a duplicate.
 
 ## Publish the selected outcome
@@ -30,7 +30,7 @@ Open or update a non-draft PR written as described in "Writing PRs and issues" i
 
 ### Ready to merge
 
-Proceed only with user authorization for this merge. Re-fetch and inspect the current PR head, base, required checks, reviews, and unresolved conversations. Focused verification must cover the current changes. Do not wait for optional full-suite CI as an extra merge gate unless explicitly requested. Follow actual GitHub rules and the shared review policy; never force or administratively bypass a failed requirement.
+Proceed only with user authorization for this merge. Re-fetch and inspect the current PR head, base, required checks, reviews, and unresolved conversations. The local suite must have passed on the current code and focused verification must cover the current changes. Do not trigger or wait for the manual full-suite CI run as an extra merge gate unless explicitly requested. Follow actual GitHub rules and the shared review policy; never force or administratively bypass a failed requirement.
 
 Merge using an enabled repository merge method and guard against merging a newly changed head (for example, `gh pr merge --match-head-commit SHA` with the chosen method). If any gate fails, leave the PR open and explain the blocker.
 

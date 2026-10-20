@@ -3,7 +3,7 @@
 - Delegate to subagents only for substantial tasks; handle small changes directly on the main thread.
 - Exploration and codebase discovery may be delegated to a dedicated explorer subagent.
 - Always use `rg` (ripgrep) for content search, never `grep`.
-- Default to focused tests for the changed behavior and directly affected areas. Run the full test suite only when explicitly requested. After relevant checks pass, do not broaden or repeat testing without a new change, failure, or concrete unresolved concern; any additional testing must remain focused unless a full run is requested.
+- While working, default to focused tests for the changed behavior and directly affected areas. Before opening a PR for a code change, run the full test suite locally (`npm test`) and open the PR only when it passes; hosted CI runs only basic checks because local hardware is faster. After the relevant checks pass, do not broaden or repeat testing without a new change, failure, or concrete unresolved concern.
 - In GitHub issues, PRs, and comments, describe the change and the result, not the steps taken: "Sessions now restart when the model changes", "Tested on macOS and Linux". Most sentences need no actor. When one does (a decision, a verification result, a merge), use first person sparingly: "I merged this after the retry test passed." Never narrate requests or approvals in third person ("Merge authorized by the user", "The user requested...").
 - Write issues, PRs, and comments in plain words for a teammate who has not seen the chat. Follow "Writing PRs and issues" in `docs/team-workflow.md` and use the terms in `docs/GLOSSARY.md`.
 
