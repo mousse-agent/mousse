@@ -68,6 +68,33 @@ describe('Claude subscription attachment', () => {
     }
   })
 
+  it('the adapter appends the project AGENTS.md to the system prompt, rereading it each turn', async () => {
+    const seen: ClaudeSubscriptionChatInput[] = []
+    const standalone = tempHome('mousse-claude-standalone-')
+    writeFileSync(join(standalone, 'AGENTS.md'), 'STANDALONE RULES')
+    const client: ClaudeSubscriptionClient = {
+      chat: vi.fn(async (chat: ClaudeSubscriptionChatInput) => { seen.push(chat); return 'ok' }),
+      commitConversation: vi.fn(),
+      standaloneWorkspace: () => standalone,
+      configured: () => true
+    }
+    const adapter = new ClaudeSubscriptionAdapter(() => client)
+    const project = tempHome('mousse-claude-project-')
+    writeFileSync(join(project, 'AGENTS.md'), 'PROJECT RULES')
+    await adapter.startTurn(input({ cwd: project }), sink(), control, host(MCP))
+    writeFileSync(join(project, 'AGENTS.md'), 'UPDATED RULES')
+    await adapter.startTurn(input({ cwd: project }), sink(), control, host(null))
+    await adapter.startTurn(input({ cwd: tempHome('mousse-claude-bare-') }), sink(), control, host(null))
+    await adapter.startTurn(input({ cwd: null }), sink(), control, host(null))
+    expect(seen[0].systemPromptAppend).toBe(
+      `${mousseOrchestrationInstructions()}\n\n## Project instructions (AGENTS.md)\nPROJECT RULES`
+    )
+    expect(seen[1].systemPromptAppend).toBe('## Project instructions (AGENTS.md)\nUPDATED RULES')
+    expect(seen[2].systemPromptAppend).toBeUndefined()
+    // A projectless thread runs in Mousse's own standalone workspace, which is not a project.
+    expect(seen[3]).toMatchObject({ cwd: standalone, systemPromptAppend: undefined })
+  })
+
   const service = (query: (input: { options: Options; prompt: unknown }) => Query) => {
     const home = tempHome('mousse-mcp-claude-')
     const binary = join(home, 'claude')
