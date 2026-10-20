@@ -9,14 +9,8 @@ import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
-import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
-import { TaskQueue } from '../src/mms/tasks/TaskQueue'
-import { WorktreeManager } from '../src/mms/worktree/WorktreeManager'
-import { PtyManager } from '../src/mms/terminals/PtyManager'
-import { HeadlessAgentRunner } from '../src/mms/terminals/HeadlessAgentRunner'
-import type { MacroEngine } from '../src/mms/macros/MacroEngine'
 import { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
-import { getDefaultSettings } from '../src/shared/settings'
+import { createOrchestrator } from './run/phase6Fixture'
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void
@@ -45,11 +39,7 @@ describe('per-thread turn admission', () => {
     home = mkdtempSync(join(tmpdir(), 'mousse-admit-'))
     process.env.MOUSSE_HOME = home
     store = new ThreadDataStore(new ProjectManager())
-    orch = new OrchestratorService(
-      new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(), new HeadlessAgentRunner(),
-      { listProviders: () => [] } as unknown as MacroEngine, { get: () => getDefaultSettings() } as never, {} as never
-    )
-    orch.setThreadStore(store)
+    orch = createOrchestrator(home, store)
     inFlight = 0; maxInFlight = 0; chatCalls = []
     chatGate = Promise.resolve()
     ;(orch as any).llm = {
