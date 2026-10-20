@@ -1,3 +1,5 @@
+import type { NetStatus } from '../../shared/net'
+
 declare const __MOUSSE_ID_ORIGIN__: string | undefined
 
 /** The hosted Mousse ID service used when nothing else is set. */
@@ -11,9 +13,6 @@ export const PRODUCTION_MOUSSE_ID_ORIGIN = 'https://api.mousse.work'
  */
 export const DEFAULT_MOUSSE_ID_ORIGIN: string =
   (typeof __MOUSSE_ID_ORIGIN__ === 'string' ? __MOUSSE_ID_ORIGIN__.trim() : '') || PRODUCTION_MOUSSE_ID_ORIGIN
-
-/** localStorage key for the origin set under Advanced in settings. */
-export const PLUS_ORIGIN_OVERRIDE_KEY = 'mousse.plus.originOverride'
 
 /** Returns a normalized origin, or undefined when the value is not a usable service address. */
 export function normalizePlusOrigin(value: string): string | undefined {
@@ -32,7 +31,7 @@ export function normalizePlusOrigin(value: string): string | undefined {
   return url.origin
 }
 
-/** The override wins when it is valid; otherwise the fallback. Empty when neither is usable. */
+/** The value wins when it is valid; otherwise the fallback. Empty when neither is usable. */
 export function resolvePlusOrigin(override: string | null | undefined, fallback = DEFAULT_MOUSSE_ID_ORIGIN): string {
   return normalizePlusOrigin(override ?? '') ?? normalizePlusOrigin(fallback) ?? ''
 }
@@ -158,3 +157,36 @@ export const secondsLeft = (expiresAt: number, now = Date.now()) =>
 
 export const formatCountdown = (seconds: number) =>
   `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+
+/** What to do first when Mousse ID is not ready yet. */
+export function mousseIdSetupStep(net?: NetStatus): string {
+  if (!net?.self) return 'Create a network identity under Devices first.'
+  if (!net.enabled) return 'Enable networking for this profile under Devices first.'
+  if (net.keystore !== 'unlocked') return 'Unlock this profile under Devices first.'
+  return 'Protect network keys with a passphrase under Devices first.'
+}
+
+/** Sign-in failure in words a person can act on. */
+export function signInErrorMessage(cause: unknown, origin: string, net?: NetStatus): string {
+  let host = origin
+  try {
+    host = new URL(origin).host
+  } catch {
+    // Keep the raw address.
+  }
+  switch ((cause as { code?: unknown } | null)?.code) {
+    case 'route_unreachable':
+    case 'deadline_exceeded':
+      return `Can’t reach Mousse ID at ${host}. Check your internet connection and try again.`
+    case 'forbidden':
+    case 'bad_request':
+    case 'too_large':
+      return `Mousse ID at ${host} didn’t accept the sign-in. Try again later.`
+    case 'keystore_locked':
+      return mousseIdSetupStep(net)
+    case 'expired':
+      return 'The sign-in code expired. Sign in again.'
+    default:
+      return String((cause as Error | null)?.message ?? cause)
+  }
+}

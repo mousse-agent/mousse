@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest'
 import {
   createWakeableSleep,
   formatCountdown,
+  mousseIdSetupStep,
   normalizePlusOrigin,
   pollPlusSignIn,
   resolvePlusOrigin,
   secondsLeft,
+  signInErrorMessage,
   withSignInCallback
 } from '../../src/renderer/lib/plusSignIn'
 
@@ -135,5 +137,25 @@ describe('sign-in callback', () => {
     const waiting = sleep(60_000, controller.signal)
     controller.abort()
     await expect(waiting).rejects.toMatchObject({ code: 'cancelled' })
+  })
+})
+
+describe('sign-in errors', () => {
+  const origin = 'https://api.mousse.work'
+
+  it('names the service when it cannot be reached or refuses', () => {
+    expect(signInErrorMessage({ code: 'route_unreachable', message: 'No route to the peer is reachable.' }, origin))
+      .toBe('Can’t reach Mousse ID at api.mousse.work. Check your internet connection and try again.')
+    expect(signInErrorMessage({ code: 'forbidden' }, origin)).toContain('api.mousse.work didn’t accept')
+  })
+
+  it('points to the setup step when the keystore is locked', () => {
+    const net = { enabled: true, self: {}, keystore: 'locked', protected: true } as never
+    expect(signInErrorMessage({ code: 'keystore_locked' }, origin, net)).toBe(mousseIdSetupStep(net))
+    expect(mousseIdSetupStep(undefined)).toBe('Create a network identity under Devices first.')
+  })
+
+  it('keeps other messages as they are', () => {
+    expect(signInErrorMessage(new Error('Something else'), origin)).toBe('Something else')
   })
 })

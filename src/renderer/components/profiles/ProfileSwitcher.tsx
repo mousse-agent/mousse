@@ -222,9 +222,10 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
 
   const signIn = async () => {
     setOpen(false)
+    // Account settings shows the sign-in code, progress and any error.
+    openSettingsSection('account')
     const result = await account.signIn()
-    // Setup steps and the service address live in Account settings.
-    if (result !== 'started') openSettingsSection('account')
+    if (result === 'needs-setup') openSettingsSection('connections')
   }
 
   const accountMenu = sidebar && <div className="profile-menu-section profile-menu-account">

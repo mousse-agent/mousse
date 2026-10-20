@@ -5,8 +5,9 @@ import type { NetStatus } from '../../shared/net'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import {
   createWakeableSleep,
+  mousseIdSetupStep,
+  signInErrorMessage,
   DEFAULT_MOUSSE_ID_ORIGIN,
-  PLUS_ORIGIN_OVERRIDE_KEY,
   pollPlusSignIn,
   PlusSignInError,
   resolvePlusOrigin,
@@ -32,8 +33,6 @@ interface MousseIdState {
   net?: NetStatus
   /** Runtime `MOUSSE_ID_ORIGIN` from the main process. */
   runtimeOrigin: string
-  /** Service address set under Advanced in Account settings. */
-  override: string
   pending?: PendingSignIn
   busy: boolean
   error: string
@@ -41,35 +40,22 @@ interface MousseIdState {
   signIn: () => Promise<SignInStart>
   cancelSignIn: () => void
   signOut: () => Promise<void>
-  setOverride: (value: string) => void
 }
 
 const request = <T,>(method: PlatformRequestMethod, params: unknown = {}) =>
   window.mousse.platformRequest.request<T>(method, params)
 const message = (cause: unknown) => String((cause as Error | null)?.message ?? cause)
-const readOverride = () => {
-  try {
-    return localStorage.getItem(PLUS_ORIGIN_OVERRIDE_KEY) ?? ''
-  } catch {
-    return ''
-  }
-}
+const errorCode = (cause: unknown) => (cause as { code?: unknown } | null)?.code
+
+export { mousseIdSetupStep, signInErrorMessage }
 
 /** Networking must be on, unlocked and passphrase-protected before Mousse ID can bind it. */
 export const mousseIdReady = (net?: NetStatus): boolean =>
   !!net?.enabled && !!net.self && net.keystore === 'unlocked' && !!net.protected
 
-/** What to do first when Mousse ID is not ready yet. */
-export function mousseIdSetupStep(net?: NetStatus): string {
-  if (!net?.self) return 'Create a network identity under Devices first.'
-  if (!net.enabled) return 'Enable networking for this profile under Devices first.'
-  if (net.keystore !== 'unlocked') return 'Unlock this profile under Devices first.'
-  return 'Protect network keys with a passphrase under Devices first.'
-}
-
-/** The service this window signs in to: Advanced override, then runtime env, then build default. */
-export const mousseIdOrigin = (state: Pick<MousseIdState, 'override' | 'runtimeOrigin'>): string =>
-  resolvePlusOrigin(state.override, resolvePlusOrigin(state.runtimeOrigin, DEFAULT_MOUSSE_ID_ORIGIN))
+/** The service this window signs in to: runtime `MOUSSE_ID_ORIGIN`, then the build default. */
+export const mousseIdOrigin = (state: Pick<MousseIdState, 'runtimeOrigin'>): string =>
+  resolvePlusOrigin(state.runtimeOrigin, DEFAULT_MOUSSE_ID_ORIGIN)
 
 /** Name shown for a signed-in account. Mousse ID has no display name yet, so it comes from the email. */
 export function mousseIdName(plus?: PlusStatus): string {
@@ -89,7 +75,6 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
   profileId: null,
   loaded: false,
   runtimeOrigin: '',
-  override: readOverride(),
   busy: false,
   error: '',
 
@@ -142,10 +127,16 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
       let callbackId: string | undefined
       try {
         const configuration = await request<Omit<PlusConfiguration, 'accountId'>>('net.plus.discover', { apiOrigin: origin })
-        const pending = await request<PendingSignIn>('net.plus.login.begin', {
+        const begin = {
           configuration,
           deviceName: (await window.mousse.app?.getInfo().catch(() => undefined))?.deviceName?.trim() || 'My device',
           bindRoot: !!net?.self?.isAuthority
+        }
+        const pending = await request<PendingSignIn>('net.plus.login.begin', begin).catch(async (cause: unknown) => {
+          // An earlier sign-in that was never finished blocks a new one; replace it.
+          if (errorCode(cause) !== 'conflict') throw cause
+          await request('net.plus.login.cancel')
+          return request<PendingSignIn>('net.plus.login.begin', begin)
         })
         if (controller.signal.aborted) throw new PlusSignInError('cancelled', 'Sign-in cancelled.')
         // The approval page sends the browser back here; polling still covers browsers that can't.
@@ -169,7 +160,7 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
         })
       } catch (cause) {
         if (!(cause instanceof PlusSignInError && cause.code === 'cancelled') && get().profileId === profileId)
-          set({ error: message(cause) })
+          set({ error: signInErrorMessage(cause, origin, get().net) })
       } finally {
         stopCallback(callbackId)
         if (current?.controller === controller) current = undefined
@@ -200,16 +191,6 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
     } finally {
       set({ busy: false })
       await get().refresh()
-    }
-  },
-
-  setOverride: (value) => {
-    set({ override: value })
-    try {
-      if (value.trim()) localStorage.setItem(PLUS_ORIGIN_OVERRIDE_KEY, value.trim())
-      else localStorage.removeItem(PLUS_ORIGIN_OVERRIDE_KEY)
-    } catch {
-      // Storage can be unavailable; the value still applies to this window.
     }
   }
 }))

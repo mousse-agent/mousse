@@ -11,6 +11,3 @@
 .account-pending a { color: var(--accent); }
 .account-note { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
 .account-link { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; }
-.account-advanced summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
-.account-advanced label { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; font-size: 12px; }
-.account-advanced p { margin: 6px 0 0; color: var(--text-secondary); font-size: 11px; }

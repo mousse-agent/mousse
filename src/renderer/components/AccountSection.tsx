@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { formatCountdown, normalizePlusOrigin, secondsLeft } from '../lib/plusSignIn'
-import { mousseIdName, mousseIdOrigin, mousseIdReady, mousseIdSetupStep, useMousseId, useMousseIdStore, type SignInStart } from '../stores/mousseIdStore'
+import { formatCountdown, secondsLeft } from '../lib/plusSignIn'
+import { mousseIdName, mousseIdOrigin, mousseIdReady, mousseIdSetupStep, useMousseId, type SignInStart } from '../stores/mousseIdStore'
 import { MousseIdAvatar } from './MousseIdAvatar'
 import './account-section.css'
 
@@ -21,7 +21,6 @@ export function AccountSection({ onOpenDevices }: { onOpenDevices: () => void })
   const [notice, setNotice] = useState('')
   const now = useNow(!!pending)
   const origin = mousseIdOrigin(state)
-  const overrideInvalid = !!state.override.trim() && !normalizePlusOrigin(state.override)
   const ready = mousseIdReady(net)
 
   let host: string | undefined
@@ -34,8 +33,9 @@ export function AccountSection({ onOpenDevices }: { onOpenDevices: () => void })
   const start = async () => {
     setNotice('')
     const result: SignInStart = await state.signIn()
-    if (result === 'needs-setup') setNotice(mousseIdSetupStep(useMousseIdStore.getState().net))
-    if (result === 'no-service') setNotice('No Mousse ID service is set. Enter one under Advanced.')
+    // Networking setup lives under Devices; take the person there instead of doing nothing.
+    if (result === 'needs-setup') onOpenDevices()
+    if (result === 'no-service') setNotice('This build has no Mousse ID service address. Set MOUSSE_ID_ORIGIN and restart Mousse.')
   }
 
   return (
@@ -67,8 +67,8 @@ export function AccountSection({ onOpenDevices }: { onOpenDevices: () => void })
             </button>
           ) : null}
           {!plus?.connected && !pending && (
-            <button type="button" className="settings-add-btn" disabled={busy || !origin} onClick={() => void start()}>
-              Sign in with Mousse ID
+            <button type="button" className="settings-add-btn" disabled={busy} onClick={() => void start()}>
+              {busy ? 'Connecting…' : 'Sign in with Mousse ID'}
             </button>
           )}
         </div>
@@ -92,17 +92,8 @@ export function AccountSection({ onOpenDevices }: { onOpenDevices: () => void })
           <button type="button" className="account-link" onClick={onOpenDevices}>Open Devices</button>
         </p>
       )}
-      {notice && (ready || !loaded) && <p role="status" className="account-note">{notice}</p>}
+      {notice && <p role="alert" className="account-note">{notice}</p>}
       {plus?.connected && net?.self?.isAuthority && <p className="account-note">This profile’s network identity is linked to this account. Add phones under Devices.</p>}
-
-      <details className="account-advanced">
-        <summary>Advanced</summary>
-        <label>
-          Mousse ID service
-          <input className="settings-input" value={state.override} onChange={(e) => state.setOverride(e.target.value)} placeholder={mousseIdOrigin({ override: '', runtimeOrigin: state.runtimeOrigin })} spellCheck={false} />
-        </label>
-        <p>{overrideInvalid ? 'Enter an https:// address (http:// only for this computer).' : origin ? `Signing in to ${origin}.` : 'No service set.'}</p>
-      </details>
     </div>
   )
 }
