@@ -54,4 +54,30 @@ describe('completed worktree integration', () => {
       reason: 'Agent created only empty commits; the branch has no changes.'
     })
   }, 15_000)
+
+  it('reports a merge candidate only while both the agent branch and its directory exist', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-merge-candidate-'))
+    tempRoots.push(root)
+    process.env.MOUSSE_HOME = join(root, 'home')
+    const git = simpleGit(root)
+    await git.init()
+    await git.addConfig('user.name', 'Mousse Test')
+    await git.addConfig('user.email', 'mousse@example.test')
+    writeFileSync(join(root, 'base.txt'), 'base\n')
+    await git.add('base.txt')
+    await git.commit('base')
+    const manager = new WorktreeManager(root)
+    await manager.init()
+
+    const intact = await manager.createWorktree('intact-agent-123456')
+    expect(await manager.hasMergeCandidate(intact)).toBe(true)
+
+    const branchGone = await manager.createWorktree('branch-gone-agent')
+    await git.raw(['update-ref', '-d', `refs/heads/${branchGone.branch}`])
+    expect(await manager.hasMergeCandidate(branchGone)).toBe(false)
+
+    const directoryGone = await manager.createWorktree('directory-gone-agent')
+    rmSync(directoryGone.path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    expect(await manager.hasMergeCandidate(directoryGone)).toBe(false)
+  }, 15_000)
 })
