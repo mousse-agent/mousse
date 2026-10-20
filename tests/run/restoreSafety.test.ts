@@ -3,6 +3,7 @@
  * another thread works in is refused (`workspace_shared`), and an allowed undo or revert is its own
  * run (`source: 'undo' | 'revert'`).
  */
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,7 +15,7 @@ import { MmsProtocolServer } from '../../src/mms/protocol/server'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { RunRecord } from '../../src/mms/run/types'
-import { evaluateRestore, pathsOverlap, restoreDiffSha } from '../../src/mms/run/workspace/restoreSafety'
+import { evaluateRestore, pathsOverlap, RESTORE_DIFF_MAX_CHARS, restoreDiff, restoreDiffSha, worktreeClaims } from '../../src/mms/run/workspace/restoreSafety'
 import { WorkspaceResolver } from '../../src/mms/workspace/WorkspaceResolver'
 import type { ThreadWorkspaceMetadata } from '../../src/shared/workspace'
 import { actionOptions, gitFoundationFixture } from '../fixtures/gitFoundation'
@@ -65,6 +66,47 @@ describe('evaluateRestore (SPEC §16.3)', () => {
     // Siblings and the thread's own claims do not overlap.
     expect(refuse([{ threadId: 't2', path: join(root, 'worktrees', 't10'), kind: 'worktree' }, { threadId: 't1', path: worktree, kind: 'live_cwd' }])).toMatchObject({ action: 'proceed' })
     expect(pathsOverlap(join(root, 'worktrees', 't1'), join(root, 'worktrees', 't10'))).toBe(false)
+  })
+})
+
+describe('restore inputs (SPEC §16.3)', () => {
+  let root: string | undefined
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true })
+    root = undefined
+  })
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+
+  it('claims the worktrees other threads recorded and skips threads without readable workspace metadata', () => {
+    root = mkdtempSync(join(tmpdir(), 'mousse-claims-'))
+    const directory = (name: string, workspace?: string) => {
+      const path = join(root!, name)
+      mkdirSync(path)
+      if (workspace !== undefined) writeFileSync(join(path, 'workspace.json'), workspace)
+      return path
+    }
+    const claims = worktreeClaims([
+      { threadId: 't2', threadDirectory: directory('t2', JSON.stringify({ worktreePath: join(root, 'wt', 't2') })) },
+      { threadId: 't3', threadDirectory: directory('t3', '{not json') },
+      { threadId: 't4', threadDirectory: directory('t4') },
+      { threadId: 't5', threadDirectory: directory('t5', JSON.stringify({ threadId: 't5' })) },
+      { threadId: 't6', threadDirectory: join(root, 'missing') }
+    ])
+    expect(claims).toEqual([{ threadId: 't2', path: join(root, 'wt', 't2'), kind: 'worktree' }])
+  })
+
+  it('bounds the review diff, marks the cut, and returns nothing for an unknown revision', () => {
+    root = mkdtempSync(join(tmpdir(), 'mousse-restore-diff-'))
+    git(root, 'init', '-b', 'main'); git(root, 'config', 'user.name', 'Restore fixture'); git(root, 'config', 'user.email', 'restore@example.invalid'); git(root, 'config', 'commit.gpgsign', 'false')
+    writeFileSync(join(root, 'file.txt'), 'small\n'); git(root, 'add', '.'); git(root, 'commit', '-m', 'small')
+    writeFileSync(join(root, 'file.txt'), 'small\nchanged\n'); git(root, 'commit', '-am', 'small change')
+    expect(restoreDiff(root, 'HEAD~1', 'HEAD')).toContain('+changed')
+    expect(restoreDiff(root, 'HEAD~1', 'HEAD')).not.toContain('truncated')
+    writeFileSync(join(root, 'file.txt'), 'line\n'.repeat(Math.ceil(RESTORE_DIFF_MAX_CHARS / 5) + 100)); git(root, 'commit', '-am', 'large change')
+    const diff = restoreDiff(root, 'HEAD~1', 'HEAD')
+    expect(diff.endsWith('\n… diff truncated')).toBe(true)
+    expect(diff).toHaveLength(RESTORE_DIFF_MAX_CHARS + '\n… diff truncated'.length)
+    expect(restoreDiff(root, 'no-such-revision', 'HEAD')).toBe('')
   })
 })
 

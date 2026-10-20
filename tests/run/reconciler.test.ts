@@ -8,6 +8,7 @@ import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox, EFFECT_LEASE_GRACE_MS } from '../../src/mms/run/EffectOutbox'
 import { RECONCILER_THREAD_ID, Reconciler } from '../../src/mms/run/Reconciler'
 import { RunEngine } from '../../src/mms/run/RunEngine'
+import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 
@@ -25,7 +26,7 @@ describe('Reconciler', () => {
   })
 
   /** One fake clock drives the database, the engine, the outbox and the reconciler. */
-  const setup = (heartbeatMs = 10_000, capabilitiesFor?: (threadId: string) => ProviderCapabilities | null) => {
+  const setup = (heartbeatMs = 10_000, capabilitiesFor?: (threadId: string) => ProviderCapabilities | null, credentialsFor?: (store: RunStore) => { pruneExpired(): number }) => {
     profileHome = mkdtempSync(join(tmpdir(), 'mousse-reconciler-'))
     let clock = T0
     db = new ProfileDatabase({ profileHome, clock: () => clock })
@@ -34,13 +35,15 @@ describe('Reconciler', () => {
     const outbox = new EffectOutbox(store, { now })
     const tools = new ToolInvocations(store)
     const engine = new RunEngine({ store, outbox, tools, now, pid: 1 })
-    const reconciler = new Reconciler({ store, outbox, tools, now, heartbeatMs, capabilitiesFor })
+    const credentials = credentialsFor?.(store)
+    const reconciler = new Reconciler({ store, outbox, tools, now, heartbeatMs, capabilitiesFor, credentials })
     return {
       store,
       outbox,
       tools,
       engine,
       reconciler,
+      credentials,
       now,
       advance: (ms: number) => {
         clock += ms
@@ -307,5 +310,30 @@ describe('Reconciler', () => {
     advance(60_000)
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(outbox.get(effect.effectId)!.status).toBe('running')
+  })
+
+  it('reports no credential count when no credential store is attached', () => {
+    expect('prunedCredentials' in setup().reconciler.runOnce()).toBe(false)
+  })
+
+  it('prunes dead MCP credentials in every pass', async () => {
+    const withStore = setup(10_000, undefined, (store) => new McpCredentials(store))
+    const credentials = withStore.credentials as McpCredentials
+    const run = await runningRun(withStore.engine)
+    credentials.mintOrReuse({ threadId: 't', runId: run.runId, provider: 'claude-subscription', modeCeiling: 'default' })
+    expect(withStore.reconciler.runOnce().prunedCredentials).toBe(0)
+    expect(credentials.listForThread('t')).toHaveLength(1)
+    withStore.advance(25 * 60 * 60 * 1000)
+    expect(withStore.reconciler.runOnce().prunedCredentials).toBe(1)
+    expect(credentials.listForThread('t')).toEqual([])
+    expect(withStore.reconciler.runOnce().prunedCredentials).toBe(0)
+  })
+
+  it('records a failing credential prune as rule_failed and still completes the pass', () => {
+    const f = setup(10_000, undefined, () => ({ pruneExpired: () => { throw new Error('credential table is locked') } }))
+    const report = f.reconciler.runOnce()
+    expect(report.prunedCredentials).toBe(0)
+    expect(report.expiredLeases).toEqual([])
+    expect(f.store.listEvents(RECONCILER_THREAD_ID).map((event) => event.payload)).toContainEqual({ rule: 'prune_credentials', error: 'credential table is locked' })
   })
 })

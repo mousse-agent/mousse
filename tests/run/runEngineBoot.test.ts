@@ -180,6 +180,21 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     expect(second.store.listEvents('u').filter((event) => event.type === 'restart.note')).toEqual([])
   })
 
+  it('cancels a queued integration run whose turn.start died, and leaves queued runs of other sources alone', async () => {
+    const first = daemon(10)
+    const integration = await first.engine.dispatch({ kind: 'send', threadId: 'p', clientRequestId: 'req-int', source: 'integration' })
+    const gui = await first.engine.dispatch({ kind: 'send', threadId: 'p2', clientRequestId: 'req-gui', source: 'gui' })
+    if (integration.status !== 'accepted' || gui.status !== 'accepted') throw new Error('send rejected')
+    first.engine.outbox.enqueue({ threadId: 'p', runId: integration.runId, kind: 'turn.start', payload: { runId: integration.runId, threadId: 'p', input: 'integrate' } })
+    // Crash.
+
+    const second = daemon(20)
+    expect(second.store.getRun(integration.runId)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'daemon_restart' } })
+    expect(second.store.getRun(gui.runId)!.status).toBe('queued')
+    // Not a delegated child: the parent may request the integration again, so nothing is published as a failure.
+    expect(second.boot.orphanedChildren).toEqual([])
+  })
+
   it('notes a turn the previous daemon interrupted while shutting down, once', async () => {
     const first = daemon(10)
     const run = await running(first.engine, 't', 'req-1')

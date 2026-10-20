@@ -108,4 +108,16 @@ describe('LlmClient tool ledger', () => {
     })
     expect(calls).toEqual(['start:bash:{"command":"ls"}', 'execute:bash', 'failed:inv-1'])
   })
+
+  it('marks a tool that returns an error result failed, not committed', async () => {
+    const calls = await runOneTool(async (call) => ({
+      role: 'toolResult',
+      toolCallId: call.id,
+      toolName: call.name,
+      content: [{ type: 'text', text: 'exit 1' }],
+      isError: true,
+      timestamp: Date.now()
+    }))
+    expect(calls).toEqual(['start:bash:{"command":"ls"}', 'execute:bash', 'failed:inv-1'])
+  })
 })

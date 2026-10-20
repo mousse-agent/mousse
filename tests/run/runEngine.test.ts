@@ -297,6 +297,80 @@ describe('RunEngine', () => {
       'stale_write'
     )
   })
+  describe('continuations (SPEC §16.4)', () => {
+    /** An ended (or still active) run on `threadId`, left in `status`. */
+    const runAt = async (engine: RunEngine, threadId: string, key: string, status: 'queued' | 'running' | 'completed' | 'uncertain') => {
+      const sent = await send(engine, threadId, key)
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      if (status === 'queued') return sent.runId
+      engine.markStarting(sent.runId)
+      engine.markRunning(sent.runId)
+      if (status === 'completed') engine.markTerminal(sent.runId, 'completed')
+      if (status === 'uncertain') engine.markTerminal(sent.runId, 'uncertain', { uncertainReason: 'non_idempotent_tool_in_flight' })
+      return sent.runId
+    }
+    const continueFrom = (engine: RunEngine, threadId: string, from: string, extra: { acknowledgeUncertain?: boolean } = {}) =>
+      engine.dispatch({ kind: 'send', threadId, clientRequestId: `continue:${from}`, source: 'gui', continuationOfRunId: from, ...extra })
+
+    it.each([
+      ['an unknown run', async () => 'run:missing', 'continuation_not_found'],
+      ['a run of another thread', async (engine: RunEngine) => runAt(engine, 'other', 'req-other', 'completed'), 'continuation_not_found'],
+      ['a queued run', async (engine: RunEngine) => runAt(engine, 't', 'req-queued', 'queued'), 'continuation_source_active'],
+      ['a running run', async (engine: RunEngine) => runAt(engine, 't', 'req-running', 'running'), 'continuation_source_active'],
+      ['an uncertain run that is not acknowledged', async (engine: RunEngine) => runAt(engine, 't', 'req-uncertain', 'uncertain'), 'uncertain_not_acknowledged']
+    ])('refuses to continue %s and stores neither a run nor a receipt', async (_title, source, reason) => {
+      const { store, engine } = open()
+      const from = await source(engine)
+      const before = store.listRuns('t').length
+      const result = await continueFrom(engine, 't', from)
+      expect(result).toMatchObject({ status: 'rejected', reason })
+      expect(store.listRuns('t')).toHaveLength(before)
+      expect(store.getReceipt(`continue:${from}`)).toBeNull()
+    })
+
+    it('accepts a continuation of a completed run, or of an uncertain run once acknowledged, and records its source', async () => {
+      const { store, engine } = open()
+      const completed = await runAt(engine, 't', 'req-done', 'completed')
+      const first = await continueFrom(engine, 't', completed)
+      if (first.status !== 'accepted') throw new Error(`continuation refused: ${JSON.stringify(first)}`)
+      expect(store.getRun(first.runId)).toMatchObject({ outcome: { continuationOf: completed } })
+      const uncertain = await runAt(engine, 'u', 'req-cut', 'uncertain')
+      const second = await continueFrom(engine, 'u', uncertain, { acknowledgeUncertain: true })
+      if (second.status !== 'accepted') throw new Error(`acknowledged continuation refused: ${JSON.stringify(second)}`)
+      expect(store.getRun(second.runId)).toMatchObject({ outcome: { continuationOf: uncertain } })
+    })
+  })
+
+  describe('takeRestartNote (SPEC §12.5)', () => {
+    const note = (epoch: number) => ({ runIds: [`run:old-${epoch}`], uncertainRunIds: [], cutOffTools: [], epoch })
+    const record = (store: RunStore, epoch: number) => store.appendEvent({ threadId: 't', type: 'restart.note', payload: note(epoch) })
+
+    it('hands out the latest note once, records its delivery and reports none afterwards', () => {
+      const { store, engine } = open()
+      expect(engine.takeRestartNote('t')).toBeNull()
+      record(store, 1); record(store, 2)
+      expect(engine.takeRestartNote('t')).toEqual(note(2))
+      expect(store.listEvents('t').filter((event) => event.type === 'restart.note.delivered')).toHaveLength(1)
+      expect(engine.takeRestartNote('t')).toBeNull()
+      record(store, 3)
+      expect(engine.takeRestartNote('t')).toEqual(note(3))
+    })
+
+    it('does not count the starting run as having moved past the note, but any other run that started after it', async () => {
+      const { store, engine } = open()
+      record(store, 1)
+      const current = await send(engine, 't', 'req-current')
+      if (current.status !== 'accepted') throw new Error('send rejected')
+      engine.markStarting(current.runId)
+      // Another run started after the note: the thread moved on, so the note is stale for a run that starts later.
+      expect(engine.takeRestartNote('t', 'run:thread:t:ordinal:99')).toBeNull()
+      expect(store.listEvents('t').filter((event) => event.type === 'restart.note.delivered')).toEqual([])
+      // The run that is starting now is not "another run": it receives the note and owns the delivery event.
+      expect(engine.takeRestartNote('t', current.runId)).toEqual(note(1))
+      expect(store.listEvents('t').find((event) => event.type === 'restart.note.delivered')).toMatchObject({ runId: current.runId })
+    })
+  })
+
 })
 
 describe('RunEngine.runLocalAction (SPEC §16.3)', () => {
