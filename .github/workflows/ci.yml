@@ -26,7 +26,7 @@ jobs:
         with:
           node-version: '24.20.0'
           package-manager-cache: false
-      - run: node --test scripts/team-status.test.mjs
+      - run: node --test scripts/team-status.test.mjs scripts/team-cleanup.test.mjs
 
   static:
     name: Static checks
