@@ -1,29 +1,23 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { build } from 'esbuild'
 import { expect, it } from 'vitest'
 import { FileKeyStore } from '../../../../src/mms/net/identity/FileKeyStore'
 import { verifyBytes, verifyDocument } from '../../../../src/mms/net/identity/crypto'
 import type { BotDelegation, Roster } from '../../../../src/shared/net'
-// Use the same real daemon bundle configuration, including its raw-TS SDK plugin.
-import { getCliBuildOptions } from '../../../../scripts/build-cli.mjs'
+import { cliChild } from '../../../support/build'
 
 it.skipIf(process.platform === 'win32')(
   'survives actual SIGKILL after protected key commit and after host commit without inventing another key, lease or original',
   async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'bot-add-kill-'))),
-      executable = join(root, 'registration.mjs')
+      // Use the same real daemon bundle configuration, including its raw-TS SDK plugin.
+      executable = await cliChild(
+        'tests/net/bots/local/registration-child.ts',
+        'bot-registration-child'
+      )
     try {
-      symlinkSync(resolve('node_modules'), join(root, 'node_modules'))
-      await build({
-        ...getCliBuildOptions(resolve('.')),
-        entryPoints: [resolve('tests/net/bots/local/registration-child.ts')],
-        outfile: executable,
-        sourcemap: false,
-        logLevel: 'silent'
-      })
       for (const mode of ['key-kill', 'ack-kill']) {
         const dir = join(root, mode)
         const killed = spawnSync(process.execPath, [executable, dir, mode], {

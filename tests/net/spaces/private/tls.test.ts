@@ -2,8 +2,6 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { buildSync } from 'esbuild'
 import { afterEach, describe, expect, it } from 'vitest'
 import { SpaceHostService } from '../../../../src/mms/spaces/host'
 import { PrivateSpaceService } from '../../../../src/mms/spaces/private'
@@ -14,6 +12,7 @@ import { NetSyncSession } from '../../../../src/mms/net/sync/session'
 import { decodeEnvelope } from '../../../../src/mms/net/sync/codec'
 import { NetError } from '../../../../src/shared/net'
 import { profile, peer, trust, signed, channels, cleanup, disposers } from '../host/helpers'
+import { crashChild } from '../../../support/build'
 afterEach(cleanup)
 async function setup() {
   const host = await profile(),
@@ -279,17 +278,10 @@ describe('P5 private existing-wire bootstrap and staged activation', () => {
       const reader = f.host.store.openSnapshot(created.descriptor.id),
         records = reader.next(1024 * 1024, 64).records
       reader.close()
-      const executable = join(f.b.path, 'private-crash-child.cjs'),
+      const executable = await crashChild('tests/net/spaces/private/crash-child.ts', {
+          target: 'node24'
+        }),
         input = join(f.b.path, 'private-crash-input.json')
-      buildSync({
-        entryPoints: [fileURLToPath(new URL('./crash-child.ts', import.meta.url))],
-        outfile: executable,
-        bundle: true,
-        platform: 'node',
-        format: 'cjs',
-        target: 'node24',
-        logLevel: 'silent'
-      })
       writeFileSync(
         input,
         JSON.stringify({
@@ -356,17 +348,10 @@ describe('P5 private existing-wire bootstrap and staged activation', () => {
   for (const mode of ['prepare-before', 'prepare-after'])
     it(`SIGKILL ${mode} retains only the committed exact creation journal`, async () => {
       const f = await setup(),
-        executable = join(f.a.path, 'private-prepare-child.cjs'),
+        executable = await crashChild('tests/net/spaces/private/crash-child.ts', {
+          target: 'node24'
+        }),
         input = join(f.a.path, 'private-prepare-input.json')
-      buildSync({
-        entryPoints: [fileURLToPath(new URL('./crash-child.ts', import.meta.url))],
-        outfile: executable,
-        bundle: true,
-        platform: 'node',
-        format: 'cjs',
-        target: 'node24',
-        logLevel: 'silent'
-      })
       writeFileSync(
         input,
         JSON.stringify({

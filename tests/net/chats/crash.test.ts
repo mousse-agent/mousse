@@ -1,22 +1,15 @@
-import { afterAll, afterEach, beforeAll, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { afterEach, beforeAll, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { build } from 'esbuild'
+import { cliChild } from '../../support/build'
 import { cleanup, profile } from './helpers'
 
-let executable: string, buildRoot: string
+let executable: string
 beforeAll(async () => {
-  buildRoot = realpathSync(mkdtempSync(join(tmpdir(), 'chats-crash-build-')))
-  symlinkSync(resolve('node_modules'), join(buildRoot, 'node_modules'), 'dir')
-  executable = join(buildRoot, 'child.mjs')
   // Use the actual CLI's package externalization and TS-package plugin.
-  const { getCliBuildOptions } = await import('../../../scripts/build-cli.mjs')
-  await build({ ...getCliBuildOptions(process.cwd()), entryPoints: [fileURLToPath(new URL('./crash-child.ts', import.meta.url))], outfile: executable, sourcemap: false, logLevel: 'silent' })
-})
-afterAll(() => rmSync(buildRoot, { recursive: true, force: true }))
+  executable = await cliChild('tests/net/chats/crash-child.ts', 'chats-crash-child')
+}, 120_000)
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
 
 it.each(['chats.publication.hostCreated', 'chats.publication.afterCommit'])('recovers actual SIGKILL at %s without duplicate Host effects or local dispatch fallback', async point => {

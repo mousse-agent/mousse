@@ -2,8 +2,9 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, relative, resolve } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { isAbsolute, join, relative } from 'node:path'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { productBuild } from './support/build'
 import { parseArgs } from '../src/cli/parseArgs'
 import { executeWorkflowCommand, prepareWorkflowCommand, workflowWaitExitCode } from '../src/cli/commands/workflow'
 import { publishOwnRuntimeRecord, removeOwnRuntimeRecord } from '../src/cli/mmsRuntime'
@@ -20,6 +21,10 @@ import { normalizeQueuedMessages, promoteQueuedMessageToSteer } from '../src/mms
 
 const roots: string[] = []
 const previousHome = process.env.MOUSSE_HOME
+let cliEntry = ''
+beforeAll(async () => {
+  cliEntry = (await productBuild()).entry
+}, 120_000)
 afterEach(() => {
   vi.restoreAllMocks()
   if (previousHome === undefined) delete process.env.MOUSSE_HOME
@@ -68,7 +73,7 @@ async function fixture() {
 type CliEvent = { kind: string; requestId?: string; runId?: string; revisionId?: string; run?: WorkflowRunView; runs?: WorkflowRunView[]; events?: unknown[]; hasMore?: boolean; workflows?: unknown[]; error?: string }
 function cli(args: string[], timeoutMs = 30_000): Promise<{ code: number | null; events: CliEvent[]; stderr: string }> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [resolve('out/cli/index.js'), ...args], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NO_COLOR: '1' } })
+    const child = spawn(process.execPath, [cliEntry, ...args], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NO_COLOR: '1' } })
     let stdout = '', stderr = '', failure: Error | undefined
     const timer = setTimeout(() => { failure = new Error('CLI fixture timed out'); child.kill() }, timeoutMs)
     const receive = (chunk: Buffer, error: boolean) => {

@@ -1,16 +1,15 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createCipheriv, createDecipheriv, randomBytes, X509Certificate } from 'node:crypto'
 import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
-import { fileURLToPath } from 'node:url'
-import { buildSync } from 'esbuild'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileKeyStore } from '../../../src/mms/net/identity/FileKeyStore'
 import { decodeBase64, verifyBytes } from '../../../src/mms/net/identity/crypto'
 import { newId } from '../../../src/shared/net/ids'
 import type { SecretCodec } from '../../../src/mms/providers/secretCodec'
+import { crashChild } from '../../support/build'
 
 const directories: string[] = []
 function profile(): string {
@@ -21,21 +20,10 @@ function profile(): string {
 afterEach(() => {
   for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
-let childExecutable: string, childBuildDir: string
-beforeAll(() => {
-  childBuildDir = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-keys-child-')))
-  childExecutable = join(childBuildDir, 'keyStore-child.cjs')
-  buildSync({
-    entryPoints: [fileURLToPath(new URL('./keyStore-child.ts', import.meta.url))],
-    outfile: childExecutable,
-    bundle: true,
-    platform: 'node',
-    format: 'cjs',
-    target: 'node24',
-    logLevel: 'silent'
-  })
-})
-afterAll(() => rmSync(childBuildDir, { recursive: true, force: true }))
+let childExecutable: string
+beforeAll(async () => {
+  childExecutable = await crashChild('tests/net/identity/keyStore-child.ts', { target: 'node24' })
+}, 120_000)
 const noVault: SecretCodec = { canEncrypt: () => false, encrypt: () => null, decrypt: () => null }
 function vault() {
   const key = randomBytes(32)

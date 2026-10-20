@@ -2,8 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { build } from 'esbuild'
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { ExecutionPolicyLayer } from '../src/shared/execution/types'
 import { CancellationRegistry } from '../src/mms/execution/CancellationRegistry'
 import { ExecutionPolicyService } from '../src/mms/execution/ExecutionPolicyService'
@@ -11,6 +10,7 @@ import { ApprovalService } from '../src/mms/execution/ApprovalService'
 import { WorkflowRegistry } from '../src/mms/workflows/registry/WorkflowRegistry'
 import { WorkflowRunService } from '../src/mms/workflows/engine/WorkflowRunService'
 import type { WorkflowFaultHooks } from '../src/shared/workflows'
+import { crashChild } from './support/build'
 
 const roots: string[] = []
 vi.setConfig({ testTimeout: 15000 })
@@ -27,16 +27,9 @@ function root(prefix: string): string {
 }
 
 let crashEntry = ''
-let crashBuildDir = ''
 beforeAll(async () => {
-  crashBuildDir = mkdtempSync(join(tmpdir(), 'mousse-crash-fixture-'))
-  crashEntry = join(crashBuildDir, 'workflow-runtime-crash-child.cjs')
-  await build({
-    entryPoints: [join(process.cwd(), 'tests', 'fixtures', 'workflow-runtime-crash-child.ts')],
-    bundle: true, platform: 'node', format: 'cjs', outfile: crashEntry, sourcemap: false
-  })
-}, 60_000)
-afterAll(() => rmSync(crashBuildDir, { recursive: true, force: true }))
+  crashEntry = await crashChild('tests/fixtures/workflow-runtime-crash-child.ts')
+}, 120_000)
 
 afterEach(() => {
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true })

@@ -1,69 +1,43 @@
-import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
-import { afterAll, beforeAll, expect, it } from 'vitest'
+import { beforeAll, expect, it } from 'vitest'
 import { MousseMainService } from '../../../../src/mms/MousseMainService'
 import { newId } from '../../../../src/shared/net'
 
-import { buildTestCli } from '../../helpers/build'
+import { productBuild } from '../../../support/build'
+import { runCli, startDaemon, type Daemon } from '../../../support/daemon'
+import { ownedTemp } from '../../../support/tmp'
 
-let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
 let entry: string
 
 beforeAll(async () => {
-  fixture = await buildTestCli()
-  entry = fixture.entry
-}, 60000)
-afterAll(() => fixture?.cleanup())
-async function stop(child: ChildProcess) {
-  if (child.exitCode !== null || child.signalCode !== null) return
-  const closed = new Promise<void>((resolve) => child.once('exit', () => resolve()))
-  child.kill('SIGKILL')
-  await closed
-}
+  entry = (await productBuild()).entry
+}, 120000)
 it.skipIf(process.platform === 'win32')(
   'uses the emitted CLI and actual daemon owner profile to register and control a signed inactive bot',
   async () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'bots-daemon-cli-'))),
+    const temp = ownedTemp('bots-daemon-cli-'),
+      root = temp.path,
       home = join(root, 'home'),
-      children: ChildProcess[] = []
+      daemons: Daemon[] = []
     let seed: MousseMainService | undefined
-    const cli = (args: string[], input?: string) =>
-      new Promise<{ code: number | null; output: string; error: string; value?: any }>(
-        (resolve, reject) => {
-          const child = spawn(process.execPath, [entry, '--home', home, '--json', ...args], {
-            stdio: ['pipe', 'pipe', 'pipe'],
-            env: { ...process.env, MOUSSE_HOME: home, MOUSSE_REPO_ROOT: root, NO_COLOR: '1' }
-          })
-          children.push(child)
-          let output = '',
-            error = ''
-          const timer = setTimeout(() => {
-            child.kill('SIGKILL')
-            reject(new Error('Actual bot CLI timed out'))
-          }, 20000)
-          child.stdout!.on('data', (bytes) => {
-            output += bytes
-          })
-          child.stderr!.on('data', (bytes) => {
-            error += bytes
-          })
-          child.on('error', (reason) => {
-            clearTimeout(timer)
-            reject(reason)
-          })
-          child.on('exit', (code) => {
-            clearTimeout(timer)
-            let value
-            try {
-              value = JSON.parse(code === 0 ? output : error)
-            } catch {}
-            resolve({ code, output, error, value })
-          })
-          child.stdin!.end(input)
-        }
-      )
+    const cli = async (
+      args: string[],
+      input?: string
+    ): Promise<{ code: number | null; output: string; error: string; value?: any }> => {
+      const result = await runCli({
+        entry,
+        home,
+        args: ['--json', ...args],
+        input,
+        env: { MOUSSE_REPO_ROOT: root },
+        label: 'Actual bot CLI'
+      })
+      let value
+      try {
+        value = JSON.parse(result.code === 0 ? result.stdout : result.stderr)
+      } catch {}
+      return { code: result.code, output: result.stdout, error: result.stderr, value }
+    }
     try {
       seed = await MousseMainService.create({
         homeDir: home,
@@ -81,31 +55,14 @@ it.skipIf(process.platform === 'win32')(
         request = newId('rpc')
       await seed.stop()
       seed = undefined
-      let logs = ''
-      const daemon = spawn(process.execPath, [entry, '--home', home, 'service', 'run'], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, MOUSSE_HOME: home, MOUSSE_REPO_ROOT: root, NO_COLOR: '1' }
+      const daemon = await startDaemon({
+        entry,
+        home,
+        repoRoot: root,
+        readiness: 'runtime',
+        label: 'Task-owned daemon'
       })
-      children.push(daemon)
-      daemon.stdout!.on('data', (bytes) => {
-        logs = (logs + bytes).slice(-8000)
-      })
-      daemon.stderr!.on('data', (bytes) => {
-        logs = (logs + bytes).slice(-8000)
-      })
-      const deadline = Date.now() + 40000
-      for (;;) {
-        if (daemon.exitCode !== null || daemon.signalCode !== null)
-          throw new Error('Task-owned daemon exited: ' + logs)
-        let ready = false
-        try {
-          ready =
-            JSON.parse(readFileSync(join(home, 'mms.runtime.json'), 'utf8')).pid === daemon.pid
-        } catch {}
-        if (ready) break
-        if (Date.now() >= deadline) throw new Error('Task-owned daemon readiness timed out')
-        await new Promise((resolve) => setTimeout(resolve, 40))
-      }
+      daemons.push(daemon)
       expect((await cli(['bots', '--help'])).output).toContain(
         'default production native adapter is inactive'
       )
@@ -194,13 +151,13 @@ it.skipIf(process.platform === 'win32')(
       expect((await cli(['bots', 'presence', space.space, bot, channel])).value).toMatchObject({
         state: 'offline'
       })
-      expect([logs, configured.output, qualification.error].join('\n')).not.toContain(
+      expect([daemon.output, configured.output, qualification.error].join('\n')).not.toContain(
         'task-owned-cli-protection'
       )
     } finally {
       if (seed) await seed.stop()
-      await Promise.all(children.map(stop))
-      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+      await Promise.all(daemons.map((daemon) => daemon.kill()))
+      await temp.close()
     }
   },
   90000

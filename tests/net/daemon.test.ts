@@ -1,94 +1,27 @@
-import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, beforeAll, expect, it } from 'vitest'
+import { beforeAll, expect, it } from 'vitest'
 import type { NetStatus } from '../../src/shared/net/local'
 
-import { buildTestCli } from './helpers/build'
-import { stop, until } from './helpers/process'
+import { productBuild } from '../support/build'
+import { cliJson, startDaemon, until, type Daemon } from '../support/daemon'
+import { ownedTemp } from '../support/tmp'
 
-let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
 let entry: string
-
 beforeAll(async () => {
-  fixture = await buildTestCli()
-  entry = fixture.entry
-}, 60000)
-afterAll(() => fixture?.cleanup())
+  entry = (await productBuild()).entry
+}, 120_000)
 it('enrolls using pasted CLI stdin between actual daemon processes, restarts each side and propagates revoke', async () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'net-daemon-'))),
+  const temp = ownedTemp('net-daemon-'),
+    root = temp.path,
     homes = [join(root, 'a'), join(root, 'b')],
-    children: ChildProcess[] = []
-  const launch = async (home: string): Promise<ChildProcess> => {
-    let output = ''
-    const child = spawn(process.execPath, [entry, '--home', home, 'service', 'run'], {
-      cwd: process.cwd(),
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, MOUSSE_HOME: home, MOUSSE_REPO_ROOT: root, NO_COLOR: '1' }
-    })
-    children.push(child)
-    child.stdout!.on('data', (b) => {
-      output = (output + String(b)).slice(-8000)
-    })
-    child.stderr!.on('data', (b) => {
-      output = (output + String(b)).slice(-8000)
-    })
-    await until(
-      () => {
-        if (child.exitCode !== null || child.signalCode !== null)
-          throw new Error('Daemon exited before readiness: ' + output)
-        try {
-          return (
-            JSON.parse(readFileSync(join(home, 'mms.runtime.json'), 'utf8')).pid === child.pid &&
-            JSON.parse(readFileSync(join(home, 'mms.owner.json'), 'utf8')).pid === child.pid
-          )
-        } catch {
-          return false
-        }
-      },
-      Boolean,
-      40000
-    )
-    return child
+    daemons: Daemon[] = []
+  const launch = async (home: string): Promise<Daemon> => {
+    const daemon = await startDaemon({ entry, home, repoRoot: root, label: 'Network daemon' })
+    daemons.push(daemon)
+    return daemon
   }
   const cli = (home: string, args: string[], input?: string): Promise<any> =>
-    new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [entry, '--home', home, '--json', ...args], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, MOUSSE_HOME: home, NO_COLOR: '1' }
-      })
-      children.push(child)
-      let out = '',
-        error = ''
-      const timer = setTimeout(() => {
-        child.kill('SIGKILL')
-        reject(new Error('Network CLI timed out'))
-      }, 20000)
-      child.stdout!.on('data', (b) => {
-        out += String(b)
-      })
-      child.stderr!.on('data', (b) => {
-        error += String(b)
-      })
-      child.on('error', (e) => {
-        clearTimeout(timer)
-        reject(e)
-      })
-      child.on('exit', (code) => {
-        clearTimeout(timer)
-        if (code !== 0) {
-          reject(new Error('Network CLI failed: ' + error.slice(-4000)))
-          return
-        }
-        try {
-          resolve(JSON.parse(out))
-        } catch {
-          reject(new Error('Network CLI returned invalid JSON'))
-        }
-      })
-      child.stdin!.end(input)
-    })
+    cliJson({ entry, home, args: ['--json', ...args], input, label: 'Network CLI' })
   try {
     let a = await launch(homes[0]),
       b = await launch(homes[1])
@@ -118,13 +51,13 @@ it('enrolls using pasted CLI stdin between actual daemon processes, restarts eac
     const open = (node: string) => (s: NetStatus) =>
       s.peers.some((p) => p.node === node && p.state === 'open')
     await until(() => cli(homes[0], ['net', 'status']), open(joined.node))
-    await stop(a)
+    await a.kill()
     a = await launch(homes[0])
     expect((await cli(homes[0], ['net', 'status'])).keystore).toBe('locked')
     await cli(homes[0], ['net', 'unlock'], 'test-authority-protection')
     await until(() => cli(homes[1], ['net', 'status']), open(joined.authority))
     expect((await cli(homes[0], ['net', 'status'])).routes).toEqual(initial.routes)
-    await stop(b)
+    await b.kill()
     b = await launch(homes[1])
     await cli(homes[1], ['net', 'unlock'], 'test-follower-protection')
     await until(() => cli(homes[1], ['net', 'status']), open(joined.authority))
@@ -147,7 +80,7 @@ it('enrolls using pasted CLI stdin between actual daemon processes, restarts eac
       (await cli(homes[0], ['net', 'status'])).peers.every((p: any) => p.state !== 'open')
     ).toBe(true)
   } finally {
-    await Promise.all(children.map(stop))
-    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    await Promise.all(daemons.map((daemon) => daemon.kill()))
+    await temp.close()
   }
 }, 120000)

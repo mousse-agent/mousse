@@ -1,27 +1,21 @@
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
-import { build } from 'esbuild'
 import { expect, it } from 'vitest'
 import { NetDatabase } from '../../../../src/mms/net/store/database'
 import { FileKeyStore, SqlPrivateStreamKeys } from '../../../../src/mms/net/identity'
+import { crashChild } from '../../../support/build'
 
 it.skipIf(process.platform === 'win32')(
   'recovers the exact fresh protected key/control bundle after real SIGKILL before SQL preparation and uses a new nonce namespace',
   async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'archive-private-key-'))),
-      path = join(root, 'profile'),
-      file = join(root, 'child.mjs')
+      path = join(root, 'profile')
     try {
-      await build({
-        entryPoints: [resolve('tests/net/spaces/archive/private-rotation-child.ts')],
-        outfile: file,
-        bundle: true,
-        platform: 'node',
+      const file = await crashChild('tests/net/spaces/archive/private-rotation-child.ts', {
         format: 'esm',
-        target: 'node24',
-        logLevel: 'silent'
+        target: 'node24'
       })
       const killed = spawnSync(process.execPath, [file, path, 'kill'], {
         encoding: 'utf8',

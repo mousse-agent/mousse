@@ -4,8 +4,6 @@ import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync, writeFileS
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { connect } from 'node:net'
-import { fileURLToPath } from 'node:url'
-import { buildSync } from 'esbuild'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileKeyStore, NetIdentityService } from '../../../src/mms/net/identity'
@@ -31,6 +29,7 @@ import { FakeClock } from '../harness/FakeClock'
 import type { Clock, SecureChannel } from '../../../src/mms/net/contracts'
 import type { NodeDelegation, Roster, RoutesRecord } from '../../../src/shared/net'
 import { NetError, newId } from '../../../src/shared/net'
+import { crashChild } from '../../support/build'
 
 const resources: Array<() => void | Promise<void>> = [],
   paths: string[] = []
@@ -351,16 +350,7 @@ describe('P2 real exporter-bound atomic node enrollment', () => {
 
   it('survives actual SIGKILL inside redemption and retries against a restarted real TCP authority', async () => {
     const { a, b, invite } = await prepared(),
-      executable = join(a.path, 'enrollment-crash-child.cjs')
-    buildSync({
-      entryPoints: [fileURLToPath(new URL('./crash-child.ts', import.meta.url))],
-      outfile: executable,
-      bundle: true,
-      platform: 'node',
-      format: 'cjs',
-      target: 'node24',
-      logLevel: 'silent'
-    })
+      executable = await crashChild('tests/net/enrollment/crash-child.ts', { target: 'node24' })
     async function child(mode: string) {
       const processChild = spawn(process.execPath, [executable, a.path, mode], {
         stdio: ['ignore', 'pipe', 'pipe']
