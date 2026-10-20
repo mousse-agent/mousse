@@ -95,7 +95,7 @@ For small, low-risk documentation and communication-guidance changes, review the
 
 Changes to authentication/authorization, credentials, destructive data migrations, or the merge/permission rules themselves require review by the other teammate. If unavailable, preserve a draft or ready PR and record the blocker. Expand or revise this list through an agreed policy change. Actual GitHub requirements always apply; no timer, label, or agent judgment bypasses them.
 
-GitHub may automatically delete a merged PR's remote head branch. Move follow-up work to another task branch before merging. Automatic remote deletion does not remove local commits or worktrees; clean up a local branch only when it has no unpublished work and is not in use by another worktree. Review abandoned branches manually.
+Move follow-up work to another task branch before merging. Remote deletion on merge, by GitHub or the cleanup helper, does not remove local commits or worktrees; see "Cleanup after merge". Review abandoned branches manually.
 
 ## Local availability after merge
 
@@ -106,6 +106,12 @@ A merge is not finished until the change is available in the user's primary work
 3. If it is on another branch, do not switch it.
 4. Do not report the change as merged and available until the primary worktree contains it. If it cannot be synced safely, say so plainly: name the branch it is on, state that it is behind, and give the exact command the user should run (for example `git switch master && git pull --ff-only`).
 5. When the primary worktree is clean, prefer making small changes there on a task branch. Use a separate worktree only when the checkout is busy, and still finish with the sync above.
+
+## Cleanup after merge
+
+After the sync, remove the merged task's branch and worktree so they do not pile up. From the primary checkout, run `node scripts/team-cleanup.mjs --apply --branch <task-branch>`. It deletes the branch locally and on origin, and removes its worktree when that worktree has no uncommitted changes. It refuses the checkout it runs in, so leave the task worktree first. If it keeps something, report the reason instead of forcing it.
+
+The same helper also runs at the start of work without `--branch` (see "Cleanup helper"), which catches branches merged elsewhere or by teammates.
 
 ## Failures and interruptions
 
@@ -122,12 +128,18 @@ Skills are instructions, not access controls. Maintainers must configure GitHub 
 - Require PRs into the default branch and the basic CI checks. Do not make a hosted full-suite run the routine gate; the full suite is run locally before a PR is opened. Confirm checks pass before making them required.
 - Require conversation resolution and block default-branch force pushes and deletion.
 - Set the review policy consistently with the routine/sensitive distinction above. A blanket one-review requirement will block routine merges during absences; sensitive-review requirements here remain procedural unless separately enforced in GitHub.
-- Enable automatic deletion of merged PR head branches. Do not automatically delete unmerged branches.
+- Enable automatic deletion of merged PR head branches (needs repository admin). The cleanup helper covers this until it is enabled. Do not automatically delete unmerged branches.
 
 Adding workflow files does not enable these settings. Verify actual rules and permissions before reporting them as active. CI uses the repository's existing typecheck, lint, build and test commands.
 
 ## Preflight helper
 
 Run `node scripts/team-status.mjs --fetch` for a fresh Git snapshot, or omit `--fetch` for cached local information. It reports the default branch, dirty files, ongoing merge/rebase state, upstream, and task-branch publishing state as JSON. It does not stage, commit, merge, switch, or push work. With `--fetch`, it updates remote-tracking refs without pruning branches.
+
+## Cleanup helper
+
+Run `node scripts/team-cleanup.mjs` from the primary checkout for a dry run, or add `--apply` to act. It prunes remote-tracking refs and treats a branch as delivered when a merged PR's head matches its tip, or when its tip is already on the default branch (but not equal to it). For delivered branches it removes the worktree and local branch, and deletes the origin branch of a merged PR with a lease on the checked tip.
+
+It keeps, and reports, anything with an open PR, commits not on the default branch, uncommitted or untracked files, a lock, use within the last day, the primary or current checkout, `backup/*` and `mousse/*` branches, worktrees managed by the Mousse app, and detached checkouts. `--branch <name>` limits it to one branch and skips the recent-use check; use it for the task you just merged. Without GitHub access it falls back to branches already on the default branch and leaves origin alone.
 
 This helper does not search GitHub issues/PRs or decide whether tasks overlap. The agent performs those checks with authenticated `gh` and inspects the evidence.
