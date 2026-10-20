@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import type { NetStatus } from '../../src/shared/net'
 import {
   createWakeableSleep,
   formatCountdown,
+  mousseIdPreparation,
   mousseIdSetupStep,
   normalizePlusOrigin,
   pollPlusSignIn,
@@ -157,5 +159,18 @@ describe('sign-in errors', () => {
 
   it('keeps other messages as they are', () => {
     expect(signInErrorMessage(new Error('Something else'), origin)).toBe('Something else')
+  })
+})
+
+describe('networking preparation', () => {
+  const base = { enabled: true, keystore: 'unlocked', protected: true, routes: [], peers: [],
+    self: { node: 'n', user: 'u', isAuthority: true } } as unknown as NetStatus
+  it('sets up networking itself unless the profile is locked', () => {
+    expect(mousseIdPreparation(base)).toBe('ready')
+    expect(mousseIdPreparation(undefined)).toBe('automatic')
+    expect(mousseIdPreparation({ ...base, self: undefined, enabled: false, keystore: 'missing' })).toBe('automatic')
+    expect(mousseIdPreparation({ ...base, enabled: false })).toBe('automatic')
+    expect(mousseIdPreparation({ ...base, protected: false })).toBe('automatic')
+    expect(mousseIdPreparation({ ...base, keystore: 'locked' })).toBe('manual')
   })
 })

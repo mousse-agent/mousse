@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { formatCountdown, secondsLeft } from '../lib/plusSignIn'
-import { mousseIdName, mousseIdOrigin, mousseIdReady, mousseIdSetupStep, useMousseId, type SignInStart } from '../stores/mousseIdStore'
+import { mousseIdName, mousseIdOrigin, mousseIdPreparation, mousseIdSetupStep, useMousseId, type SignInStart } from '../stores/mousseIdStore'
 import { MousseIdAvatar } from './MousseIdAvatar'
 import './account-section.css'
 
@@ -21,7 +21,6 @@ export function AccountSection({ onOpenDevices }: { onOpenDevices: () => void })
   const [notice, setNotice] = useState('')
   const now = useNow(!!pending)
   const origin = mousseIdOrigin(state)
-  const ready = mousseIdReady(net)
 
   let host: string | undefined
   try {
@@ -33,7 +32,7 @@ export function AccountSection({ onOpenDevices }: { onOpenDevices: () => void })
   const start = async () => {
     setNotice('')
     const result: SignInStart = await state.signIn()
-    // Networking setup lives under Devices; take the person there instead of doing nothing.
+    // Only a locked profile needs Devices: unlocking takes the passphrase.
     if (result === 'needs-setup') onOpenDevices()
     if (result === 'no-service') setNotice('This build has no Mousse ID service address. Set MOUSSE_ID_ORIGIN and restart Mousse.')
   }
@@ -86,7 +85,7 @@ export function AccountSection({ onOpenDevices }: { onOpenDevices: () => void })
         </div>
       )}
 
-      {!plus?.connected && !pending && loaded && !ready && (
+      {!plus?.connected && !pending && loaded && mousseIdPreparation(net) === 'manual' && (
         <p role="status" className="account-note">
           {mousseIdSetupStep(net)}{' '}
           <button type="button" className="account-link" onClick={onOpenDevices}>Open Devices</button>

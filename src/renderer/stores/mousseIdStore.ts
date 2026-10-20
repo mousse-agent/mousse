@@ -5,6 +5,7 @@ import type { NetStatus } from '../../shared/net'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import {
   createWakeableSleep,
+  mousseIdPreparation,
   mousseIdSetupStep,
   signInErrorMessage,
   DEFAULT_MOUSSE_ID_ORIGIN,
@@ -23,7 +24,7 @@ export interface PendingSignIn {
   pollIntervalMs?: number
 }
 
-export type SignInStart = 'started' | 'needs-setup' | 'no-service'
+export type SignInStart = 'started' | 'needs-setup' | 'no-service' | 'failed'
 
 interface MousseIdState {
   /** Mousse profile the status below belongs to. */
@@ -47,11 +48,7 @@ const request = <T,>(method: PlatformRequestMethod, params: unknown = {}) =>
 const message = (cause: unknown) => String((cause as Error | null)?.message ?? cause)
 const errorCode = (cause: unknown) => (cause as { code?: unknown } | null)?.code
 
-export { mousseIdSetupStep, signInErrorMessage }
-
-/** Networking must be on, unlocked and passphrase-protected before Mousse ID can bind it. */
-export const mousseIdReady = (net?: NetStatus): boolean =>
-  !!net?.enabled && !!net.self && net.keystore === 'unlocked' && !!net.protected
+export { mousseIdPreparation, mousseIdSetupStep, signInErrorMessage }
 
 /** The service this window signs in to: runtime `MOUSSE_ID_ORIGIN`, then the build default. */
 export const mousseIdOrigin = (state: Pick<MousseIdState, 'runtimeOrigin'>): string =>
@@ -66,6 +63,14 @@ export function mousseIdName(plus?: PlusStatus): string {
 let current: { controller: AbortController; callbackId?: string } | undefined
 let refreshing: { profileId: string; promise: Promise<void> } | undefined
 let runtimeOriginLoaded = false
+
+/** Creates the network identity, turns networking on and protects keys with the OS keychain as needed. */
+async function prepareNetworking(net: NetStatus | undefined, name: string): Promise<NetStatus> {
+  let status = net
+  if (!status?.self || !status.enabled) status = await request<NetStatus>('net.init', status?.self ? {} : { name })
+  if (!status.protected) status = await request<NetStatus>('net.protect', {})
+  return status
+}
 
 const stopCallback = (id?: string) => {
   if (id) void window.mousse.mousseId?.cancelCallback(id).catch(() => undefined)
@@ -117,19 +122,39 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
     const origin = mousseIdOrigin(get())
     if (!origin) return 'no-service'
     if (!get().loaded) await get().refresh()
-    const { net } = get()
-    if (!mousseIdReady(net)) return 'needs-setup'
+    if (mousseIdPreparation(get().net) === 'manual') return 'needs-setup'
     const profileId = get().profileId
     const controller = new AbortController()
     current = { controller }
     set({ busy: true, error: '' })
+    const deviceName = (await window.mousse.app?.getInfo().catch(() => undefined))?.deviceName?.trim() || 'My device'
+    let net = get().net
+    if (mousseIdPreparation(net) === 'automatic') {
+      try {
+        net = await prepareNetworking(net, deviceName)
+      } catch (cause) {
+        if (current?.controller === controller) current = undefined
+        const conflict = errorCode(cause) === 'conflict'
+        set({
+          busy: false,
+          error: conflict ? ''
+            : errorCode(cause) === 'keystore_locked'
+              ? 'This computer has no system keychain to protect network keys. Set a passphrase under Devices, then sign in.'
+              : `Couldn’t turn on networking: ${message(cause)}`
+        })
+        await get().refresh()
+        // A profile waiting to join another device's network is set up under Devices.
+        return conflict ? 'needs-setup' : 'failed'
+      }
+      if (get().profileId === profileId) set({ net })
+    }
     void (async () => {
       let callbackId: string | undefined
       try {
         const configuration = await request<Omit<PlusConfiguration, 'accountId'>>('net.plus.discover', { apiOrigin: origin })
         const begin = {
           configuration,
-          deviceName: (await window.mousse.app?.getInfo().catch(() => undefined))?.deviceName?.trim() || 'My device',
+          deviceName,
           bindRoot: !!net?.self?.isAuthority
         }
         const pending = await request<PendingSignIn>('net.plus.login.begin', begin).catch(async (cause: unknown) => {

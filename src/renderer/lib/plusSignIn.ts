@@ -158,6 +158,17 @@ export const secondsLeft = (expiresAt: number, now = Date.now()) =>
 export const formatCountdown = (seconds: number) =>
   `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 
+/**
+ * Whether sign-in can get networking ready by itself: create the identity, turn
+ * networking on and protect keys with the OS keychain. Only a locked profile
+ * needs the person, because unlocking takes their passphrase.
+ */
+export function mousseIdPreparation(net?: NetStatus): 'ready' | 'automatic' | 'manual' {
+  if (net?.enabled && net.self && net.keystore === 'unlocked' && net.protected) return 'ready'
+  if (net?.self && net.keystore !== 'unlocked') return 'manual'
+  return 'automatic'
+}
+
 /** What to do first when Mousse ID is not ready yet. */
 export function mousseIdSetupStep(net?: NetStatus): string {
   if (!net?.self) return 'Create a network identity under Devices first.'
