@@ -43,8 +43,6 @@ it('recognizes relay serve at the CLI dispatch boundary', () => {
 it.skipIf(process.platform === 'win32')(
   'serves authenticated opaque bytes from the real CLI and closes cleanly on both signals',
   async () => {
-    // This assertion makes the pre-fix regression safe: an unknown command would enter chat.
-    expect(parseArgs(['relay', 'serve']).command).toBe('relay')
     const directory = await mkdtemp(join(tmpdir(), 'mnfix-relay-cli-'))
     cleanup.push(() => rm(directory, { recursive: true, force: true }))
     const home = join(directory, 'unused-home')

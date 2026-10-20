@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
@@ -135,3 +135,18 @@ it('preserves a receipt ref referenced by another registered profile', async () 
   expect(result.releasedRefs).toEqual([])
   expect(result.retained[0]?.reason).toContain('another task or profile')
 })
+
+it.each(['not a valid Git object identity\n', '0'.repeat(40) + '\n'])('keeps ref release pending when post-deletion verification encounters corrupt Git authority: %j', async (corruptRef) => {
+  const { workspace, receipt, release } = await fixture()
+  const result = await release.release(workspace.worktreePath, { afterGit: () => {
+    const commonDir = resolve(workspace.worktreePath, git(workspace.worktreePath, 'rev-parse', '--git-common-dir'))
+    const path = join(commonDir, receipt.retainedRefs[0]!)
+    mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, corruptRef)
+  } })
+  expect(result.releasedRefs).toEqual([])
+  expect(result.retained).toHaveLength(1)
+  const operations = [...new ThreadJournal(f.thread).latestByOperation().values()].filter((entry) => entry.operationType === 'undo-ref-release')
+  expect(operations).toHaveLength(1)
+  expect(operations[0].state).toBe('prepared')
+  expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.baseSha)
+}, 30_000)

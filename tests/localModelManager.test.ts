@@ -4,7 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { LocalModelManager } from '../src/main/localModels/LocalModelManager'
+import { LocalModelManager, defaultLocalModelsRoot } from '../src/main/localModels/LocalModelManager'
 import { localTtsFileUrl, type LocalTtsModel, type LocalTtsModelStatus } from '../src/shared/readAloud'
 
 const sha = (data: Uint8Array | string): string => createHash('sha256').update(data).digest('hex')
@@ -58,7 +58,7 @@ function listFiles(dir: string): string[] {
   )
 }
 
-describe('LocalModelManager with a text-to-speech manifest', () => {
+describe('LocalModelManager', () => {
   it('downloads, verifies, marks complete, and serves manifest files', async () => {
     const model = fakeModel()
     const rootDir = tempRoot()
@@ -238,6 +238,11 @@ describe('LocalModelManager with a text-to-speech manifest', () => {
     expect((await manager.delete('kokoro-82m')).state).toEqual({ status: 'not-downloaded' })
     expect((await pending).state).toEqual({ status: 'not-downloaded' })
     expect(existsSync(join(rootDir, 'kokoro-82m'))).toBe(false)
+  })
+
+  it('keeps speech-to-text and text-to-speech weights in separate folders', () => {
+    expect(defaultLocalModelsRoot('stt')).toMatch(/models[\\/]stt$/)
+    expect(defaultLocalModelsRoot('tts')).toMatch(/models[\\/]tts$/)
   })
 
   it('rejects unknown model ids', () => {

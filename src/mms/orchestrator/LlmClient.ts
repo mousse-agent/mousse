@@ -564,9 +564,6 @@ export function getCacheSessionId(threadId: string | undefined): string | undefi
  */
 export const DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS = 180_000
 
-/** Kept for compatibility — identical to the default applied to every provider. */
-export const XAI_STREAM_INACTIVITY_TIMEOUT_MS = DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS
-
 /**
  * Resolve the effective per-stream inactivity timeout. An explicit override
  * (including 0 to disable) always wins; otherwise every provider gets the

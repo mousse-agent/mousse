@@ -297,37 +297,6 @@ describe('RunEngine', () => {
       'stale_write'
     )
   })
-
-  it('interrupts active runs on boot and leaves queued runs alone', async () => {
-    const { engine } = open()
-    const a = await send(engine, 't1', 'req-a')
-    const b = await send(engine, 't1', 'req-b')
-    const c = await send(engine, 't2', 'req-c')
-    if (a.status !== 'accepted' || b.status !== 'accepted' || c.status !== 'accepted')
-      throw new Error('send rejected')
-    engine.markStarting(a.runId)
-    engine.markRunning(a.runId)
-    engine.markStarting(c.runId)
-
-    // A fresh engine on a fresh connection, as after a daemon restart.
-    const store = new RunStore(openDb())
-    const rebooted = new RunEngine({ store })
-    const events: ThreadEvent[] = []
-    rebooted.on('event', (event: ThreadEvent) => events.push(event))
-    expect(rebooted.reconcileOnBoot()).toMatchObject({
-      interrupted: [a.runId, c.runId],
-      uncertain: []
-    })
-    expect(store.getRun(a.runId)).toMatchObject({
-      status: 'interrupted',
-      outcome: { interruptedBy: 'daemon_restart' }
-    })
-    expect(store.getAttempt(store.getRun(a.runId)!.activeAttemptId!)!.status).toBe('interrupted')
-    expect(store.getRun(c.runId)!.status).toBe('interrupted')
-    expect(store.getRun(b.runId)!.status).toBe('queued')
-    expect(events.filter((event) => event.type === 'run.status')).toHaveLength(2)
-    expect(rebooted.reconcileOnBoot()).toMatchObject({ interrupted: [], uncertain: [] })
-  })
 })
 
 describe('RunEngine.runLocalAction (SPEC §16.3)', () => {

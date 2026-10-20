@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'vitest'
 import { RosterEvidence } from '../../../src/mms/spaces/RosterEvidence'
-import { newId, spaceMetaStream } from '../../../src/shared/net'
+import { newId } from '../../../src/shared/net'
 import { cleanup, profile, peer } from './host/helpers'
 
 afterEach(cleanup)
@@ -37,7 +37,6 @@ it('discovers the signed Space meta stream and retains membership at its origina
   const a = await profile(),
     created = a.host.create({ name: 'History' }),
     self = peer(a)
-  expect(created.meta).toBe(spaceMetaStream(created.space))
   const original = a.projection.memberAt(created.space, self.user, { metaEpoch: 1, metaSeq: 1 })
   expect(original).toMatchObject({ user: self.user, role: 'owner', rootKey: a.keys.rootKey() })
   expect(

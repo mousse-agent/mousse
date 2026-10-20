@@ -165,4 +165,13 @@ describe('profile-owned file artifacts', () => {
     }
     await expect(store.get(ref.id, 'profile-a')).rejects.toThrow('blob must be a regular file')
   })
+
+  it('rejects path-shaped ids and detects blob tampering', async () => {
+    const root = ownedRoot('tamper')
+    const store = new FileArtifactStore({ profileId: 'profile-a', profileRoot: root })
+    await expect(store.get('../../outside', 'profile-a')).rejects.toThrow(/Invalid artifact id/)
+    const ref = await put(store)
+    writeFileSync(artifactPaths(root, ref.id).blob, 'changed')
+    await expect(store.get(ref.id, 'profile-a', { runId: 'run-a' })).rejects.toThrow(/integrity mismatch/)
+  })
 })

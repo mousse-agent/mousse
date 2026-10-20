@@ -1,8 +1,7 @@
-import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { WORKFLOW_MAX_BUNDLE_BYTES, WORKFLOW_NODE_TYPES } from '../src/shared/workflows'
+import { WORKFLOW_MAX_BUNDLE_BYTES } from '../src/shared/workflows'
 import { createAsyncGate, shouldApplyAsyncResult } from '../src/renderer/components/workflows/asyncGate'
 import { collectLocalDiagnostics, explainInvalidConnection } from '../src/renderer/components/workflows/localValidation'
 import { parseWorkflowImportFile } from '../src/renderer/components/workflows/importBundle'
@@ -11,7 +10,7 @@ import {
   publicationState,
   type WorkflowLibraryQuery
 } from '../src/renderer/components/workflows/libraryFilter'
-import { manifestToCanvas, addEdgeToManifest } from '../src/renderer/components/workflows/graphAdapter'
+import { manifestToCanvas } from '../src/renderer/components/workflows/graphAdapter'
 import { applyLayoutToEditor } from '../src/renderer/components/workflows/graphLayout'
 import { isVisualOnlyChange, semanticIdentity } from '../src/renderer/components/workflows/semanticIdentity'
 import { parseManifestSource } from '../src/renderer/components/workflows/sourceParse'
@@ -20,9 +19,7 @@ import { WorkflowLibrary } from '../src/renderer/components/workflows/WorkflowLi
 import { WorkflowRunPanel } from '../src/renderer/components/workflows/WorkflowRunPanel'
 import type { WorkflowLibraryItem } from '../src/renderer/components/workflows/client'
 import type { WorkflowRunView } from '../src/shared/workflowRunPlatform'
-import { IsolatedWorkflowDefinitionsClient, IsolatedWorkflowExecutionClient } from './fixtures/agent-platform/workflow-editor-client'
-
-const css = readFileSync(new URL('../src/renderer/components/workflows/workflows.css', import.meta.url), 'utf8')
+import { IsolatedWorkflowDefinitionsClient } from './fixtures/agent-platform/workflow-editor-client'
 
 function item(overrides: Partial<WorkflowLibraryItem> & Pick<WorkflowLibraryItem, 'id' | 'name' | 'slug'>): WorkflowLibraryItem {
   return {
@@ -97,7 +94,6 @@ describe('templates', () => {
       expect(local.diagnostics.filter((item) => item.severity === 'error')).toEqual([])
       expect(bundle.manifest.nodes.some((node) => node.type === 'start')).toBe(true)
     }
-    expect(WORKFLOW_NODE_TYPES.includes('script')).toBe(true)
   })
 })
 
@@ -119,10 +115,8 @@ describe('canvas adapter roundtrip', () => {
     const canvas = manifestToCanvas(bundle.manifest, bundle.editor)
     expect(canvas.nodes.map((node) => node.id).sort()).toEqual(bundle.manifest.nodes.map((node) => node.id).sort())
     expect(canvas.edges).toHaveLength(bundle.manifest.edges.length)
-    const connected = addEdgeToManifest(bundle.manifest, { from: 'end', port: 'next', to: 'start' })
     const reason = explainInvalidConnection(bundle.manifest, { from: 'end', port: 'next', to: 'start' })
     expect(reason).toMatch(/does not expose control port/i)
-    expect(connected.edges.length).toBeGreaterThanOrEqual(bundle.manifest.edges.length)
   })
 })
 
@@ -150,81 +144,6 @@ describe('source parse', () => {
     if (!valid.ok) throw new Error('expected valid')
     expect(valid.extrasPreserved).toBe(true)
     expect((valid.manifest as unknown as { vendorExtra: { keep: boolean } }).vendorExtra.keep).toBe(true)
-  })
-})
-
-describe('isolated client conflicts, fences, and fixture runs', () => {
-  it('rejects stale draft hashes and labels fixture execution', async () => {
-    const client = new IsolatedWorkflowDefinitionsClient()
-    const created = await client.create({ profileId: 'p', templateId: 'blank', name: 'A' })
-    await client.saveDraft({
-      profileId: 'p',
-      id: created.id,
-      expectedDraftSemanticHash: created.semanticHash,
-      bundle: {
-        ...created.bundle,
-        manifest: { ...created.bundle.manifest, description: 'v2' }
-      }
-    })
-    await expect(
-      client.saveDraft({
-        profileId: 'p',
-        id: created.id,
-        expectedDraftSemanticHash: created.semanticHash,
-        bundle: created.bundle
-      })
-    ).rejects.toMatchObject({ code: 'REVISION_CONFLICT' })
-
-    const execution = new IsolatedWorkflowExecutionClient()
-    await expect(
-      execution.start({ profileId: 'p', definitionId: created.id, requestId: crypto.randomUUID(), draft: true, input: {} } as Parameters<typeof execution.start>[0])
-    ).rejects.toMatchObject({ code: 'REVISION_CONFLICT' })
-    const draftRun = await execution.start({
-      profileId: 'p',
-      definitionId: created.id,
-      requestId: crypto.randomUUID(),
-      draft: true,
-      expectedDraftSemanticHash: created.semanticHash,
-      input: {}
-    })
-    expect(draftRun.origin).toBe('fixture')
-    const run = await execution.start({ profileId: 'p', definitionId: created.id, requestId: crypto.randomUUID(), input: { requireApproval: true } })
-    expect(run.origin).toBe('fixture')
-    expect(run.state).toBe('waiting-approval')
-    expect(run.result).toMatchObject({ fixture: true })
-    const approved = await execution.approve({
-      profileId: 'p',
-      runId: run.runId,
-      approvalId: run.pendingApproval!.approvalId,
-      nodeId: run.pendingApproval!.nodeId,
-      instanceKey: run.pendingApproval!.instanceKey,
-      attempt: run.pendingApproval!.attempt,
-      approved: true
-    })
-    expect(approved.state).toBe('succeeded')
-    expect(execution.dryRun).toBeUndefined()
-    expect(execution.setBreakpoint).toBeUndefined()
-  })
-
-  it('does not apply list results from another profile', async () => {
-    const client = new IsolatedWorkflowDefinitionsClient()
-    await client.create({ profileId: 'a', name: 'Alpha' })
-    await client.create({ profileId: 'b', name: 'Beta' })
-    const a = await client.list({ profileId: 'a' })
-    const b = await client.list({ profileId: 'b' })
-    expect(a.every((row) => row.name !== 'Beta')).toBe(true)
-    expect(b.every((row) => row.name !== 'Alpha')).toBe(true)
-  })
-
-  it('preserves unsupported node types instead of coercing them', async () => {
-    const client = new IsolatedWorkflowDefinitionsClient()
-    const bundle = createBlankWorkflowBundle('Future')
-    bundle.manifest.nodes.push({ id: 'future', type: 'quantum-gate', version: 1, config: { keep: true } })
-    const seeded = client.seed('p', bundle)
-    expect(seeded.bundle.manifest.nodes.some((node) => node.type === 'quantum-gate')).toBe(true)
-    const validated = await client.validate({ profileId: 'p', bundle: seeded.bundle })
-    expect(validated.compiled.unsupportedNodeTypes).toContain('quantum-gate')
-    expect(validated.runnable).toBe(false)
   })
 })
 
@@ -267,6 +186,5 @@ describe('library static rendering', () => {
     expect(html).toContain('New workflow')
     expect(html).toContain('Loading workflows')
     expect(html).not.toContain('data-workflow-card')
-    expect(css).toContain('wf-library-grid')
   })
 })

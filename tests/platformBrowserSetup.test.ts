@@ -1,5 +1,5 @@
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { isAbsolute, join, relative } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -27,7 +27,6 @@ import type {
 import {
   BROWSER_SETUP_CAPABILITY,
   BROWSER_SETUP_IN_APP_NOTE,
-  BROWSER_SETUP_METHODS,
   BrowserSetupStatusPoller,
   type BrowserSetupStatus
 } from '../src/shared/browser/setup'
@@ -381,8 +380,6 @@ describe('managed browser setup methods', () => {
     await expect(domains.dispatch(cli, 'browser.setup.cancel', { operationId: randomUUID() })).rejects.toMatchObject({ code: 'operation_not_found' })
     await domains.dispatch(cli, 'browser.setup.cancel', { operationId: started.operationId })
     while (service.getActiveCount() > 0) await delay(10)
-    expect(BROWSER_AUTOMATION_TOOLS.join()).not.toContain('browser.setup')
-    expect([...BROWSER_SETUP_METHODS]).toEqual(['browser.setup.status', 'browser.setup.install', 'browser.setup.cancel'])
   })
 
   it('shares one framed operation across profiles and strips private paths', async () => {
@@ -505,7 +502,7 @@ describe('managed browser setup methods', () => {
   })
 })
 
-describe('managed browser setup poller and panel copy', () => {
+describe('managed browser setup poller', () => {
   it('does not overlap status requests and ignores results after dispose', async () => {
     let inflight = 0
     let max = 0
@@ -541,16 +538,6 @@ describe('managed browser setup poller and panel copy', () => {
     resolveStatus?.(late)
     await delay(10)
     expect(seen).toEqual([])
-  })
-
-  it('exposes install and cancel actions and the in-app independence note', () => {
-    const source = readFileSync(resolve('src/renderer/components/browserAutomation/BrowserSetupPanel.tsx'), 'utf8')
-    expect(source).toContain('Install managed browser')
-    expect(source).toContain('Cancel')
-    expect(source).toContain('BROWSER_SETUP_IN_APP_NOTE')
-    expect(source).toContain('browser.setup.install')
-    expect(source).toContain('browser.setup.cancel')
-    expect(source).toContain('BrowserSetupStatusPoller')
   })
 })
 

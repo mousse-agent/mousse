@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Reconciler } from '../../src/mms/run/Reconciler'
+import { formatRestartNote } from '../../src/mms/run/restartNote'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 describe('continue after restart (SPEC §16.4)', () => {
@@ -116,7 +117,9 @@ describe('continue after restart (SPEC §16.4)', () => {
     expect(notes.map((event) => event.payload)).toEqual([{ epoch: 2, runIds: [sent.runId], uncertainRunIds: [], cutOffTools: [] }])
     // The next turn opens with the note, once.
     await second.orch.send('Next', false, { threadId: thread.id, clientRequestId: 'next-1' })
-    expect(systemOf(second)).toContain('The Mousse daemon restarted during the previous turn. Interrupted: 1 run(s).')
+    expect(systemOf(second)).toContain(
+      formatRestartNote({ epoch: 2, runIds: [sent.runId!], uncertainRunIds: [], cutOffTools: [] })
+    )
   })
 
   it('a queued send whose turn.start died with the daemon runs after the restart (rule 5)', async () => {
@@ -146,6 +149,8 @@ describe('continue after restart (SPEC §16.4)', () => {
     await waitFor(() => second.engine.getRun(sent.runId)!.status === 'completed', 'the restarted run')
     expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Pick this up'])
     const system = second.orch.getMessages(thread.id).filter((message) => message.role === 'system').map((message) => message.content)
-    expect(system).toContain('The Mousse daemon restarted before this turn started. Queued before the restart: 1 run(s).')
+    expect(system).toContain(
+      formatRestartNote({ epoch: 2, runIds: [], uncertainRunIds: [], cutOffTools: [], queuedRunIds: [sent.runId] })
+    )
   })
 })

@@ -5,7 +5,7 @@ import { buildLineEditSnapshot, buildUsageStatsSnapshot } from '../src/shared/li
 import { LineEditHeatmap } from '../src/renderer/components/LineEditHeatmap'
 
 describe('Settings usage analytics rendering', () => {
-  it('renders metric/provider/model controls and graphical token summaries', () => {
+  it('renders the token summary figures and the provider and model options from the snapshot', () => {
     const usage = buildUsageStatsSnapshot([{
       timestamp: '2026-08-25T10:00:00.000Z', provider: 'openai', model: 'gpt-test',
       input: 1_000, output: 250, cacheRead: 500, cacheWrite: 50
@@ -14,15 +14,13 @@ describe('Settings usage analytics rendering', () => {
       stats: buildLineEditSnapshot({}), usage
     }))
 
-    expect(html).toContain('Heatmap metric')
-    expect(html).toContain('Provider filter')
-    expect(html).toContain('Model filter')
-    expect(html).toContain('Tokens in')
-    expect(html).toContain('Tokens out')
-    expect(html).toContain('Cached')
-    expect(html).toContain('Cache ratio')
-    expect(html).toContain('usage-stat-track')
-    expect(html).toContain('openai')
-    expect(html).toContain('gpt-test')
+    // Visible text with tags removed: the figures come from the snapshot, cache = read + write.
+    const text = html.replace(/<[^>]+>/g, '|')
+    expect(text).toMatch(/Tokens in\|+1,000\b/)
+    expect(text).toMatch(/Tokens out\|+250\b/)
+    expect(text).toMatch(/Cached\|+550\b/)
+    expect(text).toMatch(/Cache ratio\|+33\.3%/)
+    expect(text).toContain('openai')
+    expect(text).toContain('gpt-test')
   })
 })

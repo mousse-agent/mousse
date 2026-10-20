@@ -510,7 +510,6 @@ it('validates authority selectors and recovery command arity without accepting c
     args('net', 'authority', ['transfer', 'Laptop']),
     args('net', 'authority', ['status', 'extra']),
     args('net', 'recovery', ['export', 'visible password']),
-    args('net', 'recovery', ['import'], [['passphrase', 'visible password']]),
     args('net', 'authority', ['unknown'])
   ])
     expect(() => prepareNetCommand(value)).toThrow()

@@ -2,12 +2,10 @@ import type { Message } from '@earendil-works/pi-ai'
 import { describe, expect, it, vi } from 'vitest'
 import type { ClaudeSubscriptionChatInput } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import {
-  ANTIGRAVITY_CAPABILITIES,
   AntigravityAdapter,
   type AntigravityClient
 } from '../../src/mms/run/adapters/antigravity/AntigravityAdapter'
 import {
-  CLAUDE_SUBSCRIPTION_CAPABILITIES,
   ClaudeSubscriptionAdapter,
   type ClaudeSubscriptionClient
 } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
@@ -91,7 +89,6 @@ describe('ClaudeSubscriptionAdapter', () => {
   it('declares its capabilities, reports its context and stops through the signal', async () => {
     const adapter = new ClaudeSubscriptionAdapter(() => null)
     expect(adapter.driver).toBe('claude')
-    expect(adapter.capabilities).toBe(CLAUDE_SUBSCRIPTION_CAPABILITIES)
     expect(adapter.capabilities).toMatchObject({ steer: 'interrupt_restart', interrupt: true, containment: 'weak', historyInjection: 'prompt' })
     expect(adapter.describe('sonnet')).toEqual({ contextUsage: 'reported' })
     expect(adapter.configured()).toBe(false)
@@ -221,7 +218,6 @@ describe('AntigravityAdapter', () => {
     const service = client(async () => 'never')
     const adapter = new AntigravityAdapter(() => service)
     expect(adapter.driver).toBe('antigravity')
-    expect(adapter.capabilities).toBe(ANTIGRAVITY_CAPABILITIES)
     expect(adapter.capabilities).toMatchObject({ steer: 'interrupt_restart', interrupt: true, events: 'sparse', historyInjection: 'prompt' })
     expect(adapter.describe('m')).toEqual({ contextUsage: 'none' })
     expect(adapter.configured()).toBe(true)

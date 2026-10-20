@@ -36,6 +36,7 @@ describe('Git foundation pinned child results', () => {
     })
     expect(git(f.repo, 'rev-list', '--parents', '-n', '1', 'HEAD').split(/\s+/)).toEqual([integrated.integrationSha, f.baseSha, result])
     for (const ref of receipts[0].retainedRefs) expect(git(f.repo, 'rev-parse', ref)).toMatch(/^[0-9a-f]{40}$/)
+    expect(git(f.repo, 'rev-parse', 'refs/mousse/agents/child')).toBe(result)
     expect(await service.integrate(input)).toEqual(integrated)
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(integrated.integrationSha)
     expect(new ChangeReceiptService(f.thread).list()).toEqual(receipts)

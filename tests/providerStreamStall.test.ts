@@ -9,8 +9,7 @@ import {
   consumeAssistantStream,
   DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS,
   ProviderStreamStallError,
-  resolveStreamInactivityTimeout,
-  XAI_STREAM_INACTIVITY_TIMEOUT_MS
+  resolveStreamInactivityTimeout
 } from '../src/mms/orchestrator/LlmClient'
 import {
   isConnectionFailure,
@@ -124,7 +123,6 @@ describe('provider stream inactivity protection', () => {
     // forever: concurrent turns on other providers used to hang with Stop as
     // the only way out.
     expect(DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS).toBe(180_000)
-    expect(XAI_STREAM_INACTIVITY_TIMEOUT_MS).toBe(DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS)
     expect(resolveStreamInactivityTimeout(undefined)).toBe(
       DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS
     )

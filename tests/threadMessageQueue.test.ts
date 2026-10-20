@@ -592,37 +592,9 @@ describe('OrchestratorService concurrent threads and queue', () => {
     spy.mockRestore()
   })
 
-  it('enqueues when a live peer holds the execution lease', async () => {
-    const { tryAcquireExecutionLease, releaseExecutionLeaseHandle } = await import(
-      '../src/mms/queue/ThreadExecutionLease'
-    )
-    const thread = store.createThread('LeasePeer')
+  it('queues a forced send durably with its source label', async () => {
+    const thread = store.createThread('ForceQueue')
     orch.bindThread(thread.id, [], undefined, [])
-    const threadDir = store.getThreadDir(thread.id)
-    const peer = tryAcquireExecutionLease(threadDir, {
-      source: 'peer-process',
-      // Different token, same pid — isLeaseHeldByLivePeer treats same-pid as not external.
-      // Simulate a foreign live owner with a forged dead-looking pid that we mark alive via
-      // real current pid but different process identity is hard; use foreign pid that is alive:
-      // instead write lease with our pid but check isThreadLeaseHeldExternally without self token.
-      token: 'peer-token',
-      pid: process.pid
-    })
-    expect(peer).not.toBeNull()
-
-    // Same pid is not "external" — force a different live peer by writing another pid that
-    // isProcessAlive cannot prove dead: use a child-less approach with mocked lease file of
-    // a high dead pid then verify reclaim path separately. Here we test forceQueue + durable
-    // path and external steer when lease is held by forging isThreadLeaseHeldExternally.
-    releaseExecutionLeaseHandle(peer!)
-
-    // Hold lease as external by using a token the orchestrator does not know.
-    const external = tryAcquireExecutionLease(threadDir, {
-      token: 'external-owner',
-      pid: process.pid
-    })!
-    // isThreadLeaseHeldExternally without selfToken: same pid returns not held.
-    // Use forceQueue to assert durable enqueue source still works with source label.
     const result = await orch.send('from-peer', false, {
       threadId: thread.id,
       source: 'cli-peer',
@@ -631,7 +603,6 @@ describe('OrchestratorService concurrent threads and queue', () => {
     expect(result.queued).toBe(true)
     expect(result.queueItem?.source).toBe('cli-peer')
     expect(store.loadMessageQueue(thread.id).map((i) => i.content)).toContain('from-peer')
-    releaseExecutionLeaseHandle(external)
   })
 
   it('persists external steer intent for the active owner and drops it once', () => {
@@ -665,17 +636,6 @@ describe('OrchestratorService concurrent threads and queue', () => {
         state: 'steering'
       })
     ])
-  })
-
-  it('isolates projectCwd per session without process.chdir', () => {
-    const t1 = store.createThread('CwdA')
-    const t2 = store.createThread('CwdB')
-    const s1 = orch.getOrCreateSession(t1.id)
-    const s2 = orch.getOrCreateSession(t2.id)
-    s1.projectCwd = join(home, 'proj-a')
-    s2.projectCwd = join(home, 'proj-b')
-    expect(s1.projectCwd).not.toBe(s2.projectCwd)
-    expect(process.cwd()).not.toBe(s1.projectCwd)
   })
 
   it('holds the execution lease through final transcript persistence', async () => {
@@ -1452,9 +1412,7 @@ describe('OrchestratorService concurrent threads and queue', () => {
     const failures: Array<{ error: string; queueItemId?: string }> = []
     orch.on('queue-drain-failed', (payload) => failures.push(payload))
 
-    let persistCalls = 0
     orch.setPersistCallback(() => {
-      persistCalls += 1
       throw new Error('persist boom')
     })
 
@@ -1481,13 +1439,7 @@ describe('OrchestratorService concurrent threads and queue', () => {
     // It may still be claimed (preferred) or pending only if never claimed — assert not re-enqueued at tail with new id.
     const byContent = still.filter((i) => i.content === 'must-stay-claimed-on-unreadable')
     expect(byContent).toHaveLength(1)
-    // If claimed, good; if release happened wrongly we'd still have 1 pending — check claimed preferred after unreadable.
-    // With unreadable after claim, settle leaves claimed.
-    expect(byContent[0].state === 'claimed' || byContent[0].state === 'pending').toBe(true)
-    // Must not have completed/removed the item while provenance was unavailable.
-    expect(byContent[0]).toBeDefined()
-    void persistCalls
-    // Strong assertion: unavailable path must leave claimed (not release).
+    // Unavailable provenance must leave the claim claimed, never release or complete it.
     expect(byContent[0].state).toBe('claimed')
   })
 })

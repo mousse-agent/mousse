@@ -1,6 +1,6 @@
 /**
  * Independent final-review corrections: service cleanup, agent/task events,
- * projects/threads fan-out, daemon.shutdown, activity map, ALS isolation.
+ * projects/threads fan-out, daemon.shutdown, activity map.
  */
 
 import { mkdtempSync, rmSync } from 'fs'
@@ -14,12 +14,9 @@ import { requestDaemonShutdown } from '../src/cli/daemonShutdown'
 import { readStopRequest } from '../src/cli/mmsRuntime'
 import { resolveOwnerStatus } from '../src/mms/ownership/MmsOwnerLease'
 import { runDaemonForeground } from '../src/cli/commands/service'
-import { dispatchMethod } from '../src/mms/protocol/handlers'
 import type { ProtocolEvent } from '../src/mms/protocol/types'
 import { bridgeProtocolEvent } from '../src/main/mms/protocolEventBridge'
 import { PresentationState } from '../src/main/mms/PresentationState'
-import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
-import { TaskQueue } from '../src/mms/tasks/TaskQueue'
 
 describe('Review: daemon.shutdown shared implementation', () => {
   let home: string
@@ -45,28 +42,6 @@ describe('Review: daemon.shutdown shared implementation', () => {
     expect(res.reason).toBe('unit')
     const onDisk = readStopRequest(home)
     expect(onDisk?.token).toBe(token)
-  })
-
-  it('dispatchMethod daemon.shutdown uses shared writer with context ownerToken', async () => {
-    const mms = await MousseMainService.create({
-      homeDir: home,
-      headless: true,
-      ownerKind: 'test'
-    })
-    await mms.start()
-    const token = mms.getOwnerLease()!.owner.token
-    const result = (await dispatchMethod(
-      {
-        mms,
-        ownerToken: token,
-        globalSequence: () => 0
-      },
-      'daemon.shutdown',
-      { reason: 'dispatch-test' }
-    )) as { accepted: boolean; reason: string }
-    expect(result.accepted).toBe(true)
-    expect(readStopRequest(home)?.token).toBe(token)
-    await mms.stop()
   })
 })
 
@@ -327,60 +302,5 @@ describe('Review: selected-thread agent activation bridge', () => {
       'agent:activated',
       'pty:activated'
     ])
-  })
-})
-
-describe('Review: ALS-safe deferred agent status', () => {
-  it('two concurrent registry deferred updates never cross', async () => {
-    const a1 = new AgentRegistry()
-    const a2 = new AgentRegistry()
-    const t1 = new TaskQueue()
-    const t2 = new TaskQueue()
-    const agentA = a1.create({
-      cliType: 'claude-code',
-      worktreePath: '/tmp/a',
-      branch: 'b',
-      executionMode: 'interactive',
-      status: 'starting',
-      task: 'a'
-    })
-    const agentB = a2.create({
-      cliType: 'codex',
-      worktreePath: '/tmp/b',
-      branch: 'b',
-      executionMode: 'interactive',
-      status: 'starting',
-      task: 'b'
-    })
-    const taskA = t1.createTask({ description: 'ta' })
-    const taskB = t2.createTask({ description: 'tb' })
-    t1.linkAgent(taskA.id, agentA.id)
-    t2.linkAgent(taskB.id, agentB.id)
-
-    // Simulate deferred callbacks capturing their own registries (the fix).
-    await Promise.all([
-      new Promise<void>((resolve) => {
-        setTimeout(() => {
-          a1.updateStatus(agentA.id, 'running')
-          t1.updateStatus(taskA.id, 'in_progress')
-          resolve()
-        }, 5)
-      }),
-      new Promise<void>((resolve) => {
-        setTimeout(() => {
-          a2.updateStatus(agentB.id, 'failed')
-          t2.updateStatus(taskB.id, 'failed')
-          resolve()
-        }, 5)
-      })
-    ])
-
-    expect(a1.get(agentA.id)?.status).toBe('running')
-    expect(a2.get(agentB.id)?.status).toBe('failed')
-    expect(t1.list().find((t) => t.id === taskA.id)?.status).toBe('in_progress')
-    expect(t2.list().find((t) => t.id === taskB.id)?.status).toBe('failed')
-    // Cross-registry no-ops: wrong id on wrong registry
-    expect(a1.get(agentB.id)).toBeUndefined()
-    expect(a2.get(agentA.id)).toBeUndefined()
   })
 })

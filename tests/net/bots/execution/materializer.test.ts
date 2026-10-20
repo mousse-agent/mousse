@@ -114,7 +114,7 @@ describe('actual MMS standalone bot threads and preplanned owned workspace', () 
     expect(() => f.materializer.materialize({ ...f.record, state: 'uncertain' }, reader)).toThrow()
     expect(() =>
       f.materializer.materialize(
-        { ...f.record, binding: { ...f.record.binding!, workspaceId: '../../escape' } },
+        { ...f.record, binding: { ...f.record.binding!, workspaceId: 'forged-workspace-id' } },
         reader
       )
     ).toThrow()

@@ -103,6 +103,8 @@ describe('profile drain and durable scheduler ownership', () => {
       await Promise.all([discoveryEntered.promise, requestEntered.promise])
       await expect(host.remove(profile.id, profile.revision)).rejects.toMatchObject({ code: 'profile_busy' })
       expect(host.getLive(profile.id)).toBe(services)
+      expect(host.manager.get(profile.id).status).toBe('active')
+      await expect(host.getProfileServices(profile.id)).rejects.toMatchObject({ code: 'profile_draining' })
       expect(services.getOwnedActivity()).toMatchObject({ 'rpc:fixture.profileWrite': 1 })
       for (const owner of ['mcpWork', 'channelWork']) expect(services.getOwnedActivity()[owner]).toBeGreaterThan(0)
       await expect(services.mcpManager.listConfiguredServers()).rejects.toMatchObject({ code: 'profile_draining' })
@@ -117,6 +119,7 @@ describe('profile drain and durable scheduler ownership', () => {
       releaseChannel.resolve(); stop.mockRestore()
       await host.remove(profile.id, profile.revision)
       expect(adapter.connected).toBe(false)
+      expect(host.getLive(profile.id)).toBeUndefined()
       expect(existsSync(profileRoot)).toBe(false)
       const moved = readdirSync(join(home, 'trash', 'profiles')).find((name) => name.startsWith(`${profile.id}-`))!
       expect(readFileSync(join(home, 'trash', 'profiles', moved, 'mcp-final.txt'), 'utf8')).toBe('discovery settled')
@@ -250,28 +253,6 @@ describe('profile drain and durable scheduler ownership', () => {
       release.resolve(); await Promise.allSettled([pending, removal])
       await Promise.all([bobClient.close(), adminClient.close(), peerClient.close()]); await server.stop(); await main.stop()
     }
-  }, 20_000)
-
-  it('retains the original runtime after a drain deadline and a later removal retry awaits that same work', async () => {
-    vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
-    const root = ownedRoot(), main = await MousseMainService.create({ homeDir: join(root, 'home'), repoRoot: root, requireOwnership: false })
-    const host = main.getInstallationHost()!, bob = host.manager.create({ displayName: 'Bob', slug: 'bob' })
-    const services = await main.getProfileServices(bob.id), release = deferred()
-    const work = services.runOwnedRequest('fixture-held', () => release.promise)
-    const originalStop = services.stop.bind(services)
-    const stop = vi.spyOn(services, 'stop').mockImplementation(() => originalStop({ timeoutMs: 10 }))
-    try {
-      await expect(host.remove(bob.id, bob.revision)).rejects.toMatchObject({ code: 'profile_busy' })
-      expect(host.getLive(bob.id)).toBe(services)
-      expect(host.manager.get(bob.id).status).toBe('active')
-      expect(existsSync(services.getProfileHomeDir())).toBe(true)
-      await expect(host.getProfileServices(bob.id)).rejects.toMatchObject({ code: 'profile_draining' })
-      expect(services.getOwnedActivity()['rpc:fixture-held']).toBe(1)
-      release.resolve(); await work
-      stop.mockRestore()
-      await host.remove(bob.id, bob.revision)
-      expect(host.getLive(bob.id)).toBeUndefined()
-    } finally { release.resolve(); await work; stop.mockRestore(); await main.stop() }
   }, 20_000)
 
   it('preserves profile_busy when a nested drain owner reaches its deadline', async () => {

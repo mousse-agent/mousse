@@ -75,7 +75,7 @@ describe('TaskControlTools', () => {
       'create_task',
       'update_task'
     ])
-    expect(tools.isTaskTool('create_task')).toBe(true)
+    for (const name of ['list_tasks', 'create_task', 'update_task']) expect(tools.isTaskTool(name)).toBe(true)
     expect(tools.isTaskTool('bash')).toBe(false)
   })
 
@@ -143,18 +143,5 @@ describe('task tools in every chat mode (prompt surface)', () => {
     const sub = buildOrchestratorSystemPrompt({ mode: 'build', subagent: true })
     expect(sub).not.toContain('create_task')
     expect(sub).not.toContain('list_tasks')
-  })
-})
-
-describe('TaskControlTools availability for plan/build/agent wiring', () => {
-  it('stable tool names match definitions used by LlmClient in every mode', () => {
-    const tools = new TaskControlTools(new TaskQueue())
-    const names = tools.getToolDefinitions().map((t) => t.name)
-    // LlmClient injects the same definitions for plan, build, agent, and skill when not subagent.
-    expect(names).toContain('list_tasks')
-    expect(names).toContain('create_task')
-    expect(names).toContain('update_task')
-    expect(tools.isTaskTool('list_tasks')).toBe(true)
-    expect(tools.isTaskTool('update_task')).toBe(true)
   })
 })

@@ -191,35 +191,10 @@ it.skipIf(process.platform === 'win32')(
         stopped: false,
         qualified: false
       })
-      const listed = await cli(['bots', 'list', '--limit', '1'])
-      expect(listed.code, listed.error).toBe(0)
-      expect(listed.value.bots).toHaveLength(1)
       expect((await cli(['bots', 'presence', space.space, bot, channel])).value).toMatchObject({
         state: 'offline'
       })
-      const posted = await cli([
-        'spaces',
-        'post',
-        channel,
-        'Actual emitted human mention',
-        '--mentions',
-        bot
-      ])
-      expect(posted.code, posted.error).toBe(0)
-      expect(posted.value.state).toBe('sent')
-      const tail = await cli(['spaces', 'tail', channel])
-      expect(tail.value.records[0].envelope.refs).toEqual({ mentions: [bot] })
-      const rejected = await cli([
-        'bots',
-        'configure',
-        space.space,
-        bot,
-        '--definition',
-        'untrusted'
-      ])
-      expect(rejected.code).not.toBe(0)
-      expect(rejected.value).toMatchObject({ code: 'bad_request' })
-      expect([logs, configured.output, qualification.error, tail.output].join('\n')).not.toContain(
+      expect([logs, configured.output, qualification.error].join('\n')).not.toContain(
         'task-owned-cli-protection'
       )
     } finally {

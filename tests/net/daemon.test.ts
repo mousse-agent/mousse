@@ -6,6 +6,7 @@ import { afterAll, beforeAll, expect, it } from 'vitest'
 import type { NetStatus } from '../../src/shared/net/local'
 
 import { buildTestCli } from './helpers/build'
+import { stop, until } from './helpers/process'
 
 let fixture: Awaited<ReturnType<typeof buildTestCli>> | undefined
 let entry: string
@@ -15,25 +16,6 @@ beforeAll(async () => {
   entry = fixture.entry
 }, 60000)
 afterAll(() => fixture?.cleanup())
-async function until<T>(
-  probe: () => Promise<T> | T,
-  ready: (value: T) => boolean,
-  timeout = 20000
-): Promise<T> {
-  const deadline = Date.now() + timeout
-  do {
-    const value = await probe()
-    if (ready(value)) return value
-    await new Promise((resolve) => setTimeout(resolve, 40))
-  } while (Date.now() < deadline)
-  throw new Error('Network daemon fixture timed out')
-}
-async function stop(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return
-  const done = new Promise<void>((resolve) => child.once('exit', () => resolve()))
-  child.kill('SIGKILL')
-  await done
-}
 it('enrolls using pasted CLI stdin between actual daemon processes, restarts each side and propagates revoke', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'net-daemon-'))),
     homes = [join(root, 'a'), join(root, 'b')],

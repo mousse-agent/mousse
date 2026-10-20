@@ -157,6 +157,12 @@ describe('Pi-native thread context', () => {
     expect(committed.messages).toEqual(messages)
     expect(committed.activeStartIndex).toBe(candidate.checkpoint?.retainedFromIndex)
     expect(getActiveMessages(committed)).toEqual(candidate.messages)
+    expect(committed.compaction?.generation).toBe(1)
+
+    // Reloading the persisted context does not stack another summary generation.
+    const restored = commitNativeMessages(JSON.parse(JSON.stringify(committed)), getActiveMessages(committed))
+    expect(restored.compaction?.generation).toBe(1)
+    expect(getActiveMessages(restored)).toEqual(candidate.messages)
   })
 
   it('reports an unchanged durable context by identity when no safe reduction exists', () => {

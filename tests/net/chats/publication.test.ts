@@ -87,10 +87,7 @@ it('does not publish during an actual local provider run and fences outer transa
   expect(p.services.chatNetwork.binding(group.id)).toBeUndefined()
 })
 
-it('keeps local chats default off and denies unprotected publication before Host effects', async () => {
-  const p = await profile({ initialize: false }), group = await p.createGroup()
-  p.services.platform.chats.send({ chatId: group.id, text: 'local default' }); await p.services.platform.chats.waitForIdle()
-  expect(p.services.net.status().enabled).toBe(false)
+it('denies unprotected publication before Host effects', async () => {
   const plain = await profile({ protect: false }), second = await plain.createGroup()
   expect(() => plain.services.chatNetwork.publish({ chatId: second.id, publicationId: 'unprotected' })).toThrow(expect.objectContaining({ code: 'keystore_locked' }))
   expect(plain.services.spaces.store.listStreams({ kind: 'space.meta' })).toHaveLength(0)

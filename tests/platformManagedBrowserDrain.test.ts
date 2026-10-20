@@ -11,7 +11,7 @@ import { BrowserBrokerAdmissionError } from '../src/mms/browser/brokerLifecycle'
 import { encodeWorkerFrame, WorkerFrameDecoder } from '../src/browser-worker/ipc/framing'
 import { runBrowserWorkerHost } from '../src/browser-worker/ipc/host'
 import { injectOwnedStopFailureForTests, isProcessAlive } from '../src/browser-worker/lifecycle/process'
-import { captureOwnedProcessTree, DETACHED_GRANDCHILD_LIMIT, windowsTaskkillArgs } from '../src/browser-worker/lifecycle/ownedTree'
+import { captureOwnedProcessTree, windowsTaskkillArgs } from '../src/browser-worker/lifecycle/ownedTree'
 import { workspaceLockPath } from '../src/browser-worker/lifecycle/paths'
 import { readWorkspaceLock } from '../src/browser-worker/lifecycle/lock'
 import { ensureManagedChrome, startFixtureSite, workerRequest } from './fixtures/browser/harness'
@@ -80,10 +80,6 @@ describe('managed browser process identity', () => {
     expect(force).toEqual(['/PID', '4242', '/T', '/F'])
     expect(term.join(' ')).not.toMatch(/\/IM/i)
     expect(force.some((part) => part.includes('chrome'))).toBe(false)
-  })
-
-  it('records the detached-grandchild limit for parent identity loss', () => {
-    expect(DETACHED_GRANDCHILD_LIMIT).toMatch(/detached grandchild/i)
   })
 })
 
@@ -404,12 +400,3 @@ describe.skipIf(!chrome.ok)('managed Chromium drain', () => {
     await broker.shutdown({ timeoutMs: 20_000 })
   }, 120_000)
 })
-
-if (!chrome.ok) {
-  describe('managed Chromium drain blocker', () => {
-    it('records the exact Chrome launch blocker without claiming drain qualification', () => {
-      expect(chrome.ok).toBe(false)
-      expect((chrome as { message: string }).message.length).toBeGreaterThan(0)
-    })
-  })
-}

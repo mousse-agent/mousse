@@ -76,11 +76,11 @@ describe('durable audience scoped bot context', () => {
       })
     ).toThrow(expect.objectContaining({ code: 'conflict' }))
   })
-  it('rejects unknown/forged tuples, path syntax, oversized turns and dropping live context', () => {
+  it('rejects unknown/forged tuples and non-canonical ids, oversized turns and dropping live context', () => {
     const f = setup(),
       pub = f.store.publicId(f.bot, f.space),
       binding = { profileId: 'profile-a', space: f.space, bot: f.bot }
-    expect(() => f.store.bind('../escape', binding)).toThrow()
+    expect(() => f.store.bind('not-a-canonical-id', binding)).toThrow()
     expect(() => f.store.bind(pub, { ...binding, visibilityEpoch: 1 })).toThrow()
     expect(() => f.store.history(pub, 10)).toThrow()
     f.store.bind(pub, binding)

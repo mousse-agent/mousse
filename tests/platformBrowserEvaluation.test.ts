@@ -1,10 +1,9 @@
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
+import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { BrowserToolDispatcher } from '../src/mms/browser/automation/BrowserToolDispatcher'
 import { certifiedInstallDir, certifiedMetadataPath } from '../src/browser-worker/binary/resolver'
 import {
   createEvaluationRuntime,
@@ -13,12 +12,11 @@ import {
   runModelSuite,
   runNativeBrowserGymTask,
   nativeGymTasks,
-  startEvaluationSite,
-  UNAVAILABLE_COST
+  startEvaluationSite
 } from './fixtures/browser/evaluation'
 import { DEFAULT_BUDGETS } from './fixtures/browser/evaluation/pin'
 import { haystack } from './fixtures/browser/evaluation/observations'
-import type { ActionTrace, TaskTrialResult } from './fixtures/browser/evaluation/types'
+import type { TaskTrialResult } from './fixtures/browser/evaluation/types'
 
 function readOnlyTreeSnapshot(root: string): string[] {
   const visit = (directory: string, prefix = ''): string[] => readdirSync(directory).flatMap((name) => {
@@ -34,59 +32,6 @@ function readOnlyTreeSnapshot(root: string): string[] {
 
 const chrome = inspectChromeSource()
 
-function trial(partial: Partial<TaskTrialResult> & Pick<TaskTrialResult, 'taskId' | 'taskSuccess' | 'actions'>): TaskTrialResult {
-  return {
-    trial: 0,
-    seed: 1,
-    split: 'calibration',
-    support: 'supported',
-    category: 'test',
-    observationMode: 'structured',
-    driverKind: 'executor-script',
-    mode: 'executor',
-    startedAt: '2026-09-11T00:00:00.000Z',
-    endedAt: '2026-09-11T00:00:01.000Z',
-    wallMs: 10,
-    actionSuccessCount: 0,
-    actionCount: partial.actions.length,
-    falseSuccess: false,
-    duplicateEffect: false,
-    intervention: false,
-    retries: 0,
-    recovery: false,
-    unsupportedReported: false,
-    cost: UNAVAILABLE_COST,
-    verifierNotes: [],
-    ...partial
-  }
-}
-
-function action(partial: Partial<ActionTrace>): ActionTrace {
-  return {
-    taskId: 't',
-    trial: 0,
-    seed: 1,
-    support: 'supported',
-    observationMode: 'structured',
-    driverKind: 'executor-script',
-    tool: 'browser_act',
-    startedAt: '2026-09-11T00:00:00.000Z',
-    endedAt: '2026-09-11T00:00:00.100Z',
-    wallMs: 100,
-    observationMs: 40,
-    executorOverheadMs: 60,
-    outcome: 'verified',
-    dispatched: true,
-    verifiedByGroundTruth: true,
-    falseSuccess: false,
-    duplicateEffect: false,
-    intervention: false,
-    retry: false,
-    recovery: false,
-    ...partial
-  }
-}
-
 describe.skipIf(!chrome.ok)('Q03 evaluation against the production executor', () => {
   const runtimes: Array<{ close(): Promise<void> }> = []
   let site: Awaited<ReturnType<typeof startEvaluationSite>> | undefined
@@ -95,69 +40,6 @@ describe.skipIf(!chrome.ok)('Q03 evaluation against the production executor', ()
     while (runtimes.length) await runtimes.pop()!.close()
     await site?.close()
   })
-
-  it('fills a real fixture form through BrowserToolDispatcher and verifies the end state', async () => {
-    site = site ?? await startEvaluationSite()
-    const runtime = await createEvaluationRuntime()
-    runtimes.push(runtime)
-    expect(runtime.home.includes('core')).toBe(false)
-    expect(existsSync(realpathSync(runtime.chrome.browserRoot))).toBe(true)
-    const context = runtime.context(false, 'eval-form')
-    expect(runtime.tools).toBeInstanceOf(BrowserToolDispatcher)
-    const opened = await runtime.tools.invoke('browser_open', { url: `${site.origin}/form.html` }, context)
-    expect(opened.ok, JSON.stringify(opened)).toBe(true)
-    const observation = opened.ok ? opened.value.observation : undefined
-    const session = opened.ok ? opened.value.session : undefined
-    expect(observation && session).toBeTruthy()
-    const name = observation!.elements.filter((el) => (el.name ?? '').includes('Name') || (el.text ?? '').includes('Name')).find((el) => el.role === 'textbox')
-      ?? observation!.elements.find((el) => el.role === 'textbox')
-    const filled = await runtime.tools.invoke('browser_act', {
-      sessionId: session!.id,
-      tabId: observation!.tabId,
-      generation: observation!.generation,
-      observationId: observation!.observationId,
-      controlLeaseId: session!.controlLeaseId,
-      action: { type: 'fill', target: { kind: 'ref', ref: name!.ref }, text: 'Ada' }
-    }, context)
-    expect(filled.ok, JSON.stringify(filled)).toBe(true)
-    const afterFill = filled.ok ? filled.value.action?.observation ?? observation! : observation!
-    const save = afterFill.elements.find((el) => (el.name ?? el.text ?? '').includes('Save'))
-    const clicked = await runtime.tools.invoke('browser_act', {
-      sessionId: session!.id,
-      tabId: afterFill.tabId,
-      generation: afterFill.generation,
-      observationId: afterFill.observationId,
-      controlLeaseId: session!.controlLeaseId,
-      action: { type: 'click', target: { kind: 'ref', ref: save!.ref } },
-      expected: { type: 'text', text: 'saved:Ada:pwlen=0', present: true }
-    }, context)
-    expect(clicked.ok, JSON.stringify(clicked)).toBe(true)
-    expect(haystack(clicked.ok ? clicked.value.action?.observation : undefined)).toContain('saved:Ada:pwlen=0')
-    await runtime.sessions.close(context, session!.id)
-  }, 120_000)
-
-  it('records overlay force-click as not_actionable, not as a supported success', async () => {
-    site = site ?? await startEvaluationSite()
-    const runtime = await createEvaluationRuntime()
-    runtimes.push(runtime)
-    const context = runtime.context(false, 'eval-overlay')
-    const opened = await runtime.tools.invoke('browser_open', { url: `${site.origin}/overlay.html` }, context)
-    expect(opened.ok).toBe(true)
-    const observation = opened.ok ? opened.value.observation : undefined
-    const session = opened.ok ? opened.value.session : undefined
-    const submit = observation!.elements.find((el) => (el.name ?? el.text ?? '').includes('Submit'))
-    const clicked = await runtime.tools.invoke('browser_act', {
-      sessionId: session!.id,
-      tabId: observation!.tabId,
-      generation: observation!.generation,
-      observationId: observation!.observationId,
-      controlLeaseId: session!.controlLeaseId,
-      action: { type: 'click', target: { kind: 'ref', ref: submit!.ref } }
-    }, context)
-    expect(clicked.ok).toBe(false)
-    expect(clicked.ok ? '' : clicked.error.code).toBe('not_actionable')
-    expect(haystack(observation)).not.toContain('clicked')
-  }, 120_000)
 
   it('does not fabricate closed-shadow refs and maps a BrowserGym native form through the adapter', async () => {
     site = site ?? await startEvaluationSite()

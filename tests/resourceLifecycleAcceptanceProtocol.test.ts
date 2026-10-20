@@ -8,7 +8,8 @@ import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../src/mm
 import { lifecycleApprovalWorkflow, lifecycleHarness } from './fixtures/resource-lifecycle-harness'
 
 describe('Phase 1 lifecycle public protocol acceptance', () => {
-  it.each(['threads.delete', 'threads.trash'])('%s preserves opaque data, requires reviewed purge admission and restores the same identity', async (method) => {
+  it('threads.delete preserves opaque data, requires reviewed purge admission and restores the same identity', async () => {
+    const method = 'threads.delete'
     const f = await lifecycleHarness()
     try {
       const { thread } = await f.rpc.request<{ thread: Thread }>('threads.create', { name: 'recoverable task' })
@@ -34,7 +35,8 @@ describe('Phase 1 lifecycle public protocol acceptance', () => {
     } finally { await f.close() }
   })
 
-  it.each(['threads.delete', 'threads.trash'])('%s cannot move data while a physical writer is admitted', async (method) => {
+  it('threads.trash cannot move data while a physical writer is admitted', async () => {
+    const method = 'threads.trash'
     const f = await lifecycleHarness()
     let lease: ReturnType<typeof tryAcquireExecutionLease> = null
     try {

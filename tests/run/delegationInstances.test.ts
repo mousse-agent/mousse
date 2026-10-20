@@ -8,27 +8,13 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { AgentRegistry } from '../../src/mms/agents/AgentRegistry'
-import { ProjectManager } from '../../src/mms/data/ProjectManager'
-import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
-import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
 import type { DelegateTaskInput, DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
-import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
-import { AdapterRegistry } from '../../src/mms/run/adapters/AdapterRegistry'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
-import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
-import { EffectWorker } from '../../src/mms/run/EffectWorker'
-import { RunEngine } from '../../src/mms/run/RunEngine'
-import { RunStore } from '../../src/mms/run/RunStore'
-import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
-import { HeadlessAgentRunner } from '../../src/mms/terminals/HeadlessAgentRunner'
-import { PtyManager } from '../../src/mms/terminals/PtyManager'
-import { WorktreeManager } from '../../src/mms/worktree/WorktreeManager'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
-import { getDefaultSettings } from '../../src/shared/settings'
+import { phase6Daemon, waitFor } from './phase6Fixture'
 
 type Script = (input: TurnInput, delegation: DelegationToolHost | undefined) => Promise<string>
 
@@ -61,14 +47,6 @@ class ScriptedAdapter implements ProviderAdapter {
   }
 }
 
-async function waitFor(cond: () => boolean, label: string, timeoutMs = 10_000): Promise<void> {
-  const start = Date.now()
-  while (!cond()) {
-    if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${label}`)
-    await new Promise((resolve) => setTimeout(resolve, 10))
-  }
-}
-
 describe('delegate_task by provider instance', () => {
   let home: string | undefined
   let previousHome: string | undefined
@@ -88,21 +66,6 @@ describe('delegate_task by provider instance', () => {
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
     const outcome: { started?: { delegationId: string }; error?: { code?: string; message: string } } = {}
-    const projects = new ProjectManager()
-    const store = new ThreadDataStore(projects)
-    const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, llmProvider: 'openai', model: 'gpt-replay' } }
-    const orch = new OrchestratorService(
-      new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(), new HeadlessAgentRunner(),
-      { listProviders: () => [] } as unknown as MacroEngine, { get: () => settings } as never, {} as never,
-      undefined, undefined, undefined, undefined, undefined, undefined, projects
-    )
-    orch.setThreadStore(store)
-    ;(orch as any).llm = {
-      getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'scripted' }),
-      getContextInputs: async () => ({ systemPromptText: '', mcpToolsText: '', otherToolsText: '', signature: 'scripted' }),
-      generateTitle: async () => 'Scripted',
-      chat: async () => { throw new Error('the scripted adapter replaces the pi loop') }
-    }
     const parent = new ScriptedAdapter('pi', PI_LOOP_CAPABILITIES, async (input, delegation) => {
       if (input.prompt !== 'Review the module') return 'unexpected pi turn'
       try {
@@ -115,20 +78,8 @@ describe('delegate_task by provider instance', () => {
     })
     const claude = new ScriptedAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, async () => 'Reviewed by Claude.')
     const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
-    orch.setAdapterRegistry(new AdapterRegistry(instances).register(parent).register(claude))
-    const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })), pid: 1 })
-    orch.setRunEngine(engine)
-    engine.reconcileOnBoot()
-    const worker = new EffectWorker({ outbox: engine.outbox, executors: orch.effectExecutors(), owner: engine.leaseOwner })
-    worker.start()
-    orch.attachEffectWorker(worker)
-    stops.push(async () => {
-      await worker.stop()
-      orch.attachEffectWorker(null)
-      engine.shutdown()
-      orch.setRunEngine(null)
-      engine.store.db.close()
-    })
+    const { orch, engine, store, stop } = phase6Daemon(home, [parent, claude], { instances })
+    stops.push(stop)
     return { orch, engine, store, parent, claude, outcome }
   }
 

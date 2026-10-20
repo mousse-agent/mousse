@@ -61,7 +61,8 @@ describe('chunkMessage', () => {
     const text = 'word '.repeat(900).trim()
     const chunks = chunkMessage(text, 500)
     expect(chunks.length).toBeGreaterThan(1)
-    expect(chunks.join(' ')).toContain('word')
+    for (const chunk of chunks) expect(chunk.length).toBeLessThanOrEqual(500)
+    expect(chunks.join(' ')).toBe(text)
   })
 })
 
@@ -220,7 +221,10 @@ describe('ChannelStore', () => {
         mousseThreadId: 'thread-1',
         createdAt: new Date().toISOString()
       })
-      expect(store.listSessions()).toHaveLength(1)
+      // A fresh store over the same home reads what was written to disk.
+      const reloaded = new ChannelStore(MousseConfigStore.load(tempHome))
+      expect(reloaded.getConfig().platforms.telegram).toMatchObject({ enabled: true, allowedUserIds: ['1'] })
+      expect(reloaded.listSessions()).toHaveLength(1)
     } finally {
       if (originalHome === undefined) {
         delete process.env.MOUSSE_HOME

@@ -18,16 +18,6 @@ describe('ensureWindowsConsoleTty', () => {
     expect(ensureWindowsConsoleTty({ stdin, stdout, stderr })).toBe(false)
     expect(stdin.isTTY).toBe(false)
   })
-
-  it('marks stdio TTY when already TTY without changing flags', () => {
-    const stdin = mockStream(true)
-    const stdout = mockStream(true) as unknown as NodeJS.WriteStream
-    const stderr = mockStream(true) as unknown as NodeJS.WriteStream
-    // On real win32 console this may patch nothing if already TTY
-    ensureWindowsConsoleTty({ stdin, stdout, stderr })
-    expect(stdin.isTTY).toBe(true)
-    expect(stdout.isTTY).toBe(true)
-  })
 })
 
 describe('shouldUseReadlineTerminal', () => {

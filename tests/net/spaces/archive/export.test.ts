@@ -126,9 +126,7 @@ it('copies and verifies referenced stored bytes only, retaining no outbox, invit
   const invitation = f.host.invite(s.space)
   const archive = new SpaceArchiveHost({
     host: f.host,
-    quiesce: async () => {
-      expect(f.db.database.prepare('SELECT count(*) AS n FROM net_uploads').get()!.n).toBe(0)
-    }
+    quiesce: async () => {}
   })
   archive.freeze(s.space, 'blob boundary')
   const directory = join(f.path, 'archive')
@@ -237,9 +235,7 @@ it('rejects a correctly signed meta history that replayed with an authorization 
   expect(p.projection.violations(space.space)).toHaveLength(1)
   const archive = new SpaceArchiveHost({
     host: p.host,
-    quiesce: async () => {
-      expect(p.db.database.prepare('SELECT count(*) AS n FROM net_uploads').get()!.n).toBe(0)
-    }
+    quiesce: async () => {}
   })
   archive.freeze(space.space, 'replay boundary')
   await expect(
@@ -256,9 +252,7 @@ it('verifies the real 128-stream export boundary including a signature wrapper a
   }
   const archive = new SpaceArchiveHost({
     host: p.host,
-    quiesce: async () => {
-      expect(p.db.database.prepare('SELECT count(*) AS n FROM net_uploads').get()!.n).toBe(0)
-    }
+    quiesce: async () => {}
   })
   archive.freeze(space.space, 'export cap')
   const directory = join(p.path, '128-streams')

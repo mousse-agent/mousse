@@ -40,10 +40,14 @@ describe('Git foundation reviewed publish and retention', () => {
     const workspace = (await new WorkspaceResolver(f.thread, 'task', f.repo).resolve('agent')).workspacePath!
     const { action } = await new ThreadActionService(f.thread).runCheckpointedAction(actionOptions(workspace), () => writeFileSync(join(workspace, 'value.txt'), 'unpublished\n'))
     const receipt = new ChangeReceiptService(f.thread).list().find((item) => item.id === action.receiptId)!
+    git(f.repo, 'update-ref', 'refs/mousse/agents/agent', 'HEAD')
     const gc = new WorkspaceGcService(f.repo)
     const report = gc.dryRun(new Set(), new Set())
     expect(report.staleWorktrees.map((item) => item.path)).not.toContain(workspace)
     for (const ref of receipt.retainedRefs) expect(report.retainedRefs).toContain(ref)
+    expect(report.unreferencedRefs).not.toContain('refs/mousse/agents/agent')
+    expect(report.retainedRefs).toContain('refs/mousse/agents/agent')
+    await expect(gc.purge(report, false)).rejects.toThrow('confirmation')
     await gc.purge(report, true)
     expect(existsSync(workspace)).toBe(true)
     expect(f.read(workspace)).toBe('unpublished\n')

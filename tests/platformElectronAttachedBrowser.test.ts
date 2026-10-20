@@ -76,7 +76,6 @@ describe('ElectronAttachedBrowserBackend fake-port races', () => {
     const registry = new TrustedGuestRegistry({
       ownerBinding: () => true
     })
-    expect((registry as unknown as { registerByWebContentsId?: unknown }).registerByWebContentsId).toBeUndefined()
     const backend = new ElectronAttachedBrowserBackend({
       registry,
       policy: createLoopbackAttachedPolicy(),

@@ -23,7 +23,7 @@ describe('provider-literal ratchet', () => {
     expect(result.stderr).toBe('')
     expect(result.status).toBe(0)
     const summary = JSON.parse(result.stdout.slice(0, result.stdout.lastIndexOf('}') + 1)) as { total: number }
-    expect(typeof summary.total).toBe('number')
+    expect(summary.total).toBe(0)
   })
 
   it('fails when a new provider literal is added outside the adapters', () => {

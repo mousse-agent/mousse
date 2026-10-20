@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
 import { dispatchDelegationTool, parseActions, type DelegationToolHost } from '../src/mms/orchestrator/LlmClient'
 import {
@@ -50,7 +50,15 @@ describe('agent spawning', () => {
     await expect(dispatchDelegationTool(host, call('delegate_task', { workspace: 'isolated' }))).rejects.toThrow('prompt')
     await expect(dispatchDelegationTool(host, call('delegate_task', { prompt: 'x', workspace: 'scratch' }))).rejects.toThrow('workspace')
     await expect(dispatchDelegationTool(host, call('delegate_task', { prompt: 'x', workspace: 'shared', wake: 'never' }))).rejects.toThrow('wake')
+    await expect(dispatchDelegationTool(host, call('delegate_task', { prompt: 'x', workspace: 'isolated', provider: '' }))).rejects.toThrow('provider must be a non-empty string')
+    await expect(dispatchDelegationTool(host, call('delegate_task', { prompt: 'x', workspace: 'isolated', model: 7 }))).rejects.toThrow('model must be a non-empty string')
     expect(calls).toEqual([])
+  })
+
+  it('passes provider and model overrides through to the host', async () => {
+    const { host, calls } = fakeHost()
+    await dispatchDelegationTool(host, call('delegate_task', { prompt: 'Implement the login form component', workspace: 'isolated', provider: 'openai', model: 'gpt-x' }))
+    expect(calls[0].input).toMatchObject({ provider: 'openai', model: 'gpt-x', workspace: 'isolated' })
   })
 
   it('rejects completion changes outside the discovery declaration', () => {
@@ -146,11 +154,5 @@ describe('agent spawning', () => {
     const display = getToolCallDisplay(actions[0])
     expect(display.title).toBe('Completing active task')
     expect(display.status).toBe('processing')
-  })
-
-  it('spawns nothing from a model reply that still emits the retired action', () => {
-    const spy = vi.fn()
-    for (const action of parseActions('```mousse-actions\n{"type":"spawn_agents","agents":[]}\n```')) spy(action)
-    expect(spy).not.toHaveBeenCalled()
   })
 })

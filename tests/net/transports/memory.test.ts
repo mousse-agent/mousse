@@ -54,7 +54,7 @@ describe('production memory transport and faults', () => {
     expect(network.connections).toHaveLength(0)
   })
   it('injects deterministic slow/corrupt/partition faults without pretending dropped bytes were delivered', async () => {
-    const { clock, network, local, remote } = await setup(),
+    const { clock, network, a, local, remote } = await setup(),
       received: Buffer[] = []
     remote.on('data', (bytes) => received.push(bytes))
     const link = network.connections[0]
@@ -71,6 +71,9 @@ describe('production memory transport and faults', () => {
     await tick()
     expect(Buffer.concat(received)).toEqual(Buffer.from([0, 2, 3]))
     network.partition('a', 'b')
+    await expect(
+      a.dial({ transport: 'memory', address: 'b', priority: 0 }, new AbortController().signal)
+    ).rejects.toMatchObject({ code: 'route_unreachable' })
     await new Promise<void>((resolve, reject) =>
       local.write(Buffer.from([4]), (error) => (error ? reject(error) : resolve()))
     )
@@ -83,7 +86,7 @@ describe('production memory transport and faults', () => {
     expect(Buffer.concat(received)).toEqual(Buffer.from([0, 2, 3, 5]))
   })
   it('preserves dial refusal/partition errors and listener teardown ownership', async () => {
-    const { network, a, b } = await setup()
+    const { network, a, b, local } = await setup()
     network.refuseDial('b')
     await expect(
       a.dial({ transport: 'memory', address: 'b', priority: 0 }, new AbortController().signal)
@@ -94,5 +97,7 @@ describe('production memory transport and faults', () => {
       a.dial({ transport: 'memory', address: 'b', priority: 0 }, new AbortController().signal)
     ).rejects.toMatchObject({ code: 'route_unreachable' })
     expect(b.status()).toEqual({ state: 'disabled', routes: [] })
+    await a.teardown()
+    expect(local.destroyed).toBe(true)
   })
 })

@@ -108,27 +108,37 @@ describe('Claude login policy environment', () => {
     PATH: '/usr/bin',
     HOME: '/home/me',
     ANTHROPIC_API_KEY: 'secret',
+    ANTHROPIC_AUTH_TOKEN: 'secret',
     ANTHROPIC_BASE_URL: 'router',
     CLAUDE_CODE_OAUTH_TOKEN: 'secret',
+    CLAUDE_CODE_USE_BEDROCK: '1',
     CLAUDE_CODE_USE_VERTEX: '1',
     AWS_PROFILE: 'other',
-    CLAUDECODE: '1'
+    GOOGLE_APPLICATION_CREDENTIALS: 'other',
+    CLAUDECODE: '1',
+    ELECTRON_RUN_AS_NODE: '1'
   }
-  it('cli: sets no config dir, keeps HOME and still strips API, token and cloud variables', () => {
-    expect(claudeSubscriptionEnvironment(undefined, source)).toEqual({
-      PATH: '/usr/bin',
-      HOME: '/home/me'
-    })
-  })
-  it('cli: preserves an inherited CLAUDE_CONFIG_DIR', () => {
-    expect(
-      claudeSubscriptionEnvironment(undefined, { ...source, CLAUDE_CONFIG_DIR: '/custom/claude' })
-    ).toEqual({ PATH: '/usr/bin', HOME: '/home/me', CLAUDE_CONFIG_DIR: '/custom/claude' })
-  })
-  it('isolated: replaces an inherited CLAUDE_CONFIG_DIR with the profile dir', () => {
-    expect(
-      claudeSubscriptionEnvironment('/profile/claude', { ...source, CLAUDE_CONFIG_DIR: '/custom' })
-    ).toEqual({ PATH: '/usr/bin', HOME: '/home/me', CLAUDE_CONFIG_DIR: '/profile/claude' })
+  it.each([
+    {
+      name: 'cli: sets no config dir, keeps HOME and still strips API, token, router, cloud and nested-CLI variables',
+      dir: undefined,
+      extra: {},
+      expected: { PATH: '/usr/bin', HOME: '/home/me' }
+    },
+    {
+      name: 'cli: preserves an inherited CLAUDE_CONFIG_DIR',
+      dir: undefined,
+      extra: { CLAUDE_CONFIG_DIR: '/custom/claude' },
+      expected: { PATH: '/usr/bin', HOME: '/home/me', CLAUDE_CONFIG_DIR: '/custom/claude' }
+    },
+    {
+      name: 'isolated: replaces an inherited CLAUDE_CONFIG_DIR with the profile dir',
+      dir: '/profile/claude',
+      extra: { CLAUDE_CONFIG_DIR: '/custom' },
+      expected: { PATH: '/usr/bin', HOME: '/home/me', CLAUDE_CONFIG_DIR: '/profile/claude' }
+    }
+  ])('$name', ({ dir, extra, expected }) => {
+    expect(claudeSubscriptionEnvironment(dir, { ...source, ...extra })).toEqual(expected)
   })
   it('cli turns run the SDK without an isolated dir or API key', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'secret')

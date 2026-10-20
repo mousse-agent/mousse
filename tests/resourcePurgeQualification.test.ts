@@ -62,7 +62,7 @@ it('restarts cleanup at every external irreversible ledger boundary without offe
       if (boundary === 0) boundaryCount = preview.items.length + 1
       else expect(preview.items.length + 1).toBe(boundaryCount)
       await expect(coordinator.purge({ taskId: 'task', operationId: 'boundary-purge', expectedGeneration: preview.generation, previewDigest: preview.digest }))
-        .rejects.toMatchObject({ code: 'resource_purge_failed', cause: expect.objectContaining({ message: `qualification boundary ${boundary}` }) })
+        .rejects.toMatchObject({ code: 'resource_purge_failed', cause: expect.objectContaining({ message: `qualification boundary ${boundary}` }), errorInfo: { category: 'internal', retryable: false } })
       expect(injected).toBe(true)
       expect(store.require('task').state).toBe('purge-started')
       await expect(coordinator.restore({ taskId: 'task', operationId: 'restore-partial' })).rejects.toThrow(/purge-started/)

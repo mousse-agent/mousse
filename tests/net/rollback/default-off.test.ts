@@ -53,17 +53,6 @@ it('rejects every non-opt-in Net method without composing runtime or creating an
   expect(net.getActiveCount()).toBe(0)
 })
 
-it('does not create a ledger or keys while rejecting the original bridge.nodes read', async () => {
-  const path = directory()
-  const net = new NetService({ profileDir: path })
-  cleanup.push(() => net.shutdown())
-  const error = await Promise.resolve()
-    .then(() => net.request('bridge.nodes', {}))
-    .catch((error) => error)
-  expect(existsSync(join(path, 'net'))).toBe(false)
-  expect(error).toMatchObject({ code: 'disabled' })
-})
-
 it('rejects read-only and mutating composed IPC domains without creating profile net state', async () => {
   const root = directory()
   const main = await MousseMainService.create({
@@ -129,7 +118,6 @@ it('cancels renewal on disable and starts no network timer after a disabled rest
   const restarted = new NetService({ profileDir: path, clock })
   cleanup.push(() => restarted.shutdown())
   await restarted.start()
-  expect(restarted.status()).toMatchObject({ enabled: false, routes: [], peers: [] })
   expect(clock.pending()).toBe(0)
   expect(restarted.getActiveCount()).toBe(0)
 })

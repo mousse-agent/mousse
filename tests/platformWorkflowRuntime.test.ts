@@ -7,7 +7,6 @@ import type { AgentExecutorAdapter, SandboxAdapter, WorkspaceFileAdapter } from 
 import { ExecutionPolicyService } from '../src/mms/execution/ExecutionPolicyService'
 import { CancellationRegistry } from '../src/mms/execution/CancellationRegistry'
 import { loadWorkflowDirectory, WorkflowRegistry, WorkflowRunService } from '../src/mms/workflows'
-import { createAllNodeTypesManifest } from '../src/mms/workflows/fixtures/allNodeTypes'
 import { resolveContainedPath } from '../src/mms/workflows/pathSafety'
 import { stageFileInputs } from '../src/mms/workflows/engine/fileInputs'
 
@@ -452,41 +451,6 @@ describe('WorkflowRunService', () => {
     expect(done.result).toEqual({ ok: true })
   })
 
-  it('executes catalog loops, joins, and skips note/group without adapters', async () => {
-    const profileRoot = tempDir('mousse-catalog-')
-    const registry = new WorkflowRegistry({ profileId: 'p1', profileRoot })
-    const saved = registry.saveDraft({
-      bundle: {
-        manifest: createAllNodeTypesManifest(),
-        assets: [{ relativePath: 'scripts/noop.mjs', bytes: 'process.stdout.write(JSON.stringify({ok:true}))\n' }]
-      }
-    })
-    expect(saved.compiled.runnable).toBe(true)
-    const published = registry.publish({
-      definitionId: saved.definitionId,
-      expectedDraftSemanticHash: saved.semanticHash,
-      expectedHeadRevisionId: null
-    })
-    const service = new WorkflowRunService({
-      profileId: 'p1',
-      profileRoot,
-      registry,
-      policy: new ExecutionPolicyService(),
-      cancellation: new CancellationRegistry()
-    })
-    const snap = await service.start({
-      profileId: 'p1',
-      threadId: 't1',
-      actor: { kind: 'workflow' },
-      source: 'cli',
-      definitionId: published.definitionId,
-      revisionId: published.head?.revisionId,
-      input: { topic: 'x', files: ['a'] },
-      installationPolicy: INSTALL
-    })
-    expect(snap.manifest.terminalError ?? snap.manifest.state).toMatch(/Executor unavailable|waiting-approval|failed|succeeded/)
-  })
-
   it('executes a real condition branch and for-each body with loop bindings', async () => {
     const profileRoot = tempDir('mousse-loop-')
     const registry = new WorkflowRegistry({ profileId: 'p1', profileRoot })
@@ -720,6 +684,7 @@ describe('WorkflowRunService', () => {
     const published = registry.publish({ definitionId: saved.definitionId, expectedDraftSemanticHash: saved.semanticHash, expectedHeadRevisionId: null })
     let active = 0
     let maxActive = 0
+    let aborted = 0
     const service = new WorkflowRunService({
       profileId: 'p1', profileRoot, registry, policy: new ExecutionPolicyService(), cancellation: new CancellationRegistry(),
       adapters: {
@@ -729,6 +694,7 @@ describe('WorkflowRunService', () => {
             active += 1
             maxActive = Math.max(maxActive, active)
             await new Promise((resolve) => setTimeout(resolve, 35))
+            if (request.signal.aborted) aborted += 1
             active -= 1
             return { output: { branch: request.instructions } }
           }
@@ -738,6 +704,7 @@ describe('WorkflowRunService', () => {
     const snap = await service.start({ profileId: 'p1', threadId: 't1', actor: { kind: 'workflow' }, source: 'cli', definitionId: published.definitionId, revisionId: published.head?.revisionId, input: {}, installationPolicy: INSTALL })
     expect(snap.manifest.state, snap.manifest.terminalError).toBe('succeeded')
     expect(maxActive).toBe(2)
+    expect(aborted).toBe(0)
     expect((snap.result as { results: unknown[] }).results).toHaveLength(3)
   })
 

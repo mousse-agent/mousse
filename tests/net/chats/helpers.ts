@@ -1,7 +1,8 @@
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { expect, vi } from 'vitest'
 import { createAssistantMessageEventStream, type AssistantMessage, type Context, type Model, type Provider, type StreamOptions } from '@earendil-works/pi-ai'
 import { MmsProfileServices } from '../../../src/mms/MmsProfileServices'
 import { MousseConfigStore } from '../../../src/mms/config/MousseConfigStore'
@@ -12,6 +13,10 @@ import { defaultAgentSettings } from '../../../src/shared/agents/defaults'
 import { registerChatMethods } from '../../../src/mms/chats/registerMethods'
 import { registerChatNetworkMethods } from '../../../src/mms/chats/network/registerMethods'
 import { nativeSdkVersion, modelDigest, type NativeBotDefinition } from '../../../src/mms/bots/runtime'
+import { newId } from '../../../src/shared/net'
+import { portableRepository } from '../../../src/mms/bridge/dispatch'
+import { git } from '../../../src/mms/bridge/dispatch/git'
+import type { ChatTaskSelectionInput } from '../../../src/shared/chatsNetwork'
 
 export const cleanup: Array<() => void | Promise<void>> = []
 export async function profile(input: { home?: string; profileId?: string; initialize?: boolean; protect?: boolean; paused?: boolean; native?: boolean } = {}) {
@@ -58,4 +63,23 @@ export async function profile(input: { home?: string; profileId?: string; initia
     return services.platform.chats.create({ kind: 'group', name: 'Publishable Group', agentIds: [draft.id] })
   }
   return { home, profileId, services, domains, contexts, createGroup, definitions, release: () => release() }
+}
+
+// Two linked same-user profiles plus a published Group and a task selection for the target.
+export async function linkedTaskFixture(){
+  const caller=await profile(),target=await profile({initialize:false})
+  const invite=await caller.services.net.request('bridge.invite',{}) as {invite:string}
+  await target.services.net.request('bridge.join',{invite:invite.invite})
+  await target.services.net.request('net.protect',{passphrase:'chats-candidate-fixture-protection'})
+  const node=target.services.net.runtime().identity.self()!.node
+  await vi.waitFor(()=>expect(caller.services.net.session(node).state()).toBe('open'),{timeout:10000})
+  const group=await caller.createGroup()
+  caller.services.chatNetwork.publish({chatId:group.id,publicationId:'task-group'})
+  const targetGroup=await target.createGroup(),agent=targetGroup.participants.find(value=>value.kind==='agent')!
+  const repo=join(target.home,'task-repository');mkdirSync(repo)
+  await git(repo,['init','--template=']);writeFileSync(join(repo,'base.txt'),'actual target repository')
+  await git(repo,['add','.']);await git(repo,['-c','user.name=Fixture','-c','user.email=fixture@localhost','commit','-m','base'])
+  const portable=await portableRepository(repo),baseCommit=await git(repo,['rev-parse','HEAD'])
+  const selection:ChatTaskSelectionInput={chatId:group.id,taskId:newId('rpc'),deviceId:node,input:{repoId:portable.repoId,baseCommit,agent:agent.definitionId!,prompt:'CHAT BOUND TASK ONLY',limits:{maxTurns:2,maxToolCalls:1,maxElapsedMs:15000}}}
+  return{caller,target,repo,group,selection}
 }

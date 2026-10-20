@@ -102,10 +102,16 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     startTool(first.engine, run, 'call-1', 'read_file')
     const committed = startTool(first.engine, run, 'call-2', 'bash')
     first.engine.tools.commit(committed.invocationId, '2026-10-12T00:00:01.000Z')
+    // A run that was still starting when the daemon crashed is interrupted too.
+    const starting = await first.engine.dispatch({ kind: 'send', threadId: 'u', clientRequestId: 'req-2', source: 'gui' })
+    if (starting.status !== 'accepted') throw new Error('send rejected')
+    first.engine.markStarting(starting.runId)
 
     const second = daemon(20)
-    expect(second.boot).toEqual({ interrupted: [run.runId], uncertain: [], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [] })
+    expect(second.boot).toEqual({ interrupted: [run.runId, starting.runId], uncertain: [], epoch: 2, orphanedChildren: [], recoveredWakes: [], strandedQueued: [] })
     expect(second.store.getRun(run.runId)!.outcome).toEqual({ interruptedBy: 'daemon_restart' })
+    expect(second.store.getAttempt(second.store.getRun(run.runId)!.activeAttemptId!)!.status).toBe('interrupted')
+    expect(second.store.getRun(starting.runId)!.status).toBe('interrupted')
   })
 
   it('records one restart.note per affected thread and handles effects', async () => {

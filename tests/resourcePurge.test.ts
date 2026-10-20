@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
-function fixture(options: { git?: boolean; boundary?: (record: ReturnType<ResourceLifecycleStore['require']>) => void } = {}) {
+function fixture(options: { git?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mousse-purge-')); roots.push(root)
   const home = join(root, 'profile'), location = join(home, 'thread-data', 'task'); mkdirSync(location, { recursive: true })
   writeFileSync(join(location, 'meta.json'), JSON.stringify({ id: 'task' })); writeFileSync(join(location, 'messages.json'), '[]')
@@ -29,7 +29,7 @@ function fixture(options: { git?: boolean; boundary?: (record: ReturnType<Resour
     writeFileSync(join(location, 'journal', '0000000000000002.json'), JSON.stringify({ schemaVersion: 1, sequence: 2, operationId: 'provision', operationType: 'workspace-provision', state: 'completed' }))
   }
   const projected: string[] = []
-  const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: (record) => { projected.push(record.taskId) }, onPhase: (record, phase) => { if (phase === 'purge-started') options.boundary?.(record) } })
+  const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: (record) => { projected.push(record.taskId) } })
   return { root, home, location, repo, worktree, store, coordinator, projected }
 }
 test('complete purge removes exclusive checkout, refs and task data and retains tombstone', async () => {
@@ -42,14 +42,6 @@ test('complete purge removes exclusive checkout, refs and task data and retains 
   expect(git(f.repo, ['status', '--porcelain'])).toBe('')
   expect(() => f.store.registerTask({ taskId: 'task', location: f.location, creating: true })).toThrow(/tombstone/)
   expect((await f.coordinator.purge({ taskId: 'task', operationId: 'purge' })).state).toBe('purged')
-})
-test('crash at irreversible boundary forbids restore and resumes from external ledger', async () => {
-  let crash = true
-  const f = fixture({ boundary: () => { if (crash) { crash = false; throw new Error('injected crash') } } })
-  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' }); const preview = await f.coordinator.cleanup.preview('task')
-  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toMatchObject({ code: 'resource_purge_failed', cause: expect.objectContaining({ message: 'injected crash' }), errorInfo: { category: 'internal', retryable: false } })
-  await expect(f.coordinator.restore({ taskId: 'task', operationId: 'restore' })).rejects.toThrow(/purge-started/)
-  expect((await f.coordinator.recover('task')).state).toBe('purged')
 })
 test('dirty sole copy needs a human exact preview discard; automatic request preserves it', async () => {
   const f = fixture({ git: true }); writeFileSync(join(f.worktree, 'secret.txt'), 'only copy')
