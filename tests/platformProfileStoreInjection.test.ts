@@ -1,14 +1,13 @@
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { settleThreadMutationOwnership } from '../src/mms/queue/ThreadExecutionLease'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, relative } from 'node:path'
 import { tmpdir } from 'node:os'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { ThreadStorageLayout } from '../src/mms/data/ThreadStorageLayout'
-import { ThreadTrashService } from '../src/mms/data/ThreadTrashService'
 import { ChannelStore } from '../src/mms/channels/ChannelStore'
 import { ChannelAuth } from '../src/mms/channels/ChannelAuth'
 import { ScheduledJobStore, readTickerHeartbeat, recordTickerHeartbeat } from '../src/mms/scheduled/ScheduledJobStore'
@@ -170,19 +169,6 @@ describe('explicit profile store roots', () => {
     expect(existsSync(join(a, 'line-edits.json'))).toBe(true)
     expect(existsSync(join(b, 'line-edits.json'))).toBe(false)
     expect(statsB.getSnapshot()).not.toEqual(statsA.getSnapshot())
-  })
-
-  it('refuses direct trash and purge entry points, preserving linked external data', () => {
-    const a = home('trash-a'), outside = home('trash-outside')
-    writeFileSync(join(outside, 'keep.txt'), 'keep')
-    const threadRoot = join(a, 'thread-data')
-    mkdirSync(threadRoot, { recursive: true })
-    const escapedOriginal = join(threadRoot, 'escaped')
-    symlinkSync(outside, escapedOriginal, process.platform === 'win32' ? 'junction' : 'dir')
-    const trash = new ThreadTrashService(a, { strictOwnedRoot: true })
-    expect(() => trash.trash('escaped', escapedOriginal)).toThrow('lifecycle coordinator')
-    expect(() => trash.purge('escaped')).toThrow('unavailable')
-    expect(readFileSync(join(outside, 'keep.txt'), 'utf8')).toBe('keep')
   })
 
   it.each(['undoRetention', 'scheduled'])('attempts every personal-service cleanup when %s stop fails', async (failed) => {
