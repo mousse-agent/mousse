@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  DEFAULT_VOLATILE_KEYS,
+  dropKeys,
   formatTranscript,
   parseTranscript,
   ReplayMismatchError,
@@ -49,6 +51,12 @@ describe('ReplayTransport', () => {
     expect(await replay.receive()).toBe('second')
     expect(await replay.receive()).toBeUndefined()
     expect(() => replay.assertDone()).not.toThrow()
+  })
+
+  it('drops a parent.key entry only under that parent, so the announced client version is ignored', () => {
+    const normalize = dropKeys(DEFAULT_VOLATILE_KEYS)
+    expect(normalize({ at: 1, params: { clientInfo: { name: 'mousse', version: '0.1.2' }, version: 2 } }))
+      .toEqual({ params: { clientInfo: { name: 'mousse' }, version: 2 } })
   })
 
   it('fails a differing outbound frame with a line diff, and keeps failing', () => {

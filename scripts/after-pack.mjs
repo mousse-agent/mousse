@@ -46,7 +46,7 @@ function resolveRcedit() {
   return null
 }
 
-function applyWindowsIcon(executable, iconPath) {
+function applyWindowsIcon(executable, iconPath, appInfo) {
   if (!existsSync(iconPath)) {
     throw new Error(`Windows icon missing: ${iconPath}`)
   }
@@ -55,7 +55,9 @@ function applyWindowsIcon(executable, iconPath) {
     console.warn(`[after-pack] rcedit.exe not found; leaving Electron icon on ${basename(executable)}`)
     return
   }
-  const version = String(process.env.npm_package_version ?? '').trim()
+  // Windows file versions are four numbers, so a nightly's file version is 0.1.2.<build number>;
+  // the product version keeps the full version, such as 0.1.2-nightly.20261022.17.
+  const version = appInfo.version
   const args = [executable, '--set-icon', iconPath]
   if (version) {
     args.push(
@@ -66,7 +68,7 @@ function applyWindowsIcon(executable, iconPath) {
       'FileDescription',
       'Mousse',
       '--set-file-version',
-      version,
+      appInfo.getVersionInWeirdWindowsForm(),
       '--set-product-version',
       version
     )
@@ -87,7 +89,7 @@ export default async function afterPack(context) {
 
   // signAndEditExecutable is false (avoids Authenticode hangs), so stamp the
   // Mousse icon onto the PE ourselves. Otherwise Windows keeps the Electron logo.
-  applyWindowsIcon(packagedExe, iconPath)
+  applyWindowsIcon(packagedExe, iconPath, context.packager.appInfo)
 
   if (outputName === 'mousse.exe') {
     const cliExe = join(context.appOutDir, 'mousse-cli.exe')

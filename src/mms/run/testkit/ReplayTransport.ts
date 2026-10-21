@@ -111,22 +111,27 @@ export function toJson(value: unknown): unknown {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value))
 }
 
-/** Normaliser that removes the named keys at any depth after a JSON round trip. */
+/**
+ * Normaliser that removes the named keys at any depth after a JSON round trip. A `parent.key`
+ * entry removes `key` only from an object held under `parent`.
+ */
 export function dropKeys(keys: Iterable<string>): (frame: unknown) => unknown {
   const drop = new Set(keys)
-  const walk = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(walk)
+  const walk = (value: unknown, parent?: string): unknown => {
+    if (Array.isArray(value)) return value.map((entry) => walk(entry))
     if (value && typeof value === 'object')
       return Object.fromEntries(
-        Object.entries(value).filter(([key]) => !drop.has(key)).map(([key, entry]) => [key, walk(entry)])
+        Object.entries(value)
+          .filter(([key]) => !drop.has(key) && !(parent !== undefined && drop.has(`${parent}.${key}`)))
+          .map(([key, entry]) => [key, walk(entry, key)])
       )
     return value
   }
   return (frame) => walk(toJson(frame))
 }
 
-/** Volatile fields no boundary keeps stable between runs. */
-export const DEFAULT_VOLATILE_KEYS = ['timestamp', 'at']
+/** Volatile fields no boundary keeps stable between runs. Clients announce the Mousse version. */
+export const DEFAULT_VOLATILE_KEYS = ['timestamp', 'at', 'clientInfo.version']
 
 export interface ReplayOptions {
   /** Applied to both the recorded and the actual outbound frame before comparing. */

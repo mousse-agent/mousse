@@ -11,6 +11,7 @@ import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings
 import type { ChatImageAttachment } from '../../../shared/types'
 import { ANTIGRAVITY_INSTANCE_ID } from '../../../shared/providerInstances'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
+import { mousseVersion } from '../../appVersion'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { acpMcpServers } from '../../run/mcp/attachment'
 import type { LoginSession } from '../LoginSession'
@@ -284,7 +285,7 @@ export class AntigravityProviderService {
     const response = await process.connection.agent.request(methods.agent.initialize, {
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: { fs: { readTextFile: clientFileSystem, writeTextFile: clientFileSystem }, terminal: false },
-      clientInfo: { name: 'Mousse', version: '0.1.1' }
+      clientInfo: { name: 'Mousse', version: mousseVersion() }
     })
     if (response.protocolVersion !== PROTOCOL_VERSION) throw new Error(`Unsupported Antigravity ACP protocol ${response.protocolVersion}`)
     process.mcpHttp = response.agentCapabilities?.mcpCapabilities?.http === true

@@ -1,0 +1,110 @@
+name: Package
+
+# Builds the Windows and Linux installers and CLIs for one version. Called by the
+# nightly and stable release workflows, which publish the uploaded artifacts.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version stamped into package.json before building, such as 0.1.2-nightly.20261022.17
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  # Official builds sign in to the hosted Mousse ID service (docs/DEPLOYMENT_GUIDE.md).
+  MOUSSE_ID_ORIGIN: https://api.mousse.work
+  VERSION: ${{ inputs.version }}
+  # The fourth number of the Windows file version, which only takes numbers.
+  BUILD_NUMBER: ${{ github.run_number }}
+
+jobs:
+  linux:
+    name: Package Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.20.0'
+          cache: npm
+      - run: npm ci
+      - run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+      - run: npm run dist:linux
+      - name: Check the packaged CLI reports the version
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends xvfb xauth
+          # Chromium's supported SUID sandbox helper, as in the CI full-suite job.
+          sudo chown root:root release/cli/linux-unpacked/chrome-sandbox
+          sudo chmod 4755 release/cli/linux-unpacked/chrome-sandbox
+          out=$(xvfb-run --auto-servernum release/cli/linux-unpacked/mousse-cli --version)
+          echo "$out"
+          test "$out" = "mousse-cli $VERSION"
+      - name: Scan the packaged apps for secrets and private files
+        run: |
+          # docs/DEPLOYMENT_GUIDE.md, "Secret and package-content gate".
+          for app in release/linux-unpacked release/cli/linux-unpacked; do
+            dest="scan/$(basename "$(dirname "$app")")-$(basename "$app")"
+            npx asar extract "$app/resources/app.asar" "$dest"
+            cp -r "$app/resources/." "$dest-resources" && rm -f "$dest-resources/app.asar"
+          done
+          private=$(find scan \( -name '.env*' -o -name '.mousse' -o -name '.mousse-worktrees' -o -name '*.pem' -o -name '*.key' -o -name 'id_rsa*' -o -name '*owner-token*' \) -print)
+          if [ -n "$private" ]; then echo "Private files in the package:"; echo "$private"; exit 1; fi
+          # Scan the bundled Mousse code and resources, where a build-time value could leak.
+          # secretlint skips node_modules, whose own test fixtures hold sample credentials.
+          echo '{"rules":[{"id":"@secretlint/secretlint-rule-preset-recommend"}]}' > "$RUNNER_TEMP/secretlintrc.json"
+          npx --yes -p secretlint@13.0.7 -p @secretlint/secretlint-rule-preset-recommend@13.0.7 \
+            secretlint --secretlintrc "$RUNNER_TEMP/secretlintrc.json" --maskSecrets "scan/**/*"
+      # One flat folder, so the release gets the files themselves.
+      - run: |
+          mkdir upload
+          cp "release/Mousse-$VERSION.AppImage" "release/cli/mousse-cli-$VERSION-linux-x86_64.AppImage" upload/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mousse-linux
+          if-no-files-found: error
+          path: upload/*
+
+  windows:
+    name: Package Windows
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.20.0'
+          cache: npm
+      - run: npm ci
+      - run: npm version "$env:VERSION" --no-git-tag-version --allow-same-version
+      - name: Locate MSBuild for the node-pty rebuild
+        run: |
+          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          if (-not $msbuild) { throw 'MSBuild not found' }
+          "MSBUILD_PATH=$msbuild" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - run: npm run dist:win
+      - run: npx electron-builder --win --config electron-builder.cli.yml
+      - name: Check the packaged CLI reports the version
+        run: |
+          $out = (& release\cli\win-unpacked\mousse-cli.exe --version | Out-String).Trim()
+          $out
+          if ($out -ne "mousse-cli $env:VERSION") { throw "Unexpected version output: $out" }
+      # One flat folder. GitHub serves spaces in asset names as dots, so the installer is renamed
+      # to the name it will have (as in earlier releases) before the checksums are written.
+      - run: |
+          New-Item -ItemType Directory upload | Out-Null
+          Copy-Item "release\Mousse Setup $env:VERSION.exe" "upload\Mousse.Setup.$env:VERSION.exe"
+          Copy-Item "release\cli\mousse-cli-$env:VERSION-win-x64.exe" upload
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mousse-windows
+          if-no-files-found: error
+          path: upload/*

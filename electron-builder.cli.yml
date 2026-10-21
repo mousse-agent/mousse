@@ -3,6 +3,8 @@ productName: mousse-cli
 executableName: mousse-cli
 artifactName: mousse-cli-${version}-${os}-${arch}.${ext}
 afterPack: scripts/after-pack.mjs
+# The release workflows publish; electron-builder never does.
+publish: null
 directories:
   output: release/cli
   buildResources: resources

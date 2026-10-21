@@ -201,6 +201,15 @@
   border-color: rgba(var(--accent-pale-rgb), 0.2);
 }
 
+.settings-nav-version {
+  margin-top: auto;
+  padding: 12px 8px 0;
+  font-size: 11px;
+  color: var(--text-muted, var(--text-secondary));
+  user-select: text;
+  overflow-wrap: anywhere;
+}
+
 .settings-nav-item-icon {
   display: inline-flex;
   align-items: center;
