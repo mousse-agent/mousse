@@ -38,6 +38,8 @@ export interface DaemonOptions {
   /** Appears in failure messages. */
   label?: string
   cwd?: string
+  /** Registers ownership immediately after spawn, before the first readiness wait. */
+  onStart?: (daemon: Daemon) => void
 }
 
 export interface Daemon {
@@ -111,37 +113,21 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     child.once('error', () => done())
   })
   let owner: OwnerRecord | null = null
-  await until(
-    () => {
-      if (finished(child)) throw new Error(`${label} exited before readiness: ${output}`)
-      const runtime = readJson(join(home, 'mms.runtime.json'))
-      if (runtime?.pid !== child.pid) return false
-      if (readiness === 'runtime') return true
-      const record = readJson(join(home, 'mms.owner.json'))
-      if (record?.pid !== child.pid) return false
-      owner = record
-      return true
-    },
-    Boolean,
-    timeout,
-    `${label} readiness timed out: ${output}`
-  ).catch((error) => {
-    if (!finished(child)) child.kill('SIGKILL')
-    throw error
-  }).finally(finishReadiness)
   const kill = async (signal: NodeJS.Signals = 'SIGKILL') => {
     if (finished(child)) return
     child.kill(signal)
     await fixturePhase('daemon', 'kill', () => exited)
   }
-  return {
+  const daemon: Daemon = {
     child,
     pid: child.pid!,
     home,
     get output() {
       return output
     },
-    owner,
+    get owner() {
+      return owner
+    },
     exited,
     get done() {
       return finished(child)
@@ -157,6 +143,30 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         clearTimeout(timer)
       }
     }
+  }
+  try {
+    options.onStart?.(daemon)
+    await until(
+      () => {
+        if (finished(child)) throw new Error(`${label} exited before readiness: ${output}`)
+        const runtime = readJson(join(home, 'mms.runtime.json'))
+        if (runtime?.pid !== child.pid) return false
+        if (readiness === 'runtime') return true
+        const record = readJson(join(home, 'mms.owner.json'))
+        if (record?.pid !== child.pid) return false
+        owner = record
+        return true
+      },
+      Boolean,
+      timeout,
+      `${label} readiness timed out: ${output}`
+    )
+    return daemon
+  } catch (error) {
+    await daemon.kill()
+    throw error
+  } finally {
+    finishReadiness()
   }
 }
 

@@ -68,6 +68,7 @@
     "tests/run/providerBranchRatchet.test.ts",
     "tests/run/restoreSafety.test.ts",
     "tests/run/threadFork.test.ts",
+    "tests/supportDaemon.test.ts",
     "tests/teamWorkflowScripts.test.ts",
     "tests/threadWorkspace.test.ts",
     "tests/threadWorktreeToggle.test.ts",
