@@ -55,6 +55,13 @@ import { SqliteQuotaRateLedger } from './store/limits'
 import { FileBlobStore } from './store/blobs'
 import { FileKeyStore, NetIdentityService } from './identity'
 import { ProfileTransports } from './transports/manager'
+import {
+  PHONE_DIRECT_TRANSPORT,
+  PHONE_ENDPOINTS_METHOD,
+  phoneDirectPort,
+  type PhoneAddress,
+  type PhoneEndpoint
+} from './transports/phoneDirect'
 import type { TransportConfiguration } from './transports/registry'
 import type { RelayIdentity } from './relay/protocol'
 import { inviteRequiresProtection } from './enrollment/service'
@@ -144,6 +151,7 @@ export class NetService {
   private readonly tasks = new Set<Promise<unknown>>()
   private readonly shutdownSignal = new AbortController()
   private mutation = Promise.resolve()
+  private phoneSync: Promise<void> = Promise.resolve()
   private stopped = false
   private disabled = false
   private disabling?: Promise<NetStatus>
@@ -164,6 +172,8 @@ export class NetService {
       onChanged?(status: NetStatus): void
       composeRuntime?(runtime: NetRuntime): NetDomainComposition | void
       hosted?: HostedNetModule
+      /** Tests replace the computer's addresses and port for the phone listener. */
+      phoneDirect?: { addresses?: () => PhoneAddress[]; port?: number; rescanMs?: number }
     }
   ) {
     this.clock = options.clock ?? systemClock
@@ -259,6 +269,22 @@ export class NetService {
         }),
         transfer = new AuthorityTransferDelivery({ db, identity, keys })
       transfer.register(rpc)
+      rpc.register({
+        method: PHONE_ENDPOINTS_METHOD,
+        capability: 'read',
+        mutating: false,
+        validate: (params) => {
+          if (
+            !params ||
+            typeof params !== 'object' ||
+            Array.isArray(params) ||
+            Object.keys(params).length
+          )
+            throw new NetError('bad_request')
+          return params
+        },
+        handle: async (_params, context) => ({ endpoints: this.phoneEndpoints(context.carrier) })
+      })
       rpc.register({
         method: 'authority.transfer.ready',
         capability: 'read',
@@ -628,6 +654,7 @@ export class NetService {
         try {
           this.localSignedRoutes = undefined
           this.signedRoutes()
+          this.syncPhoneDirect()
           this.emit()
         } catch (error) {
           this.lastError = error instanceof NetError ? error.code : 'internal'
@@ -645,12 +672,12 @@ export class NetService {
               ? [{ ...row, enabled: false }]
               : [row]
       ),
-      (raw, _info, deadline) => {
+      (raw, info, deadline) => {
         if (this.stopped || this.disabled || !this.config.enabled) {
           raw.destroy()
           return
         }
-        this.track(this.accept(raw, deadline)).catch((error) => {
+        this.track(this.accept(raw, deadline, info.transport)).catch((error) => {
           this.lastError = error instanceof NetError ? error.code : 'internal'
           this.emit()
         })
@@ -680,6 +707,7 @@ export class NetService {
     }
     this.localSignedRoutes = undefined
     this.signedRoutes()
+    this.syncPhoneDirect()
     this.lastError = undefined
     this.refreshPeers()
     this.scheduleRenewal()
@@ -698,7 +726,93 @@ export class NetService {
     }
     return this.localSignedRoutes
   }
-  private async accept(raw: Duplex, deadline: number): Promise<void> {
+  /**
+   * Runs the phone listener exactly while this computer is signed in to Mousse ID and holds a
+   * relay lease: the hosted relay listener is up. Nothing in settings shows or controls it.
+   */
+  private syncPhoneDirect(): void {
+    const transport = this.transport
+    if (!transport) return
+    let wanted = false
+    try {
+      wanted =
+        !!this.hosted &&
+        !this.stopped &&
+        !this.disabled &&
+        this.config.enabled &&
+        this.featureEnabled('netBridge') &&
+        transport.hasPlusRelayListener()
+    } catch {
+      wanted = false
+    }
+    const options = this.options.phoneDirect
+    this.phoneSync = this.phoneSync
+      .then(async () => {
+        if (!wanted || transport !== this.transport) return transport.stopPhoneDirect()
+        const node = this.requireEnrolled().identity.self()!.node
+        await transport.startPhoneDirect(
+          {
+            port: options?.port ?? phoneDirectPort(node),
+            ...(options?.addresses ? { addresses: options.addresses } : {}),
+            ...(options?.rescanMs ? { rescanMs: options.rescanMs } : {})
+          },
+          (raw, _info, deadline) => {
+            if (this.stopped || this.disabled || !this.config.enabled) {
+              raw.destroy()
+              return
+            }
+            this.track(this.acceptPhone(raw, deadline)).catch(() => {})
+          }
+        )
+      })
+      .catch(() => {})
+  }
+  /** Settles once the phone listener matches the current Mousse ID state; for tests. */
+  phoneDirectSettled(): Promise<void> {
+    return this.phoneSync
+  }
+  /**
+   * Direct endpoints for a phone, only over a session that came through Mousse ID: the hosted
+   * relay, or the phone listener itself. Everyone else learns nothing.
+   */
+  private phoneEndpoints(carrier: string | undefined): PhoneEndpoint[] {
+    if (carrier !== HOSTED_RELAY_TRANSPORT && carrier !== PHONE_DIRECT_TRANSPORT) return []
+    if (!this.transport?.hasPlusRelayListener()) return []
+    return this.transport.phoneEndpoints()
+  }
+  /**
+   * A connection on the phone listener: the same pinned TLS and session checks as the relay
+   * (roster, delegation, revocation), but only for the user's own nodes. It never enrolls or
+   * joins Spaces.
+   */
+  private async acceptPhone(raw: Duplex, deadline: number): Promise<void> {
+    try {
+      this.assertEnabled()
+      const rt = this.requireEnrolled()
+      const remaining = Math.floor(deadline - this.clock.monotonic())
+      if (remaining <= 0 || raw.destroyed) throw new NetError('deadline_exceeded')
+      const channel = await openSecureChannel(raw, {
+        role: 'server',
+        credentials: rt.keys.tlsCredentials(),
+        deadlineMs: Math.min(DIAL_TLS_DEADLINE_MS, remaining),
+        signal: this.shutdownSignal.signal
+      })
+      try {
+        this.makeSession(channel, undefined, undefined, raw, {
+          carrier: PHONE_DIRECT_TRANSPORT,
+          sameUserOnly: true
+        })
+      } catch (error) {
+        channel.close()
+        throw error
+      }
+    } catch (error) {
+      raw.destroy()
+      this.transport?.admission.release(raw)
+      throw error
+    }
+  }
+  private async accept(raw: Duplex, deadline: number, carrier?: string): Promise<void> {
     try {
       this.assertEnabled()
       const rt = this.requireEnrolled()
@@ -731,7 +845,8 @@ export class NetService {
               }
             : undefined,
           onEnrolled: () => this.transport?.markAuthenticated(raw),
-          normalSession: (secure, mux, context) => this.makeSession(secure, mux, context, raw)
+          normalSession: (secure, mux, context) =>
+            this.makeSession(secure, mux, context, raw, { carrier })
         })
         this.gateways.add(gateway)
         try {
@@ -753,7 +868,8 @@ export class NetService {
     channel: SecureChannel,
     mux?: Mux,
     context?: GatewayNormalContext,
-    raw?: Duplex
+    raw?: Duplex,
+    inbound?: { carrier?: string; sameUserOnly?: boolean }
   ): NetSyncSession {
     this.assertEnabled()
     const rt = this.requireEnrolled()
@@ -804,7 +920,10 @@ export class NetService {
       localRoutes: () => this.signedRoutes(),
       onPeerRoutes: (routes, peer) =>
         this.adoptRoutes(routes, peer.node, peer.user, peer.delegation),
+      ...(inbound?.carrier ? { carrier: inbound.carrier } : {}),
       onAuthenticated: () => {
+        if (inbound?.sameUserOnly && session.peer.user !== rt.identity.self()?.user)
+          throw new NetError('forbidden')
         if ([...this.sessions].filter((session) => session.state() === 'open').length > 64)
           throw new NetError('rate_limited')
         if (raw) this.transport?.markAuthenticated(raw)

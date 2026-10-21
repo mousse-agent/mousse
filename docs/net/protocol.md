@@ -282,3 +282,15 @@ The posted `sealedInvite` is base64url of `ePub32 || nonce12 || ciphertext || ta
 Default phone capabilities are read, chat and write.
 
 **Refresh.** Node delegations last 7 days (§9). The authority renews delegations near expiry every hour and sends the new roster as `rosterUpdate` on open sessions. A phone that does not connect at least once a week must enroll again.
+
+## 11. Direct path for signed-in phones
+
+A phone that reached a computer through Mousse ID may use a shorter path when both are on the same network or tailnet. Nothing in either app shows or controls it.
+
+**Listener.** While the computer is signed in to Mousse ID and its hosted relay listener is up, it also listens for phones on each of its private addresses: IPv4 `10/8`, `172.16/12` and `192.168/16`, IPv6 unique local `fc00::/7`, and the Tailscale ranges `100.64/10` and `fd7a:115c:a1e0::/48`. Loopback, public, link-local and container or VM bridge addresses are never bound. The port is derived from the node id (41000 to 48999), so it stays the same across restarts; an address whose port is taken falls back to any free port. Addresses are read again every 15 seconds. The listener stops when Mousse ID disconnects. It carries the ordinary direct WebSocket (`ws://<address>:<port>/mousse-net`) with the same preauth budget as every other carrier (`src/mms/net/transports/phoneDirect.ts`).
+
+**Authentication.** A connection runs the same pinned inner TLS and session handshake as the relay: the computer checks the phone's delegation against the roster, its key epoch and revocations, and RPCs pass the same dispatcher checks. The phone listener accepts only nodes of the computer's own user, never enrolls a node, and never joins a Space.
+
+**Discovery.** The phone asks for the endpoints with `net.direct.endpoints` (`{}`, capability `read`, not mutating). The answer is `{endpoints: [{url, kind}]}` with `kind` `lan` or `tailscale`, LAN first. It is empty unless the calling session arrived through the hosted relay (`plus-relay`) or the phone listener itself, and the hosted relay listener is up. Sessions over any other carrier learn nothing.
+
+**Phone behaviour.** The phone keeps its Mousse ID registration renewed on every path. It opens a full session on a direct endpoint before it moves streams and new requests there, and keeps the old session until the requests in flight on it finish. If the direct path stops answering, the phone falls back to the relay.

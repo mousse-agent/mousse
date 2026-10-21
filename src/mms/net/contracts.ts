@@ -737,6 +737,8 @@ export interface RpcContext {
   /** Executor-minted stable ledger identity, present only after durable admission. */
   execution?: ExecutionId
   caller: SyncSession['peer']
+  /** The inbound carrier the calling session arrived on (`plus-relay`, `phone-direct`…), when known. */
+  carrier?: string
   signal: AbortSignal
   deadlineAt: number
   progress(data: unknown): void
