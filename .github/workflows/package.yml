@@ -36,6 +36,11 @@ jobs:
       - run: npm ci
       - run: npm version "$VERSION" --no-git-tag-version --allow-same-version
       - run: npm run dist:linux
+      # Without the origin the app builds fine but hides Mousse ID.
+      - name: Check the build includes Mousse ID
+        run: |
+          test -n "$MOUSSE_ID_ORIGIN"
+          grep -rqF "$MOUSSE_ID_ORIGIN" out/renderer || { echo "out/renderer has no $MOUSSE_ID_ORIGIN"; exit 1; }
       - name: Check the packaged CLI reports the version
         run: |
           sudo apt-get update
@@ -91,6 +96,12 @@ jobs:
           if (-not $msbuild) { throw 'MSBuild not found' }
           "MSBUILD_PATH=$msbuild" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - run: npm run dist:win
+      - name: Check the build includes Mousse ID
+        run: |
+          if (-not $env:MOUSSE_ID_ORIGIN) { throw 'MOUSSE_ID_ORIGIN is not set' }
+          if (-not (Select-String -Path out\renderer\assets\*.js -SimpleMatch -Pattern $env:MOUSSE_ID_ORIGIN -Quiet)) {
+            throw "out\renderer has no $env:MOUSSE_ID_ORIGIN"
+          }
       - run: npx electron-builder --win --config electron-builder.cli.yml
       - name: Check the packaged CLI reports the version
         run: |
