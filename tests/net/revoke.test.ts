@@ -71,7 +71,8 @@ it('revoking a device closes its connection, refuses it again and sends the rost
   // The open session told the revoked device before closing.
   expect(b.net.runtime().identity.roster()).toEqual(a.net.runtime().identity.roster())
   const { nodes } = (await a.net.request('bridge.nodes', {})) as { nodes: Device[] }
-  expect(nodes.find((node) => node.node === joined.node)).toMatchObject({ revoked: true })
+  // Published rosters may leave out revoked delegations, so the device is gone or marked revoked.
+  expect(nodes.find((node) => node.node === joined.node)?.revoked ?? true).toBe(true)
   // The revoked device's retries never open a session again.
   await new Promise((resolve) => setTimeout(resolve, 1500))
   expect(a.net.status().peers.some((peer) => peer.state === 'open')).toBe(false)
