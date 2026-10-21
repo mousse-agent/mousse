@@ -19,6 +19,7 @@ import { WorkspaceLoading } from './components/WorkspaceLoading'
 
 import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { TitleBar } from './components/TitleBar'
+import { UpdatePill } from './components/updates/UpdatePill'
 import { SubscriptionUsagePage } from './components/SubscriptionUsagePage'
 
 import { openSurface } from './lib/surfaces'
@@ -578,6 +579,8 @@ export default function App() {
         </div>
 
       </div>
+
+      <UpdatePill />
 
     </div>
 

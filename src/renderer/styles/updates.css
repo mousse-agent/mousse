@@ -1,17 +1,110 @@
-/* In-app update: left-rail button, details popover and the Updates settings section. */
+/* In-app update: floating pill, details popover and the Updates settings section. */
 
-.update-rail-badge {
-  position: absolute;
-  top: 7px;
-  right: 7px;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 2px rgba(var(--surface-base-rgb), 1);
+.update-pill {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  /* Above the panes and the threads peek, below Settings and floating layers. */
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 38px;
+  padding: 0 4px 0 2px;
+  overflow: hidden;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.22);
+  border-radius: 999px;
+  background:
+    linear-gradient(90deg, rgba(var(--accent-rgb), 0.16) var(--update-progress, 0%), transparent var(--update-progress, 0%)),
+    rgb(var(--surface-strong-rgb));
+  color: var(--text-primary);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(0, 0, 0, 0.12);
+  font-size: 12.5px;
+  animation: update-pill-in 0.28s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+  -webkit-app-region: no-drag;
 }
 
-.update-rail-badge.ready { background: var(--success, var(--accent)); }
+@keyframes update-pill-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+
+.update-pill-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px 0 4px;
+  border-radius: 999px;
+  color: inherit;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.update-pill-label:hover,
+.update-pill-label[aria-expanded="true"] { background: var(--ui-hover); }
+.update-pill-label strong { font-weight: 600; }
+.update-pill-detail { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+
+.update-pill-icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
+}
+
+.update-pill-ready .update-pill-icon { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
+.update-pill-failed .update-pill-icon,
+.update-pill-retry-install .update-pill-icon { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+.update-pill-downloading .update-pill-icon { background: none; }
+
+.update-pill-ring { width: 24px; height: 24px; transform: rotate(-90deg); }
+.update-pill-ring circle { fill: none; stroke-width: 2.6; }
+.update-pill-ring-track { stroke: rgba(var(--accent-rgb), 0.2); }
+.update-pill-ring-value { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset 0.6s ease; }
+.update-pill-ring.indeterminate { animation: spin 1s linear infinite; }
+
+.update-pill-action {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: var(--gradient-accent);
+  color: white;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: filter 0.15s;
+}
+
+.update-pill-action:hover { filter: brightness(1.08); }
+
+.update-pill-hide {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin-left: 2px;
+  border-radius: 50%;
+  color: var(--text-secondary);
+  transition: background 0.15s, color 0.15s;
+}
+
+.update-pill-hide:hover { background: var(--ui-hover); color: var(--text-primary); }
+
+.update-pill-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-pill { animation: none; }
+  .update-pill-ring-value { transition: none; }
+}
 
 .update-popover {
   display: flex;
@@ -52,29 +145,6 @@
 .update-notes a { display: inline-block; margin-top: 2px; font-size: 12px; color: var(--text-secondary); text-decoration: underline dotted; }
 .update-notes a:hover { color: var(--text-primary); }
 .update-notes-more { margin: 10px 0 0; font-size: 12px; color: var(--text-secondary); }
-
-.update-popover-footer { display: flex; justify-content: flex-end; padding-top: 4px; }
-.update-popover-footer .btn { min-height: 32px; }
-
-.update-progress {
-  position: relative;
-  display: flex;
-  align-items: center;
-  width: 100%;
-  height: 32px;
-  overflow: hidden;
-  border-radius: 7px;
-  background: rgba(var(--accent-rgb), 0.08);
-}
-
-.update-progress span {
-  position: absolute;
-  inset: 0 auto 0 0;
-  background: rgba(var(--accent-rgb), 0.28);
-  transition: width 0.4s ease;
-}
-
-.update-progress em { position: relative; width: 100%; text-align: center; font-size: 12px; font-style: normal; }
 
 .update-settings-channel { display: grid; gap: 8px; margin-top: 12px; }
 
