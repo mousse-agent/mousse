@@ -21,7 +21,7 @@ The newest 10 nightlies are kept; older ones and their tags are deleted.
 - `package.json` holds the only version. The GUI (bottom of the Settings sidebar), `mousse-cli --version`, the daemon's `hello_ok.serverVersion`, provider client info and installer names all come from it.
 - `master` always holds the **next** stable version. After `v0.1.2` ships, the next PR sets `0.1.3`.
 - Nightlies are SemVer prereleases of that version: `0.1.2-nightly.20261022.17` is the nightly built on 22 October 2026 (UTC) by workflow run 17. It sorts before `0.1.2`, so a nightly never looks newer than the stable release it leads to. The release page names the commit.
-- Windows file versions take only numbers, so a nightly installer's file version is `0.1.2.<run number>` and its product version is the full version.
+- Windows file and product versions take only numbers, so a nightly's `Mousse.exe` shows `0.1.2.<run number>` in Explorer. `mousse-cli --version` and Settings show the full version.
 
 Which number to bump, while Mousse is below 1.0:
 

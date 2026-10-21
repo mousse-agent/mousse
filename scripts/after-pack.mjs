@@ -55,9 +55,9 @@ function applyWindowsIcon(executable, iconPath, appInfo) {
     console.warn(`[after-pack] rcedit.exe not found; leaving Electron icon on ${basename(executable)}`)
     return
   }
-  // Windows file versions are four numbers, so a nightly's file version is 0.1.2.<build number>.
-  // --set-product-version stores the numeric form too; the ProductVersion string, which Explorer
-  // shows, is set separately to the full version, such as 0.1.2-nightly.20261022.17.
+  // Windows file and product versions are four numbers, so a nightly shows 0.1.2.<build number>.
+  // electron-builder edits the version fields after this hook, so the full version (such as
+  // 0.1.2-nightly.20261022.17) is not kept here; the app reports it itself.
   const version = appInfo.version
   const args = [executable, '--set-icon', iconPath]
   if (version) {
@@ -71,9 +71,6 @@ function applyWindowsIcon(executable, iconPath, appInfo) {
       '--set-file-version',
       appInfo.getVersionInWeirdWindowsForm(),
       '--set-product-version',
-      version,
-      '--set-version-string',
-      'ProductVersion',
       version
     )
   }
