@@ -38,6 +38,7 @@ import { resolveDaemonHostInvocation } from '../daemonHost'
 import { MmsProtocolServer } from '../../mms/protocol'
 import {
   requestDaemonShutdown,
+  stopRunningDaemon,
   shutdownDaemonLifecycle,
   type DaemonLifecycleState
 } from '../daemonShutdown'
@@ -300,75 +301,39 @@ async function stopDaemon(
   mode: ParsedArgs['globals']['mode']
 ): Promise<void> {
   const homeDir = canonicalizeHome(resolveMousseHome(homeFlag))
-  const status = resolveRuntimeStatus(homeDir)
-
-  if (!status.running) {
-    exitWithError('MMS is not running.', mode)
-  }
-  if (!status.record) {
-    // Held unreadable — cannot issue token-checked stop.
-    exitWithError(
-      'MMS runtime is present but unreadable; cannot send owner-checked stop request.',
-      mode
-    )
-  }
-
-  const record = status.record!
-  // Prefer protocol graceful shutdown when endpoint is reachable; keep stop-file fallback.
-  try {
-    const owner = readOwnerRecord(homeDir)
-    if (owner?.token && owner.endpoint) {
-      const { LocalMmsClient } = await import('../../mms/protocol/client')
-      const client = new LocalMmsClient({
-        homeDir,
-        ownerToken: owner.token,
-        endpoint: owner.endpoint,
-        clientType: 'cli',
-        requestTimeoutMs: 5_000
-      })
-      try {
-        await client.connect()
-        await client.request('daemon.shutdown', { reason: 'service-stop' })
-      } finally {
-        await client.close().catch(() => undefined)
-      }
-    }
-  } catch {
-    /* fall through to stop-file */
-  }
-  // Same fenced stop request as protocol daemon.shutdown (compatibility path).
-  requestDaemonShutdown(homeDir, record.token, 'service-stop')
-
-  const result = await pollUntilRuntimeStopped(homeDir, record.token, {
+  const result = await stopRunningDaemon(homeDir, {
+    reason: 'service-stop',
     timeoutMs: SERVICE_STOP_TIMEOUT_MS,
     intervalMs: SERVICE_POLL_INTERVAL_MS
   })
-
-  if (result.kind === 'stopped') {
-    clearStopRequest(homeDir)
-    writeOutput(mode, { stopped: true, pid: record.pid, running: false })
-    return
+  switch (result.kind) {
+    case 'not-running':
+      exitWithError('MMS is not running.', mode)
+      return
+    case 'unreadable':
+      exitWithError('MMS runtime is present but unreadable; cannot send owner-checked stop request.', mode)
+      return
+    case 'stopped':
+      writeOutput(mode, { stopped: true, pid: result.pid, running: false })
+      return
+    case 'replaced':
+      // Accurate: original stopped/replaced, but MMS is still running under a new owner.
+      writeOutput(mode, {
+        stopped: false,
+        originalPid: result.pid,
+        running: true,
+        pid: result.record.pid,
+        processInstanceId: result.record.processInstanceId,
+        note: 'Original instance no longer owns runtime; a replacement MMS is still running'
+      })
+      return
+    case 'timeout':
+      // Do not hard-kill or remove ownership.
+      exitWithError(
+        `MMS stop timed out after ${SERVICE_STOP_TIMEOUT_MS}ms (pid ${result.pid} still running). Ownership left in place.`,
+        mode
+      )
   }
-
-  if (result.kind === 'replaced') {
-    clearStopRequest(homeDir)
-    // Accurate: original stopped/replaced, but MMS is still running under a new owner.
-    writeOutput(mode, {
-      stopped: false,
-      originalPid: record.pid,
-      running: true,
-      pid: result.record.pid,
-      processInstanceId: result.record.processInstanceId,
-      note: 'Original instance no longer owns runtime; a replacement MMS is still running'
-    })
-    return
-  }
-
-  // Timeout: do not hard-kill or remove ownership.
-  exitWithError(
-    `MMS stop timed out after ${SERVICE_STOP_TIMEOUT_MS}ms (pid ${record.pid} still running). Ownership left in place.`,
-    mode
-  )
 }
 
 async function showStatus(
