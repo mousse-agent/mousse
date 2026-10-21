@@ -56,7 +56,6 @@ jobs:
       - name: Update through the app
         env:
           MOUSSE_UPDATE_FEED_URL: http://127.0.0.1:8799/
-          MOUSSE_HOME: C:\upd\home
         run: |
           @'
           import { createServer } from 'node:http'
@@ -113,16 +112,16 @@ jobs:
           # The installer removes the old files first, so the CLI can be missing for a while.
           do { Start-Sleep 5; $version = if (Test-Path $cli) { (& $cli --version 2>$null | Out-String).Trim() } else { 'installing' }; "installed: $version" } until ($version -eq "mousse-cli $env:NEW" -or (Get-Date) -gt $deadline)
           if ($version -ne "mousse-cli $env:NEW") { throw "Still $version" }
-          $record = "C:\upd\home\electron-user-data\updates.json"
+          $record = "$env:APPDATA\mousse\updates.json"
           $deadline = (Get-Date).AddMinutes(3)
           do { Start-Sleep 5; $text = Get-Content $record -Raw -ErrorAction SilentlyContinue; "record: $($text -replace '\s+', ' ')"; Get-CimInstance Win32_Process -Filter "Name='Mousse.exe'" | ForEach-Object { "  running: $($_.ProcessId) $($_.CommandLine)" } } until (($text -and $text -notmatch '"install"') -or (Get-Date) -gt $deadline)
           if (-not $text -or $text -match '"install"') { throw 'The relaunched app did not confirm the update' }
           $deadline = (Get-Date).AddMinutes(3)
-          do { Start-Sleep 5; $status = & "$env:LOCALAPPDATA\Programs\Mousse\mousse-cli.exe" --home C:\upd\home --mode json service status | Out-String; "service: $status" } until ($status -match "`"version`":\s*`"$([regex]::Escape($env:NEW))`"" -or (Get-Date) -gt $deadline)
+          do { Start-Sleep 5; $status = & "$env:LOCALAPPDATA\Programs\Mousse\mousse-cli.exe" --mode json service status | Out-String; "service: $status" } until ($status -match "`"version`":\s*`"$([regex]::Escape($env:NEW))`"" -or (Get-Date) -gt $deadline)
           if ($status -notmatch "`"version`":\s*`"$([regex]::Escape($env:NEW))`"") { throw 'The background service is not the new version' }
           Get-Process Mousse | Select-Object Id, Path | Format-Table
       - name: Logs
         if: always()
         run: |
           Get-Content C:\upd\feed.log -ErrorAction SilentlyContinue
-          Get-Content C:\upd\home\mms-startup.log -Tail 60 -ErrorAction SilentlyContinue
+          Get-Content "$env:USERPROFILE\.mousse\mms-startup.log" -Tail 60 -ErrorAction SilentlyContinue
