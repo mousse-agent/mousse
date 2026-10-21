@@ -69,6 +69,7 @@ describe('remote composer methods', () => {
       'attachments.stage',
       'queue.enqueue',
       'queue.remove',
+      'queue.reorder',
       'queue.promoteToSteer'
     ] as const)
       expect(BRIDGE_REMOTE_METHODS[method]).toEqual({ capability: 'chat', mutating: true })
@@ -278,6 +279,14 @@ describe('remote composer methods on a real profile', () => {
       })
     ])
     expect(JSON.stringify(listed)).not.toContain('AAAA')
+    const second = mms.orchestrator.enqueueForThread(thread.id, { content: 'after' })
+    const reordered = (await call(api, 'queue.reorder', {
+      threadId: thread.id,
+      orderedIds: [second.id, item.id]
+    })) as { ok: boolean; items: Array<{ id: string }> }
+    expect(reordered.ok).toBe(true)
+    expect(reordered.items.map((row) => row.id)).toEqual([second.id, item.id])
+    await call(api, 'queue.remove', { threadId: thread.id, itemId: second.id })
     expect(
       await call(api, 'queue.promoteToSteer', { threadId: thread.id, itemId: item.id })
     ).toMatchObject({

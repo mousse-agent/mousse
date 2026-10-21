@@ -144,6 +144,20 @@ export function validateRemoteParams(
       text('threadId')
       text('itemId')
       break
+    case 'queue.reorder': {
+      keys(['threadId', 'orderedIds'])
+      text('threadId')
+      const ids = p.orderedIds
+      if (
+        !Array.isArray(ids) ||
+        ids.length < 1 ||
+        ids.length > 200 ||
+        new Set(ids).size !== ids.length ||
+        ids.some((id) => typeof id !== 'string' || !id.trim() || id.length > 256)
+      )
+        throw new NetError('bad_request')
+      break
+    }
     case 'threads.setModel': {
       keys(['threadId', 'model'])
       text('threadId')

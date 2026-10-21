@@ -69,6 +69,11 @@ export interface BridgeRemoteParams {
     threadId: string
     itemId: string
   }
+  'queue.reorder': {
+    threadId: string
+    /** Queued message ids in their new order. */
+    orderedIds: string[]
+  }
   'queue.promoteToSteer': {
     threadId: string
     itemId: string

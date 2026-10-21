@@ -126,6 +126,13 @@ export class MmsRemoteBackend implements RemoteBackendPort {
           ? { ok: true, items: s.orchestrator.listQueue(threadId).map(queueRow) }
           : { ok: false, error: 'This message already started or is no longer queued.' }
       }
+      case 'queue.reorder':
+        try {
+          s.orchestrator.reorderQueue(threadId, params.orderedIds as string[])
+          return { ok: true, items: s.orchestrator.listQueue(threadId).map(queueRow) }
+        } catch (error) {
+          return failure(error)
+        }
       case 'queue.promoteToSteer':
         try {
           const ok = s.orchestrator.promoteQueueItemToSteer(threadId, params.itemId as string)

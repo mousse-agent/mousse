@@ -23,6 +23,7 @@ export const BRIDGE_REMOTE_METHODS = {
   'queue.list': { capability: 'read', mutating: false },
   'queue.enqueue': { capability: 'chat', mutating: true },
   'queue.remove': { capability: 'chat', mutating: true },
+  'queue.reorder': { capability: 'chat', mutating: true },
   'queue.promoteToSteer': { capability: 'chat', mutating: true }
 } as const satisfies Record<string, { capability: NodeCapability; mutating: boolean }>
 export type BridgeRemoteMethod = keyof typeof BRIDGE_REMOTE_METHODS
