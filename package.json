@@ -26,9 +26,9 @@
     "clean:build-output": "node scripts/clean-build-output.mjs",
     "prepare:package": "node scripts/prepare-package.mjs",
     "disk:report": "node scripts/disk-report.mjs",
-    "dist": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --publish never && electron-builder --config electron-builder.cli.yml --publish never",
-    "dist:win": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win --publish never",
-    "dist:win:cli": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win --config electron-builder.cli.yml --publish never",
+    "dist": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && node scripts/ensure-webrtc-prebuilt.mjs && electron-builder --publish never && electron-builder --config electron-builder.cli.yml --publish never",
+    "dist:win": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && node scripts/ensure-webrtc-prebuilt.mjs && electron-builder --win --publish never",
+    "dist:win:cli": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && node scripts/ensure-webrtc-prebuilt.mjs && electron-builder --win --config electron-builder.cli.yml --publish never",
     "dist:linux": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --linux AppImage --publish never && electron-builder --linux AppImage --config electron-builder.cli.yml --publish never",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "lint": "eslint .",
@@ -70,6 +70,7 @@
     "highlight.js": "^11.11.1",
     "lottie-react": "^3.1.1",
     "next-themes": "^0.4.6",
+    "node-datachannel": "0.33.4",
     "node-pty": "^1.0.0",
     "pi-cursor-sdk": "0.3.6",
     "qrcode-generator": "^1.5.2",
@@ -81,6 +82,9 @@
     "ws": "^8.22.0",
     "yaml": "2.9.0",
     "yauzl": "2.10.0"
+  },
+  "optionalDependencies": {
+    "@node-datachannel/win32-x64-msvc": "0.33.4"
   },
   "devDependencies": {
     "@fluentui/react-icons": "^2.0.334",
@@ -194,7 +198,8 @@
       "node_modules/node-pty/prebuilds/darwin-*/**",
       "node_modules/node-pty/prebuilds/win32-x64/**",
       "node_modules/node-pty/prebuilds/linux-x64/**",
-      "node_modules/node-pty/third_party/**"
+      "node_modules/node-pty/third_party/**",
+      "node_modules/@node-datachannel/**"
     ],
     "npmRebuild": false,
     "extraResources": [
