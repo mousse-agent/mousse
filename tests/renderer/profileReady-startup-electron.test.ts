@@ -21,6 +21,9 @@ it('paints the real shell and retryable skeleton before trusted binding, then pr
         // The layout assertions use real app CSS; Tailwind's build directives
         // are unrelated to these authored shell rules and need its Vite plugin.
         builder.onLoad({ filter: /[/\\]styles[/\\]global\.css$/ }, args => ({ contents: readFileSync(args.path, 'utf8').replace('@import "tailwindcss";', '').replace(/^@source .*;\r?\n/gm, ''), loader: 'css' }))
+        // Vite's `?url` imports (dictation's noise-suppressor assets) only need a URL string here.
+        builder.onResolve({ filter: /\?url$/ }, args => ({ path: args.path, namespace: 'asset-url' }))
+        builder.onLoad({ filter: /.*/, namespace: 'asset-url' }, args => ({ contents: `export default ${JSON.stringify(args.path)}`, loader: 'js' }))
         builder.onResolve({ filter: new RegExp(`/(?:${displays.join('|')})$`) }, args => ({ path: args.path.split('/').at(-1)!, namespace: 'empty-display' }))
         builder.onLoad({ filter: /.*/, namespace: 'empty-display' }, args => ({ contents: args.path === 'OrchestratorChat'
           ? `import {createElement} from 'react'; export function OrchestratorChat(){return createElement('div',{className:'startup-transcript'})}`
