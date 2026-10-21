@@ -1161,14 +1161,7 @@ export class OrchestratorService extends EventEmitter {
       },
       tasks: (threadId) => this.getTasksForThread(threadId),
       listQueue: (threadId) => this.listQueue(threadId),
-      enqueue: (threadId, input) => {
-        this.assertQueueOpen(threadId)
-        const item = this.enqueueForThread(threadId, input, { source: 'mcp' })
-        const session = this.getOrCreateSession(threadId)
-        if (session.isTurnRunning() || session.turnAdmitted) session.drainAfterSettle = true
-        else this.scheduleQueueDrain(session)
-        return item
-      },
+      enqueue: (threadId, input) => this.enqueueAndDrain(threadId, input, 'mcp'),
       toolLedger: (runId) => this.toolLedgerFor(runId)
     }
   }
@@ -2667,6 +2660,19 @@ export class OrchestratorService extends EventEmitter {
     if (threadId === this.boundSession.threadId) {
       this.emit('message-updated', message)
     }
+  }
+
+  /**
+   * Queues a message and makes sure it runs: after the current turn settles (whoever owns it,
+   * including a channel or remote turn that suppresses its own drain), or now when the thread is idle.
+   */
+  enqueueAndDrain(threadId: string, input: OrchestratorSendInput, source: string): QueuedMessage {
+    this.assertQueueOpen(threadId)
+    const item = this.enqueueForThread(threadId, input, { source })
+    const session = this.getOrCreateSession(threadId)
+    if (session.isTurnRunning() || session.turnAdmitted) session.drainAfterSettle = true
+    else this.scheduleQueueDrain(session)
+    return item
   }
 
   enqueueForThread(
@@ -6267,6 +6273,9 @@ export class OrchestratorService extends EventEmitter {
       signal?: AbortSignal
       drainSteer?: () => string | undefined
       hostIngress?: ChannelWorkflowHostIngress
+      /** Remote sends choose a mode and attach images; channel turns run in agent mode without images. */
+      mode?: ChatMode
+      images?: ChatImageAttachment[]
     }
   ): Promise<BackgroundWorkflowTurnResult> {
     return this.lifecycle.run('channel-turn', () => this.runChannelTurnOwned(threadId, content, threadStore, opts))
@@ -6281,6 +6290,9 @@ export class OrchestratorService extends EventEmitter {
       signal?: AbortSignal
       drainSteer?: () => string | undefined
       hostIngress?: ChannelWorkflowHostIngress
+      /** Remote sends choose a mode and attach images; channel turns run in agent mode without images. */
+      mode?: ChatMode
+      images?: ChatImageAttachment[]
     }
   ): Promise<BackgroundWorkflowTurnResult> {
     const ownedTurn = !opts?.signal
@@ -6370,7 +6382,7 @@ export class OrchestratorService extends EventEmitter {
       admittedSession = null
       const result = await this.runTurnOnSession(
         session,
-        { content, mode: 'agent' },
+        { content, mode: opts?.mode ?? 'agent', ...(opts?.images?.length ? { images: opts.images } : {}) },
         false,
         true,
         {

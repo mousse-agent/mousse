@@ -1,9 +1,37 @@
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { dispatchMethod } from '../../protocol/handlers'
 import { NetError } from '../../../shared/net'
-import type { RemoteBackendPort } from './RemoteApi'
+import type { RemoteBackendPort, RemoteChatExtras } from './RemoteApi'
 import { mmsJson } from './jsonOutput'
 import type { BridgeOrdinaryMethod } from './capabilities'
+import {
+  CHANNEL_COMMAND_REGISTRY,
+  COMPOSER_DESKTOP_COMMANDS
+} from '../../../shared/channelCommands'
+import { resolveThreadProjectPath } from '../../data/resolveActiveProjectPath'
+import type { OrchestratorSendRequest, QueuedMessage } from '../../../shared/types'
+
+/** Chat modes a remote composer offers, as in the desktop composer's mode menu. */
+const REMOTE_CHAT_MODES = ['plan', 'agent', 'build'] as const
+
+/** A queued message without its image data, which can be megabytes. */
+function queueRow(item: QueuedMessage): Record<string, unknown> {
+  return {
+    id: item.id,
+    content: item.content,
+    ...(item.mode !== undefined ? { mode: item.mode } : {}),
+    images: (item.images ?? []).map((image) => ({ name: image.name, mimeType: image.mimeType })),
+    enqueuedAt: item.enqueuedAt,
+    order: item.order,
+    intent: item.intent,
+    state: item.state,
+    ...(item.source ? { source: item.source } : {})
+  }
+}
+
+function failure(error: unknown): { ok: false; error: string } {
+  return { ok: false, error: error instanceof Error ? error.message : String(error) }
+}
 
 /** Adapts the actual profile services, never a client-supplied ingress/profile/path. */
 export class MmsRemoteBackend implements RemoteBackendPort {
@@ -22,6 +50,8 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       !this.services.projects.listProjects().some((project) => project.id === params.projectId)
     )
       throw new NetError('bad_request', 'Project is outside this profile inventory.')
+    const composer = await this.composer(method, params)
+    if (composer !== undefined) return mmsJson(composer)
     return mmsJson(
       await dispatchMethod(
         {
@@ -35,6 +65,119 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         params
       )
     )
+  }
+  /**
+   * Composer methods answer here rather than through the local protocol handlers: remote callers
+   * get trimmed rows (no paths, no image data), never change global settings, and receive expected
+   * refusals as `{ ok: false, error }` so the reason survives a mutating RPC.
+   */
+  private async composer(
+    method: BridgeOrdinaryMethod,
+    params: Record<string, unknown>
+  ): Promise<unknown> {
+    const s = this.services,
+      threadId = params.threadId as string
+    switch (method) {
+      case 'composer.options':
+        return this.composerOptions(params.threadId as string | undefined)
+      case 'threads.setModel': {
+        const model = params.model as { instanceId?: string; llmProvider?: string; model: string }
+        try {
+          // Unknown or disabled instances are refused before anything is stored.
+          const override = s.providerInstances.overrideFor(model)
+          const modelOverride = s.orchestrator.setThreadModelOverride(threadId, override)
+          s.events.broadcast('threads:updated', { threads: s.threads.listAllThreads() })
+          return { ok: true, modelOverride: modelOverride ?? null }
+        } catch (error) {
+          return failure(error)
+        }
+      }
+      case 'queue.list':
+        return { items: s.orchestrator.listQueue(threadId).map(queueRow) }
+      case 'queue.enqueue': {
+        const input: OrchestratorSendRequest = {
+          content: params.content as string,
+          ...(params.mode !== undefined
+            ? { mode: params.mode as OrchestratorSendRequest['mode'] }
+            : {}),
+          ...(Array.isArray(params.images)
+            ? { images: params.images as OrchestratorSendRequest['images'] }
+            : {})
+        }
+        try {
+          const item = s.orchestrator.enqueueAndDrain(threadId, input, 'remote')
+          return {
+            ok: true,
+            item: queueRow(item),
+            items: s.orchestrator.listQueue(threadId).map(queueRow)
+          }
+        } catch (error) {
+          return failure(error)
+        }
+      }
+      case 'queue.remove': {
+        let removed
+        try {
+          removed = s.orchestrator.removeQueuedItem(threadId, params.itemId as string)
+        } catch (error) {
+          return failure(error)
+        }
+        return removed
+          ? { ok: true, items: s.orchestrator.listQueue(threadId).map(queueRow) }
+          : { ok: false, error: 'This message already started or is no longer queued.' }
+      }
+      case 'queue.promoteToSteer':
+        try {
+          const ok = s.orchestrator.promoteQueueItemToSteer(threadId, params.itemId as string)
+          return { ok, items: s.orchestrator.listQueue(threadId).map(queueRow) }
+        } catch (error) {
+          return failure(error)
+        }
+      default:
+        return undefined
+    }
+  }
+  /** The models, default model, modes, skills and slash commands a composer offers. */
+  private async composerOptions(threadId?: string): Promise<unknown> {
+    const s = this.services
+    await s.providerAuth.init()
+    const settings = s.settings.get()
+    const projectPath = threadId
+      ? resolveThreadProjectPath(s.projects, s.threads, threadId)
+      : undefined
+    const enabled = new Set(settings.integrations.skills.enabledSkills)
+    let skills: Array<{ id: string; name: string; description: string }> = []
+    try {
+      const snapshot = await s.skillsRegistry.discover({ projectPath })
+      skills = snapshot.skills
+        .filter(
+          (skill) =>
+            skill.isActive !== false &&
+            (enabled.size === 0 || enabled.has(skill.id) || enabled.has(skill.name))
+        )
+        .map((skill) => ({ id: skill.id, name: skill.name, description: skill.description }))
+    } catch {
+      // Skills are optional in the composer; models still load.
+    }
+    const provider = settings.provider
+    return {
+      providers: s.providerInstances.llmProviders(),
+      defaultModel: provider?.model
+        ? {
+            ...(provider.instanceId ? { instanceId: provider.instanceId } : {}),
+            llmProvider: provider.llmProvider,
+            model: provider.model
+          }
+        : null,
+      modes: REMOTE_CHAT_MODES,
+      skills,
+      commands: [...CHANNEL_COMMAND_REGISTRY, ...COMPOSER_DESKTOP_COMMANDS].map((command) => ({
+        name: command.name,
+        description: command.description,
+        ...(command.aliases ? { aliases: command.aliases } : {}),
+        ...(command.argsHint ? { argsHint: command.argsHint } : {})
+      }))
+    }
   }
   snapshot(threadId: string, maximumBytes = 25 * 1024 * 1024): unknown {
     const s = this.services,
@@ -58,7 +201,8 @@ export class MmsRemoteBackend implements RemoteBackendPort {
   async run(
     threadId: string,
     content: string,
-    control: Parameters<RemoteBackendPort['run']>[2]
+    control: Parameters<RemoteBackendPort['run']>[2],
+    extras: RemoteChatExtras = {}
   ): Promise<unknown> {
     if (!this.services.threads.listAllThreads().find((thread) => thread.id === threadId))
       throw new NetError('stream_unknown', 'Thread not found.')
@@ -66,7 +210,9 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     return mmsJson(
       await this.services.orchestrator.runChannelTurn(threadId, content, this.services.threads, {
         signal: control.signal,
-        drainSteer: control.drainSteer
+        drainSteer: control.drainSteer,
+        ...(extras.mode !== undefined ? { mode: extras.mode } : {}),
+        ...(extras.images?.length ? { images: extras.images } : {})
       })
     )
   }
