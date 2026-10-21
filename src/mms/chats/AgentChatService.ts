@@ -61,6 +61,7 @@ export class AgentChatService {
   private readonly device: ChatDevice
   private browserRuntime?: BrowserRuntimePort
   private networkBindingGuard?: (chatId: string) => boolean
+  private readonly changeListeners = new Set<() => void>()
   constructor(private readonly options: AgentChatServiceOptions) {
     this.profileId = options.services.profileId
     if (options.registry.profileId !== this.profileId) throw new DomainRpcError('profile_mismatch', 'Chat agents do not belong to this profile')
@@ -80,6 +81,11 @@ export class AgentChatService {
   }
   private assertLocalDispatch(chatId: string): void {
     if (this.networkBindingGuard?.(chatId)) throw new DomainRpcError('chat_published', 'This Group sends through its published Space')
+  }
+  /** Calls `listener` after any chat is created, sent to, answered or settles. Returns an unsubscribe. */
+  onChange(listener: () => void): () => void {
+    this.changeListeners.add(listener)
+    return () => { this.changeListeners.delete(listener) }
   }
   getActiveCount(): number { return this.lifecycle.count }
   beginShutdown(): void {
@@ -456,5 +462,8 @@ export class AgentChatService {
   }
   private changed(): void {
     try { this.options.onChanged?.(this.snapshot()) } catch { /* Notifications cannot invalidate an admitted durable message. */ }
+    for (const listener of this.changeListeners) {
+      try { listener() } catch { /* Same: a listener cannot invalidate an admitted durable message. */ }
+    }
   }
 }
