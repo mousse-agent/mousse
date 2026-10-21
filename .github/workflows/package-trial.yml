@@ -1,0 +1,26 @@
+name: Package trial
+
+# Temporary: exercises package.yml and the nightly decision on this branch. Publishes nothing.
+on:
+  push:
+    branches: [nightly-and-release-builds]
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: node scripts/release-version.mjs nightly
+
+  package:
+    uses: ./.github/workflows/package.yml
+    with:
+      version: 0.1.2-nightly.20261021.${{ github.run_number }}
