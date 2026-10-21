@@ -61,13 +61,15 @@ jobs:
           echo '{"rules":[{"id":"@secretlint/secretlint-rule-preset-recommend"}]}' > "$RUNNER_TEMP/secretlintrc.json"
           npx --yes -p secretlint@13.0.7 -p @secretlint/secretlint-rule-preset-recommend@13.0.7 \
             secretlint --secretlintrc "$RUNNER_TEMP/secretlintrc.json" --maskSecrets "scan/**/*"
+      # One flat folder, so the release gets the files themselves.
+      - run: |
+          mkdir upload
+          cp "release/Mousse-$VERSION.AppImage" "release/cli/mousse-cli-$VERSION-linux-x86_64.AppImage" upload/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mousse-linux
           if-no-files-found: error
-          path: |
-            release/Mousse-${{ inputs.version }}.AppImage
-            release/cli/mousse-cli-${{ inputs.version }}-linux-x86_64.AppImage
+          path: upload/*
 
   windows:
     name: Package Windows
@@ -95,10 +97,14 @@ jobs:
           $out = (& release\cli\win-unpacked\mousse-cli.exe --version | Out-String).Trim()
           $out
           if ($out -ne "mousse-cli $env:VERSION") { throw "Unexpected version output: $out" }
+      # One flat folder. GitHub serves spaces in asset names as dots, so the installer is renamed
+      # to the name it will have (as in earlier releases) before the checksums are written.
+      - run: |
+          New-Item -ItemType Directory upload | Out-Null
+          Copy-Item "release\Mousse Setup $env:VERSION.exe" "upload\Mousse.Setup.$env:VERSION.exe"
+          Copy-Item "release\cli\mousse-cli-$env:VERSION-win-x64.exe" upload
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mousse-windows
           if-no-files-found: error
-          path: |
-            release/Mousse Setup ${{ inputs.version }}.exe
-            release/cli/mousse-cli-${{ inputs.version }}-win-x64.exe
+          path: upload/*
