@@ -67,6 +67,8 @@ import { existsSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
+import { SpeechRelay } from './speech/SpeechRelay'
+import { systemClock } from './net/clock'
 
 const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.delete',
@@ -110,6 +112,13 @@ export class MmsProfileServices {
   readonly net: NetService
   readonly chatNetwork: ChatNetworkBindingService
   private bridgeService?: BridgeProfileService
+  private speechRelayInstance?: SpeechRelay
+
+  /** Phone speech requests waiting for, or served by, this profile's Mousse windows. */
+  get speechRelay(): SpeechRelay {
+    this.speechRelayInstance ??= new SpeechRelay(systemClock)
+    return this.speechRelayInstance
+  }
 
   private domainService(): BridgeProfileService {
     this.net.runtime()

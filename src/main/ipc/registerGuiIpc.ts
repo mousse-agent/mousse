@@ -38,6 +38,7 @@ import { profileBrowserPartition } from '../browser/browserPolicy'
 import { ThreadActivityTracker } from '../data/ThreadActivityTracker'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
 import { LOCAL_TTS_MODELS, type ProviderSpeechRequest, type ProviderSpeechResult } from '../../shared/readAloud'
+import { SPEECH_HOST_METHODS } from '../../shared/speechRelay'
 import {
   LOCAL_STT_MODELS,
   PROVIDER_STT_MAX_BYTES,
@@ -134,6 +135,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...SPACES_LOCAL_METHODS,
   ...BOTS_LOCAL_METHODS,
   ...SPACE_ARCHIVE_METHODS,
+  ...SPEECH_HOST_METHODS,
   ...BROWSER_ACCESS_METHODS,
   ...BROWSER_GUI_METHODS,
   ...BROWSER_SETUP_METHODS,

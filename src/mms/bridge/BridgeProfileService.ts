@@ -14,6 +14,7 @@ import { BridgeHub } from './hub'
 import { validateHubParams } from './hub/validation'
 import { MmsRemoteBackend, RemoteApi, ThreadStreamAdapter } from './remote'
 import { MmsThreadSource } from './remote/MmsThreadSource'
+import { phoneSpeechMethods } from './remote/speech'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
 
 /** Actual profile services own Bridge; no received DTO supplies a backend or path. */
@@ -160,6 +161,12 @@ export class BridgeProfileService {
     })
     this.remote = new RemoteApi(new MmsRemoteBackend(services), this.clock)
     for (const method of this.remote.methods())
+      rt.rpc.register({
+        ...method,
+        family: 'bridge',
+        handle: (params, context) => this.track(method.handle(params, context))
+      })
+    for (const method of phoneSpeechMethods(services.speechRelay))
       rt.rpc.register({
         ...method,
         family: 'bridge',
@@ -369,6 +376,7 @@ export class BridgeProfileService {
     if (this.stopped) return
     this.stopped = true
     this.remote.close()
+    this.options.services.speechRelay.close()
     this.hub.close()
     this.threads.close()
     this.spaces.beginDisable()

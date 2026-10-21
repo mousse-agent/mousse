@@ -225,3 +225,101 @@ export function speakWithLocalModel(text: string, { signal, onPlaying, voice, sp
     dispatch()
   })
 }
+
+export interface SynthesizeOptions {
+  signal: AbortSignal
+  /** Voice name for Kokoro; its default when undefined. */
+  voice: string | undefined
+  /** Speaking pace, applied by the model. */
+  speed: number
+  /** Receives each segment's speech, trimmed of Kokoro's padding, in order. */
+  onClip: (samples: Float32Array, sampleRate: number) => void
+}
+
+/**
+ * Voices `text` with the local Kokoro model without playing it, for a paired phone that plays the
+ * audio itself. Segments go to the same worker pool as read aloud; each one is handed over as soon
+ * as it and every segment before it are done. Resolves after the last segment, or when aborted.
+ */
+export function synthesizeWithLocalModel(text: string, { signal, voice, speed, onClip }: SynthesizeOptions): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return resolve()
+    const segments = splitSpeechSegments(text)
+    if (segments.length === 0) return resolve()
+    cancelIdleDispose()
+    activeSessions++
+    const workers = ensurePool(Math.min(POOL_SIZE, segments.length))
+    const results: Array<{ samples: Float32Array; sampleRate: number } | undefined> = []
+    const inFlight = new Map<number, { index: number; worker: Worker }>()
+    const busy = new Set<Worker>()
+    let nextDispatch = 0
+    let nextEmit = 0
+    let settled = false
+
+    const settle = (error?: Error): void => {
+      if (settled) return
+      settled = true
+      activeSessions--
+      if (activeSessions === 0) scheduleIdleDispose()
+      for (const worker of workers) {
+        worker.removeEventListener('message', onMessage)
+        worker.removeEventListener('error', onWorkerError)
+      }
+      for (const [id, { worker }] of inFlight) send(worker, { type: 'cancel', id })
+      inFlight.clear()
+      signal.removeEventListener('abort', onAbort)
+      if (error) reject(error)
+      else resolve()
+    }
+
+    const dispatch = (): void => {
+      for (const worker of workers) {
+        if (nextDispatch >= segments.length || nextDispatch - nextEmit > LOOKAHEAD_SEGMENTS) return
+        if (busy.has(worker)) continue
+        const id = ++lastRequestId
+        busy.add(worker)
+        inFlight.set(id, { index: nextDispatch, worker })
+        send(worker, { type: 'speak', id, text: segments[nextDispatch], voice: voice ?? KOKORO_82M.defaultVoice, speed })
+        nextDispatch++
+      }
+    }
+
+    const onMessage = (event: MessageEvent<KokoroWorkerEvent>): void => {
+      const message = event.data
+      if (message.type === 'file-request') return
+      const request = inFlight.get(message.id)
+      if (!request) return
+      inFlight.delete(message.id)
+      busy.delete(request.worker)
+      if (message.type === 'error') {
+        settle(new Error(message.message))
+        return
+      }
+      results[request.index] = { samples: trimSilence(message.samples, message.sampleRate), sampleRate: message.sampleRate }
+      while (nextEmit < segments.length && results[nextEmit]) {
+        const clip = results[nextEmit]!
+        results[nextEmit] = undefined
+        nextEmit++
+        if (clip.samples.length > 0) onClip(clip.samples, clip.sampleRate)
+        if (signal.aborted || settled) return
+      }
+      if (nextEmit >= segments.length) {
+        settle()
+        return
+      }
+      dispatch()
+    }
+    const onWorkerError = (event: ErrorEvent): void => {
+      disposeLocalEngine()
+      settle(new Error(event.message || 'The local voice engine stopped unexpectedly'))
+    }
+    const onAbort = (): void => settle()
+
+    for (const worker of workers) {
+      worker.addEventListener('message', onMessage)
+      worker.addEventListener('error', onWorkerError)
+    }
+    signal.addEventListener('abort', onAbort)
+    dispatch()
+  })
+}

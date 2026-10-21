@@ -89,8 +89,15 @@ function transcribeSegment(model: LocalSttModel, samples: Float32Array): Promise
   })
 }
 
-/** Transcribes a recording with a local model, one segment at a time. */
-export async function transcribeWithLocalModel(modelId: LocalSttModelId, recording: Blob): Promise<string> {
+/**
+ * Transcribes a recording with a local model, one segment at a time. `onPartial` receives the
+ * text of the segments done so far after each one.
+ */
+export async function transcribeWithLocalModel(
+  modelId: LocalSttModelId,
+  recording: Blob,
+  onPartial?: (text: string) => void
+): Promise<string> {
   const model = findLocalSttModel(modelId)
   if (!model) throw new Error(`Unknown local dictation model: ${modelId}`)
   cancelIdleDispose()
@@ -102,7 +109,10 @@ export async function transcribeWithLocalModel(modelId: LocalSttModelId, recordi
     for (const segment of splitIntoSegments(samples, model.sampleRate, model.maxSegmentSeconds)) {
       if (segment.length < minSamples) continue
       const text = await transcribeSegment(model, segment)
-      if (text) parts.push(text)
+      if (text) {
+        parts.push(text)
+        onPartial?.(parts.join(' '))
+      }
     }
     return parts.join(' ')
   } finally {
