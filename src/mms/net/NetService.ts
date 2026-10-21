@@ -56,12 +56,18 @@ import { FileBlobStore } from './store/blobs'
 import { FileKeyStore, NetIdentityService } from './identity'
 import { ProfileTransports } from './transports/manager'
 import {
-  PHONE_DIRECT_TRANSPORT,
   PHONE_ENDPOINTS_METHOD,
-  phoneDirectPort,
-  type PhoneAddress,
-  type PhoneEndpoint
-} from './transports/phoneDirect'
+  PHONE_WEBRTC_OFFER_METHOD,
+  PHONE_WEBRTC_TRANSPORT,
+  PhoneWebRtcAcceptor,
+  classifyAddress,
+  nodeDataChannelFactory,
+  normalizeAddress,
+  type AcceptedWebRtc,
+  type PeerConnectionFactory
+} from './transports/phoneWebRtc'
+import { lookup } from 'node:dns/promises'
+import { WEBRTC_SDP_MAX_BYTES } from '../../shared/net/limits'
 import type { TransportConfiguration } from './transports/registry'
 import type { RelayIdentity } from './relay/protocol'
 import { inviteRequiresProtection } from './enrollment/service'
@@ -151,7 +157,11 @@ export class NetService {
   private readonly tasks = new Set<Promise<unknown>>()
   private readonly shutdownSignal = new AbortController()
   private mutation = Promise.resolve()
-  private phoneSync: Promise<void> = Promise.resolve()
+  /** The WebRTC direct path for signed-in phones; created on the first offer. */
+  private webrtc?: PhoneWebRtcAcceptor
+  /** The relay's and STUN servers' addresses, which a phone candidate may never name. */
+  private webrtcBlocked: ReadonlySet<string> = new Set()
+  private webrtcBlockedFor = ''
   private stopped = false
   private disabled = false
   private disabling?: Promise<NetStatus>
@@ -172,8 +182,14 @@ export class NetService {
       onChanged?(status: NetStatus): void
       composeRuntime?(runtime: NetRuntime): NetDomainComposition | void
       hosted?: HostedNetModule
-      /** Tests replace the computer's addresses and port for the phone listener. */
-      phoneDirect?: { addresses?: () => PhoneAddress[]; port?: number; rescanMs?: number }
+      /** Tests replace the native WebRTC stack and this computer's addresses. */
+      phoneWebRtc?: {
+        factory?: PeerConnectionFactory
+        hostAddresses?: () => ReadonlySet<string>
+        ownAddresses?: () => ReadonlySet<string>
+        gatherMs?: number
+        ticketTtlMs?: number
+      }
     }
   ) {
     this.clock = options.clock ?? systemClock
@@ -273,6 +289,7 @@ export class NetService {
         method: PHONE_ENDPOINTS_METHOD,
         capability: 'read',
         mutating: false,
+        ephemeral: true,
         validate: (params) => {
           if (
             !params ||
@@ -283,7 +300,31 @@ export class NetService {
             throw new NetError('bad_request')
           return params
         },
-        handle: async (_params, context) => ({ endpoints: this.phoneEndpoints(context.carrier) })
+        handle: async (_params, context) => this.phoneEndpoints(context.carrier)
+      })
+      rpc.register({
+        method: PHONE_WEBRTC_OFFER_METHOD,
+        capability: 'read',
+        // Never persisted: every offer is a fresh PeerConnection, and a stored answer would keep
+        // addresses and ICE credentials on disk and replay them on retry.
+        mutating: false,
+        ephemeral: true,
+        validate: (params) => {
+          const value = params as { sdp?: unknown; v?: unknown }
+          if (
+            !params ||
+            typeof params !== 'object' ||
+            Array.isArray(params) ||
+            Object.keys(params).length !== 2 ||
+            value.v !== 1 ||
+            typeof value.sdp !== 'string' ||
+            value.sdp.length > WEBRTC_SDP_MAX_BYTES
+          )
+            throw new NetError('bad_request')
+          return { sdp: value.sdp, v: 1 }
+        },
+        handle: async (params, context) =>
+          this.phoneWebRtcOffer((params as { sdp: string }).sdp, context.carrier, context.caller)
       })
       rpc.register({
         method: 'authority.transfer.ready',
@@ -325,6 +366,7 @@ export class NetService {
       this.rosterListener = identity.onRosterChanged(() => {
         this.emit()
         if (this.routes) this.refreshPeers()
+        this.closeRevokedWebRtc()
       })
       return this.state
     } catch (error) {
@@ -586,6 +628,7 @@ export class NetService {
       restartTransports: async () => {
         await this.transport?.teardown()
         this.transport = undefined
+        this.syncPhoneWebRtc()
         await this.activate()
       },
       reactivateIfRunning: async () => {
@@ -595,6 +638,7 @@ export class NetService {
         await this.transport?.suspendHosted()
       },
       hostedListening: () => this.transport?.hasPlusRelayListener() === true,
+      directPathChanged: () => this.syncPhoneWebRtc(),
       relayIdentity: () => this.relayIdentity(),
       issueRendezvousInvite: (input) => this.issueRendezvousInvite(input),
       revokeUnsentInvite: (invite, error) => this.revokeUnsentInvite(invite, error)
@@ -654,7 +698,7 @@ export class NetService {
         try {
           this.localSignedRoutes = undefined
           this.signedRoutes()
-          this.syncPhoneDirect()
+          this.syncPhoneWebRtc()
           this.emit()
         } catch (error) {
           this.lastError = error instanceof NetError ? error.code : 'internal'
@@ -707,7 +751,7 @@ export class NetService {
     }
     this.localSignedRoutes = undefined
     this.signedRoutes()
-    this.syncPhoneDirect()
+    this.syncPhoneWebRtc()
     this.lastError = undefined
     this.refreshPeers()
     this.scheduleRenewal()
@@ -727,65 +771,161 @@ export class NetService {
     return this.localSignedRoutes
   }
   /**
-   * Runs the phone listener exactly while this computer is signed in to Mousse ID and holds a
-   * relay lease: the hosted relay listener is up. Nothing in settings shows or controls it.
+   * The WebRTC direct path is offered exactly while this computer is signed in to Mousse ID and
+   * holds a relay lease (the hosted relay listener is up), unless Mousse ID configuration turns
+   * it off. Nothing in settings shows or controls it.
    */
-  private syncPhoneDirect(): void {
-    const transport = this.transport
-    if (!transport) return
-    let wanted = false
+  private webrtcWanted(): boolean {
     try {
-      wanted =
+      return (
         !!this.hosted &&
         !this.stopped &&
         !this.disabled &&
         this.config.enabled &&
         this.featureEnabled('netBridge') &&
-        transport.hasPlusRelayListener()
+        this.state?.keys.state() === 'unlocked' &&
+        this.transport?.hasPlusRelayListener() === true &&
+        this.hosted.directPath?.().webrtc !== false
+      )
     } catch {
-      wanted = false
+      return false
     }
-    const options = this.options.phoneDirect
-    this.phoneSync = this.phoneSync
-      .then(async () => {
-        if (!wanted || transport !== this.transport) return transport.stopPhoneDirect()
-        const node = this.requireEnrolled().identity.self()!.node
-        await transport.startPhoneDirect(
-          {
-            port: options?.port ?? phoneDirectPort(node),
-            ...(options?.addresses ? { addresses: options.addresses } : {}),
-            ...(options?.rescanMs ? { rescanMs: options.rescanMs } : {})
-          },
-          (raw, _info, deadline) => {
-            if (this.stopped || this.disabled || !this.config.enabled) {
-              raw.destroy()
-              return
-            }
-            this.track(this.acceptPhone(raw, deadline)).catch(() => {})
-          }
+  }
+  /** Closes every WebRTC ticket and connection when the path is no longer wanted. */
+  private syncPhoneWebRtc(): void {
+    if (!this.webrtcWanted()) {
+      this.webrtc?.closeAll()
+      return
+    }
+    this.refreshWebRtcBlocked()
+  }
+  /** Resolves the relay and STUN host names, best effort, when they change. */
+  private refreshWebRtcBlocked(): void {
+    const hosts = new Set<string>()
+    for (const server of this.hosted?.directPath?.().stun ?? []) {
+      const host = server
+        .replace(/^stuns?:/, '')
+        .replace(/:\d+$/, '')
+        .replace(/^\[|\]$/g, '')
+      if (host) hosts.add(host)
+    }
+    for (const route of this.transport?.statuses().find((row) => row.id === HOSTED_RELAY_TRANSPORT)
+      ?.routes ?? [])
+      try {
+        hosts.add(new URL(route.address).hostname.replace(/^\[|\]$/g, ''))
+      } catch {
+        // Not a URL; nothing to resolve.
+      }
+    const key = [...hosts].sort().join(' ')
+    if (key === this.webrtcBlockedFor) return
+    this.webrtcBlockedFor = key
+    void Promise.all(
+      [...hosts].map((host) =>
+        classifyAddress(host) || host.includes(':') || /^[\d.]+$/.test(host)
+          ? Promise.resolve([host])
+          : lookup(host, { all: true }).then(
+              (rows) => rows.map((row) => row.address),
+              () => []
+            )
+      )
+    ).then((lists) => {
+      if (this.webrtcBlockedFor === key)
+        this.webrtcBlocked = new Set(lists.flat().map((address) => normalizeAddress(address)))
+    })
+  }
+  /** Open WebRTC tickets: pending ones and those with an authenticated session. */
+  phoneWebRtcCounts(): { pending: number; live: number } {
+    return this.webrtc?.counts() ?? { pending: 0, live: 0 }
+  }
+  /**
+   * What a phone learns about direct paths, only over a session that came through Mousse ID
+   * (the hosted relay, or the WebRTC path itself). Everyone else learns nothing.
+   */
+  private phoneEndpoints(carrier: string | undefined): {
+    endpoints: []
+    webrtc?: { v: 1 }
+  } {
+    if (carrier !== HOSTED_RELAY_TRANSPORT && carrier !== PHONE_WEBRTC_TRANSPORT)
+      return { endpoints: [] }
+    return this.webrtcWanted() ? { endpoints: [], webrtc: { v: 1 } } : { endpoints: [] }
+  }
+  private async phoneWebRtcOffer(
+    sdp: string,
+    carrier: string | undefined,
+    caller: SyncSession['peer']
+  ): Promise<{ sdp: string }> {
+    if (carrier !== HOSTED_RELAY_TRANSPORT && carrier !== PHONE_WEBRTC_TRANSPORT)
+      throw new NetError('forbidden')
+    if (!this.webrtcWanted()) throw new NetError('disabled')
+    const self = this.requireEnrolled().identity.self()!
+    if (caller.user !== self.user || caller.node === self.node) throw new NetError('forbidden')
+    return this.phoneWebRtc().offer({ node: caller.node, user: caller.user }, sdp)
+  }
+  private phoneWebRtc(): PhoneWebRtcAcceptor {
+    const options = this.options.phoneWebRtc
+    return (this.webrtc ??= new PhoneWebRtcAcceptor({
+      clock: this.clock,
+      factory: options?.factory ?? nodeDataChannelFactory(),
+      iceServers: () => this.hosted?.directPath?.().stun ?? [],
+      blockedAddresses: () => this.webrtcBlocked,
+      ...(options?.hostAddresses ? { hostAddresses: options.hostAddresses } : {}),
+      ...(options?.ownAddresses ? { ownAddresses: options.ownAddresses } : {}),
+      ...(options?.gatherMs !== undefined ? { gatherMs: options.gatherMs } : {}),
+      ...(options?.ticketTtlMs !== undefined ? { ticketTtlMs: options.ticketTtlMs } : {}),
+      onChannel: (accepted) => {
+        if (!this.webrtcWanted() || !this.transport) {
+          accepted.raw.destroy()
+          return
+        }
+        // The preauth deadline starts when the DataChannel opens, not at offer time.
+        const deadline = this.transport.admission.reserve(
+          accepted.raw,
+          `webrtc:${accepted.ticket.node}`
         )
-      })
-      .catch(() => {})
+        if (deadline === undefined) {
+          accepted.raw.destroy()
+          return
+        }
+        this.track(this.acceptPhone(accepted, deadline)).catch(() => {})
+      }
+    }))
   }
-  /** Settles once the phone listener matches the current Mousse ID state; for tests. */
-  phoneDirectSettled(): Promise<void> {
-    return this.phoneSync
+  /** Closes the WebRTC tickets and connections of nodes the roster no longer admits. */
+  private closeRevokedWebRtc(): void {
+    const webrtc = this.webrtc
+    if (!webrtc) return
+    for (const node of webrtc.nodes()) if (!this.nodeAdmitted(node)) webrtc.closeNode(node)
+  }
+  /** The node holds a current, unrevoked delegation in this user's roster. */
+  private nodeAdmitted(node: NodeId): boolean {
+    try {
+      const rt = this.state,
+        self = rt?.identity.self()
+      if (!rt || !self) return false
+      const signed = rt.identity.roster(),
+        root = rt.identity.pinnedRootKey(self.user)
+      if (!signed || !root) return false
+      const roster = rt.identity.verifySigned<Roster>(signed, root)
+      let epoch = -1
+      for (const row of roster.nodes) {
+        const delegation = rt.identity.verifySigned<NodeDelegation>(row, roster.rootKey)
+        if (delegation.subject === node) epoch = Math.max(epoch, delegation.keyEpoch)
+      }
+      return (
+        epoch >= 0 &&
+        !roster.revoked.some((row) => row.subject === node && row.throughKeyEpoch >= epoch)
+      )
+    } catch {
+      return false
+    }
   }
   /**
-   * Direct endpoints for a phone, only over a session that came through Mousse ID: the hosted
-   * relay, or the phone listener itself. Everyone else learns nothing.
+   * A DataChannel that opened for a WebRTC ticket: the same pinned TLS and session checks as
+   * the relay (roster, delegation, revocation), only for the user's own nodes, and only for the
+   * node the ticket was issued to. It never enrolls or joins Spaces.
    */
-  private phoneEndpoints(carrier: string | undefined): PhoneEndpoint[] {
-    if (carrier !== HOSTED_RELAY_TRANSPORT && carrier !== PHONE_DIRECT_TRANSPORT) return []
-    if (!this.transport?.hasPlusRelayListener()) return []
-    return this.transport.phoneEndpoints()
-  }
-  /**
-   * A connection on the phone listener: the same pinned TLS and session checks as the relay
-   * (roster, delegation, revocation), but only for the user's own nodes. It never enrolls or
-   * joins Spaces.
-   */
-  private async acceptPhone(raw: Duplex, deadline: number): Promise<void> {
+  private async acceptPhone(accepted: AcceptedWebRtc, deadline: number): Promise<void> {
+    const raw = accepted.raw
     try {
       this.assertEnabled()
       const rt = this.requireEnrolled()
@@ -797,11 +937,15 @@ export class NetService {
         deadlineMs: Math.min(DIAL_TLS_DEADLINE_MS, remaining),
         signal: this.shutdownSignal.signal
       })
+      raw.secured()
       try {
-        this.makeSession(channel, undefined, undefined, raw, {
-          carrier: PHONE_DIRECT_TRANSPORT,
-          sameUserOnly: true
+        const session = this.makeSession(channel, undefined, undefined, raw, {
+          carrier: PHONE_WEBRTC_TRANSPORT,
+          sameUserOnly: true,
+          node: accepted.ticket.node,
+          onAuthenticated: () => accepted.authenticated()
         })
+        session.onClosed(() => raw.destroy())
       } catch (error) {
         channel.close()
         throw error
@@ -869,7 +1013,13 @@ export class NetService {
     mux?: Mux,
     context?: GatewayNormalContext,
     raw?: Duplex,
-    inbound?: { carrier?: string; sameUserOnly?: boolean }
+    inbound?: {
+      carrier?: string
+      sameUserOnly?: boolean
+      /** The only node this connection may authenticate as (a WebRTC ticket's node). */
+      node?: NodeId
+      onAuthenticated?: () => void
+    }
   ): NetSyncSession {
     this.assertEnabled()
     const rt = this.requireEnrolled()
@@ -924,9 +1074,11 @@ export class NetService {
       onAuthenticated: () => {
         if (inbound?.sameUserOnly && session.peer.user !== rt.identity.self()?.user)
           throw new NetError('forbidden')
+        if (inbound?.node && session.peer.node !== inbound.node) throw new NetError('forbidden')
         if ([...this.sessions].filter((session) => session.state() === 'open').length > 64)
           throw new NetError('rate_limited')
         if (raw) this.transport?.markAuthenticated(raw)
+        inbound?.onAuthenticated?.()
         this.routes?.markSessionOpen(channel)
         this.emit()
       }
@@ -1594,6 +1746,7 @@ export class NetService {
     this.saveConfig()
     this.disabled = true
     this.shutdownSignal.abort()
+    this.webrtc?.stop()
     this.transport?.admission.close()
     this.renewal?.cancel()
     this.domain?.beginDisable?.()
@@ -1744,6 +1897,7 @@ export class NetService {
     if (this.stopped) return
     this.stopped = true
     this.shutdownSignal.abort()
+    this.webrtc?.stop()
     this.transport?.admission.close()
     this.renewal?.cancel()
     this.rosterListener?.()

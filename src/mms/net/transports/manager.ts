@@ -17,7 +17,6 @@ import { TransportRegistry, type TransportConfiguration } from './registry'
 import { tailscaleAddon } from './tailscale'
 import { cloudflaredAddon } from './cloudflared'
 import { RelayTransport, createRelayAddon } from './relay'
-import { PhoneDirectListener, type PhoneAddress, type PhoneEndpoint } from './phoneDirect'
 import { relayUrl, type RelayIdentity, type RelayRendezvous } from '../relay/protocol'
 
 const directAddon: TransportAddon = {
@@ -68,7 +67,6 @@ export class ProfileTransports {
   private readonly errors = new Map<string, import('../../../shared/net').NetErrorCode>()
   private readonly observed = new Map<string, { transport: Transport; off(): void }>()
   private readonly listeners = new Set<(status: TransportStatus) => void>()
-  private phone?: PhoneDirectListener
   private stopping = false
   constructor(
     private readonly options: {
@@ -334,47 +332,9 @@ export class ProfileTransports {
   }
   markAuthenticated(raw: Duplex): void {
     this.admission.release(raw)
-    this.phone?.markAuthenticated(raw)
     for (const transport of this.registry.transports())
       if ('markAuthenticated' in transport && typeof transport.markAuthenticated === 'function')
         transport.markAuthenticated(raw)
-  }
-  /**
-   * Starts the phone listener (see `PhoneDirectListener`) with the same preauth admission as
-   * every other inbound carrier. Calling it again keeps the running listener.
-   */
-  async startPhoneDirect(
-    options: { port: number; addresses?: () => PhoneAddress[]; rescanMs?: number },
-    accept: (stream: Duplex, info: InboundInfo, deadline: number) => void
-  ): Promise<void> {
-    if (this.stopping) return
-    this.phone ??= new PhoneDirectListener({ clock: this.options.clock, ...options })
-    await this.phone.start((raw, info) => {
-      if (this.stopping) {
-        raw.destroy()
-        return
-      }
-      const deadline = this.admission.reserve(raw, inboundPrincipal(info))
-      if (deadline === undefined) {
-        raw.destroy()
-        return
-      }
-      this.sockets.add(raw)
-      raw.once('close', () => this.sockets.delete(raw))
-      try {
-        accept(raw, info, deadline)
-      } catch {
-        raw.destroy()
-        this.admission.release(raw)
-      }
-    })
-  }
-  async stopPhoneDirect(): Promise<void> {
-    await this.phone?.stop()
-  }
-  /** Where a signed-in phone can reach this computer without the relay; empty when off. */
-  phoneEndpoints(): PhoneEndpoint[] {
-    return this.phone?.endpoints() ?? []
   }
   private changed(): void {
     if (this.stopping) return
@@ -391,7 +351,6 @@ export class ProfileTransports {
     await Promise.allSettled([
       this.registry.teardown(),
       this.direct.teardown(),
-      this.phone?.stop(),
       ...[...this.dialRelays].map((relay) => relay.teardown())
     ])
     this.dialRelays.clear()
