@@ -11,7 +11,7 @@ How the suite is organised, which command to run while working, and what must st
 | `npm run test:related -- <files>` | Tests related to the named source files | Checking one module |
 | `npm run test:plan` | Prints what `test:changed` would run and why, runs nothing | Checking the selection |
 | `npm test` | Everything | Once before a PR, see `docs/team-workflow.md` |
-| `npm run test:unit`, `npm run test:process` | One vitest project | Narrowing a failure |
+| `npm run test:unit`, `npm run test:process` | In-process or both process projects | Narrowing a failure |
 
 `npm test` stays the gate before a PR. The related commands exist for the loop before that.
 
@@ -32,7 +32,9 @@ Three outcomes short-circuit the graph:
 
 ## Projects
 
-Two vitest projects run in sequence. `unit` runs in-process tests with half the cores. `process` runs tests that start real processes (daemons, the bundled CLI, Electron, Chrome, git, native compiles) with two workers, because each holds hundreds of megabytes and starves neighbours into timeouts. Membership is decided in `vitest.config.ts`; a test that imports `tests/support/build` or `tests/support/daemon` is in `process`.
+`unit` runs in-process tests with half the cores. After it finishes, `process` runs lightweight process fixtures with three workers. Finally, `heavy` runs at most two files that own browsers, multiple daemons or multi-profile TLS compositions. The groups run sequentially because Vitest requires distinct group orders for distinct worker budgets. `npm run test:process` runs both.
+
+`tests/test-lanes.json` explicitly lists the process, service/TLS, daemon and browser resource categories; the latter three share the heavy budget. Tests outside that inventory remain in `unit`. Add new resource-owning files to the inventory after inspecting their fixtures and transitive helpers. A browser or process word in a mocked policy test does not determine membership. Changing the inventory triggers the full suite, and the selector checks that entries exist and do not overlap. Fork isolation and per-test deadlines remain enabled.
 
 ## Shared fixtures
 

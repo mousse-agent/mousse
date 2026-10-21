@@ -4,12 +4,12 @@
     {
       "name": "cli, main, preload and build inputs reach every spawned process",
       "when": ["src/cli/**", "src/main/**", "src/preload/**", "scripts/build*", "scripts/after-pack*", "scripts/prepare-package*", "scripts/ensure-*", "scripts/cached-build*", "scripts/start.mjs", "electron-builder*.yml", "build/**", "resources/**"],
-      "projects": ["process"]
+      "projects": ["process", "heavy"]
     },
     {
       "name": "daemon composition reaches every spawned or booted daemon",
       "when": ["src/mms/MousseMainService.ts", "src/mms/MmsProfileServices.ts", "src/mms/MmsOptions.ts", "src/mms/installation/**", "src/mms/profiles/**"],
-      "projects": ["process"]
+      "projects": ["process", "heavy"]
     },
     {
       "name": "browser worker and its contracts",
