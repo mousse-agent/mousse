@@ -1410,6 +1410,57 @@ export class NetIdentityService implements IdentityService {
     }
   }
 
+  /**
+   * The live roster carries only delegations that can still authorize something: it drops node
+   * delegations that are revoked or superseded by a newer key epoch of the same node. Revocation
+   * evidence stays in `revoked` because every holder rejects a roster that drops it. Verifying
+   * past records does not need the dropped rows: each holder keeps every roster it accepted in
+   * its history, and space replay ships the original roster as evidence. Without this, every
+   * revocation and re-key would grow the roster until invites, enrollment and the hello no
+   * longer fit their 16 KiB bounds, and the authority could not even revoke any more.
+   */
+  private prunableNodes(roster: Roster): Set<Signed> {
+    const rows = roster.nodes.map((signed) => ({
+      signed,
+      delegation: verifyDocument<NodeDelegation>(signed, roster.rootKey, 'nodeDelegation')
+    }))
+    const newest = new Map<string, number>()
+    for (const { delegation } of rows)
+      newest.set(
+        delegation.subject,
+        Math.max(newest.get(delegation.subject) ?? 0, delegation.keyEpoch)
+      )
+    return new Set(
+      rows
+        .filter(
+          ({ delegation }) =>
+            delegation.subject !== roster.authorityNode &&
+            (delegation.keyEpoch < newest.get(delegation.subject)! ||
+              (roster.revoked.find((row) => row.subject === delegation.subject)
+                ?.throughKeyEpoch ?? 0) >= delegation.keyEpoch)
+        )
+        .map((row) => row.signed)
+    )
+  }
+  private pruneNodes(roster: Roster): void {
+    const prunable = this.prunableNodes(roster)
+    if (prunable.size) roster.nodes = roster.nodes.filter((signed) => !prunable.has(signed))
+  }
+  /**
+   * Republishes the roster without revoked or superseded node delegations when it still holds
+   * any (rosters written before pruning existed). Returns the new roster, or undefined when the
+   * current one is already compact or this node is not the authority.
+   */
+  compactRoster(): Signed | undefined {
+    const self = this.self()
+    if (!self?.isAuthority) return undefined
+    const current = this.roster()
+    if (!current) return undefined
+    if (!this.prunableNodes(this.rosterDocument(current, this.pinnedRootKey(self.user)!)).size)
+      return undefined
+    return this.authorityUpdate(() => {})
+  }
+
   private nextEpoch(roster: Roster, subject: NodeId | BotId): number {
     const user = this.load().users[roster.owner]
     const archived = user
@@ -1447,6 +1498,7 @@ export class NetIdentityService implements IdentityService {
       if (roster.authorityNode !== self.node || !this.localNodeMatches(roster, self.node))
         throw new NetError('forbidden')
       change(roster, self)
+      this.pruneNodes(roster)
       roster.version++
       roster.issuedAt = this.clock.now()
       if (!Number.isSafeInteger(roster.version)) throw new NetError('conflict')

@@ -1060,7 +1060,11 @@ export class NetService {
       .map((row) => rt.identity.verifySigned<NodeDelegation>(row, roster.rootKey))
       .filter((row) => row.subject === node)
       .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)[0]
-    if (!result) throw new NetError('bad_delegation')
+    // The live roster drops revoked delegations but keeps their revocation evidence.
+    if (!result)
+      throw new NetError(
+        roster.revoked.some((row) => row.subject === node) ? 'revoked' : 'bad_delegation'
+      )
     if (
       roster.revoked.some((row) => row.subject === node && row.throughKeyEpoch >= result.keyEpoch)
     )
