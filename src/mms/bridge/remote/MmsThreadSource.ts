@@ -21,7 +21,11 @@ export class MmsThreadSource implements ThreadSourcePort {
   ): () => void {
     const deliver = (type: ThreadSourceEvent['type'], data: unknown, ephemeral = false): void => {
       try {
-        listener({ type, data: mmsJson(data), ...(ephemeral ? { ephemeral: true } : {}) })
+        listener({
+          type,
+          data: mmsJson(data),
+          ...(ephemeral ? { ephemeral: true } : {})
+        } as ThreadSourceEvent)
       } catch (error) {
         if (onError) onError(error)
         else throw error
@@ -47,6 +51,19 @@ export class MmsThreadSource implements ThreadSourcePort {
       }
       this.services.orchestrator.on(source, handle)
       disposers.push(() => this.services.orchestrator.off(source, handle))
+    }
+    // Pending questions change rarely and are memory-only; remote readers get the full list live.
+    const questions = (data: { threadId?: string }): void => {
+      if (data?.threadId !== threadId) return
+      deliver(
+        'questions.updated',
+        { threadId, pending: this.services.questions.listPendingForThread(threadId) },
+        true
+      )
+    }
+    for (const event of ['pending', 'cleared'] as const) {
+      this.services.questions.on(event, questions)
+      disposers.push(() => this.services.questions.off(event, questions))
     }
     let lastMetadata: string | undefined
     const metadata = (thread: { id: string }): void => {

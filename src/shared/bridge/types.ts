@@ -72,6 +72,18 @@ export interface BridgeRemoteParams {
   'orchestrator.contextUsage': {
     threadId: string
   }
+  'orchestrator.pendingQuestions': {
+    threadId: string
+  }
+  'orchestrator.answerQuestions': {
+    threadId: string
+    requestId: string
+    answers: Record<string, string | string[]>
+  }
+  'orchestrator.dismissQuestions': {
+    threadId: string
+    requestId: string
+  }
   'bridge.thread.open': {
     threadId: string
   }

@@ -626,6 +626,22 @@ export class NetSyncSession implements SyncSession {
     this.ephemeralScope(message.stream)
     void this.send(message).catch((error) => this.fail(error))
   }
+  /**
+   * Display-only delta for a stream this session is live-serving. Peers that did not negotiate
+   * presence.v1 or are not subscribed get nothing; deltas are never stored or replayed.
+   */
+  publishDelta(stream: StreamId, data: unknown): void {
+    if (
+      this.currentState !== 'open' ||
+      !this.negotiatedCaps.includes('presence.v1') ||
+      !this.serving.get(stream)?.live
+    )
+      return
+    this.authorizedRead(stream)
+    void this.send({ t: 'ephemeral', stream, kind: 'delta', data }).catch((error) =>
+      this.fail(error)
+    )
+  }
   onEphemeral(
     listener: (message: Extract<WireMessage, { t: 'presence' | 'ephemeral' }>) => void
   ): () => void {

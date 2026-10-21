@@ -15,7 +15,10 @@ export const BRIDGE_REMOTE_METHODS = {
   'orchestrator.steer': { capability: 'chat', mutating: true },
   'orchestrator.abort': { capability: 'chat', mutating: true },
   'orchestrator.isTurnActive': { capability: 'read', mutating: false },
-  'orchestrator.contextUsage': { capability: 'read', mutating: false }
+  'orchestrator.contextUsage': { capability: 'read', mutating: false },
+  'orchestrator.pendingQuestions': { capability: 'read', mutating: false },
+  'orchestrator.answerQuestions': { capability: 'chat', mutating: true },
+  'orchestrator.dismissQuestions': { capability: 'chat', mutating: true }
 } as const satisfies Record<string, { capability: NodeCapability; mutating: boolean }>
 export type BridgeRemoteMethod = keyof typeof BRIDGE_REMOTE_METHODS
 export type BridgeOrdinaryMethod = Exclude<

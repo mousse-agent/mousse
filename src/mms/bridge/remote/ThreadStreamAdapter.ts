@@ -13,11 +13,18 @@ import type { NetDatabase } from '../../net/store/database'
 import { canonicalJson, encodeEnvelope } from '../../net/sync/codec'
 
 export const THREAD_EVENT_TYPES = BRIDGE_THREAD_EVENT_TYPES
-export interface ThreadSourceEvent {
-  type: (typeof THREAD_EVENT_TYPES)[number]
-  data: unknown
-  ephemeral?: boolean
-}
+/**
+ * Event types allowed as display-only deltas (never stored). `questions.updated` stays out of the
+ * durable set because older hubs reject unknown durable event types.
+ */
+export const THREAD_DELTA_TYPES = [
+  'thread.message',
+  'thread.message-updated',
+  'questions.updated'
+] as const
+export type ThreadSourceEvent =
+  | { type: (typeof THREAD_EVENT_TYPES)[number]; data: unknown; ephemeral?: boolean }
+  | { type: (typeof THREAD_DELTA_TYPES)[number]; data: unknown; ephemeral: true }
 export interface ThreadSourcePort {
   snapshot(threadId: string): unknown
   onThread(
@@ -36,6 +43,9 @@ interface ActiveThread {
   ring: StoredRecord[]
   bytes: number
   dispose?: () => void
+  /** Latest pending delta per coalescing key, flushed at most every deltaIntervalMs. */
+  deltas: Map<string, unknown>
+  deltaTimer?: { cancel(): void }
 }
 export interface ThreadStreamOptions {
   db: NetDatabase
@@ -49,12 +59,21 @@ export interface ThreadStreamOptions {
   maxRows?: number
   maxBytes?: number
   maxThreads?: number
+  /** Minimum spacing between delta flushes per stream (default 100 ms). */
+  deltaIntervalMs?: number
   onDelta?(stream: StreamId, data: unknown): void
   onRecord?(stream: StreamId, record: StoredRecord): void
   onError?(threadId: string, error: unknown, stream: StreamId): void
 }
 const SNAPSHOT_MAX = 32 * 1024 * 1024,
-  CHUNK_BYTES = 32 * 1024
+  CHUNK_BYTES = 32 * 1024,
+  DELTA_MAX = 32 * 1024
+/** Streaming message deltas coalesce per message; question updates per thread. */
+function deltaKey(event: ThreadSourceEvent): string | undefined {
+  if (event.type === 'questions.updated') return 'questions'
+  const message = (event.data as { message?: { id?: unknown } } | undefined)?.message
+  return typeof message?.id === 'string' ? 'message:' + message.id : undefined
+}
 /** Display-only adapter. ThreadDataStore remains authoritative; no received wrapper can execute. */
 export class ThreadStreamAdapter {
   readonly store: StreamStore
@@ -139,7 +158,14 @@ export class ThreadStreamAdapter {
       }
       this.options.db.charge(1)
     })
-    const thread: ActiveThread = { threadId, stream: descriptor.id, descriptor, ring: [], bytes: 0 }
+    const thread: ActiveThread = {
+      threadId,
+      stream: descriptor.id,
+      descriptor,
+      ring: [],
+      bytes: 0,
+      deltas: new Map()
+    }
     this.refreshSnapshot(thread)
     this.active.set(thread.stream, thread)
     const fail = (error: unknown): void => {
@@ -151,12 +177,22 @@ export class ThreadStreamAdapter {
       threadId,
       (event) => {
         try {
-          if (!THREAD_EVENT_TYPES.includes(event.type)) throw new NetError('bad_request')
           const body = { threadId, type: event.type, data: event.data }
           if (event.ephemeral) {
-            if (canonicalJson(body).byteLength <= 32 * 1024)
-              this.options.onDelta?.(thread.stream, body)
+            if (!(THREAD_DELTA_TYPES as readonly string[]).includes(event.type))
+              throw new NetError('bad_request')
+            const key = deltaKey(event)
+            if (key && canonicalJson(body).byteLength <= DELTA_MAX)
+              this.queueDelta(thread, key, body)
             return
+          }
+          if (!(THREAD_EVENT_TYPES as readonly string[]).includes(event.type))
+            throw new NetError('bad_request')
+          // A settled record supersedes any streaming delta for the same message.
+          if (event.type === 'thread.messages') this.dropMessageDeltas(thread)
+          else {
+            const key = deltaKey(event)
+            if (key) thread.deltas.delete(key)
           }
           // Oversized display events are replaced by a fresh source snapshot, never inline oversize.
           if (canonicalJson(body).byteLength > 48 * 1024) this.refreshSnapshot(thread)
@@ -169,6 +205,38 @@ export class ThreadStreamAdapter {
       fail
     )
     return descriptor
+  }
+  private queueDelta(thread: ActiveThread, key: string, body: unknown): void {
+    if (!this.options.onDelta) return
+    thread.deltas.delete(key)
+    thread.deltas.set(key, body)
+    if (thread.deltaTimer) return
+    thread.deltaTimer = this.options.clock.setTimeout(
+      () => this.flushDeltas(thread),
+      this.options.deltaIntervalMs ?? 100
+    )
+  }
+  private flushDeltas(thread: ActiveThread): void {
+    thread.deltaTimer = undefined
+    if (this.active.get(thread.stream) !== thread) return
+    const pending = [...thread.deltas.values()]
+    thread.deltas.clear()
+    for (const body of pending) {
+      try {
+        this.options.onDelta?.(thread.stream, body)
+      } catch {
+        // Deltas are best effort; the durable stream stays authoritative.
+      }
+    }
+  }
+  private dropMessageDeltas(thread: ActiveThread): void {
+    for (const key of [...thread.deltas.keys()])
+      if (key.startsWith('message:')) thread.deltas.delete(key)
+  }
+  private stopDeltas(thread: ActiveThread): void {
+    thread.deltaTimer?.cancel()
+    thread.deltaTimer = undefined
+    thread.deltas.clear()
   }
   private append(thread: ActiveThread, type: string, body: unknown): void {
     if (this.options.db.database.isTransaction)
@@ -259,6 +327,7 @@ export class ThreadStreamAdapter {
     for (const [stream, thread] of this.active)
       if (thread.threadId === threadId) {
         thread.dispose?.()
+        this.stopDeltas(thread)
         this.active.delete(stream)
         return
       }
@@ -269,7 +338,10 @@ export class ThreadStreamAdapter {
     return { rows: thread.ring.length, bytes: thread.bytes }
   }
   close(): void {
-    for (const thread of this.active.values()) thread.dispose?.()
+    for (const thread of this.active.values()) {
+      thread.dispose?.()
+      this.stopDeltas(thread)
+    }
     this.active.clear()
   }
 }

@@ -696,6 +696,8 @@ export interface SyncSession {
   /** Idempotent, authenticated for the original caller; cancellation is not rollback. */
   rpcCancel(id: RpcId): Promise<void>
   sendEphemeral(message: Extract<WireMessage, { t: 'presence' | 'ephemeral' }>): void
+  /** Sends a display delta only if this session live-serves the stream and negotiated presence.v1. */
+  publishDelta(stream: StreamId, data: unknown): void
   onEphemeral(
     listener: (message: Extract<WireMessage, { t: 'presence' | 'ephemeral' }>) => void
   ): () => void
