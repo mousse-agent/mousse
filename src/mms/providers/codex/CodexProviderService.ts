@@ -8,6 +8,7 @@ import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
 import type { CodexStatus, ConfiguredProvider, ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
+import { mousseVersion } from '../../appVersion'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { codexMcpConfigOverrides } from '../../run/mcp/attachment'
@@ -52,7 +53,6 @@ export const CODEX_FALLBACK_MODELS: LlmModelOption[] = [
  * credentials, out of Mousse turns.
  */
 export const CODEX_MODEL_PROVIDER = 'openai'
-const CLIENT_VERSION = '0.1.1'
 const INTERRUPT_TIMEOUT_MS = 5_000
 /** A stopped turn must settle on the server before the thread takes a new one. */
 const PREVIOUS_TURN_SETTLE_MS = 10_000
@@ -787,7 +787,7 @@ export class CodexProviderService {
     conn.signal.addEventListener('abort', () => this.lost(conn, conn.signal.reason), { once: true })
     const ready = conn
       .request('initialize', {
-        clientInfo: { name: 'mousse', title: 'Mousse', version: CLIENT_VERSION },
+        clientInfo: { name: 'mousse', title: 'Mousse', version: mousseVersion() },
         capabilities: { experimentalApi: false, requestAttestation: false }
       })
       .then(() => {

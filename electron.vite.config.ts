@@ -1,8 +1,10 @@
+import { readFileSync } from 'fs'
 import { resolve } from 'path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
+const mousseVersion: string = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf-8')).version
 const piCodingAgentShim = resolve(__dirname, 'src/mms/providers/piCodingAgentShim.ts')
 const rendererPort = process.env.MOUSSE_RENDERER_PORT ? Number(process.env.MOUSSE_RENDERER_PORT) : 5713
 if (!Number.isInteger(rendererPort) || rendererPort < 1024 || rendererPort > 65535) {
@@ -68,8 +70,10 @@ export default defineConfig({
     root: resolve(__dirname, 'src/renderer'),
     // The Mousse ID service this build signs in to (src/renderer/lib/plusSignIn.ts). Official
     // releases set MOUSSE_ID_ORIGIN; builds without it show no Mousse ID UI.
+    // The package version, which release builds stamp before building (shown in settings).
     define: {
-      __MOUSSE_ID_ORIGIN__: JSON.stringify(process.env.MOUSSE_ID_ORIGIN || process.env.MOUSSE_PLUS_ORIGIN || '')
+      __MOUSSE_ID_ORIGIN__: JSON.stringify(process.env.MOUSSE_ID_ORIGIN || process.env.MOUSSE_PLUS_ORIGIN || ''),
+      __MOUSSE_VERSION__: JSON.stringify(mousseVersion)
     },
     resolve: {
       alias: [

@@ -6,6 +6,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { McpServerConfig, McpToolDescriptor } from '../../../shared/integrations'
 import type { IntegrationActor } from '../../../shared/integrations/actor'
 import type { McpServerTestResult, McpToolCallResult } from '../../../shared/integrations/results'
+import { mousseVersion } from '../../appVersion'
 import type { SettingsStore } from '../../settings/SettingsStore'
 import { McpRegistry } from './McpRegistry'
 import { allocateProviderToolName } from './toolNames'
@@ -819,7 +820,7 @@ export class McpManager {
       await this.prepareOAuthProvider(server)
     }
 
-    const client = new Client({ name: 'mousse', version: '0.1.0' }, { capabilities: {} })
+    const client = new Client({ name: 'mousse', version: mousseVersion() }, { capabilities: {} })
     const stderrLines: string[] = []
     const oauth =
       authMode === 'oauth' ? this.oauthProviders.get(mcpInstallationId(server)) : undefined

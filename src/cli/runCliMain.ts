@@ -30,6 +30,9 @@ import { stripCliModeArgs } from './cliLaunch'
 export async function runCliMain(argv: string[] = process.argv.slice(2)): Promise<void> {
   // Electron on Windows often leaves stdin/stdout.isTTY false on a real console.
   ensureWindowsConsoleTty()
+  // The packaged entry sets it from the app; a checkout run reads package.json. The daemon and
+  // provider clients inherit it.
+  process.env.MOUSSE_VERSION ||= readPackageVersion()
 
   const args = parseArgs(stripCliModeArgs(argv))
   const globals = args.globals
@@ -39,7 +42,12 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
   }
 
   if (globals.version) {
-    process.stdout.write(`${readPackageVersion()}\n`)
+    if (globals.mode === 'json') {
+      const { CONTRACT_VERSIONS } = await import('../mms/contractVersions')
+      process.stdout.write(`${JSON.stringify({ version: process.env.MOUSSE_VERSION, contracts: CONTRACT_VERSIONS }, null, 2)}\n`)
+    } else {
+      process.stdout.write(`mousse-cli ${process.env.MOUSSE_VERSION}\n`)
+    }
     return
   }
 
@@ -131,7 +139,7 @@ function readPackageVersion(): string {
     try {
       const require = createRequire(import.meta.url)
       const { app } = require('electron') as { app: { getVersion: () => string } }
-      return `mousse-cli ${app.getVersion()}`
+      return app.getVersion()
     } catch {
       // fall through to package.json probe
     }
@@ -156,14 +164,14 @@ function readPackageVersion(): string {
       try {
         const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as { version?: string; name?: string }
         if (pkg.version || pkg.name === 'mousse') {
-          return `mousse-cli ${pkg.version ?? '0.0.0'}`
+          return pkg.version ?? '0.0.0'
         }
       } catch {
         // try next
       }
     }
-    return 'mousse-cli'
+    return '0.0.0'
   } catch {
-    return 'mousse-cli'
+    return '0.0.0'
   }
 }

@@ -35,6 +35,10 @@ import { createIntegrationPlatformClient } from '../services/integrationPlatform
 import { confirmNavigation } from '../services/navigationGuards'
 import '../styles/settings.css'
 
+/** Set at build time from package.json (electron.vite.config.ts). */
+declare const __MOUSSE_VERSION__: string | undefined
+const MOUSSE_VERSION = typeof __MOUSSE_VERSION__ === 'string' ? __MOUSSE_VERSION__ : ''
+
 function themePreviewClass(themeId: ThemeId): string {
   switch (themeId) {
     case 'light':
@@ -668,6 +672,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
               </button>
             )
           })}
+          {MOUSSE_VERSION && <p className="settings-nav-version">Mousse {MOUSSE_VERSION}</p>}
         </nav>
 
         <div className="settings-content" key={activeSection}>
