@@ -49,10 +49,11 @@ jobs:
       - name: Install the old version
         run: |
           Start-Process -Wait "C:\upd\old\Mousse.Setup.$env:OLD.exe" -ArgumentList '/S'
-          $exe = "$env:LOCALAPPDATA\Programs\Mousse\Mousse.exe"
-          $version = (Get-Item $exe).VersionInfo.ProductVersion
-          "Installed $version"
-          if ($version -ne $env:OLD) { throw "Expected $env:OLD" }
+          $dir = "$env:LOCALAPPDATA\Programs\Mousse"
+          "Product version string: $((Get-Item "$dir\Mousse.exe").VersionInfo.ProductVersion)"
+          $version = (& "$dir\mousse-cli.exe" --version | Out-String).Trim()
+          "Installed: $version"
+          if ($version -ne "mousse-cli $env:OLD") { throw "Expected $env:OLD" }
       - name: Update through the app
         env:
           MOUSSE_UPDATE_FEED_URL: http://127.0.0.1:8799/
@@ -110,8 +111,9 @@ jobs:
         run: |
           $exe = "$env:LOCALAPPDATA\Programs\Mousse\Mousse.exe"
           $deadline = (Get-Date).AddMinutes(5)
-          do { Start-Sleep 5; $version = (Get-Item $exe -ErrorAction SilentlyContinue).VersionInfo.ProductVersion; "installed: $version" } until ($version -eq $env:NEW -or (Get-Date) -gt $deadline)
-          if ($version -ne $env:NEW) { throw "Still $version" }
+          do { Start-Sleep 5; $version = (& "$env:LOCALAPPDATA\Programs\Mousse\mousse-cli.exe" --version 2>$null | Out-String).Trim(); "installed: $version" } until ($version -eq "mousse-cli $env:NEW" -or (Get-Date) -gt $deadline)
+          if ($version -ne "mousse-cli $env:NEW") { throw "Still $version" }
+          "Product version string: $((Get-Item $exe).VersionInfo.ProductVersion)"
           $record = "C:\upd\home\electron-user-data\updates.json"
           $deadline = (Get-Date).AddMinutes(3)
           do { Start-Sleep 5; $text = Get-Content $record -Raw -ErrorAction SilentlyContinue; "record: $text" } until (($text -and $text -notmatch '"install"') -or (Get-Date) -gt $deadline)
