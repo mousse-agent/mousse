@@ -136,6 +136,7 @@
   },
   "build": {
     "afterPack": "scripts/after-pack.mjs",
+    "publish": null,
     "appId": "com.ryspa.mousse",
     "productName": "Mousse",
     "copyright": "Copyright © 2026 RYSPA",
