@@ -2,6 +2,7 @@ import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import type { BridgeDisplayPart } from '../shared/bridge'
+import type { NetStatus } from '../shared/net/local'
 import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
@@ -874,6 +875,14 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, view: MainView) => cb(view)
       ipcRenderer.on('app:navigateMainView', handler)
       return () => ipcRenderer.removeListener('app:navigateMainView', handler)
+    }
+  },
+  net: {
+    /** Network status pushed by the daemon whenever it changes, including its list of phone requests. */
+    onUpdated: (cb: (status: NetStatus) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, status: NetStatus) => cb(status)
+      ipcRenderer.on('net:updated', handler)
+      return () => ipcRenderer.removeListener('net:updated', handler)
     }
   },
   mousseId: {

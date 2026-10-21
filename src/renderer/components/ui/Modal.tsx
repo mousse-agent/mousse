@@ -1,7 +1,7 @@
 import { useEffect, useId, type ReactNode } from 'react'
 import { X } from '../../lib/icons'
 
-export function Modal({ open, title, onClose, children, footer }: { open: boolean; title: string; onClose: () => void; children: ReactNode; footer?: ReactNode }) {
+export function Modal({ open, title, onClose, children, footer, className }: { open: boolean; title: string; onClose: () => void; children: ReactNode; footer?: ReactNode; className?: string }) {
   const titleId = useId()
   useEffect(() => {
     if (!open) return
@@ -11,7 +11,7 @@ export function Modal({ open, title, onClose, children, footer }: { open: boolea
   }, [open, onClose])
   if (!open) return null
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={onClose}>
+    <div className={className ? `modal-overlay ${className}` : 'modal-overlay'} role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <header className="modal-header">
           <h3 id={titleId}>{title}</h3>

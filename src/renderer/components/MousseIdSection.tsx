@@ -5,6 +5,8 @@ import type { PlatformRequestMethod } from '../../shared/platform'
 import { qrSvgPath } from '../lib/plusQr'
 import { formatCountdown, secondsLeft } from '../lib/plusSignIn'
 import { mousseIdName } from '../stores/mousseIdStore'
+import { decideEnrollmentRequest, listEnrollmentRequests } from '../lib/plusEnrollment'
+import { EnrollmentRequestDetails } from './EnrollmentRequestPrompt'
 
 const request = <T,>(method: PlatformRequestMethod, params: unknown = {}) =>
   window.mousse.platformRequest.request<T>(method, params)
@@ -68,9 +70,9 @@ export function MousseIdSection({
     }
     let active = true
     const load = () =>
-      request<{ requests: PlusEnrollmentRequestView[] }>('net.plus.enrollment.requests')
+      listEnrollmentRequests()
         .then((value) => {
-          if (active) setRequests(value.requests)
+          if (active) setRequests(value)
         })
         .catch(() => undefined)
     void load()
@@ -105,7 +107,7 @@ export function MousseIdSection({
 
   const decide = (id: string, approve: boolean) =>
     run(async () => {
-      await request(approve ? 'net.plus.enrollment.approve' : 'net.plus.enrollment.deny', { id })
+      await decideEnrollmentRequest(id, approve)
       if (!alive.current) return
       setRequests((rows) => rows.filter((row) => row.id !== id))
       if (approve) await onChanged()
@@ -137,12 +139,7 @@ export function MousseIdSection({
           )}
           {requests.map((row) => (
             <div className="net-device-row" key={row.id}>
-              <div>
-                <strong>{row.deviceName}</strong>
-                <span>
-                  Wants to join · match code <strong>{row.matchCode.slice(0, 3)} {row.matchCode.slice(3)}</strong> · approve only if the phone shows the same code
-                </span>
-              </div>
+              <EnrollmentRequestDetails request={row} />
               <button type="button" disabled={busy} onClick={() => void decide(row.id, true)}>Approve</button>
               <button type="button" disabled={busy} onClick={() => void decide(row.id, false)}>Deny</button>
             </div>

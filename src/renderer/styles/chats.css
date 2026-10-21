@@ -181,5 +181,9 @@
 .net-devices-section .net-toggle input[type=checkbox] { flex: 0 0 auto; width: 13px; }
 .net-plus-offer { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin: 8px 0 12px; }
 .net-plus-qr { border-radius: 8px; background: #fff; }
+/* Phone requests ask over every screen, Settings included. */
+.modal-overlay.enrollment-prompt { z-index: 1150; }
+.enrollment-prompt .net-device-row { padding: 0; border-bottom: 0; }
+.enrollment-prompt .net-device-row span { font-size: 12px; }
 .net-plus-login { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .net-plus-login p { flex-basis: 100%; }
