@@ -106,9 +106,8 @@ jobs:
           Start-Process "$env:LOCALAPPDATA\Programs\Mousse\Mousse.exe" -ArgumentList '--remote-debugging-port=9333'
           node "$env:RUNNER_TEMP\drive.mjs"
           if ($LASTEXITCODE -ne 0) { throw 'Driving the update failed' }
-      - name: The new version is installed, running and serving
-        run: |
-          $exe = "$env:LOCALAPPDATA\Programs\Mousse\Mousse.exe"
+          # Same step: the runner ends a step by killing the processes it started, which would
+          # include the installer and the relaunched app.
           $deadline = (Get-Date).AddMinutes(5)
           $cli = "$env:LOCALAPPDATA\Programs\Mousse\mousse-cli.exe"
           # The installer removes the old files first, so the CLI can be missing for a while.
@@ -116,7 +115,7 @@ jobs:
           if ($version -ne "mousse-cli $env:NEW") { throw "Still $version" }
           $record = "C:\upd\home\electron-user-data\updates.json"
           $deadline = (Get-Date).AddMinutes(3)
-          do { Start-Sleep 5; $text = Get-Content $record -Raw -ErrorAction SilentlyContinue; "record: $text" } until (($text -and $text -notmatch '"install"') -or (Get-Date) -gt $deadline)
+          do { Start-Sleep 5; $text = Get-Content $record -Raw -ErrorAction SilentlyContinue; "record: $($text -replace '\s+', ' ')"; Get-CimInstance Win32_Process -Filter "Name='Mousse.exe'" | ForEach-Object { "  running: $($_.ProcessId) $($_.CommandLine)" } } until (($text -and $text -notmatch '"install"') -or (Get-Date) -gt $deadline)
           if (-not $text -or $text -match '"install"') { throw 'The relaunched app did not confirm the update' }
           $deadline = (Get-Date).AddMinutes(3)
           do { Start-Sleep 5; $status = & "$env:LOCALAPPDATA\Programs\Mousse\mousse-cli.exe" --home C:\upd\home --mode json service status | Out-String; "service: $status" } until ($status -match "`"version`":\s*`"$([regex]::Escape($env:NEW))`"" -or (Get-Date) -gt $deadline)
