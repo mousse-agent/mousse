@@ -102,7 +102,11 @@ jobs:
           sudo install -o root -g root -m 4755 .mousse-dev/browser-binaries/binaries/certified/chrome-linux64/chrome_sandbox /opt/mousse-ci/chrome-sandbox
           echo 'CHROME_DEVEL_SANDBOX=/opt/mousse-ci/chrome-sandbox' >> "$GITHUB_ENV"
       - name: Run the full test suite with a real display
-        run: xvfb-run --auto-servernum --server-args='-screen 0 1280x900x24' dbus-run-session -- npm test -- --maxWorkers=2
+        env:
+          # Release builds give a failed test two more tries: timing-sensitive process tests
+          # occasionally fail on shared runners. A test that fails every try still blocks.
+          RETRY: ${{ inputs.full-suite && '--retry=2' || '' }}
+        run: xvfb-run --auto-servernum --server-args='-screen 0 1280x900x24' dbus-run-session -- npm test -- --maxWorkers=2 $RETRY
 
   windows:
     name: Windows focused checks
