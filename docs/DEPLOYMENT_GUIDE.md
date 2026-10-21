@@ -4,6 +4,10 @@ This guide records the reproducible release path and every deployment item that
 still needs an external platform or owner action. It intentionally contains no
 credentials, approval codes, signing material, or machine-specific API keys.
 
+Nightly and stable builds are made by GitHub Actions; see [releases.md](releases.md)
+for channels, version numbers and how to cut a release. The manual steps below
+remain the reference for what those workflows check and for building by hand.
+
 ## Release invariants
 
 1. Build release assets from the exact public Git commit targeted by the GitHub
