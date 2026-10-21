@@ -296,9 +296,11 @@ export class NetService {
         rpc
       }
       this.domain = this.options.composeRuntime?.(this.state) ?? undefined
-      this.rosterListener = identity.onRosterChanged(() => {
+      this.rosterListener = identity.onRosterChanged((user) => {
         this.emit()
         if (this.routes) this.refreshPeers()
+        // Mousse ID admits relay connections against the roster it last received.
+        if (user === identity.self()?.user) this.hosted?.rosterChanged()
       })
       return this.state
     } catch (error) {
@@ -426,8 +428,12 @@ export class NetService {
             params.passphrase as string | undefined
           )
         case 'bridge.revoke': {
-          const rt = this.requireEnrolled()
-          rt.identity.revoke(params.node as NodeId)
+          const rt = this.requireEnrolled(),
+            node = params.node as NodeId
+          // Open sessions with the node send it the new roster and then close themselves;
+          // the roster change also sends the roster to Mousse ID.
+          rt.identity.revoke(node)
+          this.closeHandshakingSessions(node)
           this.emit()
           return { ok: true }
         }
@@ -1066,6 +1072,17 @@ export class NetService {
     )
       throw new NetError('revoked')
     return result
+  }
+  /** Sessions that authenticated `node` but are not open yet do not see roster changes. */
+  private closeHandshakingSessions(node: NodeId): void {
+    for (const session of this.sessions) {
+      if (session.state() !== 'connecting') continue
+      try {
+        if (session.peer.node === node) session.close('revoked')
+      } catch {
+        // Not authenticated yet: its hello is checked against the new roster.
+      }
+    }
   }
   session(node: NodeId): SyncSession {
     this.assertEnabled()

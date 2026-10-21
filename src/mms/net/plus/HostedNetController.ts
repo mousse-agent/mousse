@@ -290,7 +290,20 @@ export class HostedNetController implements HostedNet {
     this.armRenewal()
   }
 
-  private armRenewal(): void {
+  rosterChanged(): void {
+    if (this.host.signal.aborted || !this.hostedRelayEnabled()) return
+    try {
+      if (!this.service().status().registrationId) return
+    } catch {
+      // Locked or not enrolled: the next renewal after unlock carries the roster.
+      return
+    }
+    if (this.plusRenewal) clearTimeout(this.plusRenewal)
+    this.plusRenewal = undefined
+    this.armRenewal(0)
+  }
+
+  private armRenewal(delayMs?: number): void {
     if (this.host.signal.aborted) return
     this.armEnrollmentPoll(1000)
     if (this.plusRenewal) return
@@ -315,9 +328,10 @@ export class HostedNetController implements HostedNet {
             this.host.emit()
           })
       },
-      status.connected
-        ? Math.min(20000, Math.max(1000, (status.expiresAt! - this.host.clock.now()) / 3))
-        : 20000
+      delayMs ??
+        (status.connected
+          ? Math.min(20000, Math.max(1000, (status.expiresAt! - this.host.clock.now()) / 3))
+          : 20000)
     )
     this.plusRenewal.unref?.()
     if (!this.plusAbortBound) {

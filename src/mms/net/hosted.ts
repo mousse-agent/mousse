@@ -92,6 +92,11 @@ export interface HostedNet {
   prepareSpaceRendezvous(expiresAt: number, uses: number): Promise<RelayRendezvous | undefined>
   /** Space membership changed; re-check consent for hosted routes. */
   membershipChanged(): void
+  /**
+   * This user's roster changed (for example, a device was revoked). Sends it to Mousse ID now
+   * instead of at the next scheduled renewal, so the hosted relay stops admitting revoked devices.
+   */
+  rosterChanged(): void
 }
 
 /** `net.plus.status` when the module is absent or the profile cannot use it yet. */
