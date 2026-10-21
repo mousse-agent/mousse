@@ -285,12 +285,54 @@ Default phone capabilities are read, chat and write.
 
 ## 11. Direct path for signed-in phones
 
-A phone that reached a computer through Mousse ID may use a shorter path when both are on the same network or tailnet. Nothing in either app shows or controls it.
+A phone that reached a computer through Mousse ID may switch to a WebRTC peer-to-peer path when the networks allow it: the same Wi-Fi, a tailnet, IPv6 between both ends, or IPv4 through STUN hole punching. When no direct path works, the phone stays on the Mousse ID relay. There is no TURN. Nothing in either app shows or controls it. The computer never keeps a listening TCP port for it; its UDP sockets live only as long as one accepted offer (`src/mms/net/transports/phoneWebRtc.ts`).
 
-**Listener.** While the computer is signed in to Mousse ID and its hosted relay listener is up, it also listens for phones on each of its private addresses: IPv4 `10/8`, `172.16/12` and `192.168/16`, IPv6 unique local `fc00::/7`, and the Tailscale ranges `100.64/10` and `fd7a:115c:a1e0::/48`. Loopback, public, link-local and container or VM bridge addresses are never bound. The port is derived from the node id (41000 to 48999), so it stays the same across restarts; an address whose port is taken falls back to any free port. Addresses are read again every 15 seconds. The listener stops when Mousse ID disconnects. It carries the ordinary direct WebSocket (`ws://<address>:<port>/mousse-net`) with the same preauth budget as every other carrier (`src/mms/net/transports/phoneDirect.ts`).
+**When it is offered.** Only while the computer is signed in to Mousse ID with its hosted relay listener up, Net is on with Bridge enabled, the key store is unlocked, and the Mousse ID configuration document (`GET /v1/net/config`) does not set `directWebrtc: false`. That field is the kill switch. The document's `stun: string[]` (at most 4 `stun:host[:port]` URLs; `stuns:` entries are ignored) becomes the ICE servers, and an empty list means host candidates only. The computer reads the document when it signs in, when it starts, and at most every 10 minutes while it renews the relay lease. It keeps the last value while Mousse ID is unreachable.
 
-**Authentication.** A connection runs the same pinned inner TLS and session handshake as the relay: the computer checks the phone's delegation against the roster, its key epoch and revocations, and RPCs pass the same dispatcher checks. The phone listener accepts only nodes of the computer's own user, never enrolls a node, and never joins a Space.
+**Discovery.** `net.direct.endpoints` takes `{}` (capability `read`, not mutating, never stored). Over a session that arrived on the `plus-relay` or `phone-webrtc` carrier, and while the path is offered, it returns `{endpoints: [], webrtc: {v: 1}}`. Otherwise it returns `{endpoints: []}`. An older computer omits `webrtc`, and the phone then never tries.
 
-**Discovery.** The phone asks for the endpoints with `net.direct.endpoints` (`{}`, capability `read`, not mutating). The answer is `{endpoints: [{url, kind}]}` with `kind` `lan` or `tailscale`, LAN first. It is empty unless the calling session arrived through the hosted relay (`plus-relay`) or the phone listener itself, and the hosted relay listener is up. Sessions over any other carrier learn nothing.
+**Signaling.** `net.direct.webrtc.offer` takes `{sdp, v: 1}` and returns `{sdp}` (capability `read`, not mutating). It is accepted only on the `plus-relay` and `phone-webrtc` carriers, so a phone can offer again over a direct session after a Wi-Fi change. Neither method writes a request alias, an execution record or its result to disk; a retried offer is simply a new offer. Signaling is not trickled. The phone gathers for up to 1.5 s and sends what it has; the computer:
 
-**Phone behaviour.** The phone keeps its Mousse ID registration renewed on every path. It opens a full session on a direct endpoint before it moves streams and new requests there, and keeps the old session until the requests in flight on it finish. If the direct path stops answering, the phone falls back to the relay.
+1. validates the offer in JavaScript before any native code sees it (below);
+2. issues a ticket bound to the calling session's authenticated node and user and the offer's DTLS fingerprint;
+3. creates a fresh PeerConnection (UDP ports 50000 to 50999, no TCP candidates), sets the remote offer and then its own answer, so its ICE checks toward the phone start before the RPC returns, and every check from the phone arrives on a flow the computer opened (no inbound firewall rule or prompt);
+4. gathers for up to 1.5 s, removes every answer candidate outside its own direct host addresses (private LAN, Tailscale, unique local and global IPv6 on real interfaces, and public server-reflexive ones when STUN is configured), and returns the answer.
+
+**Offer validator.** At most 16 KiB and 100 lines of printable ASCII. Exactly one `m=application <port> UDP/DTLS/SCTP webrtc-datachannel`. Lines `v o s t c m` and the attributes `group:BUNDLE`, `msid-semantic`, `ice-ufrag`, `ice-pwd`, `ice-options`, `fingerprint:sha-256` (exactly one), `setup:actpass`, `mid`, `sctp-port`, `max-message-size`, `candidate`, `end-of-candidates`, `extmap-allow-mixed` and `sendrecv` only; anything else, including `ice-lite`, `rtcp*` and any other media section, rejects the offer. Origin and connection lines name IP literals. At most 8 candidate lines. A candidate reaches the native stack only if it is UDP, component 1, on port 1024 to 65535, names an IP literal (never `.local` or a host name, so the native resolver never runs), and is `typ host` in RFC 1918, Tailscale `100.64/10`, unique local `fc00::/7` (including Tailscale `fd7a:115c:a1e0::/48`) or global unicast `2000::/3`, or `typ srflx` on a public IPv4 or global IPv6 address while STUN is configured. Loopback, link-local, multicast, unspecified, broadcast, IPv4-mapped, documentation and benchmark ranges, the computer's own addresses and the relay's and STUN servers' addresses are dropped. An offer with no usable candidate fails with `route_unreachable`.
+
+**Channel and session.** The phone opens one in-band DataChannel labelled `mousse-net/1`, ordered and reliable, without a subprotocol. It carries binary messages of at most 64 KiB in each direction; a text message closes it. Any other label, a second channel, or a remote DTLS certificate other than the offered fingerprint closes the PeerConnection. When the channel opens, the computer reserves a preauth lease for the ticket's node and runs the ordinary server side: inner TLS 1.3 with the pinned keys, then the session hello with roster, delegation, key epoch and revocation checks, on carrier `phone-webrtc`. It accepts only the computer's own user, never enrolls a node, never joins a Space, and closes the session with `forbidden` when the authenticated node is not the ticket's node.
+
+**Teardown.** The PeerConnection closes and the ticket is dropped when the session ends, ICE fails, the ticket does not reach an authenticated session in 15 s, the node is revoked (pending tickets too), the relay listener goes down, the kill switch flips, Net is disabled or the app quits. ICE consent checks keep NAT and connection-tracking entries alive on idle sessions.
+
+| Limit | Value |
+|---|---|
+| Offer size | ≤ 16 KiB, ≤ 100 lines, ≤ 8 candidate lines |
+| Answer size | ≤ 16 KiB |
+| Computer's gathering before it answers | ≤ 1.5 s |
+| Ticket lifetime until an authenticated session | 15 s |
+| Offers | 6 per minute per node |
+| Pending tickets | 2 per node, 8 in total |
+| Live WebRTC sessions | 4 per node, 16 in total |
+| Preauth deadline | 10 s, from the moment the DataChannel opens |
+| Raw bytes before inner TLS completes | 64 KiB |
+| DataChannel message | ≤ 64 KiB, binary only |
+| Outbound buffering | writes wait while more than 1 MiB is queued in the channel |
+| Inbound buffering | the stream closes with `too_large` when an unread reader falls 8 MiB behind; the SCTP receive window is 1 MiB |
+| STUN servers | ≤ 4, from Mousse ID configuration |
+| UDP ports | 50000 to 50999, only while a ticket's PeerConnection exists |
+
+**Security model.**
+
+| Layer | Provides | Keys |
+|---|---|---|
+| Signaling, inside the existing session | Confidentiality and integrity of SDP and candidates; authenticated both ways | Long-term node keys: inner TLS and delegation |
+| ICE | Connectivity only; checks authenticated with the ufrag and password from the encrypted SDP | Random, per connection |
+| DTLS 1.2 | Encrypts SCTP; man-in-the-middle-proof because the fingerprints travel through the pinned session | Ephemeral, per connection |
+| Inner TLS 1.3 (unchanged) | End-to-end confidentiality and integrity; SPKI pinned; client certificate | Long-term transport keys |
+| Session hello (unchanged) | Delegation, roster, key epoch, revocation, same user | User root key |
+| RPC authorization (unchanged) | Capability per method, same user, current delegation | Roster |
+| STUN | Address reflection only; never sees payload or account data | none |
+
+A downgrade only costs latency: the fallback is the relay, still inner TLS end to end. SDP, candidates and addresses are never logged above debug level, and errors from the native stack are replaced by plain `NetError` codes before they reach a reply or `lastError`. Private, Tailscale and global IPv6 host addresses and the public reflexive address are shared only with the user's own authenticated devices, inside the encrypted session. The native stack (libdatachannel, libjuice, usrsctp and its bundled OpenSSL, through `node-datachannel` pinned to an exact version) is reachable only after an authenticated, rate-limited exchange that passed the validator. The native binding cannot report a channel's reliability settings; an unordered or partially reliable channel breaks the inner TLS record layer, which then fails closed.
+
+**Phone behaviour.** The phone keeps its Mousse ID registration renewed on every path. It opens a full session on the WebRTC path before it moves streams and new requests there, and keeps the old session until the requests in flight on it finish. If the direct path stops answering, the phone falls back to the relay.
