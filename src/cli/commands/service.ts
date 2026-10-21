@@ -14,9 +14,7 @@ import {
 import { resolveCliPathForInstall } from '../cliLaunch'
 import {
   canonicalizeHome,
-  clearStopRequest,
   pollUntilRuntimeReady,
-  pollUntilRuntimeStopped,
   publishOwnRuntimeRecord,
   readStopRequest,
   removeOwnRuntimeRecord,
@@ -29,7 +27,6 @@ import {
 import {
   formatOwnerBusyMessage,
   MmsOwnerBusyError,
-  readOwnerRecord,
   resolveOwnerStatus
 } from '../../mms/ownership/MmsOwnerLease'
 import { installDaemonDiagnostics } from '../daemonDiagnostics'
@@ -37,7 +34,6 @@ import { installElectronDaemonQuit } from '../electronDaemonLifetime'
 import { resolveDaemonHostInvocation } from '../daemonHost'
 import { MmsProtocolServer } from '../../mms/protocol'
 import {
-  requestDaemonShutdown,
   stopRunningDaemon,
   shutdownDaemonLifecycle,
   type DaemonLifecycleState

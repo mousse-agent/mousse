@@ -10,7 +10,7 @@ export interface UpdaterBackend {
   allowDowngrade: boolean
   fullChangelog: boolean
   channel: string | null
-  checkForUpdates(): Promise<{ isUpdateAvailable: boolean; updateInfo: { version: string; releaseNotes?: RawReleaseNotes } } | null>
+  checkForUpdates(): Promise<{ isUpdateAvailable: boolean; updateInfo: { version: string; releaseName?: string | null; releaseNotes?: RawReleaseNotes } } | null>
   downloadUpdate(): Promise<unknown>
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void
   on(event: 'download-progress', listener: (progress: { percent: number }) => void): unknown
@@ -69,6 +69,8 @@ export class DesktopUpdater {
   private queue: Promise<unknown> = Promise.resolve()
   private timer: unknown = null
   private failures = 0
+  /** 'started' once the installer process is launching; Mousse quits right after. */
+  private installStep: 'none' | 'starting' | 'started' = 'none'
   private lastProgressEmit = 0
   private disposed = false
   private readonly now: () => number
@@ -146,7 +148,9 @@ export class DesktopUpdater {
   private async runCheck(manual: boolean): Promise<UpdateState> {
     // A downloaded update stays ready; a newer one is offered after it is installed.
     if (this.disposed || ['disabled', 'downloading', 'downloaded', 'installing'].includes(this.state.phase)) return this.state
-    if (manual) this.update({ phase: 'checking' }, ['error'])
+    // An update already offered stays on screen while a check runs, whatever the check finds.
+    const offered = this.state.availableVersion !== undefined && (this.state.phase === 'available' || this.state.phase === 'error')
+    if (manual && !offered) this.update({ phase: 'checking' }, ['error'])
     try {
       const backend = await this.loadBackend()
       const result = await backend.checkForUpdates()
@@ -155,7 +159,9 @@ export class DesktopUpdater {
       if (!info) {
         this.update({ phase: 'up-to-date', lastCheckedAt: this.now(), releaseNotes: [], omittedReleaseCount: 0 }, ['availableVersion', 'error'])
       } else {
-        const notes = normalizeReleaseNotes(info.releaseNotes, info.version, this.options.repositoryUrl)
+        // A single note belongs to the release the feed matched; drop it when that is another release.
+        const matched = typeof info.releaseNotes !== 'string' || !info.releaseName || info.releaseName.includes(info.version)
+        const notes = normalizeReleaseNotes(matched ? info.releaseNotes : null, info.version, this.options.repositoryUrl)
         this.update({ phase: 'available', availableVersion: info.version, lastCheckedAt: this.now(), ...notes }, ['error'])
       }
       this.schedule(CHECK_INTERVAL_MS)
@@ -170,8 +176,8 @@ export class DesktopUpdater {
         this.schedule(Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (this.failures - 1)))
         // Background failures stay out of the UI (offline is normal); an offered update stays offered.
         if (!manual) console.warn(`Update check failed (retrying later): ${errorMessage(error)}`)
-        if (manual) this.update({ phase: 'error', lastCheckedAt: this.now(), error: { message: errorMessage(error), during: 'check' } })
-        else if (this.state.phase === 'checking') this.update({ phase: 'idle' })
+        if (manual && !offered) this.update({ phase: 'error', lastCheckedAt: this.now(), error: { message: errorMessage(error), during: 'check' } })
+        else this.update({ lastCheckedAt: this.now(), ...(this.state.phase === 'checking' ? { phase: 'idle' as const } : {}) })
       }
     }
     return this.state
@@ -199,8 +205,12 @@ export class DesktopUpdater {
     try {
       const backend = await this.loadBackend()
       await this.options.prepareInstall()
-      // Silent install, then start the new version. A failure here arrives as an 'error' event.
+      // Silent install, then start the new version. A failure here arrives as an 'error' event:
+      // during this call when nothing could start, or just after it while Mousse is quitting.
+      this.installStep = 'starting'
       backend.quitAndInstall(true, true)
+      // Still 'starting' unless the call itself reported a failure.
+      if (this.installStep === 'starting') this.installStep = 'started'
     } catch (error) {
       await this.failInstall(error)
     }
@@ -208,6 +218,7 @@ export class DesktopUpdater {
   }
 
   private async failInstall(error: unknown): Promise<void> {
+    this.installStep = 'none'
     const { install: _install, ...kept } = this.options.store.read()
     this.options.store.write(kept)
     try {
@@ -227,7 +238,13 @@ export class DesktopUpdater {
       // electron-updater also rejects the call that failed; this listener only has to catch
       // installer failures, which have no call to reject.
       backend.on('error', (error) => {
-        if (this.state.phase === 'installing') void this.failInstall(error)
+        if (this.state.phase !== 'installing') return
+        if (this.installStep === 'started') {
+          console.error('The update installer failed to start:', errorMessage(error))
+          return
+        }
+        this.installStep = 'none'
+        void this.failInstall(error)
       })
       this.applyChannel(backend)
       return backend

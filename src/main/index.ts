@@ -7,7 +7,7 @@ import { detectCliMode, stripCliModeArgs } from '../cli/cliLaunch'
 import { configureElectronContext, finishElectronCli } from '../cli/electronContext'
 import { resolveMousseHome } from '../cli/paths'
 import { stopRunningDaemon } from '../cli/daemonShutdown'
-import { canonicalizeHome } from '../cli/mmsRuntime'
+import { canonicalizeHome, SERVICE_STOP_TIMEOUT_MS } from '../cli/mmsRuntime'
 import { MousseConfigStore } from '../mms/config/MousseConfigStore'
 import { SettingsStore } from '../mms/settings/SettingsStore'
 import { FileService } from '../mms/files/FileService'
@@ -330,7 +330,7 @@ function startGuiApp(): void {
           // The installer replaces Mousse.exe, which also hosts the background service.
           prepareInstall: async () => {
             await guiMms?.stop()
-            const stopped = await stopRunningDaemon(canonicalizeHome(homeDir), { reason: 'update', timeoutMs: 20_000 })
+            const stopped = await stopRunningDaemon(canonicalizeHome(homeDir), { reason: 'update', timeoutMs: SERVICE_STOP_TIMEOUT_MS })
             if (stopped.kind !== 'stopped' && stopped.kind !== 'not-running') {
               throw new Error('The background service did not stop, so the update was not installed.')
             }

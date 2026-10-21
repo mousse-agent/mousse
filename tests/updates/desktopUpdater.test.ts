@@ -26,6 +26,8 @@ class FakeBackend implements UpdaterBackend {
   downloadResult: Promise<unknown> = Promise.resolve([])
   installs: Array<[boolean | undefined, boolean | undefined]> = []
   installError: Error | undefined
+  /** Reported after quitAndInstall returns, as a failed installer spawn is. */
+  lateInstallError: Error | undefined
   private listeners = new Map<string, Listener[]>()
 
   async checkForUpdates() {
@@ -39,6 +41,8 @@ class FakeBackend implements UpdaterBackend {
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean) {
     this.installs.push([isSilent, isForceRunAfter])
     if (this.installError) this.emit('error', this.installError)
+    const late = this.lateInstallError
+    if (late) queueMicrotask(() => this.emit('error', late))
   }
   on(event: string, listener: Listener) {
     this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener])
@@ -47,8 +51,8 @@ class FakeBackend implements UpdaterBackend {
   emit(event: string, value: unknown) {
     for (const listener of this.listeners.get(event) ?? []) listener(value as never)
   }
-  offer(version: string, releaseNotes?: string) {
-    this.next = { isUpdateAvailable: true, updateInfo: { version, releaseNotes } }
+  offer(version: string, releaseNotes?: string, releaseName?: string) {
+    this.next = { isUpdateAvailable: true, updateInfo: { version, releaseNotes, ...(releaseName ? { releaseName } : {}) } }
   }
 }
 
@@ -194,6 +198,56 @@ describe('DesktopUpdater', () => {
     expect(hooks.recovered).toBe(1)
     expect(store.record.install).toBeUndefined()
     expect(updater.getState()).toMatchObject({ phase: 'downloaded', error: { during: 'install' } })
+    updater.dispose()
+  })
+
+  it('keeps the install record when the installer fails while Mousse is already quitting', async () => {
+    const { backend, store, hooks, updater } = setup()
+    backend.offer('0.1.2-nightly.20261022.3')
+    backend.lateInstallError = new Error('spawn ENOENT')
+    await updater.check()
+    await updater.download()
+    await updater.install()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(hooks.recovered).toBe(0)
+    expect(store.record.install).toMatchObject({ to: '0.1.2-nightly.20261022.3' })
+    expect(updater.getState().phase).toBe('installing')
+    updater.dispose()
+  })
+
+  it('keeps an offered update on screen through a failed check the user asked for', async () => {
+    const { backend, states, updater } = setup()
+    backend.offer('0.1.2-nightly.20261022.3')
+    await updater.check()
+    backend.next = new Error('getaddrinfo ENOTFOUND github.com')
+    const before = states.length
+    await updater.check(true)
+    expect(states.slice(before).map((state) => state.phase)).not.toContain('checking')
+    expect(updater.getState()).toMatchObject({ phase: 'available', availableVersion: '0.1.2-nightly.20261022.3' })
+    updater.dispose()
+  })
+
+  it('drops stable notes that belong to another release', async () => {
+    const { backend, updater } = setup({ version: '0.1.2' })
+    backend.offer('0.1.3', '<ul><li>a nightly change</li></ul>', 'Mousse 0.1.4-nightly.20261101.9')
+    await updater.check()
+    expect(updater.getState().releaseNotes).toEqual([])
+    backend.offer('0.1.3', '<ul><li>stable change</li></ul>', 'Mousse v0.1.3')
+    await updater.check()
+    expect(updater.getState().releaseNotes[0]!.items).toEqual(['stable change'])
+    updater.dispose()
+  })
+
+  it('counts a failed background check, so focus checks resume after starting offline', async () => {
+    const { backend, updater } = setup()
+    backend.next = new Error('offline')
+    await updater.check()
+    expect(updater.getState().lastCheckedAt).toBeDefined()
+    backend.offer('0.1.2-nightly.20261022.3')
+    vi.setSystemTime(Date.now() + FOCUS_CHECK_MIN_GAP_MS)
+    updater.noteFocus()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(updater.getState().phase).toBe('available')
     updater.dispose()
   })
 
