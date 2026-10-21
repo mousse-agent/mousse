@@ -37,6 +37,27 @@ Which number to bump, while Mousse is below 1.0:
 
 Nightlies stop with an error while `master` still holds a version that is already tagged, so step 4 cannot be forgotten for long.
 
+Installed builds see the new stable release only once its draft is published.
+
+## In-app updates
+
+Installed Mousse updates itself from these GitHub releases (`src/main/updates/`, built on `electron-updater`).
+
+- **Channel.** A nightly build follows nightlies and a stable build follows stable releases. Settings → Updates switches channel; the choice is kept in `updates.json` in Electron's user data folder. Moving from a nightly to stable never installs an older build: it waits for a stable release newer than the running one, because an older build may not read data a newer one saved.
+- **Checks.** The first check runs 15 s after the app starts, then every 30 minutes, and again when a window gains focus at least 10 minutes after the last check. Failed checks back off up to 2 hours without showing anything; a check started from Settings shows its error. Each check reads GitHub's release feed and one small manifest, with no GitHub API calls and no rate limit.
+- **Download.** Nothing downloads until the user clicks Download in the update popover (the rail button that appears under Settings). After the first update, Windows downloads only the changed blocks listed in the installer's `.blockmap`. Downloads are checked against the manifest's SHA-512.
+- **Install.** The user confirms; running agent turns are stopped and marked interrupted (the Run Engine does not resume them on its own). Mousse disconnects, stops the background service, runs the installer silently and opens the new version, which starts a new service. If the service does not stop or the installer cannot start, the service comes back, the download stays, and the popover offers to try again. If the installer ran but the version did not change, the next launch says so.
+- **Not covered.** macOS (updates need a signed build), Linux builds not started from their AppImage, development builds, and the portable `mousse-cli-<version>-win-x64.exe` download. `MOUSSE_DISABLE_UPDATES=1` turns updates off.
+
+Release files the updater reads, attached by `package.yml` and checked there:
+
+| Release | Windows | Linux |
+|---|---|---|
+| Stable | `latest.yml`, `Mousse.Setup.<version>.exe(.blockmap)` | `latest-linux.yml`, `Mousse-<version>.AppImage` |
+| Nightly | `nightly.yml`, same installer files | `nightly-linux.yml`, same AppImage |
+
+To try the updater from a checkout, serve a folder with a `latest.yml` (or `nightly.yml`) and its installer over HTTP and start `npm run dev` with `MOUSSE_UPDATE_FEED_URL=http://127.0.0.1:<port>/`. Checking and downloading work in a development build; do not install from one.
+
 ## Contract versions, not component versions
 
 The orchestrator, providers and channels are internal modules. They ship together in one build and nothing outside the app depends on them, so they have no versions of their own: the app version identifies all of them. A separate version per module would move in lockstep with the app version and say nothing new.
