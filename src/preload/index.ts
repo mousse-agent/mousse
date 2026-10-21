@@ -5,6 +5,7 @@ import type { BridgeDisplayPart } from '../shared/bridge'
 import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
+import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../shared/updates'
 import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity, NamedAgentRequest, NamedAgentRecallRequest, NamedAgentIntegrationRequest, NamedAgentIntegrationReview } from '../shared/agentEpisodes'
 import type {
   Agent,
@@ -874,6 +875,19 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, view: MainView) => cb(view)
       ipcRenderer.on('app:navigateMainView', handler)
       return () => ipcRenderer.removeListener('app:navigateMainView', handler)
+    }
+  },
+  /** In-app updates from GitHub Releases (src/main/updates). */
+  updates: {
+    getState: (): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.getState),
+    check: (): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.check),
+    download: (): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.download),
+    install: (): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.install),
+    setChannel: (channel: UpdateChannel): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.setChannel, channel),
+    onState: (cb: (state: UpdateState) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, state: UpdateState) => cb(state)
+      ipcRenderer.on(UPDATE_IPC.state, handler)
+      return () => ipcRenderer.removeListener(UPDATE_IPC.state, handler)
     }
   },
   mousseId: {

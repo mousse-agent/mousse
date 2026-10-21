@@ -21,7 +21,7 @@ The newest 10 nightlies are kept; older ones and their tags are deleted.
 - `package.json` holds the only version. The GUI (bottom of the Settings sidebar), `mousse-cli --version`, the daemon's `hello_ok.serverVersion`, provider client info and installer names all come from it.
 - `master` always holds the **next** stable version. After `v0.1.2` ships, the next PR sets `0.1.3`.
 - Nightlies are SemVer prereleases of that version: `0.1.2-nightly.20261022.17` is the nightly built on 22 October 2026 (UTC) by workflow run 17. It sorts before `0.1.2`, so a nightly never looks newer than the stable release it leads to. The release page names the commit.
-- Windows file versions take only numbers, so a nightly installer's file version is `0.1.2.<run number>` and its product version is the full version.
+- Windows file and product versions take only numbers, so a nightly's `Mousse.exe` shows `0.1.2.<run number>` in Explorer. `mousse-cli --version` and Settings show the full version.
 
 Which number to bump, while Mousse is below 1.0:
 
@@ -36,6 +36,27 @@ Which number to bump, while Mousse is below 1.0:
 4. Open a PR that bumps `package.json` to the next patch version: `npm version 0.1.3 --no-git-tag-version`.
 
 Nightlies stop with an error while `master` still holds a version that is already tagged, so step 4 cannot be forgotten for long.
+
+Installed builds see the new stable release only once its draft is published.
+
+## In-app updates
+
+Installed Mousse updates itself from these GitHub releases (`src/main/updates/`, built on `electron-updater`).
+
+- **Channel.** A nightly build follows nightlies and a stable build follows stable releases. Settings → Updates switches channel; the choice is kept in `updates.json` in Electron's user data folder. Moving from a nightly to stable never installs an older build: it waits for a stable release newer than the running one, because an older build may not read data a newer one saved.
+- **Checks.** The first check runs 15 s after the app starts, then every 30 minutes, and again when a window gains focus at least 10 minutes after the last check. Failed checks back off up to 2 hours without showing anything; a check started from Settings shows its error. Each check reads GitHub's release feed and one small manifest, with no GitHub API calls and no rate limit.
+- **Download.** Nothing downloads until the user clicks Download in the update popover (the rail button that appears under Settings). After the first update, Windows downloads only the changed blocks listed in the installer's `.blockmap`. Downloads are checked against the manifest's SHA-512.
+- **Install.** The user confirms; running agent turns are stopped and marked interrupted (the Run Engine does not resume them on its own). Mousse disconnects, stops the background service, runs the installer silently and opens the new version, which starts a new service. If the service does not stop within 30 s, or the installer cannot be started at all, the service comes back, the download stays, and the popover offers to try again. If Mousse has already started quitting, or the installer ran but the version did not change, the next launch says the update did not install and offers it again. The installer opens the new version with a normal environment, so settings passed only through environment variables, such as `MOUSSE_HOME`, apply again only when Mousse is next started that way.
+- **Not covered.** macOS (updates need a signed build), Linux builds not started from their AppImage, development builds, and the portable `mousse-cli-<version>-win-x64.exe` download. `MOUSSE_DISABLE_UPDATES=1` turns updates off.
+
+Release files the updater reads, attached by `package.yml` and checked there:
+
+| Release | Windows | Linux |
+|---|---|---|
+| Stable | `latest.yml`, `Mousse.Setup.<version>.exe(.blockmap)` | `latest-linux.yml`, `Mousse-<version>.AppImage` |
+| Nightly | `nightly.yml`, same installer files | `nightly-linux.yml`, same AppImage |
+
+To try the updater from a checkout, serve a folder with a `latest.yml` (or `nightly.yml`) and its installer over HTTP and start `npm run dev` with `MOUSSE_UPDATE_FEED_URL=http://127.0.0.1:<port>/`. On Windows, checking and downloading work in a development build; on Linux, downloading needs a real AppImage. Do not install from a development build.
 
 ## Contract versions, not component versions
 

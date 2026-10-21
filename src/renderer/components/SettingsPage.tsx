@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
-import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Loader2, Mic, Palette, Plug, Plus, Radio, RefreshCw, Server, Sparkles, Trash2, User, UserCircle, VolumeHigh, Wrench } from '../lib/icons'
+import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Download, Loader2, Mic, Palette, Plug, Plus, Radio, RefreshCw, Server, Sparkles, Trash2, User, UserCircle, VolumeHigh, Wrench } from '../lib/icons'
 import type {
   AgentTypeId,
   MousseSettings,
@@ -30,6 +30,7 @@ import { AccountSection } from './AccountSection'
 import { useMousseIdAvailable } from '../stores/mousseIdStore'
 import { takePendingSettingsSection } from '../lib/settingsNavigation'
 import { StorageSettings } from './StorageSettings'
+import { UpdateSettings } from './updates/UpdateSettings'
 import { IntegrationsWorkspace } from './integrations'
 import { createIntegrationPlatformClient } from '../services/integrationPlatformClient'
 import { confirmNavigation } from '../services/navigationGuards'
@@ -121,7 +122,8 @@ const SETTINGS_SECTIONS = [
   { id: 'integrations', label: 'Skills & MCP', icon: Sparkles },
   { id: 'skills', label: 'Skill defaults', icon: Sparkles },
   { id: 'agents', label: 'Agents', icon: Bot },
-  { id: 'connections', label: 'Devices', icon: Radio }
+  { id: 'connections', label: 'Devices', icon: Radio },
+  { id: 'updates', label: 'Updates', icon: Download }
 ] as const
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id']
@@ -677,6 +679,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
         <div className="settings-content" key={activeSection}>
           {activeSection === 'storage' && <StorageSettings />}
+          {activeSection === 'updates' && <UpdateSettings />}
           {activeSection === 'context' && (() => {
             const context = normalizeContextSettings(settings.context)
             return <section id="context" className="settings-section">

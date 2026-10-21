@@ -1,0 +1,99 @@
+/* In-app update: left-rail button, details popover and the Updates settings section. */
+
+.update-rail-badge {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px rgba(var(--surface-base-rgb), 1);
+}
+
+.update-rail-badge.ready { background: var(--success, var(--accent)); }
+
+.update-popover {
+  display: flex;
+  flex-direction: column;
+  width: 340px;
+  max-height: min(520px, calc(100vh - 32px));
+  padding: 16px;
+  gap: 12px;
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
+  border-radius: 12px;
+  /* The context popover's surface, opaque so the sidebar text below cannot show through. */
+  background: rgb(var(--surface-strong-rgb));
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  color: var(--text-primary);
+  box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.5);
+}
+
+.update-popover-header h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.update-popover-header p { margin: 2px 0 0; font-size: 12px; color: var(--text-secondary); user-select: text; }
+
+.update-popover-note,
+.update-popover-error { margin: 0; font-size: 12px; line-height: 1.5; }
+.update-popover-note { color: var(--text-secondary); }
+.update-popover-error { color: var(--danger, var(--text-primary)); overflow-wrap: anywhere; }
+
+.update-notes {
+  min-height: 0;
+  overflow-y: auto;
+  padding-top: 12px;
+  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.14);
+}
+
+.update-notes h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+.update-notes h4 { margin: 10px 0 4px; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.update-notes ul { margin: 0; padding-left: 18px; list-style: disc; }
+.update-notes li { margin: 0 0 6px; font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere; }
+.update-notes a { display: inline-block; margin-top: 2px; font-size: 12px; color: var(--text-secondary); text-decoration: underline dotted; }
+.update-notes a:hover { color: var(--text-primary); }
+.update-notes-more { margin: 10px 0 0; font-size: 12px; color: var(--text-secondary); }
+
+.update-popover-footer { display: flex; justify-content: flex-end; padding-top: 4px; }
+.update-popover-footer .btn { min-height: 32px; }
+
+.update-progress {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 32px;
+  overflow: hidden;
+  border-radius: 7px;
+  background: rgba(var(--accent-rgb), 0.08);
+}
+
+.update-progress span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: rgba(var(--accent-rgb), 0.28);
+  transition: width 0.4s ease;
+}
+
+.update-progress em { position: relative; width: 100%; text-align: center; font-size: 12px; font-style: normal; }
+
+.update-settings-channel { display: grid; gap: 8px; margin-top: 12px; }
+
+.update-settings-channel label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.update-settings-channel label:has(input:checked) { background: rgba(var(--accent-rgb), 0.1); }
+.update-settings-channel label:has(input:disabled) { cursor: not-allowed; opacity: 0.6; }
+.update-settings-channel input { margin-top: 3px; accent-color: var(--accent); }
+.update-settings-channel strong { font-size: 13px; font-weight: 600; }
+.update-settings-channel span { grid-column: 2; font-size: 12px; color: var(--text-secondary); }
+
+.update-settings-status { display: flex; align-items: center; gap: 12px; margin-top: 16px; font-size: 13px; }
+.update-settings-status p { margin: 0; color: var(--text-secondary); }
