@@ -21,6 +21,7 @@ import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import type { ExecutionActor, ExecutionContext, ExecutionPolicyLayer, ExecutionPolicySnapshot } from '../src/shared/execution/types'
 import type { StartWorkflowRequest, WorkflowBundle, WorkflowRunManifest } from '../src/shared/workflows'
+import { committedGitTemplate } from './support/gitBase'
 import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 
 const roots: string[] = []
@@ -38,16 +39,14 @@ function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
-function initRepo(root: string, sentinel = 'primary-bytes'): string {
-  mkdirSync(root, { recursive: true })
+const initRepo = committedGitTemplate((root) => {
   git(root, ['init', '-q'])
   git(root, ['config', 'user.name', 'Test'])
   git(root, ['config', 'user.email', 'test@example.test'])
-  writeFileSync(join(root, 'PRIMARY.txt'), sentinel)
+  writeFileSync(join(root, 'PRIMARY.txt'), 'primary-bytes')
   git(root, ['add', '.'])
   git(root, ['commit', '-qm', 'base'])
-  return git(root, ['rev-parse', 'HEAD'])
-}
+})
 
 function scriptSource(): string {
   return `

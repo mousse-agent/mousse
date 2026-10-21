@@ -23,6 +23,7 @@ export const FULL_RUN_TRIGGERS = [
   'tests/support/**',
   'tests/fixtures/**',
   'tests/test-dependencies.json',
+  'tests/test-lanes.json',
   'vitest.config.*',
   'vite.config.*',
   'electron.vite.config.*',
