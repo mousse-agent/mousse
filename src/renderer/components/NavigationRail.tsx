@@ -7,7 +7,6 @@ import { openSurface } from '../lib/surfaces'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { ThreadSearchDialog } from './ThreadSearchDialog'
-import { UpdateRailButton } from './updates/UpdateRailButton'
 import '../styles/navigation-rail.css'
 
 interface NavigationRailProps {
@@ -121,7 +120,6 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
         <div className="navigation-rail-separator" role="separator" />
         {shortcut('Subscription usage', Gauge, usageOpen, () => void navigateRail(() => useAppStore.getState().setUsageOpen(true)))}
         {shortcut('Settings', Settings, settingsOpen, () => void navigateRail(() => setSettingsOpen(true)))}
-        <UpdateRailButton />
       </nav>
       {moreOpen && <FloatingPortal>
         <div ref={menuRef} id="navigation-rail-more" role="menu" aria-label="More navigation"
