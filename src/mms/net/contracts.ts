@@ -737,7 +737,7 @@ export interface RpcContext {
   /** Executor-minted stable ledger identity, present only after durable admission. */
   execution?: ExecutionId
   caller: SyncSession['peer']
-  /** The inbound carrier the calling session arrived on (`plus-relay`, `phone-direct`…), when known. */
+  /** The inbound carrier the calling session arrived on (`plus-relay`, `phone-webrtc`…), when known. */
   carrier?: string
   signal: AbortSignal
   deadlineAt: number
@@ -754,6 +754,12 @@ export interface RpcMethod {
   /** A scoped gateway can require the registered method's capability instead. */
   capabilityFor?(params: unknown): NodeCapability
   mutating: boolean
+  /**
+   * Runs outside the durable ledger: no request alias, no execution record and no stored
+   * result, so a retry runs the handler again. Only for non-mutating methods whose result must
+   * never be written to disk.
+   */
+  ephemeral?: boolean
   /** Explicitly registered methods may accept request-scoped input artifacts. */
   uploadEnabled?: boolean
   /** Pure exact DTO validation, before admission or any execution state exists. */
