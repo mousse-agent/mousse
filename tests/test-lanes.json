@@ -6,6 +6,7 @@
     "tests/chatService.test.ts",
     "tests/conversationForkRetirement.test.ts",
     "tests/darwinOwnedProcess.test.ts",
+    "tests/gitBaseTemplate.test.ts",
     "tests/gitFoundationIntegration.test.ts",
     "tests/gitFoundationOperationRecovery.test.ts",
     "tests/gitFoundationProtocol.test.ts",
