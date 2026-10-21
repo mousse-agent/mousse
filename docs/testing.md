@@ -40,6 +40,7 @@ Three outcomes short-circuit the graph:
 
 - `tests/support/build.ts`: the CLI, browser worker and crash children are bundled once per source state into a cache under the temp directory and shared by every worker and every run. Use `productBuild()`, `crashChild()`, `cliChild()` or `sharedBuild()`; never read the checkout's `out/` directory from a test.
 - `tests/support/daemon.ts`: `startDaemon()` launches the bundled CLI as a daemon and waits for its owner and runtime records; `runCli()` and `cliJson()` run commands with a timeout and an output bound.
+- `tests/support/phaseTiming.ts`: set `MOUSSE_TEST_PHASE_TIMING=1` to print fixture phase durations as JSON records on stderr. Daemon startup, CLI operations and drain, plus lifecycle host/profile/socket setup and teardown are measured. Arguments, paths and credentials are not logged; observations are silent by default.
 - `tests/support/tmp.ts`: `ownedTemp()` is a canonical temp directory with deferred disposers.
 
 ## What must stay
