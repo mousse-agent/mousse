@@ -323,23 +323,28 @@ function startGuiApp(): void {
         resumeRecoveryAttached = true
       }
 
-      // Before the window, so its first request for update state has a handler.
-      desktopUpdater ??= startDesktopUpdates({
-        // The installer replaces Mousse.exe, which also hosts the background service.
-        prepareInstall: async () => {
-          await guiMms?.stop()
-          const stopped = await stopRunningDaemon(canonicalizeHome(homeDir), { reason: 'update', timeoutMs: 20_000 })
-          if (stopped.kind !== 'stopped' && stopped.kind !== 'not-running') {
-            throw new Error('The background service did not stop, so the update was not installed.')
+      // Before the window, so its first request for update state has a handler. Updates are
+      // optional: a failure here must not stop Mousse from opening.
+      try {
+        desktopUpdater ??= startDesktopUpdates({
+          // The installer replaces Mousse.exe, which also hosts the background service.
+          prepareInstall: async () => {
+            await guiMms?.stop()
+            const stopped = await stopRunningDaemon(canonicalizeHome(homeDir), { reason: 'update', timeoutMs: 20_000 })
+            if (stopped.kind !== 'stopped' && stopped.kind !== 'not-running') {
+              throw new Error('The background service did not stop, so the update was not installed.')
+            }
+          },
+          recoverInstall: async () => {
+            await guiMms?.start()
+            for (const window of BrowserWindow.getAllWindows()) {
+              if (!window.isDestroyed()) window.webContents.reload()
+            }
           }
-        },
-        recoverInstall: async () => {
-          await guiMms?.start()
-          for (const window of BrowserWindow.getAllWindows()) {
-            if (!window.isDestroyed()) window.webContents.reload()
-          }
-        }
-      })
+        })
+      } catch (error) {
+        console.error('In-app updates could not start:', error instanceof Error ? error.message : String(error))
+      }
       // All chrome/IPC handlers must exist before the renderer's first frame.
       // Start the service concurrently; failures reach the profile bootstrap
       // requests and their in-window Retry action rather than a splash/modal.
