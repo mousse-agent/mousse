@@ -7,6 +7,8 @@ import type { Options, Query, SDKUserMessage } from '@anthropic-ai/claude-agent-
 import type {
   ClaudeLoginPolicy,
   ClaudeSubscriptionStatus,
+  CliProviderConfig,
+  CliProviderConfigPatch,
   ConfiguredProvider,
   ProviderLoginOption,
   ProviderLoginResult,
@@ -21,6 +23,19 @@ import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { CLAUDE_MOUSSE_TOOL_PREFIX, claudeMcpServers } from '../../run/mcp/attachment'
 import type { LoginSession } from '../LoginSession'
+import {
+  applyCliConfigPatch,
+  claudeExtraArgs,
+  cliLaunch,
+  requireExecutable,
+  sharedCliVersions,
+  storedCliArgs,
+  storedCliEnv,
+  withUserEnv,
+  type CliLaunch,
+  type CliVersionCache
+} from '../cliConfig'
+import { resolveWindowsShim } from '../resolveWindowsShim'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -50,6 +65,10 @@ type Settings = {
   /** Disconnected in Mousse under the `cli` policy; the terminal sign-in stays intact. */
   cliDisconnected?: boolean
   binaryPath?: string
+  /** Extra Claude Code launch args (long options only; passed as the SDK's `extraArgs`). */
+  args?: string[]
+  /** Extra environment variables, applied over the subscription environment. */
+  env?: Record<string, string>
   models?: LlmModelOption[]
   sessions?: Record<string, SavedSession>
 }
@@ -92,7 +111,10 @@ type Dependencies = {
     env: NodeJS.ProcessEnv,
     signal?: AbortSignal
   ) => Promise<string>
-  startLogin?: (binary: string, env: NodeJS.ProcessEnv) => ChildProcess
+  /** Starts `claude auth login`: `command` with `args` (an entry script first for node launches). */
+  startLogin?: (command: string, args: string[], env: NodeJS.ProcessEnv) => ChildProcess
+  /** `claude --version` lookups (tests). */
+  versions?: CliVersionCache
 }
 export type ClaudeSubscriptionServiceOptions = {
   /**
@@ -139,8 +161,9 @@ export function claudeSubscriptionEnvironment(
   return env
 }
 
+/** `claude` on PATH or in `~/.local/bin`; an npm `claude.cmd` shim counts once it resolves. */
 function binaryOnPath(): string | undefined {
-  const names = process.platform === 'win32' ? ['claude.exe'] : ['claude']
+  const names = process.platform === 'win32' ? ['claude.exe', 'claude.cmd'] : ['claude']
   for (const directory of [
     ...(process.env.PATH ?? '').split(delimiter),
     join(homedir(), '.local', 'bin')
@@ -150,14 +173,15 @@ function binaryOnPath(): string | undefined {
       const candidate = resolve(directory, name)
       try {
         accessSync(candidate, constants.X_OK)
-        return candidate
       } catch {
-        /* continue */
+        continue
       }
+      if (resolveWindowsShim(candidate)) return candidate
     }
   }
   return undefined
 }
+const quotePowerShell = (value: string) => `'${value.replaceAll("'", "''")}'`
 function runAuth(
   binary: string,
   args: string[],
@@ -277,22 +301,56 @@ export class ClaudeSubscriptionProviderService {
     atomicWriteJsonSync(this.settingsPath, this.settings)
     if (this.settings.loginPolicy) this.policyStored = true
   }
+  /** How to start Claude Code: the chosen or detected executable, with an npm shim resolved. */
+  private launchTarget(): CliLaunch | undefined {
+    return cliLaunch(this.settings.binaryPath || binaryOnPath())
+  }
+  /** The program that runs (reported as `resolvedBinaryPath`). */
   private binary(): string | undefined {
-    const selected = this.settings.binaryPath
-    if (!selected) return binaryOnPath()
-    try {
-      if (!isAbsolute(selected)) return undefined
-      accessSync(selected, constants.X_OK)
-      return selected
-    } catch {
-      return undefined
-    }
+    return this.launchTarget()?.path
+  }
+  /** `claude <args>` as Mousse starts it, for auth commands. */
+  private runClaude(args: string[], env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<string> {
+    const launch = this.launchTarget()
+    if (!launch) return Promise.reject(new Error('Claude Code CLI not found. Install the official Claude Code CLI, then recheck.'))
+    return (this.dependencies.runAuth ?? runAuth)(launch.command, [...launch.args, ...args], env, signal)
   }
   /** Policy-selected environment; an unresolved policy uses the isolated dir (never active). */
   private environment(): NodeJS.ProcessEnv {
-    return claudeSubscriptionEnvironment(
-      this.settings.loginPolicy === 'cli' ? undefined : this.configDir
+    return withUserEnv(
+      claudeSubscriptionEnvironment(this.settings.loginPolicy === 'cli' ? undefined : this.configDir),
+      storedCliEnv(this.settings)
     )
+  }
+  /** The executable path, launch args and environment set in Settings → Providers. */
+  async cliConfig(): Promise<CliProviderConfig> {
+    const launch = this.launchTarget()
+    return {
+      instanceId: CLAUDE_INSTANCE_ID,
+      ...(this.settings.binaryPath ? { binaryPath: this.settings.binaryPath } : {}),
+      ...(launch ? { resolvedBinaryPath: launch.path } : {}),
+      version: await (this.dependencies.versions ?? sharedCliVersions).version(launch, this.environment()),
+      args: storedCliArgs(this.settings),
+      env: storedCliEnv(this.settings)
+    }
+  }
+  /**
+   * Saves the launch settings. Each turn starts its own Claude Code process, so the next turn uses
+   * them; a changed executable re-checks the sign-in.
+   */
+  async setCliConfig(patch: CliProviderConfigPatch): Promise<CliProviderConfig> {
+    if (this.stopped) throw new Error('Claude provider is stopped')
+    if (this.settingsError) throw new Error(this.settingsError)
+    const before = this.binary()
+    applyCliConfigPatch(
+      this.settings,
+      patch,
+      (path) => requireExecutable(path, 'Claude Code'),
+      (args) => void claudeExtraArgs(args)
+    )
+    this.save()
+    if (this.binary() !== before) await this.status({ force: true })
+    return this.cliConfig()
   }
   /**
    * Synchronous view for routing and listings. Under `cli` it reflects the last live
@@ -339,7 +397,6 @@ export class ClaudeSubscriptionProviderService {
       : undefined
   }
   private async probe(
-    binary: string,
     env: NodeJS.ProcessEnv,
     signal?: AbortSignal
   ): Promise<AuthProbe> {
@@ -349,7 +406,7 @@ export class ClaudeSubscriptionProviderService {
     }
     let output: string
     try {
-      output = await (this.dependencies.runAuth ?? runAuth)(binary, ['auth', 'status'], env, signal)
+      output = await this.runClaude(['auth', 'status'], env, signal)
     } catch (error) {
       signal?.throwIfAborted()
       const stdout = (error as { stdout?: unknown } | undefined)?.stdout
@@ -381,10 +438,9 @@ export class ClaudeSubscriptionProviderService {
     scope = this.scope,
     env = this.environment()
   ): Promise<boolean> {
-    const binary = this.binary()
-    if (!binary) return false
+    if (!this.binary()) return false
     const cli = this.settings.loginPolicy === 'cli'
-    const result = await this.probe(binary, env, signal)
+    const result = await this.probe(env, signal)
     signal?.throwIfAborted()
     if (scope !== this.scope) return false
     if (cli) this.cliProbe = { at: Date.now(), result }
@@ -395,7 +451,7 @@ export class ClaudeSubscriptionProviderService {
    * sign-in unless it already has a profile-private one; other profiles stay isolated. A failed
    * check leaves the policy unresolved so Mousse never switches accounts silently.
    */
-  private async resolvePolicy(binary: string): Promise<ClaudeLoginPolicy | undefined> {
+  private async resolvePolicy(): Promise<ClaudeLoginPolicy | undefined> {
     if (this.settingsError) return undefined
     let policy = this.settings.loginPolicy
     if (!policy) {
@@ -408,7 +464,7 @@ export class ClaudeSubscriptionProviderService {
         return undefined
       }
       // The isolated dir has content: only a live check can tell whether it holds an account.
-      const result = await this.probe(binary, claudeSubscriptionEnvironment(this.configDir))
+      const result = await this.probe(claudeSubscriptionEnvironment(this.configDir))
       if (this.settings.loginPolicy) return this.settings.loginPolicy
       if (result.kind === 'error') {
         this.migrationError = { at: Date.now(), message: result.message }
@@ -442,12 +498,11 @@ export class ClaudeSubscriptionProviderService {
     return policy === 'cli' && !this.settings.cliDisconnected && !fresh(this.cliProbe?.at)
   }
   private async refreshStatus(): Promise<void> {
-    const binary = this.binary()
-    if (!binary || this.stopped) return
+    if (!this.binary() || this.stopped) return
     const scope = this.scope
-    const policy = await this.resolvePolicy(binary)
+    const policy = await this.resolvePolicy()
     if (policy !== 'cli' || this.settings.cliDisconnected || scope !== this.scope) return
-    const result = await this.probe(binary, claudeSubscriptionEnvironment(undefined))
+    const result = await this.probe(claudeSubscriptionEnvironment(undefined))
     if (scope !== this.scope || this.stopped) return
     this.cliProbe = { at: Date.now(), result }
     if (result.kind === 'signed_in' && !this.settings.models?.length && !this.modelDiscoveryStarted) {
@@ -603,12 +658,14 @@ export class ClaudeSubscriptionProviderService {
           if (answer !== 'check') throw new Error('Claude sign-in cancelled')
         }
       } else if (!(await signedIn())) {
-        const binary = this.binary()!
+        const launch = this.launchTarget()
+        if (!launch) throw new Error('Claude Code executable is unavailable')
+        const loginArgs = [...launch.args, 'auth', 'login', '--claudeai']
         checkpoint()
         child = (
           this.dependencies.startLogin ??
-          ((path, env) => spawn(path, ['auth', 'login', '--claudeai'], { env, stdio: 'ignore' }))
-        )(binary, claudeSubscriptionEnvironment(this.configDir))
+          ((path, args, env) => spawn(path, args, { env, stdio: 'ignore' }))
+        )(launch.command, loginArgs, claudeSubscriptionEnvironment(this.configDir))
         if (session.abort.signal.aborted || scope !== this.scope) {
           // The abort listener ran before this child existed; never let it outlive the sign-in.
           child.kill()
@@ -620,8 +677,8 @@ export class ClaudeSubscriptionProviderService {
         })
         const command =
           process.platform === 'win32'
-            ? `$env:CLAUDE_CONFIG_DIR = '${this.configDir.replaceAll("'", "''")}'; & '${binary.replaceAll("'", "''")}' auth login --claudeai`
-            : `CLAUDE_CONFIG_DIR=${quote(this.configDir)} ${quote(binary)} auth login --claudeai`
+            ? `$env:CLAUDE_CONFIG_DIR = ${quotePowerShell(this.configDir)}; & ${[launch.command, ...launch.args].map(quotePowerShell).join(' ')} auth login --claudeai`
+            : `CLAUDE_CONFIG_DIR=${quote(this.configDir)} ${[launch.command, ...launch.args].map(quote).join(' ')} auth login --claudeai`
         for (;;) {
           checkpoint()
           const answer = await interaction.prompt({
@@ -695,16 +752,21 @@ export class ClaudeSubscriptionProviderService {
     controller: AbortController,
     env: NodeJS.ProcessEnv = this.environment()
   ): Options {
+    const launch = this.launchTarget()
     return {
       cwd,
-      pathToClaudeCodeExecutable: this.binary(),
+      pathToClaudeCodeExecutable: launch?.path,
+      // A JavaScript entry script (npm's Claude Code before native builds) runs under the node the
+      // shim names. The SDK passes `executable` to spawn as the command, so a full path works.
+      ...(launch && launch.command !== launch.path ? { executable: launch.command as Options['executable'] } : {}),
       env,
       abortController: controller,
       permissionMode: 'default',
       permissionPrompts: 'host',
       settingSources: [],
       mcpServers: {},
-      extraArgs: { 'strict-mcp-config': null },
+      // The user's launch args first: Mousse's own flags keep their values.
+      extraArgs: { ...claudeExtraArgs(storedCliArgs(this.settings)), 'strict-mcp-config': null },
       includePartialMessages: true
     }
   }
@@ -1270,13 +1332,7 @@ export class ClaudeSubscriptionProviderService {
     this.abortInFlight()
     // Unreadable settings may hide a `cli` policy or a private sign-in; never log out blind.
     if (cli || this.settingsError) return
-    const binary = this.binary()
-    if (binary)
-      await (this.dependencies.runAuth ?? runAuth)(
-        binary,
-        ['auth', 'logout'],
-        claudeSubscriptionEnvironment(this.configDir)
-      )
+    if (this.binary()) await this.runClaude(['auth', 'logout'], claudeSubscriptionEnvironment(this.configDir))
   }
   stop(): void {
     this.stopped = true

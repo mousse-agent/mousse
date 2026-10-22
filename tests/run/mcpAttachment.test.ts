@@ -185,11 +185,15 @@ describe('Claude subscription attachment', () => {
 
 type Sent = { method: string; params: Record<string, unknown> }
 
-/** A fake ACP agent process; `http` is what its initialize advertises. */
+/**
+ * A fake ACP agent process; `http` is what its initialize advertises. It replaces the service's
+ * private `launch`, so like the real one it records the launch-settings generation it started under.
+ */
 function fakeAcp(http: boolean, sent: Sent[]) {
-  return () => {
+  return function (this: { launchGeneration: number }) {
     const abort = new AbortController()
     return {
+      generation: this.launchGeneration,
       child: { exitCode: 0, signalCode: null, kill: () => true },
       connection: {
         signal: abort.signal,

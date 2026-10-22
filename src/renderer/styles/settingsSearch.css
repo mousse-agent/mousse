@@ -1,0 +1,89 @@
+/* SettingsSearch: a soft filled field, no border or bevel; focus is the shared focus ring. */
+
+.settings-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: var(--settings-control-h, 28px);
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-hover);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+
+.settings-search:hover {
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+
+.settings-search:focus-within {
+  background: var(--ui-hover);
+  box-shadow: var(--ui-focus-ring);
+}
+
+.settings-search-icon {
+  position: absolute;
+  left: var(--space-8, 8px);
+  color: var(--ui-faint);
+  pointer-events: none;
+}
+
+.settings-search input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 var(--space-8, 8px) 0 calc(var(--space-8, 8px) + 14px + var(--space-8, 8px));
+  border: 0;
+  border-radius: inherit;
+  outline: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--settings-fs-small, 12.5px);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* The wrapper carries the fill; light and acrylic themes paint every input white. */
+html[data-theme] .settings-search input[type='search'] {
+  background: transparent;
+}
+
+.settings-search:has(.settings-search-clear) input {
+  padding-right: calc(20px + var(--space-8, 8px));
+}
+
+.settings-search input::placeholder {
+  color: var(--ui-faint);
+}
+
+.settings-search input::-webkit-search-cancel-button,
+.settings-search input::-webkit-search-decoration {
+  display: none;
+  -webkit-appearance: none;
+}
+
+.settings-search-clear {
+  position: absolute;
+  right: var(--space-4, 4px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ui-faint);
+  cursor: pointer;
+}
+
+.settings-search-clear:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.settings-search-clear:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}

@@ -1,0 +1,184 @@
+/* Settings → Devices. Rows and groups come from settings.css; these only cover the extras. */
+
+/* Dialog buttons share the row control size. */
+.devices-dialog-btn {
+  height: var(--settings-control-h);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small);
+}
+
+.devices-dialog-btn.primary {
+  border-color: transparent;
+  background-color: var(--accent);
+  color: var(--ui-on-accent, #fff);
+  font-weight: 500;
+}
+
+.devices-dialog-btn.primary:hover:not(:disabled) {
+  background-color: var(--accent);
+  filter: brightness(1.06);
+}
+
+.devices-dialog-btn.danger-fill {
+  border-color: transparent;
+  background-color: var(--danger);
+  color: #fff;
+  font-weight: 500;
+}
+
+.devices-dialog-btn.danger-fill:hover:not(:disabled) {
+  background-color: var(--danger);
+  filter: brightness(1.06);
+}
+
+.devices-error,
+.devices-note,
+.remote-thread-error {
+  margin: 0;
+  padding: var(--space-8) 0;
+  line-height: 1.5;
+}
+
+.devices-inline-form {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.devices-inline-form .settings-input {
+  width: 180px;
+}
+
+.devices-code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* Overflow menu on a device row. */
+.devices-menu {
+  position: relative;
+}
+
+.devices-menu-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.devices-menu-panel {
+  position: absolute;
+  top: calc(100% + var(--space-4));
+  right: 0;
+  z-index: 20;
+  min-width: 140px;
+  padding: var(--space-4);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-raised, var(--bg-secondary));
+  box-shadow: var(--ui-specular), 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+
+.devices-menu-item {
+  display: block;
+  width: 100%;
+  height: var(--settings-control-h);
+  padding: 0 var(--space-8);
+  border-radius: calc(var(--ui-control-radius) - 2px);
+  font-size: var(--settings-fs-small);
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.devices-menu-item:hover {
+  background: var(--ui-hover);
+}
+
+.devices-menu-item.danger {
+  color: var(--danger);
+}
+
+/* Add device and revoke dialogs. */
+.devices-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+}
+
+.devices-dialog p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.devices-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  font-size: var(--settings-fs-small);
+  color: var(--text-secondary);
+}
+
+.devices-field input,
+.devices-field textarea {
+  width: 100%;
+  min-width: 0;
+  padding: var(--space-4) var(--space-8);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--settings-fs-small);
+}
+
+.devices-field input {
+  height: var(--settings-control-h);
+}
+
+.devices-field textarea {
+  min-height: 88px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.devices-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Remote thread display: flat transcript under the pickers. */
+.remote-thread-view {
+  padding: var(--settings-row-y) 0;
+  border-top: 1px solid var(--ui-line);
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.remote-thread-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-12);
+}
+
+.remote-thread-head .settings-btn {
+  height: var(--settings-control-h);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small);
+}
+
+.remote-thread-view > p {
+  margin: var(--space-4) 0 0;
+}
+
+.remote-thread-view article {
+  padding: var(--space-12) 0;
+  border-top: 1px solid var(--ui-line);
+}
+
+.remote-thread-view article:first-of-type {
+  margin-top: var(--space-12);
+}
+
+.remote-thread-view article > strong {
+  font-size: var(--settings-fs-small);
+  color: var(--text-secondary);
+}

@@ -1,56 +1,81 @@
-import { useEffect } from 'react'
+import { useEffect, useId } from 'react'
+import { LOCAL_STT_MODELS, sttModelsFromProviders } from '../../shared/dictation'
 import {
+  LOCAL_TTS_MODELS,
   findLocalTtsModel,
   providerTtsVoices,
+  ttsModelsFromProviders,
   type ReadAloudSelection
 } from '../../shared/readAloud'
-import { Play, Stop } from '../lib/icons'
+import { Segmented, SettingsGroup, SettingsRow, Switch } from '../components/settings/SettingsRow'
+import { Select } from '../components/ui/Select'
+import {
+  dictationLocalApi,
+  localSelection as dictationLocalSelection,
+  providerSelection as dictationProviderSelection
+} from '../dictation/DictationModelPicker'
+import { useDictationStore } from '../dictation/dictationStore'
+import { Mic, Play, Stop, VolumeHigh } from '../lib/icons'
+import {
+  localSelection as readAloudLocalSelection,
+  providerSelection as readAloudProviderSelection,
+  readAloudLocalApi
+} from '../readAloud/ReadAloudModelPicker'
 import { useReadAloudStore } from '../readAloud/readAloudStore'
+import { useProviderSpeechModels } from '../speechModels/SpeechModelPicker'
+import { SpeechModelSetting } from '../speechModels/SpeechModelSetting'
 import { useAppStore } from '../stores/appStore'
 import { SPEECH_SPEEDS, useSpeechPreferences, voiceFor } from './speechPreferences'
-import { VoiceCarousel, type VoiceOption } from './VoiceCarousel'
 import '../styles/speech.css'
 
 const PREVIEW_KEY = 'speech-settings-preview'
 const PREVIEW_TEXT =
   'This is how messages sound when they are read aloud. You can change the voice and the speed at any time.'
 
+interface VoiceOption {
+  id: string
+  label: string
+}
+
 function voiceOptions(selection: ReadAloudSelection): VoiceOption[] {
   if (selection.source === 'local') {
     // Kokoro labels read "Heart, American female".
-    return (findLocalTtsModel(selection.modelId)?.voices ?? []).map((voice, index) => {
-      const [name, detail = ''] = voice.label.split(', ')
-      return { id: voice.id, name, detail, index }
-    })
+    return (findLocalTtsModel(selection.modelId)?.voices ?? []).map((voice) => ({ id: voice.id, label: voice.label }))
   }
   return providerTtsVoices(selection.providerId, selection.modelId).map((voice) => {
     const name = voice.replace(/-PlayAI$/, '')
-    return { id: voice, name: name.charAt(0).toUpperCase() + name.slice(1), detail: '' }
+    return { id: voice, label: name.charAt(0).toUpperCase() + name.slice(1) }
   })
 }
 
-const formatSpeed = (speed: number): string => `${speed}×`
+const SPEED_OPTIONS = SPEECH_SPEEDS.map((speed) => ({ value: speed, label: `${speed}×` }))
 
-/** Settings, Speech: how fast read aloud speaks and with which voice. */
-export function ReadAloudSpeechSettings() {
+/** Settings, Speech: the read aloud and dictation models, the voice, speed and microphone cleanup. */
+export function SpeechSettings() {
+  return (
+    <>
+      <ReadAloudSpeechSettings />
+      <DictationSpeechSettings />
+    </>
+  )
+}
+
+function ReadAloudSpeechSettings() {
+  const voiceSelectId = useId()
+  const speedLabelId = useId()
   const profileId = useAppStore((state) => state.profileId)
   const selection = useReadAloudStore((state) => state.selection)
+  const setSelection = useReadAloudStore((state) => state.setSelection)
   const syncReadAloud = useReadAloudStore((state) => state.syncProfile)
-  const previewing = useReadAloudStore(
-    (state) => state.activeKey === PREVIEW_KEY && state.status !== 'idle'
-  )
-  const previewError = useReadAloudStore((state) =>
-    state.error?.key === PREVIEW_KEY ? state.error.message : null
-  )
-  const previewLevels = useReadAloudStore((state) =>
-    state.activeKey === PREVIEW_KEY ? state.levels : null
-  )
+  const previewing = useReadAloudStore((state) => state.activeKey === PREVIEW_KEY && state.status !== 'idle')
+  const previewError = useReadAloudStore((state) => (state.error?.key === PREVIEW_KEY ? state.error.message : null))
   const toggle = useReadAloudStore((state) => state.toggle)
   const stop = useReadAloudStore((state) => state.stop)
   const preferences = useSpeechPreferences((state) => state.preferences)
   const syncPreferences = useSpeechPreferences((state) => state.syncProfile)
   const setSpeed = useSpeechPreferences((state) => state.setSpeed)
   const setVoice = useSpeechPreferences((state) => state.setVoice)
+  const providerModels = useProviderSpeechModels(ttsModelsFromProviders)
 
   useEffect(() => {
     syncReadAloud(profileId)
@@ -72,108 +97,103 @@ export function ReadAloudSpeechSettings() {
   }
 
   return (
-    <>
-      <div className="registry-controls">
-        <div className="registry-control-row speech-setting">
-          <div className="registry-control-text">
-            <span className="registry-control-label" id="speech-speed-label">
-              Speed
+    <SettingsGroup title="Read aloud" icon={VolumeHigh}>
+      <SpeechModelSetting
+        title="Model"
+        description="Reads messages when you press read aloud under one."
+        dialogTitle="Read aloud models"
+        value={selection}
+        onSelect={setSelection}
+        providerModels={providerModels}
+        providerSelection={readAloudProviderSelection}
+        localModels={LOCAL_TTS_MODELS}
+        localSelection={readAloudLocalSelection}
+        localApi={readAloudLocalApi}
+      />
+      <SettingsRow
+        title="Voice"
+        description={
+          previewError ? (
+            <span className="speech-settings-error" role="alert">
+              {previewError}
             </span>
-            <span className="registry-control-hint">
-              How fast messages are read. A change applies from the next sentence.
-            </span>
-          </div>
-          <div className="files-view-toggle" role="radiogroup" aria-labelledby="speech-speed-label">
-            {SPEECH_SPEEDS.map((speed) => (
-              <button
-                key={speed}
-                type="button"
-                role="radio"
-                aria-checked={preferences.speed === speed}
-                className={`btn btn-sm${preferences.speed === speed ? ' active' : ''}`}
-                onClick={() => setSpeed(speed)}
-              >
-                {formatSpeed(speed)}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="registry-control-row speech-setting">
-          <div className="registry-control-text">
-            <span className="registry-control-label" id="speech-voice-label">
-              Voice
-            </span>
-            <span className="registry-control-hint">
-              {selection
-                ? `Voices of ${selection.label}. Each read aloud model keeps its own choice.`
-                : 'Choose a read aloud model under Models to pick its voice.'}
-            </span>
-          </div>
-          {voices.length > 0 && (
-            <VoiceCarousel
-              voices={voices}
-              value={voice}
-              onSelect={chooseVoice}
-              label="Read aloud voice"
-              levels={previewLevels}
+          ) : selection ? (
+            'Each model keeps its own voice.'
+          ) : (
+            'Choose a model first.'
+          )
+        }
+        htmlFor={voiceSelectId}
+        disabled={!selection}
+        control={
+          <>
+            <Select
+              id={voiceSelectId}
+              value={voice ?? ''}
+              disabled={voices.length === 0}
+              placeholder="No voices"
+              onChange={chooseVoice}
+              options={voices.map((option) => ({ value: option.id, label: option.label }))}
             />
-          )}
-          <button
-            type="button"
-            className="btn btn-sm speech-sample-button"
-            disabled={!selection}
-            title={previewError ?? undefined}
-            onClick={playSample}
-          >
-            {previewing ? (
-              <Stop size={12} strokeWidth={2} aria-hidden="true" />
-            ) : (
-              <Play size={12} strokeWidth={2} aria-hidden="true" />
-            )}
-            {previewing ? 'Stop sample' : 'Play sample'}
-          </button>
-        </div>
-      </div>
-      {previewError && (
-        <p className="speech-settings-error" role="alert">
-          {previewError}
-        </p>
-      )}
-    </>
+            <button
+              type="button"
+              className="settings-icon-btn primary"
+              disabled={!selection}
+              title={previewing ? 'Stop sample' : 'Play sample'}
+              aria-label={previewing ? 'Stop sample' : 'Play sample'}
+              onClick={playSample}
+            >
+              {previewing ? <Stop size={14} strokeWidth={2} aria-hidden="true" /> : <Play size={14} strokeWidth={2} aria-hidden="true" />}
+            </button>
+          </>
+        }
+      />
+      <SettingsRow
+        title="Speed"
+        titleId={speedLabelId}
+        description="A change applies from the next sentence."
+        control={<Segmented value={preferences.speed} options={SPEED_OPTIONS} onChange={setSpeed} ariaLabelledBy={speedLabelId} />}
+      />
+    </SettingsGroup>
   )
 }
 
-/** Settings, Speech: how dictation records the microphone. */
-export function DictationSpeechSettings() {
+function DictationSpeechSettings() {
+  const noiseSwitchId = useId()
   const profileId = useAppStore((state) => state.profileId)
+  const selection = useDictationStore((state) => state.selection)
+  const setSelection = useDictationStore((state) => state.setSelection)
+  const syncDictation = useDictationStore((state) => state.syncProfile)
   const reduceNoise = useSpeechPreferences((state) => state.preferences.reduceNoise)
   const syncPreferences = useSpeechPreferences((state) => state.syncProfile)
   const setReduceNoise = useSpeechPreferences((state) => state.setReduceNoise)
+  const providerModels = useProviderSpeechModels(sttModelsFromProviders)
 
   useEffect(() => {
+    syncDictation(profileId)
     syncPreferences(profileId)
-  }, [profileId, syncPreferences])
+  }, [profileId, syncDictation, syncPreferences])
 
   return (
-    <div className="registry-controls">
-      <div className="registry-control-row">
-        <div className="registry-control-text">
-          <span className="registry-control-label">Reduce background noise</span>
-          <span className="registry-control-hint">
-            Dictation cleans the microphone with RNNoise, which removes fans, typing and street
-            noise before the speech-to-text model hears it.
-          </span>
-        </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={reduceNoise}
-          aria-label="Reduce background noise"
-          className={`toggle-switch${reduceNoise ? ' on' : ''}`}
-          onClick={() => setReduceNoise(!reduceNoise)}
-        />
-      </div>
-    </div>
+    <SettingsGroup title="Dictation" icon={Mic}>
+      <SpeechModelSetting
+        title="Model"
+        description="Turns speech into text when you press the microphone in the message box."
+        dialogTitle="Dictation models"
+        value={selection}
+        onSelect={setSelection}
+        providerModels={providerModels}
+        providerSelection={dictationProviderSelection}
+        localModels={LOCAL_STT_MODELS}
+        localSelection={dictationLocalSelection}
+        localApi={dictationLocalApi}
+      />
+      <SettingsRow
+        title="Reduce background noise"
+        description="Removes fans, typing and street noise before your speech is turned into text."
+        htmlFor={noiseSwitchId}
+        control={<Switch id={noiseSwitchId} checked={reduceNoise} onChange={setReduceNoise} />}
+      />
+    </SettingsGroup>
   )
 }

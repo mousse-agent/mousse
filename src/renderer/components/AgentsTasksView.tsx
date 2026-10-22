@@ -78,9 +78,11 @@ function describeSubagentModel(
   providers: LlmProviderOption[]
 ): AgentModelMark {
   if (agent.cliType === 'mousse') {
+    // Mousse subagents run on the default model unless assigned one; the daemon
+    // ignores the legacy `agents.*.mousse` keys, so the badge must too.
     const selected = resolveMousseAgentModelSelection(assignment, {
-      provider: settings.agents.llmProvider.mousse || settings.provider.llmProvider,
-      model: settings.agents.model.mousse || settings.provider.model
+      provider: settings.provider.llmProvider,
+      model: settings.provider.model
     })
     return modelMark(selected.provider, selected.model, providers)
   }

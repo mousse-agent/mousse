@@ -32,6 +32,8 @@ function fixture(blockMethod?: string) {
     const abort = new AbortController()
     const active = {
       child: { exitCode: 0, signalCode: null, kill: vi.fn() },
+      // What `launch()` records: the launch-settings generation it started with.
+      generation: (service as unknown as { launchGeneration: number }).launchGeneration,
       connection: {
         signal: abort.signal,
         close: vi.fn(() => abort.abort(new Error('ACP closed'))),
@@ -94,6 +96,17 @@ describe('Antigravity turn lifecycle', () => {
     expect(processes[1].connection.agent.request.mock.calls.find(([name]) => name === methods.agent.session.prompt)?.[1].prompt?.[0].text).toContain('restored branch history')
   })
 
+  it('replaces an idle agent process after the launch settings change, resuming its session', async () => {
+    const { service, input, processes } = fixture()
+    await service.chat({ ...input, history: '' })
+    service.commitConversation(input.threadId, 'committed')
+    await service.setCliConfig({ args: ['--flag'] })
+    expect(processes[0].connection.close).toHaveBeenCalled()
+    await service.chat({ ...input, history: 'committed' })
+    expect(processes).toHaveLength(2)
+    expect(processes[1].connection.agent.request).toHaveBeenCalledWith(methods.agent.session.resume, expect.objectContaining({ sessionId: 'session-1' }))
+  })
+
   it('cancels an active ACP prompt and delivers accepted steer within the same turn', async () => {
     const { service, input, processes } = fixture(methods.agent.session.prompt)
     let steer: string | undefined
@@ -143,7 +156,7 @@ describe('Antigravity profile admission', () => {
     const host = { activeProfileCount: () => 2, manager: { get: () => ({ id: 'personal', status: 'active' }) }, getProfileServices: vi.fn(async () => personal) }
     const installation = { getInstallationHost: () => host } as unknown as MmsProfileServices
     const args = { installation, binding: { profileId: 'personal', epoch: 1 }, capabilities: new Set([PROFILES_V1_CAPABILITY]) }
-    for (const method of ['providers.listConfigured', 'providers.getLoginOptions', 'providers.refreshModels', 'providers.loginOAuth', 'providers.logout', 'providers.claudeStatus', 'providers.claudeSetLoginPolicy', 'providers.codexStatus']) {
+    for (const method of ['providers.listConfigured', 'providers.getLoginOptions', 'providers.refreshModels', 'providers.loginOAuth', 'providers.logout', 'providers.claudeStatus', 'providers.claudeSetLoginPolicy', 'providers.codexStatus', 'providers.cliConfig', 'providers.setCliConfig']) {
       expect((await resolveBoundServices({ ...args, method })).services, method).toBe(personal)
     }
     expect((await resolveBoundServices({ ...args, method: 'providers.setApiKey' })).services).toBe(installation)

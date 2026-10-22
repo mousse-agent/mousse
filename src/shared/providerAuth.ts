@@ -132,3 +132,29 @@ export interface ProvidersUsageResponse {
   providers: ProviderUsage[]
   fetchedAt: string
 }
+
+/** Provider instances that run a local vendor CLI (Settings → Providers). */
+export type CliProviderInstanceId = 'claude' | 'codex' | 'antigravity'
+export const CLI_PROVIDER_INSTANCE_IDS: readonly CliProviderInstanceId[] = ['claude', 'codex', 'antigravity']
+
+export interface CliProviderConfig {
+  instanceId: CliProviderInstanceId
+  /** User-chosen executable; undefined = automatic lookup. */
+  binaryPath?: string
+  /** What Mousse would launch right now (user path or auto-detected), undefined if not found. */
+  resolvedBinaryPath?: string
+  /** Parsed from `<binary> --version`, undefined if unknown. */
+  version?: string
+  /** Extra arguments appended to the CLI launch. */
+  args: string[]
+  /** Extra environment variables for the CLI process, applied over Mousse's own environment. */
+  env: Record<string, string>
+}
+
+export interface CliProviderConfigPatch {
+  /** `null` (or an empty string) clears it back to automatic lookup. */
+  binaryPath?: string | null
+  args?: string[]
+  /** Full replacement. */
+  env?: Record<string, string>
+}
