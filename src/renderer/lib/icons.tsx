@@ -1,5 +1,6 @@
 import { forwardRef, type ForwardRefExoticComponent, type RefAttributes, type SVGProps } from 'react'
 import { HugeiconsIcon, type IconSvgElement } from '@hugeicons/react'
+import Activity01Icon from '@hugeicons/core-free-icons/Activity01Icon'
 import Add01Icon from '@hugeicons/core-free-icons/Add01Icon'
 import AddSquareIcon from '@hugeicons/core-free-icons/AddSquareIcon'
 import Alert02Icon from '@hugeicons/core-free-icons/Alert02Icon'
@@ -34,7 +35,9 @@ import CleanIcon from '@hugeicons/core-free-icons/CleanIcon'
 import ClipboardIcon from '@hugeicons/core-free-icons/ClipboardIcon'
 import Clock01Icon from '@hugeicons/core-free-icons/Clock01Icon'
 import CloudIcon from '@hugeicons/core-free-icons/CloudIcon'
+import Coins01Icon from '@hugeicons/core-free-icons/Coins01Icon'
 import ComputerIcon from '@hugeicons/core-free-icons/ComputerIcon'
+import ComputerPhoneSyncIcon from '@hugeicons/core-free-icons/ComputerPhoneSyncIcon'
 import ComputerTerminal01Icon from '@hugeicons/core-free-icons/ComputerTerminal01Icon'
 import CookieIcon from '@hugeicons/core-free-icons/CookieIcon'
 import Copy01Icon from '@hugeicons/core-free-icons/Copy01Icon'
@@ -108,6 +111,7 @@ import ServerStack01Icon from '@hugeicons/core-free-icons/ServerStack01Icon'
 import Settings01Icon from '@hugeicons/core-free-icons/Settings01Icon'
 import Shield01Icon from '@hugeicons/core-free-icons/Shield01Icon'
 import ShieldCheckIcon from '@hugeicons/core-free-icons/ShieldCheckIcon'
+import SmartPhone01Icon from '@hugeicons/core-free-icons/SmartPhone01Icon'
 import SourceCodeIcon from '@hugeicons/core-free-icons/SourceCodeIcon'
 import SparklesIcon from '@hugeicons/core-free-icons/SparklesIcon'
 import SquareIcon from '@hugeicons/core-free-icons/SquareIcon'
@@ -160,6 +164,7 @@ function createIcon(name: string, icon: IconSvgElement): IconComponent {
 }
 
 // Individual, static imports keep the free Stroke Rounded collection tree-shakeable.
+export const Activity = /* @__PURE__ */ createIcon('Activity', Activity01Icon)
 export const AlertTriangle = /* @__PURE__ */ createIcon('AlertTriangle', Alert02Icon)
 export const Archive = /* @__PURE__ */ createIcon('Archive', Archive01Icon)
 export const ArrowDownLeft = /* @__PURE__ */ createIcon('ArrowDownLeft', ArrowDownLeft01Icon)
@@ -184,6 +189,7 @@ export const Clipboard = /* @__PURE__ */ createIcon('Clipboard', ClipboardIcon)
 export const ClipboardList = /* @__PURE__ */ createIcon('ClipboardList', Task01Icon)
 export const Clock = /* @__PURE__ */ createIcon('Clock', Clock01Icon)
 export const Cloud = /* @__PURE__ */ createIcon('Cloud', CloudIcon)
+export const Coins = /* @__PURE__ */ createIcon('Coins', Coins01Icon)
 export const Code2 = /* @__PURE__ */ createIcon('Code2', SourceCodeIcon)
 export const Copy = /* @__PURE__ */ createIcon('Copy', Copy01Icon)
 export const Cpu = /* @__PURE__ */ createIcon('Cpu', CpuIcon)
@@ -226,6 +232,7 @@ export const Mic = /* @__PURE__ */ createIcon('Mic', Mic01Icon)
 export const Milestone = /* @__PURE__ */ createIcon('Milestone', Flag01Icon)
 export const Minus = /* @__PURE__ */ createIcon('Minus', Remove01Icon)
 export const Monitor = /* @__PURE__ */ createIcon('Monitor', ComputerIcon)
+export const MonitorSmartphone = /* @__PURE__ */ createIcon('MonitorSmartphone', ComputerPhoneSyncIcon)
 export const MoreHorizontal = /* @__PURE__ */ createIcon('MoreHorizontal', MoreHorizontalIcon)
 export const MoreVertical = /* @__PURE__ */ createIcon('MoreVertical', MoreVerticalIcon)
 export const MousePointer2 = /* @__PURE__ */ createIcon('MousePointer2', Cursor01Icon)
@@ -257,7 +264,8 @@ export const ShieldCheck = /* @__PURE__ */ createIcon('ShieldCheck', ShieldCheck
 export const Brain = /* @__PURE__ */ createIcon('Brain', Brain01Icon)
 export const Sparkles = /* @__PURE__ */ createIcon('Sparkles', SparklesIcon)
 export const Square = /* @__PURE__ */ createIcon('Square', SquareIcon)
-export const SquarePlus = /* @__PURE__ */ createIcon('SquarePlus', AddSquareIcon)
+export const Smartphone = /* @__PURE__ */ createIcon('Smartphone', SmartPhone01Icon)
+export const SquarePlus =/* @__PURE__ */ createIcon('SquarePlus', AddSquareIcon)
 export const SquareX = /* @__PURE__ */ createIcon('SquareX', CancelSquareIcon)
 export const Star = /* @__PURE__ */ createIcon('Star', StarIcon)
 export const StickyNote = /* @__PURE__ */ createIcon('StickyNote', StickyNote01Icon)

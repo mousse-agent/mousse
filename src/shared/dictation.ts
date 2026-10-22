@@ -58,7 +58,7 @@ export type LocalSttModel = TransformersSttModel | NemoTransducerSttModel
 export const MOONSHINE_BASE: TransformersSttModel = {
   id: 'moonshine-base',
   label: 'Moonshine Base',
-  description: 'English, runs on this computer',
+  description: 'English',
   parameters: '61M',
   license: 'MIT',
   homepage: 'https://huggingface.co/UsefulSensors/moonshine-base',
@@ -89,7 +89,7 @@ export const MOONSHINE_BASE: TransformersSttModel = {
 export const PARAKEET_TDT_110M: NemoTransducerSttModel = {
   id: 'parakeet-tdt-110m',
   label: 'Parakeet TDT 110M',
-  description: 'English with punctuation, runs on this computer',
+  description: 'English with punctuation',
   parameters: '110M',
   license: 'CC-BY-4.0',
   homepage: 'https://huggingface.co/nvidia/parakeet-tdt_ctc-110m',

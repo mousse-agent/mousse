@@ -1,0 +1,270 @@
+/* Settings → Providers. Built on the settings primitives (settings.css): flat rows split by
+   hairlines, text left and controls right, spacing from the --space-* scale. Only form controls
+   carry borders. Provider logos are the only icons besides textless refresh/remove buttons. */
+
+.prov-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-16);
+  min-height: var(--settings-control-h);
+  padding-top: var(--space-8);
+}
+
+.prov-toolbar + .settings-group,
+.prov-toolbar + .prov-error + .settings-group {
+  padding-top: var(--space-16);
+}
+
+.prov-toolbar > .settings-group-action {
+  margin-left: auto;
+}
+
+.prov-empty {
+  margin: 0;
+  padding: var(--space-16) 0 0;
+}
+
+/* Add view: the search fills the toolbar, "Done" keeps the action slot on the right. */
+.prov-toolbar > .prov-search {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Provider rows share the .settings-item anatomy: they span the group surface, so the
+   hairline, hover and open fill reach its edges, and the details stay on that surface. */
+
+.prov-row {
+  position: relative;
+  margin: 0 calc(-1 * var(--settings-surface-x, 0px));
+  padding: 0 var(--settings-surface-x, 0px);
+  transition: background-color 0.15s;
+}
+
+.prov-row:hover {
+  background: var(--ui-hover);
+}
+
+.prov-row::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--ui-line);
+}
+
+.settings-group-rows > .prov-row:first-child::before,
+.prov-row.is-open::before,
+.prov-row.is-open + .prov-row::before {
+  display: none;
+}
+
+.prov-row.is-open {
+  background: var(--ui-hover);
+}
+
+.prov-row-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  min-height: calc(var(--settings-control-h) + 2 * var(--settings-row-y));
+  padding: var(--settings-row-y) 0;
+  cursor: pointer;
+}
+
+.prov-row-main.is-static {
+  cursor: default;
+}
+
+.prov-row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: inherit;
+}
+
+.prov-row-head:focus-visible {
+  outline: none;
+}
+
+.prov-row-head:focus-visible .prov-name {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* Logo slot (16px) + gap (8px) = the 24px indent of the detail sub-rows. */
+.prov-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+
+.prov-name {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-8);
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.prov-version {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--ui-faint);
+}
+
+.prov-row.is-off .prov-logo,
+.prov-row.is-off .settings-item-text,
+.prov-row.is-off .prov-dot {
+  opacity: 0.45;
+}
+
+.prov-switch {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+/* Status dot: colour only; the words are its tooltip and accessible label. */
+
+.prov-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--ui-faint);
+}
+
+.prov-dot.is-ready {
+  background: var(--success);
+}
+
+.prov-dot.is-attention {
+  background: var(--warning);
+}
+
+.prov-dot.is-error {
+  background: var(--danger);
+}
+
+.prov-dot.is-unknown {
+  opacity: 0.5;
+}
+.prov-name .prov-dot {
+  align-self: center;
+}
+
+/* The per-provider "Advanced" disclosure reads as one more sub-row, not a page heading. */
+
+.prov-row-panel .settings-advanced {
+  margin-top: 0;
+}
+
+.prov-row-panel .settings-advanced > summary {
+  display: flex;
+  min-height: calc(var(--settings-control-h) + 2 * var(--settings-row-y));
+  padding: var(--settings-row-y) 0 var(--settings-row-y) var(--space-24);
+  border-top: 1px solid var(--ui-line);
+  font-size: var(--settings-fs-row);
+  font-weight: 450;
+}
+
+.prov-row-panel .settings-advanced-body > :first-child {
+  border-top: 1px solid var(--ui-line);
+}
+
+/* Details: indented .settings-item sub-rows (SettingsRow indent). */
+
+.prov-row-panel {
+  padding-bottom: var(--space-4);
+}
+
+
+.prov-indent {
+  padding-left: var(--space-24);
+}
+
+.prov-error {
+  margin: 0;
+  padding-bottom: var(--space-8);
+  font-size: var(--settings-fs-small);
+  line-height: 1.5;
+  color: var(--danger);
+}
+
+.prov-toolbar + .prov-error {
+  padding: var(--space-8) 0 0;
+}
+
+.settings-item-desc .prov-error {
+  display: block;
+  padding: 0;
+}
+
+.prov-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--ui-line-strong);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+/* Controls */
+
+.settings-btn.prov-square {
+  width: var(--settings-control-h);
+  padding: 0;
+  color: var(--text-secondary);
+}
+
+.settings-btn.prov-square:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.settings-btn.prov-confirm {
+  color: var(--danger);
+}
+
+.settings-group-rows .settings-input.prov-wide {
+  width: 320px;
+}
+
+.settings-input.prov-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.prov-env {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.prov-env-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) var(--settings-control-h);
+  gap: var(--space-8);
+  align-items: center;
+}
+
+.settings-group-rows .prov-env-row .settings-input {
+  width: 100%;
+}

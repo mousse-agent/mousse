@@ -59,6 +59,7 @@ import {
 import { surfaceToWindowBackground } from '../../shared/accentPalette'
 import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
 import { showCopyMenu } from '../contextMenu'
+import { pickExecutable } from './pickExecutable'
 import { openExternalSafely } from '../safeExternalUrl'
 import { dispatchMcpAuthBrowser } from '../mcpAuthBrowser'
 import { MousseIdCallbacks, runtimeMousseIdOrigin } from '../mousseIdCallback'
@@ -2071,7 +2072,23 @@ export function registerGuiIpc(
     if (recheck === true) broadcast('providers:changed', res.providers)
     return res.status
   })
-  registerHandler('providers:claudeSetLoginPolicy', async (_e, policy: 'cli' | 'isolated') => {
+  registerHandler('providers:cliConfig', async (_e, instanceId: string) => {
+    const res = await guiMms.request<{ config: unknown }>('providers.cliConfig', { instanceId })
+    return res.config
+  })
+  registerHandler('providers:setCliConfig', async (_e, instanceId: string, patch: unknown) => {
+    const res = await guiMms.request<{ config: unknown; providers: unknown[] }>(
+      'providers.setCliConfig',
+      { instanceId, patch }
+    )
+    broadcast('providers:changed', res.providers)
+    return res.config
+  })
+  registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
+    return pickExecutable((options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)), request)
+  })
+  registerHandler('providers:claudeSetLoginPolicy',async (_e, policy: 'cli' | 'isolated') => {
     const res = await guiMms.request<{ status: unknown; providers: unknown[] }>(
       'providers.claudeSetLoginPolicy',
       { policy }

@@ -342,6 +342,8 @@ export const PROTOCOL_METHODS = [
   'providers.claudeStatus',
   'providers.claudeSetLoginPolicy',
   'providers.codexStatus',
+  'providers.cliConfig',
+  'providers.setCliConfig',
   'webTools.getCredentialStatus',
   'webTools.setApiKey',
   'webTools.clearApiKey',

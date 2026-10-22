@@ -1745,7 +1745,7 @@ export class LlmClient {
       toolEnabled(tool.name)
     )
     // Dev GUI self-inspection tools: main orchestrator only, dev sessions only,
-    // gated by Settings → Tools like every other Mousse tool.
+    // gated by Settings → Skills & MCP like every other Mousse tool.
     const unfilteredDevGuiToolDefs =
       !subagent && isDevGuiToolsEnabled() ? this.devGuiTools.getToolDefinitions() : []
     const devGuiToolDefs = unfilteredDevGuiToolDefs.filter((tool) =>
@@ -2044,7 +2044,7 @@ export class LlmClient {
 
       if (this.webTools.isWebTool(toolCall.name)) {
         if (!settingsEnabled(toolCall.name)) {
-          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools.`, true)
+          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Skills & MCP.`, true)
         }
         const event: LlmToolEvent = {
           kind: 'build_tool_call', title: `Web tool ${toolCall.name}`,
@@ -2067,7 +2067,7 @@ export class LlmClient {
           )
         }
         if (!trustedAgent && !settingsEnabled(toolCall.name)) {
-          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools.`, true)
+          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Skills & MCP.`, true)
         }
         const callEvent: LlmToolEvent = {
           kind: 'build_tool_call',
@@ -2126,7 +2126,7 @@ export class LlmClient {
       if (toolCall.name === 'list_skills') {
 
         if (!settingsEnabled('list_skills')) {
-          return toolResult(toolCall, 'Tool "list_skills" is disabled in Settings → Tools.', true)
+          return toolResult(toolCall, 'Tool "list_skills" is disabled in Settings → Skills & MCP.', true)
         }
         return toolResult(toolCall, JSON.stringify(availableSkills.map(toSkillSummary), null, 2))
 
@@ -2137,7 +2137,7 @@ export class LlmClient {
       if (toolCall.name === 'load_skill') {
 
         if (!settingsEnabled('load_skill')) {
-          return toolResult(toolCall, 'Tool "load_skill" is disabled in Settings → Tools.', true)
+          return toolResult(toolCall, 'Tool "load_skill" is disabled in Settings → Skills & MCP.', true)
         }
         const requested = String(toolCall.arguments.skill ?? '')
 
@@ -2189,7 +2189,7 @@ export class LlmClient {
       if (this.planTools.isPlanTool(toolCall.name)) {
 
         if (!settingsEnabled(toolCall.name)) {
-          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools.`, true)
+          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Skills & MCP.`, true)
         }
         const callEvent: LlmToolEvent = {
 
@@ -2256,7 +2256,7 @@ export class LlmClient {
 
       if (this.taskTools?.isTaskTool(toolCall.name)) {
         if (!settingsEnabled(toolCall.name)) {
-          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools.`, true)
+          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Skills & MCP.`, true)
         }
         const callEvent: LlmToolEvent = {
           kind: 'build_tool_call',
@@ -2291,7 +2291,7 @@ export class LlmClient {
 
       if (this.quickActionTools.isQuickActionTool(toolCall.name)) {
         if (!settingsEnabled(toolCall.name)) {
-          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools.`, true)
+          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Skills & MCP.`, true)
         }
         const callEvent: LlmToolEvent = {
           kind: 'build_tool_call',
@@ -2400,7 +2400,7 @@ export class LlmClient {
         }
 
         if (!settingsEnabled(toolCall.name)) {
-          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Tools → Mousse tools.`, true)
+          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Skills & MCP.`, true)
         }
 
 

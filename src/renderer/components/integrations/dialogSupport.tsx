@@ -1,5 +1,7 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 import { registerNavigationGuard } from '../../services/navigationGuards'
+import { ChevronRight } from '../../lib/icons'
+import { ModalClose, useDialogFocus } from '../ui/Modal'
 
 export function useIntegrationBoundary(...identity: unknown[]) {
   const state = useRef({ identity, epoch: 0, mounted: true })
@@ -34,31 +36,22 @@ export function IntegrationField({ label, children }: { label: string; children:
   return <label className="integration-field"><span>{label}</span>{children}</label>
 }
 
-export function IntegrationModal({ title, onClose, children, wide = false }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
-  const closeRef = useRef(onClose)
-  closeRef.current = onClose
+/** Shares ui/Modal's surface, header, close button and keyboard behaviour. `hideTitle` keeps the title for assistive tech only. */
+export function IntegrationModal({ title, hideTitle = false, onClose, children, wide = false }: { title: string; hideTitle?: boolean; onClose: () => void; children: ReactNode; wide?: boolean }) {
   const dialogRef = useRef<HTMLElement>(null)
-  useEffect(() => {
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const first = dialogRef.current?.querySelector<HTMLElement>('input, button, select, textarea, [tabindex="0"]')
-    first?.focus()
-    const keyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); closeRef.current(); return }
-      if (event.key !== 'Tab') return
-      const items = [...(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]):not([type="hidden"]), textarea:not([disabled]), select:not([disabled]), [tabindex="0"]') ?? [])].filter((item) => item.getClientRects().length > 0)
-      const index = items.indexOf(document.activeElement as HTMLElement)
-      if (!items.length) { event.preventDefault(); return }
-      if ((event.shiftKey && index <= 0) || (!event.shiftKey && index === items.length - 1)) {
-        event.preventDefault(); items[event.shiftKey ? items.length - 1 : 0]?.focus()
-      }
-    }
-    document.addEventListener('keydown', keyDown)
-    return () => { document.removeEventListener('keydown', keyDown); if (previous?.isConnected) previous.focus() }
-  }, [])
+  useDialogFocus(dialogRef, true, onClose)
   return <div className="integration-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
-    <section ref={dialogRef} className={`integration-modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}>
-      <header><h2>{title}</h2><button type="button" className="btn btn-sm" aria-label="Close" onClick={onClose}>×</button></header>
+    <section ref={dialogRef} tabIndex={-1} className={`integration-modal${wide ? ' wide' : ''}${hideTitle ? ' untitled' : ''}`} role="dialog" aria-modal="true" aria-label={title}>
+      <header className="modal-header">{hideTitle ? null : <h2>{title}</h2>}<ModalClose onClose={onClose} /></header>
       {children}
     </section>
   </div>
+}
+
+/** The app's disclosure: a chevron and a quiet label, no native triangle. Pass `open`/`onOpenChange` to control it. */
+export function IntegrationDisclosure({ label, open, onOpenChange, children }: { label: string; open?: boolean; onOpenChange?: (open: boolean) => void; children: ReactNode }) {
+  return <details className="integration-disclosure" open={open} onToggle={onOpenChange ? (event) => onOpenChange(event.currentTarget.open) : undefined}>
+    <summary><ChevronRight size={14} aria-hidden="true" className="integration-disclosure-chevron" />{label}</summary>
+    <div className="integration-disclosure-body">{children}</div>
+  </details>
 }

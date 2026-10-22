@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { unzipSync, strFromU8 } from 'fflate'
 import { IntegrationsWorkspace } from '../src/renderer/components/integrations'
 import { MAX_ZIP_BYTES, validateZipBytes, fileToPackage, filesToPackage, parseMap } from '../src/renderer/components/integrations/integrationUi'
-import { parseMcpArguments } from '../src/renderer/components/integrations/mcpDraft'
+import { createMcpPayload, draftFromMcp, parseMcpArguments, updateMcpPayload } from '../src/renderer/components/integrations/mcpDraft'
 import { IsolatedIntegrationPlatformClient } from './fixtures/agent-platform/integration-editor-client'
 
 describe('integration workspace contracts', () => {
@@ -42,13 +42,35 @@ describe('integration workspace contracts', () => {
     expect(() => validateZipBytes(new Uint8Array(MAX_ZIP_BYTES + 1))).toThrow(/larger than/)
   })
 
-  it('fences profile catalogs and presents separate integration tabs', () => {
+  it('fences profile catalogs and lists skills and MCP servers as settings groups', () => {
     const client = new IsolatedIntegrationPlatformClient()
-    const html = renderToStaticMarkup(createElement(IntegrationsWorkspace, { client, profileId: 'profile-a', initialTab: 'mcp' }))
+    const html = renderToStaticMarkup(createElement(IntegrationsWorkspace, { client, profileId: 'profile-a' }))
     expect(html).toContain('data-integrations-workspace')
-    expect(html).toContain('Add MCP connection')
-    expect(html).toContain('role="tablist"')
-    expect(html).toContain('aria-selected="true"')
-    expect(html).toContain('data-action="refresh-integrations"')
+    expect(html).toContain('data-profile-id="profile-a"')
+    expect(html).toContain('data-action="add-skill"')
+    expect(html).toContain('data-action="add-mcp"')
+    expect(html).toContain('MCP servers')
+    expect(html).not.toContain('role="tablist"')
+  })
+
+  it('edits never change whether a server is on', () => {
+    const draft = draftFromMcp()
+    Object.assign(draft, { name: 'Fixture', command: 'node', enabled: true })
+    expect(createMcpPayload(draft, { profileId: 'profile-a' }, 'global')).toMatchObject({ enable: true })
+    expect(updateMcpPayload(draft, { profileId: 'profile-a' }, 'installation', 'revision')).not.toHaveProperty('enable')
+  })
+
+  it('keeps saved headers, environment and OAuth client settings unless their replace switch is on', () => {
+    const saved = { name: 'Fixture', transport: 'http', url: 'https://example.invalid/mcp', authMode: 'oauth' } as Parameters<typeof draftFromMcp>[0]
+    const draft = draftFromMcp(saved)
+    Object.assign(draft, { headers: '{"A":"${B}"}', env: '{"C":"${D}"}', clientId: 'client' })
+    const kept = updateMcpPayload(draft, { profileId: 'profile-a' }, 'installation', 'revision')
+    expect(kept).not.toHaveProperty('headers')
+    expect(kept).not.toHaveProperty('env')
+    expect(kept).not.toHaveProperty('auth')
+    Object.assign(draft, { replaceHeaders: true, replaceEnv: true, replaceAuth: true })
+    expect(updateMcpPayload(draft, { profileId: 'profile-a' }, 'installation', 'revision')).toMatchObject({
+      headers: { A: '${B}' }, env: { C: '${D}' }, auth: { clientId: 'client', scopes: [] }
+    })
   })
 })

@@ -16,7 +16,7 @@ import type { SkillDescriptor } from '../../shared/integrations'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { chatModeEquals, getChatModeLabel } from '../../shared/chatMode'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
-import { ComposerEffortPicker } from './ComposerEffortPicker'
+import { ComposerEffortPicker, MenuCheck } from './ComposerEffortPicker'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
@@ -267,6 +267,7 @@ export function ComposerFooter({
                         className={`composer-mode-menu-item${selected ? ' selected' : ''}`}
                         onClick={() => handleModeSelect(mode)}
                       >
+                        <MenuCheck on={selected} />
                         <span>{getChatModeLabel(mode)}</span>
                         {isDefault ? (
                           <span className="composer-mode-menu-item-meta">Default</span>

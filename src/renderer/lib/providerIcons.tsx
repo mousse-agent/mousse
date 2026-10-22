@@ -205,9 +205,17 @@ function ProviderAssetIcon({
   )
 }
 
+/**
+ * Maps a provider id to a logo key. Accepts legacy `llmProvider` names
+ * (`codex`, `claude-subscription`), provider instance ids (`claude`,
+ * `antigravity`, `codex`, `pi:<provider>`) and pi-ai provider ids.
+ */
 function normalizeProviderId(providerId: string): string {
-  const id = providerId.toLowerCase()
+  let id = providerId.trim().toLowerCase()
+  if (id.startsWith('pi:') && id.length > 3) id = id.slice(3)
   if (id === 'claude' || id === 'claude-subscription') return 'claude'
+  if (id === 'codex' || id === 'openai-codex') return 'openai'
+  if (id === 'antigravity' || id.includes('antigravity')) return 'google'
   if (id.includes('anthropic')) return 'anthropic'
   if (id.includes('ant-ling') || id.includes('antling')) return 'antgroup'
   if (id.includes('azure')) return 'azure'

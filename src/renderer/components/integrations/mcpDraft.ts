@@ -32,7 +32,7 @@ export function parseMcpArguments(value: string): string[] {
 
 function connectionFields(draft: McpDraft): Omit<CreateMcpParams, 'profileId' | 'projectId' | 'scope'> {
   if (!draft.name.trim()) throw new Error('Name is required.')
-  if (draft.transport === 'stdio' && !draft.command.trim()) throw new Error('Executable is required for stdio.')
+  if (draft.transport === 'stdio' && !draft.command.trim()) throw new Error('Command is required for a local server.')
   if (draft.transport !== 'stdio') {
     let url: URL
     try { url = new URL(draft.url) } catch { throw new Error('Enter a valid HTTP or HTTPS endpoint.') }
@@ -62,5 +62,7 @@ export function createMcpPayload(draft: McpDraft, identity: IntegrationProfilePa
 export function updateMcpPayload(draft: McpDraft, identity: IntegrationProfileParams, installationId: string, expectedRevision: string): UpdateMcpParams {
   if (!expectedRevision) throw new Error('Reload the saved connection before editing it.')
   // Scope is a create-only field. Never spread a create payload into update.
-  return { ...identity, installationId, expectedRevision, ...connectionFields(draft), ...(draft.transport === 'stdio' ? { cwd: draft.cwd.trim() } : {}) }
+  // On/off belongs to the row switch; an edit leaves it as it is.
+  const { enable: _enable, ...fields } = connectionFields(draft)
+  return { ...identity, installationId, expectedRevision, ...fields, ...(draft.transport === 'stdio' ? { cwd: draft.cwd.trim() } : {}) }
 }
