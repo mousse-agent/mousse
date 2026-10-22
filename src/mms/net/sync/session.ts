@@ -180,6 +180,8 @@ export class NetSyncSession implements SyncSession {
   private estimate?: QualifiedClockEstimate
   private subscriptions = new Map<StreamId, SubscriptionReceiver>()
   private serving = new Map<StreamId, { cancelled: boolean; live: boolean }>()
+  /** Per stream: whether a delta is being written, and the newest unsent delta per key. */
+  private deltas = new Map<StreamId, { sending: boolean; latest: Map<string, unknown> }>()
   private snapshotJobs = new Map<
     StreamId,
     { controller: AbortController; reader: SnapshotReader }
@@ -630,7 +632,7 @@ export class NetSyncSession implements SyncSession {
    * Display-only delta for a stream this session is live-serving. Peers that did not negotiate
    * presence.v1 or are not subscribed get nothing; deltas are never stored or replayed.
    */
-  publishDelta(stream: StreamId, data: unknown): void {
+  publishDelta(stream: StreamId, data: unknown, key = ''): void {
     if (
       this.currentState !== 'open' ||
       !this.negotiatedCaps.includes('presence.v1') ||
@@ -638,9 +640,41 @@ export class NetSyncSession implements SyncSession {
     )
       return
     this.authorizedRead(stream)
-    void this.send({ t: 'ephemeral', stream, kind: 'delta', data }).catch((error) =>
-      this.fail(error)
-    )
+    // One delta per stream is written at a time; newer ones replace older unsent ones with the
+    // same key. A slow link then sees fewer deltas instead of a full mux queue.
+    const state = this.deltas.get(stream) ?? { sending: false, latest: new Map() }
+    this.deltas.set(stream, state)
+    state.latest.delete(key)
+    state.latest.set(key, data)
+    if (!state.sending) this.sendDeltas(stream, state)
+  }
+  private sendDeltas(
+    stream: StreamId,
+    state: { sending: boolean; latest: Map<string, unknown> }
+  ): void {
+    const next = state.latest.entries().next()
+    if (
+      next.done ||
+      this.deltas.get(stream) !== state ||
+      this.currentState !== 'open' ||
+      !this.serving.get(stream)?.live
+    ) {
+      if (this.deltas.get(stream) === state) this.deltas.delete(stream)
+      return
+    }
+    const [key, data] = next.value
+    state.latest.delete(key)
+    state.sending = true
+    void this.send({ t: 'ephemeral', stream, kind: 'delta', data })
+      .catch((error) => {
+        // Deltas are best effort: a busy or cancelled send never ends the session.
+        if (error instanceof NetError && ['rate_limited', 'cancelled'].includes(error.code)) return
+        this.fail(error)
+      })
+      .finally(() => {
+        state.sending = false
+        this.sendDeltas(stream, state)
+      })
   }
   onEphemeral(
     listener: (message: Extract<WireMessage, { t: 'presence' | 'ephemeral' }>) => void
@@ -1963,6 +1997,7 @@ export class NetSyncSession implements SyncSession {
     this.subscriptions.clear()
     for (const attempt of this.serving.values()) attempt.cancelled = true
     this.serving.clear()
+    this.deltas.clear()
     for (const stream of [...this.snapshotJobs.keys()]) this.cancelSnapshot(stream)
     this.snapshotWaiting.clear()
     this.snapshotReceiving.clear()

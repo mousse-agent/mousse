@@ -423,4 +423,57 @@ describe('remote display deltas', () => {
     expect(plain.a.state()).toBe('open')
     expect(plain.b.state()).toBe('open')
   })
+
+  it('keeps the session open when deltas outpace the link, sending the newest per key', async () => {
+    // A reply with an applet streams ~32 KiB deltas every 100 ms, faster than a phone link drains.
+    const p = await setup(),
+      { source } = fakeSource('t1')
+    const adapter = new ThreadStreamAdapter({
+      db: p.aDb,
+      store: p.aStore,
+      generations: p.aStore,
+      identity: p.aIdentity,
+      keys: p.aKeys,
+      clock: systemClock,
+      source
+    })
+    resources.push(() => adapter.close())
+    const descriptor = adapter.activate('t1')
+    p.bStore.createStream(descriptor, 1)
+    const live = await p.connect(adapter.store, true),
+      received: unknown[] = []
+    live.b.onEphemeral((message) => received.push((message as { data?: unknown }).data))
+    await new Promise<void>((resolve, reject) =>
+      live.b.subscribe(descriptor.id, {
+        onRecord() {},
+        onCaughtUp: () => resolve(),
+        onSnapshotInstalled: () => resolve(),
+        onError: (code) => reject(new Error(code))
+      })
+    )
+    const questions = { threadId: 't1', type: 'questions.updated', data: { pending: [] } }
+    for (let i = 0; i < 40; i++)
+      live.a.publishDelta(
+        descriptor.id,
+        {
+          threadId: 't1',
+          type: 'thread.message-updated',
+          data: message('m1', `${i}`.padEnd(31 * 1024, 'x'))
+        },
+        'message:m1'
+      )
+    live.a.publishDelta(descriptor.id, questions, 'questions')
+    const last = message('m1', '39'.padEnd(31 * 1024, 'x'))
+    await vi.waitFor(() =>
+      expect(received).toContainEqual({
+        threadId: 't1',
+        type: 'thread.message-updated',
+        data: last
+      })
+    )
+    await vi.waitFor(() => expect(received).toContainEqual(questions))
+    expect(received.length).toBeLessThan(10)
+    expect(live.a.state()).toBe('open')
+    expect(live.b.state()).toBe('open')
+  })
 })

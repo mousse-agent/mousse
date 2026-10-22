@@ -61,7 +61,8 @@ export interface ThreadStreamOptions {
   maxThreads?: number
   /** Minimum spacing between delta flushes per stream (default 100 ms). */
   deltaIntervalMs?: number
-  onDelta?(stream: StreamId, data: unknown): void
+  /** `key` names what the delta replaces: one streaming message, or the pending questions. */
+  onDelta?(stream: StreamId, data: unknown, key: string): void
   onRecord?(stream: StreamId, record: StoredRecord): void
   onError?(threadId: string, error: unknown, stream: StreamId): void
 }
@@ -219,11 +220,11 @@ export class ThreadStreamAdapter {
   private flushDeltas(thread: ActiveThread): void {
     thread.deltaTimer = undefined
     if (this.active.get(thread.stream) !== thread) return
-    const pending = [...thread.deltas.values()]
+    const pending = [...thread.deltas]
     thread.deltas.clear()
-    for (const body of pending) {
+    for (const [key, body] of pending) {
       try {
-        this.options.onDelta?.(thread.stream, body)
+        this.options.onDelta?.(thread.stream, body, key)
       } catch {
         // Deltas are best effort; the durable stream stays authoritative.
       }

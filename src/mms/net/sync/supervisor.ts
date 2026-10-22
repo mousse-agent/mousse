@@ -163,8 +163,12 @@ export class SyncSupervisor implements SyncSession {
   sendEphemeral(message: Parameters<SyncSession['sendEphemeral']>[0]): void {
     this.session().sendEphemeral(message)
   }
-  publishDelta(stream: Parameters<SyncSession['publishDelta']>[0], data: unknown): void {
-    this.session().publishDelta(stream, data)
+  publishDelta(
+    stream: Parameters<SyncSession['publishDelta']>[0],
+    data: unknown,
+    key?: string
+  ): void {
+    this.session().publishDelta(stream, data, key)
   }
   onEphemeral(listener: Parameters<SyncSession['onEphemeral']>[0]): () => void {
     this.ephemeral.add(listener)

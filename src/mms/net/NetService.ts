@@ -1171,12 +1171,12 @@ export class NetService {
     )
   }
   /** Display-only thread deltas to sessions live-serving the stream; never stored or replayed. */
-  publishDelta(stream: StreamId, data: unknown): void {
+  publishDelta(stream: StreamId, data: unknown, key?: string): void {
     if (this.stopped || this.disabled || !this.config.enabled) return
     for (const session of this.sessions) {
       if (session.state() !== 'open') continue
       try {
-        session.publishDelta(stream, data)
+        session.publishDelta(stream, data, key)
       } catch (error) {
         if (
           error instanceof NetError &&
