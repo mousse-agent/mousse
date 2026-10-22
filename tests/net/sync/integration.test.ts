@@ -368,6 +368,52 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     expect(connection.a.state()).toBe('open')
     expect(connection.b.state()).toBe('open')
   })
+  it('delivers a burst of large live records in order without dropping any', async () => {
+    // A refreshed thread display snapshot appends one ~44 KiB chunk record after another and
+    // publishes each as it commits; together they exceed the 256 KiB control-lane queue.
+    const p = await profiles(),
+      connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce())
+    const user = p.aIdentity.self()!.user,
+      node = p.aIdentity.self()!.node,
+      rows: StoredRecord[] = []
+    for (let seq = 1; seq <= 16; seq++) {
+      const envelope = encodeEnvelope({
+        v: 1,
+        minor: 0,
+        id: newId('event'),
+        stream: p.stream.id,
+        type: 'thread.snapshot.chunk',
+        crit: false,
+        author: { user, node, keyEpoch: 1 },
+        ts: systemClock.now(),
+        body: {
+          threadId: 'thread-1',
+          snapshot: '00000000-0000-4000-8000-000000000000',
+          index: seq - 1,
+          data: Buffer.alloc(32 * 1024, seq).toString('base64url')
+        }
+      })
+      const position = p.aStore.appendAsAuthority(p.stream.id, {
+        id: JSON.parse(Buffer.from(envelope).toString()).id,
+        envelope,
+        sig: p.aKeys.signAsNode(envelope),
+        recvTs: systemClock.now()
+      })
+      rows.push({ ...position, envelope, sig: p.aKeys.signAsNode(envelope) })
+    }
+    const results = await Promise.allSettled(
+      rows.map((row) => connection.a.publishRecord(p.stream.id, row))
+    )
+    expect(results.filter((result) => result.status === 'rejected')).toEqual([])
+    await vi.waitFor(() => expect(p.bStore.cursor(p.stream.id).seq).toBe(16))
+    expect(h.onRecord.mock.calls.map(([row]) => row.seq)).toEqual(rows.map((row) => row.seq))
+    expect(connection.a.state()).toBe('open')
+    expect(connection.b.state()).toBe('open')
+  })
   it('accepts a valid 500-record wire snapshot through bounded storage appends', async () => {
     const p = await profiles()
     for (let i = 1; i <= 500; i++) {

@@ -180,6 +180,8 @@ export class NetSyncSession implements SyncSession {
   private estimate?: QualifiedClockEstimate
   private subscriptions = new Map<StreamId, SubscriptionReceiver>()
   private serving = new Map<StreamId, { cancelled: boolean; live: boolean }>()
+  /** The last live publication queued per stream; the next one starts after it settles. */
+  private livePublishing = new Map<StreamId, Promise<void>>()
   private snapshotJobs = new Map<
     StreamId,
     { controller: AbortController; reader: SnapshotReader }
@@ -643,10 +645,25 @@ export class NetSyncSession implements SyncSession {
   /** After a local authority transaction commits; all serving sessions recheck ACLs. */
   publishRecord(stream: StreamId, record: StoredRecord): Promise<void> {
     const controller = new AbortController()
-    return this.startJob(() => this.publishRecordJob(stream, record, controller.signal), {
-      stream,
-      controller
+    // One live record per stream at a time: a burst (a refreshed display snapshot is dozens of
+    // ~44 KiB records) would otherwise overflow the mux waiting queue and drop records.
+    const previous = this.livePublishing.get(stream)
+    const job = this.startJob(
+      async () => {
+        await previous
+        return this.publishRecordJob(stream, record, controller.signal)
+      },
+      { stream, controller }
+    )
+    const settled = job.then(
+      () => undefined,
+      () => undefined
+    )
+    this.livePublishing.set(stream, settled)
+    void settled.then(() => {
+      if (this.livePublishing.get(stream) === settled) this.livePublishing.delete(stream)
     })
+    return job
   }
   private async publishRecordJob(
     stream: StreamId,
