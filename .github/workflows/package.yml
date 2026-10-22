@@ -35,6 +35,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+      # Nightlies get their own icon so they are easy to tell apart from stable.
+      - name: Use the nightly icon
+        if: contains(inputs.version, '-nightly.')
+        run: cp resources/nightly/icon.png resources/nightly/icon.ico resources/
       - run: npm run dist:linux
       - name: Check the packaged CLI reports the version
         run: |
@@ -91,6 +95,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm version "$env:VERSION" --no-git-tag-version --allow-same-version
+      - name: Use the nightly icon
+        if: contains(inputs.version, '-nightly.')
+        run: Copy-Item resources/nightly/icon.png, resources/nightly/icon.ico resources/
       - name: Locate MSBuild for the node-pty rebuild
         run: |
           $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
