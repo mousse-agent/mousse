@@ -1,6 +1,6 @@
 name: Package
 
-# Builds the Windows and Linux installers and CLIs, and the macOS disk image, for one
+# Builds the Windows and Linux installers and CLIs, and the macOS disk images, for one
 # version. Called by the nightly and stable release workflows, which publish the uploaded
 # artifacts.
 on:
@@ -129,10 +129,20 @@ jobs:
           path: upload/*
 
   mac:
-    name: Package macOS
-    runs-on: macos-15
+    name: Package macOS (${{ matrix.arch }})
+    # Each architecture builds on its own runner: the build packages the Electron that
+    # npm installed, which matches the runner.
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
+      ARCH: ${{ matrix.arch }}
       # No Developer ID certificate: the app is ad-hoc signed, as Apple silicon requires.
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
@@ -145,10 +155,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm version "$VERSION" --no-git-tag-version --allow-same-version
-      - run: npm run dist:mac
+      - run: npm run dist:mac -- "--$ARCH"
       - name: Check the signature and that the bundled CLI reports the version
         run: |
-          app=release/mac-arm64/Mousse.app
+          app=$(echo release/mac*/Mousse.app)
           codesign --verify --deep --strict "$app"
           out=$("$app/Contents/Resources/mousse-cli" --version)
           echo "$out"
@@ -157,9 +167,9 @@ jobs:
       - name: Collect the release files
         run: |
           mkdir upload
-          cp "release/Mousse-$VERSION-arm64.dmg" upload/
+          cp "release/Mousse-$VERSION-$ARCH.dmg" upload/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mousse-mac
+          name: mousse-mac-${{ matrix.arch }}
           if-no-files-found: error
           path: upload/*
