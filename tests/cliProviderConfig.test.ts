@@ -86,6 +86,8 @@ describe('CLI provider config validation', () => {
     writeFileSync(join(home, 'node_modules', 'tool', 'bin', 'tool.exe'), 'MZ')
     const shim = join(home, 'tool.cmd')
     writeFileSync(shim, '@ECHO off\r\n"%dp0%\\node_modules\\tool\\bin\\tool.exe"   %*\r\n')
+    // The existence check is the host's; on Linux and macOS it also needs the execute bit.
+    chmodSync(shim, 0o755)
     expect(requireExecutable(shim, 'Codex', 'win32')).toBe(shim)
   })
 
