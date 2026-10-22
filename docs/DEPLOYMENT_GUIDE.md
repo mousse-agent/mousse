@@ -18,7 +18,8 @@ remain the reference for what those workflows check and for building by hand.
    modules are platform- and Electron-ABI-specific; never share `node_modules`
    between Windows and WSL.
 4. Produce unsigned artifacts. Code signing is a later SignPath Foundation
-   workflow and must not be simulated with a personal certificate.
+   workflow and must not be simulated with a personal certificate. The macOS
+   app is only ad-hoc signed, which Apple silicon needs to run it at all.
 5. Do not package `.mousse/`, `.mousse-worktrees/`, `.env*`, logs, build
    scratch directories, provider credential stores, or the daemon owner token.
 6. Inspect the final packaged archive, not only the source tree, before upload.

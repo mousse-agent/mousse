@@ -1,7 +1,8 @@
 name: Package
 
-# Builds the Windows and Linux installers and CLIs for one version. Called by the
-# nightly and stable release workflows, which publish the uploaded artifacts.
+# Builds the Windows and Linux installers and CLIs, and the macOS disk image, for one
+# version. Called by the nightly and stable release workflows, which publish the uploaded
+# artifacts.
 on:
   workflow_call:
     inputs:
@@ -124,5 +125,41 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mousse-windows
+          if-no-files-found: error
+          path: upload/*
+
+  mac:
+    name: Package macOS
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      # No Developer ID certificate: the app is ad-hoc signed, as Apple silicon requires.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.20.0'
+          cache: npm
+      - run: npm ci
+      - run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+      - run: npm run dist:mac
+      - name: Check the signature and that the bundled CLI reports the version
+        run: |
+          app=release/mac-arm64/Mousse.app
+          codesign --verify --deep --strict "$app"
+          out=$("$app/Contents/Resources/mousse-cli" --version)
+          echo "$out"
+          test "$out" = "mousse-cli $VERSION"
+      # macOS builds are not covered by in-app updates, so no update manifest is attached.
+      - name: Collect the release files
+        run: |
+          mkdir upload
+          cp "release/Mousse-$VERSION-arm64.dmg" upload/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mousse-mac
           if-no-files-found: error
           path: upload/*
