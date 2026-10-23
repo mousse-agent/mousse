@@ -14,6 +14,13 @@ import {
 } from './enrollmentSeal'
 import { createHostedRelayTransports } from './relayTransports'
 
+/**
+ * The longest wait between registration renewals. A registration lasts 10 minutes (60 seconds on
+ * older Mousse ID) and is renewed at a third of the time left, so it always outlasts the relay's
+ * next admission renewal.
+ */
+const RENEW_MAX_MS = 5 * 60_000
+
 /** How often a signed-in authority checks Mousse ID for phones asking to join. */
 const PLUS_ENROLLMENT_POLL_MS = 15000
 
@@ -316,7 +323,7 @@ export class HostedNetController implements HostedNet {
           })
       },
       status.connected
-        ? Math.min(20000, Math.max(1000, (status.expiresAt! - this.host.clock.now()) / 3))
+        ? Math.min(RENEW_MAX_MS, Math.max(1000, (status.expiresAt! - this.host.clock.now()) / 3))
         : 20000
     )
     this.plusRenewal.unref?.()
