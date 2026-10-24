@@ -7,6 +7,9 @@ export type MmsEvent =
   | { channel: 'scheduled:status'; data: unknown }
   | { channel: 'channels:updated'; data: unknown }
   | { channel: 'net:updated'; data: import('../shared/net/local').NetStatus }
+  /** A provider's sign-in or install state changed outside a request (clients re-read the provider list). */
+  | { channel: 'providers:changed'; data: undefined }
+  | { channel: 'providers:install'; data: import('../shared/providerAuth').CliInstallEvent }
 
 export type MmsEventChannel = MmsEvent['channel']
 

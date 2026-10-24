@@ -714,7 +714,17 @@ export interface Thread {
   startedAt?: string
 }
 
-export type ThreadActivityState = 'idle' | 'processing' | 'awaiting_input' | 'completed'
+/**
+ * Sidebar status of a thread. `processing` is Working. `waiting` is Waiting: the turn is blocked
+ * only on wait tools, or it ended while thread-owned work that reports back is still running.
+ * `awaiting_input` is Input: the agent asked the user something.
+ */
+export type ThreadActivityState = 'idle' | 'processing' | 'waiting' | 'awaiting_input' | 'completed'
+
+/** Working or Waiting: the thread's work cycle has not finished yet. */
+export function isThreadActivityActive(state: ThreadActivityState | undefined): boolean {
+  return state === 'processing' || state === 'waiting'
+}
 
 export type ThreadActivitySnapshot = Record<string, ThreadActivityState>
 
@@ -737,6 +747,15 @@ export type TurnStateSnapshot = Record<string, TurnState>
 
 export function isTurnActivePhase(phase: TurnPhase): boolean {
   return phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing'
+}
+
+/** Thread activity for a turn phase; `blockedOnWait` marks a tool phase whose calls only wait. */
+export function turnPhaseActivity(phase: TurnPhase, blockedOnWait = false): ThreadActivityState {
+  if (phase === 'awaiting_input') return 'awaiting_input'
+  if (isTurnActivePhase(phase)) return phase === 'tool_running' && blockedOnWait ? 'waiting' : 'processing'
+  // Keep a finished turn completed until its runtime activity changes.
+  if (phase === 'completed') return 'completed'
+  return 'idle'
 }
 
 export interface ThreadData {

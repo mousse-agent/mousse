@@ -302,30 +302,44 @@ describe('running actions', () => {
 
 describe('quick action editor dialog', () => {
   const dialog = (action: QuickAction | null = null) =>
-    renderToStaticMarkup(createElement(QuickActionDialog, { action, onSave: () => undefined, onClose: () => undefined }))
+    renderToStaticMarkup(createElement(QuickActionDialog, {
+      action,
+      onSave: () => undefined,
+      onDelete: action ? () => undefined : undefined,
+      onClose: () => undefined
+    }))
 
-  it('is a labelled modal dialog that can take focus itself', () => {
+  it('is a titled modal dialog that can take focus itself', () => {
     const html = dialog()
     expect(html).toContain('role="dialog"')
     expect(html).toContain('aria-modal="true"')
-    expect(html).toContain('aria-label="Create action"')
+    expect(html).toMatch(/aria-labelledby="([^"]+)"[\s\S]*<h3 id="\1">Create action<\/h3>/)
     expect(html).toContain('tabindex="-1"')
     expect(dialog({
       id: 'x', label: 'X', kind: 'bash', payload: 'ls', createdAt: '2026-10-24T10:00:00Z', updatedAt: '2026-10-24T10:00:00Z'
-    })).toContain('aria-label="Edit action"')
+    })).toContain('>Edit action</h3>')
   })
 
-  it('keeps the existing look and puts the name field before the close button', () => {
-    const html = dialog()
-    expect(html).toContain('quick-actions-backdrop')
-    expect(html).toContain('quick-actions-dialog')
-    expect(html.indexOf('<input')).toBeGreaterThan(-1)
+  it('uses the shared modal look, with the fields in the body and the buttons in the footer', () => {
+    const html = dialog({
+      id: 'x', label: 'X', kind: 'bash', payload: 'ls', createdAt: '2026-10-24T10:00:00Z', updatedAt: '2026-10-24T10:00:00Z'
+    })
+    expect(html).toContain('class="modal-overlay"')
+    expect(html).toContain('class="modal"')
+    expect(html).toContain('modal-close')
+    const body = html.slice(html.indexOf('class="modal-body"'), html.indexOf('class="modal-footer"'))
+    const footer = html.slice(html.indexOf('class="modal-footer"'))
+    expect(body).toContain('<input')
+    expect(body).toContain('<textarea')
+    expect(footer).toContain('Delete')
+    expect(footer).toContain('Cancel')
+    expect(footer).toContain('btn btn-primary')
   })
 
-  it('takes its keyboard behaviour from the shared dialog hook', () => {
+  it('is built on the shared modal', () => {
     const source = readFileSync(new URL('../src/renderer/components/QuickActionEditor.tsx', import.meta.url), 'utf8')
-    expect(source).toContain("from './ui/Modal'")
-    expect(source).toContain('useDialogFocus(')
+    expect(source).toContain("import { Modal } from './ui/Modal'")
+    expect(source).not.toContain('quick-actions-backdrop')
   })
 })
 
@@ -341,7 +355,7 @@ describe('actions section rendering', () => {
     expect(html).toContain('aria-label="Edit Run tests"')
     expect(html).toContain('Add action')
     expect(html.indexOf('Add action')).toBeGreaterThan(html.indexOf('Run tests'))
-    expect(html).not.toContain('quick-actions-dialog')
+    expect(html).not.toContain('modal-overlay')
   })
 
   it('shows only the add row when the list is empty', () => {

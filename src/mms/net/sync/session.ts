@@ -65,7 +65,8 @@ export interface SessionRpcPort {
     message: Extract<WireMessage, { t: 'rpc.request' }>,
     peer: SyncSession['peer'],
     signal: AbortSignal,
-    progress: (data: unknown) => void
+    progress: (data: unknown) => void,
+    session?: { carrier?: string }
   ): Promise<unknown>
   result(id: RpcId, peer: SyncSession['peer']): Promise<unknown>
   cancel(id: RpcId, peer: SyncSession['peer']): Promise<void>
@@ -126,6 +127,8 @@ export interface SyncSessionOptions {
   /** Bounded retained evidence for a prepared Space snapshot; never grants a pin. */
   retainRosterEvidence?: (roster: Signed, peer: SyncSession['peer']) => void
   onAuthenticated?: () => void
+  /** The inbound carrier this session arrived on, passed to RPC handlers. */
+  carrier?: string
   signal?: AbortSignal
   /** Trusted local archive fence, inherited by every new session. */
   isStreamQuiesced?: (stream: StreamId) => boolean
@@ -1643,9 +1646,15 @@ export class NetSyncSession implements SyncSession {
     const timer = this.clock.setTimeout(() => controller.abort(), h.deadlineMs)
     try {
       if (!this.options.rpc) throw new NetError('forbidden')
-      const result = await this.options.rpc.request(h, this.peer, controller.signal, (data) => {
-        void this.send({ t: 'rpc.progress', id: h.id, data }).catch((error) => this.fail(error))
-      })
+      const result = await this.options.rpc.request(
+        h,
+        this.peer,
+        controller.signal,
+        (data) => {
+          void this.send({ t: 'rpc.progress', id: h.id, data }).catch((error) => this.fail(error))
+        },
+        { carrier: this.options.carrier }
+      )
       await this.send(resultMessage(h.id, result))
     } catch (error) {
       await this.send({ t: 'rpc.result', id: h.id, error: wireError(error) })

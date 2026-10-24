@@ -1,6 +1,6 @@
 /* Short, tightly stacked marks; only pointer/focus proximity forms a bump. */
 .an-message-list-wrap .chat-prompt-rail {
-  right: 8px;
+  left: 8px;
 }
 
 .an-message-list-wrap .chat-prompt-tick {
@@ -29,7 +29,7 @@
 }
 
 .an-message-list-wrap .chat-prompt-rail.is-previewing .chat-prompt-tick span {
-  transform: translateX(-2px);
+  transform: translateX(2px);
 }
 
 .an-message-list-wrap .chat-prompt-tick:is(:hover, :focus-visible) span {

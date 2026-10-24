@@ -4,8 +4,8 @@ import ortWasmUrl from '@onnxruntime-web-dist/ort-wasm-simd-threaded.wasm?url'
 import type { LocalModelFile } from '../../shared/localModels'
 
 /**
- * Worker-side setup shared by the local speech model workers (Kokoro for read aloud, Moonshine for
- * dictation). transformers.js is pointed at the bundled WebAssembly runtime, and requests for the
+ * Worker-side setup shared by the local speech model workers (Kokoro for read aloud; Moonshine,
+ * Whisper and Parakeet for dictation). transformers.js is pointed at the bundled WebAssembly runtime, and requests for the
  * model's Hugging Face files are answered with the copy the app downloaded and verified.
  */
 

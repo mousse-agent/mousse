@@ -50,6 +50,8 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
   }
   register(method: RpcMethod): void {
     if (this.registry.has(method.method)) throw new NetError('conflict')
+    if (method.ephemeral && (method.mutating || method.uploadEnabled))
+      throw new NetError('bad_request', 'Only read-only methods can run outside the ledger.')
     this.registry.set(method.method, method)
   }
   methods(): string[] {
@@ -80,11 +82,13 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     message: Parameters<SessionRpcPort['request']>[0],
     peer: SyncSession['peer'],
     signal: AbortSignal,
-    progress: (data: unknown) => void
+    progress: (data: unknown) => void,
+    session?: { carrier?: string }
   ): Promise<unknown> {
     return this.dispatch(message.method, message.params, message.idem, {
       id: message.id,
       caller: peer,
+      ...(session?.carrier ? { carrier: session.carrier } : {}),
       signal,
       deadlineAt: this.options.clock.now() + message.deadlineMs,
       progress
@@ -105,6 +109,13 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     if (method.mutating && (!idem || idem.length > 256))
       throw new NetError('bad_request', 'Mutations need durable idempotency.')
     if (context.signal.aborted) throw new NetError('cancelled')
+    if (method.ephemeral) {
+      const returned = await method.handle(params, context)
+      this.authorize(name, context.caller, capability)
+      const result = returned === undefined ? null : returned
+      if (canonicalJson(result).byteLength > 63 * 1024) throw new NetError('too_large')
+      return result
+    }
     const payloadHash = createHash('sha256')
       .update(canonicalJson({ method: name, params }))
       .digest('hex')
@@ -136,6 +147,7 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     try {
       this.authorize(name, context.caller, capability)
       method.authorize?.(params, context)
+      method.authorizeNew?.(params, context)
       if (context.signal.aborted) throw new NetError('cancelled')
       this.options.executions.transition(id, 'running', this.options.clock.now())
       const returned = await method.handle(params, {
@@ -183,7 +195,10 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
       const record = this.options.executions.get(id)!
       if (record.state === 'accepted')
         this.options.executions.transition(id, 'failed', this.options.clock.now(), {
-          error: { code: 'cancelled', message: 'Handler did not start.' }
+          error: {
+            code: error instanceof NetError ? error.code : 'cancelled',
+            message: 'Handler did not start.'
+          }
         })
       else if (record.state === 'running') {
         // A thrown handler can have made an external effect; never claim rollback.

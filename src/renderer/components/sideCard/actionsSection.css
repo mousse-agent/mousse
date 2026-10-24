@@ -128,12 +128,8 @@
 }
 
 /* Delete sits at the far left of the editor's button row. */
-.quick-actions-secondary-btn.quick-actions-dialog-delete {
+.modal-footer > .quick-actions-dialog-delete {
   margin-right: auto;
-  color: var(--danger);
-}
-
-.quick-actions-secondary-btn.quick-actions-dialog-delete:hover {
   color: var(--danger);
 }
 

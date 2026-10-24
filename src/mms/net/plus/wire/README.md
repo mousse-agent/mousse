@@ -4,7 +4,7 @@ I copied these six files from the local `@mousse-plus/net-relay` package after i
 
 | File | SHA-256 of copied source |
 | --- | --- |
-| client.ts | 000bd00084a84242a8715e4fbff7f726a08e40ac1d7d7aa9ac004db0ec62b3e9 |
+| client.ts | 12b7ec6c259f6d2c69460dd40b678c6b8e3d6ed8d8a270ab848f237002ae3957 |
 | protocol.ts | 897a2d007d6819a05d11f3964836d6c8290d74dc6df6785b9a60ef56493a79b7 |
 | codec.ts | 2b204b9691e01898debe9b963460d31d2ffde34c9825962e7414fe39626b705b |
 | crypto.ts | b1701643e4e2275130222726b2f473b379f6174d853321e88f4fd0bfb5ed345b |
