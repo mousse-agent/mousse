@@ -29,7 +29,7 @@ try {
         window.mousse = {
           platform: 'linux',
           platformRequest: { request: async () => ({ agents: [], chats: [], devices: [] }) },
-          window: { closeAgentsTasks: async () => {}, openAgentsTasks: async () => {},
+          window: {
             isMaximized: async () => false, onMaximizedChange: subscription },
           providers: { getUsage: async () => { window.fixture.usageLoads++; return { providers: [
             { id: 'test', label: 'Test subscription', windows: [
@@ -49,7 +49,7 @@ try {
           workspace: { getStatus: async () => ({}) },
           orchestrator: { getMessages: async () => [], onThreadMessage: subscription,
             onThreadMessageUpdated: subscription, onThreadMessages: subscription },
-          agents: { list: async () => [], onUpdated: subscription, onActivated: subscription },
+          agents: { list: async () => [], onUpdated: subscription },
           tasks: { list: async () => [], onUpdated: subscription },
           projects: { list: async () => window.fixture.projects || [], onUpdated: subscription },
           threads: { listAll: async () => window.fixture.threads || [], active: async () => null, getActivity: async () => ({}),

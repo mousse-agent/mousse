@@ -48,4 +48,4 @@ The composer validates this untrusted payload, displays a removable blue titled 
 
 Project/thread metadata paths must be resolved in the daemon for the active profile. Use `ChatReferenceMetadataResolver`: thread references point to `ThreadDataStore.getThreadDir(id)/meta.json`; project references point to the active profile's actual `projects.json`. Renderer code must not infer profile storage paths. The composer resolves these references before attachment and again before send; a profile/thread change invalidates an in-flight result.
 
-Pill activation is resource-first: projects open the Files view, threads select their chat, terminals and agents select their owning thread/view/session, browser references open an internal browser tab, and only file references dispatch `mousse:open-file`.
+Pill activation is resource-first: projects open the Files view, threads select their chat, terminals select their owning thread/view/session, agent references (from older versions) open their owning thread, browser references open an internal browser tab, and only file references dispatch `mousse:open-file`.

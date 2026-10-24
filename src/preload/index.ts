@@ -7,12 +7,10 @@ import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, Provi
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
 import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../shared/updates'
-import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity, NamedAgentRequest, NamedAgentRecallRequest, NamedAgentIntegrationRequest, NamedAgentIntegrationReview } from '../shared/agentEpisodes'
 import type {
   Agent,
   BrowserBounds,
   BrowserState,
-  ChatImageAttachment,
   ChatMessage,
   ThreadMessagesSnapshot,
   OrchestratorContextUsageInput,
@@ -313,11 +311,6 @@ const api = {
     }
   },
   agents: {
-    listNamed: (threadId: string): Promise<AgentEpisodeState> => ipcRenderer.invoke('agents:listNamed', threadId),
-    createNamed: (threadId: string, input: NamedAgentRequest & { name: string }): Promise<{ agent: NamedAgentIdentity; episode: AgentEpisode }> => ipcRenderer.invoke('agents:createNamed', threadId, input),
-    recallNamed: (threadId: string, input: NamedAgentRecallRequest): Promise<{ agent: NamedAgentIdentity; episode: AgentEpisode }> => ipcRenderer.invoke('agents:recallNamed', threadId, input),
-    integrateNamed: (threadId: string, input: NamedAgentIntegrationRequest): Promise<unknown> => ipcRenderer.invoke('agents:integrateNamed', threadId, input),
-    reviewNamed: (threadId: string, agent: string, episodeId: string): Promise<NamedAgentIntegrationReview> => ipcRenderer.invoke('agents:reviewNamed', threadId, { agent, episodeId }),
     /** Omit threadId to list agents for the active thread. */
     list: (threadId?: string): Promise<Agent[]> => ipcRenderer.invoke('agents:list', threadId),
     stop: (agentId: string, threadId?: string): Promise<string[]> => ipcRenderer.invoke('agents:stop', agentId, threadId),
@@ -330,72 +323,6 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, agent: Agent) => cb(agent)
       ipcRenderer.on('agent:spawned', handler)
       return () => ipcRenderer.removeListener('agent:spawned', handler)
-    },
-    onActivated: (cb: (payload: { agentId: string }) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, payload: { agentId: string }) => cb(payload)
-      ipcRenderer.on('agent:activated', handler)
-      return () => ipcRenderer.removeListener('agent:activated', handler)
-    }
-  },
-  mousseAgent: {
-    getMessages: (agentId: string): Promise<ChatMessage[]> =>
-      ipcRenderer.invoke('mousseAgent:getMessages', agentId),
-    getAssignment: (agentId: string) => ipcRenderer.invoke('mousseAgent:getAssignment', agentId),
-    getContextUsage: (agentId: string, draftInput = ''): Promise<ContextUsageSnapshot | undefined> =>
-      ipcRenderer.invoke('mousseAgent:getContextUsage', agentId, draftInput),
-    send: (
-      agentId: string,
-      content: string,
-      images?: ChatImageAttachment[]
-    ): Promise<{ accepted: boolean; reason?: string }> =>
-      ipcRenderer.invoke('mousseAgent:send', agentId, content, images),
-    abort: (agentId: string): Promise<boolean> => ipcRenderer.invoke('mousseAgent:abort', agentId),
-    onMessage: (
-      cb: (payload: { agentId: string; message: ChatMessage }) => void
-    ): (() => void) => {
-      const handler = (
-        _: Electron.IpcRendererEvent,
-        payload: { agentId: string; message: ChatMessage }
-      ) => cb(payload)
-      ipcRenderer.on('mousse-agent:message', handler)
-      return () => ipcRenderer.removeListener('mousse-agent:message', handler)
-    },
-    onMessageUpdated: (
-      cb: (payload: { agentId: string; message: ChatMessage }) => void
-    ): (() => void) => {
-      const handler = (
-        _: Electron.IpcRendererEvent,
-        payload: { agentId: string; message: ChatMessage }
-      ) => cb(payload)
-      ipcRenderer.on('mousse-agent:message-updated', handler)
-      return () => ipcRenderer.removeListener('mousse-agent:message-updated', handler)
-    },
-    onMessagesSync: (
-      cb: (payload: { agentId: string; messages: ChatMessage[] }) => void
-    ): (() => void) => {
-      const handler = (
-        _: Electron.IpcRendererEvent,
-        payload: { agentId: string; messages: ChatMessage[] }
-      ) => cb(payload)
-      ipcRenderer.on('mousse-agent:messages-sync', handler)
-      return () => ipcRenderer.removeListener('mousse-agent:messages-sync', handler)
-    },
-    onConnectionFailed: (cb: (payload: { agentId: string }) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, payload: { agentId: string }) => cb(payload)
-      ipcRenderer.on('mousse-agent:connection-failed', handler)
-      return () => ipcRenderer.removeListener('mousse-agent:connection-failed', handler)
-    },
-    retryConnection: (agentId: string): Promise<void> =>
-      ipcRenderer.invoke('mousseAgent:retryConnection', agentId),
-    onComplete: (
-      cb: (payload: { agentId: string; summary: string }) => void
-    ): (() => void) => {
-      const handler = (
-        _: Electron.IpcRendererEvent,
-        payload: { agentId: string; summary: string }
-      ) => cb(payload)
-      ipcRenderer.on('mousse-agent:complete', handler)
-      return () => ipcRenderer.removeListener('mousse-agent:complete', handler)
     }
   },
   tasks: {
@@ -989,9 +916,6 @@ const api = {
     close: (): Promise<void> => ipcRenderer.invoke('window:close'),
     isMaximized: (): Promise<boolean> => ipcRenderer.invoke('window:isMaximized'),
     syncBackground: (): Promise<boolean> => ipcRenderer.invoke('window:syncBackground'),
-    openAgentsTasks: (anchor?: { x: number; y: number }): Promise<void> =>
-      ipcRenderer.invoke('window:openAgentsTasks', anchor),
-    closeAgentsTasks: (): Promise<void> => ipcRenderer.invoke('window:closeAgentsTasks'),
     focusMain: (): Promise<void> => ipcRenderer.invoke('window:focusMain'),
     onMaximizedChange: (cb: (maximized: boolean) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, maximized: boolean) => cb(maximized)

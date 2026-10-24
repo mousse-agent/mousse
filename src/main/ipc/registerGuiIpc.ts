@@ -75,7 +75,6 @@ import {
   type WindowDragPoint
 } from '../windowState'
 import { applyWindowMaterial, attachWindowFocusListeners, setWindowProfileSettings } from '../windowMaterial'
-import { closeAgentsTasksWindow, getAgentsTasksWindow, openAgentsTasksWindow } from '../agentsTasksWindow'
 import {
   getThreadNotificationPresentation,
   type ThreadNotificationKind
@@ -85,8 +84,6 @@ import type {
   BrowserBounds,
   ChannelConfig,
   ChannelPlatform,
-  ChatImageAttachment,
-  ContextUsageSnapshot,
   CreateScheduledJobInput,
   GitCommitOptions,
   MainView,
@@ -237,8 +234,8 @@ export function registerGuiIpc(
     repoRoot
   } = services
   activeGuiMms = guiMms
-  registerLinuxWindowResizeIpc(getWindow, getAgentsTasksWindow)
-  registerAppletIpc(registerHandler, guiMms, () => [getWindow(), getAgentsTasksWindow()])
+  registerLinuxWindowResizeIpc(getWindow)
+  registerAppletIpc(registerHandler, guiMms, () => [getWindow()])
 
   const browserHost = (event: Electron.IpcMainInvokeEvent): AttachedBrowserHost => {
     if (event.senderFrame !== event.sender.mainFrame || !services.attachedBrowserHost) throw new Error('In-app browser automation is unavailable')
@@ -1271,12 +1268,6 @@ export function registerGuiIpc(
 
   // ── Phase 4: agents / tasks / PTY / Mousse subagents (protocol) ──────────
 
-  registerHandler('agents:listNamed', async (_e, threadId: string) => guiMms.request('agents.listNamed', { threadId }))
-  for (const action of ['createNamed', 'recallNamed', 'integrateNamed', 'reviewNamed'] as const) {
-    registerHandler(`agents:${action}`, async (_e, threadId: string, input: Record<string, unknown>) =>
-      guiMms.request(`agents.${action}`, { ...input, threadId }))
-  }
-
   registerHandler('agents:list', async (_e, threadId?: string) => {
     const id =
       typeof threadId === 'string' && threadId.trim()
@@ -1340,59 +1331,6 @@ export function registerGuiIpc(
       return res.task
     }
   )
-  registerHandler('mousseAgent:getMessages', async (_e, agentId: string) => {
-    const threadId = currentPresentation().getActiveThreadId()
-    if (!threadId) return []
-    const res = await guiMms.request<{ messages: unknown[] }>('mousseAgent.getMessages', {
-      threadId,
-      agentId
-    })
-    return res.messages
-  })
-  registerHandler('mousseAgent:getAssignment', async (_e, agentId: string) => {
-    const res = await guiMms.request<{ assignment?: unknown }>('mousseAgent.getAssignment', {
-      agentId
-    })
-    return res.assignment
-  })
-  registerHandler('mousseAgent:getContextUsage', async (_e, agentId: string, draftInput = '') => {
-    const threadId = currentPresentation().getActiveThreadId()
-    if (!threadId) return undefined
-    const res = await guiMms.request<{ usage?: ContextUsageSnapshot }>('mousseAgent.contextUsage', {
-      threadId,
-      agentId,
-      draftInput
-    })
-    return res.usage
-  })
-  registerHandler('mousseAgent:retryConnection', async (_e, agentId: string) => {
-    const threadId = currentPresentation().getActiveThreadId()
-    if (!threadId) return
-    await guiMms.request('mousseAgent.retry', { threadId, agentId })
-  })
-  registerHandler('mousseAgent:abort', async (_e, agentId: string) => {
-    const res = await guiMms.request<{ aborted: boolean }>('mousseAgent.abort', { agentId })
-    return res.aborted
-  })
-  registerHandler(
-    'mousseAgent:send',
-    async (
-      _e,
-      agentId: string,
-      content: string,
-      images?: ChatImageAttachment[]
-    ) => {
-      const threadId = currentPresentation().getActiveThreadId()
-      if (!threadId) return { accepted: false, reason: 'missing' as const }
-      return guiMms.request<{ accepted: boolean; reason?: string }>('mousseAgent.send', {
-        threadId,
-        agentId,
-        content,
-        images
-      })
-    }
-  )
-
   registerHandler('pty:write', async (_e, ptyId: string, data: string) => {
     await guiMms.request('pty.write', { ptyId, data })
   })
@@ -2206,22 +2144,11 @@ export function registerGuiIpc(
     broadcast('app:navigateMainView', view)
   })
   registerHandler('window:focusMain', () => {
-    closeAgentsTasksWindow()
     const win = getWindow()
     if (!win || win.isDestroyed()) return
     if (win.isMinimized()) win.restore()
     win.show()
     win.focus()
-  })
-  registerHandler('window:closeAgentsTasks', () => {
-    closeAgentsTasksWindow()
-  })
-  registerHandler('window:openAgentsTasks', (e, anchor?: { x: number; y: number }) => {
-    openAgentsTasksWindow(
-      settings,
-      BrowserWindow.fromWebContents(e.sender) ?? getWindow() ?? undefined,
-      anchor
-    )
   })
   registerHandler('window:minimize', () => {
     getWindow()?.minimize()

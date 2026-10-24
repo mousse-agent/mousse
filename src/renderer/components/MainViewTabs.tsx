@@ -1,13 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Bot, FileText, FolderOpen, GitBranch, Globe, Plus, Terminal, X } from '../lib/icons'
+import { FileText, FolderOpen, GitBranch, Globe, Plus, Terminal, X } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { surfaceTabItems, type SurfaceTabItem } from '../lib/surfaces'
 import { SurfaceChoiceList } from './OpenSurfaceMenu'
 
 const TAB_ICONS = {
-  agents: Bot,
   browser: Globe,
   terminal: Terminal,
   files: FolderOpen,
@@ -19,7 +18,6 @@ export function MainViewTabs() {
   const mainView = useAppStore((state) => state.mainView)
   const setMainView = useAppStore((state) => state.setMainView)
   const activeThreadId = useAppStore((state) => state.activeThreadId)
-  const hasAgents = useAppStore((state) => state.agents.length > 0)
   const opened = useAppStore((state) => state.openedSurfaceKinds)
   const terminals = useAppStore((state) => state.projectTerminalTabs)
   const browsers = useAppStore((state) => state.browserTabs)
@@ -41,7 +39,6 @@ export function MainViewTabs() {
     (tab) => tab.ownerThreadId === activeThreadId || tab.ownerThreadId === null
   )
   const items = surfaceTabItems({
-    hasAgents,
     opened,
     terminals: visibleTerminals,
     browsers: visibleBrowsers,

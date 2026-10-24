@@ -473,44 +473,6 @@ export class MmsProtocolServer {
       )
     })
 
-    // Mousse subagent events
-    onOrch(
-      'mousse-agent-message',
-      (payload: { threadId: string; agentId: string; message: unknown }) => {
-        emitToSubscribers(this.ring.push('mousse-agent.message', payload, payload.threadId))
-      }
-    )
-    onOrch(
-      'mousse-agent-message-updated',
-      (payload: { threadId: string; agentId: string; message: unknown }) => {
-        emitToSubscribers(
-          this.ring.push('mousse-agent.message-updated', payload, payload.threadId)
-        )
-      }
-    )
-    onOrch(
-      'mousse-agent-messages-sync',
-      (payload: { threadId: string; agentId: string; messages: unknown }) => {
-        emitToSubscribers(
-          this.ring.push('mousse-agent.messages-sync', payload, payload.threadId)
-        )
-      }
-    )
-    onOrch(
-      'mousse-agent-complete',
-      (payload: { threadId: string; agentId: string; summary?: string }) => {
-        emitToSubscribers(this.ring.push('mousse-agent.complete', payload, payload.threadId))
-      }
-    )
-    onOrch(
-      'mousse-agent-connection-failed',
-      (payload: { threadId: string; agentId: string }) => {
-        emitToSubscribers(
-          this.ring.push('mousse-agent.connection-failed', payload, payload.threadId)
-        )
-      }
-    )
-
     // UI capability intents (Electron decides focus/open/notify)
     onOrch('document-opened', (payload: unknown) => {
       emitToSubscribers(this.ring.push('ui.document-open', payload, undefined))

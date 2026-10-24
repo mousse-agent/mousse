@@ -99,15 +99,6 @@ export class AgentRegistry extends EventEmitter {
     return agent
   }
 
-  updatePtyId(id: string, ptyId: string): Agent | undefined {
-    const agent = this.agents.get(id)
-    if (!agent) return undefined
-    agent.ptyId = ptyId
-    this.emit('updated', this.list())
-    this.persist()
-    return agent
-  }
-
   remove(id: string): void {
     this.agents.delete(id)
     this.emit('updated', this.list())

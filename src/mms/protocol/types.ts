@@ -241,11 +241,6 @@ export const PROTOCOL_METHODS = [
   'queue.promoteToSteer',
   'agents.list',
   'agents.spawn',
-  'agents.createNamed',
-  'agents.recallNamed',
-  'agents.integrateNamed',
-  'agents.listNamed',
-  'agents.reviewNamed',
   'agents.stop',
   'workspace.getStatus',
   'workspace.restore',
@@ -272,12 +267,6 @@ export const PROTOCOL_METHODS = [
   'tasks.list',
   'tasks.create',
   'tasks.update',
-  'mousseAgent.getMessages',
-  'mousseAgent.getAssignment',
-  'mousseAgent.contextUsage',
-  'mousseAgent.send',
-  'mousseAgent.retry',
-  'mousseAgent.abort',
   'pty.list',
   'pty.create',
   'pty.write',
@@ -446,11 +435,6 @@ export type ProtocolEventType =
   | 'terminal.activated'
   | 'questions.pending'
   | 'questions.cleared'
-  | 'mousse-agent.message'
-  | 'mousse-agent.message-updated'
-  | 'mousse-agent.messages-sync'
-  | 'mousse-agent.complete'
-  | 'mousse-agent.connection-failed'
   | 'pty.data'
   | 'pty.exit'
   | 'pty.created'
@@ -477,11 +461,6 @@ export type ProtocolEventType =
   | 'terminal.activated'
   | 'questions.pending'
   | 'questions.cleared'
-  | 'mousse-agent.message'
-  | 'mousse-agent.message-updated'
-  | 'mousse-agent.messages-sync'
-  | 'mousse-agent.complete'
-  | 'mousse-agent.connection-failed'
   | 'pty.data'
   | 'pty.exit'
   | 'pty.created'

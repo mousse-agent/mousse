@@ -116,26 +116,6 @@ export function bridgeProtocolEvent(
       if (isSelected) broadcast('pty:activated', event.data)
       return true
     }
-    case 'mousse-agent.message': {
-      if (isSelected) broadcast('mousse-agent:message', event.data)
-      return true
-    }
-    case 'mousse-agent.message-updated': {
-      if (isSelected) broadcast('mousse-agent:message-updated', event.data)
-      return true
-    }
-    case 'mousse-agent.messages-sync': {
-      if (isSelected) broadcast('mousse-agent:messages-sync', event.data)
-      return true
-    }
-    case 'mousse-agent.complete': {
-      if (isSelected) broadcast('mousse-agent:complete', event.data)
-      return true
-    }
-    case 'mousse-agent.connection-failed': {
-      if (isSelected) broadcast('mousse-agent:connection-failed', event.data)
-      return true
-    }
     case 'pty.data': {
       broadcast('pty:data', event.data)
       return true
