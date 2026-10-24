@@ -187,6 +187,15 @@ async function sessions(
   return { a, b, pair }
 }
 
+function oversizedRecord(seq: number, bytes: number): StoredRecord {
+  return {
+    epoch: 1,
+    seq,
+    recvTs: systemClock.now(),
+    envelope: new Uint8Array(bytes),
+    sig: new Uint8Array(64)
+  }
+}
 function handlers() {
   return { onRecord: vi.fn(), onCaughtUp: vi.fn(), onSnapshotInstalled: vi.fn(), onError: vi.fn() }
 }
@@ -373,6 +382,233 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     expect(h.onRecord.mock.calls[0][0].seq).toBe(2)
     expect(connection.a.state()).toBe('open')
     expect(connection.b.state()).toBe('open')
+  })
+  it('delivers a burst of large live records in order without dropping any', async () => {
+    // A refreshed thread display snapshot appends one ~44 KiB chunk record after another and
+    // publishes each as it commits; together they exceed the 256 KiB control-lane queue.
+    const p = await profiles(),
+      connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce())
+    const user = p.aIdentity.self()!.user,
+      node = p.aIdentity.self()!.node,
+      rows: StoredRecord[] = []
+    for (let seq = 1; seq <= 16; seq++) {
+      const envelope = encodeEnvelope({
+        v: 1,
+        minor: 0,
+        id: newId('event'),
+        stream: p.stream.id,
+        type: 'thread.snapshot.chunk',
+        crit: false,
+        author: { user, node, keyEpoch: 1 },
+        ts: systemClock.now(),
+        body: {
+          threadId: 'thread-1',
+          snapshot: '00000000-0000-4000-8000-000000000000',
+          index: seq - 1,
+          data: Buffer.alloc(32 * 1024, seq).toString('base64url')
+        }
+      })
+      const sig = p.aKeys.signAsNode(envelope)
+      const position = p.aStore.appendAsAuthority(p.stream.id, {
+        id: JSON.parse(Buffer.from(envelope).toString()).id,
+        envelope,
+        sig,
+        recvTs: systemClock.now()
+      })
+      rows.push({ ...position, envelope, sig })
+    }
+    const results = await Promise.allSettled(
+      rows.map((row) => connection.a.publishRecord(p.stream.id, row))
+    )
+    expect(results.filter((result) => result.status === 'rejected')).toEqual([])
+    await vi.waitFor(() => expect(p.bStore.cursor(p.stream.id).seq).toBe(16), { timeout: 10_000 })
+    expect(h.onRecord.mock.calls.map(([row]) => row.seq)).toEqual(rows.map((row) => row.seq))
+    expect(connection.a.state()).toBe('open')
+    expect(connection.b.state()).toBe('open')
+  })
+  it('queues a burst larger than 8 MiB on a stalled link and delivers it when the link drains', async () => {
+    const p = await profiles(),
+      connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce())
+    let release!: () => void
+    const stalled = new Promise<void>((resolve) => (release = resolve))
+    const send = vi
+      .spyOn(connection.a as unknown as { sendRecords: () => Promise<void> }, 'sendRecords')
+      .mockImplementation(() => stalled)
+    // One refreshed display snapshot is enqueued all at once: 20 x 500 KiB passes the former cap.
+    const queued = Array.from({ length: 20 }, (_, i) =>
+      connection.a.publishRecord(p.stream.id, oversizedRecord(i + 1, 500 * 1024))
+    )
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce())
+    release()
+    expect((await Promise.allSettled(queued)).map((result) => result.status)).toEqual(
+      Array(20).fill('fulfilled')
+    )
+    expect(send).toHaveBeenCalledTimes(20)
+    expect(h.onError).not.toHaveBeenCalled()
+    expect(h.onSnapshotInstalled).not.toHaveBeenCalled()
+  })
+  it('resyncs a subscriber that lags past the live queue cap instead of detaching it', async () => {
+    const p = await profiles(),
+      connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce())
+    // A stalled link: the first send never completes, so every later record waits behind it.
+    let release!: () => void
+    const stalled = new Promise<void>((resolve) => (release = resolve))
+    const send = vi
+      .spyOn(connection.a as unknown as { sendRecords: () => Promise<void> }, 'sendRecords')
+      .mockImplementationOnce(() => stalled)
+    // Records share one buffer. Seven 8 MiB records fit under the 64 MiB cap and the eighth overflows.
+    const body = new Uint8Array(8 * 1024 * 1024)
+    const row = (seq: number): StoredRecord => ({ ...oversizedRecord(seq, 0), envelope: body })
+    const queued = Array.from({ length: 7 }, (_, i) =>
+      connection.a.publishRecord(p.stream.id, row(i + 1))
+    )
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce())
+    await connection.a.publishRecord(p.stream.id, row(8))
+    // The subscriber pulls a snapshot and resumes live: no error, no detach.
+    await vi.waitFor(() => expect(h.onSnapshotInstalled).toHaveBeenCalledOnce(), {
+      timeout: 10_000
+    })
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledTimes(2), { timeout: 10_000 })
+    release()
+    await Promise.allSettled(queued)
+    expect(h.onError).not.toHaveBeenCalled()
+    // Only the record already in flight went out live; the dropped backlog never reached the mux.
+    expect(send.mock.calls.filter(([, , live]) => live === false)).toHaveLength(1)
+    expect(connection.a.state()).toBe('open')
+    expect(connection.b.state()).toBe('open')
+  })
+  it('stops a stalled replay when the live queue overflows so no caughtUp follows the resync', async () => {
+    const p = await profiles()
+    for (const row of Array.from({ length: 3 }, (_, i) => p.record(i + 1)))
+      p.aStore.appendAsAuthority(p.stream.id, {
+        id: JSON.parse(Buffer.from(row.envelope).toString()).id,
+        envelope: row.envelope,
+        sig: row.sig,
+        recvTs: row.recvTs
+      })
+    const connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const sent: string[] = []
+    const send = (
+      connection.a as unknown as { send: (header: { t: string }) => Promise<void> }
+    ).send.bind(connection.a)
+    vi.spyOn(connection.a as never, 'send' as never).mockImplementation((async (
+      header: { t: string },
+      ...rest: unknown[]
+    ) => {
+      sent.push(header.t)
+      return (send as (...args: unknown[]) => Promise<void>)(header, ...rest)
+    }) as never)
+    // The first replay page never completes, so the replay is still in flight at overflow time.
+    let release!: () => void
+    const stalled = new Promise<void>((resolve) => (release = resolve))
+    type SendRecords = (...args: unknown[]) => Promise<void>
+    const realSendRecords = (
+      connection.a as unknown as { sendRecords: SendRecords }
+    ).sendRecords.bind(connection.a)
+    let calls = 0
+    const replay = vi
+      .spyOn(connection.a as unknown as { sendRecords: SendRecords }, 'sendRecords')
+      .mockImplementation((...args) => {
+        // Replay stalls on its first page; the bogus live record is dropped; snapshot pages pass.
+        if (++calls === 1) return stalled
+        return args[2] === false ? Promise.resolve() : realSendRecords(...args)
+      })
+    const errors: unknown[] = []
+    connection.a.onClosed((error) => errors.push(error))
+    connection.b.onClosed((error) => errors.push(error))
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(replay).toHaveBeenCalledOnce())
+    const body = new Uint8Array(8 * 1024 * 1024)
+    const overflow = Array.from({ length: 8 }, (_, i) =>
+      connection.a.publishRecord(p.stream.id, { ...oversizedRecord(i + 1, 0), envelope: body })
+    )
+    await Promise.allSettled(overflow)
+    release()
+    await vi.waitFor(() => expect(h.onSnapshotInstalled).toHaveBeenCalledOnce(), {
+      timeout: 10_000
+    })
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce(), { timeout: 10_000 })
+    // The only caughtUp is the one that follows the post-snapshot subscribe.
+    const resync = sent.indexOf('snapshotRequired')
+    expect(sent.slice(resync, sent.indexOf('caughtUp', resync) + 1)).toContain('subscribed')
+    expect(sent.filter((t) => t === 'caughtUp')).toHaveLength(1)
+    expect(h.onError).not.toHaveBeenCalled()
+    expect(errors).toEqual([])
+    expect(connection.a.state()).toBe('open')
+    expect(connection.b.state()).toBe('open')
+  })
+  it('fails the session when the resync request cannot be sent to a lagging subscriber', async () => {
+    const p = await profiles(),
+      connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce())
+    const closed: unknown[] = []
+    connection.a.onClosed((error) => closed.push(error))
+    vi.spyOn(
+      connection.a as unknown as { sendRecords: () => Promise<void> },
+      'sendRecords'
+    ).mockImplementationOnce(() => new Promise<void>(() => undefined))
+    vi.spyOn(
+      connection.a as unknown as { send: (header: { t: string }) => Promise<void> },
+      'send'
+    ).mockImplementation(async (header) => {
+      if (header.t === 'snapshotRequired') throw new NetError('rate_limited')
+    })
+    const body = new Uint8Array(8 * 1024 * 1024)
+    for (let seq = 1; seq <= 8; seq++)
+      void connection.a
+        .publishRecord(p.stream.id, { ...oversizedRecord(seq, 0), envelope: body })
+        .catch(() => undefined)
+    // A swallowed send would leave the subscriber attached and silent; the session reconnects instead.
+    await vi.waitFor(() => expect(connection.a.state()).toBe('closed'))
+    // A carrier failure, so a supervised peer reconnects instead of treating it as terminal.
+    expect(closed).toHaveLength(1)
+    expect(closed[0]).toMatchObject({ code: 'route_unreachable' })
+  })
+  it('keeps the code of a resync send failure that is not a full carrier', async () => {
+    const p = await profiles(),
+      connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce())
+    const closed: unknown[] = []
+    connection.a.onClosed((error) => closed.push(error))
+    vi.spyOn(
+      connection.a as unknown as { sendRecords: () => Promise<void> },
+      'sendRecords'
+    ).mockImplementationOnce(() => new Promise<void>(() => undefined))
+    vi.spyOn(
+      connection.a as unknown as { send: (header: { t: string }) => Promise<void> },
+      'send'
+    ).mockImplementation(async (header) => {
+      if (header.t === 'snapshotRequired') throw new NetError('bad_request')
+    })
+    const body = new Uint8Array(8 * 1024 * 1024)
+    for (let seq = 1; seq <= 8; seq++)
+      void connection.a
+        .publishRecord(p.stream.id, { ...oversizedRecord(seq, 0), envelope: body })
+        .catch(() => undefined)
+    await vi.waitFor(() => expect(connection.a.state()).toBe('closed'))
+    // Only a full carrier becomes a retryable carrier failure.
+    expect(closed).toHaveLength(1)
+    expect(closed[0]).toMatchObject({ code: 'bad_request' })
   })
   it('accepts a valid 500-record wire snapshot through bounded storage appends', async () => {
     const p = await profiles()
