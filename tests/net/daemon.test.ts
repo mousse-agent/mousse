@@ -71,7 +71,8 @@ it('enrolls using pasted CLI stdin between actual daemon processes, restarts eac
     await cli(homes[0], ['bridge', 'revoke', joined.node])
     await until(
       () => cli(homes[1], ['bridge', 'nodes']),
-      (rows) => rows.nodes.some((n: any) => n.node === joined.node && n.revoked)
+      // A revoked device leaves the roster; it is no longer listed as an active node.
+      (rows) => !rows.nodes.some((n: any) => n.node === joined.node && !n.revoked)
     )
     expect(
       (await cli(homes[1], ['net', 'status'])).peers.every((p: any) => p.state !== 'open')
