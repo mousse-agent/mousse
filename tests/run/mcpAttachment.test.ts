@@ -49,7 +49,7 @@ const input = (overrides: Partial<TurnInput> = {}): TurnInput => ({
 const control = { drainSteer: () => undefined, heartbeat: () => undefined }
 
 describe('Claude subscription attachment', () => {
-  it('the Claude adapter passes the server only when host.mcp is set and appends the project AGENTS.md to the system prompt, rereading it each turn', async () => {
+  it('the Claude adapter passes the server and its guidance only when host.mcp is set, and leaves AGENTS.md to Claude Code', async () => {
     const seen: ClaudeSubscriptionChatInput[] = []
     const standalone = tempHome('mousse-claude-standalone-')
     writeFileSync(join(standalone, 'AGENTS.md'), 'STANDALONE RULES')
@@ -70,13 +70,11 @@ describe('Claude subscription attachment', () => {
     // The server is passed through only when host.mcp is set.
     expect(seen[0].mcp).toEqual(MCP)
     for (const chat of seen.slice(1)) expect(chat.mcp).toBeNull()
-    expect(seen[0].systemPromptAppend).toBe(
-      `${mousseOrchestrationInstructions()}\n\n## Project instructions (AGENTS.md)\nPROJECT RULES`
-    )
-    expect(seen[1].systemPromptAppend).toBe('## Project instructions (AGENTS.md)\nUPDATED RULES')
-    expect(seen[2].systemPromptAppend).toBeUndefined()
-    // A projectless thread runs in Mousse's own standalone workspace, which is not a project.
-    expect(seen[3]).toMatchObject({ cwd: standalone, systemPromptAppend: undefined })
+    // Claude Code loads the project's instruction files itself; Mousse adds only its own guidance.
+    expect(seen[0].systemPromptAppend).toBe(mousseOrchestrationInstructions())
+    for (const chat of seen.slice(1)) expect(chat.systemPromptAppend).toBeUndefined()
+    // A projectless thread runs in Mousse's own standalone workspace.
+    expect(seen[3]).toMatchObject({ cwd: standalone })
   })
 
   it('the adapter resolves the user\'s MCP servers and skills for the turn\'s project', async () => {
@@ -110,7 +108,7 @@ describe('Claude subscription attachment', () => {
     chmodSync(binary, 0o755)
     const directory = join(home, 'providers', 'claude-subscription')
     mkdirSync(directory, { recursive: true })
-    writeFileSync(join(directory, 'settings.json'), JSON.stringify({ signedIn: true, binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
+    writeFileSync(join(directory, 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
     const questions = new UserQuestionService()
     const runAuth = vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
     return { home, questions, service: new ClaudeSubscriptionProviderService(home, questions, { query, runAuth }) }
@@ -132,15 +130,16 @@ describe('Claude subscription attachment', () => {
     expect(options[0].mcpServers).toEqual({
       mousse: { type: 'http', url: MCP.url, headers: { Authorization: 'Bearer tok-secret' }, timeout: 3_600_000 }
     })
-    expect(options[0].systemPrompt).toBe('GUIDE')
-    expect(options[0]).toMatchObject({ settingSources: [], extraArgs: { 'strict-mcp-config': null } })
+    expect(options[0].systemPrompt).toEqual({ type: 'preset', preset: 'claude_code', append: 'GUIDE' })
+    expect(options[0]).not.toHaveProperty('settingSources')
+    expect(options[0].extraArgs?.['strict-mcp-config']).toBeUndefined()
     expect(decisions[0]).toMatchObject({ behavior: 'allow' })
     expect(ask).toHaveBeenCalledTimes(1)
     // Without the server the same name is an ordinary tool and goes to the user.
     expect(ask.mock.calls[0][0][0].prompt).toMatch(/mcp__mousse__delegate_task/)
     expect(decisions[1]).toMatchObject({ behavior: 'deny' })
     expect(options[1].mcpServers).toEqual({})
-    expect(options[1].systemPrompt).toBeUndefined()
+    expect(options[1].systemPrompt).toEqual({ type: 'preset', preset: 'claude_code' })
     expect(claudeMcpServers(null)).toEqual({})
   })
 
@@ -170,7 +169,8 @@ describe('Claude subscription attachment', () => {
     })
     expect(options[0].env).toMatchObject({ MOUSSE_MCP_VALUE_0: 'resolved-key' })
     expect(options[0].plugins).toEqual([{ type: 'local', path: '/generated/plugin' }])
-    expect(options[0]).toMatchObject({ settingSources: [], extraArgs: { 'strict-mcp-config': null } })
+    expect(options[0]).not.toHaveProperty('settingSources')
+    expect(options[0].extraArgs?.['strict-mcp-config']).toBeUndefined()
     const hook = options[0].hooks!.PreToolUse![0].hooks[0]
     const call = (tool_name: string) => hook(
       { hook_event_name: 'PreToolUse', tool_name, tool_input: {}, tool_use_id: 'u' } as never, 'u', { signal: new AbortController().signal }

@@ -6,7 +6,6 @@ import type {
   SettingsOptions
 } from '../../../shared/settings'
 import type {
-  ClaudeLoginPolicy,
   ClaudeSubscriptionStatus,
   CliProviderConfig,
   CliProviderConfigPatch,
@@ -181,11 +180,6 @@ export function ProvidersSettings({
     await refreshProviderData()
   }
 
-  const setClaudePolicy = async (policy: ClaudeLoginPolicy) => {
-    setClaudeStatus(await window.mousse.providers.claudeSetLoginPolicy(policy))
-    await refreshAll()
-  }
-
   /** A rejected path throws before the CLI is turned on, so the add step can show why. */
   const addCli = async (cli: CliProviderDefinition, binaryPath?: string) => {
     if (binaryPath) {
@@ -313,14 +307,12 @@ export function ProvidersSettings({
                     })}
                     config={config}
                     models={modelsFor(cli.id, cli.providerId)}
-                    claudeStatus={cli.id === 'claude' ? claudeStatus : undefined}
                     onToggle={toggleCli(cli)}
                     onRemove={removeCli(cli)}
                     onSaveConfig={saveCliConfig(cli)}
                     onRefreshModels={refreshModels(cli.providerId)}
                     onSignIn={signInCli(cli)}
                     onRecheck={recheckCli(cli)}
-                    onSetLoginPolicy={setClaudePolicy}
                   />
                 )
               })}

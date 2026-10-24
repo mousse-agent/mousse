@@ -1858,14 +1858,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('providers.changed', { providers })
       return { config, providers }
     }
-    case 'providers.claudeSetLoginPolicy': {
-      const p = isObject(params) ? params : {}
-      if (p.policy !== 'cli' && p.policy !== 'isolated') throw new Error('policy must be cli or isolated')
-      const status = await ctx.mms.claudeSubscription.setLoginPolicy(p.policy)
-      const providers = ctx.mms.providerInstances.configuredProviders()
-      ctx.emitEvent?.('providers.changed', { providers })
-      return { status, providers }
-    }
     case 'workspace.getStatus': {
       const p = isObject(params) ? params : {}
       const lookup = threadLookupContext(ctx, p)

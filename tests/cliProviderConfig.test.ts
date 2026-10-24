@@ -139,7 +139,7 @@ describe('Claude Subscription CLI config', () => {
     mkdirSync(directory, { recursive: true })
     writeFileSync(
       join(directory, 'settings.json'),
-      JSON.stringify({ signedIn: true, binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] })
+      JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] })
     )
     const captured: Options[] = []
     const query = (input: { options: Options }) => {
@@ -178,13 +178,13 @@ describe('Claude Subscription CLI config', () => {
       binaryPath: other,
       args: ['--add-dir', '/extra', '--verbose'],
       env: { HTTPS_PROXY: 'http://proxy', CLAUDE_CONFIG_DIR: '/user/override' },
-      signedIn: true
+      loginPolicy: 'cli'
     })
 
     await service.refreshModels(home)
     const options = captured.at(-1)!
     expect(options.pathToClaudeCodeExecutable).toBe(other)
-    expect(options.extraArgs).toEqual({ 'add-dir': '/extra', verbose: null, 'strict-mcp-config': null })
+    expect(options.extraArgs).toEqual({ 'add-dir': '/extra', verbose: null })
     // User variables apply after Mousse's own environment, so they win.
     expect(options.env?.HTTPS_PROXY).toBe('http://proxy')
     expect(options.env?.CLAUDE_CONFIG_DIR).toBe('/user/override')

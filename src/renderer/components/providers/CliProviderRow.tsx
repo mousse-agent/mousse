@@ -1,13 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { LlmModelOption } from '../../../shared/settings'
-import type {
-  ClaudeLoginPolicy,
-  ClaudeSubscriptionStatus,
-  CliProviderConfig,
-  CliProviderConfigPatch
-} from '../../../shared/providerAuth'
+import type { CliProviderConfig, CliProviderConfigPatch } from '../../../shared/providerAuth'
 import { Plus, RotateCcw, X } from '../../lib/icons'
-import { Segmented, SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
+import { SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
 import { formatArgs, parseArgs, type CliProviderDefinition } from './cliProviders'
 import {
   BrowseButton,
@@ -21,11 +16,6 @@ import {
   type HealthState
 } from './parts'
 
-const LOGIN_POLICIES = [
-  { value: 'cli', label: 'Share terminal sign-in' },
-  { value: 'isolated', label: 'Separate sign-in' }
-] as const satisfies ReadonlyArray<{ value: ClaudeLoginPolicy; label: string }>
-
 export interface CliProviderRowProps {
   cli: CliProviderDefinition
   enabled: boolean
@@ -35,8 +25,6 @@ export interface CliProviderRowProps {
   /** Undefined until loaded. */
   config?: CliProviderConfig
   models: LlmModelOption[]
-  /** Claude only: the sign-in choice. */
-  claudeStatus?: ClaudeSubscriptionStatus | null
   onToggle: (enabled: boolean) => Promise<void>
   onRemove: () => Promise<void>
   /** Rejects with the daemon's validation message, shown under the field. */
@@ -44,7 +32,6 @@ export interface CliProviderRowProps {
   onRefreshModels: () => Promise<void>
   onSignIn: () => Promise<void>
   onRecheck: () => Promise<void>
-  onSetLoginPolicy: (policy: ClaudeLoginPolicy) => Promise<void>
 }
 
 export function CliProviderRow(props: CliProviderRowProps) {
@@ -78,13 +65,11 @@ function CliDetails({
   state,
   config,
   models,
-  claudeStatus,
   onRemove,
   onSaveConfig,
   onRefreshModels,
   onSignIn,
-  onRecheck,
-  onSetLoginPolicy
+  onRecheck
 }: CliProviderRowProps) {
   const signIn = useAsyncAction()
   const removal = useAsyncAction()
@@ -111,16 +96,6 @@ function CliDetails({
               <button type="button" className="settings-btn" disabled={signIn.busy !== null} onClick={() => void signIn.run('signin', onSignIn)}>
                 Sign in
               </button>
-            )}
-            {cli.id === 'claude' && claudeStatus && (
-              <Segmented
-                ariaLabel="Claude sign-in"
-                // Unresolved policy (null) shows neither segment selected.
-                value={claudeStatus.loginPolicy as ClaudeLoginPolicy}
-                options={LOGIN_POLICIES}
-                disabled={signIn.busy !== null}
-                onChange={(policy) => void signIn.run('policy', () => onSetLoginPolicy(policy))}
-              />
             )}
           </>
         }
