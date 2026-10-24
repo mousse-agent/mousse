@@ -462,6 +462,12 @@ describe('dialog stacking', () => {
     expect(focusAfterClose(true, gone, next, inherited)).toBe(next)
   })
 
+  it('returns to the inherited opener when the dialog opened with nothing focused', () => {
+    const inherited = { isConnected: true } as HTMLElement
+    expect(focusAfterClose(true, null, undefined, inherited)).toBe(inherited)
+    expect(focusAfterClose(true, null, undefined)).toBeNull()
+  })
+
   it('returns focus into the dialog that is uncovered when the opener sits outside it', () => {
     const opener = { isConnected: true } as HTMLElement
     const insideParent = { isConnected: true } as HTMLElement
