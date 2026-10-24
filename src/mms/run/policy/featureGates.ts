@@ -44,8 +44,11 @@ export function mcpAttachable(caps: ProviderCapabilities): boolean {
 
 /** A delegation the target cannot honour; `delegate_task` returns it instead of starting a child. */
 export interface SubagentRefusal {
-  /** `provider_unsupported_for_subagents`: no child at all; `shared_unsupported_for_provider`: only a `shared` one, `isolated` works. */
-  code: 'provider_unsupported_for_subagents' | 'shared_unsupported_for_provider'
+  /**
+   * `shared_unsupported_for_provider`: the target cannot run a `shared` child (use `isolated`).
+   * `read_only_caller_requires_shared`: the caller is itself read-only, so its children must be too.
+   */
+  code: 'shared_unsupported_for_provider' | 'read_only_caller_requires_shared'
   message: string
 }
 
@@ -56,14 +59,13 @@ export interface ChildPreflightContext {
 }
 
 /**
- * Issue #142: a delegated child must keep to its policy, so a provider that cannot hold it to
- * read-only access (and cannot switch off its own native subagents) is refused as a target. `label`
- * names the provider for the message.
+ * Issue #142: a `shared` child must be read-only, so a provider that cannot hold a child to that (it
+ * rejects plan mode) is refused as the target of one. `label` names the provider for the message.
  */
-export function subagentTargetRefusal(caps: ProviderCapabilities, label: string): SubagentRefusal | null {
-  if (caps.childPolicy === 'enforced') return null
+export function subagentTargetRefusal(caps: ProviderCapabilities, label: string, workspace: 'shared' | 'isolated'): SubagentRefusal | null {
+  if (caps.childPolicy === 'enforced' || workspace !== 'shared') return null
   return {
-    code: 'provider_unsupported_for_subagents',
-    message: `${label} cannot run as a subagent: Mousse cannot keep it read-only or switch off its own native subagents. Choose another provider or model for this task.`
+    code: 'shared_unsupported_for_provider',
+    message: `${label} cannot run a read-only (shared) subagent: Mousse cannot keep it read-only. Use workspace "isolated", or choose another provider or model for this task.`
   }
 }

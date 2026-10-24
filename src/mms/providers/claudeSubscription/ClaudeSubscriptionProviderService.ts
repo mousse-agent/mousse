@@ -967,8 +967,9 @@ export class ClaudeSubscriptionProviderService {
           // tool it reveals is still checked here (or by the user's rules) when it is called.
           if (input.mcp && toolName === 'ToolSearch')
             return { behavior: 'allow', updatedInput: args }
+          // (A read-only child's own allowlist is `claudeChildToolDenial`, above.)
           if (
-            restricted &&
+            planTurn &&
             !['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'].includes(toolName)
           )
             return {

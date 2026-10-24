@@ -26,16 +26,18 @@ const MOUSSE = { url: 'http://127.0.0.1:9/mcp', token: 'tok' }
 
 describe('policy table: permission decisions', () => {
   const READ_ONLY_BUILTINS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion', 'ToolSearch']
-  const MOUSSE_READS = ['mcp__mousse__thread_read', 'mcp__mousse__queue_list', 'mcp__mousse__ask_user', 'mcp__mousse__present_plan']
-  const MOUSSE_WRITES = ['mcp__mousse__queue_enqueue', 'mcp__mousse__thread_fork', 'mcp__mousse__thread_merge_back', 'mcp__mousse__delegate_task', 'mcp__mousse__integrate_delegation', 'mcp__mousse__create_task']
+  // A read-only subagent may start (read-only) subagents; `delegate_task` itself limits them to read-only ones.
+  const MOUSSE_READS = ['mcp__mousse__thread_read', 'mcp__mousse__queue_list', 'mcp__mousse__ask_user', 'mcp__mousse__present_plan', 'mcp__mousse__delegate_task', 'mcp__mousse__task_status', 'mcp__mousse__task_cancel', 'mcp__mousse__list_delegations']
+  const MOUSSE_WRITES = ['mcp__mousse__queue_enqueue', 'mcp__mousse__thread_fork', 'mcp__mousse__thread_merge_back', 'mcp__mousse__integrate_delegation', 'mcp__mousse__create_task']
   const WRITERS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'PowerShell', 'BashOutput']
   const EXTERNAL = ['mcp__userserver__lookup', 'mcp__oauthserver__post']
   const NATIVE_SUBAGENT = ['Agent', 'Task']
 
   it.each([
     ['not a subagent', undefined, [...READ_ONLY_BUILTINS, ...MOUSSE_READS, ...MOUSSE_WRITES, ...WRITERS, ...EXTERNAL, ...NATIVE_SUBAGENT], []],
-    ['isolated child', ISOLATED, [...READ_ONLY_BUILTINS, ...MOUSSE_READS, ...MOUSSE_WRITES, ...WRITERS, ...EXTERNAL], NATIVE_SUBAGENT],
-    ['shared child', SHARED, [...READ_ONLY_BUILTINS, ...MOUSSE_READS], [...MOUSSE_WRITES, ...WRITERS, ...EXTERNAL, ...NATIVE_SUBAGENT]]
+    ['isolated child', ISOLATED, [...READ_ONLY_BUILTINS, ...MOUSSE_READS, ...MOUSSE_WRITES, ...WRITERS, ...EXTERNAL, ...NATIVE_SUBAGENT], []],
+    // A subagent may start subagents, so Claude's own subagent tool stays available; its calls pass the same hook.
+    ['shared child', SHARED, [...READ_ONLY_BUILTINS, ...MOUSSE_READS, ...NATIVE_SUBAGENT], [...MOUSSE_WRITES, ...WRITERS, ...EXTERNAL]]
   ])('Claude tools for a %s', (_name, child, allowed, denied) => {
     for (const tool of allowed) expect(claudeChildToolDenial(child, tool), tool).toBeUndefined()
     for (const tool of denied) expect(claudeChildToolDenial(child, tool), tool).toEqual(expect.any(String))
@@ -60,7 +62,7 @@ describe('Claude Subscription children', () => {
   })
 
   const result = { type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: 'vendor-session' }
-  const PROBES = ['Bash', 'Write', 'Agent', 'Task', 'mcp__userserver__lookup', 'Read', 'mcp__mousse__thread_read', 'mcp__mousse__thread_fork']
+  const PROBES = ['Bash', 'Write', 'Agent', 'Task', 'mcp__userserver__lookup', 'Read', 'mcp__mousse__thread_read', 'mcp__mousse__thread_fork', 'mcp__mousse__delegate_task', 'mcp__mousse__integrate_delegation']
   /** What the PreToolUse hook and `canUseTool` said to each probe, asked while the turn runs (its controller aborts after). */
   const seen: Array<{ hook: Record<string, string>; canUse: Record<string, string> }> = []
   const fakeQuery = (options: Options) => {
@@ -116,7 +118,7 @@ describe('Claude Subscription children', () => {
     expect(Object.keys(turn.mcpServers ?? {})).toEqual(expect.arrayContaining(['mousse', 'userserver', 'oauthserver']))
   }
 
-  it('a shared child keeps the default permission mode and is denied writes, external MCP tools and native subagents, first and resumed', async () => {
+  it('a shared child keeps the default permission mode and is denied writes, shell, external MCP tools and thread-writing tools, first and resumed', async () => {
     const { service, options, input } = fixture()
     await service.chat(input({ child: SHARED }))
     service.commitConversation('child', 'history')
@@ -128,8 +130,9 @@ describe('Claude Subscription children', () => {
       expect(turn).not.toHaveProperty('allowDangerouslySkipPermissions')
       untouched(turn)
     }
-    const hook = { Bash: 'deny', Write: 'deny', Agent: 'deny', Task: 'deny', mcp__userserver__lookup: 'deny', mcp__mousse__thread_fork: 'deny', Read: 'ask', mcp__mousse__thread_read: 'ask' }
-    const canUse = { Bash: 'deny', Write: 'deny', Agent: 'deny', Task: 'deny', mcp__userserver__lookup: 'deny', mcp__mousse__thread_fork: 'deny', Read: 'allow', mcp__mousse__thread_read: 'allow' }
+    // Agent and Task (a subagent starting its own subagents) and delegate_task go to the callback like any allowed call.
+    const hook = { Bash: 'deny', Write: 'deny', Agent: 'ask', Task: 'ask', mcp__userserver__lookup: 'deny', mcp__mousse__thread_fork: 'deny', mcp__mousse__integrate_delegation: 'deny', Read: 'ask', mcp__mousse__thread_read: 'ask', mcp__mousse__delegate_task: 'ask' }
+    const canUse = { Bash: 'deny', Write: 'deny', Agent: 'allow', Task: 'allow', mcp__userserver__lookup: 'deny', mcp__mousse__thread_fork: 'deny', mcp__mousse__integrate_delegation: 'deny', Read: 'allow', mcp__mousse__thread_read: 'allow', mcp__mousse__delegate_task: 'allow' }
     expect(seen).toEqual([{ hook, canUse }, { hook, canUse }])
   })
 
@@ -152,7 +155,7 @@ describe('Claude Subscription children', () => {
     for (const tool of ['Bash', 'Write', 'mcp__userserver__lookup', 'mcp__mousse__thread_fork']) expect(sharedSeen.hook[tool], tool).toBe('deny')
   })
 
-  it('an isolated child keeps write access and every MCP server but is denied the native subagent tool, first and resumed', async () => {
+  it('an isolated child keeps write access, every MCP server and the native subagent tool, first and resumed', async () => {
     const { service, options, input } = fixture()
     await service.chat(input({ child: ISOLATED }))
     service.commitConversation('child', 'history')
@@ -161,7 +164,7 @@ describe('Claude Subscription children', () => {
       expect(turn).toMatchObject({ permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true })
       untouched(turn)
     }
-    const hook = { Agent: 'deny', Task: 'deny', Bash: 'none', Write: 'none', mcp__userserver__lookup: 'none', Read: 'none', mcp__mousse__thread_read: 'none', mcp__mousse__thread_fork: 'none' }
+    const hook = { Agent: 'none', Task: 'none', Bash: 'none', Write: 'none', mcp__userserver__lookup: 'none', Read: 'none', mcp__mousse__thread_read: 'none', mcp__mousse__thread_fork: 'none', mcp__mousse__delegate_task: 'none', mcp__mousse__integrate_delegation: 'none' }
     expect(seen).toEqual([{ hook, canUse: {} }, { hook, canUse: {} }])
   })
 

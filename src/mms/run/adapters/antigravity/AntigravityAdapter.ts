@@ -17,9 +17,9 @@ import { promptStreams, runtimeToolEvent, withAppletGuidance } from '../shared/p
 export type AntigravityClient = Pick<AntigravityProviderService, 'chat' | 'commitConversation' | 'configured'>
 
 /**
- * `childPolicy: 'unenforceable'`: the ACP agent rejects plan mode, so a child cannot be held to
- * read-only, and its native `start_subagent` has no off switch (the provider service only observes
- * it), so a child could start subagents Mousse cannot see or stop.
+ * `childPolicy: 'isolated_only'`: the ACP agent rejects plan mode, so a `shared` (read-only) child
+ * cannot be held to read-only. An `isolated` child runs; any native `start_subagent` it makes is only
+ * observed (the provider service reports it), not controlled.
  */
 export const ANTIGRAVITY_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'interrupt_restart',
@@ -30,7 +30,7 @@ export const ANTIGRAVITY_CAPABILITIES: ProviderCapabilities = Object.freeze({
   containment: 'weak',
   historyInjection: 'prompt',
   mcp: true,
-  childPolicy: 'unenforceable'
+  childPolicy: 'isolated_only'
 })
 
 /**

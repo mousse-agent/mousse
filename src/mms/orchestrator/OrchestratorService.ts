@@ -1501,7 +1501,7 @@ export class OrchestratorService extends EventEmitter {
       return null
     }
     // The static check of the adapter's capabilities, then the adapter's look at the user's setup.
-    const refusal = subagentTargetRefusal(target.adapter.capabilities, target.entry.driver)
+    const refusal = subagentTargetRefusal(target.adapter.capabilities, target.entry.driver, workspace)
       ?? await target.adapter.childPreflight?.({ workspace, cwd: this.sharedWorkspaceOf(parentThreadId)?.path ?? null }) ?? null
     return refusal ? { started: false as const, ...refusal } : null
   }
@@ -1852,6 +1852,8 @@ export class OrchestratorService extends EventEmitter {
     const delegateTask = (input: DelegateTaskInput, call: DelegationToolCall) =>
       this.delegateTask(parentThreadId, parentRunId, input, call, callerCeiling)
     const integrateDelegation = async (delegationId: string, call: DelegationToolCall) => {
+      if (this.isReadOnlyChild(parentThreadId))
+        throw new McpToolError('mousse_read_only', 'Integration writes the workspace; a read-only subagent cannot integrate.')
       if (callerCeiling === 'plan')
         throw new McpToolError('mousse_ceiling_exceeded', 'Integration writes the workspace; a plan ceiling cannot integrate.')
       return this.integrateDelegation(parentThreadId, parentRunId, delegationId, call)
@@ -1938,6 +1940,9 @@ export class OrchestratorService extends EventEmitter {
     const instanceId = requested
       ? this.adapters.resolve(input.instanceId?.trim() || this.adapters.instances.instanceIdForLegacyProvider(requested)).instanceId
       : undefined
+    // A read-only subagent may start subagents, but only read-only ones: authority only narrows down the tree.
+    if (input.workspace !== 'shared' && this.isReadOnlyChild(parentThreadId))
+      return { started: false as const, code: 'read_only_caller_requires_shared' as const, message: 'You are a read-only subagent, so your own subagents must be read-only too: start them with workspace "shared" and role "research" or "review".' }
     const refusal = await this.delegationRefusal(parentThreadId, instanceId, input.workspace)
     if (refusal) return refusal
     const accepted = await engine.requestDelegation({
@@ -4551,8 +4556,7 @@ export class OrchestratorService extends EventEmitter {
             return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
           } : undefined,
           browser: browserExecution,
-          // A read-only child starts no tasks: a delegated writer would escape its policy.
-          delegation: engineRunId && this.effectsEnabled() && !session.sharedWorkspace ? this.delegationTools(session, engineRunId, this.modeCeilingFor(session.threadId, mode)) : undefined,
+          delegation: engineRunId && this.effectsEnabled() ? this.delegationTools(session, engineRunId, this.modeCeilingFor(session.threadId, mode)) : undefined,
           toolAccess: session.sharedWorkspace
             ? createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path)
             : turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,

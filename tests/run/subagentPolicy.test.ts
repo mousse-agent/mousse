@@ -56,12 +56,17 @@ class ScriptedAdapter implements ProviderAdapter {
 
 describe('subagent target preflight table', () => {
   it.each([
-    ['pi', PI_LOOP_CAPABILITIES, null],
-    ['claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, null],
-    ['codex', CODEX_CAPABILITIES, null],
-    ['antigravity', ANTIGRAVITY_CAPABILITIES, 'provider_unsupported_for_subagents']
-  ] as const)('%s', (driver, capabilities, code) => {
-    expect(subagentTargetRefusal(capabilities, driver)?.code ?? null).toBe(code)
+    ['pi', PI_LOOP_CAPABILITIES, 'shared', null],
+    ['pi', PI_LOOP_CAPABILITIES, 'isolated', null],
+    ['claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, 'shared', null],
+    ['claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, 'isolated', null],
+    ['codex', CODEX_CAPABILITIES, 'shared', null],
+    ['codex', CODEX_CAPABILITIES, 'isolated', null],
+    // Antigravity rejects plan mode, so it cannot be read-only; an isolated child is fine.
+    ['antigravity', ANTIGRAVITY_CAPABILITIES, 'shared', 'shared_unsupported_for_provider'],
+    ['antigravity', ANTIGRAVITY_CAPABILITIES, 'isolated', null]
+  ] as const)('%s, %s child', (driver, capabilities, workspace, code) => {
+    expect(subagentTargetRefusal(capabilities, driver, workspace)?.code ?? null).toBe(code)
   })
 })
 
@@ -79,19 +84,19 @@ describe('delegated child policy', () => {
   })
 
   /** A pi parent in a project; `onParent` runs inside its first turn with the delegation tools. */
-  const daemon = (onParent: (delegation: DelegationToolHost, threadId: string) => Promise<void>, onChild: Script = async () => 'Looked.') => {
+  const daemon = (onParent: (delegation: DelegationToolHost, threadId: string) => Promise<void>, onChild: Script = async () => 'Looked.', onPiChild?: Script) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-subagent-policy-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
     const projectDir = join(home, 'project')
     mkdirSync(projectDir)
     const parent = new ScriptedAdapter('pi', PI_LOOP_CAPABILITIES, async (input, host) => {
-      if (input.prompt !== 'Delegate it') return 'unexpected pi turn'
+      if (input.prompt !== 'Delegate it') return onPiChild ? onPiChild(input, host) : 'unexpected pi turn'
       await onParent(host.tools.delegation!, input.threadId)
       return 'Delegated.'
     })
     const claude = new ScriptedAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, onChild)
-    const antigravity = new ScriptedAdapter('antigravity', ANTIGRAVITY_CAPABILITIES, async () => 'should never run')
+    const antigravity = new ScriptedAdapter('antigravity', ANTIGRAVITY_CAPABILITIES, async () => 'Looked.')
     const d = phase6Daemon(home, [parent, claude, antigravity])
     stops.push(d.stop)
     const project = d.projects.openProject(projectDir)
@@ -102,32 +107,42 @@ describe('delegated child policy', () => {
   const delegate = (delegation: DelegationToolHost, patch: Partial<DelegateTaskInput>, id: string) =>
     delegation.delegateTask({ prompt: 'Look at it', workspace: 'shared', role: 'research', instanceId: 'claude', ...patch }, { toolCallId: id }) as Promise<Record<string, unknown>>
 
-  it.each([
-    ['shared', { workspace: 'shared', role: 'research' }],
-    ['isolated', { workspace: 'isolated', role: 'implement' }]
-  ] as const)('refuses an Antigravity target for a %s child with a value, creating no thread', async (_workspace, patch) => {
+  it('refuses an Antigravity target for a shared child with a value, creating no thread', async () => {
     const outcomes: Record<string, unknown> = {}
     const { d, thread, antigravity } = daemon(async (delegation) => {
-      outcomes.explicit = await delegate(delegation, { ...patch, instanceId: 'antigravity' }, 'explicit')
+      outcomes.explicit = await delegate(delegation, { workspace: 'shared', role: 'research', instanceId: 'antigravity' }, 'explicit')
     })
     await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
-    expect(outcomes.explicit).toMatchObject({ started: false, code: 'provider_unsupported_for_subagents', message: expect.stringContaining('antigravity') })
+    expect(outcomes.explicit).toMatchObject({ started: false, code: 'shared_unsupported_for_provider', message: expect.stringContaining('"isolated"') })
     expect(d.engine.delegations.listForParentThread(thread.id)).toEqual([])
     expect(d.store.listAllThreads().map((entry) => entry.id)).toEqual([thread.id])
     expect(antigravity.turns).toEqual([])
   }, 30_000)
 
+  it('starts an isolated child on Antigravity', async () => {
+    const outcomes: Record<string, Record<string, unknown>> = {}
+    const { d, thread, antigravity } = daemon(async (delegation) => {
+      outcomes.isolated = await delegate(delegation, { workspace: 'isolated', role: 'implement', instanceId: 'antigravity' }, 'isolated')
+    })
+    await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
+    expect(outcomes.isolated.started).not.toBe(false)
+    await waitFor(() => d.engine.getRun(outcomes.isolated.childRunId as string)?.status === 'completed', 'the child run')
+    expect(antigravity.turns).toHaveLength(1)
+  }, 30_000)
+
   it('refuses a child that would inherit an Antigravity parent selection', async () => {
     const { d, thread } = daemon(async () => undefined)
-    const refusalFor = (instanceId?: string) =>
-      (d.orch as unknown as { delegationRefusal(parent: string, instanceId: string | undefined, workspace: 'shared' | 'isolated'): Promise<unknown> }).delegationRefusal(thread.id, instanceId, 'shared')
+    const refusalFor = (instanceId?: string, workspace: 'shared' | 'isolated' = 'shared') =>
+      (d.orch as unknown as { delegationRefusal(parent: string, instanceId: string | undefined, workspace: 'shared' | 'isolated'): Promise<unknown> }).delegationRefusal(thread.id, instanceId, workspace)
     d.orch.setThreadModelOverride(thread.id, { instanceId: 'antigravity', llmProvider: 'antigravity', model: 'agent' })
-    expect(await refusalFor()).toMatchObject({ started: false, code: 'provider_unsupported_for_subagents' })
+    expect(await refusalFor()).toMatchObject({ started: false, code: 'shared_unsupported_for_provider' })
+    expect(await refusalFor(undefined, 'isolated')).toBeNull()
     // An explicit instance wins over the parent's selection, in both directions.
     expect(await refusalFor('claude')).toBeNull()
     d.orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
     expect(await refusalFor()).toBeNull()
-    expect(await refusalFor('antigravity')).toMatchObject({ code: 'provider_unsupported_for_subagents' })
+    expect(await refusalFor('antigravity')).toMatchObject({ code: 'shared_unsupported_for_provider' })
+    expect(await refusalFor('antigravity', 'isolated')).toBeNull()
   })
 
   it('the read-only Mousse tool list runtimes use matches what the registry lets a read-only child call', () => {
@@ -212,7 +227,7 @@ describe('delegated child policy', () => {
     expect(claude.turns.every((turn) => turn.input.threadId !== thread.id)).toBe(true)
   }, 30_000)
 
-  it('a shared child gets no delegation tools; an isolated one does', async () => {
+  it('shared and isolated children both get the delegation tools', async () => {
     const started: Record<string, { childThreadId: string; childRunId: string }> = {}
     const { d, claude, thread } = daemon(async (delegation) => {
       started.shared = await delegate(delegation, { workspace: 'shared', role: 'research' }, 'shared') as never
@@ -221,11 +236,11 @@ describe('delegated child policy', () => {
     await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
     for (const child of Object.values(started)) await waitFor(() => d.engine.getRun(child.childRunId)?.status === 'completed', 'a child run')
     const turn = (threadId: string) => claude.turns.find((entry) => entry.input.threadId === threadId)!
-    expect(turn(started.shared.childThreadId).delegation).toBeUndefined()
+    expect(turn(started.shared.childThreadId).delegation).toBeDefined()
     expect(turn(started.isolated.childThreadId).delegation).toBeDefined()
   }, 30_000)
 
-  it('a shared pi child can only read: no write, shell, thread or delegation tools, first turn and resumed', async () => {
+  it('a shared pi child can read and start subagents, but not write, run a shell, write threads or integrate, first turn and resumed', async () => {
     let started: { childThreadId: string; childRunId: string } | undefined
     const { d, parent, thread } = daemon(async (delegation) => {
       started = await delegate(delegation, { workspace: 'shared', role: 'research', instanceId: 'pi:openai' }, 'pi-child') as never
@@ -238,11 +253,41 @@ describe('delegated child policy', () => {
     expect(childTurns).toHaveLength(2)
     for (const turn of childTurns) {
       expect(turn.input.child).toEqual({ readOnly: true })
-      expect(turn.delegation).toBeUndefined()
-      for (const tool of ['write_file', 'edit_file', 'bash', 'delegate_task', 'integrate_delegation', 'create_task', 'queue_enqueue', 'thread_fork', 'thread_merge_back'])
+      expect(turn.delegation).toBeDefined()
+      for (const tool of ['write_file', 'edit_file', 'bash', 'integrate_delegation', 'create_task', 'queue_enqueue', 'thread_fork', 'thread_merge_back'])
         expect(turn.toolAccess?.allows(tool), tool).toBe(false)
-      expect(turn.toolAccess?.allows('read_file')).toBe(true)
+      for (const tool of ['read_file', 'delegate_task', 'task_status', 'task_cancel', 'list_delegations']) expect(turn.toolAccess?.allows(tool), tool).toBe(true)
     }
+  }, 30_000)
+
+  it('a read-only subagent may start only read-only subagents, through the delegation host and a nested start', async () => {
+    let child: { childThreadId: string; childRunId: string } | undefined
+    const nested: Record<string, Record<string, unknown>> = {}
+    const { d, thread } = daemon(
+      async (delegation) => {
+        child = await delegate(delegation, { workspace: 'shared', role: 'research', instanceId: 'pi:openai' }, 'pi-child') as never
+      },
+      async () => 'Looked.',
+      async (input, host) => {
+        if (input.prompt !== 'Nest') return 'Looked.'
+        const delegation = host.tools.delegation!
+        nested.shared = await delegate(delegation, { workspace: 'shared', role: 'review', instanceId: 'claude' }, 'nest-shared')
+        nested.isolated = await delegate(delegation, { workspace: 'isolated', role: 'implement', instanceId: 'claude' }, 'nest-isolated')
+        nested.named = await delegation.named.create({ name: 'writer', task: 'edit it', access: 'write' }, { toolCallId: 'nest-named' }) as Record<string, unknown>
+        nested.integrate = await delegation.integrateDelegation({ delegationId: 'delegation:any' }, { toolCallId: 'nest-integrate' }).catch((error: { code?: string }) => ({ code: error.code }))
+        return 'Nested.'
+      }
+    )
+    await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
+    await waitFor(() => d.engine.getRun(child!.childRunId)?.status === 'completed', 'the child run')
+    await d.orch.send('Nest', false, { threadId: child!.childThreadId, clientRequestId: 'nest' })
+    expect(nested.shared.started).not.toBe(false)
+    expect(d.engine.delegations.get(nested.shared.delegationId as string)).toMatchObject({ parentThreadId: child!.childThreadId, workspace: 'shared' })
+    for (const key of ['isolated', 'named'])
+      expect(nested[key], key).toMatchObject({ started: false, code: 'read_only_caller_requires_shared', message: expect.stringContaining('"shared"') })
+    expect(nested.integrate).toEqual({ code: 'mousse_read_only' })
+    // Only the read-only grandchild exists.
+    expect(d.engine.delegations.listForParentThread(child!.childThreadId)).toHaveLength(1)
   }, 30_000)
 
   it("a read-only child's Mousse tools cannot write threads, start work or integrate; read tools still work", async () => {
@@ -266,13 +311,16 @@ describe('delegated child policy', () => {
         ['queue_enqueue', { content: 'write more' }],
         ['thread_fork', {}],
         ['thread_merge_back', {}],
-        ['delegate_task', { prompt: 'x', workspace: 'isolated', role: 'implement' }],
+        ['delegate_task', { prompt: 'x', workspace: 'isolated', role: 'implement', instanceId: 'claude' }],
         ['integrate_delegation', { delegationId: 'delegation:any' }],
         ['create_task', { title: 't' }]
       ] as const) {
         results[name][tool] = await tools.call(tool, { ...args }, { caller, toolCallId: `${name}-${tool}`, signal: new AbortController().signal })
-          .then(() => 'allowed', (error: { code?: string }) => error.code ?? 'error')
+          .then((outcome) => tool === 'delegate_task' ? (JSON.parse(outcome.text).code ?? 'started') : 'allowed', (error: { code?: string }) => error.code ?? 'error')
       }
+      // A read-only child may start a read-only subagent through the MCP server.
+      const nestedShared = await tools.call('delegate_task', { prompt: 'sub', workspace: 'shared', role: 'research', instanceId: 'claude' }, { caller, toolCallId: `${name}-nested`, signal: new AbortController().signal })
+      results[name].delegate_shared = JSON.parse(nestedShared.text).code ?? 'started'
       return 'Probed.'
     }
     const { d, thread } = daemon(async (delegation) => {
@@ -290,13 +338,15 @@ describe('delegated child policy', () => {
       queue_enqueue: 'mousse_read_only',
       thread_fork: 'mousse_read_only',
       thread_merge_back: 'mousse_read_only',
-      delegate_task: 'mousse_read_only',
+      // The call reaches delegate_task, which refuses a non-read-only child as a value; a read-only one starts.
+      delegate_task: 'read_only_caller_requires_shared',
+      delegate_shared: 'started',
       integrate_delegation: 'mousse_read_only',
       create_task: 'mousse_read_only'
     })
     // The same calls are not refused by the policy for an isolated child.
     expect(Object.values(results.isolated)).not.toContain('mousse_read_only')
-    expect(results.isolated.queue_enqueue).toBe('allowed')
+    expect(results.isolated).toMatchObject({ queue_enqueue: 'allowed', delegate_task: 'started', delegate_shared: 'started' })
   }, 30_000)
 })
 

@@ -45,9 +45,9 @@ export interface ProviderCapabilities {
   /**
    * `featureGates.subagentTargetRefusal`. `enforced`: the adapter holds a delegated child to its
    * policy (read-only for a `shared` child, no provider-native subagents, no user MCP servers for a
-   * read-only child). `unenforceable`: it cannot, so it is refused as a delegation target.
+   * read-only child). `isolated_only`: it cannot hold a child to read-only, so it is refused as the target of a `shared` child and still runs `isolated` ones.
    */
-  childPolicy: 'enforced' | 'unenforceable'
+  childPolicy: 'enforced' | 'isolated_only'
 }
 
 /**

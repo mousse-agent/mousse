@@ -267,6 +267,9 @@ export function createMousseToolRegistry(deps: { engine: RunEngine; host: Mousse
     description: tool.description,
     inputSchema: plainSchema(tool, extra),
     access: 'actsAsCaller',
+    // A read-only subagent may start (read-only) subagents and follow them; `delegateTask` checks the
+    // workspace of each one. Integration writes the workspace and stays refused.
+    readOnlySafe: tool.name !== 'integrate_delegation',
     handler: async (args, ctx) => {
       before?.(args, ctx.caller)
       const call: ToolCall = { type: 'toolCall', id: ctx.toolCallId, name: tool.name, arguments: args }
