@@ -287,11 +287,6 @@ describe('Review: selected-thread agent activation bridge', () => {
       presentation
     )
     bridgeProtocolEvent(
-      event('agent.activated', 'selected', { agentId: 'a1' }),
-      broadcast,
-      presentation
-    )
-    bridgeProtocolEvent(
       event('terminal.activated', 'selected', { ptyId: 'p1' }),
       broadcast,
       presentation
@@ -299,7 +294,6 @@ describe('Review: selected-thread agent activation bridge', () => {
 
     expect(seen.map((entry) => entry.channel)).toEqual([
       'agent:spawned',
-      'agent:activated',
       'pty:activated'
     ])
   })
