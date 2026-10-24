@@ -703,10 +703,15 @@ export class HostedProfileService {
         roster: identity.roster,
         delegation: identity.delegation
       }
-    const body =
-      stored.pending?.body ??
-      (await this.signed(stored.configuration, 'renew', intent, stored.connectorToken))
-    stored.pending = { purpose: 'renew', intent, body }
+    // A replayed body keeps the intent it was signed with, so a failed retry cannot make the
+    // saved roster look newer than the request that will eventually be sent.
+    if (!stored.pending)
+      stored.pending = {
+        purpose: 'renew',
+        intent,
+        body: await this.signed(stored.configuration, 'renew', intent, stored.connectorToken)
+      }
+    const body = stored.pending.body
     this.save(stored)
     const registration = await this.post<RegistrationResult['registration']>(
       stored.configuration,

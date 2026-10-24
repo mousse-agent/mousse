@@ -69,6 +69,11 @@ it('revoking a device closes its connection, refuses it again and sends the rost
     expect(a.net.status().peers.some((peer) => peer.state === 'open')).toBe(false)
     expect(b.net.status().peers.some((peer) => peer.state === 'open')).toBe(false)
   })
+  // The phone's supervisor gives up: a fatal 'revoked' blocks it instead of scheduling a retry.
+  await vi.waitFor(
+    () => expect(b.net.status().peers).toContainEqual({ node: joined.authority, state: 'closed' }),
+    { timeout: 5000 }
+  )
   // The open session told the revoked device before closing.
   expect(b.net.runtime().identity.roster()).toEqual(a.net.runtime().identity.roster())
   const { nodes } = (await a.net.request('bridge.nodes', {})) as { nodes: Device[] }
