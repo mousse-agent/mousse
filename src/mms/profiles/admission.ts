@@ -27,7 +27,8 @@ const INSTALLATION_METHODS = new Set([
 const PROFILE_PROVIDER_METHODS = new Set([
   'providers.listConfigured', 'providers.getLoginOptions', 'providers.refreshModels',
   'providers.loginOAuth', 'providers.logout', 'providers.claudeStatus',
-  'providers.codexStatus', 'providers.cliConfig', 'providers.setCliConfig'
+  'providers.codexStatus', 'providers.cliConfig', 'providers.setCliConfig',
+  'providers.installAntigravity', 'providers.cancelAntigravityInstall'
 ])
 
 export function isInstallationMethod(method: string): boolean {
