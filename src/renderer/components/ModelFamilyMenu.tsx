@@ -544,7 +544,7 @@ function ProfileModelFamilyMenu({
               className="model-picker-rail"
               role="tablist"
               aria-label="Filter by provider"
-              data-tooltip-placement="cursor-left"
+              data-tooltip-placement="outside-left"
             >
               <button
                 type="button"

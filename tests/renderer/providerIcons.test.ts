@@ -42,18 +42,18 @@ describe('placeTooltip', () => {
     expect(placeTooltip(element, box, viewport)).toEqual({ top: 268, left: 55 })
   })
 
-  it('puts a cursor tooltip just left of the pointer, vertically centred on it', () => {
-    const anchor = { ...element, cursor: { x: 400, y: 315 } }
-    expect(placeTooltip(anchor, box, viewport)).toEqual({ top: 303, left: 274 })
+  it('puts a left tooltip just outside the left edge, vertically centred', () => {
+    const anchor = { top: 300, left: 400, width: 40, height: 30, side: 'left' as const }
+    expect(placeTooltip(anchor, box, viewport)).toEqual({ top: 303, left: 272 })
   })
 
-  it('flips a cursor tooltip right of the pointer only when the left has no room', () => {
-    const anchor = { ...element, cursor: { x: 60, y: 315 } }
-    expect(placeTooltip(anchor, box, viewport)).toEqual({ top: 303, left: 66 })
+  it('flips a left tooltip to the right only when the left has no room', () => {
+    const anchor = { top: 300, left: 60, width: 40, height: 30, side: 'left' as const }
+    expect(placeTooltip(anchor, box, viewport)).toEqual({ top: 303, left: 108 })
   })
 
-  it('clamps a cursor tooltip to the window', () => {
-    const anchor = { ...element, cursor: { x: 400, y: 795 } }
-    expect(placeTooltip(anchor, box, viewport)).toEqual({ top: 768, left: 274 })
+  it('clamps a left tooltip to the window', () => {
+    const anchor = { top: 790, left: 400, width: 40, height: 10, side: 'left' as const }
+    expect(placeTooltip(anchor, box, viewport)).toEqual({ top: 768, left: 272 })
   })
 })
