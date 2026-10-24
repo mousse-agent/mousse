@@ -12,6 +12,7 @@ import { startPhoneSpeechHost, type SpeechHostRequest } from './startPhoneSpeech
 
 /** This window's models, choices and preferences, read fresh for every phone request. */
 const windowDeps: PhoneSpeechDeps = {
+  profileId: () => useAppStore.getState().profileId,
   dictationSelection: () => {
     const store = useDictationStore.getState()
     store.syncProfile(useAppStore.getState().profileId)

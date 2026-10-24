@@ -1,4 +1,4 @@
-import type { SpeechHostMethod, SpeechJobInput, SpeechJobNotice } from '../../shared/speechRelay'
+import type { PhoneSpeechRefusal, SpeechHostMethod, SpeechJobInput, SpeechJobNotice } from '../../shared/speechRelay'
 import { runPhoneSpeechJob, type PhoneSpeechDeps } from './phoneSpeechJobs'
 
 /** The window's request bridge to the daemon, narrowed to the speech host methods. */
@@ -13,6 +13,20 @@ interface WaitResult {
 const MAX_RETRY_MS = 30_000
 const FIRST_RETRY_MS = 1_000
 
+interface RunningJob {
+  controller: AbortController
+  /** Set once this window has claimed the job. */
+  jobId: string | null
+  /** True once the daemon has the answer, or was told there will be none. */
+  ended: boolean
+}
+
+const STOPPED_RESULT: PhoneSpeechRefusal = {
+  ok: false,
+  code: 'failed',
+  error: 'Mousse on the computer stopped before it finished.'
+}
+
 /**
  * Serves phone speech requests from this window until `stop` is called: waits for jobs, claims
  * each one, runs it with this window's models and sends the answer back. Jobs run concurrently;
@@ -22,15 +36,26 @@ export function startPhoneSpeechHost(request: SpeechHostRequest, deps: PhoneSpee
   let stopped = false
   let retryMs = FIRST_RETRY_MS
   let retryTimer: ReturnType<typeof setTimeout> | null = null
-  const running = new Map<string, AbortController>()
+  const running = new Map<string, RunningJob>()
+
+  /** Tells the daemon a job this window took will not be answered; a job it already ended ignores it. */
+  const abandon = (entry: RunningJob): void => {
+    if (!entry.jobId || entry.ended) return
+    entry.ended = true
+    void request('speech.host.finish', { id: entry.jobId, result: STOPPED_RESULT }).catch(() => undefined)
+  }
 
   const run = async (notice: SpeechJobNotice): Promise<void> => {
     if (running.has(notice.id)) return
-    const controller = new AbortController()
-    running.set(notice.id, controller)
+    const entry: RunningJob = { controller: new AbortController(), jobId: null, ended: false }
+    const { controller } = entry
+    running.set(notice.id, entry)
     try {
       const { job } = await request<{ job: SpeechJobInput | null }>('speech.host.take', { id: notice.id })
-      if (!job || stopped) return
+      if (!job) return
+      entry.jobId = job.id
+      // The phone may have cancelled, or the window stopped, while the claim was on its way.
+      if (stopped || controller.signal.aborted) return
       const result = await runPhoneSpeechJob(job, deps, {
         signal: controller.signal,
         progress: async (data) => {
@@ -45,11 +70,16 @@ export function startPhoneSpeechHost(request: SpeechHostRequest, deps: PhoneSpee
           }
         }
       })
-      if (!controller.signal.aborted && !stopped) await request('speech.host.finish', { id: job.id, result })
+      if (!controller.signal.aborted && !stopped) {
+        await request('speech.host.finish', { id: job.id, result })
+        entry.ended = true
+      }
     } catch (error) {
       console.warn('A phone speech request failed', error)
     } finally {
       running.delete(notice.id)
+      // Whatever ended the run without an answer, the phone should not wait for one.
+      abandon(entry)
     }
   }
 
@@ -68,7 +98,7 @@ export function startPhoneSpeechHost(request: SpeechHostRequest, deps: PhoneSpee
         continue
       }
       if (stopped) return
-      for (const id of result.cancelled ?? []) running.get(id)?.abort()
+      for (const id of result.cancelled ?? []) running.get(id)?.controller.abort()
       for (const notice of result.jobs ?? []) void run(notice)
     }
   }
@@ -77,7 +107,11 @@ export function startPhoneSpeechHost(request: SpeechHostRequest, deps: PhoneSpee
   return () => {
     stopped = true
     if (retryTimer) clearTimeout(retryTimer)
-    for (const controller of running.values()) controller.abort()
+    // The connection outlives a profile switch, so the daemon would keep these jobs waiting.
+    for (const entry of running.values()) {
+      entry.controller.abort()
+      abandon(entry)
+    }
     running.clear()
   }
 }
