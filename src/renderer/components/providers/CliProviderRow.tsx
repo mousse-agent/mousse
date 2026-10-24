@@ -4,6 +4,7 @@ import type { CliProviderConfig, CliProviderConfigPatch } from '../../../shared/
 import { Plus, RotateCcw, X } from '../../lib/icons'
 import { SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
 import { formatArgs, parseArgs, type CliProviderDefinition } from './cliProviders'
+import type { CliInstall } from './useCliInstall'
 import {
   BrowseButton,
   ModelsSubRow,
@@ -32,6 +33,11 @@ export interface CliProviderRowProps {
   onRefreshModels: () => Promise<void>
   onSignIn: () => Promise<void>
   onRecheck: () => Promise<void>
+  /** Antigravity only: Mousse downloads the agent, and signing out leaves it installed. */
+  install?: CliInstall
+  /** Starts the download and refreshes what the row shows when it succeeds. */
+  onInstall?: () => Promise<void>
+  onSignOut?: () => Promise<void>
 }
 
 export function CliProviderRow(props: CliProviderRowProps) {
@@ -69,19 +75,32 @@ function CliDetails({
   onSaveConfig,
   onRefreshModels,
   onSignIn,
-  onRecheck
+  onRecheck,
+  install,
+  onInstall,
+  onSignOut
 }: CliProviderRowProps) {
   const signIn = useAsyncAction()
   const removal = useAsyncAction()
-  const needsSignIn = state.health === 'attention' && state.label !== 'Not found'
-  const recheckable = cli.id !== 'antigravity' && state.health !== 'ready'
+  const managed = cli.id === 'antigravity'
+  const installing = install?.busy === true
+  const needsSignIn = managed ? state.action === 'sign-in' : state.health === 'attention' && state.label !== 'Not found'
+  const recheckable = !managed && state.health !== 'ready'
+  const idle = signIn.busy === null && !installing
 
   return (
     <>
       <SettingsRow
         indent
-        title="Sign-in"
-        description={withError(state.detail ?? state.label, signIn.error)}
+        title={managed && state.action === 'install' ? 'Install' : 'Sign-in'}
+        description={withError(
+          installing
+            ? (install?.progress ?? 'Installing…')
+            : managed && state.action === 'install' && config?.binaryPath
+              ? `${state.detail ?? state.label}. Installing replaces your executable path.`
+              : (state.detail ?? state.label),
+          signIn.error ?? install?.error ?? null
+        )}
         control={
           <>
             {recheckable && (
@@ -92,9 +111,24 @@ function CliDetails({
                 onClick={() => void signIn.run('recheck', onRecheck)}
               />
             )}
+            {managed && installing && (
+              <button type="button" className="settings-btn" onClick={() => void install?.cancel()}>
+                Cancel
+              </button>
+            )}
+            {managed && !installing && state.action === 'install' && onInstall && (
+              <button type="button" className="settings-btn" disabled={signIn.busy !== null} onClick={() => void signIn.run('install', onInstall)}>
+                Install
+              </button>
+            )}
             {needsSignIn && (
-              <button type="button" className="settings-btn" disabled={signIn.busy !== null} onClick={() => void signIn.run('signin', onSignIn)}>
+              <button type="button" className="settings-btn" disabled={!idle} onClick={() => void signIn.run('signin', onSignIn)}>
                 Sign in
+              </button>
+            )}
+            {managed && state.action === 'sign-out' && onSignOut && (
+              <button type="button" className="settings-btn" disabled={!idle} onClick={() => void signIn.run('signout', onSignOut)}>
+                Sign out
               </button>
             )}
           </>

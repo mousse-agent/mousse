@@ -15,7 +15,7 @@ import {
   providerSelection as dictationProviderSelection
 } from '../dictation/DictationModelPicker'
 import { useDictationStore } from '../dictation/dictationStore'
-import { Mic, Play, Stop, VolumeHigh } from '../lib/icons'
+import { Loader2, Mic, Play, Stop, VolumeHigh } from '../lib/icons'
 import {
   localSelection as readAloudLocalSelection,
   providerSelection as readAloudProviderSelection,
@@ -67,7 +67,10 @@ function ReadAloudSpeechSettings() {
   const selection = useReadAloudStore((state) => state.selection)
   const setSelection = useReadAloudStore((state) => state.setSelection)
   const syncReadAloud = useReadAloudStore((state) => state.syncProfile)
-  const previewing = useReadAloudStore((state) => state.activeKey === PREVIEW_KEY && state.status !== 'idle')
+  const previewStatus = useReadAloudStore((state) => (state.activeKey === PREVIEW_KEY ? state.status : 'idle'))
+  const previewing = previewStatus !== 'idle'
+  // A voice can take a few seconds to load before the first sound, so show that it is working.
+  const previewLoading = previewStatus === 'loading'
   const previewError = useReadAloudStore((state) => (state.error?.key === PREVIEW_KEY ? state.error.message : null))
   const toggle = useReadAloudStore((state) => state.toggle)
   const stop = useReadAloudStore((state) => state.stop)
@@ -139,11 +142,18 @@ function ReadAloudSpeechSettings() {
               type="button"
               className="settings-icon-btn primary"
               disabled={!selection}
-              title={previewing ? 'Stop sample' : 'Play sample'}
+              title={previewLoading ? 'Loading voice, click to stop' : previewing ? 'Stop sample' : 'Play sample'}
               aria-label={previewing ? 'Stop sample' : 'Play sample'}
+              aria-busy={previewLoading || undefined}
               onClick={playSample}
             >
-              {previewing ? <Stop size={14} strokeWidth={2} aria-hidden="true" /> : <Play size={14} strokeWidth={2} aria-hidden="true" />}
+              {previewLoading ? (
+                <Loader2 size={14} strokeWidth={2} className="icon-spin" aria-hidden="true" />
+              ) : previewing ? (
+                <Stop size={14} strokeWidth={2} aria-hidden="true" />
+              ) : (
+                <Play size={14} strokeWidth={2} aria-hidden="true" />
+              )}
             </button>
           </>
         }

@@ -140,6 +140,19 @@ export interface CliProviderConfig {
   args: string[]
   /** Extra environment variables for the CLI process, applied over Mousse's own environment. */
   env: Record<string, string>
+  /** Antigravity: Mousse's own sign-in state, whether or not the provider is switched on. */
+  signedIn?: boolean
+  /** Antigravity: a download is running in the daemon (it outlives the page that started it). */
+  installing?: boolean
+  /** Antigravity: the latest line of that download's progress. */
+  installProgress?: string
+}
+
+/** Progress of Mousse downloading a CLI provider's agent (Antigravity only today). */
+export interface CliInstallEvent {
+  instanceId: CliProviderInstanceId
+  type: 'progress'
+  message: string
 }
 
 export interface CliProviderConfigPatch {

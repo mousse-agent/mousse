@@ -31,6 +31,7 @@ import CancelCircleIcon from '@hugeicons/core-free-icons/CancelCircleIcon'
 import CancelSquareIcon from '@hugeicons/core-free-icons/CancelSquareIcon'
 import CheckmarkCircle02Icon from '@hugeicons/core-free-icons/CheckmarkCircle02Icon'
 import CheckmarkSquare01Icon from '@hugeicons/core-free-icons/CheckmarkSquare01Icon'
+import CircleDotDashedIcon from '@hugeicons/core-free-icons/CircleDotDashedIcon'
 import CleanIcon from '@hugeicons/core-free-icons/CleanIcon'
 import ClipboardIcon from '@hugeicons/core-free-icons/ClipboardIcon'
 import Clock01Icon from '@hugeicons/core-free-icons/Clock01Icon'
@@ -186,6 +187,7 @@ export const ChevronRight = /* @__PURE__ */ createIcon('ChevronRight', ArrowRigh
 export const ChevronUp = /* @__PURE__ */ createIcon('ChevronUp', ArrowUp01Icon)
 export const CircleAlert = /* @__PURE__ */ createIcon('CircleAlert', AlertCircleIcon)
 export const CircleCheck = /* @__PURE__ */ createIcon('CircleCheck', CheckmarkCircle02Icon)
+export const CircleDotDashed = /* @__PURE__ */ createIcon('CircleDotDashed', CircleDotDashedIcon)
 export const Clipboard = /* @__PURE__ */ createIcon('Clipboard', ClipboardIcon)
 export const ClipboardList = /* @__PURE__ */ createIcon('ClipboardList', Task01Icon)
 export const Clock = /* @__PURE__ */ createIcon('Clock', Clock01Icon)

@@ -1,4 +1,4 @@
-/* Device section: the computer's name, and the new-thread menu opened from it. */
+/* Device section: the computer's name, the new-thread menu opened from it, and Open in editor. */
 
 .side-card-device-name {
   margin: 0;
@@ -94,7 +94,8 @@
   cursor: pointer;
 }
 
-.side-card-device-item svg {
+.side-card-device-item svg,
+.side-card-device-item img {
   flex-shrink: 0;
 }
 
@@ -129,4 +130,94 @@
   flex-shrink: 0;
   margin-left: auto;
   color: var(--text-secondary);
+}
+
+.side-card-device-separator {
+  height: 1px;
+  margin: 4px var(--ui-menu-row-x);
+  background: var(--ui-line);
+}
+
+.side-card-open-editor {
+  margin-top: 8px;
+}
+
+.side-card-open-editor-group {
+  display: flex;
+  align-items: stretch;
+  width: fit-content;
+  max-width: 100%;
+  height: 28px;
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-hover);
+}
+
+.side-card-open-editor-main,
+.side-card-open-editor-chevron {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.side-card-open-editor-main {
+  gap: 6px;
+  min-width: 0;
+  padding: 0 10px;
+  border-radius: var(--ui-control-radius);
+}
+
+.side-card-open-editor-chevron {
+  justify-content: center;
+  flex: none;
+  width: 26px;
+  border-left: 1px solid var(--ui-line);
+  border-radius: 0 var(--ui-control-radius) var(--ui-control-radius) 0;
+}
+
+.side-card-open-editor-group:not(.single) .side-card-open-editor-main {
+  border-radius: var(--ui-control-radius) 0 0 var(--ui-control-radius);
+}
+
+.side-card-open-editor-main:hover,
+.side-card-open-editor-chevron:hover,
+.side-card-open-editor-chevron.open {
+  background: var(--ui-pressed);
+}
+
+.side-card-open-editor-main:focus-visible,
+.side-card-open-editor-chevron:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.side-card-open-editor-main svg,
+.side-card-open-editor-main img {
+  flex: none;
+}
+
+.side-card-open-editor-chevron svg {
+  color: var(--ui-faint);
+}
+
+.side-card-open-editor-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-card-open-editor-error {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 4px 0 0;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
