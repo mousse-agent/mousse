@@ -192,6 +192,34 @@ it('refreshes a Space-peer route before its approval lapses, even when the regis
   expect(p.bodies.filter((row) => row.path === '/v1/net/routes').length).toBeGreaterThan(20)
 })
 
+function fakeClockController(
+  p: Awaited<ReturnType<typeof fixture>>,
+  host: Record<string, unknown> = {}
+): HostedNetController {
+  const controller = new HostedNetController({
+    clock: { now: () => Date.now() },
+    signal: p.signal.signal,
+    loadedRuntime: () => undefined,
+    requireEnrolled: () => p.rt,
+    closed: () => false,
+    enabled: () => true,
+    featureEnabled: () => true,
+    hostedSpacePeerAuthorized: () => true,
+    serial: (work: () => Promise<unknown>) => work(),
+    emit: () => undefined,
+    fail: (error: unknown) => {
+      throw error
+    },
+    transportRows: () => [{ id: 'plus-relay', enabled: true }],
+    hostedListening: () => true,
+    reactivateIfRunning: async () => undefined,
+    suspendHostedTransport: async () => undefined,
+    ...host
+  } as unknown as HostedNetHost)
+  ;(controller as any).hostedProfile = p.service
+  return controller
+}
+
 it('refreshes a Space-peer route that joined between renewal ticks before its approval lapses', async () => {
   const p = await fixture({ now: () => Date.now() })
   await p.service.bind(configuration, p.accountToken)
@@ -205,26 +233,7 @@ it('refreshes a Space-peer route that joined between renewal ticks before its ap
   }))
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
   try {
-    const controller = new HostedNetController({
-      clock: { now: () => Date.now() },
-      signal: p.signal.signal,
-      loadedRuntime: () => undefined,
-      requireEnrolled: () => p.rt,
-      closed: () => false,
-      enabled: () => true,
-      featureEnabled: () => true,
-      hostedSpacePeerAuthorized: () => true,
-      serial: (work) => work(),
-      emit: () => undefined,
-      fail: (error) => {
-        throw error
-      },
-      transportRows: () => [{ id: 'plus-relay', enabled: true }],
-      hostedListening: () => true,
-      reactivateIfRunning: async () => undefined,
-      suspendHostedTransport: async () => undefined
-    } as unknown as HostedNetHost)
-    ;(controller as any).hostedProfile = p.service
+    const controller = fakeClockController(p)
     controller.resumeRenewal()
     // The first timer was set with no routes, so it waits 200 seconds.
     await vi.advanceTimersByTimeAsync(5000)
@@ -234,6 +243,44 @@ it('refreshes a Space-peer route that joined between renewal ticks before its ap
     // Past the first approval's end, well before that 200 second timer: the route is still approved.
     await vi.advanceTimersByTimeAsync(121000)
     expect(p.service.managedSpaceRoutes()[0].expiresAt).toBeGreaterThan(Date.now())
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('keeps the registration renewal at its original time while reconciles repeat', async () => {
+  const p = await fixture({ now: () => Date.now() })
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  const status = p.service.status()
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+  try {
+    const startedAt = Date.now(),
+      renewedAt: number[] = []
+    // The registration lasts ten minutes from now and never changes, as a real lease would not.
+    vi.spyOn(p.service, 'status').mockImplementation(() => ({
+      ...status,
+      expiresAt: startedAt + 600000
+    }))
+    vi.spyOn(p.service, 'renew').mockImplementation(async () => {
+      renewedAt.push(Date.now() - startedAt)
+      return status as never
+    })
+    const controller = fakeClockController(p, {
+      loadedRuntime: () => ({
+        identity: { self: () => ({ isAuthority: false }) },
+        keys: { state: () => 'unlocked', encryptedAtRest: () => true }
+      }),
+      enabled: () => true
+    })
+    controller.resumeRenewal()
+    // A Space metadata change every 5 seconds, with no route, must not move the 200 second renewal.
+    for (let elapsed = 0; elapsed < 200000; elapsed += 5000) {
+      await vi.advanceTimersByTimeAsync(5000)
+      controller.membershipChanged()
+    }
+    await vi.advanceTimersByTimeAsync(0)
+    expect(renewedAt).toEqual([200000])
   } finally {
     vi.useRealTimers()
   }

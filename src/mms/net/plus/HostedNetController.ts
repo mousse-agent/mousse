@@ -63,6 +63,7 @@ export class HostedNetController implements HostedNet {
   private hostedConsentFenced = false
   private plusAbortBound = false
   private plusRenewal?: ReturnType<typeof setTimeout>
+  private plusRenewalDueAt = 0
   private enrollmentList: PlusEnrollmentRequest[] = []
   private enrollmentPoll?: ReturnType<typeof setTimeout>
   private enrollmentAbortBound = false
@@ -282,13 +283,16 @@ export class HostedNetController implements HostedNet {
   /**
    * A pending renewal timer was timed from the routes that existed when it was armed. A route added
    * or refreshed since then (a peer joining a Space, say) may need its approval refreshed sooner, so
-   * time the wait again. Does nothing while no timer is pending, such as during a renewal pass.
+   * time the wait again, but never later than the time already set: repeated reconciliation must
+   * not keep postponing the registration renewal. Does nothing while no timer is pending, such as
+   * during a renewal pass.
    */
   private rescheduleRenewal(): void {
     if (!this.plusRenewal) return
+    const dueAt = this.plusRenewalDueAt
     clearTimeout(this.plusRenewal)
     this.plusRenewal = undefined
-    this.armRenewal()
+    this.armRenewal(dueAt)
   }
 
   membershipChanged(): void {
@@ -341,37 +345,43 @@ export class HostedNetController implements HostedNet {
     this.armRenewal()
   }
 
-  private armRenewal(): void {
+  private armRenewal(notAfter?: number): void {
     if (this.host.signal.aborted) return
     this.armEnrollmentPoll(1000)
     if (this.plusRenewal) return
     const status = this.service().status()
     if (!status.configured || !status.registrationId) return
-    this.plusRenewal = setTimeout(
-      () => {
-        this.plusRenewal = undefined
-        if (this.host.signal.aborted) return
-        void this.host
-          .serial(async () => {
-            try {
-              await this.fenceUnauthorizedSpaceRoutes()
-              await this.service().renew()
-              await this.reconcileSpaceRoutes()
-            } finally {
-              this.armRenewal()
-            }
-          })
-          .catch((error) => {
-            this.host.fail(error)
-            this.host.emit()
-          })
-      },
-      renewalDelayMs(
-        status.connected ? status.expiresAt! : undefined,
-        this.service().managedSpaceRoutes(),
-        this.host.clock.now()
+    const now = this.host.clock.now(),
+      delay = Math.max(
+        0,
+        Math.min(
+          renewalDelayMs(
+            status.connected ? status.expiresAt! : undefined,
+            this.service().managedSpaceRoutes(),
+            now
+          ),
+          notAfter === undefined ? Infinity : notAfter - now
+        )
       )
-    )
+    this.plusRenewalDueAt = now + delay
+    this.plusRenewal = setTimeout(() => {
+      this.plusRenewal = undefined
+      if (this.host.signal.aborted) return
+      void this.host
+        .serial(async () => {
+          try {
+            await this.fenceUnauthorizedSpaceRoutes()
+            await this.service().renew()
+            await this.reconcileSpaceRoutes()
+          } finally {
+            this.armRenewal()
+          }
+        })
+        .catch((error) => {
+          this.host.fail(error)
+          this.host.emit()
+        })
+    }, delay)
     this.plusRenewal.unref?.()
     if (!this.plusAbortBound) {
       this.plusAbortBound = true
