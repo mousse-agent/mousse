@@ -52,6 +52,14 @@ describe('change-based test selection plan', () => {
     expect(plan.runGlobs).toContain('tests/platformEditorCrossFeature.test.ts')
   })
 
+  it('maps development launchers to the tests of their helpers instead of a full run', () => {
+    for (const path of ['scripts/dev.mjs', 'scripts/dev-mms.mjs', 'scripts/gui-launch.mjs']) {
+      const plan = classifyChanges([path], manifest)
+      expect(plan.mode, path).toBe('select')
+      expect(plan.runGlobs, path).toContain('tests/platformDevelopmentRuntime.test.ts')
+    }
+  })
+
   it('maps protocol test vectors to the files that read them from disk', () => {
     const plan = classifyChanges(['test-vectors/net/protocol/envelope.json'], manifest)
     expect(plan.mode).toBe('select')
