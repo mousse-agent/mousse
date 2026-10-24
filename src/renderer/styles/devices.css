@@ -186,6 +186,12 @@
 /* A phone asks to join over every screen, Settings included (above .settings-page). */
 .modal-overlay.enrollment-prompt {
   z-index: 1150;
+  /* The prompt renders outside .settings-page, so it carries the tokens its content and buttons use. */
+  --space-4: 4px;
+  --space-12: 12px;
+  --settings-control-h: 28px;
+  --settings-fs-row: 13.5px;
+  --settings-fs-small: 12.5px;
 }
 
 .enrollment-prompt .modal-body > .enrollment-device {
