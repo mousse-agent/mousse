@@ -9,6 +9,7 @@ import {
   type TurnStateSnapshot
 } from '../../shared/types'
 import { useAppStore } from './appStore'
+import { refreshPullRequest } from './pullRequestStore'
 
 /**
  * One shared copy of Git state per working folder, read by the Git panel and the
@@ -158,10 +159,61 @@ export async function checkoutGitBranch(path: string, branch: string, projectId?
   await refreshGitStatus(path, { force: true, quiet: true, projectId })
 }
 
-/** Stage everything and commit, then refresh. Rejects with Git's message when the commit fails. */
-export async function commitGitChanges(path: string, message: string, projectId?: string): Promise<void> {
-  await window.mousse.git.commit(message, projectId, path)
+export interface CommitGitOptions {
+  /** Rewrite the latest commit instead of adding one. */
+  amend?: boolean
+  /** Push the branch after the commit. */
+  push?: boolean
+  /** Reports each step, so a button can say what is running. */
+  onPhase?: (phase: 'committing' | 'pushing') => void
+}
+
+/** The commit landed but the push after it failed; `pushError` is the push's own failure. */
+export class CommitPushError extends Error {
+  constructor(readonly pushError: unknown) {
+    super(errorText(pushError))
+    this.name = 'CommitPushError'
+  }
+}
+
+/** Look up the pull request of the folder's current branch again, bypassing its max age. */
+async function refreshBranchPullRequest(path: string, projectId: string | undefined): Promise<void> {
+  const branch = useGitStatusStore.getState().entries[path]?.status?.branch
+  if (branch) await refreshPullRequest(path, branch, { force: true, projectId })
+}
+
+/**
+ * Stage everything and commit (or amend), optionally push, then refresh. Rejects with
+ * Git's message when the commit fails, and with a `CommitPushError` when only the push does.
+ */
+export async function commitGitChanges(
+  path: string,
+  message: string,
+  projectId?: string,
+  options: CommitGitOptions = {}
+): Promise<void> {
+  const git = window.mousse.git
+  options.onPhase?.('committing')
+  await git.commit(message, projectId, path, { amend: options.amend === true })
+  let pushError: CommitPushError | null = null
+  if (options.push) {
+    options.onPhase?.('pushing')
+    try {
+      await git.push(projectId, path)
+    } catch (error) {
+      pushError = new CommitPushError(error)
+    }
+  }
   await refreshGitStatus(path, { force: true, quiet: true, projectId })
+  if (pushError) throw pushError
+  if (options.push) await refreshBranchPullRequest(path, projectId)
+}
+
+/** Push the current branch (publishing it when it has no upstream), then refresh. Rejects with Git's message. */
+export async function pushGitBranch(path: string, projectId?: string): Promise<void> {
+  await window.mousse.git.push(projectId, path)
+  await refreshGitStatus(path, { force: true, quiet: true, projectId })
+  await refreshBranchPullRequest(path, projectId)
 }
 
 /** Whether any turn went from running to finished between two snapshots. */

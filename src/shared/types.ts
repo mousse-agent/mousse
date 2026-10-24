@@ -933,6 +933,8 @@ export interface GitCommit {
   date: string
   /** True when the commit is already on the remote tracking branch. */
   pushed: boolean
+  /** True when any remote-tracking branch contains the commit, so rewriting it would need a force push. */
+  onRemote: boolean
 }
 
 export interface GitBranchInfo {
@@ -944,6 +946,40 @@ export interface GitDiffStats {
   additions: number
   deletions: number
   filesChanged: number
+}
+
+export interface GitCommitOptions {
+  amend?: boolean
+}
+
+export type PullRequestCheckState = 'passing' | 'failing' | 'pending' | 'none'
+
+export interface GitPullRequestInfo {
+  number: number
+  title: string
+  url: string
+  state: 'open' | 'closed' | 'merged'
+  isDraft: boolean
+  checks: PullRequestCheckState
+  checkCounts: { passed: number; failed: number; pending: number; total: number }
+}
+
+export type GitPullRequestLookup =
+  | { state: 'found'; pullRequest: GitPullRequestInfo }
+  | { state: 'none'; isDefaultBranch: boolean }
+  | {
+      state: 'unavailable'
+      reason: 'gh-missing' | 'unauthenticated' | 'not-github' | 'no-branch' | 'error'
+      message: string
+    }
+
+export interface EditorInfo {
+  /** Stable id, e.g. 'vscode', 'cursor', 'zed', 'files'. */
+  id: string
+  label: string
+  kind: 'editor' | 'files'
+  /** The app's own icon; omitted when unavailable. */
+  iconDataUrl?: string
 }
 
 export interface BrowserBounds {

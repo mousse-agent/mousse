@@ -32,6 +32,7 @@ import {
 import { SettingsStore } from '../../mms/settings/SettingsStore'
 import { FileService } from '../../mms/files/FileService'
 import { GitService } from '../../mms/git/GitService'
+import { listEditors, openInEditor } from '../editors'
 import { BrowserViewManager } from '../browser/BrowserViewManager'
 import type { AttachedBrowserHost } from '../browser/AttachedBrowserHost'
 import { domainObject } from '../../mms/protocol/domainRegistry'
@@ -87,6 +88,7 @@ import type {
   ChatImageAttachment,
   ContextUsageSnapshot,
   CreateScheduledJobInput,
+  GitCommitOptions,
   MainView,
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
@@ -1807,12 +1809,27 @@ export function registerGuiIpc(
   )
   registerHandler(
     'git:commit',
-    async (_e, message: string, projectId?: string, cwd?: string) => {
-      await gitService.commit(await resolveGitCwd(projectId, cwd), message)
+    async (_e, message: string, projectId?: string, cwd?: string, options?: GitCommitOptions) => {
+      await gitService.commit(await resolveGitCwd(projectId, cwd), message, options)
     }
   )
   registerHandler('git:push', async (_e, projectId?: string, cwd?: string) => {
     await gitService.push(await resolveGitCwd(projectId, cwd))
+  })
+  registerHandler('git:lastCommitMessage', async (_e, projectId?: string, cwd?: string) =>
+    gitService.lastCommitMessage(await resolveGitCwd(projectId, cwd))
+  )
+  registerHandler('git:pullRequest', async (_e, projectId?: string, cwd?: string) =>
+    gitService.github.getPullRequest(await resolveGitCwd(projectId, cwd))
+  )
+  registerHandler('git:createPullRequest', async (_e, projectId?: string, cwd?: string) => {
+    await gitService.github.createPullRequest(await resolveGitCwd(projectId, cwd))
+  })
+  registerHandler('editors:list', async (_e, options?: { refresh?: boolean }) =>
+    listEditors(options)
+  )
+  registerHandler('editors:open', async (_e, editorId: string, path: string) => {
+    await openInEditor(editorId, path)
   })
 
   registerHandler('github:status', async () => {

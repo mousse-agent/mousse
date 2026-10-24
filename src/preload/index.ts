@@ -19,10 +19,13 @@ import type {
   ContextUsageSnapshot,
   DocumentOpenPayload,
   FileAsset,
+  EditorInfo,
   FileEntry,
   GitBranchInfo,
   GitCommit,
+  GitCommitOptions,
   GitDiffStats,
+  GitPullRequestLookup,
   GitStatusSnapshot,
   MainView,
   OrchestratorResponse,
@@ -480,10 +483,22 @@ const api = {
       ipcRenderer.invoke('git:diffStats', projectId, cwd),
     checkout: (branch: string, projectId?: string, cwd?: string): Promise<void> =>
       ipcRenderer.invoke('git:checkout', branch, projectId, cwd),
-    commit: (message: string, projectId?: string, cwd?: string): Promise<void> =>
-      ipcRenderer.invoke('git:commit', message, projectId, cwd),
+    commit: (message: string, projectId?: string, cwd?: string, options?: GitCommitOptions): Promise<void> =>
+      ipcRenderer.invoke('git:commit', message, projectId, cwd, options),
     push: (projectId?: string, cwd?: string): Promise<void> =>
-      ipcRenderer.invoke('git:push', projectId, cwd)
+      ipcRenderer.invoke('git:push', projectId, cwd),
+    lastCommitMessage: (projectId?: string, cwd?: string): Promise<string | null> =>
+      ipcRenderer.invoke('git:lastCommitMessage', projectId, cwd),
+    pullRequest: (projectId?: string, cwd?: string): Promise<GitPullRequestLookup> =>
+      ipcRenderer.invoke('git:pullRequest', projectId, cwd),
+    createPullRequest: (projectId?: string, cwd?: string): Promise<void> =>
+      ipcRenderer.invoke('git:createPullRequest', projectId, cwd)
+  },
+  editors: {
+    list: (options?: { refresh?: boolean }): Promise<EditorInfo[]> =>
+      ipcRenderer.invoke('editors:list', options),
+    open: (editorId: string, path: string): Promise<void> =>
+      ipcRenderer.invoke('editors:open', editorId, path)
   },
   inAppBrowser: {
     registerTab: (input) => ipcRenderer.invoke('browser:register-tab', input),

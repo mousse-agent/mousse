@@ -5,6 +5,7 @@ import { GitHubService } from './GitHubService'
 import type {
   GitBranchInfo,
   GitCommit,
+  GitCommitOptions,
   GitDiffStats,
   GitFileChange,
   GitStatusSnapshot
@@ -12,8 +13,32 @@ import type {
 
 const gitErrors = createErrorProvider({
   git_push_failed: { category: 'unavailable', retryable: false, message: 'Git push failed. Check the configured upstream, push destination and remote access.' },
-  git_detached_head: { category: 'invalid', retryable: false, message: 'Check out a branch before pushing.' }
+  git_detached_head: { category: 'invalid', retryable: false, message: 'Check out a branch before pushing.' },
+  git_push_rejected: { category: 'conflict', retryable: false, message: 'The remote has commits this branch does not. Pull them, then push again.' },
+  git_no_remote: { category: 'invalid', retryable: false, message: 'Add a remote before pushing.' },
+  git_amend_no_commit: { category: 'invalid', retryable: false, message: 'There is no commit to amend.' },
+  git_amend_pushed: { category: 'conflict', retryable: false, message: 'The latest commit is already pushed, so it cannot be amended.' }
 })
+
+export interface PushRemoteInputs {
+  pushRemote: string | null
+  pushDefault: string | null
+  remotes: readonly string[]
+}
+
+/** Remote used to publish a branch that has no upstream, or null when none is configured. */
+export function choosePushRemote({ pushRemote, pushDefault, remotes }: PushRemoteInputs): string | null {
+  if (pushRemote) return pushRemote
+  if (pushDefault) return pushDefault
+  if (remotes.includes('origin')) return 'origin'
+  return remotes.length === 1 ? remotes[0] : null
+}
+
+/** A push refused because the remote moved on, as opposed to an access or configuration failure. */
+export function isPushRejected(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error)
+  return /\[rejected\]|non-fast-forward|fetch first/i.test(text)
+}
 
 function mapStatus(entry: StatusResult['files'][number]): GitFileChange | null {
   const path = entry.path.replace(/\\/g, '/')
@@ -139,13 +164,20 @@ export class GitService {
       /* no upstream / remote — treat commits as local */
     }
 
+    // Commits no remote-tracking branch contains, for example on a branch made from a pushed one.
+    const hasRemotes = await git.raw(['for-each-ref', '--count=1', '--format=%(refname)', 'refs/remotes']).then((value) => Boolean(value.trim())).catch(() => false)
+    const localOnly = hasRemotes
+      ? await git.raw(['rev-list', `--max-count=${limit}`, 'HEAD', '--not', '--remotes']).then((value) => new Set(value.split('\n').map((line) => line.trim()).filter(Boolean))).catch(() => null)
+      : null
+
     return log.all.map((entry) => ({
       hash: entry.hash,
       shortHash: entry.hash.slice(0, 7),
       message: entry.message,
       author: entry.author_name,
       date: entry.date,
-      pushed: hasUpstream && !unpushed.has(entry.hash)
+      pushed: hasUpstream && !unpushed.has(entry.hash),
+      onRemote: localOnly !== null && !localOnly.has(entry.hash)
     }))
   }
 
@@ -200,21 +232,59 @@ export class GitService {
     await git.checkout(branch)
   }
 
-  async commit(cwd: string, message: string): Promise<void> {
+  async commit(cwd: string, message: string, options: GitCommitOptions = {}): Promise<void> {
     const git = this.gitFor(cwd)
+    if (options.amend) {
+      await this.assertAmendable(git)
+      await git.add(['-A'])
+      await git.raw(['commit', '--amend', '-m', message])
+      return
+    }
     await git.add(['-A'])
     await git.commit(message)
   }
 
+  async lastCommitMessage(cwd: string): Promise<string | null> {
+    if (!await this.isRepo(cwd)) return null
+    return this.gitFor(cwd).raw(['log', '-1', '--format=%B']).then((value) => value.trim() || null).catch(() => null)
+  }
+
+  /**
+   * Amending a commit any remote already has would need a force push, which is never
+   * done. This also covers a new branch whose only commit came from a pushed branch.
+   */
+  private async assertAmendable(git: SimpleGit): Promise<void> {
+    const hasHead = await git.raw(['rev-parse', '--verify', 'HEAD']).then(() => true).catch(() => false)
+    if (!hasHead) throw gitErrors.create('git_amend_no_commit')
+    const onRemote = await git.raw(['for-each-ref', '--count=1', '--contains', 'HEAD', '--format=%(refname)', 'refs/remotes'])
+      .then((value) => Boolean(value.trim()))
+    if (onRemote) throw gitErrors.create('git_amend_pushed')
+  }
+
   async push(cwd: string): Promise<void> {
     const git = this.gitFor(cwd)
-    const branch = await git.raw(['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => null)
+    const branch = (await git.raw(['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => null))?.trim()
     if (!branch) throw gitErrors.create('git_detached_head')
+    const hasUpstream = Boolean(await this.upstream(git))
+    const remote = hasUpstream ? null : await this.publishRemote(git, branch)
+    if (!hasUpstream && !remote) throw gitErrors.create('git_no_remote')
     try {
-      // Let Git resolve pushRemote, remote.pushDefault, refspecs and push.default.
-      await git.push()
+      // With an upstream, let Git resolve pushRemote, remote.pushDefault, refspecs and push.default.
+      if (remote) await git.raw(['push', '-u', remote, branch])
+      else await git.push()
     } catch (error) {
-      throw gitErrors.create('git_push_failed', error)
+      throw gitErrors.create(isPushRejected(error) ? 'git_push_rejected' : 'git_push_failed', error)
     }
+  }
+
+  private async publishRemote(git: SimpleGit, branch: string): Promise<string | null> {
+    const config = (key: string): Promise<string | null> =>
+      git.raw(['config', '--get', key]).then((value) => value.trim() || null).catch(() => null)
+    const [pushRemote, pushDefault, remotes] = await Promise.all([
+      config(`branch.${branch}.pushRemote`),
+      config('remote.pushDefault'),
+      git.raw(['remote']).then((value) => value.split('\n').map((line) => line.trim()).filter(Boolean)).catch(() => [])
+    ])
+    return choosePushRemote({ pushRemote, pushDefault, remotes })
   }
 }

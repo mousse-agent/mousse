@@ -14,6 +14,7 @@ import {
   workspaceDraftForChoice,
   type WorkspaceChoice
 } from './deviceMenu'
+import { OpenInEditor } from './EditorMenuButton'
 import { SideCardSection, type SideCardSectionContext } from './SideCardSection'
 import './deviceSection.css'
 
@@ -23,7 +24,7 @@ const WORKSPACE_ICONS = { checkout: Folder, worktree: FolderPlus } as const
  * Name of the computer the thread runs on. Plain text once the thread has
  * started, while a send is in flight, or when there is nothing to pick; on a
  * new, empty thread it opens a menu to pick where it runs and whether it
- * starts in a new worktree.
+ * starts in a new worktree. Below it, a local thread's folder opens in an editor.
  */
 export function DeviceSection({ threadId }: SideCardSectionContext) {
   const name = useAppStore((s) => localDeviceName(s.appInfo?.deviceName))
@@ -38,6 +39,7 @@ export function DeviceSection({ threadId }: SideCardSectionContext) {
       {isNew
         ? <DeviceMenuButton threadId={threadId} name={name} locked={locked} />
         : <DeviceName name={name} />}
+      <OpenInEditor />
     </SideCardSection>
   )
 }
