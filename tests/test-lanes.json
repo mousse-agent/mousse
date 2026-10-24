@@ -55,6 +55,7 @@
     "tests/receiptRefRelease.test.ts",
     "tests/repositoryIdentityLease.test.ts",
     "tests/resourceLifecycleAcceptanceInventory.test.ts",
+    "tests/resourceLifecycleNamedGate.test.ts",
     "tests/resourceLifecycleQualificationContext.test.ts",
     "tests/resourceLifecycleQualificationIngress.test.ts",
     "tests/resourceLifecycleQualificationPurge.test.ts",
