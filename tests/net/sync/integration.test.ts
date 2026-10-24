@@ -483,6 +483,68 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     expect(connection.a.state()).toBe('open')
     expect(connection.b.state()).toBe('open')
   })
+  it('stops a stalled replay when the live queue overflows so no caughtUp follows the resync', async () => {
+    const p = await profiles()
+    for (const row of Array.from({ length: 3 }, (_, i) => p.record(i + 1)))
+      p.aStore.appendAsAuthority(p.stream.id, {
+        id: JSON.parse(Buffer.from(row.envelope).toString()).id,
+        envelope: row.envelope,
+        sig: row.sig,
+        recvTs: row.recvTs
+      })
+    const connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const sent: string[] = []
+    const send = (
+      connection.a as unknown as { send: (header: { t: string }) => Promise<void> }
+    ).send.bind(connection.a)
+    vi.spyOn(connection.a as never, 'send' as never).mockImplementation((async (
+      header: { t: string },
+      ...rest: unknown[]
+    ) => {
+      sent.push(header.t)
+      return (send as (...args: unknown[]) => Promise<void>)(header, ...rest)
+    }) as never)
+    // The first replay page never completes, so the replay is still in flight at overflow time.
+    let release!: () => void
+    const stalled = new Promise<void>((resolve) => (release = resolve))
+    type SendRecords = (...args: unknown[]) => Promise<void>
+    const realSendRecords = (
+      connection.a as unknown as { sendRecords: SendRecords }
+    ).sendRecords.bind(connection.a)
+    let calls = 0
+    const replay = vi
+      .spyOn(connection.a as unknown as { sendRecords: SendRecords }, 'sendRecords')
+      .mockImplementation((...args) => {
+        // Replay stalls on its first page; the bogus live record is dropped; snapshot pages pass.
+        if (++calls === 1) return stalled
+        return args[2] === false ? Promise.resolve() : realSendRecords(...args)
+      })
+    const errors: unknown[] = []
+    connection.a.onClosed((error) => errors.push(error))
+    connection.b.onClosed((error) => errors.push(error))
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(replay).toHaveBeenCalledOnce())
+    const body = new Uint8Array(8 * 1024 * 1024)
+    const overflow = Array.from({ length: 8 }, (_, i) =>
+      connection.a.publishRecord(p.stream.id, { ...oversizedRecord(i + 1, 0), envelope: body })
+    )
+    await Promise.allSettled(overflow)
+    release()
+    await vi.waitFor(() => expect(h.onSnapshotInstalled).toHaveBeenCalledOnce(), {
+      timeout: 10_000
+    })
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce(), { timeout: 10_000 })
+    // The only caughtUp is the one that follows the post-snapshot subscribe.
+    const resync = sent.indexOf('snapshotRequired')
+    expect(sent.slice(resync, sent.indexOf('caughtUp', resync) + 1)).toContain('subscribed')
+    expect(sent.filter((t) => t === 'caughtUp')).toHaveLength(1)
+    expect(h.onError).not.toHaveBeenCalled()
+    expect(errors).toEqual([])
+    expect(connection.a.state()).toBe('open')
+    expect(connection.b.state()).toBe('open')
+  })
   it('fails the session when the resync request cannot be sent to a lagging subscriber', async () => {
     const p = await profiles(),
       connection = await sessions(p)
@@ -490,6 +552,8 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     const h = handlers()
     connection.b.subscribe(p.stream.id, h)
     await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce())
+    const closed: unknown[] = []
+    connection.a.onClosed((error) => closed.push(error))
     vi.spyOn(
       connection.a as unknown as { sendRecords: () => Promise<void> },
       'sendRecords'
@@ -507,6 +571,9 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
         .catch(() => undefined)
     // A swallowed send would leave the subscriber attached and silent; the session reconnects instead.
     await vi.waitFor(() => expect(connection.a.state()).toBe('closed'))
+    // A carrier failure, so a supervised peer reconnects instead of treating it as terminal.
+    expect(closed).toHaveLength(1)
+    expect(closed[0]).toMatchObject({ code: 'route_unreachable' })
   })
   it('accepts a valid 500-record wire snapshot through bounded storage appends', async () => {
     const p = await profiles()

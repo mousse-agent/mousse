@@ -663,7 +663,12 @@ export class NetSyncSession implements SyncSession {
       queue.overflowed = true
       this.livePublishing.delete(stream)
       attempt.live = false
-      return this.requireSnapshot(stream).catch((error) => this.fail(error))
+      // An in-flight replay must stop too: its caughtUp after snapshotRequired is a protocol error.
+      attempt.cancelled = true
+      // A rejected resync request is a carrier failure, so a supervised peer reconnects.
+      return this.requireSnapshot(stream).catch((error) =>
+        this.fail(new NetError('route_unreachable', 'Resync request rejected.', { cause: error }))
+      )
     }
     const controller = new AbortController()
     // One live record per stream at a time: a burst (a refreshed display snapshot is dozens of
