@@ -7,6 +7,7 @@ import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { MmsProtocolServer, LocalMmsClient } from '../src/mms/protocol'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { gitFoundationFixture } from './fixtures/gitFoundation'
+import { seedLegacyNamedEpisode } from './fixtures/legacy-named-agent'
 import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 
 let f: ReturnType<typeof gitFoundationFixture>, mms: MousseMainService, server: MmsProtocolServer, client: LocalMmsClient
@@ -186,3 +187,14 @@ it('cancels a delegated child and its nested delegation depth-first, aborting th
     expect(mms.orchestrator.listDelegations(thread.id)[0].status).toBe('cancelled')
   } finally { release() }
 }, 45_000)
+
+it('refuses to stop or merge a retired named agent from old task data and leaves it untouched', async () => {
+  const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Legacy named agent', project.id)
+  const { agentId } = seedLegacyNamedEpisode(mms.threads.getThreadDir(thread.id), { worktreePath: f.repo })
+  const registry = mms.orchestrator.getAgentsForThread(thread.id)
+  registry.create({ cliType: 'mousse', executionMode: 'gui', task: 'Legacy named agent task', worktreePath: f.repo, status: 'ready' }, agentId)
+  await expect(mms.orchestrator.stopAgentForThread(thread.id, agentId, true)).rejects.toThrow(/retired named agent/)
+  const logs = await mms.orchestrator.stopAgentForThread(thread.id, agentId, false)
+  expect(logs.join(' ')).toMatch(/retired named agent.*Nothing was stopped or changed/)
+  expect(registry.get(agentId)?.status).toBe('ready')
+}, 30_000)
