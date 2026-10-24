@@ -19,12 +19,28 @@
 
 .side-card-git-branch,
 .side-card-git-commit-button,
+.side-card-git-push,
+.side-card-git-pr,
+.side-card-git-pr-create,
+.side-card-git-init,
 .side-card-git-changes {
   border: 0;
   background: transparent;
   color: inherit;
   font: inherit;
   cursor: pointer;
+}
+
+.side-card-git-init {
+  display: block;
+  height: 28px;
+  margin-top: 6px;
+  padding: 0 10px;
+  border-radius: var(--ui-row-radius);
+  background: var(--ui-hover);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 .side-card-git-branch {
@@ -53,7 +69,8 @@
   white-space: nowrap;
 }
 
-.side-card-git-commit-button {
+.side-card-git-commit-button,
+.side-card-git-push {
   flex: none;
   height: 26px;
   padding: 0 10px;
@@ -61,32 +78,134 @@
   background: var(--ui-hover);
   font-size: 12px;
   font-weight: 500;
+  white-space: nowrap;
+}
+
+.side-card-git-push {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+}
+
+.side-card-git-push-count {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .side-card-git-branch:hover:not(:disabled),
 .side-card-git-branch[aria-expanded='true'],
+.side-card-git-pr:hover,
 .side-card-git-changes:hover {
   background: var(--ui-hover);
 }
 
 .side-card-git-commit-button:hover:not(:disabled),
-.side-card-git-commit-button[aria-expanded='true'] {
+.side-card-git-commit-button[aria-expanded='true'],
+.side-card-git-push:hover:not(:disabled),
+.side-card-git-init:hover:not(:disabled),
+.side-card-git-pr-create:hover:not([aria-disabled='true']) {
   background: var(--ui-pressed);
 }
 
 .side-card-git-branch:disabled,
-.side-card-git-commit-button:disabled {
+.side-card-git-commit-button:disabled,
+.side-card-git-push:disabled,
+.side-card-git-init:disabled,
+.side-card-git-pr-create[aria-disabled='true'] {
   cursor: default;
   opacity: 0.5;
 }
 
 .side-card-git-branch:focus-visible,
 .side-card-git-commit-button:focus-visible,
+.side-card-git-push:focus-visible,
+.side-card-git-pr:focus-visible,
+.side-card-git-pr-create:focus-visible,
+.side-card-git-init:focus-visible,
 .side-card-git-changes:focus-visible,
 .side-card-git-option:focus-visible,
 .side-card-git-submit:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+.side-card-git-pr {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 26px;
+  margin-top: 2px;
+  padding: 0 6px;
+  border-radius: var(--ui-row-radius);
+  font-size: 12px;
+  text-align: left;
+}
+
+.side-card-git-pr-check {
+  flex: none;
+}
+
+.side-card-git-pr-check[data-checks='passing'] {
+  color: var(--success);
+}
+
+.side-card-git-pr-check[data-checks='failing'] {
+  color: var(--danger);
+}
+
+.side-card-git-pr-pending {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin: 0 3px;
+  border-radius: 50%;
+  background: var(--ui-faint);
+  animation: side-card-git-pr-pulse 1.6s ease-in-out infinite;
+}
+
+.side-card-git-pr-number {
+  flex: none;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.side-card-git-pr-title {
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-card-git-pr-suffix {
+  flex: none;
+  color: var(--ui-faint);
+  font-size: 11px;
+}
+
+.side-card-git-pr-create {
+  display: block;
+  height: 26px;
+  margin: 2px 0 0 6px;
+  padding: 0 10px;
+  border-radius: var(--ui-row-radius);
+  background: var(--ui-hover);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+@keyframes side-card-git-pr-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .side-card-git-error {
@@ -213,6 +332,14 @@
   outline: none;
 }
 
+/* The popover already shows where focus is; the global input:focus ring would double it. */
+.side-card-git-search input:focus {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+}
+
 .side-card-git-list {
   max-height: 200px;
   overflow-y: auto;
@@ -290,22 +417,46 @@
   margin: 6px 0 0;
 }
 
-.side-card-git-popover-footer {
+.side-card-git-amend {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   margin-top: 8px;
+  cursor: pointer;
+}
+
+.side-card-git-amend[data-disabled='true'] {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.side-card-git-popover-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.side-card-git-popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .side-card-git-hint {
+  overflow: hidden;
   color: var(--ui-faint);
   font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .side-card-git-submit {
   height: 26px;
   padding: 0 12px;
+  white-space: nowrap;
   border: 0;
   border-radius: var(--ui-row-radius);
   background: var(--ui-hover);
@@ -319,6 +470,15 @@
   background: var(--ui-pressed);
 }
 
+.side-card-git-submit-quiet {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--ui-line-strong);
+}
+
+.side-card-git-submit-quiet:hover:not(:disabled) {
+  background: var(--ui-hover);
+}
+
 .side-card-git-submit:disabled {
   cursor: default;
   opacity: 0.45;
@@ -328,6 +488,10 @@
    all properties, and rows inherit the popover's visibility, so they would still
    read as hidden when focus moves into them. */
 @media (prefers-reduced-motion: reduce) {
+  .side-card-git-pr-pending {
+    animation: none;
+  }
+
   .side-card-git-popover *,
   .side-card-device-menu * {
     transition-property: none !important;

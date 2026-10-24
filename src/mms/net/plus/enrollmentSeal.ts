@@ -1,6 +1,5 @@
+import { chacha20poly1305 } from '@noble/ciphers/chacha.js'
 import {
-  createCipheriv,
-  createDecipheriv,
   createHash,
   createPrivateKey,
   createPublicKey,
@@ -34,20 +33,17 @@ function x25519Private(raw: Uint8Array) {
     type: 'pkcs8'
   })
 }
+// ChaCha20-Poly1305 comes from @noble/ciphers: Electron's BoringSSL build of node:crypto
+// has no such cipher, so createCipheriv fails inside the packaged app.
 function seal(key: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array, aad: string): Buffer {
   if (key.length !== KEY || nonce.length !== NONCE) throw new NetError('bad_request')
-  const cipher = createCipheriv('chacha20-poly1305', key, nonce, { authTagLength: TAG })
-  cipher.setAAD(Buffer.from(aad, 'utf8'), { plaintextLength: plaintext.length })
-  return Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()])
+  return Buffer.from(chacha20poly1305(key, nonce, Buffer.from(aad, 'utf8')).encrypt(plaintext))
 }
 function open(key: Uint8Array, nonce: Uint8Array, sealed: Uint8Array, aad: string): Buffer {
   if (key.length !== KEY || nonce.length !== NONCE || sealed.length < TAG)
     throw new NetError('invite_invalid')
   try {
-    const decipher = createDecipheriv('chacha20-poly1305', key, nonce, { authTagLength: TAG })
-    decipher.setAAD(Buffer.from(aad, 'utf8'), { plaintextLength: sealed.length - TAG })
-    decipher.setAuthTag(sealed.subarray(sealed.length - TAG))
-    return Buffer.concat([decipher.update(sealed.subarray(0, sealed.length - TAG)), decipher.final()])
+    return Buffer.from(chacha20poly1305(key, nonce, Buffer.from(aad, 'utf8')).decrypt(sealed))
   } catch {
     throw new NetError('invite_invalid')
   }
