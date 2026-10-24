@@ -310,8 +310,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const speakingThreadId = useSpeakingThreadId()
-  const centerAgentId = useAppStore((s) => s.centerAgentId)
-  const setCenterAgentId = useAppStore((s) => s.setCenterAgentId)
 
   const threadActivity = useAppStore((s) => s.threadActivity)
   const turnStates = useAppStore((s) => s.turnStates)
@@ -1011,19 +1009,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           </button>
         ))}
       </div>
-
-      {centerAgentId && (
-        <button
-          type="button"
-          className="threads-sidebar-main-agent"
-          onClick={() => setCenterAgentId(null)}
-        >
-          <span className="threads-sidebar-main-agent-kicker">Main agent</span>
-          <span className="threads-sidebar-main-agent-name">
-            {threads.find((thread) => thread.id === activeThreadId)?.name || 'This chat'}
-          </span>
-        </button>
-      )}
 
       <div className="threads-sidebar-scroll">
 

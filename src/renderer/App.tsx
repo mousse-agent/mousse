@@ -3,7 +3,6 @@ import { useEffect, useRef, useCallback, useState, startTransition, type Pointer
 import { ChatWorkspace } from './components/chats/ChatWorkspace'
 import { useChatsStore } from './stores/chatsStore'
 import { OrchestratorChat } from './components/OrchestratorChat'
-import { MousseAgentChat } from './components/MousseAgentChat'
 
 import { MainViewTabs } from './components/MainViewTabs'
 
@@ -91,7 +90,6 @@ export default function App() {
   const mainView = useAppStore((s) => s.mainView)
 
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
-  const centerAgentId = useAppStore((s) => s.centerAgentId)
 
   const setMainAreaOpen = useAppStore((s) => s.setMainAreaOpen)
 
@@ -332,10 +330,6 @@ export default function App() {
       }),
       window.mousse.documents.onOpened(({ title, markdown }) => {
         openDocument(title, markdown)
-      }),
-      window.mousse.agents.onActivated(() => {
-        setMainView('agents')
-        setMainAreaOpen(true)
       })
     ]
 
@@ -552,11 +546,7 @@ export default function App() {
         >
           {usageOpen && <SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} />}
           <KeepMounted active={!usageOpen} className="keep-mounted-pane">
-          {centerAgentId ? (
-            <div className="center-agent-session">
-              <MousseAgentChat key={centerAgentId} agentId={centerAgentId} active />
-            </div>
-          ) : workspaceReady ? <OrchestratorChat key={profileId} /> : <WorkspaceLoading conversationOnly />}
+          {workspaceReady ? <OrchestratorChat key={profileId} /> : <WorkspaceLoading conversationOnly />}
 
           </KeepMounted>
           <ThreadSideCard onReservedChange={setSideCardReserved} />

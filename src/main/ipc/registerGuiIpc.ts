@@ -75,7 +75,6 @@ import {
   type WindowDragPoint
 } from '../windowState'
 import { applyWindowMaterial, attachWindowFocusListeners, setWindowProfileSettings } from '../windowMaterial'
-import { closeAgentsTasksWindow, getAgentsTasksWindow, openAgentsTasksWindow } from '../agentsTasksWindow'
 import {
   getThreadNotificationPresentation,
   type ThreadNotificationKind
@@ -237,8 +236,8 @@ export function registerGuiIpc(
     repoRoot
   } = services
   activeGuiMms = guiMms
-  registerLinuxWindowResizeIpc(getWindow, getAgentsTasksWindow)
-  registerAppletIpc(registerHandler, guiMms, () => [getWindow(), getAgentsTasksWindow()])
+  registerLinuxWindowResizeIpc(getWindow)
+  registerAppletIpc(registerHandler, guiMms, () => [getWindow()])
 
   const browserHost = (event: Electron.IpcMainInvokeEvent): AttachedBrowserHost => {
     if (event.senderFrame !== event.sender.mainFrame || !services.attachedBrowserHost) throw new Error('In-app browser automation is unavailable')
@@ -1271,12 +1270,6 @@ export function registerGuiIpc(
 
   // ── Phase 4: agents / tasks / PTY / Mousse subagents (protocol) ──────────
 
-  registerHandler('agents:listNamed', async (_e, threadId: string) => guiMms.request('agents.listNamed', { threadId }))
-  for (const action of ['createNamed', 'recallNamed', 'integrateNamed', 'reviewNamed'] as const) {
-    registerHandler(`agents:${action}`, async (_e, threadId: string, input: Record<string, unknown>) =>
-      guiMms.request(`agents.${action}`, { ...input, threadId }))
-  }
-
   registerHandler('agents:list', async (_e, threadId?: string) => {
     const id =
       typeof threadId === 'string' && threadId.trim()
@@ -2206,22 +2199,11 @@ export function registerGuiIpc(
     broadcast('app:navigateMainView', view)
   })
   registerHandler('window:focusMain', () => {
-    closeAgentsTasksWindow()
     const win = getWindow()
     if (!win || win.isDestroyed()) return
     if (win.isMinimized()) win.restore()
     win.show()
     win.focus()
-  })
-  registerHandler('window:closeAgentsTasks', () => {
-    closeAgentsTasksWindow()
-  })
-  registerHandler('window:openAgentsTasks', (e, anchor?: { x: number; y: number }) => {
-    openAgentsTasksWindow(
-      settings,
-      BrowserWindow.fromWebContents(e.sender) ?? getWindow() ?? undefined,
-      anchor
-    )
   })
   registerHandler('window:minimize', () => {
     getWindow()?.minimize()

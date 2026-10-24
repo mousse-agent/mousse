@@ -4,7 +4,6 @@ import { MMS_PROTOCOL_VERSION, type ProtocolHelloOk } from '../../mms/protocol/t
 /** APIs used by the current task shell. Add required APIs when the shell adopts them. */
 export const GUI_REQUIRED_METHODS = [
   'profiles.bind', 'profiles.status', 'thread.snapshot', 'queue.list',
-  'agents.listNamed', 'agents.createNamed', 'agents.recallNamed', 'agents.integrateNamed', 'agents.reviewNamed',
   'workspace.getStatus', 'workspace.restore', 'actions.list', 'actions.undoLatest', 'actions.redo',
   'actions.revertCode', 'actions.fork', 'actions.activateBranch', 'actions.getAffectedFiles',
   'actions.sweepRetention', 'actions.configureRetention', 'actions.pin',

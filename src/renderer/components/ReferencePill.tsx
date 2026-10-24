@@ -41,15 +41,12 @@ export function ChatReferencePill({ reference: candidate, onRemove }: { referenc
       store.setActiveProjectTerminalTab(reference.threadId ?? store.activeThreadId, reference.tabId)
       return
     }
-    if (reference.kind === 'agent' && reference.agentId) {
-      if (reference.threadId && reference.threadId !== store.activeThreadId) {
+    if (reference.kind === 'agent' && reference.threadId) {
+      // There is no Agents tab any more; an old agent reference opens the thread that owns it.
+      if (reference.threadId !== store.activeThreadId) {
         store.switchToThread(reference.threadId)
         void window.mousse.threads.select(reference.threadId)
       }
-      store.setMainAreaOpen(true)
-      store.setMainView('agents')
-      store.setActiveAgentId(reference.agentId)
-      if (reference.sessionId) store.setActivePtyId(reference.sessionId)
       return
     }
     if (reference.kind === 'file' && reference.path) {

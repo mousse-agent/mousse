@@ -7,7 +7,6 @@ import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, Provi
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
 import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../shared/updates'
-import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity, NamedAgentRequest, NamedAgentRecallRequest, NamedAgentIntegrationRequest, NamedAgentIntegrationReview } from '../shared/agentEpisodes'
 import type {
   Agent,
   BrowserBounds,
@@ -313,11 +312,6 @@ const api = {
     }
   },
   agents: {
-    listNamed: (threadId: string): Promise<AgentEpisodeState> => ipcRenderer.invoke('agents:listNamed', threadId),
-    createNamed: (threadId: string, input: NamedAgentRequest & { name: string }): Promise<{ agent: NamedAgentIdentity; episode: AgentEpisode }> => ipcRenderer.invoke('agents:createNamed', threadId, input),
-    recallNamed: (threadId: string, input: NamedAgentRecallRequest): Promise<{ agent: NamedAgentIdentity; episode: AgentEpisode }> => ipcRenderer.invoke('agents:recallNamed', threadId, input),
-    integrateNamed: (threadId: string, input: NamedAgentIntegrationRequest): Promise<unknown> => ipcRenderer.invoke('agents:integrateNamed', threadId, input),
-    reviewNamed: (threadId: string, agent: string, episodeId: string): Promise<NamedAgentIntegrationReview> => ipcRenderer.invoke('agents:reviewNamed', threadId, { agent, episodeId }),
     /** Omit threadId to list agents for the active thread. */
     list: (threadId?: string): Promise<Agent[]> => ipcRenderer.invoke('agents:list', threadId),
     stop: (agentId: string, threadId?: string): Promise<string[]> => ipcRenderer.invoke('agents:stop', agentId, threadId),
@@ -330,11 +324,6 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, agent: Agent) => cb(agent)
       ipcRenderer.on('agent:spawned', handler)
       return () => ipcRenderer.removeListener('agent:spawned', handler)
-    },
-    onActivated: (cb: (payload: { agentId: string }) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, payload: { agentId: string }) => cb(payload)
-      ipcRenderer.on('agent:activated', handler)
-      return () => ipcRenderer.removeListener('agent:activated', handler)
     }
   },
   mousseAgent: {
@@ -989,9 +978,6 @@ const api = {
     close: (): Promise<void> => ipcRenderer.invoke('window:close'),
     isMaximized: (): Promise<boolean> => ipcRenderer.invoke('window:isMaximized'),
     syncBackground: (): Promise<boolean> => ipcRenderer.invoke('window:syncBackground'),
-    openAgentsTasks: (anchor?: { x: number; y: number }): Promise<void> =>
-      ipcRenderer.invoke('window:openAgentsTasks', anchor),
-    closeAgentsTasks: (): Promise<void> => ipcRenderer.invoke('window:closeAgentsTasks'),
     focusMain: (): Promise<void> => ipcRenderer.invoke('window:focusMain'),
     onMaximizedChange: (cb: (maximized: boolean) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, maximized: boolean) => cb(maximized)
