@@ -10,6 +10,7 @@ import {
   validateRemoteParams,
   type RemoteBackendPort
 } from '../../../../src/mms/bridge/remote'
+import { MmsThreadSource } from '../../../../src/mms/bridge/remote/MmsThreadSource'
 import { STAGED_UPLOAD_TTL_MS } from '../../../../src/mms/bridge/remote/RemoteApi'
 import type { RpcContext } from '../../../../src/mms/net/contracts'
 import { newId, type NodeId, type UserId } from '../../../../src/shared/net'
@@ -162,7 +163,8 @@ describe('remote composer methods', () => {
     const backend: RemoteBackendPort = {
       execute: async (method, params) => ({ method, params }),
       snapshot: () => ({}),
-      run: async (_threadId, content, _control, extras) => {
+      run: async (_threadId, content, control, extras) => {
+        control.onAccepted()
         runs.push({ content, extras })
         return { text: 'done', silent: false }
       }
@@ -225,10 +227,11 @@ describe('remote composer methods', () => {
     const backend: RemoteBackendPort = {
       execute: async () => (refuse ? { ok: false, error: 'Queue is closed' } : { ok: true }),
       snapshot: () => ({}),
-      run: async () =>
-        refuse
-          ? { text: '', silent: false, error: 'Thread already has a running turn' }
-          : { text: 'ok', silent: false }
+      run: async (_threadId, _content, control) => {
+        if (refuse) return { text: '', silent: false, error: 'Thread already has a running turn' }
+        control.onAccepted()
+        return { text: 'ok', silent: false }
+      }
     }
     const api = new RemoteApi(backend, clock)
     resources.push(() => api.close())
@@ -250,7 +253,13 @@ describe('remote composer methods', () => {
     let release: () => void = () => undefined
     const backend: RemoteBackendPort = {
       ...idleBackend,
-      run: () => new Promise((resolve) => (release = () => resolve({ text: 'ok', silent: false })))
+      run: (_threadId, _content, control) =>
+        new Promise((resolve) => {
+          release = () => {
+            control.onAccepted()
+            resolve({ text: 'ok', silent: false })
+          }
+        })
     }
     const api = new RemoteApi(backend, clock)
     resources.push(() => api.close())
@@ -276,8 +285,9 @@ describe('remote composer methods', () => {
     const api = new RemoteApi(
       {
         ...idleBackend,
-        run: async (...args) => {
-          runs.push(args)
+        run: async (threadId, content, control, extras) => {
+          control.onAccepted()
+          runs.push([threadId, content, extras])
           return { text: 'ok', silent: false }
         }
       },
@@ -339,6 +349,73 @@ describe('remote composer methods', () => {
     expect(time.pending()).toBe(1)
     api.close()
     expect(time.pending()).toBe(0)
+  })
+
+  it('gives staged images back when a send is cancelled before the message is stored', async () => {
+    let accept = false
+    const backend: RemoteBackendPort = {
+      ...idleBackend,
+      run: (_threadId, _content, control) =>
+        new Promise((resolve) => {
+          const finish = (): void => {
+            if (accept) control.onAccepted()
+            resolve({ text: '', silent: true, aborted: true })
+          }
+          control.signal.addEventListener('abort', finish, { once: true })
+        })
+    }
+    const api = new RemoteApi(backend, clock)
+    resources.push(() => api.close())
+    const send = { threadId: 't', content: 'look', attachments: ['upload-0001'] }
+    const cancelledSend = async (): Promise<unknown> => {
+      const abort = new AbortController()
+      const entry = api.methods().find((row) => row.method === 'orchestrator.send')!
+      const pending = Promise.resolve(entry.handle(send, { ...context(), signal: abort.signal }))
+      abort.abort()
+      return pending.catch((error: unknown) => error)
+    }
+    await Promise.all(stage(api, 'upload-0001', 'AAAA'))
+    expect(await cancelledSend()).toMatchObject({ code: 'cancelled' })
+    // Nothing was stored, so the same upload can be sent again.
+    const uploads = (api as unknown as { uploads: Map<string, { claimed: boolean }> }).uploads
+    expect([...uploads.values()].map((upload) => upload.claimed)).toEqual([false])
+    // Once the message is stored, a cancelled turn still uses the image up.
+    accept = true
+    expect(await cancelledSend()).toMatchObject({ code: 'cancelled' })
+    expect(uploads.size).toBe(0)
+  })
+
+  it('does not keep re-arming the sweep timer for an upload held by a long send', async () => {
+    const time = manualClock()
+    let finish: (accepted: boolean) => void = () => undefined
+    const backend: RemoteBackendPort = {
+      ...idleBackend,
+      run: (_threadId, _content, control) =>
+        new Promise((resolve) => {
+          finish = (accepted) => {
+            if (accepted) control.onAccepted()
+            resolve({ text: 'ok', silent: false })
+          }
+        })
+    }
+    const api = new RemoteApi(backend, time)
+    const timer = () => (api as unknown as { sweepTimer?: unknown }).sweepTimer
+    await Promise.all(stage(api, 'upload-0001', 'AAAA'))
+    const sending = call(api, 'orchestrator.send', {
+      threadId: 't',
+      content: 'look',
+      attachments: ['upload-0001']
+    })
+    time.advance(STAGED_UPLOAD_TTL_MS + 5000)
+    expect(timer()).toBeUndefined()
+    // A refused send gives the image back and expiry is scheduled again.
+    finish(false)
+    await sending
+    expect(timer()).toBeDefined()
+    time.advance(STAGED_UPLOAD_TTL_MS + 2)
+    expect((api as unknown as { uploads: Map<string, unknown> }).uploads.size).toBe(0)
+    expect(timer()).toBeUndefined()
+    api.close()
   })
 
   it('refuses a chunk that changes an upload already in progress', async () => {
@@ -461,6 +538,64 @@ describe('remote composer methods on a real profile', () => {
       })
     ).toMatchObject({ error: expect.stringMatching(/not available/) })
     expect(mms.orchestrator.getMessages(thread.id)).toEqual([])
+  })
+
+  it('keeps the remote thread snapshot and events small however many images the thread holds', async () => {
+    const { mms, api } = await profile()
+    const thread = mms.threads.createThread('Images')
+    const data = 'A'.repeat(6 * 1024 * 1024)
+    const image = { name: 'big.png', mimeType: 'image/png', data }
+    const messages = Array.from({ length: 5 }, (_, index) => ({
+      id: 'm' + index,
+      role: 'user' as const,
+      content: 'look ' + index,
+      timestamp: new Date(index).toISOString(),
+      images: [image, image]
+    }))
+    vi.spyOn(mms.orchestrator, 'getMessages').mockReturnValue(messages)
+    for (let index = 0; index < 4; index++)
+      mms.orchestrator.enqueueForThread(thread.id, { content: 'later ' + index, images: [image] })
+
+    const backend = new MmsRemoteBackend(mms)
+    const snapshot = backend.snapshot(thread.id) as {
+      messages: Array<{ images: unknown[] }>
+      queue: Array<{ images: unknown[] }>
+    }
+    const text = JSON.stringify(snapshot)
+    expect(text.length).toBeLessThan(64 * 1024)
+    expect(text).not.toContain('AAAA')
+    expect(snapshot.messages).toHaveLength(5)
+    expect(snapshot.messages[0].images).toEqual([
+      { name: 'big.png', mimeType: 'image/png' },
+      { name: 'big.png', mimeType: 'image/png' }
+    ])
+    expect(snapshot.queue).toHaveLength(4)
+    expect(snapshot.queue[0].images).toEqual([{ name: 'big.png', mimeType: 'image/png' }])
+    expect(
+      JSON.stringify(await call(api, 'thread.snapshot', { threadId: thread.id }))
+    ).not.toContain('AAAA')
+
+    const source = new MmsThreadSource(mms)
+    const events: Array<{ type: string; data: string }> = []
+    const stop = source.onThread(thread.id, (event) =>
+      events.push({ type: event.type, data: event.data as string })
+    )
+    resources.push(stop)
+    mms.orchestrator.emit('thread-message', { threadId: thread.id, message: messages[0] })
+    mms.orchestrator.emit('thread-messages', { threadId: thread.id, messages })
+    mms.orchestrator.emit('queue-updated', {
+      threadId: thread.id,
+      items: mms.orchestrator.listQueue(thread.id)
+    })
+    expect(events.map((event) => event.type)).toEqual([
+      'thread.message',
+      'thread.messages',
+      'queue.updated'
+    ])
+    for (const event of events) {
+      expect(JSON.stringify(event.data).length).toBeLessThan(64 * 1024)
+      expect(JSON.stringify(event.data)).not.toContain('AAAA')
+    }
   })
 
   it('sets one thread model without changing the computer default', async () => {

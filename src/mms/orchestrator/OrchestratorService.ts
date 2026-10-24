@@ -3839,6 +3839,7 @@ export class OrchestratorService extends EventEmitter {
       externalDrainSteer?: () => string | undefined
       modelOverride?: ModelOverride
       onTurnSettled?: (aborted: boolean) => void
+      onUserInputAccepted?: () => void
       /** The caller already admitted this session (see ThreadSession.turnAdmitted) and hands ownership to this turn. */
       admissionHeld?: boolean
       /** Run Engine run this turn executes; also used as the turn id. */
@@ -3971,6 +3972,7 @@ export class OrchestratorService extends EventEmitter {
       externalDrainSteer?: () => string | undefined
       modelOverride?: ModelOverride
       onTurnSettled?: (aborted: boolean) => void
+      onUserInputAccepted?: () => void
       runId?: string
     }
   ): Promise<OrchestratorResponse> {
@@ -4145,6 +4147,7 @@ export class OrchestratorService extends EventEmitter {
             mode
           )
           claimAccepted = true
+          opts?.onUserInputAccepted?.()
         } catch (err) {
           if (queueItemId) {
             const status = this.inspectDurableQueueProvenance(
@@ -6276,6 +6279,8 @@ export class OrchestratorService extends EventEmitter {
       /** Remote sends choose a mode and attach images; channel turns run in agent mode without images. */
       mode?: ChatMode
       images?: ChatImageAttachment[]
+      /** Called once the user's message is stored on the thread; not called if the turn never starts. */
+      onUserInputAccepted?: () => void
     }
   ): Promise<BackgroundWorkflowTurnResult> {
     return this.lifecycle.run('channel-turn', () => this.runChannelTurnOwned(threadId, content, threadStore, opts))
@@ -6293,6 +6298,8 @@ export class OrchestratorService extends EventEmitter {
       /** Remote sends choose a mode and attach images; channel turns run in agent mode without images. */
       mode?: ChatMode
       images?: ChatImageAttachment[]
+      /** Called once the user's message is stored on the thread; not called if the turn never starts. */
+      onUserInputAccepted?: () => void
     }
   ): Promise<BackgroundWorkflowTurnResult> {
     const ownedTurn = !opts?.signal
@@ -6399,6 +6406,7 @@ export class OrchestratorService extends EventEmitter {
               }
             : undefined),
           modelOverride: opts?.modelOverride,
+          onUserInputAccepted: opts?.onUserInputAccepted,
           onTurnSettled: (aborted) => {
             wasAborted = aborted
             try {

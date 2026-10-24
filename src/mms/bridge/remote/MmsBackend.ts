@@ -31,6 +31,37 @@ function queueRow(item: QueuedMessage): Record<string, unknown> {
   }
 }
 
+/**
+ * A message or queued item as a remote reader sees it: images keep their name and type but not
+ * their data, so a thread's remote snapshot stays small however many images it holds.
+ */
+export function withoutImageData<T extends { images?: unknown }>(item: T): T {
+  if (!Array.isArray(item?.images)) return item
+  return {
+    ...item,
+    images: (item.images as Array<{ name: string; mimeType: string }>).map((image) => ({
+      name: image.name,
+      mimeType: image.mimeType
+    }))
+  }
+}
+
+/** Trims image data from a thread event's payload before it is shown to a remote reader. */
+export function remoteThreadEventData(data: unknown): unknown {
+  const body = data as {
+    message?: { images?: unknown }
+    messages?: Array<{ images?: unknown }>
+    items?: Array<{ images?: unknown }>
+  }
+  if (!body || typeof body !== 'object') return data
+  return {
+    ...body,
+    ...(body.message ? { message: withoutImageData(body.message) } : {}),
+    ...(Array.isArray(body.messages) ? { messages: body.messages.map(withoutImageData) } : {}),
+    ...(Array.isArray(body.items) ? { items: body.items.map(withoutImageData) } : {})
+  }
+}
+
 function failure(error: unknown): { ok: false; error: string } {
   return { ok: false, error: error instanceof Error ? error.message : String(error) }
 }
@@ -215,8 +246,8 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     return mmsJson(
       {
         thread,
-        messages: s.orchestrator.getMessages(threadId),
-        queue: s.orchestrator.listQueue(threadId),
+        messages: s.orchestrator.getMessages(threadId).map(withoutImageData),
+        queue: s.orchestrator.listQueue(threadId).map(withoutImageData),
         pendingQuestions: s.questions.listPendingForThread(threadId),
         activeTurn: {
           active: s.orchestrator.isTurnActive(threadId),
@@ -245,6 +276,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       await this.services.orchestrator.runChannelTurn(threadId, content, this.services.threads, {
         signal: control.signal,
         drainSteer: control.drainSteer,
+        onUserInputAccepted: control.onAccepted,
         ...(extras.mode !== undefined ? { mode: extras.mode } : {}),
         ...(extras.images?.length ? { images: extras.images } : {})
       })

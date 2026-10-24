@@ -26,11 +26,15 @@ export interface RemoteBackendPort {
   /** `queue.enqueue` params carry resolved `images` instead of staged `attachments`. */
   execute(method: BridgeOrdinaryMethod, params: Record<string, unknown>): Promise<unknown>
   snapshot(threadId: string): unknown
-  /** Must bind signal to this exact admitted run and return only after its lease/turn settles. */
+  /**
+   * Must bind signal to this exact admitted run and return only after its lease/turn settles.
+   * `onAccepted` is called once the message is stored on the thread, never for a turn that was
+   * refused or cancelled before that.
+   */
   run(
     threadId: string,
     content: string,
-    control: { signal: AbortSignal; drainSteer(): string | undefined },
+    control: { signal: AbortSignal; drainSteer(): string | undefined; onAccepted(): void },
     extras?: RemoteChatExtras
   ): Promise<unknown>
 }
@@ -176,11 +180,13 @@ export class RemoteApi {
               const text = run.pending.shift()
               if (text !== undefined) run.bytes -= Buffer.byteLength(text)
               return text
+            },
+            onAccepted: () => {
+              accepted = true
             }
           },
           resolved.extras
         )
-        accepted = !(result as { error?: unknown } | undefined)?.error
         if (abort.signal.aborted) throw new NetError('cancelled')
         return result
       } finally {
@@ -320,6 +326,7 @@ export class RemoteApi {
         upload.updatedAt = this.clock.now()
       }
     }
+    this.scheduleSweep()
   }
   private stagedChars(prefix: string): number {
     let chars = 0
@@ -333,10 +340,12 @@ export class RemoteApi {
   }
   /** One owned timer expires abandoned uploads without waiting for another request. */
   private scheduleSweep(): void {
-    if (this.sweepTimer || this.uploads.size === 0) return
-    const oldest = Math.min(...[...this.uploads.values()].map((upload) => upload.updatedAt))
-    // At least a second, so an upload held by a running send cannot spin the timer.
-    const delay = Math.max(1000, oldest + STAGED_UPLOAD_TTL_MS + 1 - this.clock.now())
+    if (this.sweepTimer) return
+    // A claimed upload belongs to a running send; release() arms the timer again when it ends.
+    const idle = [...this.uploads.values()].filter((upload) => !upload.claimed)
+    if (idle.length === 0) return
+    const oldest = Math.min(...idle.map((upload) => upload.updatedAt))
+    const delay = Math.max(0, oldest + STAGED_UPLOAD_TTL_MS + 1 - this.clock.now())
     this.sweepTimer = this.clock.setTimeout(() => {
       this.sweepTimer = undefined
       this.sweep()
