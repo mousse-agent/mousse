@@ -4,7 +4,7 @@ import type { SubagentSummary, SubagentsUpdatedEvent } from '../src/shared/subag
 
 const row = (id: string): SubagentSummary => ({
   childThreadId: id, title: id, activity: 'idle', state: 'done', latestDelegationId: `d-${id}`, unread: false,
-  provider: null, model: null, workspace: null, role: null, createdAt: 't', updatedAt: 't', tasks: []
+  provider: null, model: null, workspace: null, role: null, createdAt: 't', updatedAt: 't', waitingOn: [], tasks: []
 })
 
 function harness(lists: Record<string, SubagentSummary[][]>) {

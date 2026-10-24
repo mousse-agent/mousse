@@ -1012,6 +1012,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         subagents: buildSubagentView(
           {
             delegations: engine.delegations,
+            inbox: engine.inbox,
             store: engine.store,
             thread: (id) => ctx.mms.threads.getThread(id),
             hasPendingQuestion: (id) => ctx.mms.questions.listPendingForThread(id).length > 0

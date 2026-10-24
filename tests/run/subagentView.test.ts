@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { buildSubagentView, childActivity, outcomeOfRun, taskOutcome } from '../../src/mms/run/delegation/subagentView'
+import { buildSubagentView, childActivity, isChildBusy, outcomeOfRun, taskOutcome } from '../../src/mms/run/delegation/subagentView'
 import { subagentParentOfEvent } from '../../src/mms/run/delegation/subagentEvents'
 import type { RunRecord } from '../../src/mms/run/types'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
@@ -19,6 +19,7 @@ describe('subagent status model (plan §3.3)', () => {
     buildSubagentView(
       {
         delegations: f!.engine.delegations,
+        inbox: f!.engine.inbox,
         store: f!.store,
         thread: (id) => (names.has(id) ? { name: names.get(id)! } : { name: id }),
         hasPendingQuestion: (id) => pending.has(id)
@@ -168,7 +169,7 @@ describe('subagent status model (plan §3.3)', () => {
       const parent = await f.runningRun('parent')
       await f.delegate(parent.runId, 'a')
       const rows = buildSubagentView(
-        { delegations: f.engine.delegations, store: f.store, thread: () => undefined, hasPendingQuestion: () => false },
+        { delegations: f.engine.delegations, inbox: f.engine.inbox, store: f.store, thread: () => undefined, hasPendingQuestion: () => false },
         'parent'
       )
       expect(rows).toEqual([])
@@ -184,7 +185,176 @@ describe('subagent status model (plan §3.3)', () => {
     })
   })
 
+  describe('a child that ended its run while still busy (plan v4–v6, read side)', () => {
+    /**
+     * Master publishes a child's result in its terminal write, so a `running` delegation with a
+     * terminal run is seeded: the child finishes, then the delegation row is put back to `running`
+     * the way a held delegation stays until the child is no longer busy.
+     */
+    const held = async () => {
+      const { parent, child } = await started()
+      f!.finish(child.childRunId)
+      f!.store.db
+        .statement(`UPDATE delegations SET status = 'running', result = NULL, completed_at = NULL WHERE delegation_id = ?`)
+        .run(child.delegationId)
+      return { parent, child }
+    }
+    const grandchild = async (childRunId: string, id: string) => {
+      const g = await f!.delegate(childRunId, id)
+      names.set(g.childThreadId, `Grandchild ${id}`)
+      return g
+    }
+    const rowFor = () => only()
+
+    it('with nothing keeping it busy, follows its run', async () => {
+      await held()
+      expect(rowFor()).toMatchObject({ activity: 'idle', state: 'done', waitingOn: [] })
+      expect(rowFor().tasks[0].outcome).toBe('done')
+    })
+
+    it('a running delegation of its own makes the task waiting_for_subagents, never done, and lists what it waits on', async () => {
+      const { child } = await held()
+      const g = await grandchild(child.childRunId, 'g1')
+      expect(rowFor()).toMatchObject({
+        activity: 'waiting',
+        state: 'waiting',
+        waitingOn: [{ title: 'Grandchild g1', state: 'queued' }]
+      })
+      expect(rowFor().tasks[0]).toMatchObject({ outcome: 'waiting_for_subagents' })
+      expect(rowFor().tasks[0].error).toBeUndefined()
+      f!.engine.markStarting(g.childRunId)
+      f!.engine.markRunning(g.childRunId)
+      expect(rowFor().waitingOn).toEqual([{ title: 'Grandchild g1', state: 'working' }])
+    })
+
+    it('stops waiting once its subagent finishes and nothing else is outstanding', async () => {
+      const { child } = await held()
+      const g = await grandchild(child.childRunId, 'g1')
+      f!.finish(g.childRunId)
+      // The grandchild's result is an unacknowledged inbox row on the child: still busy.
+      expect(rowFor()).toMatchObject({ activity: 'waiting', waitingOn: [] })
+      expect(rowFor().tasks[0].outcome).toBe('waiting_for_subagents')
+      f!.engine.acknowledgeDelegation(g.delegationId)
+      expect(rowFor()).toMatchObject({ activity: 'idle', state: 'done', waitingOn: [] })
+      expect(rowFor().tasks[0].outcome).toBe('done')
+    })
+
+    it.each([['pending'], ['delivered']] as const)('a %s inbox row addressed to it keeps it waiting until acknowledged', async (status) => {
+      const { child } = await held()
+      const row = f!.engine.inbox.append({ threadId: 'child-1', kind: 'reconcile_notice', payload: { text: 'note' } })
+      if (status === 'delivered') f!.engine.inbox.markDelivered([row.inboxId])
+      expect(rowFor()).toMatchObject({ activity: 'waiting', state: 'waiting', waitingOn: [] })
+      expect(rowFor().tasks[0].outcome).toBe('waiting_for_subagents')
+      f!.engine.inbox.markAcknowledged([row.inboxId])
+      expect(rowFor()).toMatchObject({ activity: 'idle', state: 'done' })
+      expect(child.delegationId).toBe(rowFor().latestDelegationId)
+    })
+
+    it('a live run keeps the task waiting while the activity shows the run', async () => {
+      await held()
+      f!.store.createRun({ threadId: 'child-1', source: 'wake', clientRequestId: 'wake:x' })
+      expect(rowFor()).toMatchObject({ activity: 'queued', state: 'queued' })
+      expect(rowFor().tasks[0].outcome).toBe('waiting_for_subagents')
+    })
+
+    it('a published, acknowledged or cancelled task is unaffected by what keeps the child busy', async () => {
+      const { child } = await started()
+      f!.finish(child.childRunId)
+      f!.engine.inbox.append({ threadId: 'child-1', kind: 'reconcile_notice', payload: { text: 'note' } })
+      expect(rowFor().tasks[0].outcome).toBe('done')
+      expect(rowFor().activity).toBe('waiting')
+      await f!.engine.cancelDelegation(child.delegationId)
+      expect(rowFor().tasks[0].outcome).toBe('stopped')
+    })
+
+    it('a question outranks waiting', async () => {
+      const { child } = await held()
+      await grandchild(child.childRunId, 'g1')
+      pending.add('child-1')
+      expect(rowFor()).toMatchObject({ activity: 'needs_input', state: 'needs_input' })
+      expect(rowFor().tasks[0].outcome).toBe('waiting_for_subagents')
+    })
+
+    it('waitingOn lists only unfinished subagents, oldest first, and at most the limit', async () => {
+      const { child } = await held()
+      const finished = await grandchild(child.childRunId, 'done-one')
+      f!.finish(finished.childRunId)
+      f!.engine.acknowledgeDelegation(finished.delegationId)
+      for (let i = 0; i < 10; i += 1) await grandchild(child.childRunId, `g${i}`)
+      const list = rowFor().waitingOn
+      expect(list).toHaveLength(8)
+      expect(list.map((entry) => entry.title)).toEqual(Array.from({ length: 8 }, (_, i) => `Grandchild g${i}`))
+    })
+
+    it('a row that is not waiting has no waitingOn', async () => {
+      const { child } = await started()
+      await grandchild(child.childRunId, 'g1')
+      // The child's own run is still queued: it is queued, not waiting.
+      expect(rowFor()).toMatchObject({ activity: 'queued', waitingOn: [] })
+    })
+  })
+
+  describe('which runs make an earlier task continued', () => {
+    const liveRun = (source: string) => f!.store.createRun({ threadId: 'child-1', source, clientRequestId: `${source}:x` })
+
+    it.each([
+      ['wake', false],
+      ['provider-continuation', false],
+      ['gui', true],
+      ['channel', true],
+      ['delegation', true]
+    ])('a live %s run on the child: continued is %s', async (source, expected) => {
+      const { child } = await started()
+      f!.finish(child.childRunId)
+      liveRun(source)
+      expect(only().tasks[0]).toMatchObject({ outcome: 'done', continued: expected })
+    })
+
+    it('a wake run does not hide a real follow-up that is also live', async () => {
+      const { child } = await started()
+      f!.finish(child.childRunId)
+      liveRun('wake')
+      expect(only().tasks[0].continued).toBe(false)
+      liveRun('gui')
+      expect(only().tasks[0].continued).toBe(true)
+    })
+  })
+
   describe('pure helpers', () => {
+    it.each([
+      ['a running delegation, run still live', 'running', 'queued', true, 'running'],
+      ['a running delegation, run ended, child busy', 'running', 'completed', true, 'waiting_for_subagents'],
+      ['a running delegation, run failed, child busy', 'running', 'failed', true, 'waiting_for_subagents'],
+      ['a running delegation, run ended, not busy', 'running', 'completed', false, 'done'],
+      ['a running delegation, run failed, not busy', 'running', 'failed', false, 'failed'],
+      ['a cancelled delegation, child busy', 'cancelled', 'completed', true, 'stopped'],
+      ['an acknowledged delegation, child busy', 'acknowledged', 'completed', true, 'done']
+    ] as const)('taskOutcome: %s', (_name, delegationStatus, runStatus, busy, expected) => {
+      const delegation = { status: delegationStatus, result: delegationStatus === 'acknowledged' ? { runStatus: 'completed' } : null } as never
+      expect(taskOutcome(delegation, { status: runStatus } as RunRecord, busy)).toBe(expected)
+    })
+
+    it.each([
+      ['a live run', [{ status: 'queued' }], false, false, true],
+      ['an outbound delegation', [{ status: 'completed' }], true, false, true],
+      ['an unconsumed inbox row', [{ status: 'completed' }], false, true, true],
+      ['no runs and nothing else', [], false, false, false],
+      ['only terminal runs', [{ status: 'completed' }, { status: 'failed' }], false, false, false]
+    ] as const)('isChildBusy: %s', (_name, runs, runningOutboundDelegation, unconsumedInbox, expected) => {
+      expect(isChildBusy(runs as unknown as RunRecord[], { runningOutboundDelegation, unconsumedInbox })).toBe(expected)
+    })
+
+    it('childActivity is waiting only when busy with no live run and no question', () => {
+      const busy = { runningOutboundDelegation: true, unconsumedInbox: false }
+      const quiet = { runningOutboundDelegation: false, unconsumedInbox: false }
+      const run = (status: RunRecord['status']) => ({ status }) as RunRecord
+      expect(childActivity([run('completed')], false, busy)).toBe('waiting')
+      expect(childActivity([run('completed')], false, quiet)).toBe('idle')
+      expect(childActivity([run('completed')], true, busy)).toBe('needs_input')
+      expect(childActivity([run('running')], false, busy)).toBe('working')
+      expect(childActivity([run('completed')], false)).toBe('idle')
+    })
+
     it.each([
       ['completed', undefined, 'done'],
       ['failed', undefined, 'failed'],

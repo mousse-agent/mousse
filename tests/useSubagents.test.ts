@@ -7,7 +7,7 @@ import type { SubagentSummary } from '../src/shared/subagents'
 
 const row = (id: string): SubagentSummary => ({
   childThreadId: id, title: `Title ${id}`, activity: 'idle', state: 'done', latestDelegationId: `d-${id}`, unread: false,
-  provider: null, model: null, workspace: null, role: null, createdAt: 't', updatedAt: 't', tasks: []
+  provider: null, model: null, workspace: null, role: null, createdAt: 't', updatedAt: 't', waitingOn: [], tasks: []
 })
 
 function Count({ threadId }: { threadId: string | null }) {
