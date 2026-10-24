@@ -262,6 +262,9 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
       .map((row) => identity.verifySigned<NodeDelegation>(row, root))
       .filter((row) => row.subject === peer.node)
       .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)[0]
+    // The live roster drops revoked delegations but keeps their revocation evidence.
+    if (!current && roster.revoked.some((row) => row.subject === peer.node))
+      throw new NetError('revoked')
     if (
       !current ||
       current.keyEpoch !== peer.delegation.keyEpoch ||

@@ -1274,6 +1274,9 @@ export class NetSyncSession implements SyncSession {
         b.document.keyEpoch - a.document.keyEpoch || b.document.issuedAt - a.document.issuedAt
     )
     const current = candidates[0]
+    // The live roster drops revoked delegations but keeps their revocation evidence.
+    if (!current && roster.revoked.some((row) => row.subject === node))
+      throw new NetError('revoked')
     if (
       !current ||
       !validateSignedDocument('nodeDelegation', current.document) ||
