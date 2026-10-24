@@ -495,6 +495,24 @@ export class NetIdentityService implements IdentityService {
     }
     return found ? structuredClone(found) : undefined
   }
+  historicalNodeEpoch(user: UserId, node: NodeId, at: number): number | undefined {
+    if (!Number.isSafeInteger(at) || at < 0 || !isId('node', node))
+      throw new NetError('bad_request')
+    const entry = this.load().users[user]
+    let epoch: number | undefined
+    for (const signed of entry?.history ?? [])
+      for (const row of this.delegations(this.rosterDocument(signed, entry!.root)))
+        if (
+          row.kind === 'node' &&
+          row.owner === user &&
+          row.subject === node &&
+          row.issuedAt <= at &&
+          at < row.expiresAt &&
+          row.keyEpoch > (epoch ?? 0)
+        )
+          epoch = row.keyEpoch
+    return epoch
+  }
 
   verifySigned<T>(signed: Signed, publicKey: string): T {
     return verifyDocument<T>(signed, publicKey)
@@ -586,7 +604,11 @@ export class NetIdentityService implements IdentityService {
         .filter((row): row is NodeDelegation => row.kind === 'node' && row.subject === node)
         .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)
       const held = entries[0]
-      if (!held) throw new NetError('bad_request')
+      // Revocation prunes the delegation, so a revoked node has no row left to rename.
+      if (!held)
+        throw new NetError(
+          roster.revoked.some((row) => row.subject === node) ? 'revoked' : 'bad_request'
+        )
       if (
         (roster.revoked.find((row) => row.subject === node)?.throughKeyEpoch ?? 0) >= held.keyEpoch
       )
@@ -602,6 +624,18 @@ export class NetIdentityService implements IdentityService {
     })
   }
   revoke(subject: NodeId | BotId): Signed {
+    // Revocation prunes the delegation; revoking again (another admin device, a retried
+    // request) leaves the roster as it is.
+    const self = this.self(),
+      current = this.roster()
+    if (self?.isAuthority && current) {
+      const held = this.rosterDocument(current, this.pinnedRootKey(self.user)!)
+      if (
+        !this.delegations(held).some((entry) => entry.subject === subject) &&
+        held.revoked.some((row) => row.subject === subject)
+      )
+        return current
+    }
     return this.authorityUpdate((roster) => {
       const rows = this.delegations(roster).filter((entry) => entry.subject === subject)
       if (!rows.length) throw new NetError('bad_request', 'Unknown delegation subject.')
@@ -1436,8 +1470,8 @@ export class NetIdentityService implements IdentityService {
           ({ delegation }) =>
             delegation.subject !== roster.authorityNode &&
             (delegation.keyEpoch < newest.get(delegation.subject)! ||
-              (roster.revoked.find((row) => row.subject === delegation.subject)
-                ?.throughKeyEpoch ?? 0) >= delegation.keyEpoch)
+              (roster.revoked.find((row) => row.subject === delegation.subject)?.throughKeyEpoch ??
+                0) >= delegation.keyEpoch)
         )
         .map((row) => row.signed)
     )

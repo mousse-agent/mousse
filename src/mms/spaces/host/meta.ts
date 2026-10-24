@@ -647,28 +647,11 @@ export class MetaProjection implements MetaSnapshotValidator {
     return descriptor
   }
   private hostEpoch(user: UserId, node: string, at: number): number {
-    const root = this.options.identity.pinnedRootKey(user),
-      signed = this.options.identity.roster(user)
-    if (!root || !signed) return reject('meta_stale')
-    const roster = verifyDocument<Roster>(signed, root, 'roster'),
-      rows = roster.nodes
-        .map((row) => verifyDocument<NodeDelegation>(row, root, 'nodeDelegation'))
-        .filter((row) => row.subject === node)
-        .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)
     // The live roster drops revoked and superseded delegations, so the original epoch
-    // requires independently retained historical roster evidence. Revocation evidence
-    // bounds the epochs a dropped host can have used; a signed roster could name a huge
-    // epoch, so only the newest few are tried.
-    const newest = Math.max(
-      0,
-      ...rows.map((row) => row.keyEpoch),
-      roster.revoked.find((row) => row.subject === node)?.throughKeyEpoch ?? 0
+    // comes from independently retained historical roster evidence.
+    return (
+      this.options.identity.historicalNodeEpoch(user, node as NodeId, at) ?? reject('meta_stale')
     )
-    for (let keyEpoch = newest; keyEpoch >= Math.max(1, newest - 63); keyEpoch--) {
-      if (this.options.identity.historicalRosterFor({ user, node: node as NodeId, keyEpoch }, at))
-        return keyEpoch
-    }
-    return reject('meta_stale')
   }
   assertUsable(space: SpaceId, writes = false): MetaState {
     const state = this.position(space)
