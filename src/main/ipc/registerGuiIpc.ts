@@ -205,6 +205,9 @@ function applyWindowAccentBackground(
   )
 }
 
+/** Longest delay a timer accepts (about 24 days): a request that effectively never times out. */
+const NO_REQUEST_TIMEOUT_MS = 2_147_483_647
+
 function normalizeSendContent(request: OrchestratorSendInput): {
   content: string
   requestId?: string
@@ -2111,17 +2114,10 @@ export function registerGuiIpc(
   })
   // Progress reaches the renderer as `providers:install:event` through the protocol event bridge.
   registerHandler('providers:installAntigravity', async () => {
-    try {
-      const res = await guiMms.request<{ config: unknown; providers: unknown[] }>('providers.installAntigravity', {})
-      broadcast('providers:changed', res.providers)
-      return res.config
-    } catch (error) {
-      // The daemon keeps downloading after this request gives up; stop it so the row never shows a ghost install.
-      if (error instanceof Error && error.message.startsWith('Request timeout')) {
-        await guiMms.request('providers.cancelAntigravityInstall', {}).catch(() => undefined)
-      }
-      throw error
-    }
+    // A slow connection may need hours; the daemon owns the download and cancel is explicit, so this request never times out.
+    const res = await guiMms.request<{ config: unknown; providers: unknown[] }>('providers.installAntigravity', {}, NO_REQUEST_TIMEOUT_MS)
+    broadcast('providers:changed', res.providers)
+    return res.config
   })
   registerHandler('providers:cancelAntigravityInstall', async () => {
     const res = await guiMms.request<{ cancelled: boolean }>('providers.cancelAntigravityInstall', {})

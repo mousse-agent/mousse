@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CliProviderConfig } from '../../../shared/providerAuth'
 import { errorText } from './parts'
 
+/** The daemon's message when an install is cancelled, by anyone. */
+const INSTALL_CANCELLED = 'Antigravity install cancelled'
+
 /** An agent download Mousse runs for a provider (Antigravity), as the rows and the add step show it. */
 export interface CliInstall {
   /** A download is running in the daemon, started here or before this page opened. */
@@ -36,9 +39,10 @@ export function useCliInstall(config: CliProviderConfig | undefined, reload: () 
       }),
     []
   )
-  // A finished download leaves no progress line behind for the next one.
+  // A finished download leaves no progress line behind for the next one, and a new one starts clean.
   useEffect(() => {
-    if (!busy) setLatest(null)
+    if (busy) setError(null)
+    else setLatest(null)
   }, [busy])
 
   const start = useCallback(async () => {
@@ -49,7 +53,9 @@ export function useCliInstall(config: CliProviderConfig | undefined, reload: () 
     try {
       return await window.mousse.providers.installAntigravity()
     } catch (failure) {
-      if (!cancelled.current) setError(errorText(failure))
+      // A cancel from another window or profile ends this request too; the daemon's state is what counts.
+      const message = errorText(failure)
+      if (!cancelled.current && !message.includes(INSTALL_CANCELLED)) setError(message)
       return undefined
     } finally {
       setStarting(false)
