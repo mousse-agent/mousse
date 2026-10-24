@@ -14,30 +14,42 @@ const name = '@node-datachannel/win32-x64-msvc'
 const target = join(root, 'node_modules', name)
 const lock = JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8'))
 const locked = lock.packages?.[`node_modules/${name}`]
-if (!locked?.version || !locked.integrity) throw new Error(`${name} is missing from package-lock.json`)
+if (!locked?.version || !locked.integrity)
+  throw new Error(`${name} is missing from package-lock.json`)
 
 const installed = join(target, 'package.json')
-if (existsSync(installed) && JSON.parse(readFileSync(installed, 'utf8')).version === locked.version) {
+if (
+  existsSync(installed) &&
+  JSON.parse(readFileSync(installed, 'utf8')).version === locked.version
+) {
   console.log(`[webrtc-prebuilt] ${name}@${locked.version} is present.`)
   process.exit(0)
 }
 
 const work = mkdtempSync(join(tmpdir(), 'mousse-webrtc-prebuilt-'))
 try {
-  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+  const windows = process.platform === 'win32'
+  const npm = windows ? 'npm.cmd' : 'npm'
+  // With a shell, Node joins the arguments unquoted; the temp path may contain spaces.
+  const destination = windows ? `"${work}"` : work
   const report = JSON.parse(
-    execFileSync(npm, ['pack', `${name}@${locked.version}`, '--json', '--pack-destination', work], {
-      cwd: work,
-      encoding: 'utf8',
-      shell: process.platform === 'win32'
-    })
+    execFileSync(
+      npm,
+      ['pack', `${name}@${locked.version}`, '--json', '--pack-destination', destination],
+      {
+        cwd: work,
+        encoding: 'utf8',
+        shell: windows
+      }
+    )
   )
   // npm 10 reports an array, npm 12 an object keyed by package name.
   const packed = Array.isArray(report) ? report[0] : report[name]
   const tarball = join(work, packed.filename)
   const [algorithm, expected] = locked.integrity.split('-')
   const actual = createHash(algorithm).update(readFileSync(tarball)).digest('base64')
-  if (actual !== expected) throw new Error(`${name}@${locked.version} does not match package-lock.json`)
+  if (actual !== expected)
+    throw new Error(`${name}@${locked.version} does not match package-lock.json`)
   rmSync(target, { recursive: true, force: true })
   mkdirSync(target, { recursive: true })
   execFileSync('tar', ['-xzf', tarball, '-C', target, '--strip-components=1'])
