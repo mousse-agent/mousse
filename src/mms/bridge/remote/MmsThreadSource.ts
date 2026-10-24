@@ -1,7 +1,7 @@
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { mmsJson } from './jsonOutput'
 import { MmsRemoteBackend, remoteThreadEventData } from './MmsBackend'
-import type { ThreadSourcePort, ThreadSourceEvent } from './ThreadStreamAdapter'
+import type { ThreadDisplayEvent, ThreadSourcePort, ThreadSourceEvent } from './ThreadStreamAdapter'
 /** Actual thread events/snapshots from the already-owned profile, never the old global event ring. */
 export class MmsThreadSource implements ThreadSourcePort {
   private readonly backend: MmsRemoteBackend
@@ -19,7 +19,7 @@ export class MmsThreadSource implements ThreadSourcePort {
     listener: (event: ThreadSourceEvent) => void,
     onError?: (error: unknown) => void
   ): () => void {
-    const deliver = (type: ThreadSourceEvent['type'], data: unknown, ephemeral = false): void => {
+    const deliver = (type: ThreadDisplayEvent['type'], data: unknown, ephemeral = false): void => {
       try {
         listener({
           type,

@@ -21,8 +21,10 @@ import {
   type StreamId,
   type SpaceId,
   type UserId,
-  type BotId
+  type BotId,
+  type NodeId
 } from '../../../shared/net'
+import { isId } from '../../../shared/net/ids'
 export interface SpaceDiscoveryOptions {
   db: NetDatabase
   identity: IdentityService
@@ -208,24 +210,17 @@ export class SpaceStreamDiscoveryService implements SessionDiscoveryPort {
         }
         add(current)
         add(retained)
-        const known = current && verifyDocument<Roster>(current, member.rootKey, 'roster'),
-          owned =
-            known?.nodes
-              .map((row) => verifyDocument<NodeDelegation>(row, member.rootKey, 'nodeDelegation'))
-              .filter(
-                (node) =>
-                  node.owner === user &&
-                  body.wrapped.some(
-                    (wrap) =>
-                      wrap.node === node.subject && wrap.recipientAgreementKey === node.keys.agree
-                  )
-              ) ?? []
-        for (const node of owned)
+        // The wrapped devices belong to this user per retained roster history at the control time,
+        // not per the live roster, which drops revoked and superseded devices.
+        const owned = body.wrapped.flatMap((wrap) => {
+          const keyEpoch = isId('node', wrap.node)
+            ? identity.historicalNodeEpoch(user, wrap.node, envelope.ts)
+            : undefined
+          return keyEpoch === undefined ? [] : [{ wrap, keyEpoch }]
+        })
+        for (const { wrap, keyEpoch } of owned)
           add(
-            identity.historicalRosterFor(
-              { user, node: node.subject, keyEpoch: node.keyEpoch },
-              envelope.ts
-            )
+            identity.historicalRosterFor({ user, node: wrap.node as NodeId, keyEpoch }, envelope.ts)
           )
         for (const bot of bots)
           add(
@@ -235,13 +230,7 @@ export class SpaceStreamDiscoveryService implements SessionDiscoveryPort {
             )
           )
         const expected = new Map(
-            owned.map((node) => [
-              node.subject,
-              body.wrapped.find(
-                (wrap) =>
-                  wrap.node === node.subject && wrap.recipientAgreementKey === node.keys.agree
-              )!.recipientAgreementKey
-            ])
+            owned.map(({ wrap }) => [wrap.node, wrap.recipientAgreementKey] as const)
           ),
           accepted: Array<{ signed: Signed; roster: Roster }> = []
         for (const signed of candidates.values()) {

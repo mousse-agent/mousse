@@ -150,6 +150,9 @@ export interface IdentityService {
    * Supply through existing rosterUpdate before historical replay; lower rosters archive without rollback.
    * Undefined when no such verified evidence is retained. Never grants current authority. */
   historicalRosterFor(author: Envelope['author'], at: number): Signed | undefined
+  /** Highest key epoch of a node delegation valid at `at` in the retained roster history,
+   * independent of the live roster (which drops revoked and superseded delegations). */
+  historicalNodeEpoch(user: UserId, node: NodeId, at: number): number | undefined
   verifySigned<T>(signed: Signed, publicKey: Base64Url): T
   signAsNode<T>(document: T): Signed
   // Authority-only operations. Each bumps the roster version atomically.
@@ -737,6 +740,8 @@ export interface RpcContext {
   /** Executor-minted stable ledger identity, present only after durable admission. */
   execution?: ExecutionId
   caller: SyncSession['peer']
+  /** The inbound carrier the calling session arrived on (`plus-relay`, `phone-webrtc`…), when known. */
+  carrier?: string
   signal: AbortSignal
   deadlineAt: number
   progress(data: unknown): void
@@ -752,12 +757,23 @@ export interface RpcMethod {
   /** A scoped gateway can require the registered method's capability instead. */
   capabilityFor?(params: unknown): NodeCapability
   mutating: boolean
+  /**
+   * Runs outside the durable ledger: no request alias, no execution record and no stored
+   * result, so a retry runs the handler again. Only for non-mutating methods whose result must
+   * never be written to disk.
+   */
+  ephemeral?: boolean
   /** Explicitly registered methods may accept request-scoped input artifacts. */
   uploadEnabled?: boolean
   /** Pure exact DTO validation, before admission or any execution state exists. */
   validate?(params: unknown): unknown
   /** Current caller-dependent checks before any durable admission. */
   authorize?(params: unknown, context: RpcContext): void
+  /**
+   * Refusals that apply only to a new execution. A retry that resolves to a retained execution
+   * skips this and gets its saved result; a refusal fails the admitted execution as a plain error.
+   */
+  authorizeNew?(params: unknown, context: RpcContext): void
   handle(params: unknown, context: RpcContext): Promise<unknown>
 }
 

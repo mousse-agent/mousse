@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { accessSync, constants, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
-import type { Options, Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { ModelInfo, Options, Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import type {
   ClaudeSubscriptionStatus,
   CliProviderConfig,
@@ -125,6 +125,28 @@ const FALLBACK_MODELS: LlmModelOption[] = ['sonnet', 'opus', 'haiku'].map((id) =
   id,
   label: `Claude ${id[0].toUpperCase()}${id.slice(1)}`
 }))
+
+/**
+ * Claude Code names models by family ("Sonnet") and puts the version in the description
+ * ("Sonnet 5.5 · …"). Its "default" alias repeats another listed model, so it is dropped;
+ * when it points elsewhere it is named after that model instead.
+ */
+export function claudeModelOptions(models: ModelInfo[]): LlmModelOption[] {
+  const listed = new Set(models.filter((model) => model.value !== 'default').map((model) => model.resolvedModel))
+  return models
+    .filter((model) => model.value !== 'default' || !model.resolvedModel || !listed.has(model.resolvedModel))
+    .map((model) => {
+      const version =
+        model.value === 'default'
+          ? /\(currently ([^)]+)\)/.exec(model.description)?.[1]
+          : /^([A-Za-z]+ \d+(?:\.\d+)*)\s*(?:·|$)/.exec(model.description)?.[1]
+      return {
+        id: model.value,
+        label: version?.trim() || model.displayName,
+        efforts: model.supportedEffortLevels
+      }
+    })
+}
 
 /** Variables a running Claude Code session sets for the commands it starts. */
 const CLAUDE_SESSION_MARKERS = [
@@ -650,11 +672,7 @@ export class ClaudeSubscriptionProviderService {
       const models = await query.supportedModels()
       controller.signal.throwIfAborted()
       if (models.length) {
-        this.settings.models = models.map((model) => ({
-          id: model.value,
-          label: model.displayName,
-          efforts: model.supportedEffortLevels
-        }))
+        this.settings.models = claudeModelOptions(models)
         this.save()
       }
     } finally {

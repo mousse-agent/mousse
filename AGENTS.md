@@ -10,8 +10,7 @@
 ## Team workflow
 
 - For authorized implementation or resuming implementation, read and follow `.agents/skills/work/SKILL.md` before editing. Discussion, planning, reviews, and diagnosis alone do not authorize implementation or GitHub writes.
-- When the user asks for the council or a council-gated change, read and follow `.agents/skills/council/SKILL.md`; it adds plan and code review gates on top of the work skill.
 - Only when explicitly asked to end the session, read and follow `.agents/skills/end-session/SKILL.md`. Follow an already selected outcome without asking again. Ordinary task completion, commit/push requests, and casual goodbyes do not trigger session wrap-up.
-- These skills share `docs/team-workflow.md`. Track meaningful work intended for the shared codebase; reuse existing issues/PRs and record material decisions and handoffs. Local PR testing, temporary integrations, and experiments do not create issues, PRs, or pushed checkpoints unless explicitly requested.
+- Both skills share `docs/team-workflow.md`. Track meaningful work intended for the shared codebase; reuse existing issues/PRs and record material decisions and handoffs. Local PR testing, temporary integrations, and experiments do not create issues, PRs, or pushed checkpoints unless explicitly requested.
 - For shared changes, use a task branch based on the actual remote default branch. For local testing, use the requested source, target, and checkout. Preserve unrelated changes; use a separate worktree when necessary.
 - If your client does not discover `.agents/skills` automatically, read the paths above directly. For small, low-risk documentation and communication-guidance changes, review the diff and merge promptly without asking again, subject to GitHub requirements. Other changes need task-specific merge authorization.

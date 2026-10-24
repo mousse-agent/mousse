@@ -8,7 +8,14 @@ import {
   useSideCardVisible
 } from './sideCard/sideCardLogic'
 import { useAppStore } from '../stores/appStore'
-import logoIcon from '../assets/mousse_logo_icon.svg'
+import { channelForVersion } from '../../shared/updates'
+import stableLogoIcon from '../assets/mousse_logo_icon.svg'
+import nightlyLogoIcon from '../assets/mousse_logo_icon_nightly.webp'
+
+/** Set at build time from package.json (electron.vite.config.ts). */
+declare const __MOUSSE_VERSION__: string | undefined
+const BUILD_VERSION = typeof __MOUSSE_VERSION__ === 'string' ? __MOUSSE_VERSION__ : ''
+const logoIcon = channelForVersion(BUILD_VERSION) === 'nightly' ? nightlyLogoIcon : stableLogoIcon
 
 export function TitleBar() {
   const threadsSidebarOpen = useAppStore((s) => s.threadsSidebarOpen)

@@ -208,7 +208,7 @@ The compliant host verifies the token proof and independently signed issuer-auth
 
 IdentityService.verifyAuthor uses explicit purpose history or newWork. History verification can return verifyOnly/revoked metadata while cryptographically verifying stored old records; that result never authorizes execution. NewWork rejects expired/revoked/noncurrent author epochs.
 
-Roster ordering is lexicographic `(recoveryEpoch,version)`; conflicting different payloads at a position or different lineages at one recovery epoch cause roster_conflict and fail closed. Rotation history can verify past signatures but only current epochs author new work or open sessions. Revoked notifications are hints; verified rosterUpdate closes revoked sessions and cancels in-flight work. Connected peers enforce within one roster propagation; disconnected nodes stop trusting by delegation expiry (7 days). Authority transfer/recovery and the residual double-import/withheld-revocation risks are in `state-machines.md` and `threat-model.md`.
+Roster ordering is lexicographic `(recoveryEpoch,version)`; conflicting different payloads at a position or different lineages at one recovery epoch cause roster_conflict and fail closed. Rotation history can verify past signatures but only current epochs author new work or open sessions. The authority's live roster carries only node delegations that can still authorize something: each roster it publishes drops revoked delegations and delegations superseded by a newer key epoch of the same node, but keeps every revocation entry, because holders reject a roster that drops revocation evidence. Verifying a past record uses the rosters a holder already accepted, or the original roster shipped as replay evidence, never the live roster alone. Repeated revocations therefore grow the roster only by their revocation entries, and an older roster that still lists dropped delegations is compacted before the next invite. Revoked notifications are hints; verified rosterUpdate closes revoked sessions and cancels in-flight work. Connected peers enforce within one roster propagation; disconnected nodes stop trusting by delegation expiry (7 days). Authority transfer/recovery and the residual double-import/withheld-revocation risks are in `state-machines.md` and `threat-model.md`.
 
 ## 9. Limits and errors
 
@@ -222,6 +222,7 @@ The executable constants in `src/shared/net/limits.ts` are normative. JSON strin
 | Store transaction | <=500 rows and <=1 MiB; yield between batches |
 | Overlap | <=1,000 records and <=4 MiB |
 | Preauthentication | <=32 connections total, <=4/address, <=16 KiB, <=10 s |
+| Enrollment bytes a joiner accepts from the pinned authority | <=64 KiB |
 | Session subscriptions / in-flight RPC / blob transfers | 256 / 64 / 8 |
 | Fragment no-progress | 30 s |
 | Ping / missed intervals | 20 s / 3 |
@@ -264,7 +265,7 @@ Deny posts to the deny route.
 
 The posted `sealedInvite` is base64url of `ePub32 || nonce12 || ciphertext || tag16`. A different request ID, box key or any flipped byte fails to open.
 
-**Offer path (QR code).** Add phone issues the same kind of invite with no pin. It draws a fresh 32-byte key `K` and seals the invite as base64url of `nonce12 || ChaCha20-Poly1305(K, nonce12, invite, aad=UTF8('mousse-net/enroll-offer/v1'))`. It posts the result as an enrollment offer, which returns `{id, expiresAt}`. The QR code carries `mousse://net/join?v=1&plus=<Mousse ID origin>&offer=<offer id>&key=<base64url K>`. `K` never leaves the QR code and is zeroed after sealing. The code expires at the earlier of the offer and the invite expiry, and the client rejects offers that claim more than 15 minutes. Sealed invites are at most 16 KiB.
+**Offer path (QR code).** Add phone issues the same kind of invite with no pin. It draws a fresh 32-byte key `K` and seals the invite as base64url of `nonce12 || ChaCha20-Poly1305(K, nonce12, invite, aad=UTF8('mousse-net/enroll-offer/v1'))`. It posts the result as an enrollment offer, which returns `{id, expiresAt}`. The QR code carries `mousse://net/join?v=1&plus=<Mousse ID origin>&offer=<offer id>&key=<base64url K>`. `K` never leaves the QR code and is zeroed after sealing. The code expires at the earlier of the offer and the invite expiry, and the client rejects offers that claim more than 15 minutes. Sealed invites are at most 64 KiB, which covers every roster a normal hello can carry. Mousse ID and phones before this limit accept 16 KiB, about four devices.
 
 **Match code.** Both screens show `SHA-256(UTF8('mousse-net/enroll-match/v1') || 0x00 || box32 || 0x00 || UTF8(transportFingerprint))`, read as uint32 big-endian, mod 1,000,000, zero-padded to six digits. The person approves only when the codes agree, so a swapped box key or fingerprint is visible. Mousse ID never computes it.
 
@@ -282,3 +283,57 @@ The posted `sealedInvite` is base64url of `ePub32 || nonce12 || ciphertext || ta
 Default phone capabilities are read, chat and write.
 
 **Refresh.** Node delegations last 7 days (§9). The authority renews delegations near expiry every hour and sends the new roster as `rosterUpdate` on open sessions. A phone that does not connect at least once a week must enroll again.
+
+## 11. Direct path for signed-in phones
+
+A phone that reached a computer through Mousse ID may switch to a WebRTC peer-to-peer path when the networks allow it: the same Wi-Fi, a tailnet, IPv6 between both ends, or IPv4 through STUN hole punching. When no direct path works, the phone stays on the Mousse ID relay. There is no TURN. Nothing in either app shows or controls it. The computer never keeps a listening TCP port for it; its UDP sockets live only as long as one accepted offer (`src/mms/net/transports/phoneWebRtc.ts`).
+
+**When it is offered.** Only while the computer is signed in to Mousse ID with its hosted relay listener up, Net is on with Bridge enabled, the key store is unlocked, and the Mousse ID configuration document (`GET /v1/net/config`) does not set `directWebrtc: false`. That field is the kill switch. The document's `stun: string[]` (at most 4 `stun:host[:port]` URLs; `stuns:` entries are ignored) becomes the ICE servers, and an empty list means host candidates only. The computer reads the document when it signs in, when it starts, and at most every 10 minutes while it renews the relay lease. It keeps the last value while Mousse ID is unreachable.
+
+**Discovery.** `net.direct.endpoints` takes `{}` (capability `read`, not mutating, never stored). Over a session that arrived on the `plus-relay` or `phone-webrtc` carrier, and while the path is offered, it returns `{endpoints: [], webrtc: {v: 1}}`. Otherwise it returns `{endpoints: []}`. An older computer omits `webrtc`, and the phone then never tries.
+
+**Signaling.** `net.direct.webrtc.offer` takes `{sdp, v: 1}` and returns `{sdp}` (capability `read`, not mutating). It is accepted only on the `plus-relay` and `phone-webrtc` carriers, so a phone can offer again over a direct session after a Wi-Fi change. Neither method writes a request alias, an execution record or its result to disk; a retried offer is simply a new offer. Signaling is not trickled. The phone gathers for up to 1.5 s and sends what it has; the computer:
+
+1. validates the offer in JavaScript before any native code sees it (below);
+2. issues a ticket bound to the calling session's authenticated node and user and the offer's DTLS fingerprint;
+3. creates a fresh PeerConnection (UDP ports 50000 to 50999, no TCP candidates), sets the remote offer and then its own answer, so its ICE checks toward the phone start before the RPC returns, and every check from the phone arrives on a flow the computer opened (no inbound firewall rule or prompt);
+4. gathers for up to 1.5 s, removes every answer candidate outside its own direct host addresses (private LAN, Tailscale, unique local and global IPv6 on real interfaces, and public server-reflexive ones when STUN is configured), and returns the answer.
+
+**Offer validator.** At most 16 KiB and 100 lines of printable ASCII. Exactly one `m=application <port> UDP/DTLS/SCTP webrtc-datachannel`. Lines `v o s t c m` and the attributes `group:BUNDLE`, `msid-semantic`, `ice-ufrag`, `ice-pwd`, `ice-options`, `fingerprint:sha-256` (exactly one), `setup:actpass`, `mid`, `sctp-port`, `max-message-size`, `candidate`, `end-of-candidates`, `extmap-allow-mixed` and `sendrecv` only; anything else, including `ice-lite`, `rtcp*` and any other media section, rejects the offer. Origin and connection lines name IP literals. Only the first 8 usable candidates are kept; the rest are dropped. A candidate reaches the native stack only if it is UDP, component 1, on port 1024 to 65535, names an IP literal (never `.local` or a host name, so the native resolver never runs), and is `typ host` in RFC 1918, Tailscale `100.64/10`, unique local `fc00::/7` (including Tailscale `fd7a:115c:a1e0::/48`) or global unicast `2000::/3`, or `typ srflx` on a public IPv4 or global IPv6 address while STUN is configured. Loopback, link-local, multicast, unspecified, broadcast, IPv4-mapped, documentation and benchmark ranges, the computer's own addresses and the relay's and STUN servers' addresses are dropped. An offer with no usable candidate fails with `route_unreachable`.
+
+**Channel and session.** The phone opens one in-band DataChannel labelled `mousse-net/1`, ordered and reliable, without a subprotocol. It carries binary messages of at most 64 KiB in each direction; a text message closes it. Any other label, a second channel, or a remote DTLS certificate other than the offered fingerprint closes the PeerConnection. When the channel opens, the computer reserves a preauth lease for the ticket's node and runs the ordinary server side: inner TLS 1.3 with the pinned keys, then the session hello with roster, delegation, key epoch and revocation checks, on carrier `phone-webrtc`. It accepts only the computer's own user, never enrolls a node, never joins a Space, and closes the session with `forbidden` when the authenticated node is not the ticket's node.
+
+**Teardown.** The PeerConnection closes and the ticket is dropped when the session ends, ICE fails, the ticket does not reach an authenticated session in 15 s, the node is revoked (pending tickets too), the relay listener goes down, the kill switch flips, Net is disabled or the app quits. ICE consent checks keep NAT and connection-tracking entries alive on idle sessions.
+
+| Limit | Value |
+|---|---|
+| Offer size | ≤ 16 KiB, ≤ 100 lines; first 8 usable candidates kept |
+| Answer size | ≤ 16 KiB |
+| Computer's gathering before it answers | ≤ 1.5 s |
+| Ticket lifetime until an authenticated session | 15 s |
+| Offers | 6 per minute per node |
+| Pending tickets | 2 per node, 8 in total |
+| Live WebRTC sessions | 4 per node, 16 in total |
+| Preauth deadline | 10 s, from the moment the DataChannel opens |
+| Raw bytes before inner TLS completes | 64 KiB |
+| DataChannel message | ≤ 64 KiB, binary only |
+| Outbound buffering | writes wait while more than 1 MiB is queued in the channel |
+| Inbound buffering | the stream closes with `too_large` when an unread reader falls 8 MiB behind; the SCTP receive window is 1 MiB |
+| STUN servers | ≤ 4, from Mousse ID configuration |
+| UDP ports | 50000 to 50999, only while a ticket's PeerConnection exists |
+
+**Security model.**
+
+| Layer | Provides | Keys |
+|---|---|---|
+| Signaling, inside the existing session | Confidentiality and integrity of SDP and candidates; authenticated both ways | Long-term node keys: inner TLS and delegation |
+| ICE | Connectivity only; checks authenticated with the ufrag and password from the encrypted SDP | Random, per connection |
+| DTLS 1.2 | Encrypts SCTP; man-in-the-middle-proof because the fingerprints travel through the pinned session | Ephemeral, per connection |
+| Inner TLS 1.3 (unchanged) | End-to-end confidentiality and integrity; SPKI pinned; client certificate | Long-term transport keys |
+| Session hello (unchanged) | Delegation, roster, key epoch, revocation, same user | User root key |
+| RPC authorization (unchanged) | Capability per method, same user, current delegation | Roster |
+| STUN | Address reflection only; never sees payload or account data | none |
+
+A downgrade only costs latency: the fallback is the relay, still inner TLS end to end. SDP, candidates and addresses are never logged above debug level, and errors from the native stack are replaced by plain `NetError` codes before they reach a reply or `lastError`. Private, Tailscale and global IPv6 host addresses and the public reflexive address are shared only with the user's own authenticated devices, inside the encrypted session. The native stack (libdatachannel, libjuice, usrsctp and its bundled OpenSSL, through `node-datachannel` pinned to an exact version) is reachable only after an authenticated, rate-limited exchange that passed the validator. The native binding cannot report a channel's reliability settings; an unordered or partially reliable channel breaks the inner TLS record layer, which then fails closed.
+
+**Phone behaviour.** The phone keeps its Mousse ID registration renewed on every path. It opens a full session on the WebRTC path before it moves streams and new requests there, and keeps the old session until the requests in flight on it finish. If the direct path stops answering, the phone falls back to the relay.

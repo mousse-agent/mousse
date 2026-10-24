@@ -150,6 +150,37 @@ describe('TranscriptAssembler', () => {
     expect(messages.at(-1)).toMatchObject({ kind: 'mcp_tool_result', toolCall: { status: 'complete' } })
   })
 
+  it('marks the tool phase blocked on wait only while every running call is a wait tool', () => {
+    const { phases, assembler } = harness()
+    const call = (phase: 'start' | 'complete', callId: string, title: string) =>
+      assembler.tool({ kind: 'mcp_tool_call', phase, callId, title, summary: title, details: [] })
+
+    // A wait tool alone blocks the turn on waiting.
+    call('start', 'wait-1', 'TaskOutput')
+    expect(phases.at(-1)).toEqual({ phase: 'tool_running', blockedOnWait: true })
+
+    // A command alongside it is real work.
+    call('start', 'bash-1', 'Bash')
+    expect(phases.at(-1)).toEqual({ phase: 'tool_running' })
+
+    // Once the command finishes only the wait remains.
+    call('complete', 'bash-1', 'Bash')
+    expect(phases.at(-1)).toEqual({ phase: 'tool_running', blockedOnWait: true })
+
+    const count = phases.length
+    call('complete', 'wait-1', 'TaskOutput')
+    expect(phases.length).toBe(count + 1)
+    expect(phases.at(-1)).toEqual({ phase: 'thinking' })
+  })
+
+  it('reads the pi loop tool name from the call details', () => {
+    const { phases, assembler } = harness()
+    assembler.tool({ kind: 'mcp_tool_call', phase: 'start', callId: 'c', title: 'Waiting', summary: '', details: ['Tool: TaskOutput'] })
+    expect(phases.at(-1)).toEqual({ phase: 'tool_running', blockedOnWait: true })
+    assembler.tool({ kind: 'mcp_tool_call', phase: 'start', callId: 'd', title: 'TaskOutput', summary: '', details: ['Tool: run_command'] })
+    expect(phases.at(-1)).toEqual({ phase: 'tool_running' })
+  })
+
   it('records a complete for an unknown call as a finished call', () => {
     const { messages, state, assembler } = harness()
     assembler.tool({ kind: 'mcp_tool_call', phase: 'complete', callId: 'never-started', title: 'Bash', summary: 'ls', details: [] })

@@ -4,6 +4,7 @@ import type { NetStatus, PlusEnrollmentOffer, PlusEnrollmentRequestView } from '
 import type { PlatformRequestMethod } from '../../shared/platform'
 import { qrSvgPath } from '../lib/plusQr'
 import { formatCountdown, secondsLeft } from '../lib/plusSignIn'
+import { decideEnrollmentRequest, listEnrollmentRequests, phonesBlocked } from '../lib/plusEnrollment'
 import { SettingsGroup, SettingsRow } from './settings/SettingsRow'
 import { Check, Plus, Smartphone, X } from '../lib/icons'
 
@@ -30,16 +31,6 @@ function QrCode({ text }: { text: string }) {
       <path d={path} fill="#000" />
     </svg>
   )
-}
-
-/** Why phones can't be added yet, in one line; undefined when they can. */
-function phonesBlocked(status: NetStatus | undefined, plus: PlusStatus | undefined): string | undefined {
-  if (!plus?.connected) return 'Sign in to add phones.'
-  if (!status?.enabled || !status.self) return 'Turn on networking under Devices to add phones.'
-  if (status.keystore !== 'unlocked') return 'Unlock this device under Devices to add phones.'
-  if (!status.protected) return 'Protect network keys under Devices to add phones.'
-  if (!status.self.isAuthority) return 'Add phones from the device that owns this identity.'
-  return undefined
 }
 
 /** Mousse ID phones (issue #98): add a phone with a one-time code, approve or deny requests. */
@@ -76,9 +67,9 @@ export function MousseIdSection({
     }
     let active = true
     const load = () =>
-      request<{ requests: PlusEnrollmentRequestView[] }>('net.plus.enrollment.requests')
+      listEnrollmentRequests()
         .then((value) => {
-          if (active) setRequests(value.requests)
+          if (active) setRequests(value)
         })
         .catch(() => undefined)
     void load()
@@ -113,7 +104,7 @@ export function MousseIdSection({
 
   const decide = (id: string, approve: boolean) =>
     run(async () => {
-      await request(approve ? 'net.plus.enrollment.approve' : 'net.plus.enrollment.deny', { id })
+      await decideEnrollmentRequest(id, approve)
       if (!alive.current) return
       setRequests((rows) => rows.filter((row) => row.id !== id))
       if (approve) await onChanged()

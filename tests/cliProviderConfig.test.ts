@@ -343,7 +343,7 @@ describe('Antigravity CLI config', () => {
     const service = new AntigravityProviderService(home, home, questions, cache)
     cleanups.push(() => service.stop())
 
-    expect(await service.cliConfig()).toEqual({ instanceId: 'antigravity', args: [], env: {} })
+    expect(await service.cliConfig()).toEqual({ instanceId: 'antigravity', args: [], env: {}, signedIn: false })
     await expect(service.setCliConfig({ binaryPath: join(lonely, agentName) })).rejects.toThrow(/beside/)
     const config = await service.setCliConfig({ binaryPath: agent, args: ['--flag'], env: { GEMINI_HOME: '/mine' } })
     expect(config).toEqual({
@@ -352,7 +352,8 @@ describe('Antigravity CLI config', () => {
       resolvedBinaryPath: agent,
       version: '1.1.2',
       args: ['--flag'],
-      env: { GEMINI_HOME: '/mine' }
+      env: { GEMINI_HOME: '/mine' },
+      signedIn: false
     })
     expect(JSON.parse(readFileSync(join(home, 'providers', 'antigravity', 'settings.json'), 'utf8'))).toMatchObject({
       binaryPath: agent,

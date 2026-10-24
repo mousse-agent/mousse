@@ -25,6 +25,7 @@ import type {
   MemberRecord,
   NetErrorCode,
   NodeDelegation,
+  NodeId,
   Roster,
   RoutesRecord,
   Signed,
@@ -620,6 +621,9 @@ export class MetaProjection implements MetaSnapshotValidator {
           at < row.expiresAt
       )
       .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)[0]
+    // The live roster drops revoked delegations but keeps their revocation evidence.
+    if (!delegated && !history && roster.revoked.some((row) => row.subject === descriptor.hostNode))
+      return reject('revoked')
     if (
       !delegated ||
       descriptor.hostTransportKey !== delegated.keys.transport ||
@@ -643,26 +647,11 @@ export class MetaProjection implements MetaSnapshotValidator {
     return descriptor
   }
   private hostEpoch(user: UserId, node: string, at: number): number {
-    const root = this.options.identity.pinnedRootKey(user),
-      signed = this.options.identity.roster(user)
-    if (!root || !signed) return reject('meta_stale')
-    const roster = verifyDocument<Roster>(signed, root, 'roster'),
-      rows = roster.nodes
-        .map((row) => verifyDocument<NodeDelegation>(row, root, 'nodeDelegation'))
-        .filter((row) => row.subject === node)
-        .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)
-    // Current rosters retain verify-only delegations; a missing original epoch
-    // requires independently retained historical roster evidence.
-    for (const row of rows) {
-      if (
-        this.options.identity.historicalRosterFor(
-          { user, node: row.subject, keyEpoch: row.keyEpoch },
-          at
-        )
-      )
-        return row.keyEpoch
-    }
-    return reject('meta_stale')
+    // The live roster drops revoked and superseded delegations, so the original epoch
+    // comes from independently retained historical roster evidence.
+    return (
+      this.options.identity.historicalNodeEpoch(user, node as NodeId, at) ?? reject('meta_stale')
+    )
   }
   assertUsable(space: SpaceId, writes = false): MetaState {
     const state = this.position(space)

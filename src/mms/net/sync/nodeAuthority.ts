@@ -98,6 +98,9 @@ export class NodeStreamAuthority implements StreamAuthority {
       .filter((row) => row.subject === peer.node)
       .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)
     const node = rows[0]
+    // The live roster drops revoked delegations but keeps their revocation evidence.
+    if (!node && roster.revoked.some((row) => row.subject === peer.node))
+      throw new NetError('revoked')
     if (
       !node ||
       node.keyEpoch !== peer.delegation.keyEpoch ||

@@ -32,6 +32,8 @@ import {
   PREAUTH_MAX_BYTES,
   SESSION_MAX_BLOB_TRANSFERS,
   SESSION_MAX_INFLIGHT_RPCS,
+  SESSION_MAX_LIVE_QUEUE_BYTES,
+  SESSION_MAX_LIVE_QUEUE_RECORDS,
   SESSION_MAX_SUBSCRIPTIONS,
   SESSION_PING_INTERVAL_MS,
   SESSION_MAX_SPACE_PROOFS,
@@ -65,7 +67,8 @@ export interface SessionRpcPort {
     message: Extract<WireMessage, { t: 'rpc.request' }>,
     peer: SyncSession['peer'],
     signal: AbortSignal,
-    progress: (data: unknown) => void
+    progress: (data: unknown) => void,
+    session?: { carrier?: string }
   ): Promise<unknown>
   result(id: RpcId, peer: SyncSession['peer']): Promise<unknown>
   cancel(id: RpcId, peer: SyncSession['peer']): Promise<void>
@@ -126,6 +129,8 @@ export interface SyncSessionOptions {
   /** Bounded retained evidence for a prepared Space snapshot; never grants a pin. */
   retainRosterEvidence?: (roster: Signed, peer: SyncSession['peer']) => void
   onAuthenticated?: () => void
+  /** The inbound carrier this session arrived on, passed to RPC handlers. */
+  carrier?: string
   signal?: AbortSignal
   /** Trusted local archive fence, inherited by every new session. */
   isStreamQuiesced?: (stream: StreamId) => boolean
@@ -143,6 +148,7 @@ type Upload = { upload: BlobUpload; stream: StreamId; size: number; sealed: bool
 type Download = { stream: StreamId; chunks: Buffer[]; bytes: number }
 type JobScope = { stream?: StreamId; space?: SpaceId; rpc?: boolean }
 type SessionJob = JobScope & { controller?: AbortController }
+type LiveQueue = { tail: Promise<void>; records: number; bytes: number; overflowed: boolean }
 const equalKey = (a: string, b: string): boolean => {
   const x = Buffer.from(a, 'base64url'),
     y = Buffer.from(b, 'base64url')
@@ -180,6 +186,8 @@ export class NetSyncSession implements SyncSession {
   private estimate?: QualifiedClockEstimate
   private subscriptions = new Map<StreamId, SubscriptionReceiver>()
   private serving = new Map<StreamId, { cancelled: boolean; live: boolean }>()
+  /** Live publications queued per stream; each starts after the previous one settles. */
+  private livePublishing = new Map<StreamId, LiveQueue>()
   private snapshotJobs = new Map<
     StreamId,
     { controller: AbortController; reader: SnapshotReader }
@@ -642,11 +650,67 @@ export class NetSyncSession implements SyncSession {
 
   /** After a local authority transaction commits; all serving sessions recheck ACLs. */
   publishRecord(stream: StreamId, record: StoredRecord): Promise<void> {
+    // Only a live stream sends records. While a snapshot is pulled the subscriber reads the store
+    // instead (opening it refreshes the display snapshot, a burst that must not queue here).
+    const attempt = this.serving.get(stream)
+    if (!attempt?.live || this.currentState !== 'open') return Promise.resolve()
+    const size = record.envelope.length + record.sig.length
+    let queue = this.livePublishing.get(stream)
+    // A subscriber too slow to drain the backlog is sent back to a snapshot instead of holding
+    // unbounded memory: the queued records are dropped and it resyncs from the current head.
+    if (
+      queue &&
+      (queue.records + 1 > SESSION_MAX_LIVE_QUEUE_RECORDS ||
+        queue.bytes + size > SESSION_MAX_LIVE_QUEUE_BYTES)
+    ) {
+      queue.overflowed = true
+      this.livePublishing.delete(stream)
+      attempt.live = false
+      // An in-flight replay must stop too: its caughtUp after snapshotRequired is a protocol error.
+      attempt.cancelled = true
+      // A resync request refused by a full carrier is a carrier failure, so a supervised peer
+      // reconnects; other errors keep their code.
+      return this.requireSnapshot(stream).catch((error) =>
+        this.fail(
+          error instanceof NetError && error.code === 'rate_limited'
+            ? new NetError('route_unreachable', 'Resync request rejected.', { cause: error })
+            : error
+        )
+      )
+    }
     const controller = new AbortController()
-    return this.startJob(() => this.publishRecordJob(stream, record, controller.signal), {
-      stream,
-      controller
+    // One live record per stream at a time: a burst (a refreshed display snapshot is dozens of
+    // ~44 KiB records) would otherwise overflow the mux waiting queue and drop records.
+    const current: LiveQueue = (queue ??= {
+      tail: Promise.resolve(),
+      records: 0,
+      bytes: 0,
+      overflowed: false
     })
+    const previous = current.tail
+    current.records++
+    current.bytes += size
+    const job = this.startJob(
+      async () => {
+        await previous
+        if (current.overflowed) return
+        return this.publishRecordJob(stream, record, controller.signal)
+      },
+      { stream, controller }
+    )
+    const settled = job.then(
+      () => undefined,
+      () => undefined
+    )
+    current.tail = settled
+    this.livePublishing.set(stream, current)
+    void settled.then(() => {
+      current.records--
+      current.bytes -= size
+      if (this.livePublishing.get(stream) === current && current.tail === settled)
+        this.livePublishing.delete(stream)
+    })
+    return job
   }
   private async publishRecordJob(
     stream: StreamId,
@@ -656,6 +720,12 @@ export class NetSyncSession implements SyncSession {
     if (!this.serving.get(stream)?.live || this.currentState !== 'open') return
     this.authorizedRead(stream)
     await this.sendRecords(stream, [record], false, undefined, signal)
+  }
+
+  /** Ask the subscriber to resync from a snapshot; it keeps its subscription and gets no error. */
+  private async requireSnapshot(stream: StreamId): Promise<void> {
+    const head = this.options.store.head(stream)
+    await this.send({ t: 'snapshotRequired', stream, reason: 'cursorTooOld', head })
   }
 
   /** Trusted authority failure: terminate only an already authorized serving subscription. */
@@ -1271,6 +1341,9 @@ export class NetSyncSession implements SyncSession {
         b.document.keyEpoch - a.document.keyEpoch || b.document.issuedAt - a.document.issuedAt
     )
     const current = candidates[0]
+    // The live roster drops revoked delegations but keeps their revocation evidence.
+    if (!current && roster.revoked.some((row) => row.subject === node))
+      throw new NetError('revoked')
     if (
       !current ||
       !validateSignedDocument('nodeDelegation', current.document) ||
@@ -1640,9 +1713,15 @@ export class NetSyncSession implements SyncSession {
     const timer = this.clock.setTimeout(() => controller.abort(), h.deadlineMs)
     try {
       if (!this.options.rpc) throw new NetError('forbidden')
-      const result = await this.options.rpc.request(h, this.peer, controller.signal, (data) => {
-        void this.send({ t: 'rpc.progress', id: h.id, data }).catch((error) => this.fail(error))
-      })
+      const result = await this.options.rpc.request(
+        h,
+        this.peer,
+        controller.signal,
+        (data) => {
+          void this.send({ t: 'rpc.progress', id: h.id, data }).catch((error) => this.fail(error))
+        },
+        { carrier: this.options.carrier }
+      )
       await this.send(resultMessage(h.id, result))
     } catch (error) {
       await this.send({ t: 'rpc.result', id: h.id, error: wireError(error) })
