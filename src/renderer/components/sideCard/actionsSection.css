@@ -1,0 +1,137 @@
+/* Thread side card: quick actions. One quiet row per action. */
+
+.side-card-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0 -6px;
+}
+
+.side-card-action-row {
+  display: flex;
+  align-items: center;
+  border-radius: var(--ui-row-radius);
+}
+
+.side-card-action-row:hover,
+.side-card-action-row:focus-within {
+  background: var(--ui-hover);
+}
+
+.side-card-action-run {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  border-radius: var(--ui-row-radius);
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: left;
+}
+
+.side-card-action-run:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.side-card-action-kind {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--ui-faint);
+}
+
+.side-card-action-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-card-action-spin {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  animation: side-card-action-spin 0.9s linear infinite;
+}
+
+.side-card-action-done {
+  flex-shrink: 0;
+  color: var(--success);
+}
+
+/* The running row keeps full strength while its siblings dim. */
+.side-card-action-run:disabled:has(.side-card-action-spin),
+.side-card-action-run:disabled:has(.side-card-action-done) {
+  opacity: 1;
+}
+
+.side-card-action-edit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  margin-right: 2px;
+  border-radius: 6px;
+  color: var(--ui-faint);
+  opacity: 0;
+}
+
+.side-card-action-row:hover .side-card-action-edit,
+.side-card-action-edit:focus-visible {
+  opacity: 1;
+}
+
+.side-card-action-edit:hover:not(:disabled) {
+  background: var(--ui-pressed);
+  color: var(--text-primary);
+}
+
+.side-card-action-edit:disabled {
+  cursor: default;
+}
+
+.side-card-action-error {
+  margin: 2px 6px 4px;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.side-card-action-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 6px;
+  border-radius: var(--ui-row-radius);
+  color: var(--ui-faint);
+  font-size: 12px;
+  text-align: left;
+}
+
+.side-card-action-add:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+/* Delete sits at the far left of the editor's button row. */
+.quick-actions-secondary-btn.quick-actions-dialog-delete {
+  margin-right: auto;
+  color: var(--danger);
+}
+
+.quick-actions-secondary-btn.quick-actions-dialog-delete:hover {
+  color: var(--danger);
+}
+
+@keyframes side-card-action-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

@@ -33,7 +33,7 @@ import {
 } from '../chat/components/agent-elements/tools/quick-action-approval'
 import '../chat/components/agent-elements/agent-ui.css'
 import { prepareComposerThread } from '../lib/createComposerThread'
-import { isThreadStarted } from '../../shared/threadTitle'
+import { composerWorkspaceFor, isNewEmptyThread } from '../lib/newThread'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
@@ -96,9 +96,9 @@ export function OrchestratorChat() {
   const projects = useAppStore((s) => s.projects)
   const workspaceDraft = useAppStore((s) => s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'])
   const setComposerWorkspaceDraft = useAppStore((s) => s.setComposerWorkspaceDraft)
-  const workspace = workspaceDraft ?? { projectId: activeThread?.projectId, worktreeEnabled: Boolean(activeThread?.worktreeEnabled) }
+  const workspace = composerWorkspaceFor(workspaceDraft, activeThread)
   const [workspacePending, setWorkspacePending] = useState(false)
-  const newChat = !activeThreadId || Boolean(activeThread && !isThreadStarted(activeThread) && messages.length === 0)
+  const newChat = isNewEmptyThread(activeThreadId, activeThread, messages.length)
   const browserElements = useAppStore(
     (s) =>
       s.browserElementAttachmentsByThread[s.activeThreadId ?? '__standalone__'] ??

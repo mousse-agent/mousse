@@ -1,0 +1,313 @@
+/* Git section of the thread side card. */
+
+.side-card-git-collapsed {
+  padding-block: 9px;
+}
+
+.side-card-git-quiet {
+  margin: 0;
+  color: var(--ui-faint);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.side-card-git-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.side-card-git-branch,
+.side-card-git-commit-button,
+.side-card-git-changes {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.side-card-git-branch {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  gap: 6px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  border-radius: var(--ui-row-radius);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.side-card-git-branch svg {
+  flex: none;
+  color: var(--ui-faint);
+}
+
+.side-card-git-branch-name {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-card-git-commit-button {
+  flex: none;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--ui-row-radius);
+  background: var(--ui-hover);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.side-card-git-branch:hover:not(:disabled),
+.side-card-git-branch[aria-expanded='true'],
+.side-card-git-changes:hover {
+  background: var(--ui-hover);
+}
+
+.side-card-git-commit-button:hover:not(:disabled),
+.side-card-git-commit-button[aria-expanded='true'] {
+  background: var(--ui-pressed);
+}
+
+.side-card-git-branch:disabled,
+.side-card-git-commit-button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.side-card-git-branch:focus-visible,
+.side-card-git-commit-button:focus-visible,
+.side-card-git-changes:focus-visible,
+.side-card-git-option:focus-visible,
+.side-card-git-submit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.side-card-git-error {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 4px 6px 0;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.side-card-git-changes {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  height: 26px;
+  margin-top: 2px;
+  padding: 0 6px;
+  border-radius: var(--ui-row-radius);
+  font-size: 12px;
+  text-align: left;
+}
+
+.side-card-git-summary {
+  overflow: hidden;
+  min-width: 0;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-card-git-stat {
+  display: flex;
+  flex: none;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.side-card-git-added {
+  color: var(--success);
+}
+
+.side-card-git-removed {
+  color: var(--danger);
+}
+
+.side-card-git-added[data-zero='true'],
+.side-card-git-removed[data-zero='true'] {
+  color: var(--ui-faint);
+}
+
+.side-card-git-latest {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 3px 6px 0;
+  font-size: 12px;
+}
+
+.side-card-git-subject {
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-card-git-hash,
+.side-card-git-when {
+  flex: none;
+  color: var(--ui-faint);
+  font-size: 11px;
+}
+
+.side-card-git-hash {
+  font-family: var(--font-mono);
+}
+
+/* Popovers sit in the floating layer, outside the card, so they carry their own surface. */
+.side-card-git-popover {
+  box-sizing: border-box;
+  width: min(256px, calc(100vw - 16px));
+  padding: var(--ui-menu-pad);
+  border: 1px solid var(--border);
+  border-radius: var(--ui-menu-radius);
+  background: var(--floating-surface, rgb(var(--surface-elevated-rgb)));
+  box-shadow: var(--ui-menu-drop);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.side-card-git-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 var(--ui-menu-row-x);
+  color: var(--ui-faint);
+}
+
+.side-card-git-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  outline: none;
+}
+
+.side-card-git-list {
+  max-height: 200px;
+  overflow-y: auto;
+  padding-top: 4px;
+  border-top: 1px solid var(--ui-line);
+}
+
+.side-card-git-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  height: 26px;
+  padding: 0 var(--ui-menu-row-x);
+  border: 0;
+  border-radius: var(--ui-menu-row-radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.side-card-git-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-card-git-option svg {
+  flex: none;
+  color: var(--accent);
+}
+
+.side-card-git-option[data-active='true'] {
+  background: var(--ui-hover);
+}
+
+.side-card-git-option[aria-selected='true'] {
+  color: var(--accent);
+}
+
+.side-card-git-empty {
+  margin: 0;
+  padding: 8px var(--ui-menu-row-x);
+  color: var(--ui-faint);
+}
+
+.side-card-git-commit-popover {
+  padding: 8px;
+}
+
+.side-card-git-message {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  min-height: 64px;
+  padding: 6px 8px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-row-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.side-card-git-message:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.side-card-git-commit-popover .side-card-git-error {
+  margin: 6px 0 0;
+}
+
+.side-card-git-popover-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.side-card-git-hint {
+  color: var(--ui-faint);
+  font-size: 11px;
+}
+
+.side-card-git-submit {
+  height: 26px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--ui-row-radius);
+  background: var(--accent);
+  color: var(--ui-on-accent);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.side-card-git-submit:disabled {
+  cursor: default;
+  opacity: 0.45;
+}

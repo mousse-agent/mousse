@@ -2,10 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { DiffEditor, type BeforeMount, type DiffOnMount } from '@monaco-editor/react'
 import type { Monaco } from '@monaco-editor/react'
 import { Cloud, Download, FolderOpen, GitBranch, Milestone, RefreshCw } from '../lib/icons'
-import type { GitCommit, GitFileChange, GitStatusSnapshot } from '../../shared/types'
+import type { GitCommit, GitFileChange } from '../../shared/types'
 import type { GitHubAvailability, GitHubRepositoryVisibility } from '../../shared/github'
 import { useActiveProjectPath } from '../hooks/useActiveProjectPath'
 import { useAppStore } from '../stores/appStore'
+import { useGitStatus } from '../stores/gitStatusStore'
 import { CODE_FONT } from '../lib/typography'
 import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../utils/monacoTheme'
 import { languageForPath } from '../utils/fileEditor'
@@ -22,7 +23,6 @@ const STATUS_LABELS: Record<GitFileChange['status'], string> = {
   conflicted: '!'
 }
 
-const COMMIT_LOG_LIMIT = 40
 const MIN_SECTION_RATIO = 0.15
 const MAX_SECTION_RATIO = 0.85
 
@@ -149,9 +149,7 @@ export function GitPanel() {
     const projectId = threads.find((thread) => thread.id === activeThreadId)?.projectId
     return projects.find((project) => project.id === projectId) ?? projects.find((project) => project.path === projectPath)
   }, [activeThreadId, projectPath, projects, threads])
-  const [status, setStatus] = useState<GitStatusSnapshot | null>(null)
-  const [commits, setCommits] = useState<GitCommit[]>([])
-  const [loading, setLoading] = useState(false)
+  const { status, commits, loading, refresh } = useGitStatus(projectPath)
   const [selected, setSelected] = useState<{ path: string; staged: boolean } | null>(null)
   const [diff, setDiff] = useState('')
   const [diffLoading, setDiffLoading] = useState(false)
@@ -173,32 +171,12 @@ export function GitPanel() {
   const sectionElsRef = useRef<Partial<Record<GitSectionId, HTMLDivElement | null>>>({})
   const draggingDivider = useRef<{ upper: GitSectionId; lower: GitSectionId } | null>(null)
 
-  const refresh = useCallback(async () => {
-    if (!projectPath) {
-      setStatus(null)
-      setCommits([])
-      return
-    }
-    setLoading(true)
-    try {
-      const [snapshot, log] = await Promise.all([
-        window.mousse.git.status(undefined, projectPath),
-        window.mousse.git.log(COMMIT_LOG_LIMIT, undefined, projectPath)
-      ])
-      setStatus(snapshot)
-      setCommits(snapshot.isRepo ? log : [])
-    } finally {
-      setLoading(false)
-    }
-  }, [projectPath])
-
   useEffect(() => {
     setSelected(null)
     setDiff('')
     setGithubError('')
     setGithubNotice('')
-    void refresh()
-  }, [refresh])
+  }, [projectPath])
 
   useEffect(() => {
     setRepositoryName(activeProject?.name.replace(/[^A-Za-z0-9._-]/g, '-') ?? '')
@@ -212,9 +190,10 @@ export function GitPanel() {
     }
   }, [])
 
+  const notRepo = status !== null && !status.isRepo
   useEffect(() => {
-    if (projectPath && status && !status.isRepo) void refreshGitHubStatus()
-  }, [projectPath, refreshGitHubStatus, status])
+    if (projectPath && notRepo) void refreshGitHubStatus()
+  }, [projectPath, refreshGitHubStatus, notRepo])
 
   const createGitHubRepository = useCallback(async () => {
     if (!activeProject) {

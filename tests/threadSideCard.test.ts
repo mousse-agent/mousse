@@ -79,7 +79,10 @@ describe('thread side card rendering', () => {
     seed({ activeThreadId: 'thread-1' })
     const html = render()
     const titles = [...html.matchAll(/side-card-section-title">([^<]+)</g)].map((match) => match[1])
-    expect(titles).toEqual(['Device', 'Git', 'Actions', 'Lineage'])
+    // Without a project folder the Git section collapses to one quiet line between Device and Actions.
+    expect(titles).toEqual(['Device', 'Actions', 'Lineage'])
+    expect(html.indexOf('side-card-git-collapsed')).toBeGreaterThan(html.indexOf('>Device<'))
+    expect(html.indexOf('side-card-git-collapsed')).toBeLessThan(html.indexOf('>Actions<'))
     expect(html).toContain('aria-label="Thread details"')
     expect(html).toContain('data-thread-id="thread-1"')
   })

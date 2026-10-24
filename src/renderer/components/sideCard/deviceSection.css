@@ -1,0 +1,133 @@
+/* Device section: the computer's name, and the new-thread menu opened from it. */
+
+.side-card-device-name {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-card-device-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  margin: 0 0 0 -6px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: var(--ui-menu-row-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.side-card-device-button:hover,
+.side-card-device-button.open {
+  background: var(--ui-hover);
+}
+
+.side-card-device-button:focus-visible,
+.side-card-device-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.side-card-device-button svg {
+  flex-shrink: 0;
+  color: var(--ui-faint);
+}
+
+.side-card-device-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-card-device-menu {
+  width: 240px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  padding: var(--ui-menu-pad);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius);
+  background: var(--floating-surface, rgb(var(--surface-elevated-rgb)));
+  color: var(--text-primary);
+  box-shadow: var(--ui-menu-drop);
+  font-size: 13px;
+}
+
+.side-card-device-group-label {
+  padding: 6px var(--ui-menu-row-x) 3px;
+  color: var(--ui-faint);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+[role='group'] + [role='group'] > .side-card-device-group-label {
+  margin-top: 2px;
+}
+
+.side-card-device-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px var(--ui-menu-row-x);
+  border: 0;
+  border-radius: var(--ui-menu-row-radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.side-card-device-item svg {
+  flex-shrink: 0;
+}
+
+.side-card-device-item:hover:not(:disabled),
+.side-card-device-item:focus-visible {
+  background: var(--ui-hover);
+}
+
+.side-card-device-item[aria-checked='true'] {
+  background: var(--ui-selected);
+}
+
+.side-card-device-item:disabled {
+  color: var(--ui-faint);
+  cursor: default;
+}
+
+.side-card-device-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-card-device-item-hint {
+  margin-left: auto;
+  color: var(--ui-faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.side-card-device-check {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--accent);
+}
+
+.side-card-device-item-hint + .side-card-device-check {
+  margin-left: 0;
+}
