@@ -766,6 +766,11 @@ export interface RpcMethod {
   validate?(params: unknown): unknown
   /** Current caller-dependent checks before any durable admission. */
   authorize?(params: unknown, context: RpcContext): void
+  /**
+   * Refusals that apply only to a new execution. A retry that resolves to a retained execution
+   * skips this and gets its saved result; a refusal fails the admitted execution as a plain error.
+   */
+  authorizeNew?(params: unknown, context: RpcContext): void
   handle(params: unknown, context: RpcContext): Promise<unknown>
 }
 

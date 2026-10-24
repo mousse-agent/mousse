@@ -205,6 +205,20 @@ export function isLeaseHeldByLivePeer(
 }
 
 /**
+ * Side-effect-free peek: true when `tryAcquireExecutionLease` would currently refuse.
+ * Mirrors `tryReclaimStaleLease` without unlinking: any in-process holder, a live foreign
+ * owner, or a recent/unreadable file counts as held; dead and same-pid orphans are free.
+ */
+export function isExecutionLeaseHeld(threadDir: string): boolean {
+  const lockPath = getExecutionLeasePath(threadDir)
+  if (!existsSync(lockPath)) return false
+  const owner = readLeaseOwner(lockPath)
+  if (!owner) return !mayReclaimUnreadableLock(lockPath)
+  if (heldTokensInProcess.has(owner.token)) return true
+  return isOwnerLive(owner) && owner.pid !== process.pid
+}
+
+/**
  * Attempt to remove a lease only when the recorded owner is dead/stale or matches `token`.
  * Never unlinks a live foreign owner or a recent empty/partial publication.
  */

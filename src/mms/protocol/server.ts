@@ -1018,6 +1018,12 @@ export class MmsProtocolServer {
               this.ring.push(type, data, threadId, profileId),
               profileId ?? null
             )
+            // In-daemon watchers (the phone's live lists) learn of project and thread list
+            // changes made through requests, which reach no service event of their own.
+            if (profileId && type === 'projects.updated')
+              resolved.services.events.broadcast('projects:updated', data)
+            else if (profileId && type === 'threads.updated')
+              resolved.services.events.broadcast('threads:updated', data)
           }
         },
         method,

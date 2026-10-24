@@ -147,6 +147,7 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     try {
       this.authorize(name, context.caller, capability)
       method.authorize?.(params, context)
+      method.authorizeNew?.(params, context)
       if (context.signal.aborted) throw new NetError('cancelled')
       this.options.executions.transition(id, 'running', this.options.clock.now())
       const returned = await method.handle(params, {
@@ -194,7 +195,10 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
       const record = this.options.executions.get(id)!
       if (record.state === 'accepted')
         this.options.executions.transition(id, 'failed', this.options.clock.now(), {
-          error: { code: 'cancelled', message: 'Handler did not start.' }
+          error: {
+            code: error instanceof NetError ? error.code : 'cancelled',
+            message: 'Handler did not start.'
+          }
         })
       else if (record.state === 'running') {
         // A thrown handler can have made an external effect; never claim rollback.
