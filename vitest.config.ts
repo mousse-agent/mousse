@@ -1,33 +1,14 @@
-import { readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
 import { defineConfig } from 'vitest/config'
 
-// Tests that start real processes (daemons, the built CLI, Electron, Chrome, git
-// shells, native compiles) or several full profiles over real TLS each hold
-// hundreds of MB and starve CPU-bound neighbours into timeouts. They run as a
-// separate, narrow group after the in-process tests finish.
-const PROCESS_MARKERS = [
-  /from '(node:)?child_process'/,
-  /electron|chromium|puppeteer|playwright/i,
-  /fixtures\/(gitFoundation|resource-lifecycle-qualification)/,
-  /\/(ownedTemp|terminateChild|http-fixture|pin|environment)'/,
-  /\/support\/(build|daemon)'/,
-  /buildNativeReader/
-]
-const PROCESS_PATHS = [/^tests\/net\/chats\//]
-
-const testFiles = (dir: string): string[] =>
-  readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(dir, entry.name)
-    if (entry.isDirectory()) return testFiles(path)
-    return entry.name.endsWith('.test.ts') ? [path] : []
-  })
-
-const processTests = testFiles('tests').filter((file) => {
-  if (PROCESS_PATHS.some((path) => path.test(file.replaceAll('\\', '/')))) return true
-  const source = readFileSync(file, 'utf8')
-  return PROCESS_MARKERS.some((marker) => marker.test(source))
-})
+// Resource membership is an audited inventory, not a search over test source text.
+// Resource groups run sequentially so different worker budgets cannot overlap.
+const lanes = JSON.parse(readFileSync(new URL('./tests/test-lanes.json', import.meta.url), 'utf8')) as {
+  process: string[]; serviceTls: string[]; daemon: string[]; browser: string[]
+}
+const processTests = lanes.process
+const heavyTests = [...lanes.serviceTls, ...lanes.daemon, ...lanes.browser]
+const budgetedTests = [...processTests, ...heavyTests]
 
 const shared = {
   environment: 'node',
@@ -41,6 +22,7 @@ const FULL_RUN_TRIGGERS = [
   '**/tests/support/**',
   '**/tests/fixtures/**',
   '**/tests/test-dependencies.json',
+  '**/tests/test-lanes.json',
   '**/vitest.config.*',
   '**/vite.config.*',
   '**/electron.vite.config.*',
@@ -59,7 +41,7 @@ export default defineConfig({
           ...shared,
           name: 'unit',
           include: ['tests/**/*.test.ts'],
-          exclude: processTests,
+          exclude: budgetedTests,
           maxWorkers: '50%',
           sequence: { groupOrder: 0 }
         }
@@ -69,8 +51,17 @@ export default defineConfig({
           ...shared,
           name: 'process',
           include: processTests,
-          maxWorkers: 2,
+          maxWorkers: 3,
           sequence: { groupOrder: 1 }
+        }
+      },
+      {
+        test: {
+          ...shared,
+          name: 'heavy',
+          include: heavyTests,
+          maxWorkers: 2,
+          sequence: { groupOrder: 2 }
         }
       }
     ]

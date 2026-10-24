@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
-import { Plus, Upload } from '../../lib/icons'
+import { FileText, Folder, Plus, RotateCcw, Upload, type IconComponent } from '../../lib/icons'
+import { SettingsRow, Switch } from '../settings/SettingsRow'
 import type { IntegrationPlatformClient } from '../../../shared/integrationPlatform'
 import type { SkillDescriptor } from '../../../shared/integrations'
 import type { SkillEditorDto } from '../../../shared/integrations/lifecycle'
 import { MarkdownDocumentEditor } from '../editors/MarkdownDocumentEditor'
-import { IntegrationField as Field, IntegrationModal as Modal, useIntegrationBoundary, useIntegrationDirtyGuard } from './dialogSupport'
+import { IntegrationDisclosure as Disclosure, IntegrationField as Field, IntegrationModal as Modal, useIntegrationBoundary, useIntegrationDirtyGuard } from './dialogSupport'
 import { asError, downloadPackage, errorCode, fileToPackage, filesToPackage, toBase64 } from './integrationUi'
+import { SkillModelPicker, type SkillModelBinding } from './SkillModelPicker'
 
-interface Identity { client: IntegrationPlatformClient; profileId: string; projectId?: string; onClose: () => void; onSaved: () => void }
+interface Identity {
+  client: IntegrationPlatformClient; profileId: string; projectId?: string; onClose: () => void; onSaved: () => void}
 export type TestSkill = (params: { profileId: string; projectId?: string; installationId: string; revision: string }) => Promise<unknown>
 const STARTER = '## Instructions\n\nDescribe when this skill should be used.\n'
 
@@ -32,11 +35,11 @@ export function AddSkillDialog({ client, profileId, projectId, scope, initialMod
     const ticket = boundary.capture()
     setBusy(true); setError(null)
     try {
+      if (mode === 'create' && (!name.trim() || !description.trim())) throw new Error('Name and description are required.')
+      if (mode === 'upload' && !file && !folderFiles.length) throw new Error('Choose a SKILL.md, ZIP package, or folder.')
       if (mode === 'create') {
-        if (!name.trim() || !description.trim()) throw new Error('Name and description are required.')
         await client.createSkill({ profileId, projectId, scope, name: name.trim(), description: description.trim(), instructions, license: license || undefined, compatibility: compatibility || undefined, enable })
       } else {
-        if (!file && !folderFiles.length) throw new Error('Choose a SKILL.md, ZIP package, or folder.')
         const pkg = folderFiles.length ? await filesToPackage(folderFiles) : await fileToPackage(file!)
         if (!boundary.current(ticket)) return
         await client.importSkill({ profileId, projectId, scope, zipBase64: toBase64(pkg.bytes), zipName: pkg.name, enable })
@@ -46,36 +49,56 @@ export function AddSkillDialog({ client, profileId, projectId, scope, initialMod
     finally { if (boundary.current(ticket)) setBusy(false) }
   }
 
-  return <Modal title="Add skill" onClose={close}>
-    <div className="integrations-choice">
-      <button type="button" disabled={busy} data-action="choose-create-skill" className={mode === 'create' ? 'selected' : ''} onClick={() => { setMode('create'); setError(null) }}><Plus size={16} /><strong>Create skill</strong><span>Write reusable instructions.</span></button>
-      <button type="button" disabled={busy} data-action="choose-upload-skill" className={mode === 'upload' ? 'selected' : ''} onClick={() => { setMode('upload'); setError(null) }}><Upload size={16} /><strong>Upload package</strong><span>Choose Markdown, ZIP, or a folder.</span></button>
+  const choose = (next: 'create' | 'upload') => { setMode(next); setError(null) }
+  // The Create / Upload choice names the task, so the title is for assistive tech only.
+  return <Modal title="Add skill" hideTitle onClose={close}>
+    <div className="integrations-choice" role="radiogroup" aria-label="Add skill">
+      <OptionTile role="radio" checked={mode === 'create'} disabled={busy} action="choose-create-skill" icon={Plus} title="Create skill" detail="Write reusable instructions." onClick={() => choose('create')} />
+      <OptionTile role="radio" checked={mode === 'upload'} disabled={busy} action="choose-upload-skill" icon={Upload} title="Upload package" detail="Markdown, ZIP, or a folder." onClick={() => choose('upload')} />
     </div>
     <form className="integration-form" onSubmit={(event) => { event.preventDefault(); void save() }}>
       <fieldset className="integration-fields" disabled={busy}>
         {mode === 'create' ? <>
           <Field label="Name"><input value={name} onChange={(event) => setName(event.target.value)} /></Field>
           <Field label="When to use"><textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} /></Field>
-          <div className="integration-form-grid"><Field label="License"><input value={license} onChange={(event) => setLicense(event.target.value)} placeholder="Optional" /></Field><Field label="Compatibility"><input value={compatibility} onChange={(event) => setCompatibility(event.target.value)} placeholder="Optional" /></Field></div>
-          <details><summary>Starter instructions</summary><div className="integration-starter-editor"><MarkdownDocumentEditor value={instructions} onChange={setInstructions} readOnly={busy} defaultViewMode="source" path="SKILL.md" aria-label="Skill instructions" /></div></details>
+          <Disclosure label="More options">
+            <div className="integration-form-grid"><Field label="License"><input value={license} onChange={(event) => setLicense(event.target.value)} placeholder="Optional" /></Field><Field label="Compatibility"><input value={compatibility} onChange={(event) => setCompatibility(event.target.value)} placeholder="Optional" /></Field></div>
+          </Disclosure>
+          <Disclosure label="Starter instructions"><div className="integration-starter-editor"><MarkdownDocumentEditor value={instructions} onChange={setInstructions} readOnly={busy} defaultViewMode="source" path="SKILL.md" aria-label="Skill instructions" /></div></Disclosure>
         </> : <>
           <input ref={inputRef} data-action="skill-upload-input" type="file" accept=".md,.zip,text/markdown,application/zip" hidden onChange={(event) => { setFolderFiles([]); setFile(event.target.files?.[0] ?? null) }} />
           <input ref={folderRef} data-action="skill-folder-input" type="file" hidden multiple onChange={(event) => { setFile(null); setFolderFiles(Array.from(event.target.files ?? [])) }} />
           <div className="integration-upload-options">
-            <button type="button" className="integration-drop" onClick={() => inputRef.current?.click()}><Upload size={16} /><strong>{file?.name ?? 'Choose SKILL.md or ZIP'}</strong><span>Up to 360 KiB compressed.</span></button>
-            <button type="button" className="integration-drop" onClick={() => folderRef.current?.click()}><Upload size={16} /><strong>{folderFiles.length ? `${folderFiles.length} folder files` : 'Import a folder'}</strong><span>Include SKILL.md at the folder root.</span></button>
+            <OptionTile icon={FileText} title={file?.name ?? 'Choose SKILL.md or ZIP'} detail="Up to 360 KiB compressed." onClick={() => inputRef.current?.click()} />
+            <OptionTile icon={Folder} title={folderFiles.length ? `${folderFiles.length} folder files` : 'Import a folder'} detail="With SKILL.md at its root." onClick={() => folderRef.current?.click()} />
           </div>
-          <p className="integration-help">Scripts and assets are preserved. Import does not execute the package.</p>
+          <p className="integration-help">Scripts and assets are kept. Importing does not run them.</p>
         </>}
-        <label className="integration-check"><input type="checkbox" checked={enable} onChange={(event) => setEnable(event.target.checked)} /> Enable after {mode === 'create' ? 'save' : 'import'}</label>
+        <SettingsRow title={`Turn on after ${mode === 'create' ? 'saving' : 'import'}`} htmlFor={ENABLE_SWITCH_ID}
+          control={<Switch id={ENABLE_SWITCH_ID} checked={enable} onChange={setEnable} disabled={busy} />} />
       </fieldset>
       {error ? <p className="integration-error" role="alert">{error}</p> : null}
-      <div className="integration-dialog-actions"><button type="button" className="btn" onClick={close}>Cancel</button><button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving…' : mode === 'create' ? 'Create skill' : 'Import package'}</button></div>
+      <div className="integration-dialog-actions"><button type="submit" className="settings-btn" disabled={busy}>{busy ? 'Saving…' : mode === 'create' ? 'Create skill' : 'Import package'}</button></div>
     </form>
   </Modal>
 }
 
-export function SkillEditorDialog({ client, profileId, projectId, skill, onClose, onSaved, onTestSkill }: Identity & { skill: SkillDescriptor; onTestSkill?: TestSkill }) {
+const ENABLE_SWITCH_ID = 'add-skill-enable'
+
+/** A one-row choice: icon on the title line, a short detail tight under it. */
+function OptionTile({ icon: Icon, title, detail, onClick, role, checked, disabled, action }: {
+  icon: IconComponent; title: string; detail: string; onClick: () => void; role?: 'radio'; checked?: boolean; disabled?: boolean; action?: string
+}) {
+  return <button type="button" className="integration-option" role={role} aria-checked={role ? checked : undefined} disabled={disabled} data-action={action} onClick={onClick}>
+    <Icon size={14} aria-hidden="true" />
+    <strong>{title}</strong>
+    <span>{detail}</span>
+  </button>
+}
+
+
+/** Source editor for one skill. Turning it on/off, exporting a ZIP and archiving live in the row. */
+export function SkillEditorDialog({ client, profileId, projectId, skill, onClose, onSaved, onTestSkill, skillModel }: Identity & { skill: SkillDescriptor; onTestSkill?: TestSkill; skillModel?: SkillModelBinding }) {
   const [editor, setEditor] = useState<SkillEditorDto | null>(null)
   const [content, setContent] = useState(''), [loading, setLoading] = useState(true), [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null), [feedback, setFeedback] = useState<string | null>(null), [reload, setReload] = useState(0)
@@ -96,28 +119,24 @@ export function SkillEditorDialog({ client, profileId, projectId, skill, onClose
     return () => { current = false }
   }, [client, profileId, projectId, installationId, reload])
 
-  const action = async (kind: 'save' | 'toggle' | 'archive' | 'zip' | 'markdown' | 'test') => {
+  const action = async (kind: 'save' | 'markdown' | 'test') => {
     if (!editor || busy || loading) return
-    if ((kind === 'toggle' || kind === 'archive') && !mayLeave()) return
-    if (kind === 'archive' && !window.confirm('Archive this skill?')) return
-    if (dirty && ['zip', 'markdown', 'test'].includes(kind)) return
+    if (dirty && kind !== 'save') return
     const ticket = boundary.capture()
     setBusy(true); setError(null); setFeedback(null)
     try {
       if (kind === 'save') {
         if (!editor.skill.revision) throw new Error('Reload the saved skill before editing it.')
         await client.updateSkill({ ...identity, content, expectedRevision: editor.skill.revision })
-      } else if (kind === 'toggle') await client.enableSkill({ ...identity, enabled: editor.skill.enabled === false })
-      else if (kind === 'archive') await client.archiveSkill(identity)
-      else if (kind === 'test') {
+      } else if (kind === 'test') {
         if (!onTestSkill || !editor.skill.revision) throw new Error('Skill testing is unavailable.')
         await onTestSkill({ ...identity, revision: editor.skill.revision })
         if (boundary.current(ticket)) setFeedback('Test run requested.')
       } else {
-        const exported = await client.exportSkill({ ...identity, format: kind })
+        const exported = await client.exportSkill({ ...identity, format: 'markdown' })
         if (boundary.current(ticket)) downloadPackage(exported.fileName, exported.base64, exported.contentType)
       }
-      if (boundary.current(ticket) && ['save', 'toggle', 'archive'].includes(kind)) onSaved()
+      if (boundary.current(ticket) && kind === 'save') onSaved()
     } catch (cause) {
       if (boundary.current(ticket)) setError(errorCode(cause) === 'revision_conflict'
         ? 'This skill changed elsewhere. Your edits are retained. Reload the saved skill before saving again.' : asError(cause))
@@ -127,12 +146,9 @@ export function SkillEditorDialog({ client, profileId, projectId, skill, onClose
   return <Modal title={`Edit ${editor?.skill.name ?? skill.name}`} onClose={close} wide>
     <div className="integration-editor" data-skill-editor="">
       <div className="integration-editor__toolbar"><span>{dirty ? 'Unsaved changes' : 'Saved source'}</span><div>
-        <button type="button" className="btn btn-sm" disabled={busy || loading} onClick={() => { if (mayLeave()) setReload((value) => value + 1) }}>Reload saved</button>
-        <button type="button" className="btn btn-sm" disabled={busy || loading || !editor || dirty} onClick={() => void action('zip')}>Export ZIP</button>
-        {onTestSkill ? <button type="button" className="btn btn-sm" disabled={busy || loading || !editor || dirty} onClick={() => void action('test')}>Test skill</button> : null}
-        <button type="button" className="btn btn-sm" disabled={busy || loading || !editor} onClick={() => void action('toggle')}>{editor?.skill.enabled === false ? 'Enable' : 'Disable'}</button>
-        <button type="button" className="btn btn-sm btn-danger" disabled={busy || loading || !editor} onClick={() => void action('archive')}>Archive</button>
-        <button type="button" className="btn btn-sm btn-primary" disabled={busy || loading || !editor || !dirty} onClick={() => void action('save')}>Save changes</button>
+        <button type="button" className="settings-icon-btn" title="Reload saved" aria-label="Reload saved" disabled={busy || loading} onClick={() => { if (mayLeave()) setReload((value) => value + 1) }}><RotateCcw size={14} /></button>
+        {onTestSkill ? <button type="button" className="settings-btn" disabled={busy || loading || !editor || dirty} onClick={() => void action('test')}>Test skill</button> : null}
+        <button type="button" className="settings-btn" disabled={busy || loading || !editor || !dirty} onClick={() => void action('save')}>Save changes</button>
       </div></div>
       {error ? <p className="integration-error" role="alert">{error}</p> : null}
       {feedback ? <p role="status">{feedback}</p> : null}
@@ -140,9 +156,15 @@ export function SkillEditorDialog({ client, profileId, projectId, skill, onClose
         <div className="integration-package-tree" aria-label="Package files">{editor.packageTree.map((file) => <span key={file.relativePath}>{file.relativePath}</span>)}</div>
         <div className="integration-editor__body">
           <MarkdownDocumentEditor value={content} onChange={setContent} readOnly={busy} onSave={() => void action('save')} path="SKILL.md" aria-label="Skill instructions" />
-          <aside><h3>Diagnostics</h3>{editor.skill.diagnostics?.length ? <ul>{editor.skill.diagnostics.map((item, index) => <li key={index}>{item.message}</li>)}</ul> : <p>No diagnostics.</p>}
+          <aside>
+            {skillModel ? <section className="integration-editor__model">
+              <h3>Model</h3>
+              <p className="integration-help">Optional. Used when you start a chat with this skill.</p>
+              <SkillModelPicker skillId={skill.id}binding={skillModel} disabled={busy} />
+            </section> : null}
+            <h3>Diagnostics</h3>{editor.skill.diagnostics?.length ? <ul>{editor.skill.diagnostics.map((item, index) => <li key={index}>{item.message}</li>)}</ul> : <p>No diagnostics.</p>}
             {dirty ? <p className="integration-help">Save changes before exporting or testing.</p> : null}
-            <button type="button" className="btn btn-sm" disabled={busy || dirty} onClick={() => void action('markdown')}>Export Markdown</button>
+            <button type="button" className="settings-btn" disabled={busy || dirty} onClick={() => void action('markdown')}>Export Markdown</button>
           </aside>
         </div>
       </> : null}

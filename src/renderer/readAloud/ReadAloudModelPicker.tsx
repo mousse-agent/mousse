@@ -21,7 +21,7 @@ export function providerSelection(model: SpeechProviderModel): ReadAloudSelectio
   }
 }
 
-const localApi: LocalModelApi = {
+export const readAloudLocalApi: LocalModelApi = {
   list: () => window.mousse.readAloud.localModels(),
   download: (modelId) => window.mousse.readAloud.downloadLocalModel(modelId as LocalTtsModelId),
   cancelDownload: (modelId) => window.mousse.readAloud.cancelLocalModelDownload(modelId as LocalTtsModelId),
@@ -29,7 +29,7 @@ const localApi: LocalModelApi = {
   onStatus: (listener) => window.mousse.readAloud.onLocalModelStatus((status: LocalTtsModelStatus) => listener(status))
 }
 
-function localSelection(model: LocalTtsModel): ReadAloudSelection {
+export function localSelection(model: LocalTtsModel): ReadAloudSelection {
   return { source: 'local', modelId: model.id, label: model.label }
 }
 
@@ -77,7 +77,7 @@ export function ReadAloudModelPicker({
       providerSelection={providerSelection}
       localModels={LOCAL_TTS_MODELS}
       localSelection={localSelection}
-      localApi={localApi}
+      localApi={readAloudLocalApi}
       sameSelection={sameReadAloudSelection}
       renderEmptyProviders={renderEmptyProviders}
     />

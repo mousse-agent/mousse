@@ -24,9 +24,11 @@ function fixture(query: (input: { options: Options; prompt: unknown }) => Query)
   mkdirSync(directory, { recursive: true })
   writeFileSync(
     join(directory, 'settings.json'),
-    JSON.stringify({ signedIn: true, binaryPath: binary })
+    // Models are already known, so the first sign-in check starts no model discovery.
+    JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] })
   )
-  const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), { query })
+  const runAuth = async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })
+  const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), { query, runAuth })
   services.push(service)
   return { home, service }
 }
@@ -155,10 +157,11 @@ describe('Claude subscription account quota', () => {
     expect(query.close).toHaveBeenCalledOnce()
   })
   it('cancels pending usage on service stop without waiting for SDK completion', async () => {
-    const query = fakeQuery(vi.fn(() => new Promise<never>(() => {})))
+    const read = vi.fn(() => new Promise<never>(() => {}))
+    const query = fakeQuery(read)
     const { service, home } = fixture(() => query)
     const result = service.getUsage(home)
-    await Promise.resolve()
+    await vi.waitFor(() => expect(read).toHaveBeenCalled())
     service.stop()
     expect(await result).toMatchObject({
       status: 'error',

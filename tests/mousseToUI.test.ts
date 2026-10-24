@@ -463,7 +463,7 @@ describe('mousseToUIMessages standardize layer', () => {
         kind: 'mcp_tool_call',
         toolCall: {
           title: 'Quick action create_quick_action',
-          summary: 'The orchestrator is creating a chat header quick action.',
+          summary: 'The orchestrator is creating a quick action.',
           details: ['Tool: create_quick_action'],
           response: JSON.stringify({ label: 'Test Action', kind: 'send-current', payload: 'hi' }),
           status: 'processing',

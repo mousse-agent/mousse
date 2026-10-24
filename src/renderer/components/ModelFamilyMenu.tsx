@@ -7,7 +7,8 @@ import {
   useState,
   type RefObject
 } from 'react'
-import { ChevronRight, LayoutGrid, Search, Star } from '../lib/icons'
+import { ChevronRight, LayoutGrid, Star } from '../lib/icons'
+import { SettingsSearch } from './settings/SettingsSearch'
 import type { LlmProviderOption } from '../../shared/settings'
 import {
   compareModelsNewestFirst,
@@ -527,25 +528,24 @@ function ProfileModelFamilyMenu({
           >
             <Star size={14} strokeWidth={2} fill={favoritesOnly ? 'currentColor' : 'none'} />
           </button>
-          <div className="model-picker-search-field">
-            <Search size={14} className="model-picker-search-icon" aria-hidden />
-            <input
-              ref={searchInputRef}
-              type="search"
-              className="model-picker-search-input"
-              placeholder="Search models..."
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-              aria-label="Search models"
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </div>
+          <SettingsSearch
+            className="model-picker-search-field"
+            inputRef={searchInputRef}
+            placeholder="Search models"
+            ariaLabel="Search models"
+            value={searchQuery}
+            onChange={setSearchQuery}
+          />
         </div>
 
         <div className="model-picker-body">
           {railItems.length > 1 ? (
-            <div className="model-picker-rail" role="tablist" aria-label="Filter by provider">
+            <div
+              className="model-picker-rail"
+              role="tablist"
+              aria-label="Filter by provider"
+              data-tooltip-placement="outside-left"
+            >
               <button
                 type="button"
                 role="tab"

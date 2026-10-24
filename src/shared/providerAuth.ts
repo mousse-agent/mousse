@@ -35,19 +35,10 @@ export interface ProviderLoginOption {
 }
 
 /**
- * Which Claude Code sign-in a profile's Claude Subscription provider uses: `cli` reuses the
- * terminal `claude` login (default config dir, or an inherited `CLAUDE_CONFIG_DIR`); `isolated`
- * keeps a profile-private config dir with its own sign-in.
+ * The Claude Code provider always uses the terminal `claude` sign-in (default config dir, or an
+ * inherited `CLAUDE_CONFIG_DIR`), whatever sign-in method the CLI is configured with.
  */
-export type ClaudeLoginPolicy = 'cli' | 'isolated'
-
 export interface ClaudeSubscriptionStatus {
-  /** Null while unresolved: the first-run check could not tell which sign-in to use. */
-  loginPolicy: ClaudeLoginPolicy | null
-  /** The default profile is the only one that reuses the terminal sign-in without opting in. */
-  defaultProfile: boolean
-  /** A profile-private sign-in was completed before (kept when the policy is `isolated`). */
-  isolatedSignIn: boolean
   state: 'connected' | 'missing_binary' | 'signed_out' | 'disconnected' | 'error'
   message?: string
   /** ISO time of the last live `claude auth status` check (terminal sign-in only). */
@@ -131,4 +122,30 @@ export interface ProviderUsage {
 export interface ProvidersUsageResponse {
   providers: ProviderUsage[]
   fetchedAt: string
+}
+
+/** Provider instances that run a local vendor CLI (Settings → Providers). */
+export type CliProviderInstanceId = 'claude' | 'codex' | 'antigravity'
+export const CLI_PROVIDER_INSTANCE_IDS: readonly CliProviderInstanceId[] = ['claude', 'codex', 'antigravity']
+
+export interface CliProviderConfig {
+  instanceId: CliProviderInstanceId
+  /** User-chosen executable; undefined = automatic lookup. */
+  binaryPath?: string
+  /** What Mousse would launch right now (user path or auto-detected), undefined if not found. */
+  resolvedBinaryPath?: string
+  /** Parsed from `<binary> --version`, undefined if unknown. */
+  version?: string
+  /** Extra arguments appended to the CLI launch. */
+  args: string[]
+  /** Extra environment variables for the CLI process, applied over Mousse's own environment. */
+  env: Record<string, string>
+}
+
+export interface CliProviderConfigPatch {
+  /** `null` (or an empty string) clears it back to automatic lookup. */
+  binaryPath?: string | null
+  args?: string[]
+  /** Full replacement. */
+  env?: Record<string, string>
 }

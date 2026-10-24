@@ -31,22 +31,12 @@ function ReadAloudModal() {
       title="Choose a read aloud voice"
       onClose={closePicker}
       footer={
-        <>
-          <button type="button" className="btn" onClick={closePicker}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={!draft}
-            onClick={() => draft && confirmPicker(draft)}
-          >
-            {reading ? 'Use model and read' : 'Use model'}
-          </button>
-        </>
+        <button type="button" className="btn btn-primary" disabled={!draft} onClick={() => draft && confirmPicker(draft)}>
+          {reading ? 'Use model and read' : 'Use model'}
+        </button>
       }
     >
-      <p>Messages are read with the model you pick. You can change it later under Settings, Models.</p>
+      <p>Messages are read with the model you pick. You can change it later under Settings, Speech.</p>
       <ReadAloudModelPicker
         value={draft}
         onSelect={setDraft}

@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { beginFixturePhase, fixturePhase } from './phaseTiming'
 
 /**
  * Launch the bundled CLI as a real daemon process and run CLI commands against it.
@@ -37,6 +38,8 @@ export interface DaemonOptions {
   /** Appears in failure messages. */
   label?: string
   cwd?: string
+  /** Registers ownership immediately after spawn, before the first readiness wait. */
+  onStart?: (daemon: Daemon) => void
 }
 
 export interface Daemon {
@@ -86,6 +89,7 @@ const finished = (child: ChildProcess) => child.exitCode !== null || child.signa
 
 export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const { entry, home, label = 'Daemon', logBytes = 8000, timeout = 40_000, readiness = 'owner' } = options
+  const finishReadiness = beginFixturePhase('daemon', 'spawn-to-readiness')
   const child = spawn(process.execPath, [...(options.nodeArgs ?? []), entry, '--home', home, ...(options.args ?? ['service', 'run'])], {
     cwd: options.cwd ?? process.cwd(),
     windowsHide: true,
@@ -109,37 +113,21 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     child.once('error', () => done())
   })
   let owner: OwnerRecord | null = null
-  await until(
-    () => {
-      if (finished(child)) throw new Error(`${label} exited before readiness: ${output}`)
-      const runtime = readJson(join(home, 'mms.runtime.json'))
-      if (runtime?.pid !== child.pid) return false
-      if (readiness === 'runtime') return true
-      const record = readJson(join(home, 'mms.owner.json'))
-      if (record?.pid !== child.pid) return false
-      owner = record
-      return true
-    },
-    Boolean,
-    timeout,
-    `${label} readiness timed out: ${output}`
-  ).catch((error) => {
-    if (!finished(child)) child.kill('SIGKILL')
-    throw error
-  })
   const kill = async (signal: NodeJS.Signals = 'SIGKILL') => {
     if (finished(child)) return
     child.kill(signal)
-    await exited
+    await fixturePhase('daemon', 'kill', () => exited)
   }
-  return {
+  const daemon: Daemon = {
     child,
     pid: child.pid!,
     home,
     get output() {
       return output
     },
-    owner,
+    get owner() {
+      return owner
+    },
     exited,
     get done() {
       return finished(child)
@@ -150,11 +138,35 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       child.kill('SIGTERM')
       const timer = setTimeout(() => child.kill('SIGKILL'), graceMs)
       try {
-        await exited
+        await fixturePhase('daemon', 'stop', () => exited)
       } finally {
         clearTimeout(timer)
       }
     }
+  }
+  try {
+    options.onStart?.(daemon)
+    await until(
+      () => {
+        if (finished(child)) throw new Error(`${label} exited before readiness: ${output}`)
+        const runtime = readJson(join(home, 'mms.runtime.json'))
+        if (runtime?.pid !== child.pid) return false
+        if (readiness === 'runtime') return true
+        const record = readJson(join(home, 'mms.owner.json'))
+        if (record?.pid !== child.pid) return false
+        owner = record
+        return true
+      },
+      Boolean,
+      timeout,
+      `${label} readiness timed out: ${output}`
+    )
+    return daemon
+  } catch (error) {
+    await daemon.kill()
+    throw error
+  } finally {
+    finishReadiness()
   }
 }
 
@@ -186,7 +198,8 @@ export interface CliResult {
 /** Run one CLI command to completion; resolves for any exit code, rejects on timeout or spawn failure. */
 export function runCli(options: CliOptions): Promise<CliResult> {
   const { entry, home, label = 'CLI', timeout = 20_000, maxOutput = 4 * 1024 * 1024 } = options
-  return new Promise((resolve, reject) => {
+  const finish = beginFixturePhase('daemon', 'cli')
+  return new Promise<CliResult>((resolve, reject) => {
     const child = spawn(process.execPath, [...(options.nodeArgs ?? []), entry, ...(home ? ['--home', home] : []), ...options.args], {
       cwd: options.cwd,
       windowsHide: true,
@@ -218,7 +231,7 @@ export function runCli(options: CliOptions): Promise<CliResult> {
       else resolve({ code, signal, stdout, stderr })
     })
     child.stdin!.end(options.input)
-  })
+  }).finally(finish)
 }
 
 /** Run a CLI command that must succeed and print one JSON document. */
