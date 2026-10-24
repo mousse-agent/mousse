@@ -5,7 +5,7 @@ const readRendererComponent = (name: string): string =>
   readFileSync(new URL(`../src/renderer/components/${name}`, import.meta.url), 'utf8')
 
 describe('composer rendering performance', () => {
-  it.each(['OrchestratorChat.tsx', 'MousseAgentChat.tsx'])(
+  it.each(['OrchestratorChat.tsx'])(
     'keeps transcript derivation and element construction out of %s input renders',
     (name) => {
       const source = readRendererComponent(name)

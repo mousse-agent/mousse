@@ -136,14 +136,12 @@ describe('lineageAgentName', () => {
 })
 
 describe('LineageList rendering', () => {
-  const render = (agents: Agent[], extra: { centerAgentId?: string | null; expanded?: boolean } = {}) =>
+  const render = (agents: Agent[], extra: { expanded?: boolean } = {}) =>
     renderToStaticMarkup(createElement(LineageList, {
       agents,
       now: NOW,
-      centerAgentId: extra.centerAgentId ?? null,
       expanded: extra.expanded ?? false,
-      onExpand: () => undefined,
-      onOpen: () => undefined
+      onExpand: () => undefined
     }))
 
   it('renders nothing for an empty list; the section collapses instead', () => {
@@ -161,11 +159,10 @@ describe('LineageList rendering', () => {
     expect(html).toContain('Running')
   })
 
-  it('highlights the open agent and exposes the full task as a title', () => {
-    const html = render([agent('one', { task: 'A very long task name' }), agent('two')], { centerAgentId: 'one' })
-    expect(html.match(/is-current/g)).toHaveLength(1)
-    expect(html).toContain('aria-current="true"')
+  it('exposes the full task as a title and has no clickable agent rows', () => {
+    const html = render([agent('one', { task: 'A very long task name' }), agent('two')])
     expect(html).toContain('title="A very long task name"')
+    expect(html).not.toContain('<button')
   })
 
   it('adds a "Show N more" row past five agents and drops it when expanded', () => {

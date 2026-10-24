@@ -1,12 +1,11 @@
 import { join } from 'node:path'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { writeFileSync } from 'node:fs'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Context, AssistantMessage } from '@earendil-works/pi-ai'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { MmsProtocolServer, LocalMmsClient } from '../src/mms/protocol'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
-import type { AgentEpisode, NamedAgentIdentity } from '../src/shared/agentEpisodes'
 import { gitFoundationFixture } from './fixtures/gitFoundation'
 import { providerResponse, streamOf } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 
@@ -53,52 +52,6 @@ const toolCall = (id: string, name: string, args: Record<string, unknown>) => pr
 const text = (value: string) => providerResponse([{ type: 'text', text: value }], 'stop')
 const DELEGATION_ID = /Delegated task (delegation:[0-9a-f-]+)/
 
-async function completed(threadId: string, episodeId: string) {
-  let value!: { agent: NamedAgentIdentity; episode: AgentEpisode }
-  await vi.waitFor(async () => {
-    const state = await client.request<{ identities: NamedAgentIdentity[]; episodes: AgentEpisode[] }>('agents.listNamed', { threadId })
-    const episode = state.episodes.find((entry) => entry.id === episodeId)!
-    expect(episode.state).toBe('completed')
-    value = { agent: state.identities.find((entry) => entry.id === episode.agentId)!, episode }
-  }, { timeout: 15_000, interval: 40 })
-  return value
-}
-
-it('creates a real named shared reader by default, denies emitted writes and durably exposes its completed episode', async () => {
-  const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Named reader', project.id)
-  responses.push(providerResponse([
-    { type: 'toolCall', id: 'bad-write', name: 'write', arguments: { path: 'value.txt', content: 'bad' } },
-    { type: 'toolCall', id: 'read-value', name: 'read', arguments: { path: 'value.txt' } }
-  ], 'toolUse'), providerResponse([{ type: 'text', text: 'Read the task' }], 'stop'))
-  const input = { threadId: thread.id, name: 'Reviewer', task: 'Review value.txt', operationId: 'named-reader-1' }
-  const admission = await client.request<{ agent: NamedAgentIdentity; episode: AgentEpisode }>('agents.createNamed', input)
-  expect(admission.episode.state).toBe('queued')
-  const result = await completed(thread.id, input.operationId)
-  expect(result.agent).toMatchObject({ name: 'Reviewer', state: 'dormant', contextGeneration: 1 })
-  expect(result.episode).toMatchObject({ state: 'completed', policy: { workspace: 'shared', access: 'read-only' }, binding: { consistency: 'moving' } })
-  const metadata = new ThreadWorkspaceManager(mms.threads.getThreadDir(thread.id)).load()!
-  expect(result.episode.binding.worktreePath).toBe(metadata.worktreePath)
-  expect(f.read(metadata.worktreePath)).toBe('base\n'); expect(f.read(f.repo)).toBe('base\n')
-  expect(JSON.stringify(captured[1].messages)).toContain('prohibited by read-only')
-  expect(await client.request('agents.createNamed', input)).toEqual(result)
-  const listed = await client.request<{ episodes: AgentEpisode[] }>('agents.listNamed', { threadId: thread.id })
-  expect(listed.episodes).toEqual([result.episode])
-  expect(readFileSync(join(mms.threads.getThreadDir(thread.id), 'agent-episodes.json'), 'utf8')).toContain('Reviewer')
-  await expect(client.request('agents.createNamed', { ...input, operationId: 'different' })).rejects.toThrow('already exists')
-}, 30_000)
-
-it('executes a named shared writer under the task lease and records code receipt without changing primary', async () => {
-  const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Named writer', project.id)
-  responses.push(providerResponse([{ type: 'toolCall', id: 'write-value', name: 'write', arguments: { path: 'value.txt', content: 'named result\n' } }], 'toolUse'),
-    providerResponse([{ type: 'text', text: 'Written' }], 'stop'))
-  await client.request<{ episode: AgentEpisode }>('agents.createNamed', { threadId: thread.id, name: 'Writer', task: 'Edit value.txt', operationId: 'named-writer-1', access: 'write' })
-  const result = await completed(thread.id, 'named-writer-1')
-  expect(result.episode.state).toBe('completed')
-  expect(result.episode.result?.receiptId).toBeTruthy()
-  expect(f.read(result.episode.binding.worktreePath)).toBe('named result\n')
-  expect(f.read(f.repo)).toBe('base\n')
-  expect(existsSync(join(mms.threads.getThreadDir(thread.id), 'execution.lease'))).toBe(false)
-}, 30_000)
 // Phase 4 (SPEC §14): create_subagent is a wrapper over delegate_task. The parent no longer
 // blocks inside the tool call: the child is a thread with lineage, its completion is an inbox row,
 // and reconciler rule 4 wakes the parent, which reads the result and integrates the isolated work.
@@ -140,41 +93,6 @@ it('delegates main to an isolated writer thread, wakes main with its result and 
   expect(f.read(f.repo)).toBe('base\n')
   expect(seen).toContain('Write value#0')
 }, 45_000)
-it('recalls the same named identity with native context and rejects stale concurrent generations', async () => {
-  const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Recall', project.id)
-  responses.push(providerResponse([{ type: 'text', text: 'Remember continuity-marker-519' }], 'stop'))
-  await client.request('agents.createNamed', { threadId: thread.id, name: 'Rememberer', task: 'Remember the marker', operationId: 'remember-first' })
-  const first = await completed(thread.id, 'remember-first')
-  responses.push(providerResponse([{ type: 'text', text: 'Recalled continuity-marker-519' }], 'stop'))
-  const input = { threadId: thread.id, agent: first.agent.id, task: 'Recall your marker', operationId: 'remember-second', expectedAgentGeneration: 1 }
-  await client.request('agents.recallNamed', input)
-  const second = await completed(thread.id, 'remember-second')
-  expect(second.agent.id).toBe(first.agent.id)
-  expect(second.agent.contextGeneration).toBe(2)
-  expect(captured[1].messages.some((message) => message.role === 'assistant' && JSON.stringify(message).includes('continuity-marker-519'))).toBe(true)
-  expect(JSON.stringify(captured[1].messages)).toContain('Mousse recall notice')
-  expect(await client.request('agents.recallNamed', input)).toEqual(second)
-  await expect(client.request('agents.recallNamed', { ...input, operationId: 'remember-third' })).rejects.toThrow('generation')
-  await expect(client.request('mousseAgent.retry', { threadId: thread.id, agentId: first.agent.id })).rejects.toThrow('recall')
-}, 30_000)
-it('retires a completed isolated checkout and integrates its pinned result after verified reconstruction', async () => {
-  const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Isolated retirement', project.id)
-  responses.push(providerResponse([{ type: 'toolCall', id: 'isolated-write', name: 'write', arguments: { path: 'value.txt', content: 'isolated result\n' } }], 'toolUse'), providerResponse([{ type: 'text', text: 'Done' }], 'stop'))
-  await client.request('agents.createNamed', { threadId: thread.id, name: 'Isolated', task: 'Edit value', operationId: 'isolated-first', workspace: 'isolated', access: 'write' })
-  const result = await completed(thread.id, 'isolated-first')
-  await vi.waitFor(() => expect(existsSync(result.episode.binding.worktreePath)).toBe(false), { timeout: 10_000 })
-  expect(mms.orchestrator.listMousseAgentSessionIds()).not.toContain(result.agent.id)
-  const manager = new ThreadWorkspaceManager(mms.threads.getThreadDir(thread.id)), metadata = manager.load()!
-  expect(f.read(metadata.worktreePath)).toBe('base\n')
-  const request = { threadId: thread.id, agent: result.agent.id, episodeId: result.episode.id, operationId: 'integrate-isolated-first', expectedResultSha: result.episode.result!.resultSha, expectedDestinationSha: metadata.headSha }
-  const integrated = await client.request('agents.integrateNamed', request)
-  expect(f.read(metadata.worktreePath)).toBe('isolated result\n')
-  expect(existsSync(result.episode.binding.worktreePath)).toBe(false)
-  expect(await client.request('agents.integrateNamed', request)).toEqual(integrated)
-  expect(existsSync(result.episode.binding.worktreePath)).toBe(false)
-  expect(f.read(f.repo)).toBe('base\n')
-}, 45_000)
-
 it('provisions first-use task editor writes and commits only in the owned checkout', async () => {
   const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('First editor save', project.id)
   await client.request('files.write', { threadId: thread.id, path: 'value.txt', content: 'editor-owned\n' })

@@ -51,11 +51,11 @@ try {
           if(method==='chatResources.file.write'){if(fixture.deferFileSave)await new Promise(resolve=>fixture.finishFileSave=resolve);if(fixture.file.revision!==params.expectedRevision)return clone({status:'conflict',file:fixture.file});fixture.file={path:params.path,content:params.content,revision:'saved'};return clone({status:'saved',file:fixture.file})}
           return {}
         }},
-        window:{closeAgentsTasks:async()=>{},openAgentsTasks:async()=>{},isMaximized:async()=>false,onMaximizedChange:subscription},
+        window:{isMaximized:async()=>false,onMaximizedChange:subscription},
         profiles:{list:async()=>({profiles:[{id:'default',displayName:'Default',isDefault:true,status:'active',revision:1}],defaultProfileId:'default'}),status:async()=>({binding:{profileId:'default'}})},
         app:{getInfo:async()=>({platform:'linux',deviceName:'Fixture laptop'}),getActiveProjectPath:async()=>'/fixture',onNavigateMainView:subscription},workspace:{getStatus:async()=>({})},
         orchestrator:{getMessages:async()=>[],answerQuestions:async(requestId,answers)=>{fixture.calls.push({method:'answerQuestions',params:{requestId,answers}});Object.values(fixture.conversations).forEach(chat=>{chat.pendingQuestions=[]})},dismissQuestions:async(requestId)=>{fixture.calls.push({method:'dismissQuestions',params:{requestId}});Object.values(fixture.conversations).forEach(chat=>{chat.pendingQuestions=[]})},onThreadMessage:subscription,onThreadMessageUpdated:subscription,onThreadMessages:subscription},
-        agents:{list:async()=>[],onUpdated:subscription,onActivated:subscription},tasks:{list:async()=>[],onUpdated:subscription},
+        agents:{list:async()=>[],onUpdated:subscription},tasks:{list:async()=>[],onUpdated:subscription},
         projects:{list:async()=>fixture.projects,onUpdated:subscription},threads:{listAll:async()=>fixture.threads,active:async()=>null,getActivity:async()=>({}),onUpdated:subscription,onSelected:subscription,onActivity:subscription,onView:subscription},
         turn:{getSnapshot:async()=>({}),onTurnState:subscription,onTurnSnapshot:subscription},channels:{onActivity:subscription},documents:{onOpened:subscription}}
       useAppStore.setState({mainAreaOpen:false,threadsSidebarOpen:true,threadsSidebarWidth:280,sidebarMode:'projects'})
