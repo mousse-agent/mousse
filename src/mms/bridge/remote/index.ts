@@ -4,7 +4,7 @@ export { validateRemoteParams } from './dto'
 export { RemoteApi } from './RemoteApi'
 export type { RemoteBackendPort } from './RemoteApi'
 export { MmsRemoteBackend } from './MmsBackend'
-export { ThreadStreamAdapter, THREAD_EVENT_TYPES } from './ThreadStreamAdapter'
+export { ThreadStreamAdapter, THREAD_EVENT_TYPES, THREAD_DELTA_TYPES } from './ThreadStreamAdapter'
 export type {
   ThreadStreamOptions,
   ThreadSourcePort,

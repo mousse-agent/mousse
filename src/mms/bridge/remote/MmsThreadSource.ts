@@ -1,7 +1,12 @@
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { mmsJson } from './jsonOutput'
 import { MmsRemoteBackend } from './MmsBackend'
-import type { ThreadDisplayEvent, ThreadSourcePort, ThreadSourceEvent } from './ThreadStreamAdapter'
+import type {
+  ThreadDeltaEvent,
+  ThreadDisplayEvent,
+  ThreadSourcePort,
+  ThreadSourceEvent
+} from './ThreadStreamAdapter'
 /** Actual thread events/snapshots from the already-owned profile, never the old global event ring. */
 export class MmsThreadSource implements ThreadSourcePort {
   private readonly backend: MmsRemoteBackend
@@ -19,9 +24,17 @@ export class MmsThreadSource implements ThreadSourcePort {
     listener: (event: ThreadSourceEvent) => void,
     onError?: (error: unknown) => void
   ): () => void {
-    const deliver = (type: ThreadDisplayEvent['type'], data: unknown, ephemeral = false): void => {
+    const deliver = (
+      type: (ThreadDisplayEvent | ThreadDeltaEvent)['type'],
+      data: unknown,
+      ephemeral = false
+    ): void => {
       try {
-        listener({ type, data: mmsJson(data), ...(ephemeral ? { ephemeral: true } : {}) })
+        listener({
+          type,
+          data: mmsJson(data),
+          ...(ephemeral ? { ephemeral: true } : {})
+        } as ThreadSourceEvent)
       } catch (error) {
         if (onError) onError(error)
         else throw error
@@ -47,6 +60,19 @@ export class MmsThreadSource implements ThreadSourcePort {
       }
       this.services.orchestrator.on(source, handle)
       disposers.push(() => this.services.orchestrator.off(source, handle))
+    }
+    // Pending questions change rarely and are memory-only; remote readers get the full list live.
+    const questions = (data: { threadId?: string }): void => {
+      if (data?.threadId !== threadId) return
+      deliver(
+        'questions.updated',
+        { threadId, pending: this.services.questions.listPendingForThread(threadId) },
+        true
+      )
+    }
+    for (const event of ['pending', 'cleared'] as const) {
+      this.services.questions.on(event, questions)
+      disposers.push(() => this.services.questions.off(event, questions))
     }
     let lastMetadata: string | undefined
     const metadata = (thread: { id: string }): void => {

@@ -86,6 +86,42 @@ export function validateRemoteParams(
       text('text', 64 * 1024)
       if (!isId('rpc', p.run)) throw new NetError('bad_request')
       break
+    case 'orchestrator.pendingQuestions':
+      keys(['threadId'])
+      text('threadId')
+      break
+    case 'orchestrator.dismissQuestions':
+      keys(['threadId', 'requestId'])
+      text('threadId')
+      text('requestId')
+      break
+    case 'orchestrator.answerQuestions': {
+      keys(['threadId', 'requestId', 'answers'])
+      text('threadId')
+      text('requestId')
+      const answers = p.answers
+      if (!answers || typeof answers !== 'object' || Array.isArray(answers))
+        throw new NetError('bad_request')
+      const entries = Object.entries(answers)
+      const answer = (value: unknown, max = 8 * 1024): boolean =>
+        typeof value === 'string' && value.length <= max
+      if (
+        entries.length > 32 ||
+        entries.some(
+          ([key, value]) =>
+            !key ||
+            key.length > 256 ||
+            !(
+              answer(value) ||
+              (Array.isArray(value) &&
+                value.length <= 32 &&
+                value.every((item) => answer(item, 1024)))
+            )
+        )
+      )
+        throw new NetError('bad_request')
+      break
+    }
     case 'orchestrator.abort':
       keys(['threadId', 'run'])
       text('threadId')
