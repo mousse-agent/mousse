@@ -25,7 +25,7 @@ export interface GitStatusEntry {
   commits: GitCommit[]
   branches: GitBranchInfo | null
   diffStats: GitDiffStats | null
-  /** A fetch the UI should show a spinner for is running. Quiet refreshes leave this alone. */
+  /** The first fetch for this folder is running. Later refreshes keep showing the data they have. */
   loading: boolean
   /** The first fetch for this folder has finished, successfully or not. */
   loaded: boolean
@@ -53,7 +53,7 @@ export const useGitStatusStore = create<GitStatusState>(() => ({ entries: {} }))
 export interface GitRefreshOptions {
   /** Fetch again even if the data is fresh, and again after a fetch already in flight. */
   force?: boolean
-  /** Update the data without flagging `loading`, for refreshes the user did not ask for. */
+  /** Marks refreshes the user did not ask for. `loading` is only ever set for the first fetch, so this does not change the state. */
   quiet?: boolean
   projectId?: string
 }
@@ -126,7 +126,6 @@ export function refreshGitStatus(path: string, options: GitRefreshOptions = {}):
   const flight = flights.get(path)
   if (flight) {
     if (options.force) flight.rerun = true
-    if (!options.quiet) patchEntry(path, { loading: true })
     return flight.promise
   }
 
@@ -137,7 +136,8 @@ export function refreshGitStatus(path: string, options: GitRefreshOptions = {}):
 
   const next: Flight = { promise: Promise.resolve(), rerun: false }
   flights.set(path, next)
-  patchEntry(path, { loading: !options.quiet || !entry?.loaded })
+  // Only a folder with nothing loaded yet shows a spinner; a refresh keeps the cached data on screen.
+  patchEntry(path, { loading: !entry?.loaded })
   next.promise = (async () => {
     try {
       do {
@@ -202,7 +202,11 @@ export function retainGitPath(path: string, projectId?: string): () => void {
   const current = retained.get(path)
   retained.set(path, { count: (current?.count ?? 0) + 1, projectId: projectId ?? current?.projectId })
   attach()
+  let released = false
   return () => {
+    // A second call would take a count that belongs to another holder.
+    if (released) return
+    released = true
     const entry = retained.get(path)
     if (!entry) return
     if (entry.count > 1) retained.set(path, { ...entry, count: entry.count - 1 })

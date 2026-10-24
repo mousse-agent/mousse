@@ -1,5 +1,8 @@
 import type { QuickAction } from './quickActions'
 import { useAppStore } from '../stores/appStore'
+import { composerThreadActions } from './composerThreadActions'
+import { prepareComposerThread } from './createComposerThread'
+import { composerWorkspaceFor, isNewEmptyThread } from './newThread'
 
 const TERMINAL_SPAWN_TIMEOUT_MS = 15_000
 const TERMINAL_SPAWN_POLL_MS = 150
@@ -12,47 +15,77 @@ function requireActiveProfile(profileId: string): ReturnType<typeof useAppStore.
   return current
 }
 
-async function sendToActiveThread(content: string, profileId: string): Promise<void> {
+/**
+ * On a new chat, applies the workspace picked in the composer or the side card
+ * (project, new worktree) before the first send, like the composer does.
+ * Returns the thread to send to, or null if the user moved away meanwhile.
+ */
+async function threadForSend(profileId: string): Promise<string | null> {
   const store = requireActiveProfile(profileId)
-  const activeThreadId = store.activeThreadId
-  const mode = store.chatMode
+  const startId = store.activeThreadId
+  const thread = store.threads.find((entry) => entry.id === startId)
+  if (!isNewEmptyThread(startId, thread, store.messages.length)) return startId
+  let targetId = startId
+  const stillVisible = () => {
+    const current = useAppStore.getState()
+    return current.profileId === profileId && current.activeThreadId === targetId
+  }
+  return prepareComposerThread({
+    thread,
+    workspace: composerWorkspaceFor(store.composerWorkspaceDrafts[startId ?? '__blank__'], thread),
+    ...composerThreadActions(),
+    stillVisible,
+    activate: (created) => {
+      const current = useAppStore.getState()
+      current.upsertThread(created)
+      current.setComposerWorkspaceDraft(startId)
+      targetId = created.id
+      current.switchToThread(created.id)
+    }
+  })
+}
+
+async function sendToActiveThread(content: string, profileId: string): Promise<void> {
+  const mode = requireActiveProfile(profileId).chatMode
   const trimmed = content.trim()
   if (!trimmed) return
+  let activeThreadId: string | null
+  try {
+    activeThreadId = await threadForSend(profileId)
+  } catch {
+    requireActiveProfile(profileId)
+    throw new Error('Failed to send message.')
+  }
+  if (!activeThreadId) return
+  // Selecting a thread resets loading, so it is set only once the thread is chosen.
+  const store = requireActiveProfile(profileId)
   store.setLoading(true)
   // Promote drafts immediately so switching away mid-title still lists the thread.
-  if (activeThreadId) {
-    const current = store.threads.find((t) => t.id === activeThreadId)
-    if (current && !current.startedAt) {
-      store.upsertThread({
-        ...current,
-        startedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      })
-    }
+  const current = store.threads.find((t) => t.id === activeThreadId)
+  if (current && !current.startedAt) {
+    store.upsertThread({
+      ...current,
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    })
   }
   try {
-    const result = activeThreadId
-      ? await window.mousse.orchestrator.sendToThread(activeThreadId, {
-          content: trimmed,
-          mode
-        })
-      : await window.mousse.orchestrator.send({ content: trimmed, mode })
+    const result = await window.mousse.orchestrator.sendToThread(activeThreadId, {
+      content: trimmed,
+      mode
+    })
     requireActiveProfile(profileId)
     if (result.queued) {
-      const stillActive = await window.mousse.orchestrator.isTurnActive(
-        activeThreadId ?? undefined
-      )
+      const stillActive = await window.mousse.orchestrator.isTurnActive(activeThreadId)
       requireActiveProfile(profileId).setLoading(stillActive)
       return
     }
-    const stillActive = await window.mousse.orchestrator.isTurnActive(
-      activeThreadId ?? undefined
-    )
+    const stillActive = await window.mousse.orchestrator.isTurnActive(activeThreadId)
     requireActiveProfile(profileId).setLoading(stillActive)
   } catch {
     requireActiveProfile(profileId)
     const stillActive = await window.mousse.orchestrator
-      .isTurnActive(activeThreadId ?? undefined)
+      .isTurnActive(activeThreadId)
       .catch(() => true)
     requireActiveProfile(profileId).setLoading(stillActive)
     throw new Error('Failed to send message.')

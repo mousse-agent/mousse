@@ -13,6 +13,8 @@ import { FloatingPortal, useFloatingPosition, type FloatingPlacement } from '../
 import { openSurface } from '../../lib/surfaces'
 import { useOutsideDismiss } from '../../hooks/useOutsideDismiss'
 import { useActiveProjectLocation } from '../../hooks/useActiveProjectPath'
+import { composerWorkspaceFor, isNewEmptyThread } from '../../lib/newThread'
+import { useAppStore } from '../../stores/appStore'
 import {
   checkoutGitBranch,
   commitGitChanges,
@@ -23,12 +25,15 @@ import { SideCardSection, type SideCardSectionContext } from './SideCardSection'
 import {
   branchChoices,
   branchLabel,
+  branchSearchAria,
   changedFileCount,
   changesSummary,
   diffStatLabel,
   formatCommitLine,
   gitCollapsedLabel,
-  gitErrorMessage
+  gitErrorMessage,
+  gitTarget,
+  untrackedFileCount
 } from './gitSectionLogic'
 import './gitSection.css'
 
@@ -171,8 +176,7 @@ function BranchPicker({ status, branches, busy, onPick }: BranchPickerProps) {
             value={query}
             placeholder="Find a branch"
             aria-label="Find a branch"
-            aria-controls={listId}
-            aria-activedescendant={choices.length ? `${listId}-${active}` : undefined}
+            {...branchSearchAria(listId, active, choices.length)}
             spellCheck={false}
             autoComplete="off"
             onChange={(event) => {
@@ -369,7 +373,7 @@ export function GitSectionView({ threadId, projectId, path, git, collapsedLabel,
     }
   }
 
-  const stat = diffStatLabel(git.diffStats)
+  const stat = diffStatLabel(git.diffStats, untrackedFileCount(git.status))
   const latest = git.commits[0] ? formatCommitLine(git.commits[0], now ?? Date.now()) : null
   const fileCount = changedFileCount(git.status)
 
@@ -395,6 +399,7 @@ export function GitSectionView({ threadId, projectId, path, git, collapsedLabel,
         <span className="side-card-git-stat">
           <span className="side-card-git-added" data-zero={stat.addedZero}>{stat.added}</span>
           <span className="side-card-git-removed" data-zero={stat.removedZero}>{stat.removed}</span>
+          {stat.untracked && <span className="side-card-git-new">· {stat.untracked}</span>}
         </span>
       </button>
       {latest && (
@@ -409,14 +414,28 @@ export function GitSectionView({ threadId, projectId, path, git, collapsedLabel,
 }
 
 /** Branch, latest commit, commit button and change counts for the selected thread's folder. */
-export function GitSection({ threadId, projectId }: SideCardSectionContext) {
+export function GitSection({ threadId, projectId: threadProjectId }: SideCardSectionContext) {
   const location = useActiveProjectLocation()
-  // A thread without a project has nothing of its own to show Git state for.
-  const path = projectId ? location.path : null
+  const projects = useAppStore((s) => s.projects)
+  const thread = useAppStore((s) => s.threads.find((entry) => entry.id === s.activeThreadId))
+  const draft = useAppStore((s) => s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'])
+  const isNewChat = useAppStore((s) => isNewEmptyThread(
+    s.activeThreadId,
+    s.threads.find((entry) => entry.id === s.activeThreadId),
+    s.messages.length
+  ))
+  // A new chat's project is picked in the composer, which only changes its workspace draft.
+  const { projectId, path, pathPending } = gitTarget({
+    isNewChat,
+    draftProjectId: composerWorkspaceFor(draft, thread).projectId,
+    threadProjectId,
+    projects,
+    location
+  })
   const git = useGitStatus(path, projectId)
   const collapsedLabel = gitCollapsedLabel({
     hasProject: projectId !== null,
-    pathPending: location.loading,
+    pathPending,
     hasPath: path !== null,
     loaded: git.loaded,
     status: git.status

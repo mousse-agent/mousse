@@ -15,7 +15,8 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
  */
 
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell } from 'electron'
-import { homedir, hostname } from 'os'
+import { homedir } from 'os'
+import { getComputerName } from '../computerName'
 import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
 import { PresentationState } from '../mms/PresentationState'
@@ -1692,9 +1693,11 @@ export function registerGuiIpc(
   registerHandler('mousseId:callback.wait', (_event, id: unknown) => mousseIdCallbacks!.wait(callbackId(id)))
   registerHandler('mousseId:callback.cancel', (_event, id: unknown) => { mousseIdCallbacks!.cancel(callbackId(id)) })
 
-  registerHandler('app:getInfo', () => ({
+  // The computer name is looked up once; starting it here keeps getInfo fast.
+  void getComputerName()
+  registerHandler('app:getInfo', async () => ({
     platform: process.platform,
-    deviceName: hostname(),
+    deviceName: await getComputerName(),
     repoRoot,
     llmProvider: settings.get().provider.llmProvider
   }))

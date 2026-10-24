@@ -5,13 +5,16 @@ import { GitSectionView } from '../src/renderer/components/sideCard/GitSection'
 import {
   branchChoices,
   branchLabel,
+  branchSearchAria,
   changedFileCount,
   changesSummary,
   diffStatLabel,
   formatCommitLine,
   gitCollapsedLabel,
   gitErrorMessage,
-  relativeTime
+  gitTarget,
+  relativeTime,
+  untrackedFileCount
 } from '../src/renderer/components/sideCard/gitSectionLogic'
 import {
   EMPTY_GIT_ENTRY,
@@ -157,6 +160,30 @@ describe('shared git status store', () => {
     expect(seen).not.toContain(true)
   })
 
+  it('flags loading only for the first fetch of a folder, never for a later refresh', async () => {
+    installGit()
+    const seen: boolean[] = []
+    const stop = useGitStatusStore.subscribe((state) => seen.push(state.entries['/repo/a']?.loading))
+    await refreshGitStatus('/repo/a')
+    expect(seen).toContain(true)
+    seen.length = 0
+    // What the Git panel asks for on mount and from its refresh button.
+    await refreshGitStatus('/repo/a', { force: true })
+    await refreshGitStatus('/repo/a', { force: true, quiet: false })
+    stop()
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen).not.toContain(true)
+  })
+
+  it('keeps loaded data free of loading when a refresh joins a fetch already running', async () => {
+    installGit()
+    await refreshGitStatus('/repo/a')
+    const first = refreshGitStatus('/repo/a', { force: true })
+    const joined = refreshGitStatus('/repo/a')
+    expect(useGitStatusStore.getState().entries['/repo/a'].loading).toBe(false)
+    await Promise.all([first, joined])
+  })
+
   it('clears commits, branches and stats for a folder that is not a repo', async () => {
     installGit({ status: vi.fn(async () => repoStatus({ isRepo: false, branch: null, tracking: 'none' })) })
     await refreshGitStatus('/plain')
@@ -226,6 +253,28 @@ describe('shared git status store', () => {
   })
 })
 
+describe('retainGitPath release', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('is idempotent: a second call does not take a count that belongs to another holder', () => {
+    installGit()
+    const win = (globalThis as unknown as { window: { addEventListener: ReturnType<typeof vi.fn>; removeEventListener: ReturnType<typeof vi.fn> } }).window
+    const releaseOne = retainGitPath('/repo/held')
+    const releaseTwo = retainGitPath('/repo/held')
+    releaseOne()
+    releaseOne()
+    releaseOne()
+    // The second holder still keeps the path, and the shared listener, alive.
+    expect(win.removeEventListener).not.toHaveBeenCalled()
+    releaseTwo()
+    expect(win.removeEventListener).toHaveBeenCalledTimes(1)
+    releaseTwo()
+    expect(win.removeEventListener).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('anyTurnEnded', () => {
   const turn = (threadId: string, phase: TurnState['phase']): TurnState => ({
     threadId, turnId: 't', phase, updatedAt: '2026-10-24T10:00:00Z'
@@ -251,12 +300,34 @@ describe('git section formatting', () => {
 
   it('labels the diff stat with a real minus sign and flags zeros', () => {
     expect(diffStatLabel({ additions: 12, deletions: 3, filesChanged: 2 })).toEqual({
-      added: '+12', removed: '−3', addedZero: false, removedZero: false, text: '+12 −3'
+      added: '+12', removed: '−3', untracked: null, addedZero: false, removedZero: false, text: '+12 −3'
     })
     const onlyAdds = diffStatLabel({ additions: 5, deletions: 0, filesChanged: 1 })
     expect(onlyAdds.removedZero).toBe(true)
     expect(onlyAdds.addedZero).toBe(false)
     expect(diffStatLabel(null)).toMatchObject({ text: '+0 −0', addedZero: true, removedZero: true })
+  })
+
+  it('adds a short count of new files after the diff stat, since a diff never includes them', () => {
+    const withNew = diffStatLabel({ additions: 0, deletions: 0, filesChanged: 0 }, 1)
+    expect(withNew).toMatchObject({ untracked: '1 new', text: '+0 −0 · 1 new', addedZero: true, removedZero: true })
+    expect(diffStatLabel({ additions: 4, deletions: 1, filesChanged: 2 }, 3).text).toBe('+4 −1 · 3 new')
+    expect(diffStatLabel({ additions: 4, deletions: 1, filesChanged: 2 }).untracked).toBeNull()
+    expect(diffStatLabel(null, 0).text).toBe('+0 −0')
+  })
+
+  it('counts only untracked files as new', () => {
+    const status = repoStatus({
+      changes: [
+        { path: 'a.ts', status: 'modified', staged: false },
+        { path: 'b.ts', status: 'untracked', staged: false },
+        { path: 'c.ts', status: 'untracked', staged: false },
+        { path: 'dist/x', status: 'ignored', staged: false }
+      ]
+    })
+    expect(untrackedFileCount(status)).toBe(2)
+    expect(untrackedFileCount(repoStatus())).toBe(0)
+    expect(untrackedFileCount(null)).toBe(0)
   })
 
   it('summarizes changed files and ignores ignored ones', () => {
@@ -322,6 +393,64 @@ describe('git section formatting', () => {
     expect(gitErrorMessage(raw)).toBe('Your local changes to the following files would be overwritten by checkout:')
     expect(gitErrorMessage('fatal: not a git repository')).toBe('not a git repository')
     expect(gitErrorMessage(new Error(''))).toBe('Git command failed')
+  })
+})
+
+describe('git section target', () => {
+  const projects = [
+    { id: 'p1', path: '/work/one' },
+    { id: 'p2', path: '/work/two' }
+  ]
+  const base = {
+    isNewChat: false,
+    draftProjectId: 'p1' as string | undefined,
+    threadProjectId: 'p1' as string | null,
+    projects,
+    location: { path: '/work/one', loading: false }
+  }
+
+  it('keeps the thread own project and folder once the chat has started', () => {
+    expect(gitTarget(base)).toEqual({ projectId: 'p1', path: '/work/one', pathPending: false })
+    // A stale draft for a started thread changes nothing.
+    expect(gitTarget({ ...base, draftProjectId: 'p2' })).toMatchObject({ projectId: 'p1', path: '/work/one' })
+  })
+
+  it('follows the project picked in the composer on a new empty chat', () => {
+    expect(gitTarget({ ...base, isNewChat: true, draftProjectId: 'p2' })).toEqual({
+      projectId: 'p2',
+      path: '/work/two',
+      pathPending: false
+    })
+  })
+
+  it('shows no project for a blank new chat and no folder for an unknown project', () => {
+    expect(gitTarget({ ...base, isNewChat: true, draftProjectId: undefined, threadProjectId: null })).toEqual({
+      projectId: null,
+      path: null,
+      pathPending: false
+    })
+    expect(gitTarget({ ...base, isNewChat: true, draftProjectId: 'gone' })).toMatchObject({ projectId: 'gone', path: null })
+  })
+
+  it('has no folder for a started thread without a project, and reports a pending lookup', () => {
+    expect(gitTarget({ ...base, threadProjectId: null })).toMatchObject({ projectId: null, path: null })
+    expect(gitTarget({ ...base, location: { path: null, loading: true } }).pathPending).toBe(true)
+  })
+})
+
+describe('branch search semantics', () => {
+  it('describes a combobox that controls the branch list and points at the active option', () => {
+    expect(branchSearchAria('list-1', 2, 5)).toEqual({
+      role: 'combobox',
+      'aria-expanded': true,
+      'aria-controls': 'list-1',
+      'aria-autocomplete': 'list',
+      'aria-activedescendant': 'list-1-2'
+    })
+  })
+
+  it('points at no option when nothing matches', () => {
+    expect(branchSearchAria('list-1', 0, 0)['aria-activedescendant']).toBeUndefined()
   })
 })
 
@@ -396,6 +525,34 @@ describe('git section markup', () => {
     expect(html).toContain('a1b2c3d')
     expect(html).toContain('>5m<')
     expect(html).toMatch(/<button[^>]*class="side-card-git-commit-button"(?![^>]*disabled)/)
+  })
+
+  it('counts a lone new file in the changes row and keeps the zero figures muted', () => {
+    const html = render({
+      git: view({
+        status: repoStatus({ changes: [{ path: 'new.ts', status: 'untracked', staged: false }] }),
+        commits: [commit()],
+        branches: { current: 'main', branches: ['main'] },
+        diffStats: { additions: 0, deletions: 0, filesChanged: 0 }
+      }),
+      collapsedLabel: null
+    })
+    expect(html).toContain('1 file changed')
+    expect(html).toContain('data-zero="true">+0')
+    expect(html).toContain('data-zero="true">−0')
+    expect(html).toContain('side-card-git-new">· 1 new<')
+    expect(html).toContain('+0 −0 · 1 new')
+  })
+
+  it('shows no new-file count when nothing is untracked', () => {
+    const html = render({
+      git: view({
+        status: repoStatus({ changes: [{ path: 'a.ts', status: 'modified', staged: false }] }),
+        diffStats: { additions: 2, deletions: 0, filesChanged: 1 }
+      }),
+      collapsedLabel: null
+    })
+    expect(html).not.toContain('side-card-git-new')
   })
 
   it('disables the commit button and mutes the stat when there are no changes', () => {

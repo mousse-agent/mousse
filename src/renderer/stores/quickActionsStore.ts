@@ -21,9 +21,13 @@ interface QuickActionsState {
   actions: QuickAction[]
   /** Load the active profile's list when it is not the one already held. */
   syncProfile: () => void
-  add: (input: QuickActionInput) => void
-  update: (id: string, input: QuickActionInput) => void
-  remove: (id: string) => void
+  /**
+   * Edits take the profile they were opened for and do nothing once another profile is
+   * active: ids such as the built-in action's are shared between profiles.
+   */
+  add: (input: QuickActionInput, profileId: string) => void
+  update: (id: string, input: QuickActionInput, profileId: string) => void
+  remove: (id: string, profileId: string) => void
   /** Add an action published by the agent; ignores malformed payloads and ids already present. */
   receiveCreated: (raw: unknown) => void
 }
@@ -40,6 +44,12 @@ export const useQuickActionsStore = create<QuickActionsState>((set, get) => {
     saveQuickActions(next, profileId)
   }
 
+  /** `commit`, unless the profile the edit was made for is no longer the active one. */
+  const commitFor = (profileId: string, change: (current: QuickAction[]) => QuickAction[]) => {
+    if (useAppStore.getState().profileId !== profileId) return
+    commit(change)
+  }
+
   return {
     profileId: null,
     actions: [],
@@ -48,9 +58,9 @@ export const useQuickActionsStore = create<QuickActionsState>((set, get) => {
       if (!profileId || get().profileId === profileId) return
       set({ profileId, actions: loadQuickActions(profileId) })
     },
-    add: (input) => commit((current) => [...current, createQuickAction(input)]),
-    update: (id, input) =>
-      commit((current) =>
+    add: (input, profileId) => commitFor(profileId, (current) => [...current, createQuickAction(input)]),
+    update: (id, input, profileId) =>
+      commitFor(profileId, (current) =>
         current.map((action) =>
           action.id === id
             ? {
@@ -63,7 +73,7 @@ export const useQuickActionsStore = create<QuickActionsState>((set, get) => {
             : action
         )
       ),
-    remove: (id) => commit((current) => current.filter((action) => action.id !== id)),
+    remove: (id, profileId) => commitFor(profileId, (current) => current.filter((action) => action.id !== id)),
     receiveCreated: (raw) => {
       const action = sanitizeQuickAction(raw)
       if (!action) return

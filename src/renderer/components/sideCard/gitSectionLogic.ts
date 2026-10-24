@@ -5,6 +5,8 @@ const MINUS = '−'
 export interface DiffStatLabel {
   added: string
   removed: string
+  /** "N new" when untracked files exist; the line counts do not include them. */
+  untracked: string | null
   /** Zero counts render muted instead of green or red. */
   addedZero: boolean
   removedZero: boolean
@@ -12,18 +14,28 @@ export interface DiffStatLabel {
   text: string
 }
 
-/** The `+N −M` pair for the changes row. Missing stats read as no changes. */
-export function diffStatLabel(stats: GitDiffStats | null): DiffStatLabel {
+/** Files Git does not track yet; they are in no diff, so the line counts miss them. */
+export function untrackedFileCount(status: GitStatusSnapshot | null): number {
+  return status?.changes.filter((change) => change.status === 'untracked').length ?? 0
+}
+
+/**
+ * The `+N −M` pair for the changes row, with "· N new" after it when untracked
+ * files exist. Missing stats read as no changes.
+ */
+export function diffStatLabel(stats: GitDiffStats | null, untrackedCount = 0): DiffStatLabel {
   const additions = stats?.additions ?? 0
   const deletions = stats?.deletions ?? 0
   const added = `+${additions}`
   const removed = `${MINUS}${deletions}`
+  const untracked = untrackedCount > 0 ? `${untrackedCount} new` : null
   return {
     added,
     removed,
+    untracked,
     addedZero: additions === 0,
     removedZero: deletions === 0,
-    text: `${added} ${removed}`
+    text: untracked ? `${added} ${removed} · ${untracked}` : `${added} ${removed}`
   }
 }
 
@@ -123,4 +135,55 @@ export function gitCollapsedLabel(input: GitCollapseInput): string | null {
   if (!input.status) return 'Git: unavailable'
   if (!input.status.isRepo) return 'Git: not a repository'
   return null
+}
+
+export interface GitTargetInput {
+  /** The thread is the new-chat composer state, where the workspace draft decides the project. */
+  isNewChat: boolean
+  /** Project of the composer workspace draft, falling back to the thread's own. */
+  draftProjectId: string | undefined
+  /** Project the selected thread belongs to. */
+  threadProjectId: string | null
+  projects: ReadonlyArray<{ id: string; path: string }>
+  /** Folder of the selected thread, as resolved for its own project. */
+  location: { path: string | null; loading: boolean }
+}
+
+export interface GitTarget {
+  projectId: string | null
+  path: string | null
+  pathPending: boolean
+}
+
+/**
+ * The project and folder the section reads. An empty new chat follows the project
+ * picked in the composer, since it only changes the draft; any other thread keeps
+ * its own project and resolved folder.
+ */
+export function gitTarget(input: GitTargetInput): GitTarget {
+  if (input.isNewChat) {
+    const projectId = input.draftProjectId ?? null
+    const path = input.projects.find((project) => project.id === projectId)?.path ?? null
+    return { projectId, path, pathPending: false }
+  }
+  return {
+    projectId: input.threadProjectId,
+    // A thread without a project has nothing of its own to show Git state for.
+    path: input.threadProjectId ? input.location.path : null,
+    pathPending: input.location.loading
+  }
+}
+
+/**
+ * Attributes that make the branch search a combobox over the branch listbox. The
+ * search only exists while the popover is open, so it is always expanded.
+ */
+export function branchSearchAria(listId: string, activeIndex: number, choiceCount: number) {
+  return {
+    role: 'combobox',
+    'aria-expanded': true,
+    'aria-controls': listId,
+    'aria-autocomplete': 'list',
+    'aria-activedescendant': choiceCount > 0 ? `${listId}-${activeIndex}` : undefined
+  } as const
 }

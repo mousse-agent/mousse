@@ -34,9 +34,9 @@ interface LineageListProps {
   onOpen: (agentId: string) => void
 }
 
-/** Agents this thread started: active ones first, then finished ones. */
+/** Agents this thread started: active ones first, then finished ones. Renders nothing for an empty list; the section collapses instead. */
 export function LineageList({ agents, now, centerAgentId, expanded, onExpand, onOpen }: LineageListProps) {
-  if (agents.length === 0) return <p className="side-card-placeholder lineage-empty">No agents started yet</p>
+  if (agents.length === 0) return null
 
   const { visible, hiddenCount } = sliceLineage(orderLineageAgents(agents), expanded)
   return (
@@ -84,6 +84,15 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
   const expanded = threadId !== null && expandedThreadId === threadId
 
   const now = useLineageNow(agents.length > 0)
+
+  // With nothing to list the section is one quiet line without a heading, like Git without a repository.
+  if (agents.length === 0) {
+    return (
+      <div className="side-card-section lineage-collapsed" data-thread-id={threadId ?? undefined}>
+        <p className="lineage-empty">No agents started yet</p>
+      </div>
+    )
+  }
 
   return (
     <SideCardSection title="Lineage" threadId={threadId}>

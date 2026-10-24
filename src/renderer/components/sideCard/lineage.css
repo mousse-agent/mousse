@@ -1,7 +1,14 @@
 /* Lineage: one quiet line per agent the thread started. */
 
+.lineage-collapsed {
+  padding-block: 9px;
+}
+
 .lineage-empty {
+  margin: 0;
   color: var(--ui-faint);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .lineage-list {

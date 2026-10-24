@@ -1,43 +1,41 @@
-import { useLayoutEffect, useState } from 'react'
-import { usePrefersReducedMotion } from '../../hooks/usePrefersReducedMotion'
+import { useLayoutEffect, useRef, useState } from 'react'
+import {
+  createSideCardPresence,
+  sideCardPresenceView,
+  type SideCardPhase,
+  type SideCardPresence,
+  type SideCardPresenceView
+} from './sideCardPresence'
 
-/** Keep in sync with the opacity/transform transition on `.thread-side-card` in sideCard.css. */
-export const SIDE_CARD_FADE_MS = 180
+export { SIDE_CARD_FADE_MS } from './sideCardPresence'
 
 /**
- * Splits "the card should be showing" into mounting and fading so the exit
- * can finish before the card leaves the layout. `mounted` stays true through
- * the fade-out; `shown` drives the faded-in styling. Reduced motion skips the
- * wait and swaps the card in and out immediately.
+ * Splits "the card should be showing" into mounting and fading so the exit can
+ * finish before the card leaves the layout (see sideCardPresence.ts for the
+ * phases). Reduced motion keeps the same timings; the stylesheet drops the slide.
+ * `animate: false` lets a card that is already wanted at launch appear without
+ * a fade-in.
  */
-export function useSideCardPresence(present: boolean): { mounted: boolean; shown: boolean } {
-  const reducedMotion = usePrefersReducedMotion()
-  const [mounted, setMounted] = useState(present)
-  const [shown, setShown] = useState(present)
+export function useSideCardPresence(present: boolean, animate = true): SideCardPresenceView {
+  const [phase, setPhase] = useState<SideCardPhase>(present ? 'shown' : 'unmounted')
+  const phaseRef = useRef(phase)
+  const presenceRef = useRef<SideCardPresence | null>(null)
 
   useLayoutEffect(() => {
-    if (present) {
-      setMounted(true)
-      if (reducedMotion) {
-        setShown(true)
-        return
-      }
-      // Two frames let the faded-out styles paint once, so the fade-in runs as a transition.
-      let inner: number | undefined
-      const outer = requestAnimationFrame(() => { inner = requestAnimationFrame(() => setShown(true)) })
-      return () => {
-        cancelAnimationFrame(outer)
-        if (inner !== undefined) cancelAnimationFrame(inner)
-      }
+    const presence = createSideCardPresence((next) => {
+      phaseRef.current = next
+      setPhase(next)
+    }, phaseRef.current)
+    presenceRef.current = presence
+    return () => {
+      presence.dispose()
+      presenceRef.current = null
     }
-    setShown(false)
-    if (reducedMotion) {
-      setMounted(false)
-      return
-    }
-    const timer = window.setTimeout(() => setMounted(false), SIDE_CARD_FADE_MS)
-    return () => window.clearTimeout(timer)
-  }, [present, reducedMotion])
+  }, [])
 
-  return { mounted, shown }
+  useLayoutEffect(() => {
+    presenceRef.current?.setPresent(present, animate)
+  }, [present, animate])
+
+  return sideCardPresenceView(phase)
 }

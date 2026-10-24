@@ -2,7 +2,12 @@ import { useEffect, useState } from 'react'
 import { PanelLeft, PanelRightClose, PanelRightOpen, SidebarRight } from '../lib/icons'
 import { WindowCloseButton } from './WindowCloseButton'
 import { IconButton } from './IconButton'
-import { nextSideCardToggleState, useSideCardVisible } from './sideCard/sideCardLogic'
+import {
+  nextSideCardToggleState,
+  sideCardButtonTitle,
+  useSideCardUnavailable,
+  useSideCardVisible
+} from './sideCard/sideCardLogic'
 import { useAppStore } from '../stores/appStore'
 import logoIcon from '../assets/mousse_logo_icon.svg'
 
@@ -24,6 +29,7 @@ export function TitleBar() {
   const sideCardOn = useAppStore((s) => s.sideCardOn)
   const setSideCardOn = useAppStore((s) => s.setSideCardOn)
   const sideCardVisible = useSideCardVisible()
+  const sideCardUnavailable = useSideCardUnavailable()
   const isMac = appInfo?.platform === 'darwin' || window.mousse.platform === 'darwin'
 
   const toggleSideCard = () => {
@@ -73,10 +79,12 @@ export function TitleBar() {
         <div className="titlebar-app-actions">
           <IconButton
             icon={SidebarRight}
-            label={sideCardVisible ? 'Hide thread details' : 'Show thread details'}
+            label="Thread details"
+            title={sideCardButtonTitle(sideCardUnavailable)}
             variant="titlebar"
             className={sideCardVisible ? 'titlebar-side-card-on' : undefined}
             aria-pressed={sideCardVisible}
+            disabled={sideCardUnavailable !== null}
             onClick={toggleSideCard}
           />
           <IconButton

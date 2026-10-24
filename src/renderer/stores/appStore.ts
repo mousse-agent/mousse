@@ -129,6 +129,9 @@ interface AppState {
   /** Thread side card preference. On at every launch; deliberately kept out of the per-profile workspace. */
   sideCardOn: boolean
   setSideCardOn: (sideCardOn: boolean) => void
+  /** Whether the full-width thread area measured wide enough for the side card. False until measured. */
+  sideCardFits: boolean
+  setSideCardFits: (sideCardFits: boolean) => void
   activeThreadId: string | null
   projects: Project[]
   threads: Thread[]
@@ -333,6 +336,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   threadsSidebarOpen: true,
   mainAreaOpen: false,
   sideCardOn: true,
+  sideCardFits: false,
   activeThreadId: null,
   projects: [],
   threads: [],
@@ -423,6 +427,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setThreadsSidebarOpen: (threadsSidebarOpen) => set({ threadsSidebarOpen }),
   setMainAreaOpen: (mainAreaOpen) => set({ mainAreaOpen }),
   setSideCardOn: (sideCardOn) => set({ sideCardOn }),
+  setSideCardFits: (sideCardFits) => set({ sideCardFits }),
   setTurnState: (state) => set((s) => ({ turnStates: { ...s.turnStates, [state.threadId]: state } })),
   setTurnSnapshot: (snap) => set({ turnStates: snap }),
   setActiveThreadId: (activeThreadId) => set({ activeThreadId }),

@@ -6,11 +6,13 @@ import {
   activeWorkspaceChoice,
   buildDeviceMenu,
   connectedRemoteDevices,
+  hasDeviceChoices,
   localDeviceName,
+  menuRowLabel,
   workspaceDraftForChoice
 } from '../src/renderer/components/sideCard/deviceMenu'
 import type { Device } from '../src/renderer/lib/netDevices'
-import { composerWorkspaceFor, isNewEmptyThread } from '../src/renderer/lib/newThread'
+import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread } from '../src/renderer/lib/newThread'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import type { Thread } from '../src/shared/types'
 
@@ -60,6 +62,21 @@ describe('composerWorkspaceFor', () => {
   })
 })
 
+describe('isComposerWorkspaceLocked', () => {
+  const turn = (phase: string) => ({ t1: { phase } as never })
+  it('locks while loading or while the selected thread has an active turn', () => {
+    expect(isComposerWorkspaceLocked({ loading: true, activeThreadId: null, turnStates: {} })).toBe(true)
+    expect(isComposerWorkspaceLocked({ loading: false, activeThreadId: 't1', turnStates: turn('streaming') })).toBe(true)
+    expect(isComposerWorkspaceLocked({ loading: false, activeThreadId: 't1', turnStates: turn('queued') })).toBe(true)
+  })
+
+  it('stays open when idle, or when only another thread is busy', () => {
+    expect(isComposerWorkspaceLocked({ loading: false, activeThreadId: 't1', turnStates: turn('idle') })).toBe(false)
+    expect(isComposerWorkspaceLocked({ loading: false, activeThreadId: 't2', turnStates: turn('streaming') })).toBe(false)
+    expect(isComposerWorkspaceLocked({ loading: false, activeThreadId: null, turnStates: turn('streaming') })).toBe(false)
+  })
+})
+
 describe('device menu options', () => {
   const workspace = { projectId: 'p', worktreeEnabled: false }
 
@@ -80,8 +97,29 @@ describe('device menu options', () => {
     const { runOn } = buildDeviceMenu({ localName: 'Mac', devices: [device({ name: 'Studio' })], workspace })
     expect(runOn).toEqual([
       { id: 'local', name: 'Mac', active: true, disabled: false },
-      { id: 'node-1', name: 'Studio', active: false, disabled: true, hint: 'Not available yet' }
+      { id: 'node-1', name: 'Studio', active: false, disabled: true, reason: 'Not available yet' }
     ])
+  })
+
+  it('says why remote devices are dimmed once, not on every row', () => {
+    const model = buildDeviceMenu({
+      localName: 'Mac', devices: [device({ name: 'Studio' }), device({ node: 'node-2' as Device['node'], name: 'Laptop' })], workspace
+    })
+    expect(model.runOnNote).toBe('Not available yet')
+    expect(buildDeviceMenu({ localName: 'Mac', devices: [], workspace }).runOnNote).toBeUndefined()
+  })
+
+  it('puts the reason for a disabled row in its accessible name', () => {
+    expect(menuRowLabel('Current checkout', 'Needs a project')).toBe('Current checkout, needs a project')
+    expect(menuRowLabel('Current checkout', undefined)).toBe('Current checkout')
+  })
+
+  it('has choices only with a project or a pickable device', () => {
+    const noProject = { worktreeEnabled: false }
+    expect(hasDeviceChoices(buildDeviceMenu({ localName: 'Mac', devices: [], workspace }))).toBe(true)
+    expect(hasDeviceChoices(buildDeviceMenu({ localName: 'Mac', devices: [], workspace: noProject }))).toBe(false)
+    // Another device that cannot be picked yet, and this computer already selected, change nothing.
+    expect(hasDeviceChoices(buildDeviceMenu({ localName: 'Mac', devices: [device({})], workspace: noProject }))).toBe(false)
   })
 
   it('marks the active workspace choice', () => {
@@ -119,7 +157,7 @@ describe('DeviceSection rendering', () => {
   const render = () => renderToStaticMarkup(createElement(DeviceSection, { threadId: 't1', projectId: null }))
 
   afterEach(() => {
-    seed({ activeThreadId: null, threads: [], messages: [], appInfo: null })
+    seed({ activeThreadId: null, threads: [], messages: [], appInfo: null, loading: false, turnStates: {} })
   })
 
   it('shows a running thread as plain text with no button or chevron', () => {
@@ -141,11 +179,31 @@ describe('DeviceSection rendering', () => {
     expect(render()).toContain('This computer')
   })
 
-  it('shows a button with a chevron on a new, empty thread', () => {
-    seed({ activeThreadId: 't1', threads: [thread({})], messages: [], appInfo: null })
+  it('shows a button with a chevron on a new, empty thread with a project', () => {
+    seed({ activeThreadId: 't1', threads: [thread({ projectId: 'p' })], messages: [], appInfo: null })
     const html = render()
     expect(html).toContain('<button')
     expect(html).toContain('aria-haspopup="menu"')
     expect(html).toContain('<svg')
+    // The visible name is not repeated as a tooltip.
+    expect(html).not.toContain('title=')
+  })
+
+  it('shows plain text when there is nothing to pick', () => {
+    seed({ activeThreadId: 't1', threads: [thread({})], messages: [], appInfo: null })
+    const html = render()
+    expect(html).toContain('This computer')
+    expect(html).not.toContain('<button')
+    expect(html).not.toContain('<svg')
+  })
+
+  it('shows plain text while a send is in flight', () => {
+    seed({ activeThreadId: 't1', threads: [thread({ projectId: 'p' })], messages: [], loading: true })
+    expect(render()).not.toContain('<button')
+    seed({
+      loading: false,
+      turnStates: { t1: { threadId: 't1', phase: 'thinking' } as never }
+    })
+    expect(render()).not.toContain('<button')
   })
 })

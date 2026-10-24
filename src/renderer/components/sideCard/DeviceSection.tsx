@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { focusInitialMenuItem, useMenuKeyboard } from '../../hooks/useMenuKeyboard'
 import { useOutsideDismiss } from '../../hooks/useOutsideDismiss'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
 import { Check, ChevronDown, Folder, FolderPlus, Laptop, Server } from '../../lib/icons'
 import { readDevices, type Device } from '../../lib/netDevices'
-import { composerWorkspaceFor, isNewEmptyThread } from '../../lib/newThread'
+import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread } from '../../lib/newThread'
 import { useAppStore } from '../../stores/appStore'
 import {
   buildDeviceMenu,
+  hasDeviceChoices,
   localDeviceName,
+  menuRowLabel,
   workspaceDraftForChoice,
   type WorkspaceChoice
 } from './deviceMenu'
@@ -18,8 +21,9 @@ const WORKSPACE_ICONS = { checkout: Folder, worktree: FolderPlus } as const
 
 /**
  * Name of the computer the thread runs on. Plain text once the thread has
- * started; on a new, empty thread it opens a menu to pick where it runs and
- * whether it starts in a new worktree.
+ * started, while a send is in flight, or when there is nothing to pick; on a
+ * new, empty thread it opens a menu to pick where it runs and whether it
+ * starts in a new worktree.
  */
 export function DeviceSection({ threadId }: SideCardSectionContext) {
   const name = useAppStore((s) => localDeviceName(s.appInfo?.deviceName))
@@ -28,27 +32,35 @@ export function DeviceSection({ threadId }: SideCardSectionContext) {
     s.threads.find((thread) => thread.id === s.activeThreadId),
     s.messages.length
   ))
+  const locked = useAppStore(isComposerWorkspaceLocked)
   return (
     <SideCardSection title="Device" threadId={threadId}>
       {isNew
-        ? <DeviceMenuButton threadId={threadId} name={name} />
-        : <p className="side-card-device-name" title={name}>{name}</p>}
+        ? <DeviceMenuButton threadId={threadId} name={name} locked={locked} />
+        : <DeviceName name={name} />}
     </SideCardSection>
   )
 }
 
-function DeviceMenuButton({ threadId, name }: { threadId: string | null; name: string }) {
+function DeviceName({ name }: { name: string }) {
+  return <p className="side-card-device-name" title={name}>{name}</p>
+}
+
+function DeviceMenuButton({ threadId, name, locked }: { threadId: string | null; name: string; locked: boolean }) {
   const draft = useAppStore((s) => s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'])
   const thread = useAppStore((s) => s.threads.find((entry) => entry.id === s.activeThreadId))
   const setComposerWorkspaceDraft = useAppStore((s) => s.setComposerWorkspaceDraft)
   const workspace = composerWorkspaceFor(draft, thread)
 
-  const [open, setOpen] = useState(false)
+  const [menuOpen, setOpen] = useState(false)
   const [devices, setDevices] = useState<Device[]>([])
   const triggerRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const menuId = useId()
   const model = buildDeviceMenu({ localName: name, devices, workspace })
+  // Nothing to pick without a project or another device, and nothing can change mid-send.
+  const interactive = !locked && hasDeviceChoices(model)
+  const open = menuOpen && interactive
   const menuStyle = useFloatingPosition({
     open,
     anchorRef: triggerRef,
@@ -73,20 +85,31 @@ function DeviceMenuButton({ threadId, name }: { threadId: string | null; name: s
   }, [open])
 
   useEffect(() => {
-    if (!open || menuStyle.visibility !== 'visible') return
-    const items = enabledItems(menuRef.current)
-    const checked = items.find((item) => item.getAttribute('aria-checked') === 'true')
-    ;(checked ?? items[0])?.focus()
+    if (open && menuStyle.visibility === 'visible') focusInitialMenuItem(menuRef.current)
   }, [open, menuStyle.visibility])
 
-  const closeAndFocus = () => {
+  // Escape closes through the window-level path above when focus is outside
+  // the menu; the button gets focus back either way.
+  useEffect(() => {
+    if (!open) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') triggerRef.current?.focus()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
+
+  const closeAndFocus = useCallback(() => {
     setOpen(false)
     triggerRef.current?.focus()
-  }
+  }, [])
+  const menuKeyDown = useMenuKeyboard(menuRef, closeAndFocus)
   const chooseWorkspace = (choice: WorkspaceChoice) => {
     setComposerWorkspaceDraft(threadId, workspaceDraftForChoice(workspace, choice))
     closeAndFocus()
   }
+
+  if (!interactive) return <DeviceName name={name} />
 
   return (
     <>
@@ -94,7 +117,6 @@ function DeviceMenuButton({ threadId, name }: { threadId: string | null; name: s
         ref={triggerRef}
         type="button"
         className={`side-card-device-button${open ? ' open' : ''}`}
-        title={name}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
@@ -118,72 +140,41 @@ function DeviceMenuButton({ threadId, name }: { threadId: string | null; name: s
             role="menu"
             aria-label="Run on and workspace"
             style={menuStyle}
-            onKeyDown={(event) => {
-              const items = enabledItems(menuRef.current)
-              const index = items.indexOf(document.activeElement as HTMLButtonElement)
-              let next: number | undefined
-              if (event.key === 'ArrowDown') next = (index + 1) % items.length
-              if (event.key === 'ArrowUp') next = (index - 1 + items.length) % items.length
-              if (event.key === 'Home') next = 0
-              if (event.key === 'End') next = items.length - 1
-              if (next !== undefined) {
-                event.preventDefault()
-                items[next]?.focus()
-              } else if (event.key === 'Escape') {
-                event.preventDefault()
-                event.stopPropagation()
-                closeAndFocus()
-              } else if (event.key === 'Tab') close()
-            }}
+            onKeyDown={menuKeyDown}
           >
             {model.runOn && (
               <div role="group" aria-labelledby={`${menuId}-run-on`}>
                 <div id={`${menuId}-run-on`} className="side-card-device-group-label">Run on</div>
-                {model.runOn.map((option) => {
-                  const Icon = option.id === 'local' ? Laptop : Server
-                  return (
-                    <button
-                      key={option.id}
-                      type="button"
-                      role="menuitemradio"
-                      tabIndex={-1}
-                      aria-checked={option.active}
-                      disabled={option.disabled}
-                      className="side-card-device-item"
-                      onClick={closeAndFocus}
-                    >
-                      <Icon size={14} aria-hidden="true" />
-                      <span className="side-card-device-item-label">{option.name}</span>
-                      {option.hint && <span className="side-card-device-item-hint">{option.hint}</span>}
-                      {option.active && <Check size={13} className="side-card-device-check" aria-hidden="true" />}
-                    </button>
-                  )
-                })}
+                {model.runOn.map((option) => (
+                  <MenuRow
+                    key={option.id}
+                    icon={option.id === 'local' ? Laptop : Server}
+                    label={option.name}
+                    active={option.active}
+                    disabled={option.disabled}
+                    reason={option.reason}
+                    onSelect={closeAndFocus}
+                  />
+                ))}
+                {model.runOnNote && (
+                  <div className="side-card-device-note" aria-hidden="true">{model.runOnNote}</div>
+                )}
               </div>
             )}
             <div role="group" aria-labelledby={`${menuId}-workspace`}>
               <div id={`${menuId}-workspace`} className="side-card-device-group-label">Workspace</div>
-              {model.workspace.map((option) => {
-                const Icon = WORKSPACE_ICONS[option.id]
-                return (
-                  <button
-                    key={option.id}
-                    type="button"
-                    role="menuitemradio"
-                    tabIndex={-1}
-                    aria-checked={option.active}
-                    disabled={option.disabled}
-                    className="side-card-device-item"
-                    data-workspace-choice={option.id}
-                    onClick={() => chooseWorkspace(option.id)}
-                  >
-                    <Icon size={14} aria-hidden="true" />
-                    <span className="side-card-device-item-label">{option.label}</span>
-                    {option.hint && <span className="side-card-device-item-hint">{option.hint}</span>}
-                    {option.active && <Check size={13} className="side-card-device-check" aria-hidden="true" />}
-                  </button>
-                )
-              })}
+              {model.workspace.map((option) => (
+                <MenuRow
+                  key={option.id}
+                  icon={WORKSPACE_ICONS[option.id]}
+                  label={option.label}
+                  active={option.active}
+                  disabled={option.disabled}
+                  reason={option.reason}
+                  workspaceChoice={option.id}
+                  onSelect={() => chooseWorkspace(option.id)}
+                />
+              ))}
             </div>
           </div>
         </FloatingPortal>
@@ -192,6 +183,35 @@ function DeviceMenuButton({ threadId, name }: { threadId: string | null; name: s
   )
 }
 
-function enabledItems(menu: HTMLElement | null): HTMLButtonElement[] {
-  return menu ? Array.from(menu.querySelectorAll<HTMLButtonElement>('button[role="menuitemradio"]:not(:disabled)')) : []
+/**
+ * A radio row. A disabled row stays focusable so keyboard users can reach it and
+ * hear why; activating it does nothing.
+ */
+function MenuRow({ icon: Icon, label, active, disabled, reason, workspaceChoice, onSelect }: {
+  icon: typeof Laptop
+  label: string
+  active: boolean
+  disabled: boolean
+  reason?: string
+  workspaceChoice?: WorkspaceChoice
+  onSelect: () => void
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitemradio"
+      tabIndex={-1}
+      aria-checked={active}
+      aria-disabled={disabled || undefined}
+      aria-label={disabled ? menuRowLabel(label, reason) : undefined}
+      title={disabled ? reason : undefined}
+      className="side-card-device-item"
+      data-workspace-choice={workspaceChoice}
+      onClick={disabled ? undefined : onSelect}
+    >
+      <Icon size={14} aria-hidden="true" />
+      <span className="side-card-device-item-label">{label}</span>
+      {active && <Check size={13} className="side-card-device-check" aria-hidden="true" />}
+    </button>
+  )
 }

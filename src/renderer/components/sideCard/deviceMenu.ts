@@ -3,6 +3,8 @@ import type { ComposerWorkspace } from '../../lib/newThread'
 
 export const LOCAL_DEVICE_FALLBACK_NAME = 'This computer'
 
+const REMOTE_NOT_AVAILABLE = 'Not available yet'
+
 export type WorkspaceChoice = 'checkout' | 'worktree'
 
 export interface RunOnOption {
@@ -11,8 +13,8 @@ export interface RunOnOption {
   /** Where the thread will run; only this computer today. */
   active: boolean
   disabled: boolean
-  /** Muted text beside the name. */
-  hint?: string
+  /** Why the row cannot be picked; shown as its tooltip and accessible name, not as text. */
+  reason?: string
 }
 
 export interface WorkspaceOption {
@@ -20,12 +22,14 @@ export interface WorkspaceOption {
   label: string
   active: boolean
   disabled: boolean
-  hint?: string
+  reason?: string
 }
 
 export interface DeviceMenuModel {
   /** Null when no other device is connected, so the whole group is left out. */
   runOn: RunOnOption[] | null
+  /** One muted line under the Run on group when some of its rows are dimmed. */
+  runOnNote?: string
   workspace: WorkspaceOption[]
 }
 
@@ -49,6 +53,17 @@ export function workspaceDraftForChoice(workspace: ComposerWorkspace, choice: Wo
   return { projectId: workspace.projectId, worktreeEnabled: choice === 'worktree' }
 }
 
+/** True when at least one row would change something if picked. */
+export function hasDeviceChoices(model: DeviceMenuModel): boolean {
+  return model.workspace.some((option) => !option.disabled) ||
+    (model.runOn ?? []).some((option) => !option.disabled && !option.active)
+}
+
+/** Accessible name of a row: its label, plus why it is unavailable. */
+export function menuRowLabel(label: string, reason: string | undefined): string {
+  return reason ? `${label}, ${reason.toLowerCase()}` : label
+}
+
 /**
  * Rows of the new-thread menu. Other devices are listed but cannot be picked
  * yet, because a thread can only start on this computer.
@@ -63,6 +78,7 @@ export function buildDeviceMenu(input: {
   const choice = activeWorkspaceChoice(input.workspace)
   const noProject = hasProject ? undefined : 'Needs a project'
   return {
+    runOnNote: remote.length === 0 ? undefined : REMOTE_NOT_AVAILABLE,
     runOn: remote.length === 0 ? null : [
       { id: 'local', name: input.localName, active: true, disabled: false },
       ...remote.map((device) => ({
@@ -70,12 +86,12 @@ export function buildDeviceMenu(input: {
         name: device.name,
         active: false,
         disabled: true,
-        hint: 'Not available yet'
+        reason: REMOTE_NOT_AVAILABLE
       }))
     ],
     workspace: [
-      { id: 'checkout', label: 'Current checkout', active: choice === 'checkout', disabled: !hasProject, hint: noProject },
-      { id: 'worktree', label: 'New worktree', active: choice === 'worktree', disabled: !hasProject, hint: noProject }
+      { id: 'checkout', label: 'Current checkout', active: choice === 'checkout', disabled: !hasProject, reason: noProject },
+      { id: 'worktree', label: 'New worktree', active: choice === 'worktree', disabled: !hasProject, reason: noProject }
     ]
   }
 }

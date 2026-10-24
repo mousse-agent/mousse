@@ -33,6 +33,7 @@ import {
 } from '../chat/components/agent-elements/tools/quick-action-approval'
 import '../chat/components/agent-elements/agent-ui.css'
 import { prepareComposerThread } from '../lib/createComposerThread'
+import { composerThreadActions } from '../lib/composerThreadActions'
 import { composerWorkspaceFor, isNewEmptyThread } from '../lib/newThread'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
@@ -728,9 +729,7 @@ export function OrchestratorChat() {
       const id = await prepareComposerThread({
         thread: activeThread,
         workspace,
-        create: (projectId, opts) => window.mousse.threads.create(undefined, projectId, opts),
-        setWorktreeEnabled: (id, enabled) => window.mousse.threads.setWorktreeEnabled(id, enabled),
-        update: (thread) => useAppStore.getState().upsertThread(thread),
+        ...composerThreadActions(),
         stillVisible,
         activate: (thread) => {
           const store = useAppStore.getState()
@@ -749,8 +748,7 @@ export function OrchestratorChat() {
           activeMediaKeyRef.current = thread.id
           targetThreadId = thread.id
           store.switchToThread(thread.id)
-        },
-        select: (id) => window.mousse.threads.select(id)
+        }
       })
       if (!id) return
       if (!stillVisible()) return

@@ -15,9 +15,25 @@
 
 /* Reserve the card's width on the right only as far as the centered column needs
    it. Percentages in padding resolve against the pane width, so this is zero in
-   windows wide enough to leave the card its own gutter. */
+   windows wide enough to leave the card its own gutter. The padding moves with
+   the card's fade (SIDE_CARD_FADE_MS), so the transcript does not jump when the
+   card is gone. */
+.sidebar.sidebar-full > .keep-mounted-pane {
+  transition: padding-right 180ms ease;
+}
+
 .sidebar.sidebar-full.sidebar-side-card > .keep-mounted-pane {
   padding-right: max(0px, calc(var(--side-card-clearance) - 100%));
+}
+
+/* The app panel opens by narrowing this aside while the card fades out pinned to
+   the old width, so the card hangs over the panel's edge. The aside is a stacking
+   context (backdrop-filter) and the panel comes later in the DOM, so by default
+   the panel paints over the card. Lift the aside above it for as long as a card is
+   mounted in a narrowed aside, which is only the fade. The panel's resizer is the
+   one sibling that overlaps the aside, and it exists only in that same window. */
+.sidebar:not(.sidebar-full):has(> .thread-side-card-layer > .thread-side-card) {
+  z-index: 1;
 }
 
 .thread-side-card-layer {
@@ -59,12 +75,20 @@
   pointer-events: auto;
 }
 
-/* Opacity only, no slide. The app-wide reduced-motion rule cuts transitions to
-   near zero anyway, so the card swaps in and out at once; useSideCardPresence
-   skips the exit wait in this mode. */
+/* Reduced motion fades without the slide, over the same 180ms, and keeps the exit
+   wait. The app-wide reduced-motion rule in global.css forces every transition
+   duration to 0.01ms with !important and six :not() classes of specificity, so
+   this needs !important and more specificity than that (the repeated class is
+   deliberate). The padding follows the fade, but a reflow is motion, so it is
+   instant. */
 @media (prefers-reduced-motion: reduce) {
-  .thread-side-card {
+  .app .sidebar .thread-side-card-layer .thread-side-card.thread-side-card.thread-side-card[data-shown] {
     transform: none;
+    transition-property: opacity;
+    transition-duration: 180ms !important;
+  }
+
+  .sidebar.sidebar-full > .keep-mounted-pane {
     transition: none;
   }
 }
@@ -80,10 +104,8 @@
 .side-card-section-title {
   margin: 0 0 8px;
   color: var(--ui-faint);
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 .side-card-placeholder {

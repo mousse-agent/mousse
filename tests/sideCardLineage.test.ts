@@ -11,6 +11,7 @@ import {
   orderLineageAgents,
   sliceLineage
 } from '../src/renderer/components/sideCard/lineageLogic'
+import { useAppStore } from '../src/renderer/stores/appStore'
 import type { Agent } from '../src/shared/types'
 
 const NOW = Date.parse('2026-10-24T12:00:00.000Z')
@@ -145,10 +146,8 @@ describe('LineageList rendering', () => {
       onOpen: () => undefined
     }))
 
-  it('collapses to one quiet line with no agents', () => {
-    const html = render([])
-    expect(html).toContain('No agents started yet')
-    expect(html).not.toContain('<ul')
+  it('renders nothing for an empty list; the section collapses instead', () => {
+    expect(render([])).toBe('')
   })
 
   it('renders running agents with a live dot ahead of finished ones', () => {
@@ -181,9 +180,28 @@ describe('LineageList rendering', () => {
 })
 
 describe('LineageSection rendering', () => {
-  it('renders the empty state inside the Lineage section', () => {
+  it('collapses to one quiet line with no heading when there are no agents', () => {
     const html = renderToStaticMarkup(createElement(LineageSection, { threadId: 't1', projectId: null }))
-    expect(html).toContain('Lineage')
     expect(html).toContain('No agents started yet')
+    expect(html).not.toContain('side-card-section-title')
+    expect(html).not.toContain('Lineage')
+    expect(html).not.toContain('<ul')
+    expect(html).toContain('data-thread-id="t1"')
+  })
+
+  it('keeps the Lineage heading once there are agents', () => {
+    const initial = useAppStore.getInitialState()
+    const patch = { agents: [agent('one')] }
+    useAppStore.setState(patch)
+    Object.assign(initial, patch)
+    try {
+      const html = renderToStaticMarkup(createElement(LineageSection, { threadId: 't1', projectId: null }))
+      expect(html).toContain('side-card-section-title">Lineage<')
+      expect(html).toContain('Task one')
+      expect(html).not.toContain('No agents started yet')
+    } finally {
+      useAppStore.setState({ agents: [] })
+      Object.assign(initial, { agents: [] })
+    }
   })
 })

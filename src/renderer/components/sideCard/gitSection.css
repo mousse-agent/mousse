@@ -140,6 +140,10 @@
   color: var(--danger);
 }
 
+.side-card-git-new {
+  color: var(--text-secondary);
+}
+
 .side-card-git-added[data-zero='true'],
 .side-card-git-removed[data-zero='true'] {
   color: var(--ui-faint);
