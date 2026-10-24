@@ -257,3 +257,68 @@ describe('local read aloud when a read is cut short', () => {
     expect(FakeWorker.all).toHaveLength(2)
   })
 })
+
+describe('local synthesis for a phone', () => {
+  const synthesize = (text: string, onClip: (samples: Float32Array, rate: number) => void | Promise<void>, controller = new AbortController()) =>
+    engine.synthesizeWithLocalModel(text, { signal: controller.signal, voice: undefined, speed: 1, onClip })
+
+  const answerAll = (): void => {
+    while (FakeWorker.all.some((worker) => worker.answerPending())) {
+      // answering a segment hands the worker its next one, so go around until none is left
+    }
+  }
+
+  it('hands over the next clip only after the receiver finished the one before', async () => {
+    expect(splitSpeechSegments(LONG)).toHaveLength(2)
+    const gates: Array<() => void> = []
+    const done = synthesize(LONG, () => new Promise<void>((resolve) => gates.push(resolve)))
+    answerAll()
+    await vi.advanceTimersByTimeAsync(0)
+    // Both segments are voiced, but the second waits for the receiver of the first.
+    expect(gates).toHaveLength(1)
+    gates[0]()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(gates).toHaveLength(2)
+    gates[1]()
+    await done
+  })
+
+  it('keeps voicing within the lookahead of what the receiver took', async () => {
+    const text = Array.from({ length: 40 }, () => LONG).join('\n\n')
+    const total = splitSpeechSegments(text).length
+    expect(total).toBeGreaterThan(30)
+    const gates: Array<() => void> = []
+    const controller = new AbortController()
+    const done = synthesize(text, () => new Promise<void>((resolve) => gates.push(resolve)), controller)
+    answerAll()
+    await vi.advanceTimersByTimeAsync(0)
+    answerAll()
+    const requested = FakeWorker.all.reduce((count, worker) => count + worker.speakRequests().length, 0)
+    expect(gates).toHaveLength(1)
+    // Eight segments ahead of the one being received, and a little slack for the pool.
+    expect(requested).toBeLessThanOrEqual(12)
+    controller.abort()
+    await done
+  })
+
+  it('fails when the receiver fails', async () => {
+    const done = synthesize(SHORT, () => Promise.reject(new Error('phone gone')))
+    const outcome = expect(done).rejects.toThrow('phone gone')
+    answerAll()
+    await outcome
+  })
+
+  it('stops handing over clips once aborted while the receiver is busy', async () => {
+    const gates: Array<() => void> = []
+    const controller = new AbortController()
+    const onClip = vi.fn(() => new Promise<void>((resolve) => gates.push(resolve)))
+    const done = synthesize(LONG, onClip, controller)
+    answerAll()
+    await vi.advanceTimersByTimeAsync(0)
+    controller.abort()
+    gates[0]()
+    await done
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onClip).toHaveBeenCalledTimes(1)
+  })
+})

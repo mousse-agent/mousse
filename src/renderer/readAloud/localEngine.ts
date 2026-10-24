@@ -232,14 +232,19 @@ export interface SynthesizeOptions {
   voice: string | undefined
   /** Speaking pace, applied by the model. */
   speed: number
-  /** Receives each segment's speech, trimmed of Kokoro's padding, in order. */
-  onClip: (samples: Float32Array, sampleRate: number) => void
+  /**
+   * Receives each segment's speech, trimmed of Kokoro's padding, in order. The next segment is
+   * handed over only after this returns, and voicing runs only a few segments ahead of what was
+   * handed over, so a slow receiver does not pile up audio.
+   */
+  onClip: (samples: Float32Array, sampleRate: number) => void | Promise<void>
 }
 
 /**
  * Voices `text` with the local Kokoro model without playing it, for a paired phone that plays the
  * audio itself. Segments go to the same worker pool as read aloud; each one is handed over as soon
- * as it and every segment before it are done. Resolves after the last segment, or when aborted.
+ * as it and every segment before it are done. Resolves after the last segment, or when aborted;
+ * rejects when a segment fails or `onClip` throws.
  */
 export function synthesizeWithLocalModel(text: string, { signal, voice, speed, onClip }: SynthesizeOptions): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -254,6 +259,7 @@ export function synthesizeWithLocalModel(text: string, { signal, voice, speed, o
     const busy = new Set<Worker>()
     let nextDispatch = 0
     let nextEmit = 0
+    let emitting = false
     let settled = false
 
     const settle = (error?: Error): void => {
@@ -296,18 +302,28 @@ export function synthesizeWithLocalModel(text: string, { signal, voice, speed, o
         return
       }
       results[request.index] = { samples: trimSilence(message.samples, message.sampleRate), sampleRate: message.sampleRate }
-      while (nextEmit < segments.length && results[nextEmit]) {
-        const clip = results[nextEmit]!
-        results[nextEmit] = undefined
-        nextEmit++
-        if (clip.samples.length > 0) onClip(clip.samples, clip.sampleRate)
-        if (signal.aborted || settled) return
-      }
-      if (nextEmit >= segments.length) {
-        settle()
-        return
-      }
+      void emitReady()
       dispatch()
+    }
+    const emitReady = async (): Promise<void> => {
+      if (emitting) return
+      emitting = true
+      try {
+        while (!settled && nextEmit < segments.length && results[nextEmit]) {
+          const clip = results[nextEmit]!
+          results[nextEmit] = undefined
+          if (clip.samples.length > 0) await onClip(clip.samples, clip.sampleRate)
+          // Counted done only now, so voicing stays within the lookahead of what was handed over.
+          nextEmit++
+          if (signal.aborted || settled) return
+          dispatch()
+        }
+        if (!settled && nextEmit >= segments.length) settle()
+      } catch (error) {
+        settle(error instanceof Error ? error : new Error(String(error)))
+      } finally {
+        emitting = false
+      }
     }
     const onWorkerError = (event: ErrorEvent): void => {
       disposeLocalEngine()
