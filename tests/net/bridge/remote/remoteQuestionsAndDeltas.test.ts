@@ -621,6 +621,50 @@ describe('remote display deltas', () => {
     expect(live.b.state()).toBe('open')
   })
 
+  it('still sends a thread that keeps updating while another one streams, within a few writes', async () => {
+    const p = await setup(),
+      { source } = multiSource(),
+      adapter = new ThreadStreamAdapter({
+        db: p.aDb,
+        store: p.aStore,
+        generations: p.aStore,
+        identity: p.aIdentity,
+        keys: p.aKeys,
+        clock: manualClock(),
+        source
+      })
+    resources.push(() => adapter.close())
+    const { live, descriptors } = await subscribed(p, adapter, ['t1', 't2']),
+      [first, second] = descriptors.map((descriptor) => descriptor.id),
+      sent: string[] = [],
+      gates: Array<() => void> = [],
+      internals = live.a as unknown as { send(message: WireMessage): Promise<void> },
+      send = internals.send.bind(live.a)
+    // Every delta write stays open until the test completes it, like a slow phone link.
+    internals.send = (message) => {
+      if (message.t !== 'ephemeral' || message.kind !== 'delta') return send(message)
+      sent.push(message.stream)
+      return new Promise<void>((resolve) => gates.push(resolve)).then(() => send(message))
+    }
+    const publish = (stream: string, n: number) =>
+      live.a.publishDelta(
+        stream,
+        { type: 'thread.message-updated', data: message('m', `${n}`) },
+        'message:m'
+      )
+    publish(first, 0)
+    for (let n = 1; n <= 6; n++) {
+      // Both threads refresh in the same order before each write completes.
+      publish(first, n)
+      publish(second, n)
+      gates.shift()!()
+      await vi.waitFor(() => expect(sent).toHaveLength(n + 1))
+    }
+    expect(sent.slice(0, 4)).toContain(second)
+    gates.splice(0).forEach((open) => open())
+    expect(live.a.state()).toBe('open')
+  })
+
   it('drops a delta the mux refuses and keeps both the session and later deltas', async () => {
     const p = await setup(),
       { source, emit } = multiSource()

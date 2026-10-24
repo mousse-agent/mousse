@@ -180,7 +180,6 @@ export class NetSyncSession implements SyncSession {
   private estimate?: QualifiedClockEstimate
   private subscriptions = new Map<StreamId, SubscriptionReceiver>()
   private serving = new Map<StreamId, { cancelled: boolean; live: boolean }>()
-  /** Per stream: whether a delta is being written, and the newest unsent delta per key. */
   /** Unsent display deltas by stream and key; at most one delta per session is being written. */
   private deltas = new Map<string, { stream: StreamId; key: string; data: unknown }>()
   private deltaSending = false
@@ -645,9 +644,9 @@ export class NetSyncSession implements SyncSession {
     // One delta per session is written at a time, so deltas never hold more than one message in
     // the control lane; newer ones replace older unsent ones with the same key. A slow link then
     // sees fewer deltas instead of a full mux queue that would refuse pings and snapshot requests.
-    const id = `${stream}\u0000${key}`
-    this.deltas.delete(id)
-    this.deltas.set(id, { stream, key, data })
+    // Replacing a waiting delta keeps its place in line, so a thread that updates faster than the
+    // writer drains still gets its turn; a key that was just selected re-enters at the tail.
+    this.deltas.set(`${stream}\u0000${key}`, { stream, key, data })
     if (!this.deltaSending) this.sendDeltas()
   }
   /**
