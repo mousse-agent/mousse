@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { profile, cleanup } from '../chats/helpers'
 import { HostedProfileService } from '../../../src/mms/net/plus/HostedProfileService'
+import { renewalDelayMs } from '../../../src/mms/net/plus/HostedNetController'
 import { canonicalJson } from '../../../src/mms/net/sync/codec'
 import { verifyBytes } from '../../../src/mms/net/identity/crypto'
 const configuration = {
@@ -171,6 +172,31 @@ it('drops an expired uncertain route after lease recovery and signs fresh curren
   expect(routes[1].body.operationId).not.toBe(original)
   expect(routes[1].body.expiresAt).toBe(now + 120000)
   expect(p.service.managedSpaceRoutes()[0].expiresAt).toBe(now + 120000)
+})
+
+it('refreshes a Space-peer route before its approval lapses, even when the registration lasts 10 minutes', async () => {
+  let now = Date.now()
+  const p = await fixture({ now: () => now })
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  const self = p.rt.identity.self()!
+  p.service.rememberSpaceRoute(self.node, self.user)
+  await p.service.reconcileSpaceRoutes(() => true)
+  // The renewal pass is the only periodic refresh, so each wait must end before an approval lapses.
+  for (let pass = 0; pass < 30; pass++) {
+    now += renewalDelayMs(now + 600000, p.service.managedSpaceRoutes(), now)
+    expect(p.service.managedSpaceRoutes()[0].expiresAt).toBeGreaterThan(now)
+    await p.service.reconcileSpaceRoutes(() => true)
+  }
+  expect(p.bodies.filter((row) => row.path === '/v1/net/routes').length).toBeGreaterThan(20)
+})
+
+it('waits a third of the registration lease between renewals, at most 5 minutes, when no route is due', () => {
+  expect(renewalDelayMs(60000, [], 0)).toBe(20000)
+  expect(renewalDelayMs(600000, [], 0)).toBe(200000)
+  expect(renewalDelayMs(3600000, [], 0)).toBe(300000)
+  expect(renewalDelayMs(undefined, [], 0)).toBe(20000)
+  expect(renewalDelayMs(600000, [{ expiresAt: 0 }], 0)).toBe(20000)
 })
 
 it('releases a definitively rejected rendezvous so renewal and a corrected invitation can proceed', async () => {

@@ -21,6 +21,34 @@ import { createHostedRelayTransports } from './relayTransports'
  */
 const RENEW_MAX_MS = 5 * 60_000
 
+/** The shortest wait between renewal passes, so a failing pass cannot spin. */
+const RENEW_MIN_MS = 20_000
+
+/**
+ * Space-peer route approvals last 2 minutes and are refreshed once less than a minute is left, but
+ * only by the renewal pass. This is how long before an approval gets that low the next pass must run.
+ */
+const ROUTE_REFRESH_LEAD_MS = 60_000
+
+/**
+ * How long to wait before the next renewal pass: a third of the registration lease (at most
+ * RENEW_MAX_MS), or sooner when a Space-peer route approval needs refreshing first. A computer
+ * without a lease passes every 20 seconds.
+ */
+export function renewalDelayMs(
+  leaseExpiresAt: number | undefined,
+  routes: ReadonlyArray<{ expiresAt: number }>,
+  now: number
+): number {
+  let delay =
+    leaseExpiresAt === undefined
+      ? RENEW_MIN_MS
+      : Math.min(RENEW_MAX_MS, Math.max(1000, (leaseExpiresAt - now) / 3))
+  for (const route of routes)
+    delay = Math.min(delay, Math.max(RENEW_MIN_MS, route.expiresAt - ROUTE_REFRESH_LEAD_MS - now))
+  return delay
+}
+
 /** How often a signed-in authority checks Mousse ID for phones asking to join. */
 const PLUS_ENROLLMENT_POLL_MS = 15000
 
@@ -322,9 +350,11 @@ export class HostedNetController implements HostedNet {
             this.host.emit()
           })
       },
-      status.connected
-        ? Math.min(RENEW_MAX_MS, Math.max(1000, (status.expiresAt! - this.host.clock.now()) / 3))
-        : 20000
+      renewalDelayMs(
+        status.connected ? status.expiresAt! : undefined,
+        this.service().managedSpaceRoutes(),
+        this.host.clock.now()
+      )
     )
     this.plusRenewal.unref?.()
     if (!this.plusAbortBound) {
