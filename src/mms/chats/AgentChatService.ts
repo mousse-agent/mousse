@@ -205,6 +205,17 @@ export class AgentChatService {
     return { profileId: this.profileId, chatId: record.conversation.id, threadId: record.conversation.threadId, projectId: record.conversation.projectId,
       workspaceRoot: this.workspace(record), participants: structuredClone(record.conversation.participants) }
   }
+  /** Throws the refusal `send` would raise for a new message, without sending or taking a lease. */
+  assertSendable(chatId: string, text: string): void {
+    this.lifecycle.assertAccepting()
+    this.assertLocalDispatch(chatId)
+    const record = this.store.read(chatId)
+    if (this.active.has(chatId) || record.conversation.run?.state === 'running') throw new DomainRpcError('chat_busy', 'Wait for this chat response or cancel it first')
+    this.workspace(record)
+    const agents = record.conversation.participants.filter((participant) => participant.kind === 'agent')
+    for (const agent of record.conversation.kind === 'direct' ? agents.slice(0, 1) : this.targets(text, agents)) this.assertAgent(agent)
+    if (record.conversation.messages.length > 1990) throw new DomainRpcError('chat_full', 'This chat has reached its message limit')
+  }
   send(input: ChatSendInput): ChatConversation {
     this.lifecycle.assertAccepting()
     this.assertLocalDispatch(input.chatId)
@@ -252,6 +263,10 @@ export class AgentChatService {
       }
       throw error
     }
+  }
+  /** Throws the refusal `cancel` would raise when `runId` is no longer the chat's current response. */
+  assertCancellable(chatId: string, runId: string): void {
+    if (this.store.read(chatId).conversation.run?.id !== runId) throw new DomainRpcError('run_conflict', 'The selected response is no longer current')
   }
   cancel(input: ChatCancelInput): ChatConversation {
     const record = this.store.read(input.chatId)

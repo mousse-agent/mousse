@@ -35,6 +35,23 @@ it('keeps legacy local default execution and publishes no transcript, resources,
   expect(p.contexts).toHaveLength(1)
 })
 
+it('refuses a send to a published Group and a stale stop before anything runs', async () => {
+  const p = await profile(), group = await p.createGroup(), chats = p.services.platform.chats
+  expect(() => chats.assertSendable(group.id, 'still local')).not.toThrow()
+  chats.send({ chatId: group.id, text: 'first', clientMessageId: 'first-message' })
+  expect(() => chats.assertSendable(group.id, 'while running')).toThrow(expect.objectContaining({ code: 'chat_busy' }))
+  const runId = chats.get(group.id).run!.id
+  expect(() => chats.assertCancellable(group.id, runId)).not.toThrow()
+  expect(() => chats.assertCancellable(group.id, 'older-run')).toThrow(expect.objectContaining({ code: 'run_conflict' }))
+  await chats.waitForIdle()
+  // The finished reply keeps its run id; a stop for any other run is refused, not uncertain.
+  expect(() => chats.assertCancellable(group.id, runId)).not.toThrow()
+  expect(() => chats.assertSendable(group.id, 'after the reply')).not.toThrow()
+  p.services.chatNetwork.publish({ chatId: group.id, publicationId: 'preflight-publish' })
+  expect(() => chats.assertSendable(group.id, 'must not fall back')).toThrow(expect.objectContaining({ code: 'chat_published' }))
+  expect(p.contexts).toHaveLength(1)
+})
+
 it('retains committed publication after a lost reply and reopens the same dispatch fence without duplicate channels', async () => {
   const p = await profile(), group = await p.createGroup(), request = { chatId: group.id, publicationId: 'lost-reply' }
   const rt = p.services.net.runtime(), checkpoint = rt.db.checkpoint.bind(rt.db)

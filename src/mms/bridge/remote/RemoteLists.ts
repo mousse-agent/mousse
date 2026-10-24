@@ -14,6 +14,10 @@ const MESSAGE_LIMIT = 64 * 1024
 
 export interface RemoteChatsPort {
   snapshot(): { chats: ChatSummary[] }
+  /** Throws why a new message cannot be sent now, without sending it. */
+  assertSendable(chatId: string, text: string): void
+  /** Throws unless `runId` is still the chat's current response. */
+  assertCancellable(chatId: string, runId: string): void
   send(input: { chatId: string; text: string; clientMessageId?: string }): LocalChatConversation
   cancel(input: { chatId: string; runId: string }): LocalChatConversation
 }
@@ -52,6 +56,26 @@ function localChat(chats: RemoteChatsPort, chatId: string): ChatSummary {
   return chat
 }
 
+/** A chat service refusal as the plain error the phone sees; it never becomes an uncertain outcome. */
+function refusal(error: unknown): never {
+  const code = (error as { code?: unknown } | undefined)?.code
+  if (code === 'chat_published')
+    throw new NetError(
+      'forbidden',
+      'This conversation sends through its Space. Open it on the computer.'
+    )
+  const message = error instanceof Error ? error.message : undefined
+  throw new NetError(code === 'invalid_params' ? 'bad_request' : 'conflict', message)
+}
+
+function refusing(check: () => void): void {
+  try {
+    check()
+  } catch (error) {
+    refusal(error)
+  }
+}
+
 /** The state of a chat after a send or cancel; never the whole transcript. */
 function result(conversation: LocalChatConversation): unknown {
   return {
@@ -82,11 +106,15 @@ export function remoteListMethods(options: {
         text(params, 'text', MESSAGE_LIMIT)
         return params
       },
-      // Refusals that need no durable admission come back as plain errors, not uncertain outcomes.
+      // Refusals come back as plain errors, never as uncertain outcomes. The chat's current state
+      // is checked only for a new execution, so a retry of a send that already went through still
+      // gets its saved result while the reply it started is running.
       authorize: (value) => {
-        const chat = localChat(options.chats(), (value as { chatId: string }).chatId)
-        if (chat.run?.state === 'running')
-          throw new NetError('rate_limited', 'Wait for this chat response or stop it first.')
+        localChat(options.chats(), (value as { chatId: string }).chatId)
+      },
+      authorizeNew: (value) => {
+        const params = value as { chatId: string; text: string }
+        refusing(() => options.chats().assertSendable(params.chatId, params.text))
       },
       handle: async (value, context) => {
         const params = value as { chatId: string; text: string }
@@ -113,6 +141,10 @@ export function remoteListMethods(options: {
       },
       authorize: (value) => {
         localChat(options.chats(), (value as { chatId: string }).chatId)
+      },
+      authorizeNew: (value) => {
+        const params = value as { chatId: string; runId: string }
+        refusing(() => options.chats().assertCancellable(params.chatId, params.runId))
       },
       handle: async (value) =>
         result(options.chats().cancel(value as { chatId: string; runId: string }))

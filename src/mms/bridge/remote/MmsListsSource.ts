@@ -161,7 +161,21 @@ export class MmsListsSource {
     }
   ) {}
 
+  /** The chats are read from disk, so `watch` rereads them only when a chat signalled or on reconcile. */
+  private readChats(): ListsChat[] {
+    try {
+      return this.services.platform.chats.snapshot().chats.map(chatOf)
+    } catch {
+      // A profile whose chat store cannot be read still lists its projects and threads.
+      return []
+    }
+  }
+
   snapshot(): ListsSnapshot {
+    return this.compose(this.readChats())
+  }
+
+  private compose(chats: ListsChat[]): ListsSnapshot {
     const s = this.services
     const activity = s.threadRuntimes.getActivitySnapshot()
     const turns = s.orchestrator.getTurnSnapshot()
@@ -170,12 +184,6 @@ export class MmsListsSource {
     for (const thread of threads) {
       const entry = statusOf(activity[thread.id], turns[thread.id])
       if (entry) status[thread.id] = entry
-    }
-    let chats: ListsChat[] = []
-    try {
-      chats = s.platform.chats.snapshot().chats.map(chatOf)
-    } catch {
-      // A profile whose chat store cannot be read still lists its projects and threads.
     }
     return mmsJson({
       kind: 'mousse.lists',
@@ -210,14 +218,20 @@ export class MmsListsSource {
    */
   watch(changed: () => void, onError?: (error: unknown) => void): () => void {
     const s = this.services
-    let last = JSON.stringify(this.snapshot())
+    let chats = this.readChats()
+    let chatsStale = false
+    let last = JSON.stringify(this.compose(chats))
     let pending: unknown
     let stopped = false
     const check = (): void => {
       pending = undefined
       if (stopped) return
       try {
-        const next = JSON.stringify(this.snapshot())
+        if (chatsStale) {
+          chats = this.readChats()
+          chatsStale = false
+        }
+        const next = JSON.stringify(this.compose(chats))
         if (next === last) return
         last = next
         changed()
@@ -251,8 +265,12 @@ export class MmsListsSource {
     on(s.threadRuntimes as unknown as Emitter, 'activity')
     on(s.questions as unknown as Emitter, 'pending')
     on(s.questions as unknown as Emitter, 'cleared')
-    disposers.push(s.platform.chats.onChange(poke))
-    const reconcile = this.timers.setInterval(poke, RECONCILE_MS)
+    const chatsChanged = (): void => {
+      chatsStale = true
+      poke()
+    }
+    disposers.push(s.platform.chats.onChange(chatsChanged))
+    const reconcile = this.timers.setInterval(chatsChanged, RECONCILE_MS)
     disposers.push(() => this.timers.clearInterval(reconcile))
     return () => {
       stopped = true

@@ -221,8 +221,16 @@ describe('phone sidebar lists', () => {
       { presentation: 'network', id: 'c2', kind: 'group', name: 'Space', createdAt: at, updatedAt: at, participants: [], binding: {} } as unknown as ChatSummary
     ]
     const sent: unknown[] = []
+    let refuse: { code: string; message: string } | undefined
+    let currentRun = 'r1'
     const port: RemoteChatsPort = {
       snapshot: () => ({ chats }),
+      assertSendable: () => {
+        if (refuse) throw Object.assign(new Error(refuse.message), { code: refuse.code })
+      },
+      assertCancellable: (_chatId, runId) => {
+        if (runId !== currentRun) throw Object.assign(new Error('The selected response is no longer current'), { code: 'run_conflict' })
+      },
       send: (input) => {
         sent.push(input)
         return { ...(chats[0] as never), messages: [], run: { id: 'r1', state: 'running', startedAt: at } }
@@ -245,9 +253,56 @@ describe('phone sidebar lists', () => {
     send.authorize!({ chatId: 'c1', text: 'hi' }, context)
     expect(await send.handle({ chatId: 'c1', text: 'hi' }, context)).toEqual({ chatId: 'c1', run: { id: 'r1', state: 'running' } })
     expect(sent).toEqual([{ chatId: 'c1', text: 'hi', clientMessageId: 'exec_01abc' }])
-    chats[0] = { ...(chats[0] as object), run: { id: 'r1', state: 'running', startedAt: at } } as ChatSummary
-    expect(() => send.authorize!({ chatId: 'c1', text: 'again' }, context)).toThrow(expect.objectContaining({ code: 'rate_limited' }))
+    // Refusals from the chat service reach the phone as plain, non-retryable errors.
+    expect(() => send.authorizeNew!({ chatId: 'c1', text: 'again' }, context)).not.toThrow()
+    refuse = { code: 'chat_busy', message: 'Wait for this chat response or cancel it first' }
+    expect(() => send.authorizeNew!({ chatId: 'c1', text: 'again' }, context)).toThrow(expect.objectContaining({ code: 'conflict', message: 'Wait for this chat response or cancel it first' }))
+    refuse = { code: 'chat_published', message: 'This Group sends through its published Space' }
+    expect(() => send.authorizeNew!({ chatId: 'c1', text: 'again' }, context)).toThrow(expect.objectContaining({ code: 'forbidden' }))
+    refuse = { code: 'agent_unavailable', message: 'Reviewer is unavailable on this device' }
+    expect(() => send.authorizeNew!({ chatId: 'c1', text: 'again' }, context)).toThrow(expect.objectContaining({ code: 'conflict' }))
+    // The busy check is not part of `authorize`, which a retry of an earlier send also passes.
+    expect(() => send.authorize!({ chatId: 'c1', text: 'again' }, context)).not.toThrow()
     const cancel = methods.get('chats.cancel')!
     expect(await cancel.handle(cancel.validate!({ chatId: 'c1', runId: 'r1' }), context)).toEqual({ chatId: 'c1', run: { id: 'r1', state: 'cancelled' } })
+    // Stop after the reply finished and a newer run took its place is a plain conflict.
+    expect(() => cancel.authorizeNew!({ chatId: 'c1', runId: 'r1' }, context)).not.toThrow()
+    currentRun = 'r2'
+    expect(() => cancel.authorizeNew!({ chatId: 'c1', runId: 'r1' }, context)).toThrow(expect.objectContaining({ code: 'conflict' }))
+  })
+
+  it('rereads chats only when a chat signals or the reconcile tick runs', () => {
+    const f = fakeServices(),
+      timers = manualTimers()
+    f.threads.list = [thread('t1')]
+    let reads = 0
+    const read = f.chats.snapshot
+    f.chats.snapshot = () => (reads++, read())
+    let calls = 0
+    const stop = new MmsListsSource(f.services, timers).watch(() => calls++)
+    expect(reads).toBe(1)
+    // Thread, turn and activity signals change the lists without touching the chat files.
+    f.runtimes.activity = { t1: 'processing' }
+    f.runtimes.emit('activity', {})
+    timers.flush()
+    f.orchestrator.emit('turn-state', {})
+    f.threads.emit('updated', f.threads.list[0])
+    timers.flush()
+    expect(calls).toBe(1)
+    expect(reads).toBe(1)
+    // A chat signal rereads once for the burst and publishes the new chat.
+    f.chats.list = [{ id: 'c', kind: 'direct', name: 'C', threadId: 'ct', createdAt: at, updatedAt: at, participants: [] }]
+    f.chats.changed()
+    f.chats.changed()
+    timers.flush()
+    expect(reads).toBe(2)
+    expect(calls).toBe(2)
+    // The reconcile tick rereads once, and catches a chat change that sent no signal.
+    f.chats.list = []
+    ;[...timers.intervals.values()][0]!()
+    timers.flush()
+    expect(reads).toBe(3)
+    expect(calls).toBe(3)
+    stop()
   })
 })
