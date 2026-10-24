@@ -96,21 +96,36 @@ function transcribeSegment(model: LocalSttModel, samples: Float32Array): Promise
   })
 }
 
-/** Transcribes a recording with a local model, one segment at a time. */
-export async function transcribeWithLocalModel(modelId: LocalSttModelId, recording: Blob): Promise<string> {
+/**
+ * Transcribes a recording with a local model, one segment at a time. `onPartial` receives the
+ * text of the segments done so far after each one. Aborting `signal` stops before the next
+ * segment goes to the worker and rejects; the segment the worker is already on finishes unseen.
+ */
+export async function transcribeWithLocalModel(
+  modelId: LocalSttModelId,
+  recording: Blob,
+  onPartial?: (text: string) => void,
+  signal?: AbortSignal
+): Promise<string> {
   const model = findLocalSttModel(modelId)
   if (!model) throw new Error(`Unknown local dictation model: ${modelId}`)
   cancelIdleDispose()
   activeTranscriptions++
   try {
+    signal?.throwIfAborted()
     const samples = await decodeRecording(recording, model.sampleRate)
     const minSamples = Math.ceil(MIN_SEGMENT_SECONDS * model.sampleRate)
     const parts: string[] = []
     for (const segment of splitIntoSegments(samples, model.sampleRate, model.maxSegmentSeconds)) {
+      signal?.throwIfAborted()
       if (segment.length < minSamples) continue
       const text = await transcribeSegment(model, segment)
-      if (text) parts.push(text)
+      if (text) {
+        parts.push(text)
+        if (!signal?.aborted) onPartial?.(parts.join(' '))
+      }
     }
+    signal?.throwIfAborted()
     return parts.join(' ')
   } finally {
     activeTranscriptions--

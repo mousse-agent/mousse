@@ -744,7 +744,12 @@ export interface RpcContext {
   carrier?: string
   signal: AbortSignal
   deadlineAt: number
-  progress(data: unknown): void
+  /**
+   * Sends interim data to the caller. A handler that streams should await the result, so it
+   * paces to the link; the promise rejects when the data could not be sent, and the handler
+   * should then stop.
+   */
+  progress(data: unknown): void | Promise<void>
   /** Trusted domain publication/settlement committed with the terminal RPC result. */
   onTerminalCommit?(work: () => void): void
 }

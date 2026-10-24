@@ -16,6 +16,7 @@ import { MmsRemoteBackend, RemoteApi, ThreadStreamAdapter } from './remote'
 import { MmsThreadSource } from './remote/MmsThreadSource'
 import { LISTS_STREAM_THREAD_ID, MmsListsSource } from './remote/MmsListsSource'
 import { remoteListMethods } from './remote/RemoteLists'
+import { phoneSpeechMethods } from './remote/speech'
 import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
 
@@ -176,6 +177,12 @@ export class BridgeProfileService {
     })
     this.remote = new RemoteApi(new MmsRemoteBackend(services), this.clock)
     for (const method of this.remote.methods())
+      rt.rpc.register({
+        ...method,
+        family: 'bridge',
+        handle: (params, context) => this.track(method.handle(params, context))
+      })
+    for (const method of phoneSpeechMethods(services.speechRelay))
       rt.rpc.register({
         ...method,
         family: 'bridge',
@@ -398,6 +405,7 @@ export class BridgeProfileService {
     if (this.stopped) return
     this.stopped = true
     this.remote.close()
+    this.options.services.speechRelay.close()
     this.hub.close()
     this.threads.close()
     this.spaces.beginDisable()

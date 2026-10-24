@@ -37,6 +37,7 @@ import { mainBrowserBinding } from './platform/mainBrowserBinding'
 import { createBrowserSetupService, type BrowserSetupService } from './browser/BrowserSetupService'
 import { createManagedBrowserInstaller } from './browser/install'
 import { registerBrowserSetupMethods, type BrowserSetupDomainRegistration } from './browser/registerBrowserSetupMethods'
+import { registerSpeechHostMethods } from './speech/registerSpeechHostMethods'
 
 export type { MmsOptions } from './MmsOptions'
 
@@ -211,6 +212,9 @@ export class MousseMainService extends MmsProfileServices {
     }
     registerNetMethods(this.domains, async profileId => (await profile(profileId)).net)
     registerBridgeMethods(this.domains, async profileId => (await profile(profileId)).bridge)
+    this.domainCleanupSubscriptions.push(
+      registerSpeechHostMethods(this.domains, async profileId => (await profile(profileId)).speechRelay)
+    )
     registerSpaceMethods(this.domains, async profileId => (await profile(profileId)).spaces.local)
     registerSpaceArchiveMethods(this.domains, async profileId => (await profile(profileId)).archives)
     const botLocals = new WeakMap<import('./bots/BotProfileService').BotProfileService, BotLocalService>()

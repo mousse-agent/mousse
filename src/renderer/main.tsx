@@ -8,6 +8,7 @@ import { useAppStore } from './stores/appStore'
 import { AppTooltip } from './components/AppTooltip'
 import { DictationHost } from './dictation/DictationModal'
 import { ReadAloudHost } from './readAloud/ReadAloudModal'
+import { PhoneSpeechHost } from './speechRelay/PhoneSpeechHost'
 import { EnrollmentRequestHost } from './components/EnrollmentRequestPrompt'
 import './styles/global.css'
 import './styles/compact-shell.css'
@@ -42,6 +43,7 @@ function Root() {
       {profileReady && <ProfilePages />}
       {profileReady && <ReadAloudHost />}
       {profileReady && <DictationHost />}
+      {profileReady && <PhoneSpeechHost />}
       {profileReady && <EnrollmentRequestHost />}
       <AppTooltip />
     </>
