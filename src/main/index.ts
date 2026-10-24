@@ -6,6 +6,8 @@ import { join } from 'path'
 import { detectCliMode, stripCliModeArgs } from '../cli/cliLaunch'
 import { configureElectronContext, finishElectronCli } from '../cli/electronContext'
 import { resolveMousseHome } from '../cli/paths'
+import { stopRunningDaemon } from '../cli/daemonShutdown'
+import { canonicalizeHome, SERVICE_STOP_TIMEOUT_MS } from '../cli/mmsRuntime'
 import { MousseConfigStore } from '../mms/config/MousseConfigStore'
 import { SettingsStore } from '../mms/settings/SettingsStore'
 import { FileService } from '../mms/files/FileService'
@@ -38,6 +40,8 @@ import {
   registerWindowForResumeRecovery
 } from './windowResume'
 import { attachContextMenu } from './contextMenu'
+import { startDesktopUpdates } from './updates'
+import type { DesktopUpdater } from './updates/DesktopUpdater'
 import { setupApplicationMenu } from './applicationMenu'
 import { attachZoomShortcuts } from './zoomShortcuts'
 import { openExternalSafely } from './safeExternalUrl'
@@ -124,6 +128,7 @@ function startGuiApp(): void {
   let windowListenersAttached = false
   let resumeRecoveryAttached = false
   let devGuiPollerStop: (() => void) | null = null
+  let desktopUpdater: DesktopUpdater | null = null
 
   const browserView = new BrowserViewManager()
   const presentation = new PresentationState()
@@ -318,6 +323,28 @@ function startGuiApp(): void {
         resumeRecoveryAttached = true
       }
 
+      // Before the window, so its first request for update state has a handler. Updates are
+      // optional: a failure here must not stop Mousse from opening.
+      try {
+        desktopUpdater ??= startDesktopUpdates({
+          // The installer replaces Mousse.exe, which also hosts the background service.
+          prepareInstall: async () => {
+            await guiMms?.stop()
+            const stopped = await stopRunningDaemon(canonicalizeHome(homeDir), { reason: 'update', timeoutMs: SERVICE_STOP_TIMEOUT_MS })
+            if (stopped.kind !== 'stopped' && stopped.kind !== 'not-running') {
+              throw new Error('The background service did not stop, so the update was not installed.')
+            }
+          },
+          recoverInstall: async () => {
+            await guiMms?.start()
+            for (const window of BrowserWindow.getAllWindows()) {
+              if (!window.isDestroyed()) window.webContents.reload()
+            }
+          }
+        })
+      } catch (error) {
+        console.error('In-app updates could not start:', error instanceof Error ? error.message : String(error))
+      }
       // All chrome/IPC handlers must exist before the renderer's first frame.
       // Start the service concurrently; failures reach the profile bootstrap
       // requests and their in-window Retry action rather than a splash/modal.
@@ -358,6 +385,7 @@ function startGuiApp(): void {
           devGuiPollerStop()
           devGuiPollerStop = null
         }
+        desktopUpdater?.dispose()
         if (guiMms) await guiMms.stop()
       } catch (err) {
         console.error('guiMms.stop failed during shutdown:', err)
