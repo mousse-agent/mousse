@@ -75,6 +75,43 @@ describe('RunEngine delegation (SPEC §14.1-§14.2)', () => {
     expect(f.store.db.statement('SELECT COUNT(*) AS n FROM effects').get()!.n).toBe(effects)
   })
 
+  it('cancelling a task whose result is already published acknowledges its inbox row, so it never wakes the parent', async () => {
+    f = delegationFixture()
+    const parent = await f.runningRun('parent')
+    const child = await f.delegate(parent.runId, 'call-1')
+    f.finish(child.childRunId)
+    f.engine.markTerminal(parent.runId, 'completed')
+    expect(f.engine.delegations.get(child.delegationId)!.status).toBe('result_available')
+    expect(f.engine.inbox.listPending('parent')).toHaveLength(1)
+
+    expect(await f.engine.cancelDelegation(child.delegationId)).toEqual([child.delegationId])
+    expect(f.engine.delegations.get(child.delegationId)!.status).toBe('cancelled')
+    expect(f.engine.inbox.listForDelegation(child.delegationId).map((row) => row.status)).toEqual(['acknowledged'])
+    expect(f.reconciler.runOnce().wakes.wakes).toEqual([])
+  })
+
+  it('cancelling a task whose wake has not started cancels the wake run; another task still wakes the parent', async () => {
+    f = delegationFixture()
+    const parent = await f.runningRun('parent')
+    const cancelledTask = await f.delegate(parent.runId, 'call-1')
+    f.finish(cancelledTask.childRunId)
+    f.engine.markTerminal(parent.runId, 'completed')
+    const wakeRunId = f.reconciler.runOnce().wakes.wakes[0]
+    expect(f.engine.getRun(wakeRunId)!.status).toBe('queued')
+
+    await f.engine.cancelDelegation(cancelledTask.delegationId)
+    expect(f.engine.getRun(wakeRunId)!.status).toBe('cancelled')
+    expect(f.outbox.listForRun(wakeRunId).find((effect) => effect.kind === 'turn.start')!.status).toBe('cancelled')
+
+    // A second task that finished is unaffected by the first one's cancel.
+    const parent2 = await f.runningRun('parent')
+    const kept = await f.delegate(parent2.runId, 'call-2')
+    f.finish(kept.childRunId)
+    f.engine.markTerminal(parent2.runId, 'completed')
+    expect(f.reconciler.runOnce().wakes.wakes).toHaveLength(1)
+    expect(f.engine.delegations.get(kept.delegationId)!.status).toBe('result_available')
+  })
+
   it('task_cancel is retryable: a cancelled delegation whose child is still live is stopped again (H6, M4)', async () => {
     f = delegationFixture()
     const parent = await f.runningRun('parent')

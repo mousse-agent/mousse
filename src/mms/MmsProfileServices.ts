@@ -13,6 +13,7 @@ import { ProviderInstanceService } from './providers/ProviderInstanceService'
 import { createCodexProviderService, type CodexProviderService } from './run/adapters/codex'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
+import { backfillSubagentLineage } from './data/subagentLineage'
 import { OrchestratorService } from './orchestrator/OrchestratorService'
 import { ProfileDatabase } from './run/db/ProfileDatabase'
 import { McpCredentials } from './run/mcp/McpCredentials'
@@ -688,6 +689,7 @@ export class MmsProfileServices {
       const episodes = new AgentEpisodeStore(this.threads.getThreadDir(thread.id))
       if (existsSync(episodes.path)) episodes.interruptOrphans()
     }
+    this.repairSubagentLineage()
     // A packaged GUI can start before the user opens a Git project. Keep the
     // worktree manager lazy in that state; project-bound operations still call
     // RepositoryContext.open() and fail clearly if their project is invalid.
@@ -697,6 +699,22 @@ export class MmsProfileServices {
     this.config.startWatching(() => {
       /* external edits reload sections; stores read on demand */
     })
+  }
+
+  /**
+   * Boot repair for subagent threads (thread metadata against the run store's lineage rows): a child
+   * whose creation died before its rows committed is discarded while empty, and older children get
+   * the lineage their metadata lacks. A failure here never blocks start.
+   */
+  private repairSubagentLineage(): void {
+    try {
+      const rows = this.runEngine.delegations.listLineage('subagent')
+      const known = new Set(rows.map((row) => row.threadId))
+      this.threads.discardOrphanedSubagents((threadId) => known.has(threadId))
+      backfillSubagentLineage(this.threads, rows)
+    } catch (error) {
+      console.warn('subagent lineage repair failed', { error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   private wireServiceEvents(): void {

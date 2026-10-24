@@ -1,6 +1,7 @@
 import { registerAppletIpc } from '../applets/registerAppletIpc'
 import { AppError, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
 import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
+import type { SubagentSummary } from '../../shared/subagents'
 import { CHAT_METHODS } from '../../shared/chats'
 import { CHAT_RESOURCE_METHODS } from '../../shared/chatResources'
 import { CHAT_NETWORK_METHODS } from '../../shared/chatsNetwork'
@@ -1288,6 +1289,10 @@ export function registerGuiIpc(
     if (!threadId) throw new Error('No active thread')
     const res = await guiMms.request<{ logs: string[] }>('agents.stop', { threadId, agentId })
     return res.logs
+  })
+  registerHandler('subagents:list', async (_e, threadId: string) => {
+    const res = await guiMms.request<{ subagents: SubagentSummary[] }>('subagents.list', { threadId })
+    return res.subagents
   })
   registerHandler('tasks:list', async () => {
     const threadId = currentPresentation().getActiveThreadId()

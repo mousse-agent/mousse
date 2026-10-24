@@ -232,6 +232,7 @@ export const PROTOCOL_METHODS = [
   'orchestrator.answerQuestions',
   'orchestrator.dismissQuestions',
   'orchestrator.pendingQuestions',
+  'subagents.list',
   'queue.list',
   'queue.enqueue',
   'queue.reorder',
@@ -423,6 +424,7 @@ export type ProtocolEventType =
   | 'projects.updated'
   | 'threads.updated'
   | 'thread.title-generation-failed'
+  | 'subagents.updated'
   | 'thread.message'
   | 'thread.message-updated'
   | 'thread.messages'

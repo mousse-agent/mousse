@@ -62,6 +62,7 @@ import {
   isObject
 } from './validators'
 import { PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
+import { buildSubagentView } from '../run/delegation/subagentView'
 import { asCliProviderInstanceId, parseCliConfigPatch } from '../providers/cliConfig'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
@@ -1000,6 +1001,24 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         return { pending: ctx.mms.questions.listPendingForThread(threadId) }
       }
       return { pending: ctx.mms.questions.listAllPending() }
+    }
+    case 'subagents.list': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const engine = ctx.mms.runEngine
+      return {
+        threadId,
+        subagents: buildSubagentView(
+          {
+            delegations: engine.delegations,
+            store: engine.store,
+            thread: (id) => ctx.mms.threads.getThread(id),
+            hasPendingQuestion: (id) => ctx.mms.questions.listPendingForThread(id).length > 0
+          },
+          threadId
+        )
+      }
     }
     case 'agents.list': {
       const p = isObject(params) ? params : {}
