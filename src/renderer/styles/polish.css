@@ -7,7 +7,8 @@
 /* ---------- Tooltips ---------- */
 .app-tooltip {
   position: fixed;
-  z-index: 4000;
+  /* Above floating menus and pickers, which sit on --z-floating. */
+  z-index: calc(var(--z-floating, 50000) + 1000);
   max-width: min(280px, calc(100vw - 16px));
   padding: 5px 8px;
   border: 1px solid var(--ui-line-strong);
@@ -32,6 +33,14 @@
   --ui-row-radius: 7px;
   --ui-control-radius: 8px;
   --ui-card-radius: 12px;
+
+  /* Dropdown menus (context menus, Select, model and effort menus): one
+     surface, one row inset, neutral states. */
+  --ui-menu-radius: 10px;
+  --ui-menu-pad: 4px;
+  --ui-menu-row-radius: 6px;
+  --ui-menu-row-x: 8px;
+  --ui-menu-drop: 0 16px 44px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.2);
 
   --ui-hover: color-mix(in srgb, var(--text-primary) 6%, transparent);
   --ui-pressed: color-mix(in srgb, var(--text-primary) 10%, transparent);
@@ -844,16 +853,16 @@ html .navigation-rail-menu,
 html .composer-workspace-menu,
 html .profile-menu {
   border: 1px solid var(--ui-line-strong);
-  border-radius: 10px;
-  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.2);
+  border-radius: var(--ui-menu-radius);
+  box-shadow: var(--ui-menu-drop);
 }
 
 html .threads-context-menu-item,
 html .navigation-rail-menu button,
 html .composer-workspace-menu .composer-workspace-menu-item {
   min-height: 30px;
-  padding: 5px 9px;
-  border-radius: 6px;
+  padding: 5px var(--ui-menu-row-x);
+  border-radius: var(--ui-menu-row-radius);
   font-size: 13px;
 }
 
@@ -884,13 +893,14 @@ html .settings-nav {
 }
 
 html .settings-nav {
-  gap: 4px;
+  gap: 1px;
 }
 
 html .settings-nav-item {
   position: relative;
-  min-height: 36px;
-  padding: 8px var(--ui-row-x);
+  min-height: 32px;
+  /* 6px around the 20px icon tile keeps the row at 32px. */
+  padding: 6px var(--ui-row-x);
   border: 0;
   border-radius: var(--ui-row-radius);
 }
@@ -903,31 +913,6 @@ html .settings-nav-item.active {
   background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised));
   box-shadow: var(--ui-specular);
   font-weight: 550;
-}
-
-html .settings-nav-item.active .settings-nav-item-icon {
-  color: var(--accent);
-}
-
-html .settings-section-icon {
-  border-color: rgba(var(--accent-rgb), 0.26);
-  background: rgba(var(--accent-rgb), 0.12);
-  color: var(--accent);
-}
-
-html .line-edit-card,
-html .usage-stat-card {
-  border-color: var(--ui-line-strong);
-  background: var(--ui-raised);
-}
-
-html .line-edit-card {
-  border-radius: var(--ui-card-radius);
-}
-
-html .usage-stat-card {
-  border-color: var(--ui-line);
-  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
 }
 
 /* ---------- Inputs ---------- */
@@ -972,7 +957,6 @@ textarea:focus {
   to { background-position: 50% 0, center top; }
 }
 
-html .line-edit-card,
 html .chat-dialog,
 html .chat-network-dialog,
 html .thread-hover-card {
@@ -984,7 +968,7 @@ html .threads-context-menu,
 html .navigation-rail-menu,
 html .composer-workspace-menu,
 html .profile-menu {
-  box-shadow: var(--ui-specular), 0 16px 44px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
 }
 
 .app .threads-sidebar-tab.active {
@@ -1009,8 +993,6 @@ html .profile-menu {
 .app .header-toggle-active,
 .app .header-actions .icon-btn-ghost.header-toggle-active,
 html .settings-nav-item.active,
-html .model-picker-row.highlighted,
-html .model-picker-row.active,
 html .composer-command-suggestion.selected {
   position: relative;
 }
@@ -1023,8 +1005,6 @@ html .composer-command-suggestion.selected {
 .app .header-toggle-active::before,
 .app .header-actions .icon-btn-ghost.header-toggle-active::before,
 html .settings-nav-item.active::before,
-html .model-picker-row.highlighted::before,
-html .model-picker-row.active::before,
 html .composer-command-suggestion.selected::before {
   content: "";
   position: absolute;
@@ -1046,8 +1026,6 @@ html .composer-command-suggestion.selected::before {
   100% { background-position: 100% 0; opacity: 0; }
 }
 
-html .model-picker-row.highlighted,
-html .model-picker-row.active,
 html .composer-command-suggestion.selected {
   background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised));
   box-shadow: var(--ui-specular);
@@ -1060,8 +1038,6 @@ html[data-theme='high-contrast'] .app .main-view-tab.active,
 html[data-theme='high-contrast'] .app .header-toggle-active,
 html[data-theme='high-contrast'] .app .header-actions .icon-btn-ghost.header-toggle-active,
 html[data-theme='high-contrast'] .settings-nav-item.active,
-html[data-theme='high-contrast'] .model-picker-row.highlighted,
-html[data-theme='high-contrast'] .model-picker-row.active,
 html[data-theme='high-contrast'] .composer-command-suggestion.selected {
   background: var(--ui-selected);
   box-shadow: none;
@@ -1075,8 +1051,6 @@ html[data-theme='high-contrast'] .app .threads-sidebar-tab.active::before,
 html[data-theme='high-contrast'] .app .header-toggle-active::before,
 html[data-theme='high-contrast'] .app .header-actions .icon-btn-ghost.header-toggle-active::before,
 html[data-theme='high-contrast'] .settings-nav-item.active::before,
-html[data-theme='high-contrast'] .model-picker-row.highlighted::before,
-html[data-theme='high-contrast'] .model-picker-row.active::before,
 html[data-theme='high-contrast'] .composer-command-suggestion.selected::before {
   content: none;
 }

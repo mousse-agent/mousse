@@ -46,9 +46,3 @@ export const updateActions = {
   install: () => apply(window.mousse.updates.install()),
   setChannel: (channel: UpdateChannel) => apply(window.mousse.updates.setChannel(channel))
 }
-
-/** Whether the rail shows the update button: something to download, install, or retry. */
-export function updateNeedsAttention(state: Pick<UpdateState, 'phase' | 'error'>): boolean {
-  return state.phase === 'available' || state.phase === 'downloading' || state.phase === 'downloaded' ||
-    state.phase === 'installing' || (state.phase === 'error' && state.error?.during !== 'check')
-}

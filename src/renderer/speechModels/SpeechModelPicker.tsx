@@ -68,9 +68,10 @@ export function useProviderSpeechModels(select: (providers: readonly LlmProvider
   return models
 }
 
-type LocalStates = Record<string, LocalModelState | undefined>
+export type LocalStates = Record<string, LocalModelState | undefined>
 
-function useLocalModelStates(api: LocalModelApi): [LocalStates, (status: LocalModelStatus) => void] {
+/** Download state of each local model of `api`, kept current from its status events. */
+export function useLocalModelStates(api: LocalModelApi): [LocalStates, (status: LocalModelStatus) => void] {
   const [states, setStates] = useState<LocalStates>({})
   const apply = (status: LocalModelStatus): void => setStates((current) => ({ ...current, [status.modelId]: status.state }))
   useEffect(() => {
@@ -241,27 +242,14 @@ function errorStatus(modelId: string, error: unknown): LocalModelStatus {
   return { modelId, state: { status: 'error', message: error instanceof Error ? error.message : String(error) } }
 }
 
-function LocalModelRow({
-  model,
-  api,
-  radioName,
-  state,
-  selected,
-  onStatus,
-  onSelect,
-  onDeleted
-}: {
-  model: LocalModelManifest
-  api: LocalModelApi
-  radioName: string
-  state: LocalModelState
-  selected: boolean
-  onStatus: (status: LocalModelStatus) => void
-  onSelect: () => void
+/** Download, cancel and delete for one local model. Results and errors arrive through `onStatus`. */
+export function useLocalModelActions(
+  model: LocalModelManifest,
+  api: LocalModelApi,
+  onStatus: (status: LocalModelStatus) => void,
   onDeleted?: (modelId: string) => void
-}) {
+): { download: () => void; cancel: () => void; remove: () => void; deleting: boolean; size: string } {
   const [deleting, setDeleting] = useState(false)
-  const downloaded = state.status === 'downloaded'
   const totalBytes = localModelBytes(model)
   const size = formatModelSize(totalBytes)
 
@@ -284,6 +272,30 @@ function LocalModelRow({
       .catch((error: unknown) => onStatus(errorStatus(model.id, error)))
       .finally(() => setDeleting(false))
   }
+  return { download, cancel, remove, deleting, size }
+}
+
+function LocalModelRow({
+  model,
+  api,
+  radioName,
+  state,
+  selected,
+  onStatus,
+  onSelect,
+  onDeleted
+}: {
+  model: LocalModelManifest
+  api: LocalModelApi
+  radioName: string
+  state: LocalModelState
+  selected: boolean
+  onStatus: (status: LocalModelStatus) => void
+  onSelect: () => void
+  onDeleted?: (modelId: string) => void
+}) {
+  const { download, cancel, remove, deleting, size } = useLocalModelActions(model, api, onStatus, onDeleted)
+  const downloaded = state.status === 'downloaded'
 
   return (
     <li className="read-aloud-option" data-downloaded={downloaded || undefined}>
@@ -344,6 +356,6 @@ function LocalModelRow({
   )
 }
 
-function downloadPercent(state: Extract<LocalModelState, { status: 'downloading' }>): number {
+export function downloadPercent(state: Extract<LocalModelState, { status: 'downloading' }>): number {
   return state.totalBytes > 0 ? Math.min(100, Math.floor((state.receivedBytes / state.totalBytes) * 100)) : 0
 }

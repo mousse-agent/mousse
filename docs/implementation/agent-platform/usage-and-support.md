@@ -48,7 +48,7 @@ The Run panel shows the durable execution state and pending approvals/inputs. Ch
 
 ## Skills and MCP
 
-Open **Settings → Integrations**. Use **Add skill** to write a Skill or import supported Markdown/package/folder content. The Skill editor reuses Source/Preview editing. Save and enable the Skill for the intended actor.
+Open **Settings → Skills & MCP**. Use **Add skill** to write a Skill or import supported Markdown/package/folder content. The Skill editor reuses Source/Preview editing. Save and enable the Skill for the intended actor.
 
 Use **Add MCP** to configure stdio or a supported remote transport. Configure authentication, explicitly test the connection, and enable it for the intended actor. The connection panel distinguishes configured, connecting, authentication-required, verified, failed, and cancelled states. A failed or cancelled login is not presented as a working connection.
 

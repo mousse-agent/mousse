@@ -1,6 +1,67 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
-type Anchor = { top: number; left: number; width: number; height: number }
+/**
+ * The box a tooltip is placed against. `left` side tooltips sit to the left
+ * of the box, vertically centred on it; the default sits centred above.
+ */
+type Anchor = {
+  top: number
+  left: number
+  width: number
+  height: number
+  side?: 'left'
+}
+
+const GAP = 8
+const EDGE = 8
+
+/**
+ * Opt-in: a container marked `data-tooltip-placement="outside-left"` shows
+ * the tooltips of elements inside it just outside its left edge, vertically
+ * centred on the hovered element. The model picker's provider rail uses this
+ * so the tooltip sits beside the picker instead of over it.
+ */
+function anchorFor(element: HTMLElement): Anchor {
+  const rect = element.getBoundingClientRect()
+  const container = element.closest<HTMLElement>('[data-tooltip-placement="outside-left"]')
+  if (!container) return { top: rect.top, left: rect.left, width: rect.width, height: rect.height }
+  const outer = container.getBoundingClientRect()
+  return { top: rect.top, left: outer.left, width: outer.width, height: rect.height, side: 'left' }
+}
+
+/**
+ * Places a tooltip of size `box` inside the viewport. By default it is
+ * centred above the anchor. A `left` anchor puts it left of the anchor,
+ * vertically centred, and flips it right only when the left has no room.
+ */
+export function placeTooltip(
+  anchor: Anchor,
+  box: { width: number; height: number },
+  viewport: { width: number; height: number }
+): { top: number; left: number } {
+  const clampTop = (top: number) =>
+    Math.min(Math.max(EDGE, top), Math.max(EDGE, viewport.height - box.height - EDGE))
+  const clampLeft = (left: number) =>
+    Math.min(Math.max(EDGE, left), Math.max(EDGE, viewport.width - box.width - EDGE))
+
+  if (anchor.side === 'left') {
+    const left = anchor.left - GAP - box.width
+    const right = anchor.left + anchor.width + GAP
+    const fitsLeft = left >= EDGE
+    const fitsRight = right + box.width <= viewport.width - EDGE
+    return {
+      top: clampTop(anchor.top + anchor.height / 2 - box.height / 2),
+      left: clampLeft(!fitsLeft && fitsRight ? right : left)
+    }
+  }
+
+  let top = anchor.top - box.height - GAP
+  if (top < EDGE) top = anchor.top + anchor.height + GAP
+  return {
+    top: clampTop(top),
+    left: clampLeft(anchor.left + anchor.width / 2 - box.width / 2)
+  }
+}
 
 const SHOW_DELAY_MS = 380
 
@@ -21,15 +82,7 @@ export function AppTooltip() {
     const tip = tipRef.current
     if (!tip || !anchor || !text) return
     const box = tip.getBoundingClientRect()
-    const gap = 8
-    let top = anchor.top - box.height - gap
-    let left = anchor.left + anchor.width / 2 - box.width / 2
-    if (top < 8) top = anchor.top + anchor.height + gap
-    left = Math.min(Math.max(8, left), window.innerWidth - box.width - 8)
-    if (top + box.height > window.innerHeight - 8) {
-      top = Math.max(8, window.innerHeight - box.height - 8)
-    }
-    setPlace({ top, left })
+    setPlace(placeTooltip(anchor, box, { width: window.innerWidth, height: window.innerHeight }))
   }, [anchor, text])
 
   useEffect(() => {
@@ -81,9 +134,8 @@ export function AppTooltip() {
       liftTitle(element)
       hostRef.current = element
       pendingRef.current = null
-      const rect = element.getBoundingClientRect()
       setText(value)
-      setAnchor({ top: rect.top, left: rect.left, width: rect.width, height: rect.height })
+      setAnchor(anchorFor(element))
       setPlace(null)
     }
 
