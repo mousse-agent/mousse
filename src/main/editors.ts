@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join, win32 } from 'node:path'
-import { app, shell } from 'electron'
+import { app, nativeImage, shell } from 'electron'
 import type { EditorInfo } from '../shared/types'
 
 interface EditorDefinition {
@@ -13,7 +13,7 @@ interface EditorDefinition {
   apps: readonly string[]
   /** Command-line launchers looked up on PATH (Linux and Windows). */
   cli: readonly string[]
-  /** Windows install locations relative to `%LOCALAPPDATA%\Programs`. */
+  /** Windows install locations relative to `%LOCALAPPDATA%\Programs` and the Program Files folders. */
   windows?: readonly string[]
   macOnly?: boolean
 }
@@ -31,11 +31,20 @@ export const EDITOR_CATALOG: readonly EditorDefinition[] = [
     cli: ['code-insiders'],
     windows: ['Microsoft VS Code Insiders\\Code - Insiders.exe']
   },
+  { id: 'antigravity', label: 'Antigravity', apps: ['Antigravity', 'Antigravity IDE'], cli: ['antigravity'], windows: ['Antigravity\\Antigravity.exe'] },
+  { id: 'kiro', label: 'Kiro', apps: ['Kiro'], cli: ['kiro'], windows: ['Kiro\\Kiro.exe'] },
+  { id: 'trae', label: 'Trae', apps: ['Trae'], cli: ['trae'], windows: ['Trae\\Trae.exe'] },
   { id: 'sublime', label: 'Sublime Text', apps: ['Sublime Text'], cli: ['subl'] },
+  { id: 'nova', label: 'Nova', apps: ['Nova'], cli: [], macOnly: true },
   { id: 'idea', label: 'IntelliJ IDEA', apps: ['IntelliJ IDEA', 'IntelliJ IDEA Ultimate', 'IntelliJ IDEA CE'], cli: ['idea'] },
   { id: 'webstorm', label: 'WebStorm', apps: ['WebStorm'], cli: ['webstorm'] },
   { id: 'pycharm', label: 'PyCharm', apps: ['PyCharm', 'PyCharm CE', 'PyCharm Professional Edition'], cli: ['pycharm'] },
   { id: 'goland', label: 'GoLand', apps: ['GoLand'], cli: ['goland'] },
+  { id: 'rustrover', label: 'RustRover', apps: ['RustRover'], cli: ['rustrover'] },
+  { id: 'clion', label: 'CLion', apps: ['CLion'], cli: ['clion'] },
+  { id: 'rider', label: 'Rider', apps: ['Rider'], cli: ['rider'] },
+  { id: 'phpstorm', label: 'PhpStorm', apps: ['PhpStorm'], cli: ['phpstorm'] },
+  { id: 'android-studio', label: 'Android Studio', apps: ['Android Studio'], cli: ['studio'] },
   { id: 'xcode', label: 'Xcode', apps: ['Xcode'], cli: [], macOnly: true }
 ]
 
@@ -54,6 +63,8 @@ export interface EditorDetectionEnv {
   platform: NodeJS.Platform
   home: string
   localAppData?: string
+  /** `%ProgramFiles%` and `%ProgramFiles(x86)%`, for system-wide installs. */
+  programFiles?: readonly string[]
   exists: (path: string) => boolean
   /** Resolves a command name to an executable on PATH, or null. */
   findOnPath: (name: string) => string | null
@@ -80,9 +91,11 @@ export function detectEditors(env: EditorDetectionEnv): DetectedEditor[] {
     }
     if (definition.macOnly) continue
     let launcherPath: string | null = null
-    if (env.platform === 'win32' && env.localAppData) {
-      const programs = win32.join(env.localAppData, 'Programs')
-      launcherPath = (definition.windows ?? []).map((relative) => win32.join(programs, relative)).find((candidate) => env.exists(candidate)) ?? null
+    if (env.platform === 'win32') {
+      const roots = [...(env.localAppData ? [win32.join(env.localAppData, 'Programs')] : []), ...(env.programFiles ?? [])]
+      launcherPath = (definition.windows ?? [])
+        .flatMap((relative) => roots.map((root) => win32.join(root, relative)))
+        .find((candidate) => env.exists(candidate)) ?? null
     }
     for (const name of definition.cli) {
       if (launcherPath) break
@@ -116,6 +129,7 @@ function realEnv(): EditorDetectionEnv {
     platform,
     home: homedir(),
     localAppData: process.env.LOCALAPPDATA,
+    programFiles: [process.env.ProgramFiles, process.env['ProgramFiles(x86)']].filter((value): value is string => Boolean(value)),
     exists: existsSync,
     findOnPath: (name) => scanPath(name, pathEnv, platform, existsSync)
   }
@@ -124,9 +138,19 @@ function realEnv(): EditorDetectionEnv {
 let cache: { detected: DetectedEditor[]; infos: EditorInfo[] } | null = null
 let pending: Promise<{ detected: DetectedEditor[]; infos: EditorInfo[] }> | null = null
 
+/** 32px so the 16px icon stays sharp on Retina displays. */
+const ICON_SIZE = { width: 32, height: 32 }
+
 async function iconFor(appPath: string): Promise<string | undefined> {
+  // getFileIcon returns the generic bundle icon for apps; the Quick Look thumbnail is the app's own.
   try {
-    const image = await app.getFileIcon(appPath, { size: 'small' })
+    const image = await nativeImage.createThumbnailFromPath(appPath, ICON_SIZE)
+    if (!image.isEmpty()) return image.toDataURL()
+  } catch {
+    // Fall through to the file icon.
+  }
+  try {
+    const image = await app.getFileIcon(appPath, { size: 'normal' })
     return image.isEmpty() ? undefined : image.toDataURL()
   } catch {
     return undefined

@@ -19,7 +19,6 @@ import {
 } from '../src/renderer/components/sideCard/gitSectionLogic'
 import {
   EMPTY_GIT_ENTRY,
-  anyTurnEnded,
   checkoutGitBranch,
   commitGitChanges,
   refreshGitStatus,
@@ -27,6 +26,7 @@ import {
   useGitStatusStore,
   type GitStatusView
 } from '../src/renderer/stores/gitStatusStore'
+import { anyTurnEnded } from '../src/renderer/lib/turnEnded'
 import type {
   GitBranchInfo,
   GitCommit,

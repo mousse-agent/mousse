@@ -923,6 +923,8 @@ export interface GitStatusSnapshot {
   ahead: number
   behind: number
   changes: GitFileChange[]
+  /** The repository has at least one remote to push to. */
+  hasRemote?: boolean
 }
 
 export interface GitCommit {
@@ -966,7 +968,8 @@ export interface GitPullRequestInfo {
 
 export type GitPullRequestLookup =
   | { state: 'found'; pullRequest: GitPullRequestInfo }
-  | { state: 'none'; isDefaultBranch: boolean }
+  /** isDefaultBranch is null when the repository's default branch could not be read. */
+  | { state: 'none'; isDefaultBranch: boolean | null }
   | {
       state: 'unavailable'
       reason: 'gh-missing' | 'unauthenticated' | 'not-github' | 'no-branch' | 'error'

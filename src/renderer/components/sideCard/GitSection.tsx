@@ -13,30 +13,38 @@ import { FloatingPortal, useFloatingPosition, type FloatingPlacement } from '../
 import { openSurface } from '../../lib/surfaces'
 import { useOutsideDismiss } from '../../hooks/useOutsideDismiss'
 import { useActiveProjectLocation } from '../../hooks/useActiveProjectPath'
+import { useTransientError } from '../../hooks/useTransientError'
 import {
   CommitPushError,
   checkoutGitBranch,
   commitGitChanges,
+  initGitRepository,
   pushGitBranch,
   useGitStatus,
   type GitStatusView
 } from '../../stores/gitStatusStore'
 import { createPullRequestForBranch, usePullRequest } from '../../stores/pullRequestStore'
 import type { GitCommit, GitPullRequestLookup } from '../../../shared/types'
+import { Switch } from '../settings/SettingsRow'
+import { menuRowLabel } from './deviceMenu'
 import { SideCardSection, type SideCardSectionContext } from './SideCardSection'
 import {
-  EMPTY_COMMIT_DRAFT,
   branchChoices,
   branchLabel,
   branchSearchAria,
+  canInitRepository,
   changedFileCount,
   changesSummary,
   clearAmendPrefill,
   commitButtonLabels,
+  commitFormFor,
   commitHint,
   commitMenuState,
+  commitScopeKey,
   diffStatLabel,
+  emptyCommitForm,
   formatCommitLine,
+  gitActionLock,
   gitCollapsedLabel,
   gitErrorMessage,
   prefillAmendDraft,
@@ -45,13 +53,13 @@ import {
   pushFailedMessage,
   untrackedFileCount,
   type CommitDraft,
+  type CommitForm,
+  type GitAction,
+  type GitActionLock,
   type PullRequestFoundRow,
   type PushButtonModel
 } from './gitSectionLogic'
 import './gitSection.css'
-
-/** How long an inline action error stays before it clears itself. */
-const ERROR_VISIBLE_MS = 6000
 
 interface CardPopoverProps {
   open: boolean
@@ -121,11 +129,13 @@ function CardPopover({
 interface BranchPickerProps {
   status: GitStatusView['status']
   branches: GitStatusView['branches']
+  /** A checkout is running. */
   busy: boolean
+  lock: GitActionLock
   onPick: (branch: string) => void
 }
 
-function BranchPicker({ status, branches, busy, onPick }: BranchPickerProps) {
+function BranchPicker({ status, branches, busy, lock, onPick }: BranchPickerProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
@@ -160,12 +170,12 @@ function BranchPicker({ status, branches, busy, onPick }: BranchPickerProps) {
         ref={triggerRef}
         type="button"
         className="side-card-git-branch"
-        title={busy ? 'Switching branch…' : undefined}
+        title={lock.reason ?? (busy ? 'Switching branch…' : undefined)}
         aria-label={`Branch ${label}`}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-busy={busy}
-        disabled={busy || !status?.isRepo}
+        disabled={lock.disabled || !status?.isRepo}
         onClick={toggle}
       >
         <GitBranch size={13} strokeWidth={1.8} aria-hidden="true" />
@@ -243,8 +253,14 @@ function BranchPicker({ status, branches, busy, onPick }: BranchPickerProps) {
 interface CommitButtonProps {
   path: string
   projectId: string | null
+  branch: string | null
   fileCount: number
   commits: GitCommit[]
+  /** Another Git action is running, so nothing here may start. */
+  lock: GitActionLock
+  /** Claims the section's one running action; false when another already runs. */
+  onBegin: () => boolean
+  onEnd: () => void
   onActionError: (message: string) => void
 }
 
@@ -254,28 +270,47 @@ interface CommitWork {
   phase: 'committing' | 'pushing'
 }
 
-function CommitButton({ path, projectId, fileCount, commits, onActionError }: CommitButtonProps) {
+function CommitButton({ path, projectId, branch, fileCount, commits, lock, onBegin, onEnd, onActionError }: CommitButtonProps) {
   const [open, setOpen] = useState(false)
-  const [draft, setDraft] = useState<CommitDraft>(EMPTY_COMMIT_DRAFT)
-  const [amendChecked, setAmendChecked] = useState(false)
+  const scope = commitScopeKey(branch, commits)
+  const [storedForm, setForm] = useState<CommitForm>(() => emptyCommitForm(scope))
   const [work, setWork] = useState<CommitWork | null>(null)
   const [error, setError] = useState<string | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const messageRef = useRef<HTMLTextAreaElement>(null)
   const close = useCallback(() => setOpen(false), [])
+  // Text and the amend choice belong to one branch at one HEAD; on another they are gone.
+  const { draft, amendChecked } = commitFormFor(storedForm, scope)
+  const setDraft = useCallback((change: (draft: CommitDraft) => CommitDraft) => {
+    setForm((previous) => {
+      const form = commitFormFor(previous, scope)
+      const next = change(form.draft)
+      return next === form.draft && form === previous ? previous : { ...form, draft: next }
+    })
+  }, [scope])
+  const setAmendChecked = useCallback((checked: boolean) => {
+    setForm((previous) => ({ ...commitFormFor(previous, scope), amendChecked: checked }))
+  }, [scope])
   const menu = commitMenuState(commits, fileCount, amendChecked)
   const { amend } = menu
   const trimmed = draft.message.trim()
   const labels = commitButtonLabels(amend)
-  const canSubmit = Boolean(trimmed) && !work
+  const blocked = lock.reason !== null
+  const canSubmit = Boolean(trimmed) && !work && !blocked
   // Amend with an empty message starts from the last commit's message, once: clearing it by hand sticks.
-  const needsPrefill = amend && open && !trimmed && draft.prefilled === null
+  const needsPrefill = amend && open && !work && !trimmed && draft.prefilled === null
 
   // The changes may be committed elsewhere while the popover is open.
   useEffect(() => {
     if (!menu.triggerEnabled) setOpen(false)
   }, [menu.triggerEnabled])
 
+  // Amend is the only possible commit: keep it on, so files changing under the open popover do not drop it.
+  useEffect(() => {
+    if (open && menu.forced) setAmendChecked(true)
+  }, [open, menu.forced, setAmendChecked])
+
+  // The prefill is the message of the HEAD it was read for; a different HEAD cancels the read.
   useEffect(() => {
     if (!needsPrefill) return
     let current = true
@@ -284,19 +319,18 @@ function CommitButton({ path, projectId, fileCount, commits, onActionError }: Co
       () => undefined
     )
     return () => { current = false }
-  }, [needsPrefill, path, projectId])
+  }, [needsPrefill, path, projectId, scope, setDraft])
 
   useEffect(() => {
     if (!amend) setDraft(clearAmendPrefill)
-  }, [amend])
+  }, [amend, setDraft])
 
   const submit = async (push: boolean) => {
-    if (!canSubmit) return
+    if (!canSubmit || !onBegin()) return
     setWork({ push, phase: 'committing' })
     setError(null)
     const finish = () => {
-      setDraft(EMPTY_COMMIT_DRAFT)
-      setAmendChecked(false)
+      setForm(emptyCommitForm(scope))
       setOpen(false)
     }
     try {
@@ -315,6 +349,7 @@ function CommitButton({ path, projectId, fileCount, commits, onActionError }: Co
       }
     } finally {
       setWork(null)
+      onEnd()
     }
   }
 
@@ -327,10 +362,10 @@ function CommitButton({ path, projectId, fileCount, commits, onActionError }: Co
         ref={triggerRef}
         type="button"
         className="side-card-git-commit-button"
-        title={menu.triggerTitle}
+        title={lock.reason ?? menu.triggerTitle}
         aria-haspopup="dialog"
         aria-expanded={open}
-        disabled={!menu.triggerEnabled}
+        disabled={!menu.triggerEnabled || blocked}
         onClick={() => {
           setError(null)
           setOpen((value) => !value)
@@ -356,7 +391,10 @@ function CommitButton({ path, projectId, fileCount, commits, onActionError }: Co
           placeholder="Commit message"
           aria-label="Commit message"
           disabled={Boolean(work)}
-          onChange={(event) => setDraft({ message: event.target.value, prefilled: draft.prefilled })}
+          onChange={(event) => {
+            const message = event.target.value
+            setDraft((value) => ({ message, prefilled: value.prefilled }))
+          }}
           onKeyDown={(event) => {
             if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
               event.preventDefault()
@@ -365,13 +403,13 @@ function CommitButton({ path, projectId, fileCount, commits, onActionError }: Co
           }}
         />
         <label className="side-card-git-amend" data-disabled={menu.amendDisabled} title={menu.amendTitle ?? undefined}>
-          <input
-            type="checkbox"
-            checked={amend}
-            disabled={menu.amendDisabled || Boolean(work)}
-            onChange={(event) => setAmendChecked(event.target.checked)}
-          />
           <span>Amend last commit</span>
+          <Switch
+            checked={amend}
+            label="Amend last commit"
+            disabled={menu.amendDisabled || Boolean(work)}
+            onChange={setAmendChecked}
+          />
         </label>
         {error && (
           <p className="side-card-git-error" role="alert" title={error}>
@@ -406,19 +444,22 @@ function CommitButton({ path, projectId, fileCount, commits, onActionError }: Co
 
 interface PushButtonProps {
   model: PushButtonModel
+  /** A push is running. */
   busy: boolean
+  lock: GitActionLock
   onPush: () => void
 }
 
-function PushButton({ model, busy, onPush }: PushButtonProps) {
+function PushButton({ model, busy, lock, onPush }: PushButtonProps) {
+  const name = model.count === null ? undefined : model.title
   return (
     <button
       type="button"
       className="side-card-git-push"
-      title={model.title}
-      aria-label={model.count === null ? undefined : model.title}
+      title={lock.reason ?? model.title}
+      aria-label={lock.reason ? menuRowLabel(name ?? model.label, lock.reason) : name}
       aria-busy={busy}
-      disabled={busy}
+      disabled={lock.disabled}
       onClick={onPush}
     >
       {busy ? 'Pushing…' : model.label}
@@ -458,66 +499,101 @@ interface GitSectionViewProps {
   pullRequest?: GitPullRequestLookup | null
   /** When set, the section collapses to this one muted line. */
   collapsedLabel: string | null
+  /** The folder is not a repository, so the collapsed section offers to make it one. */
+  canInitialize?: boolean
   /** Clock for commit ages; tests pin it. */
   now?: number
 }
 
 /** The section's markup, given its data. `GitSection` supplies the data. */
-export function GitSectionView({ threadId, projectId, path, git, pullRequest = null, collapsedLabel, now }: GitSectionViewProps) {
-  const [checkoutBusy, setCheckoutBusy] = useState(false)
-  const [pushBusy, setPushBusy] = useState(false)
-  const [creatingPullRequest, setCreatingPullRequest] = useState(false)
-  const [actionError, setActionError] = useState<string | null>(null)
+export function GitSectionView({ threadId, projectId, path, git, pullRequest = null, collapsedLabel, canInitialize = false, now }: GitSectionViewProps) {
+  const [running, setRunning] = useState<GitAction | null>(null)
+  const runningRef = useRef<GitAction | null>(null)
+  const [actionError, setActionError] = useTransientError()
 
-  useEffect(() => {
-    if (!actionError) return
-    const timer = window.setTimeout(() => setActionError(null), ERROR_VISIBLE_MS)
-    return () => window.clearTimeout(timer)
-  }, [actionError])
+  // One Git action at a time: the ref answers a second click before the state has rendered.
+  const begin = (action: GitAction) => {
+    if (runningRef.current) return false
+    runningRef.current = action
+    setRunning(action)
+    return true
+  }
+  const end = () => {
+    runningRef.current = null
+    setRunning(null)
+  }
 
   if (collapsedLabel !== null || !path) {
+    const initialize = async () => {
+      if (!path || !begin('init')) return
+      setActionError(null)
+      try {
+        await initGitRepository(path, projectId ?? undefined)
+      } catch (error) {
+        setActionError(gitErrorMessage(error))
+      } finally {
+        end()
+      }
+    }
+    const initLock = gitActionLock(running, 'init')
     return (
       <div className="side-card-section side-card-git-collapsed" data-thread-id={threadId ?? undefined}>
         <p className="side-card-git-quiet">{collapsedLabel ?? 'Git: no project folder'}</p>
+        {canInitialize && path && (
+          <button
+            type="button"
+            className="side-card-git-init"
+            title={initLock.reason ?? undefined}
+            aria-busy={running === 'init'}
+            disabled={initLock.disabled}
+            onClick={() => void initialize()}
+          >
+            {running === 'init' ? 'Initializing…' : 'Initialize repository'}
+          </button>
+        )}
+        {actionError && (
+          <p className="side-card-git-error" role="alert" title={actionError}>
+            {actionError}
+          </p>
+        )}
       </div>
     )
   }
 
   const checkout = async (branch: string) => {
-    setCheckoutBusy(true)
+    if (!begin('checkout')) return
     setActionError(null)
     try {
       await checkoutGitBranch(path, branch, projectId ?? undefined)
     } catch (error) {
       setActionError(gitErrorMessage(error))
     } finally {
-      setCheckoutBusy(false)
+      end()
     }
   }
 
   const push = async () => {
-    setPushBusy(true)
+    if (!begin('push')) return
     setActionError(null)
     try {
       await pushGitBranch(path, projectId ?? undefined)
     } catch (error) {
       setActionError(gitErrorMessage(error))
     } finally {
-      setPushBusy(false)
+      end()
     }
   }
 
   const branch = git.status?.branch ?? null
   const createPullRequest = async () => {
-    if (!branch) return
-    setCreatingPullRequest(true)
+    if (!branch || !begin('pullRequest')) return
     setActionError(null)
     try {
       await createPullRequestForBranch(path, branch, projectId ?? undefined)
     } catch (error) {
       setActionError(gitErrorMessage(error))
     } finally {
-      setCreatingPullRequest(false)
+      end()
     }
   }
 
@@ -526,26 +602,45 @@ export function GitSectionView({ threadId, projectId, path, git, pullRequest = n
   const fileCount = changedFileCount(git.status)
   const pushButton = pushButtonModel(git.status, git.commits.length)
   const prRow = pullRequestRow(pullRequest, git.status)
+  const createLock = gitActionLock(running, 'pullRequest')
 
   return (
     <SideCardSection title="Git" threadId={threadId}>
       <div className="side-card-git-row">
-        <BranchPicker status={git.status} branches={git.branches} busy={checkoutBusy} onPick={(name) => void checkout(name)} />
-        {pushButton && <PushButton model={pushButton} busy={pushBusy} onPush={() => void push()} />}
-        <CommitButton path={path} projectId={projectId} fileCount={fileCount} commits={git.commits} onActionError={setActionError} />
+        <BranchPicker
+          status={git.status}
+          branches={git.branches}
+          busy={running === 'checkout'}
+          lock={gitActionLock(running, 'checkout')}
+          onPick={(name) => void checkout(name)}
+        />
+        {pushButton && (
+          <PushButton model={pushButton} busy={running === 'push'} lock={gitActionLock(running, 'push')} onPush={() => void push()} />
+        )}
+        <CommitButton
+          path={path}
+          projectId={projectId}
+          branch={branch}
+          fileCount={fileCount}
+          commits={git.commits}
+          lock={gitActionLock(running, 'commit')}
+          onBegin={() => begin('commit')}
+          onEnd={end}
+          onActionError={setActionError}
+        />
       </div>
       {prRow?.kind === 'found' && <PullRequestLink row={prRow} />}
       {prRow?.kind === 'create' && (
         <button
           type="button"
           className="side-card-git-pr-create"
-          title={prRow.hint ?? undefined}
-          aria-disabled={!prRow.enabled || creatingPullRequest}
+          title={createLock.reason ?? prRow.hint ?? undefined}
+          aria-disabled={!prRow.enabled || createLock.disabled}
           onClick={() => {
-            if (prRow.enabled && !creatingPullRequest) void createPullRequest()
+            if (prRow.enabled && !createLock.disabled) void createPullRequest()
           }}
         >
-          {creatingPullRequest ? 'Opening…' : 'Create PR'}
+          {running === 'pullRequest' ? 'Opening…' : 'Create PR'}
         </button>
       )}
       {actionError && (
@@ -585,13 +680,14 @@ export function GitSection({ threadId }: SideCardSectionContext) {
   // A project-less thread has no folder of its own to show Git state for.
   const path = projectId ? projectPath : null
   const git = useGitStatus(path, projectId)
-  const collapsedLabel = gitCollapsedLabel({
+  const collapse = {
     hasProject: projectId !== null,
     pathPending: loading,
     hasPath: path !== null,
     loaded: git.loaded,
     status: git.status
-  })
+  }
+  const collapsedLabel = gitCollapsedLabel(collapse)
   // No branch, or not a repository: nothing to look up.
   const pullRequest = usePullRequest(path, git.status?.isRepo ? git.status.branch : null, projectId)
   return (
@@ -602,6 +698,7 @@ export function GitSection({ threadId }: SideCardSectionContext) {
       git={git}
       pullRequest={pullRequest}
       collapsedLabel={collapsedLabel}
+      canInitialize={canInitRepository(collapse)}
     />
   )
 }

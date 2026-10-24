@@ -5,10 +5,16 @@ import { GitSectionView } from '../src/renderer/components/sideCard/GitSection'
 import {
   EMPTY_COMMIT_DRAFT,
   canAmendCommit,
+  canInitRepository,
+  GIT_BUSY_REASON,
   clearAmendPrefill,
   commitButtonLabels,
+  commitFormFor,
   commitHint,
   commitMenuState,
+  commitScopeKey,
+  emptyCommitForm,
+  gitActionLock,
   prefillAmendDraft,
   pullRequestRow,
   pushButtonModel,
@@ -127,8 +133,12 @@ describe('pull request row', () => {
     expect(pullRequestRow({ state: 'none', isDefaultBranch: false }, status({ tracking: 'none', upstream: null }))).toEqual({ kind: 'create', enabled: false, hint })
   })
 
-  it('shows nothing on the default branch or when the lookup is unavailable', () => {
+  it('shows nothing on the default branch, or when it is unknown', () => {
     expect(pullRequestRow({ state: 'none', isDefaultBranch: true }, status())).toBeNull()
+    expect(pullRequestRow({ state: 'none', isDefaultBranch: null }, status())).toBeNull()
+  })
+
+  it('shows nothing when the lookup is unavailable', () => {
     for (const reason of ['gh-missing', 'unauthenticated', 'not-github', 'no-branch', 'error'] as const) {
       expect(pullRequestRow({ state: 'unavailable', reason, message: 'x' }, status())).toBeNull()
     }
@@ -152,6 +162,13 @@ describe('push button', () => {
       title: 'Push this branch and track it on the remote'
     })
     expect(pushButtonModel(status({ tracking: 'none', upstream: null }), 0)).toBeNull()
+  })
+
+  it('publishes only to a remote that exists', () => {
+    const local = status({ tracking: 'none', upstream: null })
+    expect(pushButtonModel({ ...local, hasRemote: true }, 2)?.label).toBe('Publish')
+    expect(pushButtonModel(local, 2)?.label).toBe('Publish')
+    expect(pushButtonModel({ ...local, hasRemote: false }, 2)).toBeNull()
   })
 
   it('has no button for a pushed, detached or unborn branch', () => {
@@ -203,6 +220,18 @@ describe('commit menu state', () => {
     expect(commitMenuState([], 2, true)).toMatchObject({ amend: false, amendDisabled: true, amendTitle: 'No commits yet' })
   })
 
+  it('reports amend as forced only when it is the one possible commit', () => {
+    expect(commitMenuState([commit()], 0, false).forced).toBe(true)
+    expect(commitMenuState([commit()], 1, false).forced).toBe(false)
+    expect(commitMenuState([commit({ onRemote: true })], 0, false).forced).toBe(false)
+  })
+
+  it('keeps amend on once it was set, so files appearing later do not drop it', () => {
+    // The popover stores the choice while amend is forced; with changes it stays checked and can be turned off.
+    expect(commitMenuState([commit()], 2, true)).toMatchObject({ amend: true, forced: false, amendDisabled: false })
+    expect(commitMenuState([commit()], 2, false).amend).toBe(false)
+  })
+
   it('names the commit it would amend', () => {
     expect(commitMenuState([commit()], 1, false).shortHash).toBe('a1b2c3d')
     expect(commitMenuState([], 1, false).shortHash).toBeNull()
@@ -215,6 +244,77 @@ describe('commit menu state', () => {
     expect(commitHint(true, 'a1b2c3d', 2)).toBe('Amends a1b2c3d · stages 2 files')
     expect(commitButtonLabels(false)).toEqual({ commit: 'Commit', commitAndPush: 'Commit and push' })
     expect(commitButtonLabels(true)).toEqual({ commit: 'Amend', commitAndPush: 'Amend and push' })
+  })
+})
+
+describe('commit form scope', () => {
+  const head = commit()
+  const other = commit({ hash: 'ffffffffffffffffffffffffffffffffffffffff', shortHash: 'fffffff' })
+
+  it('differs by branch and by HEAD commit', () => {
+    const key = commitScopeKey('feature/login', [head])
+    expect(commitScopeKey('feature/login', [head, other])).toBe(key)
+    expect(commitScopeKey('main', [head])).not.toBe(key)
+    expect(commitScopeKey('feature/login', [other, head])).not.toBe(key)
+    expect(commitScopeKey(null, [])).toBe(commitScopeKey(null, []))
+  })
+
+  it('keeps the text and amend choice while the scope is unchanged', () => {
+    const scope = commitScopeKey('feature/login', [head])
+    const form = { scope, draft: { message: 'Typed here', prefilled: null }, amendChecked: true }
+    expect(commitFormFor(form, scope)).toBe(form)
+  })
+
+  it('drops text typed on one branch when the branch changes', () => {
+    const form = { ...emptyCommitForm(commitScopeKey('a', [head])), draft: { message: 'Only for a', prefilled: null }, amendChecked: true }
+    const onB = commitFormFor(form, commitScopeKey('b', [head]))
+    expect(onB.draft.message).toBe('')
+    expect(onB.amendChecked).toBe(false)
+  })
+
+  it('drops an unedited prefill and an edited message when HEAD moves', () => {
+    const scope = commitScopeKey('a', [head])
+    const prefilled = { ...emptyCommitForm(scope), draft: { message: 'Fix login', prefilled: 'Fix login' }, amendChecked: true }
+    const edited = { ...emptyCommitForm(scope), draft: { message: 'Fix login, reworded', prefilled: 'Fix login' }, amendChecked: true }
+    const moved = commitScopeKey('a', [other])
+    expect(commitFormFor(prefilled, moved)).toEqual(emptyCommitForm(moved))
+    expect(commitFormFor(edited, moved)).toEqual(emptyCommitForm(moved))
+  })
+})
+
+describe('initialize repository', () => {
+  const input = { hasProject: true, pathPending: false, hasPath: true, loaded: true, status: status({ isRepo: false, branch: null }) }
+
+  it('is offered for a known folder that Git says is not a repository', () => {
+    expect(canInitRepository(input)).toBe(true)
+  })
+
+  it('is not offered for a repository, or while the folder or its status is unknown', () => {
+    expect(canInitRepository({ ...input, status: status() })).toBe(false)
+    expect(canInitRepository({ ...input, hasProject: false })).toBe(false)
+    expect(canInitRepository({ ...input, pathPending: true })).toBe(false)
+    expect(canInitRepository({ ...input, hasPath: false })).toBe(false)
+    expect(canInitRepository({ ...input, loaded: false })).toBe(false)
+    expect(canInitRepository({ ...input, status: null })).toBe(false)
+  })
+})
+
+describe('git action lock', () => {
+  it('leaves every control enabled while nothing runs', () => {
+    for (const action of ['checkout', 'commit', 'push', 'pullRequest'] as const) {
+      expect(gitActionLock(null, action)).toEqual({ disabled: false, reason: null })
+    }
+  })
+
+  it('disables the other controls with the reason while an action runs', () => {
+    expect(GIT_BUSY_REASON).toBe('Another Git action is running')
+    expect(gitActionLock('commit', 'checkout')).toEqual({ disabled: true, reason: GIT_BUSY_REASON })
+    expect(gitActionLock('push', 'pullRequest')).toEqual({ disabled: true, reason: GIT_BUSY_REASON })
+    expect(gitActionLock('pullRequest', 'push')).toEqual({ disabled: true, reason: GIT_BUSY_REASON })
+  })
+
+  it('disables the running control without a reason, since it shows its own progress', () => {
+    expect(gitActionLock('push', 'push')).toEqual({ disabled: true, reason: null })
   })
 })
 
@@ -302,6 +402,7 @@ describe('git section actions markup', () => {
   it('renders no pull request row on the default branch, when unavailable, or before the lookup', () => {
     const rows = [
       render(view(), { state: 'none', isDefaultBranch: true }),
+      render(view(), { state: 'none', isDefaultBranch: null }),
       render(view(), { state: 'unavailable', reason: 'gh-missing', message: 'GitHub CLI (gh) was not found.' }),
       render(view(), null)
     ]
@@ -331,6 +432,14 @@ describe('git section actions markup', () => {
     expect(html).not.toContain('side-card-git-push-count')
   })
 
+  it('renders no Publish button when the repository has no remote', () => {
+    const local = status({ tracking: 'none', upstream: null, hasRemote: false })
+    const html = render(view({ status: local }))
+    expect(html).not.toContain('side-card-git-push')
+    expect(html).not.toContain('Publish')
+    expect(render(view({ status: { ...local, hasRemote: true } }))).toContain('>Publish<')
+  })
+
   it('renders no push button for a pushed, detached or unborn branch', () => {
     expect(render(view())).not.toContain('side-card-git-push')
     expect(render(view({ status: status({ branch: null, tracking: 'detached' }) }))).not.toContain('side-card-git-push')
@@ -341,6 +450,29 @@ describe('git section actions markup', () => {
     const html = render(view({ commits: [commit()] }))
     expect(html).toMatch(/<button[^>]*class="side-card-git-commit-button"(?![^>]*disabled)/)
     expect(html).toContain('title="Amend the last commit"')
+  })
+
+  describe('not a repository', () => {
+    const renderCollapsed = (canInitialize: boolean, path: string | null = '/repo/a') =>
+      renderToStaticMarkup(createElement(GitSectionView, {
+        threadId: 't1',
+        projectId: 'p1',
+        path,
+        git: view({ status: status({ isRepo: false, branch: null }), commits: [] }),
+        collapsedLabel: 'Git: not a repository',
+        canInitialize
+      }))
+
+    it('keeps the quiet line and adds an enabled Initialize repository button', () => {
+      const html = renderCollapsed(true)
+      expect(html).toContain('Git: not a repository')
+      expect(html).toMatch(/<button[^>]*class="side-card-git-init"(?![^>]*disabled)[^>]*>Initialize repository</)
+    })
+
+    it('shows no button when the section is not asked to offer one', () => {
+      expect(renderCollapsed(false)).not.toContain('side-card-git-init')
+      expect(renderCollapsed(true, null)).not.toContain('side-card-git-init')
+    })
   })
 
   it('leaves the branch button without a repeated Branch tooltip and keeps its aria-label', () => {

@@ -1,6 +1,8 @@
 import { useEffect } from 'react'
 import { create } from 'zustand'
-import { isTurnActivePhase, type GitPullRequestLookup, type TurnStateSnapshot } from '../../shared/types'
+import type { GitPullRequestLookup } from '../../shared/types'
+import { errorText } from '../lib/errorText'
+import { anyTurnEnded } from '../lib/turnEnded'
 import { useAppStore } from './appStore'
 
 /**
@@ -40,10 +42,6 @@ interface Flight {
 
 const flights = new Map<string, Flight>()
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
 function setEntry(key: string, entry: PullRequestEntry) {
   useGitPullRequestStore.setState((state) => ({ entries: { ...state.entries, [key]: entry } }))
 }
@@ -51,7 +49,7 @@ function setEntry(key: string, entry: PullRequestEntry) {
 async function fetchInto(path: string, branch: string, projectId: string | undefined): Promise<void> {
   const key = pullRequestKey(path, branch)
   try {
-    const lookup = await window.mousse.git.pullRequest(projectId, path)
+    const lookup = await window.mousse.git.pullRequest(projectId, path, branch)
     setEntry(key, { lookup, fetchedAt: Date.now() })
   } catch (error) {
     // Keep what is on screen; the age still advances so a broken lookup is not retried at once.
@@ -104,14 +102,6 @@ const retained = new Map<string, Retained>()
 const awaitingReturn = new Map<string, { path: string; branch: string; projectId?: string }>()
 let detach: (() => void) | null = null
 
-function turnEnded(previous: TurnStateSnapshot, next: TurnStateSnapshot): boolean {
-  if (previous === next) return false
-  return Object.values(previous).some((turn) => {
-    const after = next[turn.threadId]
-    return isTurnActivePhase(turn.phase) && after !== undefined && !isTurnActivePhase(after.phase)
-  })
-}
-
 function refreshRetained() {
   for (const { path, branch, projectId } of retained.values()) {
     void refreshPullRequest(path, branch, { projectId })
@@ -121,6 +111,8 @@ function refreshRetained() {
 function refreshAwaiting() {
   const pending = [...awaitingReturn.values()]
   awaitingReturn.clear()
+  // Nothing may be left holding the listeners once the last reader has gone.
+  detachIfIdle()
   for (const { path, branch, projectId } of pending) {
     void refreshPullRequest(path, branch, { force: true, projectId })
   }
@@ -135,7 +127,7 @@ function attach() {
   }
   window.addEventListener('focus', onFocus)
   const unsubscribe = useAppStore.subscribe((state, previous) => {
-    if (turnEnded(previous.turnStates, state.turnStates)) refreshRetained()
+    if (anyTurnEnded(previous.turnStates, state.turnStates)) refreshRetained()
   })
   detach = () => {
     window.removeEventListener('focus', onFocus)

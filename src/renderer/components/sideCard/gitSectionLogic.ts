@@ -5,6 +5,7 @@ import type {
   GitPullRequestLookup,
   GitStatusSnapshot
 } from '../../../shared/types'
+import { ipcErrorLine } from '../../lib/errorText'
 
 const MINUS = '−'
 
@@ -112,10 +113,7 @@ export function branchLabel(status: GitStatusSnapshot | null): string {
 
 /** Git's own message for an IPC failure, trimmed to its first line without the transport prefix. */
 export function gitErrorMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error)
-  const stripped = raw.replace(/^Error invoking remote method '[^']*':\s*/, '').replace(/^(?:Error|GitError):\s*/i, '')
-  const line = stripped.split('\n').map((part) => part.trim()).find(Boolean) ?? ''
-  return line.replace(/^(?:error|fatal):\s*/i, '') || 'Git command failed'
+  return ipcErrorLine(error).replace(/^(?:error|fatal):\s*/i, '') || 'Git command failed'
 }
 
 export interface GitCollapseInput {
@@ -141,6 +139,14 @@ export function gitCollapsedLabel(input: GitCollapseInput): string | null {
   if (!input.status) return 'Git: unavailable'
   if (!input.status.isRepo) return 'Git: not a repository'
   return null
+}
+
+/**
+ * Whether the section offers "Initialize repository": the folder is known and loaded,
+ * and Git says it is not a repository. Never while the folder or its status is unknown.
+ */
+export function canInitRepository(input: GitCollapseInput): boolean {
+  return input.hasProject && !input.pathPending && input.hasPath && input.loaded && input.status !== null && !input.status.isRepo
 }
 
 /**
@@ -200,7 +206,8 @@ function checksText(tone: PullRequestChecksTone, failed: number): { label: strin
 export function pullRequestRow(lookup: GitPullRequestLookup | null, status: GitStatusSnapshot | null): PullRequestRow | null {
   if (!lookup) return null
   if (lookup.state === 'none') {
-    if (lookup.isDefaultBranch) return null
+    // Only a branch known not to be the default one can get a pull request; unknown (null) shows nothing.
+    if (lookup.isDefaultBranch !== false) return null
     const pushed = status?.tracking === 'tracked' && status.ahead === 0
     return { kind: 'create', enabled: pushed, hint: pushed ? null : 'Push the branch first' }
   }
@@ -233,14 +240,14 @@ export interface PushButtonModel {
   title: string
 }
 
-/** The Push or Publish button, or null when there is nothing to push. */
+/** The Push or Publish button, or null when there is nothing to push or nowhere to push it. */
 export function pushButtonModel(status: GitStatusSnapshot | null, commitCount: number): PushButtonModel | null {
   if (!status?.isRepo || !status.branch) return null
   if (status.tracking === 'tracked' && status.ahead > 0) {
     const noun = status.ahead === 1 ? '1 commit' : `${status.ahead} commits`
     return { label: 'Push', count: status.ahead, title: status.upstream ? `Push ${noun} to ${status.upstream}` : `Push ${noun}` }
   }
-  if (status.tracking === 'none' && commitCount > 0) {
+  if (status.tracking === 'none' && commitCount > 0 && status.hasRemote !== false) {
     return { label: 'Publish', count: null, title: 'Push this branch and track it on the remote' }
   }
   return null
@@ -257,6 +264,8 @@ export interface CommitMenuState {
   /** The Commit button opens the menu when there is something to commit or amend. */
   triggerEnabled: boolean
   triggerTitle: string
+  /** Without file changes the only possible commit is an amend, so amend is on and cannot be turned off. */
+  forced: boolean
   /** Whether the commit amends: asked for, or the only possible commit. */
   amend: boolean
   amendDisabled: boolean
@@ -277,6 +286,7 @@ export function commitMenuState(commits: readonly GitCommit[], fileCount: number
     canAmend,
     triggerEnabled,
     triggerTitle: !triggerEnabled ? 'No changes to commit' : hasChanges ? 'Commit all changes' : 'Amend the last commit',
+    forced,
     amend: canAmend && (amendChecked || forced),
     amendDisabled: amendTitle !== null,
     amendTitle,
@@ -314,6 +324,47 @@ export function prefillAmendDraft(draft: CommitDraft, last: string | null): Comm
 export function clearAmendPrefill(draft: CommitDraft): CommitDraft {
   if (draft.prefilled === null) return draft
   return draft.message === draft.prefilled ? EMPTY_COMMIT_DRAFT : { message: draft.message, prefilled: null }
+}
+
+/** What a commit message and its amend choice belong to: one branch at one HEAD commit. */
+export function commitScopeKey(branch: string | null, commits: readonly GitCommit[]): string {
+  return `${branch ?? ''}\u0000${commits[0]?.hash ?? ''}`
+}
+
+/** The commit popover's inputs, tagged with the scope they were entered for. */
+export interface CommitForm {
+  scope: string
+  draft: CommitDraft
+  amendChecked: boolean
+}
+
+export function emptyCommitForm(scope: string): CommitForm {
+  return { scope, draft: EMPTY_COMMIT_DRAFT, amendChecked: false }
+}
+
+/**
+ * The form as it applies to a scope. Text and the amend choice made on another branch
+ * or at another HEAD are gone, so they can never be submitted for this one.
+ */
+export function commitFormFor(form: CommitForm, scope: string): CommitForm {
+  return form.scope === scope ? form : emptyCommitForm(scope)
+}
+
+/** Why mutating Git controls are disabled while one action runs. */
+export const GIT_BUSY_REASON = 'Another Git action is running'
+
+export type GitAction = 'checkout' | 'commit' | 'push' | 'pullRequest' | 'init'
+
+export interface GitActionLock {
+  disabled: boolean
+  /** Shown as the tooltip; null for the control that is itself running, and when nothing runs. */
+  reason: string | null
+}
+
+/** Whether a control for `action` may be used while `running` is in progress. */
+export function gitActionLock(running: GitAction | null, action: GitAction): GitActionLock {
+  if (running === null) return { disabled: false, reason: null }
+  return { disabled: true, reason: running === action ? null : GIT_BUSY_REASON }
 }
 
 /** Shown in the section when the commit landed and the push after it did not. */

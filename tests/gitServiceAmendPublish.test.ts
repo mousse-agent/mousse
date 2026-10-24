@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -143,5 +143,52 @@ describe('GitService rejected push', () => {
     commitFile(other, 'b.txt', 'theirs'); git(other, 'push', '-q')
     commitFile(cwd, 'c.txt', 'mine')
     await expect(new GitService().push(cwd)).rejects.toMatchObject({ code: 'git_push_rejected' })
+  })
+})
+
+describe('GitService status', () => {
+  it('lists unstaged, staged and partly staged changes', async () => {
+    const { cwd } = fixture(); commitFile(cwd, 'a.txt', 'first'); commitFile(cwd, 'b.txt', 'second')
+    writeFileSync(join(cwd, 'a.txt'), 'edited\n')
+    writeFileSync(join(cwd, 'b.txt'), 'staged\n'); git(cwd, 'add', 'b.txt')
+    writeFileSync(join(cwd, 'c.txt'), 'new\n')
+    const { changes } = await new GitService().getStatus(cwd)
+    expect(changes).toEqual(expect.arrayContaining([
+      { path: 'a.txt', status: 'modified', staged: false, originalPath: undefined },
+      { path: 'b.txt', status: 'modified', staged: true, originalPath: undefined },
+      { path: 'c.txt', status: 'untracked', staged: false }
+    ]))
+    expect(changes).toHaveLength(3)
+  })
+})
+
+describe('GitService mutations', () => {
+  it('runs changes to one folder one at a time', async () => {
+    const { cwd, origin } = fixture(); git(cwd, 'remote', 'add', 'origin', origin)
+    commitFile(cwd, 'a.txt', 'first'); git(cwd, 'push', '-u', 'origin', 'main')
+    const service = new GitService()
+    const writes = Array.from({ length: 4 }, (_, index) => {
+      writeFileSync(join(cwd, `f${index}.txt`), `${index}\n`)
+      return service.commit(cwd, `commit ${index}`)
+    })
+    // Every commit after the first finds nothing left to stage, so only the first may succeed;
+    // none may fail on Git's index lock, which concurrent `git add` runs would hit.
+    const results = await Promise.allSettled([...writes, service.push(cwd)])
+    const lockErrors = results.filter((result) => result.status === 'rejected' && /index\.lock/.test(String(result.reason)))
+    expect(lockErrors).toEqual([])
+    expect(git(cwd, 'status', '--porcelain')).toBe('')
+    expect(git(origin, 'rev-parse', 'refs/heads/main')).toBe(git(cwd, 'rev-parse', 'HEAD'))
+  })
+})
+
+describe('GitService init', () => {
+  it('initializes a plain folder and refuses an existing repository or a missing folder', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-git-init-')); roots.push(root)
+    const folder = join(root, 'plain'); mkdirSync(folder)
+    const service = new GitService()
+    await service.init(folder)
+    expect((await service.getStatus(folder)).isRepo).toBe(true)
+    await expect(service.init(folder)).rejects.toMatchObject({ code: 'git_already_repo' })
+    await expect(service.init(join(root, 'missing'))).rejects.toMatchObject({ code: 'git_init_no_folder' })
   })
 })

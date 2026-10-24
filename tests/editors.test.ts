@@ -1,7 +1,7 @@
 import { win32 } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
-vi.mock('electron', () => ({ app: { getFileIcon: vi.fn() }, shell: { openPath: vi.fn() } }))
+vi.mock('electron', () => ({ app: { getFileIcon: vi.fn() }, nativeImage: { createThumbnailFromPath: vi.fn() }, shell: { openPath: vi.fn() } }))
 
 import { detectEditors, EDITOR_CATALOG, filesLabel, scanPath, type EditorDetectionEnv } from '../src/main/editors'
 
@@ -47,6 +47,12 @@ describe('detectEditors', () => {
     const found = detectEditors(env({ platform: 'win32', localAppData: local, files: [code], commands: { cursor: 'C:\\tools\\cursor.exe' } }))
     expect(found.map((entry) => entry.id)).toEqual(['vscode', 'cursor'])
     expect(found[1].launcherPath).toBe('C:\\tools\\cursor.exe')
+  })
+
+  it('finds system-wide Windows installs under Program Files', () => {
+    const code = win32.join('C:\\Program Files', 'Microsoft VS Code', 'Code.exe')
+    const found = detectEditors(env({ platform: 'win32', localAppData: 'C:\\Users\\me\\AppData\\Local', programFiles: ['C:\\Program Files', 'C:\\Program Files (x86)'], files: [code] }))
+    expect(found).toEqual([{ id: 'vscode', label: 'VS Code', launcherPath: code }])
   })
 
   it('returns nothing when nothing is installed', () => {

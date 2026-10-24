@@ -3,6 +3,7 @@ import { useAppStore } from '../src/renderer/stores/appStore'
 import {
   CommitPushError,
   commitGitChanges,
+  initGitRepository,
   pushGitBranch,
   refreshGitStatus,
   useGitStatusStore
@@ -45,6 +46,7 @@ interface Mock {
   pullRequest: ReturnType<typeof vi.fn>
   createPullRequest: ReturnType<typeof vi.fn>
   commit: ReturnType<typeof vi.fn>
+  init: ReturnType<typeof vi.fn>
   push: ReturnType<typeof vi.fn>
   status: ReturnType<typeof vi.fn>
 }
@@ -57,6 +59,7 @@ const install = (patch: Partial<Mock> = {}): Mock => {
     pullRequest: vi.fn(async () => lookup(1)),
     createPullRequest: vi.fn(async () => undefined),
     commit: vi.fn(async () => undefined),
+    init: vi.fn(async () => undefined),
     push: vi.fn(async () => undefined),
     status: vi.fn(async () => repoStatus()),
     ...patch
@@ -98,8 +101,22 @@ describe('pull request store', () => {
       refreshPullRequest('/repo/a', 'feature')
     ])
     expect(git.pullRequest).toHaveBeenCalledTimes(1)
-    expect(git.pullRequest).toHaveBeenCalledWith('p1', '/repo/a')
+    expect(git.pullRequest).toHaveBeenCalledWith('p1', '/repo/a', 'feature')
     expect(entry('/repo/a', 'feature').lookup).toEqual(lookup(1))
+  })
+
+  it('asks about the branch of the entry it stores the result under', async () => {
+    const git = install({
+      pullRequest: vi.fn(async (_projectId: unknown, _path: unknown, branch: unknown) => lookup(branch === 'other' ? 2 : 1))
+    })
+    await Promise.all([
+      refreshPullRequest('/repo/a', 'feature', { projectId: 'p1' }),
+      refreshPullRequest('/repo/a', 'other', { projectId: 'p1' })
+    ])
+    expect(git.pullRequest).toHaveBeenCalledWith('p1', '/repo/a', 'feature')
+    expect(git.pullRequest).toHaveBeenCalledWith('p1', '/repo/a', 'other')
+    expect(entry('/repo/a', 'feature').lookup).toEqual(lookup(1))
+    expect(entry('/repo/a', 'other').lookup).toEqual(lookup(2))
   })
 
   it('keeps one entry per path and branch', async () => {
@@ -209,6 +226,45 @@ describe('pull request store', () => {
     release()
   })
 
+  it('detaches its listeners on the focus after Create PR once the last reader has gone', async () => {
+    const git = install()
+    const unsubscribe = vi.fn()
+    const subscribe = vi.spyOn(useAppStore, 'subscribe').mockImplementation(() => unsubscribe)
+    try {
+      const release = retainPullRequest('/repo/a', 'feature')
+      await refreshPullRequest('/repo/a', 'feature')
+      await createPullRequestForBranch('/repo/a', 'feature')
+      release()
+      // The pending return keeps the listeners.
+      expect(removeEventListener).not.toHaveBeenCalled()
+      expect(unsubscribe).not.toHaveBeenCalled()
+      listeners.get('focus')?.()
+      await vi.waitFor(() => expect(git.pullRequest).toHaveBeenCalledTimes(2))
+      expect(removeEventListener).toHaveBeenCalledTimes(1)
+      expect(unsubscribe).toHaveBeenCalledTimes(1)
+      expect(subscribe).toHaveBeenCalledTimes(1)
+    } finally {
+      subscribe.mockRestore()
+    }
+  })
+
+  it('keeps its listeners on the focus after Create PR while a reader remains', async () => {
+    install()
+    const unsubscribe = vi.fn()
+    const subscribe = vi.spyOn(useAppStore, 'subscribe').mockImplementation(() => unsubscribe)
+    try {
+      const release = retainPullRequest('/repo/a', 'feature')
+      await createPullRequestForBranch('/repo/a', 'feature')
+      listeners.get('focus')?.()
+      expect(removeEventListener).not.toHaveBeenCalled()
+      release()
+      expect(removeEventListener).toHaveBeenCalledTimes(1)
+      expect(unsubscribe).toHaveBeenCalledTimes(1)
+    } finally {
+      subscribe.mockRestore()
+    }
+  })
+
   it('does not wait for focus when Create PR fails', async () => {
     const git = install({ createPullRequest: vi.fn(async () => { throw new Error('gh missing') }) })
     const release = retainPullRequest('/repo/a', 'feature')
@@ -259,7 +315,7 @@ describe('commit and push through the git store', () => {
     expect(git.status).toHaveBeenCalledTimes(2)
     // The lookup was fresh, so only a forced refresh fetches it again.
     expect(git.pullRequest).toHaveBeenCalledTimes(2)
-    expect(git.pullRequest).toHaveBeenLastCalledWith('p1', '/repo/a')
+    expect(git.pullRequest).toHaveBeenLastCalledWith('p1', '/repo/a', 'feature')
   })
 
   it('refreshes the status, then rejects with the push failure when only the push fails', async () => {
@@ -298,6 +354,27 @@ describe('commit and push through the git store', () => {
     await expect(pushGitBranch('/repo/a')).rejects.toThrow('rejected')
     expect(git.status).toHaveBeenCalledTimes(1)
     expect(git.pullRequest).not.toHaveBeenCalled()
+  })
+
+  it('initializes the repository, then force-refreshes the status', async () => {
+    const order: string[] = []
+    const git = install({
+      init: vi.fn(async () => { order.push('init') }),
+      status: vi.fn(async () => { order.push('status'); return repoStatus() })
+    })
+    await refreshGitStatus('/repo/a')
+    order.length = 0
+    await initGitRepository('/repo/a', 'p1')
+    expect(git.init).toHaveBeenCalledWith('p1', '/repo/a')
+    expect(order).toEqual(['init', 'status'])
+    expect(git.status).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not refresh after an init that fails', async () => {
+    const git = install({ init: vi.fn(async () => { throw new Error('This folder is already a Git repository.') }) })
+    await refreshGitStatus('/repo/a')
+    await expect(initGitRepository('/repo/a')).rejects.toThrow('already a Git repository')
+    expect(git.status).toHaveBeenCalledTimes(1)
   })
 
   it('skips the pull request refresh when there is no branch', async () => {

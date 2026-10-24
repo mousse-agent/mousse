@@ -1,10 +1,8 @@
 import type { EditorInfo } from '../../../shared/types'
+import { ipcErrorLine } from '../../lib/errorText'
 import { profilePreferenceKey } from '../../lib/profilePreferences'
 
 const PREFERENCE_NAME = 'openInEditor.v1'
-
-/** How long an inline open error stays before it clears itself. */
-export const OPEN_ERROR_VISIBLE_MS = 6000
 
 /** The editor or file manager last chosen for this profile, or null. */
 export function loadLastEditorId(profileId: string): string | null {
@@ -60,8 +58,5 @@ export function sameEditors(a: readonly EditorInfo[], b: readonly EditorInfo[]):
 
 /** The failure's own message, without the IPC transport prefix. */
 export function openErrorMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error)
-  const stripped = raw.replace(/^Error invoking remote method '[^']*':\s*/, '').replace(/^Error:\s*/i, '')
-  const line = stripped.split('\n').map((part) => part.trim()).find(Boolean) ?? ''
-  return line || 'Could not open the folder'
+  return ipcErrorLine(error) || 'Could not open the folder'
 }

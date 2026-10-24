@@ -52,7 +52,7 @@ export function createGhFallbackRunner(
   base: ExecutableRunner,
   platform: NodeJS.Platform = process.platform
 ): ExecutableRunner {
-  const fallbacks = platform === 'darwin' || platform === 'linux' ? ['/opt/homebrew/bin/gh', '/usr/local/bin/gh'] : []
+  const fallbacks = platform === 'darwin' || platform === 'linux' ? ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/home/linuxbrew/.linuxbrew/bin/gh'] : []
   let remembered: string | null = null
   return async (executable, args, options) => {
     if (executable !== 'gh') return base(executable, args, options)
@@ -159,7 +159,7 @@ export function classifyPullRequestFailure(message: string): 'none' | 'not-githu
 
 const AVAILABILITY_TTL_MS = 60_000
 
-type GhProbe = { ok: true } | { ok: false; reason: 'gh-missing' | 'unauthenticated'; message: string }
+type GhProbe = { ok: true } | { ok: false; reason: 'gh-missing' | 'error'; message: string }
 
 function validateRepository(value: string): string {
   const repository = value.trim()
@@ -214,12 +214,18 @@ export class GitHubService {
     }
   }
 
-  /** Looks up the pull request for the folder's current branch. Never takes the operation lock. */
-  async getPullRequest(cwd: string): Promise<GitPullRequestLookup> {
-    const branch = await this.runExecutable('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd })
+  /**
+   * Looks up the pull request for a branch, by default the folder's current one. Naming
+   * the branch keeps a slow lookup from answering for a branch checked out meanwhile.
+   * Never takes the operation lock.
+   */
+  async getPullRequest(cwd: string, requestedBranch?: string): Promise<GitPullRequestLookup> {
+    const branch = requestedBranch?.trim() || await this.runExecutable('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd })
       .then((result) => result.stdout.trim())
       .catch(() => '')
     if (!branch) return { state: 'unavailable', reason: 'no-branch', message: 'There is no branch checked out.' }
+    // Git refuses branch names that start with a dash; never let one read as a gh flag.
+    if (branch.startsWith('-')) return { state: 'unavailable', reason: 'error', message: 'Unsupported branch name.' }
 
     const probe = await this.probeGh()
     if (!probe.ok) return { state: 'unavailable', reason: probe.reason, message: probe.message }
@@ -227,7 +233,7 @@ export class GitHubService {
     try {
       const { stdout } = await this.runExecutable(
         'gh',
-        ['pr', 'view', '--json', 'number,title,url,state,isDraft,statusCheckRollup'],
+        ['pr', 'view', branch, '--json', 'number,title,url,state,isDraft,statusCheckRollup'],
         { cwd }
       )
       const pullRequest = parsePullRequestJson(stdout)
@@ -238,10 +244,7 @@ export class GitHubService {
       const kind = classifyPullRequestFailure(message)
       if (kind === 'none') return { state: 'none', isDefaultBranch: await this.isDefaultBranch(cwd, branch) }
       if (kind === 'not-github') return { state: 'unavailable', reason: 'not-github', message }
-      if (kind === 'unauthenticated') {
-        this.probe = null
-        return { state: 'unavailable', reason: 'unauthenticated', message }
-      }
+      if (kind === 'unauthenticated') return { state: 'unavailable', reason: 'unauthenticated', message }
       return { state: 'unavailable', reason: 'error', message }
     }
   }
@@ -258,22 +261,27 @@ export class GitHubService {
     })
   }
 
+  /**
+   * Only checks that gh is installed. Sign-in is judged from the lookup itself, because
+   * `gh auth status` also fails when an unrelated host's token is stale.
+   */
   private async probeGh(): Promise<GhProbe> {
     if (this.probe && Date.now() - this.probe.at < AVAILABILITY_TTL_MS) return this.probe.result
     let result: GhProbe
     try {
-      await this.runExecutable('gh', ['auth', 'status'])
+      await this.runExecutable('gh', ['--version'])
       result = { ok: true }
     } catch (error) {
       result = isMissingExecutable(error)
         ? { ok: false, reason: 'gh-missing', message: 'GitHub CLI (gh) was not found. Install it to see pull requests.' }
-        : { ok: false, reason: 'unauthenticated', message: `GitHub CLI is not authenticated. Run “gh auth login” in a terminal. ${processMessage(error)}` }
+        : { ok: false, reason: 'error', message: `Could not run GitHub CLI: ${processMessage(error)}` }
     }
     this.probe = { at: Date.now(), result }
     return result
   }
 
-  private async isDefaultBranch(cwd: string, branch: string): Promise<boolean> {
+  /** Null when the repository's default branch could not be read. */
+  private async isDefaultBranch(cwd: string, branch: string): Promise<boolean | null> {
     let name = this.defaultBranches.get(cwd)
     if (!name) {
       try {
@@ -284,9 +292,9 @@ export class GitHubService {
         )
         name = stdout.trim()
       } catch {
-        return false
+        return null
       }
-      if (!name) return false
+      if (!name) return null
       this.defaultBranches.set(cwd, name)
     }
     return name === branch

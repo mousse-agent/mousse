@@ -76,7 +76,7 @@ describe('GitHubService.getPullRequest', () => {
         if (overrides.branch === '') throw failure('fatal')
         return ok(`${overrides.branch ?? 'feature'}\n`)
       }
-      if (args[0] === 'auth') return (overrides.auth ?? (async () => ok()))()
+      if (args[0] === '--version') return (overrides.auth ?? (async () => ok()))()
       if (args[0] === 'pr') return (overrides.pr ?? (async () => ok(prJson)))()
       if (args[0] === 'repo') return ok(`${overrides.defaultBranch ?? 'main'}\n`)
       throw new Error(`unexpected ${args.join(' ')}`)
@@ -86,7 +86,20 @@ describe('GitHubService.getPullRequest', () => {
     const run = runner()
     const result = await new GitHubService(run).getPullRequest('/repo')
     expect(result).toMatchObject({ state: 'found', pullRequest: { number: 3, state: 'open', isDraft: true, checks: 'none' } })
-    expect(run).toHaveBeenCalledWith('gh', ['pr', 'view', '--json', 'number,title,url,state,isDraft,statusCheckRollup'], { cwd: '/repo' })
+    expect(run).toHaveBeenCalledWith('gh', ['pr', 'view', 'feature', '--json', 'number,title,url,state,isDraft,statusCheckRollup'], { cwd: '/repo' })
+  })
+
+  it('looks up the requested branch, not whatever is checked out when the lookup runs', async () => {
+    const run = runner({ branch: 'other' })
+    await new GitHubService(run).getPullRequest('/repo', 'feature-a')
+    expect(run.mock.calls.some((call) => call[0] === 'git')).toBe(false)
+    expect(run).toHaveBeenCalledWith('gh', ['pr', 'view', 'feature-a', '--json', 'number,title,url,state,isDraft,statusCheckRollup'], { cwd: '/repo' })
+  })
+
+  it('never passes a branch that could read as a flag', async () => {
+    const run = runner()
+    expect(await new GitHubService(run).getPullRequest('/repo', '--web')).toMatchObject({ state: 'unavailable', reason: 'error' })
+    expect(run.mock.calls.some((call) => call[1][0] === 'pr')).toBe(false)
   })
 
   it('reports no pull request and whether the branch is the default branch', async () => {
@@ -104,20 +117,20 @@ describe('GitHubService.getPullRequest', () => {
     expect(run.mock.calls.filter((call) => call[1][0] === 'repo')).toHaveLength(2)
   })
 
-  it('treats a failed default-branch lookup as not default', async () => {
+  it('reports an unknown default branch when the lookup fails', async () => {
     const run = vi.fn<ExecutableRunner>(async (executable, args) => {
       if (executable === 'git') return ok('main\n')
       if (args[0] === 'pr') throw failure('no pull requests found')
       if (args[0] === 'repo') throw failure('boom')
       return ok()
     })
-    expect(await new GitHubService(run).getPullRequest('/repo')).toEqual({ state: 'none', isDefaultBranch: false })
+    expect(await new GitHubService(run).getPullRequest('/repo')).toEqual({ state: 'none', isDefaultBranch: null })
   })
 
   it('maps unavailable reasons', async () => {
     const missing = await new GitHubService(runner({ auth: async () => { throw enoent() } })).getPullRequest('/repo')
     expect(missing).toMatchObject({ state: 'unavailable', reason: 'gh-missing' })
-    const signedOut = await new GitHubService(runner({ auth: async () => { throw failure('You are not logged in') } })).getPullRequest('/repo')
+    const signedOut = await new GitHubService(runner({ pr: async () => { throw failure('You are not logged into any GitHub hosts. To log in, run: gh auth login') } })).getPullRequest('/repo')
     expect(signedOut).toMatchObject({ state: 'unavailable', reason: 'unauthenticated' })
     const noBranch = await new GitHubService(runner({ branch: '' })).getPullRequest('/repo')
     expect(noBranch).toMatchObject({ state: 'unavailable', reason: 'no-branch' })
@@ -131,7 +144,7 @@ describe('GitHubService.getPullRequest', () => {
     const run = runner()
     const service = new GitHubService(run)
     await service.getPullRequest('/repo'); await service.getPullRequest('/repo')
-    expect(run.mock.calls.filter((call) => call[1][0] === 'auth')).toHaveLength(1)
+    expect(run.mock.calls.filter((call) => call[1][0] === '--version')).toHaveLength(1)
   })
 
   it('is not blocked by an exclusive operation', async () => {

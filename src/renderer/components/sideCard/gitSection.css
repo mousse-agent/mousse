@@ -11,6 +11,18 @@
   line-height: 1.4;
 }
 
+.side-card-git-init {
+  display: block;
+  height: 28px;
+  margin-top: 6px;
+  padding: 0 10px;
+  border-radius: var(--ui-row-radius);
+  background: var(--ui-hover);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 .side-card-git-row {
   display: flex;
   align-items: center;
@@ -22,6 +34,7 @@
 .side-card-git-push,
 .side-card-git-pr,
 .side-card-git-pr-create,
+.side-card-git-init,
 .side-card-git-changes {
   border: 0;
   background: transparent;
@@ -91,6 +104,7 @@
 .side-card-git-commit-button:hover:not(:disabled),
 .side-card-git-commit-button[aria-expanded='true'],
 .side-card-git-push:hover:not(:disabled),
+.side-card-git-init:hover:not(:disabled),
 .side-card-git-pr-create:hover:not([aria-disabled='true']) {
   background: var(--ui-pressed);
 }
@@ -98,6 +112,7 @@
 .side-card-git-branch:disabled,
 .side-card-git-commit-button:disabled,
 .side-card-git-push:disabled,
+.side-card-git-init:disabled,
 .side-card-git-pr-create[aria-disabled='true'] {
   cursor: default;
   opacity: 0.5;
@@ -108,7 +123,7 @@
 .side-card-git-push:focus-visible,
 .side-card-git-pr:focus-visible,
 .side-card-git-pr-create:focus-visible,
-.side-card-git-amend input:focus-visible,
+.side-card-git-init:focus-visible,
 .side-card-git-changes:focus-visible,
 .side-card-git-option:focus-visible,
 .side-card-git-submit:focus-visible {
@@ -405,20 +420,10 @@
 .side-card-git-amend {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
   margin-top: 8px;
   cursor: pointer;
-}
-
-.side-card-git-amend input {
-  flex: none;
-  margin: 0;
-  padding: 0;
-  accent-color: var(--accent);
-}
-
-.side-card-git-amend input:focus {
-  box-shadow: none;
 }
 
 .side-card-git-amend[data-disabled='true'] {

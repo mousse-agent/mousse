@@ -487,10 +487,12 @@ const api = {
       ipcRenderer.invoke('git:commit', message, projectId, cwd, options),
     push: (projectId?: string, cwd?: string): Promise<void> =>
       ipcRenderer.invoke('git:push', projectId, cwd),
+    init: (projectId?: string, cwd?: string): Promise<void> =>
+      ipcRenderer.invoke('git:init', projectId, cwd),
     lastCommitMessage: (projectId?: string, cwd?: string): Promise<string | null> =>
       ipcRenderer.invoke('git:lastCommitMessage', projectId, cwd),
-    pullRequest: (projectId?: string, cwd?: string): Promise<GitPullRequestLookup> =>
-      ipcRenderer.invoke('git:pullRequest', projectId, cwd),
+    pullRequest: (projectId?: string, cwd?: string, branch?: string): Promise<GitPullRequestLookup> =>
+      ipcRenderer.invoke('git:pullRequest', projectId, cwd, branch),
     createPullRequest: (projectId?: string, cwd?: string): Promise<void> =>
       ipcRenderer.invoke('git:createPullRequest', projectId, cwd)
   },

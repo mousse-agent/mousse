@@ -1,13 +1,8 @@
 import { useCallback, useEffect } from 'react'
 import { create } from 'zustand'
-import {
-  isTurnActivePhase,
-  type GitBranchInfo,
-  type GitCommit,
-  type GitDiffStats,
-  type GitStatusSnapshot,
-  type TurnStateSnapshot
-} from '../../shared/types'
+import type { GitBranchInfo, GitCommit, GitDiffStats, GitStatusSnapshot } from '../../shared/types'
+import { errorText } from '../lib/errorText'
+import { anyTurnEnded } from '../lib/turnEnded'
 import { useAppStore } from './appStore'
 import { refreshPullRequest } from './pullRequestStore'
 
@@ -75,10 +70,6 @@ function patchEntry(path: string, patch: Partial<GitStatusEntry>) {
 /** Keep the previous reference when nothing changed, so unchanged data does not re-render readers. */
 export function keepIfEqual<T>(previous: T, next: T): T {
   return JSON.stringify(previous) === JSON.stringify(next) ? previous : next
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }
 
 async function fetchInto(path: string, projectId: string | undefined): Promise<void> {
@@ -216,13 +207,10 @@ export async function pushGitBranch(path: string, projectId?: string): Promise<v
   await refreshBranchPullRequest(path, projectId)
 }
 
-/** Whether any turn went from running to finished between two snapshots. */
-export function anyTurnEnded(previous: TurnStateSnapshot, next: TurnStateSnapshot): boolean {
-  if (previous === next) return false
-  return Object.values(previous).some((turn) => {
-    const after = next[turn.threadId]
-    return isTurnActivePhase(turn.phase) && after !== undefined && !isTurnActivePhase(after.phase)
-  })
+/** Make the folder a Git repository, then refresh so the section switches to its normal view. Rejects with Git's message. */
+export async function initGitRepository(path: string, projectId?: string): Promise<void> {
+  await window.mousse.git.init(projectId, path)
+  await refreshGitStatus(path, { force: true, quiet: true, projectId })
 }
 
 const retained = new Map<string, { count: number; projectId?: string }>()

@@ -1813,14 +1813,17 @@ export function registerGuiIpc(
       await gitService.commit(await resolveGitCwd(projectId, cwd), message, options)
     }
   )
+  registerHandler('git:init', async (_e, projectId?: string, cwd?: string) => {
+    await gitService.init(await resolveGitCwd(projectId, cwd))
+  })
   registerHandler('git:push', async (_e, projectId?: string, cwd?: string) => {
     await gitService.push(await resolveGitCwd(projectId, cwd))
   })
   registerHandler('git:lastCommitMessage', async (_e, projectId?: string, cwd?: string) =>
     gitService.lastCommitMessage(await resolveGitCwd(projectId, cwd))
   )
-  registerHandler('git:pullRequest', async (_e, projectId?: string, cwd?: string) =>
-    gitService.github.getPullRequest(await resolveGitCwd(projectId, cwd))
+  registerHandler('git:pullRequest', async (_e, projectId?: string, cwd?: string, branch?: string) =>
+    gitService.github.getPullRequest(await resolveGitCwd(projectId, cwd), typeof branch === 'string' ? branch : undefined)
   )
   registerHandler('git:createPullRequest', async (_e, projectId?: string, cwd?: string) => {
     await gitService.github.createPullRequest(await resolveGitCwd(projectId, cwd))

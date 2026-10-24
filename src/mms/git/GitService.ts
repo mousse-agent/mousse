@@ -1,5 +1,7 @@
 import { createErrorProvider } from '../../shared/errors'
 import { existsSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
+import { resolve } from 'node:path'
 import simpleGit, { type SimpleGit, type StatusResult } from 'simple-git'
 import { GitHubService } from './GitHubService'
 import type {
@@ -15,6 +17,8 @@ const gitErrors = createErrorProvider({
   git_push_failed: { category: 'unavailable', retryable: false, message: 'Git push failed. Check the configured upstream, push destination and remote access.' },
   git_detached_head: { category: 'invalid', retryable: false, message: 'Check out a branch before pushing.' },
   git_push_rejected: { category: 'conflict', retryable: false, message: 'The remote has commits this branch does not. Pull them, then push again.' },
+  git_init_no_folder: { category: 'invalid', retryable: false, message: 'The project folder does not exist.' },
+  git_already_repo: { category: 'conflict', retryable: false, message: 'This folder is already a Git repository.' },
   git_no_remote: { category: 'invalid', retryable: false, message: 'Add a remote before pushing.' },
   git_amend_no_commit: { category: 'invalid', retryable: false, message: 'There is no commit to amend.' },
   git_amend_pushed: { category: 'conflict', retryable: false, message: 'The latest commit is already pushed, so it cannot be amended.' }
@@ -55,7 +59,7 @@ function mapStatus(entry: StatusResult['files'][number]): GitFileChange | null {
     return { path, status: 'conflicted', staged: index !== ' ' }
   }
 
-  const staged = index !== ' ' && index !== '?'
+  const staged = index !== '' && index !== '?'
   const code = staged ? index : workdir
 
   const statusMap: Record<string, GitFileChange['status']> = {
@@ -81,6 +85,7 @@ function mapStatus(entry: StatusResult['files'][number]): GitFileChange | null {
 export class GitService {
   /** Profile-scoped GitHub CLI integration alongside the existing Git operations. */
   readonly github = new GitHubService()
+  private readonly mutations = new Map<string, Promise<void>>()
 
   private gitFor(cwd: string): SimpleGit {
     return simpleGit(cwd)
@@ -101,6 +106,7 @@ export class GitService {
     const branch = await git.raw(['symbolic-ref', '--quiet', '--short', 'HEAD']).then((value) => value.trim() || null).catch(() => null)
     const hasHead = await git.raw(['rev-parse', '--verify', 'HEAD']).then(() => true).catch(() => false)
     const upstream = branch && hasHead ? await this.upstream(git) : null
+    const hasRemote = await git.raw(['remote']).then((value) => Boolean(value.trim())).catch(() => false)
     const changes = status.files
       .map(mapStatus)
       .filter((entry): entry is GitFileChange => entry !== null)
@@ -118,7 +124,7 @@ export class GitService {
       }
     }
 
-    return { isRepo: true, branch, upstream, tracking: !hasHead ? 'unborn' : !branch ? 'detached' : upstream ? 'tracked' : 'none', ahead, behind, changes }
+    return { isRepo: true, branch, upstream, tracking: !hasHead ? 'unborn' : !branch ? 'detached' : upstream ? 'tracked' : 'none', ahead, behind, changes, hasRemote }
   }
 
   private async upstream(git: SimpleGit): Promise<string | null> {
@@ -227,21 +233,50 @@ export class GitService {
     }
   }
 
+  /**
+   * Runs the changes this app makes to a folder (checkout, commit, push) one at a
+   * time, so a push cannot land between the amend check and the amend itself.
+   */
+  private serialized<T>(cwd: string, operation: () => Promise<T>): Promise<T> {
+    const key = resolve(cwd)
+    const previous = this.mutations.get(key) ?? Promise.resolve()
+    const run = previous.then(operation, operation)
+    const settled = run.then(() => undefined, () => undefined)
+    this.mutations.set(key, settled)
+    void settled.then(() => {
+      if (this.mutations.get(key) === settled) this.mutations.delete(key)
+    })
+    return run
+  }
+
+  /** Turns a project folder into a Git repository. Never touches an existing one. */
+  async init(cwd: string): Promise<void> {
+    await this.serialized(cwd, async () => {
+      const info = await stat(cwd).catch(() => null)
+      if (!info?.isDirectory()) throw gitErrors.create('git_init_no_folder')
+      if (await this.isRepo(cwd)) throw gitErrors.create('git_already_repo')
+      await this.gitFor(cwd).init()
+    })
+  }
+
   async checkout(cwd: string, branch: string): Promise<void> {
-    const git = this.gitFor(cwd)
-    await git.checkout(branch)
+    await this.serialized(cwd, async () => {
+      await this.gitFor(cwd).checkout(branch)
+    })
   }
 
   async commit(cwd: string, message: string, options: GitCommitOptions = {}): Promise<void> {
-    const git = this.gitFor(cwd)
-    if (options.amend) {
-      await this.assertAmendable(git)
+    await this.serialized(cwd, async () => {
+      const git = this.gitFor(cwd)
+      if (options.amend) {
+        await this.assertAmendable(git)
+        await git.add(['-A'])
+        await git.raw(['commit', '--amend', '-m', message])
+        return
+      }
       await git.add(['-A'])
-      await git.raw(['commit', '--amend', '-m', message])
-      return
-    }
-    await git.add(['-A'])
-    await git.commit(message)
+      await git.commit(message)
+    })
   }
 
   async lastCommitMessage(cwd: string): Promise<string | null> {
@@ -262,6 +297,10 @@ export class GitService {
   }
 
   async push(cwd: string): Promise<void> {
+    await this.serialized(cwd, () => this.pushNow(cwd))
+  }
+
+  private async pushNow(cwd: string): Promise<void> {
     const git = this.gitFor(cwd)
     const branch = (await git.raw(['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => null))?.trim()
     if (!branch) throw gitErrors.create('git_detached_head')
