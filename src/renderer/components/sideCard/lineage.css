@@ -37,6 +37,7 @@
   text-align: left;
 }
 
+/* Only "Show more" is a button today; the Lineage rewrite makes agent rows buttons again and uses these rules. */
 button.lineage-row {
   cursor: pointer;
 }
