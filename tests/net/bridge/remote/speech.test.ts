@@ -506,4 +506,41 @@ describe('speech host methods', () => {
     registry.notifyConnectionClosed('conn-1')
     expect(await answer).toMatchObject({ ok: false, code: 'failed' })
   })
+
+  it('fails the work a window took for one profile when the same connection moves to another', async () => {
+    const registry = new DomainHandlerRegistry()
+    const relays: Record<string, SpeechRelay> = {
+      alpha: new SpeechRelay(new ManualClock()),
+      beta: new SpeechRelay(new ManualClock())
+    }
+    registerSpeechHostMethods(registry, (profileId) => relays[profileId])
+    const binding = { profileId: 'alpha', epoch: 1 }
+    const ctx = {
+      mms: {} as HandlerContext['mms'],
+      globalSequence: () => 0,
+      connection: { id: 'conn-1', clientType: 'gui', binding, capabilities: new Set([NET_LOCAL_CAPABILITY]) }
+    } as unknown as HandlerContext
+    const waiting = registry.dispatch(ctx, 'speech.host.wait', {}) as Promise<{
+      jobs: Array<{ id: string }>
+    }>
+    await flush()
+    const answer = call(relays.alpha, 'speech.options', { kind: 'readAloud' })
+    const { jobs } = await waiting
+    await registry.dispatch(ctx, 'speech.host.take', { id: jobs[0].id })
+
+    // What the daemon does when profiles.bind moves a connection: it announces the close of the
+    // old binding, then swaps in the new one. The window's own stop notice arrives under beta.
+    registry.notifyConnectionClosed('conn-1')
+    Object.assign(binding, { profileId: 'beta', epoch: 2 })
+    await registry.dispatch(ctx, 'speech.host.finish', {
+      id: jobs[0].id,
+      result: { ok: false, code: 'failed', error: 'stopped' }
+    })
+
+    expect(await answer).toMatchObject({
+      ok: false,
+      code: 'failed',
+      error: expect.stringMatching(/stopped before it finished/)
+    })
+  })
 })

@@ -143,6 +143,8 @@ type Upload = { upload: BlobUpload; stream: StreamId; size: number; sealed: bool
 type Download = { stream: StreamId; chunks: Buffer[]; bytes: number }
 type JobScope = { stream?: StreamId; space?: SpaceId; rpc?: boolean }
 type SessionJob = JobScope & { controller?: AbortController }
+/** How long an RPC answer waits before trying again when the control queue is full. */
+const RPC_RESULT_RETRY_MS = 50
 const equalKey = (a: string, b: string): boolean => {
   const x = Buffer.from(a, 'base64url'),
     y = Buffer.from(b, 'base64url')
@@ -1645,12 +1647,40 @@ export class NetSyncSession implements SyncSession {
       const result = await this.options.rpc.request(h, this.peer, controller.signal, (data) =>
         this.send({ t: 'rpc.progress', id: h.id, data })
       )
-      await this.send(resultMessage(h.id, result))
+      await this.sendRpcResult(resultMessage(h.id, result), controller.signal)
     } catch (error) {
-      await this.send({ t: 'rpc.result', id: h.id, error: wireError(error) })
+      await this.sendRpcResult(
+        { t: 'rpc.result', id: h.id, error: wireError(error) },
+        controller.signal
+      )
     } finally {
       timer.cancel()
       this.rpcControllers.delete(h.id)
+    }
+  }
+  /**
+   * The answer to a request. A full control queue is not fatal to the session: the answer waits
+   * for room until the request's deadline (or its cancel) ends it.
+   */
+  private async sendRpcResult(message: WireMessage, signal: AbortSignal): Promise<void> {
+    for (;;) {
+      try {
+        return await this.send(message)
+      } catch (error) {
+        if (!(error instanceof NetError) || error.code !== 'rate_limited') throw error
+        if (signal.aborted) return
+        await new Promise<void>((resolve) => {
+          const timer = this.clock.setTimeout(resolve, RPC_RESULT_RETRY_MS)
+          signal.addEventListener(
+            'abort',
+            () => {
+              timer.cancel()
+              resolve()
+            },
+            { once: true }
+          )
+        })
+      }
     }
   }
   private spaceProofCapacity(): void {
