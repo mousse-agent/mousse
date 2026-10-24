@@ -11,18 +11,6 @@
   line-height: 1.4;
 }
 
-.side-card-git-init {
-  display: block;
-  height: 28px;
-  margin-top: 6px;
-  padding: 0 10px;
-  border-radius: var(--ui-row-radius);
-  background: var(--ui-hover);
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
 .side-card-git-row {
   display: flex;
   align-items: center;
@@ -41,6 +29,18 @@
   color: inherit;
   font: inherit;
   cursor: pointer;
+}
+
+.side-card-git-init {
+  display: block;
+  height: 28px;
+  margin-top: 6px;
+  padding: 0 10px;
+  border-radius: var(--ui-row-radius);
+  background: var(--ui-hover);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 .side-card-git-branch {
