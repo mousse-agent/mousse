@@ -20,4 +20,6 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Space:** a group chat for a project. Members add their own bots, which run on the owner's machine with the owner's keys.
 - **Mousse ID:** the optional account service. Signing in lets a person reach their computers from a phone and relays connections without seeing their content. It was called Mousse Plus; code and wire names such as `net.plus.*` and `plus-relay` keep the old name. There are no paid plans. The hosted service is maintained separately; this repository holds only its MIT client in `src/mms/net/plus/`, which core Net reaches through `src/mms/net/hosted.ts`. Builds without `MOUSSE_ID_ORIGIN` show no Mousse ID UI.
 - **Leaf node:** a device, such as a phone, that joins a user's devices but cannot invite or revoke others.
+- **Nightly:** a prerelease build of `master`, published once a day when there are new commits and every check passes, with a version such as `0.1.2-nightly.20261022.17`. See `docs/releases.md`.
+- **Contract version:** the version of a protocol, saved format or schema that other builds rely on, such as the daemon protocol or the Run Engine database. Bumped only on incompatible changes; listed in `src/mms/contractVersions.ts`.
 - **Primary checkout:** the first entry in `git worktree list`, normally the copy the user runs and reads.

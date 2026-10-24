@@ -1,0 +1,106 @@
+/* Lineage: one quiet line per agent the thread started. */
+
+.lineage-collapsed {
+  padding-block: 9px;
+}
+
+.lineage-empty {
+  margin: 0;
+  color: var(--ui-faint);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.lineage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0 -6px;
+  padding: 0;
+  list-style: none;
+}
+
+.lineage-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lineage-row:hover {
+  background: var(--ui-hover);
+}
+
+.lineage-row:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.lineage-row.is-working {
+  color: var(--text-primary);
+}
+
+.lineage-row.is-current {
+  background: var(--ui-pressed);
+  color: var(--text-primary);
+}
+
+.lineage-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lineage-status {
+  flex: 0 0 auto;
+  color: var(--ui-faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.lineage-more {
+  color: var(--ui-faint);
+}
+
+.lineage-more:hover {
+  color: var(--text-primary);
+}
+
+.lineage-live {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-right: -2px;
+  border-radius: 50%;
+  background: var(--success);
+  animation: lineage-live-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes lineage-live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lineage-live {
+    animation: none;
+  }
+}

@@ -1,0 +1,82 @@
+name: Release
+
+# Pushing a stable tag such as v0.1.2 builds that commit and creates a draft release.
+# Publish the draft by hand after checking it (docs/releases.md). Nightly tags never
+# start this workflow: they are created by the nightly job's token, which starts no runs.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  resolve:
+    name: Check the tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      previous: ${{ steps.resolve.outputs.previous }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - name: The tagged commit is on master
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/master
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-version.mjs stable >> "$GITHUB_OUTPUT"
+
+  checks:
+    name: Checks
+    needs: resolve
+    uses: ./.github/workflows/ci.yml
+    with:
+      full-suite: true
+
+  package:
+    name: Package
+    needs: resolve
+    uses: ./.github/workflows/package.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+
+  draft:
+    name: Draft the release
+    needs: [resolve, checks, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      PREVIOUS: ${{ needs.resolve.outputs.previous }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Write checksums
+        working-directory: dist
+        run: sha256sum -- * > "SHA256SUMS-$VERSION.txt" && cat "SHA256SUMS-$VERSION.txt"
+      - name: Create the draft release
+        run: |
+          args=(--draft --verify-tag --title "Mousse v$VERSION" --generate-notes)
+          if [ -n "$PREVIOUS" ]; then args+=(--notes-start-tag "$PREVIOUS"); fi
+          gh release create "$GITHUB_REF_NAME" "${args[@]}" dist/*

@@ -83,7 +83,7 @@ The full test suite runs locally, once, before a PR is opened. For a code change
 
 Once relevant checks pass, do not broaden or repeat testing without a new change, failure, or concrete unresolved concern. Reuse passing evidence for unchanged code and state what was tested. Documentation-only changes normally need diff and consistency review, not application tests.
 
-Hosted CI runs basic checks on every PR and push to the default branch: the workflow tools test, typecheck and lint, a build, and the Windows-relevant tests. It does not run the full suite. The full suite can be started by hand from the CI workflow's `workflow_dispatch` trigger; do not start or wait for it as an extra completion or merge gate unless explicitly requested. Actual GitHub-enforced checks still apply.
+Hosted CI runs basic checks on every PR and push to the default branch: the workflow tools test, typecheck and lint, a build, and the Windows-relevant tests. It does not run the full suite. The full suite can be started by hand from the CI workflow's `workflow_dispatch` trigger, and the nightly and stable release builds run it before publishing (`docs/releases.md`); do not start or wait for it as an extra completion or merge gate unless explicitly requested. Actual GitHub-enforced checks still apply.
 
 ## Review and merge
 

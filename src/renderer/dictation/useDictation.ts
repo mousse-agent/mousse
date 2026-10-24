@@ -83,7 +83,7 @@ export function useDictation({ disabled, loading, onTranscript }: UseDictationOp
     setTranscribing(true)
     try {
       const selection = useDictationStore.getState().selection
-      if (!selection) throw new Error('No dictation model is selected. Choose one under Settings, Models.')
+      if (!selection) throw new Error('No dictation model is selected. Choose one under Settings, Speech.')
       const text = blob.size > 0 ? (await transcribeRecording(blob, selection)).trim() : ''
       if (!live()) return
       if (text) onTranscriptRef.current(text)

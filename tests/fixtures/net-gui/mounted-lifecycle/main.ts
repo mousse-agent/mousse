@@ -36,10 +36,16 @@ async function main() {
         await window.loadURL(url); await until('!!window.qa')
         if (mode === 'remote') {
           await execute("qa.mountRemote('open')")
-          await until("document.querySelector('select')?.options.length===2")
-          await execute("document.querySelector('select').value='nod_00000000000000000000000001';document.querySelector('select').dispatchEvent(new Event('change',{bubbles:true}))")
-          await until("document.querySelectorAll('select')[1]?.options.length===2")
-          await execute("document.querySelectorAll('select')[1].value='thread';document.querySelectorAll('select')[1].dispatchEvent(new Event('change',{bubbles:true}))")
+          // Themed selects: open the listbox, check its options, click one.
+          const choose = async (index: number, value: string) => {
+            await until(`!!document.querySelectorAll('[role="combobox"]')[${index}]`)
+            await execute(`document.querySelectorAll('[role="combobox"]')[${index}].click()`)
+            await until(`document.querySelectorAll('[role="listbox"] [role="option"]').length===2`)
+            await execute(`document.querySelector('[role="listbox"] [role="option"][data-value=${JSON.stringify(value)}]').click()`)
+            await until(`!document.querySelector('[role="listbox"]') && document.querySelectorAll('[role="combobox"]')[${index}].value===${JSON.stringify(value)}`)
+          }
+          await choose(0, 'nod_00000000000000000000000001')
+          await choose(1, 'thread')
           await until("qa.calls.filter(row=>row.method==='bridge.hub.attach').length===1 && qa.listenerCount()===1")
           await execute('qa.publish(qa.remoteSnapshot())'); await until("qa.text().includes('Working')")
           const online = await execute('qa.text()')

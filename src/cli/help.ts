@@ -47,7 +47,7 @@ Global options:
   --session <id>              Use a specific thread/session id
   --home <dir>                MOUSSE_HOME directory (default: ~/.mousse)
   --profile <id|slug>         Bind this invocation to a profile (providers stay shared)
-  -v, --version               Show version
+  -v, --version               Show version (with --json, also contract versions)
   -h, --help                  Show help
 
 Interactive chat (default on a TTY without -p):

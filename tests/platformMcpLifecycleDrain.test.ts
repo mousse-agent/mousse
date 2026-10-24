@@ -34,6 +34,15 @@ function deferred<T = void>() {
   return { promise, resolve }
 }
 
+async function waitForOAuthRedirect(redirect: Promise<void>, authentication: ReturnType<McpManager['authenticateServer']>): Promise<void> {
+  await Promise.race([
+    redirect,
+    authentication.then((result) => {
+      throw new Error(`OAuth completed before redirect readiness: ${result.error ?? (result.success ? 'unexpected success' : 'authentication failed')}`)
+    })
+  ])
+}
+
 function ownedRoot(): string {
   const root = mkdtempSync(join(tmpdir(), FIXTURE_PREFIX))
   const tmp = realpathSync.native(tmpdir())
@@ -349,6 +358,17 @@ describe('injected deterministic timeout races', () => {
 })
 
 describe('OAuth callback and local HTTP I/O during shutdown', () => {
+  it('surfaces authentication completion and errors before a deferred redirect, and accepts a ready redirect', async () => {
+    const neverRedirected = deferred()
+    await expect(waitForOAuthRedirect(neverRedirected.promise, Promise.resolve({ success: false, error: 'fixture discovery failed' })))
+      .rejects.toThrow('OAuth completed before redirect readiness: fixture discovery failed')
+    const failure = new Error('fixture authentication rejected')
+    await expect(waitForOAuthRedirect(neverRedirected.promise, Promise.reject(failure))).rejects.toBe(failure)
+    const authentication = deferred<Awaited<ReturnType<McpManager['authenticateServer']>>>()
+    await expect(waitForOAuthRedirect(Promise.resolve(), authentication.promise)).resolves.toBeUndefined()
+    authentication.resolve({ success: false, error: 'drained after redirect' })
+  })
+
   it('closes the local callback listener and does not leave a session write after drain', async (ctx) => {
     // The callback port is a product contract. When another process already holds it, the
     // test cannot own it and would only time out; say so instead.
@@ -399,7 +419,7 @@ describe('OAuth callback and local HTTP I/O during shutdown', () => {
       expect(new URL(url).pathname).toBe('/authorize')
       redirected.resolve()
     })
-    await redirected.promise
+    await waitForOAuthRedirect(redirected.promise, pending)
     await waitUntil('oauth callback port', () => isPortOpen(8791))
     const oauthDir = getManagedMcpOAuthDir(root)
     await waitUntil('oauth session write', () => {
@@ -485,7 +505,7 @@ describe('OAuth callback and local HTTP I/O during shutdown', () => {
     managers.push(first, second)
 
     const firstPending = first.authenticateServer('inst-echo')
-    await firstRedirect.promise
+    await waitForOAuthRedirect(firstRedirect.promise, firstPending)
     expect(await isPortOpen(8791)).toBe(true)
     const collided = await second.authenticateServer('inst-echo')
     expect(collided.success).toBe(false)

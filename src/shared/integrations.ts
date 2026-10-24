@@ -262,7 +262,7 @@ export const MOUSSE_BUILTIN_TOOL_GROUPS: MousseBuiltInToolGroupInfo[] = [
   { id: 'project', label: 'Project tools', description: 'File, shell and git tools.' },
   { id: 'interaction', label: 'Interaction', description: 'Questions and document previews.' },
   { id: 'tasks', label: 'Tasks', description: 'Thread task queue management.' },
-  { id: 'actions', label: 'Quick actions', description: 'Reusable chat header buttons.' },
+  { id: 'actions', label: 'Quick actions', description: 'Saved actions you run from the thread side card.' },
   { id: 'skills', label: 'Skill helpers', description: 'List and load agent skills.' },
   { id: 'web', label: 'Web', description: 'Search and fetch public web content.' },
   { id: 'browser', label: 'Browser', description: 'Host-selected in-app tab or managed browser tools.' },

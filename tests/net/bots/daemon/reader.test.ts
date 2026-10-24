@@ -58,6 +58,7 @@ function harness() {
     project = join(root, 'project'),
     sensitive = join(root, 'sensitive'),
     children: ChildProcess[] = [],
+    readiness: Promise<unknown>[] = [],
     ownerLogs: Array<{ role: string; pid: number | undefined; log: string }> = []
   mkdirSync(project)
   mkdirSync(sensitive)
@@ -82,12 +83,14 @@ function harness() {
     }
     child.stdout!.on('data', capture)
     child.stderr!.on('data', capture)
-    await wait(() => {
+    const ready = wait(() => {
       if (child.exitCode !== null || child.signalCode !== null)
         throw Error(`Actual ${role} owner exited: ${logs}`)
       const report = read(home)
       return report?.pid === child.pid ? report : undefined
     }, role + ' owner readiness')
+    readiness.push(ready)
+    await ready
     return { role, home, child, report: () => read(home), logs: () => logs }
   }
   const cli = (home: string, args: string[], input?: string) =>
@@ -139,6 +142,7 @@ function harness() {
     ownerLogs,
     async close() {
       await Promise.all(children.map((child) => kill(child)))
+      await Promise.allSettled(readiness)
       rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     }
   }
@@ -218,9 +222,11 @@ it.skipIf(!['darwin', 'linux'].includes(process.platform))(
     const currentPresence = (owner: Awaited<ReturnType<typeof qa.start>>, bot: string) =>
       owner.report()?.presence.find((row: any) => row.bot === bot)?.view.state
     try {
-      const host = await qa.start('host'),
-        executor = await qa.start('executor'),
-        sender = await qa.start('sender')
+      const [host, executor, sender] = await Promise.all([
+        qa.start('host'),
+        qa.start('executor'),
+        qa.start('sender')
+      ])
       for (const owner of [host, executor, sender]) {
         await command(owner.home, ['net', 'init', '--listen', '--port', '0'])
         await command(owner.home, ['net', 'protect'], 'fixed-reader-owned-protection')
@@ -560,9 +566,11 @@ it.skipIf(!['darwin', 'linux'].includes(process.platform))(
     }
     let old: any, fresh: any, hostReceipts: any
     try {
-      const host = await qa.start('host'),
-        executor = await qa.start('executor'),
-        sender = await qa.start('sender')
+      const [host, executor, sender] = await Promise.all([
+        qa.start('host'),
+        qa.start('executor'),
+        qa.start('sender')
+      ])
       for (const owner of [host, executor, sender]) {
         await command(owner.home, ['net', 'init', '--listen', '--port', '0'])
         await command(owner.home, ['net', 'protect'], 'fixed-reader-owned-protection')

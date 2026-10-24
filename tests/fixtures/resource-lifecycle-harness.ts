@@ -8,6 +8,7 @@ import { MmsProtocolServer } from '../../src/mms/protocol/server'
 import type { WorkflowBundle } from '../../src/shared/workflows'
 import { ProviderAuthService } from '../../src/mms/providers/ProviderAuthService'
 import { vi } from 'vitest'
+import { fixturePhase } from '../support/phaseTiming'
 
 /** Real composition and authenticated socket; no lifecycle, persistence or runtime mocks. */
 export async function lifecycleHarness(options: { prepareProfile?: (profileHome: string, profileId: string) => void } = {}) {
@@ -16,35 +17,38 @@ export async function lifecycleHarness(options: { prepareProfile?: (profileHome:
   const previousHome = process.env.MOUSSE_HOME
   const root = mkdtempSync(join(tmpdir(), 'resource-lifecycle-acceptance-'))
   const home = join(root, 'home')
-  const main = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false, headless: true })
+  const main = await fixturePhase('lifecycle', 'create', () => MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false, headless: true }))
   const host = main.getInstallationHost()!
   const alice = host.manager.create({ displayName: 'Lifecycle Alice', slug: 'lifecycle-alice' })
   const bob = host.manager.create({ displayName: 'Lifecycle Bob', slug: 'lifecycle-bob' })
   options.prepareProfile?.(join(home, 'profiles', alice.id), alice.id)
-  const services = await main.getProfileServices(alice.id)
-  const bobServices = await main.getProfileServices(bob.id)
+  const services = await fixturePhase('lifecycle', 'alice-profile', () => main.getProfileServices(alice.id))
+  const bobServices = await fixturePhase('lifecycle', 'bob-profile', () => main.getProfileServices(bob.id))
   const ownerToken = randomUUID()
   const server = new MmsProtocolServer({ mms: main, ownerToken, commandRouter: main.browserCommandRouter })
-  const endpoint = await server.start()
+  const endpoint = await fixturePhase('lifecycle', 'listen', () => server.start())
   const clients: LocalMmsClient[] = []
   const connect = async (profile = alice.id, additionalCapabilities: string[] = [], clientType: 'gui' | 'cli' = 'gui') => {
     const client = new LocalMmsClient({ homeDir: home, endpoint, ownerToken, clientType,
       requestedCapabilities: ['profiles-v1', 'workflows.definitions.v1', 'workflowRuns.v1', ...additionalCapabilities] })
     clients.push(client)
-    await client.connect()
-    await client.request('profiles.bind', { profile })
+    await fixturePhase('lifecycle', 'connect-and-bind', async () => {
+      await client.connect()
+      await client.request('profiles.bind', { profile })
+    })
     return client
   }
   const rpc = await connect()
   return { root, home, main, alice, bob, services, bobServices, rpc, connect,
     async close() {
-      await Promise.all(clients.map((client) => client.close()))
-      try { await server.stop() } finally { await main.stop() }
+      await fixturePhase('lifecycle', 'close-clients', () => Promise.all(clients.map((client) => client.close())))
+      try { await fixturePhase('lifecycle', 'stop-server', () => server.stop()) }
+      finally { await fixturePhase('lifecycle', 'stop-main', () => main.stop()) }
       providerInit.mockRestore()
       if (previousHome === undefined) delete process.env.MOUSSE_HOME
       else process.env.MOUSSE_HOME = previousHome
       if (!basename(root).startsWith('resource-lifecycle-acceptance-') || resolve(root) === resolve(tmpdir())) throw new Error('Unsafe fixture cleanup')
-      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+      await fixturePhase('lifecycle', 'remove-files', () => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }))
     }
   }
 }
