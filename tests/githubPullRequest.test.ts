@@ -87,14 +87,32 @@ describe('GitHubService.getPullRequest', () => {
     const run = runner()
     const result = await new GitHubService(run).getPullRequest('/repo')
     expect(result).toMatchObject({ state: 'found', pullRequest: { number: 3, state: 'open', isDraft: true, checks: 'none' } })
-    expect(run).toHaveBeenCalledWith('gh', ['pr', 'list', '--head', 'feature', '--state', 'all', '--limit', '1', '--json', 'number,title,url,state,isDraft,statusCheckRollup'], { cwd: '/repo' })
+    expect(run).toHaveBeenCalledWith('gh', ['pr', 'list', '--head', 'feature', '--state', 'open', '--limit', '10', '--json', 'number,title,url,state,isDraft,statusCheckRollup,isCrossRepository'], { cwd: '/repo' })
   })
 
   it('looks up the requested branch, not whatever is checked out when the lookup runs', async () => {
     const run = runner({ branch: 'other' })
     await new GitHubService(run).getPullRequest('/repo', 'feature-a')
     expect(run.mock.calls.some((call) => call[0] === 'git')).toBe(false)
-    expect(run).toHaveBeenCalledWith('gh', ['pr', 'list', '--head', 'feature-a', '--state', 'all', '--limit', '1', '--json', 'number,title,url,state,isDraft,statusCheckRollup'], { cwd: '/repo' })
+    expect(run).toHaveBeenCalledWith('gh', ['pr', 'list', '--head', 'feature-a', '--state', 'open', '--limit', '10', '--json', 'number,title,url,state,isDraft,statusCheckRollup,isCrossRepository'], { cwd: '/repo' })
+  })
+
+  it('prefers an open pull request and falls back to closed or merged ones', async () => {
+    const closed = JSON.stringify({ number: 9, title: 'Old', url: 'https://github.com/a/b/pull/9', state: 'MERGED', isDraft: false, statusCheckRollup: [] })
+    const run = vi.fn<ExecutableRunner>(async (executable, args) => {
+      if (executable === 'git') return ok('feature\n')
+      if (args[0] === 'pr') return ok(args.includes('open') ? '[]' : `[${closed}]`)
+      return ok()
+    })
+    expect(await new GitHubService(run).getPullRequest('/repo')).toMatchObject({ state: 'found', pullRequest: { number: 9, state: 'merged' } })
+    expect(run.mock.calls.filter((call) => call[1][0] === 'pr').map((call) => call[1][5])).toEqual(['open', 'all'])
+  })
+
+  it('skips a fork pull request whose branch has the same name', async () => {
+    const fork = JSON.stringify({ number: 12, title: 'Fork', url: 'https://github.com/x/b/pull/12', state: 'OPEN', isDraft: false, statusCheckRollup: [], isCrossRepository: true })
+    const own = JSON.stringify({ number: 10, title: 'Own', url: 'https://github.com/a/b/pull/10', state: 'OPEN', isDraft: false, statusCheckRollup: [], isCrossRepository: false })
+    expect(parsePullRequestList(`[${fork},${own}]`)).toMatchObject({ number: 10 })
+    expect(parsePullRequestList(`[${fork}]`)).toBe('empty')
   })
 
   it('treats an all-digit branch as a branch, not a pull request number', async () => {

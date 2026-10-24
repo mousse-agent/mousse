@@ -1,9 +1,12 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { withGitMutationLocks } from '../src/mms/actions/GitOperationCoordinator'
 import { choosePushRemote, GitService } from '../src/mms/git/GitService'
+import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
+import { acquireRepositoryLease } from '../src/mms/git/RepositoryLease'
 
 const roots: string[] = []
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
@@ -194,26 +197,27 @@ describe('GitService init', () => {
 })
 
 describe('GitService lease', () => {
-  it('waits for a lease held by another live process and takes over a stale one', async () => {
-    const { cwd } = fixture(); commitFile(cwd, 'a.txt', 'first')
-    const lease = join(cwd, '.git', 'mousse-git.lease')
-    // A live holder (this test process) blocks the commit until the lease is released.
-    writeFileSync(lease, `${process.pid} ${Date.now()}\n`)
+  it('waits for the repository mutation lease, which every worktree shares', async () => {
+    const { root, cwd } = fixture(); commitFile(cwd, 'a.txt', 'first')
+    const linked = join(root, 'linked'); git(cwd, 'worktree', 'add', '-q', '-b', 'other', linked)
+    // Another holder, here the lease taken through a linked worktree of the same repository.
+    const held = await acquireRepositoryLease(resolveRepositoryIdentity(linked))
     writeFileSync(join(cwd, 'b.txt'), 'b\n')
     let done = false
     const committing = new GitService().commit(cwd, 'second').then(() => { done = true })
     await new Promise((resolve) => setTimeout(resolve, 400))
     expect(done).toBe(false)
-    rmSync(lease)
+    held.release()
     await committing
     expect(git(cwd, 'log', '-1', '--format=%s')).toBe('second')
-    expect(existsSync(lease)).toBe(false)
-    // A lease left by a process that is gone does not block.
-    writeFileSync(lease, `999999 ${Date.now()}\n`)
-    writeFileSync(join(cwd, 'c.txt'), 'c\n')
-    await new GitService().commit(cwd, 'third')
-    expect(git(cwd, 'log', '-1', '--format=%s')).toBe('third')
-    expect(existsSync(lease)).toBe(false)
+  })
+
+  it('runs inside a Git action that already holds the lease instead of waiting on itself', async () => {
+    const { root, cwd, origin } = fixture(); git(cwd, 'remote', 'add', 'origin', origin)
+    commitFile(cwd, 'a.txt', 'first')
+    const threadDir = join(root, 'thread'); mkdirSync(threadDir)
+    await withGitMutationLocks(threadDir, cwd, 'test-push', () => new GitService().push(cwd))
+    expect(git(origin, 'rev-parse', 'refs/heads/main')).toBe(git(cwd, 'rev-parse', 'HEAD'))
   })
 
   it('covers two service instances, as the desktop app and the background service run', async () => {

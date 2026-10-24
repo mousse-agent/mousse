@@ -1,9 +1,12 @@
 import { createErrorProvider } from '../../shared/errors'
 import { existsSync } from 'node:fs'
-import { open, readFile, rm, stat } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { stat } from 'node:fs/promises'
+import { resolve } from 'node:path'
 import simpleGit, { type SimpleGit, type StatusResult } from 'simple-git'
+import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
 import { GitHubService } from './GitHubService'
+import { resolveRepositoryIdentity } from './RepositoryIdentity'
+import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
 import type {
   GitBranchInfo,
   GitCommit,
@@ -25,31 +28,12 @@ const gitErrors = createErrorProvider({
   git_busy: { category: 'unavailable', retryable: true, message: 'Another Git action on this folder is still running. Try again shortly.' }
 })
 
-/** Lease file in a repository's Git folder, shared by every process that runs this service. */
-const LEASE_FILE = 'mousse-git.lease'
-/** A lease this old is left over from a crash, whatever its owner says. */
-const LEASE_STALE_MS = 10 * 60_000
+/** How long a Git action waits for another one on the same repository before giving up. */
 const LEASE_WAIT_MS = 2 * 60_000
-const LEASE_RETRY_MS = 150
+/** Well inside the repository lease's 30 s stale window, so a long hook keeps its lease. */
+const LEASE_HEARTBEAT_MS = 5_000
 /** A push that prints nothing for this long is waiting on a prompt nobody can answer. */
 const PUSH_SILENCE_MS = 2 * 60_000
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM'
-  }
-}
-
-async function isLeaseStale(path: string, now: number): Promise<boolean> {
-  const text = await readFile(path, 'utf8').catch(() => null)
-  if (text === null) return true
-  const [pid, startedAt] = text.trim().split(/\s+/).map(Number)
-  if (!Number.isFinite(startedAt) || now - startedAt > LEASE_STALE_MS) return true
-  return Number.isInteger(pid) && pid > 0 && !isProcessAlive(pid)
-}
 
 export interface PushRemoteInputs {
   pushRemote: string | null
@@ -263,8 +247,9 @@ export class GitService {
   /**
    * Runs the changes this app makes to a folder (checkout, commit, push) one at a
    * time, so a push cannot land between the amend check and the amend itself. The
-   * desktop app and the background service each run this service, so the queue
-   * also holds a lease file in the repository's Git folder that both respect.
+   * desktop app and the background service each run this service, so the queue also
+   * holds the repository mutation lease, which every worktree of the repository and
+   * every other Git mutation in the app share.
    */
   private serialized<T>(cwd: string, operation: () => Promise<T>): Promise<T> {
     const key = resolve(cwd)
@@ -280,36 +265,30 @@ export class GitService {
   }
 
   private async withLease<T>(cwd: string, operation: () => Promise<T>): Promise<T> {
-    // A folder that is not a repository yet (init) has no Git folder to hold a lease in.
-    const gitDir = existsSync(cwd)
-      ? await this.gitFor(cwd).raw(['rev-parse', '--absolute-git-dir']).then((value) => value.trim() || null).catch(() => null)
-      : null
-    if (!gitDir) return operation()
-    const lease = join(gitDir, LEASE_FILE)
-    const deadline = Date.now() + LEASE_WAIT_MS
-    for (;;) {
-      try {
-        const handle = await open(lease, 'wx')
-        try {
-          await handle.writeFile(`${process.pid} ${Date.now()}\n`)
-        } finally {
-          await handle.close()
-        }
-        break
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-        if (await isLeaseStale(lease, Date.now())) {
-          await rm(lease, { force: true })
-          continue
-        }
-        if (Date.now() > deadline) throw gitErrors.create('git_busy')
-        await new Promise((done) => setTimeout(done, LEASE_RETRY_MS))
-      }
+    let identity: ReturnType<typeof resolveRepositoryIdentity> | null = null
+    try {
+      identity = existsSync(cwd) ? resolveRepositoryIdentity(cwd) : null
+    } catch {
+      identity = null
     }
+    // Not a repository yet, or no commit yet: there is nothing a push or an amend could race with.
+    if (!identity?.capability.allowed) return operation()
+    // Background Git actions already hold this lease when they call in; taking it again would wait on itself.
+    if (holdsRepositoryMutation(identity.key)) return operation()
+    let lease: Awaited<ReturnType<typeof acquireRepositoryLease>>
+    try {
+      lease = await acquireRepositoryLease(identity, { signal: AbortSignal.timeout(LEASE_WAIT_MS) })
+    } catch (error) {
+      if (error instanceof RepositoryLeaseAbortedError) throw gitErrors.create('git_busy', error)
+      throw error
+    }
+    const heartbeat = setInterval(() => lease.heartbeat(), LEASE_HEARTBEAT_MS)
+    heartbeat.unref?.()
     try {
       return await operation()
     } finally {
-      await rm(lease, { force: true })
+      clearInterval(heartbeat)
+      lease.release()
     }
   }
 
@@ -374,8 +353,9 @@ export class GitService {
     if (!hasUpstream && !remote) throw gitErrors.create('git_no_remote')
     try {
       // With an upstream, let Git resolve pushRemote, remote.pushDefault, refspecs and push.default.
-      if (remote) await git.raw(['push', '-u', remote, branch])
-      else await git.push()
+      // Progress output keeps a slow but healthy upload from looking silent.
+      if (remote) await git.raw(['push', '--progress', '-u', remote, branch])
+      else await git.raw(['push', '--progress'])
     } catch (error) {
       throw gitErrors.create(isPushRejected(error) ? 'git_push_rejected' : 'git_push_failed', error)
     }

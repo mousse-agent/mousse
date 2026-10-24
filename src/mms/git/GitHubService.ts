@@ -125,9 +125,14 @@ export function summarizeCheckRollup(rollup: unknown): PullRequestCheckSummary {
   return { checks, checkCounts: counts }
 }
 
-const PULL_REQUEST_FIELDS = 'number,title,url,state,isDraft,statusCheckRollup'
+const PULL_REQUEST_FIELDS = 'number,title,url,state,isDraft,statusCheckRollup,isCrossRepository'
+/** Enough to find this repository's own pull request among forks with a branch of the same name. */
+const PULL_REQUEST_CANDIDATES = 10
 
-/** Parses `gh pr list --json …` output: the newest pull request, 'empty' for none, or null when unreadable. */
+/**
+ * Parses `gh pr list --json …` output, newest first: the newest pull request from this
+ * repository (a fork's branch can share the name), 'empty' for none, or null when unreadable.
+ */
 export function parsePullRequestList(stdout: string): GitPullRequestInfo | 'empty' | null {
   let data: unknown
   try {
@@ -137,7 +142,8 @@ export function parsePullRequestList(stdout: string): GitPullRequestInfo | 'empt
   }
   if (!Array.isArray(data)) return null
   if (data.length === 0) return 'empty'
-  return parsePullRequest(data[0])
+  const own = data.find((item) => item && typeof item === 'object' && (item as { isCrossRepository?: unknown }).isCrossRepository !== true)
+  return own === undefined ? 'empty' : parsePullRequest(own)
 }
 
 /** Parses one pull request from gh's JSON (`number,title,url,state,isDraft,statusCheckRollup`). */
@@ -251,12 +257,14 @@ export class GitHubService {
 
     try {
       // `pr list --head` matches branch names only; `pr view <branch>` reads an all-digit branch as a PR number.
-      const { stdout } = await this.runExecutable(
+      // An open pull request wins over a newer closed one, as `pr view` would choose.
+      const list = (state: 'open' | 'all') => this.runExecutable(
         'gh',
-        ['pr', 'list', '--head', branch, '--state', 'all', '--limit', '1', '--json', PULL_REQUEST_FIELDS],
+        ['pr', 'list', '--head', branch, '--state', state, '--limit', String(PULL_REQUEST_CANDIDATES), '--json', PULL_REQUEST_FIELDS],
         { cwd }
-      )
-      const listed = parsePullRequestList(stdout)
+      ).then((result) => parsePullRequestList(result.stdout))
+      let listed = await list('open')
+      if (listed === 'empty') listed = await list('all')
       if (listed === 'empty') return { state: 'none', isDefaultBranch: await this.isDefaultBranch(cwd, branch) }
       if (listed) return { state: 'found', pullRequest: listed }
       return { state: 'unavailable', reason: 'error', message: 'GitHub CLI returned an unexpected pull request response.' }

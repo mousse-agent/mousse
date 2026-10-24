@@ -12,6 +12,11 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 
 const mutationContext = new AsyncLocalStorage<Set<string>>()
 
+/** Whether the current async operation already holds this repository's mutation lease. */
+export function holdsRepositoryMutation(key: string): boolean {
+  return mutationContext.getStore()?.has(key) ?? false
+}
+
 export function assertHeldThreadLease(threadDirectory: string, lease: ThreadLeaseHandle): void {
   if (resolve(lease.threadDir) !== resolve(threadDirectory) ||
       resolve(lease.lockPath) !== resolve(getExecutionLeasePath(threadDirectory)) ||
