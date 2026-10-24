@@ -28,6 +28,7 @@ import type { ChatMessage, NativeLlmContext, OrchestratorSendInput, Orchestrator
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
 import type { ModelOverride } from '../../shared/providerInstances'
+import type { CliProviderInstanceId } from '../../shared/providerAuth'
 import {
   ACCENT_COLORS,
   THEME_OPTIONS,
@@ -61,6 +62,7 @@ import {
   isObject
 } from './validators'
 import { PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
+import { asCliProviderInstanceId, parseCliConfigPatch } from '../providers/cliConfig'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
@@ -89,9 +91,37 @@ import { isInstallationMethod } from '../profiles/admission'
 import { ChatReferenceMetadataResolver } from '../data/resolveChatReferenceMetadata'
 import { parseChatReference } from '../../shared/chatReferences'
 
-/** Claude and Codex report their terminal sign-ins from cached live checks; refresh both. */
+/** Profiles (keyed by their Claude service) whose last sign-in statuses both had a usable answer. */
+const vendorSignInsAnswered = new WeakSet<object>()
+
+/** False only while a sign-in has never been checked (or its settings cannot be read). */
+function signInAnswered(status: { state: string; checkedAt?: string } | undefined): boolean {
+  return !!status && (status.state !== 'error' || status.checkedAt !== undefined)
+}
+
+/**
+ * Claude and Codex report their terminal sign-ins from cached live checks, each of which starts
+ * the vendor CLI (a few hundred ms). Until both have an answer the check is awaited. After that,
+ * reads such as opening Settings use the cached answer while a stale one refreshes in the
+ * background, and clients get `providers.changed` when the refresh changes the provider list.
+ */
 async function refreshVendorSignIns(ctx: HandlerContext): Promise<void> {
-  await Promise.all([ctx.mms.claudeSubscription.status(), ctx.mms.codex.status()])
+  const key = ctx.mms.claudeSubscription
+  const refresh = async (): Promise<void> => {
+    const [claude, codex] = await Promise.all([ctx.mms.claudeSubscription.status(), ctx.mms.codex.status()])
+    if (signInAnswered(claude) && signInAnswered(codex)) vendorSignInsAnswered.add(key)
+    else vendorSignInsAnswered.delete(key)
+  }
+  if (!vendorSignInsAnswered.has(key)) return refresh()
+  const before = JSON.stringify(ctx.mms.providerInstances.configuredProviders())
+  void refresh()
+    .then(() => {
+      const providers = ctx.mms.providerInstances.configuredProviders()
+      if (JSON.stringify(providers) !== before) ctx.emitEvent?.('providers.changed', { providers })
+    })
+    .catch(() => {
+      vendorSignInsAnswered.delete(key)
+    })
 }
 
 export interface HandlerContext {
@@ -412,6 +442,13 @@ export async function dispatchMethod(
     return ctx.mms.runOwnedRequest(method, () => dispatchOwnedMethod(ctx, method, params))
   }
   return dispatchOwnedMethod(ctx, method, params)
+}
+
+/** The vendor driver that owns a CLI provider instance's launch settings. */
+function cliProviderService(ctx: HandlerContext, instanceId: CliProviderInstanceId) {
+  if (instanceId === 'claude') return ctx.mms.claudeSubscription
+  if (instanceId === 'codex') return ctx.mms.codex
+  return ctx.mms.antigravity
 }
 
 async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
@@ -1809,13 +1846,17 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (p.recheck === true) ctx.emitEvent?.('providers.changed', { providers })
       return { status, providers }
     }
-    case 'providers.claudeSetLoginPolicy': {
+    case 'providers.cliConfig': {
       const p = isObject(params) ? params : {}
-      if (p.policy !== 'cli' && p.policy !== 'isolated') throw new Error('policy must be cli or isolated')
-      const status = await ctx.mms.claudeSubscription.setLoginPolicy(p.policy)
+      return { config: await cliProviderService(ctx, asCliProviderInstanceId(p.instanceId)).cliConfig() }
+    }
+    case 'providers.setCliConfig': {
+      const p = isObject(params) ? params : {}
+      const service = cliProviderService(ctx, asCliProviderInstanceId(p.instanceId))
+      const config = await service.setCliConfig(parseCliConfigPatch(p.patch))
       const providers = ctx.mms.providerInstances.configuredProviders()
       ctx.emitEvent?.('providers.changed', { providers })
-      return { status, providers }
+      return { config, providers }
     }
     case 'workspace.getStatus': {
       const p = isObject(params) ? params : {}

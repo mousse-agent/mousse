@@ -5,13 +5,33 @@ import { delimiter, isAbsolute, join, resolve } from 'node:path'
 import { AppError, redactSecrets } from '../../../shared/errors'
 import { CODEX_INSTANCE_ID } from '../../../shared/providerInstances'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
-import type { CodexStatus, ConfiguredProvider, ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
+import type {
+  CliProviderConfig,
+  CliProviderConfigPatch,
+  CodexStatus,
+  ConfiguredProvider,
+  ProviderLoginOption,
+  ProviderLoginResult
+} from '../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
+import { mousseVersion } from '../../appVersion'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { codexMcpConfigOverrides } from '../../run/mcp/attachment'
 import type { LoginSession } from '../LoginSession'
+import {
+  applyCliConfigPatch,
+  cliLaunch,
+  requireExecutable,
+  sharedCliVersions,
+  storedCliArgs,
+  storedCliEnv,
+  withUserEnv,
+  type CliLaunch,
+  type CliVersionCache
+} from '../cliConfig'
+import { resolveWindowsShim } from '../resolveWindowsShim'
 import {
   CodexAppServerClient,
   CodexRpcError,
@@ -52,7 +72,6 @@ export const CODEX_FALLBACK_MODELS: LlmModelOption[] = [
  * credentials, out of Mousse turns.
  */
 export const CODEX_MODEL_PROVIDER = 'openai'
-const CLIENT_VERSION = '0.1.1'
 const INTERRUPT_TIMEOUT_MS = 5_000
 /** A stopped turn must settle on the server before the thread takes a new one. */
 const PREVIOUS_TURN_SETTLE_MS = 10_000
@@ -75,6 +94,10 @@ type SavedThread = {
 type Settings = {
   /** Absolute path chosen in Settings; PATH lookup otherwise. */
   binaryPath?: string
+  /** Extra arguments after `codex app-server`. */
+  args?: string[]
+  /** Extra environment variables, applied over `codexEnvironment()`. */
+  env?: Record<string, string>
   models?: LlmModelOption[]
   /** Disconnected in Mousse; the terminal sign-in in `~/.codex` stays intact. */
   disconnected?: boolean
@@ -96,6 +119,8 @@ export type CodexServiceDependencies = {
   requestTimeoutMs?: number
   /** Overrides both idle-close delays (tests). */
   idleCloseMs?: number
+  /** `codex --version` lookups (tests). */
+  versions?: CliVersionCache
 }
 
 export interface CodexToolEvent {
@@ -174,7 +199,10 @@ export function codexEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJ
   return env
 }
 
-/** `codex` on PATH (plus `~/.local/bin`, where the standalone installer puts it). */
+/**
+ * `codex` on PATH (plus `~/.local/bin`, where the standalone installer puts it). On Windows an npm
+ * `codex.cmd` shim counts only when it resolves to the program it runs (see `resolveWindowsShim`).
+ */
 export function findCodexBinary(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const names = process.platform === 'win32' ? ['codex.exe', 'codex.cmd'] : ['codex']
   for (const directory of [...(env.PATH ?? '').split(delimiter), join(homedir(), '.local', 'bin')]) {
@@ -183,10 +211,10 @@ export function findCodexBinary(env: NodeJS.ProcessEnv = process.env): string | 
       const candidate = resolve(directory, name)
       try {
         accessSync(candidate, constants.X_OK)
-        return candidate
       } catch {
-        /* next */
+        continue
       }
+      if (resolveWindowsShim(candidate, { env })) return candidate
     }
   }
   return undefined
@@ -481,7 +509,9 @@ export class CodexProviderService {
   private settingsError?: string
   private stopped = false
   /** `verified`: this process answered `account/read` with a ChatGPT account. */
-  private app?: { conn: CodexConnection; ready: Promise<CodexConnection>; verified: boolean }
+  private app?: { conn: CodexConnection; ready: Promise<CodexConnection>; verified: boolean; generation: number }
+  /** Bumped when the launch settings change; a process from an older generation is replaced once idle. */
+  private launchGeneration = 0
   private probeResult?: { at: number; result: AccountProbe }
   private probing?: Promise<void>
   private modelDiscoveryStarted = false
@@ -527,16 +557,14 @@ export class CodexProviderService {
     atomicWriteJsonSync(this.settingsPath, this.settings)
   }
 
+  /** How to start Codex: the chosen or detected executable, with an npm shim resolved. */
+  private launchTarget(): CliLaunch | undefined {
+    return cliLaunch(this.settings.binaryPath || (this.dependencies.findBinary ?? findCodexBinary)())
+  }
+
+  /** The program that runs (reported as `resolvedBinaryPath`). */
   private binary(): string | undefined {
-    const selected = this.settings.binaryPath
-    if (!selected) return (this.dependencies.findBinary ?? findCodexBinary)()
-    try {
-      if (!isAbsolute(selected)) return undefined
-      accessSync(selected, constants.X_OK)
-      return selected
-    } catch {
-      return undefined
-    }
+    return this.launchTarget()?.path
   }
 
   standaloneWorkspace(threadId: string): string {
@@ -757,6 +785,39 @@ export class CodexProviderService {
     this.app?.conn.close()
   }
 
+  /** The executable path, launch args and environment set in Settings → Providers. */
+  async cliConfig(): Promise<CliProviderConfig> {
+    const launch = this.launchTarget()
+    return {
+      instanceId: CODEX_INSTANCE_ID,
+      ...(this.settings.binaryPath ? { binaryPath: this.settings.binaryPath } : {}),
+      ...(launch ? { resolvedBinaryPath: launch.path } : {}),
+      version: await (this.dependencies.versions ?? sharedCliVersions).version(launch, this.environment()),
+      args: storedCliArgs(this.settings),
+      env: storedCliEnv(this.settings)
+    }
+  }
+
+  /**
+   * Saves the launch settings. The app-server process is long-lived, so one started with the old
+   * settings is replaced: at once when idle, otherwise when its running turns and checks finish.
+   * A changed executable re-checks the sign-in.
+   */
+  async setCliConfig(patch: CliProviderConfigPatch): Promise<CliProviderConfig> {
+    if (this.stopped) throw new Error('Codex provider is stopped')
+    if (this.settingsError) throw new Error(this.settingsError)
+    const before = this.binary()
+    applyCliConfigPatch(this.settings, patch, (path) => requireExecutable(path, 'Codex'))
+    this.save()
+    this.launchGeneration += 1
+    if (this.app) {
+      if (this.busy()) this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
+      else this.closeProcess()
+    }
+    if (this.binary() !== before) await this.status({ force: true })
+    return this.cliConfig()
+  }
+
   stop(): void {
     this.stopped = true
     if (this.idleClose) clearTimeout(this.idleClose.timer)
@@ -777,17 +838,23 @@ export class CodexProviderService {
   private connection(): Promise<CodexConnection> {
     if (this.stopped) return Promise.reject(new Error('Codex provider is stopped'))
     if (this.app && !this.app.conn.signal.aborted) return this.app.ready
-    const binary = this.binary()
-    if (!binary) return Promise.reject(new Error('Codex CLI not found. Install the Codex CLI first.'))
+    const target = this.launchTarget()
+    if (!target) return Promise.reject(new Error('Codex CLI not found. Install the Codex CLI first.'))
     mkdirSync(this.dir, { recursive: true, mode: 0o700 })
-    const process = (this.dependencies.launch ?? spawnCodexAppServer)({ binary, args: [], env: codexEnvironment(), cwd: this.dir })
+    const process = (this.dependencies.launch ?? spawnCodexAppServer)({
+      binary: target.command,
+      ...(target.args.length ? { entryArgs: target.args } : {}),
+      args: storedCliArgs(this.settings),
+      env: this.environment(),
+      cwd: this.dir
+    })
     const conn = new CodexAppServerClient(process, { defaultTimeoutMs: this.dependencies.requestTimeoutMs, secrets: () => this.secrets })
     conn.onNotification((notification) => this.route(notification))
     conn.setServerRequestHandler((request) => this.serve(request))
     conn.signal.addEventListener('abort', () => this.lost(conn, conn.signal.reason), { once: true })
     const ready = conn
       .request('initialize', {
-        clientInfo: { name: 'mousse', title: 'Mousse', version: CLIENT_VERSION },
+        clientInfo: { name: 'mousse', title: 'Mousse', version: mousseVersion() },
         capabilities: { experimentalApi: false, requestAttestation: false }
       })
       .then(() => {
@@ -795,32 +862,52 @@ export class CodexProviderService {
         return conn
       })
     ready.catch(() => conn.close())
-    this.app = { conn, ready, verified: false }
+    this.app = { conn, ready, verified: false, generation: this.launchGeneration }
     return ready
+  }
+
+  private environment(): NodeJS.ProcessEnv {
+    return withUserEnv(codexEnvironment(), storedCliEnv(this.settings))
+  }
+
+  /** Something is using the process: a check, a model listing, or a turn. */
+  private busy(): boolean {
+    return Boolean(this.probing || this.listing || this.activeThreads.size || this.turns.size)
+  }
+
+  /** Detaches and closes the process; `lost` then treats the exit as expected. */
+  private closeProcess(): void {
+    const app = this.app
+    if (!app) return
+    if (this.idleClose) clearTimeout(this.idleClose.timer)
+    this.idleClose = undefined
+    this.app = undefined
+    this.loaded.clear()
+    app.conn.close()
   }
 
   /**
    * Closes the process `delay` ms from now unless something is using it then; an earlier close
-   * already scheduled is pushed back, never brought forward. The cached sign-in check survives,
-   * so Codex stays listed; the next process proves its own sign-in before it gets a turn.
+   * already scheduled is pushed back, never brought forward. A process started with older launch
+   * settings is the exception: it closes as soon as nothing uses it. The cached sign-in check
+   * survives, so Codex stays listed; the next process proves its own sign-in before it gets a turn.
    */
-  private closeWhenIdle(delay: number): void {
+  private closeWhenIdle(delay: number, retry = false): void {
     if (!this.app || this.stopped) return
-    const at = Date.now() + (this.dependencies.idleCloseMs ?? delay)
-    if (this.idleClose && this.idleClose.at >= at) return
+    const stale = this.app.generation !== this.launchGeneration
+    const at = Date.now() + (stale && !retry ? 0 : (this.dependencies.idleCloseMs ?? delay))
+    if (this.idleClose && this.idleClose.at >= at && !stale) return
     if (this.idleClose) clearTimeout(this.idleClose.timer)
     const timer = setTimeout(() => {
       this.idleClose = undefined
       const app = this.app
       if (!app) return
-      if (this.probing || this.listing || this.activeThreads.size || this.turns.size) {
-        this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
+      if (this.busy()) {
+        this.closeWhenIdle(CODEX_CHECK_CLOSE_MS, true)
         return
       }
       // Detached first, so `lost` treats the exit as expected and keeps the sign-in result.
-      this.app = undefined
-      this.loaded.clear()
-      app.conn.close()
+      this.closeProcess()
     }, at - Date.now())
     timer.unref?.()
     this.idleClose = { timer, at }

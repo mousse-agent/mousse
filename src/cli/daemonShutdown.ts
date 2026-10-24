@@ -5,12 +5,73 @@
 
 import type { MousseMainService } from './contract'
 import type { MmsProtocolServer } from '../mms/protocol/server'
+import { readOwnerRecord } from '../mms/ownership/MmsOwnerLease'
 import {
   clearStopRequest,
+  pollUntilRuntimeStopped,
   removeOwnRuntimeRecord,
+  resolveRuntimeStatus,
+  SERVICE_STOP_TIMEOUT_MS,
   writeStopRequest,
+  type MmsRuntimeRecord,
   type MmsStopRequest
 } from './mmsRuntime'
+
+export type DaemonStopResult =
+  | { kind: 'not-running' }
+  /** The runtime file exists but cannot be read, so no owner-checked stop can be sent. */
+  | { kind: 'unreadable' }
+  | { kind: 'stopped'; pid: number }
+  /** The original daemon stopped but another one owns the home now. */
+  | { kind: 'replaced'; pid: number; record: MmsRuntimeRecord }
+  | { kind: 'timeout'; pid: number }
+
+/**
+ * Asks the daemon for `homeDir` to shut down and waits until it has. Uses protocol
+ * `daemon.shutdown` when the endpoint answers and always writes the fenced stop request
+ * as the fallback. Never kills the process or removes its ownership.
+ */
+export async function stopRunningDaemon(
+  homeDir: string,
+  opts: { reason?: string; timeoutMs?: number; intervalMs?: number } = {}
+): Promise<DaemonStopResult> {
+  const reason = opts.reason ?? 'service-stop'
+  const status = resolveRuntimeStatus(homeDir)
+  if (!status.running) return { kind: 'not-running' }
+  if (!status.record) return { kind: 'unreadable' }
+  const record = status.record
+  try {
+    const owner = readOwnerRecord(homeDir)
+    if (owner?.token && owner.endpoint) {
+      const { LocalMmsClient } = await import('../mms/protocol/client')
+      const client = new LocalMmsClient({
+        homeDir,
+        ownerToken: owner.token,
+        endpoint: owner.endpoint,
+        clientType: 'cli',
+        requestTimeoutMs: 5_000
+      })
+      try {
+        await client.connect()
+        await client.request('daemon.shutdown', { reason })
+      } finally {
+        await client.close().catch(() => undefined)
+      }
+    }
+  } catch {
+    /* fall through to the stop request */
+  }
+  requestDaemonShutdown(homeDir, record.token, reason)
+  const result = await pollUntilRuntimeStopped(homeDir, record.token, {
+    timeoutMs: opts.timeoutMs ?? SERVICE_STOP_TIMEOUT_MS,
+    ...(opts.intervalMs === undefined ? {} : { intervalMs: opts.intervalMs })
+  })
+  if (result.kind === 'timeout') return { kind: 'timeout', pid: record.pid }
+  clearStopRequest(homeDir)
+  return result.kind === 'stopped'
+    ? { kind: 'stopped', pid: record.pid }
+    : { kind: 'replaced', pid: record.pid, record: result.record }
+}
 
 /** Write an owner-token-fenced stop request. Single source of truth for graceful stop signaling. */
 export function requestDaemonShutdown(

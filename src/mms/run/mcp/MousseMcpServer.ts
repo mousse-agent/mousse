@@ -4,6 +4,7 @@ import type { AddressInfo, Socket } from 'node:net'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import { mousseVersion } from '../../appVersion'
 import type { ModeCeiling } from '../types'
 import { mousseOrchestrationInstructions } from './instructions'
 import type { McpCredentials } from './McpCredentials'
@@ -183,7 +184,7 @@ export class MousseMcpServer implements McpAttachmentProvider {
   /** One SDK server per request, bound to the caller the request's token resolved to. */
   private mcpServer(caller: McpCaller, requestSignal: AbortSignal): Server {
     const server = new Server(
-      { name: 'mousse', version: '1.0.0' },
+      { name: 'mousse', version: mousseVersion() },
       { capabilities: { tools: {} }, instructions: mousseOrchestrationInstructions() }
     )
     const registry = this.options.registry

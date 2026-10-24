@@ -1,11 +1,12 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { PlusEnrollmentRequestView } from '../../src/shared/net'
+import type { NetStatus, PlusEnrollmentRequestView } from '../../src/shared/net'
+import type { PlusStatus } from '../../src/shared/net/local'
 import type { ProtocolEvent } from '../../src/mms/protocol/types'
 import { bridgeProtocolEvent } from '../../src/main/mms/protocolEventBridge'
 import { PresentationState } from '../../src/main/mms/PresentationState'
-import { formatMatchCode, nextEnrollmentRequest, notifyEnrollmentRequest } from '../../src/renderer/lib/plusEnrollment'
+import { canApproveEnrollment, formatMatchCode, nextEnrollmentRequest, notifyEnrollmentRequest, phonesBlocked } from '../../src/renderer/lib/plusEnrollment'
 import {
   ENROLLMENT_RECONCILE_MS,
   currentEnrollmentRequest,
@@ -69,6 +70,26 @@ afterEach(() => {
   globals.window = original.window
   globals.document = original.document
   globals.Notification = original.Notification
+})
+
+describe('who can approve requests', () => {
+  const plus = { connected: true } as PlusStatus
+  const net = { enabled: true, self: { isAuthority: true }, keystore: 'unlocked', protected: true } as unknown as NetStatus
+
+  it('needs sign-in, networking, an unlocked protected keystore and authority', () => {
+    expect(canApproveEnrollment(net, plus)).toBe(true)
+    expect(canApproveEnrollment(net, { connected: false } as PlusStatus)).toBe(false)
+    expect(canApproveEnrollment({ ...net, enabled: false } as NetStatus, plus)).toBe(false)
+    expect(canApproveEnrollment({ ...net, keystore: 'locked' } as unknown as NetStatus, plus)).toBe(false)
+    expect(canApproveEnrollment({ ...net, protected: false } as NetStatus, plus)).toBe(false)
+    expect(canApproveEnrollment({ ...net, self: { isAuthority: false } } as unknown as NetStatus, plus)).toBe(false)
+    expect(canApproveEnrollment(undefined, plus)).toBe(false)
+  })
+
+  it('says why in one line', () => {
+    expect(phonesBlocked(net, plus)).toBeUndefined()
+    expect(phonesBlocked({ ...net, keystore: 'locked' } as unknown as NetStatus, plus)).toBe('Unlock this device under Devices to add phones.')
+  })
 })
 
 describe('choosing the next request', () => {
@@ -170,6 +191,42 @@ describe('request store', () => {
     expect(state.error).toBe('')
   })
 
+  it('forgets closed and notified marks once their request is gone, but not while it is listed', async () => {
+    let list = [row('a'), row('b')]
+    stubWindow({ 'net.plus.enrollment.requests': async () => ({ requests: list }) })
+    const store = useEnrollmentPromptStore.getState()
+    await store.load()
+    store.dismiss('a')
+    store.markNotified('a')
+    store.markNotified('b')
+    await store.load()
+    expect([...useEnrollmentPromptStore.getState().dismissed]).toEqual(['a'])
+    list = [row('b')]
+    await store.load()
+    const state = useEnrollmentPromptStore.getState()
+    expect([...state.dismissed]).toEqual([])
+    expect([...state.notified]).toEqual(['b'])
+  })
+
+  it('forgets marks of requests that ran out or were decided', async () => {
+    stubWindow({
+      'net.plus.enrollment.requests': async () => ({ requests: [row('a', { expiresAt: now + 10 }), row('b')] }),
+      'net.plus.enrollment.approve': async () => ({})
+    })
+    const store = useEnrollmentPromptStore.getState()
+    await store.load()
+    for (const id of ['a', 'b']) {
+      store.dismiss(id)
+      store.markNotified(id)
+    }
+    store.prune(now + 10)
+    expect([...useEnrollmentPromptStore.getState().dismissed]).toEqual(['b'])
+    expect([...useEnrollmentPromptStore.getState().notified]).toEqual(['b'])
+    await store.decide('b', true)
+    expect(useEnrollmentPromptStore.getState().dismissed.size).toBe(0)
+    expect(useEnrollmentPromptStore.getState().notified.size).toBe(0)
+  })
+
   it('drops requests whose time ran out', async () => {
     stubWindow({ 'net.plus.enrollment.requests': async () => ({ requests: [row('a', { expiresAt: now + 10 })] }) })
     await useEnrollmentPromptStore.getState().load()
@@ -243,17 +300,17 @@ describe('request dialog', () => {
     expect(html).toContain('role="dialog"')
     expect(html).toContain('modal-overlay enrollment-prompt')
     expect(html).toContain('Phone wants to join')
-    expect(html).toContain('Pixel 9')
-    expect(html).toContain('match code <strong>123 456</strong> · approve only if the phone shows the same code')
-    expect(html).toContain('>Approve</button>')
-    expect(html).toContain('>Deny</button>')
+    expect(html).toContain('<p class="enrollment-device">Pixel 9</p>')
+    expect(html).toContain('Match code <strong>123 456</strong> · approve only if the phone shows it')
+    expect(html).toContain('Approve</button>')
+    expect(html).toContain('Deny</button>')
     expect(html).not.toContain('role="alert"')
   })
 
   it('shows errors inline and blocks a second choice while one is running', () => {
     const html = render({ busy: true, error: 'This phone request has expired or was withdrawn.' })
     expect(html).toContain('<p role="alert" class="chat-error">This phone request has expired or was withdrawn.</p>')
-    expect(html.match(/<button type="button" class="btn[^"]*" data-action="(approve|deny)-enrollment" disabled=""/g)).toHaveLength(2)
+    expect(html.match(/<button type="button" class="settings-btn" data-action="(approve|deny)-enrollment" disabled=""/g)).toHaveLength(2)
   })
 
   it('names a computer request as a computer', () => {

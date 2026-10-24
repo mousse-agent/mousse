@@ -1,0 +1,99 @@
+name: Nightly
+
+# Publishes a nightly prerelease of master once a day, only when master has new
+# commits since the last nightly and every check, the full suite and packaging pass.
+# Version: <next stable>-nightly.<UTC date>.<run number>, such as 0.1.2-nightly.20261022.17.
+on:
+  schedule:
+    - cron: '47 20 * * *' # 02:17 IST
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even when master has not changed since the last nightly
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+env:
+  GH_REPO: ${{ github.repository }}
+  KEEP_NIGHTLIES: 10
+
+jobs:
+  resolve:
+    name: Decide whether to build
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      version: ${{ steps.decide.outputs.version }}
+      previous: ${{ steps.decide.outputs.previous }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force || false }}
+        run: node scripts/release-version.mjs nightly >> "$GITHUB_OUTPUT"
+
+  checks:
+    name: Checks
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    uses: ./.github/workflows/ci.yml
+    with:
+      full-suite: true
+
+  package:
+    name: Package
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    uses: ./.github/workflows/package.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+
+  publish:
+    name: Publish nightly
+    needs: [resolve, checks, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      PREVIOUS: ${{ needs.resolve.outputs.previous }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Write checksums
+        working-directory: dist
+        run: sha256sum -- * > "SHA256SUMS-$VERSION.txt" && cat "SHA256SUMS-$VERSION.txt"
+      - name: Create the prerelease
+        run: |
+          notes="Nightly build of ${GITHUB_SHA::12}. Unsigned and not tested by hand; use a stable release for daily work."
+          args=(--prerelease --latest=false --target "$GITHUB_SHA" --title "Mousse $VERSION" --notes "$notes" --generate-notes)
+          if [ -n "$PREVIOUS" ]; then args+=(--notes-start-tag "$PREVIOUS"); fi
+          gh release create "v$VERSION" "${args[@]}" dist/*
+      - name: Keep the newest ${{ env.KEEP_NIGHTLIES }} nightlies
+        run: |
+          gh release list --limit 200 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | test("-nightly\\."))] | sort_by(.createdAt) | reverse | .['"$KEEP_NIGHTLIES"':][].tagName' |
+          while read -r tag; do
+            echo "Deleting $tag"
+            gh release delete "$tag" --yes --cleanup-tag
+          done

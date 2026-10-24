@@ -1,22 +1,11 @@
 import { useEffect } from 'react'
 import type { PlusEnrollmentRequestView } from '../../shared/net'
-import { formatMatchCode, notifyEnrollmentRequest } from '../lib/plusEnrollment'
+import { canApproveEnrollment, formatMatchCode, notifyEnrollmentRequest } from '../lib/plusEnrollment'
 import { useAppStore } from '../stores/appStore'
 import { currentEnrollmentRequest, useEnrollmentPromptStore, useEnrollmentRequestWatch } from '../stores/enrollmentPromptStore'
 import { useMousseId, useMousseIdAvailable } from '../stores/mousseIdStore'
+import { Check, X } from '../lib/icons'
 import { Modal } from './ui/Modal'
-
-/** Device name and match code of a phone request, shared by the dialog and Settings → Devices. */
-export function EnrollmentRequestDetails({ request }: { request: PlusEnrollmentRequestView }) {
-  return (
-    <div>
-      <strong>{request.deviceName}</strong>
-      <span>
-        Wants to join · match code <strong>{formatMatchCode(request.matchCode)}</strong> · approve only if the phone shows the same code
-      </span>
-    </div>
-  )
-}
 
 export function EnrollmentRequestPrompt({
   request,
@@ -39,19 +28,22 @@ export function EnrollmentRequestPrompt({
       onClose={onClose}
       footer={
         <>
-          <button type="button" className="btn" data-action="deny-enrollment" disabled={busy} onClick={() => onDecide(false)}>
+          <button type="button" className="settings-btn" data-action="deny-enrollment" disabled={busy} onClick={() => onDecide(false)}>
+            <X size={14} />
             Deny
           </button>
-          <button type="button" className="btn btn-primary" data-action="approve-enrollment" disabled={busy} onClick={() => onDecide(true)}>
+          <button type="button" className="settings-btn" data-action="approve-enrollment" disabled={busy} onClick={() => onDecide(true)}>
+            <Check size={14} className="settings-status-ok" />
             Approve
           </button>
         </>
       }
     >
       {error && <p role="alert" className="chat-error">{error}</p>}
-      <div className="net-device-row">
-        <EnrollmentRequestDetails request={request} />
-      </div>
+      <p className="enrollment-device">{request.deviceName}</p>
+      <p className="enrollment-code">
+        Match code <strong>{formatMatchCode(request.matchCode)}</strong> · approve only if the {request.kind === 'computer' ? 'computer' : 'phone'} shows it
+      </p>
     </Modal>
   )
 }
@@ -64,7 +56,7 @@ export function EnrollmentRequestHost() {
   const available = useMousseIdAvailable()
   const account = useMousseId(available)
   const profileId = useAppStore((s) => s.profileId)
-  const active = available && !!account.plus?.connected && !!account.net?.self?.isAuthority
+  const active = available && canApproveEnrollment(account.net, account.plus)
   useEnrollmentRequestWatch(active, profileId)
   const { requests, dismissed, notified, busy, error, errorId, decide, dismiss, markNotified, prune } = useEnrollmentPromptStore()
   const current = active ? currentEnrollmentRequest({ requests, dismissed }) : undefined

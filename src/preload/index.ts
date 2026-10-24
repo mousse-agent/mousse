@@ -6,6 +6,7 @@ import type { NetStatus } from '../shared/net/local'
 import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
+import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../shared/updates'
 import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity, NamedAgentRequest, NamedAgentRecallRequest, NamedAgentIntegrationRequest, NamedAgentIntegrationReview } from '../shared/agentEpisodes'
 import type {
   Agent,
@@ -60,8 +61,10 @@ import type {
 } from '../shared/integrations'
 import type {
   AmbientProviderInfo,
-  ClaudeLoginPolicy,
   ClaudeSubscriptionStatus,
+  CliProviderConfig,
+  CliProviderConfigPatch,
+  CliProviderInstanceId,
   CodexStatus,
   ConfiguredProvider,
   ProviderLoginEvent,
@@ -789,11 +792,17 @@ const api = {
     /** Claude Subscription sign-in state; `recheck` skips the cached `claude auth status`. */
     claudeStatus: (recheck?: boolean): Promise<ClaudeSubscriptionStatus> =>
       ipcRenderer.invoke('providers:claudeStatus', recheck),
-    claudeSetLoginPolicy: (policy: ClaudeLoginPolicy): Promise<ClaudeSubscriptionStatus> =>
-      ipcRenderer.invoke('providers:claudeSetLoginPolicy', policy),
     /** Codex sign-in state; `recheck` skips the cached `account/read`. */
     codexStatus: (recheck?: boolean): Promise<CodexStatus> =>
       ipcRenderer.invoke('providers:codexStatus', recheck),
+    /** Executable path, launch args, environment and installed version of a CLI provider. */
+    cliConfig: (instanceId: CliProviderInstanceId): Promise<CliProviderConfig> =>
+      ipcRenderer.invoke('providers:cliConfig', instanceId),
+    /** Saves CLI launch settings; new sessions use them. Rejects invalid input. */
+    setCliConfig: (
+      instanceId: CliProviderInstanceId,
+      patch: CliProviderConfigPatch
+    ): Promise<CliProviderConfig> => ipcRenderer.invoke('providers:setCliConfig', instanceId, patch),
     loginOAuth: (providerId: string): Promise<ProviderLoginResult> =>
       ipcRenderer.invoke('providers:loginOAuth', providerId),
     loginApiKey: (providerId: string): Promise<ProviderLoginResult> =>
@@ -885,6 +894,19 @@ const api = {
       return () => ipcRenderer.removeListener('net:updated', handler)
     }
   },
+  /** In-app updates from GitHub Releases (src/main/updates). */
+  updates: {
+    getState: (): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.getState),
+    check: (): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.check),
+    download: (): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.download),
+    install: (): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.install),
+    setChannel: (channel: UpdateChannel): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.setChannel, channel),
+    onState: (cb: (state: UpdateState) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, state: UpdateState) => cb(state)
+      ipcRenderer.on(UPDATE_IPC.state, handler)
+      return () => ipcRenderer.removeListener(UPDATE_IPC.state, handler)
+    }
+  },
   mousseId: {
     /** Runtime service origin from `MOUSSE_ID_ORIGIN`; empty when unset. */
     config: (): Promise<{ origin: string }> => ipcRenderer.invoke('mousseId:config'),
@@ -917,6 +939,11 @@ const api = {
   clipboard: {
     showCopyMenu: (x: number, y: number, text: string): Promise<void> =>
       ipcRenderer.invoke('clipboard:showCopyMenu', x, y, text)
+  },
+  dialog: {
+    /** Native open-file dialog; resolves to the chosen absolute path, or null when cancelled. */
+    pickExecutable: (options?: { title?: string; defaultPath?: string }): Promise<string | null> =>
+      ipcRenderer.invoke('dialog:pickExecutable', options ?? {})
   },
   window: {
     resizeStart: (edge: WindowResizeEdge, pointerId: number): Promise<boolean> => ipcRenderer.invoke('window:resizeStart', edge, pointerId),

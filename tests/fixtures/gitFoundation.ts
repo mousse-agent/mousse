@@ -2,17 +2,13 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative } from 'node:path'
+import { committedGitTemplate } from '../support/gitBase'
 
 export function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 }
 
-export function gitFoundationFixture() {
-  const root = mkdtempSync(join(tmpdir(), 'mousse-foundation-test-'))
-  const repo = join(root, 'primary')
-  const home = join(root, 'home')
-  const thread = join(root, 'thread')
-  for (const dir of [repo, home, thread]) mkdirSync(dir)
+const copyBaseRepo = committedGitTemplate((repo) => {
   git(repo, 'init', '-q')
   git(repo, 'config', 'user.name', 'Foundation Test')
   git(repo, 'config', 'user.email', 'foundation@example.test')
@@ -20,7 +16,15 @@ export function gitFoundationFixture() {
   writeFileSync(join(repo, 'value.txt'), 'base\n')
   git(repo, 'add', '.')
   git(repo, 'commit', '-qm', 'base')
-  const baseSha = git(repo, 'rev-parse', 'HEAD')
+})
+
+export function gitFoundationFixture() {
+  const root = mkdtempSync(join(tmpdir(), 'mousse-foundation-test-'))
+  const repo = join(root, 'primary')
+  const home = join(root, 'home')
+  const thread = join(root, 'thread')
+  for (const dir of [repo, home, thread]) mkdirSync(dir)
+  const baseSha = copyBaseRepo(repo)
   const previousHome = process.env.MOUSSE_HOME
   process.env.MOUSSE_HOME = home
   return {

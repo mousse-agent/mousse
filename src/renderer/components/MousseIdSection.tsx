@@ -4,9 +4,9 @@ import type { NetStatus, PlusEnrollmentOffer, PlusEnrollmentRequestView } from '
 import type { PlatformRequestMethod } from '../../shared/platform'
 import { qrSvgPath } from '../lib/plusQr'
 import { formatCountdown, secondsLeft } from '../lib/plusSignIn'
-import { mousseIdName } from '../stores/mousseIdStore'
-import { decideEnrollmentRequest, listEnrollmentRequests } from '../lib/plusEnrollment'
-import { EnrollmentRequestDetails } from './EnrollmentRequestPrompt'
+import { decideEnrollmentRequest, listEnrollmentRequests, phonesBlocked } from '../lib/plusEnrollment'
+import { SettingsGroup, SettingsRow } from './settings/SettingsRow'
+import { Check, Plus, Smartphone, X } from '../lib/icons'
 
 const request = <T,>(method: PlatformRequestMethod, params: unknown = {}) =>
   window.mousse.platformRequest.request<T>(method, params)
@@ -26,24 +26,22 @@ function QrCode({ text }: { text: string }) {
   const { size, path } = useMemo(() => qrSvgPath(text), [text])
   // Always dark on white with a quiet zone so phone cameras read it in either theme.
   return (
-    <svg className="net-plus-qr" viewBox={`0 0 ${size} ${size}`} width={224} height={224} role="img" aria-label="Phone sign-in QR code" shapeRendering="crispEdges">
+    <svg className="net-plus-qr" viewBox={`0 0 ${size} ${size}`} width={192} height={192} role="img" aria-label="Phone sign-in QR code" shapeRendering="crispEdges">
       <rect width={size} height={size} fill="#fff" />
       <path d={path} fill="#000" />
     </svg>
   )
 }
 
-/** Mousse ID phone codes and phone requests (issue #98). Sign-in lives under Settings → Account. */
+/** Mousse ID phones (issue #98): add a phone with a one-time code, approve or deny requests. */
 export function MousseIdSection({
   status,
   plus,
-  onChanged,
-  onOpenAccount
+  onChanged
 }: {
   status?: NetStatus
   plus?: PlusStatus
   onChanged: () => Promise<void>
-  onOpenAccount: () => void
 }) {
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('')
@@ -51,9 +49,8 @@ export function MousseIdSection({
   const [requests, setRequests] = useState<PlusEnrollmentRequestView[]>([])
   const alive = useRef(true)
   const now = useNow(!!offer)
-  const ready = !!status?.enabled && !!status.self && status.keystore === 'unlocked' && !!status.protected
-  const authority = !!status?.self?.isAuthority
-  const canEnroll = ready && authority && !!plus?.connected
+  const blocked = phonesBlocked(status, plus)
+  const canEnroll = !blocked
 
   useEffect(() => {
     alive.current = true
@@ -114,39 +111,41 @@ export function MousseIdSection({
     })
 
   return (
-    <section className="net-plus">
-      <h3>Mousse ID</h3>
-      {error && <p role="alert" className="chat-error">{error}</p>}
-
-      <p>
-        {plus?.connected
-          ? <>Signed in as <strong>{plus.email ?? mousseIdName(plus)}</strong>. {authority ? 'Add phones to reach this computer from them.' : 'Phones can be added from the device that owns this identity.'}</>
-          : 'Sign in to Mousse ID to add phones.'}{' '}
-        <button type="button" className="account-link" onClick={onOpenAccount}>Account settings</button>
-      </p>
-
-      {canEnroll && (
-        <div className="net-plus-phones">
-          <h3>Phones</h3>
-          {offer ? (
-            <div className="net-plus-offer">
-              <QrCode text={offer.url} />
-              <p>Scan with the Mousse app on your phone. This code works once and expires in {formatCountdown(secondsLeft(offer.expiresAt, now))}.</p>
-              <button type="button" onClick={() => setOffer(undefined)}>Hide code</button>
-            </div>
-          ) : (
-            <button type="button" disabled={busy} onClick={() => void addPhone()}>Add phone</button>
-          )}
-          {requests.map((row) => (
-            <div className="net-device-row" key={row.id}>
-              <EnrollmentRequestDetails request={row} />
-              <button type="button" disabled={busy} onClick={() => void decide(row.id, true)}>Approve</button>
-              <button type="button" disabled={busy} onClick={() => void decide(row.id, false)}>Deny</button>
-            </div>
-          ))}
-        </div>
+    <SettingsGroup
+      title="Phones"
+      icon={Smartphone}
+      className="account-group"
+      description={blocked}
+      action={canEnroll && !offer && (
+        <button type="button" className="settings-btn" disabled={busy} onClick={() => void addPhone()}><Plus size={14} />Add phone</button>
       )}
-
-    </section>
+    >
+      {error && <p role="alert" className="chat-error account-error">{error}</p>}
+      {offer && (
+        <SettingsRow
+          title="Scan with the Mousse app on your phone"
+          description={`Works once · expires in ${formatCountdown(secondsLeft(offer.expiresAt, now))}`}
+          control={<button type="button" className="settings-icon-btn" title="Hide code" aria-label="Hide code" onClick={() => setOffer(undefined)}><X size={14} /></button>}
+        >
+          <QrCode text={offer.url} />
+        </SettingsRow>
+      )}
+      {requests.map((row) => (
+        <SettingsRow
+          key={row.id}
+          title={row.deviceName}
+          description={<>Match code <strong>{row.matchCode.slice(0, 3)} {row.matchCode.slice(3)}</strong> · approve only if the phone shows it</>}
+          control={
+            <>
+              <button type="button" className="settings-btn" disabled={busy} onClick={() => void decide(row.id, false)}><X size={14} />Deny</button>
+              <button type="button" className="settings-btn" disabled={busy} onClick={() => void decide(row.id, true)}>
+                <Check size={14} className="settings-status-ok" />Approve
+              </button>
+            </>
+          }
+        />
+      ))}
+      {canEnroll && !offer && !requests.length && <p className="settings-muted account-empty">No phones waiting to join.</p>}
+    </SettingsGroup>
   )
 }

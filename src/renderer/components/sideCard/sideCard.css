@@ -1,0 +1,116 @@
+/* Thread side card: a floating card on the right of the full-width thread view. */
+
+.sidebar {
+  --side-card-width: 272px;
+  --side-card-gutter: 12px;
+  /* Thread area width below which the card would overlap the conversation: the
+     680px column (--an-max-width) plus the card and its gutters on both sides. */
+  --side-card-clearance: calc(680px + 2 * (var(--side-card-width) + 2 * var(--side-card-gutter)));
+}
+
+/* The layer anchors the card to the thread pane. */
+.sidebar:has(> .thread-side-card-layer) {
+  position: relative;
+}
+
+/* Reserve the card's width on the right only as far as the centered column needs
+   it. Percentages in padding resolve against the pane width, so this is zero in
+   windows wide enough to leave the card its own gutter. The padding moves with
+   the card's fade (SIDE_CARD_FADE_MS), so the transcript does not jump when the
+   card is gone. */
+.sidebar.sidebar-full > .keep-mounted-pane {
+  transition: padding-right 180ms ease;
+}
+
+.sidebar.sidebar-full.sidebar-side-card > .keep-mounted-pane {
+  padding-right: max(0px, calc(var(--side-card-clearance) - 100%));
+}
+
+/* The app panel opens by narrowing this aside while the card fades out pinned to
+   the old width, so the card hangs over the panel's edge. The aside is a stacking
+   context (backdrop-filter) and the panel comes later in the DOM, so by default
+   the panel paints over the card. Lift the aside above it for as long as a card is
+   mounted in a narrowed aside, which is only the fade. The panel's resizer is the
+   one sibling that overlaps the aside, and it exists only in that same window. */
+.sidebar:not(.sidebar-full):has(> .thread-side-card-layer > .thread-side-card) {
+  z-index: 1;
+}
+
+.thread-side-card-layer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.thread-side-card {
+  position: absolute;
+  top: var(--side-card-gutter);
+  right: var(--side-card-gutter);
+  display: flex;
+  flex-direction: column;
+  width: var(--side-card-width);
+  max-height: calc(100% - 2 * var(--side-card-gutter));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-card-radius);
+  background: var(--ui-raised);
+  box-shadow: var(--ui-raised-shadow);
+  color: var(--text-primary);
+  opacity: 0;
+  transform: translateX(10px);
+  transition: opacity 180ms ease, transform 180ms ease;
+  pointer-events: none;
+}
+
+.thread-side-card[data-shown='true'] {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+/* Reduced motion fades without the slide, over the same 180ms, and keeps the exit
+   wait. The app-wide reduced-motion rule in global.css forces every transition
+   duration to 0.01ms with !important and six :not() classes of specificity, so
+   this needs !important and more specificity than that (the repeated class is
+   deliberate). The padding follows the fade, but a reflow is motion, so it is
+   instant. */
+@media (prefers-reduced-motion: reduce) {
+  .app .sidebar .thread-side-card-layer .thread-side-card.thread-side-card.thread-side-card[data-shown] {
+    transform: none;
+    transition-property: opacity;
+    transition-duration: 180ms !important;
+  }
+
+  .sidebar.sidebar-full > .keep-mounted-pane {
+    transition: none;
+  }
+}
+
+.side-card-section {
+  padding: 12px 14px;
+}
+
+.side-card-section + .side-card-section {
+  border-top: 1px solid var(--ui-line);
+}
+
+.side-card-section-title {
+  margin: 0 0 8px;
+  color: var(--ui-faint);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.side-card-placeholder {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}

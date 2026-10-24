@@ -8,7 +8,7 @@ export const ENROLLMENT_RECONCILE_MS = 30_000
 
 interface EnrollmentPromptState {
   requests: PlusEnrollmentRequestView[]
-  /** Requests closed without a choice. Kept until the window reloads; Settings → Devices still lists them. */
+  /** Requests closed without a choice, kept while the request is listed; Settings → Devices still lists them. */
   dismissed: ReadonlySet<string>
   /** Requests a system notification was already shown for. */
   notified: ReadonlySet<string>
@@ -20,12 +20,24 @@ interface EnrollmentPromptState {
   decide: (id: string, approve: boolean) => Promise<void>
   dismiss: (id: string) => void
   markNotified: (id: string) => void
-  /** Drops requests whose time ran out. */
+  /** Drops requests whose time ran out, and the marks kept for them. */
   prune: (now?: number) => void
   reset: () => void
 }
 
 const message = (cause: unknown) => String((cause as Error | null)?.message ?? cause)
+
+/** Closed and notified marks only matter while their request is listed; drop the rest. */
+const forgetGone = (requests: readonly PlusEnrollmentRequestView[], marks: ReadonlySet<string>): ReadonlySet<string> => {
+  const kept = new Set(requests.map((row) => row.id).filter((id) => marks.has(id)))
+  return kept.size === marks.size ? marks : kept
+}
+
+const withRequests = (state: Pick<EnrollmentPromptState, 'dismissed' | 'notified'>, requests: PlusEnrollmentRequestView[]) => ({
+  requests,
+  dismissed: forgetGone(requests, state.dismissed),
+  notified: forgetGone(requests, state.notified)
+})
 
 let loading: { owner: number; again: boolean; promise: Promise<void> } | undefined
 let generation = 0
@@ -50,7 +62,7 @@ export const useEnrollmentPromptStore = create<EnrollmentPromptState>((set, get)
         do {
           entry.again = false
           const requests = await listEnrollmentRequests().catch(() => undefined)
-          if (requests && entry.owner === generation) set({ requests })
+          if (requests && entry.owner === generation) set((state) => withRequests(state, requests))
         } while (entry.again && entry.owner === generation)
       } finally {
         if (loading === entry) loading = undefined
@@ -64,7 +76,7 @@ export const useEnrollmentPromptStore = create<EnrollmentPromptState>((set, get)
     set({ busy: true, error: '', errorId: undefined })
     try {
       await decideEnrollmentRequest(id, approve)
-      if (owner === generation) set((state) => ({ requests: state.requests.filter((row) => row.id !== id) }))
+      if (owner === generation) set((state) => withRequests(state, state.requests.filter((row) => row.id !== id)))
     } catch (cause) {
       if (owner === generation) set({ error: message(cause), errorId: id })
     } finally {
@@ -83,7 +95,7 @@ export const useEnrollmentPromptStore = create<EnrollmentPromptState>((set, get)
   prune: (now = Date.now()) => {
     const { requests } = get()
     const open = requests.filter((row) => row.expiresAt > now)
-    if (open.length !== requests.length) set({ requests: open })
+    if (open.length !== requests.length) set((state) => withRequests(state, open))
   },
 
   reset: () => {
