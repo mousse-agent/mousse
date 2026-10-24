@@ -63,6 +63,8 @@ export interface ThreadStreamOptions {
   deltaIntervalMs?: number
   /** `key` names what the delta replaces: one streaming message, or the pending questions. */
   onDelta?(stream: StreamId, data: unknown, key: string): void
+  /** Deltas already handed to `onDelta` whose key matches are superseded by a durable record. */
+  onDeltaDiscard?(stream: StreamId, matches: (key: string) => boolean): void
   onRecord?(stream: StreamId, record: StoredRecord): void
   onError?(threadId: string, error: unknown, stream: StreamId): void
 }
@@ -75,6 +77,7 @@ function deltaKey(event: ThreadSourceEvent): string | undefined {
   const message = (event.data as { message?: { id?: unknown } } | undefined)?.message
   return typeof message?.id === 'string' ? 'message:' + message.id : undefined
 }
+const isMessageKey = (key: string): boolean => key.startsWith('message:')
 /** Display-only adapter. ThreadDataStore remains authoritative; no received wrapper can execute. */
 export class ThreadStreamAdapter {
   readonly store: StreamStore
@@ -190,10 +193,10 @@ export class ThreadStreamAdapter {
           if (!(THREAD_EVENT_TYPES as readonly string[]).includes(event.type))
             throw new NetError('bad_request')
           // A settled record supersedes any streaming delta for the same message.
-          if (event.type === 'thread.messages') this.dropMessageDeltas(thread)
+          if (event.type === 'thread.messages') this.dropDeltas(thread, isMessageKey)
           else {
             const key = deltaKey(event)
-            if (key) thread.deltas.delete(key)
+            if (key) this.dropDeltas(thread, (candidate) => candidate === key)
           }
           // Oversized display events are replaced by a fresh source snapshot, never inline oversize.
           if (canonicalJson(body).byteLength > 48 * 1024) this.refreshSnapshot(thread)
@@ -230,9 +233,10 @@ export class ThreadStreamAdapter {
       }
     }
   }
-  private dropMessageDeltas(thread: ActiveThread): void {
-    for (const key of [...thread.deltas.keys()])
-      if (key.startsWith('message:')) thread.deltas.delete(key)
+  /** Pending deltas here and any already handed to the sessions, before the record is stored. */
+  private dropDeltas(thread: ActiveThread, matches: (key: string) => boolean): void {
+    for (const key of [...thread.deltas.keys()]) if (matches(key)) thread.deltas.delete(key)
+    this.options.onDeltaDiscard?.(thread.stream, matches)
   }
   private stopDeltas(thread: ActiveThread): void {
     thread.deltaTimer?.cancel()

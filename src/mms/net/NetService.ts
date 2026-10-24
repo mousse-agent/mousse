@@ -1195,6 +1195,16 @@ export class NetService {
       }
     }
   }
+  /** Drops unsent deltas a durable record supersedes; best effort like `publishDelta`. */
+  discardDeltas(stream: StreamId, matches: (key: string) => boolean): void {
+    for (const session of this.sessions) {
+      try {
+        session.discardDeltas(stream, matches)
+      } catch {
+        // A closing session has nothing left to send.
+      }
+    }
+  }
   /** Trusted local composition only. Presence has no durable delivery receipt. */
   async publishPresence(message: PresenceMessage, exclude?: NodeId): Promise<void> {
     if (message.t !== 'presence') throw new NetError('bad_request')

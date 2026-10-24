@@ -698,9 +698,12 @@ export interface SyncSession {
   sendEphemeral(message: Extract<WireMessage, { t: 'presence' | 'ephemeral' }>): void
   /**
    * Sends a display delta only if this session live-serves the stream and negotiated presence.v1.
-   * While a delta is being written, a newer one with the same key replaces the unsent older one.
+   * While a delta is being written, a newer one with the same key replaces the unsent older one;
+   * deltas without a key share one slot.
    */
   publishDelta(stream: StreamId, data: unknown, key?: string): void
+  /** Drops unsent deltas for the stream whose key matches; call before publishing the durable record. */
+  discardDeltas(stream: StreamId, matches: (key: string) => boolean): void
   onEphemeral(
     listener: (message: Extract<WireMessage, { t: 'presence' | 'ephemeral' }>) => void
   ): () => void

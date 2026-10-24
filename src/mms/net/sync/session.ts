@@ -181,7 +181,9 @@ export class NetSyncSession implements SyncSession {
   private subscriptions = new Map<StreamId, SubscriptionReceiver>()
   private serving = new Map<StreamId, { cancelled: boolean; live: boolean }>()
   /** Per stream: whether a delta is being written, and the newest unsent delta per key. */
-  private deltas = new Map<StreamId, { sending: boolean; latest: Map<string, unknown> }>()
+  /** Unsent display deltas by stream and key; at most one delta per session is being written. */
+  private deltas = new Map<string, { stream: StreamId; key: string; data: unknown }>()
+  private deltaSending = false
   private snapshotJobs = new Map<
     StreamId,
     { controller: AbortController; reader: SnapshotReader }
@@ -640,41 +642,40 @@ export class NetSyncSession implements SyncSession {
     )
       return
     this.authorizedRead(stream)
-    // One delta per stream is written at a time; newer ones replace older unsent ones with the
-    // same key. A slow link then sees fewer deltas instead of a full mux queue.
-    const state = this.deltas.get(stream) ?? { sending: false, latest: new Map() }
-    this.deltas.set(stream, state)
-    state.latest.delete(key)
-    state.latest.set(key, data)
-    if (!state.sending) this.sendDeltas(stream, state)
+    // One delta per session is written at a time, so deltas never hold more than one message in
+    // the control lane; newer ones replace older unsent ones with the same key. A slow link then
+    // sees fewer deltas instead of a full mux queue that would refuse pings and snapshot requests.
+    const id = `${stream}\u0000${key}`
+    this.deltas.delete(id)
+    this.deltas.set(id, { stream, key, data })
+    if (!this.deltaSending) this.sendDeltas()
   }
-  private sendDeltas(
-    stream: StreamId,
-    state: { sending: boolean; latest: Map<string, unknown> }
-  ): void {
-    const next = state.latest.entries().next()
-    if (
-      next.done ||
-      this.deltas.get(stream) !== state ||
-      this.currentState !== 'open' ||
-      !this.serving.get(stream)?.live
-    ) {
-      if (this.deltas.get(stream) === state) this.deltas.delete(stream)
+  /**
+   * Drops unsent deltas a durable record supersedes. Called before that record is published, so a
+   * stale streaming update never reaches the phone after the settled one.
+   */
+  discardDeltas(stream: StreamId, matches: (key: string) => boolean): void {
+    for (const [id, delta] of this.deltas)
+      if (delta.stream === stream && matches(delta.key)) this.deltas.delete(id)
+  }
+  private sendDeltas(): void {
+    for (const [id, next] of this.deltas) {
+      this.deltas.delete(id)
+      if (this.currentState !== 'open' || !this.serving.get(next.stream)?.live) continue
+      this.deltaSending = true
+      void this.send({ t: 'ephemeral', stream: next.stream, kind: 'delta', data: next.data })
+        .catch((error) => {
+          // Deltas are best effort: a busy or cancelled send never ends the session.
+          if (error instanceof NetError && ['rate_limited', 'cancelled'].includes(error.code))
+            return
+          this.fail(error)
+        })
+        .finally(() => {
+          this.deltaSending = false
+          this.sendDeltas()
+        })
       return
     }
-    const [key, data] = next.value
-    state.latest.delete(key)
-    state.sending = true
-    void this.send({ t: 'ephemeral', stream, kind: 'delta', data })
-      .catch((error) => {
-        // Deltas are best effort: a busy or cancelled send never ends the session.
-        if (error instanceof NetError && ['rate_limited', 'cancelled'].includes(error.code)) return
-        this.fail(error)
-      })
-      .finally(() => {
-        state.sending = false
-        this.sendDeltas(stream, state)
-      })
   }
   onEphemeral(
     listener: (message: Extract<WireMessage, { t: 'presence' | 'ephemeral' }>) => void

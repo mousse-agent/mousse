@@ -152,6 +152,7 @@ export class BridgeProfileService {
       clock: this.clock,
       source: new MmsThreadSource(services),
       onDelta: (stream, data, key) => net.publishDelta(stream, data, key),
+      onDeltaDiscard: (stream, matches) => net.discardDeltas(stream, matches),
       onRecord: (stream, record) => {
         void this.track(net.publish(stream, record))
       },
