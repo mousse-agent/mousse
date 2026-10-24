@@ -381,6 +381,19 @@ export class HostedNetController implements HostedNet {
     this.armRenewal()
   }
 
+  rosterChanged(): void {
+    if (this.host.signal.aborted || !this.hostedRelayEnabled()) return
+    try {
+      if (!this.service().status().registrationId) return
+    } catch {
+      // Locked or not enrolled: the next renewal after unlock carries the roster.
+      return
+    }
+    if (this.plusRenewal) clearTimeout(this.plusRenewal)
+    this.plusRenewal = undefined
+    this.armRenewal(this.host.clock.now())
+  }
+
   private armRenewal(notAfter?: number): void {
     if (this.host.signal.aborted) return
     this.armEnrollmentPoll(1000)

@@ -677,6 +677,23 @@ export class HostedProfileService {
     return this.status()
   }
   async renew(): Promise<PlusStatus> {
+    const replayed = this.read()?.pending
+    const status = await this.renewOnce()
+    // A replayed request carries the roster inside its signed body, which is what the server
+    // received (the saved intent can disagree with it). When the roster changed since (a revoked
+    // device), send the current one now instead of at the next scheduled renewal.
+    const replayedRoster = replayed?.body.roster
+    if (
+      replayed?.purpose === 'renew' &&
+      replayedRoster !== undefined &&
+      !Buffer.from(canonicalJson(replayedRoster)).equals(
+        canonicalJson(this.options.identity().roster)
+      )
+    )
+      return this.renewOnce()
+    return status
+  }
+  private async renewOnce(): Promise<PlusStatus> {
     const stored = this.read()
     if (!stored?.registration || !stored.connectorToken) throw new NetError('not_enrolled')
     if (stored.pending?.purpose === 'route') {
@@ -693,10 +710,15 @@ export class HostedProfileService {
         roster: identity.roster,
         delegation: identity.delegation
       }
-    const body =
-      stored.pending?.body ??
-      (await this.signed(stored.configuration, 'renew', intent, stored.connectorToken))
-    stored.pending = { purpose: 'renew', intent, body }
+    // A replayed body keeps the intent it was signed with, so a failed retry cannot make the
+    // saved roster look newer than the request that will eventually be sent.
+    if (!stored.pending)
+      stored.pending = {
+        purpose: 'renew',
+        intent,
+        body: await this.signed(stored.configuration, 'renew', intent, stored.connectorToken)
+      }
+    const body = stored.pending.body
     this.save(stored)
     const registration = await this.post<RegistrationResult['registration']>(
       stored.configuration,
