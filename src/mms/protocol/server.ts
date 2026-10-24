@@ -595,16 +595,6 @@ export class MmsProtocolServer {
       }
     )
     onOrch(
-      'agent-activated',
-      (payload: { agentId: string; threadId?: string }) => {
-        const threadId =
-          payload.threadId ?? services.orchestrator.getBoundThreadId() ?? undefined
-        emitToSubscribers(
-          this.ring.push('agent.activated', payload, threadId)
-        )
-      }
-    )
-    onOrch(
       'terminal-activated',
       (payload: { ptyId: string; threadId?: string }) => {
         const threadId =

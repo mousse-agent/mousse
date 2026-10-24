@@ -357,7 +357,6 @@ export function isDelegationSettledStatus(status: AgentStatus): boolean {
 }
 
 export interface Agent {
-  namedIdentityId?: string
   episodeId?: string
   workspacePolicy?: import('./agentEpisodes').AgentWorkspacePolicy
   id: string

@@ -6,6 +6,7 @@ import { logDebug } from '../log/diag'
 import { ConversationActionService, assertConversationBoundary } from '../actions/ConversationActionService'
 import { existsSync } from 'node:fs'
 import { sha256Hex } from '../../shared/agents/hashes'
+import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { TaskWriterAuthority } from '../agents/TaskWriterAuthority'
 import { createAgentToolAccess } from '../agents/WorkspaceAccessPolicy'
 import type { AgentWorkspacePolicy } from '../../shared/agentEpisodes'
@@ -829,21 +830,6 @@ export class OrchestratorService extends EventEmitter {
       completeAgent: (agentId, merge, summary) => this.completeMousseAgent(agentId, merge, summary)
     })
 
-    this.mousseAgents.on('message', ({ agentId, message }) => {
-      this.emit('mousse-agent-message', { agentId, message })
-    })
-    this.mousseAgents.on('message-updated', ({ agentId, message }) => {
-      this.emit('mousse-agent-message-updated', { agentId, message })
-    })
-    this.mousseAgents.on('messages-sync', ({ agentId, messages }) => {
-      this.emit('mousse-agent-messages-sync', { agentId, messages })
-    })
-    this.mousseAgents.on('complete', ({ agentId, summary }) => {
-      this.emit('mousse-agent-complete', { agentId, summary })
-    })
-    this.mousseAgents.on('connection-failed', ({ agentId }) => {
-      this.emit('mousse-agent-connection-failed', { agentId })
-    })
     this.mousseAgents.on('lifecycle', (event: MousseAgentLifecycleEvent) => {
       if (event.state === 'failed') {
         this.reportGuiAgentFailure(
@@ -5584,7 +5570,20 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /** Named agents are retired, but old task data still holds their identities in agent-episodes.json. */
+  private isLegacyNamedAgent(agent: Agent): boolean {
+    const owner = this.agentOwner(agent.id)
+    const directory = owner ? this.resolveThreadDir(owner.threadId) : undefined
+    try { return Boolean(directory && new AgentEpisodeStore(directory).resolve(agent.id)) }
+    catch { return false }
+  }
+
   private async finalizeAgent(agent: Agent, merge: boolean): Promise<string[]> {
+    if (this.isLegacyNamedAgent(agent)) {
+      const retired = `${agent.id.slice(0, 8)} is a retired named agent; its result stays on its retained branch and can be merged by hand.`
+      if (merge) throw new Error(`Cannot merge ${retired}`)
+      return [`[agent] ${retired} Nothing was stopped or changed.`]
+    }
     const logs: string[] = []
     // Enter merging before aborting writers so a programmatic abort during finalize
     // is not mis-reported as a user interrupt on a still-ready agent.

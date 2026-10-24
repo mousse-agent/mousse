@@ -108,10 +108,6 @@ export function bridgeProtocolEvent(
       }
       return true
     }
-    case 'agent.activated': {
-      if (isSelected) broadcast('agent:activated', event.data)
-      return true
-    }
     case 'terminal.activated': {
       if (isSelected) broadcast('pty:activated', event.data)
       return true
