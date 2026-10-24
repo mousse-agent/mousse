@@ -11,8 +11,5 @@ export const isStreamingMessage = (phase: TurnPhase, msgId: string, activeId?: s
 
 export const isAwaitingInput = (phase: TurnPhase) => phase === 'awaiting_input'
 
-export const toActivity = (phase: TurnPhase) =>
-  isAwaitingInput(phase) ? 'awaiting_input' : isResponseActive(phase) ? 'processing' : phase === 'completed' ? 'completed' : 'idle'
-
 export const selectTurnPhase = (snapshot: Record<string, any>, threadId: string | null) =>
   threadId ? (snapshot[threadId]?.phase ?? 'idle') : 'idle'
