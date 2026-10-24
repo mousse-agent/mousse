@@ -253,6 +253,17 @@ html.platform-darwin .titlebar-left {
   app-region: no-drag;
 }
 
+/* Window buttons on a full-window page sit where the app title bar's do:
+   cancel the header's 12px so only .titlebar-controls' own 4px remains. */
+.overlay-titlebar-controls {
+  margin-left: auto;
+  margin-right: -12px;
+}
+
+.overlay-titlebar-controls:empty {
+  display: none;
+}
+
 .titlebar-app-actions {
   display: flex;
   align-items: center;
@@ -262,6 +273,13 @@ html.platform-darwin .titlebar-left {
 
 .titlebar-panel-open {
   color: var(--text-primary);
+}
+
+/* Background only: no edge bar, ring or glint. */
+.icon-btn-titlebar.titlebar-side-card-on,
+.icon-btn-titlebar.titlebar-side-card-on:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
 }
 
 .icon-btn {
@@ -1602,7 +1620,7 @@ html.platform-darwin .titlebar-left {
 
 .composer-pill-btn:hover,
 .composer-pill-btn.open {
-  background: rgba(var(--accent-rgb), 0.1);
+  background: var(--ui-hover);
   color: var(--text-primary);
 }
 
@@ -1710,24 +1728,28 @@ html.platform-darwin .titlebar-left {
   max-width: min(360px, calc(100vw - 48px));
 }
 
+/* Model menu: the shared dropdown material (--ui-menu-* in polish.css, same
+   as the context menus and Select). Hover and keyboard highlight are a
+   neutral --ui-hover fill; the selected model is a neutral raised fill with
+   the specular top light. No accent anywhere in the menu. */
 .model-picker-panel {
   display: flex;
   flex-direction: column;
   min-width: min(340px, calc(100vw - 48px));
   max-width: min(420px, calc(100vw - 48px));
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
-  border-radius: 12px;
-  background: rgb(var(--surface-strong-rgb));
-  box-shadow: 0 16px 40px rgba(var(--surface-base-rgb), 0.5);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius);
+  background: var(--ui-raised);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
   overflow: hidden;
 }
 
 .model-picker-search {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px 8px;
-  border-bottom: 1px solid rgba(var(--accent-pale-rgb), 0.14);
+  gap: var(--ui-menu-pad);
+  padding: var(--ui-menu-pad);
+  border-bottom: 1px solid var(--ui-line);
 }
 
 .model-picker-favorites-toggle {
@@ -1736,60 +1758,33 @@ html.platform-darwin .titlebar-left {
   justify-content: center;
   width: 28px;
   height: 28px;
-  border-radius: 8px;
-  color: var(--text-secondary);
+  border-radius: var(--ui-control-radius);
+  color: var(--ui-faint);
   flex-shrink: 0;
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.12s, color 0.12s;
 }
 
 .model-picker-favorites-toggle:hover {
-  background: rgba(var(--accent-rgb), 0.14);
+  background: var(--ui-hover);
   color: var(--text-primary);
 }
 
 .model-picker-favorites-toggle.active {
-  color: #f0c14b;
-  background: rgba(240, 193, 75, 0.12);
+  background: var(--ui-pressed);
+  box-shadow: var(--ui-specular);
+  color: var(--text-primary);
 }
 
+/* The search field is SettingsSearch. It is focused whenever the menu is
+   open, so the caret is the focus cue here, not the accent ring. */
 .model-picker-search-field {
-  position: relative;
   flex: 1;
   min-width: 0;
 }
 
-.model-picker-search-icon {
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  color: var(--text-secondary);
-  opacity: 0.75;
-  pointer-events: none;
-}
-
-.model-picker-search-input {
-  width: 100%;
-  padding: 6px 4px 8px 22px;
-  border: none;
-  border-radius: 0;
-  background: rgba(var(--surface-strong-rgb), 0.96);
-  color: var(--text-primary);
-  font-size: 13px;
-  outline: none;
-}
-
-.model-picker-search-input::placeholder {
-  color: var(--text-secondary);
-  opacity: 0.8;
-}
-
-.model-picker-search-input:focus,
-.model-picker-search-input:focus-visible {
-  background: rgba(var(--surface-strong-rgb), 0.96);
+.model-picker-search .settings-search:focus-within,
+.model-picker-search .settings-search input:focus {
   box-shadow: none;
-  border: none;
-  outline: none;
 }
 
 .model-picker-body {
@@ -1801,9 +1796,9 @@ html.platform-darwin .titlebar-left {
 .model-picker-rail {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 8px 6px;
-  border-right: 1px solid rgba(var(--accent-pale-rgb), 0.12);
+  gap: 2px;
+  padding: var(--ui-menu-pad);
+  border-right: 1px solid var(--ui-line);
   overflow-y: auto;
   flex-shrink: 0;
 }
@@ -1812,20 +1807,21 @@ html.platform-darwin .titlebar-left {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--ui-menu-row-radius);
   color: var(--text-secondary);
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.12s, color 0.12s;
 }
 
 .model-picker-rail-item:hover {
-  background: rgba(var(--accent-rgb), 0.14);
+  background: var(--ui-hover);
   color: var(--text-primary);
 }
 
 .model-picker-rail-item.selected {
-  background: rgba(var(--accent-deep-rgb), 0.28);
+  background: var(--ui-pressed);
+  box-shadow: var(--ui-specular);
   color: var(--text-primary);
 }
 
@@ -1841,21 +1837,28 @@ html.platform-darwin .titlebar-left {
   max-height: 320px;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 6px;
+  padding: var(--ui-menu-pad);
+}
+
+/* Neutral scrollbar thumb inside dropdowns. */
+.model-picker-list.scrollbar-ultra-thin:is(:hover, .is-scrolling),
+.composer-model-menu.scrollbar-ultra-thin:is(:hover, .is-scrolling),
+.composer-mode-menu.scrollbar-ultra-thin:is(:hover, .is-scrolling) {
+  scrollbar-color: var(--ui-line-strong) transparent;
 }
 
 .composer-model-menu:not(.model-picker-list) {
   min-width: 240px;
   max-width: min(360px, calc(100vw - 48px));
   max-height: 280px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
-  border-radius: 10px;
-  background: rgb(var(--surface-strong-rgb));
-  box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.45);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius);
+  background: var(--ui-raised);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
 }
 
 .model-picker-empty {
-  padding: 18px 12px;
+  padding: 16px 12px;
   text-align: center;
   font-size: 13px;
   color: var(--text-secondary);
@@ -1865,28 +1868,37 @@ html.platform-darwin .titlebar-left {
   display: flex;
   align-items: center;
   gap: 2px;
-  border-radius: 8px;
+  border-radius: var(--ui-menu-row-radius);
   transition: background 0.12s;
 }
 
 .model-picker-row:hover,
 .model-picker-row.highlighted,
 .model-picker-row.active {
-  background: rgba(var(--accent-rgb), 0.12);
+  background: var(--ui-hover);
 }
 
 .model-picker-row.selected {
-  background: rgba(var(--accent-deep-rgb), 0.2);
+  background: var(--ui-pressed);
+  box-shadow: var(--ui-specular);
+}
+
+html[data-theme='high-contrast'] .model-picker-row.selected {
+  box-shadow: inset 0 0 0 1px var(--ui-line-strong);
 }
 
 .model-picker-row-main {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--ui-menu-row-x);
   flex: 1;
   min-width: 0;
-  padding: 8px 8px 8px 10px;
+  padding: 5px 4px 5px var(--ui-menu-row-x);
   text-align: left;
+  color: color-mix(in srgb, var(--text-primary) 80%, transparent);
+}
+
+.model-picker-row:is(:hover, .highlighted, .active, .selected) .model-picker-row-main {
   color: var(--text-primary);
 }
 
@@ -1894,8 +1906,8 @@ html.platform-darwin .titlebar-left {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   flex-shrink: 0;
   color: var(--text-secondary);
 }
@@ -1903,97 +1915,100 @@ html.platform-darwin .titlebar-left {
 .model-picker-row-text {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
   flex: 1;
 }
 
 .model-picker-row-title {
   font-size: 13px;
-  font-weight: 500;
-  line-height: 1.25;
+  font-weight: 400;
+  line-height: 1.3;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.model-picker-row.selected .model-picker-row-title {
+  font-weight: 500;
 }
 
 .model-picker-row-subtitle {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
-  line-height: 1.2;
+  line-height: 1.3;
 }
 
 .model-picker-row-chevron {
   flex-shrink: 0;
-  opacity: 0.55;
-  color: var(--text-secondary);
+  color: var(--ui-faint);
 }
 
+/* Shortcut hints and stars are quiet chrome: faint, no fill, no colour. */
 .model-picker-shortcut {
   flex-shrink: 0;
   margin-left: 4px;
-  padding: 2px 6px;
-  border-radius: 5px;
+  padding: 0 5px;
+  border: 1px solid var(--ui-line);
+  border-radius: 4px;
   font-size: 11px;
+  line-height: 16px;
   font-variant-numeric: tabular-nums;
-  color: var(--text-secondary);
-  background: rgba(var(--surface-base-rgb), 0.55);
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.14);
+  color: var(--ui-faint);
 }
 
 .model-picker-star {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 24px;
+  height: 24px;
   margin-right: 4px;
-  border-radius: 8px;
-  color: var(--text-secondary);
-  opacity: 0.55;
+  border-radius: var(--ui-menu-row-radius);
+  color: var(--ui-faint);
+  opacity: 0.6;
   flex-shrink: 0;
-  transition: opacity 0.15s, color 0.15s, background 0.15s;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
 }
 
-.model-picker-row:hover .model-picker-star,
-.model-picker-row.highlighted .model-picker-star,
+.model-picker-row:is(:hover, .highlighted) .model-picker-star,
 .model-picker-star.active {
   opacity: 1;
 }
 
 .model-picker-star:hover {
-  background: rgba(var(--accent-rgb), 0.14);
+  background: var(--ui-hover);
   color: var(--text-primary);
 }
 
 .model-picker-star.active {
-  color: #f0c14b;
+  color: var(--text-secondary);
 }
 
 .composer-model-variant-panel {
   position: absolute;
-  min-width: 220px;
+  min-width: 200px;
   max-width: min(280px, calc(100vw - 48px));
   max-height: 280px;
   overflow-y: auto;
-  padding: 10px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
-  border-radius: 10px;
-  background: rgb(var(--surface-strong-rgb));
-  box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.45);
+  padding: var(--ui-menu-pad);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius);
+  background: var(--ui-raised);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
   z-index: calc(var(--z-floating, 50000) + 1);
 }
 
 .composer-model-variant-panel-right {
-  left: calc(100% + 8px);
+  left: calc(100% + 6px);
   right: auto;
 }
 
 .composer-model-variant-panel-left {
-  right: calc(100% + 8px);
+  right: calc(100% + 6px);
   left: auto;
 }
 
@@ -2008,26 +2023,25 @@ html.platform-darwin .titlebar-left {
 
 .composer-model-menu-settings {
   align-self: flex-start;
-  padding: 6px 10px;
-  border-radius: 6px;
+  padding: 5px 10px;
+  border-radius: var(--ui-control-radius);
   font-size: 12px;
-  color: var(--text-secondary);
-  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--text-primary);
+  background: var(--ui-hover);
 }
 
 .composer-model-menu-settings:hover {
-  background: rgba(var(--accent-pale-rgb), 0.24);
-  color: var(--text-primary);
+  background: var(--ui-pressed);
 }
 
 .model-family-variant-section + .model-family-variant-section {
-  margin-top: 10px;
+  margin-top: var(--ui-menu-pad);
 }
 
 .model-family-variant-heading {
-  margin-bottom: 6px;
+  padding: 4px var(--ui-menu-row-x);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: normal;
   color: var(--text-secondary);
 }
@@ -2035,22 +2049,30 @@ html.platform-darwin .titlebar-left {
 .model-family-variant-options {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
+  padding: 0 var(--ui-menu-pad) var(--ui-menu-pad);
 }
 
 .model-family-variant-chip {
-  padding: 5px 8px;
-  border-radius: 999px;
+  padding: 4px var(--ui-menu-row-x);
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-menu-row-radius);
   font-size: 12px;
-  color: var(--text-primary);
-  background: rgba(var(--accent-rgb), 0.12);
-  transition: background 0.15s, color 0.15s;
+  color: color-mix(in srgb, var(--text-primary) 80%, transparent);
+  background: transparent;
+  transition: background 0.12s, color 0.12s;
 }
 
-.model-family-variant-chip:hover,
+.model-family-variant-chip:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
 .model-family-variant-chip.selected {
-  background: rgba(var(--accent-deep-rgb), 0.24);
-  color: var(--text-secondary);
+  border-color: transparent;
+  background: var(--ui-pressed);
+  box-shadow: var(--ui-specular);
+  color: var(--text-primary);
 }
 
 .composer-mode-picker {
@@ -2071,6 +2093,8 @@ html.platform-darwin .titlebar-left {
   display: none;
 }
 
+/* Mode and effort/speed menus: same dropdown material and rows as Select
+   (check column, neutral hover, brighter text when selected). */
 .composer-mode-menu {
   position: absolute;
   bottom: calc(100% + 8px);
@@ -2079,11 +2103,11 @@ html.platform-darwin .titlebar-left {
   min-width: 180px;
   max-height: 280px;
   overflow-y: auto;
-  padding: 6px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.2);
-  border-radius: 10px;
-  background: rgb(var(--surface-strong-rgb));
-  box-shadow: 0 12px 32px rgba(var(--surface-base-rgb), 0.45);
+  padding: var(--ui-menu-pad);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius);
+  background: var(--ui-raised);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
 }
 
 .composer-mode-menu-floating {
@@ -2097,15 +2121,15 @@ html.platform-darwin .titlebar-left {
 }
 
 .composer-mode-menu-group {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.12);
+  margin-top: var(--ui-menu-pad);
+  padding-top: var(--ui-menu-pad);
+  border-top: 1px solid var(--ui-line);
 }
 
 .composer-mode-menu-heading {
-  padding: 4px 10px 6px;
+  padding: 4px var(--ui-menu-row-x);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: normal;
   color: var(--text-secondary);
 }
@@ -2113,19 +2137,20 @@ html.platform-darwin .titlebar-left {
 .composer-mode-menu-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 6px;
   width: 100%;
-  padding: 8px 10px;
-  border-radius: 6px;
+  min-height: var(--ui-row-height, 30px);
+  padding: 5px var(--ui-menu-row-x) 5px 6px;
+  border-radius: var(--ui-menu-row-radius);
   text-align: left;
   font-size: 13px;
-  color: var(--text-primary);
-  transition: background 0.15s, color 0.15s;
+  color: color-mix(in srgb, var(--text-primary) 80%, transparent);
+  transition: background 0.12s, color 0.12s;
 }
 
 .composer-mode-menu-item:hover:not(:disabled) {
-  background: rgba(var(--accent-rgb), 0.16);
+  background: var(--ui-hover);
+  color: var(--text-primary);
 }
 
 .composer-mode-menu-item:disabled {
@@ -2134,15 +2159,23 @@ html.platform-darwin .titlebar-left {
 }
 
 .composer-mode-menu-item.selected {
-  background: rgba(var(--accent-deep-rgb), 0.22);
-  color: var(--text-secondary);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.composer-mode-menu-check {
+  display: inline-flex;
+  flex: 0 0 14px;
+  justify-content: center;
+  color: var(--text-primary);
 }
 
 .composer-mode-menu-item-meta {
   flex-shrink: 0;
+  margin-left: auto;
   font-size: 12px;
+  font-weight: 400;
   color: var(--text-secondary);
-  opacity: 0.8;
 }
 
 .composer-implement-btn {
@@ -2167,24 +2200,6 @@ html.platform-darwin .titlebar-left {
 .composer-implement-btn:disabled {
   opacity: 0.6;
   cursor: default;
-}
-
-.skill-model-settings {
-  margin-top: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.skill-model-label {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.skill-model-row {
-  display: grid;
-  grid-template-columns: minmax(140px, 0.8fr) minmax(0, 1.2fr);
-  gap: 8px;
 }
 
 .composer-action-btn {
@@ -3314,57 +3329,113 @@ button.terminal-tab {
   inset: 8px;
 }
 
+/* Dialog tokens, shared by ui/Modal and the integrations dialog. A light dim with
+   a soft blur behind; a mild top light (as faint as the settings group edge) and
+   a soft drop shadow on the surface, never a bright band. */
+:root {
+  --ui-dialog-dim: rgba(0, 0, 0, 0.4);
+  --ui-dialog-blur: blur(3px);
+  --ui-dialog-edge: inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+  --ui-dialog-drop: 0 16px 48px rgba(0, 0, 0, 0.36), 0 2px 8px rgba(0, 0, 0, 0.16);
+}
+
+html[data-theme='light'] {
+  --ui-dialog-dim: rgba(20, 16, 30, 0.22);
+  --ui-dialog-edge: inset 0 0 0 1px rgba(20, 16, 30, 0.06);
+  --ui-dialog-drop: 0 16px 40px rgba(20, 16, 30, 0.14), 0 2px 6px rgba(20, 16, 30, 0.06);
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] {
+    --ui-dialog-dim: rgba(20, 16, 30, 0.22);
+    --ui-dialog-edge: inset 0 0 0 1px rgba(20, 16, 30, 0.06);
+    --ui-dialog-drop: 0 16px 40px rgba(20, 16, 30, 0.14), 0 2px 6px rgba(20, 16, 30, 0.06);
+  }
+}
+
+html[data-theme='high-contrast'] {
+  --ui-dialog-dim: rgba(0, 0, 0, 0.6);
+  --ui-dialog-blur: none;
+  --ui-dialog-edge: inset 0 0 0 1px var(--ui-line-strong);
+  --ui-dialog-drop: 0 0 0 0 transparent;
+}
+
+/* Centred in the window; the body scrolls when the content is taller. */
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(var(--surface-base-rgb), 0.45);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: var(--ui-dialog-dim);
+  backdrop-filter: var(--ui-dialog-blur);
+  -webkit-backdrop-filter: var(--ui-dialog-blur);
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
-  padding-top: 60px;
+  padding: 16px;
   z-index: 1000;
 }
 
+/* Dialogs are the surface (mousse-ui skill, section 4): lit, not boxed. No
+   dividers: the header, body and footer share one 16px inset and are told apart
+   by position alone. The close glyph sits on the right edge of the row controls. */
 .modal {
-  background: linear-gradient(180deg, rgba(var(--surface-soft-rgb), 0.82) 0%, rgba(var(--surface-strong-rgb), 0.78) 100%);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  border-radius: 10px;
+  background: var(--ui-raised);
+  border-radius: var(--ui-card-radius);
   width: 560px;
-  max-width: calc(100vw - 32px);
-  max-height: 70vh;
+  max-width: 100%;
+  max-height: min(80vh, 720px);
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 24px 64px rgba(var(--accent-deep-dark-rgb), 0.35);
+  color: var(--text-primary);
+  box-shadow: var(--ui-dialog-edge), var(--ui-dialog-drop);
 }
+
+/* The panel takes focus only as a fallback when it has no field or control to focus. */
+:is(.modal, .integration-modal):focus { outline: none; }
 
 .modal-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 14px 18px;
+  gap: 16px;
+  flex-shrink: 0;
+  padding: 12px 12px 4px 16px;
+}
+
+/* Without a visible title the close button keeps its corner and the content leads. */
+:is(.modal, .integration-modal).untitled > .modal-header {
+  justify-content: flex-end;
+  padding-bottom: 0;
 }
 
 .modal-header h2, .modal-header h3 {
-  font-size: 16px;
+  min-width: 0;
   margin: 0;
+  font-size: 16px;
+  font-weight: 600;
   line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
-.modal-header { gap: 16px; flex-shrink: 0; }
-.modal-close { display: grid; place-items: center; width: 28px; height: 28px; flex-shrink: 0; border-radius: 6px; color: var(--text-secondary); }
-.modal-close:hover { background: rgba(var(--accent-rgb), .12); }
+/* Self-contained so it works outside Settings, where the settings tokens are unset. */
+:is(.modal, .integration-modal) .modal-close { display: grid; place-items: center; width: 28px; height: 28px; flex-shrink: 0; margin-left: auto; border-radius: var(--ui-control-radius); color: var(--text-secondary); transition: background-color 0.15s, color 0.15s; }
+:is(.modal, .integration-modal) .modal-close:hover:not(:disabled) { background: var(--ui-hover); color: var(--text-primary); }
+:is(.modal, .integration-modal) .modal-close:focus-visible { outline: none; box-shadow: var(--ui-focus-ring); }
 .modal-body > p { margin: 0 0 12px; line-height: 1.6; }
 .modal-body > p:last-child { margin-bottom: 0; }
-.modal-footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: 12px 18px 18px; flex-shrink: 0; }
+.modal-footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: 0 16px 16px; flex-shrink: 0; }
 .modal-footer > button { min-height: 36px; }
+/* Settings buttons keep the one control size in a footer too. */
+.modal-footer > .settings-btn { height: var(--settings-control-h, 28px); min-height: 0; border-radius: var(--ui-control-radius); font-size: var(--settings-fs-small, 12.5px); }
 
 .modal-body {
+  min-height: 0;
   overflow-y: auto;
-  padding: 16px 18px;
+  padding: 0 16px 16px;
+}
+
+.modal-body:has(+ .modal-footer) {
+  padding-bottom: 12px;
 }
 
 .modal-section {
@@ -5876,61 +5947,7 @@ html.platform-darwin .agents-tasks-header-actions {
 .turn-status-retry:hover { background: rgba(var(--accent-rgb), 0.18); }
 .message-stopped { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-secondary); opacity: 0.65; }
 
-/* Quick actions (header button + dropdown + editor) */
-.quick-actions-menu {
-  min-width: 230px;
-  max-width: 300px;
-}
-
-.quick-actions-row {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  border-radius: 6px;
-}
-
-.quick-actions-row:hover {
-  background: rgba(var(--accent-rgb), 0.16);
-}
-
-.quick-actions-run {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
-  padding: 8px 6px 8px 10px;
-  border-radius: 6px;
-  text-align: left;
-  font-size: 13px;
-  color: var(--text-primary);
-}
-
-.quick-actions-run:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-.quick-actions-kind {
-  display: inline-flex;
-  align-items: center;
-  color: var(--text-secondary);
-  flex-shrink: 0;
-}
-
-.quick-actions-label {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.quick-actions-running {
-  color: var(--text-secondary);
-  flex-shrink: 0;
-}
-
+/* Quick action editor */
 .quick-actions-delete {
   display: inline-flex;
   align-items: center;
@@ -5947,12 +5964,6 @@ html.platform-darwin .agents-tasks-header-actions {
   color: var(--text-primary);
 }
 
-.quick-actions-empty {
-  padding: 8px 10px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
 .quick-actions-error {
   margin: 4px 2px;
   padding: 6px 10px;
@@ -5961,27 +5972,6 @@ html.platform-darwin .agents-tasks-header-actions {
   color: var(--danger);
   background: rgba(248, 81, 73, 0.1);
   word-break: break-word;
-}
-
-.quick-actions-separator {
-  margin: 6px 2px;
-  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.16);
-}
-
-.quick-actions-create {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 10px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.quick-actions-create:hover {
-  background: rgba(var(--accent-rgb), 0.16);
 }
 
 .quick-actions-backdrop {

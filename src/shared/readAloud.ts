@@ -60,7 +60,7 @@ const KOKORO_VOICES: readonly LocalTtsVoice[] = (
 export const KOKORO_82M: LocalTtsModel = {
   id: 'kokoro-82m',
   label: 'Kokoro 82M',
-  description: 'English voices, runs on this computer',
+  description: 'English voices',
   parameters: '82M',
   license: 'Apache-2.0',
   homepage: 'https://huggingface.co/hexgrad/Kokoro-82M',

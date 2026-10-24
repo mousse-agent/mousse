@@ -82,8 +82,8 @@ describe.skipIf(!live)('live: Claude and Codex delegate to each other over the M
       undefined, undefined, undefined, undefined, undefined, undefined, projects, { questions }
     )
     orch.setThreadStore(store)
-    // The default profile reuses the terminal Claude sign-in (`cli` policy).
-    const claude = new ClaudeSubscriptionProviderService(home, questions, {}, { defaultProfile: true })
+    // Claude Code uses the terminal sign-in.
+    const claude = new ClaudeSubscriptionProviderService(home, questions)
     const codex = createCodexProviderService(home, questions)
     orch.setClaudeSubscriptionProvider(claude)
     orch.setCodexProvider(codex)

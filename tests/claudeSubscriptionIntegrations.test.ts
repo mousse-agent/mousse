@@ -9,6 +9,7 @@ import type { McpServerConfig, McpToolDescriptor, MousseIntegrationsSettings, Sk
 import type { McpToolCallResult } from '../src/shared/integrations/results'
 import {
   ClaudeIntegrationResolver,
+  claudeLoadsSkill,
   claudeMcpToolBlocked,
   claudeProxiedMcpServer
 } from '../src/mms/providers/claudeSubscription/integrations'
@@ -209,6 +210,20 @@ describe('Claude Subscription integrations', () => {
     utimesSync(first.pluginPath!, old, old)
     await claude.resolve()
     expect(readdirSync(pluginRoot)).toEqual([second.pluginPath!.slice(pluginRoot.length + 1)])
+  })
+
+  it("leaves out skills Claude Code already loads from its own skill folders", async () => {
+    const root = temp()
+    const project = { ...skill(root, 'project-skill'), source: 'claude-project' as const, scope: 'project' as const }
+    const { resolver: claude } = resolver({ skills: [project, skill(root, 'mousse-skill')] })
+    const result = await claude.resolve('/project')
+    expect(readdirSync(join(result.pluginPath!, 'skills'))).toEqual(['mousse-skill'])
+    const { resolver: only } = resolver({ skills: [project] })
+    expect((await only.resolve('/project')).pluginPath).toBeUndefined()
+    // ~/.claude/skills counts only while Claude Code keeps its config there.
+    expect(claudeLoadsSkill({ source: 'claude-global' }, {})).toBe(true)
+    expect(claudeLoadsSkill({ source: 'claude-global' }, { CLAUDE_CONFIG_DIR: '/elsewhere' })).toBe(false)
+    expect(claudeLoadsSkill({ source: 'agents-global' }, {})).toBe(false)
   })
 
   it('skips a skill that contains a symlink and keeps the rest', async () => {

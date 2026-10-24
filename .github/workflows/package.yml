@@ -1,7 +1,8 @@
 name: Package
 
-# Builds the Windows and Linux installers and CLIs for one version. Called by the
-# nightly and stable release workflows, which publish the uploaded artifacts.
+# Builds the Windows and Linux installers and CLIs, and the macOS disk images, for one
+# version. Called by the nightly and stable release workflows, which publish the uploaded
+# artifacts.
 on:
   workflow_call:
     inputs:
@@ -35,6 +36,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+      # Nightlies get their own icon so they are easy to tell apart from stable.
+      - name: Use the nightly icon
+        if: contains(inputs.version, '-nightly.')
+        run: cp resources/nightly/icon.png resources/nightly/icon.ico resources/
       - run: npm run dist:linux
       - name: Check the packaged CLI reports the version
         run: |
@@ -61,10 +66,16 @@ jobs:
           echo '{"rules":[{"id":"@secretlint/secretlint-rule-preset-recommend"}]}' > "$RUNNER_TEMP/secretlintrc.json"
           npx --yes -p secretlint@13.0.7 -p @secretlint/secretlint-rule-preset-recommend@13.0.7 \
             secretlint --secretlintrc "$RUNNER_TEMP/secretlintrc.json" --maskSecrets "scan/**/*"
-      # One flat folder, so the release gets the files themselves.
-      - run: |
+      # One flat folder, so the release gets the files themselves. The in-app updater reads
+      # latest-linux.yml on stable releases and nightly-linux.yml on nightlies (docs/releases.md).
+      - name: Collect the release files
+        run: |
           mkdir upload
           cp "release/Mousse-$VERSION.AppImage" "release/cli/mousse-cli-$VERSION-linux-x86_64.AppImage" upload/
+          channel=latest; case "$VERSION" in *-nightly.*) channel=nightly ;; esac
+          grep -qx "path: Mousse-$VERSION.AppImage" release/latest-linux.yml
+          grep -q "provider: github" release/linux-unpacked/resources/app-update.yml
+          cp release/latest-linux.yml "upload/$channel-linux.yml"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mousse-linux
@@ -85,26 +96,83 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm version "$env:VERSION" --no-git-tag-version --allow-same-version
+      - name: Use the nightly icon
+        if: contains(inputs.version, '-nightly.')
+        run: Copy-Item resources/nightly/icon.png, resources/nightly/icon.ico resources/
       - name: Locate MSBuild for the node-pty rebuild
         run: |
           $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
           if (-not $msbuild) { throw 'MSBuild not found' }
           "MSBUILD_PATH=$msbuild" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - run: npm run dist:win
-      - run: npx electron-builder --win --config electron-builder.cli.yml
+      - run: npx electron-builder --win --config electron-builder.cli.yml --publish never
       - name: Check the packaged CLI reports the version
         run: |
           $out = (& release\cli\win-unpacked\mousse-cli.exe --version | Out-String).Trim()
           $out
           if ($out -ne "mousse-cli $env:VERSION") { throw "Unexpected version output: $out" }
-      # One flat folder. GitHub serves spaces in asset names as dots, so the installer is renamed
-      # to the name it will have (as in earlier releases) before the checksums are written.
-      - run: |
+      # One flat folder. The in-app updater reads latest.yml on stable releases and nightly.yml
+      # on nightlies, and downloads only the changed blocks listed in the .blockmap.
+      - name: Collect the release files
+        run: |
           New-Item -ItemType Directory upload | Out-Null
-          Copy-Item "release\Mousse Setup $env:VERSION.exe" "upload\Mousse.Setup.$env:VERSION.exe"
-          Copy-Item "release\cli\mousse-cli-$env:VERSION-win-x64.exe" upload
+          $installer = "Mousse.Setup.$env:VERSION.exe"
+          $channel = if ($env:VERSION -match '-nightly\.') { 'nightly' } else { 'latest' }
+          if (-not (Select-String -Path release\latest.yml -SimpleMatch -Quiet "path: $installer")) { throw "latest.yml does not name $installer" }
+          if (-not (Select-String -Path release\win-unpacked\resources\app-update.yml -SimpleMatch -Quiet 'provider: github')) { throw 'The packaged app has no update feed' }
+          Copy-Item "release\$installer", "release\$installer.blockmap", "release\cli\mousse-cli-$env:VERSION-win-x64.exe" upload
+          Copy-Item release\latest.yml "upload\$channel.yml"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mousse-windows
+          if-no-files-found: error
+          path: upload/*
+
+  mac:
+    name: Package macOS (${{ matrix.arch }})
+    # Each architecture builds on its own runner: the build packages the Electron that
+    # npm installed, which matches the runner.
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      ARCH: ${{ matrix.arch }}
+      # No Developer ID certificate: the app is ad-hoc signed, as Apple silicon requires.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.20.0'
+          cache: npm
+      - run: npm ci
+      - run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+      - name: Use the nightly icon
+        if: contains(inputs.version, '-nightly.')
+        run: cp resources/nightly/icon.png resources/
+      - run: npm run dist:mac -- "--$ARCH"
+      - name: Check the signature and that the bundled CLI reports the version
+        run: |
+          app=$(echo release/mac*/Mousse.app)
+          codesign --verify --deep --strict "$app"
+          out=$("$app/Contents/Resources/mousse-cli" --version)
+          echo "$out"
+          test "$out" = "mousse-cli $VERSION"
+      # macOS builds are not covered by in-app updates, so no update manifest is attached.
+      - name: Collect the release files
+        run: |
+          mkdir upload
+          cp "release/Mousse-$VERSION-$ARCH.dmg" upload/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mousse-mac-${{ matrix.arch }}
           if-no-files-found: error
           path: upload/*

@@ -1,0 +1,18 @@
+/* In-app update: release notes shown under the update row of the downloads popover. */
+
+.update-notes {
+  max-height: 220px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px var(--ui-menu-row-x, 8px) 8px 42px;
+  user-select: text;
+}
+
+.update-notes h4 { margin: 8px 0 4px; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.update-notes-group:first-child h4 { margin-top: 0; }
+.update-notes ul { margin: 0; padding-left: 16px; list-style: disc; }
+.update-notes li { margin: 0 0 4px; font-size: 12px; line-height: 1.45; color: var(--text-secondary); overflow-wrap: anywhere; }
+.update-notes a { display: inline-block; margin-top: 2px; font-size: 12px; color: var(--ui-faint, var(--text-secondary)); text-decoration: underline dotted; }
+.update-notes a:hover { color: var(--text-primary); }
+.update-notes-more { margin: 8px 0 0; font-size: 12px; color: var(--ui-faint, var(--text-secondary)); }

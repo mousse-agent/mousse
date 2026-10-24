@@ -26,17 +26,18 @@
     "clean:build-output": "node scripts/clean-build-output.mjs",
     "prepare:package": "node scripts/prepare-package.mjs",
     "disk:report": "node scripts/disk-report.mjs",
-    "dist": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder && electron-builder --config electron-builder.cli.yml",
-    "dist:win": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win",
-    "dist:win:cli": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win --config electron-builder.cli.yml",
-    "dist:linux": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --linux AppImage && electron-builder --linux AppImage --config electron-builder.cli.yml",
+    "dist": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --publish never && electron-builder --config electron-builder.cli.yml --publish never",
+    "dist:win": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win --publish never",
+    "dist:win:cli": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win --config electron-builder.cli.yml --publish never",
+    "dist:linux": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --linux AppImage --publish never && electron-builder --linux AppImage --config electron-builder.cli.yml --publish never",
+    "dist:mac": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --mac dmg --publish never",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "lint": "eslint .",
     "format:net": "prettier --write \"src/mms/net/**/*.{ts,tsx,mjs}\" \"src/mms/spaces/**/*.{ts,tsx,mjs}\" \"src/mms/bridge/**/*.{ts,tsx,mjs}\" \"src/mms/bots/**/*.{ts,tsx,mjs}\" \"src/shared/net/**/*.{ts,tsx,mjs}\" \"src/shared/bridge/**/*.{ts,tsx,mjs}\" \"src/shared/bots/**/*.{ts,tsx,mjs}\" \"src/shared/spaces/**/*.{ts,tsx,mjs}\" \"tests/net/**/*.{ts,tsx,mjs}\" \"scripts/net/**/*.{ts,tsx,mjs}\" \"scripts/net-qa/**/*.{ts,tsx,mjs}\" \"scripts/net-spikes/**/*.{ts,tsx,mjs}\" src/cli/commands/net.ts src/cli/commands/bridge.ts src/cli/commands/spaces.ts src/cli/commands/bots.ts src/cli/commands/spaceArchive.ts src/cli/electronDaemonLifetime.ts src/mms/protocol/connectionEventWriter.ts",
     "format:net:check": "prettier --check \"src/mms/net/**/*.{ts,tsx,mjs}\" \"src/mms/spaces/**/*.{ts,tsx,mjs}\" \"src/mms/bridge/**/*.{ts,tsx,mjs}\" \"src/mms/bots/**/*.{ts,tsx,mjs}\" \"src/shared/net/**/*.{ts,tsx,mjs}\" \"src/shared/bridge/**/*.{ts,tsx,mjs}\" \"src/shared/bots/**/*.{ts,tsx,mjs}\" \"src/shared/spaces/**/*.{ts,tsx,mjs}\" \"tests/net/**/*.{ts,tsx,mjs}\" \"scripts/net/**/*.{ts,tsx,mjs}\" \"scripts/net-qa/**/*.{ts,tsx,mjs}\" \"scripts/net-spikes/**/*.{ts,tsx,mjs}\" src/cli/commands/net.ts src/cli/commands/bridge.ts src/cli/commands/spaces.ts src/cli/commands/bots.ts src/cli/commands/spaceArchive.ts src/cli/electronDaemonLifetime.ts src/mms/protocol/connectionEventWriter.ts",
     "test": "vitest run",
     "test:unit": "vitest run --project unit",
-    "test:process": "vitest run --project process",
+    "test:process": "vitest run --project process --project heavy",
     "test:changed": "node scripts/test-select.mjs --changed",
     "test:branch": "node scripts/test-select.mjs --branch",
     "test:related": "node scripts/test-select.mjs --related",
@@ -65,6 +66,7 @@
     "ajv": "8.20.0",
     "clsx": "^2.1.1",
     "discord.js": "^14.27.0",
+    "electron-updater": "6.8.9",
     "fflate": "0.8.3",
     "highlight.js": "^11.11.1",
     "lottie-react": "^3.1.1",
@@ -136,7 +138,11 @@
   },
   "build": {
     "afterPack": "scripts/after-pack.mjs",
-    "publish": null,
+    "publish": {
+      "provider": "github",
+      "owner": "mousse-agent",
+      "repo": "mousse"
+    },
     "appId": "com.ryspa.mousse",
     "productName": "Mousse",
     "copyright": "Copyright © 2026 RYSPA",
@@ -206,16 +212,6 @@
         "to": "macros"
       }
     ],
-    "extraFiles": [
-      {
-        "from": "resources/cli/mousse-cli.cmd",
-        "to": "mousse-cli.cmd"
-      },
-      {
-        "from": "resources/cli/mousse-cli",
-        "to": "mousse-cli"
-      }
-    ],
     "win": {
       "target": [
         {
@@ -226,7 +222,17 @@
         }
       ],
       "icon": "resources/icon.ico",
-      "signExecutable": false
+      "signExecutable": false,
+      "extraFiles": [
+        {
+          "from": "resources/cli/mousse-cli.cmd",
+          "to": "mousse-cli.cmd"
+        },
+        {
+          "from": "resources/cli/mousse-cli",
+          "to": "mousse-cli"
+        }
+      ]
     },
     "linux": {
       "target": [
@@ -239,9 +245,38 @@
       ],
       "category": "Development",
       "icon": "resources/icon.png",
-      "executableName": "mousse"
+      "executableName": "mousse",
+      "extraFiles": [
+        {
+          "from": "resources/cli/mousse-cli.cmd",
+          "to": "mousse-cli.cmd"
+        },
+        {
+          "from": "resources/cli/mousse-cli",
+          "to": "mousse-cli"
+        }
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.developer-tools",
+      "icon": "resources/icon.png",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "extraFiles": [
+        {
+          "from": "resources/cli/mousse-cli",
+          "to": "Resources/mousse-cli"
+        }
+      ]
+    },
+    "dmg": {
+      "artifactName": "Mousse-${version}-${arch}.${ext}"
     },
     "nsis": {
+      "artifactName": "Mousse.Setup.${version}.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "include": "build/installer.nsh"
