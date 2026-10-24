@@ -155,6 +155,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+      - name: Use the nightly icon
+        if: contains(inputs.version, '-nightly.')
+        run: cp resources/nightly/icon.png resources/
       - run: npm run dist:mac -- "--$ARCH"
       - name: Check the signature and that the bundled CLI reports the version
         run: |

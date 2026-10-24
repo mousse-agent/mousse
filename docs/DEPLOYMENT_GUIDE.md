@@ -141,7 +141,8 @@ store.
 
 `mousse-site` resolves Windows and Linux downloads server-side from the latest
 GitHub release and falls back to the repository release page. The macOS control
-links to the repository until a macOS release artifact exists.
+still links to the repository; releases now include `Mousse-<version>-arm64.dmg`
+and `Mousse-<version>-x64.dmg`, which the site can resolve the same way.
 
 The site build is local-only while the owner instruction **do not push
 anything** remains in force. The existing Vercel deployment will update only
@@ -164,8 +165,9 @@ provisioning profile, signing password, Apple API key, or built mobile package.
 
 ## Known external blockers and deferred gates
 
-- macOS desktop binaries are intentionally absent; the website links to GitHub
-  until the owner adds them.
+- macOS builds are ad-hoc signed, not notarized, and get no in-app updates.
+  Signing and notarizing them needs a Developer ID Application certificate and
+  an App Store Connect API key in the repository secrets.
 - An iOS native build cannot be verified on Windows/WSL; it requires a macOS
   runner with Xcode.
 - Site publication is deferred by the explicit no-push instruction.
