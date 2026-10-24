@@ -158,22 +158,6 @@
   animation: read-aloud-spin 0.9s linear infinite;
 }
 
-.read-aloud-current {
-  margin: 0 0 10px;
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-
-.read-aloud-current strong {
-  color: var(--text-primary);
-  font-weight: 500;
-}
-
-.read-aloud-settings {
-  max-width: 720px;
-  margin-bottom: 14px;
-}
-
 @keyframes read-aloud-spin {
   to {
     transform: rotate(360deg);

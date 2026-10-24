@@ -1,131 +1,218 @@
-import { ExternalLink, X, FileText, Link2, Pencil, Plus, RefreshCw, Search, Shield, Upload } from '../../lib/icons'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { IntegrationPlatformClient, IntegrationPlatformSnapshot } from '../../../shared/integrationPlatform'
 import type { McpServerConfig, SkillDescriptor } from '../../../shared/integrations'
-import { asError, isManagedSource, scopeLabel, snapshotItems } from './integrationUi'
+import { AlertTriangle, CircleAlert, CircleCheck, Plug, Plus, RotateCcw, Sparkles, X } from '../../lib/icons'
+import { SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
+import { asError, downloadPackage, snapshotItems } from './integrationUi'
 import { AddSkillDialog, SkillEditorDialog, type TestSkill } from './SkillDialogs'
 import { McpConnectionDialog } from './McpConnectionDialog'
+import { RowMenu } from './RowMenu'
+import type { SkillModelBinding } from './SkillModelPicker'
 import { useMcpConnectionChecks, type McpConnectionCheck } from './useMcpConnectionChecks'
+import { isIntegrationItemOn, itemId, type IntegrationGates, type IntegrationKind as Kind } from './itemState'
+import { groupMcpServers, groupSkills, mcpEndpoint, OtherAppsGroup } from './otherAppsGroup'
 import './integrations.css'
+
+/**
+ * Settings-side state that decides whether an installed item is actually on:
+ * the hidden category gate (`enabled`) and the selection list. Rows show on only
+ * when all of them agree, so no switch reads "on" while a hidden gate is off.
+ * Turning an item on also turns its gate on; the daemon does that in `select`.
+ */
+export interface IntegrationPolicy {
+  integrations: IntegrationGates
+  /** Re-reads settings after the daemon changed the selection. */
+  refresh: () => void | Promise<void>
+}
 
 export interface IntegrationsWorkspaceProps {
   client: IntegrationPlatformClient
   profileId: string
   projectId?: string
-  projects?: Array<{ id: string; name: string }>
-  initialTab?: 'skills' | 'mcp'
-  showHeading?: boolean
   onTestSkill?: TestSkill
+  policy?: IntegrationPolicy
+  skillModel?: SkillModelBinding
 }
-type Dialog = { kind: 'skill-create' | 'skill-upload' | 'mcp-create' } | { kind: 'skill-edit' | 'mcp-edit'; id: string } | null
+type Dialog = { kind: 'skill-create' | 'mcp-create' } | { kind: 'skill-edit' | 'mcp-edit'; id: string } | null
 
 /** Key personal data before rendering so profile switches never show stale rows. */
 export function IntegrationsWorkspace(props: IntegrationsWorkspaceProps) {
-  return <ScopedWorkspace key={`${props.profileId}:${props.projectId ?? ''}:${props.initialTab ?? 'skills'}`} {...props} />
+  return <ScopedWorkspace key={`${props.profileId}:${props.projectId ?? ''}`} {...props} />
 }
 
-function ScopedWorkspace({ client, profileId, projectId, projects = [], initialTab = 'skills', showHeading = true, onTestSkill }: IntegrationsWorkspaceProps) {
-  const [tab, setTab] = useState(initialTab)
+function ScopedWorkspace({ client, profileId, projectId, onTestSkill, policy, skillModel }: IntegrationsWorkspaceProps) {
   const [snapshot, setSnapshot] = useState<IntegrationPlatformSnapshot | null>(null)
-  const [loading, setLoading] = useState(true), [refreshing, setRefreshing] = useState(false)
-  const [error, setError] = useState<string | null>(null), [query, setQuery] = useState('')
-  const [pendingToggle, setPendingToggle] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [pending, setPending] = useState<string | null>(null)
   const [dialog, setDialog] = useState<Dialog>(null)
-  const mcpConnections = useMcpConnectionChecks(client, profileId, projectId, tab === 'mcp' ? snapshot : null)
   const generation = useRef(0)
   const scope = projectId ? 'project' : 'global'
   const load = useCallback(async (refresh = false) => {
     const current = ++generation.current
-    setLoading(!refresh); setRefreshing(refresh); setError(null)
+    if (!refresh) setLoading(true)
+    setError(null)
     try {
       const result = await client.snapshot({ profileId, projectId, refresh })
       if (current === generation.current) setSnapshot(result)
     } catch (cause) { if (current === generation.current) setError(asError(cause)) }
-    finally { if (current === generation.current) { setLoading(false); setRefreshing(false) } }
+    finally { if (current === generation.current) setLoading(false) }
   }, [client, profileId, projectId])
   useEffect(() => { void load(); return () => { generation.current += 1 } }, [load])
-  const items = snapshotItems(snapshot), normalized = query.trim().toLowerCase()
-  const skills = items.skills.filter((skill) => !normalized || `${skill.name} ${skill.description} ${skill.source}`.toLowerCase().includes(normalized))
-  const servers = items.servers.filter((server) => !normalized || `${server.name} ${server.transport} ${server.source}`.toLowerCase().includes(normalized))
-  const selectedSkill = dialog?.kind === 'skill-edit' ? items.skills.find((skill) => (skill.installationId ?? skill.id) === dialog.id) : undefined
-  const selectedMcp = dialog?.kind === 'mcp-edit' ? items.servers.find((server) => (server.installationId ?? server.id) === dialog.id) : undefined
+
+  const integrations = policy?.integrations
+  const isOn = (kind: Kind, item: SkillDescriptor | McpServerConfig) => isIntegrationItemOn(kind, item, integrations)
+  // Only servers that are on get connection checks (which may start a local process).
+  const checkedSnapshot = useMemo(() => snapshot && integrations ? {
+    ...snapshot,
+    mcp: { ...snapshot.mcp, servers: snapshot.mcp.servers.filter((server) => isIntegrationItemOn('mcp', server, integrations)) }
+  } : snapshot, [snapshot, integrations])
+  const mcpConnections = useMcpConnectionChecks(client, profileId, projectId, checkedSnapshot)
+
+  const items = snapshotItems(snapshot)
+  const byName = <T extends { name: string }>(list: T[]) => [...list].sort((a, b) => a.name.localeCompare(b.name))
+  // One row per name: other apps' read-only skills and servers get their own collapsed groups.
+  const skillGroups = groupSkills(items.skills)
+  const skills = byName(skillGroups.own)
+  const serverGroups = groupMcpServers(items.servers)
+  const servers = byName(serverGroups.own)
+  const selectedSkill = dialog?.kind === 'skill-edit' ? items.skills.find((skill) => itemId(skill) === dialog.id) : undefined
+  const selectedMcp = dialog?.kind === 'mcp-edit' ? items.servers.find((server) => itemId(server) === dialog.id) : undefined
+
+  const afterChange = async () => { await Promise.all([load(true), policy?.refresh()]) }
   const close = () => setDialog(null)
-  const saved = () => { close(); void load(true) }
+  const saved = () => { close(); void afterChange() }
   const common = { client, profileId, projectId, onClose: close, onSaved: saved }
-  const toggleSkill = async (skill: SkillDescriptor) => {
-    const installationId = skill.installationId ?? skill.id
-    setPendingToggle(installationId)
-    try { await client.enableSkill({ profileId, projectId, installationId, enabled: skill.enabled === false }); await load(true) }
+
+  const run = async (id: string, task: () => Promise<unknown>) => {
+    setPending(id); setError(null)
+    try { await task(); await afterChange() }
     catch (cause) { setError(asError(cause)) }
-    finally { setPendingToggle(null) }
+    finally { setPending(null) }
   }
-  const toggleMcp = async (server: McpServerConfig) => {
-    const installationId = server.installationId ?? server.id
-    setPendingToggle(installationId)
-    try { await client.enableMcp({ profileId, projectId, installationId, enabled: server.enabled === false }); await load(true) }
-    catch (cause) { setError(asError(cause)) }
-    finally { setPendingToggle(null) }
+  const toggle = (kind: Kind, item: SkillDescriptor | McpServerConfig, next: boolean) => run(itemId(item), async () => {
+    const params = { profileId, projectId, installationId: itemId(item), enabled: next }
+    if (kind === 'skills') await client.enableSkill(params)
+    else await client.enableMcp(params)
+  })
+  const exportZip = (skill: SkillDescriptor) => run(itemId(skill), async () => {
+    const exported = await client.exportSkill({ profileId, projectId, installationId: itemId(skill), format: 'zip' })
+    downloadPackage(exported.fileName, exported.base64, exported.contentType)
+  })
+  const archive = (skill: SkillDescriptor) => {
+    if (!window.confirm(`Archive ${skill.name}? It stops being available to agents.`)) return
+    void run(itemId(skill), () => client.archiveSkill({ profileId, projectId, installationId: itemId(skill) }))
   }
-  return <div className="integrations-root" data-integrations-workspace="" data-profile-id={profileId} data-project-id={projectId ?? ''}>
-    <header className="integrations-header">
-      {showHeading && <div><h1>Integrations</h1><p>Skills and MCP connections for {projectId ? 'this project in this profile' : 'this profile'}.</p></div>}
-      <div className="integrations-header__actions">
-        <button type="button" className="btn btn-sm" data-action="refresh-integrations" disabled={loading || refreshing || Boolean(dialog)} onClick={() => { mcpConnections.reset(); void load(true) }}><RefreshCw size={14} /> Refresh</button>
-        {tab === 'skills' ? <>
-          <button type="button" className="btn integration-header-icon" data-action="upload-skill" aria-label="Upload skill" title="Upload skill" onClick={() => setDialog({ kind: 'skill-upload' })}><Upload size={15} /></button>
-          <button type="button" className="btn btn-primary" data-action="add-skill" onClick={() => setDialog({ kind: 'skill-create' })}><Plus size={14} /> Add skill</button>
-        </> : <button type="button" className="btn btn-primary integration-header-icon" data-action="add-mcp" aria-label="Add MCP connection" title="Add MCP connection" onClick={() => setDialog({ kind: 'mcp-create' })}><Plus size={16} /></button>}
-      </div>
-    </header>
-    <nav className="integrations-tabs" role="tablist" aria-label="Integration type">
-      {(['skills', 'mcp'] as const).map((value) => <button type="button" role="tab" key={value} id={`integration-tab-${value}`} aria-controls={`integration-panel-${value}`} tabIndex={value === tab ? 0 : -1} className={value === tab ? 'active' : ''} aria-selected={value === tab} onClick={() => { setTab(value); setQuery('') }} onKeyDown={(event) => {
-        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
-        event.preventDefault()
-        const next = event.key === 'Home' ? 'skills' : event.key === 'End' ? 'mcp' : tab === 'skills' ? 'mcp' : 'skills'
-        setTab(next); setQuery('')
-        document.getElementById(`integration-tab-${next}`)?.focus()
-      }}>{value === 'skills' ? 'Skills' : 'MCP'} <span>{value === 'skills' ? items.skills.length : items.servers.length}</span></button>)}
-    </nav>
-    <div className="integrations-toolbar"><label className="integrations-search"><Search size={15} /><input aria-label={`Search ${tab}`} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${tab === 'skills' ? 'skills' : 'MCP connections'}`} /></label><span className="integrations-scope"><Shield size={14} /> {scopeLabel(scope, projects.find((item) => item.id === projectId)?.name)}</span></div>
-    {error ? <div className="integrations-banner integrations-banner--error" role="alert">{error}<button type="button" className="btn btn-sm" onClick={() => void load(true)}>Try again</button></div> : null}
-    <div className="integrations-catalog" role="tabpanel" id={`integration-panel-${tab}`} aria-labelledby={`integration-tab-${tab}`}>
-      {loading ? <div className="integrations-state" role="status">Loading integrations…</div> : normalized && !(tab === 'skills' ? skills : servers).length ? <div className="integrations-state">No matches for “{query}”.</div>
-        : tab === 'skills' && !skills.length ? <div className="integrations-empty"><h2>No skills yet</h2><p>Add or upload a reusable skill.</p></div>
-          : tab === 'mcp' && !servers.length ? <div className="integrations-empty"><h2>No MCP connections yet</h2><p>Connect an MCP server.</p></div>
-            : <IntegrationList checks={mcpConnections.checks} onAuthenticateMcp={(server) => void mcpConnections.authenticate(server)} onCancelMcpAuth={(server) => void mcpConnections.cancel(server)} skills={tab === 'skills' ? skills : []} servers={tab === 'mcp' ? servers : []} pendingToggle={pendingToggle} onEditSkill={(id) => setDialog({ kind: 'skill-edit', id })} onEditMcp={(id) => setDialog({ kind: 'mcp-edit', id })} onToggleSkill={(skill) => void toggleSkill(skill)} onToggleMcp={(server) => void toggleMcp(server)} />}
-    </div>
-    {dialog?.kind === 'skill-create' || dialog?.kind === 'skill-upload' ? <AddSkillDialog {...common} scope={scope} initialMode={dialog.kind === 'skill-upload' ? 'upload' : 'create'} /> : null}
-    {selectedSkill ? <SkillEditorDialog key={selectedSkill.installationId ?? selectedSkill.id} {...common} skill={selectedSkill} onTestSkill={onTestSkill} /> : null}
-    {dialog?.kind === 'mcp-create' || selectedMcp ? <McpConnectionDialog onConnectionChanged={() => { mcpConnections.reset(); void load(true) }} key={selectedMcp?.installationId ?? 'new'} {...common} scope={scope} server={selectedMcp} /> : null}
+  const remove = (server: McpServerConfig) => {
+    if (!window.confirm(`Delete ${server.name}?`)) return
+    void run(itemId(server), () => client.deleteMcp({ profileId, projectId, installationId: itemId(server) }))
+  }
+
+  return <div className="skills-mcp-lists" data-integrations-workspace="" data-profile-id={profileId} data-project-id={projectId ?? ''}>
+    {error ? <p className="skills-mcp-error" role="alert">{error} <button type="button" className="settings-icon-btn" title="Try again" aria-label="Try again" onClick={() => void load(true)}><RotateCcw size={14} /></button></p> : null}
+    <SettingsGroup
+      title="Skills"
+      icon={Sparkles}
+      description="Instructions an agent loads when a task calls for them."
+      action={<button type="button" className="settings-btn" data-action="add-skill" onClick={() => setDialog({ kind: 'skill-create' })}><Plus size={14} />Add skill</button>}
+    >
+      {loading ? <p className="skills-mcp-state" role="status">Loading skills…</p>
+        : skills.length === 0 ? <p className="skills-mcp-state">No skills yet.</p>
+          : skills.map((skill) => <SkillRow key={itemId(skill)} skill={skill} on={isOn('skills', skill)} busy={pending === itemId(skill)}
+            onToggle={(next) => void toggle('skills', skill, next)} onEdit={() => setDialog({ kind: 'skill-edit', id: itemId(skill) })}
+            onExport={() => void exportZip(skill)} onArchive={() => archive(skill)} />)}
+    </SettingsGroup>
+    {loading ? null : <OtherAppsGroup kind="skills" rows={skillGroups.otherApps} />}
+    <SettingsGroup
+      title="MCP servers"
+      icon={Plug}
+      description="Servers that give agents extra tools."
+      action={<button type="button" className="settings-btn" data-action="add-mcp" onClick={() => setDialog({ kind: 'mcp-create' })}><Plus size={14} />Add server</button>}
+    >
+      {loading ? <p className="skills-mcp-state" role="status">Loading servers…</p>
+        : servers.length === 0 ? <p className="skills-mcp-state">No MCP servers yet.</p>
+          : servers.map((server) => <McpRow key={itemId(server)} server={server} on={isOn('mcp', server)} busy={pending === itemId(server)}
+            check={mcpConnections.checks[itemId(server)]}
+            onToggle={(next) => void toggle('mcp', server, next)} onEdit={() => setDialog({ kind: 'mcp-edit', id: itemId(server) })}
+            onSignIn={() => void mcpConnections.authenticate(server)} onCancelSignIn={() => void mcpConnections.cancel(server)}
+            onDelete={() => remove(server)} />)}
+    </SettingsGroup>
+    {loading ? null : <OtherAppsGroup kind="mcp" rows={serverGroups.otherApps} />}
+    {dialog?.kind === 'skill-create' ? <AddSkillDialog {...common} scope={scope} initialMode="create" /> : null}
+    {selectedSkill ? <SkillEditorDialog key={itemId(selectedSkill)} {...common} skill={selectedSkill} onTestSkill={onTestSkill} skillModel={skillModel} /> : null}
+    {dialog?.kind === 'mcp-create' || selectedMcp ? <McpConnectionDialog key={selectedMcp ? itemId(selectedMcp) : 'new'} {...common} scope={scope} server={selectedMcp}
+      onConnectionChanged={() => { mcpConnections.reset(); void load(true) }} /> : null}
   </div>
 }
 
-function IntegrationList({ checks, onAuthenticateMcp, onCancelMcpAuth, skills, servers, pendingToggle, onEditSkill, onEditMcp, onToggleSkill, onToggleMcp }: {
-  checks: Record<string, McpConnectionCheck>; onAuthenticateMcp: (server: McpServerConfig) => void; onCancelMcpAuth: (server: McpServerConfig) => void
-  skills: SkillDescriptor[]; servers: McpServerConfig[]; pendingToggle: string | null
-  onEditSkill: (id: string) => void; onEditMcp: (id: string) => void
-  onToggleSkill: (skill: SkillDescriptor) => void; onToggleMcp: (server: McpServerConfig) => void
+function SkillRow({ skill, on, busy, onToggle, onEdit, onExport, onArchive }: {
+  skill: SkillDescriptor; on: boolean; busy: boolean
+  onToggle: (next: boolean) => void; onEdit: () => void; onExport: () => void; onArchive: () => void
 }) {
-  const rows = [
-    ...skills.map((value) => ({ kind: 'skill' as const, value, name: value.name })),
-    ...servers.map((value) => ({ kind: 'mcp' as const, value, name: value.name }))
-  ].sort((a, b) => a.name.localeCompare(b.name))
-  return <div className="integration-list" aria-label="Integrations">{rows.map((row) => {
-    const item = row.value
-    const id = item.installationId ?? item.id
-    const managed = isManagedSource(item.source, item.managed)
-    const enabled = row.kind === 'skill' ? row.value.enabled !== false && !row.value.archived : row.value.enabled !== false
-    const connection = row.kind === 'mcp' && enabled && managed ? checks[id] : undefined
-    const needsAuth = connection?.result?.errorCategory === 'auth-required' || connection?.result?.errorCategory === 'unauthorized'
-    const description = row.kind === 'skill' ? row.value.description || 'No description provided.' : row.value.transport === 'stdio' ? row.value.command ?? 'Executable' : row.value.url ?? 'No endpoint'
-    return <article className={`integration-row${enabled ? '' : ' is-disabled'}`} key={`${row.kind}:${id}`} {...(row.kind === 'skill' ? { 'data-skill-card': id } : { 'data-mcp-card': id })}>
-      <div className="integration-row__icon" title={row.kind === 'skill' ? 'Skill' : 'MCP connection'}>{row.kind === 'skill' ? <FileText size={16} /> : <Link2 size={16} />}</div>
-      <div className="integration-row__main"><h2>{item.name}</h2><p>{description}</p>{row.kind === 'mcp' && enabled && managed ? <p className="integration-connection-status" role="status" title={connection?.result?.error}>{connection?.phase === 'signing-in' ? connection.result?.error ?? 'Signing in…' : !connection || connection.phase === 'checking' ? 'Checking connection…' : connection.result?.success ? `Connected · ${connection.result.toolCount ?? 0} tools` : needsAuth ? connection.result?.error ?? 'Sign-in required' : connection.result?.error ?? 'Connection failed'}</p> : null}{item.diagnostics?.length ? <p className="integration-diagnostic">{item.diagnostics[0].message}</p> : null}</div>
-      <div className="integration-row__actions">
-        {row.kind === 'mcp' && managed && enabled && (needsAuth || connection?.phase === 'signing-in') ? <button type="button" className="integration-icon-button" aria-label={`${connection?.phase === 'signing-in' ? 'Cancel sign-in for' : 'Sign in to'} ${item.name}`} title={connection?.phase === 'signing-in' ? 'Cancel sign-in' : 'Sign in'} onClick={() => connection?.phase === 'signing-in' ? onCancelMcpAuth(row.value) : onAuthenticateMcp(row.value)}>{connection?.phase === 'signing-in' ? <X size={15} /> : <ExternalLink size={15} />}</button> : null}
-        {managed ? <button type="button" className="integration-icon-button" aria-label={`Edit ${item.name}`} disabled={connection?.phase === 'signing-in'} title="Edit" onClick={() => row.kind === 'skill' ? onEditSkill(id) : onEditMcp(id)}><Pencil size={15} /></button> : null}
-        <button type="button" role="switch" aria-checked={enabled} aria-label={`${enabled ? 'Disable' : 'Enable'} ${item.name}`} title={managed ? (enabled ? 'Disable' : 'Enable') : 'Read-only'} className={`integration-switch${enabled ? ' is-on' : ''}`} disabled={!managed || pendingToggle === id || connection?.phase === 'signing-in'} onClick={() => row.kind === 'skill' ? onToggleSkill(row.value) : onToggleMcp(row.value)}><span /></button>
-      </div>
-    </article>
-  })}</div>
+  // Only Mousse's own skills come here; other apps' skills are in OtherAppsGroup.
+  const shadowed = skill.isActive === false
+  const description = skill.diagnostics?.[0]?.message
+    ?? (shadowed ? 'Hidden by another skill with the same name.' : null)
+    ?? (skill.description || 'No description.')
+  return <SettingsRow
+    className="skills-mcp-row"
+    data-skill-card={itemId(skill)}
+    title={skill.name}
+    description={<span className="skills-mcp-line" title={description}>{description}</span>}
+    control={<>
+      <RowMenu label={`More actions for ${skill.name}`} disabled={busy} items={[
+        { label: 'Edit', onSelect: onEdit },
+        { label: 'Export ZIP', onSelect: onExport },
+        { label: 'Archive', onSelect: onArchive, danger: true }
+      ]} />
+      <Switch checked={on} label={skill.name} disabled={busy || shadowed} onChange={onToggle} />
+    </>}
+  />
+}
+
+type StatusTone = 'ok' | 'warn' | 'bad'
+
+const STATUS_GLYPHS = { ok: CircleCheck, warn: AlertTriangle, bad: CircleAlert } as const
+
+/** Leads a coloured status word; the line's own colour tints it. */
+function StatusGlyph({ tone }: { tone: StatusTone }) {
+  const Glyph = STATUS_GLYPHS[tone]
+  return <Glyph size={14} className="settings-status-glyph" />
+}
+
+function mcpStatus(server: McpServerConfig, on: boolean, check: McpConnectionCheck | undefined): { text: string; needsSignIn: boolean; signingIn: boolean; tone?: StatusTone } {
+  const signingIn = check?.phase === 'signing-in'
+  const category = check?.result?.errorCategory
+  const needsSignIn = !signingIn && check?.phase === 'complete' && (category === 'auth-required' || category === 'unauthorized')
+  const endpoint = mcpEndpoint(server)
+  if (server.diagnostics?.length) return { text: server.diagnostics[0].message, needsSignIn: false, signingIn: false, tone: 'warn' }
+  if (!on) return { text: endpoint, needsSignIn: false, signingIn: false }
+  if (signingIn) return { text: 'Signing in…', needsSignIn, signingIn }
+  if (!check || check.phase === 'checking') return { text: 'Checking…', needsSignIn, signingIn }
+  if (check.result?.success) return { text: `Connected · ${check.result.toolCount ?? 0} tools`, needsSignIn, signingIn, tone: 'ok' }
+  if (needsSignIn) return { text: 'Needs sign-in', needsSignIn, signingIn, tone: 'warn' }
+  return { text: check.result?.error ?? 'Can’t connect', needsSignIn, signingIn, tone: 'bad' }
+}
+
+function McpRow({ server, on, busy, check, onToggle, onEdit, onSignIn, onCancelSignIn, onDelete }: {
+  server: McpServerConfig; on: boolean; busy: boolean; check: McpConnectionCheck | undefined
+  onToggle: (next: boolean) => void; onEdit: () => void; onSignIn: () => void; onCancelSignIn: () => void; onDelete: () => void
+}) {
+  // Only Mousse's own servers come here; other apps' servers are in OtherAppsGroup.
+  const status = mcpStatus(server, on, check)
+  return <SettingsRow
+    className="skills-mcp-row"
+    data-mcp-card={itemId(server)}
+    title={server.name}
+    description={<span className={`skills-mcp-line${status.tone ? ` settings-status-${status.tone}` : ''}`} role={on ? 'status' : undefined} title={check?.result?.error ?? status.text}>{status.tone ? <StatusGlyph tone={status.tone} /> : null}{status.text}</span>}
+    control={<>
+      {on && status.needsSignIn ? <button type="button" className="settings-btn" onClick={onSignIn}>Sign in</button> : null}
+      {on && status.signingIn ? <button type="button" className="settings-icon-btn" title="Cancel sign-in" aria-label="Cancel sign-in" onClick={onCancelSignIn}><X size={14} /></button> : null}
+      <RowMenu label={`More actions for ${server.name}`} disabled={busy || status.signingIn} items={[
+        { label: 'Edit', onSelect: onEdit },
+        { label: 'Delete', onSelect: onDelete, danger: true }
+      ]} />
+      <Switch checked={on} label={server.name} disabled={busy || status.signingIn} onChange={onToggle} />
+    </>}
+  />
 }

@@ -1,0 +1,268 @@
+/* Downloads indicator (navigation rail and Settings nav) and its popover.
+   Neutral surfaces; the accent only on the progress ring and the update's
+   download icon; success for done, danger for failed. No cards, no edge bars. */
+
+/* ---------- Progress ring ---------- */
+.downloads-glyph {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+}
+
+.downloads-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+  pointer-events: none;
+}
+
+.downloads-ring circle {
+  fill: none;
+  stroke-width: 2;
+}
+
+.downloads-ring-track { stroke: var(--ui-line-strong); }
+
+.downloads-ring-fill {
+  stroke: var(--accent);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.3s ease;
+}
+
+.downloads-ring.indeterminate { animation: downloads-ring-spin 1s linear infinite; }
+
+@keyframes downloads-ring-spin {
+  from { transform: rotate(-90deg); }
+  to { transform: rotate(270deg); }
+}
+
+.downloads-ok { color: var(--success); }
+.downloads-bad { color: var(--danger); }
+
+html[data-theme='high-contrast'] .downloads-ring-fill { stroke: var(--text-primary); }
+
+/* ---------- Rail (narrow): icon, ring, count ---------- */
+.navigation-rail-button.downloads-rail .downloads-glyph {
+  width: 30px;
+  height: 30px;
+}
+
+.downloads-count {
+  position: absolute;
+  top: 2px;
+  right: 1px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  text-align: center;
+  color: var(--text-primary);
+  background: var(--ui-raised);
+  box-shadow: inset 0 0 0 1px var(--ui-line-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.downloads-dot {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px rgba(var(--surface-base-rgb), 1);
+}
+
+.downloads-dot.ready { background: var(--success, var(--accent)); }
+
+/* ---------- Settings nav (wide): icon, ring and a short label ---------- */
+.downloads-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8, 8px);
+  flex-shrink: 0;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px var(--ui-row-x);
+  border: 0;
+  border-radius: var(--ui-row-radius);
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-align: left;
+  transition: background 0.15s, color 0.15s;
+}
+
+/* Pinned to the bottom of the nav column, with a gap above when the list is long. */
+.downloads-nav-slot {
+  display: flex;
+  flex-shrink: 0;
+  margin-top: auto;
+  padding-top: var(--space-16, 16px);
+}
+
+.downloads-nav:hover,
+.downloads-nav.active {
+  color: var(--text-primary);
+  background: var(--ui-hover);
+}
+
+.downloads-nav:focus-visible {
+  outline: 1px solid var(--ui-line-strong);
+  outline-offset: 0;
+}
+
+.downloads-nav-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.downloads-nav-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Popover: the unified menu surface ---------- */
+.downloads-popover {
+  box-sizing: border-box;
+  width: 320px;
+  max-width: calc(100vw - 16px);
+  max-height: min(440px, calc(100vh - 16px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--ui-menu-pad);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius);
+  background: var(--ui-raised);
+  color: var(--text-primary);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
+  animation: downloads-popover-in 0.12s ease-out;
+  -webkit-app-region: no-drag;
+}
+
+@keyframes downloads-popover-in {
+  from { opacity: 0; transform: scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+.downloads-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.downloads-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 6px 4px 6px 4px;
+  border-radius: var(--ui-menu-row-radius);
+}
+
+.downloads-row-glyph {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.downloads-row-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.downloads-row-name {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.downloads-row-detail {
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.downloads-row-detail.downloads-bad { color: var(--danger); }
+
+.downloads-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.downloads-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--ui-control-radius);
+  color: var(--text-secondary);
+}
+
+.downloads-icon-btn:hover,
+.downloads-icon-btn.pressed {
+  color: var(--text-primary);
+  background: var(--ui-hover);
+}
+
+.downloads-icon-btn.accent,
+.downloads-icon-btn.accent:hover { color: var(--accent); }
+
+.downloads-icon-btn:focus-visible,
+.downloads-btn:focus-visible {
+  outline: 1px solid var(--ui-line-strong);
+  outline-offset: 0;
+}
+
+.downloads-btn {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  font-size: 12.5px;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.downloads-btn:hover { background: var(--ui-hover); }
+
+.downloads-empty {
+  margin: 0;
+  padding: 8px var(--ui-menu-row-x);
+  font-size: 12.5px;
+  color: var(--ui-faint);
+}
+
+html[data-theme='high-contrast'] .downloads-icon-btn.accent { color: var(--text-primary); }
+
+@media (prefers-reduced-motion: reduce) {
+  .downloads-ring.indeterminate,
+  .downloads-popover { animation: none; }
+  .downloads-ring-fill { transition: none; }
+}

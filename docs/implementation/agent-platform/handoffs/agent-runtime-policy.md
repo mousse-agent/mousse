@@ -74,7 +74,7 @@ Covered:
 - Dedicated child worktree allocation
 - Browser, delegation, sandbox, and network isolation implementations
 - CLI grant/permission/config materialization (Claude/Codex/OpenCode/Cursor). Those files were not modified
-- Main-agent Settings enablement vs definition grants in production (trusted native runs use grants+policy, not Settings → Tools)
+- Main-agent Settings enablement vs definition grants in production (trusted native runs use grants+policy, not Settings → Skills & MCP)
 - Real provider fallback across data-residency catalogs
 - UI tests and packaged qualification (root)
 

@@ -13,7 +13,7 @@ const probes = {
   mediaMode: 'denied' as MediaMode, mediaRequests: 0, stoppedTracks: 0, recordings: 0,
   recorderStops: 0, inventoryCalls: 0, inventoryActive: 0, inventoryMaxActive: 0,
   activeIntervals: 0,
-  inventoryDelay: 0, savedGraceDays: 30, state: 'active', resolveMedia: undefined as (() => void) | undefined,
+  inventoryDelay: 0, savedGraceDays: 30, savedAutomaticPurge: false, state: 'active', resolveMedia: undefined as (() => void) | undefined,
   failRecorder: undefined as (() => void) | undefined,
   actionFailure: undefined as AppErrorShape | undefined,
   sendRequests: 0, sendAcknowledged: true, renderErrors: [] as string[]
@@ -82,11 +82,11 @@ Object.assign(window, { mousse: { threads: {
     try {
       if (probes.inventoryDelay) await new Promise((resolve) => setTimeout(resolve, probes.inventoryDelay))
       return { lifecycles: [record()], taskNames: { 'fixture-task': 'Fixture task' },
-        trashPolicy: { schemaVersion: 1, graceDays: probes.savedGraceDays, automaticPurge: false },
+        trashPolicy: { schemaVersion: 1, graceDays: probes.savedGraceDays, automaticPurge: probes.savedAutomaticPurge },
         trashSweepStatus: { reason: 'Fixture cleanup status' } }
     } finally { probes.inventoryActive -= 1 }
   },
-  configureTrash: async (policy: { graceDays: number }) => { if (probes.actionFailure) throw probes.actionFailure; probes.savedGraceDays = policy.graceDays },
+  configureTrash: async (policy: { graceDays: number; automaticPurge: boolean }) => { if (probes.actionFailure) throw probes.actionFailure; probes.savedGraceDays = policy.graceDays; probes.savedAutomaticPurge = policy.automaticPurge },
   delete: async () => { if (probes.actionFailure) throw probes.actionFailure; probes.state = 'trashed' },
   restore: async () => { if (probes.actionFailure) throw probes.actionFailure; probes.state = 'active' }
 } } })

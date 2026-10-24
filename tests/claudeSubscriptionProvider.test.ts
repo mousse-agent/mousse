@@ -1,13 +1,11 @@
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { EventEmitter } from 'node:events'
 import { createHash } from 'node:crypto'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ClaudeSubscriptionProviderService } from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
-import { LoginSession } from '../src/mms/providers/LoginSession'
 
 const homes: string[] = []
 afterEach(() => {
@@ -15,7 +13,7 @@ afterEach(() => {
 })
 function fixture(
   query: (input: { options: Options; prompt: unknown }) => Query,
-  authMethod = 'claude.ai'
+  loggedIn = true
 ) {
   const home = mkdtempSync(join(tmpdir(), 'claude-subscription-test-'))
   homes.push(home)
@@ -27,13 +25,13 @@ function fixture(
   writeFileSync(
     join(directory, 'settings.json'),
     JSON.stringify({
-      signedIn: true,
+      loginPolicy: 'cli',
       binaryPath: binary,
       models: [{ id: 'sonnet', label: 'Sonnet' }]
     })
   )
   const questions = new UserQuestionService()
-  const runAuth = vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod }))
+  const runAuth = vi.fn(async () => JSON.stringify({ loggedIn, authMethod: loggedIn ? 'claude.ai' : 'none' }))
   const service = new ClaudeSubscriptionProviderService(home, questions, { query, runAuth })
   return {
     home,
@@ -71,13 +69,14 @@ const chatInput = (cwd: string) => ({
 })
 
 describe('Claude Subscription native provider', () => {
-  it('exposes a subscription choice separate from Anthropic API keys', () => {
+  it('exposes a subscription choice separate from Anthropic API keys', async () => {
     const { service } = fixture(() => fakeQuery())
     expect(service.loginOption()).toMatchObject({
       id: 'claude-subscription',
       label: 'Claude Subscription',
       authType: 'oauth'
     })
+    await service.status()
     expect(service.llmProvider()?.models[0].id).toBe('sonnet')
   })
   it('discovers vendor models without sending a prompt or allowing tools', async () => {
@@ -98,10 +97,10 @@ describe('Claude Subscription native provider', () => {
       { id: 'sonnet', label: 'Sonnet', efforts: undefined }
     ])
   })
-  it('refuses API-key auth without starting a paid turn', async () => {
+  it('refuses a signed-out terminal without starting a turn', async () => {
     const query = vi.fn(() => fakeQuery([result]))
-    const { service, home } = fixture(query, 'api_key')
-    await expect(service.chat(chatInput(home))).rejects.toThrow(/sign-in expired/)
+    const { service, home } = fixture(query, false)
+    await expect(service.chat(chatInput(home))).rejects.toThrow(/claude auth login/)
     expect(query).not.toHaveBeenCalled()
   })
   it('streams text/thinking/tools and only resumes committed matching history', async () => {
@@ -151,29 +150,35 @@ describe('Claude Subscription native provider', () => {
     expect(inputs[0].options).toMatchObject({
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
-      settingSources: [],
-      extraArgs: { 'strict-mcp-config': null }
+      // Claude Code's own system prompt, as in a terminal.
+      systemPrompt: { type: 'preset', preset: 'claude_code' }
     })
+    // No settingSources: the SDK then loads the user, project and local settings like the CLI.
+    // No strict-mcp-config: the user's own MCP servers load too.
+    for (const input of inputs) {
+      expect(input.options).not.toHaveProperty('settingSources')
+      expect(input.options).not.toHaveProperty('extraArgs')
+    }
     expect(JSON.stringify(settings())).not.toContain('secret')
   })
-  it('resumes a saved session only on the instance and login policy that created it', async () => {
+  it('resumes a saved session only on the instance that created it', async () => {
     const inputs: Array<{ options: Options; prompt: unknown }> = []
     const { service, home, settings } = fixture((input) => {
       inputs.push(input)
       return fakeQuery([result])
     })
     await service.chat({ ...chatInput(home), instanceId: 'claude' })
-    expect(settings().sessions.thread).toMatchObject({ sessionId: 'vendor-session', instanceId: 'claude', loginPolicy: 'isolated' })
+    expect(settings().sessions.thread).toMatchObject({ sessionId: 'vendor-session', instanceId: 'claude' })
     service.commitConversation('thread', 'history')
     // Another instance never resumes this instance's session.
     await service.chat({ ...chatInput(home), instanceId: 'claude-work', history: 'history' })
     expect(inputs[1].options.resume).toBeUndefined()
     expect(settings().sessions.thread.instanceId).toBe('claude-work')
 
-    // A session saved before instances existed belongs to the default instance and current policy.
+    // A session saved before instances existed belongs to the default instance.
     const directory = join(home, 'providers', 'claude-subscription')
-    const legacy = (session: Record<string, unknown>) =>
-      writeFileSync(join(directory, 'settings.json'), JSON.stringify({ ...settings(), sessions: { thread: session } }))
+    const legacy = (session: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+      writeFileSync(join(directory, 'settings.json'), JSON.stringify({ ...settings(), ...extra, sessions: { thread: session } }))
     const key = createHash('sha256').update('history').digest('hex')
     legacy({ sessionId: 'old-session', cwd: home, model: 'sonnet', historyKey: key })
     const reloaded = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
@@ -183,14 +188,36 @@ describe('Claude Subscription native provider', () => {
     await reloaded.chat({ ...chatInput(home), history: 'history' })
     expect(inputs[2].options.resume).toBe('old-session')
 
-    // A session from another credential scope is never resumed.
-    legacy({ sessionId: 'cli-session', cwd: home, model: 'sonnet', historyKey: key, instanceId: 'claude', loginPolicy: 'cli' })
+    // A session from an older separate (profile-private) sign-in is never resumed.
+    legacy({ sessionId: 'isolated-session', cwd: home, model: 'sonnet', historyKey: key, instanceId: 'claude' }, { loginPolicy: 'isolated' })
     const switched = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
       query: (input) => { inputs.push(input); return fakeQuery([result]) },
       runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
     })
     await switched.chat({ ...chatInput(home), instanceId: 'claude', history: 'history' })
     expect(inputs[3].options.resume).toBeUndefined()
+  })
+  it("keeps the user's --append-system-prompt launch args by moving their text after Mousse's guidance", async () => {
+    const inputs: Array<{ options: Options; prompt: unknown }> = []
+    const { service, home } = fixture((input) => {
+      inputs.push(input)
+      return fakeQuery([result])
+    })
+    writeFileSync(join(home, 'extra.md'), 'FROM FILE\n')
+    await service.setCliConfig({ args: ['--append-system-prompt', 'INLINE', '--append-system-prompt-file', 'extra.md', '--verbose'] })
+    await service.chat({ ...chatInput(home), systemPromptAppend: 'GUIDE' })
+    expect(inputs[0].options.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code', append: 'GUIDE\n\nFROM FILE\n\nINLINE' })
+    // The SDK's append text replaces the CLI's, so the flags are not passed again.
+    expect(inputs[0].options.extraArgs).toEqual({ verbose: null })
+    await service.chat({ ...chatInput(home), threadId: 'plain' })
+    expect(inputs[1].options.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code', append: 'FROM FILE\n\nINLINE' })
+
+    // Values Claude Code would reject fail the turn with a clear message instead of disappearing.
+    await service.setCliConfig({ args: ['--append-system-prompt-file', 'missing.md'] })
+    await expect(service.chat({ ...chatInput(home), threadId: 'missing' })).rejects.toThrow(/could not read the --append-system-prompt-file/)
+    await service.setCliConfig({ args: ['--append-system-prompt'] })
+    await expect(service.chat({ ...chatInput(home), threadId: 'empty' })).rejects.toThrow(/--append-system-prompt launch argument has no text/)
+    expect(inputs).toHaveLength(2)
   })
   it('lets ToolSearch load the Mousse tools without a prompt only when the Mousse server is attached', async () => {
     const decisions: unknown[] = []
@@ -271,28 +298,6 @@ describe('Claude Subscription native provider', () => {
       updatedInput: { answers: { 'Continue?': 'Yes' } }
     })
   })
-  it('cancels automatic vendor login without saving Claude credentials', async () => {
-    const { home, service: initial } = fixture(() => fakeQuery())
-    const settingsPath = join(home, 'providers', 'claude-subscription', 'settings.json')
-    const settings = JSON.parse(readFileSync(settingsPath, 'utf8'))
-    settings.signedIn = false
-    writeFileSync(settingsPath, JSON.stringify(settings))
-    initial.stop()
-    const child = Object.assign(new EventEmitter(), { kill: vi.fn() })
-    const startLogin = vi.fn(() => child as never)
-    const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
-      runAuth: async () => '{}',
-      startLogin
-    })
-    const session = new LoginSession('login')
-    session.on('event', (event) => {
-      if (event.type === 'select') session.abort.abort()
-    })
-    expect((await service.login(session, home)).success).toBe(false)
-    expect(startLogin).toHaveBeenCalledOnce()
-    expect(child.kill).toHaveBeenCalled()
-    expect(JSON.parse(readFileSync(settingsPath, 'utf8')).signedIn).toBe(false)
-  })
   it('refuses unsupported image formats explicitly', async () => {
     const query = vi.fn(() => fakeQuery([result]))
     const { service, home } = fixture(query)
@@ -307,12 +312,13 @@ describe('Claude Subscription native provider', () => {
   it('prevents concurrent same-thread turns even while authentication is pending', async () => {
     const { home } = fixture(() => fakeQuery())
     let finish!: (value: string) => void
+    // Every sign-in check of the turn waits on the same pending answer.
+    const pending = new Promise<string>((resolve) => {
+      finish = resolve
+    })
     const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
       query: () => fakeQuery([result]),
-      runAuth: () =>
-        new Promise((resolve) => {
-          finish = resolve
-        })
+      runAuth: () => pending
     })
     const first = service.chat(chatInput(home))
     await expect(service.chat(chatInput(home))).rejects.toThrow(/already running/)
@@ -386,7 +392,7 @@ describe('Claude Subscription native provider', () => {
     await expect(service.chat(chatInput(home))).rejects.toThrow()
     await loggedOut
     expect(questions.listAllPending()).toEqual([])
-    expect(settings()).toMatchObject({ signedIn: false, sessions: {} })
+    expect(settings()).toMatchObject({ cliDisconnected: true, sessions: {} })
   })
   it('interrupts and resumes steering exactly once without replaying the original request', async () => {
     const captured: Array<{ options: Options; prompt: unknown }> = []
