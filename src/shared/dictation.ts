@@ -17,7 +17,12 @@ export type DictationSelection =
 // Local models
 // ---------------------------------------------------------------------------------------------
 
-export type LocalSttModelId = 'moonshine-base' | 'parakeet-tdt-110m'
+export type LocalSttModelId =
+  | 'moonshine-tiny'
+  | 'moonshine-base'
+  | 'whisper-base'
+  | 'parakeet-tdt-110m'
+  | 'parakeet-tdt-0.6b-v3'
 
 interface LocalSttModelBase extends LocalModelManifest {
   id: LocalSttModelId
@@ -27,12 +32,25 @@ interface LocalSttModelBase extends LocalModelManifest {
   maxSegmentSeconds: number
 }
 
-/** A model run through transformers.js's speech recognition pipeline. */
-export interface TransformersSttModel extends LocalSttModelBase {
-  runtime: 'transformers'
+interface TransformersSttModelBase extends LocalSttModelBase {
   /** transformers.js dtype per ONNX component; selects the files in `files`. */
   dtype: Readonly<Record<string, 'q8'>>
 }
+
+/** A Moonshine model run through transformers.js's speech recognition pipeline. */
+export interface MoonshineSttModel extends TransformersSttModelBase {
+  runtime: 'moonshine'
+}
+
+/**
+ * A Whisper model run through transformers.js. The pipeline always assumes English for a
+ * multilingual model, so `whisperWorker.ts` detects the spoken language itself.
+ */
+export interface WhisperSttModel extends TransformersSttModelBase {
+  runtime: 'whisper'
+}
+
+export type TransformersSttModel = MoonshineSttModel | WhisperSttModel
 
 /** A NeMo transducer exported by sherpa-onnx, decoded with TDT greedy search. */
 export interface NemoTransducerSttModel extends LocalSttModelBase {
@@ -44,6 +62,8 @@ export interface NemoTransducerSttModel extends LocalSttModelBase {
   joiner: string
   /** Width of the prediction network's LSTM state. */
   predictorSize: number
+  /** Stacked LSTM layers in the prediction network. */
+  predictorLayers: number
   /** `<piece> <id>` per line; the last id is the blank token. */
   tokens: string
 }
@@ -51,11 +71,40 @@ export interface NemoTransducerSttModel extends LocalSttModelBase {
 export type LocalSttModel = TransformersSttModel | NemoTransducerSttModel
 
 /**
+ * Moonshine Tiny (Useful Sensors) as converted for transformers.js in
+ * `onnx-community/moonshine-tiny-ONNX`. English only and the smallest model offered; same files and
+ * runtime as Moonshine Base.
+ */
+export const MOONSHINE_TINY: MoonshineSttModel = {
+  id: 'moonshine-tiny',
+  label: 'Moonshine Tiny',
+  description: 'English, fastest',
+  parameters: '27M',
+  license: 'MIT',
+  homepage: 'https://huggingface.co/moonshine-ai/moonshine-tiny',
+  repo: 'onnx-community/moonshine-tiny-ONNX',
+  revision: 'a6da1241cd305dcd64eab1edbd615f2bb9aabb95',
+  runtime: 'moonshine',
+  dtype: { encoder_model: 'q8', decoder_model_merged: 'q8' },
+  sampleRate: 16000,
+  maxSegmentSeconds: 30,
+  files: [
+    { path: 'config.json', size: 921, sha256: '558e1e02069137c796ace1e50c48d8fe451f04a295929138e6bea885517f0edb' },
+    { path: 'generation_config.json', size: 147, sha256: 'f9b3f711b57be7def2e50a8942f64f36ee0a55fad5b84ff93a687b6c5bcc1d44' },
+    { path: 'preprocessor_config.json', size: 128, sha256: 'fa43a7017ef85cd1d0fba0d9aae77c8adb16990ae6f11115631f41ec5d8aa679' },
+    { path: 'tokenizer.json', size: 3761754, sha256: '7b913404bdd039af4756783218af4440bc07fb7d6d8258d677e34f95b3ec416f' },
+    { path: 'tokenizer_config.json', size: 135735, sha256: 'edaee394565d428ea98a663ae7209cdcfeefc5585c42d7a570ff7c986df2cd15' },
+    { path: 'onnx/encoder_model_quantized.onnx', size: 7937661, sha256: 'c6fc4b7bc5af75c0591fd157a1f3829b533d18e9769a888fd95a62e470dd4f4a' },
+    { path: 'onnx/decoder_model_merged_quantized.onnx', size: 20243286, sha256: 'eed87831c3a6103534aae7d47a5d485025c659a1323901513961c39fe8a1a367' }
+  ]
+}
+
+/**
  * Moonshine Base (Useful Sensors) as converted for transformers.js in
  * `onnx-community/moonshine-base-ONNX`. English only; the q8 encoder and merged decoder run on CPU
  * through WebAssembly.
  */
-export const MOONSHINE_BASE: TransformersSttModel = {
+export const MOONSHINE_BASE: MoonshineSttModel = {
   id: 'moonshine-base',
   label: 'Moonshine Base',
   description: 'English',
@@ -64,7 +113,7 @@ export const MOONSHINE_BASE: TransformersSttModel = {
   homepage: 'https://huggingface.co/UsefulSensors/moonshine-base',
   repo: 'onnx-community/moonshine-base-ONNX',
   revision: 'b1e9b6aae3c3c7298f10c3798393fdf38e8fbbad',
-  runtime: 'transformers',
+  runtime: 'moonshine',
   dtype: { encoder_model: 'q8', decoder_model_merged: 'q8' },
   sampleRate: 16000,
   maxSegmentSeconds: 30,
@@ -103,6 +152,7 @@ export const PARAKEET_TDT_110M: NemoTransducerSttModel = {
   decoder: 'decoder.int8.onnx',
   joiner: 'joiner.int8.onnx',
   predictorSize: 640,
+  predictorLayers: 1,
   tokens: 'tokens.txt',
   files: [
     { path: 'tokens.txt', size: 9953, sha256: '450e56bd2f036fe5b6aa821865838cc5aa9d8b0106134ce9a9ba0664abe6cd10' },
@@ -111,8 +161,77 @@ export const PARAKEET_TDT_110M: NemoTransducerSttModel = {
     { path: 'encoder.int8.onnx', size: 131113202, sha256: '0f35509ddeb9b39002fb077d979a9fe74f06eb0bc4dd5c34f512f82e5111d657' }
   ]
 }
+/**
+ * OpenAI Whisper Base as converted for transformers.js in `onnx-community/whisper-base`.
+ * Multilingual: the spoken language is detected for each recording. The q8 encoder and merged
+ * decoder run on CPU through WebAssembly.
+ */
+export const WHISPER_BASE: WhisperSttModel = {
+  id: 'whisper-base',
+  label: 'Whisper Base',
+  description: '99 languages',
+  parameters: '74M',
+  license: 'Apache-2.0',
+  homepage: 'https://huggingface.co/openai/whisper-base',
+  repo: 'onnx-community/whisper-base',
+  revision: '1846881b6b3a3024392c1eea3ad983695bc23925',
+  runtime: 'whisper',
+  dtype: { encoder_model: 'q8', decoder_model_merged: 'q8' },
+  sampleRate: 16000,
+  maxSegmentSeconds: 30,
+  files: [
+    { path: 'config.json', size: 2243, sha256: 'f4d0608f7d918166da7edb3e188de5ef1bfe70d9802e785d271fd88111e9cf4b' },
+    { path: 'generation_config.json', size: 3832, sha256: '61070cf8de25b1e9256e8e102ded49d8d24a8369ed36ef84fdf21549e68125a0' },
+    { path: 'preprocessor_config.json', size: 339, sha256: 'a6a76d28c93edb273669eb9e0b0636a2bddbb1272c3261e47b7ca6dfdbac1b8d' },
+    { path: 'tokenizer.json', size: 2480466, sha256: '27fc476bfe7f17299480be2273fc0608e4d5a99aba2ab5dec5374b4482d1a566' },
+    { path: 'tokenizer_config.json', size: 282682, sha256: '2e036e4dbacfdeb7242c7d4ec4149f4a16e86026048f94d1637e3a8ee9c6a573' },
+    { path: 'onnx/encoder_model_quantized.onnx', size: 23201314, sha256: '5862993336bf33acd23736071aae2b32261d3b1b2f37780194460d4ef974dd46' },
+    { path: 'onnx/decoder_model_merged_quantized.onnx', size: 53693315, sha256: 'fa3ef9902734ce5ae6f9ef2bdb2ba9a6c4b5785b09f4f420ce036573dc9d090b' }
+  ]
+}
 
-export const LOCAL_STT_MODELS: readonly LocalSttModel[] = [MOONSHINE_BASE, PARAKEET_TDT_110M]
+/**
+ * NVIDIA Parakeet TDT 0.6B v3 in sherpa-onnx's int8 export, published by the sherpa-onnx
+ * maintainer as `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`. Transcribes 25 European
+ * languages with punctuation and capitals. Unlike the 110M model it takes 128 mel bins, its
+ * prediction network has two LSTM layers, and its vocabulary has 8192 pieces. The 650 MB encoder
+ * runs on CPU through WebAssembly.
+ */
+export const PARAKEET_TDT_06B_V3: NemoTransducerSttModel = {
+  id: 'parakeet-tdt-0.6b-v3',
+  label: 'Parakeet TDT 0.6B v3',
+  description: '25 European languages',
+  parameters: '600M',
+  license: 'CC-BY-4.0',
+  homepage: 'https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3',
+  repo: 'csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8',
+  revision: '2bda32ec70b097a55adaa07d9a7173915b43cc78',
+  runtime: 'nemo-transducer',
+  sampleRate: 16000,
+  maxSegmentSeconds: 30,
+  featureSize: 128,
+  encoder: 'encoder.int8.onnx',
+  decoder: 'decoder.int8.onnx',
+  joiner: 'joiner.int8.onnx',
+  predictorSize: 640,
+  predictorLayers: 2,
+  tokens: 'tokens.txt',
+  files: [
+    { path: 'tokens.txt', size: 93939, sha256: 'd58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d' },
+    { path: 'decoder.int8.onnx', size: 11845275, sha256: '179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e' },
+    { path: 'joiner.int8.onnx', size: 6355277, sha256: '3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3' },
+    { path: 'encoder.int8.onnx', size: 652184281, sha256: 'acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247' }
+  ]
+}
+
+/** Listed in this order in the model picker. */
+export const LOCAL_STT_MODELS: readonly LocalSttModel[] = [
+  MOONSHINE_TINY,
+  MOONSHINE_BASE,
+  WHISPER_BASE,
+  PARAKEET_TDT_110M,
+  PARAKEET_TDT_06B_V3
+]
 
 export function findLocalSttModel(modelId: string): LocalSttModel | undefined {
   return LOCAL_STT_MODELS.find((model) => model.id === modelId)

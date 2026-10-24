@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { writeFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { cleanup, profile } from './helpers'
+import { isExecutionLeaseHeld, releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../../../src/mms/queue/ThreadExecutionLease'
 import { decodeEnvelope } from '../../../src/mms/net/sync/codec'
 import { signedDocument } from '../../../src/mms/net/identity/crypto'
 import type { NodeDelegation, Roster } from '../../../src/shared/net'
@@ -33,6 +34,37 @@ it('keeps legacy local default execution and publishes no transcript, resources,
   expect(JSON.stringify(sent.network)).not.toContain('LOCAL FILE CANARY')
   expect(JSON.stringify(sent.network)).not.toContain('LOCAL ONLY PROMPT')
   expect(p.contexts).toHaveLength(1)
+})
+
+it('refuses a send to a published Group and a stale stop before anything runs', async () => {
+  const p = await profile(), group = await p.createGroup(), chats = p.services.platform.chats
+  expect(() => chats.assertSendable(group.id, 'still local')).not.toThrow()
+  chats.send({ chatId: group.id, text: 'first', clientMessageId: 'first-message' })
+  expect(() => chats.assertSendable(group.id, 'while running')).toThrow(expect.objectContaining({ code: 'chat_busy' }))
+  const runId = chats.get(group.id).run!.id
+  expect(() => chats.assertCancellable(group.id, runId)).not.toThrow()
+  expect(() => chats.assertCancellable(group.id, 'older-run')).toThrow(expect.objectContaining({ code: 'run_conflict' }))
+  await chats.waitForIdle()
+  // The finished reply keeps its run id; a stop for any other run is refused, not uncertain.
+  expect(() => chats.assertCancellable(group.id, runId)).not.toThrow()
+  expect(() => chats.assertSendable(group.id, 'after the reply')).not.toThrow()
+  p.services.chatNetwork.publish({ chatId: group.id, publicationId: 'preflight-publish' })
+  expect(() => chats.assertSendable(group.id, 'must not fall back')).toThrow(expect.objectContaining({ code: 'chat_published' }))
+  expect(p.contexts).toHaveLength(1)
+})
+
+it('refuses a send up front while another holder has the backing thread lease', async () => {
+  const p = await profile(), group = await p.createGroup(), chats = p.services.platform.chats
+  const threadDir = p.services.threads.getThreadDir(chats.resourceBinding(group.id).threadId)
+  const lease = tryAcquireExecutionLease(threadDir, { source: 'test' })!
+  expect(lease).toBeTruthy()
+  expect(() => chats.assertSendable(group.id, 'while the thread runs')).toThrow(expect.objectContaining({ code: 'chat_busy' }))
+  // The peek takes nothing and removes nothing.
+  expect(isExecutionLeaseHeld(threadDir)).toBe(true)
+  expect(releaseExecutionLeaseHandle(lease)).toBe(true)
+  expect(() => chats.assertSendable(group.id, 'after it released')).not.toThrow()
+  expect(isExecutionLeaseHeld(threadDir)).toBe(false)
+  expect(p.contexts).toHaveLength(0)
 })
 
 it('retains committed publication after a lost reply and reopens the same dispatch fence without duplicate channels', async () => {

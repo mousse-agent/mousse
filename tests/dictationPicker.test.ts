@@ -39,8 +39,8 @@ it('lists provider models under the Providers tab', () => {
 
 it('opens on the Local tab with the Moonshine model when no provider model exists', () => {
   const html = render([])
-  for (const label of ['Moonshine Base', 'Parakeet TDT 110M']) {
-    expect(html).toContain(`Download ${label}`)
+  for (const model of LOCAL_STT_MODELS) {
+    expect(html).toContain(`Download ${model.label}`)
   }
   // Undownloaded models cannot be selected: one disabled radio per local model.
   expect(html.match(/<input type="radio"[^>]*disabled=""/g)).toHaveLength(LOCAL_STT_MODELS.length)

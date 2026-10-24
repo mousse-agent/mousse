@@ -2,6 +2,7 @@ import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import type { BridgeDisplayPart } from '../shared/bridge'
+import type { NetStatus } from '../shared/net/local'
 import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
@@ -64,6 +65,7 @@ import type {
 import type {
   AmbientProviderInfo,
   ClaudeSubscriptionStatus,
+  CliInstallEvent,
   CliProviderConfig,
   CliProviderConfigPatch,
   CliProviderInstanceId,
@@ -819,6 +821,18 @@ const api = {
       instanceId: CliProviderInstanceId,
       patch: CliProviderConfigPatch
     ): Promise<CliProviderConfig> => ipcRenderer.invoke('providers:setCliConfig', instanceId, patch),
+    /**
+     * Downloads Google's verified Antigravity agent and resolves with the new config. Progress
+     * arrives through `onInstallEvent`. Never signs in; rejects when cancelled or already running.
+     */
+    installAntigravity: (): Promise<CliProviderConfig> => ipcRenderer.invoke('providers:installAntigravity'),
+    /** Stops a running Antigravity install; resolves false when none is running. */
+    cancelAntigravityInstall: (): Promise<boolean> => ipcRenderer.invoke('providers:cancelAntigravityInstall'),
+    onInstallEvent: (cb: (event: CliInstallEvent) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: CliInstallEvent) => cb(event)
+      ipcRenderer.on('providers:install:event', handler)
+      return () => ipcRenderer.removeListener('providers:install:event', handler)
+    },
     loginOAuth: (providerId: string): Promise<ProviderLoginResult> =>
       ipcRenderer.invoke('providers:loginOAuth', providerId),
     loginApiKey: (providerId: string): Promise<ProviderLoginResult> =>
@@ -900,6 +914,14 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, view: MainView) => cb(view)
       ipcRenderer.on('app:navigateMainView', handler)
       return () => ipcRenderer.removeListener('app:navigateMainView', handler)
+    }
+  },
+  net: {
+    /** Network status pushed by the daemon whenever it changes, including its list of phone requests. */
+    onUpdated: (cb: (status: NetStatus) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, status: NetStatus) => cb(status)
+      ipcRenderer.on('net:updated', handler)
+      return () => ipcRenderer.removeListener('net:updated', handler)
     }
   },
   /** In-app updates from GitHub Releases (src/main/updates). */

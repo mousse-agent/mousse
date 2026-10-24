@@ -1281,6 +1281,51 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     expect(await connection.b.rpcResult(id, { deadlineMs: 5000 })).toEqual({ retained: true })
     expect(requestOnly).toHaveBeenCalledTimes(requestChecks)
   })
+  it('skips new-execution refusals for a retry and returns an admitted refusal as a plain error', async () => {
+    const p = await profiles(),
+      executions = new SqliteExecutionLedger(p.aDb)
+    const rpc = new DurableRpcDispatcher({
+      db: p.aDb,
+      executions,
+      identity: p.aIdentity,
+      clock: systemClock
+    })
+    let busy = false,
+      effects = 0
+    const refusal = vi.fn(() => {
+      if (busy) throw new NetError('conflict', 'Busy.')
+    })
+    rpc.register({
+      method: 'test.fresh',
+      capability: 'write',
+      mutating: true,
+      authorizeNew: refusal,
+      handle: async () => {
+        effects++
+        busy = true
+        return { effects }
+      }
+    })
+    const connection = await sessions(p, { rpc })
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const first = { id: newId('rpc'), idem: 'send-1', deadlineMs: 5000 }
+    expect(await connection.b.rpc('test.fresh', {}, first)).toEqual({ effects: 1 })
+    // The lost-reply retry, under a new request id, gets the saved result while the work is still busy.
+    expect(await connection.b.rpc('test.fresh', {}, { ...first, id: newId('rpc') })).toEqual({
+      effects: 1
+    })
+    expect(effects).toBe(1)
+    expect(refusal).toHaveBeenCalledTimes(1)
+    // A new request is refused with its real code, never `outcome_uncertain`, and keeps that code on retry.
+    const second = { id: newId('rpc'), idem: 'send-2', deadlineMs: 5000 }
+    await expect(connection.b.rpc('test.fresh', {}, second)).rejects.toMatchObject({
+      code: 'conflict'
+    })
+    await expect(
+      connection.b.rpc('test.fresh', {}, { ...second, id: newId('rpc') })
+    ).rejects.toMatchObject({ code: 'conflict' })
+    expect(effects).toBe(1)
+  })
   it('journals mutations, returns the same outcome after retry, and refuses changed payloads', async () => {
     const p = await profiles(),
       executions = new SqliteExecutionLedger(p.aDb)

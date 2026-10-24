@@ -13,7 +13,7 @@ import type { MmsProfileServices } from '../MmsProfileServices'
 import type { AgentRuntimeHostWithBrowser } from '../orchestrator/browser'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import { DomainRpcError } from '../protocol/domainRegistry'
-import { getExecutionLeasePath, readLeaseOwner, releaseExecutionLeaseHandle, tryAcquireExecutionLease, type ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
+import { getExecutionLeasePath, isExecutionLeaseHeld, readLeaseOwner, releaseExecutionLeaseHandle, tryAcquireExecutionLease, type ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { isOwnerLive } from '../queue/processLiveness'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
@@ -61,6 +61,7 @@ export class AgentChatService {
   private readonly device: ChatDevice
   private browserRuntime?: BrowserRuntimePort
   private networkBindingGuard?: (chatId: string) => boolean
+  private readonly changeListeners = new Set<() => void>()
   constructor(private readonly options: AgentChatServiceOptions) {
     this.profileId = options.services.profileId
     if (options.registry.profileId !== this.profileId) throw new DomainRpcError('profile_mismatch', 'Chat agents do not belong to this profile')
@@ -80,6 +81,11 @@ export class AgentChatService {
   }
   private assertLocalDispatch(chatId: string): void {
     if (this.networkBindingGuard?.(chatId)) throw new DomainRpcError('chat_published', 'This Group sends through its published Space')
+  }
+  /** Calls `listener` after any chat is created, sent to, answered or settles. Returns an unsubscribe. */
+  onChange(listener: () => void): () => void {
+    this.changeListeners.add(listener)
+    return () => { this.changeListeners.delete(listener) }
   }
   getActiveCount(): number { return this.lifecycle.count }
   beginShutdown(): void {
@@ -199,6 +205,18 @@ export class AgentChatService {
     return { profileId: this.profileId, chatId: record.conversation.id, threadId: record.conversation.threadId, projectId: record.conversation.projectId,
       workspaceRoot: this.workspace(record), participants: structuredClone(record.conversation.participants) }
   }
+  /** Throws the refusal `send` would raise for a new message, without sending or taking a lease. */
+  assertSendable(chatId: string, text: string): void {
+    this.lifecycle.assertAccepting()
+    this.assertLocalDispatch(chatId)
+    const record = this.store.read(chatId)
+    if (this.active.has(chatId) || record.conversation.run?.state === 'running') throw new DomainRpcError('chat_busy', 'Wait for this chat response or cancel it first')
+    this.workspace(record)
+    const agents = record.conversation.participants.filter((participant) => participant.kind === 'agent')
+    for (const agent of record.conversation.kind === 'direct' ? agents.slice(0, 1) : this.targets(text, agents)) this.assertAgent(agent)
+    if (record.conversation.messages.length > 1990) throw new DomainRpcError('chat_full', 'This chat has reached its message limit')
+    if (isExecutionLeaseHeld(this.options.services.threads.getThreadDir(record.conversation.threadId))) throw new DomainRpcError('chat_busy', 'The backing thread is executing other work')
+  }
   send(input: ChatSendInput): ChatConversation {
     this.lifecycle.assertAccepting()
     this.assertLocalDispatch(input.chatId)
@@ -246,6 +264,10 @@ export class AgentChatService {
       }
       throw error
     }
+  }
+  /** Throws the refusal `cancel` would raise when `runId` is no longer the chat's current response. */
+  assertCancellable(chatId: string, runId: string): void {
+    if (this.store.read(chatId).conversation.run?.id !== runId) throw new DomainRpcError('run_conflict', 'The selected response is no longer current')
   }
   cancel(input: ChatCancelInput): ChatConversation {
     const record = this.store.read(input.chatId)
@@ -456,5 +478,8 @@ export class AgentChatService {
   }
   private changed(): void {
     try { this.options.onChanged?.(this.snapshot()) } catch { /* Notifications cannot invalidate an admitted durable message. */ }
+    for (const listener of this.changeListeners) {
+      try { listener() } catch { /* Same: a listener cannot invalidate an admitted durable message. */ }
+    }
   }
 }

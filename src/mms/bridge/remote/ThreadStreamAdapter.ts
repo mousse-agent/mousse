@@ -13,11 +13,15 @@ import type { NetDatabase } from '../../net/store/database'
 import { canonicalJson, encodeEnvelope } from '../../net/sync/codec'
 
 export const THREAD_EVENT_TYPES = BRIDGE_THREAD_EVENT_TYPES
-export interface ThreadSourceEvent {
+export interface ThreadDisplayEvent {
   type: (typeof THREAD_EVENT_TYPES)[number]
   data: unknown
   ephemeral?: boolean
 }
+export type ThreadSourceEvent =
+  | ThreadDisplayEvent
+  /** The source changed as a whole; publish a fresh snapshot instead of an event. */
+  | { snapshot: true }
 export interface ThreadSourcePort {
   snapshot(threadId: string): unknown
   onThread(
@@ -151,6 +155,11 @@ export class ThreadStreamAdapter {
       threadId,
       (event) => {
         try {
+          // A fresh snapshot truncates the records before it, so no ring trim follows.
+          if ('snapshot' in event) {
+            this.refreshSnapshot(thread)
+            return
+          }
           if (!THREAD_EVENT_TYPES.includes(event.type)) throw new NetError('bad_request')
           const body = { threadId, type: event.type, data: event.data }
           if (event.ephemeral) {
