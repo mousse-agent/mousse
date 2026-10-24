@@ -100,7 +100,7 @@ export function speakWithLocalModel(
     if (segments.length === 0) return resolve()
     cancelIdleDispose()
     activeSessions++
-    const workers = ensurePool(model, Math.min(POOL_SIZE, segments.length))
+    const workers = ensurePool(model, Math.min(model.maxWorkers ?? POOL_SIZE, segments.length))
     const context = new AudioContext()
     if (pause.paused) void context.suspend().catch(() => undefined)
     else void context.resume().catch(() => undefined)

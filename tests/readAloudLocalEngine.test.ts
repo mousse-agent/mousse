@@ -290,6 +290,12 @@ describe('local read aloud with more than one model', () => {
     expect(worker.speakRequests()[0]).toMatchObject({ voice: 'F1' })
   })
 
+  it('runs Supertonic on one worker even for a long message, since one loaded copy is large', async () => {
+    expect(splitSpeechSegments(LONG)).toHaveLength(2)
+    await finishRead(startRead(LONG, new AbortController(), 'supertonic-3'))
+    expect(FakeWorker.all).toHaveLength(1)
+  })
+
   it('starts the Pocket worker for a Pocket language, with that language\'s default voice', async () => {
     await finishRead(startRead(SHORT, new AbortController(), 'pocket-tts-fr'))
     const [worker] = FakeWorker.all
