@@ -11,6 +11,7 @@ import { SettingsGroup, SettingsRow } from '../settings/SettingsRow'
 import { SettingsSearch } from '../settings/SettingsSearch'
 import type { CliProviderDefinition } from './cliProviders'
 import { BrowseButton, useAsyncAction } from './parts'
+import type { CliInstall } from './useCliInstall'
 
 type ConnectKind = 'subscription' | 'api_key' | 'cloud'
 
@@ -72,6 +73,8 @@ export function AddProviderView({
   cliConfigs,
   apis,
   onAddCli,
+  install,
+  onInstallCli,
   onApiConnected,
   runLogin,
   onDone
@@ -82,6 +85,10 @@ export function AddProviderView({
   apis: ProviderLoginOption[]
   /** Saves `binaryPath` first when given (rejects with the validation message), then adds the CLI. */
   onAddCli: (cli: CliProviderDefinition, binaryPath?: string) => Promise<void>
+  /** Antigravity's agent download, shared with the provider list. */
+  install: CliInstall
+  /** Downloads the agent, then adds the CLI. It does not sign in. */
+  onInstallCli: (cli: CliProviderDefinition) => Promise<void>
   onApiConnected: (providerId: string) => Promise<void>
   runLogin: (login: () => Promise<ProviderLoginResult>) => Promise<ProviderLoginResult>
   onDone: () => void
@@ -124,7 +131,7 @@ export function AddProviderView({
       {error && !selected && <p className="prov-error">{error}</p>}
 
       {shownClis.length > 0 && (
-        <SettingsGroup title="Agent CLIs" description="Coding agents you have installed, with their own sign-in">
+        <SettingsGroup title="Agent CLIs" description="Coding agents with their own sign-in">
           {shownClis.map((cli) => {
             const key = `cli:${cli.id}`
             const open = selected === key
@@ -154,7 +161,9 @@ export function AddProviderView({
                   busy={busy === key}
                   disabled={busy !== null}
                   error={error}
+                  install={install}
                   onAdd={(binaryPath) => void run(key, () => onAddCli(cli, binaryPath))}
+                  onInstall={() => void run(key, () => onInstallCli(cli))}
                 />
               </PickerRow>
             )
@@ -212,74 +221,135 @@ export function AddProviderView({
 
 /**
  * The sub-row under a chosen agent CLI: its executable, then Add. A path is optional when Mousse
- * found the CLI (shown as the placeholder) and required when it didn't.
+ * found the CLI (shown as the placeholder) and required when it didn't. Antigravity that is not
+ * installed offers Install first (it does not sign in); an existing agent binary is the smaller option.
  */
-function CliConnectStep({
+export function CliConnectStep({
   cli,
   config,
   busy,
   disabled,
   error,
-  onAdd
+  install,
+  onAdd,
+  onInstall
 }: {
   cli: CliProviderDefinition
   config?: CliProviderConfig
   busy: boolean
   disabled: boolean
   error: string | null
+  install: CliInstall
   onAdd: (binaryPath?: string) => void
+  onInstall: () => void
 }) {
   const [path, setPath] = useState('')
+  const [manual, setManual] = useState(false)
+  /** Install was chosen: its row stays up while the download and the add finish, so the path row never flashes in. */
+  const [started, setStarted] = useState(false)
   const detected = config?.resolvedBinaryPath
   const missing = config !== undefined && !detected
+  const offerInstall = cli.id === 'antigravity' && (missing || started)
+  const showPath = !offerInstall || manual
   const entered = path.trim()
   const canAdd = !disabled && (entered !== '' || !missing)
   const add = () => {
     if (canAdd) onAdd(entered || undefined)
   }
-  const description = error ? (
-    <span className="prov-error">{error}</span>
+  const installError = offerInstall ? (install.error ?? (manual ? null : error)) : null
+  const pathError = showPath ? error : null
+  const pathDescription = pathError ? (
+    <span className="prov-error">{pathError}</span>
   ) : busy && entered ? (
     'Checking the executable…'
+  ) : offerInstall ? (
+    'Google’s agy_acp_server, beside localharness_external'
   ) : missing ? (
     'Not found automatically — choose the executable'
   ) : undefined
 
   return (
-    <SettingsRow
-      indent
-      title="Executable"
-      description={description}
-      control={
-        <>
-          <input
-            className="settings-input prov-mono prov-wide"
-            value={path}
-            autoFocus
-            disabled={disabled}
-            placeholder={detected ?? 'Path to the executable'}
-            title={detected}
-            aria-label={`${cli.label} executable path`}
-            aria-invalid={error ? true : undefined}
-            aria-required={missing || undefined}
-            spellCheck={false}
-            onChange={(event) => setPath(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') add()
-            }}
-          />
-          <BrowseButton
-            title={`Choose the ${cli.label} executable`}
-            defaultPath={entered || detected}
-            disabled={disabled}
-            onPick={setPath}
-          />
-          <button type="button" className="settings-btn" disabled={!canAdd} onClick={() => add()}>
-            {busy ? 'Adding…' : 'Add'}
-          </button>
-        </>
-      }
-    />
+    <>
+      {offerInstall && (
+        <SettingsRow
+          indent
+          title="Install"
+          description={
+            installError ? (
+              <span className="prov-error">{installError}</span>
+            ) : install.busy ? (
+              (install.progress ?? 'Installing…')
+            ) : busy ? (
+              'Adding…'
+            ) : (
+              `Mousse downloads Google’s official Antigravity agent (several hundred MB). Your agy CLI isn’t used.${
+                config?.binaryPath ? ' Installing replaces your executable path.' : ''
+              }`
+            )
+          }
+          control={
+            install.busy ? (
+              <button type="button" className="settings-btn" onClick={() => void install.cancel()}>
+                Cancel
+              </button>
+            ) : (
+              <>
+                <button type="button" className="prov-link" disabled={disabled} onClick={() => setManual((open) => !open)}>
+                  {manual ? 'Hide existing agent binary' : 'Use an existing agent binary'}
+                </button>
+                <button
+                  type="button"
+                  className="settings-btn"
+                  disabled={disabled}
+                  onClick={() => {
+                    setStarted(true)
+                    onInstall()
+                  }}
+                >
+                  Install
+                </button>
+              </>
+            )
+          }
+        />
+      )}
+      {showPath && (
+        <SettingsRow
+          indent
+          title="Executable"
+          description={pathDescription}
+          control={
+            <>
+              <input
+                className="settings-input prov-mono prov-wide"
+                value={path}
+                autoFocus
+                disabled={disabled}
+                placeholder={detected ?? 'Path to the executable'}
+                title={detected}
+                aria-label={`${cli.label} executable path`}
+                aria-invalid={pathError ? true : undefined}
+                aria-required={missing || undefined}
+                spellCheck={false}
+                onChange={(event) => setPath(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') add()
+                }}
+              />
+              <BrowseButton
+                title={`Choose the ${cli.label} executable`}
+                defaultPath={entered || detected}
+                disabled={disabled}
+                onPick={setPath}
+              />
+              <button type="button" className="settings-btn" disabled={!canAdd} onClick={() => add()}>
+                {busy ? 'Adding…' : 'Add'}
+              </button>
+            </>
+          }
+        />
+      )}
+    </>
   )
 }
 

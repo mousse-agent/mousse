@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
+import { methods, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AntigravityProviderService } from '../src/mms/providers/antigravity/AntigravityProviderService'
 import { antigravityAssistantMessage, antigravityHistory } from '../src/mms/providers/antigravity/history'
@@ -20,12 +20,14 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-function fixture(blockMethod?: string) {
+/** `fail` may return the error a request rejects with. */
+function fixture(blockMethod?: string, installed = false, fail?: (method: string) => unknown) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-acp-lifecycle-'))
   homes.push(home)
   const service = new AntigravityProviderService(home, home, new UserQuestionService())
   services.push(service)
   vi.spyOn(service, 'configured').mockReturnValue(true)
+  if (installed) vi.spyOn(service as unknown as { binary: () => string }, 'binary').mockReturnValue(join(home, 'agy_acp_server'))
   const processes: Array<ReturnType<typeof createProcess>> = []
   let finishPrompt: (() => void) | undefined
   function createProcess() {
@@ -34,11 +36,14 @@ function fixture(blockMethod?: string) {
       child: { exitCode: 0, signalCode: null, kill: vi.fn() },
       // What `launch()` records: the launch-settings generation it started with.
       generation: (service as unknown as { launchGeneration: number }).launchGeneration,
+      signInGeneration: (service as unknown as { signInGeneration: number }).signInGeneration,
       connection: {
         signal: abort.signal,
         close: vi.fn(() => abort.abort(new Error('ACP closed'))),
         agent: {
           request: vi.fn(async (method: string, params: { prompt?: Array<{ text?: string }> }) => {
+            const failure = fail?.(method)
+            if (failure) throw failure
             if (method === blockMethod) {
               await new Promise<void>((resolve, reject) => {
                 if (method === methods.agent.session.prompt) finishPrompt = resolve
@@ -122,13 +127,107 @@ describe('Antigravity turn lifecycle', () => {
     expect(prompts[1][1].prompt).toEqual([{ type: 'text', text: 'Focus on the bug' }])
   })
 
-  it.each(['stop', 'logout'] as const)('releases profile-owned login work on %s before an agent is launched', async (operation) => {
-    const { service, input } = fixture()
+  it.each(['stop', 'logout'] as const)('releases profile-owned login work on %s while Google sign-in is pending', async (operation) => {
+    const { service, input, processes } = fixture(methods.agent.authenticate, true)
     const session = new LoginSession('setup')
     const pending = service.login(session, input.cwd)
+    await vi.waitFor(() => expect(processes[0]?.connection.agent.request).toHaveBeenCalledWith(methods.agent.authenticate, expect.anything()))
     await service[operation]()
     expect(await pending).toEqual({ success: false, sessionId: 'setup', error: 'Login cancelled' })
     expect(session.abort.signal.aborted).toBe(true)
+  })
+
+  it('goes straight to Google sign-in once installed, without asking how to set up', async () => {
+    const { service, input, processes } = fixture(undefined, true)
+    const session = new LoginSession('setup')
+    const events: unknown[] = []
+    session.on('event', (event) => events.push(event))
+    expect(await service.login(session, input.cwd)).toEqual({ success: true, sessionId: 'setup' })
+    expect(processes[0].connection.agent.request.mock.calls.map(([method]) => method)).toEqual([methods.agent.initialize, methods.agent.authenticate, methods.agent.session.new])
+    expect(processes[0].connection.agent.request).toHaveBeenCalledWith(methods.agent.authenticate, { methodId: 'oauth-personal' })
+    // A process that started before this sign-in can no longer sign the profile out.
+    expect((service as unknown as { signInGeneration: number }).signInGeneration).toBe(1)
+    // Only the Google redirect-URL fallback may be offered; never a setup choice or a path prompt.
+    expect((events as Array<{ type: string }>).map((event) => event.type).filter((type) => type !== 'manual_code')).toEqual([])
+  })
+
+  it('fails sign-in fast, without a prompt or an agent, when Antigravity is not installed', async () => {
+    const { service, input, processes } = fixture()
+    const session = new LoginSession('setup')
+    const events: unknown[] = []
+    session.on('event', (event) => events.push(event))
+    expect(await service.login(session, input.cwd)).toEqual({ success: false, sessionId: 'setup', error: 'Install Antigravity first, then sign in' })
+    expect(events).toEqual([])
+    expect(processes).toHaveLength(0)
+  })
+})
+
+describe('Antigravity auth-required answers', () => {
+  const authRequired = () => RequestError.authRequired()
+  const signedInSettings = { signedIn: true, models: [{ id: 'account-model', label: 'Account Model' }] }
+  const arm = (service: AntigravityProviderService) => {
+    ;(service as unknown as { settings: unknown }).settings = { ...signedInSettings }
+    const changed = vi.fn()
+    service.hooks.changed = changed
+    const saved = () => JSON.parse(readFileSync(join((service as unknown as { profileDir: string }).profileDir, 'settings.json'), 'utf8'))
+    return { changed, saved }
+  }
+
+  it.each([methods.agent.session.new, methods.agent.session.setConfigOption, methods.agent.session.prompt])('marks the provider signed out when %s answers authentication required, keeping the chat error', async (method) => {
+    const { service, input } = fixture(undefined, false, (name) => name === method && authRequired())
+    const { changed, saved } = arm(service)
+    await expect(service.chat(input)).rejects.toThrow('Sign in to Antigravity in Settings before chatting')
+    expect(saved()).toMatchObject({ signedIn: false, models: [] })
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['Not logged in', undefined],
+    ['Please sign in', undefined],
+    ['Request failed', { type: 'auth_required' }]
+  ])('also recognizes Google wording: %s', async (message, data) => {
+    const { service, input } = fixture(undefined, false, (name) => name === methods.agent.session.new && new RequestError(-32000, message, data))
+    const { changed, saved } = arm(service)
+    await expect(service.chat(input)).rejects.toThrow('Sign in to Antigravity in Settings before chatting')
+    expect(saved()).toMatchObject({ signedIn: false, models: [] })
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it('needs the -32000 code: the same words under another code are an ordinary failure', async () => {
+    const { service, input } = fixture(undefined, false, (name) => name === methods.agent.session.new && new RequestError(-32603, 'Not logged in'))
+    const { changed } = arm(service)
+    await expect(service.chat(input)).rejects.toThrow('Not logged in')
+    expect(changed).not.toHaveBeenCalled()
+  })
+
+  it('marks the provider signed out when a model refresh is asked to authenticate', async () => {
+    const { service, input } = fixture(undefined, false, (name) => name === methods.agent.session.new && authRequired())
+    const { changed, saved } = arm(service)
+    await expect(service.refreshModels(input.cwd)).rejects.toThrow('Sign in to Antigravity in Settings before chatting')
+    expect(saved()).toMatchObject({ signedIn: false, models: [] })
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not sign out for other agent errors', async () => {
+    const { service, input } = fixture(undefined, false, (name) => name === methods.agent.session.prompt && new RequestError(-32000, 'turn failed'))
+    const { changed } = arm(service)
+    await expect(service.chat(input)).rejects.toThrow('turn failed')
+    expect(changed).not.toHaveBeenCalled()
+    expect(service.llmProvider()).toBeDefined()
+  })
+
+  it('does not sign out for a request from before the latest sign-in', async () => {
+    let holder: AntigravityProviderService | undefined
+    const { service, input } = fixture(undefined, false, (name) => {
+      if (name !== methods.agent.session.new) return undefined
+      ;(holder as unknown as { signInGeneration: number }).signInGeneration += 1 // a login finishes during the request
+      return authRequired()
+    })
+    holder = service
+    const { changed } = arm(service)
+    await expect(service.chat(input)).rejects.toThrow('Sign in to Antigravity in Settings before chatting')
+    expect(changed).not.toHaveBeenCalled()
+    expect(service.llmProvider()).toBeDefined()
   })
 })
 
@@ -156,7 +255,7 @@ describe('Antigravity profile admission', () => {
     const host = { activeProfileCount: () => 2, manager: { get: () => ({ id: 'personal', status: 'active' }) }, getProfileServices: vi.fn(async () => personal) }
     const installation = { getInstallationHost: () => host } as unknown as MmsProfileServices
     const args = { installation, binding: { profileId: 'personal', epoch: 1 }, capabilities: new Set([PROFILES_V1_CAPABILITY]) }
-    for (const method of ['providers.listConfigured', 'providers.getLoginOptions', 'providers.refreshModels', 'providers.loginOAuth', 'providers.logout', 'providers.claudeStatus','providers.codexStatus', 'providers.cliConfig', 'providers.setCliConfig']) {
+    for (const method of ['providers.listConfigured', 'providers.getLoginOptions', 'providers.refreshModels', 'providers.loginOAuth', 'providers.logout', 'providers.claudeStatus','providers.codexStatus', 'providers.cliConfig', 'providers.setCliConfig', 'providers.installAntigravity', 'providers.cancelAntigravityInstall']) {
       expect((await resolveBoundServices({ ...args, method })).services, method).toBe(personal)
     }
     expect((await resolveBoundServices({ ...args, method: 'providers.setApiKey' })).services).toBe(installation)

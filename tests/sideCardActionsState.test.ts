@@ -152,7 +152,7 @@ describe('editor host', () => {
   it('renders the open editor outside the card, for the profile it was opened in', () => {
     seedRender('alice', { editor: { profileId: 'alice', target: { mode: 'edit', action: action('a', 'Deploy') } } })
     const html = renderToStaticMarkup(createElement(QuickActionEditorHost))
-    expect(html).toContain('aria-label="Edit action"')
+    expect(html).toContain('>Edit action</h3>')
     expect(html).toContain('value="Deploy"')
   })
 
