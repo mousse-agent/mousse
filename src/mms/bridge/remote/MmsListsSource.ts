@@ -161,18 +161,29 @@ export class MmsListsSource {
     }
   ) {}
 
-  /** The chats are read from disk, so `watch` rereads them only when a chat signalled or on reconcile. */
-  private readChats(): ListsChat[] {
-    try {
-      return this.services.platform.chats.snapshot().chats.map(chatOf)
-    } catch {
-      // A profile whose chat store cannot be read still lists its projects and threads.
-      return []
+  private chats: ListsChat[] | undefined
+  private chatsStale = true
+  private watchers = 0
+
+  /**
+   * The chats are read from disk. While a watcher runs, both `watch` and `snapshot` reuse the last read
+   * until a chat signals or the reconcile tick runs; without a watcher nothing signals, so each call reads.
+   */
+  private currentChats(): ListsChat[] {
+    if (this.watchers === 0 || this.chatsStale || !this.chats) {
+      try {
+        this.chats = this.services.platform.chats.snapshot().chats.map(chatOf)
+      } catch {
+        // A profile whose chat store cannot be read still lists its projects and threads.
+        this.chats = []
+      }
+      this.chatsStale = false
     }
+    return this.chats
   }
 
   snapshot(): ListsSnapshot {
-    return this.compose(this.readChats())
+    return this.compose(this.currentChats())
   }
 
   private compose(chats: ListsChat[]): ListsSnapshot {
@@ -218,20 +229,16 @@ export class MmsListsSource {
    */
   watch(changed: () => void, onError?: (error: unknown) => void): () => void {
     const s = this.services
-    let chats = this.readChats()
-    let chatsStale = false
-    let last = JSON.stringify(this.compose(chats))
+    this.watchers++
+    this.chatsStale = true
+    let last = JSON.stringify(this.snapshot())
     let pending: unknown
     let stopped = false
     const check = (): void => {
       pending = undefined
       if (stopped) return
       try {
-        if (chatsStale) {
-          chats = this.readChats()
-          chatsStale = false
-        }
-        const next = JSON.stringify(this.compose(chats))
+        const next = JSON.stringify(this.snapshot())
         if (next === last) return
         last = next
         changed()
@@ -266,14 +273,16 @@ export class MmsListsSource {
     on(s.questions as unknown as Emitter, 'pending')
     on(s.questions as unknown as Emitter, 'cleared')
     const chatsChanged = (): void => {
-      chatsStale = true
+      this.chatsStale = true
       poke()
     }
     disposers.push(s.platform.chats.onChange(chatsChanged))
     const reconcile = this.timers.setInterval(chatsChanged, RECONCILE_MS)
     disposers.push(() => this.timers.clearInterval(reconcile))
     return () => {
+      if (stopped) return
       stopped = true
+      if (--this.watchers === 0) this.chats = undefined
       if (pending !== undefined) this.timers.clearTimeout(pending)
       for (const dispose of disposers.splice(0)) dispose()
     }

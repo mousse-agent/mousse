@@ -305,4 +305,49 @@ describe('phone sidebar lists', () => {
     expect(calls).toBe(3)
     stop()
   })
+
+  it('publishes a thread-only change through the adapter without rereading chats', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-lists-')))
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+    const db = new NetDatabase({ profileDir: dir })
+    cleanups.push(() => db.close())
+    const keys = new FileKeyStore(dir),
+      identity = new NetIdentityService({ database: db.database, keys, clock: systemClock, coordinator: db })
+    await identity.bootstrapAuthority('Lists source')
+    const store = new SqliteStreamStore(db)
+    cleanups.push(() => store.close())
+    const f = fakeServices(),
+      timers = manualTimers()
+    f.threads.list = [thread('t1')]
+    let reads = 0
+    const read = f.chats.snapshot
+    f.chats.snapshot = () => (reads++, read())
+    const lists = new MmsListsSource(f.services, timers)
+    // The same wiring as the profile: a change publishes a fresh snapshot through the source.
+    const adapter = new ThreadStreamAdapter({
+      db, store, generations: store, identity, keys, clock: systemClock,
+      source: {
+        snapshot: () => lists.snapshot(),
+        onThread: (_id, listener, onError) => lists.watch(() => listener({ snapshot: true }), onError)
+      }
+    })
+    cleanups.push(() => adapter.close())
+    const descriptor = adapter.activate(LISTS_STREAM_THREAD_ID)
+    const settled = reads
+    const head = () => adapter.store.head(descriptor.id).seq
+    const before = head()
+    // A thread change publishes, and neither the check nor the publication touches the chat files.
+    f.runtimes.activity = { t1: 'processing' }
+    f.runtimes.emit('activity', {})
+    timers.flush()
+    expect(head()).toBeGreaterThan(before)
+    expect(reads).toBe(settled)
+    // A chat change rereads once for the check and reuses that read for the publication.
+    const afterThread = head()
+    f.chats.list = [{ id: 'c', kind: 'direct', name: 'C', threadId: 'ct', createdAt: at, updatedAt: at, participants: [] }]
+    f.chats.changed()
+    timers.flush()
+    expect(head()).toBeGreaterThan(afterThread)
+    expect(reads).toBe(settled + 1)
+  })
 })
