@@ -83,11 +83,20 @@ describe('GitService configured upstream and push behavior', () => {
     expect(git(fixture.cwd, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('team/release')
   })
 
-  it('does not silently create an origin tracking branch when plain push lacks an upstream', async () => {
+  it('publishes to origin and sets the upstream when plain push lacks one', async () => {
     const fixture = repo()
     git(fixture.cwd, 'branch', '--unset-upstream')
-    await expect(new GitService().push(fixture.cwd)).rejects.toThrow()
-    expect(() => git(fixture.cwd, 'rev-parse', '--abbrev-ref', '@{upstream}')).toThrow()
+    await new GitService().push(fixture.cwd)
+    expect(git(fixture.cwd, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('origin/feature')
+    expect(git(fixture.origin, 'rev-parse', '--verify', 'refs/heads/feature')).toBe(git(fixture.cwd, 'rev-parse', 'HEAD'))
+  })
+
+  it('publishes to the branch pushRemote when one is configured', async () => {
+    const fixture = repo()
+    git(fixture.cwd, 'branch', '--unset-upstream')
+    git(fixture.cwd, 'config', 'branch.feature.pushRemote', 'team')
+    await new GitService().push(fixture.cwd)
+    expect(git(fixture.cwd, 'rev-parse', '--abbrev-ref', '@{upstream}')).toBe('team/feature')
     expect(() => git(fixture.origin, 'rev-parse', '--verify', 'refs/heads/feature')).toThrow()
   })
 
