@@ -155,8 +155,8 @@ export function useDialogFocus(ref: RefObject<HTMLElement | null>, active: boole
     const dialog = ref.current
     if (!active || !dialog) return
     // Nothing focused reads as body, which is always connected: it would win over a real opener handed along.
-    const active = document.activeElement
-    const previous = active instanceof HTMLElement && active !== document.body ? active : null
+    const focused = document.activeElement
+    const previous = focused instanceof HTMLElement && focused !== document.body ? focused : null
     const unregister = registerDialog(dialog, parentRef?.current, previous)
     if (isTopDialog(dialog)) initialDialogFocus(dialog).focus({ preventScroll: true })
     const keyDown = (event: KeyboardEvent) => {
