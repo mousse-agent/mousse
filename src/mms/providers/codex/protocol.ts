@@ -159,19 +159,30 @@ export interface TurnInterruptParams {
 }
 export type TurnInterruptResponse = Record<string, never>
 
+export interface ExperimentalFeatureListParams {
+  cursor?: string | null
+  limit?: number | null
+}
+export interface ExperimentalFeatureListResponse {
+  /** Every feature flag with whether it is on in the loaded config (`enabled`) and by default. */
+  data: Array<{ name: string; enabled: boolean; defaultEnabled: boolean }>
+  nextCursor: string | null
+}
+
 export interface ConfigReadParams {
   /** Resolves project config layers as seen from this directory. */
   cwd?: string | null
 }
 export interface ConfigReadResponse {
-  /** The effective config; Mousse reads only the names under `mcp_servers`. */
-  config: { mcp_servers?: Record<string, unknown> | null } & Record<string, unknown>
+  /** The effective config; Mousse reads only the entries under `mcp_servers`. */
+  config: { mcp_servers?: Record<string, { enabled?: boolean | null } | null> | null } & Record<string, unknown>
 }
 
 /** Request methods Mousse calls, with their params and results. `account/logout` is deliberately absent. */
 export interface CodexRequestMap {
   initialize: { params: InitializeParams; result: InitializeResponse }
   'config/read': { params: ConfigReadParams; result: ConfigReadResponse }
+  'experimentalFeature/list': { params: ExperimentalFeatureListParams; result: ExperimentalFeatureListResponse }
   'account/read': { params: AccountReadParams; result: AccountReadResponse }
   'model/list': { params: ModelListParams; result: ModelListResponse }
   'thread/start': { params: ThreadStartParams; result: ThreadStartResponse }

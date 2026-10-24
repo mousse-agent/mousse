@@ -60,6 +60,13 @@ export function claudeMcpServers(attachment: McpAttachment | null | undefined): 
 /** Tool-name prefix Claude gives the Mousse server's tools. */
 export const CLAUDE_MOUSSE_TOOL_PREFIX = `mcp__${MOUSSE_MCP_SERVER_NAME}__`
 
+/**
+ * The Mousse tools a read-only (`shared`) delegated child may call, by name without the prefix:
+ * the `reads` tools and the `readOnlySafe` ones of the tool registry (a test keeps them equal).
+ * Runtimes that decide per tool name use it; the server refuses the rest in any case.
+ */
+export const READ_ONLY_MOUSSE_TOOLS: ReadonlySet<string> = new Set(['thread_read', 'queue_list', 'ask_user', 'present_plan'])
+
 export type AcpMcpServer =
   | { name: string; type: 'http'; url: string; headers: Array<{ name: string; value: string }> }
   | { name: string; command: string; args: string[]; env: Array<{ name: string; value: string }> }

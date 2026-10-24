@@ -44,8 +44,15 @@ export function mcpAttachable(caps: ProviderCapabilities): boolean {
 
 /** A delegation the target cannot honour; `delegate_task` returns it instead of starting a child. */
 export interface SubagentRefusal {
-  code: 'provider_unsupported_for_subagents'
+  /** `provider_unsupported_for_subagents`: no child at all; `shared_unsupported_for_provider`: only a `shared` one, `isolated` works. */
+  code: 'provider_unsupported_for_subagents' | 'shared_unsupported_for_provider'
   message: string
+}
+
+/** What `ProviderAdapter.childPreflight` is asked about: the requested workspace and the parent's workspace path. */
+export interface ChildPreflightContext {
+  workspace: 'shared' | 'isolated'
+  cwd: string | null
 }
 
 /**

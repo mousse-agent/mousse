@@ -1,7 +1,7 @@
 /**
  * Issue #142: a delegated child's policy per provider, on its first and its resumed turns. Shared
- * (read-only) children cannot change the workspace, see no user MCP servers and start no native
- * subagents; isolated children keep their write access but lose native subagents too.
+ * (read-only) children are held to read-only through permission decisions only; the user's MCP
+ * servers, settings and config stay as configured. Isolated children keep their write access.
  */
 import { EventEmitter } from 'node:events'
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -11,58 +11,44 @@ import { PassThrough } from 'node:stream'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
-import { claudeChildOptions } from '../src/mms/providers/claudeSubscription/childPolicy'
+import { claudeChildToolDenial } from '../src/mms/providers/claudeSubscription/childPolicy'
 import type { ClaudeTurnIntegrations } from '../src/mms/providers/claudeSubscription/integrations'
 import { ClaudeSubscriptionProviderService, type ClaudeSubscriptionChatInput } from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import type { CodexLaunch, CodexProcess } from '../src/mms/providers/codex/CodexAppServerClient'
-import { codexChildConfigOverrides, codexTurnPolicy } from '../src/mms/providers/codex/childPolicy'
+import { codexTurnPolicy } from '../src/mms/providers/codex/childPolicy'
 import { CODEX_MODEL_PROVIDER, CodexProviderService, type CodexChatInput } from '../src/mms/providers/codex/CodexProviderService'
+import { CodexAdapter } from '../src/mms/run/adapters/codex/CodexAdapter'
 import type { ChildTurnPolicy } from '../src/mms/run/adapters/ProviderAdapter'
 
 const SHARED: ChildTurnPolicy = { readOnly: true }
 const ISOLATED: ChildTurnPolicy = { readOnly: false }
 const MOUSSE = { url: 'http://127.0.0.1:9/mcp', token: 'tok' }
 
-describe('policy table: pure option builders', () => {
+describe('policy table: permission decisions', () => {
+  const READ_ONLY_BUILTINS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion', 'ToolSearch']
+  const MOUSSE_READS = ['mcp__mousse__thread_read', 'mcp__mousse__queue_list', 'mcp__mousse__ask_user', 'mcp__mousse__present_plan']
+  const MOUSSE_WRITES = ['mcp__mousse__queue_enqueue', 'mcp__mousse__thread_fork', 'mcp__mousse__thread_merge_back', 'mcp__mousse__delegate_task', 'mcp__mousse__integrate_delegation', 'mcp__mousse__create_task']
+  const WRITERS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'PowerShell', 'BashOutput']
+  const EXTERNAL = ['mcp__userserver__lookup', 'mcp__oauthserver__post']
+  const NATIVE_SUBAGENT = ['Agent', 'Task']
+
   it.each([
-    ['not a subagent', undefined, {}],
-    ['isolated child', ISOLATED, { disallowedTools: ['Agent', 'Task'] }],
-    ['shared child', SHARED, {
-      tools: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion', 'ToolSearch'],
-      disallowedTools: ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'PowerShell', 'Agent', 'Task'],
-      strictMcpConfig: true
-    }]
-  ])('Claude options for %s', (_name, child, expected) => {
-    expect(claudeChildOptions(child)).toEqual(expected)
+    ['not a subagent', undefined, [...READ_ONLY_BUILTINS, ...MOUSSE_READS, ...MOUSSE_WRITES, ...WRITERS, ...EXTERNAL, ...NATIVE_SUBAGENT], []],
+    ['isolated child', ISOLATED, [...READ_ONLY_BUILTINS, ...MOUSSE_READS, ...MOUSSE_WRITES, ...WRITERS, ...EXTERNAL], NATIVE_SUBAGENT],
+    ['shared child', SHARED, [...READ_ONLY_BUILTINS, ...MOUSSE_READS], [...MOUSSE_WRITES, ...WRITERS, ...EXTERNAL, ...NATIVE_SUBAGENT]]
+  ])('Claude tools for a %s', (_name, child, allowed, denied) => {
+    for (const tool of allowed) expect(claudeChildToolDenial(child, tool), tool).toBeUndefined()
+    for (const tool of denied) expect(claudeChildToolDenial(child, tool), tool).toEqual(expect.any(String))
   })
 
   it.each([
     ['agent turn', 'default', undefined, { approvalPolicy: 'on-request', sandbox: 'workspace-write', sandboxPolicy: { type: 'workspaceWrite' } }],
     ['plan turn', 'plan', undefined, { approvalPolicy: 'on-request', sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: false } }],
     ['isolated child', 'default', ISOLATED, { approvalPolicy: 'on-request', sandbox: 'workspace-write', sandboxPolicy: { type: 'workspaceWrite' } }],
-    ['shared child', 'default', SHARED, { approvalPolicy: 'never', sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: false } }],
-    ['shared child in plan mode', 'plan', SHARED, { approvalPolicy: 'never', sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: false } }]
+    ['shared child', 'default', SHARED, { approvalPolicy: 'on-request', sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: false } }],
+    ['shared child in plan mode', 'plan', SHARED, { approvalPolicy: 'on-request', sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: false } }]
   ] as const)('Codex sandbox and approvals for a %s', (_name, mode, child, expected) => {
     expect(codexTurnPolicy(mode, child)).toMatchObject(expected)
-  })
-
-  it('Codex config: only children change it; every child loses native subagents', () => {
-    expect(codexChildConfigOverrides(undefined, ['ext'])).toEqual({})
-    expect(codexChildConfigOverrides(ISOLATED, ['ext'])).toEqual({ 'features.multi_agent': false, 'features.multi_agent_v2': false })
-    expect(codexChildConfigOverrides(SHARED, ['ext', 'mousse', 'other_2'])).toEqual({
-      'features.multi_agent': false,
-      'features.multi_agent_v2': false,
-      'features.plugins': false,
-      'features.apps': false,
-      'features.computer_use': false,
-      'features.browser_use': false,
-      'mcp_servers.ext.enabled': false,
-      'mcp_servers.other_2.enabled': false
-    })
-  })
-
-  it('Codex config: a server name a dotted key cannot address fails closed', () => {
-    expect(() => codexChildConfigOverrides(SHARED, ['a.b'])).toThrow(/cannot be turned off/)
   })
 })
 
@@ -70,26 +56,25 @@ describe('Claude Subscription children', () => {
   const homes: string[] = []
   afterEach(() => {
     for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
+    seen.length = 0
   })
 
   const result = { type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: 'vendor-session' }
-  /** What `canUseTool` said to each probe, asked while the turn runs (the turn's controller aborts after it). */
-  const PROBES: Array<[string, Record<string, unknown>]> = [
-    ['Bash', { command: 'touch x' }],
-    ['Write', { file_path: 'x' }],
-    ['Agent', {}],
-    ['mcp__userserver__anything', {}],
-    ['Read', { file_path: 'x' }],
-    ['mcp__mousse__thread_read', {}]
-  ]
-  const decisions: Array<Record<string, string>> = []
+  const PROBES = ['Bash', 'Write', 'Agent', 'Task', 'mcp__userserver__lookup', 'Read', 'mcp__mousse__thread_read', 'mcp__mousse__thread_fork']
+  /** What the PreToolUse hook and `canUseTool` said to each probe, asked while the turn runs (its controller aborts after). */
+  const seen: Array<{ hook: Record<string, string>; canUse: Record<string, string> }> = []
   const fakeQuery = (options: Options) => {
     const generator = (async function* () {
-      const decided: Record<string, string> = {}
-      // A bypass turn asks the user for what it cannot approve itself; only restricted turns are probed.
-      for (const [tool, args] of options.permissionMode === 'bypassPermissions' ? [] : PROBES)
-        decided[tool] = (await options.canUseTool!(tool, args, { signal: new AbortController().signal } as never)).behavior
-      decisions.push(decided)
+      const hook: Record<string, string> = {}
+      const canUse: Record<string, string> = {}
+      const hooks = options.hooks!.PreToolUse![0].hooks
+      for (const tool of PROBES) {
+        const output = (await hooks[0]({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: {}, tool_use_id: `id-${tool}` } as never, `id-${tool}`, { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecision?: string } }
+        hook[tool] = output.hookSpecificOutput?.permissionDecision ?? 'none'
+        // A bypass turn asks the user for what it cannot approve itself; only restricted turns reach the callback in this test.
+        if (options.permissionMode !== 'bypassPermissions') canUse[tool] = (await options.canUseTool!(tool, {}, { signal: new AbortController().signal } as never)).behavior
+      }
+      seen.push({ hook, canUse })
       yield result
     })()
     return Object.assign(generator, { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
@@ -125,57 +110,54 @@ describe('Claude Subscription children', () => {
     return { service, options, input }
   }
 
-  afterEach(() => {
-    decisions.length = 0
-  })
+  /** The user's setup is left alone: no tool lists, no strict MCP config, every server still passed. */
+  const untouched = (turn: Options) => {
+    for (const key of ['tools', 'disallowedTools', 'strictMcpConfig', 'settingSources', 'extraArgs']) expect(turn).not.toHaveProperty(key)
+    expect(Object.keys(turn.mcpServers ?? {})).toEqual(expect.arrayContaining(['mousse', 'userserver', 'oauthserver']))
+  }
 
-  it('a shared child is read-only on its first turn and on a resumed turn', async () => {
+  it('a shared child keeps the default permission mode and is denied writes, external MCP tools and native subagents, first and resumed', async () => {
     const { service, options, input } = fixture()
     await service.chat(input({ child: SHARED }))
     service.commitConversation('child', 'history')
     await service.chat(input({ child: SHARED, history: 'history' }))
     expect(options[1].resume).toBe('vendor-session')
     for (const turn of options) {
-      expect(turn).toMatchObject({
-        permissionMode: 'default',
-        strictMcpConfig: true,
-        tools: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion', 'ToolSearch']
-      })
+      // Not plan mode: that would inject the planning and ExitPlanMode flow into a research task.
+      expect(turn.permissionMode).toBe('default')
       expect(turn).not.toHaveProperty('allowDangerouslySkipPermissions')
-      expect(turn.disallowedTools).toEqual(expect.arrayContaining(['Write', 'Edit', 'NotebookEdit', 'Bash', 'PowerShell', 'Agent', 'Task']))
-      // Only Mousse's own server: neither the user's stdio server nor the OAuth one Mousse proxies.
-      expect(Object.keys(turn.mcpServers ?? {})).toEqual(['mousse'])
+      untouched(turn)
     }
-    // The permission callback of each turn: reads and Mousse's own tools only.
-    expect(decisions).toEqual([
-      { Bash: 'deny', Write: 'deny', Agent: 'deny', mcp__userserver__anything: 'deny', Read: 'allow', mcp__mousse__thread_read: 'allow' },
-      { Bash: 'deny', Write: 'deny', Agent: 'deny', mcp__userserver__anything: 'deny', Read: 'allow', mcp__mousse__thread_read: 'allow' }
-    ])
+    const hook = { Bash: 'deny', Write: 'deny', Agent: 'deny', Task: 'deny', mcp__userserver__lookup: 'deny', mcp__mousse__thread_fork: 'deny', Read: 'ask', mcp__mousse__thread_read: 'ask' }
+    const canUse = { Bash: 'deny', Write: 'deny', Agent: 'deny', Task: 'deny', mcp__userserver__lookup: 'deny', mcp__mousse__thread_fork: 'deny', Read: 'allow', mcp__mousse__thread_read: 'allow' }
+    expect(seen).toEqual([{ hook, canUse }, { hook, canUse }])
   })
 
-  it('an isolated child keeps write access and the user MCP servers but has no native subagent tool', async () => {
+  it('an isolated child keeps write access and every MCP server but is denied the native subagent tool, first and resumed', async () => {
     const { service, options, input } = fixture()
     await service.chat(input({ child: ISOLATED }))
     service.commitConversation('child', 'history')
     await service.chat(input({ child: ISOLATED, history: 'history' }))
     for (const turn of options) {
-      expect(turn).toMatchObject({ permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true, disallowedTools: ['Agent', 'Task'] })
-      expect(turn).not.toHaveProperty('tools')
-      expect(turn).not.toHaveProperty('strictMcpConfig')
-      expect(Object.keys(turn.mcpServers ?? {})).toEqual(expect.arrayContaining(['mousse', 'userserver', 'oauthserver']))
+      expect(turn).toMatchObject({ permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true })
+      untouched(turn)
     }
+    const hook = { Agent: 'deny', Task: 'deny', Bash: 'none', Write: 'none', mcp__userserver__lookup: 'none', Read: 'none', mcp__mousse__thread_read: 'none', mcp__mousse__thread_fork: 'none' }
+    expect(seen).toEqual([{ hook, canUse: {} }, { hook, canUse: {} }])
   })
 
   it('a thread that is not a subagent is unchanged', async () => {
     const { service, options, input } = fixture()
     await service.chat(input())
     expect(options[0]).toMatchObject({ permissionMode: 'bypassPermissions' })
-    for (const key of ['tools', 'disallowedTools', 'strictMcpConfig']) expect(options[0]).not.toHaveProperty(key)
+    expect(seen[0].hook.Agent).toBe('none')
+    expect(seen[0].hook.Bash).toBe('none')
   })
 })
 
 describe('Codex children', () => {
   type Message = { id?: number | string; method?: string; params?: Record<string, unknown>; result?: unknown }
+  type Feature = { name: string; enabled: boolean; defaultEnabled: boolean }
   let home: string
   const services: CodexProviderService[] = []
   const questions = new UserQuestionService()
@@ -191,9 +173,10 @@ describe('Codex children', () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  /** An app-server stand-in: a signed-in account, a user MCP server named `ext`, instant turns. */
-  function server(options: { approvalRequest?: boolean } = {}) {
+  /** An app-server stand-in: a signed-in account, instant turns, and the feature pages in `pages`. */
+  function server(options: { approvalRequests?: boolean; pages?: Feature[][]; mcpServers?: Record<string, { enabled?: boolean } | null> } = {}) {
     const messages: Message[] = []
+    const pages = options.pages ?? [[{ name: 'multi_agent', enabled: false, defaultEnabled: true }]]
     const launch = (): CodexProcess => {
       const stdout = new PassThrough()
       const stdin = new PassThrough()
@@ -217,16 +200,23 @@ describe('Codex children', () => {
           messages.push(message)
           if (message.id === undefined || !message.method) continue
           const thread = { result: { thread: { id: 'thr-1' }, model: 'gpt-x', modelProvider: CODEX_MODEL_PROVIDER, cwd: home } }
+          const page = Number((message.params?.cursor as string | undefined) ?? 0)
           const reply: Record<string, unknown> =
             message.method === 'initialize' ? { result: { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' } }
             : message.method === 'account/read' ? { result: { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, requiresOpenaiAuth: true } }
-            : message.method === 'config/read' ? { result: { config: { mcp_servers: { ext: { command: 'ext' }, mousse: { url: 'stale' } } } } }
+            : message.method === 'config/read' ? { result: { config: { mcp_servers: options.mcpServers ?? {} } } }
+            : message.method === 'experimentalFeature/list' ? { result: { data: pages[page], nextCursor: page + 1 < pages.length ? String(page + 1) : null } }
             : ['thread/start', 'thread/resume', 'thread/fork'].includes(message.method) ? thread
             : message.method === 'turn/start' ? { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
             : { result: {} }
           send({ id: message.id, ...reply })
           if (message.method === 'turn/start') {
-            if (options.approvalRequest) send({ id: 99, method: 'item/commandExecution/requestApproval', params: { threadId: 'thr-1', itemId: 'cmd-1', command: 'rm -rf build' } })
+            if (options.approvalRequests) {
+              send({ id: 99, method: 'item/commandExecution/requestApproval', params: { threadId: 'thr-1', itemId: 'cmd-1', command: 'rm -rf build' } })
+              send({ id: 98, method: 'item/fileChange/requestApproval', params: { threadId: 'thr-1', itemId: 'edit-1' } })
+              send({ id: 97, method: 'mcpServer/elicitation/request', params: { threadId: 'thr-1', serverName: 'ext', message: 'Allow ext.write?' } })
+              send({ id: 96, method: 'item/permissions/requestApproval', params: { threadId: 'thr-1', itemId: 'perm-1' } })
+            }
             setImmediate(() => send({ method: 'turn/completed', params: { threadId: 'thr-1', turn: { id: 'turn-1', status: 'completed', error: null } } }))
           }
         }
@@ -245,67 +235,107 @@ describe('Codex children', () => {
   }
   const chat = (service: CodexProviderService, patch: Partial<CodexChatInput> = {}) =>
     service.chat({ threadId: 'child', cwd: home, model: 'gpt-x', prompt: 'look', onText: () => {}, mcp: MOUSSE, ...patch })
+  /** The config Mousse sends: its own server and the pinned model provider, nothing of the user's changed. */
+  const mousseOnly = { 'mcp_servers.mousse.url': MOUSSE.url, model_provider: CODEX_MODEL_PROVIDER }
 
-  it('a shared child gets a read-only sandbox, no approvals, no native subagents and no user MCP servers; resumed turns the same', async () => {
+  it('a shared child gets the read-only sandbox on every turn, first, loaded and resumed after a restart', async () => {
     const s = server()
     const service = create(s)
     await chat(service, { child: SHARED })
     const start = s.requests('thread/start')[0].params!
-    expect(start).toMatchObject({ sandbox: 'read-only', approvalPolicy: 'never' })
-    expect(start.config).toMatchObject({
-      'features.multi_agent': false,
-      'features.multi_agent_v2': false,
-      'features.plugins': false,
-      'features.apps': false,
-      'mcp_servers.ext.enabled': false,
-      'mcp_servers.mousse.url': MOUSSE.url
-    })
-    expect(start.config).not.toHaveProperty('mcp_servers.mousse.enabled')
+    expect(start).toMatchObject({ sandbox: 'read-only', approvalPolicy: 'on-request' })
+    // The user's Codex config is not touched: only Mousse's own server and the provider pin.
+    expect(Object.keys(start.config as object).filter((key) => !key.startsWith('mcp_servers.mousse.'))).toEqual(['model_provider'])
+    expect(start.config).toMatchObject(mousseOnly)
 
-    // The same service, the thread still loaded: only the turn's own policy applies.
     service.commitConversation('child', '')
     await chat(service, { child: SHARED })
     service.commitConversation('child', '')
-    // A new process after a restart resumes the saved thread; the policy rides on the resume.
     service.stop()
     const restarted = new CodexProviderService(home, questions, { launch: s.launch })
     services.push(restarted)
     await chat(restarted, { child: SHARED })
-    const resume = s.requests('thread/resume')[0].params!
-    expect(resume).toMatchObject({ sandbox: 'read-only', approvalPolicy: 'never' })
-    expect(resume.config).toMatchObject({ 'features.multi_agent': false, 'mcp_servers.ext.enabled': false })
+    expect(s.requests('thread/resume')[0].params).toMatchObject({ sandbox: 'read-only', approvalPolicy: 'on-request' })
 
     const turns = s.requests('turn/start')
     expect(turns).toHaveLength(3)
-    for (const turn of turns)
-      expect(turn.params).toMatchObject({ approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly', networkAccess: false } })
+    for (const turn of turns) expect(turn.params).toMatchObject({ approvalPolicy: 'on-request', sandboxPolicy: { type: 'readOnly', networkAccess: false } })
+    // The turns themselves never read or write the user's Codex config.
+    expect(s.messages.map((message) => message.method)).not.toContain('config/read')
   })
 
-  it('an isolated child keeps workspace-write and its MCP servers but has no native subagents', async () => {
-    const s = server()
-    await chat(create(s), { child: ISOLATED })
-    expect(s.requests('config/read')).toHaveLength(0)
-    expect(s.requests('thread/start')[0].params).toMatchObject({ sandbox: 'workspace-write', approvalPolicy: 'on-request' })
-    const config = s.requests('thread/start')[0].params!.config as Record<string, unknown>
-    expect(config).toMatchObject({ 'features.multi_agent': false, 'features.multi_agent_v2': false })
-    expect(Object.keys(config).some((key) => key.startsWith('mcp_servers.ext') || key === 'features.plugins')).toBe(false)
-    expect(s.requests('turn/start')[0].params).toMatchObject({ approvalPolicy: 'on-request', sandboxPolicy: { type: 'workspaceWrite' } })
+  it('an isolated child keeps workspace-write; a thread that is not a subagent is unchanged', async () => {
+    for (const child of [ISOLATED, undefined]) {
+      const s = server()
+      await chat(create(s), { child })
+      expect(s.requests('thread/start')[0].params).toMatchObject({ sandbox: 'workspace-write', approvalPolicy: 'on-request' })
+      expect(s.requests('thread/start')[0].params!.config).toMatchObject(mousseOnly)
+      expect(s.requests('turn/start')[0].params).toMatchObject({ sandboxPolicy: { type: 'workspaceWrite' } })
+    }
   })
 
-  it('a thread that is not a subagent is unchanged', async () => {
-    const s = server()
-    await chat(create(s))
-    expect(Object.keys(s.requests('thread/start')[0].params!.config as object).some((key) => key.startsWith('features.'))).toBe(false)
-    expect(s.requests('thread/start')[0].params).toMatchObject({ sandbox: 'workspace-write', approvalPolicy: 'on-request' })
-  })
-
-  it('a shared child declines a command approval instead of asking in its hidden thread', async () => {
-    const s = server({ approvalRequest: true })
+  it('a shared child answers every approval with a denial itself and never asks in its hidden thread', async () => {
+    const s = server({ approvalRequests: true })
     const asked = vi.spyOn(questions, 'requestAnswers')
     await chat(create(s), { child: SHARED })
-    await vi.waitFor(() => expect(s.messages.find((message) => message.id === 99)).toBeTruthy())
-    expect(s.messages.find((message) => message.id === 99)).toMatchObject({ result: { decision: 'decline' } })
+    const reply = (id: number) => s.messages.find((message) => message.id === id)
+    await vi.waitFor(() => expect(reply(96)).toBeTruthy())
+    expect(reply(99)).toMatchObject({ result: { decision: 'decline' } })
+    expect(reply(98)).toMatchObject({ result: { decision: 'decline' } })
+    expect(reply(97)).toMatchObject({ result: { action: 'decline' } })
+    expect(reply(96)).toMatchObject({ result: { permissions: {} } })
     expect(asked).not.toHaveBeenCalled()
     asked.mockRestore()
+  })
+
+  describe('preflight of the user setup (CodexAdapter.childPreflight)', () => {
+    const preflight = (s: ReturnType<typeof server>, workspace: 'shared' | 'isolated') =>
+      new CodexAdapter(() => create(s)).childPreflight({ workspace, cwd: home })
+    const on = [[{ name: 'multi_agent', enabled: true, defaultEnabled: true }]]
+    const off = [[{ name: 'multi_agent', enabled: false, defaultEnabled: true }, { name: 'multi_agent_v2', enabled: false, defaultEnabled: false }]]
+
+    it.each([
+      ['no MCP servers, native subagents off', off, {}, 'shared', null],
+      ['no MCP servers, native subagents off', off, {}, 'isolated', null],
+      ['only Mousse\'s own server and a disabled one', off, { mousse: { enabled: true }, old: { enabled: false } }, 'shared', null],
+      ['a user MCP server', off, { ext: { enabled: true } }, 'shared', 'shared_unsupported_for_provider'],
+      ['a user MCP server whose enabled flag is unset', off, { ext: {} }, 'shared', 'shared_unsupported_for_provider'],
+      ['a user MCP server, isolated child', off, { ext: { enabled: true } }, 'isolated', null],
+      ['native subagents on, shared child', on, {}, 'shared', 'provider_unsupported_for_subagents'],
+      ['native subagents on, isolated child', on, {}, 'isolated', 'provider_unsupported_for_subagents']
+    ] as const)('%s (%s workspace)', async (_name, pages, mcpServers, workspace, code) => {
+      const s = server({ pages: pages as never, mcpServers })
+      expect((await preflight(s, workspace))?.code ?? null).toBe(code)
+      // It only reads: no config write, no feature change.
+      expect(s.messages.map((message) => message.method).filter((method) => /write|set|batch/i.test(method ?? ''))).toEqual([])
+    })
+
+    it('names the servers and points to isolated', async () => {
+      const refusal = await preflight(server({ pages: off, mcpServers: { ext: {}, other: {} } }), 'shared')
+      expect(refusal?.message).toContain('ext, other')
+      expect(refusal?.message).toContain('"isolated"')
+    })
+
+    it('refuses when the setup cannot be read', async () => {
+      const refusal = await new CodexAdapter(() => ({ nativeSubagentsEnabled: async () => { throw new Error('down') } }) as never).childPreflight({ workspace: 'isolated', cwd: home })
+      expect(refusal?.code).toBe('provider_unsupported_for_subagents')
+    })
+  })
+
+  describe('native subagents (setup check)', () => {
+    const feature = (name: string, enabled: boolean): Feature => ({ name, enabled, defaultEnabled: name === 'multi_agent' })
+
+    it.each([
+      ['both off', [[feature('multi_agent', false), feature('multi_agent_v2', false)]], false],
+      ['multi_agent on (the Codex default)', [[feature('multi_agent', true)]], true],
+      ['multi_agent_v2 on', [[feature('multi_agent', false), feature('multi_agent_v2', true)]], true],
+      ['on in a later page', [[feature('apps', true)], [feature('multi_agent', true)]], true],
+      ['an unrelated feature on', [[feature('apps', true), feature('multi_agent', false)]], false]
+    ])('%s', async (_name, pages, enabled) => {
+      const s = server({ pages })
+      expect(await create(s).nativeSubagentsEnabled()).toBe(enabled)
+      // Read only: it never writes the user's config.
+      expect(s.messages.map((message) => message.method).filter((method) => /config|write/.test(method ?? ''))).toEqual([])
+    })
   })
 })

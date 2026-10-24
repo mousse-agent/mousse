@@ -13,8 +13,9 @@ import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/cla
 import { CODEX_CAPABILITIES } from '../../src/mms/run/adapters/codex/CodexAdapter'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
+import { READ_ONLY_MOUSSE_TOOLS } from '../../src/mms/run/mcp/attachment'
 import { createMousseToolRegistry, ToolRegistry } from '../../src/mms/run/mcp/toolRegistry'
-import { subagentTargetRefusal } from '../../src/mms/run/policy/featureGates'
+import { subagentTargetRefusal, type ChildPreflightContext, type SubagentRefusal } from '../../src/mms/run/policy/featureGates'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { phase6Daemon, waitFor } from './phase6Fixture'
 
@@ -116,17 +117,74 @@ describe('delegated child policy', () => {
     expect(antigravity.turns).toEqual([])
   }, 30_000)
 
-  it('refuses a child that would inherit an Antigravity parent selection', () => {
+  it('refuses a child that would inherit an Antigravity parent selection', async () => {
     const { d, thread } = daemon(async () => undefined)
     const refusalFor = (instanceId?: string) =>
-      (d.orch as unknown as { delegationRefusal(parent: string, instanceId: string | undefined): unknown }).delegationRefusal(thread.id, instanceId)
+      (d.orch as unknown as { delegationRefusal(parent: string, instanceId: string | undefined, workspace: 'shared' | 'isolated'): Promise<unknown> }).delegationRefusal(thread.id, instanceId, 'shared')
     d.orch.setThreadModelOverride(thread.id, { instanceId: 'antigravity', llmProvider: 'antigravity', model: 'agent' })
-    expect(refusalFor()).toMatchObject({ started: false, code: 'provider_unsupported_for_subagents' })
+    expect(await refusalFor()).toMatchObject({ started: false, code: 'provider_unsupported_for_subagents' })
     // An explicit instance wins over the parent's selection, in both directions.
-    expect(refusalFor('claude')).toBeNull()
+    expect(await refusalFor('claude')).toBeNull()
     d.orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
-    expect(refusalFor()).toBeNull()
-    expect(refusalFor('antigravity')).toMatchObject({ code: 'provider_unsupported_for_subagents' })
+    expect(await refusalFor()).toBeNull()
+    expect(await refusalFor('antigravity')).toMatchObject({ code: 'provider_unsupported_for_subagents' })
+  })
+
+  it('the read-only Mousse tool list runtimes use matches what the registry lets a read-only child call', () => {
+    const { d } = daemon(async () => undefined)
+    const registry = createMousseToolRegistry({ engine: d.engine, host: d.orch.mcpToolHost() })
+    const callable = registry.list().filter((tool) => tool.access === 'reads' || tool.readOnlySafe).map((tool) => tool.name)
+    expect(new Set(callable)).toEqual(READ_ONLY_MOUSSE_TOOLS)
+  })
+
+  describe('an adapter preflight of the user setup (Codex)', () => {
+    /** A Codex-shaped adapter whose setup check says what `setup` says. */
+    const codexDaemon = (setup: (context: ChildPreflightContext) => SubagentRefusal | null) => {
+      const calls: ChildPreflightContext[] = []
+      const codex = Object.assign(new ScriptedAdapter('codex', CODEX_CAPABILITIES, async () => 'Looked.'), {
+        childPreflight: async (context: ChildPreflightContext) => {
+          calls.push(context)
+          return setup(context)
+        }
+      })
+      const outcomes: Record<string, Record<string, unknown>> = {}
+      home = mkdtempSync(join(tmpdir(), 'mousse-subagent-codex-'))
+      previousHome = process.env.MOUSSE_HOME
+      process.env.MOUSSE_HOME = home
+      const projectDir = join(home, 'project')
+      mkdirSync(projectDir)
+      const parent = new ScriptedAdapter('pi', PI_LOOP_CAPABILITIES, async (input, host) => {
+        if (input.prompt !== 'Delegate it') return 'unexpected pi turn'
+        for (const workspace of ['shared', 'isolated'] as const)
+          outcomes[workspace] = await delegate(host.tools.delegation!, { workspace, role: workspace === 'shared' ? 'research' : 'implement', instanceId: 'codex' }, workspace)
+        return 'Delegated.'
+      })
+      const d = phase6Daemon(home, [parent, codex])
+      stops.push(d.stop)
+      const thread = d.store.createThread('Parent', d.projects.openProject(projectDir).id)
+      return { d, thread, codex, calls, outcomes, projectDir }
+    }
+
+    it('returns the adapter\'s refusal as a value for each workspace, creating no thread', async () => {
+      const { d, thread, codex, calls, outcomes, projectDir } = codexDaemon((context) => context.workspace === 'shared'
+        ? { code: 'shared_unsupported_for_provider', message: 'use isolated' }
+        : { code: 'provider_unsupported_for_subagents', message: 'native subagents are on' })
+      await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
+      expect(outcomes.shared).toMatchObject({ started: false, code: 'shared_unsupported_for_provider', message: 'use isolated' })
+      expect(outcomes.isolated).toMatchObject({ started: false, code: 'provider_unsupported_for_subagents' })
+      // The check ran for both, before any child, with the requested workspace and the parent's path.
+      expect(calls).toEqual([{ workspace: 'shared', cwd: projectDir }, { workspace: 'isolated', cwd: projectDir }])
+      expect(d.engine.delegations.listForParentThread(thread.id)).toEqual([])
+      expect(d.store.listAllThreads().map((entry) => entry.id)).toEqual([thread.id])
+      expect(codex.turns).toEqual([])
+    }, 30_000)
+
+    it('starts the child when the adapter finds nothing in the setup', async () => {
+      const { d, thread, codex, outcomes } = codexDaemon(() => null)
+      await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
+      for (const name of ['shared', 'isolated']) await waitFor(() => d.engine.getRun((outcomes[name] as { childRunId: string }).childRunId)?.status === 'completed', 'a child run')
+      expect(codex.turns.map((turn) => turn.input.child)).toEqual(expect.arrayContaining([{ readOnly: true }, { readOnly: false }]))
+    }, 30_000)
   })
 
   it('starts a Claude child and carries its policy on the first and on a resumed turn', async () => {

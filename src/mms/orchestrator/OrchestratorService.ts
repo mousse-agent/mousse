@@ -1492,7 +1492,7 @@ export class OrchestratorService extends EventEmitter {
    * child to its policy gets a structured refusal instead of a child it could not keep read-only.
    * `instanceId` is the requested instance; without one the child runs on the parent's selection.
    */
-  private delegationRefusal(parentThreadId: string, instanceId: string | undefined) {
+  private async delegationRefusal(parentThreadId: string, instanceId: string | undefined, workspace: 'shared' | 'isolated') {
     let target: ReturnType<OrchestratorService['adapterForThread']>
     try {
       target = instanceId ? this.adapters.resolve(instanceId) : this.adapterForThread(parentThreadId)
@@ -1500,7 +1500,9 @@ export class OrchestratorService extends EventEmitter {
       // An unresolvable target fails loudly when the child is created, as before.
       return null
     }
+    // The static check of the adapter's capabilities, then the adapter's look at the user's setup.
     const refusal = subagentTargetRefusal(target.adapter.capabilities, target.entry.driver)
+      ?? await target.adapter.childPreflight?.({ workspace, cwd: this.sharedWorkspaceOf(parentThreadId)?.path ?? null }) ?? null
     return refusal ? { started: false as const, ...refusal } : null
   }
 
@@ -1936,7 +1938,7 @@ export class OrchestratorService extends EventEmitter {
     const instanceId = requested
       ? this.adapters.resolve(input.instanceId?.trim() || this.adapters.instances.instanceIdForLegacyProvider(requested)).instanceId
       : undefined
-    const refusal = this.delegationRefusal(parentThreadId, instanceId)
+    const refusal = await this.delegationRefusal(parentThreadId, instanceId, input.workspace)
     if (refusal) return refusal
     const accepted = await engine.requestDelegation({
       parentThreadId,

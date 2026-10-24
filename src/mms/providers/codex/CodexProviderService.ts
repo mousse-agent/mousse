@@ -18,7 +18,7 @@ import type { ChatImageAttachment } from '../../../shared/types'
 import { mousseVersion } from '../../appVersion'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
-import { codexMcpConfigOverrides } from '../../run/mcp/attachment'
+import { MOUSSE_MCP_SERVER_NAME, codexMcpConfigOverrides } from '../../run/mcp/attachment'
 import type { LoginSession } from '../LoginSession'
 import {
   applyCliConfigPatch,
@@ -48,6 +48,7 @@ import {
   type CodexServerRequest,
   type CodexServerRequestMap,
   type CodexTurn,
+  type ExperimentalFeatureListResponse,
   type ModelListResponse,
   type SandboxPolicy,
   type ThreadConfig,
@@ -55,10 +56,12 @@ import {
   type TokenUsageBreakdown,
   type UserInput
 } from './protocol'
-import { codexChildConfigOverrides, codexTurnPolicy } from './childPolicy'
+import { codexTurnPolicy } from './childPolicy'
 import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
 
 export const CODEX_PROVIDER_ID = 'codex'
+/** Codex feature flags that let it start its own subagents. */
+const NATIVE_SUBAGENT_FEATURES: ReadonlySet<string> = new Set(['multi_agent', 'multi_agent_v2'])
 /** How long a live `account/read` result stands before it is checked again. */
 export const CODEX_ACCOUNT_TTL_MS = 5 * 60_000
 /** Model id that leaves the choice to the user's Codex config (`model` in `config.toml`). */
@@ -783,6 +786,50 @@ export class CodexProviderService {
     }
   }
 
+  /**
+   * Whether the user's Codex setup lets Codex start its own subagents (`multi_agent`,
+   * `multi_agent_v2`), read from the loaded config without changing it. Codex asks for no approval
+   * before it spawns one, so Mousse has no permission decision that could stop it; a child on Codex
+   * is only safe where they are off. Reads the user and global config: a project's own config is
+   * only visible once a thread exists.
+   */
+  async nativeSubagentsEnabled(): Promise<boolean> {
+    this.listing += 1
+    try {
+      const conn = await this.connection()
+      let cursor: string | null = null
+      for (let page = 0; page < 20; page += 1) {
+        const response: ExperimentalFeatureListResponse = await conn.request('experimentalFeature/list', cursor ? { cursor, limit: 500 } : { limit: 500 }, { timeoutMs: 15_000 })
+        if (response.data.some((feature) => NATIVE_SUBAGENT_FEATURES.has(feature.name) && feature.enabled)) return true
+        cursor = response.nextCursor
+        if (!cursor) return false
+      }
+      throw new Error('Codex listed too many feature flags')
+    } finally {
+      this.listing -= 1
+      this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
+    }
+  }
+
+  /**
+   * The names of the MCP servers the user's Codex config has switched on for `cwd` (user, global and
+   * project layers), read without changing it. Mousse's own server is not the user's and is left out.
+   * Mousse has no way to deny a Codex MCP tool call, so a read-only child cannot run beside them.
+   */
+  async externalMcpServers(cwd: string | null): Promise<string[]> {
+    this.listing += 1
+    try {
+      const conn = await this.connection()
+      const response = await conn.request('config/read', cwd ? { cwd: resolve(cwd) } : {}, { timeoutMs: 15_000 })
+      return Object.entries(response.config.mcp_servers ?? {})
+        .filter(([name, server]) => name !== MOUSSE_MCP_SERVER_NAME && server?.enabled !== false)
+        .map(([name]) => name)
+    } finally {
+      this.listing -= 1
+      this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
+    }
+  }
+
   /** Disconnects this profile in Mousse only; the terminal sign-in is never logged out. */
   async logout(): Promise<void> {
     this.scope += 1
@@ -1096,11 +1143,6 @@ export class CodexProviderService {
     const overrides = codexMcpConfigOverrides(input.mcp) as ThreadConfig
     const { baseId } = parseThinkingSuffixFromModelId(input.model)
     const policy = codexTurnPolicy(input.mode ?? 'default', input.child)
-    // A read-only child switches off every MCP server the user configured; they are listed from the
-    // effective config of its workspace.
-    const userMcpServers = input.child?.readOnly
-      ? Object.keys((await conn.request('config/read', { cwd }, { signal, timeoutMs: 15_000 })).config.mcp_servers ?? {})
-      : []
     const childKey = input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''
     const params = {
       cwd,
@@ -1109,7 +1151,7 @@ export class CodexProviderService {
       ...(baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}),
       // Pinned twice: the request field and the config layer above user and workspace config.
       modelProvider: CODEX_MODEL_PROVIDER,
-      config: { ...overrides, ...codexChildConfigOverrides(input.child, userMcpServers), model_provider: CODEX_MODEL_PROVIDER },
+      config: { ...overrides, model_provider: CODEX_MODEL_PROVIDER },
       ...(input.developerInstructions ? { developerInstructions: input.developerInstructions } : {})
     }
     // A Codex thread belongs to the instance that started it; another instance starts fresh.

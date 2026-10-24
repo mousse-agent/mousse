@@ -9,6 +9,7 @@ import type {
   ToolLoopSafetyOptions
 } from '../../orchestrator/LlmClient'
 import type { NativeMessageCheckpoint } from '../../orchestrator/nativeContext'
+import type { ChildPreflightContext, SubagentRefusal } from '../policy/featureGates'
 import type { ProviderRef } from '../types'
 
 /**
@@ -272,6 +273,13 @@ export interface ProviderAdapter {
   describe?(model: string): ModelInfo
   /** The runtime is signed in and installed, so its models can be selected by default. */
   configured?(): boolean
+  /**
+   * Issue #142: a check of the user's own setup before a child is created on this adapter, for
+   * shared and isolated children alike. Returns why the child cannot be held to its policy (the
+   * runtime's native subagents are enabled, or a read-only child would sit beside MCP servers whose
+   * tool calls Mousse cannot deny), or null. It reads the setup and never changes it.
+   */
+  childPreflight?(context: ChildPreflightContext): Promise<SubagentRefusal | null>
   /**
    * Runs one turn. Settling is the turn's terminal signal for every adapter: the vendor runtimes
    * resolve when their stream closes, so there is no separate "stream closed without a terminal

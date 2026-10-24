@@ -43,7 +43,7 @@ import {
 } from './metrics'
 import { parseClaudeSubscriptionUsage } from './usage'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
-import { claudeChildOptions } from './childPolicy'
+import { claudeChildToolDenial } from './childPolicy'
 import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
@@ -86,7 +86,7 @@ export type ClaudeSubscriptionChatInput = {
   images?: ChatImageAttachment[]
   signal?: AbortSignal
   mode?: 'plan' | 'default'
-  /** Set for a delegated child's turns (first and resumed); see `claudeChildOptions`. */
+  /** Set for a delegated child's turns (first and resumed); see `claudeChildToolDenial`. */
   child?: ChildTurnPolicy
   /** The Mousse MCP server for this run (SPEC §15.2); null attaches no server. */
   mcp?: { url: string; token: string } | null
@@ -868,7 +868,9 @@ export class ClaudeSubscriptionProviderService {
         ? selected.effort as Options['effort'] : undefined
       const planTurn = input.mode === 'plan'
       const readOnlyChild = input.child?.readOnly === true
-      // Plan turns and read-only children route every call through canUseTool's read-only allowlist.
+      // Plan turns and read-only children route every call through the hook and canUseTool's
+      // read-only allowlist. A read-only child keeps the default permission mode: plan mode would
+      // inject its planning and ExitPlanMode flow into a research or review task.
       const restricted = planTurn || readOnlyChild
       const launchAppend = claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.settings)), input.cwd)
       const options: Options = {
@@ -883,13 +885,11 @@ export class ClaudeSubscriptionProviderService {
           : readOnlyChild
             ? { permissionMode: 'default' as const }
             : { permissionMode: 'bypassPermissions' as const, allowDangerouslySkipPermissions: true }),
-        ...claudeChildOptions(input.child),
-        // The Mousse server keeps its name: user servers are spread first. A read-only child gets
-        // only Mousse's own server.
+        // The Mousse server keeps its name: user servers are spread first.
         mcpServers: {
-          ...(readOnlyChild ? {} : integrations?.mcpServers),
+          ...integrations?.mcpServers,
           // Servers that sign in with OAuth run in this process and call Mousse's own connection.
-          ...Object.fromEntries(Object.entries(readOnlyChild ? {} : integrations?.proxiedServers ?? {}).map(([name, proxied]) => [name, claudeProxiedMcpServer(name, proxied)])),
+          ...Object.fromEntries(Object.entries(integrations?.proxiedServers ?? {}).map(([name, proxied]) => [name, claudeProxiedMcpServer(name, proxied)])),
           ...claudeMcpServers(input.mcp)
         },
         // The skills enabled in Mousse reach Claude as a local plugin, next to the user's own.
@@ -907,6 +907,16 @@ export class ClaudeSubscriptionProviderService {
                         hookEventName: 'PreToolUse',
                         permissionDecision: 'deny',
                         permissionDecisionReason: 'This tool is turned off for this MCP server in Mousse.'
+                      }
+                    }
+                  // A delegated child's policy (no native subagents; read-only for a shared child).
+                  const childDenial = event.hook_event_name === 'PreToolUse' ? claudeChildToolDenial(input.child, event.tool_name) : undefined
+                  if (childDenial)
+                    return {
+                      hookSpecificOutput: {
+                        hookEventName: 'PreToolUse',
+                        permissionDecision: 'deny',
+                        permissionDecisionReason: childDenial
                       }
                     }
                   if (event.hook_event_name === 'PreToolUse')
@@ -945,6 +955,8 @@ export class ClaudeSubscriptionProviderService {
         canUseTool: async (toolName, args, context) => {
           if (controller.signal.aborted || context.signal.aborted)
             return { behavior: 'deny', message: 'Turn cancelled' }
+          const childDenial = claudeChildToolDenial(input.child, toolName)
+          if (childDenial) return { behavior: 'deny', message: childDenial }
           // Mousse's own tools are scoped by the run's credential (mode ceiling, caller thread);
           // the server refuses what the run may not do, so they need no extra prompt.
           if (input.mcp && toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX))
@@ -961,9 +973,7 @@ export class ClaudeSubscriptionProviderService {
           )
             return {
               behavior: 'deny',
-              message: planTurn
-                ? 'This turn is planning only; edits and shell commands are disabled.'
-                : 'This subagent is read-only; edits and shell commands are disabled.'
+              message: 'This turn is planning only; edits and shell commands are disabled.'
             }
           try {
             if (toolName === 'AskUserQuestion') {

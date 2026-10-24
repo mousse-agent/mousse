@@ -4,6 +4,7 @@ import {
   type CodexProviderService
 } from '../../../providers/codex/CodexProviderService'
 import { mousseOrchestrationInstructions } from '../../mcp/instructions'
+import type { ChildPreflightContext, SubagentRefusal } from '../../policy/featureGates'
 import type { ProviderRef } from '../../types'
 import type {
   AdapterHost,
@@ -21,7 +22,7 @@ import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
 /** The slice of the provider service a turn drives. */
 export type CodexClient = Pick<
   CodexProviderService,
-  'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'steer'
+  'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'steer' | 'nativeSubagentsEnabled' | 'externalMcpServers'
 >
 
 /**
@@ -65,6 +66,31 @@ export class CodexAdapter implements ProviderAdapter {
 
   configured(): boolean {
     return this.service()?.configured() ?? false
+  }
+
+  /**
+   * What the user's own Codex setup allows for a child; nothing is changed. Codex asks for no
+   * approval before it starts a subagent of its own, so no permission decision of Mousse can stop
+   * one: a child runs on Codex only where `features.multi_agent` is off. Mousse also cannot deny a
+   * Codex MCP tool call (it answers command, file and permission approvals and elicitations, but a
+   * tool the user's server offers runs under Codex's own rules), so a `shared` child is refused
+   * while the user's config has any MCP server of its own; `isolated` still works.
+   */
+  async childPreflight(context: ChildPreflightContext): Promise<SubagentRefusal | null> {
+    const service = this.service()
+    if (!service) return null
+    const refuse = (message: string): SubagentRefusal => ({ code: 'provider_unsupported_for_subagents', message })
+    try {
+      if (await service.nativeSubagentsEnabled())
+        return refuse('Codex cannot run as a subagent while its own subagents are enabled: Mousse cannot stop Codex from starting them and does not change your Codex config. Turn them off yourself (`features.multi_agent = false` in your Codex config), or choose another provider or model for this task.')
+      if (context.workspace !== 'shared') return null
+      const servers = await service.externalMcpServers(context.cwd)
+      return servers.length
+        ? { code: 'shared_unsupported_for_provider', message: `A read-only (shared) Codex subagent is not possible while your Codex config has MCP servers (${servers.join(', ')}): Mousse cannot stop one of their tools from writing and does not change your Codex config. Use workspace "isolated", or choose another provider or model.` }
+        : null
+    } catch {
+      return refuse('Codex cannot run as a subagent: Mousse could not read the Codex setup to check it. Check that Codex is signed in, or choose another provider or model for this task.')
+    }
   }
 
   async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
