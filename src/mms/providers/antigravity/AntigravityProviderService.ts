@@ -17,7 +17,7 @@ import { acpMcpServers } from '../../run/mcp/attachment'
 import type { LoginSession } from '../LoginSession'
 import { applyCliConfigPatch, requireExecutable, sharedCliVersions, storedCliArgs, storedCliEnv, withUserEnv, type CliVersionCache } from '../cliConfig'
 import { directLaunch } from '../resolveWindowsShim'
-import { ANTIGRAVITY_RELEASE, installAntigravity, installedAntigravityBinary, validateManualAntigravityBinary } from './installation'
+import { ANTIGRAVITY_RELEASE, antigravityInstallState, cancelAntigravityInstall, installAntigravity, installedAntigravityBinary, validateManualAntigravityBinary } from './installation'
 
 export const ANTIGRAVITY_PROVIDER_ID = 'antigravity'
 type AcpProcess = { child: ChildProcessWithoutNullStreams; connection: ClientConnection; sessionId?: string; cwd?: string; threadId?: string; onUpdate?: (update: unknown) => void; turnSignal?: AbortSignal
@@ -28,7 +28,9 @@ type AcpProcess = { child: ChildProcessWithoutNullStreams; connection: ClientCon
   /** Provider instance whose turn opened the session. */
   instanceId?: string
   /** Launch-settings generation the process was started with; an older one is not reused. */
-  generation: number }
+  generation: number
+  /** Sign-in generation at launch; a process from before the latest sign-in cannot sign the profile out. */
+  signInGeneration: number }
 /** `instanceId` is absent on sessions saved before provider instances existed (the default instance). */
 type SavedAcpSession = { sessionId: string; cwd: string; historyKey?: string; instanceId?: string }
 type ProfileSettings = {
@@ -132,8 +134,12 @@ export class AntigravityProviderService {
   private launchGeneration = 0
   /** Processes running a turn right now. */
   private readonly turning = new Set<AcpProcess>()
-  /** Aborts the install in progress; at most one runs at a time. */
+  /** Aborts this service's own install when it stops. The installation allows one install at a time. */
   private installing?: AbortController
+  /** Bumped when a sign-in succeeds, so an older process's late sign-in request is ignored. */
+  private signInGeneration = 0
+  /** Clients are told through these hooks, set by the profile services. */
+  readonly hooks: { changed?: () => void; installProgress?: (message: string) => void } = {}
 
   constructor(private readonly profileHome: string, private readonly installationHome: string, private readonly questions: UserQuestionService,
     private readonly versions: CliVersionCache = sharedCliVersions) {
@@ -214,7 +220,7 @@ export class AntigravityProviderService {
     const args = [...(process.platform === 'linux' ? ['--uid='] : []), ...storedCliArgs(this.settings)]
     const child = spawn(binary, args, { env: withUserEnv(env, storedCliEnv(this.settings)), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     const app = client({ name: 'Mousse' })
-    const active: AcpProcess = { child, connection: undefined!, generation: this.launchGeneration }
+    const active: AcpProcess = { child, connection: undefined!, generation: this.launchGeneration, signInGeneration: this.signInGeneration }
     app.onRequest(methods.client.session.requestPermission, async ({ params: request }) => {
       if (active.turnSignal?.aborted || active.connection.signal.aborted || !active.threadId || !request.options.length) return { outcome: { outcome: 'cancelled' } }
       const answers = await this.questions.requestAnswers([{
@@ -253,7 +259,7 @@ export class AntigravityProviderService {
       if (onAuthUrl) onAuthUrl(url)
       else {
         // The agent wants Google sign-in outside a login: the saved sign-in is gone or was never valid.
-        this.markSignedOut()
+        if (active.signInGeneration === this.signInGeneration) this.markSignedOut()
         active.connection.close(new Error(SIGN_IN_REQUIRED_MESSAGE))
       }
     }
@@ -374,6 +380,7 @@ export class AntigravityProviderService {
       session.abort.signal.throwIfAborted()
       const models = modelOptions(newSession)
       if (!models.length) throw new Error('Google agent did not confirm account model access')
+      this.signInGeneration += 1
       this.settings = { ...this.settings, signedIn: true, models }
       this.save()
       return { success: true, sessionId: session.sessionId }
@@ -589,15 +596,19 @@ export class AntigravityProviderService {
           await active.connection.agent.request(methods.agent.logout, {})
         } finally { this.close(active) }
       }
+    } catch {
+      // A revoked or expired Google session makes the agent refuse (or ask for sign-in again); the local reset below is what counts.
     } finally {
       this.settings.signedIn = false
       this.settings.models = []
       this.settings.sessions = {}
       this.save()
+      this.notifyChanged()
     }
   }
   /** The executable path, launch args and environment set in Settings → Providers. */
   async cliConfig(): Promise<CliProviderConfig> {
+    const install = antigravityInstallState(this.installationHome)
     const resolvedBinaryPath = this.binary()
     // The pinned install is verified by hash, so its version is known without starting it.
     const version = resolvedBinaryPath && resolvedBinaryPath === installedAntigravityBinary(this.installationHome)
@@ -609,7 +620,10 @@ export class AntigravityProviderService {
       ...(resolvedBinaryPath ? { resolvedBinaryPath } : {}),
       ...(version ? { version } : {}),
       args: storedCliArgs(this.settings),
-      env: storedCliEnv(this.settings)
+      env: storedCliEnv(this.settings),
+      // Independent of whether the instance is enabled, which `listConfigured` is not.
+      signedIn: this.configured(),
+      ...(install.installing ? { installing: true, ...(install.progress ? { installProgress: install.progress } : {}) } : {})
     }
   }
 
@@ -641,6 +655,11 @@ export class AntigravityProviderService {
     this.settings.signedIn = false
     this.settings.models = []
     this.save()
+    this.notifyChanged()
+  }
+
+  private notifyChanged(): void {
+    try { this.hooks.changed?.() } catch { /* a listener must not break provider work */ }
   }
 
   /**
@@ -649,28 +668,34 @@ export class AntigravityProviderService {
    */
   async install(onProgress?: (message: string) => void): Promise<CliProviderConfig> {
     if (this.stopped) throw new Error('Antigravity provider is stopped')
-    if (this.installing) throw new Error('Antigravity is already being installed')
     const abort = new AbortController()
     this.installing = abort
     try {
-      await installAntigravity(this.installationHome, abort.signal, onProgress)
+      const running = installAntigravity(this.installationHome, abort.signal, (message) => {
+        onProgress?.(message)
+        try { this.hooks.installProgress?.(message) } catch { /* progress is best effort */ }
+      })
+      // The installation now reports installing; clients read it from `cliConfig`.
+      this.notifyChanged()
+      await running
+      // A cancel that lands after the download leaves the settings alone.
+      abort.signal.throwIfAborted()
       delete this.settings.binaryPath
       this.save()
       this.relaunchAfterSettingsChange()
       return await this.cliConfig()
     } catch (error) {
-      if (abort.signal.aborted) throw new Error('Antigravity install cancelled')
+      if (abort.signal.aborted || (error instanceof Error && error.name === 'AbortError')) throw new Error('Antigravity install cancelled')
       throw error
     } finally {
-      this.installing = undefined
+      if (this.installing === abort) this.installing = undefined
+      this.notifyChanged()
     }
   }
 
-  /** Stops a running install; false when none is running. */
+  /** Stops the install running in this installation; false when none is running. */
   cancelInstall(): boolean {
-    if (!this.installing) return false
-    this.installing.abort()
-    return true
+    return cancelAntigravityInstall(this.installationHome)
   }
 
   closeAll(): void { for (const active of this.processes) this.close(active); this.sessions.clear() }

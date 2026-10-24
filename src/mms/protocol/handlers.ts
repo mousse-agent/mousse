@@ -1859,14 +1859,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       return { config, providers }
     }
     case 'providers.installAntigravity': {
-      // Streams progress as `providers.install-event` until the verified agent is in place.
+      // Streams `providers.install-event` until the verified agent is in place.
       // It never starts a sign-in.
-      const config = await ctx.mms.antigravity.install((message) => {
-        ctx.emitEvent?.('providers.install-event', { event: { instanceId: 'antigravity', type: 'progress', message } })
-      })
-      const providers = ctx.mms.providerInstances.configuredProviders()
-      ctx.emitEvent?.('providers.changed', { providers })
-      return { config, providers }
+      // Progress and the start and end of the install reach clients from the service itself,
+      // so a page that closed or a request that timed out still sees them.
+      const config = await ctx.mms.antigravity.install()
+      return { config, providers: ctx.mms.providerInstances.configuredProviders() }
     }
     case 'providers.cancelAntigravityInstall':
       return { cancelled: ctx.mms.antigravity.cancelInstall() }

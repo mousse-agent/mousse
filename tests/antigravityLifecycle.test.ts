@@ -141,6 +141,8 @@ describe('Antigravity turn lifecycle', () => {
     expect(await service.login(session, input.cwd)).toEqual({ success: true, sessionId: 'setup' })
     expect(processes[0].connection.agent.request.mock.calls.map(([method]) => method)).toEqual([methods.agent.initialize, methods.agent.authenticate, methods.agent.session.new])
     expect(processes[0].connection.agent.request).toHaveBeenCalledWith(methods.agent.authenticate, { methodId: 'oauth-personal' })
+    // A process that started before this sign-in can no longer sign the profile out.
+    expect((service as unknown as { signInGeneration: number }).signInGeneration).toBe(1)
     // Only the Google redirect-URL fallback may be offered; never a setup choice or a path prompt.
     expect((events as Array<{ type: string }>).map((event) => event.type).filter((type) => type !== 'manual_code')).toEqual([])
   })

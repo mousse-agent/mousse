@@ -2111,9 +2111,17 @@ export function registerGuiIpc(
   })
   // Progress reaches the renderer as `providers:install:event` through the protocol event bridge.
   registerHandler('providers:installAntigravity', async () => {
-    const res = await guiMms.request<{ config: unknown; providers: unknown[] }>('providers.installAntigravity', {})
-    broadcast('providers:changed', res.providers)
-    return res.config
+    try {
+      const res = await guiMms.request<{ config: unknown; providers: unknown[] }>('providers.installAntigravity', {})
+      broadcast('providers:changed', res.providers)
+      return res.config
+    } catch (error) {
+      // The daemon keeps downloading after this request gives up; stop it so the row never shows a ghost install.
+      if (error instanceof Error && error.message.startsWith('Request timeout')) {
+        await guiMms.request('providers.cancelAntigravityInstall', {}).catch(() => undefined)
+      }
+      throw error
+    }
   })
   registerHandler('providers:cancelAntigravityInstall', async () => {
     const res = await guiMms.request<{ cancelled: boolean }>('providers.cancelAntigravityInstall', {})
