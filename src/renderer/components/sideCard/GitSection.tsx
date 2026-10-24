@@ -33,16 +33,19 @@ import {
   branchLabel,
   branchSearchAria,
   canInitRepository,
+  canPush,
   changedFileCount,
   changesSummary,
+  chooseAmend,
   clearAmendPrefill,
   commitButtonLabels,
   commitFormFor,
   commitHint,
   commitMenuState,
-  commitScopeKey,
+  commitScope,
   diffStatLabel,
   emptyCommitForm,
+  forceAmend,
   formatCommitLine,
   gitActionLock,
   gitCollapsedLabel,
@@ -51,6 +54,7 @@ import {
   pullRequestRow,
   pushButtonModel,
   pushFailedMessage,
+  releaseForcedAmend,
   untrackedFileCount,
   type CommitDraft,
   type CommitForm,
@@ -256,6 +260,8 @@ interface CommitButtonProps {
   branch: string | null
   fileCount: number
   commits: GitCommit[]
+  /** The branch has somewhere to push to, so the commit can go on to push. */
+  pushable: boolean
   /** Another Git action is running, so nothing here may start. */
   lock: GitActionLock
   /** Claims the section's one running action; false when another already runs. */
@@ -270,27 +276,31 @@ interface CommitWork {
   phase: 'committing' | 'pushing'
 }
 
-function CommitButton({ path, projectId, branch, fileCount, commits, lock, onBegin, onEnd, onActionError }: CommitButtonProps) {
+function CommitButton({ path, projectId, branch, fileCount, commits, pushable, lock, onBegin, onEnd, onActionError }: CommitButtonProps) {
   const [open, setOpen] = useState(false)
-  const scope = commitScopeKey(branch, commits)
+  const { branch: scopeBranch, head } = commitScope(branch, commits)
+  const scope = useMemo(() => ({ branch: scopeBranch, head }), [scopeBranch, head])
   const [storedForm, setForm] = useState<CommitForm>(() => emptyCommitForm(scope))
   const [work, setWork] = useState<CommitWork | null>(null)
   const [error, setError] = useState<string | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const messageRef = useRef<HTMLTextAreaElement>(null)
   const close = useCallback(() => setOpen(false), [])
-  // Text and the amend choice belong to one branch at one HEAD; on another they are gone.
-  const { draft, amendChecked } = commitFormFor(storedForm, scope)
+  // Text belongs to one branch, the amend choice to one HEAD on it. The stored form is replaced as soon
+  // as that changes, open or not, so an earlier draft cannot come back with the branch.
+  const form = commitFormFor(storedForm, scope)
+  if (form !== storedForm) setForm(form)
+  const { draft, amendChecked } = form
+  const updateForm = useCallback((change: (form: CommitForm) => CommitForm) => {
+    setForm((previous) => change(commitFormFor(previous, scope)))
+  }, [scope])
   const setDraft = useCallback((change: (draft: CommitDraft) => CommitDraft) => {
-    setForm((previous) => {
-      const form = commitFormFor(previous, scope)
-      const next = change(form.draft)
-      return next === form.draft && form === previous ? previous : { ...form, draft: next }
+    updateForm((value) => {
+      const next = change(value.draft)
+      return next === value.draft ? value : { ...value, draft: next }
     })
-  }, [scope])
-  const setAmendChecked = useCallback((checked: boolean) => {
-    setForm((previous) => ({ ...commitFormFor(previous, scope), amendChecked: checked }))
-  }, [scope])
+  }, [updateForm])
+  const setAmendChecked = useCallback((checked: boolean) => updateForm((value) => chooseAmend(value, checked)), [updateForm])
   const menu = commitMenuState(commits, fileCount, amendChecked)
   const { amend } = menu
   const trimmed = draft.message.trim()
@@ -307,8 +317,13 @@ function CommitButton({ path, projectId, branch, fileCount, commits, lock, onBeg
 
   // Amend is the only possible commit: keep it on, so files changing under the open popover do not drop it.
   useEffect(() => {
-    if (open && menu.forced) setAmendChecked(true)
-  }, [open, menu.forced, setAmendChecked])
+    if (open && menu.forced) updateForm(forceAmend)
+  }, [open, menu.forced, updateForm])
+
+  // A forced amend is not the user's choice, so it does not outlive the popover.
+  useEffect(() => {
+    if (!open) updateForm(releaseForcedAmend)
+  }, [open, updateForm])
 
   // The prefill is the message of the HEAD it was read for; a different HEAD cancels the read.
   useEffect(() => {
@@ -419,14 +434,16 @@ function CommitButton({ path, projectId, branch, fileCount, commits, lock, onBeg
         <div className="side-card-git-popover-footer">
           <span className="side-card-git-hint">{commitHint(amend, menu.shortHash, fileCount)}</span>
           <div className="side-card-git-popover-actions">
-            <button
-              type="button"
-              className="side-card-git-submit side-card-git-submit-quiet"
-              disabled={!canSubmit}
-              onClick={() => void submit(true)}
-            >
-              {label(true, labels.commitAndPush)}
-            </button>
+            {pushable && (
+              <button
+                type="button"
+                className="side-card-git-submit side-card-git-submit-quiet"
+                disabled={!canSubmit}
+                onClick={() => void submit(true)}
+              >
+                {label(true, labels.commitAndPush)}
+              </button>
+            )}
             <button
               type="button"
               className="side-card-git-submit"
@@ -623,6 +640,7 @@ export function GitSectionView({ threadId, projectId, path, git, pullRequest = n
           branch={branch}
           fileCount={fileCount}
           commits={git.commits}
+          pushable={canPush(git.status)}
           lock={gitActionLock(running, 'commit')}
           onBegin={() => begin('commit')}
           onEnd={end}

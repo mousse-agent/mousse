@@ -6,19 +6,24 @@ import {
   EMPTY_COMMIT_DRAFT,
   canAmendCommit,
   canInitRepository,
+  canPush,
+  chooseAmend,
   GIT_BUSY_REASON,
   clearAmendPrefill,
   commitButtonLabels,
   commitFormFor,
   commitHint,
   commitMenuState,
-  commitScopeKey,
+  commitScope,
   emptyCommitForm,
+  forceAmend,
+  gitCollapsedLabel,
   gitActionLock,
   prefillAmendDraft,
   pullRequestRow,
   pushButtonModel,
-  pushFailedMessage
+  pushFailedMessage,
+  releaseForcedAmend
 } from '../src/renderer/components/sideCard/gitSectionLogic'
 import { EMPTY_GIT_ENTRY, type GitStatusView } from '../src/renderer/stores/gitStatusStore'
 import type {
@@ -250,35 +255,74 @@ describe('commit menu state', () => {
 describe('commit form scope', () => {
   const head = commit()
   const other = commit({ hash: 'ffffffffffffffffffffffffffffffffffffffff', shortHash: 'fffffff' })
+  const scopeA = commitScope('a', [head])
+  const typed = (scope = scopeA) => ({ ...emptyCommitForm(scope), draft: { message: 'Only for a', prefilled: null } })
 
   it('differs by branch and by HEAD commit', () => {
-    const key = commitScopeKey('feature/login', [head])
-    expect(commitScopeKey('feature/login', [head, other])).toBe(key)
-    expect(commitScopeKey('main', [head])).not.toBe(key)
-    expect(commitScopeKey('feature/login', [other, head])).not.toBe(key)
-    expect(commitScopeKey(null, [])).toBe(commitScopeKey(null, []))
+    const key = commitScope('feature/login', [head])
+    expect(commitScope('feature/login', [head, other])).toEqual(key)
+    expect(commitScope('main', [head])).not.toEqual(key)
+    expect(commitScope('feature/login', [other, head])).not.toEqual(key)
+    expect(commitScope(null, [])).toEqual(commitScope(null, []))
   })
 
   it('keeps the text and amend choice while the scope is unchanged', () => {
-    const scope = commitScopeKey('feature/login', [head])
-    const form = { scope, draft: { message: 'Typed here', prefilled: null }, amendChecked: true }
-    expect(commitFormFor(form, scope)).toBe(form)
+    const form = { ...typed(), amendChecked: true }
+    expect(commitFormFor(form, scopeA)).toBe(form)
   })
 
   it('drops text typed on one branch when the branch changes', () => {
-    const form = { ...emptyCommitForm(commitScopeKey('a', [head])), draft: { message: 'Only for a', prefilled: null }, amendChecked: true }
-    const onB = commitFormFor(form, commitScopeKey('b', [head]))
+    const onB = commitFormFor({ ...typed(), amendChecked: true }, commitScope('b', [head]))
     expect(onB.draft.message).toBe('')
     expect(onB.amendChecked).toBe(false)
   })
 
-  it('drops an unedited prefill and an edited message when HEAD moves', () => {
-    const scope = commitScopeKey('a', [head])
-    const prefilled = { ...emptyCommitForm(scope), draft: { message: 'Fix login', prefilled: 'Fix login' }, amendChecked: true }
-    const edited = { ...emptyCommitForm(scope), draft: { message: 'Fix login, reworded', prefilled: 'Fix login' }, amendChecked: true }
-    const moved = commitScopeKey('a', [other])
+  it('keeps typed text across a new HEAD on the same branch, but not the amend choice', () => {
+    const moved = commitFormFor({ ...typed(), amendChecked: true, amendForced: true }, commitScope('a', [other]))
+    expect(moved).toEqual({ ...emptyCommitForm(commitScope('a', [other])), draft: { message: 'Only for a', prefilled: null } })
+  })
+
+  it('keeps an edited prefill as plain text across a new HEAD, and drops an unedited one', () => {
+    const edited = { ...emptyCommitForm(scopeA), draft: { message: 'Fix login, reworded', prefilled: 'Fix login' }, amendChecked: true }
+    const prefilled = { ...emptyCommitForm(scopeA), draft: { message: 'Fix login', prefilled: 'Fix login' }, amendChecked: true }
+    const moved = commitScope('a', [other])
+    expect(commitFormFor(edited, moved).draft).toEqual({ message: 'Fix login, reworded', prefilled: null })
     expect(commitFormFor(prefilled, moved)).toEqual(emptyCommitForm(moved))
-    expect(commitFormFor(edited, moved)).toEqual(emptyCommitForm(moved))
+  })
+
+  it('does not bring a draft back after a round trip through another branch', () => {
+    // The popover stores each result, closed or not, which is what makes A -> B -> A start empty.
+    let stored = typed()
+    stored = commitFormFor(stored, commitScope('b', [head]))
+    stored = commitFormFor(stored, scopeA)
+    expect(stored).toEqual(emptyCommitForm(scopeA))
+  })
+
+  it('turns a forced amend back off on close, and keeps one the user chose', () => {
+    const forced = forceAmend(emptyCommitForm(scopeA))
+    expect(forced).toMatchObject({ amendChecked: true, amendForced: true })
+    expect(releaseForcedAmend(forced)).toMatchObject({ amendChecked: false, amendForced: false })
+
+    const chosen = chooseAmend(emptyCommitForm(scopeA), true)
+    expect(releaseForcedAmend(chosen)).toBe(chosen)
+    // Amend the user already switched on is not taken over by the forced state.
+    expect(forceAmend(chosen)).toBe(chosen)
+    expect(chooseAmend(forced, true).amendForced).toBe(false)
+  })
+})
+
+describe('push availability', () => {
+  it('needs a branch and either an upstream or a remote', () => {
+    expect(canPush(status())).toBe(true)
+    expect(canPush(status({ tracking: 'none', upstream: null }))).toBe(true)
+    expect(canPush(status({ tracking: 'none', upstream: null, hasRemote: true }))).toBe(true)
+    expect(canPush(status({ tracking: 'none', upstream: null, hasRemote: false }))).toBe(false)
+  })
+
+  it('is false without a branch or a repository', () => {
+    expect(canPush(status({ branch: null, tracking: 'detached' }))).toBe(false)
+    expect(canPush(status({ isRepo: false, branch: null }))).toBe(false)
+    expect(canPush(null)).toBe(false)
   })
 })
 
@@ -296,6 +340,13 @@ describe('initialize repository', () => {
     expect(canInitRepository({ ...input, hasPath: false })).toBe(false)
     expect(canInitRepository({ ...input, loaded: false })).toBe(false)
     expect(canInitRepository({ ...input, status: null })).toBe(false)
+  })
+
+  it('is not offered for a folder that does not exist, which reads as not found', () => {
+    const missing = { ...input, status: status({ isRepo: false, branch: null, missing: true }) }
+    expect(canInitRepository(missing)).toBe(false)
+    expect(gitCollapsedLabel(missing)).toBe('Git: folder not found')
+    expect(gitCollapsedLabel(input)).toBe('Git: not a repository')
   })
 })
 

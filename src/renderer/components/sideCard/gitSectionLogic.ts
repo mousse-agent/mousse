@@ -137,16 +137,25 @@ export function gitCollapsedLabel(input: GitCollapseInput): string | null {
   if (!input.hasPath) return 'Git: no project folder'
   if (!input.loaded) return 'Git: checking…'
   if (!input.status) return 'Git: unavailable'
+  if (input.status.missing === true) return 'Git: folder not found'
   if (!input.status.isRepo) return 'Git: not a repository'
   return null
 }
 
 /**
- * Whether the section offers "Initialize repository": the folder is known and loaded,
+ * Whether the section offers "Initialize repository": the folder exists and is loaded,
  * and Git says it is not a repository. Never while the folder or its status is unknown.
  */
 export function canInitRepository(input: GitCollapseInput): boolean {
-  return input.hasProject && !input.pathPending && input.hasPath && input.loaded && input.status !== null && !input.status.isRepo
+  return (
+    input.hasProject &&
+    !input.pathPending &&
+    input.hasPath &&
+    input.loaded &&
+    input.status !== null &&
+    !input.status.isRepo &&
+    input.status.missing !== true
+  )
 }
 
 /**
@@ -240,14 +249,20 @@ export interface PushButtonModel {
   title: string
 }
 
+/** Whether the branch has somewhere to push to: an upstream, or a remote to publish to. */
+export function canPush(status: GitStatusSnapshot | null): boolean {
+  if (!status?.isRepo || !status.branch) return false
+  return status.tracking === 'tracked' || status.hasRemote !== false
+}
+
 /** The Push or Publish button, or null when there is nothing to push or nowhere to push it. */
 export function pushButtonModel(status: GitStatusSnapshot | null, commitCount: number): PushButtonModel | null {
-  if (!status?.isRepo || !status.branch) return null
+  if (!status || !canPush(status)) return null
   if (status.tracking === 'tracked' && status.ahead > 0) {
     const noun = status.ahead === 1 ? '1 commit' : `${status.ahead} commits`
     return { label: 'Push', count: status.ahead, title: status.upstream ? `Push ${noun} to ${status.upstream}` : `Push ${noun}` }
   }
-  if (status.tracking === 'none' && commitCount > 0 && status.hasRemote !== false) {
+  if (status.tracking === 'none' && commitCount > 0) {
     return { label: 'Publish', count: null, title: 'Push this branch and track it on the remote' }
   }
   return null
@@ -326,28 +341,52 @@ export function clearAmendPrefill(draft: CommitDraft): CommitDraft {
   return draft.message === draft.prefilled ? EMPTY_COMMIT_DRAFT : { message: draft.message, prefilled: null }
 }
 
-/** What a commit message and its amend choice belong to: one branch at one HEAD commit. */
-export function commitScopeKey(branch: string | null, commits: readonly GitCommit[]): string {
-  return `${branch ?? ''}\u0000${commits[0]?.hash ?? ''}`
+/** What a commit message and its amend choice belong to: a branch and the HEAD commit on it. */
+export interface CommitScope {
+  branch: string
+  head: string
 }
 
-/** The commit popover's inputs, tagged with the scope they were entered for. */
-export interface CommitForm {
-  scope: string
+export function commitScope(branch: string | null, commits: readonly GitCommit[]): CommitScope {
+  return { branch: branch ?? '', head: commits[0]?.hash ?? '' }
+}
+
+/** The commit popover's inputs, tagged with the branch and HEAD they were entered for. */
+export interface CommitForm extends CommitScope {
   draft: CommitDraft
   amendChecked: boolean
+  /** Amend was switched on because it was the only possible commit, not by the user. */
+  amendForced: boolean
 }
 
-export function emptyCommitForm(scope: string): CommitForm {
-  return { scope, draft: EMPTY_COMMIT_DRAFT, amendChecked: false }
+export function emptyCommitForm(scope: CommitScope): CommitForm {
+  return { ...scope, draft: EMPTY_COMMIT_DRAFT, amendChecked: false, amendForced: false }
 }
 
 /**
- * The form as it applies to a scope. Text and the amend choice made on another branch
- * or at another HEAD are gone, so they can never be submitted for this one.
+ * The form as it applies to a scope. Another branch drops everything, so text typed there
+ * can never be submitted here. A new HEAD on the same branch drops the amend choice and an
+ * unedited prefill, which belonged to the old HEAD, but keeps typed text.
  */
-export function commitFormFor(form: CommitForm, scope: string): CommitForm {
-  return form.scope === scope ? form : emptyCommitForm(scope)
+export function commitFormFor(form: CommitForm, scope: CommitScope): CommitForm {
+  if (form.branch !== scope.branch) return emptyCommitForm(scope)
+  if (form.head === scope.head) return form
+  return { ...emptyCommitForm(scope), draft: clearAmendPrefill(form.draft) }
+}
+
+/** The popover closed: an amend that was only forced goes back off, one the user chose stays. */
+export function releaseForcedAmend(form: CommitForm): CommitForm {
+  return form.amendForced ? { ...form, amendChecked: false, amendForced: false } : form
+}
+
+/** Amend is the only possible commit, so switch it on, remembering the user did not choose it. */
+export function forceAmend(form: CommitForm): CommitForm {
+  return form.amendChecked ? form : { ...form, amendChecked: true, amendForced: true }
+}
+
+/** The user's own amend choice. */
+export function chooseAmend(form: CommitForm, checked: boolean): CommitForm {
+  return { ...form, amendChecked: checked, amendForced: false }
 }
 
 /** Why mutating Git controls are disabled while one action runs. */

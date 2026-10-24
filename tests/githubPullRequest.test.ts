@@ -4,6 +4,7 @@ import {
   createGhFallbackRunner,
   GitHubService,
   parsePullRequestJson,
+  parsePullRequestList,
   summarizeCheckRollup,
   type ExecutableRunner
 } from '../src/mms/git/GitHubService'
@@ -77,7 +78,7 @@ describe('GitHubService.getPullRequest', () => {
         return ok(`${overrides.branch ?? 'feature'}\n`)
       }
       if (args[0] === '--version') return (overrides.auth ?? (async () => ok()))()
-      if (args[0] === 'pr') return (overrides.pr ?? (async () => ok(prJson)))()
+      if (args[0] === 'pr') return (overrides.pr ?? (async () => ok(`[${prJson}]`)))()
       if (args[0] === 'repo') return ok(`${overrides.defaultBranch ?? 'main'}\n`)
       throw new Error(`unexpected ${args.join(' ')}`)
     })
@@ -86,14 +87,21 @@ describe('GitHubService.getPullRequest', () => {
     const run = runner()
     const result = await new GitHubService(run).getPullRequest('/repo')
     expect(result).toMatchObject({ state: 'found', pullRequest: { number: 3, state: 'open', isDraft: true, checks: 'none' } })
-    expect(run).toHaveBeenCalledWith('gh', ['pr', 'view', 'feature', '--json', 'number,title,url,state,isDraft,statusCheckRollup'], { cwd: '/repo' })
+    expect(run).toHaveBeenCalledWith('gh', ['pr', 'list', '--head', 'feature', '--state', 'all', '--limit', '1', '--json', 'number,title,url,state,isDraft,statusCheckRollup'], { cwd: '/repo' })
   })
 
   it('looks up the requested branch, not whatever is checked out when the lookup runs', async () => {
     const run = runner({ branch: 'other' })
     await new GitHubService(run).getPullRequest('/repo', 'feature-a')
     expect(run.mock.calls.some((call) => call[0] === 'git')).toBe(false)
-    expect(run).toHaveBeenCalledWith('gh', ['pr', 'view', 'feature-a', '--json', 'number,title,url,state,isDraft,statusCheckRollup'], { cwd: '/repo' })
+    expect(run).toHaveBeenCalledWith('gh', ['pr', 'list', '--head', 'feature-a', '--state', 'all', '--limit', '1', '--json', 'number,title,url,state,isDraft,statusCheckRollup'], { cwd: '/repo' })
+  })
+
+  it('treats an all-digit branch as a branch, not a pull request number', async () => {
+    const run = runner()
+    await new GitHubService(run).getPullRequest('/repo', '1234')
+    const call = run.mock.calls.find((entry) => entry[1][0] === 'pr')
+    expect(call?.[1].slice(0, 4)).toEqual(['pr', 'list', '--head', '1234'])
   })
 
   it('never passes a branch that could read as a flag', async () => {
@@ -103,13 +111,13 @@ describe('GitHubService.getPullRequest', () => {
   })
 
   it('reports no pull request and whether the branch is the default branch', async () => {
-    const pr = async () => { throw failure('no pull requests found for branch "main"') }
+    const pr = async () => ok('[]')
     expect(await new GitHubService(runner({ pr, branch: 'main' })).getPullRequest('/repo')).toEqual({ state: 'none', isDefaultBranch: true })
     expect(await new GitHubService(runner({ pr, branch: 'feature' })).getPullRequest('/repo')).toEqual({ state: 'none', isDefaultBranch: false })
   })
 
   it('caches the default branch per folder', async () => {
-    const run = runner({ pr: async () => { throw failure('no pull requests found') } })
+    const run = runner({ pr: async () => ok('[]') })
     const service = new GitHubService(run)
     await service.getPullRequest('/repo'); await service.getPullRequest('/repo')
     expect(run.mock.calls.filter((call) => call[1][0] === 'repo')).toHaveLength(1)
@@ -120,7 +128,7 @@ describe('GitHubService.getPullRequest', () => {
   it('reports an unknown default branch when the lookup fails', async () => {
     const run = vi.fn<ExecutableRunner>(async (executable, args) => {
       if (executable === 'git') return ok('main\n')
-      if (args[0] === 'pr') throw failure('no pull requests found')
+      if (args[0] === 'pr') return ok('[]')
       if (args[0] === 'repo') throw failure('boom')
       return ok()
     })
@@ -153,7 +161,7 @@ describe('GitHubService.getPullRequest', () => {
     const run = vi.fn<ExecutableRunner>(async (executable, args) => {
       if (args[0] === 'pr' && args[1] === 'create') { await gate; return ok() }
       if (executable === 'git') return ok('feature\n')
-      if (args[0] === 'pr') return ok(prJson)
+      if (args[0] === 'pr') return ok(`[${prJson}]`)
       return ok()
     })
     const service = new GitHubService(run)
@@ -203,5 +211,14 @@ describe('createGhFallbackRunner', () => {
     const base = vi.fn<ExecutableRunner>(async () => { throw failure('not logged in') })
     await expect(createGhFallbackRunner(base, 'darwin')('gh', [])).rejects.toThrow('exit 1')
     expect(base).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('parsePullRequestList', () => {
+  it('returns the newest pull request, empty for none, and null for unreadable output', () => {
+    expect(parsePullRequestList('[]')).toBe('empty')
+    expect(parsePullRequestList('[{"number":7,"title":"T","url":"https://github.com/a/b/pull/7","state":"MERGED","isDraft":false,"statusCheckRollup":[]}]')).toMatchObject({ number: 7, state: 'merged' })
+    expect(parsePullRequestList('{"number":7}')).toBeNull()
+    expect(parsePullRequestList('nope')).toBeNull()
   })
 })

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -190,5 +190,40 @@ describe('GitService init', () => {
     expect((await service.getStatus(folder)).isRepo).toBe(true)
     await expect(service.init(folder)).rejects.toMatchObject({ code: 'git_already_repo' })
     await expect(service.init(join(root, 'missing'))).rejects.toMatchObject({ code: 'git_init_no_folder' })
+  })
+})
+
+describe('GitService lease', () => {
+  it('waits for a lease held by another live process and takes over a stale one', async () => {
+    const { cwd } = fixture(); commitFile(cwd, 'a.txt', 'first')
+    const lease = join(cwd, '.git', 'mousse-git.lease')
+    // A live holder (this test process) blocks the commit until the lease is released.
+    writeFileSync(lease, `${process.pid} ${Date.now()}\n`)
+    writeFileSync(join(cwd, 'b.txt'), 'b\n')
+    let done = false
+    const committing = new GitService().commit(cwd, 'second').then(() => { done = true })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(done).toBe(false)
+    rmSync(lease)
+    await committing
+    expect(git(cwd, 'log', '-1', '--format=%s')).toBe('second')
+    expect(existsSync(lease)).toBe(false)
+    // A lease left by a process that is gone does not block.
+    writeFileSync(lease, `999999 ${Date.now()}\n`)
+    writeFileSync(join(cwd, 'c.txt'), 'c\n')
+    await new GitService().commit(cwd, 'third')
+    expect(git(cwd, 'log', '-1', '--format=%s')).toBe('third')
+    expect(existsSync(lease)).toBe(false)
+  })
+
+  it('covers two service instances, as the desktop app and the background service run', async () => {
+    const { cwd, origin } = fixture(); git(cwd, 'remote', 'add', 'origin', origin)
+    commitFile(cwd, 'a.txt', 'first'); git(cwd, 'push', '-u', 'origin', 'main')
+    const results = await Promise.allSettled(Array.from({ length: 4 }, (_, index) => {
+      writeFileSync(join(cwd, `f${index}.txt`), `${index}\n`)
+      return new GitService().commit(cwd, `commit ${index}`)
+    }))
+    expect(results.filter((result) => result.status === 'rejected' && /index\.lock/.test(String(result.reason)))).toEqual([])
+    expect(git(cwd, 'status', '--porcelain')).toBe('')
   })
 })

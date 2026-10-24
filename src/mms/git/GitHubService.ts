@@ -125,7 +125,22 @@ export function summarizeCheckRollup(rollup: unknown): PullRequestCheckSummary {
   return { checks, checkCounts: counts }
 }
 
-/** Parses `gh pr view --json number,title,url,state,isDraft,statusCheckRollup` output. */
+const PULL_REQUEST_FIELDS = 'number,title,url,state,isDraft,statusCheckRollup'
+
+/** Parses `gh pr list --json …` output: the newest pull request, 'empty' for none, or null when unreadable. */
+export function parsePullRequestList(stdout: string): GitPullRequestInfo | 'empty' | null {
+  let data: unknown
+  try {
+    data = JSON.parse(stdout)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(data)) return null
+  if (data.length === 0) return 'empty'
+  return parsePullRequest(data[0])
+}
+
+/** Parses one pull request from gh's JSON (`number,title,url,state,isDraft,statusCheckRollup`). */
 export function parsePullRequestJson(stdout: string): GitPullRequestInfo | null {
   let data: unknown
   try {
@@ -133,6 +148,10 @@ export function parsePullRequestJson(stdout: string): GitPullRequestInfo | null 
   } catch {
     return null
   }
+  return parsePullRequest(data)
+}
+
+function parsePullRequest(data: unknown): GitPullRequestInfo | null {
   if (!data || typeof data !== 'object') return null
   const value = data as Record<string, unknown>
   const state = upper(value.state).toLowerCase()
@@ -231,13 +250,15 @@ export class GitHubService {
     if (!probe.ok) return { state: 'unavailable', reason: probe.reason, message: probe.message }
 
     try {
+      // `pr list --head` matches branch names only; `pr view <branch>` reads an all-digit branch as a PR number.
       const { stdout } = await this.runExecutable(
         'gh',
-        ['pr', 'view', branch, '--json', 'number,title,url,state,isDraft,statusCheckRollup'],
+        ['pr', 'list', '--head', branch, '--state', 'all', '--limit', '1', '--json', PULL_REQUEST_FIELDS],
         { cwd }
       )
-      const pullRequest = parsePullRequestJson(stdout)
-      if (pullRequest) return { state: 'found', pullRequest }
+      const listed = parsePullRequestList(stdout)
+      if (listed === 'empty') return { state: 'none', isDefaultBranch: await this.isDefaultBranch(cwd, branch) }
+      if (listed) return { state: 'found', pullRequest: listed }
       return { state: 'unavailable', reason: 'error', message: 'GitHub CLI returned an unexpected pull request response.' }
     } catch (error) {
       const message = processMessage(error)

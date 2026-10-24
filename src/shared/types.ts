@@ -925,6 +925,8 @@ export interface GitStatusSnapshot {
   changes: GitFileChange[]
   /** The repository has at least one remote to push to. */
   hasRemote?: boolean
+  /** The folder itself does not exist, for example a removed worktree. */
+  missing?: boolean
 }
 
 export interface GitCommit {

@@ -1,7 +1,7 @@
 import { createErrorProvider } from '../../shared/errors'
 import { existsSync } from 'node:fs'
-import { stat } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { open, readFile, rm, stat } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import simpleGit, { type SimpleGit, type StatusResult } from 'simple-git'
 import { GitHubService } from './GitHubService'
 import type {
@@ -21,8 +21,35 @@ const gitErrors = createErrorProvider({
   git_already_repo: { category: 'conflict', retryable: false, message: 'This folder is already a Git repository.' },
   git_no_remote: { category: 'invalid', retryable: false, message: 'Add a remote before pushing.' },
   git_amend_no_commit: { category: 'invalid', retryable: false, message: 'There is no commit to amend.' },
-  git_amend_pushed: { category: 'conflict', retryable: false, message: 'The latest commit is already pushed, so it cannot be amended.' }
+  git_amend_pushed: { category: 'conflict', retryable: false, message: 'The latest commit is already pushed, so it cannot be amended.' },
+  git_busy: { category: 'unavailable', retryable: true, message: 'Another Git action on this folder is still running. Try again shortly.' }
 })
+
+/** Lease file in a repository's Git folder, shared by every process that runs this service. */
+const LEASE_FILE = 'mousse-git.lease'
+/** A lease this old is left over from a crash, whatever its owner says. */
+const LEASE_STALE_MS = 10 * 60_000
+const LEASE_WAIT_MS = 2 * 60_000
+const LEASE_RETRY_MS = 150
+/** A push that prints nothing for this long is waiting on a prompt nobody can answer. */
+const PUSH_SILENCE_MS = 2 * 60_000
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+async function isLeaseStale(path: string, now: number): Promise<boolean> {
+  const text = await readFile(path, 'utf8').catch(() => null)
+  if (text === null) return true
+  const [pid, startedAt] = text.trim().split(/\s+/).map(Number)
+  if (!Number.isFinite(startedAt) || now - startedAt > LEASE_STALE_MS) return true
+  return Number.isInteger(pid) && pid > 0 && !isProcessAlive(pid)
+}
 
 export interface PushRemoteInputs {
   pushRemote: string | null
@@ -98,7 +125,7 @@ export class GitService {
   async getStatus(cwd: string): Promise<GitStatusSnapshot> {
     const isRepo = await this.isRepo(cwd)
     if (!isRepo) {
-      return { isRepo: false, branch: null, upstream: null, tracking: 'none', ahead: 0, behind: 0, changes: [] }
+      return { isRepo: false, branch: null, upstream: null, tracking: 'none', ahead: 0, behind: 0, changes: [], ...(existsSync(cwd) ? {} : { missing: true }) }
     }
 
     const git = this.gitFor(cwd)
@@ -235,18 +262,55 @@ export class GitService {
 
   /**
    * Runs the changes this app makes to a folder (checkout, commit, push) one at a
-   * time, so a push cannot land between the amend check and the amend itself.
+   * time, so a push cannot land between the amend check and the amend itself. The
+   * desktop app and the background service each run this service, so the queue
+   * also holds a lease file in the repository's Git folder that both respect.
    */
   private serialized<T>(cwd: string, operation: () => Promise<T>): Promise<T> {
     const key = resolve(cwd)
     const previous = this.mutations.get(key) ?? Promise.resolve()
-    const run = previous.then(operation, operation)
+    const leased = () => this.withLease(cwd, operation)
+    const run = previous.then(leased, leased)
     const settled = run.then(() => undefined, () => undefined)
     this.mutations.set(key, settled)
     void settled.then(() => {
       if (this.mutations.get(key) === settled) this.mutations.delete(key)
     })
     return run
+  }
+
+  private async withLease<T>(cwd: string, operation: () => Promise<T>): Promise<T> {
+    // A folder that is not a repository yet (init) has no Git folder to hold a lease in.
+    const gitDir = existsSync(cwd)
+      ? await this.gitFor(cwd).raw(['rev-parse', '--absolute-git-dir']).then((value) => value.trim() || null).catch(() => null)
+      : null
+    if (!gitDir) return operation()
+    const lease = join(gitDir, LEASE_FILE)
+    const deadline = Date.now() + LEASE_WAIT_MS
+    for (;;) {
+      try {
+        const handle = await open(lease, 'wx')
+        try {
+          await handle.writeFile(`${process.pid} ${Date.now()}\n`)
+        } finally {
+          await handle.close()
+        }
+        break
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        if (await isLeaseStale(lease, Date.now())) {
+          await rm(lease, { force: true })
+          continue
+        }
+        if (Date.now() > deadline) throw gitErrors.create('git_busy')
+        await new Promise((done) => setTimeout(done, LEASE_RETRY_MS))
+      }
+    }
+    try {
+      return await operation()
+    } finally {
+      await rm(lease, { force: true })
+    }
   }
 
   /** Turns a project folder into a Git repository. Never touches an existing one. */
@@ -301,7 +365,8 @@ export class GitService {
   }
 
   private async pushNow(cwd: string): Promise<void> {
-    const git = this.gitFor(cwd)
+    // A push waiting on a prompt nobody can answer would hold the folder's lease; stop it once it goes silent.
+    const git = simpleGit({ baseDir: cwd, timeout: { block: PUSH_SILENCE_MS } })
     const branch = (await git.raw(['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => null))?.trim()
     if (!branch) throw gitErrors.create('git_detached_head')
     const hasUpstream = Boolean(await this.upstream(git))
