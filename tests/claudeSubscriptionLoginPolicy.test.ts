@@ -84,8 +84,8 @@ function fakeQuery(events: unknown[] = []) {
 const exitOne = (stdout: string) =>
   Object.assign(new Error('Claude Code authentication command failed.'), { stdout })
 
-describe('Claude terminal sign-in environment', () => {
-  const source = {
+describe('Claude Code launch environment', () => {
+  const user = {
     PATH: '/usr/bin',
     HOME: '/home/me',
     ANTHROPIC_API_KEY: 'secret',
@@ -96,27 +96,26 @@ describe('Claude terminal sign-in environment', () => {
     CLAUDE_CODE_USE_VERTEX: '1',
     AWS_PROFILE: 'other',
     GOOGLE_APPLICATION_CREDENTIALS: 'other',
-    CLAUDECODE: '1',
-    ELECTRON_RUN_AS_NODE: '1'
+    HTTPS_PROXY: 'http://proxy',
+    CLAUDE_CONFIG_DIR: '/custom/claude'
   }
-  it.each([
-    {
-      name: 'sets no config dir, keeps HOME and still strips API, token, router, cloud and nested-CLI variables',
-      extra: {},
-      expected: { PATH: '/usr/bin', HOME: '/home/me' }
-    },
-    {
-      name: 'preserves an inherited CLAUDE_CONFIG_DIR',
-      extra: { CLAUDE_CONFIG_DIR: '/custom/claude' },
-      expected: { PATH: '/usr/bin', HOME: '/home/me', CLAUDE_CONFIG_DIR: '/custom/claude' }
+  it("keeps the user's configuration and removes only the markers of Mousse's own process", () => {
+    // Mousse running as Electron-as-Node, or started from inside another Claude Code session.
+    const mousseProcess = {
+      ELECTRON_RUN_AS_NODE: '1',
+      CLAUDECODE: '1',
+      CLAUDE_CODE_ENTRYPOINT: 'cli',
+      CLAUDE_CODE_SESSION_ID: 'parent',
+      CLAUDE_CODE_CHILD_SESSION: '1',
+      CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/parent.sock',
+      CLAUDE_PID: '42'
     }
-  ])('$name', ({ extra, expected }) => {
-    expect(claudeSubscriptionEnvironment({ ...source, ...extra })).toEqual(expected)
+    expect(claudeSubscriptionEnvironment({ ...user, ...mousseProcess })).toEqual(user)
   })
-  it('turns run the SDK with the terminal config dir and without an API key', async () => {
-    vi.stubEnv('ANTHROPIC_API_KEY', 'secret')
-    vi.stubEnv('CLAUDE_CONFIG_DIR', '/custom/claude')
-    let captured: Options | undefined
+  it('the sign-in check, model discovery and turns all start Claude Code with that environment', async () => {
+    for (const [key, value] of Object.entries(user)) vi.stubEnv(key, value)
+    vi.stubEnv('ELECTRON_RUN_AS_NODE', '1')
+    const captured: Options[] = []
     const result = {
       type: 'result',
       subtype: 'success',
@@ -125,15 +124,20 @@ describe('Claude terminal sign-in environment', () => {
       session_id: 'vendor-session'
     }
     const { service, home, calls } = profile({
+      settings: { models: [] },
       query: ({ options }) => {
-        captured = options
+        captured.push(options)
         return fakeQuery([result])
       }
     })
+    await service.status()
+    await service.refreshModels(home)
     await service.chat({ threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: () => {} })
-    expect(captured?.env?.CLAUDE_CONFIG_DIR).toBe('/custom/claude')
-    expect(captured?.env).not.toHaveProperty('ANTHROPIC_API_KEY')
-    expect(calls.every((call) => call.env.CLAUDE_CONFIG_DIR === '/custom/claude')).toBe(true)
+    expect(captured.length).toBeGreaterThanOrEqual(2)
+    for (const env of [...calls.map((call) => call.env), ...captured.map((options) => options.env!)]) {
+      expect(env).toMatchObject(user)
+      expect(env).not.toHaveProperty('ELECTRON_RUN_AS_NODE')
+    }
   })
 })
 

@@ -184,7 +184,7 @@ describe('Claude Subscription CLI config', () => {
     await service.refreshModels(home)
     const options = captured.at(-1)!
     expect(options.pathToClaudeCodeExecutable).toBe(other)
-    expect(options.extraArgs).toEqual({ 'add-dir': '/extra', verbose: null, 'strict-mcp-config': null })
+    expect(options.extraArgs).toEqual({ 'add-dir': '/extra', verbose: null })
     // User variables apply after Mousse's own environment, so they win.
     expect(options.env?.HTTPS_PROXY).toBe('http://proxy')
     expect(options.env?.CLAUDE_CONFIG_DIR).toBe('/user/override')

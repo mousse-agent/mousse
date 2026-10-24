@@ -86,7 +86,7 @@ export type ClaudeSubscriptionChatInput = {
   mode?: 'plan' | 'default'
   /** The Mousse MCP server for this run (SPEC §15.2); null attaches no server. */
   mcp?: { url: string; token: string } | null
-  /** Text appended to the (otherwise empty) SDK system prompt. */
+  /** Mousse's own instructions, appended to Claude Code's system prompt. */
   systemPromptAppend?: string
   /** The MCP servers and skills the user enabled in Mousse; absent attaches none. */
   integrations?: ClaudeTurnIntegrations
@@ -126,25 +126,67 @@ const FALLBACK_MODELS: LlmModelOption[] = ['sonnet', 'opus', 'haiku'].map((id) =
   label: `Claude ${id[0].toUpperCase()}${id.slice(1)}`
 }))
 
+/** Variables a running Claude Code session sets for the commands it starts. */
+const CLAUDE_SESSION_MARKERS = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_SESSION_ATTENDED',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_CODE_EXECPATH',
+  'CLAUDE_CODE_INVOKED_SKILLS',
+  'CLAUDE_PID',
+  'CLAUDE_EFFORT',
+  'CLAUDE_AGENT_SDK_VERSION'
+]
+
 /**
- * Claude Code runs with the sign-in from your terminal; Mousse never reads its token files. An
- * inherited `CLAUDE_CONFIG_DIR` is kept. API keys, tokens and cloud routing in Mousse's own
- * environment are removed so they cannot override how the CLI is configured.
+ * The environment Claude Code starts with: the one Mousse inherited from the user, as a terminal
+ * would pass it. The user's own configuration (API keys, tokens, proxies, cloud routing,
+ * `CLAUDE_CONFIG_DIR`) is kept; Claude Code then applies its own `settings.json` on top. Only
+ * markers that describe Mousse's own process, not the user's setup, are removed:
+ * - `ELECTRON_RUN_AS_NODE`: set when Mousse runs as Electron-as-Node. Left in place, any Electron
+ *   app the agent starts from its shell would run as plain Node instead.
+ * - The variables a running Claude Code session gives the commands it starts, present when Mousse
+ *   itself was started from one (`CLAUDECODE`, its session id, PID, messaging socket and so on).
+ *   They describe that other session; left in place, Claude Code would treat itself as a child
+ *   of it. Settings never set these.
  */
 export function claudeSubscriptionEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env = { ...source }
-  const inheritedConfigDir = source.CLAUDE_CONFIG_DIR
-  for (const key of Object.keys(env)) {
-    if (
-      /^(ANTHROPIC_|CLAUDE_CODE_OAUTH_TOKEN|CLAUDE_CODE_USE_|CLAUDE_CODE_API_KEY_HELPER|CLAUDE_CODE_CUSTOM_MODEL|AWS_|AMAZON_|GOOGLE_|GCLOUD_|CLOUDSDK_|AZURE_|VERTEX_|BEDROCK_)/.test(
-        key
-      ) ||
-      ['ELECTRON_RUN_AS_NODE', 'CLAUDECODE', 'CLAUDE_CONFIG_DIR'].includes(key)
-    )
-      delete env[key]
-  }
-  if (inheritedConfigDir) env.CLAUDE_CONFIG_DIR = inheritedConfigDir
+  for (const key of ['ELECTRON_RUN_AS_NODE', ...CLAUDE_SESSION_MARKERS]) delete env[key]
   return env
+}
+
+/** Claude Code's launch args that add text to its system prompt. */
+const APPEND_SYSTEM_PROMPT_ARGS = ['append-system-prompt', 'append-system-prompt-file'] as const
+
+/**
+ * The text the user's `--append-system-prompt-file` and `--append-system-prompt` launch args add,
+ * in the order Claude Code uses (file text first, one trailing newline trimmed, then the inline
+ * text). Claude Code replaces its own append text with the SDK's `systemPrompt.append`, so this
+ * text has to travel there or it is lost. A relative file resolves against the turn's folder,
+ * where Claude Code runs. Values the CLI would reject are rejected here too.
+ */
+export function claudeLaunchAppendSystemPrompt(extraArgs: Record<string, string | null>, cwd: string): string[] {
+  const inline = extraArgs['append-system-prompt']
+  const file = extraArgs['append-system-prompt-file']
+  if (inline === null)
+    throw new Error('The --append-system-prompt launch argument has no text. Add it after the flag in the Claude Code launch arguments, then send the message again.')
+  if (file === null || file === '')
+    throw new Error('The --append-system-prompt-file launch argument has no file path. Add it after the flag in the Claude Code launch arguments, then send the message again.')
+  let fileText: string | undefined
+  if (file !== undefined) {
+    const path = resolve(cwd, file)
+    try {
+      fileText = readFileSync(path, 'utf8').replace(/\r?\n$/, '')
+    } catch {
+      throw new Error(`Claude Code could not read the --append-system-prompt-file launch argument at ${path}. Fix the path in the Claude Code launch arguments, then send the message again.`)
+    }
+  }
+  return [fileText, inline].filter((text): text is string => typeof text === 'string' && text.length > 0)
 }
 
 /** `claude` on PATH or in `~/.local/bin`; an npm `claude.cmd` shim counts once it resolves. */
@@ -409,7 +451,7 @@ export class ClaudeSubscriptionProviderService {
   }
   private async refreshStatus(): Promise<void> {
     if (!this.binary() || this.stopped) return
-    const result = await this.probe(claudeSubscriptionEnvironment())
+    const result = await this.probe(this.environment())
     if (this.stopped) return
     this.cliProbe = { at: Date.now(), result }
     if (result.kind === 'signed_in' && !this.settings.models?.length && !this.modelDiscoveryStarted) {
@@ -547,12 +589,23 @@ export class ClaudeSubscriptionProviderService {
     if (this.stopped) throw new Error('Claude provider is stopped')
     return sdk.query({ prompt, options })
   }
+  /**
+   * How Mousse starts Claude Code. It runs as the user set it up: `settingSources` is left out, so
+   * the user, project and local settings load as in a terminal (their `env`, MCP servers, hooks,
+   * plugins, permission rules, CLAUDE.md and so on). Mousse adds its own MCP servers and
+   * instructions per turn on top, and sets the permission mode for each turn.
+   */
   private options(
     cwd: string,
     controller: AbortController,
-    env: NodeJS.ProcessEnv = this.environment()
+    env: NodeJS.ProcessEnv = this.environment(),
+    append: string[] = []
   ): Options {
     const launch = this.launchTarget()
+    // The append flags travel in `systemPrompt.append` (see claudeLaunchAppendSystemPrompt).
+    const extraArgs = claudeExtraArgs(storedCliArgs(this.settings))
+    for (const name of APPEND_SYSTEM_PROMPT_ARGS) delete extraArgs[name]
+    const appendText = append.filter(Boolean).join('\n\n')
     return {
       cwd,
       pathToClaudeCodeExecutable: launch?.path,
@@ -563,10 +616,10 @@ export class ClaudeSubscriptionProviderService {
       abortController: controller,
       permissionMode: 'default',
       permissionPrompts: 'host',
-      settingSources: [],
+      // Claude Code's own system prompt, as in a terminal; Mousse only appends to it.
+      systemPrompt: { type: 'preset', preset: 'claude_code', ...(appendText ? { append: appendText } : {}) },
       mcpServers: {},
-      // The user's launch args first: Mousse's own flags keep their values.
-      extraArgs: { ...claudeExtraArgs(storedCliArgs(this.settings)), 'strict-mcp-config': null },
+      ...(Object.keys(extraArgs).length ? { extraArgs } : {}),
       includePartialMessages: true
     }
   }
@@ -810,8 +863,10 @@ export class ClaudeSubscriptionProviderService {
       const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(selected.effort ?? '')
         ? selected.effort as Options['effort'] : undefined
       const planTurn = input.mode === 'plan'
+      const launchAppend = claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.settings)), input.cwd)
       const options: Options = {
-        ...this.options(input.cwd, controller, env),
+        // Mousse's instructions first, then the user's own append text.
+        ...this.options(input.cwd, controller, env, [input.systemPromptAppend ?? '', ...launchAppend]),
         model: selected.baseId,
         effort,
         resume,
@@ -826,10 +881,8 @@ export class ClaudeSubscriptionProviderService {
           ...Object.fromEntries(Object.entries(integrations?.proxiedServers ?? {}).map(([name, proxied]) => [name, claudeProxiedMcpServer(name, proxied)])),
           ...claudeMcpServers(input.mcp)
         },
-        // Skills reach Claude as a local plugin because the launch reads no setting sources.
+        // The skills enabled in Mousse reach Claude as a local plugin, next to the user's own.
         ...(integrations?.pluginPath ? { plugins: [{ type: 'local' as const, path: integrations.pluginPath }] } : {}),
-        // The SDK's default system prompt is empty; appending to it is setting it.
-        ...(input.systemPromptAppend ? { systemPrompt: input.systemPromptAppend } : {}),
         hooks: {
           PreToolUse: [
             {
@@ -885,10 +938,10 @@ export class ClaudeSubscriptionProviderService {
           // the server refuses what the run may not do, so they need no extra prompt.
           if (input.mcp && toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX))
             return { behavior: 'allow', updatedInput: args }
-          // Claude Code defers MCP tool schemas behind ToolSearch, which only loads them; without it
-          // the Mousse tools above are unreachable unless the user approves a prompt every turn.
-          // Any query is safe because the launch uses `strict-mcp-config` and `settingSources: []`:
-          // only the Mousse server and the servers the user enabled in Mousse can load.
+          // Claude Code defers MCP tool schemas behind ToolSearch; without it the Mousse tools above
+          // are unreachable unless the user approves a prompt every turn. Any query is safe, even
+          // with the user's own MCP servers loaded: ToolSearch only loads tool definitions, and each
+          // tool it reveals is still checked here (or by the user's rules) when it is called.
           if (input.mcp && toolName === 'ToolSearch')
             return { behavior: 'allow', updatedInput: args }
           if (

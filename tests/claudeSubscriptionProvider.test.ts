@@ -150,9 +150,15 @@ describe('Claude Subscription native provider', () => {
     expect(inputs[0].options).toMatchObject({
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
-      settingSources: [],
-      extraArgs: { 'strict-mcp-config': null }
+      // Claude Code's own system prompt, as in a terminal.
+      systemPrompt: { type: 'preset', preset: 'claude_code' }
     })
+    // No settingSources: the SDK then loads the user, project and local settings like the CLI.
+    // No strict-mcp-config: the user's own MCP servers load too.
+    for (const input of inputs) {
+      expect(input.options).not.toHaveProperty('settingSources')
+      expect(input.options).not.toHaveProperty('extraArgs')
+    }
     expect(JSON.stringify(settings())).not.toContain('secret')
   })
   it('resumes a saved session only on the instance that created it', async () => {
@@ -190,6 +196,28 @@ describe('Claude Subscription native provider', () => {
     })
     await switched.chat({ ...chatInput(home), instanceId: 'claude', history: 'history' })
     expect(inputs[3].options.resume).toBeUndefined()
+  })
+  it("keeps the user's --append-system-prompt launch args by moving their text after Mousse's guidance", async () => {
+    const inputs: Array<{ options: Options; prompt: unknown }> = []
+    const { service, home } = fixture((input) => {
+      inputs.push(input)
+      return fakeQuery([result])
+    })
+    writeFileSync(join(home, 'extra.md'), 'FROM FILE\n')
+    await service.setCliConfig({ args: ['--append-system-prompt', 'INLINE', '--append-system-prompt-file', 'extra.md', '--verbose'] })
+    await service.chat({ ...chatInput(home), systemPromptAppend: 'GUIDE' })
+    expect(inputs[0].options.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code', append: 'GUIDE\n\nFROM FILE\n\nINLINE' })
+    // The SDK's append text replaces the CLI's, so the flags are not passed again.
+    expect(inputs[0].options.extraArgs).toEqual({ verbose: null })
+    await service.chat({ ...chatInput(home), threadId: 'plain' })
+    expect(inputs[1].options.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code', append: 'FROM FILE\n\nINLINE' })
+
+    // Values Claude Code would reject fail the turn with a clear message instead of disappearing.
+    await service.setCliConfig({ args: ['--append-system-prompt-file', 'missing.md'] })
+    await expect(service.chat({ ...chatInput(home), threadId: 'missing' })).rejects.toThrow(/could not read the --append-system-prompt-file/)
+    await service.setCliConfig({ args: ['--append-system-prompt'] })
+    await expect(service.chat({ ...chatInput(home), threadId: 'empty' })).rejects.toThrow(/--append-system-prompt launch argument has no text/)
+    expect(inputs).toHaveLength(2)
   })
   it('lets ToolSearch load the Mousse tools without a prompt only when the Mousse server is attached', async () => {
     const decisions: unknown[] = []
