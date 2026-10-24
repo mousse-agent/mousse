@@ -15,7 +15,7 @@ import {
   watchEnrollmentRequests
 } from '../../src/renderer/stores/enrollmentPromptStore'
 import { EnrollmentRequestPrompt } from '../../src/renderer/components/EnrollmentRequestPrompt'
-import { isTopDialog, registerDialog } from '../../src/renderer/components/ui/Modal'
+import { focusAfterClose, isTopDialog, registerDialog } from '../../src/renderer/components/ui/Modal'
 
 const now = 1_000_000
 const row = (id: string, extra: Partial<PlusEnrollmentRequestView> = {}): PlusEnrollmentRequestView => ({
@@ -374,6 +374,61 @@ describe('dialog stacking', () => {
     releaseLower()
     expect(isTopDialog(upper)).toBe(true)
     releaseUpper()
+  })
+
+  it('keeps a nested dialog above its parent when the nested one registers first', () => {
+    const parent = {} as HTMLElement
+    const child = {} as HTMLElement
+    // Both mount in one commit: the child's effect runs before its parent's.
+    const releaseChild = registerDialog(child, parent)
+    const releaseParent = registerDialog(parent)
+    expect(isTopDialog(child)).toBe(true)
+    expect(isTopDialog(parent)).toBe(false)
+    releaseChild()
+    expect(isTopDialog(parent)).toBe(true)
+    releaseParent()
+    expect(isTopDialog(parent)).toBe(false)
+  })
+
+  it('keeps nesting through several levels and ignores unrelated dialogs', () => {
+    const root = {} as HTMLElement
+    const middle = {} as HTMLElement
+    const leaf = {} as HTMLElement
+    const other = {} as HTMLElement
+    const releases = [registerDialog(leaf, middle), registerDialog(other), registerDialog(middle, root), registerDialog(root)]
+    expect(isTopDialog(other)).toBe(true)
+    releases[1]()
+    expect(isTopDialog(leaf)).toBe(true)
+    releases[0]()
+    expect(isTopDialog(middle)).toBe(true)
+    releases[2]()
+    expect(isTopDialog(root)).toBe(true)
+    releases[3]()
+  })
+
+  it('leaves focus alone when a dialog under another one closes', () => {
+    const opener = { isConnected: true } as HTMLElement
+    const upper = { isConnected: true } as HTMLElement
+    expect(focusAfterClose(false, opener, upper)).toBeNull()
+  })
+
+  it('returns focus to the opener when the top dialog closes', () => {
+    const opener = { isConnected: true } as HTMLElement
+    expect(focusAfterClose(true, opener, undefined)).toBe(opener)
+    expect(focusAfterClose(true, { isConnected: false } as HTMLElement, undefined)).toBeNull()
+  })
+
+  it('returns focus into the dialog that is uncovered when the opener sits outside it', () => {
+    const opener = { isConnected: true } as HTMLElement
+    const insideParent = { isConnected: true } as HTMLElement
+    const parent = {
+      isConnected: true,
+      contains: (node: unknown) => node === insideParent,
+      querySelector: () => null,
+      querySelectorAll: () => []
+    } as unknown as HTMLElement
+    expect(focusAfterClose(true, opener, parent)).toBe(parent)
+    expect(focusAfterClose(true, insideParent, parent)).toBe(insideParent)
   })
 })
 

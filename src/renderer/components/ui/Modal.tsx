@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type ReactNode, type RefObject } from 'react'
+import { createContext, useContext, useEffect, useId, useRef, type ReactNode, type RefObject } from 'react'
 import { X } from '../../lib/icons'
 
 /**
@@ -42,8 +42,10 @@ export function Modal({
           {!hideTitle && <h3 id={titleId}>{title}</h3>}
           <ModalClose onClose={onClose} />
         </header>
-        <div className="modal-body">{children}</div>
-        {footer ? <footer className="modal-footer">{footer}</footer> : null}
+        <DialogParent.Provider value={panelRef}>
+          <div className="modal-body">{children}</div>
+          {footer ? <footer className="modal-footer">{footer}</footer> : null}
+        </DialogParent.Provider>
       </div>
     </div>
   )
@@ -76,18 +78,49 @@ export function initialDialogFocus(dialog: HTMLElement): HTMLElement {
 }
 
 const openDialogs: HTMLElement[] = []
+const parentDialogs = new WeakMap<HTMLElement, HTMLElement>()
 
-/** Registers an open dialog; returns what unregisters it. Dialogs opened later sit above earlier ones. */
-export function registerDialog(dialog: HTMLElement): () => void {
-  openDialogs.push(dialog)
+/** The dialog a nested dialog is rendered inside (even through a portal), so it can register above it. */
+const DialogParent = createContext<RefObject<HTMLElement | null> | null>(null)
+
+const isInside = (dialog: HTMLElement, ancestor: HTMLElement): boolean => {
+  for (let parent = parentDialogs.get(dialog); parent; parent = parentDialogs.get(parent)) if (parent === ancestor) return true
+  return false
+}
+
+/**
+ * Registers an open dialog; returns what unregisters it. Dialogs opened later sit above earlier
+ * ones, and a dialog nested in another always sits above it, even when its effect ran first
+ * because both mounted in the same commit.
+ */
+export function registerDialog(dialog: HTMLElement, parent?: HTMLElement | null): () => void {
+  if (parent && parent !== dialog) parentDialogs.set(dialog, parent)
+  const nested = openDialogs.findIndex((other) => isInside(other, dialog))
+  openDialogs.splice(nested === -1 ? openDialogs.length : nested, 0, dialog)
   return () => {
     const index = openDialogs.indexOf(dialog)
     if (index !== -1) openDialogs.splice(index, 1)
+    parentDialogs.delete(dialog)
   }
 }
 
-/** Only the dialog opened last answers Tab and Escape, so one stacked above another does not fight it for focus. */
-export const isTopDialog = (dialog: HTMLElement): boolean => openDialogs[openDialogs.length - 1] === dialog
+const topDialog = (): HTMLElement | undefined => openDialogs[openDialogs.length - 1]
+
+/** Only the top dialog answers Tab and Escape, so one stacked above another does not fight it for focus. */
+export const isTopDialog = (dialog: HTMLElement): boolean => topDialog() === dialog
+
+/**
+ * Where focus goes when a dialog closes. Nowhere if another dialog sits above it: focus is already
+ * there. Otherwise its opener, or, when the opener is outside the dialog now on top, that dialog.
+ */
+export function focusAfterClose(wasTop: boolean, previous: HTMLElement | null, next: HTMLElement | undefined): HTMLElement | null {
+  if (!wasTop) return null
+  const target = next && !(previous && next.contains(previous)) ? initialDialogFocus(next) : previous
+  return target?.isConnected ? target : null
+}
+
+/** Escape presses a dialog already answered, so the dialog uncovered by its close does not close too. */
+const answeredEscapes = new WeakSet<Event>()
 
 /**
  * Dialog keyboard behaviour shared by ui/Modal and the integrations dialog: initial focus in the
@@ -97,15 +130,16 @@ export const isTopDialog = (dialog: HTMLElement): boolean => openDialogs[openDia
 export function useDialogFocus(ref: RefObject<HTMLElement | null>, active: boolean, onClose: () => void) {
   const closeRef = useRef(onClose)
   closeRef.current = onClose
+  const parentRef = useContext(DialogParent)
   useEffect(() => {
     const dialog = ref.current
     if (!active || !dialog) return
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const unregister = registerDialog(dialog)
-    initialDialogFocus(dialog).focus({ preventScroll: true })
+    const unregister = registerDialog(dialog, parentRef?.current)
+    if (isTopDialog(dialog)) initialDialogFocus(dialog).focus({ preventScroll: true })
     const keyDown = (event: KeyboardEvent) => {
-      if (!isTopDialog(dialog)) return
-      if (event.key === 'Escape') { event.preventDefault(); closeRef.current(); return }
+      if (!isTopDialog(dialog) || answeredEscapes.has(event)) return
+      if (event.key === 'Escape') { event.preventDefault(); answeredEscapes.add(event); closeRef.current(); return }
       if (event.key !== 'Tab') return
       const items = focusables(dialog, FOCUSABLE)
       if (!items.length) { event.preventDefault(); return }
@@ -116,6 +150,11 @@ export function useDialogFocus(ref: RefObject<HTMLElement | null>, active: boole
       }
     }
     document.addEventListener('keydown', keyDown)
-    return () => { document.removeEventListener('keydown', keyDown); unregister(); if (previous?.isConnected) previous.focus() }
-  }, [ref, active])
+    return () => {
+      document.removeEventListener('keydown', keyDown)
+      const wasTop = isTopDialog(dialog)
+      unregister()
+      focusAfterClose(wasTop, previous, topDialog())?.focus()
+    }
+  }, [ref, active, parentRef])
 }
