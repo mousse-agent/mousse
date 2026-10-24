@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { Readable, Transform, Writable } from 'node:stream'
 import { client, methods, ndJsonStream, PROTOCOL_VERSION, type ClientConnection, type McpServer, type NewSessionResponse } from '@agentclientprotocol/sdk'
-import type { ConfiguredProvider, ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
+import type { CliProviderConfig, CliProviderConfigPatch, ConfiguredProvider, ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
 import { ANTIGRAVITY_INSTANCE_ID } from '../../../shared/providerInstances'
@@ -15,7 +15,9 @@ import { mousseVersion } from '../../appVersion'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { acpMcpServers } from '../../run/mcp/attachment'
 import type { LoginSession } from '../LoginSession'
-import { installAntigravity, installedAntigravityBinary, validateManualAntigravityBinary } from './installation'
+import { applyCliConfigPatch, requireExecutable, sharedCliVersions, storedCliArgs, storedCliEnv, withUserEnv, type CliVersionCache } from '../cliConfig'
+import { directLaunch } from '../resolveWindowsShim'
+import { ANTIGRAVITY_RELEASE, installAntigravity, installedAntigravityBinary, validateManualAntigravityBinary } from './installation'
 
 export const ANTIGRAVITY_PROVIDER_ID = 'antigravity'
 type AcpProcess = { child: ChildProcessWithoutNullStreams; connection: ClientConnection; sessionId?: string; cwd?: string; threadId?: string; onUpdate?: (update: unknown) => void; turnSignal?: AbortSignal
@@ -24,10 +26,21 @@ type AcpProcess = { child: ChildProcessWithoutNullStreams; connection: ClientCon
   /** Bearer token of the Mousse MCP server the session was opened with (null: none). */
   mcpToken?: string | null
   /** Provider instance whose turn opened the session. */
-  instanceId?: string }
+  instanceId?: string
+  /** Launch-settings generation the process was started with; an older one is not reused. */
+  generation: number }
 /** `instanceId` is absent on sessions saved before provider instances existed (the default instance). */
 type SavedAcpSession = { sessionId: string; cwd: string; historyKey?: string; instanceId?: string }
-type ProfileSettings = { binaryPath?: string; models?: LlmModelOption[]; signedIn?: boolean; sessions?: Record<string, SavedAcpSession> }
+type ProfileSettings = {
+  binaryPath?: string
+  /** Extra arguments for the ACP agent launch. */
+  args?: string[]
+  /** Extra environment variables, applied over the environment Mousse prepares. */
+  env?: Record<string, string>
+  models?: LlmModelOption[]
+  signedIn?: boolean
+  sessions?: Record<string, SavedAcpSession>
+}
 const AUTH_PREFIX = 'Open the following link to authenticate the ACP server: '
 const BROWSER_MARKER = '__MOUSSE_ANTIGRAVITY_AUTH_URL__'
 const ISOLATED_KEYS = [
@@ -113,8 +126,13 @@ export class AntigravityProviderService {
   private stopped = false
   private readonly processes = new Set<AcpProcess>()
   private readonly loginSessions = new Set<LoginSession>()
+  /** Bumped when the launch settings change. */
+  private launchGeneration = 0
+  /** Processes running a turn right now. */
+  private readonly turning = new Set<AcpProcess>()
 
-  constructor(private readonly profileHome: string, private readonly installationHome: string, private readonly questions: UserQuestionService) {
+  constructor(private readonly profileHome: string, private readonly installationHome: string, private readonly questions: UserQuestionService,
+    private readonly versions: CliVersionCache = sharedCliVersions) {
     this.profileDir = join(profileHome, 'providers', 'antigravity')
     this.settingsPath = join(this.profileDir, 'settings.json')
     try { this.settings = JSON.parse(readFileSync(this.settingsPath, 'utf8')) as ProfileSettings }
@@ -189,9 +207,10 @@ export class AntigravityProviderService {
     mkdirSync(tempDir, { recursive: true, mode: 0o700 })
     if (process.platform === 'win32') { env.TEMP = tempDir; env.TMP = tempDir }
     else env.TMPDIR = tempDir
-    const child = spawn(binary, process.platform === 'linux' ? ['--uid='] : [], { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+    const args = [...(process.platform === 'linux' ? ['--uid='] : []), ...storedCliArgs(this.settings)]
+    const child = spawn(binary, args, { env: withUserEnv(env, storedCliEnv(this.settings)), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     const app = client({ name: 'Mousse' })
-    const active: AcpProcess = { child, connection: undefined! }
+    const active: AcpProcess = { child, connection: undefined!, generation: this.launchGeneration }
     app.onRequest(methods.client.session.requestPermission, async ({ params: request }) => {
       if (active.turnSignal?.aborted || active.connection.signal.aborted || !active.threadId || !request.options.length) return { outcome: { outcome: 'cancelled' } }
       const answers = await this.questions.requestAnswers([{
@@ -398,7 +417,7 @@ export class AntigravityProviderService {
     const saved = stored && (stored.instanceId ?? ANTIGRAVITY_INSTANCE_ID) === instanceId ? stored : undefined
     let active = this.sessions.get(input.threadId)
     const mcpToken = input.mcp?.token ?? null
-    if (active && (active.connection.signal.aborted || active.cwd !== input.cwd || saved?.historyKey !== historyKey || (active.mcpToken ?? null) !== mcpToken || (active.instanceId ?? ANTIGRAVITY_INSTANCE_ID) !== instanceId)) {
+    if (active && (active.connection.signal.aborted || active.generation !== this.launchGeneration || active.cwd !== input.cwd || saved?.historyKey !== historyKey || (active.mcpToken ?? null) !== mcpToken || (active.instanceId ?? ANTIGRAVITY_INSTANCE_ID) !== instanceId)) {
       this.close(active)
       this.sessions.delete(input.threadId)
       active = undefined
@@ -410,6 +429,7 @@ export class AntigravityProviderService {
     active.cwd = input.cwd
     active.turnSignal = input.signal
     const current = active
+    this.turning.add(current)
     const abort = () => {
       this.questions.autoRejectPendingForThread(input.threadId)
       // Closing also aborts setup RPCs; a lost startup abort must never dispatch a prompt.
@@ -546,6 +566,7 @@ export class AntigravityProviderService {
       input.signal?.removeEventListener('abort', abort)
       current.onUpdate = undefined
       current.turnSignal = undefined
+      this.turning.delete(current)
     }
   }
 
@@ -582,6 +603,40 @@ export class AntigravityProviderService {
       this.save()
     }
   }
+  /** The executable path, launch args and environment set in Settings → Providers. */
+  async cliConfig(): Promise<CliProviderConfig> {
+    const resolvedBinaryPath = this.binary()
+    // The pinned install is verified by hash, so its version is known without starting it.
+    const version = resolvedBinaryPath && resolvedBinaryPath === installedAntigravityBinary(this.installationHome)
+      ? ANTIGRAVITY_RELEASE.replace(/^agy_acp_server_/, '')
+      : await this.versions.version(resolvedBinaryPath ? directLaunch(resolvedBinaryPath) : undefined, withUserEnv(process.env, storedCliEnv(this.settings)))
+    return {
+      instanceId: ANTIGRAVITY_INSTANCE_ID,
+      ...(this.settings.binaryPath ? { binaryPath: this.settings.binaryPath } : {}),
+      ...(resolvedBinaryPath ? { resolvedBinaryPath } : {}),
+      ...(version ? { version } : {}),
+      args: storedCliArgs(this.settings),
+      env: storedCliEnv(this.settings)
+    }
+  }
+
+  /**
+   * Saves the launch settings. A thread's agent process is kept between turns, so idle ones close
+   * now and a busy one is replaced on that thread's next turn (resuming its ACP session).
+   */
+  async setCliConfig(patch: CliProviderConfigPatch): Promise<CliProviderConfig> {
+    if (this.stopped) throw new Error('Antigravity provider is stopped')
+    applyCliConfigPatch(this.settings, patch, (path) => validateManualAntigravityBinary(requireExecutable(path, 'Antigravity')))
+    this.save()
+    this.launchGeneration += 1
+    for (const [threadId, active] of this.sessions) {
+      if (this.turning.has(active)) continue
+      this.close(active)
+      this.sessions.delete(threadId)
+    }
+    return this.cliConfig()
+  }
+
   closeAll(): void { for (const active of this.processes) this.close(active); this.sessions.clear() }
   stop(): void {
     this.stopped = true

@@ -37,6 +37,8 @@ export interface CodexProcess {
 
 export interface CodexLaunch {
   binary: string
+  /** Arguments before `app-server`: the entry script when `binary` is node running a JavaScript CLI. */
+  entryArgs?: string[]
   /** Extra arguments after `app-server`, such as `-c key=value` overrides. */
   args: string[]
   env: NodeJS.ProcessEnv
@@ -314,9 +316,9 @@ export class CodexAppServerClient implements CodexConnection {
   }
 }
 
-/** Spawns `<binary> app-server [args]` with piped stdio. */
+/** Spawns `<binary> [entryArgs] app-server [args]` with piped stdio. */
 export function spawnCodexAppServer(launch: CodexLaunch): CodexProcess {
-  return spawn(launch.binary, ['app-server', ...launch.args], {
+  return spawn(launch.binary, [...(launch.entryArgs ?? []), 'app-server', ...launch.args], {
     env: launch.env,
     cwd: launch.cwd,
     stdio: ['pipe', 'pipe', 'pipe'],

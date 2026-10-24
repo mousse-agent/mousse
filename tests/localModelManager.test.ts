@@ -306,6 +306,6 @@ describe('LocalModelManager optional files', () => {
   it('says how to fix a model that is not downloaded', async () => {
     const model = modelWithVoice()
     const manager = new LocalModelManager({ rootDir: tempRoot(), models: [model], fetchImpl: servedFetch(model, {}) })
-    await expect(manager.readFile('kokoro-82m', 'config.json')).rejects.toThrow('Fake is not downloaded. Download it under Settings, Models.')
+    await expect(manager.readFile('kokoro-82m', 'config.json')).rejects.toThrow('Fake is not downloaded. Download it under Settings, Speech.')
   })
 })
