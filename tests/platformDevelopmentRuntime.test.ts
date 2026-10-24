@@ -1,14 +1,17 @@
-import { mkdtempSync, mkdirSync, realpathSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { join, relative, isAbsolute } from 'node:path'
+import { join, relative, isAbsolute, resolve } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { developmentRuntime, developmentDaemonInvocation } from '../scripts/development-runtime.mjs'
+import { developmentRuntime, developmentDaemonInvocation, developmentUsesGlobalHome } from '../scripts/development-runtime.mjs'
 
 const fixture = mkdtempSync(join(tmpdir(), 'mousse-platform-dev-'))
 const first = join(fixture, 'first')
 const second = join(fixture, 'second')
+const shared = join(fixture, 'shared')
 mkdirSync(first)
 mkdirSync(second)
+mkdirSync(join(shared, '.mousse-dev'), { recursive: true })
+writeFileSync(join(shared, '.mousse-dev', 'dev.json'), JSON.stringify({ useGlobalHome: true }))
 afterAll(() => {
   const rel = relative(realpathSync(tmpdir()), realpathSync(fixture))
   if (!rel.startsWith('mousse-platform-dev-') || rel.startsWith('..') || isAbsolute(rel)) throw new Error('Unsafe fixture cleanup')
@@ -56,4 +59,33 @@ describe('worktree development runtime', () => {
 
 it('rejects a shared global development home before starting processes', () => {
   expect(() => developmentRuntime(first, { MOUSSE_HOME: join(homedir(), '.mousse') })).toThrow('Development cannot share')
+})
+
+describe('shared global development home', () => {
+  const globalHome = join(homedir(), '.mousse')
+
+  it('uses the installed home and leaves vault, browser and artifact roots to the app', () => {
+    const env = { MOUSSE_DEV_USE_GLOBAL: '1', MOUSSE_ELECTRON_USER_DATA: '/stale', MOUSSE_BROWSER_ROOT: '/stale' }
+    const runtime = developmentRuntime(first, { MOUSSE_DEV_USE_GLOBAL: '1' })
+    expect(runtime).toMatchObject({ homeDir: globalHome, sharedGlobalHome: true, electronUserData: null, browserRoot: null, artifactRoot: null })
+    const invocation = developmentDaemonInvocation(first, { MOUSSE_DEV_USE_GLOBAL: '1', MOUSSE_BROWSER_ROOT: '' })
+    expect(invocation.env.MOUSSE_HOME).toBe(globalHome)
+    for (const key of ['MOUSSE_ELECTRON_USER_DATA', 'MOUSSE_BROWSER_ROOT', 'MOUSSE_ARTIFACT_ROOT']) expect(invocation.env).not.toHaveProperty(key)
+    // Explicit overrides still apply.
+    expect(developmentRuntime(first, env).electronUserData).toBe(resolve('/stale'))
+  })
+
+  it('is the checkout default with dev.json, and the flag overrides it either way', () => {
+    expect(developmentUsesGlobalHome(first, {})).toBe(false)
+    expect(developmentUsesGlobalHome(shared, {})).toBe(true)
+    expect(developmentUsesGlobalHome(shared, { MOUSSE_DEV_USE_GLOBAL: '0' })).toBe(false)
+    expect(developmentUsesGlobalHome(first, { MOUSSE_DEV_USE_GLOBAL: 'true' })).toBe(true)
+    expect(developmentRuntime(shared, { MOUSSE_DEV_USE_GLOBAL: '0' }).homeDir).toBe(join(realpathSync(shared), '.mousse-dev', 'runtime'))
+  })
+
+  it('rejects an unclear flag or a conflicting home', () => {
+    expect(() => developmentUsesGlobalHome(first, { MOUSSE_DEV_USE_GLOBAL: 'maybe' })).toThrow('MOUSSE_DEV_USE_GLOBAL must be 1 or 0')
+    expect(() => developmentRuntime(first, { MOUSSE_DEV_USE_GLOBAL: '1', MOUSSE_HOME: fixture })).toThrow('conflicts with MOUSSE_HOME')
+    expect(developmentRuntime(first, { MOUSSE_DEV_USE_GLOBAL: '1', MOUSSE_HOME: globalHome }).homeDir).toBe(globalHome)
+  })
 })
