@@ -674,11 +674,13 @@ export class HostedProfileService {
   async renew(): Promise<PlusStatus> {
     const replayed = this.read()?.pending
     const status = await this.renewOnce()
-    // A replayed request carries the roster it was signed with. When the roster changed since
-    // (a revoked device), send the current one now instead of at the next scheduled renewal.
-    const replayedRoster = (replayed?.intent as { roster?: unknown } | undefined)?.roster
+    // A replayed request carries the roster inside its signed body, which is what the server
+    // received (the saved intent can disagree with it). When the roster changed since (a revoked
+    // device), send the current one now instead of at the next scheduled renewal.
+    const replayedRoster = replayed?.body.roster
     if (
       replayed?.purpose === 'renew' &&
+      replayedRoster !== undefined &&
       !Buffer.from(canonicalJson(replayedRoster)).equals(
         canonicalJson(this.options.identity().roster)
       )

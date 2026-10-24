@@ -301,6 +301,36 @@ it('still sends the current roster after a replay of an older renewal failed onc
   ).toBeUndefined()
 })
 
+it('compares the roster in the replayed body, not the saved intent, when they disagree', async () => {
+  const p = await fixture()
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  let offline = true
+  const roster = { ...p.hostedOptions.identity().roster, version: 2 } as never
+  const options = {
+    ...p.hostedOptions,
+    fetch: async (url: string | URL | Request, input?: RequestInit) => {
+      if (offline && String(url).endsWith('/renew')) throw new Error('Network down')
+      return p.hostedOptions.fetch(url, input)
+    }
+  }
+  await expect(new HostedProfileService(options).renew()).rejects.toMatchObject({
+    code: 'outcome_uncertain'
+  })
+  // An earlier version saved the newer roster's intent beside the older signed body.
+  const stored = JSON.parse(Buffer.from(p.rt.keys.getSecret('plus/connector')!).toString())
+  stored.pending.intent.roster = roster
+  p.rt.keys.putSecret('plus/connector', canonicalJson(stored))
+  offline = false
+  await new HostedProfileService({
+    ...options,
+    identity: () => ({ ...p.hostedOptions.identity(), roster })
+  }).renew()
+  expect(
+    p.bodies.filter((row) => row.path.endsWith('/renew')).map((row) => row.body.roster)
+  ).toEqual([p.hostedOptions.identity().roster, roster])
+})
+
 it('releases an older pending rendezvous only after its exact retry is definitively rejected', async () => {
   let rejected = false
   const p = await fixture({
