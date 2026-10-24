@@ -13,9 +13,12 @@ import {
   sealInviteForRequest
 } from './enrollmentSeal'
 import { createHostedRelayTransports } from './relayTransports'
+import { DEFAULT_DIRECT_PATH, type DirectPathConfig } from '../transports/phoneWebRtc'
 
 /** How often a signed-in authority checks Mousse ID for phones asking to join. */
 const PLUS_ENROLLMENT_POLL_MS = 15000
+/** How often a signed-in computer reads Mousse ID's direct-path configuration again. */
+const DIRECT_PATH_REFRESH_MS = 10 * 60_000
 
 /** The Mousse ID module: account sign-in, the hosted relay lease and phone enrollment. */
 export const mousseIdNetModule: HostedNetModule = {
@@ -31,6 +34,8 @@ export class HostedNetController implements HostedNet {
   private enrollmentList: PlusEnrollmentRequest[] = []
   private enrollmentPoll?: ReturnType<typeof setTimeout>
   private enrollmentAbortBound = false
+  private direct: DirectPathConfig = DEFAULT_DIRECT_PATH
+  private directReadAt?: number
 
   constructor(private readonly host: HostedNetHost) {
     this.transports = createHostedRelayTransports(() => this.service())
@@ -49,6 +54,35 @@ export class HostedNetController implements HostedNet {
 
   connected(): boolean {
     return this.service().status().connected
+  }
+
+  directPath(): DirectPathConfig {
+    return this.direct
+  }
+
+  /**
+   * Reads Mousse ID's direct-path configuration (the WebRTC kill switch and STUN servers) when
+   * it is older than ten minutes or `force` is set. An unreachable service keeps the last value.
+   */
+  private async refreshDirectPath(force = false): Promise<void> {
+    const now = this.host.clock.monotonic()
+    if (
+      !force &&
+      this.directReadAt !== undefined &&
+      now - this.directReadAt < DIRECT_PATH_REFRESH_MS
+    )
+      return
+    let next: DirectPathConfig
+    try {
+      next = await this.service().directPath()
+    } catch {
+      return
+    }
+    this.directReadAt = now
+    if (next.webrtc === this.direct.webrtc && next.stun.join(' ') === this.direct.stun.join(' '))
+      return
+    this.direct = next
+    this.host.directPathChanged()
   }
 
   consentFenced(): boolean {
@@ -184,6 +218,7 @@ export class HostedNetController implements HostedNet {
     )
     await this.host.restartTransports()
     this.armRenewal()
+    await this.refreshDirectPath(true)
   }
 
   private assertTransportCapacity(): void {
@@ -211,6 +246,7 @@ export class HostedNetController implements HostedNet {
       this.host.fail(error)
       this.host.emit()
     }
+    await this.refreshDirectPath(true)
   }
 
   private async fenceUnauthorizedSpaceRoutes(): Promise<void> {
@@ -319,6 +355,7 @@ export class HostedNetController implements HostedNet {
               await this.fenceUnauthorizedSpaceRoutes()
               await this.service().renew()
               await this.reconcileSpaceRoutes()
+              await this.refreshDirectPath()
             } finally {
               this.armRenewal()
             }

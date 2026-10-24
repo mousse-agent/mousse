@@ -37,8 +37,17 @@ export interface TranscriptHooks {
   emitUpdated(message: ChatMessage): void
   /** `force` writes now; otherwise the owner may debounce. */
   persist(force: boolean): void
-  setPhase(phase: TurnPhase, patch?: { activeMessageId?: string }): void
+  /** `blockedOnWait`: every running tool call is a wait tool (see `WAIT_TOOL_NAMES`). */
+  setPhase(phase: TurnPhase, patch?: { activeMessageId?: string; blockedOnWait?: boolean }): void
 }
+
+/**
+ * Tools that only block until other work finishes or time passes. While every running call of a
+ * turn is one of these, the thread shows Waiting instead of Working. Mousse's own delegation
+ * tools return at once and wake the parent later, so they are not here.
+ * - `TaskOutput`: Claude Code waiting for a background shell or subagent (older Claude Code).
+ */
+export const WAIT_TOOL_NAMES: ReadonlySet<string> = new Set(['TaskOutput'])
 
 /**
  * How a text event's `content` relates to the open reply. `replace`: each delta and `complete`
@@ -54,6 +63,9 @@ export type TranscriptTextMode = 'replace' | 'append'
  * tool call, with the turn phase following the stream.
  */
 export class TranscriptAssembler {
+  /** The `blockedOnWait` last published with `tool_running`. */
+  private blockedOnWait = false
+
   constructor(
     private readonly hooks: TranscriptHooks,
     private readonly state: TranscriptStreamState,
@@ -63,6 +75,7 @@ export class TranscriptAssembler {
   /** Forgets the previous turn's open messages (the messages themselves stay). */
   reset(): void {
     this.state.activeToolCallMessageIds.clear()
+    this.blockedOnWait = false
     this.state.activeThinkingMessageId = null
     this.state.activeAssistantMessageId = null
     this.state.lastCompletedAssistantMessageId = null
@@ -140,7 +153,7 @@ export class TranscriptAssembler {
         ...(parsed.input ? { input: parsed.input } : {})
       })
       this.state.activeToolCallMessageIds.set(event.callId, message.id)
-      this.hooks.setPhase('tool_running')
+      this.setToolPhase()
       return
     }
 
@@ -170,6 +183,8 @@ export class TranscriptAssembler {
         this.state.activeToolCallMessageIds.delete(event.callId)
         if (this.state.activeToolCallMessageIds.size === 0)
           this.hooks.setPhase(this.state.activeAssistantMessageId ? 'streaming' : 'thinking')
+        // A command finishing can leave only wait tools running.
+        else if (this.isBlockedOnWait() !== this.blockedOnWait) this.setToolPhase()
         return
       }
       // A complete for a call this turn never saw start is recorded as a finished call below.
@@ -250,6 +265,22 @@ export class TranscriptAssembler {
     if (message?.thinking?.status === 'processing')
       this.updateThinking(messageId, message.thinking.content, 'complete')
     this.state.activeThinkingMessageId = null
+  }
+
+  private setToolPhase(): void {
+    this.blockedOnWait = this.isBlockedOnWait()
+    this.hooks.setPhase('tool_running', this.blockedOnWait ? { blockedOnWait: true } : undefined)
+  }
+
+  /** True when tool calls are running and every one is a wait tool. */
+  private isBlockedOnWait(): boolean {
+    if (this.state.activeToolCallMessageIds.size === 0) return false
+    for (const messageId of this.state.activeToolCallMessageIds.values()) {
+      const call = this.hooks.getMessage(messageId)?.toolCall
+      // Vendor runtimes name the tool in the title; the pi loop parses it into `toolName`.
+      if (!WAIT_TOOL_NAMES.has(call?.toolName ?? call?.title ?? '')) return false
+    }
+    return true
   }
 
   private add(message: ChatMessage): void {

@@ -1,6 +1,11 @@
 import { createHash, randomUUID, randomBytes } from 'node:crypto'
 import type { FileKeyStore } from '../identity/FileKeyStore'
 import { NetError, type Signed, type NodeId, type UserId } from '../../../shared/net'
+import {
+  DEFAULT_DIRECT_PATH,
+  parseDirectPathConfig,
+  type DirectPathConfig
+} from '../transports/phoneWebRtc'
 import { canonicalJson } from '../sync/codec'
 import { canonicalAudience } from './wire/protocol'
 import type {
@@ -960,6 +965,12 @@ export class HostedProfileService {
   }
   configuration(): PlusConfiguration | undefined {
     return this.read()?.configuration
+  }
+  /** The direct-path fields (`directWebrtc`, `stun`) of the signed-in service's configuration. */
+  async directPath(): Promise<DirectPathConfig> {
+    const configuration = this.configuration()
+    if (!configuration) return DEFAULT_DIRECT_PATH
+    return parseDirectPathConfig(await this.loginHttp<unknown>(configuration, '/v1/net/config'))
   }
   clear(): void {
     this.guard()
