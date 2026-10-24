@@ -15,6 +15,41 @@ import {
 import { createHostedRelayTransports } from './relayTransports'
 import { DEFAULT_DIRECT_PATH, type DirectPathConfig } from '../transports/phoneWebRtc'
 
+/**
+ * The longest wait between registration renewals. A registration lasts 10 minutes (60 seconds on
+ * older Mousse ID) and is renewed at a third of the time left, so it always outlasts the relay's
+ * next admission renewal.
+ */
+const RENEW_MAX_MS = 5 * 60_000
+
+/** The shortest wait a Space-peer route can impose between renewal passes, so a failing pass cannot spin. */
+const RENEW_MIN_MS = 20_000
+
+/**
+ * Space-peer route approvals last 2 minutes and are refreshed once less than a minute is left, but
+ * only by the renewal pass. This is how long before an approval gets that low the next pass must run.
+ */
+const ROUTE_REFRESH_LEAD_MS = 60_000
+
+/**
+ * How long to wait before the next renewal pass: a third of the registration lease (at most
+ * RENEW_MAX_MS), or sooner when a Space-peer route approval needs refreshing first. A computer
+ * without a lease passes every 20 seconds.
+ */
+export function renewalDelayMs(
+  leaseExpiresAt: number | undefined,
+  routes: ReadonlyArray<{ expiresAt: number }>,
+  now: number
+): number {
+  let delay =
+    leaseExpiresAt === undefined
+      ? RENEW_MIN_MS
+      : Math.min(RENEW_MAX_MS, Math.max(1000, (leaseExpiresAt - now) / 3))
+  for (const route of routes)
+    delay = Math.min(delay, Math.max(RENEW_MIN_MS, route.expiresAt - ROUTE_REFRESH_LEAD_MS - now))
+  return delay
+}
+
 /** How often a signed-in authority checks Mousse ID for phones asking to join. */
 const PLUS_ENROLLMENT_POLL_MS = 15000
 /** How often a signed-in computer reads Mousse ID's direct-path configuration again. */
@@ -31,6 +66,7 @@ export class HostedNetController implements HostedNet {
   private hostedConsentFenced = false
   private plusAbortBound = false
   private plusRenewal?: ReturnType<typeof setTimeout>
+  private plusRenewalDueAt = 0
   private enrollmentList: PlusEnrollmentRequest[] = []
   private enrollmentPoll?: ReturnType<typeof setTimeout>
   private enrollmentAbortBound = false
@@ -268,12 +304,31 @@ export class HostedNetController implements HostedNet {
     const hosted = this.service(),
       authorized = (user: UserId, node: NodeId) =>
         this.host.featureEnabled('netSpaces') && this.host.hostedSpacePeerAuthorized(user, node)
-    await this.fenceUnauthorizedSpaceRoutes()
-    await hosted.reconcileSpaceRoutes(authorized)
-    if (this.hostedConsentFenced) {
-      this.hostedConsentFenced = false
-      await this.host.reactivateIfRunning()
+    try {
+      await this.fenceUnauthorizedSpaceRoutes()
+      await hosted.reconcileSpaceRoutes(authorized)
+      if (this.hostedConsentFenced) {
+        this.hostedConsentFenced = false
+        await this.host.reactivateIfRunning()
+      }
+    } finally {
+      this.rescheduleRenewal()
     }
+  }
+
+  /**
+   * A pending renewal timer was timed from the routes that existed when it was armed. A route added
+   * or refreshed since then (a peer joining a Space, say) may need its approval refreshed sooner, so
+   * time the wait again, but never later than the time already set: repeated reconciliation must
+   * not keep postponing the registration renewal. Does nothing while no timer is pending, such as
+   * during a renewal pass.
+   */
+  private rescheduleRenewal(): void {
+    if (!this.plusRenewal) return
+    const dueAt = this.plusRenewalDueAt
+    clearTimeout(this.plusRenewal)
+    this.plusRenewal = undefined
+    this.armRenewal(dueAt)
   }
 
   membershipChanged(): void {
@@ -326,36 +381,57 @@ export class HostedNetController implements HostedNet {
     this.armRenewal()
   }
 
-  private armRenewal(): void {
+  rosterChanged(): void {
+    if (this.host.signal.aborted || !this.hostedRelayEnabled()) return
+    try {
+      if (!this.service().status().registrationId) return
+    } catch {
+      // Locked or not enrolled: the next renewal after unlock carries the roster.
+      return
+    }
+    if (this.plusRenewal) clearTimeout(this.plusRenewal)
+    this.plusRenewal = undefined
+    this.armRenewal(this.host.clock.now())
+  }
+
+  private armRenewal(notAfter?: number): void {
     if (this.host.signal.aborted) return
     this.armEnrollmentPoll(1000)
     if (this.plusRenewal) return
     const status = this.service().status()
     if (!status.configured || !status.registrationId) return
-    this.plusRenewal = setTimeout(
-      () => {
-        this.plusRenewal = undefined
-        if (this.host.signal.aborted) return
-        void this.host
-          .serial(async () => {
-            try {
-              await this.fenceUnauthorizedSpaceRoutes()
-              await this.service().renew()
-              await this.reconcileSpaceRoutes()
-              await this.refreshDirectPath()
-            } finally {
-              this.armRenewal()
-            }
-          })
-          .catch((error) => {
-            this.host.fail(error)
-            this.host.emit()
-          })
-      },
-      status.connected
-        ? Math.min(20000, Math.max(1000, (status.expiresAt! - this.host.clock.now()) / 3))
-        : 20000
-    )
+    const now = this.host.clock.now(),
+      delay = Math.max(
+        0,
+        Math.min(
+          renewalDelayMs(
+            status.connected ? status.expiresAt! : undefined,
+            this.service().managedSpaceRoutes(),
+            now
+          ),
+          notAfter === undefined ? Infinity : notAfter - now
+        )
+      )
+    this.plusRenewalDueAt = now + delay
+    this.plusRenewal = setTimeout(() => {
+      this.plusRenewal = undefined
+      if (this.host.signal.aborted) return
+      void this.host
+        .serial(async () => {
+          try {
+            await this.fenceUnauthorizedSpaceRoutes()
+            await this.service().renew()
+            await this.reconcileSpaceRoutes()
+            await this.refreshDirectPath()
+          } finally {
+            this.armRenewal()
+          }
+        })
+        .catch((error) => {
+          this.host.fail(error)
+          this.host.emit()
+        })
+    }, delay)
     this.plusRenewal.unref?.()
     if (!this.plusAbortBound) {
       this.plusAbortBound = true

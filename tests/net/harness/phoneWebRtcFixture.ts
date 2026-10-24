@@ -101,6 +101,7 @@ export function fakeMousseId() {
         spaceJoined: async () => {},
         prepareSpaceRendezvous: async () => undefined,
         membershipChanged: () => {},
+        rosterChanged: () => {},
         directPath: () => direct
       } as unknown as HostedNet
     }
