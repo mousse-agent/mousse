@@ -11,7 +11,7 @@ import {
 import { useAppStore } from '../stores/appStore'
 import { channelForVersion } from '../../shared/updates'
 import stableLogoIcon from '../assets/mousse_logo_icon.svg'
-import nightlyLogoIcon from '../assets/mousse_logo_icon_nightly.png'
+import nightlyLogoIcon from '../assets/mousse_logo_icon_nightly.webp'
 
 /** Set at build time from package.json (electron.vite.config.ts). */
 declare const __MOUSSE_VERSION__: string | undefined
