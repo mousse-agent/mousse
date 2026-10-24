@@ -1,10 +1,11 @@
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { createHash, randomBytes } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { profile, cleanup } from '../chats/helpers'
 import { HostedProfileService } from '../../../src/mms/net/plus/HostedProfileService'
-import { renewalDelayMs } from '../../../src/mms/net/plus/HostedNetController'
+import type { HostedNetHost } from '../../../src/mms/net/hosted'
+import { HostedNetController, renewalDelayMs } from '../../../src/mms/net/plus/HostedNetController'
 import { canonicalJson } from '../../../src/mms/net/sync/codec'
 import { verifyBytes } from '../../../src/mms/net/identity/crypto'
 const configuration = {
@@ -189,6 +190,53 @@ it('refreshes a Space-peer route before its approval lapses, even when the regis
     await p.service.reconcileSpaceRoutes(() => true)
   }
   expect(p.bodies.filter((row) => row.path === '/v1/net/routes').length).toBeGreaterThan(20)
+})
+
+it('refreshes a Space-peer route that joined between renewal ticks before its approval lapses', async () => {
+  const p = await fixture({ now: () => Date.now() })
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  const self = p.rt.identity.self()!,
+    status = p.service.status()
+  // The fixture's registration lasts a minute; the real one lasts ten.
+  vi.spyOn(p.service, 'status').mockImplementation(() => ({
+    ...status,
+    expiresAt: Date.now() + 600000
+  }))
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+  try {
+    const controller = new HostedNetController({
+      clock: { now: () => Date.now() },
+      signal: p.signal.signal,
+      loadedRuntime: () => undefined,
+      requireEnrolled: () => p.rt,
+      closed: () => false,
+      enabled: () => true,
+      featureEnabled: () => true,
+      hostedSpacePeerAuthorized: () => true,
+      serial: (work) => work(),
+      emit: () => undefined,
+      fail: (error) => {
+        throw error
+      },
+      transportRows: () => [{ id: 'plus-relay', enabled: true }],
+      hostedListening: () => true,
+      reactivateIfRunning: async () => undefined,
+      suspendHostedTransport: async () => undefined
+    } as unknown as HostedNetHost)
+    ;(controller as any).hostedProfile = p.service
+    controller.resumeRenewal()
+    // The first timer was set with no routes, so it waits 200 seconds.
+    await vi.advanceTimersByTimeAsync(5000)
+    await controller.spaceJoined(self.node, self.user)
+    const granted = p.service.managedSpaceRoutes()[0].expiresAt
+    expect(granted).toBe(Date.now() + 120000)
+    // Past the first approval's end, well before that 200 second timer: the route is still approved.
+    await vi.advanceTimersByTimeAsync(121000)
+    expect(p.service.managedSpaceRoutes()[0].expiresAt).toBeGreaterThan(Date.now())
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 it('waits a third of the registration lease between renewals, at most 5 minutes, when no route is due', () => {

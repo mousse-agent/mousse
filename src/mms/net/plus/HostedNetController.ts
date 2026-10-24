@@ -21,7 +21,7 @@ import { createHostedRelayTransports } from './relayTransports'
  */
 const RENEW_MAX_MS = 5 * 60_000
 
-/** The shortest wait between renewal passes, so a failing pass cannot spin. */
+/** The shortest wait a Space-peer route can impose between renewal passes, so a failing pass cannot spin. */
 const RENEW_MIN_MS = 20_000
 
 /**
@@ -267,12 +267,28 @@ export class HostedNetController implements HostedNet {
     const hosted = this.service(),
       authorized = (user: UserId, node: NodeId) =>
         this.host.featureEnabled('netSpaces') && this.host.hostedSpacePeerAuthorized(user, node)
-    await this.fenceUnauthorizedSpaceRoutes()
-    await hosted.reconcileSpaceRoutes(authorized)
-    if (this.hostedConsentFenced) {
-      this.hostedConsentFenced = false
-      await this.host.reactivateIfRunning()
+    try {
+      await this.fenceUnauthorizedSpaceRoutes()
+      await hosted.reconcileSpaceRoutes(authorized)
+      if (this.hostedConsentFenced) {
+        this.hostedConsentFenced = false
+        await this.host.reactivateIfRunning()
+      }
+    } finally {
+      this.rescheduleRenewal()
     }
+  }
+
+  /**
+   * A pending renewal timer was timed from the routes that existed when it was armed. A route added
+   * or refreshed since then (a peer joining a Space, say) may need its approval refreshed sooner, so
+   * time the wait again. Does nothing while no timer is pending, such as during a renewal pass.
+   */
+  private rescheduleRenewal(): void {
+    if (!this.plusRenewal) return
+    clearTimeout(this.plusRenewal)
+    this.plusRenewal = undefined
+    this.armRenewal()
   }
 
   membershipChanged(): void {
