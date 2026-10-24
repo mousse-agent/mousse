@@ -264,6 +264,13 @@ html.platform-darwin .titlebar-left {
   color: var(--text-primary);
 }
 
+/* Background only: no edge bar, ring or glint. */
+.icon-btn-titlebar.titlebar-side-card-on,
+.icon-btn-titlebar.titlebar-side-card-on:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
 .icon-btn {
   display: inline-flex;
   align-items: center;
@@ -5929,61 +5936,7 @@ html.platform-darwin .agents-tasks-header-actions {
 .turn-status-retry:hover { background: rgba(var(--accent-rgb), 0.18); }
 .message-stopped { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-secondary); opacity: 0.65; }
 
-/* Quick actions (header button + dropdown + editor) */
-.quick-actions-menu {
-  min-width: 230px;
-  max-width: 300px;
-}
-
-.quick-actions-row {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  border-radius: 6px;
-}
-
-.quick-actions-row:hover {
-  background: rgba(var(--accent-rgb), 0.16);
-}
-
-.quick-actions-run {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
-  padding: 8px 6px 8px 10px;
-  border-radius: 6px;
-  text-align: left;
-  font-size: 13px;
-  color: var(--text-primary);
-}
-
-.quick-actions-run:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-.quick-actions-kind {
-  display: inline-flex;
-  align-items: center;
-  color: var(--text-secondary);
-  flex-shrink: 0;
-}
-
-.quick-actions-label {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.quick-actions-running {
-  color: var(--text-secondary);
-  flex-shrink: 0;
-}
-
+/* Quick action editor */
 .quick-actions-delete {
   display: inline-flex;
   align-items: center;
@@ -6000,12 +5953,6 @@ html.platform-darwin .agents-tasks-header-actions {
   color: var(--text-primary);
 }
 
-.quick-actions-empty {
-  padding: 8px 10px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
 .quick-actions-error {
   margin: 4px 2px;
   padding: 6px 10px;
@@ -6014,27 +5961,6 @@ html.platform-darwin .agents-tasks-header-actions {
   color: var(--danger);
   background: rgba(248, 81, 73, 0.1);
   word-break: break-word;
-}
-
-.quick-actions-separator {
-  margin: 6px 2px;
-  border-top: 1px solid rgba(var(--accent-pale-rgb), 0.16);
-}
-
-.quick-actions-create {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 10px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.quick-actions-create:hover {
-  background: rgba(var(--accent-rgb), 0.16);
 }
 
 .quick-actions-backdrop {

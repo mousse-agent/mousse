@@ -2296,7 +2296,7 @@ export class LlmClient {
         const callEvent: LlmToolEvent = {
           kind: 'build_tool_call',
           title: `Quick action ${toolCall.name}`,
-          summary: 'The orchestrator is creating a chat header quick action.',
+          summary: 'The orchestrator is creating a quick action.',
           details: [`Tool: ${toolCall.name}`],
           response: JSON.stringify(toolCall.arguments, null, 2)
         }
