@@ -97,4 +97,59 @@ describe('idle phone speech wait', () => {
       await main.stop()
     }
   }, 20_000)
+
+  it('ends a wait that was admitted before shutdown but reaches the relay after it', async () => {
+    vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+    const root = mkdtempSync(join(tmpdir(), 'mousse-speech-idle-'))
+    roots.push(root)
+    process.env.MOUSSE_HOME = root
+    const main = await MousseMainService.create({
+      homeDir: join(root, 'home'),
+      repoRoot: root,
+      requireOwnership: false
+    })
+    const host = main.getInstallationHost()!
+    const profile = host.manager.create({ displayName: 'Speech late', slug: 'speech-late' })
+    const services = await host.getProfileServices(profile.id)
+    try {
+      let ended = false
+      // Like the real handler, the wait looks up the profile's relay asynchronously first.
+      const wait = services
+        .runOwnedRequest('speech.host.wait', async () => {
+          await Promise.resolve()
+          await Promise.resolve()
+          return services.speechRelay.wait('window-1')
+        })
+        .then(() => (ended = true))
+      services.beginShutdown()
+      await wait
+      expect(ended).toBe(true)
+    } finally {
+      await main.stop()
+    }
+  }, 20_000)
+})
+
+describe('speech relay shutdown', () => {
+  it('ends later waits, while a plain close lets the relay serve again', async () => {
+    const { SpeechRelay } = await import('../src/mms/speech/SpeechRelay')
+    const timers: Array<() => void> = []
+    const clock = {
+      now: () => 0,
+      setTimeout: (callback: () => void) => {
+        timers.push(callback)
+        return { cancel: () => undefined }
+      }
+    }
+    const reused = new SpeechRelay(clock as never)
+    reused.close()
+    let served = false
+    void reused.wait('window-1').then(() => (served = true))
+    await Promise.resolve()
+    expect(served).toBe(false)
+
+    const ended = new SpeechRelay(clock as never)
+    ended.shutdown()
+    await expect(ended.wait('window-1')).resolves.toBeDefined()
+  })
 })

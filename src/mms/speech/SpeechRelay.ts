@@ -80,6 +80,7 @@ export class SpeechRelay {
   private readonly cancelNotices = new Map<string, Set<string>>()
   private readonly uploads = new Map<string, Upload>()
   private lastWaitAt = Number.NEGATIVE_INFINITY
+  private ended = false
 
   constructor(private readonly clock: SpeechRelayClock) {}
 
@@ -139,6 +140,8 @@ export class SpeechRelay {
 
   /** Resolves with queued jobs and cancellations at once, or when one arrives, or after a while. */
   wait(connection: string): Promise<SpeechWaitResult> {
+    // A wait admitted before the profile shut down may only reach here afterwards.
+    if (this.ended) return Promise.resolve(EMPTY_WAIT)
     this.lastWaitAt = this.clock.now()
     this.waiters.get(connection)?.resolve(EMPTY_WAIT)
     const ready = this.collect(connection)
@@ -256,6 +259,13 @@ export class SpeechRelay {
     this.uploads.delete(key)
   }
 
+  /** Ends the relay for the rest of the profile's life: open and later waits return at once. */
+  shutdown(): void {
+    this.ended = true
+    this.close()
+  }
+
+  /** Releases windows and settles jobs. Net disable uses this and may serve again later. */
   close(): void {
     for (const waiter of [...this.waiters.values()]) waiter.resolve(EMPTY_WAIT)
     for (const job of [...this.jobs.values()])

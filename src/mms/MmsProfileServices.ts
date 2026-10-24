@@ -687,8 +687,9 @@ export class MmsProfileServices {
     void this.undoRetention.stop()
     void this.lifecycle.cleanup.stop()
     this.requests.beginShutdown()
-    // Ends any open window speech wait now, even when Net never started and so never closes it.
-    this.speechRelayInstance?.close()
+    // Ends open and late window speech waits now, even when Net never started and so never closes
+    // the relay.
+    this.speechRelay.shutdown()
     this.mcpManager.beginShutdown()
     this.channels.beginShutdown()
     this.chatNetwork?.beginShutdown()
