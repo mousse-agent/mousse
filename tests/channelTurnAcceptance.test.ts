@@ -3,7 +3,7 @@
  * slash-workflow admission. A turn that never stores the message does not report acceptance, and a
  * throwing observer cannot abort a turn whose message is already stored.
  */
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, realpathSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -20,7 +20,7 @@ describe('channel turn input acceptance', () => {
   let chatCalls: number
 
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), 'mousse-accept-'))
+    home = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-accept-')))
     process.env.MOUSSE_HOME = home
     store = new ThreadDataStore(new ProjectManager())
     orch = createOrchestrator(home, store)
