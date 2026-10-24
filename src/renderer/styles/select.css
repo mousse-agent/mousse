@@ -1,0 +1,183 @@
+/* Themed select (components/ui/Select.tsx). The trigger matches the other
+   28px settings controls; the list uses the shared dropdown material (the
+   --ui-menu-* tokens in polish.css, same as the context menus). Hover and
+   keyboard highlight are a neutral --ui-hover fill; selection is a checkmark
+   plus brighter text. No accent on rows or on the open trigger. */
+
+.ui-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 220px;
+  max-width: 100%;
+  min-width: 0;
+  height: var(--settings-control-h, 28px);
+  padding: 0 6px 0 var(--space-8, 8px);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--settings-fs-small, 12.5px);
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+  transition: background-color 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+  -webkit-app-region: no-drag;
+}
+
+.ui-select.small {
+  width: auto;
+  height: 24px;
+}
+
+.ui-select:hover:not(:disabled),
+.ui-select.open {
+  background: var(--ui-hover);
+}
+
+/* Keyboard focus gets the quiet ring; an open list is its own indicator. */
+.ui-select:focus-visible:not(.open) {
+  box-shadow: var(--ui-focus-ring);
+}
+
+.ui-select:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.ui-select-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-select-value.placeholder {
+  color: var(--text-secondary);
+}
+
+.ui-select-chevron {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  transition: transform 0.15s ease;
+}
+
+.ui-select.open .ui-select-chevron {
+  transform: rotate(180deg);
+}
+
+.ui-select-list {
+  box-sizing: border-box;
+  max-width: min(420px, calc(100vw - 16px));
+  max-height: min(320px, calc(100vh - 16px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--ui-menu-pad);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius);
+  background: var(--ui-raised);
+  color: var(--text-primary);
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
+  font-size: 13px;
+  outline: none;
+  animation: ui-select-in 0.12s ease-out;
+  transform-origin: top center;
+  -webkit-app-region: no-drag;
+}
+
+@keyframes ui-select-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-select,
+  .ui-select-chevron {
+    transition: none;
+  }
+
+  .ui-select-list {
+    animation: none;
+  }
+}
+
+.ui-select-group {
+  padding: 8px var(--ui-menu-row-x) 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.ui-select-list > :first-child > .ui-select-group {
+  padding-top: 4px;
+}
+
+.ui-select-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--ui-line);
+}
+
+.ui-select-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--ui-row-height, 30px);
+  padding: 5px var(--ui-menu-row-x) 5px 6px;
+  border-radius: var(--ui-menu-row-radius);
+  color: color-mix(in srgb, var(--text-primary) 80%, transparent);
+  cursor: pointer;
+  user-select: none;
+}
+
+.ui-select-option.active {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.ui-select-option.selected {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.ui-select-option.disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.ui-select-check {
+  display: inline-flex;
+  flex: 0 0 14px;
+  justify-content: center;
+  color: var(--text-primary);
+}
+
+.ui-select-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ui-select-option-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-select-option-desc {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.3;
+}

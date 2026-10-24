@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { resolveActiveProject, type ActiveProject } from '../lib/activeProject'
+import { composerWorkspaceFor, isNewEmptyThread } from '../lib/newThread'
 import { useAppStore } from '../stores/appStore'
 
 async function resolveWorkspaceProjectPath(threadId: string | null): Promise<string | null> {
@@ -16,10 +18,25 @@ async function resolveWorkspaceProjectPath(threadId: string | null): Promise<str
   return window.mousse.app.getActiveProjectPath(threadId)
 }
 
-/** Keep unresolved lookups distinct from a confirmed standalone thread. */
-export function useActiveProjectLocation(): { path: string | null; loading: boolean } {
+/**
+ * The project and folder the selected thread works on. A new, empty thread
+ * follows the composer's project pick, so every surface agrees with the card.
+ * Keeps unresolved lookups distinct from a confirmed standalone thread.
+ */
+export function useActiveProjectLocation(): ActiveProject {
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const profileId = useAppStore((s) => s.profileId)
+  const projects = useAppStore((s) => s.projects)
+  const threadProjectId = useAppStore((s) => s.threads.find((thread) => thread.id === s.activeThreadId)?.projectId ?? null)
+  const isNewChat = useAppStore((s) => isNewEmptyThread(
+    s.activeThreadId,
+    s.threads.find((thread) => thread.id === s.activeThreadId),
+    s.messages.length
+  ))
+  const draftProjectId = useAppStore((s) => composerWorkspaceFor(
+    s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'],
+    s.threads.find((thread) => thread.id === s.activeThreadId)
+  ).projectId)
   const scope = `${profileId}:${activeThreadId ?? '__blank__'}`
   const [resolved, setResolved] = useState<{ scope: string; path: string | null } | null>(null)
 
@@ -31,7 +48,13 @@ export function useActiveProjectLocation(): { path: string | null; loading: bool
     return () => { cancelled = true }
   }, [activeThreadId, profileId, scope])
 
-  return resolved?.scope === scope ? { path: resolved.path, loading: false } : { path: null, loading: true }
+  return resolveActiveProject({
+    isNewChat,
+    draftProjectId,
+    threadProjectId,
+    projects,
+    resolved: resolved?.scope === scope ? { path: resolved.path, loading: false } : { path: null, loading: true }
+  })
 }
 
 export function useActiveProjectPath(): string | null {

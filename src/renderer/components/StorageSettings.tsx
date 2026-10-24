@@ -1,20 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { errorDiagnostic, knownAppError, normalizeAppError, parseErrorInfo, type AppErrorShape } from '../../shared/errors'
-import type { LifecyclePurgePreview, TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
+import type { LifecyclePurgeItem, LifecyclePurgePreview, LifecycleState, TaskLifecycleRecord, TrashRetentionPolicy } from '../../shared/resourceLifecycle'
+import { Modal } from './ui/Modal'
+import { Select } from './ui/Select'
+import { ArchiveRestore, RotateCcw, Trash2 } from '../lib/icons'
+import { SettingsGroup, SettingsRow } from './settings/SettingsRow'
+import '../styles/storage.css'
+
+const PRESET_DAYS = [7, 30, 90]
+/** Threads that are not in (or on their way into) the trash. */
+const LIVE_STATES: ReadonlySet<LifecycleState> = new Set(['active', 'draining'])
 
 export function StorageSettings() {
   const [records, setRecords] = useState<TaskLifecycleRecord[]>([])
   const [taskNames, setTaskNames] = useState<Record<string, string>>({})
-  const [policy, setPolicy] = useState<TrashRetentionPolicy>({ schemaVersion: 1, graceDays: 30, automaticPurge: false })
-  const [savedPolicy, setSavedPolicy] = useState<TrashRetentionPolicy>()
+  const [policy, setPolicy] = useState<TrashRetentionPolicy>()
   const [suspended, setSuspended] = useState(false)
+  const [reviewOpen, setReviewOpen] = useState(false)
   const [preview, setPreview] = useState<LifecyclePurgePreview>()
   const [discard, setDiscard] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [sweepReason, setSweepReason] = useState('')
   const mounted = useRef(true)
-  const dirty = useRef(false)
   const busyRef = useRef(false)
   const inFlight = useRef<Promise<void> | null>(null)
   const reload = useCallback((): Promise<void> => {
@@ -23,9 +30,7 @@ export function StorageSettings() {
       if (!mounted.current) return
       setRecords(result.lifecycles)
       setTaskNames(result.taskNames ?? {})
-      setSavedPolicy(result.trashPolicy)
-      if (!dirty.current) setPolicy(result.trashPolicy)
-      setSweepReason(result.trashSweepStatus.reason ?? '')
+      setPolicy(result.trashPolicy)
       setSuspended(result.trashSweepStatus.suspended)
     }).finally(() => { if (inFlight.current === request) inFlight.current = null })
     inFlight.current = request
@@ -41,7 +46,7 @@ export function StorageSettings() {
   }, [])
   const showRefreshError = useCallback((cause: unknown) => {
     console.error('Storage refresh failed', errorDiagnostic(normalizeAppError(cause, 'storage_refresh_failed'), 'storage.inventory'))
-    if (mounted.current) setError('Unable to refresh storage inventory. Please try again.')
+    if (mounted.current) setError('Unable to refresh storage. Please try again.')
   }, [])
   useEffect(() => {
     mounted.current = true
@@ -57,7 +62,7 @@ export function StorageSettings() {
       document.removeEventListener('visibilitychange', refresh)
     }
   }, [reload, showRefreshError])
-  const run = async (work: () => Promise<unknown>, savePolicy = false) => {
+  const run = async (work: () => Promise<unknown>) => {
     if (busyRef.current) return
     busyRef.current = true
     setBusy(true); setError('')
@@ -65,7 +70,6 @@ export function StorageSettings() {
       // Finish any older snapshot before the mutation; refresh afterwards.
       await inFlight.current?.catch(() => {})
       await work()
-      if (savePolicy) dirty.current = false
       await reload()
     } catch (cause) {
       showError(cause)
@@ -75,54 +79,167 @@ export function StorageSettings() {
       if (mounted.current) setBusy(false)
     }
   }
+  const savePolicy = (next: TrashRetentionPolicy) => void run(async () => {
+    setPolicy(next)
+    await window.mousse.threads.configureTrash(next)
+  })
+  const choosePolicy = (value: string) => {
+    if (!policy) return
+    savePolicy(value === 'never' ? { ...policy, automaticPurge: false } : { ...policy, automaticPurge: true, graceDays: Number(value) })
+  }
+  const closeReview = useCallback(() => { setReviewOpen(false); setPreview(undefined); setDiscard(false) }, [])
+
+  const roots = records.filter((record) => !record.parentTaskId && record.state !== 'purged')
+  const inTrash = roots.filter((record) => !LIVE_STATES.has(record.state))
+  const live = roots.filter((record) => LIVE_STATES.has(record.state))
+  const unfinished = inTrash.filter((record) => record.state === 'purge-started').length
+  const selectValue = !policy ? '' : policy.automaticPurge ? String(policy.graceDays) : 'never'
+  const customDays = policy?.automaticPurge && !PRESET_DAYS.includes(policy.graceDays) ? policy.graceDays : undefined
+  const autoPaused = Boolean(policy?.automaticPurge && suspended)
+  const name = (taskId: string) => taskNames[taskId] ?? 'Untitled thread'
+
+  const threadRow = (record: TaskLifecycleRecord) => (
+    <SettingsRow
+      key={record.taskId}
+      data-testid="storage-thread-row"
+      data-task-id={record.taskId}
+      title={name(record.taskId)}
+      description={threadStatus(record, policy)}
+      control={<span className="settings-icon-actions">
+        {record.state === 'active' && <button type="button" className="settings-icon-btn danger" title="Move to trash" aria-label="Move to trash" disabled={busy} onClick={() => void run(() => window.mousse.threads.delete(record.taskId))}><Trash2 size={14} /></button>}
+        {record.state === 'trashed' && <button type="button" className="settings-icon-btn primary" title="Restore" aria-label="Restore" disabled={busy} onClick={() => void run(() => window.mousse.threads.restore(record.taskId))}><ArchiveRestore size={14} /></button>}
+        {record.state === 'trashed' && <button type="button" className="settings-icon-btn danger" title="Delete…" aria-label="Delete…" disabled={busy} onClick={() => void run(async () => { const result = await window.mousse.threads.purge(record.taskId, { preview: true }); setPreview(result.preview); setDiscard(false) })}><Trash2 size={14} /></button>}
+        {record.state === 'purge-started' && <button type="button" className="settings-icon-btn primary" title="Retry deletion" aria-label="Retry deletion" disabled={busy} onClick={() => void run(() => window.mousse.threads.purge(record.taskId, { operationId: record.purge!.operationId }))}><RotateCcw size={14} /></button>}
+      </span>}
+    />
+  )
+
+  const needsDiscard = preview?.items.some((item) => item.discardRequired) ?? false
+  const footer = preview
+    ? <>
+        <button type="button" className="settings-btn" disabled={busy} onClick={() => setPreview(undefined)}>Back</button>
+        <button
+          type="button"
+          className="settings-btn danger"
+          data-testid="storage-delete-permanently"
+          disabled={busy || preview.blockers.length > 0 || needsDiscard && !discard}
+          onClick={() => void run(async () => { await window.mousse.threads.purge(preview.taskId, { operationId: crypto.randomUUID(), expectedGeneration: preview.generation, previewDigest: preview.digest, discard }); setPreview(undefined) })}
+        >Delete permanently</button>
+      </>
+    : undefined
+
   return <section className="settings-section storage-settings">
-    <h2>Storage and trash</h2>
-    <p className="settings-section-desc">Configure global trash retention and automatic cleanup.</p>
-    <div className="storage-policy">
-      <h3>Trash retention</h3>
-      <label className="storage-grace-field"><span>Grace period <span className="storage-muted">(days)</span></span><input className="settings-input" aria-label="Trash grace period in days" type="number" min={1} max={3650} value={policy.graceDays} disabled={busy} onChange={(event) => { dirty.current = true; setPolicy({ ...policy, graceDays: Number(event.target.value) }) }} /></label>
-      <label className="storage-checkbox"><input type="checkbox" checked={policy.automaticPurge} disabled={busy} onChange={(event) => { dirty.current = true; setPolicy({ ...policy, automaticPurge: event.target.checked }) }} /><span>Automatically purge eligible trash after the grace period</span></label>
-      <button className="settings-inline-btn" disabled={busy} onClick={() => void run(() => window.mousse.threads.configureTrash(policy), true)}>Save trash policy</button>
-    </div>
-    <p>Trash remains restorable for review. Undo has its own retention window. Retained conversations and Git history reachable from other branches are separate from reclaimable checkout files.</p>
-    <p>Automatic cleanup retains unpublished results and any files that need a human discard decision. Permanent deletion cannot be undone once it starts.</p>
-    {error && <p role="alert">{error}</p>}
-    {savedPolicy && <p role="status">Automatic cleanup: {!savedPolicy.automaticPurge ? 'off' : suspended ? 'suspended' : 'enabled'}.</p>}
-    {sweepReason && <p role="status">{sweepReason}</p>}
-    {records.filter((record) => !record.parentTaskId && record.state !== 'purged').map((record) => <div key={record.taskId} data-task-id={record.taskId} className="settings-row" style={{ display: 'block', marginBlock: 12 }}>
-      <strong>{taskNames[record.taskId] ?? 'Task with unavailable title'}</strong>  /  {record.state}
-      <div style={{ color: 'var(--text-secondary)', fontSize: 11, marginTop: 4 }}>Task ID: {record.taskId}</div>
-      {record.state === 'trashed' && savedPolicy && <TrashDates record={record} graceDays={savedPolicy.graceDays} />}
-      {record.blockedReason && <p role="status">{record.blockedReason}</p>}
-      {record.purge && <p>{record.purge.items.filter((item) => item.status === 'removed').length} / {record.purge.items.length} resources removed. Restore is unavailable because permanent deletion has started.</p>}
-      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-        {record.state === 'active' && <button className="settings-inline-btn" disabled={busy} onClick={() => void run(() => window.mousse.threads.delete(record.taskId))}>Move to trash</button>}
-        {record.state === 'trashed' && <button className="settings-inline-btn" disabled={busy} onClick={() => void run(() => window.mousse.threads.restore(record.taskId))}>Restore idle task</button>}
-        {record.state === 'trashed' && <button className="settings-inline-btn" disabled={busy} onClick={() => void run(async () => { const result = await window.mousse.threads.purge(record.taskId, { preview: true }); setPreview(result.preview); setDiscard(false) })}>Review permanent deletion</button>}
-        {record.state === 'purge-started' && <button className="settings-inline-btn" disabled={busy} onClick={() => void run(() => window.mousse.threads.purge(record.taskId, { operationId: record.purge!.operationId }))}>Retry cleanup</button>}
+    <SettingsGroup title="Trash" icon={Trash2}>
+      <SettingsRow
+        data-testid="storage-auto-empty"
+        title="Empty trash automatically"
+        htmlFor="storage-auto-empty-select"
+        description={autoPaused ? 'Paused after a system clock change.' : 'Unpublished work is never deleted automatically.'}
+        control={<>
+          {autoPaused && policy && <button type="button" className="settings-btn" disabled={busy} onClick={() => savePolicy(policy)}>Resume</button>}
+          <Select
+            id="storage-auto-empty-select"
+            data-testid="storage-auto-empty-select"
+            value={selectValue}
+            disabled={busy || !policy}
+            placeholder="Loading…"
+            onChange={choosePolicy}
+            options={[
+              { value: 'never', label: 'Never' },
+              ...PRESET_DAYS.map((days) => ({ value: String(days), label: `After ${days} days` })),
+              ...(customDays !== undefined ? [{ value: String(customDays), label: `After ${customDays} ${customDays === 1 ? 'day' : 'days'}` }] : [])
+            ]}
+          />
+        </>}
+      />
+      <SettingsRow
+        data-testid="storage-review-trash"
+        title="Review trash"
+        description={trashSummary(inTrash.length, unfinished)}
+        control={<button type="button" className="settings-btn" data-testid="storage-review-trash-button" onClick={() => setReviewOpen(true)}>Review…</button>}
+      />
+    </SettingsGroup>
+    {error && !reviewOpen && <p className="storage-error" role="alert">{error}</p>}
+
+    <Modal open={reviewOpen} title={preview ? `Delete “${name(preview.taskId)}”` : 'Trash'} onClose={closeReview} footer={footer}>
+      <div className="storage-dialog" data-testid="storage-trash-dialog">
+        {error && <p className="storage-error" role="alert">{error}</p>}
+        {preview
+          ? <DeletionPreview preview={preview} discard={discard} onDiscardChange={setDiscard} />
+          : <>
+              <SettingsGroup title="In trash">
+                {inTrash.length ? inTrash.map(threadRow) : <p className="settings-muted storage-empty">Trash is empty.</p>}
+              </SettingsGroup>
+              {live.length > 0 && <SettingsGroup title="Other threads">{live.map(threadRow)}</SettingsGroup>}
+            </>}
       </div>
-    </div>)}
-    {preview && <div role="dialog" aria-label="Permanent deletion preview" style={{ border: '1px solid currentColor', padding: 16, marginTop: 16 }}>
-      <h3>Review permanent deletion: {taskNames[preview.taskId] ?? preview.taskId}</h3>
-      <p>{preview.items.length} exclusive resources; {(preview.exclusiveBytes / 1024 / 1024).toFixed(2)} MiB of checkout and owned files. This excludes shared Git object storage.</p>
-      <div style={{ maxHeight: 260, overflow: 'auto' }}>
-        {preview.items.map((item) => <div key={item.id} style={{ marginBlock: 8, overflowWrap: 'anywhere' }}>{item.kind}: {item.identity}{item.discardRequired && <strong>  -  Discard required: {item.reason ?? 'unpublished content'}</strong>}{item.discardRequired && item.content && <details><summary>Files included in discard</summary>{item.content.filter((entry) => entry.kind !== 'directory').map((entry) => <div key={entry.path}>{entry.path} ({entry.bytes} bytes)</div>)}</details>}</div>)}
-        {preview.retained.map((item) => <p key={item.identity}>Retained: {item.identity}  -  {item.reason}</p>)}
-        {preview.blockers.map((reason) => <p key={reason} role="alert">Blocked: {reason}</p>)}
-      </div>
-      {preview.items.some((item) => item.discardRequired) && <label><input type="checkbox" checked={discard} onChange={(event) => setDiscard(event.target.checked)} /> I explicitly discard the listed unpublished results and sole-copy files.</label>}
-      <p>Starting deletion permanently removes the listed content. You cannot restore or cancel after this boundary.</p>
-      <button className="settings-inline-btn" disabled={busy} onClick={() => setPreview(undefined)}>Cancel</button>{' '}
-      <button className="settings-inline-btn" disabled={busy || preview.blockers.length > 0 || preview.items.some((item) => item.discardRequired) && !discard} onClick={() => void run(async () => { await window.mousse.threads.purge(preview.taskId, { operationId: crypto.randomUUID(), expectedGeneration: preview.generation, previewDigest: preview.digest, discard }); setPreview(undefined) })}>Permanently delete</button>
-    </div>}
+    </Modal>
   </section>
 }
 
-function TrashDates({ record, graceDays }: { record: TaskLifecycleRecord; graceDays: number }) {
-  // Same timestamp fallback as ResourcePurgeService.sweep; this is presentation only.
-  const trashedAt = record.trashedAt ?? record.operations.filter((operation) => operation.kind === 'trash' && operation.phase === 'completed').at(-1)?.completedAt ?? record.createdAt
-  const time = Date.parse(trashedAt)
-  if (!Number.isFinite(time)) return <p>Cleanup eligibility date is unavailable.</p>
-  const eligibleAt = new Date(time + graceDays * 86_400_000)
-  return <p>Moved to trash: <time dateTime={trashedAt}>{new Date(time).toLocaleString()}</time>. Grace period ends: <time dateTime={eligibleAt.toISOString()}>{eligibleAt.toLocaleString()}</time>. Cleanup also requires all blockers to be cleared.</p>
+function DeletionPreview({ preview, discard, onDiscardChange }: { preview: LifecyclePurgePreview; discard: boolean; onDiscardChange: (next: boolean) => void }) {
+  const needsDiscard = preview.items.some((item) => item.discardRequired)
+  return <section className="storage-preview" aria-label="Permanent deletion preview" data-testid="storage-deletion-preview">
+    <p className="settings-muted">
+      {preview.items.length} {preview.items.length === 1 ? 'item' : 'items'} · {formatBytes(preview.exclusiveBytes)} freed. Shared Git history is kept.
+    </p>
+    {preview.blockers.map((reason) => <p key={reason} className="storage-error" role="alert">Can’t delete: {reason}</p>)}
+    {needsDiscard && <label className="storage-discard">
+      <input type="checkbox" checked={discard} onChange={(event) => onDiscardChange(event.target.checked)} />
+      <span>Discard the unpublished results and only-copy files listed below.</span>
+    </label>}
+    <p className="settings-muted">Deletion can’t be undone or cancelled once it starts.</p>
+    <SettingsGroup>
+      {[...preview.items].sort((a, b) => Number(Boolean(b.discardRequired)) - Number(Boolean(a.discardRequired))).map((item) => <SettingsRow
+        key={item.id}
+        title={<span className="storage-identity">{item.identity}</span>}
+        description={item.discardRequired ? `${KIND_LABELS[item.kind]} · Unpublished: ${item.reason ?? 'may contain unpublished work'}` : KIND_LABELS[item.kind]}
+      >
+        {item.discardRequired && item.content && <details className="storage-files">
+          <summary>Files to discard</summary>
+          {item.content.filter((entry) => entry.kind !== 'directory').map((entry) => <div key={entry.path} className="settings-muted storage-identity">{entry.path} ({formatBytes(entry.bytes)})</div>)}
+        </details>}
+      </SettingsRow>)}
+      {preview.retained.map((item) => <SettingsRow key={item.identity} title={<span className="storage-identity">{item.identity}</span>} description={`Kept · ${item.reason}`} />)}
+    </SettingsGroup>
+  </section>
+}
+
+const KIND_LABELS: Record<LifecyclePurgeItem['kind'], string> = { worktree: 'Worktree', ref: 'Branch', path: 'Files', 'scheduled-row': 'Scheduled task' }
+
+function trashSummary(count: number, unfinished: number): string {
+  if (!count) return 'Trash is empty'
+  const threads = `${count} ${count === 1 ? 'thread' : 'threads'}`
+  return unfinished ? `${threads} · ${unfinished} unfinished ${unfinished === 1 ? 'deletion' : 'deletions'}` : threads
+}
+
+function threadStatus(record: TaskLifecycleRecord, policy: TrashRetentionPolicy | undefined): string | undefined {
+  switch (record.state) {
+    case 'active': return undefined
+    case 'draining': return 'Stopping…'
+    case 'trash-moving': return 'Moving to trash…'
+    case 'restore-moving': return 'Restoring…'
+    case 'purge-started': {
+      const items = record.purge?.items ?? []
+      return `Deletion started · ${items.filter((item) => item.status === 'removed').length} of ${items.length} removed · can’t be restored`
+    }
+    case 'blocked': return record.blockedReason ?? 'Blocked'
+    case 'trashed': {
+      if (record.blockedReason) return record.blockedReason
+      // Same timestamp fallback as ResourcePurgeService.sweep; this is presentation only.
+      const trashedAt = record.trashedAt ?? record.operations.filter((operation) => operation.kind === 'trash' && operation.phase === 'completed').at(-1)?.completedAt ?? record.createdAt
+      const time = Date.parse(trashedAt)
+      if (!Number.isFinite(time)) return undefined
+      const trashed = `Trashed ${new Date(time).toLocaleDateString()}`
+      return policy?.automaticPurge ? `${trashed} · deleted after ${new Date(time + policy.graceDays * 86_400_000).toLocaleDateString()}` : trashed
+    }
+    default: return undefined
+  }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`
 }

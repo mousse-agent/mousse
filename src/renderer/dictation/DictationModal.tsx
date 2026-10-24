@@ -31,22 +31,12 @@ function DictationModal() {
       title="Choose a dictation model"
       onClose={closePicker}
       footer={
-        <>
-          <button type="button" className="btn" onClick={closePicker}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={!draft}
-            onClick={() => draft && confirmPicker(draft)}
-          >
-            {recording ? 'Use model and record' : 'Use model'}
-          </button>
-        </>
+        <button type="button" className="btn btn-primary" disabled={!draft} onClick={() => draft && confirmPicker(draft)}>
+          {recording ? 'Use model and record' : 'Use model'}
+        </button>
       }
     >
-      <p>Speech is turned into text with the model you pick. You can change it later under Settings, Models.</p>
+      <p>Speech is turned into text with the model you pick. You can change it later under Settings, Speech.</p>
       <DictationModelPicker
         value={draft}
         onSelect={setDraft}

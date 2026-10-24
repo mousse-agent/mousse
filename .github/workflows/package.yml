@@ -1,7 +1,8 @@
 name: Package
 
-# Builds the Windows and Linux installers and CLIs for one version. Called by the
-# nightly and stable release workflows, which publish the uploaded artifacts.
+# Builds the Windows and Linux installers and CLIs, and the macOS disk images, for one
+# version. Called by the nightly and stable release workflows, which publish the uploaded
+# artifacts.
 on:
   workflow_call:
     inputs:
@@ -35,6 +36,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+      # Nightlies get their own icon so they are easy to tell apart from stable.
+      - name: Use the nightly icon
+        if: contains(inputs.version, '-nightly.')
+        run: cp resources/nightly/icon.png resources/nightly/icon.ico resources/
       - run: npm run dist:linux
       - name: Check the packaged CLI reports the version
         run: |
@@ -91,6 +96,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm version "$env:VERSION" --no-git-tag-version --allow-same-version
+      - name: Use the nightly icon
+        if: contains(inputs.version, '-nightly.')
+        run: Copy-Item resources/nightly/icon.png, resources/nightly/icon.ico resources/
       - name: Locate MSBuild for the node-pty rebuild
         run: |
           $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
@@ -117,5 +125,54 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mousse-windows
+          if-no-files-found: error
+          path: upload/*
+
+  mac:
+    name: Package macOS (${{ matrix.arch }})
+    # Each architecture builds on its own runner: the build packages the Electron that
+    # npm installed, which matches the runner.
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      ARCH: ${{ matrix.arch }}
+      # No Developer ID certificate: the app is ad-hoc signed, as Apple silicon requires.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.20.0'
+          cache: npm
+      - run: npm ci
+      - run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+      - name: Use the nightly icon
+        if: contains(inputs.version, '-nightly.')
+        run: cp resources/nightly/icon.png resources/
+      - run: npm run dist:mac -- "--$ARCH"
+      - name: Check the signature and that the bundled CLI reports the version
+        run: |
+          app=$(echo release/mac*/Mousse.app)
+          codesign --verify --deep --strict "$app"
+          out=$("$app/Contents/Resources/mousse-cli" --version)
+          echo "$out"
+          test "$out" = "mousse-cli $VERSION"
+      # macOS builds are not covered by in-app updates, so no update manifest is attached.
+      - name: Collect the release files
+        run: |
+          mkdir upload
+          cp "release/Mousse-$VERSION-$ARCH.dmg" upload/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mousse-mac-${{ matrix.arch }}
           if-no-files-found: error
           path: upload/*

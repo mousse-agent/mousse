@@ -1,0 +1,74 @@
+/* Storage settings and its trash review dialog. Layout rules: see settings.css. */
+
+.storage-settings .storage-error {
+  margin: var(--space-8) 0 0;
+  font-size: var(--settings-fs-small);
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.storage-settings .modal {
+  width: 640px;
+}
+
+.storage-dialog > .settings-group:first-child,
+.storage-dialog > .settings-group:first-of-type,
+.storage-preview > .settings-group {
+  padding-top: 0;
+}
+
+.storage-dialog > .settings-group + .settings-group {
+  padding-top: var(--space-24);
+}
+
+.storage-dialog > .storage-error {
+  margin: 0 0 var(--space-12);
+}
+
+.storage-empty {
+  margin: 0;
+  padding: var(--settings-row-y) 0;
+}
+
+.storage-preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+}
+
+.storage-preview > p {
+  margin: 0;
+}
+
+.storage-identity {
+  overflow-wrap: anywhere;
+}
+
+.storage-preview .settings-item-title .storage-identity {
+  font-size: var(--settings-fs-small);
+}
+
+.storage-files > summary {
+  cursor: pointer;
+  font-size: var(--settings-fs-small);
+  color: var(--text-secondary);
+}
+
+.storage-files > div {
+  padding-top: var(--space-4);
+}
+
+.storage-discard {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-8);
+  font-size: var(--settings-fs-small);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.storage-discard input {
+  flex-shrink: 0;
+  margin: var(--space-4) 0 0;
+  accent-color: var(--accent);
+}

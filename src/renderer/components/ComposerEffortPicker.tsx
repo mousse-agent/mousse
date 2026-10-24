@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import type { LlmModelOption } from '../../shared/settings'
 import { applyEffortToModelId, findModelFamily, formatEffortLabel, getCurrentEffort, getEffortsForModel, getModelFastToggle, parseModelVariant, parseThinkingSuffixFromModelId, resolveModelVariant } from '../../shared/modelVariants'
-import { ChevronDown } from '../lib/icons'
+import { Check, ChevronDown } from '../lib/icons'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
+
+/** The check column shared by the composer's single-line menus (same as Select). */
+export function MenuCheck({ on }: { on: boolean }) {
+  return <span className="composer-mode-menu-check" aria-hidden="true">{on && <Check size={14} strokeWidth={2} />}</span>
+}
 
 export function ComposerEffortPicker({ providerId, modelId, models, readOnly, onSelect }: {
   providerId: string
@@ -45,11 +50,11 @@ export function ComposerEffortPicker({ providerId, modelId, models, readOnly, on
     {open && !readOnly && <FloatingPortal><div ref={contentRef} style={style} className="composer-mode-menu composer-mode-menu-floating" role="menu" aria-label="Reasoning effort and speed">
       {efforts.length > 0 && <div className="composer-mode-menu-section" role="group" aria-label="Reasoning">
         <div className="composer-mode-menu-heading">Reasoning</div>
-        {['off', ...efforts.filter((value) => value !== 'off')].map((value) => <button key={value} type="button" role="menuitemradio" aria-checked={effort === value} className={`composer-mode-menu-item${effort === value ? ' selected' : ''}`} onClick={() => selectEffort(value)}>{value === 'xhigh' ? 'Extra high' : formatEffortLabel(value)}</button>)}
+        {['off', ...efforts.filter((value) => value !== 'off')].map((value) => <button key={value} type="button" role="menuitemradio" aria-checked={effort === value} className={`composer-mode-menu-item${effort === value ? ' selected' : ''}`} onClick={() => selectEffort(value)}><MenuCheck on={effort === value} /><span>{value === 'xhigh' ? 'Extra high' : formatEffortLabel(value)}</span></button>)}
       </div>}
       {fast && <div className="composer-mode-menu-section composer-mode-menu-group" role="group" aria-label="Speed">
         <div className="composer-mode-menu-heading">Speed</div>
-        {[false, true].map((enabled) => <button key={String(enabled)} type="button" role="menuitemradio" aria-checked={fast.active === enabled} className={`composer-mode-menu-item${fast.active === enabled ? ' selected' : ''}`} onClick={() => { if (fast.active !== enabled) select(effort === 'off' ? `${parseThinkingSuffixFromModelId(fast.targetModelId).baseId}:off` : fast.targetModelId); else setOpen(false) }}>{enabled ? 'Fast' : 'Standard'}</button>)}
+        {[false, true].map((enabled) => <button key={String(enabled)} type="button" role="menuitemradio" aria-checked={fast.active === enabled} className={`composer-mode-menu-item${fast.active === enabled ? ' selected' : ''}`} onClick={() => { if (fast.active !== enabled) select(effort === 'off' ? `${parseThinkingSuffixFromModelId(fast.targetModelId).baseId}:off` : fast.targetModelId); else setOpen(false) }}><MenuCheck on={fast.active === enabled} /><span>{enabled ? 'Fast' : 'Standard'}</span></button>)}
       </div>}
     </div></FloatingPortal>}
   </div>

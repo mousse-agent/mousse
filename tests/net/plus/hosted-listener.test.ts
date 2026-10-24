@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { randomBytes } from 'node:crypto'
@@ -51,7 +51,6 @@ it('keeps the route while a listener nobody dialed listens again after the relay
   // The desktop closes its phones' direct paths whenever the listener reports no route.
   const states: string[] = []
   transport.onStatus((status) => states.push(`${status.state}:${status.routes.length}`))
-  await new Promise((resolve) => setTimeout(resolve, 400))
-  expect(server.listens()).toBeGreaterThanOrEqual(3)
+  await vi.waitFor(() => expect(server.listens()).toBeGreaterThanOrEqual(4), { timeout: 10_000, interval: 10 })
   expect(states.filter((state) => state !== 'ready:1')).toEqual([])
 })

@@ -10,7 +10,7 @@ import { SpeechModelPicker, useProviderSpeechModels, type LocalModelApi, type Sp
 import { useDictationStore } from './dictationStore'
 import { sameDictationSelection } from './selection'
 
-function providerSelection(model: SpeechProviderModel): DictationSelection {
+export function providerSelection(model: SpeechProviderModel): DictationSelection {
   return {
     source: 'provider',
     providerId: model.providerId,
@@ -19,11 +19,11 @@ function providerSelection(model: SpeechProviderModel): DictationSelection {
   }
 }
 
-function localSelection(model: LocalSttModel): DictationSelection {
+export function localSelection(model: LocalSttModel): DictationSelection {
   return { source: 'local', modelId: model.id, label: model.label }
 }
 
-const localApi: LocalModelApi = {
+export const dictationLocalApi: LocalModelApi = {
   list: () => window.mousse.dictation.localModels(),
   download: (modelId) => window.mousse.dictation.downloadLocalModel(modelId as LocalSttModelId),
   cancelDownload: (modelId) => window.mousse.dictation.cancelLocalModelDownload(modelId as LocalSttModelId),
@@ -75,7 +75,7 @@ export function DictationModelPicker({
       providerSelection={providerSelection}
       localModels={LOCAL_STT_MODELS}
       localSelection={localSelection}
-      localApi={localApi}
+      localApi={dictationLocalApi}
       sameSelection={sameDictationSelection}
       renderEmptyProviders={renderEmptyProviders}
     />

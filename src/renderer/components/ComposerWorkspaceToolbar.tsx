@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { Check, ChevronDown, Folder, FolderPlus, GitBranch, Laptop } from '../lib/icons'
 import type { Project } from '../../shared/types'
+import { useMenuKeyboard } from '../hooks/useMenuKeyboard'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import '../styles/composer-workspace.css'
 
@@ -34,6 +35,7 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, onChan
     setMenuOpen(false)
     triggerRef.current?.focus()
   }
+  const menuKeyDown = useMenuKeyboard(menuRef, closeMenu)
   const openMenu = (index = selectedIndex) => {
     initialFocusRef.current = index
     setMenuOpen(true)
@@ -87,23 +89,7 @@ export function ComposerWorkspaceToolbar({ projects, workspace, disabled, onChan
             role="menu"
             aria-label="Select project"
             style={menuStyle}
-            onKeyDown={(event) => {
-              const index = itemRefs.current.indexOf(document.activeElement as HTMLButtonElement)
-              const count = choices.length + 1
-              let next: number | undefined
-              if (event.key === 'ArrowDown') next = (index + 1) % count
-              if (event.key === 'ArrowUp') next = (index - 1 + count) % count
-              if (event.key === 'Home') next = 0
-              if (event.key === 'End') next = count - 1
-              if (next !== undefined) {
-                event.preventDefault()
-                itemRefs.current[next]?.focus()
-              } else if (event.key === 'Escape') {
-                event.preventDefault()
-                event.stopPropagation()
-                closeMenu()
-              } else if (event.key === 'Tab') closeMenu()
-            }}
+            onKeyDown={menuKeyDown}
           >
             {choices.map((entry, index) => (
               <button
