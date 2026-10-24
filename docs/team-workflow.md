@@ -24,7 +24,7 @@ Discussion, planning, reviews, and diagnosis alone do not authorize code changes
 - Assign the authenticated human taking responsibility. Verify their identity and permissions. Record an agreed handoff when ownership changes.
 - Detect the remote default branch rather than assuming `main` or `master`. Start new shared work from its latest fetched commit. Name branches after the work only: `issue-123-short-description` when an issue number is available, otherwise a short description of the task. Never put an agent, model, or tool name in a branch name. For local PR testing, use the requested source and target commits and checkout. Respect an explicit branch name from the user.
 - Use small, descriptive commits; this repo uses Conventional Commits. Commit only task-owned changes. For shared work, push useful checkpoints during work and before going offline. WIP commits need not pass every test.
-- For shared work, open a draft PR when the diff is useful for review or handoff and the local suite passes, reusing the existing PR for the task. Keep material decisions and blockers attached to the issue/PR. Use the handoff format in `end-session` when pausing or transferring responsibility. A local experiment or backup alone does not warrant a PR.
+- For shared work, open a draft PR when the diff is useful for review or handoff and its relevant tests pass, reusing the existing PR for the task. Keep material decisions and blockers attached to the issue/PR. Use the handoff format in `end-session` when pausing or transferring responsibility. A local experiment or backup alone does not warrant a PR.
 - Before resuming, inspect changes on the default branch, related issues, and teammate branches. Reconcile old work and discard duplicate implementation only after verifying what is already accepted; do not destroy unpublished work automatically.
 - Use `Closes #123` only when merging the PR completes the issue; otherwise use `Refs #123`. Keep WIP/review issues open. Status belongs in the handoff and draft/review state; no custom labels are required.
 
@@ -79,7 +79,7 @@ Keep the issue body current like a PR description. Decisions, blockers, and hand
 
 While working, default to focused tests for the changed behavior and directly affected areas. `npm run test:changed` runs the tests related to the working tree and `npm run test:plan` shows that selection without running it; see `docs/testing.md` for how related tests are chosen and which tests must stay. Choose checks that establish the requested behavior and relevant regressions, including a targeted app check when the change warrants it.
 
-The full test suite runs locally, once, before a PR is opened. For a code change, run `npm test` on the commit you will publish and open the PR only when it passes. Local hardware is faster than the hosted runners, so the local run is the real gate and hosted CI stays basic. If the suite fails, fix it or keep the work on its pushed task branch without a PR. A failure that looks unrelated or flaky still blocks the PR until it is shown to fail on the default branch too; the PR then names it. Rerun the suite after later commits that change code, and state the result in the PR's Verification section.
+Before a PR is opened, run only the isolated tests relevant to the specific change, for example `npm run test:branch` or `npm run test:related -- <files>`, on the commit you will publish, and open the PR when they pass. Run the full suite (`npm test`) only for very large changes that affect multiple modules, such as shared infrastructure or cross-cutting refactors. If the tests fail, fix them or keep the work on its pushed task branch without a PR. A failure that looks unrelated or flaky still blocks the PR until it is shown to fail on the default branch too; the PR then names it. Rerun the relevant tests after later commits that change code, and state what ran and the result in the PR's Verification section.
 
 Once relevant checks pass, do not broaden or repeat testing without a new change, failure, or concrete unresolved concern. Reuse passing evidence for unchanged code and state what was tested. Documentation-only changes normally need diff and consistency review, not application tests.
 
@@ -87,7 +87,7 @@ Hosted CI runs basic checks on every PR and push to the default branch: the work
 
 ## Review and merge
 
-Changes intended for the shared default branch go through a PR. Local-only testing does not require a PR and does not authorize a remote merge. The local suite must have passed on the current code, focused verification must cover the current changes, and actual GitHub-required checks and reviews must be satisfied. Passing tests do not by themselves prove the requested behavior works; include direct verification evidence. The manual full-suite CI run is not an additional merge requirement.
+Changes intended for the shared default branch go through a PR. Local-only testing does not require a PR and does not authorize a remote merge. The relevant local tests must have passed on the current code, focused verification must cover the current changes, and actual GitHub-required checks and reviews must be satisfied. Passing tests do not by themselves prove the requested behavior works; include direct verification evidence. The manual full-suite CI run is not an additional merge requirement.
 
 For routine changes, the present human may authorize a merge after verification, including when they authored the PR, if GitHub rules permit it. This is permission to merge, not a self-approval review. No additional teammate approval is imposed by these skills for routine work.
 
@@ -125,7 +125,7 @@ If a push fails, retain the local work and state that it is not backed up remote
 
 Skills are instructions, not access controls. Maintainers must configure GitHub separately:
 
-- Require PRs into the default branch and the basic CI checks. Do not make a hosted full-suite run the routine gate; the full suite is run locally before a PR is opened. Confirm checks pass before making them required.
+- Require PRs into the default branch and the basic CI checks. Do not make a hosted full-suite run the routine gate; PRs are gated on the relevant local tests. Confirm checks pass before making them required.
 - Require conversation resolution and block default-branch force pushes and deletion.
 - Set the review policy consistently with the routine/sensitive distinction above. A blanket one-review requirement will block routine merges during absences; sensitive-review requirements here remain procedural unless separately enforced in GitHub.
 - Enable automatic deletion of merged PR head branches (needs repository admin). The cleanup helper covers this until it is enabled. Do not automatically delete unmerged branches.
