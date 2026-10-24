@@ -77,6 +77,9 @@ const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.purge'
 ])
 
+/** Long-poll requests that sit open while nothing happens; they are not owned profile work. */
+const IDLE_WAIT_METHODS = new Set(['speech.host.wait'])
+
 function containsProfileBusy(error: unknown): boolean {
   if (
     error instanceof Error &&
@@ -619,6 +622,12 @@ export class MmsProfileServices {
 
   async runOwnedRequest<T>(method: string, work: () => T | Promise<T>): Promise<T> {
     const label = `rpc:${method}`
+    // An idle window's wait holds no profile state and ends when the relay closes, so it must not
+    // make storage changes or shutdown wait for it. It is still refused once the profile drains.
+    if (IDLE_WAIT_METHODS.has(method)) {
+      this.requests.assertAccepting()
+      return work()
+    }
     try {
       return await this.requests.run(label, async () => {
         if (!STORAGE_LIFECYCLE_METHODS.has(method)) return work()
