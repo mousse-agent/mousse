@@ -75,9 +75,24 @@ export function initialDialogFocus(dialog: HTMLElement): HTMLElement {
   return inBody(FIELDS) ?? inBody(FOCUSABLE) ?? dialog
 }
 
+const openDialogs: HTMLElement[] = []
+
+/** Registers an open dialog; returns what unregisters it. Dialogs opened later sit above earlier ones. */
+export function registerDialog(dialog: HTMLElement): () => void {
+  openDialogs.push(dialog)
+  return () => {
+    const index = openDialogs.indexOf(dialog)
+    if (index !== -1) openDialogs.splice(index, 1)
+  }
+}
+
+/** Only the dialog opened last answers Tab and Escape, so one stacked above another does not fight it for focus. */
+export const isTopDialog = (dialog: HTMLElement): boolean => openDialogs[openDialogs.length - 1] === dialog
+
 /**
  * Dialog keyboard behaviour shared by ui/Modal and the integrations dialog: initial focus in the
- * body, Tab kept inside the dialog, Escape closes, focus returns to the opener on close.
+ * body, Tab kept inside the dialog, Escape closes, focus returns to the opener on close. With
+ * dialogs stacked, only the top one handles the keys.
  */
 export function useDialogFocus(ref: RefObject<HTMLElement | null>, active: boolean, onClose: () => void) {
   const closeRef = useRef(onClose)
@@ -86,8 +101,10 @@ export function useDialogFocus(ref: RefObject<HTMLElement | null>, active: boole
     const dialog = ref.current
     if (!active || !dialog) return
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const unregister = registerDialog(dialog)
     initialDialogFocus(dialog).focus({ preventScroll: true })
     const keyDown = (event: KeyboardEvent) => {
+      if (!isTopDialog(dialog)) return
       if (event.key === 'Escape') { event.preventDefault(); closeRef.current(); return }
       if (event.key !== 'Tab') return
       const items = focusables(dialog, FOCUSABLE)
@@ -99,6 +116,6 @@ export function useDialogFocus(ref: RefObject<HTMLElement | null>, active: boole
       }
     }
     document.addEventListener('keydown', keyDown)
-    return () => { document.removeEventListener('keydown', keyDown); if (previous?.isConnected) previous.focus() }
+    return () => { document.removeEventListener('keydown', keyDown); unregister(); if (previous?.isConnected) previous.focus() }
   }, [ref, active])
 }
