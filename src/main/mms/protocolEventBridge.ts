@@ -163,6 +163,10 @@ export function bridgeProtocolEvent(
     case 'ui.notify': {
       return true
     }
+    case 'net.updated': {
+      broadcast('net:updated', event.data)
+      return true
+    }
     case 'scheduled.updated': {
       broadcast(
         'scheduled:updated',
@@ -208,6 +212,11 @@ export function bridgeProtocolEvent(
     case 'providers.login-event': {
       const data = event.data as { event?: unknown }
       if (data?.event) broadcast('providers:login:event', data.event)
+      return true
+    }
+    case 'providers.install-event': {
+      const data = event.data as { event?: unknown }
+      if (data?.event) broadcast('providers:install:event', data.event)
       return true
     }
     case 'mcp.changed': {

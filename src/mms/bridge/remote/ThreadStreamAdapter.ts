@@ -22,9 +22,21 @@ export const THREAD_DELTA_TYPES = [
   'thread.message-updated',
   'questions.updated'
 ] as const
+export interface ThreadDisplayEvent {
+  type: (typeof THREAD_EVENT_TYPES)[number]
+  data: unknown
+  ephemeral?: boolean
+}
+export interface ThreadDeltaEvent {
+  type: (typeof THREAD_DELTA_TYPES)[number]
+  data: unknown
+  ephemeral: true
+}
 export type ThreadSourceEvent =
-  | { type: (typeof THREAD_EVENT_TYPES)[number]; data: unknown; ephemeral?: boolean }
-  | { type: (typeof THREAD_DELTA_TYPES)[number]; data: unknown; ephemeral: true }
+  | ThreadDisplayEvent
+  | ThreadDeltaEvent
+  /** The source changed as a whole; publish a fresh snapshot instead of an event. */
+  | { snapshot: true }
 export interface ThreadSourcePort {
   snapshot(threadId: string): unknown
   onThread(
@@ -69,7 +81,7 @@ const SNAPSHOT_MAX = 32 * 1024 * 1024,
   CHUNK_BYTES = 32 * 1024,
   DELTA_MAX = 32 * 1024
 /** Streaming message deltas coalesce per message; question updates per thread. */
-function deltaKey(event: ThreadSourceEvent): string | undefined {
+function deltaKey(event: ThreadDisplayEvent | ThreadDeltaEvent): string | undefined {
   if (event.type === 'questions.updated') return 'questions'
   const message = (event.data as { message?: { id?: unknown } } | undefined)?.message
   return typeof message?.id === 'string' ? 'message:' + message.id : undefined
@@ -177,6 +189,11 @@ export class ThreadStreamAdapter {
       threadId,
       (event) => {
         try {
+          // A fresh snapshot truncates the records before it, so no ring trim follows.
+          if ('snapshot' in event) {
+            this.refreshSnapshot(thread)
+            return
+          }
           const body = { threadId, type: event.type, data: event.data }
           if (event.ephemeral) {
             if (!(THREAD_DELTA_TYPES as readonly string[]).includes(event.type))

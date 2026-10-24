@@ -182,3 +182,31 @@
   font-size: var(--settings-fs-small);
   color: var(--text-secondary);
 }
+
+/* A phone asks to join over every screen, Settings and floating dialogs (the quick action editor) included. */
+.modal-overlay.enrollment-prompt {
+  z-index: calc(var(--z-floating, 50000) + 1);
+  /* The prompt renders outside .settings-page, so it carries the tokens its content and buttons use. */
+  --space-4: 4px;
+  --space-12: 12px;
+  --settings-control-h: 28px;
+  --settings-fs-row: 13.5px;
+  --settings-fs-small: 12.5px;
+}
+
+.enrollment-prompt .modal-body > .enrollment-device {
+  margin-bottom: var(--space-4);
+  font-size: var(--settings-fs-row);
+  font-weight: 600;
+}
+
+.enrollment-prompt .enrollment-code {
+  color: var(--text-secondary);
+  font-size: var(--settings-fs-small);
+}
+
+.enrollment-prompt .enrollment-code strong {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
