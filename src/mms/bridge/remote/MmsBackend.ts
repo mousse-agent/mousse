@@ -114,6 +114,13 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       !this.services.projects.listProjects().some((project) => project.id === params.projectId)
     )
       throw new NetError('bad_request', 'Project is outside this profile inventory.')
+    if (method === 'orchestrator.answerQuestions' || method === 'orchestrator.dismissQuestions') {
+      // A remote caller may only settle a question that belongs to the thread it names.
+      if (
+        this.services.questions.getPending(params.requestId as string)?.threadId !== params.threadId
+      )
+        return { ok: false }
+    }
     const composer = await this.composer(method, params)
     if (composer !== undefined) return mmsJson(composer)
     return mmsJson(
