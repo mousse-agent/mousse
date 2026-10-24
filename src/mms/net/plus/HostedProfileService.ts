@@ -672,6 +672,21 @@ export class HostedProfileService {
     return this.status()
   }
   async renew(): Promise<PlusStatus> {
+    const replayed = this.read()?.pending
+    const status = await this.renewOnce()
+    // A replayed request carries the roster it was signed with. When the roster changed since
+    // (a revoked device), send the current one now instead of at the next scheduled renewal.
+    const replayedRoster = (replayed?.intent as { roster?: unknown } | undefined)?.roster
+    if (
+      replayed?.purpose === 'renew' &&
+      !Buffer.from(canonicalJson(replayedRoster)).equals(
+        canonicalJson(this.options.identity().roster)
+      )
+    )
+      return this.renewOnce()
+    return status
+  }
+  private async renewOnce(): Promise<PlusStatus> {
     const stored = this.read()
     if (!stored?.registration || !stored.connectorToken) throw new NetError('not_enrolled')
     if (stored.pending?.purpose === 'route') {
