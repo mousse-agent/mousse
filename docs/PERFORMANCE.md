@@ -1,5 +1,7 @@
 # Mousse GUI Performance & Memory Report
 
+> **Note:** the Agents tab (`AgentsPanel`, `AgentsTasksView`, `NamedAgents`), the Agents & Tasks window (`agentsTasksWindow.ts`) and `MousseAgentChat` were removed in #143. Findings below that name them are kept for history.
+
 Analysis of the Mousse Electron app (`src/main/**`, `src/preload/**`, `src/renderer/**`) with actionable recommendations for smooth rendering, responsive IPC, and stable memory use. Findings are grounded in the current codebase as of this audit.
 
 ---
@@ -57,7 +59,7 @@ The largest wins are in the **renderer chat path** (virtualization, memoization,
 | | |
 |---|---|
 | **Symptom** | Widespread subtree re-renders when any Zustand slice updates. |
-| **Root cause** | Grep shows zero `React.memo` / `memo(` usage under `src/renderer/`. Heavy children (`ThreadsSidebar`, `AgentsPanel`, `ComposerFooter`) re-render on unrelated store updates. |
+| **Root cause** | Grep shows zero `React.memo` / `memo(` usage under `src/renderer/`. Heavy children (`ThreadsSidebar`, `AgentsPanel` (removed), `ComposerFooter`) re-render on unrelated store updates. |
 | **Fix** | Add `memo` to leaf presentation components (`ChatMessageContent`, `ToolCallResponse`, `FileTree` nodes, tab bars). Split Zustand into slices (`messagesStore`, `layoutStore`, `threadsStore`) or use shallow compare selectors. |
 | **Impact** | Medium |
 | **Effort** | Medium |
@@ -77,7 +79,7 @@ The largest wins are in the **renderer chat path** (virtualization, memoization,
 | | |
 |---|---|
 | **Symptom** | Memory grows after agents complete; hidden terminal wrappers accumulate. |
-| **Root cause** | `AgentsPanel` mounts terminals in `mountTerminal` (`src/renderer/components/AgentsPanel.tsx:66–100`) but has **no** cleanup when agents leave `visibleAgents` (completed/failed filtered at `17–23`). Terminals stay in `instancesRef` and DOM with `display: none` (`165–168`). Contrast `ProjectTerminalPanel.unmountTerminal` which calls `terminal.dispose()` (`src/renderer/components/ProjectTerminalPanel.tsx:42–51`). |
+| **Root cause** | `AgentsPanel` (removed) mounts terminals in `mountTerminal` (`src/renderer/components/AgentsPanel.tsx:66–100` (removed)) but has **no** cleanup when agents leave `visibleAgents` (completed/failed filtered at `17–23`). Terminals stay in `instancesRef` and DOM with `display: none` (`165–168`). Contrast `ProjectTerminalPanel.unmountTerminal` which calls `terminal.dispose()` (`src/renderer/components/ProjectTerminalPanel.tsx:42–51`). |
 | **Fix** | On agent removal/completion: `terminal.dispose()`, remove wrapper DOM, delete from `instancesRef`, `pty.kill` if still active. Mirror project-terminal lifecycle. |
 | **Impact** | High |
 | **Effort** | Low |
@@ -87,7 +89,7 @@ The largest wins are in the **renderer chat path** (virtualization, memoization,
 | | |
 |---|---|
 | **Symptom** | Long-running shells increase renderer memory; many tabs multiply cost. |
-| **Root cause** | `new Terminal({...})` omits `scrollback` (defaults 1000 lines × N terminals) in `useXtermTerminal.ts:52–57`, `ProjectTerminalPanel.tsx:82–87`, `AgentsPanel.tsx:71–76`. All tab PTYs mount xterm wrappers hidden via `display: none` (`ProjectTerminalPanel.tsx:231–256`). |
+| **Root cause** | `new Terminal({...})` omits `scrollback` (defaults 1000 lines × N terminals) in `useXtermTerminal.ts:52–57`, `ProjectTerminalPanel.tsx:82–87`, `AgentsPanel.tsx:71–76` (removed). All tab PTYs mount xterm wrappers hidden via `display: none` (`ProjectTerminalPanel.tsx:231–256`). |
 | **Fix** | Set explicit `scrollback: 500` (or lower for agent panes). Unmount non-active tab terminals after delay; restore from main scrollback on focus if needed. |
 | **Impact** | Medium |
 | **Effort** | Low |
@@ -97,7 +99,7 @@ The largest wins are in the **renderer chat path** (virtualization, memoization,
 | | |
 |---|---|
 | **Symptom** | Janky column resize; terminals flicker while dragging dividers. |
-| **Root cause** | `App.tsx` updates `sidebarWidth` / `threadsSidebarWidth` on every `mousemove` (`src/renderer/App.tsx:174–191`) causing full layout recalc. Each xterm pane listens to `window.resize` and calls `fit()` + `pty.resize` IPC (`AgentsPanel.tsx:180–187`, `ProjectTerminalPanel.tsx:263–269`, `useXtermTerminal.ts:111–116`). TitleBar drag sends IPC per pointer move (`src/renderer/components/TitleBar.tsx:35–44` → `src/main/windowState.ts:154–160`). |
+| **Root cause** | `App.tsx` updates `sidebarWidth` / `threadsSidebarWidth` on every `mousemove` (`src/renderer/App.tsx:174–191`) causing full layout recalc. Each xterm pane listens to `window.resize` and calls `fit()` + `pty.resize` IPC (`AgentsPanel.tsx:180–187` (removed), `ProjectTerminalPanel.tsx:263–269`, `useXtermTerminal.ts:111–116`). TitleBar drag sends IPC per pointer move (`src/renderer/components/TitleBar.tsx:35–44` → `src/main/windowState.ts:154–160`). |
 | **Fix** | Throttle sidebar width updates with `requestAnimationFrame`. Batch terminal `fit()` until `mouseup`. Coalesce window drag updates in main (max 60/s). |
 | **Impact** | Medium |
 | **Effort** | Low |
@@ -121,7 +123,7 @@ The largest wins are in the **renderer chat path** (virtualization, memoization,
 | | |
 |---|---|
 | **Symptom** | UI stutter during `npm install`, `tail -f`, build output; elevated main/renderer CPU. |
-| **Root cause** | `PtyManager` forwards each `node-pty` `onData` chunk immediately via `webContents.send('pty:data', ...)` (`src/main/terminals/PtyManager.ts:66–72`). No batching or throttle. Renderer writes directly to xterm (`AgentsPanel.tsx:103–106`). |
+| **Root cause** | `PtyManager` forwards each `node-pty` `onData` chunk immediately via `webContents.send('pty:data', ...)` (`src/main/terminals/PtyManager.ts:66–72`). No batching or throttle. Renderer writes directly to xterm (`AgentsPanel.tsx:103–106` (removed)). |
 | **Fix** | Batch in main: accumulate per `ptyId` in a 16ms `setImmediate`/`setTimeout(0)` flush (cap ~8–16 KB per frame). Optionally use `Buffer` + transferable semantics. Filter: only send to focused pty + active tab. |
 | **Impact** | High |
 | **Effort** | Medium |
@@ -182,7 +184,7 @@ The largest wins are in the **renderer chat path** (virtualization, memoization,
 |---|---|
 | **Symptom** | Not a direct runtime issue today; constrains future optimization. |
 | **Root cause** | Large monolithic `api` in `src/preload/index.ts` (~500 lines) exposes every channel to all renderer entry points. |
-| **Fix** | Split preload APIs per window (`main` vs `agentsTasks`) to reduce attack surface and accidental listeners. Document which windows may subscribe to high-frequency channels. |
+| **Fix** | Split preload APIs per window (`main` vs `agentsTasks` (removed)) to reduce attack surface and accidental listeners. Document which windows may subscribe to high-frequency channels. |
 | **Impact** | Low |
 | **Effort** | Medium |
 
@@ -299,7 +301,7 @@ The largest wins are in the **renderer chat path** (virtualization, memoization,
 | | |
 |---|---|
 | **Symptom** | Potential leaks on window reload; hard-to-debug ghost handlers. |
-| **Root cause** | Most renderer `on*` preload APIs return unsubscribe (good). Main attaches permanent `win.on` handlers (`windowState.ts:216–272`, `windowMaterial.ts:48–49`) without removal on destroy — acceptable for window lifetime. `AgentsPanel` re-subscribes `agents.onActivated` when `agents` changes (`AgentsPanel.tsx:110–130`) — can stack duplicate handlers if effect deps churn. |
+| **Root cause** | Most renderer `on*` preload APIs return unsubscribe (good). Main attaches permanent `win.on` handlers (`windowState.ts:216–272`, `windowMaterial.ts:48–49`) without removal on destroy — acceptable for window lifetime. `AgentsPanel` (removed) re-subscribes `agents.onActivated` when `agents` changes (`AgentsPanel.tsx:110–130` (removed)) — can stack duplicate handlers if effect deps churn. |
 | **Fix** | Stabilize effect deps (use refs for `agents` lookup in activated handler). Audit `attachWindowStateListeners` to detach on `closed`. |
 | **Impact** | Low |
 | **Effort** | Low |
@@ -387,7 +389,7 @@ The largest wins are in the **renderer chat path** (virtualization, memoization,
 | | |
 |---|---|
 | **Symptom** | Extra renderer process + memory when Agents & Tasks open. |
-| **Root cause** | `openAgentsTasksWindow` creates second `BrowserWindow` with full preload (`src/main/agentsTasksWindow.ts:89–116`). System tray always created (`src/main/index.ts:426`). |
+| **Root cause** | `openAgentsTasksWindow` (removed) creates second `BrowserWindow` with full preload (`src/main/agentsTasksWindow.ts:89–116` (removed)). System tray always created (`src/main/index.ts:426`). |
 | **Fix** | Agents/tasks overlay as main-window panel (popper) instead of second window — removes duplicate hydration. Tray is low cost; keep. |
 | **Impact** | Medium |
 | **Effort** | High |
@@ -423,7 +425,7 @@ The store is a **single flat slice** (`src/renderer/stores/appStore.ts:16–192`
 | 1 | Virtualize orchestrator message list + memoize `ChatMessageContent` | High | Medium | `OrchestratorChat.tsx`, `ChatMessageContent.tsx` |
 | 2 | Batch `pty:data` IPC (16ms window) + optional focused-pty filter | High | Medium | `PtyManager.ts` |
 | 3 | Batch LLM streaming IPC (`delta` events or 50ms coalesce) | High | Medium | `OrchestratorService.ts`, `registerIpc.ts` |
-| 4 | Dispose agent xterm instances when agents complete | High | Low | `AgentsPanel.tsx` |
+| 4 | Dispose agent xterm instances when agents complete | High | Low | `AgentsPanel.tsx` (removed) |
 | 5 | Cap PTY/headless scrollback buffers (256 KB) | High | Low | `PtyManager.ts`, `HeadlessAgentRunner.ts` |
 | 6 | Show window before `threadContext.initialize`; hydrate async | High | Medium | `src/main/index.ts` |
 | 7 | Reduce KeepMounted scope; lazy-load Browser/Git/Files | High | Medium | `MainViewPanel.tsx`, `main.tsx` |
@@ -485,14 +487,14 @@ Target: < 2s to interactive UI on mid-range hardware (deferrable work excluded).
 |------|-----------|
 | Zustand | `src/renderer/stores/appStore.ts` |
 | Chat UI | `src/renderer/components/OrchestratorChat.tsx`, `ChatMessageContent.tsx` |
-| xterm | `src/renderer/hooks/useXtermTerminal.ts`, `AgentsPanel.tsx`, `ProjectTerminalPanel.tsx` |
+| xterm | `src/renderer/hooks/useXtermTerminal.ts`, `AgentsPanel.tsx` (removed), `ProjectTerminalPanel.tsx` |
 | Panel lifecycle | `src/renderer/components/MainViewPanel.tsx`, `KeepMounted.tsx` |
 | IPC bridge | `src/preload/index.ts`, `src/main/ipc/registerIpc.ts` |
 | PTY | `src/main/terminals/PtyManager.ts` |
 | Thread I/O | `src/main/data/ThreadDataStore.ts`, `ThreadContext.ts` |
 | Bootstrap | `src/main/index.ts` |
 | Build | `electron.vite.config.ts`, `package.json` |
-| Windows chrome | `src/main/index.ts`, `windowMaterial.ts`, `agentsTasksWindow.ts` |
+| Windows chrome | `src/main/index.ts`, `windowMaterial.ts`, `agentsTasksWindow.ts` (removed) |
 
 ---
 

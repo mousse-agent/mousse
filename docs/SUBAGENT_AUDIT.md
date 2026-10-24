@@ -1,5 +1,7 @@
 # Mousse Subagent Audit
 
+> **Note:** the Agents tab (`AgentsPanel`, `AgentsTasksView`, `NamedAgents`), the Agents & Tasks window (`agentsTasksWindow.ts`) and `MousseAgentChat` were removed in #143. Findings below that name them are kept for history.
+
 **Date:** 2026-08-01  
 **Scope:** In-app Mousse subagents, external CLI agents, worktree lifecycle, task progress, persistence, integrations, renderer behavior, and CLI management.
 
@@ -74,7 +76,7 @@ Relevant code:
 - `src/main/ipc/registerIpc.ts:286-293`
 - `src/mms/orchestrator/OrchestratorService.ts:1327`
 - `src/mms/agents/MousseAgentService.ts:235`
-- `src/renderer/components/MousseAgentChat.tsx:219-223`
+- `src/renderer/components/MousseAgentChat.tsx:219-223` (removed)
 
 If the user sends another message, `MousseAgentService.send()` silently returns because the session is busy. The composer has already cleared the user's text, so the message is lost without feedback.
 
@@ -94,7 +96,7 @@ When a Mousse subagent emits `complete_task`, `MousseAgentService` deletes its s
 Relevant code:
 
 - `src/mms/agents/MousseAgentService.ts:336`
-- `src/renderer/components/AgentsPanel.tsx:17-23`
+- `src/renderer/components/AgentsPanel.tsx:17-23` (removed)
 
 The Agents panel continues to show `ready` GUI agents, but subsequent sends find no session and silently do nothing. The existing component may retain messages locally, while a remount shows an empty “Starting agent…” view.
 
