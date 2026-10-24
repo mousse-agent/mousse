@@ -738,12 +738,19 @@ export class RunEngine extends EventEmitter {
       const current = this.delegations.get(delegationId)
       if (!current) fail('bad_request', `Unknown delegation ${delegationId}.`)
       if (current.status !== 'running' && current.status !== 'result_available') return current
-      return this.delegations.setStatus({
+      const next = this.delegations.setStatus({
         delegationId,
         from: current.status,
         to: 'cancelled',
         completedAt: current.completedAt ?? this.now()
       })
+      // A published result still sits in the parent's inbox; once cancelled it must not wake the
+      // parent, so its rows are acknowledged and a wake that carried only them never starts.
+      if (current.status === 'result_available') {
+        this.inbox.markAcknowledged(this.inbox.listForDelegation(delegationId).map((row) => row.inboxId))
+        cancelAcknowledgedWakes(this.store, this.outbox, this.now(), current.parentThreadId)
+      }
+      return next
     })
     for (const child of this.delegations.listForParentThread(delegation.childThreadId))
       await this.cancelTree(child.delegationId, cancelled, seen)
