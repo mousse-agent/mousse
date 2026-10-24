@@ -52,7 +52,7 @@ import { PiLoopAdapter } from '../run/adapters/pi/PiLoopAdapter'
 import { ClaudeSubscriptionAdapter } from '../run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { AntigravityAdapter } from '../run/adapters/antigravity/AntigravityAdapter'
 import { CodexAdapter, type CodexClient } from '../run/adapters/codex'
-import type { AdapterHost, ProviderAdapter, ProviderCapabilities, ProviderMetrics, RecoveredContext, TurnControl, TurnInput, TurnSink } from '../run/adapters/ProviderAdapter'
+import type { AdapterHost, ChildTurnPolicy, ProviderAdapter, ProviderCapabilities, ProviderMetrics, RecoveredContext, TurnControl, TurnInput, TurnSink } from '../run/adapters/ProviderAdapter'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { McpCaller, MousseToolHost } from '../run/mcp/toolRegistry'
 import { formatWakeNotice } from '../run/delegation/notice'
@@ -60,7 +60,7 @@ import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/Ru
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
 import { TranscriptAssembler } from '../run/adapters/shared/TranscriptAssembler'
-import { forkStrategy, handoffDelivery, mcpAttachable } from '../run/policy/featureGates'
+import { forkStrategy, handoffDelivery, mcpAttachable, subagentTargetRefusal } from '../run/policy/featureGates'
 import { isContextOverflowError, retryContextOverflowOnce } from '../run/adapters/shared/retryContextOverflow'
 import {
   TERMINAL_RUN_STATUSES,
@@ -1168,7 +1168,8 @@ export class OrchestratorService extends EventEmitter {
         else this.scheduleQueueDrain(session)
         return item
       },
-      toolLedger: (runId) => this.toolLedgerFor(runId)
+      toolLedger: (runId) => this.toolLedgerFor(runId),
+      readOnlyThread: (threadId) => this.isReadOnlyChild(threadId)
     }
   }
 
@@ -1404,12 +1405,16 @@ export class OrchestratorService extends EventEmitter {
   /** Capabilities of the adapter serving the thread's selected model (reconciler rule 4). */
   capabilitiesForThread(threadId: string): ProviderCapabilities | null {
     try {
-      const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
-      const explicit = session?.modelOverride ?? this.threadStore?.getThread(threadId)?.modelOverride
-      return this.adapters.resolveSelection(explicit ?? this.defaultAgentModel(), { allowDisabled: true, unselectedDefault: !explicit }).adapter.capabilities
+      return this.adapterForThread(threadId).adapter.capabilities
     } catch {
       return null
     }
+  }
+
+  private adapterForThread(threadId: string) {
+    const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
+    const explicit = session?.modelOverride ?? this.threadStore?.getThread(threadId)?.modelOverride
+    return this.adapters.resolveSelection(explicit ?? this.defaultAgentModel(), { allowDisabled: true, unselectedDefault: !explicit })
   }
 
   private defaultAgentModel(): ModelOverride {
@@ -1461,6 +1466,43 @@ export class OrchestratorService extends EventEmitter {
   private discardCreatedThread(threadId: string): void {
     this.sessions.delete(threadId)
     this.threadStore?.discardUnusedThread(threadId)
+  }
+
+  /**
+   * Issue #142: the policy every turn of a delegated child carries (first or resumed); undefined
+   * for a thread that is not a subagent. A `shared` child is read-only.
+   */
+  private childTurnPolicy(session: ThreadSession): ChildTurnPolicy | undefined {
+    if (session.sharedWorkspace) return { readOnly: true }
+    try {
+      return this.runEngine?.delegations.getLineage(session.threadId)?.relationship === 'subagent' ? { readOnly: false } : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Whether `threadId` is a read-only (`shared`) delegated child; its Mousse tools may not write threads. */
+  private isReadOnlyChild(threadId: string): boolean {
+    return Boolean(this.getOrCreateSession(threadId).sharedWorkspace)
+  }
+
+  /**
+   * Issue #142 preflight, before any thread is created: a target whose provider cannot hold a
+   * child to its policy gets a structured refusal instead of a child it could not keep read-only.
+   * `instanceId` is the requested instance; without one the child runs on the parent's selection.
+   */
+  private async delegationRefusal(parentThreadId: string, instanceId: string | undefined, workspace: 'shared' | 'isolated') {
+    let target: ReturnType<OrchestratorService['adapterForThread']>
+    try {
+      target = instanceId ? this.adapters.resolve(instanceId) : this.adapterForThread(parentThreadId)
+    } catch {
+      // An unresolvable target fails loudly when the child is created, as before.
+      return null
+    }
+    // The static check of the adapter's capabilities, then the adapter's look at the user's setup.
+    const refusal = subagentTargetRefusal(target.adapter.capabilities, target.entry.driver, workspace)
+      ?? await target.adapter.childPreflight?.({ workspace, cwd: this.sharedWorkspaceOf(parentThreadId)?.path ?? null }) ?? null
+    return refusal ? { started: false as const, ...refusal } : null
   }
 
   /**
@@ -1809,6 +1851,8 @@ export class OrchestratorService extends EventEmitter {
     const delegateTask = (input: DelegateTaskInput, call: DelegationToolCall) =>
       this.delegateTask(parentThreadId, parentRunId, input, call, callerCeiling)
     const integrateDelegation = async (delegationId: string, call: DelegationToolCall) => {
+      if (this.isReadOnlyChild(parentThreadId))
+        throw new McpToolError('mousse_read_only', 'Integration writes the workspace; a read-only subagent cannot integrate.')
       if (callerCeiling === 'plan')
         throw new McpToolError('mousse_ceiling_exceeded', 'Integration writes the workspace; a plan ceiling cannot integrate.')
       return this.integrateDelegation(parentThreadId, parentRunId, delegationId, call)
@@ -1895,6 +1939,11 @@ export class OrchestratorService extends EventEmitter {
     const instanceId = requested
       ? this.adapters.resolve(input.instanceId?.trim() || this.adapters.instances.instanceIdForLegacyProvider(requested)).instanceId
       : undefined
+    // A read-only subagent may start subagents, but only read-only ones: authority only narrows down the tree.
+    if (input.workspace !== 'shared' && this.isReadOnlyChild(parentThreadId))
+      return { started: false as const, code: 'read_only_caller_requires_shared' as const, message: 'You are a read-only subagent, so your own subagents must be read-only too: start them with workspace "shared" and role "research" or "review".' }
+    const refusal = await this.delegationRefusal(parentThreadId, instanceId, input.workspace)
+    if (refusal) return refusal
     const accepted = await engine.requestDelegation({
       parentThreadId,
       parentRunId,
@@ -4422,6 +4471,7 @@ export class OrchestratorService extends EventEmitter {
         llmProvider: instance.llmProvider,
         modelPinned: Boolean(modelOverride),
         mode,
+        child: this.childTurnPolicy(session),
         prompt: handoffs ? handoffs.prompt(userContent) : userContent,
         messages: handoffs ? handoffs.messages(activeMessages) : activeMessages,
         // A switch handoff stands in for the transcript, including its compaction memory.

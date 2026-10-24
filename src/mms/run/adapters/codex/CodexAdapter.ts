@@ -4,6 +4,7 @@ import {
   type CodexProviderService
 } from '../../../providers/codex/CodexProviderService'
 import { mousseOrchestrationInstructions } from '../../mcp/instructions'
+import type { ChildPreflightContext, SubagentRefusal } from '../../policy/featureGates'
 import type { ProviderRef } from '../../types'
 import type {
   AdapterHost,
@@ -21,7 +22,7 @@ import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
 /** The slice of the provider service a turn drives. */
 export type CodexClient = Pick<
   CodexProviderService,
-  'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'steer'
+  'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'steer' | 'userSetup'
 >
 
 /**
@@ -38,7 +39,8 @@ export const CODEX_CAPABILITIES: ProviderCapabilities = Object.freeze({
   events: 'rich',
   containment: 'weak',
   historyInjection: 'prompt',
-  mcp: true
+  mcp: true,
+  childPolicy: 'enforced'
 })
 
 /**
@@ -66,6 +68,24 @@ export class CodexAdapter implements ProviderAdapter {
     return this.service()?.configured() ?? false
   }
 
+  /**
+   * What the user's own Codex setup allows for a child; nothing is changed. Mousse cannot deny a
+   * Codex MCP tool call (it answers command, file and permission approvals and elicitations, but a
+   * tool the user's server offers runs under Codex's own rules), so a `shared` child is refused
+   * while the config has any enabled MCP server, a Mousse-managed one included, or cannot be read;
+   * `isolated` still works. Codex's own subagents are left on: see `NativeHelpers`.
+   */
+  async childPreflight(context: ChildPreflightContext): Promise<SubagentRefusal | null> {
+    const service = this.service()
+    if (!service || context.workspace !== 'shared') return null
+    const { mcpServers } = await service.userSetup(context.cwd)
+    if (mcpServers === null)
+      return { code: 'shared_unsupported_for_provider', message: 'A read-only (shared) Codex subagent needs Mousse to read your Codex config, and it could not. Use workspace "isolated", or choose another provider or model.' }
+    return mcpServers.length
+      ? { code: 'shared_unsupported_for_provider', message: `A read-only (shared) Codex subagent is not possible while your Codex config has MCP servers (${mcpServers.join(', ')}): Mousse cannot stop one of their tools from writing and does not change your Codex config. Use workspace "isolated", or choose another provider or model.` }
+      : null
+  }
+
   async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
     const service = this.service()
     if (!service) throw new Error(`${input.llmProvider} is not available in this profile`)
@@ -84,6 +104,7 @@ export class CodexAdapter implements ProviderAdapter {
     }
     const chatInput = (): CodexChatInput => ({
       mode: input.mode === 'plan' ? 'plan' : 'default',
+      child: input.child,
       threadId: input.threadId,
       instanceId: input.instanceId,
       cwd,
@@ -114,6 +135,7 @@ export class CodexAdapter implements ProviderAdapter {
         progress()
         sink.tool(runtimeToolEvent(event))
       },
+      onHeartbeat: () => ctl.heartbeat(),
       onLineEdits: (lines) => sink.lineEdits(lines),
       onRetry: (attempt) => {
         ctl.heartbeat()

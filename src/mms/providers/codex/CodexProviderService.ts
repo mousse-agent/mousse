@@ -55,6 +55,10 @@ import {
   type TokenUsageBreakdown,
   type UserInput
 } from './protocol'
+import { codexTurnPolicy } from './childPolicy'
+import { NativeHelpers, type StrayThread } from './nativeHelpers'
+import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
+import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
 
 export const CODEX_PROVIDER_ID = 'codex'
 /** How long a live `account/read` result stands before it is checked again. */
@@ -155,6 +159,8 @@ export type CodexChatInput = {
   images?: ChatImageAttachment[]
   signal?: AbortSignal
   mode?: 'plan' | 'default'
+  /** Set for a delegated child's turns (first and resumed); see `codexTurnPolicy`. */
+  child?: ChildTurnPolicy
   /** The Mousse MCP server for this run (SPEC §15.2); null attaches none. */
   mcp?: { url: string; token: string } | null
   /** Codex developer instructions for a new or resumed thread (SPEC §15.3). */
@@ -169,6 +175,8 @@ export type CodexChatInput = {
   onSession?: (session: { codexThreadId: string; turnId?: string }) => void
   drainSteer?: () => string | undefined
   onSteer?: (text: string) => void
+  /** Liveness while the turn only waits for the native helpers it started. */
+  onHeartbeat?: () => void
 }
 
 export interface CodexChatResult {
@@ -323,6 +331,8 @@ class TurnRun {
   private idleWaiters: Array<() => void> = []
   /** Resolves once the run is released: settled on the server, or the process died. */
   readonly finished: Promise<void>
+  /** Codex's own subagents this turn started; they outlive the parent's turn unless Mousse waits for them. */
+  readonly helpers: NativeHelpers
   private finish!: () => void
 
   constructor(
@@ -330,14 +340,21 @@ class TurnRun {
     readonly mousseThreadId: string,
     readonly mode: 'plan' | 'default',
     readonly signal: AbortSignal,
-    private readonly input: CodexChatInput
+    private readonly input: CodexChatInput,
+    stray?: (threadId: string) => StrayThread | undefined
   ) {
+    this.helpers = new NativeHelpers(stray)
     this.finished = new Promise((done) => (this.finish = done))
     this.questionSignal = AbortSignal.any([signal, this.questionsDone.signal])
   }
 
   cancelQuestions(): void {
     this.questionsDone.abort(new Error('The Codex turn ended'))
+  }
+
+  /** A read-only (`shared`) delegated child: every command and file change is declined, never asked. */
+  get readOnlyChild(): boolean {
+    return this.input.child?.readOnly === true
   }
 
   get text(): string {
@@ -354,6 +371,7 @@ class TurnRun {
   }
 
   fail(error: unknown): void {
+    this.helpers.close(error)
     this.cancelQuestions()
     this.settle?.reject(error)
     this.settle = undefined
@@ -444,6 +462,7 @@ class TurnRun {
     const itemStarted = notificationParams(notification, 'item/started')
     if (itemStarted) {
       const { item } = itemStarted
+      this.helpers.noteItem(item as never)
       this.items.set(item.id, item)
       if (item.type === 'agentMessage' && !this.parts.has(item.id)) {
         this.order.push(item.id)
@@ -459,6 +478,7 @@ class TurnRun {
     const itemCompleted = notificationParams(notification, 'item/completed')
     if (itemCompleted) {
       const { item } = itemCompleted
+      this.helpers.noteItem(item as never)
       this.items.set(item.id, item)
       if (item.type === 'agentMessage') {
         const text = (item as { text?: string }).text ?? ''
@@ -527,7 +547,10 @@ export class CodexProviderService {
    * Only cold opens (start, resume of an unloaded thread, fork) record an entry: Codex applies
    * config overrides when it loads a thread and ignores them on an already-loaded one.
    */
-  private readonly loaded = new Map<string, { mcpToken: string | null; cwd: string }>()
+  private readonly strays = new Map<string, StrayThread>()
+  /** Helpers of finished chats that were told to stop before their turn id was known. */
+  private readonly orphans = new Set<NativeHelpers>()
+  private readonly loaded = new Map<string, { mcpToken: string | null; cwd: string; childKey: string }>()
   private readonly activeThreads = new Set<string>()
   private readonly controllers = new Set<AbortController>()
   private readonly readyToCommit = new Set<string>()
@@ -774,6 +797,23 @@ export class CodexProviderService {
     }
   }
 
+  /**
+   * The user's effective Codex setup for `cwd` (its enabled MCP servers), read without changing it;
+   * see `readCodexUserSetup`. A read-only child runs only where the user has no MCP server, because
+   * Mousse cannot deny a Codex MCP tool call. A null field could not be read.
+   */
+  async userSetup(cwd: string | null): Promise<CodexUserSetup> {
+    this.listing += 1
+    try {
+      return await readCodexUserSetup(await this.connection(), cwd ? resolve(cwd) : null)
+    } catch {
+      return { mcpServers: null }
+    } finally {
+      this.listing -= 1
+      this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
+    }
+  }
+
   /** Disconnects this profile in Mousse only; the terminal sign-in is never logged out. */
   async logout(): Promise<void> {
     this.scope += 1
@@ -883,6 +923,7 @@ export class CodexProviderService {
     this.idleClose = undefined
     this.app = undefined
     this.loaded.clear()
+    this.orphans.clear()
     app.conn.close()
   }
 
@@ -937,7 +978,19 @@ export class CodexProviderService {
       return
     }
     const threadId = (notification.params as { threadId?: unknown } | undefined)?.threadId
-    if (typeof threadId === 'string') this.turns.get(threadId)?.handle(notification)
+    if (typeof threadId !== 'string') return
+    const run = this.turns.get(threadId)
+    if (run) return run.handle(notification)
+    // A native helper's own thread: its turn belongs to the run that started it.
+    const owner = [...this.turns.values()].find((candidate) => candidate.helpers.has(threadId))
+    if (owner) return owner.helpers.handle(notification)
+    const orphan = [...this.orphans].find((helpers) => helpers.has(threadId))
+    if (orphan) {
+      orphan.handle(notification)
+      if (!orphan.awaitingTurn()) this.orphans.delete(orphan)
+      return
+    }
+    this.noteStray(notification, threadId)
   }
 
   private async serve(request: CodexServerRequest): Promise<unknown> {
@@ -948,7 +1001,7 @@ export class CodexProviderService {
       case 'item/commandExecution/requestApproval': {
         const approval = request.params as CodexServerRequestMap['item/commandExecution/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/commandExecution/requestApproval'>
-        if (run.mode === 'plan') return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
+        if (run.mode === 'plan' || run.readOnlyChild) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
         const command = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command ?? 'a command'
         const decision = await this.approve(
           run,
@@ -959,7 +1012,7 @@ export class CodexProviderService {
       case 'item/fileChange/requestApproval': {
         const approval = request.params as CodexServerRequestMap['item/fileChange/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/fileChange/requestApproval'>
-        if (run.mode === 'plan') return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
+        if (run.mode === 'plan' || run.readOnlyChild) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
         const changes = (run.item(approval.itemId) as { changes?: Array<{ path: string }> } | undefined)?.changes ?? []
         const decision = await this.approve(
           run,
@@ -1056,10 +1109,39 @@ export class CodexProviderService {
     }
   }
 
+  /** Remembers the turn of a thread no run owns yet: a helper's first events can beat the item that names it. */
+  private noteStray(notification: CodexNotification, threadId: string): void {
+    const turn = (notification.params as { turn?: { id?: string } } | undefined)?.turn
+    if (notification.method !== 'turn/started' && notification.method !== 'turn/completed') return
+    const stray = this.strays.get(threadId) ?? { completed: false }
+    if (notification.method === 'turn/started' && turn?.id) Object.assign(stray, { turnId: turn.id, completed: false })
+    else if (notification.method === 'turn/completed') stray.completed = true
+    this.strays.delete(threadId)
+    this.strays.set(threadId, stray)
+    if (this.strays.size > 64) this.strays.delete(this.strays.keys().next().value as string)
+  }
+
   private requestInterrupt(run: TurnRun): void {
     if (run.interruptRequested) return
     run.interruptRequested = true
     if (run.turnId) this.sendInterrupt(run)
+    this.stopHelpers(run)
+  }
+
+  /**
+   * Interrupts the native helpers of `run`, those running now and any that start later. The parent's
+   * interrupt does not reach them; each helper thread is interrupted on its own.
+   */
+  private stopHelpers(run: TurnRun): void {
+    const conn = this.app?.conn
+    if (!conn) return
+    run.helpers.stopAll((threadId, turnId) => {
+      void conn.request('turn/interrupt', { threadId, turnId }, { timeoutMs: INTERRUPT_TIMEOUT_MS }).catch(() => {
+        /* the helper ended meanwhile, or the process is gone */
+      })
+    })
+    // A helper whose turn has not started yet is interrupted when it does, even after this chat ended.
+    if (run.helpers.awaitingTurn()) this.orphans.add(run.helpers)
   }
 
   private sendInterrupt(run: TurnRun): void {
@@ -1086,10 +1168,12 @@ export class CodexProviderService {
     const mcpToken = input.mcp?.token ?? null
     const overrides = codexMcpConfigOverrides(input.mcp) as ThreadConfig
     const { baseId } = parseThinkingSuffixFromModelId(input.model)
+    const policy = codexTurnPolicy(input.mode ?? 'default', input.child)
+    const childKey = input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''
     const params = {
       cwd,
-      approvalPolicy: 'on-request' as const,
-      sandbox: input.mode === 'plan' ? ('read-only' as const) : ('workspace-write' as const),
+      approvalPolicy: policy.approvalPolicy,
+      sandbox: policy.sandbox,
       ...(baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}),
       // Pinned twice: the request field and the config layer above user and workspace config.
       modelProvider: CODEX_MODEL_PROVIDER,
@@ -1108,34 +1192,34 @@ export class CodexProviderService {
         if (this.turns.has(saved.codexThreadId)) throw new Error('The previous Codex turn on this thread is still running')
       }
       const loaded = this.loaded.get(saved.codexThreadId)
-      if (loaded && loaded.mcpToken === mcpToken && loaded.cwd === cwd)
+      if (loaded && loaded.mcpToken === mcpToken && loaded.cwd === cwd && loaded.childKey === childKey)
         return { codexThreadId: saved.codexThreadId, model: undefined, continued: true }
       if (loaded) {
-        // The attachment (or cwd) changed while the thread is loaded. A resume would keep the old
-        // MCP config, so fork it: Codex loads the history into a new thread with the new config,
-        // and the old thread is released.
+        // The attachment, cwd or child policy changed while the thread is loaded. A resume would
+        // keep the old config, so fork it: Codex loads the history into a new thread with the new
+        // config, and the old thread is released.
         const forked = chatgptProvider(await conn.request('thread/fork', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
         this.loaded.delete(saved.codexThreadId)
-        this.loaded.set(forked.thread.id, { mcpToken, cwd })
+        this.loaded.set(forked.thread.id, { mcpToken, cwd, childKey })
         await conn.request('thread/unsubscribe', { threadId: saved.codexThreadId }, { signal, timeoutMs: 5_000 }).catch(() => undefined)
         signal.throwIfAborted()
         return { codexThreadId: forked.thread.id, model: forked.model, continued: true }
       }
       try {
         const resumed = chatgptProvider(await conn.request('thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
-        this.loaded.set(resumed.thread.id, { mcpToken, cwd })
+        this.loaded.set(resumed.thread.id, { mcpToken, cwd, childKey })
         return { codexThreadId: resumed.thread.id, model: resumed.model, continued: true }
       } catch (error) {
         signal.throwIfAborted()
         conn.signal.throwIfAborted()
         if (!(error instanceof CodexRpcError)) throw error
         const fresh = chatgptProvider(await conn.request('thread/start', params, { signal }))
-        this.loaded.set(fresh.thread.id, { mcpToken, cwd })
+        this.loaded.set(fresh.thread.id, { mcpToken, cwd, childKey })
         return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false }
       }
     }
     const fresh = chatgptProvider(await conn.request('thread/start', params, { signal }))
-    this.loaded.set(fresh.thread.id, { mcpToken, cwd })
+    this.loaded.set(fresh.thread.id, { mcpToken, cwd, childKey })
     return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false }
   }
 
@@ -1180,16 +1264,15 @@ export class CodexProviderService {
       this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID } }
       this.save()
       input.onSession?.({ codexThreadId })
-      const current = new TurnRun(codexThreadId, input.threadId, input.mode ?? 'default', signal, input)
+      const current = new TurnRun(codexThreadId, input.threadId, input.mode ?? 'default', signal, input, (id) => this.strays.get(id))
       run = current
       this.turns.set(codexThreadId, current)
       const { baseId, effort } = parseThinkingSuffixFromModelId(input.model)
+      const policy = codexTurnPolicy(input.mode ?? 'default', input.child)
       const turnParams = {
         cwd: resolve(input.cwd),
-        approvalPolicy: 'on-request' as const,
-        sandboxPolicy: (input.mode === 'plan'
-          ? { type: 'readOnly', networkAccess: false }
-          : { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }) satisfies SandboxPolicy,
+        approvalPolicy: policy.approvalPolicy,
+        sandboxPolicy: policy.sandboxPolicy,
         ...(baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}),
         ...(effort && EFFORTS.has(effort) ? { effort } : {})
       }
@@ -1289,6 +1372,19 @@ export class CodexProviderService {
         if (!undelivered.length) break
         nextInput = [textInput(undelivered.splice(0).join('\n'))]
       }
+      // Codex completes the parent's turn while the helpers it started keep running, so this chat (the
+      // child's run) stays open until they settle; Stop interrupts them and ends the wait.
+      if (current.helpers.running().length) {
+        const beat = setInterval(() => input.onHeartbeat?.(), 5_000)
+        beat.unref?.()
+        try {
+          await Promise.race([current.helpers.whenSettled(), aborted])
+        } finally {
+          clearInterval(beat)
+        }
+        // Stop interrupts the helpers, and their end can be reported before the abort is seen.
+        signal.throwIfAborted()
+      }
       this.turns.delete(codexThreadId)
       current.settled()
       current.closeTools()
@@ -1305,6 +1401,8 @@ export class CodexProviderService {
         usage: current.usage()
       }
     } catch (error) {
+      // A failed or stopped chat leaves no helper of its own running.
+      if (run) this.stopHelpers(run)
       run?.closeTools()
       if (signal.aborted && input.signal?.aborted) throw input.signal.reason ?? error
       throw error
