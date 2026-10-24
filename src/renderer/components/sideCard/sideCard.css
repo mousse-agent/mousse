@@ -1,0 +1,94 @@
+/* Thread side card: a floating card on the right of the full-width thread view. */
+
+.sidebar {
+  --side-card-width: 272px;
+  --side-card-gutter: 12px;
+  /* Thread area width below which the card would overlap the conversation: the
+     680px column (--an-max-width) plus the card and its gutters on both sides. */
+  --side-card-clearance: calc(680px + 2 * (var(--side-card-width) + 2 * var(--side-card-gutter)));
+}
+
+/* The layer anchors the card to the thread pane. */
+.sidebar:has(> .thread-side-card-layer) {
+  position: relative;
+}
+
+/* Reserve the card's width on the right only as far as the centered column needs
+   it. Percentages in padding resolve against the pane width, so this is zero in
+   windows wide enough to leave the card its own gutter. */
+.sidebar.sidebar-full.sidebar-side-card > .keep-mounted-pane {
+  padding-right: max(0px, calc(var(--side-card-clearance) - 100%));
+}
+
+.thread-side-card-layer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.thread-side-card {
+  position: absolute;
+  top: var(--side-card-gutter);
+  right: var(--side-card-gutter);
+  display: flex;
+  flex-direction: column;
+  width: var(--side-card-width);
+  max-height: calc(100% - 2 * var(--side-card-gutter));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-card-radius);
+  background: var(--ui-raised);
+  box-shadow: var(--ui-raised-shadow);
+  color: var(--text-primary);
+  opacity: 0;
+  transform: translateX(10px);
+  transition: opacity 180ms ease, transform 180ms ease;
+  pointer-events: none;
+}
+
+.thread-side-card[data-shown='true'] {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+/* Opacity only, no slide. The app-wide reduced-motion rule cuts transitions to
+   near zero anyway, so the card swaps in and out at once; useSideCardPresence
+   skips the exit wait in this mode. */
+@media (prefers-reduced-motion: reduce) {
+  .thread-side-card {
+    transform: none;
+    transition: none;
+  }
+}
+
+.side-card-section {
+  padding: 12px 14px;
+}
+
+.side-card-section + .side-card-section {
+  border-top: 1px solid var(--ui-line);
+}
+
+.side-card-section-title {
+  margin: 0 0 8px;
+  color: var(--ui-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.side-card-placeholder {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}

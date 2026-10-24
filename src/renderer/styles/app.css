@@ -264,6 +264,13 @@ html.platform-darwin .titlebar-left {
   color: var(--text-primary);
 }
 
+/* Background only: no edge bar, ring or glint. */
+.icon-btn-titlebar.titlebar-side-card-on,
+.icon-btn-titlebar.titlebar-side-card-on:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
 .icon-btn {
   display: inline-flex;
   align-items: center;

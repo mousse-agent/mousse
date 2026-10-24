@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { PanelLeft, PanelRightClose, PanelRightOpen } from '../lib/icons'
+import { PanelLeft, PanelRightClose, PanelRightOpen, SidebarRight } from '../lib/icons'
 import { WindowCloseButton } from './WindowCloseButton'
 import { IconButton } from './IconButton'
-import { QuickActionsButton } from './QuickActionsButton'
+import { nextSideCardToggleState, useSideCardVisible } from './sideCard/sideCardLogic'
 import { useAppStore } from '../stores/appStore'
 import logoIcon from '../assets/mousse_logo_icon.svg'
 
@@ -21,7 +21,16 @@ export function TitleBar() {
   const setThreadsSidebarOpen = useAppStore((s) => s.setThreadsSidebarOpen)
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
   const setMainAreaOpen = useAppStore((s) => s.setMainAreaOpen)
+  const sideCardOn = useAppStore((s) => s.sideCardOn)
+  const setSideCardOn = useAppStore((s) => s.setSideCardOn)
+  const sideCardVisible = useSideCardVisible()
   const isMac = appInfo?.platform === 'darwin' || window.mousse.platform === 'darwin'
+
+  const toggleSideCard = () => {
+    const next = nextSideCardToggleState(sideCardVisible, { sideCardOn, mainAreaOpen })
+    if (next.mainAreaOpen !== mainAreaOpen) setMainAreaOpen(next.mainAreaOpen)
+    if (next.sideCardOn !== sideCardOn) setSideCardOn(next.sideCardOn)
+  }
 
   useEffect(() => {
     window.mousse.window.isMaximized().then(setIsMaximized)
@@ -62,7 +71,14 @@ export function TitleBar() {
       </div>
       <div className="titlebar-controls">
         <div className="titlebar-app-actions">
-          <QuickActionsButton variant="titlebar" />
+          <IconButton
+            icon={SidebarRight}
+            label={sideCardVisible ? 'Hide thread details' : 'Show thread details'}
+            variant="titlebar"
+            className={sideCardVisible ? 'titlebar-side-card-on' : undefined}
+            aria-pressed={sideCardVisible}
+            onClick={toggleSideCard}
+          />
           <IconButton
             icon={mainAreaOpen ? PanelRightClose : PanelRightOpen}
             label={mainAreaOpen ? 'Hide app panel' : 'Show app panel'}

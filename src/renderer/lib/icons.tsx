@@ -111,6 +111,7 @@ import ServerStack01Icon from '@hugeicons/core-free-icons/ServerStack01Icon'
 import Settings01Icon from '@hugeicons/core-free-icons/Settings01Icon'
 import Shield01Icon from '@hugeicons/core-free-icons/Shield01Icon'
 import ShieldCheckIcon from '@hugeicons/core-free-icons/ShieldCheckIcon'
+import SidebarRight01Icon from '@hugeicons/core-free-icons/SidebarRight01Icon'
 import SmartPhone01Icon from '@hugeicons/core-free-icons/SmartPhone01Icon'
 import SourceCodeIcon from '@hugeicons/core-free-icons/SourceCodeIcon'
 import SparklesIcon from '@hugeicons/core-free-icons/SparklesIcon'
@@ -262,6 +263,7 @@ export const Settings = /* @__PURE__ */ createIcon('Settings', Settings01Icon)
 export const Shield = /* @__PURE__ */ createIcon('Shield', Shield01Icon)
 export const ShieldCheck = /* @__PURE__ */ createIcon('ShieldCheck', ShieldCheckIcon)
 export const Brain = /* @__PURE__ */ createIcon('Brain', Brain01Icon)
+export const SidebarRight = /* @__PURE__ */ createIcon('SidebarRight', SidebarRight01Icon)
 export const Sparkles = /* @__PURE__ */ createIcon('Sparkles', SparklesIcon)
 export const Square = /* @__PURE__ */ createIcon('Square', SquareIcon)
 export const Smartphone = /* @__PURE__ */ createIcon('Smartphone', SmartPhone01Icon)

@@ -126,6 +126,9 @@ interface AppState {
   setSidebarMode: (sidebarMode: 'projects' | 'chats') => void
   threadsSidebarOpen: boolean
   mainAreaOpen: boolean
+  /** Thread side card preference. On at every launch; deliberately kept out of the per-profile workspace. */
+  sideCardOn: boolean
+  setSideCardOn: (sideCardOn: boolean) => void
   activeThreadId: string | null
   projects: Project[]
   threads: Thread[]
@@ -329,6 +332,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   appInfo: null,
   threadsSidebarOpen: true,
   mainAreaOpen: false,
+  sideCardOn: true,
   activeThreadId: null,
   projects: [],
   threads: [],
@@ -418,6 +422,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setAppInfo: (appInfo) => set({ appInfo }),
   setThreadsSidebarOpen: (threadsSidebarOpen) => set({ threadsSidebarOpen }),
   setMainAreaOpen: (mainAreaOpen) => set({ mainAreaOpen }),
+  setSideCardOn: (sideCardOn) => set({ sideCardOn }),
   setTurnState: (state) => set((s) => ({ turnStates: { ...s.turnStates, [state.threadId]: state } })),
   setTurnSnapshot: (snap) => set({ turnStates: snap }),
   setActiveThreadId: (activeThreadId) => set({ activeThreadId }),
