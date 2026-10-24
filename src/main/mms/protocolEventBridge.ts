@@ -214,6 +214,11 @@ export function bridgeProtocolEvent(
       if (data?.event) broadcast('providers:login:event', data.event)
       return true
     }
+    case 'providers.install-event': {
+      const data = event.data as { event?: unknown }
+      if (data?.event) broadcast('providers:install:event', data.event)
+      return true
+    }
     case 'mcp.changed': {
       broadcast('mcp:changed', null)
       return true

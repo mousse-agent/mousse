@@ -65,6 +65,7 @@ import type {
 import type {
   AmbientProviderInfo,
   ClaudeSubscriptionStatus,
+  CliInstallEvent,
   CliProviderConfig,
   CliProviderConfigPatch,
   CliProviderInstanceId,
@@ -820,6 +821,18 @@ const api = {
       instanceId: CliProviderInstanceId,
       patch: CliProviderConfigPatch
     ): Promise<CliProviderConfig> => ipcRenderer.invoke('providers:setCliConfig', instanceId, patch),
+    /**
+     * Downloads Google's verified Antigravity agent and resolves with the new config. Progress
+     * arrives through `onInstallEvent`. Never signs in; rejects when cancelled or already running.
+     */
+    installAntigravity: (): Promise<CliProviderConfig> => ipcRenderer.invoke('providers:installAntigravity'),
+    /** Stops a running Antigravity install; resolves false when none is running. */
+    cancelAntigravityInstall: (): Promise<boolean> => ipcRenderer.invoke('providers:cancelAntigravityInstall'),
+    onInstallEvent: (cb: (event: CliInstallEvent) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: CliInstallEvent) => cb(event)
+      ipcRenderer.on('providers:install:event', handler)
+      return () => ipcRenderer.removeListener('providers:install:event', handler)
+    },
     loginOAuth: (providerId: string): Promise<ProviderLoginResult> =>
       ipcRenderer.invoke('providers:loginOAuth', providerId),
     loginApiKey: (providerId: string): Promise<ProviderLoginResult> =>
