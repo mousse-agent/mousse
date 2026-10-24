@@ -16,7 +16,12 @@ export type ReadAloudSelection =
 // Local models
 // ---------------------------------------------------------------------------------------------
 
-export type LocalTtsModelId = 'kokoro-82m' | 'kitten-tts-mini' | 'kitten-tts-micro' | 'kitten-tts-nano' | 'supertonic-3'
+export type PocketTtsLanguage = 'en' | 'fr' | 'de' | 'es' | 'it' | 'pt' | 'nl'
+
+export type PocketTtsModelId = `pocket-tts-${PocketTtsLanguage}`
+
+export type LocalTtsModelId = 'kokoro-82m' | 'kitten-tts-mini' | 'kitten-tts-micro' | 'kitten-tts-nano' | 'supertonic-3' | PocketTtsModelId
+  | PocketTtsModelId
 
 export type LocalTtsModelFile = LocalModelFile
 
@@ -66,8 +71,25 @@ export interface SupertonicTtsModel extends LocalTtsModelBase {
   voiceStyles: string
 }
 
+/** Pocket TTS: four ONNX graphs, a unigram tokenizer, and the voices as precomputed model states in one file. */
+export interface PocketTtsModel extends LocalTtsModelBase {
+  runtime: 'pocket'
+  id: PocketTtsModelId
+  /** The language the weights were trained for; numbers are spelled out in English words only for `en`. */
+  language: PocketTtsLanguage
+  /** `bundle.json`: sampling settings, text rules and the state layout of the graphs. */
+  bundle: string
+  tokenizer: string
+  /** `voices.bin` with every voice. */
+  voicesFile: string
+  textConditioner: string
+  flowLmMain: string
+  flowLmFlow: string
+  mimiDecoder: string
+}
+
 /** The model families Mousse can run; each runtime has its own worker. */
-export type LocalTtsModel = KokoroTtsModel | KittenTtsModel | SupertonicTtsModel
+export type LocalTtsModel = KokoroTtsModel | KittenTtsModel | SupertonicTtsModel | PocketTtsModel
 
 /**
  * Kokoro's English voices as listed by kokoro-js, best graded first within each accent. The id
@@ -259,7 +281,153 @@ export const SUPERTONIC_3: SupertonicTtsModel = {
   ]
 }
 
-export const LOCAL_TTS_MODELS: readonly LocalTtsModel[] = [KOKORO_82M, KITTEN_TTS_MINI, KITTEN_TTS_MICRO, KITTEN_TTS_NANO, SUPERTONIC_3]
+/**
+ * Pocket TTS voices, as Kyutai names them (characters of Les Miserables). Every language package
+ * has the same eight names; each is that language's own recording of the voice state.
+ */
+const POCKET_VOICES: readonly LocalTtsVoice[] = [
+  ['alba', 'Alba', 'female'], ['azelma', 'Azelma', 'female'], ['cosette', 'Cosette', 'female'], ['eponine', 'Eponine', 'female'],
+  ['fantine', 'Fantine', 'female'], ['javert', 'Javert', 'male'], ['jean', 'Jean', 'male'], ['marius', 'Marius', 'male']
+].map(([id, name, gender]) => ({ id, label: `${name}, ${gender}` }))
+
+const POCKET_REPO = 'Alias-Alias/pocket-3-3-0-tts-onnx'
+const POCKET_REVISION = '71a4d6d11a76e26b98709fa163477c77d16bdbdb'
+
+/** Sizes and hashes of the files every language package shares in shape; the graphs differ per language. */
+interface PocketPackage {
+  language: PocketTtsLanguage
+  name: string
+  bundle: Pick<LocalModelFile, 'size' | 'sha256'>
+  tokenizer: Pick<LocalModelFile, 'size' | 'sha256'>
+  flowLmFlow: string
+  flowLmMain: string
+  mimiDecoder: string
+  textConditioner: string
+  voices: string
+}
+
+const POCKET_PACKAGES: readonly PocketPackage[] = [
+  {
+    language: 'en', name: 'English',
+    bundle: { size: 13438, sha256: 'ccbb828d6dceee19688ee6eee884bb8de16edcc0f21fac5ed713a8739d978b2e' },
+    tokenizer: { size: 245020, sha256: 'f498428e1eafee50492f7be13dc9bfafcfc12e508cd0eb1b01c92ecd5d8c6687' },
+    flowLmFlow: '7edfcbccb1d40a84b2b59ac1e921963287471ff0cb266603d7fd4282a131d716',
+    flowLmMain: 'c9328891492caaa7580284d81d47d01679f570f297023d68fc4c7ce503113dc8',
+    mimiDecoder: 'b27d1c38b96947a08bc54a7b660b553866a47b3b368b2170b89b09f5c7f35b56',
+    textConditioner: 'a060f0926e87a12309c54a681dde9daba8e32821e1e2348224fd6c30a3a7a28b',
+    voices: '720343118b8ec5177397d3898d43b0d13c7948f76794956610e5f0e795100cf1'
+  },
+  {
+    language: 'fr', name: 'French',
+    bundle: { size: 13638, sha256: '0894c2fc533b0a94d1f120fa9f959f4125ccff2443ac5362925989a5fcdd7fae' },
+    tokenizer: { size: 246403, sha256: '6211acffe9cb95172f71f0051f18e26ea305b2b32ea00b331ee976551c70887f' },
+    flowLmFlow: '8c72996bdcae9ea4a981b6afc0a40986523525aaa5491c09ef9546c14becd272',
+    flowLmMain: '1c6611cc3d524843e990e3abfdc15ce84f16f7a9250b5970b0255df4759fe70b',
+    mimiDecoder: 'd7b00abae02b2916f0be6d42bfbe14e87e0b4f1aaa25b1d5778a1f128edb6bb6',
+    textConditioner: '6127b51df140da0123123aa929a9453fc9a63a7cfebdc33f8a1f3fb46c5f2139',
+    voices: 'a43532290caa733c6670bc52427f0ed9f709c43867049f3e511f85568fcf9c5c'
+  },
+  {
+    language: 'de', name: 'German',
+    bundle: { size: 13623, sha256: '7e43fa70568f3a1800a7dfeab6b3f97e2b5f1ff682c11db9cf22103d53f5fea5' },
+    tokenizer: { size: 245966, sha256: '2d77849811e3d1b6ae80e5b11b203f57e1847901104d8a0573b34f46f8dddb53' },
+    flowLmFlow: '6198087a456287420d14b98083cd534bee3e92fa107dca1324f03a27c65c8315',
+    flowLmMain: '96cb9a628438ca4b26d7ed3160d79bd8ad2e0f097d08a8faea95e00c944ea84e',
+    mimiDecoder: '3d0f9574384d73c91404514b933e239333d9580bc42c8fcc161e5402ff67d6b9',
+    textConditioner: '0479f6bc635fedf130086c357d013a6a0c54568b301d9b255ffd67d732965378',
+    voices: 'a45485ca28c8f046f6e45089d7b01ea45e9a2d36f1ac4cb0947a956b27f4a70d'
+  },
+  {
+    language: 'es', name: 'Spanish',
+    bundle: { size: 13654, sha256: '196151a61b907afb2b0ccb4570a4c39993de69d705b371d38ae459120f6aac23' },
+    tokenizer: { size: 246610, sha256: '9ade09bbdc64ab2b59952b90773fa0890b780ece4fd5aef0d36a00c6ad5f0531' },
+    flowLmFlow: 'b3f028c3cdd909ffa10dffa8055edc9147f273e43bda852733e6a4a36cc3d292',
+    flowLmMain: 'f37c8b4a2409de010f638529daf947b863396a78b8b659a77ed6e35362174629',
+    mimiDecoder: 'f2f1b6e380a6388557768534d24036cb8b549b9f4eb49bedbb7ed3c4fb06336a',
+    textConditioner: '8e98c0abd4ba06fde1db0decb75e3b211e6097ba15854fc9266aa1d16feaeae4',
+    voices: '49a8e4d3562074a1e8d041edb4fad3877b327daf4cd898893ff10273216ae178'
+  },
+  {
+    language: 'it', name: 'Italian',
+    bundle: { size: 13624, sha256: '5dce446b175a8b9fd8766bde7ce3ee15fb396f2228b77777028c26eb88acfc4f' },
+    tokenizer: { size: 246586, sha256: '4bc1c0d4d54f9480183e94c94cfabf74fd89b0912537d4ef607d1982c4a381ec' },
+    flowLmFlow: 'b4da5f938b81d895eee0a8c6267162c6466382b761114affb96049db9e649431',
+    flowLmMain: '80c1ebae13a0033f7746f2b7a886e3d7fa3523c9d7be2122bec9412ad82c46b8',
+    mimiDecoder: 'c258c72d1b8079eb16a08fc9c6a255e918d897f53f784abcb5eaae2f3a0e9344',
+    textConditioner: 'f716f278fa279495889fbe8f4426da68d4ca5112b962121991ec8fed002ff090',
+    voices: 'cf8f292f5d91d887f8370ebbd4329928421a87f564d475f53a7d456bf144acac'
+  },
+  {
+    language: 'pt', name: 'Portuguese',
+    bundle: { size: 13624, sha256: '4b23a635bd375e5d476416cc960ad7488aabd4441aea2861eaf54d98734ea34b' },
+    tokenizer: { size: 247014, sha256: 'b33e269f7f042a763080d71ba087d74d2f6759674b238a723c028e436b1a25ab' },
+    flowLmFlow: 'f2e2a3da0fb5c1e6b472f1921459f7e6c051fa54c25e08186b46d559d620b379',
+    flowLmMain: '15357eb39cbd574bc4193fef960d6b332a861c84bfcf99e9417316bac129d1d8',
+    mimiDecoder: '6974a4330bbbfe91fcc46084b26e769c8eefd6121bd3ad42e84861f9f05854b2',
+    textConditioner: '22ee9182a3dadc37ba06cdf3ff9c0e0ac0622f006a2eb29d2f5e0a13ba642d3e',
+    voices: '402d569dcb5d25c5b93cae6995d6d4d499cf1bfc591ed8edf2ce50547a8b3651'
+  },
+  {
+    language: 'nl', name: 'Dutch',
+    bundle: { size: 13624, sha256: '48581badbfe176db6df37ac0f784893fe2c681ae1e845263c4cd36106d8c1705' },
+    tokenizer: { size: 245206, sha256: 'e6f610b98c427641b4ab0e1024dca7843e3d6b620871a14b204932e42c5a1736' },
+    flowLmFlow: 'd0b3e7da6ef29c0c0a2e6f721b9c3b3835b93c3f3f2854f5882e11222f7450ea',
+    flowLmMain: 'b6ae39189f6881ec0d87fa50ac690db239c6759c110e179714752b8b5d36e75c',
+    mimiDecoder: '2cf5feebf7ba7486491c87a49036b0afae3093546aff3f5a46ec5e967b6c3ca5',
+    textConditioner: '3bd2960e2ea136a8f870149f4238789f6dbcc54c1b643a4639b7be028e52fbb2',
+    voices: '1e7f812d5824a931fef68337291896bd88521c9f031d545877e7f46b144ed38c'
+  }
+]
+
+/** Sizes shared by every language package: the quantized graphs and the voices file have the same shapes. */
+const POCKET_SIZES = { flowLmFlow: 10040048, flowLmMain: 76397201, mimiDecoder: 22638621, textConditioner: 16388338, voices: 52404520 }
+
+/**
+ * Pocket TTS (Kyutai) 3.3.0 as exported to INT8 ONNX by Alias-Alias for browsers and native
+ * runtimes, pinned to one commit of that repository. The export keeps Kyutai's official weights
+ * and voices (CC BY 4.0); the repository records the source revisions and checksums. English plus
+ * six more languages, each a separate package of about 180 MB. Pocket TTS has no speed control, so
+ * Mousse changes the pace of the finished audio instead.
+ */
+const pocketModel = (pack: PocketPackage): PocketTtsModel => {
+  const path = (name: string): string => `${pack.language}/${name}`
+  return {
+    id: `pocket-tts-${pack.language}`,
+    label: `Pocket TTS ${pack.name}`,
+    description: `${pack.name} voices`,
+    parameters: '100M',
+    license: 'CC-BY-4.0',
+    homepage: 'https://huggingface.co/kyutai/pocket-tts',
+    repo: POCKET_REPO,
+    revision: POCKET_REVISION,
+    runtime: 'pocket',
+    language: pack.language,
+    bundle: path('bundle.json'),
+    tokenizer: path('tokenizer.json'),
+    voicesFile: path('voices.bin'),
+    textConditioner: path('text_conditioner_int8.onnx'),
+    flowLmMain: path('flow_lm_main_int8.onnx'),
+    flowLmFlow: path('flow_lm_flow_int8.onnx'),
+    mimiDecoder: path('mimi_decoder_int8.onnx'),
+    defaultVoice: 'alba',
+    voices: POCKET_VOICES,
+    files: [
+      { path: path('bundle.json'), ...pack.bundle },
+      { path: path('tokenizer.json'), ...pack.tokenizer },
+      { path: path('text_conditioner_int8.onnx'), size: POCKET_SIZES.textConditioner, sha256: pack.textConditioner },
+      { path: path('flow_lm_main_int8.onnx'), size: POCKET_SIZES.flowLmMain, sha256: pack.flowLmMain },
+      { path: path('flow_lm_flow_int8.onnx'), size: POCKET_SIZES.flowLmFlow, sha256: pack.flowLmFlow },
+      { path: path('mimi_decoder_int8.onnx'), size: POCKET_SIZES.mimiDecoder, sha256: pack.mimiDecoder },
+      { path: path('voices.bin'), size: POCKET_SIZES.voices, sha256: pack.voices }
+    ]
+  }
+}
+
+export const POCKET_TTS_MODELS: readonly PocketTtsModel[] = POCKET_PACKAGES.map(pocketModel)
+
+export const LOCAL_TTS_MODELS: readonly LocalTtsModel[] = [
+  KOKORO_82M, KITTEN_TTS_MINI, KITTEN_TTS_MICRO, KITTEN_TTS_NANO, SUPERTONIC_3, ...POCKET_TTS_MODELS
+]
 
 export function findLocalTtsModel(modelId: string): LocalTtsModel | undefined {
   return LOCAL_TTS_MODELS.find((model) => model.id === modelId)

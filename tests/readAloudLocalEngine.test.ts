@@ -290,6 +290,14 @@ describe('local read aloud with more than one model', () => {
     expect(worker.speakRequests()[0]).toMatchObject({ voice: 'F1' })
   })
 
+  it('starts the Pocket worker for a Pocket language, with that language\'s default voice', async () => {
+    await finishRead(startRead(SHORT, new AbortController(), 'pocket-tts-fr'))
+    const [worker] = FakeWorker.all
+    expect(worker.url.pathname).toMatch(/pocketWorker\.ts$/)
+    expect(worker.posted[0]).toEqual({ type: 'init', modelId: 'pocket-tts-fr' })
+    expect(worker.speakRequests()[0]).toMatchObject({ voice: 'alba' })
+  })
+
   it('asks for the default voice of the chosen model', async () => {
     const read = startRead(SHORT, new AbortController(), 'kitten-tts-micro')
     const [worker] = FakeWorker.all
