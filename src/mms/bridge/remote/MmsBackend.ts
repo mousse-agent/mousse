@@ -10,6 +10,8 @@ import {
 } from '../../../shared/channelCommands'
 import { resolveThreadProjectPath } from '../../data/resolveActiveProjectPath'
 import type { OrchestratorSendRequest, QueuedMessage } from '../../../shared/types'
+import { defaultIntegrationActor } from '../../../shared/integrations/actor'
+import { resolveEffectiveSkills } from '../../integrations/catalog/EffectiveIntegrationResolver'
 
 /** Chat modes a remote composer offers, as in the desktop composer's mode menu. */
 const REMOTE_CHAT_MODES = ['plan', 'agent', 'build'] as const
@@ -105,6 +107,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
             : {})
         }
         try {
+          await this.assertSkillMode(threadId, input.mode)
           const item = s.orchestrator.enqueueAndDrain(threadId, input, 'remote')
           return {
             ok: true,
@@ -152,17 +155,13 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     const projectPath = threadId
       ? resolveThreadProjectPath(s.projects, s.threads, threadId)
       : undefined
-    const enabled = new Set(settings.integrations.skills.enabledSkills)
     let skills: Array<{ id: string; name: string; description: string }> = []
     try {
-      const snapshot = await s.skillsRegistry.discover({ projectPath })
-      skills = snapshot.skills
-        .filter(
-          (skill) =>
-            skill.isActive !== false &&
-            (enabled.size === 0 || enabled.has(skill.id) || enabled.has(skill.name))
-        )
-        .map((skill) => ({ id: skill.id, name: skill.name, description: skill.description }))
+      skills = (await this.effectiveSkills(projectPath)).map((skill) => ({
+        id: skill.id,
+        name: skill.name,
+        description: skill.description
+      }))
     } catch {
       // Skills are optional in the composer; models still load.
     }
@@ -185,6 +184,29 @@ export class MmsRemoteBackend implements RemoteBackendPort {
         ...(command.argsHint ? { argsHint: command.argsHint } : {})
       }))
     }
+  }
+  /** The skills the desktop composer offers: the same resolution a turn applies. */
+  private async effectiveSkills(projectPath?: string) {
+    const snapshot = await this.services.skillsRegistry.discover({ projectPath })
+    return resolveEffectiveSkills({
+      snapshot,
+      settings: this.services.settings.get().integrations.skills,
+      actor: defaultIntegrationActor(false)
+    })
+  }
+  /** Refuses a skill mode whose skill this composer would not offer, before anything is stored. */
+  private async assertSkillMode(threadId: string, mode: unknown): Promise<void> {
+    if (!mode || typeof mode !== 'object') return
+    const skillId = (mode as { skillId: string }).skillId,
+      s = this.services
+    let skills: Awaited<ReturnType<MmsRemoteBackend['effectiveSkills']>> = []
+    try {
+      skills = await this.effectiveSkills(resolveThreadProjectPath(s.projects, s.threads, threadId))
+    } catch {
+      // Treated as no skills: the mode is refused below.
+    }
+    if (!skills.some((skill) => skill.id === skillId || skill.installationId === skillId))
+      throw new Error('That skill is not available.')
   }
   snapshot(threadId: string, maximumBytes = 25 * 1024 * 1024): unknown {
     const s = this.services,
@@ -213,6 +235,11 @@ export class MmsRemoteBackend implements RemoteBackendPort {
   ): Promise<unknown> {
     if (!this.services.threads.listAllThreads().find((thread) => thread.id === threadId))
       throw new NetError('stream_unknown', 'Thread not found.')
+    try {
+      await this.assertSkillMode(threadId, extras.mode)
+    } catch (error) {
+      return { text: '', silent: false, error: failure(error).error }
+    }
     // Existing MMS takes an owned cross-process lease and binds this exact signal to executeTurn.
     return mmsJson(
       await this.services.orchestrator.runChannelTurn(threadId, content, this.services.threads, {

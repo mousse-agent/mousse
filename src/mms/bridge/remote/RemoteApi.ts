@@ -44,6 +44,15 @@ export const STAGED_UPLOAD_TTL_MS = 10 * 60 * 1000
 class RemoteInputError extends Error {}
 const STAGED_UPLOADS_PER_CALLER = 32
 const STAGED_UPLOADS_TOTAL = 128
+/** Base64 characters held for one caller, and for everyone, before more images are refused. */
+const STAGED_CHARS_PER_CALLER = 24 * 1024 * 1024
+const STAGED_CHARS_TOTAL = 48 * 1024 * 1024
+/**
+ * Base64 characters in one message's images. The message is shown to every remote reader, whose
+ * events and snapshots are bounded (25 and 32 MiB), so a larger batch would make the thread
+ * unreadable from a phone.
+ */
+export const REMOTE_MESSAGE_IMAGES_MAX_CHARS = 8 * 1024 * 1024
 interface StagedUpload {
   user: UserId
   name: string
@@ -52,6 +61,13 @@ interface StagedUpload {
   received: number
   chars: number
   updatedAt: number
+  /** Set while a send or enqueue that uses this image is running; a refusal releases it. */
+  claimed: boolean
+}
+interface ResolvedExtras {
+  extras: RemoteChatExtras
+  /** Upload keys to delete once the backend accepts the message. */
+  keys: string[]
 }
 interface OwnedRun {
   threadId: string
@@ -65,6 +81,7 @@ export class RemoteApi {
   private runs = new Map<RpcId, OwnedRun>()
   /** Images staged chunk by chunk, keyed by caller node and upload id; memory only. */
   private uploads = new Map<string, StagedUpload>()
+  private sweepTimer: { cancel(): void } | undefined
   constructor(
     private readonly backend: RemoteBackendPort,
     private readonly clock: Clock
@@ -102,17 +119,25 @@ export class RemoteApi {
     }
     if (method === 'queue.enqueue') {
       const { attachments: _staged, ...rest } = params
-      let extras: RemoteChatExtras
+      let resolved: ResolvedExtras
       try {
-        extras = this.extras(params, context)
+        resolved = this.extras(params, context)
       } catch (error) {
         if (error instanceof RemoteInputError) return { ok: false, error: error.message }
         throw error
       }
-      return this.backend.execute(method, {
-        ...rest,
-        ...(extras.images ? { images: extras.images } : {})
-      })
+      let result: unknown
+      try {
+        result = await this.backend.execute(method, {
+          ...rest,
+          ...(resolved.extras.images ? { images: resolved.extras.images } : {})
+        })
+      } catch (error) {
+        this.release(resolved.keys)
+        throw error
+      }
+      this.settle(resolved.keys, (result as { ok?: unknown } | undefined)?.ok !== false)
+      return result
     }
     if (method === 'orchestrator.send') {
       const threadId = params.threadId as string
@@ -128,14 +153,15 @@ export class RemoteApi {
           pending: [],
           bytes: 0
         }
-      let extras: RemoteChatExtras
+      let resolved: ResolvedExtras
       try {
-        extras = this.extras(params, context)
+        resolved = this.extras(params, context)
       } catch (error) {
         if (error instanceof RemoteInputError)
           return { text: '', silent: false, error: error.message }
         throw error
       }
+      let accepted = false
       this.runs.set(context.id, run)
       const stop = (): void => abort.abort()
       context.signal.addEventListener('abort', stop, { once: true })
@@ -152,11 +178,13 @@ export class RemoteApi {
               return text
             }
           },
-          extras
+          resolved.extras
         )
+        accepted = !(result as { error?: unknown } | undefined)?.error
         if (abort.signal.aborted) throw new NetError('cancelled')
         return result
       } finally {
+        this.settle(resolved.keys, accepted)
         timer.cancel()
         context.signal.removeEventListener('abort', stop)
         this.runs.delete(context.id)
@@ -189,6 +217,8 @@ export class RemoteApi {
   close(): void {
     for (const run of this.runs.values()) run.abort.abort()
     this.uploads.clear()
+    this.sweepTimer?.cancel()
+    this.sweepTimer = undefined
   }
   /** Stores one chunk of an image; a repeated chunk (a retried request) is accepted once. */
   private stage(params: Record<string, unknown>, context: RpcContext): unknown {
@@ -219,15 +249,24 @@ export class RemoteApi {
         chunks: new Array<string | undefined>(total).fill(undefined),
         received: 0,
         chars: 0,
-        updatedAt: this.clock.now()
+        updatedAt: this.clock.now(),
+        claimed: false
       }
       this.uploads.set(key, upload)
+      this.scheduleSweep()
     }
     const existing = upload.chunks[index]
     if (existing === undefined) {
       if (upload.chars + data.length > REMOTE_ATTACHMENT_MAX_CHARS) {
         this.uploads.delete(key)
         throw new RemoteInputError('The image is too large.')
+      }
+      if (
+        this.stagedChars(context.caller.node + ':') + data.length > STAGED_CHARS_PER_CALLER ||
+        this.stagedChars('') + data.length > STAGED_CHARS_TOTAL
+      ) {
+        this.uploads.delete(key)
+        throw new RemoteInputError('Too many images are waiting to be sent.')
       }
       upload.chunks[index] = data
       upload.received++
@@ -237,34 +276,71 @@ export class RemoteApi {
     upload.updatedAt = this.clock.now()
     return { ok: true, received: upload.received, total }
   }
-  /** Resolves a request's mode and staged images; the images are consumed. */
-  private extras(params: Record<string, unknown>, context: RpcContext): RemoteChatExtras {
+  /** Resolves a request's mode and staged images; the images stay claimed until settled. */
+  private extras(params: Record<string, unknown>, context: RpcContext): ResolvedExtras {
     const extras: RemoteChatExtras = {}
     if (params.mode !== undefined) extras.mode = params.mode as RemoteChatMode
     const ids = params.attachments as string[] | undefined
-    if (!ids) return extras
+    if (!ids) return { extras, keys: [] }
     this.sweep()
-    const images: RemoteImage[] = []
-    for (const id of ids) {
-      const upload = this.uploads.get(context.caller.node + ':' + id)
+    const keys = ids.map((id) => context.caller.node + ':' + id),
+      images: RemoteImage[] = []
+    let total = 0
+    for (const key of keys) {
+      const upload = this.uploads.get(key)
       if (
         !upload ||
+        upload.claimed ||
         upload.user !== context.caller.user ||
         upload.received !== upload.chunks.length
       )
         throw new RemoteInputError('An attached image did not finish uploading. Attach it again.')
+      total += upload.chars
+      if (total > REMOTE_MESSAGE_IMAGES_MAX_CHARS)
+        throw new RemoteInputError('These images are too large to send together. Send fewer.')
       const data = upload.chunks.join('')
       if (data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data))
         throw new RemoteInputError('An attached image could not be read. Attach it again.')
       images.push({ name: upload.name, mimeType: upload.mimeType, data })
     }
-    for (const id of ids) this.uploads.delete(context.caller.node + ':' + id)
-    extras.images = images
-    return extras
+    for (const key of keys) this.uploads.get(key)!.claimed = true
+    if (images.length) extras.images = images
+    return { extras, keys }
+  }
+  /** Single use on success; a refused message gives its images back so the phone can retry. */
+  private settle(keys: string[], accepted: boolean): void {
+    if (accepted) for (const key of keys) this.uploads.delete(key)
+    else this.release(keys)
+  }
+  private release(keys: string[]): void {
+    for (const key of keys) {
+      const upload = this.uploads.get(key)
+      if (upload) {
+        upload.claimed = false
+        upload.updatedAt = this.clock.now()
+      }
+    }
+  }
+  private stagedChars(prefix: string): number {
+    let chars = 0
+    for (const [key, upload] of this.uploads) if (key.startsWith(prefix)) chars += upload.chars
+    return chars
   }
   private sweep(): void {
     const now = this.clock.now()
     for (const [key, upload] of this.uploads)
-      if (now - upload.updatedAt > STAGED_UPLOAD_TTL_MS) this.uploads.delete(key)
+      if (!upload.claimed && now - upload.updatedAt > STAGED_UPLOAD_TTL_MS) this.uploads.delete(key)
+  }
+  /** One owned timer expires abandoned uploads without waiting for another request. */
+  private scheduleSweep(): void {
+    if (this.sweepTimer || this.uploads.size === 0) return
+    const oldest = Math.min(...[...this.uploads.values()].map((upload) => upload.updatedAt))
+    // At least a second, so an upload held by a running send cannot spin the timer.
+    const delay = Math.max(1000, oldest + STAGED_UPLOAD_TTL_MS + 1 - this.clock.now())
+    this.sweepTimer = this.clock.setTimeout(() => {
+      this.sweepTimer = undefined
+      this.sweep()
+      this.scheduleSweep()
+    }, delay)
   }
 }
