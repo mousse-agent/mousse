@@ -67,7 +67,7 @@ export interface SessionRpcPort {
     message: Extract<WireMessage, { t: 'rpc.request' }>,
     peer: SyncSession['peer'],
     signal: AbortSignal,
-    progress: (data: unknown) => void,
+    progress: (data: unknown) => void | Promise<void>,
     session?: { carrier?: string }
   ): Promise<unknown>
   result(id: RpcId, peer: SyncSession['peer']): Promise<unknown>
@@ -149,6 +149,8 @@ type Download = { stream: StreamId; chunks: Buffer[]; bytes: number }
 type JobScope = { stream?: StreamId; space?: SpaceId; rpc?: boolean }
 type SessionJob = JobScope & { controller?: AbortController }
 type LiveQueue = { tail: Promise<void>; records: number; bytes: number; overflowed: boolean }
+/** How long an RPC answer waits before trying again when the control queue is full. */
+const RPC_RESULT_RETRY_MS = 50
 const equalKey = (a: string, b: string): boolean => {
   const x = Buffer.from(a, 'base64url'),
     y = Buffer.from(b, 'base64url')
@@ -1763,21 +1765,49 @@ export class NetSyncSession implements SyncSession {
     const timer = this.clock.setTimeout(() => controller.abort(), h.deadlineMs)
     try {
       if (!this.options.rpc) throw new NetError('forbidden')
+      // Progress rides the control lane, whose queue is small: a producer that does not wait for
+      // each send is rejected. The handler gets the rejection and stops; the session stays up.
       const result = await this.options.rpc.request(
         h,
         this.peer,
         controller.signal,
-        (data) => {
-          void this.send({ t: 'rpc.progress', id: h.id, data }).catch((error) => this.fail(error))
-        },
+        (data) => this.send({ t: 'rpc.progress', id: h.id, data }),
         { carrier: this.options.carrier }
       )
-      await this.send(resultMessage(h.id, result))
+      await this.sendRpcResult(resultMessage(h.id, result), controller.signal)
     } catch (error) {
-      await this.send({ t: 'rpc.result', id: h.id, error: wireError(error) })
+      await this.sendRpcResult(
+        { t: 'rpc.result', id: h.id, error: wireError(error) },
+        controller.signal
+      )
     } finally {
       timer.cancel()
       this.rpcControllers.delete(h.id)
+    }
+  }
+  /**
+   * The answer to a request. A full control queue is not fatal to the session: the answer waits
+   * for room until the request's deadline (or its cancel) ends it.
+   */
+  private async sendRpcResult(message: WireMessage, signal: AbortSignal): Promise<void> {
+    for (;;) {
+      try {
+        return await this.send(message)
+      } catch (error) {
+        if (!(error instanceof NetError) || error.code !== 'rate_limited') throw error
+      }
+      if (signal.aborted) return
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          timer.cancel()
+          signal.removeEventListener('abort', done)
+          resolve()
+        }
+        const timer = this.clock.setTimeout(done, RPC_RESULT_RETRY_MS)
+        signal.addEventListener('abort', done)
+      })
+      // A request cancelled or past its deadline while waiting is not answered.
+      if (signal.aborted) return
     }
   }
   private spaceProofCapacity(): void {
