@@ -624,11 +624,11 @@ export class MmsProfileServices {
     const label = `rpc:${method}`
     // An idle window's wait holds no profile state and ends when the relay closes, so it must not
     // make storage changes or shutdown wait for it. It is still refused once the profile drains.
-    if (IDLE_WAIT_METHODS.has(method)) {
-      this.requests.assertAccepting()
-      return work()
-    }
     try {
+      if (IDLE_WAIT_METHODS.has(method)) {
+        this.requests.assertAccepting()
+        return await work()
+      }
       return await this.requests.run(label, async () => {
         if (!STORAGE_LIFECYCLE_METHODS.has(method)) return work()
         // Let short GUI polls and writes settle without exempting their ownership.
@@ -687,6 +687,8 @@ export class MmsProfileServices {
     void this.undoRetention.stop()
     void this.lifecycle.cleanup.stop()
     this.requests.beginShutdown()
+    // Ends any open window speech wait now, even when Net never started and so never closes it.
+    this.speechRelayInstance?.close()
     this.mcpManager.beginShutdown()
     this.channels.beginShutdown()
     this.chatNetwork?.beginShutdown()

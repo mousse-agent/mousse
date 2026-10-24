@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
+import { DomainRpcError } from '../src/mms/protocol/domainRegistry'
 
 const roots: string[] = []
 const previousHome = process.env.MOUSSE_HOME
@@ -41,11 +42,16 @@ describe('idle phone speech wait', () => {
       expect(services.getOwnedActivity()).not.toHaveProperty('rpc:speech.host.wait')
 
       // A storage lifecycle request still runs while the window's wait is open.
-      await expect(services.runOwnedRequest('threads.trash', () => 'trashed')).resolves.toBe('trashed')
+      await expect(services.runOwnedRequest('threads.trash', () => 'trashed')).resolves.toBe(
+        'trashed'
+      )
 
       // Other requests stay owned work.
       let finish!: () => void
-      const held = services.runOwnedRequest('fixture.write', () => new Promise<void>((resolve) => (finish = resolve)))
+      const held = services.runOwnedRequest(
+        'fixture.write',
+        () => new Promise<void>((resolve) => (finish = resolve))
+      )
       expect(services.getOwnedActivity()).toMatchObject({ 'rpc:fixture.write': 1 })
       finish()
       await held
@@ -54,9 +60,39 @@ describe('idle phone speech wait', () => {
       services.beginShutdown()
       await expect(
         Promise.resolve().then(() => services.runOwnedRequest('speech.host.wait', async () => ({})))
-      ).rejects.toMatchObject({ code: 'profile_draining' })
+      ).rejects.toSatisfy(
+        (error) => error instanceof DomainRpcError && error.code === 'profile_draining'
+      )
       release()
       await wait
+    } finally {
+      await main.stop()
+    }
+  }, 20_000)
+
+  it('ends an open relay wait when the profile shuts down, even with Net never started', async () => {
+    vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+    const root = mkdtempSync(join(tmpdir(), 'mousse-speech-idle-'))
+    roots.push(root)
+    process.env.MOUSSE_HOME = root
+    const main = await MousseMainService.create({
+      homeDir: join(root, 'home'),
+      repoRoot: root,
+      requireOwnership: false
+    })
+    const host = main.getInstallationHost()!
+    const profile = host.manager.create({ displayName: 'Speech close', slug: 'speech-close' })
+    const services = await host.getProfileServices(profile.id)
+    try {
+      let ended = false
+      const wait = services
+        .runOwnedRequest('speech.host.wait', () => services.speechRelay.wait('window-1'))
+        .then(() => (ended = true))
+      await Promise.resolve()
+      expect(ended).toBe(false)
+      services.beginShutdown()
+      await wait
+      expect(ended).toBe(true)
     } finally {
       await main.stop()
     }
