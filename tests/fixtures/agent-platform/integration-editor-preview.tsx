@@ -17,6 +17,6 @@ function Preview() {
   }, [])
   const [profileId, setProfileId] = useState('profile-a')
   const switchProfile = async (next: string) => { if (await confirmNavigation('profile')) setProfileId(next) }
-  return <div className="fixture-host"><div className="fixture-bar"><span>Integration editor fixture</span><button type="button" data-fixture="profile-a" onClick={() => void switchProfile('profile-a')}>Profile A</button><button type="button" data-fixture="profile-b" onClick={() => void switchProfile('profile-b')}>Profile B</button><span id="fixture-profile">{profileId}</span></div><div className="fixture-main"><IntegrationsWorkspace profileId={profileId} client={client} initialTab="skills" /></div></div>
+  return <div className="fixture-host"><div className="fixture-bar"><span>Integration editor fixture</span><button type="button" data-fixture="profile-a" onClick={() => void switchProfile('profile-a')}>Profile A</button><button type="button" data-fixture="profile-b" onClick={() => void switchProfile('profile-b')}>Profile B</button><span id="fixture-profile">{profileId}</span></div><div className="fixture-main"><IntegrationsWorkspace profileId={profileId} client={client} /></div></div>
 }
 createRoot(document.getElementById('root')!).render(<Preview />)

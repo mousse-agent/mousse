@@ -1,137 +1,77 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
-import { ArrowLeft, Bell, Bot, ChevronDown, ChevronRight, Cpu, Download, Loader2, Mic, Palette, Plug, Plus, Radio, RefreshCw, Server, Sparkles, Trash2, User, UserCircle, VolumeHigh, Wrench } from '../lib/icons'
+import { ArrowLeft, Bot, Laptop, Plug, Server, Settings, Sparkles, UserCircle, VolumeHigh } from '../lib/icons'
+import { SettingsPageTitle } from './settings/SettingsRow'
+import { SettingsSearch } from './settings/SettingsSearch'
 import type {
-  AgentTypeId,
   MousseSettings,
   MousseSettingsUpdate,
-  SettingsOptions,
-  ThemeId
+  SettingsOptions
 } from '../../shared/settings'
-import { resolveTitleModel, groupAgentModelOptions, CONTEXT_COMPACTION_OPTIONS, normalizeContextSettings, type ContextCompactionTokens } from '../../shared/settings'
-import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
-import type {
-  ConfiguredProvider,
-  ProviderLoginOption
-} from '../../shared/providerAuth'
-import type { McpConfigSourceDescriptor, McpServerConfig, SkillsRegistrySnapshot } from '../../shared/integrations'
-import { MOUSSE_BUILTIN_TOOLS } from '../../shared/integrations'
+import type { ConfiguredProvider } from '../../shared/providerAuth'
 import { useAppStore } from '../stores/appStore'
-import { ProviderLoginModal } from './ProviderLoginModal'
-import { ClaudeSubscriptionPanel } from './ClaudeSubscriptionPanel'
-import { CodexStatusPanel } from './CodexStatusPanel'
-import { ModelFamilySettingsFields } from './ModelFamilySettingsFields'
-import { ProfileSection } from './ProfileSection'
-import { DictationSettings } from '../dictation/DictationSettings'
-import { ReadAloudSettings } from '../readAloud/ReadAloudSettings'
-import { DictationSpeechSettings, ReadAloudSpeechSettings } from '../speech/SpeechSettings'
+import { ProvidersSettings } from './providers/ProvidersSettings'
+import { SpeechSettings } from '../speech/SpeechSettings'
 import { NetDevicesSection } from './NetDevicesSection'
 import { AccountSection } from './AccountSection'
-import { useMousseIdAvailable } from '../stores/mousseIdStore'
 import { takePendingSettingsSection } from '../lib/settingsNavigation'
 import { StorageSettings } from './StorageSettings'
-import { UpdateSettings } from './updates/UpdateSettings'
-import { IntegrationsWorkspace } from './integrations'
+import { AgentsSettings } from './settings/AgentsSettings'
+import { GeneralSettings } from './settings/GeneralSettings'
+import { DownloadsIndicator } from './downloads/DownloadsIndicator'
+import { WindowCaptionButtons } from './WindowCaptionButtons'
+import { SkillsMcpSettings } from './settings/SkillsMcpSettings'
 import { createIntegrationPlatformClient } from '../services/integrationPlatformClient'
 import { confirmNavigation } from '../services/navigationGuards'
 import '../styles/settings.css'
 
-/** Set at build time from package.json (electron.vite.config.ts). */
-declare const __MOUSSE_VERSION__: string | undefined
-const MOUSSE_VERSION = typeof __MOUSSE_VERSION__ === 'string' ? __MOUSSE_VERSION__ : ''
-
-function themePreviewClass(themeId: ThemeId): string {
-  switch (themeId) {
-    case 'light':
-      return 'preview-light'
-    case 'system':
-      return 'preview-system'
-    case 'blacksphere-plus':
-      return 'preview-blacksphere-plus'
-    case 'dark-modern':
-      return 'preview-dark-modern'
-    case 'one-dark':
-      return 'preview-one-dark'
-    case 'monokai':
-      return 'preview-monokai'
-    case 'solarized-dark':
-      return 'preview-solarized-dark'
-    case 'github-dark':
-      return 'preview-github-dark'
-    case 'high-contrast':
-      return 'preview-high-contrast'
-    case 'dark':
-    default:
-      return 'preview-dark'
-  }
-}
-
-function ThemePreview({ themeId }: { themeId: ThemeId }) {
-  const cls = themePreviewClass(themeId)
-  const isLightMain = themeId === 'light' || themeId === 'system'
+function SettingsLoader() {
   return (
-    <div className={`theme-preview ${cls}${isLightMain ? ' main-light' : ''}`}>
-      <div className="theme-preview-titlebar" />
-      <div className="theme-preview-body">
-        <div className="theme-preview-sidebar" />
-        <div className="theme-preview-main" />
-      </div>
-    </div>
-  )
-}
-
-type AddProviderStep = 'provider' | 'credentials'
-
-type IconType = typeof Palette
-
-function SectionHeading({
-  icon: Icon,
-  title,
-  description,
-  className
-}: {
-  icon: IconType
-  title: string
-  description?: string
-  className?: string
-}) {
-  return (
-    <div className={`settings-section-heading${className ? ` ${className}` : ''}`}>
-      <span className="settings-section-icon">
-        <Icon size={15} />
-      </span>
-      <div className="settings-section-heading-text">
-        <h2>{title}</h2>
-        {description && <p className="settings-section-desc">{description}</p>}
-      </div>
+    <div className="settings-loader" role="status" aria-label="Loading settings">
+      <span className="settings-loader-ring" />
+      <span className="settings-loader-core" />
     </div>
   )
 }
 
 const SETTINGS_SECTIONS = [
-  { id: 'account', label: 'Account', icon: UserCircle },
-  { id: 'profile', label: 'Profile', icon: User },
-  { id: 'appearance', label: 'Appearance', icon: Palette },
-  { id: 'notifications', label: 'Notifications', icon: Bell },
-  { id: 'context', label: 'Context', icon: Cpu },
-  { id: 'storage', label: 'Storage & trash', icon: Trash2 },
-  { id: 'providers', label: 'Providers', icon: Plug },
-  { id: 'orchestrator', label: 'Models', icon: Cpu },
-  { id: 'speech', label: 'Speech', icon: VolumeHigh },
-  { id: 'tools', label: 'Tools', icon: Wrench },
-  { id: 'integrations', label: 'Skills & MCP', icon: Sparkles },
-  { id: 'skills', label: 'Skill defaults', icon: Sparkles },
-  { id: 'agents', label: 'Agents', icon: Bot },
-  { id: 'connections', label: 'Devices', icon: Radio },
-  { id: 'updates', label: 'Updates', icon: Download }
+  { id: 'general', label: 'General', icon: Settings, hue: 0, group: 'Settings', keywords: ['appearance', 'theme', 'dark', 'light', 'acrylic', 'glass', 'accent', 'color', 'notification', 'sound', 'alert', 'completion', 'update', 'version', 'about'] },
+  { id: 'account', label: 'Account', icon: UserCircle, hue: 5, group: 'Settings', keywords: ['mousse id', 'sign in', 'login', 'profile', 'name', 'avatar', 'environment', 'activity'] },
+  { id: 'providers', label: 'Providers', icon: Plug, hue: 4, group: 'Settings', keywords: ['api key', 'subscription', 'claude', 'codex', 'openai', 'login'] },
+  { id: 'agents', label: 'Agents', icon: Bot, hue: 1, group: 'Customize', keywords: ['main agent', 'orchestrator', 'model', 'title', 'subagent', 'cli', 'headless', 'claude code', 'codex', 'context', 'compaction', 'tokens'] },
+  { id: 'integrations', label: 'Skills & MCP', icon: Sparkles, hue: 6, group: 'Customize', keywords: ['skills', 'mcp', 'integrations', 'tools', 'web search', 'exa', 'parallel', 'servers', 'skill defaults'] },
+  { id: 'speech', label: 'Speech', icon: VolumeHigh, hue: 3, group: 'Customize', keywords: ['voice', 'read aloud', 'dictation', 'microphone', 'noise', 'speed'] },
+  { id: 'connections', label: 'Devices', icon: Laptop, hue: 2, group: 'This computer', keywords: ['devices', 'network', 'pair', 'remote'] },
+  { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['trash', 'delete', 'purge', 'retention', 'disk'] }
 ] as const
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id']
 
 const VISIBLE_SETTINGS_SECTIONS = SETTINGS_SECTIONS
 
+/** Section ids from before the redesign, still sent by links and other surfaces. */
+const LEGACY_SETTINGS_SECTIONS: Record<string, SettingsSectionId> = {
+  profile: 'account',
+  appearance: 'general',
+  notifications: 'general',
+  updates: 'general',
+  context: 'agents',
+  orchestrator: 'agents',
+  tools: 'integrations',
+  skills: 'integrations'
+}
+
 const settingsSectionId = (value: unknown): SettingsSectionId | undefined =>
-  SETTINGS_SECTIONS.find((section) => section.id === value)?.id
+  SETTINGS_SECTIONS.find((section) => section.id === value)?.id ??
+  (typeof value === 'string' && Object.hasOwn(LEGACY_SETTINGS_SECTIONS, value) ? LEGACY_SETTINGS_SECTIONS[value] : undefined)
+
+const CONTEXT_COMPACTION_HASH = '#settings-context-compaction'
+
+const matchesSettingsQuery = (section: (typeof SETTINGS_SECTIONS)[number], query: string): boolean => {
+  const q = query.trim().toLowerCase()
+  if (!q) return true
+  return section.label.toLowerCase().includes(q) || section.keywords.some((keyword) => keyword.includes(q))
+}
 
 export function SettingsPage() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
@@ -150,39 +90,26 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const [settings, setSettings] = useState<MousseSettings | null>(null)
   const [options, setOptions] = useState<SettingsOptions | null>(null)
   const [configuredProviders, setConfiguredProviders] = useState<ConfiguredProvider[]>([])
-  const [mcpServers, setMcpServers] = useState<McpServerConfig[]>([])
-  const [mcpSources, setMcpSources] = useState<McpConfigSourceDescriptor[]>([])
-  const [skillsSnapshot, setSkillsSnapshot] = useState<SkillsRegistrySnapshot | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
 
-  const [addOpen, setAddOpen] = useState(false)
-  const [addStep, setAddStep] = useState<AddProviderStep>('provider')
-  const [authType, setAuthType] = useState<'api_key' | 'oauth' | 'all'>('all')
-  const [loginOptions, setLoginOptions] = useState<ProviderLoginOption[]>([])
-  const [providerFilter, setProviderFilter] = useState('')
-  const [selectedProvider, setSelectedProvider] = useState<ProviderLoginOption | null>(null)
-  const [apiKeyInput, setApiKeyInput] = useState('')
-  const [ambientInstructions, setAmbientInstructions] = useState<string[]>([])
-  const [connecting, setConnecting] = useState(false)
-  const [connectError, setConnectError] = useState<string | null>(null)
-  const [providerRefreshError, setProviderRefreshError] = useState<string | null>(null)
-  const [refreshingNativeModels, setRefreshingNativeModels] = useState(false)
-  const [loginActive, setLoginActive] = useState(false)
   const [restartRequired, setRestartRequired] = useState(false)
-  const [webToolCredentials, setWebToolCredentials] = useState({ exa: false, parallel: false })
-  const [webToolKeys, setWebToolKeys] = useState({ exa: '', parallel: '' })
-  const [savingWebTool, setSavingWebTool] = useState<'exa' | 'parallel' | null>(null)
 
-  const accountAvailable = useMousseIdAvailable()
-  const [selectedSection, setActiveSection] = useState<SettingsSectionId>(() =>
-    window.location.hash === '#settings-context-compaction' ? 'context' : settingsSectionId(takePendingSettingsSection()) ?? 'account')
-  // Account holds Mousse ID only; builds without a Mousse ID service open on Profile instead.
-  const activeSection: SettingsSectionId = selectedSection === 'account' && !accountAvailable ? 'profile' : selectedSection
+  // Opening at the old 'context' section, or with the compaction hash, focuses the compaction threshold on Agents.
+  const focusCompaction = useRef(false)
+  const [selectedSection, setActiveSection] = useState<SettingsSectionId>(() => {
+    const requested = window.location.hash === CONTEXT_COMPACTION_HASH ? 'context' : takePendingSettingsSection()
+    if (requested === 'context') focusCompaction.current = true
+    return settingsSectionId(requested) ?? 'general'
+  })
+  // Account always exists: it shows Activity, plus Mousse ID when this build has the service.
+  const activeSection: SettingsSectionId = selectedSection
   useEffect(() => {
     const openSection = (event: Event) => {
-      const section = settingsSectionId((event as CustomEvent).detail)
+      const requested = (event as CustomEvent).detail
+      const section = settingsSectionId(requested)
       if (section) {
         takePendingSettingsSection()
+        if (requested === 'context' || window.location.hash === CONTEXT_COMPACTION_HASH) focusCompaction.current = true
         setActiveSection(section)
       }
     }
@@ -190,18 +117,13 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     return () => window.removeEventListener('mousse:settings-section', openSection)
   }, [])
   useEffect(() => {
-    if (activeSection !== 'context' || !settings) return
-    const option = document.getElementById('context-compaction-tokens')
-    option?.focus()
-    if (window.location.hash === '#settings-context-compaction') {
+    if (activeSection !== 'agents' || !settings || !focusCompaction.current) return
+    focusCompaction.current = false
+    document.getElementById('agents-context-compaction')?.focus()
+    if (window.location.hash === CONTEXT_COMPACTION_HASH) {
       window.history.replaceState(null, '', window.location.pathname + window.location.search)
     }
   }, [activeSection, settings])
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
-
-  const toggleCollapsedGroup = useCallback((groupId: string) => {
-    setCollapsedGroups((prev) => ({ ...prev, [groupId]: !(prev[groupId] ?? false) }))
-  }, [])
 
   const refreshProviderData = useCallback(async () => {
     const [configured, opts] = await Promise.all([
@@ -213,21 +135,13 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     return { configured, opts }
   }, [])
 
+  // Only settings and provider data gate the page; Skills & MCP loads its own data.
   const loadSettings = useCallback(() => {
     setLoadError(null)
     setSettings(null)
     setOptions(null)
-    Promise.all([
-      window.mousse.settings.get(),
-      refreshProviderData(),
-      window.mousse.mcp.listServers(),
-      window.mousse.mcp.getConfigSources().catch(() => [] as McpConfigSourceDescriptor[]),
-      window.mousse.skills.list()
-    ])
-      .then(([s, _providerData, servers, sources, skills]) => {
-        setMcpServers(servers)
-        setMcpSources(sources)
-        setSkillsSnapshot(skills)
+    Promise.all([window.mousse.settings.get(), refreshProviderData()])
+      .then(([s]) => {
         setSettings(s)
       })
       .catch(() => {
@@ -239,7 +153,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     if (!settingsOpen) return
     setRestartRequired(false)
     loadSettings()
-    void window.mousse.webTools.getCredentialStatus().then(setWebToolCredentials).catch(() => {})
   }, [settingsOpen, loadSettings])
 
   useEffect(() => {
@@ -250,19 +163,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     })
     return unsub
   }, [settingsOpen, refreshProviderData])
-
-  useEffect(() => {
-    if (!settingsOpen) return
-    const unsubscribeMcp = window.mousse.mcp.onChanged(() => {
-      void window.mousse.mcp.listServers().then(setMcpServers)
-      void window.mousse.mcp.getConfigSources().then(setMcpSources).catch(() => {})
-    })
-    const unsubscribeSkills = window.mousse.skills.onChanged(setSkillsSnapshot)
-    return () => {
-      unsubscribeMcp()
-      unsubscribeSkills()
-    }
-  }, [settingsOpen])
 
   const updateSettings = useCallback(
     async (partial: MousseSettingsUpdate) => {
@@ -356,227 +256,12 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     [options?.llmProviders]
   )
 
-  const handleProviderChange = (llmProvider: MousseSettings['provider']['llmProvider']) => {
-    const provider = options?.llmProviders.find((p) => p.id === llmProvider)
-    const model = provider?.models[0]?.id ?? ''
-    void updateSettings({ provider: { llmProvider, model } })
-  }
-
-  const resetAddFlow = () => {
-    setAddOpen(false)
-    setAddStep('provider')
-    setAuthType('all')
-    setLoginOptions([])
-    setProviderFilter('')
-    setSelectedProvider(null)
-    setApiKeyInput('')
-    setAmbientInstructions([])
-    setConnectError(null)
-    setConnecting(false)
-    setLoginActive(false)
-  }
-
-  const loadLoginOptions = useCallback(async (filter: 'api_key' | 'oauth' | 'all') => {
-    const options =
-      filter === 'all'
-        ? await window.mousse.providers.getLoginOptions()
-        : await window.mousse.providers.getLoginOptions(filter)
-    return options.filter((option) => !option.configured)
-  }, [])
-
-  const openAddProvider = async () => {
-    setAddOpen(true)
-    setAddStep('provider')
-    setAuthType('all')
-    setProviderFilter('')
-    setConnectError(null)
-    setLoginOptions(await loadLoginOptions('all'))
-  }
-
-  const chooseAuthType = async (nextAuthType: 'api_key' | 'oauth' | 'all') => {
-    setAuthType(nextAuthType)
-    setProviderFilter('')
-    setLoginOptions(await loadLoginOptions(nextAuthType))
-    setAddStep('provider')
-  }
-
-  const chooseProvider = async (provider: ProviderLoginOption) => {
-    setSelectedProvider(provider)
-    setConnectError(null)
-    setApiKeyInput('')
-
-    if (provider.ambient) {
-      const info = await window.mousse.providers.getAmbientInfo(provider.id)
-      setAmbientInstructions(info?.instructions ?? [])
-      setAddStep('credentials')
-      return
-    }
-
-    setAddStep('credentials')
-  }
-
-  const finishProviderAdd = async (providerId: string) => {
-    const refreshed = await refreshProviderData()
-    if (!settings) return
-    const nextSettings = await ensureValidProviderSelection(settings, refreshed.opts.llmProviders)
-    const updated = await window.mousse.settings.set({ provider: nextSettings.provider })
-    setSettings(updated)
-    resetAddFlow()
-  }
-
-  const connectSelectedProvider = async () => {
-    if (!selectedProvider) return
-    setConnecting(true)
-    setConnectError(null)
-
-    try {
-      if (selectedProvider.ambient) {
-        const result = await window.mousse.providers.verifyAmbient(selectedProvider.id)
-        if (!result.success) {
-          setConnectError(result.error ?? 'Could not verify provider credentials.')
-          return
-        }
-        await finishProviderAdd(selectedProvider.id)
-        return
-      }
-
-      if (selectedProvider.authType === 'oauth') {
-        setLoginActive(true)
-        const result = await window.mousse.providers.loginOAuth(selectedProvider.id)
-        setLoginActive(false)
-        if (!result.success) {
-          setConnectError(result.error ?? 'OAuth login failed.')
-          return
-        }
-        await finishProviderAdd(selectedProvider.id)
-        return
-      }
-
-      // Multi-step api-key providers (e.g. Cloudflare account/gateway IDs).
-      if (selectedProvider.guidedLogin || !apiKeyInput.trim()) {
-        setLoginActive(true)
-        const result = await window.mousse.providers.loginApiKey(selectedProvider.id)
-        setLoginActive(false)
-        if (!result.success) {
-          setConnectError(result.error ?? 'API key login failed.')
-          return
-        }
-        await finishProviderAdd(selectedProvider.id)
-        return
-      }
-
-      await window.mousse.providers.setApiKey(selectedProvider.id, apiKeyInput.trim())
-      await finishProviderAdd(selectedProvider.id)
-    } catch (error) {
-      setConnectError(error instanceof Error ? error.message : String(error))
-    } finally {
-      setConnecting(false)
-      setLoginActive(false)
-    }
-  }
-
-  const handleLogout = async (providerId: string) => {
-    await window.mousse.providers.logout(providerId)
-    const { configured, opts } = await refreshProviderData()
-    if (!settings) return
-    if (settings.provider.llmProvider !== providerId) return
-
-    const nextSettings = await ensureValidProviderSelection(
-      {
-        ...settings,
-        provider: { llmProvider: '', model: '' }
-      },
-      opts.llmProviders
-    )
-    const updated = await window.mousse.settings.set({ provider: nextSettings.provider })
-    setSettings(updated)
-    if (configured.length === 0) {
-      setOptions(opts)
-    }
-  }
-
   const handleRestart = () => {
     void window.mousse.app.restart()
   }
 
-  const toggleMcpServer = (server: McpServerConfig) => {
-    const enabled = new Set(settings?.integrations.mcp.enabledServers ?? [])
-    if (enabled.has(server.id)) {
-      enabled.delete(server.id)
-    } else {
-      enabled.add(server.id)
-    }
-    void updateSettings({
-      integrations: {
-        ...settings!.integrations,
-        mcp: { ...settings!.integrations.mcp, enabledServers: Array.from(enabled) }
-      }
-    })
-  }
-
-  const toggleMousseTool = (toolId: string) => {
-    const current = settings?.integrations.tools
-    const enabled = new Set(current?.enabledTools ?? MOUSSE_BUILTIN_TOOLS.map((t) => t.id))
-    if (enabled.has(toolId)) {
-      enabled.delete(toolId)
-    } else {
-      enabled.add(toolId)
-    }
-    void updateSettings({
-      integrations: {
-        ...settings!.integrations,
-        tools: {
-          enabled: current?.enabled ?? true,
-          enabledTools: MOUSSE_BUILTIN_TOOLS.map((t) => t.id).filter((id) => enabled.has(id))
-        }
-      }
-    })
-  }
-
-  const toggleAllMousseTools = () => {
-    const current = settings?.integrations.tools
-    const allIds = MOUSSE_BUILTIN_TOOLS.map((t) => t.id)
-    const enabled = new Set(current?.enabledTools ?? allIds)
-    const allOn = allIds.every((id) => enabled.has(id))
-    void updateSettings({
-      integrations: {
-        ...settings!.integrations,
-        tools: {
-          enabled: current?.enabled ?? true,
-          enabledTools: allOn ? [] : allIds
-        }
-      }
-    })
-  }
-
-  const handleMcpConnect = async (serverId: string) => {
-    const result = await window.mousse.mcp.authenticate(serverId)
-    if (!result.success) {
-      window.alert(result.error ?? 'MCP authentication failed.')
-      return
-    }
-    const servers = await window.mousse.mcp.listServers()
-    setMcpServers(servers)
-  }
-
-  const toggleSkill = (skillId: string) => {
-    const enabled = new Set(settings?.integrations.skills.enabledSkills ?? [])
-    if (enabled.has(skillId)) {
-      enabled.delete(skillId)
-    } else {
-      enabled.add(skillId)
-    }
-    void updateSettings({
-      integrations: {
-        ...settings!.integrations,
-        skills: { ...settings!.integrations.skills, enabledSkills: Array.from(enabled) }
-      }
-    })
-  }
-
   const closeSettings = useCallback(async () => {
     if (!await confirmNavigation('navigate', 'integrations')) return
-    resetAddFlow()
     setSettingsOpen(false)
   }, [setSettingsOpen])
 
@@ -591,7 +276,61 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
         <ArrowLeft size={14} strokeWidth={2} />
       </button>
       <h1>Settings</h1>
+      {/* Settings covers the app title bar, so it carries the window buttons. */}
+      <div className="titlebar-controls overlay-titlebar-controls">
+        <WindowCaptionButtons />
+      </div>
     </header>
+  )
+
+  const [navQuery, setNavQuery] = useState('')
+  const goToSection = (id: SettingsSectionId) => {
+    // Only the integrations editors hold unsaved drafts; ask before leaving that section.
+    if (activeSection !== 'integrations' || id === 'integrations') {
+      setActiveSection(id)
+      return
+    }
+    void confirmNavigation('navigate', 'integrations').then((allowed) => { if (allowed) setActiveSection(id) })
+  }
+  const navSections = VISIBLE_SETTINGS_SECTIONS
+    .filter((section) => matchesSettingsQuery(section, navQuery))
+  const activeSectionLabel = SETTINGS_SECTIONS.find((section) => section.id === activeSection)?.label ?? 'Settings'
+
+  const settingsNav = (
+    <nav className="settings-nav" aria-label="Settings sections">
+      <SettingsSearch
+        className="settings-nav-search"
+        value={navQuery}
+        ariaLabel="Search settings"
+        onChange={setNavQuery}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && navSections[0]) goToSection(navSections[0].id)
+        }}
+      />
+      {navSections.map((section, index, visible) => {
+        const Icon = section.icon
+        const active = activeSection === section.id
+        const startsGroup = index === 0 || visible[index - 1].group !== section.group
+        return (
+          <Fragment key={section.id}>
+            {startsGroup && <p className="settings-nav-group">{section.group}</p>}
+            <button
+              type="button"
+              className={`settings-nav-item${active ? ' active' : ''}`}
+              onClick={() => goToSection(section.id)}
+              aria-current={active ? 'page' : undefined}
+            >
+              <span className="settings-nav-item-icon" data-hue={section.hue}>
+                <Icon size={14} strokeWidth={1.8} aria-hidden="true" />
+              </span>
+              {section.label}
+            </button>
+          </Fragment>
+        )
+      })}
+      {navSections.length === 0 && <p className="settings-nav-empty">No matching settings</p>}
+      <DownloadsIndicator variant="nav" />
+    </nav>
   )
 
   if (!settings || !options) {
@@ -599,6 +338,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
       <div className="settings-page overlay-page" hidden={!settingsOpen}>
         {settingsHeader}
         <div className="settings-body">
+          {settingsNav}
           <div className="settings-status">
             {loadError ? (
               <>
@@ -608,7 +348,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
                 </button>
               </>
             ) : (
-              <div className="settings-loading">Loading settings…</div>
+              <SettingsLoader />
             )}
           </div>
         </div>
@@ -616,1416 +356,65 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     )
   }
 
-  const providerModels =
-    options.llmProviders.find((p) => p.id === settings.provider.llmProvider)?.models ?? []
-  const currentModels = (() => {
-    const modelId = settings.provider.model
-    if (!modelId) return providerModels
-    if (providerModels.some((model) => model.id === modelId)) return providerModels
-    const { baseId } = parseThinkingSuffixFromModelId(modelId)
-    if (baseId !== modelId && providerModels.some((model) => model.id === baseId)) return providerModels
-    return [...providerModels, { id: modelId, label: modelId }]
-  })()
-  const resolvedTitle = resolveTitleModel(settings, options.llmProviders)
-  const titleProviderModels =
-    options.llmProviders.find((p) => p.id === resolvedTitle.llmProvider)?.models ?? []
-  const titleModels = (() => {
-    const modelId = resolvedTitle.model
-    if (!modelId) return titleProviderModels
-    if (titleProviderModels.some((model) => model.id === modelId)) return titleProviderModels
-    const { baseId } = parseThinkingSuffixFromModelId(modelId)
-    if (baseId !== modelId && titleProviderModels.some((model) => model.id === baseId)) return titleProviderModels
-    return [...titleProviderModels, { id: modelId, label: modelId }]
-  })()
-  const hasConfiguredProviders = options.llmProviders.length > 0
-  const mousseProviderId = settings.agents.llmProvider.mousse ?? ''
-  const mousseProvider = options.llmProviders.find((provider) => provider.id === mousseProviderId)
-  const mousseModelId = settings.agents.model.mousse ?? ''
-  const mousseModels = (() => {
-    if (!mousseModelId || !mousseProvider) return (mousseProvider?.models ?? [])
-    if (mousseProvider.models.some((model) => model.id === mousseModelId)) return mousseProvider.models
-    const { baseId } = parseThinkingSuffixFromModelId(mousseModelId)
-    if (baseId !== mousseModelId && mousseProvider.models.some((model) => model.id === baseId)) return mousseProvider.models
-    return [...mousseProvider.models, { id: mousseModelId, label: mousseModelId }]
-  })()
-
   return (
     <div className="settings-page overlay-page" hidden={!settingsOpen}>
       {settingsHeader}
-      <ProviderLoginModal active={loginActive} onClose={() => setLoginActive(false)} />
 
       <div className="settings-body">
-        <nav className="settings-nav" aria-label="Settings sections">
-          {VISIBLE_SETTINGS_SECTIONS.filter((section) => section.id !== 'account' || accountAvailable).map((section) => {
-            const Icon = section.icon
-            const active = activeSection === section.id
-            return (
-              <button
-                key={section.id}
-                type="button"
-                className={`settings-nav-item${active ? ' active' : ''}`}
-                onClick={() => { void confirmNavigation('navigate', 'integrations').then((allowed) => { if (allowed) setActiveSection(section.id) }) }}
-                aria-current={active ? 'page' : undefined}
-              >
-                <span className="settings-nav-item-icon">
-                  <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
-                </span>
-                {section.label}
-              </button>
-            )
-          })}
-          {MOUSSE_VERSION && <p className="settings-nav-version">Mousse {MOUSSE_VERSION}</p>}
-        </nav>
+        {settingsNav}
 
         <div className="settings-content" key={activeSection}>
+          <SettingsPageTitle title={activeSectionLabel} />
           {activeSection === 'storage' && <StorageSettings />}
-          {activeSection === 'updates' && <UpdateSettings />}
-          {activeSection === 'context' && (() => {
-            const context = normalizeContextSettings(settings.context)
-            return <section id="context" className="settings-section">
-              <div className="settings-row">
-                <div>
-                  <label htmlFor="context-compaction-enabled">Use context compaction</label>
-                  <p className="settings-section-desc">Turn this off to never compact automatically. When enabled, Mousse compacts the active prompt at the selected threshold, or sooner when response headroom or the model’s 95% safety limit requires it.</p>
-                </div>
-                <button id="context-compaction-enabled" type="button" role="switch" aria-checked={context.compactionEnabled}
-                  aria-label="Use context compaction"
-                  className={`toggle-switch${context.compactionEnabled ? ' on' : ''}`}
-                  onClick={() => void updateSettings({ context: { ...context, compactionEnabled: !context.compactionEnabled } })} />
-              </div>
-              <div className="settings-row" style={{ marginTop: 20 }}>
-                <label htmlFor="context-compaction-tokens">Compact active context at</label>
-                <select id="context-compaction-tokens" className="settings-select" value={context.compactionTokens}
-                  disabled={!context.compactionEnabled}
-                  onChange={(event) => {
-                    const selected = event.target.value === 'model-max' ? 'model-max' : Number(event.target.value) as ContextCompactionTokens
-                    void updateSettings({ context: { ...context, compactionTokens: selected } })
-                  }}>
-                  {CONTEXT_COMPACTION_OPTIONS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
-                </select>
-                <span>tokens</span>
-              </div>
-              <p className="settings-section-desc" style={{ marginTop: 12 }}>The effective threshold is capped by the selected model and reserves room for the next response. It measures the prompt currently sent to the model; cumulative tokens processed are reported separately.</p>
-            </section>
-          })()}
-          {activeSection === 'integrations' && <section id="integrations" className="settings-section">
-            <label className="integration-settings-scope">Manage integrations for
-              <select className="settings-select" aria-label="Integration scope" value={integrationProject} onChange={(event) => {
-                const next = event.target.value
-                void confirmNavigation('navigate', 'integrations').then((allowed) => { if (allowed) setIntegrationProject(next) })
-              }}>
-                <option value="">This profile</option>
-                {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-              </select>
-            </label>
-            <IntegrationsWorkspace client={integrationClient} profileId={profileId} projectId={integrationProject || undefined} projects={projects} showHeading={false} />
-          </section>}
+          {activeSection === 'general' && (
+            <GeneralSettings
+              settings={settings}
+              options={options}
+              onUpdate={updateSettings}
+              restartRequired={restartRequired}
+              onRestart={handleRestart}
+              onPreviewAcrylicIntensity={previewAcrylicIntensity}
+              onCommitAcrylicIntensity={commitAcrylicIntensity}
+            />
+          )}
+          {activeSection === 'integrations' && (
+            <SkillsMcpSettings
+              client={integrationClient}
+              profileId={profileId}
+              projectId={integrationProject || undefined}
+              projects={projects}
+              onProjectChange={setIntegrationProject}
+              settings={settings}
+              options={options}
+              onUpdate={updateSettings}
+            />
+          )}
           {activeSection === 'account' && (
           <section id="account" className="settings-section">
-            <AccountSection onOpenDevices={() => setActiveSection('connections')} />
+            <AccountSection />
           </section>
-          )}
-
-          {activeSection === 'profile' && (
-          <section id="profile" className="settings-section">
-            <ProfileSection settings={settings} onUpdate={updateSettings} />
-          </section>
-          )}
-
-          {activeSection === 'appearance' && (
-          <section id="appearance" className="settings-section">
-
-          <p className="settings-section-desc" style={{ marginBottom: 10 }}>
-            Color theme
-          </p>
-          <div className="theme-carousel">
-            {options.themes.map((theme) => {
-              const selected = settings.appearance.theme === theme.id
-              return (
-                <div
-                  key={theme.id}
-                  className={`theme-card${selected ? ' selected' : ''}`}
-                  onClick={() =>
-                    void updateSettings({ appearance: { ...settings.appearance, theme: theme.id } })
-                  }
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      void updateSettings({
-                        appearance: { ...settings.appearance, theme: theme.id }
-                      })
-                    }
-                  }}
-                  role="button"
-                  tabIndex={0}
-                >
-                  <ThemePreview themeId={theme.id} />
-                  <span className="theme-card-label">{theme.label}</span>
-                </div>
-              )
-            })}
-          </div>
-
-          <div className="acrylic-controls">
-            <div className="registry-control-row acrylic-toggle-row">
-              <div className="registry-control-text">
-                <span className="registry-control-label">Acrylic glass</span>
-                <span className="registry-control-hint">
-                  Translucent window material across every theme (Windows). Intensity dials blur and
-                  opacity of the glass layers.
-                </span>
-              </div>
-              <button
-                type="button"
-                className={`toggle-switch${settings.appearance.acrylic ? ' on' : ''}`}
-                role="switch"
-                aria-checked={settings.appearance.acrylic}
-                aria-label="Acrylic glass"
-                onClick={() =>
-                  void updateSettings({
-                    appearance: {
-                      ...settings.appearance,
-                      acrylic: !settings.appearance.acrylic
-                    }
-                  })
-                }
-              />
-            </div>
-
-            <div
-              className={`acrylic-intensity-row${settings.appearance.acrylic ? '' : ' disabled'}`}
-            >
-              <div className="acrylic-intensity-header">
-                <label htmlFor="acrylic-intensity">Intensity</label>
-                <span className="acrylic-intensity-value">
-                  {settings.appearance.acrylicIntensity}
-                </span>
-              </div>
-              <input
-                id="acrylic-intensity"
-                type="range"
-                className="acrylic-intensity-dial"
-                min={0}
-                max={100}
-                step={1}
-                disabled={!settings.appearance.acrylic}
-                value={settings.appearance.acrylicIntensity}
-                onInput={(e) => {
-                  // React maps range onChange → continuous input; use only onInput so we
-                  // do not double-fire IPC and snap the controlled thumb backward.
-                  const acrylicIntensity = Number(e.currentTarget.value)
-                  previewAcrylicIntensity(acrylicIntensity)
-                  commitAcrylicIntensity(acrylicIntensity)
-                }}
-              />
-              <div className="acrylic-intensity-ticks">
-                <span>Solid</span>
-                <span>Glassy</span>
-              </div>
-            </div>
-
-            {restartRequired && (
-              <button type="button" className="theme-restart-link acrylic-restart" onClick={handleRestart}>
-                Restart required to apply acrylic material
-              </button>
-            )}
-          </div>
-
-          <div style={{ marginTop: 20 }}>
-            <p className="settings-section-desc">Accent color</p>
-            <div className="accent-grid">
-              {options.accentColors.map((color) => (
-                <button
-                  key={color.id}
-                  type="button"
-                  className={`accent-swatch${settings.appearance.accentColor === color.value ? ' selected' : ''}`}
-                  style={{ backgroundColor: color.value }}
-                  title={color.label}
-                  aria-label={color.label}
-                  onClick={() =>
-                    void updateSettings({
-                      appearance: { ...settings.appearance, accentColor: color.value }
-                    })
-                  }
-                />
-              ))}
-            </div>
-          </div>
-        </section>
-          )}
-
-          {activeSection === 'notifications' && (
-        <section id="notifications" className="settings-section">
-
-          <div className="registry-controls">
-            <div className="registry-control-row">
-              <div className="registry-control-text">
-                <span className="registry-control-label">Agent completion sound</span>
-                <span className="registry-control-hint">
-                  Play the operating system notification sound when Mousse shows an agent completion alert.
-                </span>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.notifications.threadCompletionSound}
-                aria-label="Agent completion sound"
-                className={`toggle-switch${settings.notifications.threadCompletionSound ? ' on' : ''}`}
-                onClick={() =>
-                  void updateSettings({
-                    notifications: {
-                      threadCompletionSound: !settings.notifications.threadCompletionSound
-                    }
-                  })
-                }
-              />
-            </div>
-          </div>
-        </section>
           )}
 
           {activeSection === 'providers' && (
-        <section id="providers" className="settings-section">
-          <div className="settings-provider-actions">
-            <button type="button" className="settings-add-btn" onClick={() => void openAddProvider()}>
-              <Plus size={14} />
-              Add provider
-            </button>
-          </div>
-
-          <ClaudeSubscriptionPanel />
-          <CodexStatusPanel />
-
-          {configuredProviders.length === 0 ? (
-            <div className="provider-empty-state">
-              <p>No providers connected yet.</p>
-              <button type="button" className="settings-add-btn" onClick={() => void openAddProvider()}>
-                <Plus size={14} />
-                Add your first provider
-              </button>
-            </div>
-          ) : (
-            <div className="provider-list">
-              {providerRefreshError && <p className="settings-error">{providerRefreshError}</p>}
-              {configuredProviders.map((provider) => (
-                <div key={provider.id} className="provider-list-item">
-                  <div>
-                    <strong>{provider.label}</strong>
-                    <span className="provider-list-meta">
-                      {provider.source?.startsWith('unsupported')
-                        ? 'Unsupported credential'
-                        : provider.authType === 'oauth' ? 'Subscription' : 'API key'}
-                      {provider.source ? ` · ${provider.source}` : ''}
-                    </span>
-                  </div>
-                  {['antigravity', 'claude-subscription'].includes(provider.id) && (
-                    <button type="button" className="provider-remove-btn" title={`Refresh ${provider.label} models`}
-                      aria-label={`Refresh ${provider.label} models`} disabled={refreshingNativeModels}
-                      onClick={() => {
-                        setRefreshingNativeModels(true)
-                        setProviderRefreshError(null)
-                        void window.mousse.providers.refreshModels(provider.id)
-                          .then(() => refreshProviderData())
-                          .catch((error: unknown) => setProviderRefreshError(error instanceof Error ? error.message : String(error)))
-                          .finally(() => setRefreshingNativeModels(false))
-                      }}>
-                      <RefreshCw size={14} className={refreshingNativeModels ? 'icon-spin' : undefined} />
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="provider-remove-btn"
-                    onClick={() => void handleLogout(provider.id)}
-                    aria-label={`Remove ${provider.label}`}
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {addOpen && (
-            <div className="provider-add-panel">
-              {addStep === 'provider' && (
-                <>
-                  <p className="settings-section-desc">
-                    Choose a provider. API keys, Claude Subscription, other supported subscription
-                    logins, and Google’s Antigravity agent are available here.
-                  </p>
-                  <div className="provider-filter-row">
-                    <input
-                      className="settings-input provider-filter-input"
-                      type="search"
-                      value={providerFilter}
-                      onChange={(e) => setProviderFilter(e.target.value)}
-                      placeholder="Search providers…"
-                      aria-label="Search providers"
-                    />
-                    <div className="provider-auth-filter" role="group" aria-label="Auth type filter">
-                      {(
-                        [
-                          { id: 'all', label: 'All' },
-                          { id: 'api_key', label: 'API key' },
-                          { id: 'oauth', label: 'Subscription' }
-                        ] as const
-                      ).map((filter) => (
-                        <button
-                          key={filter.id}
-                          type="button"
-                          className={`provider-auth-filter-btn${authType === filter.id ? ' active' : ''}`}
-                          onClick={() => void chooseAuthType(filter.id)}
-                        >
-                          {filter.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="provider-picker-list">
-                    {loginOptions
-                      .filter((provider) => {
-                        const q = providerFilter.trim().toLowerCase()
-                        if (!q) return true
-                        return (
-                          provider.label.toLowerCase().includes(q) ||
-                          provider.id.toLowerCase().includes(q) ||
-                          (provider.description?.toLowerCase().includes(q) ?? false)
-                        )
-                      })
-                      .map((provider) => (
-                        <button
-                          key={`${provider.id}:${provider.authType}`}
-                          type="button"
-                          className="provider-picker-item"
-                          onClick={() => void chooseProvider(provider)}
-                        >
-                          <span>{provider.label}</span>
-                          <small>
-                            {provider.description ??
-                              (provider.authType === 'oauth' ? 'Subscription / OAuth' : 'API key')}
-                          </small>
-                        </button>
-                      ))}
-                    {loginOptions.length === 0 && (
-                      <p className="provider-empty-hint">All known providers are already connected.</p>
-                    )}
-                  </div>
-                  <button type="button" className="provider-add-cancel" onClick={resetAddFlow}>
-                    Cancel
-                  </button>
-                </>
-              )}
-
-              {addStep === 'credentials' && selectedProvider && (
-                <>
-                  <p className="settings-section-desc">
-                    Connect <strong>{selectedProvider.label}</strong>
-                    {selectedProvider.description ? (
-                      <>
-                        {' '}
-                        <span className="provider-list-meta">({selectedProvider.description})</span>
-                      </>
-                    ) : null}
-                  </p>
-
-                  {selectedProvider.ambient && (
-                    <ul className="provider-ambient-instructions">
-                      {ambientInstructions.map((line) => (
-                        <li key={line}>{line}</li>
-                      ))}
-                    </ul>
-                  )}
-
-                  {selectedProvider.authType === 'api_key' &&
-                    !selectedProvider.ambient &&
-                    !selectedProvider.guidedLogin && (
-                      <>
-                        <label className="settings-row" htmlFor="provider-api-key">
-                          API key
-                        </label>
-                        <input
-                          id="provider-api-key"
-                          className="settings-input"
-                          type="password"
-                          value={apiKeyInput}
-                          onChange={(e) => setApiKeyInput(e.target.value)}
-                          placeholder={`Enter ${selectedProvider.label} API key`}
-                        />
-                        <p className="provider-login-hint">
-                          Paste your key, or leave blank to use the guided prompt.
-                        </p>
-                      </>
-                    )}
-
-                  {selectedProvider.authType === 'api_key' && selectedProvider.guidedLogin && (
-                    <p className="provider-login-hint">
-                      This provider needs a short guided setup (API key plus account details).
-                    </p>
-                  )}
-
-                  {selectedProvider.authType === 'oauth' && (
-                    <p className="provider-login-hint">
-                      {selectedProvider.id === 'claude-subscription' ? 'Connect through official Claude Code sign-in. Claude manages your account and usage.' : 'You will be redirected to sign in with your subscription account.'}
-                    </p>
-                  )}
-
-                  {connectError && <p className="settings-error">{connectError}</p>}
-
-                  <div className="provider-add-actions">
-                    <button
-                      type="button"
-                      className="provider-add-cancel"
-                      onClick={() => setAddStep('provider')}
-                      disabled={connecting}
-                    >
-                      Back
-                    </button>
-                    <button
-                      type="button"
-                      className="provider-connect-btn"
-                      onClick={() => void connectSelectedProvider()}
-                      disabled={connecting}
-                    >
-                      {connecting ? (
-                        <>
-                          <Loader2 size={14} className="icon-spin" />
-                          Connecting…
-                        </>
-                      ) : (
-                        'Connect'
-                      )}
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-        </section>
-          )}
-
-          {activeSection === 'orchestrator' && (
-        <section id="orchestrator" className="settings-section">
-
-          {!hasConfiguredProviders ? (
-            <p className="provider-empty-hint">Add a provider under Providers to select a model.</p>
-          ) : (
-            <>
-              <div className="settings-row">
-                <label htmlFor="llm-provider">Orchestrator provider</label>
-                <select
-                  id="llm-provider"
-                  className="settings-select"
-                  value={settings.provider.llmProvider}
-                  onChange={(e) =>
-                    handleProviderChange(
-                      e.target.value as MousseSettings['provider']['llmProvider']
-                    )
-                  }
-                >
-                  {options.llmProviders.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <ModelFamilySettingsFields
-                providerId={settings.provider.llmProvider}
-                modelId={settings.provider.model}
-                models={currentModels}
-                familySelectId="llm-model-family"
-                contextSelectId="llm-model-context"
-                effortSelectId="llm-model-effort"
-                speedSelectId="llm-model-speed"
-                onChange={(model) =>
-                  void updateSettings({
-                    provider: { ...settings.provider, model }
-                  })
-                }
+            <section id="providers" className="settings-section">
+              <ProvidersSettings
+                settings={settings}
+                options={options}
+                configuredProviders={configuredProviders}
+                refreshProviderData={refreshProviderData}
+                updateSettings={updateSettings}
+                ensureValidProviderSelection={ensureValidProviderSelection}
               />
-
-              <SectionHeading
-                icon={Bot}
-                title="Mousse subagents"
-                className="settings-subsection-heading"
-                description="Choose a default model for in-app subagents, or inherit the orchestrator model."
-              />
-              <div className="settings-row">
-                <label htmlFor="agent-provider-mousse">Default provider</label>
-                <select
-                  id="agent-provider-mousse"
-                  className="settings-select"
-                  value={mousseProviderId}
-                  onChange={(event) => {
-                    const llmProvider = event.target.value
-                    const provider = options.llmProviders.find((item) => item.id === llmProvider)
-                    void updateSettings({
-                      agents: {
-                        llmProvider: { ...settings.agents.llmProvider, mousse: llmProvider },
-                        model: {
-                          ...settings.agents.model,
-                          mousse: provider?.models[0]?.id ?? ''
-                        }
-                      }
-                    })
-                  }}
-                >
-                  <option value="">Inherit orchestrator model</option>
-                  {options.llmProviders.map((provider) => (
-                    <option key={provider.id} value={provider.id}>{provider.label}</option>
-                  ))}
-                </select>
-              </div>
-              {mousseProvider && (
-                <ModelFamilySettingsFields
-                  providerId={mousseProviderId}
-                  modelId={mousseModelId}
-                  models={mousseModels}
-                  familySelectId="agent-model-mousse"
-                  contextSelectId="agent-model-mousse-context"
-                  effortSelectId="agent-model-mousse-effort"
-                  speedSelectId="agent-model-mousse-speed"
-                  onChange={(model) =>
-                    void updateSettings({
-                      agents: { model: { ...settings.agents.model, mousse: model } }
-                    })
-                  }
-                />
-              )}
-
-              <SectionHeading
-                icon={Cpu}
-                title="Chat titles"
-                className="settings-subsection-heading"
-                description="Leave empty to use prompt words, or pick a lightweight model to generate titles."
-              />
-              <div className="settings-row">
-                <label htmlFor="title-provider">Title provider</label>
-                <select
-                  id="title-provider"
-                  className="settings-select"
-                  value={resolvedTitle.llmProvider}
-                  onChange={(event) => {
-                    const llmProvider = event.target.value
-                    if (!llmProvider) {
-                      void updateSettings({ title: { llmProvider: '', model: '' } })
-                      return
-                    }
-                    const provider = options.llmProviders.find((item) => item.id === llmProvider)
-                    const model = provider?.models[0]?.id ?? ''
-                    const preferred =
-                      provider && model
-                        ? resolveTitleModel({ ...settings, title: { llmProvider, model } }, [provider]).model
-                        : model
-                    void updateSettings({ title: { llmProvider, model: preferred || model } })
-                  }}
-                >
-                  <option value="">None — use prompt words</option>
-                  {options.llmProviders.map((provider) => (
-                    <option key={provider.id} value={provider.id}>{provider.label}</option>
-                  ))}
-                </select>
-              </div>
-              {resolvedTitle.llmProvider ? (
-                <ModelFamilySettingsFields
-                  providerId={resolvedTitle.llmProvider}
-                  modelId={resolvedTitle.model}
-                  models={titleModels}
-                  familySelectId="title-model-family"
-                  contextSelectId="title-model-context"
-                  effortSelectId="title-model-effort"
-                  speedSelectId="title-model-speed"
-                  onChange={(model) =>
-                    void updateSettings({ title: { llmProvider: resolvedTitle.llmProvider, model } })
-                  }
-                />
-              ) : (
-                <p className="provider-empty-hint">Titles will use the first words of your prompt.</p>
-              )}
-            </>
-          )}
-
-          <SectionHeading
-            icon={VolumeHigh}
-            title="Read Aloud Model"
-            className="settings-subsection-heading"
-            description="The voice used by the read aloud button under each message. Provider models need a configured provider; local models run on this computer."
-          />
-          <ReadAloudSettings />
-
-          <SectionHeading
-            icon={Mic}
-            title="Dictation Model"
-            className="settings-subsection-heading"
-            description="The speech-to-text model used by the microphone button in the message box. Provider models need a configured provider; local models run on this computer."
-          />
-          <DictationSettings />
-        </section>
+            </section>
           )}
 
           {activeSection === 'speech' && (
         <section id="speech" className="settings-section">
-          <SectionHeading
-            icon={VolumeHigh}
-            title="Read Aloud"
-            description="How messages sound when the read aloud button under a message plays them."
-          />
-          <ReadAloudSpeechSettings />
-
-          <SectionHeading
-            icon={Mic}
-            title="Dictation"
-            className="settings-subsection-heading"
-            description="How the microphone button in the message box records."
-          />
-          <DictationSpeechSettings />
+          <SpeechSettings />
         </section>
           )}
 
-          {activeSection === 'tools' && (
-        <section id="tools" className="settings-section">
-
-          <div className="integration-list">
-            <div className="integration-card integration-group-card">
-              <div className="integration-group-head">
-                <div className="integration-card-info">
-                  <div className="integration-card-head"><strong>Web search APIs</strong></div>
-                  <span className="integration-description">Optional API keys for Exa and Parallel web tools. Keys are kept in Mousse's secure credential store.</span>
-                </div>
-              </div>
-              <div className="integration-group-children">
-                {(['exa', 'parallel'] as const).map((service) => {
-                  const label = service === 'exa' ? 'Exa' : 'Parallel'
-                  const configured = webToolCredentials[service]
-                  return (
-                    <div key={service} className="integration-child-row" style={{ alignItems: 'center' }}>
-                      <span className={`integration-status-dot ${configured ? 'status-connected' : 'status-disabled'}`} />
-                      <div className="integration-child-text" style={{ minWidth: 100 }}>
-                        <strong>{label}</strong>
-                        <span>{configured ? 'API key configured' : 'Not configured'}</span>
-                      </div>
-                      <input
-                        className="settings-input"
-                        type="password"
-                        autoComplete="off"
-                        value={webToolKeys[service]}
-                        onChange={(event) => setWebToolKeys((keys) => ({ ...keys, [service]: event.target.value }))}
-                        placeholder={configured ? 'Enter a replacement key' : `Enter ${label} API key`}
-                        aria-label={`${label} API key`}
-                        style={{ maxWidth: 280 }}
-                      />
-                      <button
-                        type="button"
-                        className="settings-btn-secondary"
-                        disabled={savingWebTool !== null || !webToolKeys[service].trim()}
-                        onClick={() => void (async () => {
-                          setSavingWebTool(service)
-                          try {
-                            await window.mousse.webTools.setApiKey(service, webToolKeys[service])
-                            setWebToolCredentials((current) => ({ ...current, [service]: true }))
-                            setWebToolKeys((keys) => ({ ...keys, [service]: '' }))
-                          } finally { setSavingWebTool(null) }
-                        })()}
-                      >{savingWebTool === service ? 'Saving…' : configured ? 'Replace' : 'Save'}</button>
-                      {configured && (
-                        <button
-                          type="button"
-                          className="provider-remove-btn"
-                          disabled={savingWebTool !== null}
-                          onClick={() => void (async () => {
-                            setSavingWebTool(service)
-                            try {
-                              await window.mousse.webTools.clearApiKey(service)
-                              setWebToolCredentials((current) => ({ ...current, [service]: false }))
-                            } finally { setSavingWebTool(null) }
-                          })()}
-                          aria-label={`Remove ${label} API key`}
-                        ><Trash2 size={14} /></button>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-            {(() => {
-              const groupOn = settings.integrations.tools?.enabled ?? true
-              const enabledIds = settings.integrations.tools?.enabledTools ?? MOUSSE_BUILTIN_TOOLS.map((t) => t.id)
-              const onCount = groupOn ? MOUSSE_BUILTIN_TOOLS.filter((t) => enabledIds.includes(t.id)).length : 0
-              const allOn = MOUSSE_BUILTIN_TOOLS.every((t) => enabledIds.includes(t.id))
-              const collapsed = collapsedGroups['mousse:tools'] ?? false
-              return (
-                <div className="integration-card integration-group-card">
-                  <div
-                    className="integration-group-head integration-group-head-clickable"
-                    onClick={() => toggleCollapsedGroup('mousse:tools')}
-                    role="button"
-                    tabIndex={0}
-                    aria-expanded={!collapsed}
-                    aria-label="Mousse tools"
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault()
-                        toggleCollapsedGroup('mousse:tools')
-                      }
-                    }}
-                  >
-                    <span className="integration-group-chevron">
-                      {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-                    </span>
-                    <div className="integration-card-info">
-                      <div className="integration-card-head">
-                        <span className={`integration-status-dot ${groupOn && onCount > 0 ? 'status-connected' : 'status-disabled'}`} />
-                        <strong>Mousse tools</strong>
-                        <span className="integration-group-count">{onCount}/{MOUSSE_BUILTIN_TOOLS.length} on</span>
-                      </div>
-                      <span className="integration-description">Built-in Mousse tools.</span>
-                    </div>
-                    <div className="integration-card-actions">
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={allOn}
-                        aria-label="Mousse tools"
-                        className={`toggle-switch${allOn ? ' on' : ''}`}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          toggleAllMousseTools()
-                        }}
-                      />
-                    </div>
-                  </div>
-                  {!collapsed && (
-                    <div className="integration-group-children">
-                      {MOUSSE_BUILTIN_TOOLS.map((tool) => {
-                        const enabled = enabledIds.includes(tool.id)
-                        const on = groupOn && enabled
-                        return (
-                          <div key={tool.id} className="integration-child-row">
-                            <span className={`integration-status-dot ${on ? 'status-connected' : 'status-disabled'}`} />
-                            <div className="integration-child-text">
-                              <strong>{tool.label}</strong>
-                              <span>{tool.description}</span>
-                            </div>
-                            <button
-                              type="button"
-                              role="switch"
-                              aria-checked={enabled}
-                              aria-label={`${tool.label} tool`}
-                              className={`toggle-switch${enabled ? ' on' : ''}`}
-                              onClick={() => toggleMousseTool(tool.id)}
-                            />
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </div>
-              )
-            })()}
-          </div>
-
-          <SectionHeading
-            icon={Server}
-            title="MCP Servers"
-            className="settings-subsection-heading"
-            description="Standard MCP config files, with secrets redacted. Selected servers are exposed to the orchestrator or spawned CLIs."
-          />
-
-          <div className="registry-controls">
-            <div className="registry-control-row">
-              <div className="registry-control-text">
-                <span className="registry-control-label">MCP registry</span>
-                <span className="registry-control-hint">Scan config files for servers</span>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.integrations.mcp.enabled}
-                className={`toggle-switch${settings.integrations.mcp.enabled ? ' on' : ''}`}
-                onClick={() =>
-                  void updateSettings({
-                    integrations: {
-                      ...settings.integrations,
-                      mcp: {
-                        ...settings.integrations.mcp,
-                        enabled: !settings.integrations.mcp.enabled
-                      }
-                    }
-                  })
-                }
-              />
-            </div>
-            <div className="registry-control-row">
-              <div className="registry-control-text">
-                <span className="registry-control-label">Expose to orchestrator</span>
-                <span className="registry-control-hint">Share selected servers with the main agent</span>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.integrations.mcp.enableForMainAgent}
-                className={`toggle-switch${settings.integrations.mcp.enableForMainAgent ? ' on' : ''}`}
-                onClick={() =>
-                  void updateSettings({
-                    integrations: {
-                      ...settings.integrations,
-                      mcp: {
-                        ...settings.integrations.mcp,
-                        enableForMainAgent: !settings.integrations.mcp.enableForMainAgent
-                      }
-                    }
-                  })
-                }
-              />
-            </div>
-          </div>
-
-          <div className="integration-list">
-            {mcpServers.length === 0 ? (
-              <p className="provider-empty-hint">No MCP servers discovered yet.</p>
-            ) : (
-              (() => {
-                const onCount = mcpServers.filter((s) => settings.integrations.mcp.enabledServers.includes(s.id)).length
-                const collapsed = collapsedGroups['mcp:servers'] ?? false
-                return (
-                  <div className="integration-card integration-group-card">
-                    <div
-                      className="integration-group-head integration-group-head-clickable"
-                      onClick={() => toggleCollapsedGroup('mcp:servers')}
-                      role="button"
-                      tabIndex={0}
-                      aria-expanded={!collapsed}
-                      aria-label="MCP servers"
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault()
-                          toggleCollapsedGroup('mcp:servers')
-                        }
-                      }}
-                    >
-                      <span className="integration-group-chevron">
-                        {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-                      </span>
-                      <div className="integration-card-info">
-                        <div className="integration-card-head">
-                          <span className={`integration-status-dot ${onCount > 0 ? 'status-connected' : 'status-disabled'}`} />
-                          <strong>MCP servers</strong>
-                          <span className="integration-group-count">{onCount}/{mcpServers.length} on</span>
-                        </div>
-                      </div>
-                    </div>
-                    {!collapsed && (
-                    <div className="integration-group-children">
-                      {mcpServers.map((server) => {
-                        const enabled = settings.integrations.mcp.enabledServers.includes(server.id)
-                        const meta = [server.source, server.transport, server.status].filter(Boolean).join(' · ')
-                        const missing = server.missingEnvVars && server.missingEnvVars.length > 0
-                          ? `Missing: ${server.missingEnvVars.join(', ')}`
-                          : null
-                        return (
-                          <div key={server.id} className="integration-child-row">
-                            <span className={`integration-status-dot status-${server.status}`} />
-                            <div className="integration-child-text">
-                              <strong>{server.name}</strong>
-                              <span>{missing ? `${meta} · ${missing}` : meta}</span>
-                            </div>
-                            <div className="integration-child-actions">
-                              {(server.transport === 'http' || server.transport === 'sse') && (
-                                <button
-                                  type="button"
-                                  className="settings-inline-btn"
-                                  onClick={() => void handleMcpConnect(server.id)}
-                                >
-                                  Connect
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                role="switch"
-                                aria-checked={enabled}
-                                aria-label={`${server.name} server`}
-                                className={`toggle-switch${enabled ? ' on' : ''}`}
-                                onClick={() => toggleMcpServer(server)}
-                              />
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                    )}
-                  </div>
-                )
-              })()
-            )}
-          </div>
-
-          <SectionHeading
-            icon={Server}
-            title="Config files checked"
-            className="settings-subsection-heading"
-            description="MCP servers are discovered from these standard config files. Missing files are skipped."
-          />
-
-          <div className="integration-list">
-            {mcpSources.length === 0 ? (
-              <p className="provider-empty-hint">No config sources resolved yet.</p>
-            ) : (
-              (() => {
-                const found = mcpSources.filter((s) => s.exists).length
-                const collapsed = collapsedGroups['mcp:config'] ?? false
-                return (
-                  <div className="integration-card integration-group-card">
-                    <div
-                      className="integration-group-head integration-group-head-clickable"
-                      onClick={() => toggleCollapsedGroup('mcp:config')}
-                      role="button"
-                      tabIndex={0}
-                      aria-expanded={!collapsed}
-                      aria-label="Config files"
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault()
-                          toggleCollapsedGroup('mcp:config')
-                        }
-                      }}
-                    >
-                      <span className="integration-group-chevron">
-                        {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-                      </span>
-                      <div className="integration-card-info">
-                        <div className="integration-card-head">
-                          <span className={`integration-status-dot ${found > 0 ? 'status-connected' : 'status-disabled'}`} />
-                          <strong>Config files</strong>
-                          <span className="integration-group-count">{found}/{mcpSources.length} found</span>
-                        </div>
-                      </div>
-                    </div>
-                    {!collapsed && (
-                    <div className="integration-group-children">
-                      {mcpSources.map((source) => (
-                        <div key={`${source.source}:${source.path}`} className="integration-child-row">
-                          <span className={`integration-status-dot ${source.exists ? 'status-connected' : 'status-disabled'}`} />
-                          <div className="integration-child-text">
-                            <strong>{source.source} · {source.exists ? 'found' : 'missing'}</strong>
-                            <span>{source.path}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    )}
-                  </div>
-                )
-              })()
-            )}
-          </div>
-        </section>
-          )}
-
-          {activeSection === 'skills' && (
-        <section id="skills" className="settings-section">
-
-          <div className="registry-controls">
-            <div className="registry-control-row">
-              <div className="registry-control-text">
-                <span className="registry-control-label">Skills registry</span>
-                <span className="registry-control-hint">Scan folders for Skills</span>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.integrations.skills.enabled}
-                className={`toggle-switch${settings.integrations.skills.enabled ? ' on' : ''}`}
-                onClick={() =>
-                  void updateSettings({
-                    integrations: {
-                      ...settings.integrations,
-                      skills: {
-                        ...settings.integrations.skills,
-                        enabled: !settings.integrations.skills.enabled
-                      }
-                    }
-                  })
-                }
-              />
-            </div>
-            <div className="registry-control-row">
-              <div className="registry-control-text">
-                <span className="registry-control-label">Expose to orchestrator</span>
-                <span className="registry-control-hint">Share selected Skills with the main agent</span>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.integrations.skills.enableForMainAgent}
-                className={`toggle-switch${settings.integrations.skills.enableForMainAgent ? ' on' : ''}`}
-                onClick={() =>
-                  void updateSettings({
-                    integrations: {
-                      ...settings.integrations,
-                      skills: {
-                        ...settings.integrations.skills,
-                        enableForMainAgent: !settings.integrations.skills.enableForMainAgent
-                      }
-                    }
-                  })
-                }
-              />
-            </div>
-          </div>
-
-          <div className="integration-list">
-            {!skillsSnapshot || skillsSnapshot.skills.length === 0 ? (
-              <p className="provider-empty-hint">No Skills discovered yet.</p>
-            ) : (
-              skillsSnapshot.skills.map((skill) => {
-                const enabled = settings.integrations.skills.enabledSkills.includes(skill.id)
-                const duplicate = skill.isActive === false
-                const skillModel = settings.integrations.skills.model[skill.id]
-                const skillProviderId = skillModel?.llmProvider ?? settings.provider.llmProvider
-                const skillModelId = skillModel?.model ?? settings.provider.model
-                const skillProvider = options.llmProviders.find((p) => p.id === skillProviderId)
-                const skillModelOptions = (() => {
-                  if (!skillModelId || !skillProvider) return (skillProvider?.models ?? [])
-                  if (skillProvider.models.some((model) => model.id === skillModelId)) return skillProvider.models
-                  const { baseId } = parseThinkingSuffixFromModelId(skillModelId)
-                  if (baseId !== skillModelId && skillProvider.models.some((model) => model.id === baseId)) return skillProvider.models
-                  return [...skillProvider.models, { id: skillModelId, label: skillModelId }]
-                })()
-                return (
-                  <div key={skill.id} className="integration-card">
-                    <div className="integration-card-info">
-                      <div className="integration-card-head">
-                        <span
-                          className={`integration-status-dot ${duplicate ? 'status-duplicate' : 'status-ready'}`}
-                        />
-                        <strong>{skill.name}</strong>
-                      </div>
-                      <span className="integration-description">{skill.description}</span>
-                      <div className="integration-badges">
-                        <span className="integration-badge">{skill.source}</span>
-                        <span className="integration-badge">{skill.scope}</span>
-                        {duplicate && (
-                          <span className="integration-badge integration-badge-warn">duplicate</span>
-                        )}
-                      </div>
-                      {enabled && !duplicate && hasConfiguredProviders && (
-                        <div className="skill-model-settings">
-                          <label className="skill-model-label" htmlFor={`skill-provider-${skill.id}`}>
-                            Default model
-                          </label>
-                          <div className="skill-model-row">
-                            <select
-                              id={`skill-provider-${skill.id}`}
-                              className="settings-select"
-                              value={skillProviderId}
-                              onChange={(e) => {
-                                const nextProviderId = e.target.value
-                                const nextProvider = options.llmProviders.find(
-                                  (p) => p.id === nextProviderId
-                                )
-                                void updateSettings({
-                                  integrations: {
-                                    ...settings.integrations,
-                                    skills: {
-                                      ...settings.integrations.skills,
-                                      model: {
-                                        ...settings.integrations.skills.model,
-                                        [skill.id]: {
-                                          llmProvider: nextProviderId,
-                                          model: nextProvider?.models[0]?.id ?? ''
-                                        }
-                                      }
-                                    }
-                                  }
-                                })
-                              }}
-                            >
-                              {options.llmProviders.map((provider) => (
-                                <option key={provider.id} value={provider.id}>
-                                  {provider.label}
-                                </option>
-                              ))}
-                            </select>
-                            <ModelFamilySettingsFields
-                              providerId={skillProviderId}
-                              modelId={skillModelId}
-                              models={skillModelOptions}
-                              familySelectId={`skill-model-family-${skill.id}`}
-                              contextSelectId={`skill-model-context-${skill.id}`}
-                              effortSelectId={`skill-model-effort-${skill.id}`}
-                              speedSelectId={`skill-model-speed-${skill.id}`}
-                              onChange={(model) =>
-                                void updateSettings({
-                                  integrations: {
-                                    ...settings.integrations,
-                                    skills: {
-                                      ...settings.integrations.skills,
-                                      model: {
-                                        ...settings.integrations.skills.model,
-                                        [skill.id]: {
-                                          llmProvider: skillProviderId,
-                                          model
-                                        }
-                                      }
-                                    }
-                                  }
-                                })
-                              }
-                            />
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={enabled}
-                      className={`toggle-switch${enabled ? ' on' : ''}`}
-                      onClick={() => toggleSkill(skill.id)}
-                      disabled={duplicate}
-                    />
-                  </div>
-                )
-              })
-            )}
-          </div>
-        </section>
-          )}
-
-          {activeSection === 'agents' && (
-        <section id="agents" className="settings-section">
-
-          <div className="agent-config-list">
-            {options.agentTypes.map((agent) => {
-              const agentId = agent.id as AgentTypeId
-              const isMousse = agentId === 'mousse'
-              const enabled = isMousse ? true : (settings.agents.enabled[agentId] ?? false)
-              const selectedModel = settings.agents.model[agentId] ?? ''
-              const modelOptions =
-                selectedModel && !agent.models.some((model) => model.id === selectedModel)
-                  ? [...agent.models, { id: selectedModel, label: selectedModel }]
-                  : agent.models
-              const mcpOn = settings.integrations.mcp.enableForAgents[agentId] ?? true
-              const skillsOn = settings.integrations.skills.enableForAgents[agentId] ?? true
-              const headlessOn = settings.agents.headless[agentId] ?? true
-
-              if (isMousse) {
-                return (
-                  <div key={agent.id} className="agent-config-row enabled agent-config-row-mousse">
-                    <div className="agent-config-head">
-                      <div className="agent-config-id">
-                        <span className="agent-config-label">{agent.label}</span>
-                        <span className="agent-config-state on">Always on</span>
-                      </div>
-                    </div>
-                    <div className="agent-config-body">
-                      <p className="agent-config-mousse-hint">
-                        In-app subagent with the orchestrator chat experience. Its default model
-                        is configured under Models.
-                      </p>
-                      <div className="agent-config-exposure">
-                        <span className="agent-config-exposure-label">Expose</span>
-                        <button
-                          type="button"
-                          className={`exposure-pill${mcpOn ? ' on' : ''}`}
-                          onClick={() =>
-                            void updateSettings({
-                              integrations: {
-                                ...settings.integrations,
-                                mcp: {
-                                  ...settings.integrations.mcp,
-                                  enableForAgents: {
-                                    ...settings.integrations.mcp.enableForAgents,
-                                    [agentId]: !mcpOn
-                                  }
-                                }
-                              }
-                            })
-                          }
-                        >
-                          <Server size={12} />
-                          MCP
-                        </button>
-                        <button
-                          type="button"
-                          className={`exposure-pill${skillsOn ? ' on' : ''}`}
-                          onClick={() =>
-                            void updateSettings({
-                              integrations: {
-                                ...settings.integrations,
-                                skills: {
-                                  ...settings.integrations.skills,
-                                  enableForAgents: {
-                                    ...settings.integrations.skills.enableForAgents,
-                                    [agentId]: !skillsOn
-                                  }
-                                }
-                              }
-                            })
-                          }
-                        >
-                          <Sparkles size={12} />
-                          Skills
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )
-              }
-
-              return (
-                <div
-                  key={agent.id}
-                  className={`agent-config-row${enabled ? ' enabled' : ''}`}
-                >
-                  <div className="agent-config-head">
-                    <div className="agent-config-id">
-                      <span className="agent-config-label">{agent.label}</span>
-                      <span className={`agent-config-state${enabled ? ' on' : ''}`}>
-                        {enabled ? 'Enabled' : 'Disabled'}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={enabled}
-                      className={`toggle-switch${enabled ? ' on' : ''}`}
-                      onClick={() =>
-                        void updateSettings({
-                          agents: {
-                            enabled: {
-                              ...settings.agents.enabled,
-                              [agentId]: !enabled
-                            }
-                          }
-                        })
-                      }
-                    />
-                  </div>
-
-                  {enabled && (
-                    <div className="agent-config-body">
-                      {agent.models.length > 0 && (
-                        <div className="agent-config-field">
-                          <label htmlFor={`agent-model-${agent.id}`}>Model</label>
-                          <select
-                            id={`agent-model-${agent.id}`}
-                            className="settings-select agent-model-select"
-                            value={selectedModel}
-                            aria-label={`${agent.label} model`}
-                            onChange={(e) =>
-                              void updateSettings({
-                                agents: {
-                                  model: {
-                                    ...settings.agents.model,
-                                    [agentId]: e.target.value
-                                  }
-                                }
-                              })
-                            }
-                          >
-                            <option value="">Default (CLI)</option>
-                            {groupAgentModelOptions(modelOptions).map(({ group, models: groupModels }) =>
-                              group ? (
-                                <optgroup key={group} label={group}>
-                                  {groupModels.map((model) => (
-                                    <option key={model.id} value={model.id}>
-                                      {model.label}
-                                    </option>
-                                  ))}
-                                </optgroup>
-                              ) : (
-                                groupModels.map((model) => (
-                                  <option key={model.id} value={model.id}>
-                                    {model.label}
-                                  </option>
-                                ))
-                              )
-                            )}
-                          </select>
-                        </div>
-                      )}
-
-                      <div className="agent-config-field">
-                        <label htmlFor={`agent-headless-${agent.id}`}>Headless subagent</label>
-                        <div className="agent-config-headless-row">
-                          <span className="agent-config-headless-hint">
-                            Run in background with programmatic CLI flags instead of an interactive terminal
-                          </span>
-                          <button
-                            id={`agent-headless-${agent.id}`}
-                            type="button"
-                            role="switch"
-                            aria-checked={headlessOn}
-                            aria-label={`${agent.label} headless subagent`}
-                            className={`toggle-switch${headlessOn ? ' on' : ''}`}
-                            onClick={() =>
-                              void updateSettings({
-                                agents: {
-                                  headless: {
-                                    ...settings.agents.headless,
-                                    [agentId]: !headlessOn
-                                  }
-                                }
-                              })
-                            }
-                          />
-                        </div>
-                      </div>
-
-                      <div className="agent-config-exposure">
-                        <span className="agent-config-exposure-label">Expose</span>
-                        <button
-                          type="button"
-                          className={`exposure-pill${mcpOn ? ' on' : ''}`}
-                          onClick={() =>
-                            void updateSettings({
-                              integrations: {
-                                ...settings.integrations,
-                                mcp: {
-                                  ...settings.integrations.mcp,
-                                  enableForAgents: {
-                                    ...settings.integrations.mcp.enableForAgents,
-                                    [agentId]: !mcpOn
-                                  }
-                                }
-                              }
-                            })
-                          }
-                        >
-                          <Server size={12} />
-                          MCP
-                        </button>
-                        <button
-                          type="button"
-                          className={`exposure-pill${skillsOn ? ' on' : ''}`}
-                          onClick={() =>
-                            void updateSettings({
-                              integrations: {
-                                ...settings.integrations,
-                                skills: {
-                                  ...settings.integrations.skills,
-                                  enableForAgents: {
-                                    ...settings.integrations.skills.enableForAgents,
-                                    [agentId]: !skillsOn
-                                  }
-                                }
-                              }
-                            })
-                          }
-                        >
-                          <Sparkles size={12} />
-                          Skills
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        </section>
-          )}
+          {activeSection === 'agents' && <AgentsSettings settings={settings} options={options} updateSettings={updateSettings} />}
 
           {activeSection === 'connections' && (
           <section id="connections" className="settings-section">

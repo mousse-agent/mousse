@@ -26,7 +26,7 @@ export function ipcErrorMessage(error: unknown): string {
 export function normalizeTranscriptionError(error: unknown) {
   const cause = ipcErrorMessage(error)
   return knownAppError(
-    { code: 'voice_transcription_failed', message: cause ? `Dictation failed: ${cause}` : 'Dictation failed. Check the dictation model under Settings, Models, then try again.' },
+    { code: 'voice_transcription_failed', message: cause ? `Dictation failed: ${cause}` : 'Dictation failed. Check the dictation model under Settings, Speech, then try again.' },
     { category: 'unavailable', retryable: true }
   )
 }

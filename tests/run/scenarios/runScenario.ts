@@ -189,7 +189,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     chmodSync(binary, 0o755)
     const providerDir = join(home, 'providers', 'claude-subscription')
     mkdirSync(providerDir, { recursive: true })
-    writeFileSync(join(providerDir, 'settings.json'), JSON.stringify({ signedIn: true, binaryPath: binary }))
+    writeFileSync(join(providerDir, 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary }))
     const service = new ClaudeSubscriptionProviderService(home, questions, {
       query: replaySdkQuery(transport),
       runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })
