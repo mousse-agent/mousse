@@ -1,7 +1,13 @@
 import { createHash } from 'node:crypto'
 import type { Duplex } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { newId, NetError, type StoredRecord, type StreamDescriptor } from '../../../src/shared/net'
+import {
+  newId,
+  NetError,
+  type NodeDelegation,
+  type StoredRecord,
+  type StreamDescriptor
+} from '../../../src/shared/net'
 import { DirectTransport } from '../../../src/mms/net/transports/direct'
 import { FakeClock } from '../harness/FakeClock'
 import { systemClock } from '../../../src/mms/net/clock'
@@ -801,6 +807,44 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     await vi.waitFor(() => expect(connection.a.state()).toBe('closed'))
     await vi.waitFor(() => expect(connection.b.state()).toBe('closed'))
     expect(p.bIdentity.roster()).toEqual(p.aIdentity.roster())
+  })
+  it('closes a session with revoked once the live roster has dropped the peer', async () => {
+    const p = await profiles(),
+      connection = await sessions(p),
+      closed: Array<Error | undefined> = []
+    await Promise.all([connection.a.opened, connection.b.opened])
+    connection.a.onClosed((error) => closed.push(error))
+    p.aIdentity.revoke(p.bIdentity.self()!.node)
+    await vi.waitFor(() => expect(connection.a.state()).toBe('closed'))
+    expect(closed).toEqual([expect.objectContaining({ code: 'revoked' })])
+  })
+  it('refuses a revoked peer with revoked, not bad_delegation, once its delegation is dropped', async () => {
+    const p = await profiles(),
+      clock = new FakeClock(Date.now()),
+      executions = new SqliteExecutionLedger(p.aDb),
+      peer = {
+        node: p.bIdentity.self()!.node,
+        user: p.bIdentity.self()!.user,
+        delegation: p.aIdentity.verifySigned<NodeDelegation>(p.delegation, p.aKeys.rootKey()!)
+      }
+    const rpc = new DurableRpcDispatcher({ db: p.aDb, executions, identity: p.aIdentity, clock })
+    rpc.register({ method: 'test.revoked', capability: 'read', handle: async () => null })
+    const authority = new NodeStreamAuthority(p.aIdentity, p.aStore, p.aBlobs, clock),
+      record = p.record(1),
+      context = {
+        id: newId('rpc'),
+        caller: peer,
+        signal: new AbortController().signal,
+        deadlineAt: clock.now() + 5_000,
+        progress: () => {}
+      }
+    p.aIdentity.revoke(peer.node)
+    await expect(rpc.dispatch('test.revoked', {}, undefined, context)).rejects.toMatchObject({
+      code: 'revoked'
+    })
+    expect(() =>
+      authority.append(p.stream.id, newId('event'), record.envelope, record.sig, peer)
+    ).toThrow(expect.objectContaining({ code: 'revoked' }))
   })
   it('flushes revocation while an aborted RPC unwinds behind a stalled write', async () => {
     const p = await profiles(),
