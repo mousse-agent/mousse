@@ -110,6 +110,59 @@ describe('WebRTC acceptor', () => {
     })
   })
 
+  it('counts pending tickets against the live limits', async () => {
+    const { factory, webrtc, accepted } = acceptor()
+    const offer = (name: string) => webrtc.offer({ node: node(name), user: USER }, fakeOffer())
+    const connect = async (name: string) => {
+      await offer(name)
+      factory.peers.at(-1)!.openChannel()
+      accepted.at(-1)!.authenticated()
+    }
+    for (let index = 0; index < 3; index++) await connect('a')
+    await offer('a')
+    // Three live and one pending already fill the node's four slots.
+    await expect(offer('a')).rejects.toMatchObject({ code: 'rate_limited' })
+    factory.peers.at(-1)!.openChannel()
+    accepted.at(-1)!.authenticated()
+    expect(webrtc.counts(node('a'))).toEqual({ pending: 0, live: 4 })
+
+    for (const name of ['b', 'c', 'd']) for (let index = 0; index < 4; index++) await connect(name)
+    expect(webrtc.counts().live).toBe(16)
+  })
+
+  it('counts pending tickets against the overall live limit', async () => {
+    const { factory, webrtc, accepted } = acceptor()
+    const offer = (name: string) => webrtc.offer({ node: node(name), user: USER }, fakeOffer())
+    for (const name of ['a', 'b', 'c']) {
+      for (let index = 0; index < 4; index++) {
+        await offer(name)
+        factory.peers.at(-1)!.openChannel()
+        accepted.at(-1)!.authenticated()
+      }
+    }
+    for (let index = 0; index < 3; index++) {
+      await offer('d')
+      factory.peers.at(-1)!.openChannel()
+      accepted.at(-1)!.authenticated()
+    }
+    expect(webrtc.counts()).toEqual({ pending: 0, live: 15 })
+    await offer('e')
+    await expect(offer('f')).rejects.toMatchObject({ code: 'rate_limited' })
+    expect(webrtc.counts()).toEqual({ pending: 1, live: 15 })
+  })
+
+  it('does not spend the offer budget on offers refused by the ticket limits', async () => {
+    const { webrtc } = acceptor()
+    const offer = () => webrtc.offer({ node: node('a'), user: USER }, fakeOffer())
+    await offer()
+    await offer()
+    for (let index = 0; index < 10; index++)
+      await expect(offer()).rejects.toMatchObject({ code: 'rate_limited' })
+    webrtc.closeAll()
+    // Two offers were admitted; the refused retries did not use up the six a minute.
+    await expect(offer()).resolves.toMatchObject({ sdp: expect.any(String) })
+  })
+
   it('allows six offers a minute per node', async () => {
     const { clock, webrtc } = acceptor()
     const offer = () => webrtc.offer({ node: node('a'), user: USER }, fakeOffer())
@@ -249,6 +302,25 @@ describe('DataChannel byte stream', () => {
     later.secured()
     for (let index = 0; index < 4; index++) second.deliver(Buffer.alloc(64 * 1024))
     expect(later.destroyed).toBe(false)
+  })
+
+  it('closes on any message over 64 KiB, before and after inner TLS completes', async () => {
+    const early = new DataChannelDuplex(new FakeChannel('mousse-net/1'))
+    const first = (early as unknown as { channel: FakeChannel }).channel
+    early.on('data', () => {})
+    const earlyFailed = new Promise<unknown>((resolve) => early.once('error', resolve))
+    first.deliver(Buffer.alloc(64 * 1024 + 1))
+    await expect(earlyFailed).resolves.toMatchObject({ code: 'too_large' })
+
+    const later = new DataChannelDuplex(new FakeChannel('mousse-net/1'))
+    const second = (later as unknown as { channel: FakeChannel }).channel
+    later.on('data', () => {})
+    later.secured()
+    second.deliver(Buffer.alloc(64 * 1024))
+    expect(later.destroyed).toBe(false)
+    const laterFailed = new Promise<unknown>((resolve) => later.once('error', resolve))
+    second.deliver(Buffer.alloc(64 * 1024 + 1))
+    await expect(laterFailed).resolves.toMatchObject({ code: 'too_large' })
   })
 
   it('closes when a reader falls more than 8 MiB behind', async () => {

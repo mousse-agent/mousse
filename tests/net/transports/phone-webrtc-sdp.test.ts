@@ -119,11 +119,48 @@ describe('WebRTC offer validator', () => {
     )
   })
 
-  it('rejects more than eight candidates and malformed candidate lines', () => {
-    const nine = Array.from({ length: 9 }, (_, index) => host(`192.168.1.${index + 2}`))
-    expect(() => validateOffer(offer({ candidates: nine }), policy)).toThrow(
+  it('keeps the first eight usable candidates, not counting dropped lines', () => {
+    const many = Array.from({ length: 12 }, (_, index) => host(`192.168.1.${index + 2}`))
+    const truncated = validateOffer(offer({ candidates: many }), policy)
+    expect(truncated.candidates.map((row) => row.address)).toEqual(
+      many.slice(0, 8).map((line) => line.split(' ')[4])
+    )
+    expect(truncated.sdp).not.toContain('192.168.1.10 ')
+
+    // A dual-radio phone: dropped TCP and mDNS lines do not use up the usable slots.
+    const dropped = Array.from({ length: 10 }, (_, index) =>
+      index % 2
+        ? host(`192.168.2.${index}`, 54321, 'host', 'tcp')
+        : host(`3c1a5a3d-6a7e-4e0a-9d43-0cbb1e2a1f0${index}.local`)
+    )
+    const usable = [host('192.168.1.20'), host('10.0.0.5')]
+    const mixed = validateOffer(offer({ candidates: [...dropped, ...usable] }), policy)
+    expect(mixed.candidates.map((row) => row.address)).toEqual(['192.168.1.20', '10.0.0.5'])
+
+    // The line count stays a hard guard.
+    const lines = Array.from({ length: 100 }, (_, index) => host(`10.0.${index}.2`))
+    expect(() => validateOffer(offer({ candidates: lines }), policy)).toThrow(
       expect.objectContaining({ code: 'bad_request' })
     )
+  })
+
+  it('drops Chrome-style TCP candidates with a tcptype instead of rejecting the offer', () => {
+    const result = validateOffer(
+      offer({
+        candidates: [
+          'a=candidate:3 1 tcp 1518280447 192.168.1.20 9 typ host tcptype active generation 0 network-id 1 network-cost 10',
+          'a=candidate:4 1 tcp 1518214911 192.168.1.20 54322 typ host tcptype passive generation 0',
+          host('192.168.1.20')
+        ]
+      }),
+      policy
+    )
+    expect(result.candidates).toEqual([{ address: '192.168.1.20', port: 54321, type: 'host' }])
+    expect(result.sdp).not.toContain('tcptype')
+    expect(result.sdp).not.toMatch(/ tcp /i)
+  })
+
+  it('rejects malformed candidate lines', () => {
     for (const line of [
       'a=candidate:1 2 udp 1 192.168.1.20 54321 typ host',
       'a=candidate:1 1 udp 1 192.168.1.20 54321 typ host secret-extension 1',
