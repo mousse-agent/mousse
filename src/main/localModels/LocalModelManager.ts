@@ -128,7 +128,7 @@ export class LocalModelManager<M extends LocalModelManifest> {
     const file = typeof path === 'string' ? model.files.find((entry) => entry.path === path) : undefined
     if (!file) throw new Error(`${model.label} has no file named ${JSON.stringify(path)}`)
     if (!(await this.isInstalled(model))) {
-      throw new Error(`${model.label} is not downloaded. Download it under Settings, Models.`)
+      throw new Error(`${model.label} is not downloaded. Download it under Settings, Speech.`)
     }
     if (file.optional) await this.fetchOptionalFile(model, file)
     const bytes = await readFile(join(this.modelDir(model), file.path))

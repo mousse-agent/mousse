@@ -225,10 +225,8 @@ export class MmsProfileServices {
       shared.installationHome,
       this.questions
     )
-    // The default profile reuses the terminal Claude sign-in unless it already has its own.
-    this.claudeSubscription = new ClaudeSubscriptionProviderService(homeDir, this.questions, {}, {
-      defaultProfile: shared.includeExternalCliConfigs ?? !shared.personal
-    })
+    // Every profile uses the terminal Claude sign-in, like Codex.
+    this.claudeSubscription = new ClaudeSubscriptionProviderService(homeDir, this.questions)
     this.codex = createCodexProviderService(homeDir, this.questions)
     // Seeded on load; a stored instance is never rewritten.
     this.providerInstances = new ProviderInstanceService({

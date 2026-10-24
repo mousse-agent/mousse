@@ -15,6 +15,8 @@ import { SlidingThreadsPane } from './components/SlidingThreadsPane'
 import { ScheduledPage } from './components/ScheduledPage'
 import { ChannelsPage } from './components/ChannelsPage'
 import { NavigationRail } from './components/NavigationRail'
+import { ThreadSideCard } from './components/sideCard/ThreadSideCard'
+import { QuickActionEditorHost } from './components/QuickActionEditor'
 import { WorkspaceLoading } from './components/WorkspaceLoading'
 
 import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
@@ -57,6 +59,7 @@ export default function App() {
   const railPageOpen = useAppStore((s) => s.scheduledOpen || s.channelsOpen)
   const workspaceReady = useAppStore((s) => s.workspaceReady)
   const sidebarMode = useAppStore((s) => s.sidebarMode)
+  const [sideCardReserved, setSideCardReserved] = useState(false)
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
   useEffect(() => {
     if (!profileReady) return
@@ -544,7 +547,7 @@ export default function App() {
 
         <aside
           ref={sidebarRef}
-          className={`sidebar${!mainAreaOpen ? ' sidebar-full' : ''}`}
+          className={`sidebar${!mainAreaOpen ? ' sidebar-full' : ''}${sideCardReserved ? ' sidebar-side-card' : ''}`}
           style={sidebarMode === 'chats' && !usageOpen ? { display: 'none' } : mainAreaOpen ? { width: `${sidebarWidth}%` } : undefined}
         >
           {usageOpen && <SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} />}
@@ -556,6 +559,8 @@ export default function App() {
           ) : workspaceReady ? <OrchestratorChat key={profileId} /> : <WorkspaceLoading conversationOnly />}
 
           </KeepMounted>
+          <ThreadSideCard onReservedChange={setSideCardReserved} />
+          <QuickActionEditorHost />
         </aside>
 
 

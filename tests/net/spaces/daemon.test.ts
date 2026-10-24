@@ -21,9 +21,13 @@ it('holds a three-daemon public conversation through each SIGKILL restart, prese
     authored: Array<{ author: number; delivery: SpaceLocalDelivery; text: string }> = [],
     passphrase = 'actual-space-daemon-protection'
   const launch = async (home: string): Promise<Daemon> => {
-    const daemon = await startDaemon({ entry, home, repoRoot: root, label: 'Space daemon' })
-    started.push(daemon)
-    return daemon
+    return startDaemon({
+      entry,
+      home,
+      repoRoot: root,
+      label: 'Space daemon',
+      onStart: (daemon) => started.push(daemon)
+    })
   }
   const cli = (author: number, args: string[], input?: string): Promise<any> =>
     cliJson({
@@ -35,6 +39,7 @@ it('holds a three-daemon public conversation through each SIGKILL restart, prese
       timeout: 30000,
       label: 'Space CLI'
     })
+  let initialBoots: Promise<Daemon>[] = []
   let daemons: Daemon[] = [],
     space = '',
     stream = ''
@@ -60,8 +65,9 @@ it('holds a three-daemon public conversation through each SIGKILL restart, prese
     await cli(author, ['net', 'unlock'], passphrase)
   }
   try {
+    initialBoots = homes.map(launch)
+    daemons = await Promise.all(initialBoots)
     for (let author = 0; author < 3; author++) {
-      daemons.push(await launch(homes[author]))
       await cli(author, ['net', 'init', '--listen', '--port', '0', '--name', `member-${author}`])
       await cli(author, ['net', 'protect'], passphrase)
     }
@@ -148,6 +154,7 @@ it('holds a three-daemon public conversation through each SIGKILL restart, prese
     expect(new Set(self.map((value) => value.self.node)).size).toBe(3)
   } finally {
     await Promise.all(started.map((daemon) => daemon.kill()))
+    await Promise.allSettled(initialBoots)
     await temp.close()
   }
 }, 180000)

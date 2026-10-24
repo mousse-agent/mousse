@@ -10,6 +10,7 @@ describe('change-based test selection plan', () => {
       'tests/support/build.ts',
       'tests/fixtures/agent-platform/migration-crash/child.ts',
       'tests/test-dependencies.json',
+      'tests/test-lanes.json',
       'vitest.config.ts',
       'electron.vite.config.ts',
       'package.json',
@@ -32,7 +33,7 @@ describe('change-based test selection plan', () => {
     for (const path of ['src/cli/index.ts', 'src/main/index.ts', 'src/preload/index.ts', 'scripts/build-cli.mjs', 'electron-builder.yml']) {
       const plan = classifyChanges([path], manifest)
       expect(plan.mode, path).toBe('select')
-      expect(plan.projects, path).toContain('process')
+      expect(plan.projects, path).toEqual(['process', 'heavy'])
     }
   })
 
@@ -78,13 +79,22 @@ describe('change-based test selection plan', () => {
     expect(configured.map((glob) => glob.replace(/^\*\*\//, '')).sort()).toEqual([...FULL_RUN_TRIGGERS].sort())
   })
 
+  it('keeps explicit resource lanes disjoint and names only existing tests', async () => {
+    const { readFileSync, globSync } = await import('node:fs')
+    const lanes = JSON.parse(readFileSync(new URL('./test-lanes.json', import.meta.url), 'utf8'))
+    const entries = ['process', 'serviceTls', 'daemon', 'browser'].flatMap((lane) => lanes[lane] as string[])
+    expect(new Set(entries).size).toBe(entries.length)
+    const files = new Set(globSync('tests/**/*.test.ts'))
+    for (const file of entries) expect(files.has(file), file).toBe(true)
+  })
+
   it('every manifest rule names at least one existing test file or project', async () => {
     const { globSync } = await import('node:fs')
     const { resolve } = await import('node:path')
     const root = resolve(import.meta.dirname, '..')
     for (const rule of manifest.rules as Array<{ name: string; run?: string[]; projects?: string[] }>) {
       if (rule.projects?.length) {
-        for (const project of rule.projects) expect(['unit', 'process'], rule.name).toContain(project)
+        for (const project of rule.projects) expect(['unit', 'process', 'heavy'], rule.name).toContain(project)
         continue
       }
       const matches = rule.run!.flatMap((glob) => globSync(glob, { cwd: root }))
