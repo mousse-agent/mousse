@@ -110,6 +110,54 @@ describe('answering an RPC over a full control queue', () => {
     expect(sent).toEqual([])
   })
 
+  it('keeps one abort listener however long it waits for room', async () => {
+    const full = { value: true }
+    const { serve, advance, session } = fakeSession({ full, request: async () => ({ ok: true }) })
+    let listeners = 0
+    const add = AbortSignal.prototype.addEventListener
+    const remove = AbortSignal.prototype.removeEventListener
+    AbortSignal.prototype.addEventListener = function (this: AbortSignal, ...args: never[]) {
+      if (args[0] === 'abort' && this === session.rpcControllers.get('rpc_1')?.signal) listeners++
+      return add.apply(this, args as never)
+    } as typeof add
+    AbortSignal.prototype.removeEventListener = function (this: AbortSignal, ...args: never[]) {
+      if (args[0] === 'abort' && this === session.rpcControllers.get('rpc_1')?.signal) listeners--
+      return remove.apply(this, args as never)
+    } as typeof remove
+    try {
+      void serve()
+      await flush()
+      const before = listeners
+      for (let i = 0; i < 40; i++) {
+        advance(50)
+        await flush()
+      }
+      expect(listeners).toBe(before)
+    } finally {
+      AbortSignal.prototype.addEventListener = add
+      AbortSignal.prototype.removeEventListener = remove
+    }
+  })
+
+  it('does not send the answer once the request ended while it waited, even if room appears', async () => {
+    const full = { value: true }
+    const { serve, sent, advance, session } = fakeSession({
+      full,
+      request: async () => ({ ok: true })
+    })
+    let outcome: 'pending' | 'done' | Error = 'pending'
+    void serve().then(
+      () => (outcome = 'done'),
+      (error) => (outcome = error)
+    )
+    await flush()
+    full.value = false
+    session.rpcControllers.get('rpc_1')!.abort()
+    await flush()
+    expect(outcome).toBe('done')
+    expect(sent).toEqual([])
+  })
+
   it('still raises other send failures', async () => {
     const { serve, session } = fakeSession({
       full: { value: false },

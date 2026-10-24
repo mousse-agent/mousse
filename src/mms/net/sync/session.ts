@@ -1668,19 +1668,19 @@ export class NetSyncSession implements SyncSession {
         return await this.send(message)
       } catch (error) {
         if (!(error instanceof NetError) || error.code !== 'rate_limited') throw error
-        if (signal.aborted) return
-        await new Promise<void>((resolve) => {
-          const timer = this.clock.setTimeout(resolve, RPC_RESULT_RETRY_MS)
-          signal.addEventListener(
-            'abort',
-            () => {
-              timer.cancel()
-              resolve()
-            },
-            { once: true }
-          )
-        })
       }
+      if (signal.aborted) return
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          timer.cancel()
+          signal.removeEventListener('abort', done)
+          resolve()
+        }
+        const timer = this.clock.setTimeout(done, RPC_RESULT_RETRY_MS)
+        signal.addEventListener('abort', done)
+      })
+      // A request cancelled or past its deadline while waiting is not answered.
+      if (signal.aborted) return
     }
   }
   private spaceProofCapacity(): void {
