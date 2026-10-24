@@ -1462,6 +1462,41 @@ export class NetService {
         .map((session) => session.publishRecord(stream, record))
     )
   }
+  /** Display-only thread deltas to sessions live-serving the stream; never stored or replayed. */
+  publishDelta(stream: StreamId, data: unknown, key?: string): void {
+    if (this.stopped || this.disabled || !this.config.enabled) return
+    for (const session of this.sessions) {
+      if (session.state() !== 'open') continue
+      try {
+        session.publishDelta(stream, data, key)
+      } catch (error) {
+        if (
+          error instanceof NetError &&
+          (NET_ERRORS[error.code].category === 'denied' ||
+            [
+              'peer_offline',
+              'cancelled',
+              'stream_unknown',
+              'meta_stale',
+              'roster_conflict',
+              'outcome_uncertain'
+            ].includes(error.code))
+        )
+          continue
+        throw error
+      }
+    }
+  }
+  /** Drops unsent deltas a durable record supersedes; best effort like `publishDelta`. */
+  discardDeltas(stream: StreamId, matches: (key: string) => boolean): void {
+    for (const session of this.sessions) {
+      try {
+        session.discardDeltas(stream, matches)
+      } catch {
+        // A closing session has nothing left to send.
+      }
+    }
+  }
   /** Trusted local composition only. Presence has no durable delivery receipt. */
   async publishPresence(message: PresenceMessage, exclude?: NodeId): Promise<void> {
     if (message.t !== 'presence') throw new NetError('bad_request')

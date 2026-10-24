@@ -350,7 +350,8 @@ describe('P3 real MMS remote Bridge', () => {
       )
       .catch((error) => error)
     await vi.waitFor(() => expect(calls).toHaveLength(1))
-    expect(deltas.length).toBeGreaterThan(0)
+    // Live deltas are batched and published about every 100 ms.
+    await vi.waitFor(() => expect(deltas.length).toBeGreaterThan(0))
     expect(await expired).toMatchObject({ code: 'deadline_exceeded' })
     await vi.waitFor(
       () => {

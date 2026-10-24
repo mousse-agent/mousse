@@ -16,6 +16,9 @@ export const BRIDGE_REMOTE_METHODS = {
   'orchestrator.abort': { capability: 'chat', mutating: true },
   'orchestrator.isTurnActive': { capability: 'read', mutating: false },
   'orchestrator.contextUsage': { capability: 'read', mutating: false },
+  'orchestrator.pendingQuestions': { capability: 'read', mutating: false },
+  'orchestrator.answerQuestions': { capability: 'chat', mutating: true },
+  'orchestrator.dismissQuestions': { capability: 'chat', mutating: true },
   // Composer: model/effort/mode/skill choices, image staging and the thread's message queue.
   'composer.options': { capability: 'read', mutating: false },
   'threads.setModel': { capability: 'chat', mutating: true },

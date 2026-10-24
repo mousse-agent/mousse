@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { NetService } from '../../src/mms/net/NetService'
 import type { Clock } from '../../src/mms/net/contracts'
 import { NODE_DELEGATION_TTL_MS } from '../../src/shared/net/limits'
-import type { Roster } from '../../src/shared/net'
+import { NetError, type Roster, type StreamId } from '../../src/shared/net'
 import { FakeClock } from './harness/FakeClock'
 const cleanups: Array<() => Promise<void> | void> = []
 afterEach(async () => {
@@ -136,4 +136,20 @@ it('orchestrates protected transfer only after the target is protected and drops
   expect(a.net.status().self?.isAuthority).toBe(false)
   expect(a.net.runtime().keys.rootKey()).toBeUndefined()
   expect(b.net.status().self?.isAuthority).toBe(true)
+})
+it('keeps delivering a live delta to later sessions when one session refuses it', async () => {
+  const { net } = service()
+  await net.request('net.init', { name: 'authority' })
+  const delivered: unknown[] = [],
+    stub = (publishDelta: () => void): object => ({ state: () => 'open', publishDelta }),
+    sessions = (net as unknown as { sessions: Set<object> }).sessions
+  sessions.add(
+    stub(() => {
+      throw new NetError('outcome_uncertain')
+    })
+  )
+  sessions.add(stub(() => delivered.push('delta')))
+  net.publishDelta('stream' as StreamId, { threadId: 't' })
+  expect(delivered).toEqual(['delta'])
+  sessions.clear()
 })
