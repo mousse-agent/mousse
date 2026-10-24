@@ -163,6 +163,10 @@ export function bridgeProtocolEvent(
     case 'ui.notify': {
       return true
     }
+    case 'net.updated': {
+      broadcast('net:updated', event.data)
+      return true
+    }
     case 'scheduled.updated': {
       broadcast(
         'scheduled:updated',
