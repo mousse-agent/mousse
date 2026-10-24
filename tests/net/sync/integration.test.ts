@@ -575,6 +575,35 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
     expect(closed).toHaveLength(1)
     expect(closed[0]).toMatchObject({ code: 'route_unreachable' })
   })
+  it('keeps the code of a resync send failure that is not a full carrier', async () => {
+    const p = await profiles(),
+      connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce())
+    const closed: unknown[] = []
+    connection.a.onClosed((error) => closed.push(error))
+    vi.spyOn(
+      connection.a as unknown as { sendRecords: () => Promise<void> },
+      'sendRecords'
+    ).mockImplementationOnce(() => new Promise<void>(() => undefined))
+    vi.spyOn(
+      connection.a as unknown as { send: (header: { t: string }) => Promise<void> },
+      'send'
+    ).mockImplementation(async (header) => {
+      if (header.t === 'snapshotRequired') throw new NetError('bad_request')
+    })
+    const body = new Uint8Array(8 * 1024 * 1024)
+    for (let seq = 1; seq <= 8; seq++)
+      void connection.a
+        .publishRecord(p.stream.id, { ...oversizedRecord(seq, 0), envelope: body })
+        .catch(() => undefined)
+    await vi.waitFor(() => expect(connection.a.state()).toBe('closed'))
+    // Only a full carrier becomes a retryable carrier failure.
+    expect(closed).toHaveLength(1)
+    expect(closed[0]).toMatchObject({ code: 'bad_request' })
+  })
   it('accepts a valid 500-record wire snapshot through bounded storage appends', async () => {
     const p = await profiles()
     for (let i = 1; i <= 500; i++) {

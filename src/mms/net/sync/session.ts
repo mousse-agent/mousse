@@ -665,9 +665,14 @@ export class NetSyncSession implements SyncSession {
       attempt.live = false
       // An in-flight replay must stop too: its caughtUp after snapshotRequired is a protocol error.
       attempt.cancelled = true
-      // A rejected resync request is a carrier failure, so a supervised peer reconnects.
+      // A resync request refused by a full carrier is a carrier failure, so a supervised peer
+      // reconnects; other errors keep their code.
       return this.requireSnapshot(stream).catch((error) =>
-        this.fail(new NetError('route_unreachable', 'Resync request rejected.', { cause: error }))
+        this.fail(
+          error instanceof NetError && error.code === 'rate_limited'
+            ? new NetError('route_unreachable', 'Resync request rejected.', { cause: error })
+            : error
+        )
       )
     }
     const controller = new AbortController()
