@@ -30,6 +30,7 @@
     "dist:win": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win --publish never",
     "dist:win:cli": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --win --config electron-builder.cli.yml --publish never",
     "dist:linux": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --linux AppImage --publish never && electron-builder --linux AppImage --config electron-builder.cli.yml --publish never",
+    "dist:mac": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && electron-builder --mac dmg --publish never",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "lint": "eslint .",
     "format:net": "prettier --write \"src/mms/net/**/*.{ts,tsx,mjs}\" \"src/mms/spaces/**/*.{ts,tsx,mjs}\" \"src/mms/bridge/**/*.{ts,tsx,mjs}\" \"src/mms/bots/**/*.{ts,tsx,mjs}\" \"src/shared/net/**/*.{ts,tsx,mjs}\" \"src/shared/bridge/**/*.{ts,tsx,mjs}\" \"src/shared/bots/**/*.{ts,tsx,mjs}\" \"src/shared/spaces/**/*.{ts,tsx,mjs}\" \"tests/net/**/*.{ts,tsx,mjs}\" \"scripts/net/**/*.{ts,tsx,mjs}\" \"scripts/net-qa/**/*.{ts,tsx,mjs}\" \"scripts/net-spikes/**/*.{ts,tsx,mjs}\" src/cli/commands/net.ts src/cli/commands/bridge.ts src/cli/commands/spaces.ts src/cli/commands/bots.ts src/cli/commands/spaceArchive.ts src/cli/electronDaemonLifetime.ts src/mms/protocol/connectionEventWriter.ts",
@@ -211,16 +212,6 @@
         "to": "macros"
       }
     ],
-    "extraFiles": [
-      {
-        "from": "resources/cli/mousse-cli.cmd",
-        "to": "mousse-cli.cmd"
-      },
-      {
-        "from": "resources/cli/mousse-cli",
-        "to": "mousse-cli"
-      }
-    ],
     "win": {
       "target": [
         {
@@ -231,7 +222,17 @@
         }
       ],
       "icon": "resources/icon.ico",
-      "signExecutable": false
+      "signExecutable": false,
+      "extraFiles": [
+        {
+          "from": "resources/cli/mousse-cli.cmd",
+          "to": "mousse-cli.cmd"
+        },
+        {
+          "from": "resources/cli/mousse-cli",
+          "to": "mousse-cli"
+        }
+      ]
     },
     "linux": {
       "target": [
@@ -244,7 +245,35 @@
       ],
       "category": "Development",
       "icon": "resources/icon.png",
-      "executableName": "mousse"
+      "executableName": "mousse",
+      "extraFiles": [
+        {
+          "from": "resources/cli/mousse-cli.cmd",
+          "to": "mousse-cli.cmd"
+        },
+        {
+          "from": "resources/cli/mousse-cli",
+          "to": "mousse-cli"
+        }
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.developer-tools",
+      "icon": "resources/icon.png",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "extraFiles": [
+        {
+          "from": "resources/cli/mousse-cli",
+          "to": "Resources/mousse-cli"
+        }
+      ]
+    },
+    "dmg": {
+      "artifactName": "Mousse-${version}-${arch}.${ext}"
     },
     "nsis": {
       "artifactName": "Mousse.Setup.${version}.${ext}",
