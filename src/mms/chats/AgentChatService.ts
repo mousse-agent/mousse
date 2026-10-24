@@ -13,7 +13,7 @@ import type { MmsProfileServices } from '../MmsProfileServices'
 import type { AgentRuntimeHostWithBrowser } from '../orchestrator/browser'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import { DomainRpcError } from '../protocol/domainRegistry'
-import { getExecutionLeasePath, readLeaseOwner, releaseExecutionLeaseHandle, tryAcquireExecutionLease, type ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
+import { getExecutionLeasePath, isExecutionLeaseHeld, readLeaseOwner, releaseExecutionLeaseHandle, tryAcquireExecutionLease, type ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { isOwnerLive } from '../queue/processLiveness'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
@@ -215,6 +215,7 @@ export class AgentChatService {
     const agents = record.conversation.participants.filter((participant) => participant.kind === 'agent')
     for (const agent of record.conversation.kind === 'direct' ? agents.slice(0, 1) : this.targets(text, agents)) this.assertAgent(agent)
     if (record.conversation.messages.length > 1990) throw new DomainRpcError('chat_full', 'This chat has reached its message limit')
+    if (isExecutionLeaseHeld(this.options.services.threads.getThreadDir(record.conversation.threadId))) throw new DomainRpcError('chat_busy', 'The backing thread is executing other work')
   }
   send(input: ChatSendInput): ChatConversation {
     this.lifecycle.assertAccepting()
