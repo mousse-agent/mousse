@@ -647,10 +647,14 @@ export class NetSyncSession implements SyncSession {
 
   /** After a local authority transaction commits; all serving sessions recheck ACLs. */
   publishRecord(stream: StreamId, record: StoredRecord): Promise<void> {
+    // Only a live stream sends records. While a snapshot is pulled the subscriber reads the store
+    // instead (opening it refreshes the display snapshot, a burst that must not queue here).
+    const attempt = this.serving.get(stream)
+    if (!attempt?.live || this.currentState !== 'open') return Promise.resolve()
     const size = record.envelope.length + record.sig.length
     let queue = this.livePublishing.get(stream)
-    // A subscriber too slow to drain the backlog gets an error instead of unbounded memory: the
-    // queued records are dropped and it resubscribes, which resyncs from the current head.
+    // A subscriber too slow to drain the backlog is sent back to a snapshot instead of holding
+    // unbounded memory: the queued records are dropped and it resyncs from the current head.
     if (
       queue &&
       (queue.records + 1 > SESSION_MAX_LIVE_QUEUE_RECORDS ||
@@ -658,7 +662,8 @@ export class NetSyncSession implements SyncSession {
     ) {
       queue.overflowed = true
       this.livePublishing.delete(stream)
-      return this.failServingStream(stream, 'rate_limited').catch(() => undefined)
+      attempt.live = false
+      return this.requireSnapshot(stream).catch((error) => this.fail(error))
     }
     const controller = new AbortController()
     // One live record per stream at a time: a burst (a refreshed display snapshot is dozens of
@@ -702,6 +707,12 @@ export class NetSyncSession implements SyncSession {
     if (!this.serving.get(stream)?.live || this.currentState !== 'open') return
     this.authorizedRead(stream)
     await this.sendRecords(stream, [record], false, undefined, signal)
+  }
+
+  /** Ask the subscriber to resync from a snapshot; it keeps its subscription and gets no error. */
+  private async requireSnapshot(stream: StreamId): Promise<void> {
+    const head = this.options.store.head(stream)
+    await this.send({ t: 'snapshotRequired', stream, reason: 'cursorTooOld', head })
   }
 
   /** Trusted authority failure: terminate only an already authorized serving subscription. */
