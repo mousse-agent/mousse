@@ -16,7 +16,7 @@ export type ReadAloudSelection =
 // Local models
 // ---------------------------------------------------------------------------------------------
 
-export type LocalTtsModelId = 'kokoro-82m'
+export type LocalTtsModelId = 'kokoro-82m' | 'kitten-tts-mini' | 'kitten-tts-micro' | 'kitten-tts-nano'
 
 export type LocalTtsModelFile = LocalModelFile
 
@@ -26,14 +26,33 @@ export interface LocalTtsVoice {
   label: string
 }
 
-export interface LocalTtsModel extends LocalModelManifest {
+interface LocalTtsModelBase extends LocalModelManifest {
   id: LocalTtsModelId
-  /** transformers.js dtype that selects the ONNX file in `files`. */
-  dtype: 'q8'
   defaultVoice: string
-  /** Every voice whose file is in `files`. Voices other than the default are optional files. */
+  /** Every voice whose data is in `files`. Voices stored as separate files other than the default are optional files. */
   voices: readonly LocalTtsVoice[]
 }
+
+/** Kokoro through kokoro-js (transformers.js). */
+export interface KokoroTtsModel extends LocalTtsModelBase {
+  runtime: 'kokoro'
+  /** transformers.js dtype that selects the ONNX file in `files`. */
+  dtype: 'q8'
+}
+
+/** KittenTTS: one ONNX graph, espeak phonemes, and all voices in one `.npz` file. */
+export interface KittenTtsModel extends LocalTtsModelBase {
+  runtime: 'kitten'
+  /** `config.json` with the voice aliases and per-voice speed priors. */
+  config: string
+  /** The ONNX graph. */
+  model: string
+  /** `.npz` archive holding one style matrix per voice. */
+  voicesFile: string
+}
+
+/** The model families Mousse can run; each runtime has its own worker. */
+export type LocalTtsModel = KokoroTtsModel | KittenTtsModel
 
 /**
  * Kokoro's English voices as listed by kokoro-js, best graded first within each accent. The id
@@ -57,7 +76,7 @@ const KOKORO_VOICES: readonly LocalTtsVoice[] = (
  * Kokoro v1.0 ONNX weights from `onnx-community/Kokoro-82M-v1.0-ONNX`, the repository loaded by
  * the official `kokoro-js` package (hexgrad/kokoro). The q8 model runs on CPU through WebAssembly.
  */
-export const KOKORO_82M: LocalTtsModel = {
+export const KOKORO_82M: KokoroTtsModel = {
   id: 'kokoro-82m',
   label: 'Kokoro 82M',
   description: 'English voices',
@@ -66,6 +85,7 @@ export const KOKORO_82M: LocalTtsModel = {
   homepage: 'https://huggingface.co/hexgrad/Kokoro-82M',
   repo: 'onnx-community/Kokoro-82M-v1.0-ONNX',
   revision: '1939ad2a8e416c0acfeecc08a694d14ef25f2231',
+  runtime: 'kokoro',
   dtype: 'q8',
   defaultVoice: 'af_heart',
   voices: KOKORO_VOICES,
@@ -105,7 +125,81 @@ export const KOKORO_82M: LocalTtsModel = {
   ]
 }
 
-export const LOCAL_TTS_MODELS: readonly LocalTtsModel[] = [KOKORO_82M]
+/**
+ * KittenTTS 0.8 voices, by the names the model's `config.json` gives them. The name maps to the
+ * voice's matrix in `voices.npz` (Bella is `expr-voice-2-f`, and so on).
+ */
+const KITTEN_VOICES: readonly LocalTtsVoice[] = [
+  ['Bella', 'female'], ['Jasper', 'male'], ['Luna', 'female'], ['Bruno', 'male'],
+  ['Rosie', 'female'], ['Hugo', 'male'], ['Kiki', 'female'], ['Leo', 'male']
+].map(([id, gender]) => ({ id, label: `${id}, ${gender}` }))
+
+/**
+ * KittenTTS 0.8 (KittenML), a StyleTTS 2 model with espeak phonemes. English only, 24 kHz. The
+ * mini and micro graphs are float32; the nano graph is the int8 build from
+ * `kitten-tts-nano-0.8-int8`. All three share the same eight voices.
+ */
+const kittenModel = (
+  id: LocalTtsModelId,
+  label: string,
+  parameters: string,
+  repo: string,
+  revision: string,
+  model: LocalModelFile,
+  config: LocalModelFile,
+  voicesFile: LocalModelFile
+): KittenTtsModel => ({
+  id,
+  label,
+  description: 'English voices',
+  parameters,
+  license: 'Apache-2.0',
+  homepage: `https://huggingface.co/${repo}`,
+  repo,
+  revision,
+  runtime: 'kitten',
+  config: config.path,
+  model: model.path,
+  voicesFile: voicesFile.path,
+  defaultVoice: 'Bella',
+  voices: KITTEN_VOICES,
+  files: [config, model, voicesFile]
+})
+
+export const KITTEN_TTS_MINI: KittenTtsModel = kittenModel(
+  'kitten-tts-mini',
+  'Kitten TTS Mini',
+  '80M',
+  'KittenML/kitten-tts-mini-0.8',
+  'c02725660cea441db4c383af69f1f26f5cd00947',
+  { path: 'kitten_tts_mini_v0_8.onnx', size: 78268016, sha256: '0f5bbae4fc4800c98dbc544a87ecfa79510de2fb8222db30d12e5bfe9177df91' },
+  { path: 'config.json', size: 470, sha256: '6b160bc9b19e24ecb21e84bc14f8a7da21fdf47ec72d42450bc5cf514b61804a' },
+  { path: 'voices.npz', size: 3278902, sha256: '40ad2638952b77b7b2f30127e2608e169fc69dd256b53bd8aaa3409a33193c42' }
+)
+
+export const KITTEN_TTS_MICRO: KittenTtsModel = kittenModel(
+  'kitten-tts-micro',
+  'Kitten TTS Micro',
+  '40M',
+  'KittenML/kitten-tts-micro-0.8',
+  '1ccf72b2c2048fd17efac7de2fab32d10e225084',
+  { path: 'kitten_tts_micro_v0_8.onnx', size: 41384970, sha256: '95481626fee1ba70ce683e69c534fc7cb38433c46ce42d3abbeafb4b9f1a4123' },
+  { path: 'config.json', size: 473, sha256: '1f0bd2208348f9211cb0da64fcd1536eb28228571cc6b09e767eb6e203a0a532' },
+  { path: 'voices.npz', size: 3278902, sha256: '112710c1be8ad0e967c190fb0fd95cbe5848ec4791b93209f20b28b7da20dac1' }
+)
+
+export const KITTEN_TTS_NANO: KittenTtsModel = kittenModel(
+  'kitten-tts-nano',
+  'Kitten TTS Nano',
+  '15M',
+  'KittenML/kitten-tts-nano-0.8-int8',
+  '84781d74e29ee25217551556398b42f80593a813',
+  { path: 'kitten_tts_nano_v0_8.onnx', size: 24369971, sha256: 'f7b0afcbee92870b32b8e0276d855b954dc25470c9f051b376ac7eee537c76fc' },
+  { path: 'config.json', size: 688, sha256: 'b66006ccbeccd4de5fc3c9272059c47f5725df7215fd889785c03602652fab64' },
+  { path: 'voices.npz', size: 3278902, sha256: '8aa7cee235abb0739cb51e6559685f65a4dacd95568833d05699b1633f519b3f' }
+)
+
+export const LOCAL_TTS_MODELS: readonly LocalTtsModel[] = [KOKORO_82M, KITTEN_TTS_MINI, KITTEN_TTS_MICRO, KITTEN_TTS_NANO]
 
 export function findLocalTtsModel(modelId: string): LocalTtsModel | undefined {
   return LOCAL_TTS_MODELS.find((model) => model.id === modelId)

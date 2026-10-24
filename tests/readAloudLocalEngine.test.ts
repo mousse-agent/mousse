@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SpeakOptions } from '../src/renderer/readAloud/playback'
+import type { LocalTtsModelId } from '../src/shared/readAloud'
 import { PauseGate } from '../src/renderer/readAloud/playback'
 import { splitSpeechSegments } from '../src/renderer/readAloud/speechText'
 
@@ -103,7 +104,7 @@ interface Read {
 
 let engine: Engine
 
-function startRead(text: string, controller = new AbortController()): Read {
+function startRead(text: string, controller = new AbortController(), modelId: LocalTtsModelId = 'kokoro-82m'): Read {
   const onPlaying = vi.fn()
   const options: SpeakOptions = {
     signal: controller.signal,
@@ -113,7 +114,7 @@ function startRead(text: string, controller = new AbortController()): Read {
     pause: new PauseGate(),
     onLevels: () => undefined
   }
-  return { done: engine.speakWithLocalModel(text, options), controller, onPlaying }
+  return { done: engine.speakWithLocalModel(modelId, text, options), controller, onPlaying }
 }
 
 /** Voices every segment, plays every clip to its end and waits for the read to resolve. */
@@ -255,5 +256,41 @@ describe('local read aloud when a read is cut short', () => {
 
     await finishRead(startRead(OTHER_SHORT))
     expect(FakeWorker.all).toHaveLength(2)
+  })
+})
+
+describe('local read aloud with more than one model', () => {
+  it('starts the worker of the model family and tells it which model to run', async () => {
+    await finishRead(startRead(SHORT, new AbortController(), 'kitten-tts-micro'))
+    await finishRead(startRead(OTHER_SHORT))
+
+    const [kitten, kokoro] = FakeWorker.all
+    expect(kitten.url.pathname).toMatch(/kittenWorker\.ts$/)
+    expect(kitten.posted[0]).toEqual({ type: 'init', modelId: 'kitten-tts-micro' })
+    expect(kokoro.url.pathname).toMatch(/kokoroWorker\.ts$/)
+    expect(kokoro.posted[0]).toEqual({ type: 'init', modelId: 'kokoro-82m' })
+  })
+
+  it('replaces the workers when another model is read, and keeps them for the same model', async () => {
+    await finishRead(startRead(SHORT, new AbortController(), 'kitten-tts-nano'))
+    await finishRead(startRead(OTHER_SHORT, new AbortController(), 'kitten-tts-nano'))
+    expect(FakeWorker.all).toHaveLength(1)
+
+    await finishRead(startRead(SHORT, new AbortController(), 'kitten-tts-mini'))
+    expect(FakeWorker.all).toHaveLength(2)
+    expect(FakeWorker.all[0].terminated).toBe(1)
+    expect(FakeWorker.all[1].terminated).toBe(0)
+  })
+
+  it('asks for the default voice of the chosen model', async () => {
+    const read = startRead(SHORT, new AbortController(), 'kitten-tts-micro')
+    const [worker] = FakeWorker.all
+    expect(worker.speakRequests()[0]).toMatchObject({ voice: 'Bella' })
+    await finishRead(read)
+  })
+
+  it('fails the read for a model that no longer exists', async () => {
+    await expect(startRead(SHORT, new AbortController(), 'gone' as LocalTtsModelId).done).rejects.toThrow('not available')
+    expect(FakeWorker.all).toHaveLength(0)
   })
 })

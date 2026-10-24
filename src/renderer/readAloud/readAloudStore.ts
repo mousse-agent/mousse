@@ -90,7 +90,7 @@ export const useReadAloudStore = create<ReadAloudState>((set, get) => {
     }
     const run =
       selection.source === 'local'
-        ? speakWithLocalModel(text, options)
+        ? speakWithLocalModel(selection.modelId, text, options)
         : speakWithProvider(selection.providerId, selection.modelId, text, options)
     run
       .catch((error: unknown) => {
