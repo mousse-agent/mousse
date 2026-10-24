@@ -52,7 +52,7 @@
 }
 
 .lineage-row.is-current {
-  background: var(--ui-selected);
+  background: var(--ui-pressed);
   color: var(--text-primary);
 }
 

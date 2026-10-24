@@ -2,10 +2,18 @@ import type { QuickAction } from './quickActions'
 import { useAppStore } from '../stores/appStore'
 import { composerThreadActions } from './composerThreadActions'
 import { prepareComposerThread } from './createComposerThread'
-import { composerWorkspaceFor, isNewEmptyThread } from './newThread'
+import { composerWorkspaceFor, isNewEmptyThread, isWorkspacePending } from './newThread'
 
 const TERMINAL_SPAWN_TIMEOUT_MS = 15_000
 const TERMINAL_SPAWN_POLL_MS = 150
+
+/** The new chat is already being prepared by another send; nothing was started. */
+export class WorkspaceBusyError extends Error {
+  constructor() {
+    super('Busy: the new chat is still being prepared.')
+    this.name = 'WorkspaceBusyError'
+  }
+}
 
 function requireActiveProfile(profileId: string): ReturnType<typeof useAppStore.getState> {
   const current = useAppStore.getState()
@@ -25,24 +33,35 @@ async function threadForSend(profileId: string): Promise<string | null> {
   const startId = store.activeThreadId
   const thread = store.threads.find((entry) => entry.id === startId)
   if (!isNewEmptyThread(startId, thread, store.messages.length)) return startId
+  // One preparation at a time: a composer send or another action already owns this thread.
+  if (isWorkspacePending(store)) throw new WorkspaceBusyError()
   let targetId = startId
+  // Marked before the first await, so the composer and the side card see it at once.
+  store.setWorkspacePending(profileId, startId, true)
   const stillVisible = () => {
     const current = useAppStore.getState()
     return current.profileId === profileId && current.activeThreadId === targetId
   }
-  return prepareComposerThread({
-    thread,
-    workspace: composerWorkspaceFor(store.composerWorkspaceDrafts[startId ?? '__blank__'], thread),
-    ...composerThreadActions(),
-    stillVisible,
-    activate: (created) => {
-      const current = useAppStore.getState()
-      current.upsertThread(created)
-      current.setComposerWorkspaceDraft(startId)
-      targetId = created.id
-      current.switchToThread(created.id)
-    }
-  })
+  try {
+    return await prepareComposerThread({
+      thread,
+      workspace: composerWorkspaceFor(store.composerWorkspaceDrafts[startId ?? '__blank__'], thread),
+      ...composerThreadActions(),
+      stillVisible,
+      activate: (created) => {
+        const current = useAppStore.getState()
+        current.upsertThread(created)
+        current.setComposerWorkspaceDraft(startId)
+        targetId = created.id
+        current.setWorkspacePending(profileId, created.id, true)
+        current.switchToThread(created.id)
+      }
+    })
+  } finally {
+    const current = useAppStore.getState()
+    current.setWorkspacePending(profileId, startId, false)
+    current.setWorkspacePending(profileId, targetId, false)
+  }
 }
 
 async function sendToActiveThread(content: string, profileId: string): Promise<void> {
@@ -52,7 +71,8 @@ async function sendToActiveThread(content: string, profileId: string): Promise<v
   let activeThreadId: string | null
   try {
     activeThreadId = await threadForSend(profileId)
-  } catch {
+  } catch (error) {
+    if (error instanceof WorkspaceBusyError) throw error
     requireActiveProfile(profileId)
     throw new Error('Failed to send message.')
   }

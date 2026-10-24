@@ -29,15 +29,37 @@ export function composerWorkspaceFor(
 }
 
 /**
+ * Key of one new thread or blank draft whose workspace is being prepared. It
+ * carries the profile so a preparation that outlives a profile switch can only
+ * ever clear its own entry.
+ */
+export function workspacePendingKey(profileId: string, threadId: string | null): string {
+  return `${profileId}:${threadId ?? '__blank__'}`
+}
+
+/** True while the selected thread or blank draft is having its workspace prepared by a send. */
+export function isWorkspacePending(state: {
+  profileId?: string
+  activeThreadId: string | null
+  workspacePending?: Record<string, true>
+}): boolean {
+  if (!state.workspacePending || state.profileId === undefined) return false
+  return Boolean(state.workspacePending[workspacePendingKey(state.profileId, state.activeThreadId)])
+}
+
+/**
  * True while a send is in flight for the selected thread, when the workspace
  * can no longer change. The composer toolbar and the thread side card both
- * lock on this.
+ * lock on this, so a send that is still preparing a new thread (from the composer
+ * or a quick action) locks both.
  */
 export function isComposerWorkspaceLocked(state: {
   loading: boolean
   activeThreadId: string | null
   turnStates: Record<string, { phase: TurnPhase } | undefined>
+  profileId?: string
+  workspacePending?: Record<string, true>
 }): boolean {
   const phase = state.activeThreadId ? state.turnStates[state.activeThreadId]?.phase : undefined
-  return state.loading || isTurnActivePhase(phase ?? 'idle')
+  return state.loading || isTurnActivePhase(phase ?? 'idle') || isWorkspacePending(state)
 }

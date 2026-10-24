@@ -14,8 +14,8 @@ export interface SideCardVisibilityInput {
   scheduledOpen: boolean
   channelsOpen: boolean
   sidebarMode: 'projects' | 'chats'
-  /** The measured full-width thread area has room for the card. False until the first measurement. */
-  sideCardFits: boolean
+  /** The measured full-width thread area has room for the card. Null until the first measurement. */
+  sideCardFits: boolean | null
 }
 
 /** Why the card cannot appear right now, as opposed to merely being switched off. */
@@ -32,7 +32,9 @@ export interface SideCardState {
  * shows a thread (not Settings, Usage, Scheduled, Channels or Chats) and a
  * thread area wide enough for it. Within those, it shows when switched on and
  * the app panel is closed. An open app panel does not make the card
- * unavailable: the button closes the panel and brings the card back.
+ * unavailable: the button closes the panel and brings the card back. Until the
+ * width is measured the card stays hidden, but the button is not disabled for it:
+ * only a measurement that came up short does that.
  */
 export function deriveSideCardState(input: SideCardVisibilityInput): SideCardState {
   const viewBlocked = input.settingsOpen
@@ -41,18 +43,33 @@ export function deriveSideCardState(input: SideCardVisibilityInput): SideCardSta
     || input.channelsOpen
     || input.sidebarMode === 'chats'
   if (viewBlocked) return { visible: false, unavailable: 'view' }
-  if (!input.sideCardFits) return { visible: false, unavailable: 'narrow' }
+  if (input.sideCardFits === false) return { visible: false, unavailable: 'narrow' }
+  // Unmeasured never flashes the card; the first measurement lands before the first paint.
+  if (input.sideCardFits === null) return { visible: false, unavailable: null }
   return { visible: input.sideCardOn && !input.mainAreaOpen, unavailable: null }
-}
-
-/** The card shows only over a full-width thread view, switched on, and wide enough. */
-export function isSideCardVisible(input: SideCardVisibilityInput): boolean {
-  return deriveSideCardState(input).visible
 }
 
 /** Whether a thread area of this width has room for the card beside the conversation. */
 export function sideCardFitsThreadWidth(width: number): boolean {
   return width >= SIDE_CARD_MIN_THREAD_WIDTH
+}
+
+/** The threads sidebar's 1px resizer sits inside its reserved width. */
+const THREADS_SIDEBAR_RESIZER_WIDTH = 1
+
+/** Width the threads sidebar takes beside the thread view while it is open; it slides, so this is the end state. */
+export function threadsSidebarReservedWidth(open: boolean, width: number): number {
+  return open ? width + THREADS_SIDEBAR_RESIZER_WIDTH : 0
+}
+
+/**
+ * Width the thread view has when the app panel is closed: the whole workspace
+ * less what stays beside it. Null when the workspace is hidden (zero width, as
+ * under a rail page) or nothing would be left, which says nothing about fit.
+ */
+export function threadViewWidth(workspaceWidth: number, reservedBesideThread: number): number | null {
+  const width = workspaceWidth - reservedBesideThread
+  return workspaceWidth > 0 && width > 0 ? width : null
 }
 
 /** Tooltip for the title-bar button; explains a disabled button, otherwise just names it. */

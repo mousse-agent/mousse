@@ -4,7 +4,7 @@ import type { Monaco } from '@monaco-editor/react'
 import { Cloud, Download, FolderOpen, GitBranch, Milestone, RefreshCw } from '../lib/icons'
 import type { GitCommit, GitFileChange } from '../../shared/types'
 import type { GitHubAvailability, GitHubRepositoryVisibility } from '../../shared/github'
-import { useActiveProjectPath } from '../hooks/useActiveProjectPath'
+import { useActiveProjectLocation } from '../hooks/useActiveProjectPath'
 import { useAppStore } from '../stores/appStore'
 import { useGitStatus } from '../stores/gitStatusStore'
 import { CODE_FONT } from '../lib/typography'
@@ -141,14 +141,12 @@ function CommitsSection({
 }
 
 export function GitPanel() {
-  const projectPath = useActiveProjectPath()
+  const { path: projectPath, projectId } = useActiveProjectLocation()
   const projects = useAppStore((state) => state.projects)
-  const threads = useAppStore((state) => state.threads)
-  const activeThreadId = useAppStore((state) => state.activeThreadId)
-  const activeProject = useMemo(() => {
-    const projectId = threads.find((thread) => thread.id === activeThreadId)?.projectId
-    return projects.find((project) => project.id === projectId) ?? projects.find((project) => project.path === projectPath)
-  }, [activeThreadId, projectPath, projects, threads])
+  const activeProject = useMemo(
+    () => projects.find((project) => project.id === projectId) ?? projects.find((project) => project.path === projectPath),
+    [projectId, projectPath, projects]
+  )
   const { status, commits, loading, refresh } = useGitStatus(projectPath)
   const [selected, setSelected] = useState<{ path: string; staged: boolean } | null>(null)
   const [diff, setDiff] = useState('')

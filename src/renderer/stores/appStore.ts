@@ -19,6 +19,7 @@ import type {
 import { parseChatReference, type ChatReference } from '../../shared/chatReferences'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
+import { workspacePendingKey } from '../lib/newThread'
 
 /** In-memory transcript cache so re-visiting a thread paints instantly (not in Zustand). */
 // Each entry is a fully hydrated transcript. Keeping sixteen live-sized threads
@@ -129,9 +130,9 @@ interface AppState {
   /** Thread side card preference. On at every launch; deliberately kept out of the per-profile workspace. */
   sideCardOn: boolean
   setSideCardOn: (sideCardOn: boolean) => void
-  /** Whether the full-width thread area measured wide enough for the side card. False until measured. */
-  sideCardFits: boolean
-  setSideCardFits: (sideCardFits: boolean) => void
+  /** Whether the full-width thread area measured wide enough for the side card. Null until measured. */
+  sideCardFits: boolean | null
+  setSideCardFits: (sideCardFits: boolean | null) => void
   activeThreadId: string | null
   projects: Project[]
   threads: Thread[]
@@ -154,6 +155,12 @@ interface AppState {
   /** Workspace choices for each new-chat draft, isolated by profile. */
   composerWorkspaceDrafts: Record<string, { projectId?: string; worktreeEnabled: boolean }>
   setComposerWorkspaceDraft: (threadId: string | null, workspace?: { projectId?: string; worktreeEnabled: boolean }) => void
+  /**
+   * New threads or blank drafts whose workspace a send is preparing, keyed by
+   * `workspacePendingKey`. Not persisted; the composer and quick actions both set it.
+   */
+  workspacePending: Record<string, true>
+  setWorkspacePending: (profileId: string, threadId: string | null, pending: boolean) => void
   /** Text drafts keyed by their hidden or started thread id. */
   composerDrafts: Record<string, string>
   /** Durable rich references staged in each composer. */
@@ -336,7 +343,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   threadsSidebarOpen: true,
   mainAreaOpen: false,
   sideCardOn: true,
-  sideCardFits: false,
+  sideCardFits: null,
   activeThreadId: null,
   projects: [],
   threads: [],
@@ -371,6 +378,15 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   threadsSidebarView: 'projects',
   setThreadsSidebarView: (threadsSidebarView) => set({ threadsSidebarView }),
   composerWorkspaceDrafts: {},
+  workspacePending: {},
+  setWorkspacePending: (profileId, threadId, pending) => set((state) => {
+    const key = workspacePendingKey(profileId, threadId)
+    if (Boolean(state.workspacePending[key]) === pending) return state
+    const workspacePending = { ...state.workspacePending }
+    if (pending) workspacePending[key] = true
+    else delete workspacePending[key]
+    return { workspacePending }
+  }),
   composerDrafts: {},
   composerReferences: {},
 

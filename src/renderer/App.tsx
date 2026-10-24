@@ -16,6 +16,7 @@ import { ScheduledPage } from './components/ScheduledPage'
 import { ChannelsPage } from './components/ChannelsPage'
 import { NavigationRail } from './components/NavigationRail'
 import { ThreadSideCard } from './components/sideCard/ThreadSideCard'
+import { QuickActionEditorHost } from './components/QuickActionEditor'
 import { WorkspaceLoading } from './components/WorkspaceLoading'
 
 import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
@@ -559,6 +560,7 @@ export default function App() {
 
           </KeepMounted>
           <ThreadSideCard onReservedChange={setSideCardReserved} />
+          <QuickActionEditorHost />
         </aside>
 
 

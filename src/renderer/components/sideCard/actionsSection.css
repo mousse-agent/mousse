@@ -1,9 +1,13 @@
 /* Thread side card: quick actions. One quiet row per action. */
 
-.side-card-actions {
+.side-card-actions,
+.side-card-action-list {
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+
+.side-card-actions {
   margin: 0 -6px;
 }
 
@@ -32,7 +36,8 @@
   text-align: left;
 }
 
-.side-card-action-run:disabled {
+/* Blocked by another run: dimmed, still focusable. Clicks are ignored in the handler. */
+.side-card-action-run[data-blocked] {
   opacity: 0.6;
   cursor: default;
 }
@@ -62,12 +67,6 @@
   color: var(--success);
 }
 
-/* The running row keeps full strength while its siblings dim. */
-.side-card-action-run:disabled:has(.side-card-action-spin),
-.side-card-action-run:disabled:has(.side-card-action-done) {
-  opacity: 1;
-}
-
 .side-card-action-edit {
   display: inline-flex;
   align-items: center;
@@ -78,20 +77,23 @@
   margin-right: 2px;
   border-radius: 6px;
   color: var(--ui-faint);
-  opacity: 0;
+  opacity: 0.55;
+  transition: opacity 0.12s ease;
 }
 
+/* Muted at rest so it can be found; brighter once the row is in use. */
 .side-card-action-row:hover .side-card-action-edit,
-.side-card-action-edit:focus-visible {
+.side-card-action-row:focus-within .side-card-action-edit {
   opacity: 1;
+  color: var(--text-secondary);
 }
 
-.side-card-action-edit:hover:not(:disabled) {
+.side-card-action-edit:hover:not([aria-disabled='true']) {
   background: var(--ui-pressed);
   color: var(--text-primary);
 }
 
-.side-card-action-edit:disabled {
+.side-card-action-edit[aria-disabled='true'] {
   cursor: default;
 }
 
@@ -118,6 +120,11 @@
 .side-card-action-add:hover {
   background: var(--ui-hover);
   color: var(--text-primary);
+}
+
+/* The kind field fills the dialog's width like the other fields. */
+.quick-actions-field .ui-select {
+  width: 100%;
 }
 
 /* Delete sits at the far left of the editor's button row. */

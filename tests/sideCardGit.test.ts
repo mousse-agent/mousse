@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -12,7 +14,6 @@ import {
   formatCommitLine,
   gitCollapsedLabel,
   gitErrorMessage,
-  gitTarget,
   relativeTime,
   untrackedFileCount
 } from '../src/renderer/components/sideCard/gitSectionLogic'
@@ -396,45 +397,26 @@ describe('git section formatting', () => {
   })
 })
 
-describe('git section target', () => {
-  const projects = [
-    { id: 'p1', path: '/work/one' },
-    { id: 'p2', path: '/work/two' }
-  ]
-  const base = {
-    isNewChat: false,
-    draftProjectId: 'p1' as string | undefined,
-    threadProjectId: 'p1' as string | null,
-    projects,
-    location: { path: '/work/one', loading: false }
+describe('git section stylesheet', () => {
+  const css = readFileSync(resolve(__dirname, '../src/renderer/components/sideCard/gitSection.css'), 'utf8')
+  // Body of the rule that opens with exactly this selector.
+  const rule = (selector: string) => {
+    const start = css.indexOf(`${selector} {`)
+    return start < 0 ? '' : css.slice(start, css.indexOf('}', start))
   }
 
-  it('keeps the thread own project and folder once the chat has started', () => {
-    expect(gitTarget(base)).toEqual({ projectId: 'p1', path: '/work/one', pathPending: false })
-    // A stale draft for a started thread changes nothing.
-    expect(gitTarget({ ...base, draftProjectId: 'p2' })).toMatchObject({ projectId: 'p1', path: '/work/one' })
+  it('keeps the popover free of transitions, so focus can move in once it is positioned', () => {
+    expect(rule('.side-card-git-popover')).toMatch(/transition:\s*none/)
   })
 
-  it('follows the project picked in the composer on a new empty chat', () => {
-    expect(gitTarget({ ...base, isNewChat: true, draftProjectId: 'p2' })).toEqual({
-      projectId: 'p2',
-      path: '/work/two',
-      pathPending: false
-    })
+  it('marks the selected branch with a neutral fill, not an accent tint', () => {
+    const selected = rule(".side-card-git-option[aria-selected='true']")
+    expect(selected).toMatch(/background:\s*var\(--ui-pressed\)/)
+    expect(selected).not.toContain('accent')
   })
 
-  it('shows no project for a blank new chat and no folder for an unknown project', () => {
-    expect(gitTarget({ ...base, isNewChat: true, draftProjectId: undefined, threadProjectId: null })).toEqual({
-      projectId: null,
-      path: null,
-      pathPending: false
-    })
-    expect(gitTarget({ ...base, isNewChat: true, draftProjectId: 'gone' })).toMatchObject({ projectId: 'gone', path: null })
-  })
-
-  it('has no folder for a started thread without a project, and reports a pending lookup', () => {
-    expect(gitTarget({ ...base, threadProjectId: null })).toMatchObject({ projectId: null, path: null })
-    expect(gitTarget({ ...base, location: { path: null, loading: true } }).pathPending).toBe(true)
+  it('leaves the commit submit button neutral', () => {
+    expect(rule('.side-card-git-submit')).not.toMatch(/accent/)
   })
 })
 

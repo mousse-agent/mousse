@@ -137,43 +137,6 @@ export function gitCollapsedLabel(input: GitCollapseInput): string | null {
   return null
 }
 
-export interface GitTargetInput {
-  /** The thread is the new-chat composer state, where the workspace draft decides the project. */
-  isNewChat: boolean
-  /** Project of the composer workspace draft, falling back to the thread's own. */
-  draftProjectId: string | undefined
-  /** Project the selected thread belongs to. */
-  threadProjectId: string | null
-  projects: ReadonlyArray<{ id: string; path: string }>
-  /** Folder of the selected thread, as resolved for its own project. */
-  location: { path: string | null; loading: boolean }
-}
-
-export interface GitTarget {
-  projectId: string | null
-  path: string | null
-  pathPending: boolean
-}
-
-/**
- * The project and folder the section reads. An empty new chat follows the project
- * picked in the composer, since it only changes the draft; any other thread keeps
- * its own project and resolved folder.
- */
-export function gitTarget(input: GitTargetInput): GitTarget {
-  if (input.isNewChat) {
-    const projectId = input.draftProjectId ?? null
-    const path = input.projects.find((project) => project.id === projectId)?.path ?? null
-    return { projectId, path, pathPending: false }
-  }
-  return {
-    projectId: input.threadProjectId,
-    // A thread without a project has nothing of its own to show Git state for.
-    path: input.threadProjectId ? input.location.path : null,
-    pathPending: input.location.loading
-  }
-}
-
 /**
  * Attributes that make the branch search a combobox over the branch listbox. The
  * search only exists while the popover is open, so it is always expanded.

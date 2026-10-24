@@ -1,15 +1,21 @@
-import { useRef, useState } from 'react'
+import { useCallback, useId, useRef, useState } from 'react'
 import { X } from '../lib/icons'
 import { FloatingPortal } from '../lib/floatingLayer'
 import { validateQuickAction, type QuickAction, type QuickActionKind } from '../lib/quickActions'
-import type { QuickActionInput } from '../stores/quickActionsStore'
+import { useAppStore } from '../stores/appStore'
+import { useQuickActionsStore, type QuickActionInput } from '../stores/quickActionsStore'
+import { refocusActionsSection } from './sideCard/actionsRunLogic'
+import { Select } from './ui/Select'
 import { useDialogFocus } from './ui/Modal'
+import './sideCard/actionsSection.css'
 
 const KIND_OPTIONS: { value: QuickActionKind; label: string; hint: string }[] = [
   { value: 'send-current', label: 'Send in current chat', hint: 'Message to send' },
   { value: 'send-new-chat', label: 'Create new chat and send there', hint: 'Message to send' },
   { value: 'bash', label: 'Run bash command', hint: 'Shell command' }
 ]
+
+const KIND_SELECT_OPTIONS = KIND_OPTIONS.map(({ value, label }) => ({ value, label }))
 
 interface QuickActionEditorProps {
   /** The action to edit, or null to create one. */
@@ -18,6 +24,36 @@ interface QuickActionEditorProps {
   /** Offered only when editing. */
   onDelete?: () => void
   onClose: () => void
+}
+
+/**
+ * Renders the editor the quick actions store has open. Mounted once at the app root, so
+ * the draft survives the side card unmounting (for example when an action opens the app
+ * panel). It shows only for the profile it was opened in.
+ */
+export function QuickActionEditorHost() {
+  const editor = useQuickActionsStore((state) => state.editor)
+  const profileId = useAppStore((state) => state.profileId)
+  const handleClose = useCallback(() => {
+    useQuickActionsStore.getState().closeEditor()
+    // After the dialog has restored focus itself: if the opener is gone, land in the section.
+    requestAnimationFrame(() => refocusActionsSection(document))
+  }, [])
+  if (!editor || editor.profileId !== profileId) return null
+  const editing = editor.target.mode === 'edit' ? editor.target.action : null
+  return (
+    <QuickActionEditor
+      key={`${profileId}:${editing?.id ?? 'new'}`}
+      action={editing}
+      onSave={(input) => {
+        const store = useQuickActionsStore.getState()
+        if (editing) store.update(editing.id, input, profileId)
+        else store.add(input, profileId)
+      }}
+      onDelete={editing ? () => useQuickActionsStore.getState().remove(editing.id, profileId) : undefined}
+      onClose={handleClose}
+    />
+  )
 }
 
 /** Dialog for creating or editing a quick action. Mount it while open; it starts from `action` each time. */
@@ -40,6 +76,7 @@ export function QuickActionDialog({ action, onSave, onDelete, onClose }: QuickAc
   const [draftKind, setDraftKind] = useState<QuickActionKind>(action?.kind ?? 'send-current')
   const [draftPayload, setDraftPayload] = useState(action?.payload ?? '')
   const [editorError, setEditorError] = useState<string | null>(null)
+  const kindLabelId = useId()
 
   const editing = action !== null
   const draftHint = KIND_OPTIONS.find((option) => option.value === draftKind)?.hint ?? 'Content'
@@ -81,16 +118,16 @@ export function QuickActionDialog({ action, onSave, onDelete, onClose }: QuickAc
             onChange={(event) => setDraftLabel(event.target.value)}
           />
         </label>
-        <label className="quick-actions-field">
-          <span>Type</span>
-          <select value={draftKind} onChange={(event) => setDraftKind(event.target.value as QuickActionKind)}>
-            {KIND_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="quick-actions-field">
+          <span id={kindLabelId}>Type</span>
+          <Select
+            value={draftKind}
+            onChange={setDraftKind}
+            options={KIND_SELECT_OPTIONS}
+            ariaLabelledBy={kindLabelId}
+            className="quick-actions-kind"
+          />
+        </div>
         <label className="quick-actions-field">
           <span>{draftHint}</span>
           <textarea

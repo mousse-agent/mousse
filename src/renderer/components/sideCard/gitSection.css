@@ -188,6 +188,10 @@
   box-shadow: var(--ui-menu-drop);
   color: var(--text-primary);
   font-size: 12px;
+  /* Focus moves into the popover as soon as it is positioned, which needs it to be
+     visible by then. A transition on visibility, even a near-instant one under
+     reduced motion, would still read as hidden at that moment. */
+  transition: none;
 }
 
 .side-card-git-search {
@@ -241,7 +245,7 @@
 
 .side-card-git-option svg {
   flex: none;
-  color: var(--accent);
+  color: var(--text-secondary);
 }
 
 .side-card-git-option[data-active='true'] {
@@ -249,7 +253,7 @@
 }
 
 .side-card-git-option[aria-selected='true'] {
-  color: var(--accent);
+  background: var(--ui-pressed);
 }
 
 .side-card-git-empty {
@@ -304,14 +308,28 @@
   padding: 0 12px;
   border: 0;
   border-radius: var(--ui-row-radius);
-  background: var(--accent);
-  color: var(--ui-on-accent);
+  background: var(--ui-hover);
+  color: inherit;
   font: inherit;
   font-weight: 500;
   cursor: pointer;
 }
 
+.side-card-git-submit:hover:not(:disabled) {
+  background: var(--ui-pressed);
+}
+
 .side-card-git-submit:disabled {
   cursor: default;
   opacity: 0.45;
+}
+
+/* The global reduced-motion rule gives every element a near-instant transition on
+   all properties, and rows inherit the popover's visibility, so they would still
+   read as hidden when focus moves into them. */
+@media (prefers-reduced-motion: reduce) {
+  .side-card-git-popover *,
+  .side-card-device-menu * {
+    transition-property: none !important;
+  }
 }

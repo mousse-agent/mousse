@@ -227,13 +227,12 @@ describe('running actions', () => {
     expect(seen.at(-1)).toBeNull()
   })
 
-  it('ignores a slow action from a previous profile that finishes after the section was reset', async () => {
+  it('ignores a slow action that finishes after it was cancelled, and clears the feedback', async () => {
     const slow = deferred()
     const seen: Array<RunFeedback | null> = []
-    // One controller per profile, as the keyed section creates one per mount.
+    // One controller per profile; the store cancels the departing profile's.
     const forAlice = createRunController({ execute: () => slow.promise, onFeedback: (feedback) => seen.push(feedback) })
     const pending = forAlice.run(action('a'), 'alice')
-    // The profile switches: alice's section unmounts and bob's starts its own run.
     forAlice.cancel()
     const bobSeen: Array<RunFeedback | null> = []
     const forBob = createRunController({ execute: () => new Promise<void>(() => undefined), onFeedback: (feedback) => bobSeen.push(feedback) })
@@ -242,7 +241,7 @@ describe('running actions', () => {
     slow.resolve()
     await pending
     vi.advanceTimersByTime(ERROR_FEEDBACK_MS)
-    expect(seen).toEqual([{ id: 'a', phase: 'running' }])
+    expect(seen).toEqual([{ id: 'a', phase: 'running' }, null])
     expect(bobSeen).toEqual([{ id: 'b', phase: 'running' }])
   })
 
@@ -254,22 +253,39 @@ describe('running actions', () => {
     runs.cancel()
     slow.reject(new Error('late'))
     await pending
-    expect(seen).toEqual([{ id: 'a', phase: 'running' }])
+    expect(seen).toEqual([{ id: 'a', phase: 'running' }, null])
   })
 
-  it('lets only the newest run report when two overlap', async () => {
+  it('does not start a second run while one is still in flight', async () => {
     const first = deferred()
-    const second = deferred()
     const seen: Array<RunFeedback | null> = []
-    const executions = [first.promise, second.promise]
-    const runs = createRunController({ execute: () => executions.shift()!, onFeedback: (feedback) => seen.push(feedback) })
+    const execute = vi.fn(() => first.promise)
+    const runs = createRunController({ execute, onFeedback: (feedback) => seen.push(feedback) })
     const older = runs.run(action('a'), 'alice')
-    const newer = runs.run(action('b'), 'alice')
-    second.resolve()
-    await newer
+    expect(runs.isRunning()).toBe(true)
+    await runs.run(action('a'), 'alice')
+    await runs.run(action('b'), 'alice')
+    expect(execute).toHaveBeenCalledTimes(1)
     first.resolve()
     await older
-    expect(seen).toEqual([{ id: 'a', phase: 'running' }, { id: 'b', phase: 'running' }, { id: 'b', phase: 'done' }])
+    expect(seen).toEqual([{ id: 'a', phase: 'running' }, { id: 'a', phase: 'done' }])
+    expect(runs.isRunning()).toBe(false)
+    await runs.run(action('b'), 'alice')
+    expect(execute).toHaveBeenCalledTimes(2)
+  })
+
+  it('stays blocked after cancel until the action itself settles', async () => {
+    const slow = deferred()
+    const execute = vi.fn(() => slow.promise)
+    const runs = createRunController({ execute, onFeedback: () => undefined })
+    const pending = runs.run(action('a'), 'alice')
+    runs.cancel()
+    expect(runs.isRunning()).toBe(true)
+    await runs.run(action('a'), 'alice')
+    expect(execute).toHaveBeenCalledTimes(1)
+    slow.resolve()
+    await pending
+    expect(runs.isRunning()).toBe(false)
   })
 
   it('clears the pending reset timer when cancelled', async () => {
@@ -277,8 +293,10 @@ describe('running actions', () => {
     const runs = createRunController({ execute: async () => undefined, onFeedback: (feedback) => seen.push(feedback) })
     await runs.run(action('a'), 'alice')
     runs.cancel()
+    const count = seen.length
     vi.advanceTimersByTime(ERROR_FEEDBACK_MS)
-    expect(seen.at(-1)).toEqual({ id: 'a', phase: 'done' })
+    expect(seen).toHaveLength(count)
+    expect(seen.at(-1)).toBeNull()
   })
 })
 

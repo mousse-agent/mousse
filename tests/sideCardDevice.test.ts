@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -205,5 +207,14 @@ describe('DeviceSection rendering', () => {
       turnStates: { t1: { threadId: 't1', phase: 'thinking' } as never }
     })
     expect(render()).not.toContain('<button')
+  })
+})
+
+describe('device menu stylesheet', () => {
+  it('keeps the menu free of transitions, so focus can move in once it is positioned', () => {
+    const css = readFileSync(resolve(__dirname, '../src/renderer/components/sideCard/deviceSection.css'), 'utf8')
+    const start = css.indexOf('.side-card-device-menu {')
+    expect(start).toBeGreaterThan(-1)
+    expect(css.slice(start, css.indexOf('}', start))).toMatch(/transition:\s*none/)
   })
 })

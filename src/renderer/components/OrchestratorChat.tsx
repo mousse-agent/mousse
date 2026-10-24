@@ -34,7 +34,7 @@ import {
 import '../chat/components/agent-elements/agent-ui.css'
 import { prepareComposerThread } from '../lib/createComposerThread'
 import { composerThreadActions } from '../lib/composerThreadActions'
-import { composerWorkspaceFor, isNewEmptyThread } from '../lib/newThread'
+import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending } from '../lib/newThread'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
@@ -98,7 +98,9 @@ export function OrchestratorChat() {
   const workspaceDraft = useAppStore((s) => s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'])
   const setComposerWorkspaceDraft = useAppStore((s) => s.setComposerWorkspaceDraft)
   const workspace = composerWorkspaceFor(workspaceDraft, activeThread)
-  const [workspacePending, setWorkspacePending] = useState(false)
+  // Shared with quick actions and the side card, which also prepare or edit the new chat's workspace.
+  const workspacePending = useAppStore(isWorkspacePending)
+  const workspaceLocked = useAppStore(isComposerWorkspaceLocked)
   const newChat = isNewEmptyThread(activeThreadId, activeThread, messages.length)
   const browserElements = useAppStore(
     (s) =>
@@ -668,11 +670,20 @@ export function OrchestratorChat() {
     // create two threads or submit the same first message twice.
     if (blankSendPending.current) return
     const startingBlank = newChat
+    let targetThreadId = activeThreadId
+    // A quick action may already be preparing this new chat; a second send would create another thread.
+    if (startingBlank && isWorkspacePending(useAppStore.getState())) return
     if (startingBlank) {
       blankSendPending.current = true
-      setWorkspacePending(true)
+      useAppStore.getState().setWorkspacePending(profileId, activeThreadId, true)
     }
-    let targetThreadId = activeThreadId
+    const releaseWorkspacePending = () => {
+      if (!startingBlank) return
+      blankSendPending.current = false
+      const store = useAppStore.getState()
+      store.setWorkspacePending(profileId, activeThreadId, false)
+      store.setWorkspacePending(profileId, targetThreadId, false)
+    }
     const stillVisible = () => useAppStore.getState().profileId === profileId && useAppStore.getState().activeThreadId === targetThreadId
     try {
     const resolutionProfile = profileId
@@ -747,6 +758,7 @@ export function OrchestratorChat() {
           mediaByThreadRef.current[composerMediaKey(activeThreadId)] = { files: [], voice: [] }
           activeMediaKeyRef.current = thread.id
           targetThreadId = thread.id
+          store.setWorkspacePending(profileId, thread.id, true)
           store.switchToThread(thread.id)
         }
       })
@@ -772,10 +784,7 @@ export function OrchestratorChat() {
     clearComposer(false)
     // Thread preparation is complete. The send promise lasts for the entire
     // first turn, so it must not keep typing, queueing, or Stop disabled.
-    if (startingBlank) {
-      blankSendPending.current = false
-      setWorkspacePending(false)
-    }
+    releaseWorkspacePending()
     const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId)
     if (sent === false && stillVisible()) {
       setInput((current) => current === text || !current ? input : current)
@@ -793,10 +802,7 @@ export function OrchestratorChat() {
         setLoading(false)
       }
     } finally {
-      if (startingBlank) {
-        blankSendPending.current = false
-        setWorkspacePending(false)
-      }
+      releaseWorkspacePending()
     }
   }
 
@@ -962,7 +968,7 @@ export function OrchestratorChat() {
                 key={`${profileId}:${activeThreadId ?? '__blank__'}`}
                 projects={projects}
                 workspace={workspace}
-                disabled={workspacePending || loading || turnActive}
+                disabled={workspaceLocked}
                 onChange={(next) => setComposerWorkspaceDraft(activeThreadId, next)}
                 onOpenProject={async () => {
                   const project = await window.mousse.projects.open()

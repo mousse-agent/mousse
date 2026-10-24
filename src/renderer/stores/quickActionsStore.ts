@@ -7,6 +7,8 @@ import {
   type QuickAction,
   type QuickActionKind
 } from '../lib/quickActions'
+import { executeQuickAction } from '../lib/executeQuickAction'
+import { createRunController, type RunController, type RunFeedback } from '../components/sideCard/actionsRunLogic'
 import { useAppStore } from './appStore'
 
 export interface QuickActionInput {
@@ -15,10 +17,25 @@ export interface QuickActionInput {
   payload: string
 }
 
+/** What the editor dialog is open for: a new action, or the action being edited. */
+export type QuickActionEditorTarget = { mode: 'add' } | { mode: 'edit'; action: QuickAction }
+
 interface QuickActionsState {
   /** Profile the list was loaded for; null until the first load. */
   profileId: string | null
   actions: QuickAction[]
+  /**
+   * Run feedback per profile (running, done or error for the action last run). Held here
+   * rather than in the card so it survives the card unmounting, for example when running
+   * an action opens the app panel.
+   */
+  runs: Record<string, RunFeedback>
+  /** Run an action for the active profile; does nothing while one of that profile's actions is running. */
+  runAction: (action: QuickAction, profileId: string) => Promise<void>
+  /** The open editor, kept here so it survives the card unmounting. Closes on a profile switch. */
+  editor: { profileId: string; target: QuickActionEditorTarget } | null
+  openEditor: (target: QuickActionEditorTarget, profileId: string) => void
+  closeEditor: () => void
   /** Load the active profile's list when it is not the one already held. */
   syncProfile: () => void
   /**
@@ -50,13 +67,47 @@ export const useQuickActionsStore = create<QuickActionsState>((set, get) => {
     commit(change)
   }
 
+  // One controller per profile: a run belongs to the profile it started in.
+  const controllers = new Map<string, RunController>()
+  const controllerFor = (profileId: string): RunController => {
+    let controller = controllers.get(profileId)
+    if (!controller) {
+      controller = createRunController({
+        execute: executeQuickAction,
+        onFeedback: (feedback) =>
+          set((state) => {
+            const runs = { ...state.runs }
+            if (feedback) runs[profileId] = feedback
+            else delete runs[profileId]
+            return { runs }
+          })
+      })
+      controllers.set(profileId, controller)
+    }
+    return controller
+  }
+
   return {
     profileId: null,
     actions: [],
+    runs: {},
+    editor: null,
+    runAction: async (action, profileId) => {
+      if (useAppStore.getState().profileId !== profileId) return
+      await controllerFor(profileId).run(action, profileId)
+    },
+    openEditor: (target, profileId) => {
+      if (useAppStore.getState().profileId === profileId) set({ editor: { profileId, target } })
+    },
+    closeEditor: () => set({ editor: null }),
     syncProfile: () => {
       const profileId = useAppStore.getState().profileId
       if (!profileId || get().profileId === profileId) return
-      set({ profileId, actions: loadQuickActions(profileId) })
+      const previous = get().profileId
+      // The departing profile's open editor and run feedback do not carry over; a run
+      // that finishes later reports nothing.
+      if (previous) controllers.get(previous)?.cancel()
+      set({ profileId, actions: loadQuickActions(profileId), editor: null })
     },
     add: (input, profileId) => commitFor(profileId, (current) => [...current, createQuickAction(input)]),
     update: (id, input, profileId) =>
@@ -112,6 +163,11 @@ export function startQuickActionsSync(): () => void {
 }
 
 const NO_ACTIONS: QuickAction[] = []
+
+/** Feedback for the action last run in a profile; null once it has cleared. */
+export function useRunFeedback(profileId: string): RunFeedback | null {
+  return useQuickActionsStore((state) => state.runs[profileId] ?? null)
+}
 
 /** The active profile's quick actions; empty for the instant a profile switch has not loaded yet. */
 export function useQuickActions(): { profileId: string; actions: QuickAction[] } {

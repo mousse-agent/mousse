@@ -4,7 +4,12 @@ import { ActionsSection } from './ActionsSection'
 import { DeviceSection } from './DeviceSection'
 import { GitSection } from './GitSection'
 import { LineageSection } from './LineageSection'
-import { sideCardFitsThreadWidth, useSideCardVisible } from './sideCardLogic'
+import {
+  sideCardFitsThreadWidth,
+  threadsSidebarReservedWidth,
+  threadViewWidth,
+  useSideCardVisible
+} from './sideCardLogic'
 import { useSideCardPresence } from './useSideCardPresence'
 import './sideCard.css'
 
@@ -37,9 +42,9 @@ export function SideCardSections({ threadId, projectId }: SideCardSectionsProps)
 
 /**
  * Floating card on the right of the thread view. Render it inside the thread
- * pane: its layer fills that pane and measures it to decide whether there is
- * room. Opening the app panel fades the card out in place instead of letting
- * it jump into the narrower pane.
+ * pane, within the workspace: its layer fills that pane, and the workspace is
+ * measured to decide whether there is room. Opening the app panel fades the card
+ * out in place instead of letting it jump into the narrower pane.
  */
 export function ThreadSideCard({ onReservedChange }: ThreadSideCardProps) {
   const visible = useSideCardVisible()
@@ -49,33 +54,36 @@ export function ThreadSideCard({ onReservedChange }: ThreadSideCardProps) {
   const projectId = useAppStore((s) => s.threads.find((thread) => thread.id === s.activeThreadId)?.projectId ?? null)
 
   const layerRef = useRef<HTMLDivElement>(null)
-  // Only used to pin the layer while the app panel is open; whether the width
-  // is enough lives in the store so the title-bar button can share it.
-  const [threadWidth, setThreadWidth] = useState<number | null>(null)
-  // While the app panel is open the thread pane is narrow and says nothing about
-  // the full-width layout the card belongs to, so keep the last full-width reading.
-  const panelOpenRef = useRef(mainAreaOpen)
-  panelOpenRef.current = mainAreaOpen
+  // The thread view's width with the app panel closed: the whole workspace less
+  // the threads sidebar that stays beside it. Opening the panel narrows the aside
+  // the card sits in, so the aside says nothing about whether the card fits; the
+  // workspace holds still and keeps reporting while the panel is open.
+  const threadsReserved = useAppStore((s) => threadsSidebarReservedWidth(s.threadsSidebarOpen, s.threadsSidebarWidth))
+  const [workspaceWidth, setWorkspaceWidth] = useState<number | null>(null)
+  const threadWidth = workspaceWidth === null ? null : threadViewWidth(workspaceWidth, threadsReserved)
 
   // The first reading lands before the first paint, so a wide window shows the
   // card at launch without waiting for the observer and a narrow one never flashes it.
   useLayoutEffect(() => {
-    const layer = layerRef.current
-    if (!layer) return
+    const workspace = layerRef.current?.closest<HTMLElement>('.app-workspace')
+    if (!workspace) return
+    // Zero means the workspace is hidden (Scheduled, Channels), not narrow.
     const measure = (width: number) => {
-      // Zero means the pane is hidden (Chats, Scheduled, Channels), not narrow.
-      if (width <= 0 || panelOpenRef.current) return
-      setThreadWidth(width)
-      setSideCardFits(sideCardFitsThreadWidth(width))
+      if (width > 0) setWorkspaceWidth(width)
     }
-    measure(layer.getBoundingClientRect().width)
+    measure(workspace.getBoundingClientRect().width)
     if (typeof ResizeObserver === 'undefined') return
     const observer = new ResizeObserver((entries) => {
       measure(entries[entries.length - 1]?.contentRect.width ?? 0)
     })
-    observer.observe(layer)
+    observer.observe(workspace)
     return () => observer.disconnect()
-  }, [setSideCardFits])
+  }, [])
+
+  // Whether the width is enough lives in the store so the title-bar button can share it.
+  useLayoutEffect(() => {
+    if (threadWidth !== null) setSideCardFits(sideCardFitsThreadWidth(threadWidth))
+  }, [threadWidth, setSideCardFits])
 
   // The launch cascade (measure, then present) happens within the first frame
   // and skips the fade-in; everything after it fades.
@@ -91,7 +99,7 @@ export function ThreadSideCard({ onReservedChange }: ThreadSideCardProps) {
     onReservedChange?.(reserved)
   }, [onReservedChange, reserved])
 
-  // Pin the layer to the width it had so the fading card stays where it was.
+  // Pin the layer to the full thread width so the fading card stays where it was.
   // The aside lifts above the incoming app panel while a card is mounted there
   // (see the .sidebar rule in sideCard.css), so the pinned card is not painted under it.
   const pinned = mainAreaOpen && threadWidth !== null

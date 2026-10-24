@@ -62,6 +62,9 @@
   color: var(--text-primary);
   box-shadow: var(--ui-menu-drop);
   font-size: 13px;
+  /* Focus moves into the menu as soon as it is positioned, which needs it to be
+     visible by then; see the Git popover. */
+  transition: none;
 }
 
 .side-card-device-group-label {
@@ -101,7 +104,7 @@
 }
 
 .side-card-device-item[aria-checked='true'] {
-  background: var(--ui-selected);
+  background: var(--ui-pressed);
 }
 
 .side-card-device-item[aria-disabled='true'] {
@@ -125,5 +128,5 @@
 .side-card-device-check {
   flex-shrink: 0;
   margin-left: auto;
-  color: var(--accent);
+  color: var(--text-secondary);
 }

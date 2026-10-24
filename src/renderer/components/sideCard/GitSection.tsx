@@ -13,8 +13,6 @@ import { FloatingPortal, useFloatingPosition, type FloatingPlacement } from '../
 import { openSurface } from '../../lib/surfaces'
 import { useOutsideDismiss } from '../../hooks/useOutsideDismiss'
 import { useActiveProjectLocation } from '../../hooks/useActiveProjectPath'
-import { composerWorkspaceFor, isNewEmptyThread } from '../../lib/newThread'
-import { useAppStore } from '../../stores/appStore'
 import {
   checkoutGitBranch,
   commitGitChanges,
@@ -32,7 +30,6 @@ import {
   formatCommitLine,
   gitCollapsedLabel,
   gitErrorMessage,
-  gitTarget,
   untrackedFileCount
 } from './gitSectionLogic'
 import './gitSection.css'
@@ -413,29 +410,16 @@ export function GitSectionView({ threadId, projectId, path, git, collapsedLabel,
   )
 }
 
-/** Branch, latest commit, commit button and change counts for the selected thread's folder. */
-export function GitSection({ threadId, projectId: threadProjectId }: SideCardSectionContext) {
-  const location = useActiveProjectLocation()
-  const projects = useAppStore((s) => s.projects)
-  const thread = useAppStore((s) => s.threads.find((entry) => entry.id === s.activeThreadId))
-  const draft = useAppStore((s) => s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'])
-  const isNewChat = useAppStore((s) => isNewEmptyThread(
-    s.activeThreadId,
-    s.threads.find((entry) => entry.id === s.activeThreadId),
-    s.messages.length
-  ))
-  // A new chat's project is picked in the composer, which only changes its workspace draft.
-  const { projectId, path, pathPending } = gitTarget({
-    isNewChat,
-    draftProjectId: composerWorkspaceFor(draft, thread).projectId,
-    threadProjectId,
-    projects,
-    location
-  })
+/** Branch, latest commit, commit button and change counts for the folder the thread works on. */
+export function GitSection({ threadId }: SideCardSectionContext) {
+  // The same project the Git panel opens on, including a new chat's composer pick.
+  const { projectId, path: projectPath, loading } = useActiveProjectLocation()
+  // A project-less thread has no folder of its own to show Git state for.
+  const path = projectId ? projectPath : null
   const git = useGitStatus(path, projectId)
   const collapsedLabel = gitCollapsedLabel({
     hasProject: projectId !== null,
-    pathPending,
+    pathPending: loading,
     hasPath: path !== null,
     loaded: git.loaded,
     status: git.status

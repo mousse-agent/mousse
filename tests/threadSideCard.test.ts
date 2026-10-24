@@ -5,10 +5,11 @@ import { SideCardSections, ThreadSideCard } from '../src/renderer/components/sid
 import {
   SIDE_CARD_MIN_THREAD_WIDTH,
   deriveSideCardState,
-  isSideCardVisible,
   nextSideCardToggleState,
   sideCardButtonTitle,
   sideCardFitsThreadWidth,
+  threadViewWidth,
+  threadsSidebarReservedWidth,
   type SideCardVisibilityInput
 } from '../src/renderer/components/sideCard/sideCardLogic'
 import { useAppStore } from '../src/renderer/stores/appStore'
@@ -24,9 +25,11 @@ const open: SideCardVisibilityInput = {
   sideCardFits: true
 }
 
+const visible = (input: SideCardVisibilityInput) => deriveSideCardState(input).visible
+
 describe('side card visibility', () => {
   it('shows over a full-width thread view when switched on', () => {
-    expect(isSideCardVisible(open)).toBe(true)
+    expect(visible(open)).toBe(true)
   })
 
   it.each<[string, Partial<SideCardVisibilityInput>]>([
@@ -37,9 +40,10 @@ describe('side card visibility', () => {
     ['Scheduled is open', { scheduledOpen: true }],
     ['Channels is open', { channelsOpen: true }],
     ['the Chats view is showing', { sidebarMode: 'chats' }],
-    ['the thread area is too narrow', { sideCardFits: false }]
+    ['the thread area is too narrow', { sideCardFits: false }],
+    ['the width is not measured yet', { sideCardFits: null }]
   ])('hides when %s', (_name, patch) => {
-    expect(isSideCardVisible({ ...open, ...patch })).toBe(false)
+    expect(visible({ ...open, ...patch })).toBe(false)
   })
 
   it('needs a thread area of at least the minimum width', () => {
@@ -47,9 +51,38 @@ describe('side card visibility', () => {
     expect(sideCardFitsThreadWidth(SIDE_CARD_MIN_THREAD_WIDTH - 1)).toBe(false)
   })
 
-  it('is on at launch, with the width unmeasured and so not fitting', () => {
+  it('is on at launch, with the width unmeasured', () => {
     expect(useAppStore.getInitialState().sideCardOn).toBe(true)
-    expect(useAppStore.getInitialState().sideCardFits).toBe(false)
+    expect(useAppStore.getInitialState().sideCardFits).toBeNull()
+  })
+})
+
+describe('thread view width', () => {
+  it('is the workspace less the open threads sidebar and its resizer', () => {
+    const reserved = threadsSidebarReservedWidth(true, 260)
+    expect(reserved).toBe(261)
+    expect(threadViewWidth(1400, reserved)).toBe(1139)
+  })
+
+  it('takes the whole workspace when the threads sidebar is closed', () => {
+    expect(threadsSidebarReservedWidth(false, 260)).toBe(0)
+    expect(threadViewWidth(1200, 0)).toBe(1200)
+  })
+
+  it('decides fit from the full width, whatever the app panel does to the aside', () => {
+    // A 1400px workspace with the sidebar open leaves a thread view that fits,
+    // even though opening the app panel would narrow the aside well below the minimum.
+    const width = threadViewWidth(1400, threadsSidebarReservedWidth(true, 260))
+    expect(width).not.toBeNull()
+    expect(sideCardFitsThreadWidth(width as number)).toBe(true)
+    // The same window with a wider sidebar no longer fits.
+    expect(sideCardFitsThreadWidth(threadViewWidth(1200, threadsSidebarReservedWidth(true, 260)) as number)).toBe(false)
+  })
+
+  it('says nothing for a hidden workspace or when nothing is left beside the sidebar', () => {
+    expect(threadViewWidth(0, 0)).toBeNull()
+    expect(threadViewWidth(0, 261)).toBeNull()
+    expect(threadViewWidth(200, 261)).toBeNull()
   })
 })
 
@@ -84,15 +117,17 @@ describe('title-bar button availability', () => {
     expect(deriveSideCardState({ ...open, settingsOpen: true, sideCardFits: false }).unavailable).toBe('view')
   })
 
-  it('agrees with the visibility the card uses', () => {
-    for (const sideCardFits of [true, false]) {
-      for (const sideCardOn of [true, false]) {
-        for (const mainAreaOpen of [true, false]) {
-          const input = { ...open, sideCardFits, sideCardOn, mainAreaOpen }
-          expect(isSideCardVisible(input)).toBe(deriveSideCardState(input).visible)
-        }
-      }
+  it('stays enabled until a measurement comes up short', () => {
+    // At launch the width is unmeasured, with the app panel open or not.
+    for (const patch of [{}, { mainAreaOpen: true }, { sideCardOn: false }]) {
+      expect(deriveSideCardState({ ...open, ...patch, sideCardFits: null })).toEqual({ visible: false, unavailable: null })
     }
+    // A wide measurement taken with the app panel open keeps the button usable.
+    expect(deriveSideCardState({ ...open, mainAreaOpen: true, sideCardFits: true }).unavailable).toBeNull()
+  })
+
+  it('still names the view first while unmeasured', () => {
+    expect(deriveSideCardState({ ...open, settingsOpen: true, sideCardFits: null }).unavailable).toBe('view')
   })
 
   it('explains a disabled button in its tooltip and otherwise just names it', () => {
@@ -126,7 +161,7 @@ describe('thread side card rendering', () => {
   }
   const reset = {
     sideCardOn: true,
-    sideCardFits: false,
+    sideCardFits: null as boolean | null,
     mainAreaOpen: false,
     settingsOpen: false,
     sidebarMode: 'projects' as const,
@@ -151,6 +186,8 @@ describe('thread side card rendering', () => {
 
   it('renders no card until the width is measured, so a narrow window never flashes it', () => {
     seed({ activeThreadId: 'thread-1' })
+    expect(render()).not.toContain('thread-side-card"')
+    seed({ sideCardFits: false })
     expect(render()).not.toContain('thread-side-card"')
   })
 
