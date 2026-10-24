@@ -65,7 +65,7 @@ export interface SessionRpcPort {
     message: Extract<WireMessage, { t: 'rpc.request' }>,
     peer: SyncSession['peer'],
     signal: AbortSignal,
-    progress: (data: unknown) => void
+    progress: (data: unknown) => void | Promise<void>
   ): Promise<unknown>
   result(id: RpcId, peer: SyncSession['peer']): Promise<unknown>
   cancel(id: RpcId, peer: SyncSession['peer']): Promise<void>
@@ -1640,9 +1640,11 @@ export class NetSyncSession implements SyncSession {
     const timer = this.clock.setTimeout(() => controller.abort(), h.deadlineMs)
     try {
       if (!this.options.rpc) throw new NetError('forbidden')
-      const result = await this.options.rpc.request(h, this.peer, controller.signal, (data) => {
-        void this.send({ t: 'rpc.progress', id: h.id, data }).catch((error) => this.fail(error))
-      })
+      // Progress rides the control lane, whose queue is small: a producer that does not wait for
+      // each send is rejected. The handler gets the rejection and stops; the session stays up.
+      const result = await this.options.rpc.request(h, this.peer, controller.signal, (data) =>
+        this.send({ t: 'rpc.progress', id: h.id, data })
+      )
       await this.send(resultMessage(h.id, result))
     } catch (error) {
       await this.send({ t: 'rpc.result', id: h.id, error: wireError(error) })

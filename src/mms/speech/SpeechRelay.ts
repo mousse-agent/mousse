@@ -36,7 +36,7 @@ interface Job {
   host?: string
   /** Windows already told about it; each hears of a job once. */
   announced: Set<string>
-  progress(data: unknown): void
+  progress(data: unknown): void | Promise<void>
   settle(value: unknown): void
   takeTimer?: { cancel(): void }
 }
@@ -61,7 +61,8 @@ export interface SpeechWaitResult {
 
 export interface SpeechSubmitOptions {
   signal: AbortSignal
-  progress(data: unknown): void
+  /** Sends interim data to the phone; rejects when it could not be sent. */
+  progress(data: unknown): void | Promise<void>
   audio?: Buffer
 }
 
@@ -170,12 +171,21 @@ export class SpeechRelay {
     }
   }
 
-  /** Forwards progress to the phone; `active: false` tells the window to stop. */
-  progress(connection: string, id: string, data: unknown): { active: boolean } {
+  /**
+   * Forwards progress to the phone and answers once it is sent, so the window sends the next piece
+   * at the pace of the link. `active: false` tells the window to stop; that includes a piece the
+   * phone link could not take, which also ends the request.
+   */
+  async progress(connection: string, id: string, data: unknown): Promise<{ active: boolean }> {
     const job = this.jobs.get(id)
     if (!job || job.host !== connection) return { active: false }
-    job.progress(data)
-    return { active: true }
+    try {
+      await job.progress(data)
+    } catch {
+      job.settle(refusal('failed', 'The phone could not receive the result.'))
+      return { active: false }
+    }
+    return { active: this.jobs.get(id) === job }
   }
 
   finish(connection: string, id: string, result: unknown): void {

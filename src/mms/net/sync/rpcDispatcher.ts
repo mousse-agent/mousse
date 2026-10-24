@@ -80,7 +80,7 @@ export class DurableRpcDispatcher implements RpcDispatcher, SessionRpcPort {
     message: Parameters<SessionRpcPort['request']>[0],
     peer: SyncSession['peer'],
     signal: AbortSignal,
-    progress: (data: unknown) => void
+    progress: (data: unknown) => void | Promise<void>
   ): Promise<unknown> {
     return this.dispatch(message.method, message.params, message.idem, {
       id: message.id,

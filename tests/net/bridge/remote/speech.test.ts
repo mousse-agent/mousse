@@ -49,7 +49,11 @@ const phone = { node: newId('node') as NodeId, user: newId('user') as UserId }
 const otherPhone = { node: newId('node') as NodeId, user: phone.user }
 
 function context(
-  options: { caller?: typeof phone; signal?: AbortSignal; progress?: (data: unknown) => void } = {}
+  options: {
+    caller?: typeof phone
+    signal?: AbortSignal
+    progress?: (data: unknown) => void | Promise<void>
+  } = {}
 ): RpcContext {
   return {
     id: newId('rpc'),
@@ -166,21 +170,65 @@ describe('phone speech methods', () => {
       relay,
       'speech.speak',
       { text: 'Hello' },
-      context({ progress: (data) => progress.push(data) })
+      context({ progress: (data) => void progress.push(data) })
     )
     const { jobs } = await waiting
     expect(jobs).toEqual([{ id: expect.stringMatching(/^sj_/), op: 'speak', kind: 'readAloud' }])
     const job = relay.take('window-a', jobs[0].id)
     expect(job).toMatchObject({ op: 'speak', kind: 'readAloud', params: { text: 'Hello' } })
     expect(relay.take('window-b', jobs[0].id)).toBeNull()
-    expect(relay.progress('window-b', jobs[0].id, { type: 'audio' })).toEqual({ active: false })
-    expect(relay.progress('window-a', jobs[0].id, { type: 'audio', clip: 0 })).toEqual({
+    expect(await relay.progress('window-b', jobs[0].id, { type: 'audio' })).toEqual({
+      active: false
+    })
+    expect(await relay.progress('window-a', jobs[0].id, { type: 'audio', clip: 0 })).toEqual({
       active: true
     })
     relay.finish('window-a', jobs[0].id, { ok: true, clips: 1 })
     expect(await answer).toEqual({ ok: true, clips: 1 })
     expect(progress).toEqual([{ type: 'audio', clip: 0 }])
-    expect(relay.progress('window-a', jobs[0].id, {})).toEqual({ active: false })
+    expect(await relay.progress('window-a', jobs[0].id, {})).toEqual({ active: false })
+  })
+
+  it('answers progress only once the phone link took it, so the window paces to the link', async () => {
+    const relay = new SpeechRelay(new ManualClock())
+    const waiting = nextJobs(relay)
+    let release: () => void = () => undefined
+    const answer = call(
+      relay,
+      'speech.speak',
+      { text: 'Hello' },
+      context({ progress: () => new Promise<void>((resolve) => (release = resolve)) })
+    )
+    const { jobs } = await waiting
+    relay.take('window-a', jobs[0].id)
+    let answered = false
+    const sent = relay.progress('window-a', jobs[0].id, { type: 'audio' }).then((value) => {
+      answered = true
+      return value
+    })
+    await flush()
+    expect(answered).toBe(false)
+    release()
+    expect(await sent).toEqual({ active: true })
+    relay.finish('window-a', jobs[0].id, { ok: true, clips: 1 })
+    await answer
+  })
+
+  it('ends the request and stops the window when the phone link refuses a piece', async () => {
+    const relay = new SpeechRelay(new ManualClock())
+    const waiting = nextJobs(relay)
+    const answer = call(
+      relay,
+      'speech.speak',
+      { text: 'Hello' },
+      context({ progress: () => Promise.reject(new Error('rate_limited')) })
+    )
+    const { jobs } = await waiting
+    relay.take('window-a', jobs[0].id)
+    expect(await relay.progress('window-a', jobs[0].id, { type: 'audio' })).toEqual({
+      active: false
+    })
+    expect(await answer).toMatchObject({ ok: false, code: 'failed' })
   })
 
   it('tells each window about a job once', async () => {
@@ -222,7 +270,7 @@ describe('phone speech methods', () => {
     abort.abort()
     expect(await answer).toMatchObject({ ok: false, code: 'failed' })
     expect(await nextWait).toEqual({ jobs: [], cancelled: [jobs[0].id] })
-    expect(relay.progress('window-a', jobs[0].id, {})).toEqual({ active: false })
+    expect(await relay.progress('window-a', jobs[0].id, {})).toEqual({ active: false })
   })
 
   it('fails the jobs of a window that closes', async () => {
@@ -342,6 +390,54 @@ describe('phone recordings', () => {
     relay.take('window-a', jobs[0].id)
     relay.finish('window-a', jobs[0].id, { ok: true, text: 'hello' })
     expect(await answer).toEqual({ ok: true, text: 'hello' })
+    expect(relay.recording(phone.node, 'rec_12345678', 1)).toMatchObject({ ok: false })
+  })
+
+  it('keeps the recording when no window is open, so the phone can try again', async () => {
+    const relay = new SpeechRelay(new ManualClock())
+    await call(relay, 'speech.upload', { upload: 'rec_12345678', index: 0, data: piece([1, 2, 3]) })
+    const params = { upload: 'rec_12345678', parts: 1, mimeType: 'audio/webm' }
+    expect(await call(relay, 'speech.transcribe', params)).toMatchObject({
+      ok: false,
+      code: 'no_host'
+    })
+    const waiting = nextJobs(relay)
+    const answer = call(relay, 'speech.transcribe', params)
+    const { jobs } = await waiting
+    relay.take('window-a', jobs[0].id)
+    relay.finish('window-a', jobs[0].id, { ok: true, text: 'hello' })
+    expect(await answer).toEqual({ ok: true, text: 'hello' })
+  })
+
+  it('keeps the recording when the computer is busy', async () => {
+    const relay = new SpeechRelay(new ManualClock())
+    await call(relay, 'speech.upload', { upload: 'rec_12345678', index: 0, data: piece([1, 2, 3]) })
+    void nextJobs(relay)
+    for (let index = 0; index < PHONE_SPEECH_MAX_JOBS; index += 1)
+      void call(relay, 'speech.options', { kind: 'dictation' })
+    expect(
+      await call(relay, 'speech.transcribe', {
+        upload: 'rec_12345678',
+        parts: 1,
+        mimeType: 'audio/webm'
+      })
+    ).toMatchObject({ ok: false, code: 'busy' })
+    expect(relay.recording(phone.node, 'rec_12345678', 1)).toEqual(Buffer.from([1, 2, 3]))
+  })
+
+  it('drops the recording once the window ran it, even when the run failed', async () => {
+    const relay = new SpeechRelay(new ManualClock())
+    await call(relay, 'speech.upload', { upload: 'rec_12345678', index: 0, data: piece([1, 2, 3]) })
+    const waiting = nextJobs(relay)
+    const answer = call(relay, 'speech.transcribe', {
+      upload: 'rec_12345678',
+      parts: 1,
+      mimeType: 'audio/webm'
+    })
+    const { jobs } = await waiting
+    relay.take('window-a', jobs[0].id)
+    relay.finish('window-a', jobs[0].id, { ok: false, code: 'failed', error: 'Decoding failed' })
+    expect(await answer).toMatchObject({ code: 'failed' })
     expect(relay.recording(phone.node, 'rec_12345678', 1)).toMatchObject({ ok: false })
   })
 })
