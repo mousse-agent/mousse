@@ -41,6 +41,33 @@ function vendorHealth(cli: CliProviderDefinition, status: VendorStatus, connecte
   }
 }
 
+/**
+ * Mousse runs Google's own ACP agent with a private sign-in, so a separately installed `agy` CLI
+ * and its sign-in never count. Install and sign-in are separate stages.
+ */
+function antigravityHealth(input: { config?: CliProviderConfig; configured: boolean }): HealthState {
+  const { config, configured } = input
+  if (!config && !configured) return { health: 'unknown', label: 'Checking' }
+  if (config && !config.resolvedBinaryPath) {
+    return config.binaryPath
+      ? { health: 'attention', label: 'Not found', detail: `Nothing runs at ${config.binaryPath}`, action: 'install' }
+      : {
+          health: 'attention',
+          label: 'Not installed',
+          detail: "Mousse downloads Google's official Antigravity agent (several hundred MB). Your agy CLI isn't used.",
+          action: 'install'
+        }
+  }
+  return configured
+    ? { health: 'ready', label: 'Ready', detail: 'Signed in', action: 'sign-out' }
+    : {
+        health: 'attention',
+        label: 'Signed out',
+        detail: "Sign in with Google here. Your agy CLI sign-in isn't shared.",
+        action: 'sign-in'
+      }
+}
+
 export function cliHealth(
   cli: CliProviderDefinition,
   input: {
@@ -51,6 +78,7 @@ export function cliHealth(
     configured: boolean
   }
 ): HealthState {
+  if (cli.id === 'antigravity') return antigravityHealth(input)
   if (input.config && !input.config.resolvedBinaryPath) {
     return {
       health: 'attention',
@@ -62,17 +90,12 @@ export function cliHealth(
     if (!input.claude) return { health: 'unknown', label: 'Checking' }
     return vendorHealth(cli, input.claude, 'Signed in through your terminal')
   }
-  if (cli.id === 'codex') {
-    if (!input.codex) return { health: 'unknown', label: 'Checking' }
-    return vendorHealth(
-      cli,
-      input.codex,
-      input.codex.planType ? `Signed in through your terminal (ChatGPT ${input.codex.planType})` : 'Signed in through your terminal'
-    )
-  }
-  return input.configured
-    ? { health: 'ready', label: 'Ready', detail: 'Signed in' }
-    : { health: 'attention', label: 'Signed out' }
+  if (!input.codex) return { health: 'unknown', label: 'Checking' }
+  return vendorHealth(
+    cli,
+    input.codex,
+    input.codex.planType ? `Signed in through your terminal (ChatGPT ${input.codex.planType})` : 'Signed in through your terminal'
+  )
 }
 
 /** Space-separated, with quotes for arguments that contain spaces. */
