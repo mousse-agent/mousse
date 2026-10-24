@@ -174,6 +174,8 @@ export class BridgeHub {
         .map((s) => identity.verifySigned<NodeDelegation>(s, root))
         .filter((d) => d.subject === node)
         .sort((a, b) => b.keyEpoch - a.keyEpoch || b.issuedAt - a.issuedAt)[0]
+    // The live roster drops revoked delegations but keeps their revocation evidence.
+    if (!latest && roster.revoked.some((r) => r.subject === node)) return fail('revoked')
     if (
       !latest ||
       latest.owner !== self.user ||

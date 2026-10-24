@@ -44,6 +44,13 @@ export const META_HEAD_FRESHNESS_MS = 30_000
 export const PREAUTH_MAX_CONNECTIONS = 32
 export const PREAUTH_MAX_PER_ADDRESS = 4
 export const PREAUTH_MAX_BYTES = 16 * 1024
+/**
+ * What a joining node accepts from the authority during enrollment: its hello and the result,
+ * which each carry the whole roster. The authority's TLS key is pinned by the invite, so this
+ * budget is larger than the unauthenticated preauth bound and covers every roster a normal hello
+ * can carry.
+ */
+export const ENROLLMENT_JOINER_MAX_BYTES = 64 * 1024
 export const PREAUTH_DEADLINE_MS = 10_000
 
 /** WebRTC direct path for signed-in phones (docs/net/protocol.md §11). */

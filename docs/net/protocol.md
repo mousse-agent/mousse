@@ -208,7 +208,7 @@ The compliant host verifies the token proof and independently signed issuer-auth
 
 IdentityService.verifyAuthor uses explicit purpose history or newWork. History verification can return verifyOnly/revoked metadata while cryptographically verifying stored old records; that result never authorizes execution. NewWork rejects expired/revoked/noncurrent author epochs.
 
-Roster ordering is lexicographic `(recoveryEpoch,version)`; conflicting different payloads at a position or different lineages at one recovery epoch cause roster_conflict and fail closed. Rotation history can verify past signatures but only current epochs author new work or open sessions. Revoked notifications are hints; verified rosterUpdate closes revoked sessions and cancels in-flight work. Connected peers enforce within one roster propagation; disconnected nodes stop trusting by delegation expiry (7 days). Authority transfer/recovery and the residual double-import/withheld-revocation risks are in `state-machines.md` and `threat-model.md`.
+Roster ordering is lexicographic `(recoveryEpoch,version)`; conflicting different payloads at a position or different lineages at one recovery epoch cause roster_conflict and fail closed. Rotation history can verify past signatures but only current epochs author new work or open sessions. The authority's live roster carries only node delegations that can still authorize something: each roster it publishes drops revoked delegations and delegations superseded by a newer key epoch of the same node, but keeps every revocation entry, because holders reject a roster that drops revocation evidence. Verifying a past record uses the rosters a holder already accepted, or the original roster shipped as replay evidence, never the live roster alone. Repeated revocations therefore grow the roster only by their revocation entries, and an older roster that still lists dropped delegations is compacted before the next invite. Revoked notifications are hints; verified rosterUpdate closes revoked sessions and cancels in-flight work. Connected peers enforce within one roster propagation; disconnected nodes stop trusting by delegation expiry (7 days). Authority transfer/recovery and the residual double-import/withheld-revocation risks are in `state-machines.md` and `threat-model.md`.
 
 ## 9. Limits and errors
 
@@ -222,6 +222,7 @@ The executable constants in `src/shared/net/limits.ts` are normative. JSON strin
 | Store transaction | <=500 rows and <=1 MiB; yield between batches |
 | Overlap | <=1,000 records and <=4 MiB |
 | Preauthentication | <=32 connections total, <=4/address, <=16 KiB, <=10 s |
+| Enrollment bytes a joiner accepts from the pinned authority | <=64 KiB |
 | Session subscriptions / in-flight RPC / blob transfers | 256 / 64 / 8 |
 | Fragment no-progress | 30 s |
 | Ping / missed intervals | 20 s / 3 |
@@ -264,7 +265,7 @@ Deny posts to the deny route.
 
 The posted `sealedInvite` is base64url of `ePub32 || nonce12 || ciphertext || tag16`. A different request ID, box key or any flipped byte fails to open.
 
-**Offer path (QR code).** Add phone issues the same kind of invite with no pin. It draws a fresh 32-byte key `K` and seals the invite as base64url of `nonce12 || ChaCha20-Poly1305(K, nonce12, invite, aad=UTF8('mousse-net/enroll-offer/v1'))`. It posts the result as an enrollment offer, which returns `{id, expiresAt}`. The QR code carries `mousse://net/join?v=1&plus=<Mousse ID origin>&offer=<offer id>&key=<base64url K>`. `K` never leaves the QR code and is zeroed after sealing. The code expires at the earlier of the offer and the invite expiry, and the client rejects offers that claim more than 15 minutes. Sealed invites are at most 16 KiB.
+**Offer path (QR code).** Add phone issues the same kind of invite with no pin. It draws a fresh 32-byte key `K` and seals the invite as base64url of `nonce12 || ChaCha20-Poly1305(K, nonce12, invite, aad=UTF8('mousse-net/enroll-offer/v1'))`. It posts the result as an enrollment offer, which returns `{id, expiresAt}`. The QR code carries `mousse://net/join?v=1&plus=<Mousse ID origin>&offer=<offer id>&key=<base64url K>`. `K` never leaves the QR code and is zeroed after sealing. The code expires at the earlier of the offer and the invite expiry, and the client rejects offers that claim more than 15 minutes. Sealed invites are at most 64 KiB, which covers every roster a normal hello can carry. Mousse ID and phones before this limit accept 16 KiB, about four devices.
 
 **Match code.** Both screens show `SHA-256(UTF8('mousse-net/enroll-match/v1') || 0x00 || box32 || 0x00 || UTF8(transportFingerprint))`, read as uint32 big-endian, mod 1,000,000, zero-padded to six digits. The person approves only when the codes agree, so a swapped box key or fingerprint is visible. Mousse ID never computes it.
 
