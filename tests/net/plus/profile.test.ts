@@ -1,9 +1,11 @@
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { createHash, randomBytes } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { profile, cleanup } from '../chats/helpers'
 import { HostedProfileService } from '../../../src/mms/net/plus/HostedProfileService'
+import type { HostedNetHost } from '../../../src/mms/net/hosted'
+import { HostedNetController, renewalDelayMs } from '../../../src/mms/net/plus/HostedNetController'
 import { canonicalJson } from '../../../src/mms/net/sync/codec'
 import { verifyBytes } from '../../../src/mms/net/identity/crypto'
 const configuration = {
@@ -171,6 +173,125 @@ it('drops an expired uncertain route after lease recovery and signs fresh curren
   expect(routes[1].body.operationId).not.toBe(original)
   expect(routes[1].body.expiresAt).toBe(now + 120000)
   expect(p.service.managedSpaceRoutes()[0].expiresAt).toBe(now + 120000)
+})
+
+it('refreshes a Space-peer route before its approval lapses, even when the registration lasts 10 minutes', async () => {
+  let now = Date.now()
+  const p = await fixture({ now: () => now })
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  const self = p.rt.identity.self()!
+  p.service.rememberSpaceRoute(self.node, self.user)
+  await p.service.reconcileSpaceRoutes(() => true)
+  // The renewal pass is the only periodic refresh, so each wait must end before an approval lapses.
+  for (let pass = 0; pass < 30; pass++) {
+    now += renewalDelayMs(now + 600000, p.service.managedSpaceRoutes(), now)
+    expect(p.service.managedSpaceRoutes()[0].expiresAt).toBeGreaterThan(now)
+    await p.service.reconcileSpaceRoutes(() => true)
+  }
+  expect(p.bodies.filter((row) => row.path === '/v1/net/routes').length).toBeGreaterThan(20)
+})
+
+function fakeClockController(
+  p: Awaited<ReturnType<typeof fixture>>,
+  host: Record<string, unknown> = {}
+): HostedNetController {
+  const controller = new HostedNetController({
+    clock: { now: () => Date.now(), monotonic: () => Date.now() },
+    signal: p.signal.signal,
+    loadedRuntime: () => undefined,
+    requireEnrolled: () => p.rt,
+    closed: () => false,
+    enabled: () => true,
+    featureEnabled: () => true,
+    hostedSpacePeerAuthorized: () => true,
+    serial: (work: () => Promise<unknown>) => work(),
+    emit: () => undefined,
+    fail: (error: unknown) => {
+      throw error
+    },
+    transportRows: () => [{ id: 'plus-relay', enabled: true }],
+    hostedListening: () => true,
+    reactivateIfRunning: async () => undefined,
+    suspendHostedTransport: async () => undefined,
+    ...host
+  } as unknown as HostedNetHost)
+  ;(controller as any).hostedProfile = p.service
+  return controller
+}
+
+it('refreshes a Space-peer route that joined between renewal ticks before its approval lapses', async () => {
+  const p = await fixture({ now: () => Date.now() })
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  const self = p.rt.identity.self()!,
+    status = p.service.status()
+  // The fixture's registration lasts a minute; the real one lasts ten.
+  vi.spyOn(p.service, 'status').mockImplementation(() => ({
+    ...status,
+    expiresAt: Date.now() + 600000
+  }))
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+  try {
+    const controller = fakeClockController(p)
+    controller.resumeRenewal()
+    // The first timer was set with no routes, so it waits 200 seconds.
+    await vi.advanceTimersByTimeAsync(5000)
+    await controller.spaceJoined(self.node, self.user)
+    const granted = p.service.managedSpaceRoutes()[0].expiresAt
+    expect(granted).toBe(Date.now() + 120000)
+    // Past the first approval's end, well before that 200 second timer: the route is still approved.
+    await vi.advanceTimersByTimeAsync(121000)
+    expect(p.service.managedSpaceRoutes()[0].expiresAt).toBeGreaterThan(Date.now())
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('keeps the registration renewal at its original time while reconciles repeat', async () => {
+  const p = await fixture({ now: () => Date.now() })
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  const status = p.service.status()
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+  try {
+    const startedAt = Date.now(),
+      renewedAt: number[] = []
+    // The registration lasts ten minutes from now and never changes, as a real lease would not.
+    vi.spyOn(p.service, 'status').mockImplementation(() => ({
+      ...status,
+      expiresAt: startedAt + 600000
+    }))
+    vi.spyOn(p.service, 'renew').mockImplementation(async () => {
+      renewedAt.push(Date.now() - startedAt)
+      return status as never
+    })
+    const controller = fakeClockController(p, {
+      loadedRuntime: () => ({
+        identity: { self: () => ({ isAuthority: false }) },
+        keys: { state: () => 'unlocked', encryptedAtRest: () => true }
+      }),
+      enabled: () => true
+    })
+    controller.resumeRenewal()
+    // A Space metadata change every 5 seconds, with no route, must not move the 200 second renewal.
+    for (let elapsed = 0; elapsed < 200000; elapsed += 5000) {
+      await vi.advanceTimersByTimeAsync(5000)
+      controller.membershipChanged()
+    }
+    await vi.advanceTimersByTimeAsync(0)
+    expect(renewedAt).toEqual([200000])
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('waits a third of the registration lease between renewals, at most 5 minutes, when no route is due', () => {
+  expect(renewalDelayMs(60000, [], 0)).toBe(20000)
+  expect(renewalDelayMs(600000, [], 0)).toBe(200000)
+  expect(renewalDelayMs(3600000, [], 0)).toBe(300000)
+  expect(renewalDelayMs(undefined, [], 0)).toBe(20000)
+  expect(renewalDelayMs(600000, [{ expiresAt: 0 }], 0)).toBe(20000)
 })
 
 it('releases a definitively rejected rendezvous so renewal and a corrected invitation can proceed', async () => {

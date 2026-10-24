@@ -1,6 +1,6 @@
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { mmsJson } from './jsonOutput'
-import { MmsRemoteBackend } from './MmsBackend'
+import { MmsRemoteBackend, remoteThreadEventData } from './MmsBackend'
 import type {
   ThreadDeltaEvent,
   ThreadDisplayEvent,
@@ -32,7 +32,7 @@ export class MmsThreadSource implements ThreadSourcePort {
       try {
         listener({
           type,
-          data: mmsJson(data),
+          data: mmsJson(remoteThreadEventData(data)),
           ...(ephemeral ? { ephemeral: true } : {})
         } as ThreadSourceEvent)
       } catch (error) {
