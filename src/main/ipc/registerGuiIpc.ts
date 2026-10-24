@@ -2115,8 +2115,8 @@ export function registerGuiIpc(
   // Progress reaches the renderer as `providers:install:event` through the protocol event bridge.
   registerHandler('providers:installAntigravity', async () => {
     // A slow connection may need hours; the daemon owns the download and cancel is explicit, so this request never times out.
-    const res = await guiMms.request<{ config: unknown; providers: unknown[] }>('providers.installAntigravity', {}, NO_REQUEST_TIMEOUT_MS)
-    broadcast('providers:changed', res.providers)
+    // The daemon announces the change to every window of the profile when the install ends.
+    const res = await guiMms.request<{ config: unknown }>('providers.installAntigravity', {}, NO_REQUEST_TIMEOUT_MS)
     return res.config
   })
   registerHandler('providers:cancelAntigravityInstall', async () => {

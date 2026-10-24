@@ -70,6 +70,15 @@ describe('Antigravity release install', () => {
   })
 })
 
+describe('Antigravity install events', () => {
+  it('allows any number of profiles to listen without a warning', () => {
+    const warn = vi.spyOn(process, 'emitWarning')
+    const installation = newHome()
+    for (let index = 0; index < 20; index++) services.push(new AntigravityProviderService(newHome(), installation, new UserQuestionService()))
+    expect(warn).not.toHaveBeenCalled()
+  })
+})
+
 describe('Antigravity install shared by two profiles', () => {
   function profiles() {
     const installation = newHome()
@@ -101,6 +110,19 @@ describe('Antigravity install shared by two profiles', () => {
     expect((await a.service.cliConfig()).installing).toBeUndefined()
   })
 
+  it('says nothing more after the profile that owns the download stops', async () => {
+    const { a, b } = profiles()
+    vi.spyOn(globalThis, 'fetch').mockImplementation(stalledDownload())
+    const running = a.service.install()
+    const rejected = expect(running).rejects.toThrow('Antigravity install cancelled')
+    expect(a.changed).toHaveBeenCalledTimes(1)
+    a.service.stop() // aborts its own download
+    await rejected
+    expect(a.changed).toHaveBeenCalledTimes(1)
+    expect(a.progress).toEqual(['Downloading Google Antigravity ACP agent…'])
+    expect(b.changed).toHaveBeenCalledTimes(2) // the other profile still hears the install end
+  })
+
   it('tells every profile when the shared install starts, progresses and ends, and does not tell a stopped one', async () => {
     const { a, b, make } = profiles()
     const stopped = make()
@@ -114,9 +136,9 @@ describe('Antigravity install shared by two profiles', () => {
     }
     a.service.cancelInstall()
     await rejected
-    // Finished for everyone; the installing profile also reports its own settings change.
+    // Finished for everyone; the installing profile reports once, after its own settings changed.
     expect(b.changed).toHaveBeenCalledTimes(2)
-    expect(a.changed).toHaveBeenCalledTimes(3)
+    expect(a.changed).toHaveBeenCalledTimes(2)
     expect(stopped.changed).not.toHaveBeenCalled()
   })
 })

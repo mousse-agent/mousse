@@ -60,6 +60,8 @@ const activeInstalls = new Map<string, { abort: AbortController; progress?: stri
 
 export type AntigravityInstallEvent = { type: 'started' | 'finished' } | { type: 'progress'; message: string }
 const installEvents = new EventEmitter()
+// One listener per live profile of the installation; there is no fixed limit.
+installEvents.setMaxListeners(0)
 
 /**
  * Hears about installs into this installation, whichever profile started them: every profile

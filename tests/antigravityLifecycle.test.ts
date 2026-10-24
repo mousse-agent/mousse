@@ -181,6 +181,25 @@ describe('Antigravity auth-required answers', () => {
     expect(changed).toHaveBeenCalledTimes(1)
   })
 
+  it.each([
+    ['Not logged in', undefined],
+    ['Please sign in', undefined],
+    ['Request failed', { type: 'auth_required' }]
+  ])('also recognizes Google wording: %s', async (message, data) => {
+    const { service, input } = fixture(undefined, false, (name) => name === methods.agent.session.new && new RequestError(-32000, message, data))
+    const { changed, saved } = arm(service)
+    await expect(service.chat(input)).rejects.toThrow('Sign in to Antigravity in Settings before chatting')
+    expect(saved()).toMatchObject({ signedIn: false, models: [] })
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it('needs the -32000 code: the same words under another code are an ordinary failure', async () => {
+    const { service, input } = fixture(undefined, false, (name) => name === methods.agent.session.new && new RequestError(-32603, 'Not logged in'))
+    const { changed } = arm(service)
+    await expect(service.chat(input)).rejects.toThrow('Not logged in')
+    expect(changed).not.toHaveBeenCalled()
+  })
+
   it('marks the provider signed out when a model refresh is asked to authenticate', async () => {
     const { service, input } = fixture(undefined, false, (name) => name === methods.agent.session.new && authRequired())
     const { changed, saved } = arm(service)

@@ -55,10 +55,14 @@ const ISOLATED_KEYS = [
   'BROWSER', 'PYTHONUNBUFFERED'
 ]
 
-/** ACP `authRequired`: JSON-RPC -32000 "Authentication required". */
+/**
+ * ACP `authRequired` is JSON-RPC -32000 "Authentication required", but Google's agent is not the
+ * TypeScript SDK and may word it "Not logged in" or "Please sign in". Other -32000 errors are not sign-in.
+ */
 function isAuthRequired(error: unknown): boolean {
-  const { code, message } = (error ?? {}) as { code?: unknown; message?: unknown }
-  return code === -32000 && typeof message === 'string' && /auth/i.test(message)
+  const { code, message, data } = (error ?? {}) as { code?: unknown; message?: unknown; data?: { type?: unknown } | null }
+  if (code !== -32000) return false
+  return data?.type === 'auth_required' || (typeof message === 'string' && /auth|sign.?in|log(ged)?.?in/i.test(message))
 }
 
 function modelOptions(session: Pick<NewSessionResponse, 'configOptions'>): LlmModelOption[] {
@@ -156,8 +160,11 @@ export class AntigravityProviderService {
     catch { this.settings = {} }
     // The download is shared by every profile of the installation; each tells its own clients.
     this.unsubscribeInstall = onAntigravityInstallEvent(installationHome, (event) => {
+      if (this.stopped) return
       if (event.type === 'progress') {
         try { this.hooks.installProgress?.(event.message) } catch { /* progress is best effort */ }
+      } else if (event.type === 'finished' && this.installing) {
+        // This service's own install reports once its settings have changed (see `install`).
       } else this.notifyChanged()
     })
   }
@@ -684,6 +691,7 @@ export class AntigravityProviderService {
   }
 
   private notifyChanged(): void {
+    if (this.stopped) return
     try { this.hooks.changed?.() } catch { /* a listener must not break provider work */ }
   }
 
