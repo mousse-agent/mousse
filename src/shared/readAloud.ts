@@ -36,6 +36,11 @@ interface LocalTtsModelBase extends LocalModelManifest {
   defaultVoice: string
   /** Every voice whose data is in `files`. Voices stored as separate files other than the default are optional files. */
   voices: readonly LocalTtsVoice[]
+  /**
+   * Most workers to run at once, for models whose loaded copy is large and that already voice
+   * faster than real time on one worker. Two when unset.
+   */
+  maxWorkers?: number
 }
 
 /** Kokoro through kokoro-js (transformers.js). */
@@ -252,6 +257,8 @@ export const SUPERTONIC_3: SupertonicTtsModel = {
   repo: 'supertone-oss-archive/supertonic-3',
   revision: 'aafc6e32416a594460b32413efc49d7fe4ce6d46',
   runtime: 'supertonic',
+  // One loaded copy peaks near 1.5 GB and voices about 1.15x real time, so one worker keeps up.
+  maxWorkers: 1,
   durationPredictor: 'onnx/duration_predictor.onnx',
   textEncoder: 'onnx/text_encoder.onnx',
   vectorEstimator: 'onnx/vector_estimator.onnx',
