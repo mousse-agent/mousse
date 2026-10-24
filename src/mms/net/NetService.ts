@@ -1186,7 +1186,8 @@ export class NetService {
               'cancelled',
               'stream_unknown',
               'meta_stale',
-              'roster_conflict'
+              'roster_conflict',
+              'outcome_uncertain'
             ].includes(error.code))
         )
           continue
