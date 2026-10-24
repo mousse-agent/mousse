@@ -12,6 +12,9 @@ ensureElectron()
 ensureNodePtyHelperExecutable()
 await buildCli({ watch: false })
 const invocation = developmentDaemonInvocation(root)
+if (invocation.runtime.sharedGlobalHome) {
+  console.error('[dev:mms] WARNING: sharing your real Mousse profile at ~/.mousse; quit the installed app first.')
+}
 const child = spawn(electronPath, [...invocation.argsPrefix, 'service', 'run'], {
   cwd: root, env: invocation.env, stdio: 'inherit', windowsHide: true
 })
