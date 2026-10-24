@@ -1,5 +1,6 @@
+import { posix, win32 } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { FULL_RUN_TRIGGERS, classifyChanges, loadManifest } from '../scripts/test-select.mjs'
+import { FULL_RUN_TRIGGERS, classifyChanges, loadManifest, moduleId } from '../scripts/test-select.mjs'
 
 const manifest = loadManifest()
 
@@ -73,6 +74,15 @@ describe('change-based test selection plan', () => {
     expect(plan.graph).toEqual(['tests/new-name.test.ts', 'tests/old-name.test.ts'])
   })
 
+  it('names modules the way Vite does, with forward slashes, on Windows paths too', () => {
+    // Vite ids look like `E:/repo/src/a.ts`; a native Windows path never matches the module graph.
+    expect(win32.resolve('E:\\repo', 'src/shared/chatMode.ts')).toBe('E:\\repo\\src\\shared\\chatMode.ts')
+    expect(moduleId('src/shared/chatMode.ts', 'E:\\repo', win32)).toBe('E:/repo/src/shared/chatMode.ts')
+    expect(moduleId('src\\shared\\chatMode.ts', 'E:\\repo', win32)).toBe('E:/repo/src/shared/chatMode.ts')
+    expect(moduleId('src/shared/chatMode.ts', 'e:\\repo', win32)).toBe('e:/repo/src/shared/chatMode.ts')
+    expect(moduleId('src/shared/chatMode.ts', '/repo', posix)).toBe('/repo/src/shared/chatMode.ts')
+  })
+
   it('keeps the trigger list in step with the vitest configuration', async () => {
     const config = await import('../vitest.config')
     const configured = (config.default as { test?: { forceRerunTriggers?: string[] } }).test?.forceRerunTriggers ?? []
@@ -84,7 +94,7 @@ describe('change-based test selection plan', () => {
     const lanes = JSON.parse(readFileSync(new URL('./test-lanes.json', import.meta.url), 'utf8'))
     const entries = ['process', 'serviceTls', 'daemon', 'browser'].flatMap((lane) => lanes[lane] as string[])
     expect(new Set(entries).size).toBe(entries.length)
-    const files = new Set(globSync('tests/**/*.test.ts'))
+    const files = new Set(globSync('tests/**/*.test.ts').map((file) => file.replaceAll('\\', '/')))
     for (const file of entries) expect(files.has(file), file).toBe(true)
   })
 

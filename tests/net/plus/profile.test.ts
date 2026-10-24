@@ -234,6 +234,103 @@ it.each(['unavailable', 'malformed', 'other-rejection', 'lost-response'] as cons
   }
 )
 
+it('sends the current roster right after replaying a renewal signed with an older one', async () => {
+  const p = await fixture()
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  let offline = true
+  const roster = { ...p.hostedOptions.identity().roster, version: 2 } as never
+  const later = new HostedProfileService({
+    ...p.hostedOptions,
+    fetch: async (url, input) => {
+      if (offline && String(url).endsWith('/renew')) throw new Error('Network down')
+      return p.hostedOptions.fetch(url, input)
+    }
+  })
+  await expect(later.renew()).rejects.toMatchObject({ code: 'outcome_uncertain' })
+  offline = false
+  const changed = new HostedProfileService({
+    ...p.hostedOptions,
+    identity: () => ({ ...p.hostedOptions.identity(), roster })
+  })
+  await changed.renew()
+  // The failed request never reached the server. The replay reuses its body (no new challenge),
+  // and the follow-up renewal is signed over the current roster.
+  expect(p.bodies.filter((row) => row.path.endsWith('/renew'))).toHaveLength(2)
+  expect(
+    p.bodies
+      .filter((row) => row.path === '/v1/net/challenges' && row.body.purpose === 'renew')
+      .map((row) => row.body.intent.roster)
+  ).toEqual([p.hostedOptions.identity().roster, roster])
+  expect(
+    JSON.parse(Buffer.from(p.rt.keys.getSecret('plus/connector')!).toString()).pending
+  ).toBeUndefined()
+})
+
+it('still sends the current roster after a replay of an older renewal failed once more', async () => {
+  const p = await fixture()
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  let offline = true
+  const roster = { ...p.hostedOptions.identity().roster, version: 2 } as never
+  const options = {
+    ...p.hostedOptions,
+    fetch: async (url: string | URL | Request, input?: RequestInit) => {
+      if (offline && String(url).endsWith('/renew')) throw new Error('Network down')
+      return p.hostedOptions.fetch(url, input)
+    }
+  }
+  await expect(new HostedProfileService(options).renew()).rejects.toMatchObject({
+    code: 'outcome_uncertain'
+  })
+  const changed = new HostedProfileService({
+    ...options,
+    identity: () => ({ ...p.hostedOptions.identity(), roster })
+  })
+  // The retry for the new roster replays the old body and fails again.
+  await expect(changed.renew()).rejects.toMatchObject({ code: 'outcome_uncertain' })
+  offline = false
+  await changed.renew()
+  expect(
+    p.bodies
+      .filter((row) => row.path === '/v1/net/challenges' && row.body.purpose === 'renew')
+      .map((row) => row.body.intent.roster)
+  ).toEqual([p.hostedOptions.identity().roster, roster])
+  expect(
+    JSON.parse(Buffer.from(p.rt.keys.getSecret('plus/connector')!).toString()).pending
+  ).toBeUndefined()
+})
+
+it('compares the roster in the replayed body, not the saved intent, when they disagree', async () => {
+  const p = await fixture()
+  await p.service.bind(configuration, p.accountToken)
+  await p.service.connect(p.accountToken)
+  let offline = true
+  const roster = { ...p.hostedOptions.identity().roster, version: 2 } as never
+  const options = {
+    ...p.hostedOptions,
+    fetch: async (url: string | URL | Request, input?: RequestInit) => {
+      if (offline && String(url).endsWith('/renew')) throw new Error('Network down')
+      return p.hostedOptions.fetch(url, input)
+    }
+  }
+  await expect(new HostedProfileService(options).renew()).rejects.toMatchObject({
+    code: 'outcome_uncertain'
+  })
+  // An earlier version saved the newer roster's intent beside the older signed body.
+  const stored = JSON.parse(Buffer.from(p.rt.keys.getSecret('plus/connector')!).toString())
+  stored.pending.intent.roster = roster
+  p.rt.keys.putSecret('plus/connector', canonicalJson(stored))
+  offline = false
+  await new HostedProfileService({
+    ...options,
+    identity: () => ({ ...p.hostedOptions.identity(), roster })
+  }).renew()
+  expect(
+    p.bodies.filter((row) => row.path.endsWith('/renew')).map((row) => row.body.roster)
+  ).toEqual([p.hostedOptions.identity().roster, roster])
+})
+
 it('releases an older pending rendezvous only after its exact retry is definitively rejected', async () => {
   let rejected = false
   const p = await fixture({

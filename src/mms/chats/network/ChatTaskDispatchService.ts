@@ -94,6 +94,7 @@ export class ChatTaskDispatchService {
     const roster=identity.verifySigned<Roster>(signed,root)
     for(const node of [self.node,target]){
       const delegation=roster.nodes.map(row=>identity.verifySigned<NodeDelegation>(row,root)).filter(row=>row.subject===node).sort((a,b)=>b.keyEpoch-a.keyEpoch||b.issuedAt-a.issuedAt)[0]
+      if(!delegation&&roster.revoked.some(row=>row.subject===node))throw new NetError('revoked')
       if(!delegation||delegation.owner!==self.user||delegation.issuedAt>now||now>=delegation.expiresAt)throw new NetError('bad_delegation')
       if(roster.revoked.some(row=>row.subject===node&&row.throughKeyEpoch>=delegation.keyEpoch))throw new NetError('revoked')
       if(!delegation.caps.includes(capability))throw new NetError('forbidden')
