@@ -706,6 +706,52 @@ html[data-theme='high-contrast'] .app .chat-input-area .composer {
   }
 }
 
+/* On the start page the aura lights the composer: its top light and sheen take
+   the accent. --ui-raised-shadow is restated so it resolves with this specular,
+   and keeps two insets so leaving the empty state still transitions. */
+.app .chat--empty .chat-input-area .composer {
+  --ui-specular: inset 0 1px 0 color-mix(in srgb, rgba(var(--accent-rgb), 0.5) 75%, rgba(255, 255, 255, 0.12)), inset 0 -1px 0 rgba(0, 0, 0, 0.27);
+  --ui-glint: color-mix(in srgb, rgba(var(--accent-rgb), 0.85) 75%, rgba(255, 255, 255, 0.3));
+  --ui-sheen: radial-gradient(125% 78% at 50% -8%, rgba(var(--accent-rgb), 0.13) 0%, rgba(var(--accent-rgb), 0.035) 34%, transparent 64%);
+  --ui-raised-shadow: var(--ui-specular), 0 10px 32px rgba(0, 0, 0, 0.32);
+}
+
+.app .chat--empty .chat-input-area .composer-workspace-toolbar {
+  box-shadow: inset 0 1px 0 rgba(var(--accent-rgb), 0.16);
+}
+
+html[data-theme='blacksphere-plus'] .app .chat--empty .chat-input-area .composer {
+  --ui-specular: inset 0 1px 0 color-mix(in srgb, rgba(var(--accent-rgb), 0.6) 75%, rgba(255, 255, 255, 0.14)), inset 0 -1px 0 rgba(0, 0, 0, 0.48);
+  --ui-glint: color-mix(in srgb, rgba(var(--accent-rgb), 0.95) 75%, rgba(255, 255, 255, 0.36));
+  --ui-sheen: radial-gradient(125% 80% at 50% -10%, rgba(var(--accent-rgb), 0.16) 0%, rgba(var(--accent-rgb), 0.04) 36%, transparent 66%);
+}
+
+html[data-theme='blacksphere-plus'] .app .chat--empty .chat-input-area .composer-workspace-toolbar {
+  box-shadow: inset 0 1px 0 rgba(var(--accent-rgb), 0.2);
+}
+
+/* Light and high contrast keep their usual composer on the start page. */
+html[data-theme='light'] .app .chat--empty .chat-input-area .composer {
+  --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.11), inset 0 -1px 0 rgba(0, 0, 0, 0.27);
+  --ui-raised-shadow: inherit;
+}
+
+html[data-theme='light'] .app .chat--empty .chat-input-area .composer-workspace-toolbar,
+html[data-theme='high-contrast'] .app .chat--empty .chat-input-area .composer-workspace-toolbar {
+  box-shadow: none;
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] .app .chat--empty .chat-input-area .composer {
+    --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.11), inset 0 -1px 0 rgba(0, 0, 0, 0.27);
+    --ui-raised-shadow: inherit;
+  }
+
+  html[data-theme='system'] .app .chat--empty .chat-input-area .composer-workspace-toolbar {
+    box-shadow: none;
+  }
+}
+
 .app .chat-input-area .composer:focus-within {
   border-color: color-mix(in srgb, var(--text-primary) 28%, transparent);
   box-shadow: var(--ui-raised-shadow);

@@ -33,13 +33,13 @@ Confirm instance ids and model ids with T3 `orchestrator_capabilities` before th
 
 ## Gate 2: code
 
-1. Implement per the work skill. Run focused tests, then `npm test`, push, and open or update the PR as usual.
+1. Implement per the work skill. Run the tests relevant to the change (the full `npm test` only for very large multi-module changes), push, and open or update the PR as usual.
 2. Send the code brief below to both members with the PR link and the head SHA under review.
 3. Triage each finding. Do not fix it yourself. Dispatch a subagent per independent finding or cluster; run them in parallel only when they touch different files:
    - Sonnet 5.5 (`model: "sonnet"`, `claude-sonnet-5-5`): routine or mechanical fixes with a clear target, such as a missed null check, a test gap, a rename, a doc fix.
    - Opus 5.5 (`model: "opus"`, `claude-opus-5-5`): cross-cutting or design-level fixes, concurrency, anything that needs judgment about more than one module.
    Give the fixer the finding verbatim, the files, the expected behavior, and the focused tests to run. Review its diff before committing.
-4. Commit the fixes, rerun `npm test` when code changed, push, and reconvene with the new head SHA. Findings you dispute go back in the brief as arguments, not as fixes.
+4. Commit the fixes, rerun the relevant tests when code changed, push, and reconvene with the new head SHA. Findings you dispute go back in the brief as arguments, not as fixes.
 5. Repeat until both members return `VERDICT: APPROVE` on the same head SHA.
 
 ## When it does not converge
@@ -48,7 +48,7 @@ Stop and ask the user, with both members' positions and your own, when any of th
 
 ## Merge
 
-Merge only when all of these hold on the current head: both approvals name that SHA, the local suite passed on it, GitHub-required checks and reviews are green, conversations are resolved, and the merge is authorized under the shared policy. Any commit after approval, including a rebase, sends the PR back to Gate 2. Sensitive changes still need the other teammate regardless of the council's verdict. Record the final approvals (round count, head SHA) in the PR's Verification section; do not log every round.
+Merge only when all of these hold on the current head: both approvals name that SHA, the relevant local tests passed on it, GitHub-required checks and reviews are green, conversations are resolved, and the merge is authorized under the shared policy. Any commit after approval, including a rebase, sends the PR back to Gate 2. Sensitive changes still need the other teammate regardless of the council's verdict. Record the final approvals (round count, head SHA) in the PR's Verification section; do not log every round.
 
 After the merge, follow "Local availability after merge" and "Cleanup after merge" in the shared policy.
 

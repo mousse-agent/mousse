@@ -19,7 +19,6 @@ import {
 } from '../src/renderer/components/sideCard/gitSectionLogic'
 import {
   EMPTY_GIT_ENTRY,
-  anyTurnEnded,
   checkoutGitBranch,
   commitGitChanges,
   refreshGitStatus,
@@ -27,6 +26,7 @@ import {
   useGitStatusStore,
   type GitStatusView
 } from '../src/renderer/stores/gitStatusStore'
+import { anyTurnEnded } from '../src/renderer/lib/turnEnded'
 import type {
   GitBranchInfo,
   GitCommit,
@@ -54,6 +54,7 @@ const commit = (patch: Partial<GitCommit> = {}): GitCommit => ({
   author: 'Ada',
   date: '2026-10-24T10:00:00Z',
   pushed: false,
+  onRemote: false,
   ...patch
 })
 
@@ -64,6 +65,7 @@ interface GitMock {
   diffStats: ReturnType<typeof vi.fn>
   checkout: ReturnType<typeof vi.fn>
   commit: ReturnType<typeof vi.fn>
+  push: ReturnType<typeof vi.fn>
 }
 
 const installGit = (patch: Partial<GitMock> = {}): GitMock => {
@@ -74,6 +76,7 @@ const installGit = (patch: Partial<GitMock> = {}): GitMock => {
     diffStats: vi.fn(async (): Promise<GitDiffStats> => ({ additions: 4, deletions: 1, filesChanged: 2 })),
     checkout: vi.fn(async () => undefined),
     commit: vi.fn(async () => undefined),
+    push: vi.fn(async () => undefined),
     ...patch
   }
   vi.stubGlobal('window', {
@@ -223,7 +226,7 @@ describe('shared git status store', () => {
     expect(git.checkout).toHaveBeenCalledWith('dev', undefined, '/repo/a')
     expect(git.status).toHaveBeenCalledTimes(2)
     await commitGitChanges('/repo/a', 'Add things', 'project-1')
-    expect(git.commit).toHaveBeenCalledWith('Add things', 'project-1', '/repo/a')
+    expect(git.commit).toHaveBeenCalledWith('Add things', 'project-1', '/repo/a', { amend: false })
     expect(git.status).toHaveBeenCalledTimes(3)
   })
 
@@ -415,8 +418,23 @@ describe('git section stylesheet', () => {
     expect(selected).not.toContain('accent')
   })
 
-  it('leaves the commit submit button neutral', () => {
+  it('leaves the commit submit buttons neutral', () => {
     expect(rule('.side-card-git-submit')).not.toMatch(/accent/)
+    expect(rule('.side-card-git-submit-quiet')).not.toMatch(/accent/)
+  })
+
+  it('removes the global focus ring from the branch search', () => {
+    const focus = rule('.side-card-git-search input:focus')
+    expect(focus).toMatch(/box-shadow:\s*none/)
+    expect(focus).toMatch(/outline:\s*none/)
+    expect(focus).toMatch(/border:\s*0/)
+  })
+
+  it('keeps the action buttons on one line and the branch name the part that shrinks', () => {
+    expect(rule('.side-card-git-commit-button,\n.side-card-git-push')).toMatch(/flex:\s*none/)
+    expect(rule('.side-card-git-commit-button,\n.side-card-git-push')).toMatch(/white-space:\s*nowrap/)
+    expect(rule('.side-card-git-branch')).toMatch(/min-width:\s*0/)
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\) \{\s*\.side-card-git-pr-pending \{\s*animation: none/)
   })
 })
 
@@ -541,7 +559,7 @@ describe('git section markup', () => {
     const html = render({
       git: view({
         status: repoStatus(),
-        commits: [commit()],
+        commits: [commit({ pushed: true, onRemote: true })],
         branches: { current: 'main', branches: ['main'] },
         diffStats: { additions: 0, deletions: 0, filesChanged: 0 }
       }),
@@ -549,6 +567,7 @@ describe('git section markup', () => {
     })
     expect(html).toContain('No changes')
     expect(html).toMatch(/class="side-card-git-commit-button"[^>]*disabled/)
+    expect(html).toContain('title="No changes to commit"')
     expect(html).toContain('data-zero="true">+0')
     expect(html).toContain('data-zero="true">−0')
   })
