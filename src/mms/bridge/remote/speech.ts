@@ -180,10 +180,12 @@ async function handlePhoneSpeech(
       const audio = relay.recording(context.caller.node, upload, params.parts as number)
       if (!Buffer.isBuffer(audio)) return audio
       const result = await submit('transcribe', 'dictation', { mimeType: params.mimeType }, audio)
-      // Keep the recording when no model was chosen, so the phone can choose one and try again.
+      // Keep the recording when no window ran it or no model was chosen, so the phone can open
+      // Mousse or choose a model and try again. The upload expires on its own.
       const refused =
         result && typeof result === 'object' && (result as { ok?: unknown }).ok === false
-      if (!refused || (result as { code?: unknown }).code !== 'no_model')
+      const code = refused ? (result as { code?: unknown }).code : undefined
+      if (code !== 'no_model' && code !== 'no_host' && code !== 'busy')
         relay.dropUpload(context.caller.node, upload)
       return result
     }
