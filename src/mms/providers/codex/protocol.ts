@@ -159,16 +159,6 @@ export interface TurnInterruptParams {
 }
 export type TurnInterruptResponse = Record<string, never>
 
-export interface ExperimentalFeatureListParams {
-  cursor?: string | null
-  limit?: number | null
-}
-export interface ExperimentalFeatureListResponse {
-  /** Every feature flag with whether it is on in the loaded config (`enabled`) and by default. */
-  data: Array<{ name: string; enabled: boolean; defaultEnabled: boolean }>
-  nextCursor: string | null
-}
-
 export interface ConfigReadParams {
   /** Resolves project config layers as seen from this directory. */
   cwd?: string | null
@@ -186,7 +176,6 @@ export interface ConfigReadResponse {
 export interface CodexRequestMap {
   initialize: { params: InitializeParams; result: InitializeResponse }
   'config/read': { params: ConfigReadParams; result: ConfigReadResponse }
-  'experimentalFeature/list': { params: ExperimentalFeatureListParams; result: ExperimentalFeatureListResponse }
   'account/read': { params: AccountReadParams; result: AccountReadResponse }
   'model/list': { params: ModelListParams; result: ModelListResponse }
   'thread/start': { params: ThreadStartParams; result: ThreadStartResponse }

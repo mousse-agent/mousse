@@ -56,6 +56,7 @@ import {
   type UserInput
 } from './protocol'
 import { codexTurnPolicy } from './childPolicy'
+import { NativeHelpers, type StrayThread } from './nativeHelpers'
 import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
 import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
 
@@ -174,6 +175,8 @@ export type CodexChatInput = {
   onSession?: (session: { codexThreadId: string; turnId?: string }) => void
   drainSteer?: () => string | undefined
   onSteer?: (text: string) => void
+  /** Liveness while the turn only waits for the native helpers it started. */
+  onHeartbeat?: () => void
 }
 
 export interface CodexChatResult {
@@ -328,6 +331,8 @@ class TurnRun {
   private idleWaiters: Array<() => void> = []
   /** Resolves once the run is released: settled on the server, or the process died. */
   readonly finished: Promise<void>
+  /** Codex's own subagents this turn started; they outlive the parent's turn unless Mousse waits for them. */
+  readonly helpers: NativeHelpers
   private finish!: () => void
 
   constructor(
@@ -335,8 +340,10 @@ class TurnRun {
     readonly mousseThreadId: string,
     readonly mode: 'plan' | 'default',
     readonly signal: AbortSignal,
-    private readonly input: CodexChatInput
+    private readonly input: CodexChatInput,
+    stray?: (threadId: string) => StrayThread | undefined
   ) {
+    this.helpers = new NativeHelpers(stray)
     this.finished = new Promise((done) => (this.finish = done))
     this.questionSignal = AbortSignal.any([signal, this.questionsDone.signal])
   }
@@ -364,6 +371,7 @@ class TurnRun {
   }
 
   fail(error: unknown): void {
+    this.helpers.close(error)
     this.cancelQuestions()
     this.settle?.reject(error)
     this.settle = undefined
@@ -454,6 +462,7 @@ class TurnRun {
     const itemStarted = notificationParams(notification, 'item/started')
     if (itemStarted) {
       const { item } = itemStarted
+      this.helpers.noteItem(item as never)
       this.items.set(item.id, item)
       if (item.type === 'agentMessage' && !this.parts.has(item.id)) {
         this.order.push(item.id)
@@ -469,6 +478,7 @@ class TurnRun {
     const itemCompleted = notificationParams(notification, 'item/completed')
     if (itemCompleted) {
       const { item } = itemCompleted
+      this.helpers.noteItem(item as never)
       this.items.set(item.id, item)
       if (item.type === 'agentMessage') {
         const text = (item as { text?: string }).text ?? ''
@@ -537,6 +547,9 @@ export class CodexProviderService {
    * Only cold opens (start, resume of an unloaded thread, fork) record an entry: Codex applies
    * config overrides when it loads a thread and ignores them on an already-loaded one.
    */
+  private readonly strays = new Map<string, StrayThread>()
+  /** Helpers of finished chats that were told to stop before their turn id was known. */
+  private readonly orphans = new Set<NativeHelpers>()
   private readonly loaded = new Map<string, { mcpToken: string | null; cwd: string; childKey: string }>()
   private readonly activeThreads = new Set<string>()
   private readonly controllers = new Set<AbortController>()
@@ -785,17 +798,16 @@ export class CodexProviderService {
   }
 
   /**
-   * The user's effective Codex setup for `cwd` (enabled MCP servers, native subagents), read
-   * without changing it; see `readCodexUserSetup`. A child on Codex is only safe where Codex starts
-   * no subagents of its own, and a read-only one only where the user has no MCP server: Mousse can
-   * deny neither. Null fields could not be read.
+   * The user's effective Codex setup for `cwd` (its enabled MCP servers), read without changing it;
+   * see `readCodexUserSetup`. A read-only child runs only where the user has no MCP server, because
+   * Mousse cannot deny a Codex MCP tool call. A null field could not be read.
    */
   async userSetup(cwd: string | null): Promise<CodexUserSetup> {
     this.listing += 1
     try {
       return await readCodexUserSetup(await this.connection(), cwd ? resolve(cwd) : null)
     } catch {
-      return { mcpServers: null, nativeSubagents: null }
+      return { mcpServers: null }
     } finally {
       this.listing -= 1
       this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
@@ -911,6 +923,7 @@ export class CodexProviderService {
     this.idleClose = undefined
     this.app = undefined
     this.loaded.clear()
+    this.orphans.clear()
     app.conn.close()
   }
 
@@ -965,7 +978,19 @@ export class CodexProviderService {
       return
     }
     const threadId = (notification.params as { threadId?: unknown } | undefined)?.threadId
-    if (typeof threadId === 'string') this.turns.get(threadId)?.handle(notification)
+    if (typeof threadId !== 'string') return
+    const run = this.turns.get(threadId)
+    if (run) return run.handle(notification)
+    // A native helper's own thread: its turn belongs to the run that started it.
+    const owner = [...this.turns.values()].find((candidate) => candidate.helpers.has(threadId))
+    if (owner) return owner.helpers.handle(notification)
+    const orphan = [...this.orphans].find((helpers) => helpers.has(threadId))
+    if (orphan) {
+      orphan.handle(notification)
+      if (!orphan.awaitingTurn()) this.orphans.delete(orphan)
+      return
+    }
+    this.noteStray(notification, threadId)
   }
 
   private async serve(request: CodexServerRequest): Promise<unknown> {
@@ -1084,10 +1109,39 @@ export class CodexProviderService {
     }
   }
 
+  /** Remembers the turn of a thread no run owns yet: a helper's first events can beat the item that names it. */
+  private noteStray(notification: CodexNotification, threadId: string): void {
+    const turn = (notification.params as { turn?: { id?: string } } | undefined)?.turn
+    if (notification.method !== 'turn/started' && notification.method !== 'turn/completed') return
+    const stray = this.strays.get(threadId) ?? { completed: false }
+    if (notification.method === 'turn/started' && turn?.id) Object.assign(stray, { turnId: turn.id, completed: false })
+    else if (notification.method === 'turn/completed') stray.completed = true
+    this.strays.delete(threadId)
+    this.strays.set(threadId, stray)
+    if (this.strays.size > 64) this.strays.delete(this.strays.keys().next().value as string)
+  }
+
   private requestInterrupt(run: TurnRun): void {
     if (run.interruptRequested) return
     run.interruptRequested = true
     if (run.turnId) this.sendInterrupt(run)
+    this.stopHelpers(run)
+  }
+
+  /**
+   * Interrupts the native helpers of `run`, those running now and any that start later. The parent's
+   * interrupt does not reach them; each helper thread is interrupted on its own.
+   */
+  private stopHelpers(run: TurnRun): void {
+    const conn = this.app?.conn
+    if (!conn) return
+    run.helpers.stopAll((threadId, turnId) => {
+      void conn.request('turn/interrupt', { threadId, turnId }, { timeoutMs: INTERRUPT_TIMEOUT_MS }).catch(() => {
+        /* the helper ended meanwhile, or the process is gone */
+      })
+    })
+    // A helper whose turn has not started yet is interrupted when it does, even after this chat ended.
+    if (run.helpers.awaitingTurn()) this.orphans.add(run.helpers)
   }
 
   private sendInterrupt(run: TurnRun): void {
@@ -1210,7 +1264,7 @@ export class CodexProviderService {
       this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID } }
       this.save()
       input.onSession?.({ codexThreadId })
-      const current = new TurnRun(codexThreadId, input.threadId, input.mode ?? 'default', signal, input)
+      const current = new TurnRun(codexThreadId, input.threadId, input.mode ?? 'default', signal, input, (id) => this.strays.get(id))
       run = current
       this.turns.set(codexThreadId, current)
       const { baseId, effort } = parseThinkingSuffixFromModelId(input.model)
@@ -1318,6 +1372,19 @@ export class CodexProviderService {
         if (!undelivered.length) break
         nextInput = [textInput(undelivered.splice(0).join('\n'))]
       }
+      // Codex completes the parent's turn while the helpers it started keep running, so this chat (the
+      // child's run) stays open until they settle; Stop interrupts them and ends the wait.
+      if (current.helpers.running().length) {
+        const beat = setInterval(() => input.onHeartbeat?.(), 5_000)
+        beat.unref?.()
+        try {
+          await Promise.race([current.helpers.whenSettled(), aborted])
+        } finally {
+          clearInterval(beat)
+        }
+        // Stop interrupts the helpers, and their end can be reported before the abort is seen.
+        signal.throwIfAborted()
+      }
       this.turns.delete(codexThreadId)
       current.settled()
       current.closeTools()
@@ -1334,6 +1401,8 @@ export class CodexProviderService {
         usage: current.usage()
       }
     } catch (error) {
+      // A failed or stopped chat leaves no helper of its own running.
+      if (run) this.stopHelpers(run)
       run?.closeTools()
       if (signal.aborted && input.signal?.aborted) throw input.signal.reason ?? error
       throw error

@@ -193,9 +193,9 @@ describe('Codex children', () => {
   })
 
   /** An app-server stand-in: a signed-in account, instant turns, and the feature pages in `pages`. */
-  function server(options: { approvalRequests?: boolean; pages?: Feature[][]; mcpServers?: Record<string, { enabled?: boolean } | null>; layers?: Array<{ disabledReason: string | null; config?: unknown }>; configFails?: boolean; featuresFail?: boolean } = {}) {
+  function server(options: { approvalRequests?: boolean; pages?: Feature[][]; mcpServers?: Record<string, { enabled?: boolean } | null>; layers?: Array<{ disabledReason: string | null; config?: unknown }>; configFails?: boolean; onTurnStart?: (send: (value: unknown) => void) => void; onInterrupt?: (send: (value: unknown) => void, params: Record<string, unknown>) => void } = {}) {
     const messages: Message[] = []
-    const pages = options.pages ?? [[{ name: 'multi_agent', enabled: false, defaultEnabled: true }]]
+    let latest: PassThrough | undefined
     const launch = (): CodexProcess => {
       const stdout = new PassThrough()
       const stdin = new PassThrough()
@@ -209,6 +209,7 @@ describe('Codex children', () => {
         }
       })
       const send = (value: unknown) => stdout.write(JSON.stringify(value) + '\n')
+      latest = stdout
       let pending = ''
       stdin.on('data', (chunk: Buffer) => {
         pending += chunk.toString()
@@ -219,18 +220,17 @@ describe('Codex children', () => {
           messages.push(message)
           if (message.id === undefined || !message.method) continue
           const thread = { result: { thread: { id: 'thr-1' }, model: 'gpt-x', modelProvider: CODEX_MODEL_PROVIDER, cwd: home } }
-          const page = Number((message.params?.cursor as string | undefined) ?? 0)
           const reply: Record<string, unknown> =
             message.method === 'initialize' ? { result: { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' } }
             : message.method === 'account/read' ? { result: { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, requiresOpenaiAuth: true } }
             : message.method === 'config/read' ? (options.configFails ? { error: { code: -32603, message: 'unreadable' } } : { result: { config: { mcp_servers: options.mcpServers ?? {} }, layers: options.layers ?? [] } })
-            : message.method === 'experimentalFeature/list' && options.featuresFail ? { error: { code: -32603, message: 'unreadable' } }
-            : message.method === 'experimentalFeature/list' ? { result: { data: pages[page], nextCursor: page + 1 < pages.length ? String(page + 1) : null } }
             : ['thread/start', 'thread/resume', 'thread/fork'].includes(message.method) ? thread
             : message.method === 'turn/start' ? { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
             : { result: {} }
           send({ id: message.id, ...reply })
-          if (message.method === 'turn/start') {
+          if (message.method === 'turn/interrupt') options.onInterrupt?.(send, message.params ?? {})
+          if (message.method === 'turn/start' && options.onTurnStart) options.onTurnStart(send)
+          else if (message.method === 'turn/start') {
             if (options.approvalRequests) {
               send({ id: 99, method: 'item/commandExecution/requestApproval', params: { threadId: 'thr-1', itemId: 'cmd-1', command: 'rm -rf build' } })
               send({ id: 98, method: 'item/fileChange/requestApproval', params: { threadId: 'thr-1', itemId: 'edit-1' } })
@@ -243,7 +243,7 @@ describe('Codex children', () => {
       })
       return process as unknown as CodexProcess
     }
-    return { launch: launch as (spec: CodexLaunch) => CodexProcess, messages, requests: (method: string) => messages.filter((message) => message.method === method) }
+    return { launch: launch as (spec: CodexLaunch) => CodexProcess, messages, emit: (value: unknown) => latest?.write(JSON.stringify(value) + '\n'), requests: (method: string) => messages.filter((message) => message.method === method) }
   }
 
   const create = (s: ReturnType<typeof server>) => {
@@ -311,14 +311,11 @@ describe('Codex children', () => {
   describe('preflight of the user setup (CodexAdapter.childPreflight)', () => {
     const preflight = (s: ReturnType<typeof server>, workspace: 'shared' | 'isolated') =>
       new CodexAdapter(() => create(s)).childPreflight({ workspace, cwd: home })
-    const on = [[{ name: 'multi_agent', enabled: true, defaultEnabled: true }]]
-    const off = [[{ name: 'multi_agent', enabled: false, defaultEnabled: true }, { name: 'multi_agent_v2', enabled: false, defaultEnabled: false }]]
     const SHARED_REFUSED = 'shared_unsupported_for_provider'
-    const TARGET_REFUSED = 'provider_unsupported_for_subagents'
 
     it.each([
-      ['no MCP servers, native subagents off', {}, 'shared', null],
-      ['no MCP servers, native subagents off', {}, 'isolated', null],
+      ['no MCP servers', {}, 'shared', null],
+      ['no MCP servers', {}, 'isolated', null],
       ['a disabled server only', { mcpServers: { old: { enabled: false } } }, 'shared', null],
       ['a user MCP server', { mcpServers: { ext: { enabled: true } } }, 'shared', SHARED_REFUSED],
       ['a user MCP server whose enabled flag is unset', { mcpServers: { ext: {} } }, 'shared', SHARED_REFUSED],
@@ -327,33 +324,155 @@ describe('Codex children', () => {
       ['a server only in an applied config layer (project)', { layers: [{ disabledReason: null, config: { mcp_servers: { projsrv: {} } } }] }, 'shared', SHARED_REFUSED],
       ['a server in a layer Codex switched off (untrusted project)', { layers: [{ disabledReason: 'trust this project', config: { mcp_servers: { projsrv: {} } } }] }, 'shared', null],
       ['an unreadable config, shared child', { configFails: true }, 'shared', SHARED_REFUSED],
-      ['an unreadable config, isolated child (nothing detected)', { configFails: true }, 'isolated', null],
-      ['unreadable feature flags (nothing detected)', { featuresFail: true }, 'isolated', null]
+      ['an unreadable config, isolated child', { configFails: true }, 'isolated', null]
     ] as const)('%s (%s workspace)', async (_name, setup, workspace, code) => {
-      const s = server({ pages: off, ...setup })
+      const s = server(setup)
       expect((await preflight(s, workspace))?.code ?? null).toBe(code)
-      // It only reads the user's setup.
-      expect(s.messages.map((message) => message.method).filter((method) => /write|set|batch/i.test(method ?? ''))).toEqual([])
+      // It only reads the user's setup, and it never looks at Codex's own subagent flags.
+      expect(s.messages.map((message) => message.method).filter((method) => /write|set|batch|experimentalFeature/i.test(method ?? ''))).toEqual([])
     })
 
-    it.each(['shared', 'isolated'] as const)('native subagents detected on refuses a %s child, whatever else is configured', async (workspace) => {
-      const refusal = await preflight(server({ pages: on, configFails: true }), workspace)
-      expect(refusal?.code).toBe(TARGET_REFUSED)
-      expect(refusal?.message).toContain('features.multi_agent')
-    })
-
-    it.each([
-      ['multi_agent_v2 on', [[{ name: 'multi_agent', enabled: false, defaultEnabled: true }, { name: 'multi_agent_v2', enabled: true, defaultEnabled: false }]], TARGET_REFUSED],
-      ['on in a later page', [[{ name: 'apps', enabled: true, defaultEnabled: false }], [{ name: 'multi_agent', enabled: true, defaultEnabled: true }]], TARGET_REFUSED],
-      ['an unrelated feature on', [[{ name: 'apps', enabled: true, defaultEnabled: false }, { name: 'multi_agent', enabled: false, defaultEnabled: true }]], null]
-    ] as const)('feature flags: %s', async (_name, pages, code) => {
-      expect((await preflight(server({ pages: pages as never }), 'isolated'))?.code ?? null).toBe(code)
+    it("leaves Codex's native subagents alone: no refusal whatever the config", async () => {
+      for (const workspace of ['shared', 'isolated'] as const) expect((await preflight(server(), workspace))?.code ?? null).toBeNull()
     })
 
     it('names the servers and points to isolated', async () => {
-      const refusal = await preflight(server({ pages: off, mcpServers: { ext: {}, other: {} } }), 'shared')
+      const refusal = await preflight(server({ mcpServers: { ext: {}, other: {} } }), 'shared')
       expect(refusal?.message).toContain('ext, other')
       expect(refusal?.message).toContain('"isolated"')
+    })
+  })
+
+  describe("native helpers (Codex's own subagents) of a child's turn", () => {
+    const PARENT = 'thr-1'
+    const HELPER = 'helper-1'
+    const completed = (threadId: string, id: string, status = 'completed') => ({ method: 'turn/completed', params: { threadId, turn: { id, status, error: null } } })
+    const spawned = (kind: 'subAgentActivity' | 'collabAgentToolCall') => ({
+      method: 'item/completed',
+      params: {
+        threadId: PARENT,
+        turnId: 'turn-1',
+        item:
+          kind === 'subAgentActivity'
+            ? { type: 'subAgentActivity', id: 'spawn-1', kind: 'started', agentThreadId: HELPER }
+            : { type: 'collabAgentToolCall', id: 'spawn-1', tool: 'spawnAgent', status: 'completed', receiverThreadIds: [HELPER], agentsStates: { [HELPER]: { status: 'running', message: null } } }
+      }
+    })
+    const helperTurn = { method: 'turn/started', params: { threadId: HELPER, turn: { id: 'h-turn-1', status: 'inProgress', error: null } } }
+    const interrupts = (s: ReturnType<typeof server>) => s.requests('turn/interrupt').map((message) => `${message.params!.threadId}/${message.params!.turnId}`)
+    const state = (promise: Promise<unknown>) => Promise.race([promise.then(() => 'settled', () => 'rejected'), new Promise((done) => setTimeout(() => done('pending'), 150))])
+    const interruptReply = (send: (value: unknown) => void, params: Record<string, unknown>) =>
+      send(completed(params.threadId as string, params.threadId === HELPER ? 'h-turn-1' : 'turn-1', 'interrupted'))
+
+    /** The parent spawns a helper and completes its own turn at once; the helper goes on. */
+    const parentCompletesFirst = (kind: 'subAgentActivity' | 'collabAgentToolCall') => (send: (value: unknown) => void) =>
+      setImmediate(() => {
+        send(spawned(kind))
+        send(helperTurn)
+        send(completed(PARENT, 'turn-1'))
+      })
+
+    it.each(['subAgentActivity', 'collabAgentToolCall'] as const)('the child run does not complete while a helper (%s) is still running, and completes when it finishes', async (kind) => {
+      let finishHelper: () => void = () => undefined
+      const s = server({
+        onTurnStart: (send) => {
+          finishHelper = () => send(completed(HELPER, 'h-turn-1'))
+          parentCompletesFirst(kind)(send)
+        }
+      })
+      const running = chat(create(s), { child: SHARED })
+      expect(await state(running)).toBe('pending')
+      expect(interrupts(s)).toEqual([])
+      finishHelper()
+      await expect(running).resolves.toMatchObject({ codexThreadId: PARENT })
+    })
+
+    it('a child with no helper completes as soon as its own turn does', async () => {
+      await expect(chat(create(server()), { child: SHARED })).resolves.toMatchObject({ codexThreadId: PARENT })
+    })
+
+    it("a helper that finished before the parent's item named it does not hold the run", async () => {
+      const s = server({
+        onTurnStart: (send) =>
+          setImmediate(() => {
+            send(helperTurn)
+            send(completed(HELPER, 'h-turn-1'))
+            send(spawned('subAgentActivity'))
+            send(completed(PARENT, 'turn-1'))
+          })
+      })
+      await expect(chat(create(s), { child: SHARED })).resolves.toMatchObject({ codexThreadId: PARENT })
+    })
+
+    it('a helper that went idle after being active ends the wait', async () => {
+      let idle: () => void = () => undefined
+      const s = server({
+        onTurnStart: (send) => {
+          idle = () => send({ method: 'thread/status/changed', params: { threadId: HELPER, status: { type: 'idle' } } })
+          parentCompletesFirst('subAgentActivity')(send)
+        }
+      })
+      const running = chat(create(s), { child: SHARED })
+      expect(await state(running)).toBe('pending')
+      idle()
+      await expect(running).resolves.toBeTruthy()
+    })
+
+    it('Stop while the run waits for its helper interrupts the helper and ends the run', async () => {
+      const s = server({ onTurnStart: parentCompletesFirst('subAgentActivity'), onInterrupt: (send, params) => params.threadId === HELPER && interruptReply(send, params) })
+      const stop = new AbortController()
+      const running = chat(create(s), { child: SHARED, signal: stop.signal })
+      expect(await state(running)).toBe('pending')
+      stop.abort(new Error('Stopped'))
+      await expect(running).rejects.toThrow('Stopped')
+      // The parent's turn was already complete; only the helper is interrupted.
+      await vi.waitFor(() => expect(interrupts(s)).toEqual([`${HELPER}/h-turn-1`]))
+    })
+
+    it("Stop during the parent's turn interrupts the parent and its helper", async () => {
+      const s = server({
+        onTurnStart: (send) =>
+          setImmediate(() => {
+            send(spawned('subAgentActivity'))
+            send(helperTurn)
+          }),
+        onInterrupt: interruptReply
+      })
+      const stop = new AbortController()
+      const running = chat(create(s), { child: ISOLATED, signal: stop.signal })
+      running.catch(() => undefined)
+      await vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(1))
+      await new Promise((done) => setTimeout(done, 80))
+      stop.abort(new Error('Stopped'))
+      await expect(running).rejects.toThrow()
+      await vi.waitFor(() => expect([...interrupts(s)].sort()).toEqual([`${HELPER}/h-turn-1`, `${PARENT}/turn-1`].sort()))
+    })
+
+    it('a helper whose turn starts after Stop is interrupted as soon as its turn id is known', async () => {
+      const s = server({ onTurnStart: (send) => setImmediate(() => send(spawned('subAgentActivity'))), onInterrupt: interruptReply })
+      const stop = new AbortController()
+      const running = chat(create(s), { child: ISOLATED, signal: stop.signal })
+      running.catch(() => undefined)
+      await vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(1))
+      await new Promise((done) => setTimeout(done, 80))
+      stop.abort(new Error('Stopped'))
+      await expect(running).rejects.toThrow()
+      expect(interrupts(s)).not.toContain(`${HELPER}/h-turn-1`)
+      s.emit(helperTurn)
+      await vi.waitFor(() => expect(interrupts(s)).toContain(`${HELPER}/h-turn-1`))
+    })
+
+    it('a failed parent turn stops the helpers it started', async () => {
+      const s = server({
+        onTurnStart: (send) =>
+          setImmediate(() => {
+            send(spawned('subAgentActivity'))
+            send(helperTurn)
+            send(completed(PARENT, 'turn-1', 'failed'))
+          })
+      })
+      await expect(chat(create(s), { child: SHARED })).rejects.toThrow()
+      await vi.waitFor(() => expect(interrupts(s)).toEqual([`${HELPER}/h-turn-1`]))
     })
   })
 })
