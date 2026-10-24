@@ -41,6 +41,9 @@ function createWorker(model: LocalTtsModel): Worker {
     case 'supertonic':
       created = new Worker(new URL('./supertonicWorker.ts', import.meta.url), { type: 'module' })
       break
+    case 'pocket':
+      created = new Worker(new URL('./pocketWorker.ts', import.meta.url), { type: 'module' })
+      break
     default:
       created = new Worker(new URL('./kokoroWorker.ts', import.meta.url), { type: 'module' })
   }

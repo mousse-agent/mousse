@@ -168,7 +168,7 @@ describe('Kitten TTS manifests', () => {
   const models = [KITTEN_TTS_MINI, KITTEN_TTS_MICRO, KITTEN_TTS_NANO]
 
   it('are listed after Kokoro and can be found by id', () => {
-    expect(LOCAL_TTS_MODELS.map((model) => model.id)).toEqual(['kokoro-82m', 'kitten-tts-mini', 'kitten-tts-micro', 'kitten-tts-nano'])
+    expect(LOCAL_TTS_MODELS.slice(0, 4).map((model) => model.id)).toEqual(['kokoro-82m', 'kitten-tts-mini', 'kitten-tts-micro', 'kitten-tts-nano'])
     for (const model of models) expect(findLocalTtsModel(model.id)).toBe(model)
   })
 
