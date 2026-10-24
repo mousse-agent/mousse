@@ -267,6 +267,10 @@ function parseCandidate(value: string): {
   if (!match) throw bad()
   const [, , component, transport, , address, port, type, extensions] = match
   if (component !== '1') throw bad()
+  // Only UDP is used; TCP candidates carry a `tcptype` extension, so they return before it.
+  if (transport.toLowerCase() !== 'udp') {
+    return { address, port: Number(port), type, transport: transport.toLowerCase() }
+  }
   const parts = extensions.trim() ? extensions.trim().split(' ') : []
   for (let index = 0; index < parts.length; index += 2) {
     const name = parts[index],
@@ -317,7 +321,6 @@ export function validateOffer(sdp: unknown, policy: OfferPolicy): ValidatedOffer
   const count = (key: string) => once.set(key, (once.get(key) ?? 0) + 1)
   const candidates: ValidatedOffer['candidates'] = []
   let fingerprint = ''
-  let candidateLines = 0
   let media = false
   for (const line of lines) {
     const match = line.match(/^([a-z])=(.*)$/)
@@ -358,9 +361,11 @@ export function validateOffer(sdp: unknown, policy: OfferPolicy): ValidatedOffer
           option = separator < 0 ? '' : value.slice(separator + 1)
         if (!SESSION_ATTRIBUTES.has(name)) throw bad()
         if (name === 'candidate') {
-          if (!media || ++candidateLines > WEBRTC_MAX_CANDIDATES) throw bad()
+          if (!media) throw bad()
           const candidate = parseCandidate(value)
-          if (!candidateAllowed(candidate, policy)) continue
+          // Lines the policy drops do not count; extra usable candidates are dropped too.
+          if (!candidateAllowed(candidate, policy) || candidates.length >= WEBRTC_MAX_CANDIDATES)
+            continue
           candidates.push({
             address: candidate.address,
             port: candidate.port,
@@ -607,6 +612,10 @@ export class DataChannelDuplex extends Duplex {
         this.destroy(new NetError('bad_request'))
         return
       }
+      if (data.length > WEBRTC_CHUNK_BYTES) {
+        this.destroy(new NetError('too_large'))
+        return
+      }
       if (this.preauthBytes !== undefined) {
         this.preauthBytes += data.length
         if (this.preauthBytes > (limits.preauthMaxBytes ?? WEBRTC_PREAUTH_MAX_BYTES)) {
@@ -838,19 +847,22 @@ export class PhoneWebRtcAcceptor {
       this.offers.set(node, recent)
       throw new NetError('rate_limited')
     }
+    const mine = this.counts(node),
+      all = this.counts()
+    // A pending ticket becomes a live session when it authenticates, so it holds a live slot.
+    if (
+      mine.pending >= WEBRTC_PENDING_PER_NODE ||
+      all.pending >= WEBRTC_PENDING_MAX ||
+      mine.live + mine.pending >= WEBRTC_LIVE_PER_NODE ||
+      all.live + all.pending >= WEBRTC_LIVE_MAX
+    ) {
+      this.offers.set(node, recent)
+      throw new NetError('rate_limited')
+    }
     recent.push(now)
     this.offers.set(node, recent)
     for (const [other, times] of this.offers)
       if (other !== node && times.every((at) => now - at >= 60_000)) this.offers.delete(other)
-    const mine = this.counts(node),
-      all = this.counts()
-    if (
-      mine.pending >= WEBRTC_PENDING_PER_NODE ||
-      all.pending >= WEBRTC_PENDING_MAX ||
-      mine.live >= WEBRTC_LIVE_PER_NODE ||
-      all.live >= WEBRTC_LIVE_MAX
-    )
-      throw new NetError('rate_limited')
   }
 
   private channel(ticket: TicketState, channel: WebRtcChannel): void {
