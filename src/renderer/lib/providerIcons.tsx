@@ -139,10 +139,24 @@ const PROVIDER_ICONS: Record<string, (props: { size?: number; className?: string
   ),
 }
 
-const PROVIDER_ASSET_ICONS: Record<string, { src: string; monochrome?: boolean }> = {
+interface ProviderAsset {
+  src: string
+  /**
+   * Single-colour mark. It is drawn as a mask in `color`, or in the
+   * surrounding text colour when there is no brand colour, so black marks
+   * such as OpenAI stay legible on dark and light themes.
+   */
+  monochrome?: boolean
+  color?: string
+}
+
+/** Claude's brand orange, used for both the Claude and Anthropic marks. */
+const CLAUDE_ORANGE = '#D97757'
+
+const PROVIDER_ASSET_ICONS: Record<string, ProviderAsset> = {
   antgroup: { src: antgroupAsset },
-  anthropic: { src: anthropicAsset, monochrome: true },
-  claude: { src: claudeAsset, monochrome: true },
+  anthropic: { src: anthropicAsset, monochrome: true, color: CLAUDE_ORANGE },
+  claude: { src: claudeAsset, monochrome: true, color: CLAUDE_ORANGE },
   aws: { src: awsAsset },
   azure: { src: azureAsset },
   baseten: { src: basetenAsset, monochrome: true },
@@ -181,10 +195,35 @@ function ProviderAssetIcon({
   size,
   className
 }: {
-  asset: { src: string; monochrome?: boolean }
+  asset: ProviderAsset
   size: number
   className?: string
 }) {
+  if (asset.monochrome) {
+    const mask = `url("${asset.src}")`
+    return (
+      <span
+        className={className}
+        aria-hidden
+        data-provider-mark="mono"
+        style={{
+          display: 'block',
+          width: size,
+          height: size,
+          flexShrink: 0,
+          backgroundColor: asset.color ?? 'currentColor',
+          maskImage: mask,
+          WebkitMaskImage: mask,
+          maskSize: 'contain',
+          WebkitMaskSize: 'contain',
+          maskRepeat: 'no-repeat',
+          WebkitMaskRepeat: 'no-repeat',
+          maskPosition: 'center',
+          WebkitMaskPosition: 'center'
+        }}
+      />
+    )
+  }
   return (
     <img
       src={asset.src}
@@ -198,8 +237,7 @@ function ProviderAssetIcon({
         width: size,
         height: size,
         flexShrink: 0,
-        objectFit: 'contain',
-        filter: asset.monochrome ? 'invert(0.72)' : undefined
+        objectFit: 'contain'
       }}
     />
   )

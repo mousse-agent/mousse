@@ -540,7 +540,12 @@ function ProfileModelFamilyMenu({
 
         <div className="model-picker-body">
           {railItems.length > 1 ? (
-            <div className="model-picker-rail" role="tablist" aria-label="Filter by provider">
+            <div
+              className="model-picker-rail"
+              role="tablist"
+              aria-label="Filter by provider"
+              data-tooltip-placement="cursor-left"
+            >
               <button
                 type="button"
                 role="tab"

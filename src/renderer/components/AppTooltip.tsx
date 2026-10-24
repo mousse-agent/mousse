@@ -1,6 +1,63 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
-type Anchor = { top: number; left: number; width: number; height: number }
+/**
+ * `element` is the hovered element's box. `cursor` is set for tooltips that
+ * opted into following the pointer: then the tooltip sits beside that point.
+ */
+type Anchor = {
+  top: number
+  left: number
+  width: number
+  height: number
+  cursor?: { x: number; y: number }
+}
+
+const GAP = 8
+const CURSOR_GAP = 6
+const EDGE = 8
+
+/**
+ * Opt-in: `data-tooltip-placement="cursor-left"` on an element or an ancestor
+ * shows its tooltip just left of the pointer instead of above the element.
+ */
+function followsCursor(element: HTMLElement): boolean {
+  return element.closest<HTMLElement>('[data-tooltip-placement]')?.dataset.tooltipPlacement === 'cursor-left'
+}
+
+/**
+ * Places a tooltip of size `box` inside the viewport. By default it is
+ * centred above the element. A cursor anchor puts it left of the pointer,
+ * vertically centred, and flips it right only when the left has no room.
+ */
+export function placeTooltip(
+  anchor: Anchor,
+  box: { width: number; height: number },
+  viewport: { width: number; height: number }
+): { top: number; left: number } {
+  const clampTop = (top: number) =>
+    Math.min(Math.max(EDGE, top), Math.max(EDGE, viewport.height - box.height - EDGE))
+  const clampLeft = (left: number) =>
+    Math.min(Math.max(EDGE, left), Math.max(EDGE, viewport.width - box.width - EDGE))
+
+  if (anchor.cursor) {
+    const { x, y } = anchor.cursor
+    const left = x - CURSOR_GAP - box.width
+    const right = x + CURSOR_GAP
+    const fitsLeft = left >= EDGE
+    const fitsRight = right + box.width <= viewport.width - EDGE
+    return {
+      top: clampTop(y - box.height / 2),
+      left: clampLeft(!fitsLeft && fitsRight ? right : left)
+    }
+  }
+
+  let top = anchor.top - box.height - GAP
+  if (top < EDGE) top = anchor.top + anchor.height + GAP
+  return {
+    top: clampTop(top),
+    left: clampLeft(anchor.left + anchor.width / 2 - box.width / 2)
+  }
+}
 
 const SHOW_DELAY_MS = 380
 
@@ -13,6 +70,7 @@ export function AppTooltip() {
   const pendingRef = useRef<HTMLElement | null>(null)
   const hostRef = useRef<HTMLElement | null>(null)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pointerRef = useRef<{ x: number; y: number } | null>(null)
   const [text, setText] = useState<string | null>(null)
   const [anchor, setAnchor] = useState<Anchor | null>(null)
   const [place, setPlace] = useState<{ top: number; left: number } | null>(null)
@@ -21,15 +79,7 @@ export function AppTooltip() {
     const tip = tipRef.current
     if (!tip || !anchor || !text) return
     const box = tip.getBoundingClientRect()
-    const gap = 8
-    let top = anchor.top - box.height - gap
-    let left = anchor.left + anchor.width / 2 - box.width / 2
-    if (top < 8) top = anchor.top + anchor.height + gap
-    left = Math.min(Math.max(8, left), window.innerWidth - box.width - 8)
-    if (top + box.height > window.innerHeight - 8) {
-      top = Math.max(8, window.innerHeight - box.height - 8)
-    }
-    setPlace({ top, left })
+    setPlace(placeTooltip(anchor, box, { width: window.innerWidth, height: window.innerHeight }))
   }, [anchor, text])
 
   useEffect(() => {
@@ -82,9 +132,24 @@ export function AppTooltip() {
       hostRef.current = element
       pendingRef.current = null
       const rect = element.getBoundingClientRect()
+      const pointer = pointerRef.current
       setText(value)
-      setAnchor({ top: rect.top, left: rect.left, width: rect.width, height: rect.height })
+      setAnchor({
+        top: rect.top,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height,
+        cursor: pointer && followsCursor(element) ? pointer : undefined
+      })
       setPlace(null)
+    }
+
+    const onMove = (event: PointerEvent) => {
+      pointerRef.current = { x: event.clientX, y: event.clientY }
+      const host = hostRef.current
+      if (!host || !(event.target instanceof Node) || !host.contains(event.target)) return
+      const cursor = { x: event.clientX, y: event.clientY }
+      setAnchor((current) => (current?.cursor ? { ...current, cursor } : current))
     }
 
     const titledElement = (target: EventTarget | null) => {
@@ -104,6 +169,7 @@ export function AppTooltip() {
     }
 
     const onOver = (event: PointerEvent) => {
+      pointerRef.current = { x: event.clientX, y: event.clientY }
       const element = titledElement(event.target)
       if (!element) return
       if (element === hostRef.current || element === pendingRef.current) return
@@ -142,6 +208,7 @@ export function AppTooltip() {
 
     document.addEventListener('pointerover', onOver)
     document.addEventListener('pointerout', onOut)
+    document.addEventListener('pointermove', onMove)
     window.addEventListener('scroll', onScroll, true)
     window.addEventListener('blur', hide)
     return () => {
@@ -149,6 +216,7 @@ export function AppTooltip() {
       observer.disconnect()
       document.removeEventListener('pointerover', onOver)
       document.removeEventListener('pointerout', onOut)
+      document.removeEventListener('pointermove', onMove)
       window.removeEventListener('scroll', onScroll, true)
       window.removeEventListener('blur', hide)
     }
