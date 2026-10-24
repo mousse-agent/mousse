@@ -11,7 +11,6 @@ import type {
   Agent,
   BrowserBounds,
   BrowserState,
-  ChatImageAttachment,
   ChatMessage,
   ThreadMessagesSnapshot,
   OrchestratorContextUsageInput,
@@ -324,67 +323,6 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, agent: Agent) => cb(agent)
       ipcRenderer.on('agent:spawned', handler)
       return () => ipcRenderer.removeListener('agent:spawned', handler)
-    }
-  },
-  mousseAgent: {
-    getMessages: (agentId: string): Promise<ChatMessage[]> =>
-      ipcRenderer.invoke('mousseAgent:getMessages', agentId),
-    getAssignment: (agentId: string) => ipcRenderer.invoke('mousseAgent:getAssignment', agentId),
-    getContextUsage: (agentId: string, draftInput = ''): Promise<ContextUsageSnapshot | undefined> =>
-      ipcRenderer.invoke('mousseAgent:getContextUsage', agentId, draftInput),
-    send: (
-      agentId: string,
-      content: string,
-      images?: ChatImageAttachment[]
-    ): Promise<{ accepted: boolean; reason?: string }> =>
-      ipcRenderer.invoke('mousseAgent:send', agentId, content, images),
-    abort: (agentId: string): Promise<boolean> => ipcRenderer.invoke('mousseAgent:abort', agentId),
-    onMessage: (
-      cb: (payload: { agentId: string; message: ChatMessage }) => void
-    ): (() => void) => {
-      const handler = (
-        _: Electron.IpcRendererEvent,
-        payload: { agentId: string; message: ChatMessage }
-      ) => cb(payload)
-      ipcRenderer.on('mousse-agent:message', handler)
-      return () => ipcRenderer.removeListener('mousse-agent:message', handler)
-    },
-    onMessageUpdated: (
-      cb: (payload: { agentId: string; message: ChatMessage }) => void
-    ): (() => void) => {
-      const handler = (
-        _: Electron.IpcRendererEvent,
-        payload: { agentId: string; message: ChatMessage }
-      ) => cb(payload)
-      ipcRenderer.on('mousse-agent:message-updated', handler)
-      return () => ipcRenderer.removeListener('mousse-agent:message-updated', handler)
-    },
-    onMessagesSync: (
-      cb: (payload: { agentId: string; messages: ChatMessage[] }) => void
-    ): (() => void) => {
-      const handler = (
-        _: Electron.IpcRendererEvent,
-        payload: { agentId: string; messages: ChatMessage[] }
-      ) => cb(payload)
-      ipcRenderer.on('mousse-agent:messages-sync', handler)
-      return () => ipcRenderer.removeListener('mousse-agent:messages-sync', handler)
-    },
-    onConnectionFailed: (cb: (payload: { agentId: string }) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, payload: { agentId: string }) => cb(payload)
-      ipcRenderer.on('mousse-agent:connection-failed', handler)
-      return () => ipcRenderer.removeListener('mousse-agent:connection-failed', handler)
-    },
-    retryConnection: (agentId: string): Promise<void> =>
-      ipcRenderer.invoke('mousseAgent:retryConnection', agentId),
-    onComplete: (
-      cb: (payload: { agentId: string; summary: string }) => void
-    ): (() => void) => {
-      const handler = (
-        _: Electron.IpcRendererEvent,
-        payload: { agentId: string; summary: string }
-      ) => cb(payload)
-      ipcRenderer.on('mousse-agent:complete', handler)
-      return () => ipcRenderer.removeListener('mousse-agent:complete', handler)
     }
   },
   tasks: {

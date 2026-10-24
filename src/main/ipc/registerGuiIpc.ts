@@ -84,8 +84,6 @@ import type {
   BrowserBounds,
   ChannelConfig,
   ChannelPlatform,
-  ChatImageAttachment,
-  ContextUsageSnapshot,
   CreateScheduledJobInput,
   GitCommitOptions,
   MainView,
@@ -1333,59 +1331,6 @@ export function registerGuiIpc(
       return res.task
     }
   )
-  registerHandler('mousseAgent:getMessages', async (_e, agentId: string) => {
-    const threadId = currentPresentation().getActiveThreadId()
-    if (!threadId) return []
-    const res = await guiMms.request<{ messages: unknown[] }>('mousseAgent.getMessages', {
-      threadId,
-      agentId
-    })
-    return res.messages
-  })
-  registerHandler('mousseAgent:getAssignment', async (_e, agentId: string) => {
-    const res = await guiMms.request<{ assignment?: unknown }>('mousseAgent.getAssignment', {
-      agentId
-    })
-    return res.assignment
-  })
-  registerHandler('mousseAgent:getContextUsage', async (_e, agentId: string, draftInput = '') => {
-    const threadId = currentPresentation().getActiveThreadId()
-    if (!threadId) return undefined
-    const res = await guiMms.request<{ usage?: ContextUsageSnapshot }>('mousseAgent.contextUsage', {
-      threadId,
-      agentId,
-      draftInput
-    })
-    return res.usage
-  })
-  registerHandler('mousseAgent:retryConnection', async (_e, agentId: string) => {
-    const threadId = currentPresentation().getActiveThreadId()
-    if (!threadId) return
-    await guiMms.request('mousseAgent.retry', { threadId, agentId })
-  })
-  registerHandler('mousseAgent:abort', async (_e, agentId: string) => {
-    const res = await guiMms.request<{ aborted: boolean }>('mousseAgent.abort', { agentId })
-    return res.aborted
-  })
-  registerHandler(
-    'mousseAgent:send',
-    async (
-      _e,
-      agentId: string,
-      content: string,
-      images?: ChatImageAttachment[]
-    ) => {
-      const threadId = currentPresentation().getActiveThreadId()
-      if (!threadId) return { accepted: false, reason: 'missing' as const }
-      return guiMms.request<{ accepted: boolean; reason?: string }>('mousseAgent.send', {
-        threadId,
-        agentId,
-        content,
-        images
-      })
-    }
-  )
-
   registerHandler('pty:write', async (_e, ptyId: string, data: string) => {
     await guiMms.request('pty.write', { ptyId, data })
   })

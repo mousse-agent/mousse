@@ -81,8 +81,6 @@ import {
   type ChatMessage,
   type CliType,
   type ContextUsageSnapshot,
-  type MousseAgentAssignment,
-  type MousseAgentSendResult,
   type MousseAgentSessionSnapshot,
   type NativeLlmContext,
   type OrchestratorAction,
@@ -5680,14 +5678,6 @@ export class OrchestratorService extends EventEmitter {
     return logs
   }
 
-  getMousseAgentMessages(agentId: string): ChatMessage[] {
-    return this.mousseAgents.getMessages(agentId)
-  }
-
-  getMousseAgentAssignment(agentId: string): MousseAgentAssignment | undefined {
-    return this.mousseAgents.getAssignment(agentId)
-  }
-
   validateConversationActionRestore(threadId: string, action: import('../../shared/threadActions').ThreadAction, kind: 'undo' | 'redo'): void {
     assertConversationBoundary(action)
     const directory = this.resolveThreadDir(threadId)
@@ -5795,14 +5785,6 @@ export class OrchestratorService extends EventEmitter {
     })
   }
 
-  async getMousseAgentContextUsage(agentId: string, draftInput = '') {
-    return await this.mousseAgents.getContextUsage(agentId, draftInput)
-  }
-
-  abortMousseAgent(agentId: string): boolean {
-    return this.mousseAgents.abort(agentId)
-  }
-
   exportMousseAgentSessions(threadId?: string): MousseAgentSessionSnapshot[] {
     const snapshots = this.mousseAgents.exportSessions()
     if (!threadId) return snapshots
@@ -5830,42 +5812,6 @@ export class OrchestratorService extends EventEmitter {
 
   setMousseAgentPersistCallback(fn: (immediate?: boolean) => void): void {
     this.mousseAgents.setPersistCallback(fn)
-  }
-
-  async sendMousseAgentMessage(
-    agentId: string,
-    content: string,
-    images?: ChatImageAttachment[]
-  ): Promise<MousseAgentSendResult> {
-    this.lifecycle.assertAccepting()
-    if (!this.prepareGuiAgentResume(agentId)) return { accepted: false, reason: 'missing' }
-    return this.mousseAgents.send(agentId, content, images)
-  }
-
-  retryMousseAgent(agentId: string): void {
-    this.lifecycle.assertAccepting()
-    if (!this.prepareGuiAgentResume(agentId)) return
-    this.mousseAgents.retry(agentId)
-  }
-
-  private prepareGuiAgentResume(agentId: string): boolean {
-    const agent = this.agents.get(agentId)
-    if (!agent || this.mousseAgents.getRunState(agentId) === undefined) return false
-    if (
-      agent.executionMode !== 'gui' ||
-      (agent.status !== 'failed' && agent.status !== 'interrupted')
-    ) {
-      return true
-    }
-    this.agents.updateStatus(agentId, 'running')
-    const task = this.tasks.findByAgentId(agentId)
-    if (task) {
-      this.tasks.updateStatus(task.id, 'in_progress')
-      this.tasks.updateProgress(task.id, {
-        message: 'Resuming from the last durable Mousse checkpoint.'
-      })
-    }
-    return true
   }
 
   /**

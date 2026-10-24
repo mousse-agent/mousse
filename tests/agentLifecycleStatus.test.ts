@@ -226,45 +226,6 @@ describe('GUI failure propagation', () => {
     orchestrator.reportGuiAgentFailure(agent.id, 'another reason')
     expect(task?.progressMessage).toBe('Provider rate limit exceeded')
   })
-
-  it('returns failed GUI agent and task to running when retrying a durable checkpoint', () => {
-    const root = makeTempRoot()
-    const { orchestrator, agents, tasks } = createOrchestrator(root)
-    const worktreePath = join(root, '.mousse-worktrees', 'agent-retry123')
-    mkdirSync(worktreePath, { recursive: true })
-    const { agent } = seedRunningGuiAgent(agents, tasks, {
-      worktreePath,
-      branch: 'mousse/agent-retry123'
-    })
-
-    orchestrator.restoreMousseAgentSessions([
-      {
-        version: 1,
-        agentId: agent.id,
-        worktreePath,
-        task: agent.task,
-        assignment: {},
-        messages: [],
-        history: [],
-        runState: 'failed',
-        lastError: 'Token safety budget reached',
-        updatedAt: new Date().toISOString()
-      }
-    ])
-    expect(agents.get(agent.id)?.status).toBe('failed')
-    const internals = orchestrator as unknown as {
-      mousseAgents: { retry: (agentId: string) => void }
-    }
-    const retry = vi.spyOn(internals.mousseAgents, 'retry').mockImplementation(() => {})
-
-    orchestrator.retryMousseAgent(agent.id)
-
-    expect(retry).toHaveBeenCalledWith(agent.id)
-    expect(agents.get(agent.id)?.status).toBe('running')
-    expect(tasks.findByAgentId(agent.id)?.status).toBe('in_progress')
-    // No progress monitor overwrites the resume message any more (SPEC §14.5).
-    expect(tasks.findByAgentId(agent.id)?.progressMessage).toBe('Resuming from the last durable Mousse checkpoint.')
-  })
 })
 
 describe('startup reconciliation', () => {

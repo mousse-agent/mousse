@@ -1058,67 +1058,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       })
       return { task, tasks: ctx.mms.threadRuntimes.listTasks(threadId), threadId }
     }
-    case 'mousseAgent.getMessages': {
-      const p = isObject(params) ? params : {}
-      const threadId = asString(p.threadId, 'threadId', 256)
-      const agentId = asString(p.agentId, 'agentId', 256)
-      if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
-        return { threadId, agentId, messages: [] }
-      }
-      return {
-        threadId,
-        agentId,
-        messages: ctx.mms.orchestrator.getMousseAgentMessages(agentId)
-      }
-    }
-    case 'mousseAgent.getAssignment': {
-      const p = isObject(params) ? params : {}
-      const agentId = asString(p.agentId, 'agentId', 256)
-      return {
-        agentId,
-        assignment: ctx.mms.orchestrator.getMousseAgentAssignment(agentId)
-      }
-    }
-    case 'mousseAgent.contextUsage': {
-      const p = isObject(params) ? params : {}
-      const threadId = asString(p.threadId, 'threadId', 256)
-      const agentId = asString(p.agentId, 'agentId', 256)
-      const draftInput = asOptionalString(p.draftInput) ?? ''
-      if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
-        return { threadId, agentId, usage: undefined }
-      }
-      return {
-        threadId,
-        agentId,
-        usage: await ctx.mms.orchestrator.getMousseAgentContextUsage(agentId, draftInput)
-      }
-    }
-    case 'mousseAgent.send': {
-      const p = isObject(params) ? params : {}
-      const threadId = asString(p.threadId, 'threadId', 256)
-      const agentId = asString(p.agentId, 'agentId', 256)
-      const content = asString(p.content, 'content')
-      const images = asOptionalChatImages(p.images, 'images')
-      if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
-        return { threadId, agentId, accepted: false, reason: 'missing' }
-      }
-      return { threadId, agentId, ...(await ctx.mms.orchestrator.sendMousseAgentMessage(agentId, content, images)) }
-    }
-    case 'mousseAgent.retry': {
-      const p = isObject(params) ? params : {}
-      const threadId = asString(p.threadId, 'threadId', 256)
-      const agentId = asString(p.agentId, 'agentId', 256)
-      if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
-        return { threadId, agentId, ok: false }
-      }
-      ctx.mms.orchestrator.retryMousseAgent(agentId)
-      return { threadId, agentId, ok: true }
-    }
-    case 'mousseAgent.abort': {
-      const p = isObject(params) ? params : {}
-      const agentId = asString(p.agentId, 'agentId', 256)
-      return { agentId, aborted: ctx.mms.orchestrator.abortMousseAgent(agentId) }
-    }
     case 'pty.list': {
       const p = isObject(params) ? params : {}
       const threadId = asOptionalString(p.threadId, 256)

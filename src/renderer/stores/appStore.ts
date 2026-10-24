@@ -106,8 +106,6 @@ interface AppState {
   messages: ChatMessage[]
   agents: Agent[]
   tasks: Task[]
-  activePtyId: string | null
-  activeAgentId: string | null
   sidebarWidth: number
   threadsSidebarWidth: number
   usageOpen: boolean
@@ -169,8 +167,6 @@ interface AppState {
   updateMessage: (message: ChatMessage) => void
   setAgents: (agents: Agent[]) => void
   setTasks: (tasks: Task[]) => void
-  setActivePtyId: (ptyId: string | null) => void
-  setActiveAgentId: (agentId: string | null) => void
   setSidebarWidth: (width: number) => void
   setThreadsSidebarWidth: (width: number) => void
   setSettingsOpen: (open: boolean) => void
@@ -337,8 +333,6 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   messages: [],
   agents: [],
   tasks: [],
-  activePtyId: null,
-  activeAgentId: null,
   sidebarWidth: 30,
   threadsSidebarWidth: 260,
   usageOpen: false,
@@ -434,8 +428,6 @@ export const useAppStore = create<AppState>()(persist((set) => ({
     }),
   setAgents: (agents) => set({ agents }),
   setTasks: (tasks) => set({ tasks }),
-  setActivePtyId: (activePtyId) => set({ activePtyId }),
-  setActiveAgentId: (activeAgentId) => set({ activeAgentId }),
   setSidebarWidth: (sidebarWidth) => set({ sidebarWidth }),
   setThreadsSidebarWidth: (threadsSidebarWidth) => set({ threadsSidebarWidth }),
   setSettingsOpen: (settingsOpen) => set(settingsOpen ? { settingsOpen, scheduledOpen: false, channelsOpen: false } : { settingsOpen }),
@@ -612,8 +604,6 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       messages: [],
       agents: [],
       tasks: [],
-      activePtyId: null,
-      activeAgentId: null,
       activeThreadId: null,
       projects: [],
       threads: [],
