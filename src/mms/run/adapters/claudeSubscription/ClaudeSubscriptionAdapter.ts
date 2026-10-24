@@ -4,7 +4,6 @@ import {
 } from '../../../providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import type { ClaudeIntegrationSource, ClaudeTurnIntegrations } from '../../../providers/claudeSubscription/integrations'
 import type { ClaudeSubscriptionMetrics } from '../../../providers/claudeSubscription/metrics'
-import { projectAgentInstructionsSection } from '../../../orchestrator/projectInstructions'
 import { mousseOrchestrationInstructions } from '../../mcp/instructions'
 import type { ProviderRef } from '../../types'
 import type {
@@ -112,12 +111,9 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       // SPEC §15.2: the Mousse MCP server over HTTP with this run's bearer token, and the shared
       // orchestration guidance appended to the system prompt.
       mcp: host.mcp ?? null,
-      // The SDK launches with `settingSources: []`, so it loads no instruction files itself: the
-      // project's AGENTS.md is read here on every turn. A projectless thread has none.
-      systemPromptAppend: [
-        host.mcp ? mousseOrchestrationInstructions() : undefined,
-        projectAgentInstructionsSection(input.cwd ?? undefined)
-      ].filter(Boolean).join('\n\n') || undefined,
+      // Claude Code loads the project's instruction files itself, as in a terminal (CLAUDE.md, and
+      // AGENTS.md as its own settings decide), so Mousse appends only its own guidance.
+      systemPromptAppend: host.mcp ? mousseOrchestrationInstructions() : undefined,
       integrations,
       drainSteer: () => ctl.drainSteer(),
       onSteer: (text) => {

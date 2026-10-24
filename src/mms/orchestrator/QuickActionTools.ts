@@ -59,7 +59,7 @@ export class QuickActionTools {
       {
         name: 'create_quick_action',
         description:
-          'Create a reusable quick-action button in the chat header dropdown. ' +
+          'Create a reusable quick-action button in the Actions list of the thread side card. ' +
           'Call only when the user asks for a reusable action, shortcut, or button. ' +
           'Creating the action ALWAYS requires the user\u2019s approval, which Mousse requests automatically — ' +
           'never claim the action exists until the tool result confirms it was created. ' +
@@ -67,7 +67,7 @@ export class QuickActionTools {
           'send-new-chat (open a new chat and send the message there), ' +
           'bash (open a new terminal tab and run the shell command).',
         parameters: Type.Object({
-          label: Type.String({ description: 'Button label shown in the dropdown (max 60 chars).' }),
+          label: Type.String({ description: 'Button label shown in the Actions list (max 60 chars).' }),
           kind: Type.String({
             description: 'One of: send-current, send-new-chat, bash.'
           }),
@@ -129,7 +129,7 @@ export class QuickActionTools {
       return {
         text:
           `Quick action created: "${created.label}" (${describeQuickActionKind(created.kind)}). ` +
-          `It is now available in the chat header quick-actions dropdown.`,
+          `It is now available in the thread side card's Actions list.`,
         isError: false
       }
     } catch (err) {

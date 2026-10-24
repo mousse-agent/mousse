@@ -1,3 +1,5 @@
+import type { ChildProcess } from 'node:child_process'
+import { once } from 'node:events'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises'
@@ -8,7 +10,8 @@ import type { BrowserActionResult, BrowserElement, BrowserObservation, BrowserSe
 import { BrowserBroker } from '../src/mms/browser/BrowserBroker'
 import { createAllowHttpPolicy, createFilesystemArtifactPort } from '../src/mms/browser/defaultPorts'
 import { isProcessAlive } from '../src/browser-worker/lifecycle/process'
-import { processRecordPath } from '../src/browser-worker/lifecycle/paths'
+import { journalPath, processRecordPath } from '../src/browser-worker/lifecycle/paths'
+import { productBuild, sharedBuild } from './support/build'
 import { createInProcessBroker, ensureManagedChrome, MANAGED_BROWSER_ROOT, startFixtureSite, workerRequest } from './fixtures/browser/harness'
 
 const chrome = await ensureManagedChrome()
@@ -292,17 +295,7 @@ describe.skipIf(!chrome.ok)('atomic action execution', () => {
 describe.skipIf(!chrome.ok)('child-process broker IPC', () => {
   it('opens and closes a session through a bundled worker child', async () => {
     const site = await startFixtureSite()
-    const esbuild = await import('esbuild')
-    const outfile = join(await mkdtemp(join(tmpdir(), 'mousse-worker-bundle-')), 'worker.mjs')
-    await esbuild.build({
-      entryPoints: [join(process.cwd(), 'src/browser-worker/index.ts')],
-      outfile,
-      bundle: true,
-      platform: 'node',
-      format: 'esm',
-      target: 'node22',
-      logLevel: 'silent'
-    })
+    const outfile = (await productBuild()).browserWorker
     const empty = await mkdtemp(join(tmpdir(), 'mousse-broker-child-'))
     const broker = new BrowserBroker({
       profileRoot: join(empty, 'profiles'),
@@ -312,29 +305,25 @@ describe.skipIf(!chrome.ok)('child-process broker IPC', () => {
       transport: 'child-process',
       workerModulePath: outfile
     })
-    const capabilities = await broker.start()
-    expect(capabilities.transport).toBe('remote-debugging-pipe')
-    const opened = await broker.call(workerRequest('profile_child', 'session.open', { url: `${site.origin}/form.html` }))
-    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
-    const payload = opened.result as { session: BrowserSessionRecord }
-    const closed = await broker.call(workerRequest('profile_child', 'session.close', { sessionId: payload.session.id }))
-    expect(closed.ok).toBe(true)
-    await broker.close()
-    await site.close()
+    try {
+      const capabilities = await broker.start()
+      expect(capabilities.transport).toBe('remote-debugging-pipe')
+      const opened = await broker.call(workerRequest('profile_child', 'session.open', { url: `${site.origin}/form.html` }))
+      expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
+      const payload = opened.result as { session: BrowserSessionRecord }
+      const closed = await broker.call(workerRequest('profile_child', 'session.close', { sessionId: payload.session.id }))
+      expect(closed.ok).toBe(true)
+    } finally {
+      try { await broker.close() } finally { await site.close() }
+    }
   }, 180_000)
 
   it('recovers the same persistent workspace after a real worker crash without replay', async () => {
     const site = await startFixtureSite()
-    const esbuild = await import('esbuild')
-    const outfile = join(await mkdtemp(join(tmpdir(), 'mousse-worker-crash-')), 'worker.mjs')
-    await esbuild.build({
-      entryPoints: [join(process.cwd(), 'src/browser-worker/index.ts')],
-      outfile,
-      bundle: true,
-      platform: 'node',
-      format: 'esm',
-      target: 'node22',
-      logLevel: 'silent'
+    const outfile = await sharedBuild({
+      entryPoints: ['tests/fixtures/browser/held-response-worker.ts'],
+      outfile: 'held-response-worker.mjs',
+      bundle: true, platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent'
     })
     const empty = await mkdtemp(join(tmpdir(), 'mousse-broker-crash-'))
     const suffix = String(Date.now())
@@ -348,67 +337,74 @@ describe.skipIf(!chrome.ok)('child-process broker IPC', () => {
       transport: 'child-process',
       workerModulePath: outfile
     })
-    const previousDelay = process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS
-    process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS = '10000'
-    await broker.start()
-    if (previousDelay === undefined) delete process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS
-    else process.env.MOUSSE_BROWSER_TEST_DELAY_RESPONSE_MS = previousDelay
-    const opened = await broker.call(workerRequest(profileId, 'session.open', { persistent: true, workspaceId, url: `${site.origin}/submit-once.html` }))
-    expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
-    const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
-    let submitObservation = payload.observation
-    const submitDeadline = Date.now() + 10_000
-    while (!submitObservation.elements.some((element) => element.name === 'Submit once') && Date.now() < submitDeadline) {
-      const observed = await broker.call(workerRequest(profileId, 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId }))
-      if (observed.ok) submitObservation = observed.result as BrowserObservation
-      await new Promise((resolve) => setTimeout(resolve, 50))
+    try {
+      await broker.start()
+      const opened = await broker.call(workerRequest(profileId, 'session.open', { persistent: true, workspaceId, url: `${site.origin}/submit-once.html` }))
+      expect(opened.ok, JSON.stringify(opened.error)).toBe(true)
+      const payload = opened.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+      let submitObservation = payload.observation
+      const submitDeadline = Date.now() + 10_000
+      while (!submitObservation.elements.some((element) => element.name === 'Submit once') && Date.now() < submitDeadline) {
+        const observed = await broker.call(workerRequest(profileId, 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId }))
+        if (observed.ok) submitObservation = observed.result as BrowserObservation
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      const submit = named(submitObservation, 'Submit once')
+      const request = workerRequest(profileId, 'act', actParams(payload.session, submitObservation, {
+        type: 'click', target: { kind: 'ref', ref: submit.ref }
+      }, 'submit_once'))
+      const pending = broker.call(request, { timeoutMs: 30_000 })
+      const marker = join(empty, 'profiles', 'held-action-response.json')
+      await Promise.race([
+        expect.poll(() => existsSync(marker), { timeout: 10_000 }).toBe(true),
+        pending.then((response) => { throw new Error(`Action settled before its response was held: ${JSON.stringify(response)}`) })
+      ])
+      const held = JSON.parse(await readFile(marker, 'utf8'))
+      expect(held.response).toMatchObject({ id: request.id, ok: true, result: { requestId: 'submit_once', dispatched: true } })
+      expect(site.submitCount()).toBe(1)
+      const journal = (await readFile(journalPath(MANAGED_BROWSER_ROOT, profileId, payload.session.id), 'utf8'))
+        .trim().split('\n').map((line) => JSON.parse(line)).filter((record) => record.requestId === 'submit_once')
+      expect(journal.map((record) => record.phase)).toEqual(['intent', 'dispatched', 'outcome'])
+      await expect.poll(async () => {
+        const effect = await broker.call(workerRequest(profileId, 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId }))
+        return effect.ok && JSON.stringify(effect.result).includes('submitted')
+      }, { timeout: 5_000 }).toBe(true)
+      const recordPath = processRecordPath(join(MANAGED_BROWSER_ROOT, 'user-data', profileId, 'workspaces', workspaceId))
+      const processRecord = JSON.parse(await readFile(recordPath, 'utf8')) as { pid: number }
+      expect(isProcessAlive(processRecord.pid)).toBe(true)
+      const child = (broker as unknown as { child: ChildProcess }).child
+      expect(child.pid).toBe(held.pid)
+      const exited = once(child, 'exit')
+      expect(child.kill('SIGKILL')).toBe(true)
+      await exited
+      expect(child.signalCode).toBe('SIGKILL')
+      const crashed = await pending.catch((error: Error & { code?: string }) => error)
+      expect(crashed.ok, JSON.stringify(crashed)).toBe(true)
+      expect((crashed.result as BrowserActionResult).outcome).toBe('unknown-effect')
+      expect((crashed.result as BrowserActionResult).code).toBe('worker_disconnected')
+      const cleanupDeadline = Date.now() + 10_000
+      while (isProcessAlive(processRecord.pid) && Date.now() < cleanupDeadline) await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(isProcessAlive(processRecord.pid)).toBe(false)
+      const recovered = await broker.call(workerRequest(profileId, 'session.open', { persistent: true, workspaceId, url: `${site.origin}/submit-once.html` }))
+      expect(recovered.ok).toBe(true)
+      const recoveredPayload = recovered.result as { session: BrowserSessionRecord; observation: BrowserObservation }
+      expect(recoveredPayload.session.generation).toBeGreaterThan(payload.session.generation)
+      expect(existsSync(join(MANAGED_BROWSER_ROOT, 'user-data', profileId, 'workspaces', workspaceId))).toBe(true)
+      expect(site.submitCount()).toBe(1)
+      const staleLease = await broker.call(workerRequest(profileId, 'act', {
+        ...actParams(recoveredPayload.session, recoveredPayload.observation, { type: 'navigate', url: `${site.origin}/cookies.html` }, 'stale_lease'),
+        controlLeaseId: payload.session.controlLeaseId
+      }))
+      expect(staleLease.ok).toBe(false)
+      expect(staleLease.error?.code).toBe('human_controlled')
+      const staleRef = await broker.call(workerRequest(profileId, 'act', {
+        ...actParams(recoveredPayload.session, recoveredPayload.observation, { type: 'click', target: { kind: 'ref', ref: submit.ref } }, 'stale_ref'),
+        observationId: payload.observation.observationId
+      }))
+      expect(staleRef.ok).toBe(false)
+      expect(['stale_observation', 'stale_ref']).toContain(staleRef.error?.code)
+    } finally {
+      try { await broker.close() } finally { await site.close() }
     }
-    const submit = named(submitObservation, 'Submit once')
-    const pending = broker.call(workerRequest(profileId, 'act', actParams(payload.session, submitObservation, {
-      type: 'click', target: { kind: 'ref', ref: submit.ref }
-    }, 'submit_once')), { timeoutMs: 30_000 })
-    const postedDeadline = Date.now() + 10_000
-    while (site.submitCount() < 1 && Date.now() < postedDeadline) await new Promise((resolve) => setTimeout(resolve, 50))
-    expect(site.submitCount()).toBe(1)
-    const effectDeadline = Date.now() + 5_000
-    while (Date.now() < effectDeadline) {
-      const effect = await broker.call(workerRequest(profileId, 'observe', { sessionId: payload.session.id, tabId: payload.observation.tabId }))
-      if (effect.ok && JSON.stringify(effect.result).includes('submitted')) break
-      await new Promise((resolve) => setTimeout(resolve, 100))
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1_000))
-    const recordPath = processRecordPath(join(MANAGED_BROWSER_ROOT, 'user-data', profileId, 'workspaces', workspaceId))
-    const processRecord = JSON.parse(await readFile(recordPath, 'utf8')) as { pid: number }
-    expect(isProcessAlive(processRecord.pid)).toBe(true)
-    const child = (broker as unknown as { child?: { kill: () => boolean } }).child
-    expect(child).toBeTruthy()
-    child?.kill()
-    const crashed = await pending.catch((error: Error & { code?: string }) => error)
-    expect(crashed.ok, JSON.stringify(crashed)).toBe(true)
-    expect((crashed.result as BrowserActionResult).outcome).toBe('unknown-effect')
-    expect((crashed.result as BrowserActionResult).code).toBe('worker_disconnected')
-    const cleanupDeadline = Date.now() + 10_000
-    while (isProcessAlive(processRecord.pid) && Date.now() < cleanupDeadline) await new Promise((resolve) => setTimeout(resolve, 100))
-    expect(isProcessAlive(processRecord.pid)).toBe(false)
-    const recovered = await broker.call(workerRequest(profileId, 'session.open', { persistent: true, workspaceId, url: `${site.origin}/submit-once.html` }))
-    expect(recovered.ok).toBe(true)
-    const recoveredPayload = recovered.result as { session: BrowserSessionRecord; observation: BrowserObservation }
-    expect(recoveredPayload.session.generation).toBeGreaterThan(payload.session.generation)
-    expect(existsSync(join(MANAGED_BROWSER_ROOT, 'user-data', profileId, 'workspaces', workspaceId))).toBe(true)
-    expect(site.submitCount()).toBe(1)
-    const staleLease = await broker.call(workerRequest(profileId, 'act', {
-      ...actParams(recoveredPayload.session, recoveredPayload.observation, { type: 'navigate', url: `${site.origin}/cookies.html` }, 'stale_lease'),
-      controlLeaseId: payload.session.controlLeaseId
-    }))
-    expect(staleLease.ok).toBe(false)
-    expect(staleLease.error?.code).toBe('human_controlled')
-    const staleRef = await broker.call(workerRequest(profileId, 'act', {
-      ...actParams(recoveredPayload.session, recoveredPayload.observation, { type: 'click', target: { kind: 'ref', ref: submit.ref } }, 'stale_ref'),
-      observationId: payload.observation.observationId
-    }))
-    expect(staleRef.ok).toBe(false)
-    expect(['stale_observation', 'stale_ref']).toContain(staleRef.error?.code)
-    await broker.close()
-    await site.close()
   }, 180_000)
 })

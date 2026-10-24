@@ -56,6 +56,14 @@ const PLUGIN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_SKILL_FILES = 10_000
 const MAX_SKILL_BYTES = 100 * 1024 * 1024
 
+/**
+ * Whether Claude Code loads this skill itself: one in the project's `.claude/skills`, or in
+ * `~/.claude/skills` while Claude Code keeps its config in `~/.claude` (no `CLAUDE_CONFIG_DIR`).
+ */
+export function claudeLoadsSkill(skill: Pick<SkillDescriptor, 'source'>, env: NodeJS.ProcessEnv = process.env): boolean {
+  return skill.source === 'claude-project' || (skill.source === 'claude-global' && !env.CLAUDE_CONFIG_DIR)
+}
+
 export function claudeMcpToolBlocked(rules: ClaudeMcpToolRules | undefined, toolName: string): boolean {
   for (const [prefix, rule] of Object.entries(rules ?? {})) {
     if (!toolName.startsWith(prefix)) continue
@@ -98,8 +106,10 @@ export function claudeProxiedMcpServer(name: string, proxied: ClaudeProxiedMcpSe
 
 /**
  * Resolves the MCP servers and skills the user enabled in Mousse for the main agent into what the
- * Claude Agent SDK takes. The SDK launches with `settingSources: []` and `strict-mcp-config`, so
- * Claude sees only what is passed here.
+ * Claude Agent SDK takes. Claude Code also loads the user's own configuration (settings, MCP
+ * servers, plugins, `~/.claude/skills` and `<project>/.claude/skills`), so these are added on top.
+ * Skills Mousse found in Claude Code's own skill folders are left out: Claude Code already loads
+ * them, and passing them again would list each one twice.
  */
 export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
   constructor(private readonly deps: {
@@ -128,7 +138,7 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
 
     try {
       const snapshot = await this.deps.skillsRegistry.discover({ projectPath })
-      const skills = resolveEffectiveSkills({ snapshot, settings: settings.skills, actor })
+      const skills = resolveEffectiveSkills({ snapshot, settings: settings.skills, actor }).filter((skill) => !claudeLoadsSkill(skill))
       if (skills.length > 0) result.pluginPath = await this.buildPlugin(skills, result.warnings)
     } catch (error) {
       result.warnings.push(`Skills were not attached: ${message(error)}`)

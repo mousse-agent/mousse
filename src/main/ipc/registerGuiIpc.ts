@@ -15,7 +15,8 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
  */
 
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell } from 'electron'
-import { homedir, hostname } from 'os'
+import { homedir } from 'os'
+import { getComputerName } from '../computerName'
 import { randomUUID } from 'node:crypto'
 import type { GuiMmsController } from '../mms/GuiMmsController'
 import { PresentationState } from '../mms/PresentationState'
@@ -59,6 +60,7 @@ import {
 import { surfaceToWindowBackground } from '../../shared/accentPalette'
 import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
 import { showCopyMenu } from '../contextMenu'
+import { pickExecutable } from './pickExecutable'
 import { openExternalSafely } from '../safeExternalUrl'
 import { dispatchMcpAuthBrowser } from '../mcpAuthBrowser'
 import { MousseIdCallbacks, runtimeMousseIdOrigin } from '../mousseIdCallback'
@@ -1691,9 +1693,11 @@ export function registerGuiIpc(
   registerHandler('mousseId:callback.wait', (_event, id: unknown) => mousseIdCallbacks!.wait(callbackId(id)))
   registerHandler('mousseId:callback.cancel', (_event, id: unknown) => { mousseIdCallbacks!.cancel(callbackId(id)) })
 
-  registerHandler('app:getInfo', () => ({
+  // The computer name is looked up once; starting it here keeps getInfo fast.
+  void getComputerName()
+  registerHandler('app:getInfo', async () => ({
     platform: process.platform,
-    deviceName: hostname(),
+    deviceName: await getComputerName(),
     repoRoot,
     llmProvider: settings.get().provider.llmProvider
   }))
@@ -2071,13 +2075,21 @@ export function registerGuiIpc(
     if (recheck === true) broadcast('providers:changed', res.providers)
     return res.status
   })
-  registerHandler('providers:claudeSetLoginPolicy', async (_e, policy: 'cli' | 'isolated') => {
-    const res = await guiMms.request<{ status: unknown; providers: unknown[] }>(
-      'providers.claudeSetLoginPolicy',
-      { policy }
+  registerHandler('providers:cliConfig', async (_e, instanceId: string) => {
+    const res = await guiMms.request<{ config: unknown }>('providers.cliConfig', { instanceId })
+    return res.config
+  })
+  registerHandler('providers:setCliConfig', async (_e, instanceId: string, patch: unknown) => {
+    const res = await guiMms.request<{ config: unknown; providers: unknown[] }>(
+      'providers.setCliConfig',
+      { instanceId, patch }
     )
     broadcast('providers:changed', res.providers)
-    return res.status
+    return res.config
+  })
+  registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
+    return pickExecutable((options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)), request)
   })
   registerHandler('providers:login:respond', async (_e, response: ProviderLoginResponse) => {
     await guiMms.request('providers.loginRespond', {
