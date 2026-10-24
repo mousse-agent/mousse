@@ -33,10 +33,17 @@ function send(target: Worker, message: LocalTtsWorkerRequest): void {
 
 /** Each model family runs in its own worker file. */
 function createWorker(model: LocalTtsModel): Worker {
-  const created =
-    model.runtime === 'kitten'
-      ? new Worker(new URL('./kittenWorker.ts', import.meta.url), { type: 'module' })
-      : new Worker(new URL('./kokoroWorker.ts', import.meta.url), { type: 'module' })
+  let created: Worker
+  switch (model.runtime) {
+    case 'kitten':
+      created = new Worker(new URL('./kittenWorker.ts', import.meta.url), { type: 'module' })
+      break
+    case 'supertonic':
+      created = new Worker(new URL('./supertonicWorker.ts', import.meta.url), { type: 'module' })
+      break
+    default:
+      created = new Worker(new URL('./kokoroWorker.ts', import.meta.url), { type: 'module' })
+  }
   serveModelFiles(created, (path) => window.mousse.readAloud.readLocalModelFile(model.id, path))
   send(created, { type: 'init', modelId: model.id })
   return created

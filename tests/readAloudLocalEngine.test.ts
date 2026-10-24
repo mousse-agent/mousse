@@ -282,6 +282,14 @@ describe('local read aloud with more than one model', () => {
     expect(FakeWorker.all[1].terminated).toBe(0)
   })
 
+  it('starts the Supertonic worker for Supertonic', async () => {
+    await finishRead(startRead(SHORT, new AbortController(), 'supertonic-3'))
+    const [worker] = FakeWorker.all
+    expect(worker.url.pathname).toMatch(/supertonicWorker\.ts$/)
+    expect(worker.posted[0]).toEqual({ type: 'init', modelId: 'supertonic-3' })
+    expect(worker.speakRequests()[0]).toMatchObject({ voice: 'F1' })
+  })
+
   it('asks for the default voice of the chosen model', async () => {
     const read = startRead(SHORT, new AbortController(), 'kitten-tts-micro')
     const [worker] = FakeWorker.all
