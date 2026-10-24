@@ -1,12 +1,11 @@
-import { useCallback, useId, useRef, useState } from 'react'
-import { X } from '../lib/icons'
+import { useCallback, useId, useState } from 'react'
 import { FloatingPortal } from '../lib/floatingLayer'
 import { validateQuickAction, type QuickAction, type QuickActionKind } from '../lib/quickActions'
 import { useAppStore } from '../stores/appStore'
 import { useQuickActionsStore, type QuickActionInput } from '../stores/quickActionsStore'
 import { refocusActionsSection } from './sideCard/actionsRunLogic'
 import { Select } from './ui/Select'
-import { useDialogFocus } from './ui/Modal'
+import { Modal } from './ui/Modal'
 import './sideCard/actionsSection.css'
 
 const KIND_OPTIONS: { value: QuickActionKind; label: string; hint: string }[] = [
@@ -65,13 +64,8 @@ export function QuickActionEditor(props: QuickActionEditorProps) {
   )
 }
 
-/**
- * The editor's markup. Focus starts on the first field, Tab stays inside, Escape closes
- * and focus returns to whatever opened it, as in the shared modal.
- */
+/** The editor's markup, in the shared modal, so it looks and behaves like every other dialog. */
 export function QuickActionDialog({ action, onSave, onDelete, onClose }: QuickActionEditorProps) {
-  const dialogRef = useRef<HTMLDivElement>(null)
-  useDialogFocus(dialogRef, true, onClose)
   const [draftLabel, setDraftLabel] = useState(action?.label ?? '')
   const [draftKind, setDraftKind] = useState<QuickActionKind>(action?.kind ?? 'send-current')
   const [draftPayload, setDraftPayload] = useState(action?.payload ?? '')
@@ -92,22 +86,34 @@ export function QuickActionDialog({ action, onSave, onDelete, onClose }: QuickAc
   }
 
   return (
-    <div className="quick-actions-backdrop" onMouseDown={onClose}>
-      <div
-        ref={dialogRef}
-        tabIndex={-1}
-        className="quick-actions-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-label={editing ? 'Edit action' : 'Create action'}
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="quick-actions-dialog-heading">
-          <h2>{editing ? 'Edit action' : 'Create action'}</h2>
-          <button type="button" className="quick-actions-delete" aria-label="Close" onClick={onClose}>
-            <X size={14} strokeWidth={2} />
+    <Modal
+      open
+      title={editing ? 'Edit action' : 'Create action'}
+      onClose={onClose}
+      footer={
+        <>
+          {editing && onDelete && (
+            <button
+              type="button"
+              className="btn btn-ghost quick-actions-dialog-delete"
+              onClick={() => {
+                onDelete()
+                onClose()
+              }}
+            >
+              Delete
+            </button>
+          )}
+          <button type="button" className="btn btn-ghost" onClick={onClose}>
+            Cancel
           </button>
-        </div>
+          <button type="button" className="btn btn-primary" onClick={handleSave}>
+            {editing ? 'Save changes' : 'Save action'}
+          </button>
+        </>
+      }
+    >
+      <div className="quick-actions-form">
         <label className="quick-actions-field">
           <span>Name</span>
           <input
@@ -139,28 +145,12 @@ export function QuickActionDialog({ action, onSave, onDelete, onClose }: QuickAc
             onChange={(event) => setDraftPayload(event.target.value)}
           />
         </label>
-        {editorError && <div className="quick-actions-error">{editorError}</div>}
-        <div className="quick-actions-dialog-actions">
-          {editing && onDelete && (
-            <button
-              type="button"
-              className="quick-actions-secondary-btn quick-actions-dialog-delete"
-              onClick={() => {
-                onDelete()
-                onClose()
-              }}
-            >
-              Delete
-            </button>
-          )}
-          <button type="button" className="quick-actions-secondary-btn" onClick={onClose}>
-            Cancel
-          </button>
-          <button type="button" className="quick-actions-primary-btn" onClick={handleSave}>
-            {editing ? 'Save changes' : 'Save action'}
-          </button>
-        </div>
+        {editorError && (
+          <div className="quick-actions-error" role="alert">
+            {editorError}
+          </div>
+        )}
       </div>
-    </div>
+    </Modal>
   )
 }
