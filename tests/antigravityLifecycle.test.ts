@@ -20,12 +20,13 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-function fixture(blockMethod?: string) {
+function fixture(blockMethod?: string, installed = false) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-acp-lifecycle-'))
   homes.push(home)
   const service = new AntigravityProviderService(home, home, new UserQuestionService())
   services.push(service)
   vi.spyOn(service, 'configured').mockReturnValue(true)
+  if (installed) vi.spyOn(service as unknown as { binary: () => string }, 'binary').mockReturnValue(join(home, 'agy_acp_server'))
   const processes: Array<ReturnType<typeof createProcess>> = []
   let finishPrompt: (() => void) | undefined
   function createProcess() {
@@ -122,13 +123,36 @@ describe('Antigravity turn lifecycle', () => {
     expect(prompts[1][1].prompt).toEqual([{ type: 'text', text: 'Focus on the bug' }])
   })
 
-  it.each(['stop', 'logout'] as const)('releases profile-owned login work on %s before an agent is launched', async (operation) => {
-    const { service, input } = fixture()
+  it.each(['stop', 'logout'] as const)('releases profile-owned login work on %s while Google sign-in is pending', async (operation) => {
+    const { service, input, processes } = fixture(methods.agent.authenticate, true)
     const session = new LoginSession('setup')
     const pending = service.login(session, input.cwd)
+    await vi.waitFor(() => expect(processes[0]?.connection.agent.request).toHaveBeenCalledWith(methods.agent.authenticate, expect.anything()))
     await service[operation]()
     expect(await pending).toEqual({ success: false, sessionId: 'setup', error: 'Login cancelled' })
     expect(session.abort.signal.aborted).toBe(true)
+  })
+
+  it('goes straight to Google sign-in once installed, without asking how to set up', async () => {
+    const { service, input, processes } = fixture(undefined, true)
+    const session = new LoginSession('setup')
+    const events: unknown[] = []
+    session.on('event', (event) => events.push(event))
+    expect(await service.login(session, input.cwd)).toEqual({ success: true, sessionId: 'setup' })
+    expect(processes[0].connection.agent.request.mock.calls.map(([method]) => method)).toEqual([methods.agent.initialize, methods.agent.authenticate, methods.agent.session.new])
+    expect(processes[0].connection.agent.request).toHaveBeenCalledWith(methods.agent.authenticate, { methodId: 'oauth-personal' })
+    // Only the Google redirect-URL fallback may be offered; never a setup choice or a path prompt.
+    expect((events as Array<{ type: string }>).map((event) => event.type).filter((type) => type !== 'manual_code')).toEqual([])
+  })
+
+  it('fails sign-in fast, without a prompt or an agent, when Antigravity is not installed', async () => {
+    const { service, input, processes } = fixture()
+    const session = new LoginSession('setup')
+    const events: unknown[] = []
+    session.on('event', (event) => events.push(event))
+    expect(await service.login(session, input.cwd)).toEqual({ success: false, sessionId: 'setup', error: 'Install Antigravity first, then sign in' })
+    expect(events).toEqual([])
+    expect(processes).toHaveLength(0)
   })
 })
 
@@ -156,7 +180,7 @@ describe('Antigravity profile admission', () => {
     const host = { activeProfileCount: () => 2, manager: { get: () => ({ id: 'personal', status: 'active' }) }, getProfileServices: vi.fn(async () => personal) }
     const installation = { getInstallationHost: () => host } as unknown as MmsProfileServices
     const args = { installation, binding: { profileId: 'personal', epoch: 1 }, capabilities: new Set([PROFILES_V1_CAPABILITY]) }
-    for (const method of ['providers.listConfigured', 'providers.getLoginOptions', 'providers.refreshModels', 'providers.loginOAuth', 'providers.logout', 'providers.claudeStatus','providers.codexStatus', 'providers.cliConfig', 'providers.setCliConfig']) {
+    for (const method of ['providers.listConfigured', 'providers.getLoginOptions', 'providers.refreshModels', 'providers.loginOAuth', 'providers.logout', 'providers.claudeStatus','providers.codexStatus', 'providers.cliConfig', 'providers.setCliConfig', 'providers.installAntigravity', 'providers.cancelAntigravityInstall']) {
       expect((await resolveBoundServices({ ...args, method })).services, method).toBe(personal)
     }
     expect((await resolveBoundServices({ ...args, method: 'providers.setApiKey' })).services).toBe(installation)

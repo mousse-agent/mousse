@@ -2109,6 +2109,16 @@ export function registerGuiIpc(
     broadcast('providers:changed', res.providers)
     return res.config
   })
+  // Progress reaches the renderer as `providers:install:event` through the protocol event bridge.
+  registerHandler('providers:installAntigravity', async () => {
+    const res = await guiMms.request<{ config: unknown; providers: unknown[] }>('providers.installAntigravity', {})
+    broadcast('providers:changed', res.providers)
+    return res.config
+  })
+  registerHandler('providers:cancelAntigravityInstall', async () => {
+    const res = await guiMms.request<{ cancelled: boolean }>('providers.cancelAntigravityInstall', {})
+    return res.cancelled
+  })
   registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
     return pickExecutable((options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)), request)

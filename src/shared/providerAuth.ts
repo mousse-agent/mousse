@@ -142,6 +142,13 @@ export interface CliProviderConfig {
   env: Record<string, string>
 }
 
+/** Progress of Mousse downloading a CLI provider's agent (Antigravity only today). */
+export interface CliInstallEvent {
+  instanceId: CliProviderInstanceId
+  type: 'progress'
+  message: string
+}
+
 export interface CliProviderConfigPatch {
   /** `null` (or an empty string) clears it back to automatic lookup. */
   binaryPath?: string | null
