@@ -699,4 +699,70 @@ describe('remote display deltas', () => {
     await vi.waitFor(() => expect(seen).toEqual(['delta:two']))
     expect(live.a.state()).toBe('open')
   })
+
+  it('drops deltas of a stream that is resyncing after a live queue overflow without failing the session', async () => {
+    const p = await setup(),
+      { source, emit } = multiSource()
+    let session: Awaited<ReturnType<typeof subscribed>>['live']['a'] | undefined
+    const clock = manualClock(),
+      adapter = new ThreadStreamAdapter({
+        db: p.aDb,
+        store: p.aStore,
+        generations: p.aStore,
+        identity: p.aIdentity,
+        keys: p.aKeys,
+        clock,
+        source,
+        onDelta: (stream, body, key) => session!.publishDelta(stream, body, key)
+      })
+    resources.push(() => adapter.close())
+    const { live, descriptors, seen } = await subscribed(p, adapter, ['t1', 't2'])
+    session = live.a
+    const sent: string[] = [],
+      internals = live.a as unknown as {
+        send(message: WireMessage): Promise<void>
+        sendRecords(): Promise<void>
+      },
+      send = internals.send.bind(live.a)
+    let refused = 0
+    internals.send = (message) => {
+      sent.push(message.t)
+      // The control lane is full for the first delta only; the resync request must still go out.
+      if (message.t === 'ephemeral' && message.kind === 'delta' && refused++ === 0)
+        return Promise.reject(new NetError('rate_limited'))
+      return send(message)
+    }
+    // A stalled link: the first record never completes, so later ones queue behind it.
+    let release!: () => void
+    const stalled = new Promise<void>((resolve) => (release = resolve))
+    vi.spyOn(internals, 'sendRecords').mockImplementationOnce(() => stalled)
+    resources.push(() => release())
+    emit('t1', { type: 'thread.message-updated', data: message('m1', 'one'), ephemeral: true })
+    clock.flush()
+    await vi.waitFor(() => expect(refused).toBe(1))
+    const body = new Uint8Array(8 * 1024 * 1024),
+      record = (seq: number) => ({
+        epoch: 1,
+        seq,
+        recvTs: Date.now(),
+        envelope: body,
+        sig: new Uint8Array(64)
+      })
+    // Seven 8 MiB records fit under the 64 MiB cap and the eighth overflows into a resync.
+    const queued = Array.from({ length: 7 }, (_, i) =>
+      live.a.publishRecord(descriptors[0].id, record(i + 1))
+    )
+    await live.a.publishRecord(descriptors[0].id, record(8))
+    expect(sent).toContain('snapshotRequired')
+    // The stream no longer serves live, so its deltas are dropped; other streams are unaffected.
+    emit('t1', { type: 'thread.message-updated', data: message('m1', 'stale'), ephemeral: true })
+    emit('t2', { type: 'thread.message-updated', data: message('m2', 'two'), ephemeral: true })
+    clock.flush()
+    await vi.waitFor(() => expect(seen).toContain('delta:two'))
+    expect(seen).not.toContain('delta:sta')
+    release()
+    await Promise.allSettled(queued)
+    expect(live.a.state()).toBe('open')
+    expect(live.b.state()).toBe('open')
+  })
 })

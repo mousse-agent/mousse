@@ -14,6 +14,11 @@ export interface Device {
   state: 'connecting' | 'open' | 'closed'
 }
 
+/** Devices shown under "My devices": a revoked device is gone from this user's devices. */
+export function listedDevices(devices: Device[]): Device[] {
+  return devices.filter((device) => !device.revoked)
+}
+
 /**
  * Core device state for the Devices screen. Mousse ID status is read only when this build has
  * the service, and a failing read never holds up the rest.

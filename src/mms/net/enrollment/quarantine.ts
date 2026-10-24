@@ -9,6 +9,7 @@ import {
   NET_PROTO_MAJOR,
   NET_PROTO_MINOR,
   PREAUTH_DEADLINE_MS,
+  ENROLLMENT_JOINER_MAX_BYTES,
   PREAUTH_MAX_BYTES,
   SESSION_CAPABILITIES,
   NetError
@@ -290,7 +291,7 @@ export class EnrollmentQuarantine {
       onBytesReceived: (count) => {
         if (this.done || this.sent) return
         this.bytes += count
-        if (this.bytes > PREAUTH_MAX_BYTES) throw new NetError('too_large')
+        if (this.bytes > ENROLLMENT_JOINER_MAX_BYTES) throw new NetError('too_large')
       }
     })
     this.listeners.push(
