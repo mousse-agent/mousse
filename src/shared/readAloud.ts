@@ -21,7 +21,6 @@ export type PocketTtsLanguage = 'en' | 'fr' | 'de' | 'es' | 'it' | 'pt' | 'nl'
 export type PocketTtsModelId = `pocket-tts-${PocketTtsLanguage}`
 
 export type LocalTtsModelId = 'kokoro-82m' | 'kitten-tts-mini' | 'kitten-tts-micro' | 'kitten-tts-nano' | 'supertonic-3' | PocketTtsModelId
-  | PocketTtsModelId
 
 export type LocalTtsModelFile = LocalModelFile
 
