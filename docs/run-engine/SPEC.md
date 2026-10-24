@@ -339,12 +339,13 @@ export interface ProviderCapabilities {
   containment: 'strong' | 'weak'                           // CheckpointRestoreSafety (Phase 6): weak → review diff, never auto-restore
   historyInjection: 'native' | 'prompt'                    // HandoffDelivery (Phase 6)
   mcp: boolean                                             // Phase 5: whether the Mousse MCP server can be attached
+  childPolicy: 'enforced' | 'unenforceable'                // featureGates.subagentTargetRefusal: can a delegated child be held to its policy (§14.2)
 }
 ```
 
 `steer` describes how steer text reaches a live turn. `native`: the text joins the live turn without cancelling in-flight work (a running tool call finishes and the model sees the text at its next step); only the pi loop does this. `interrupt_restart`: the provider delivers it by interrupting the turn and resuming or restarting the session with the text as a new user message, so a tool call in flight is cancelled (Claude Subscription: `query.interrupt()` then resume; Antigravity: `session/cancel` then a new prompt). `queue_only`: the text waits for the turn to end. User steers are delivered the same way whatever the value; the capability decides only whether reconciler rule 4 may push a delegation notice into a live run (§14.3).
 
-Rule: `tests/run/capabilityReaders.test.ts` lists each key with its reader functions (`steer` → `steerStrategy`, `interrupt` → `stopStrategy`, `rollback` → `canUndoNatively`, `fork` → `forkStrategy`, `events` → `heartbeatToleranceMs`, `containment` → `restoreMode`, `historyInjection` → `handoffDelivery`, `mcp` → `mcpAttachable`) and asserts that each reader, defined under `src/mms/run/**` outside `adapters/**`, reads `caps.<key>`, and that some non-test source under `src/` outside `adapters/**` **calls** it (a `name(` call site other than its definition, comment lines excluded). Adding a flag without a called reader fails CI. (A flag nobody reads is documentation pretending to be behavior.) There is no `nativeSubagents` flag: every adapter's delegation goes through Mousse's own `delegate_task` (§14), so nothing would read it.
+Rule: `tests/run/capabilityReaders.test.ts` lists each key with its reader functions (`steer` → `steerStrategy`, `interrupt` → `stopStrategy`, `rollback` → `canUndoNatively`, `fork` → `forkStrategy`, `events` → `heartbeatToleranceMs`, `containment` → `restoreMode`, `historyInjection` → `handoffDelivery`, `mcp` → `mcpAttachable`, `childPolicy` → `subagentTargetRefusal`) and asserts that each reader, defined under `src/mms/run/**` outside `adapters/**`, reads `caps.<key>`, and that some non-test source under `src/` outside `adapters/**` **calls** it (a `name(` call site other than its definition, comment lines excluded). Adding a flag without a called reader fails CI. (A flag nobody reads is documentation pretending to be behavior.) There is no `nativeSubagents` flag: every adapter's delegation goes through Mousse's own `delegate_task` (§14). A provider's own native subagents are not offered to a delegated child (`childPolicy`, §14.2).
 
 ### 13.3 CommandPolicy (`src/mms/run/CommandPolicy.ts`)
 
@@ -416,6 +417,17 @@ list_delegations()
 Deleting a thread cancels what it still has in flight (`RunEngine.cancelThreadWork`): its delegations and their children depth-first, its queued runs and wakes with their effects (a claimed `turn.start` aborted in flight), a `stop` for its active run, and its pending or delivered inbox rows are acknowledged; its MCP credentials are revoked.
 
 `provider`/`model` default to the parent's. `workspace:'isolated'` allocates a worktree through the existing `WorkspaceResolver` with a lease held by the child run; `shared` is allowed only for read-only roles (execution contract check, §13). Each tool call is a `delegation.*` command with a `clientRequestId` derived from `(parentRunId, toolCallId)` so retries are no-ops.
+
+**Child policy.** Every turn of a delegated child, first or resumed, carries `TurnInput.child` (`{ readOnly }`; `readOnly` is a `shared` child). Before creating the child, `delegate_task` checks the target with `subagentTargetRefusal`; an adapter whose `childPolicy` is `unenforceable` (Antigravity) gets a returned value `{ started: false, code: 'provider_unsupported_for_subagents', message }` and no thread is created. Per provider:
+
+| Provider | Read-only (`shared`) child | Any child |
+|---|---|---|
+| pi | `toolAccess` allows read tools only; no delegation host | — |
+| Claude | built-in tools limited to Read, Glob, Grep, WebSearch, WebFetch, AskUserQuestion, ToolSearch; Write, Edit, MultiEdit, NotebookEdit, Bash and PowerShell denied; `strictMcpConfig`, and only Mousse's MCP server | `Agent` and `Task` (Claude Code's native subagent tool) denied |
+| Codex | `read-only` sandbox on thread open and on every `turn/start`, approval policy `never` (commands and file changes are declined, never asked); plugins, apps, computer and browser use off; every user MCP server (listed by `config/read`) set `enabled=false` | `features.multi_agent` and `multi_agent_v2` off |
+| Antigravity | refused as a target | refused as a target (`start_subagent` has no off switch) |
+
+The Mousse MCP server refuses a read-only child every tool that is not a `reads` tool or marked `readOnlySafe` (`ask_user`, `present_plan`), with `mousse_read_only`: no `queue_enqueue`, `thread_fork`, `thread_merge_back`, delegation or integration tools.
 
 ### 14.3 Wake-up (reconciler rule 4)
 
