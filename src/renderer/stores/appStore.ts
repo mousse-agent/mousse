@@ -17,6 +17,7 @@ import type {
   BrowserTabState
 } from '../../shared/types'
 import { parseChatReference, type ChatReference } from '../../shared/chatReferences'
+import type { SubagentSummary } from '../../shared/subagents'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { workspacePendingKey } from '../lib/newThread'
@@ -137,6 +138,9 @@ interface AppState {
   projects: Project[]
   threads: Thread[]
   threadActivity: ThreadActivitySnapshot
+  /** Each thread's subagents as the daemon last reported them, by parent thread id. Not persisted. */
+  subagentsByParent: Record<string, SubagentSummary[]>
+  setSubagents: (parentThreadId: string, subagents: SubagentSummary[]) => void
   turnStates: TurnStateSnapshot
   mainView: MainView
   /** Surfaces the user opened in the side panel. Agents is added on its own. */
@@ -348,6 +352,9 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   projects: [],
   threads: [],
   threadActivity: {},
+  subagentsByParent: {},
+  setSubagents: (parentThreadId, subagents) =>
+    set((s) => ({ subagentsByParent: { ...s.subagentsByParent, [parentThreadId]: subagents } })),
   turnStates: {},
   mainView: 'agents',
   openedSurfaceKinds: [],
@@ -619,6 +626,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       projects: [],
       threads: [],
       threadActivity: {},
+      subagentsByParent: {},
       turnStates: {},
       documentTabs: [],
       activeDocumentTabId: null,
