@@ -1,6 +1,7 @@
 import type { MmsProfileServices } from '../../MmsProfileServices'
 import { dispatchMethod } from '../../protocol/handlers'
 import { NetError } from '../../../shared/net'
+import { REMOTE_MESSAGE_IMAGES_MAX_CHARS } from './RemoteApi'
 import type { RemoteBackendPort, RemoteChatExtras } from './RemoteApi'
 import { mmsJson } from './jsonOutput'
 import type { BridgeOrdinaryMethod } from './capabilities'
@@ -31,19 +32,49 @@ function queueRow(item: QueuedMessage): Record<string, unknown> {
   }
 }
 
+type RemoteImage = { name: string; mimeType: string; data?: string }
+
 /**
- * A message or queued item as a remote reader sees it: images keep their name and type but not
- * their data, so a thread's remote snapshot stays small however many images it holds.
+ * A queued item as a remote reader sees it: images keep their name and type but not their data,
+ * which can be megabytes each.
  */
 export function withoutImageData<T extends { images?: unknown }>(item: T): T {
   if (!Array.isArray(item?.images)) return item
   return {
     ...item,
-    images: (item.images as Array<{ name: string; mimeType: string }>).map((image) => ({
+    images: (item.images as RemoteImage[]).map((image) => ({
       name: image.name,
       mimeType: image.mimeType
     }))
   }
+}
+
+/**
+ * Messages as a remote reader sees them: the newest images keep their data until
+ * `REMOTE_MESSAGE_IMAGES_MAX_CHARS` is used up, and every older image keeps only its name and
+ * type, so a remote snapshot or event stays small however many images the thread holds.
+ */
+export function withImageBudget<T extends { images?: unknown }>(items: T[]): T[] {
+  let remaining = REMOTE_MESSAGE_IMAGES_MAX_CHARS
+  const trimmed = items.slice()
+  for (let index = trimmed.length - 1; index >= 0; index -= 1) {
+    const item = trimmed[index]
+    if (!Array.isArray(item?.images)) continue
+    const images = (item.images as RemoteImage[]).slice()
+    for (let at = images.length - 1; at >= 0; at -= 1) {
+      const image = images[at]
+      const size = typeof image.data === 'string' ? image.data.length : 0
+      if (size <= remaining) {
+        remaining -= size
+      } else {
+        // Once one image does not fit, every older one goes without data too.
+        remaining = 0
+        images[at] = { name: image.name, mimeType: image.mimeType }
+      }
+    }
+    trimmed[index] = { ...item, images }
+  }
+  return trimmed
 }
 
 /** Trims image data from a thread event's payload before it is shown to a remote reader. */
@@ -56,8 +87,8 @@ export function remoteThreadEventData(data: unknown): unknown {
   if (!body || typeof body !== 'object') return data
   return {
     ...body,
-    ...(body.message ? { message: withoutImageData(body.message) } : {}),
-    ...(Array.isArray(body.messages) ? { messages: body.messages.map(withoutImageData) } : {}),
+    ...(body.message ? { message: withImageBudget([body.message])[0] } : {}),
+    ...(Array.isArray(body.messages) ? { messages: withImageBudget(body.messages) } : {}),
     ...(Array.isArray(body.items) ? { items: body.items.map(withoutImageData) } : {})
   }
 }
@@ -246,7 +277,7 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     return mmsJson(
       {
         thread,
-        messages: s.orchestrator.getMessages(threadId).map(withoutImageData),
+        messages: withImageBudget(s.orchestrator.getMessages(threadId)),
         queue: s.orchestrator.listQueue(threadId).map(withoutImageData),
         pendingQuestions: s.questions.listPendingForThread(threadId),
         activeTurn: {

@@ -11,7 +11,10 @@ import {
   type RemoteBackendPort
 } from '../../../../src/mms/bridge/remote'
 import { MmsThreadSource } from '../../../../src/mms/bridge/remote/MmsThreadSource'
-import { STAGED_UPLOAD_TTL_MS } from '../../../../src/mms/bridge/remote/RemoteApi'
+import {
+  REMOTE_MESSAGE_IMAGES_MAX_CHARS,
+  STAGED_UPLOAD_TTL_MS
+} from '../../../../src/mms/bridge/remote/RemoteApi'
 import type { RpcContext } from '../../../../src/mms/net/contracts'
 import { newId, type NodeId, type UserId } from '../../../../src/shared/net'
 import type { SkillDescriptor } from '../../../../src/shared/integrations'
@@ -556,32 +559,33 @@ describe('remote composer methods on a real profile', () => {
     for (let index = 0; index < 4; index++)
       mms.orchestrator.enqueueForThread(thread.id, { content: 'later ' + index, images: [image] })
 
+    const budget = REMOTE_MESSAGE_IMAGES_MAX_CHARS + 64 * 1024
+    const nameOnly = { name: 'big.png', mimeType: 'image/png' }
     const backend = new MmsRemoteBackend(mms)
     const snapshot = backend.snapshot(thread.id) as {
       messages: Array<{ images: unknown[] }>
       queue: Array<{ images: unknown[] }>
     }
     const text = JSON.stringify(snapshot)
-    expect(text.length).toBeLessThan(64 * 1024)
-    expect(text).not.toContain('AAAA')
+    expect(text.length).toBeLessThan(budget)
     expect(snapshot.messages).toHaveLength(5)
-    expect(snapshot.messages[0].images).toEqual([
-      { name: 'big.png', mimeType: 'image/png' },
-      { name: 'big.png', mimeType: 'image/png' }
-    ])
+    // Newest first: only the last image of the newest message fits in the budget.
+    expect(snapshot.messages[4].images).toEqual([nameOnly, image])
+    for (const message of snapshot.messages.slice(0, 4))
+      expect(message.images).toEqual([nameOnly, nameOnly])
     expect(snapshot.queue).toHaveLength(4)
-    expect(snapshot.queue[0].images).toEqual([{ name: 'big.png', mimeType: 'image/png' }])
+    expect(snapshot.queue[0].images).toEqual([nameOnly])
     expect(
-      JSON.stringify(await call(api, 'thread.snapshot', { threadId: thread.id }))
-    ).not.toContain('AAAA')
+      JSON.stringify(await call(api, 'thread.snapshot', { threadId: thread.id })).length
+    ).toBeLessThan(budget)
 
     const source = new MmsThreadSource(mms)
-    const events: Array<{ type: string; data: string }> = []
+    const events: Array<{ type: string; data: any }> = []
     const stop = source.onThread(thread.id, (event) =>
-      events.push({ type: event.type, data: event.data as string })
+      events.push({ type: event.type, data: event.data })
     )
     resources.push(stop)
-    mms.orchestrator.emit('thread-message', { threadId: thread.id, message: messages[0] })
+    mms.orchestrator.emit('thread-message', { threadId: thread.id, message: messages[4] })
     mms.orchestrator.emit('thread-messages', { threadId: thread.id, messages })
     mms.orchestrator.emit('queue-updated', {
       threadId: thread.id,
@@ -592,10 +596,56 @@ describe('remote composer methods on a real profile', () => {
       'thread.messages',
       'queue.updated'
     ])
-    for (const event of events) {
-      expect(JSON.stringify(event.data).length).toBeLessThan(64 * 1024)
-      expect(JSON.stringify(event.data)).not.toContain('AAAA')
+    for (const event of events) expect(JSON.stringify(event.data).length).toBeLessThan(budget)
+    // A single message with images keeps the newest within the budget; the queue stays name-only.
+    expect(events[0].data.message.images).toEqual([nameOnly, image])
+    expect(events[1].data.messages[4].images).toEqual([nameOnly, image])
+    expect(events[1].data.messages[3].images).toEqual([nameOnly, nameOnly])
+    expect(JSON.stringify(events[2].data).length).toBeLessThan(64 * 1024)
+  })
+
+  it('keeps the data of recent images and drops it from older ones once the budget is used', async () => {
+    const { mms } = await profile()
+    const thread = mms.threads.createThread('Recent images')
+    const small = { name: 'photo.png', mimeType: 'image/png', data: 'iVBORw0KGgo=' }
+    const big = {
+      name: 'old.png',
+      mimeType: 'image/png',
+      data: 'B'.repeat(REMOTE_MESSAGE_IMAGES_MAX_CHARS)
     }
+    const messages = [
+      {
+        id: 'a',
+        role: 'user' as const,
+        content: 'old',
+        timestamp: '2026-01-01T00:00:00Z',
+        images: [big]
+      },
+      {
+        id: 'b',
+        role: 'user' as const,
+        content: 'new',
+        timestamp: '2026-01-02T00:00:00Z',
+        images: [small]
+      },
+      {
+        id: 'c',
+        role: 'user' as const,
+        content: 'new too',
+        timestamp: '2026-01-03T00:00:00Z',
+        images: [small, small]
+      }
+    ]
+    vi.spyOn(mms.orchestrator, 'getMessages').mockReturnValue(messages)
+
+    const snapshot = new MmsRemoteBackend(mms).snapshot(thread.id) as {
+      messages: Array<{ images: unknown[] }>
+    }
+    expect(snapshot.messages[2].images).toEqual([small, small])
+    expect(snapshot.messages[1].images).toEqual([small])
+    expect(snapshot.messages[0].images).toEqual([{ name: 'old.png', mimeType: 'image/png' }])
+    // The stored messages themselves are untouched.
+    expect(messages[0].images[0].data).toHaveLength(REMOTE_MESSAGE_IMAGES_MAX_CHARS)
   })
 
   it('sets one thread model without changing the computer default', async () => {
