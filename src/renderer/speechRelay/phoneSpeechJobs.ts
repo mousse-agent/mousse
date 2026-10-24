@@ -57,6 +57,7 @@ export interface PhoneSpeechDeps {
   transcribe(recording: Blob, selection: DictationSelection, onPartial: (text: string) => void, signal: AbortSignal): Promise<string>
   /** Hands over each clip and waits for `onClip` before going on, so a slow phone holds synthesis back. */
   synthesizeLocal(
+    modelId: LocalTtsModelId,
     text: string,
     options: {
       signal: AbortSignal
@@ -291,7 +292,7 @@ async function speak(job: SpeechJobInput, deps: PhoneSpeechDeps, io: PhoneSpeech
   }
   try {
     if (selection.source === 'local') {
-      await deps.synthesizeLocal(text, {
+      await deps.synthesizeLocal(selection.modelId, text, {
         signal: stop.signal,
         voice,
         speed: preferences.speed,

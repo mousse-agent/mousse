@@ -87,7 +87,7 @@ export default defineConfig({
     optimizeDeps: {
       // The local speech workers load only when a voice or dictation model first runs. Bundling
       // their dependencies at startup keeps that first run from re-optimizing mid-session.
-      include: ['kokoro-js', '@huggingface/transformers', 'onnxruntime-web'],
+      include: ['kokoro-js', 'phonemizer', '@huggingface/transformers', 'onnxruntime-web'],
       // The alias looks like a package, so the dev server would pre-bundle the `?url` runtime
       // import. That fails the whole optimization and the worker cannot load.
       exclude: ['@onnxruntime-web-dist']

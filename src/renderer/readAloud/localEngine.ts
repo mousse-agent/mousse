@@ -1,5 +1,5 @@
-import { KOKORO_82M } from '../../shared/readAloud'
-import type { KokoroWorkerEvent, KokoroWorkerRequest } from './kokoroWorker'
+import { findLocalTtsModel, type LocalTtsModel, type LocalTtsModelId } from '../../shared/readAloud'
+import type { LocalTtsWorkerEvent, LocalTtsWorkerRequest } from './localTtsWorker'
 import { CLIP_GAP_SECONDS, MAX_START_DELAY_SECONDS, startDelaySeconds, trimSilence, type SegmentTiming } from './localPlayback'
 import type { SpeakOptions } from './playback'
 import { createLevelMeter } from '../speech/audioLevels'
@@ -7,9 +7,9 @@ import { serveModelFiles } from '../speechModels/pageSupport'
 import { splitSpeechSegments } from './speechText'
 
 /**
- * Kokoro runs on single-threaded WebAssembly (the window is not cross-origin isolated), where one
- * worker produces audio at about 0.7x real time. Two workers voicing consecutive segments in
- * parallel stay ahead of playback.
+ * The local models run on single-threaded WebAssembly (the window is not cross-origin isolated),
+ * where one worker produces audio at roughly 0.6x to 0.7x real time. Two workers voicing
+ * consecutive segments in parallel stay ahead of playback.
  */
 const POOL_SIZE = 2
 /** Segments voiced ahead of the one playing; each holds a few seconds of audio. */
@@ -21,25 +21,33 @@ const LOOKAHEAD_SEGMENTS = 8
  */
 const IDLE_DISPOSE_MS = 5 * 60_000
 
-let pool: Worker[] = []
+/** The workers of the model that was used last; another model replaces them. */
+let pool: { modelId: LocalTtsModelId; workers: Worker[] } | null = null
 let lastRequestId = 0
 let activeSessions = 0
 let idleTimer: ReturnType<typeof setTimeout> | null = null
 
-function send(target: Worker, message: KokoroWorkerRequest): void {
+function send(target: Worker, message: LocalTtsWorkerRequest): void {
   target.postMessage(message)
 }
 
-function createWorker(): Worker {
-  const created = new Worker(new URL('./kokoroWorker.ts', import.meta.url), { type: 'module' })
-  serveModelFiles(created, (path) => window.mousse.readAloud.readLocalModelFile(KOKORO_82M.id, path))
+/** Each model family runs in its own worker file. */
+function createWorker(model: LocalTtsModel): Worker {
+  const created =
+    model.runtime === 'kitten'
+      ? new Worker(new URL('./kittenWorker.ts', import.meta.url), { type: 'module' })
+      : new Worker(new URL('./kokoroWorker.ts', import.meta.url), { type: 'module' })
+  serveModelFiles(created, (path) => window.mousse.readAloud.readLocalModelFile(model.id, path))
+  send(created, { type: 'init', modelId: model.id })
   return created
 }
 
-/** Starts workers up to `size`; a one-segment message needs only one. */
-function ensurePool(size: number): Worker[] {
-  while (pool.length < size) pool.push(createWorker())
-  return pool.slice(0, size)
+/** Starts workers for `model` up to `size`; a one-segment message needs only one. */
+function ensurePool(model: LocalTtsModel, size: number): Worker[] {
+  if (pool && pool.modelId !== model.id) disposeLocalEngine()
+  pool ??= { modelId: model.id, workers: [] }
+  while (pool.workers.length < size) pool.workers.push(createWorker(model))
+  return pool.workers.slice(0, size)
 }
 
 function cancelIdleDispose(): void {
@@ -58,8 +66,8 @@ function scheduleIdleDispose(): void {
 /** Drops the loaded model, e.g. after its files were deleted or when it has been idle. */
 export function disposeLocalEngine(): void {
   cancelIdleDispose()
-  for (const worker of pool) worker.terminate()
-  pool = []
+  for (const worker of pool?.workers ?? []) worker.terminate()
+  pool = null
 }
 
 interface SegmentState extends SegmentTiming {
@@ -68,15 +76,21 @@ interface SegmentState extends SegmentTiming {
 
 const seconds = (): number => performance.now() / 1000
 
-/** Speaks `text` with the local Kokoro model. Resolves when playback ends or is aborted. */
-export function speakWithLocalModel(text: string, { signal, onPlaying, voice, speed, pause, onLevels }: SpeakOptions): Promise<void> {
+/** Speaks `text` with a local model. Resolves when playback ends or is aborted. */
+export function speakWithLocalModel(
+  modelId: LocalTtsModelId,
+  text: string,
+  { signal, onPlaying, voice, speed, pause, onLevels }: SpeakOptions
+): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) return resolve()
+    const model = findLocalTtsModel(modelId)
+    if (!model) return reject(new Error('This voice model is not available'))
     const segments = splitSpeechSegments(text)
     if (segments.length === 0) return resolve()
     cancelIdleDispose()
     activeSessions++
-    const workers = ensurePool(Math.min(POOL_SIZE, segments.length))
+    const workers = ensurePool(model, Math.min(POOL_SIZE, segments.length))
     const context = new AudioContext()
     if (pause.paused) void context.suspend().catch(() => undefined)
     else void context.resume().catch(() => undefined)
@@ -135,7 +149,7 @@ export function speakWithLocalModel(text: string, { signal, onPlaying, voice, sp
         busy.add(worker)
         inFlight.set(id, { index: nextDispatch, worker })
         states[nextDispatch].startedAt = seconds()
-        send(worker, { type: 'speak', id, text: segments[nextDispatch], voice: voice ?? KOKORO_82M.defaultVoice, speed: speed() })
+        send(worker, { type: 'speak', id, text: segments[nextDispatch], voice: voice ?? model.defaultVoice, speed: speed() })
         nextDispatch++
       }
     }
@@ -192,7 +206,7 @@ export function speakWithLocalModel(text: string, { signal, onPlaying, voice, sp
       if (nextPlay >= states.length && sources.size === 0) settle()
     }
 
-    const onMessage = (event: MessageEvent<KokoroWorkerEvent>): void => {
+    const onMessage = (event: MessageEvent<LocalTtsWorkerEvent>): void => {
       const message = event.data
       if (message.type === 'file-request') return
       const request = inFlight.get(message.id)
@@ -228,12 +242,12 @@ export function speakWithLocalModel(text: string, { signal, onPlaying, voice, sp
 
 export interface SynthesizeOptions {
   signal: AbortSignal
-  /** Voice name for Kokoro; its default when undefined. */
+  /** Voice name of the model; its default when undefined. */
   voice: string | undefined
   /** Speaking pace, applied by the model. */
   speed: number
   /**
-   * Receives each segment's speech, trimmed of Kokoro's padding, in order. The next segment is
+   * Receives each segment's speech, trimmed of the model's padding, in order. The next segment is
    * handed over only after this returns, and voicing runs only a few segments ahead of what was
    * handed over, so a slow receiver does not pile up audio.
    */
@@ -241,19 +255,25 @@ export interface SynthesizeOptions {
 }
 
 /**
- * Voices `text` with the local Kokoro model without playing it, for a paired phone that plays the
+ * Voices `text` with a local model without playing it, for a paired phone that plays the
  * audio itself. Segments go to the same worker pool as read aloud; each one is handed over as soon
  * as it and every segment before it are done. Resolves after the last segment, or when aborted;
  * rejects when a segment fails or `onClip` throws.
  */
-export function synthesizeWithLocalModel(text: string, { signal, voice, speed, onClip }: SynthesizeOptions): Promise<void> {
+export function synthesizeWithLocalModel(
+  modelId: LocalTtsModelId,
+  text: string,
+  { signal, voice, speed, onClip }: SynthesizeOptions
+): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) return resolve()
+    const model = findLocalTtsModel(modelId)
+    if (!model) return reject(new Error('This voice model is not available'))
     const segments = splitSpeechSegments(text)
     if (segments.length === 0) return resolve()
     cancelIdleDispose()
     activeSessions++
-    const workers = ensurePool(Math.min(POOL_SIZE, segments.length))
+    const workers = ensurePool(model, Math.min(POOL_SIZE, segments.length))
     const results: Array<{ samples: Float32Array; sampleRate: number } | undefined> = []
     const inFlight = new Map<number, { index: number; worker: Worker }>()
     const busy = new Set<Worker>()
@@ -285,12 +305,12 @@ export function synthesizeWithLocalModel(text: string, { signal, voice, speed, o
         const id = ++lastRequestId
         busy.add(worker)
         inFlight.set(id, { index: nextDispatch, worker })
-        send(worker, { type: 'speak', id, text: segments[nextDispatch], voice: voice ?? KOKORO_82M.defaultVoice, speed })
+        send(worker, { type: 'speak', id, text: segments[nextDispatch], voice: voice ?? model.defaultVoice, speed })
         nextDispatch++
       }
     }
 
-    const onMessage = (event: MessageEvent<KokoroWorkerEvent>): void => {
+    const onMessage = (event: MessageEvent<LocalTtsWorkerEvent>): void => {
       const message = event.data
       if (message.type === 'file-request') return
       const request = inFlight.get(message.id)

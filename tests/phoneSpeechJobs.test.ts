@@ -144,7 +144,7 @@ describe('phone speech jobs', () => {
   })
 
   it('reads with the local model at the computer voice and speed, as WAV clips in pieces', async () => {
-    const synthesizeLocal = vi.fn<PhoneSpeechDeps['synthesizeLocal']>(async (_text, options) => {
+    const synthesizeLocal = vi.fn<PhoneSpeechDeps['synthesizeLocal']>(async (_modelId, _text, options) => {
       await options.onClip(new Float32Array(PHONE_SPEECH_AUDIO_PART_BYTES), 24_000)
       await options.onClip(new Float32Array([0.5, -0.5]), 24_000)
     })
@@ -153,8 +153,9 @@ describe('phone speech jobs', () => {
     fake.setPreferences({ speed: 1.25, voices: { 'kokoro-82m': 'bm_george' } })
     const channel = io()
     expect(await runPhoneSpeechJob(job('speak', 'readAloud', { text: '# Title\n\nSome **bold** words.' }), fake.deps, channel.io)).toEqual({ ok: true, clips: 2 })
-    expect(synthesizeLocal.mock.calls[0][0]).toBe('Title.\n\nSome bold words.')
-    expect(synthesizeLocal.mock.calls[0][1]).toMatchObject({ voice: 'bm_george', speed: 1.25 })
+    expect(synthesizeLocal.mock.calls[0][0]).toBe('kokoro-82m')
+    expect(synthesizeLocal.mock.calls[0][1]).toBe('Title.\n\nSome bold words.')
+    expect(synthesizeLocal.mock.calls[0][2]).toMatchObject({ voice: 'bm_george', speed: 1.25 })
     const parts = channel.sent as PhoneSpeechAudioPart[]
     // The first clip has 2 bytes per sample plus the header, so it needs three pieces.
     expect(parts.map((part) => [part.clip, part.part, part.last])).toEqual([[0, 0, false], [0, 1, false], [0, 2, true], [1, 0, true]])
@@ -177,7 +178,7 @@ describe('phone speech jobs', () => {
 
   it('stops reading once the phone stops listening', async () => {
     let signal: AbortSignal | undefined
-    const synthesizeLocal = vi.fn<PhoneSpeechDeps['synthesizeLocal']>(async (_text, options) => {
+    const synthesizeLocal = vi.fn<PhoneSpeechDeps['synthesizeLocal']>(async (_modelId, _text, options) => {
       signal = options.signal
       options.onClip(new Float32Array(4), 24_000)
       await new Promise((resolve) => setTimeout(resolve, 0))
@@ -296,7 +297,7 @@ describe('phone speech jobs', () => {
         progress: (data: unknown) => new Promise<boolean>((resolve) => (sent.push(data as PhoneSpeechAudioPart), releases.push(resolve)))
       }
       let handedOver = 0
-      const synthesizeLocal = vi.fn<PhoneSpeechDeps['synthesizeLocal']>(async (_text, options) => {
+      const synthesizeLocal = vi.fn<PhoneSpeechDeps['synthesizeLocal']>(async (_modelId, _text, options) => {
         for (let clip = 0; clip < 3; clip += 1) {
           await options.onClip(new Float32Array(4), 24_000)
           handedOver += 1
