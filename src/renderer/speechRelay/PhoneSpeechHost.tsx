@@ -8,7 +8,7 @@ import { useReadAloudStore } from '../readAloud/readAloudStore'
 import { currentSpeechPreferences, voiceFor } from '../speech/speechPreferences'
 import { useAppStore } from '../stores/appStore'
 import type { PhoneSpeechDeps } from './phoneSpeechJobs'
-import { startPhoneSpeechHost, type SpeechHostRequest } from './phoneSpeechHost'
+import { startPhoneSpeechHost, type SpeechHostRequest } from './startPhoneSpeechHost'
 
 /** This window's models, choices and preferences, read fresh for every phone request. */
 const windowDeps: PhoneSpeechDeps = {

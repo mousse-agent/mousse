@@ -6,7 +6,7 @@ import type { LlmProviderOption } from '../src/shared/settings'
 import { PHONE_SPEECH_AUDIO_PART_BYTES, type PhoneSpeechAudioPart, type SpeechJobInput } from '../src/shared/speechRelay'
 import { base64ToBytes, bytesToBase64, encodeWav } from '../src/renderer/speechRelay/audioEncoding'
 import { runPhoneSpeechJob, type PhoneSpeechDeps } from '../src/renderer/speechRelay/phoneSpeechJobs'
-import { startPhoneSpeechHost, type SpeechHostRequest } from '../src/renderer/speechRelay/phoneSpeechHost'
+import { startPhoneSpeechHost, type SpeechHostRequest } from '../src/renderer/speechRelay/startPhoneSpeechHost'
 import { DEFAULT_SPEECH_PREFERENCES, type SpeechPreferences } from '../src/renderer/speech/speechPreferences'
 
 const providers = [
