@@ -185,17 +185,21 @@ export class ResourceLifecycleStore {
   /**
    * Drops the registration of a task created moments ago that nothing used: its creating command
    * failed before commit (a delegated child or fork whose run-engine transaction rolled back).
-   * Refuses any task that moved, has operations or a parent. Returns false for an unknown task.
+   * Refuses any task that moved or has operations. A task with a parent is forgotten only when the
+   * caller names that same parent (`ownedBy`) and no other task is owned by it. Returns false for
+   * an unknown task.
    */
-  forgetCreatedTask(taskId: string): boolean {
+  forgetCreatedTask(taskId: string, options: { ownedBy?: string } = {}): boolean {
     identity(taskId)
     return this.withGate('_registry', () => {
       this.initialize()
       return this.withGate(taskId, () => {
         const record = this.get(taskId)
         if (!record) return false
-        if (record.state !== 'active' || record.generation !== 1 || record.operations.length || record.locations.length !== 1 || record.parentTaskId)
+        if (record.state !== 'active' || record.generation !== 1 || record.operations.length || record.locations.length !== 1 || record.parentTaskId !== options.ownedBy)
           throw new ResourceLifecycleError('stale', 'Only an unused new task can be forgotten')
+        if (record.parentTaskId && this.list().some((other) => other.parentTaskId === taskId))
+          throw new ResourceLifecycleError('stale', 'A task that owns other tasks cannot be forgotten')
         const indexPath = this.locationIndexPath(record.location)
         assertLifecyclePath(this.root, indexPath)
         if (existsSync(indexPath)) unlinkSync(indexPath)

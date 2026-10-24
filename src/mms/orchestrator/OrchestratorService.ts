@@ -130,6 +130,7 @@ import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
+import { lineageForChild } from '../data/subagentLineage'
 import { WorkspaceResolver } from '../workspace/WorkspaceResolver'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { UndoService } from '../actions/UndoService'
@@ -967,7 +968,8 @@ export class OrchestratorService extends EventEmitter {
         reuseLastUser: false,
         displayUserMessage: true,
         source: 'delegation',
-        ...(request.workspace === 'shared' ? { sharedWorkspace: this.sharedWorkspaceOf(request.parentThreadId) } : {})
+        // The path recorded when the child was created, not the parent's workspace as it is now.
+        ...(request.workspace === 'shared' ? { sharedWorkspace: this.getOrCreateSession(childThreadId).sharedWorkspace ?? null } : {})
       })
     })
     const onEvent = (event: ThreadEvent): void => { this.emit('run-event', event) }
@@ -1447,11 +1449,20 @@ export class OrchestratorService extends EventEmitter {
           model: request.model ?? base().model
         })
       : inherited
-    const child = this.threadStore.createThread(title, parentThread.projectId)
-    if (override) this.threadStore.updateThreadMeta(child.id, { modelOverride: structuredClone(override) })
+    // What the child runs on is fixed now: with no explicit selection it would otherwise follow the
+    // global default (or the parent's session) at every later turn.
+    const effective = override ?? this.defaultAgentModel()
+    const model = effective.model?.trim() && (effective.instanceId?.trim() || effective.llmProvider?.trim()) ? structuredClone(effective) : undefined
+    const shared = request.workspace === 'shared' ? this.sharedWorkspaceOf(request.parentThreadId) : null
+    const child = this.threadStore.createThread(title, parentThread.projectId, undefined, {
+      lineage: lineageForChild(parentThread),
+      ownerThreadId: parentThread.id,
+      workspaceBinding: { policy: request.workspace === 'shared' ? 'shared' : 'isolated', ...(shared ? { sharedPath: shared.path } : {}) },
+      ...(model ? { modelOverride: model } : {})
+    })
     const session = this.getOrCreateSession(child.id)
-    session.modelOverride = override ? structuredClone(override) : undefined
-    if (request.workspace === 'shared') session.sharedWorkspace = this.sharedWorkspaceOf(request.parentThreadId)
+    session.modelOverride = model ? structuredClone(model) : undefined
+    if (shared) session.sharedWorkspace = shared
     return { threadId: child.id }
   }
 
@@ -1495,6 +1506,13 @@ export class OrchestratorService extends EventEmitter {
     try {
       const lineage = engine.delegations.getLineage(session.threadId)
       if (lineage?.relationship !== 'subagent') return
+      // A child created with a recorded binding keeps exactly that; older children fall back to the
+      // delegation row and the parent's current workspace.
+      const binding = this.threadStore?.getThread(session.threadId)?.workspaceBinding
+      if (binding) {
+        if (binding.policy === 'shared' && binding.sharedPath) session.sharedWorkspace = { path: binding.sharedPath, parentThreadId: lineage.parentThreadId }
+        return
+      }
       const policy = engine.delegations.listForChildThread(session.threadId).filter((delegation) => delegation.workspace).at(-1)
       if (policy?.workspace === 'shared') session.sharedWorkspace = this.sharedWorkspaceOf(lineage.parentThreadId)
     } catch (error) {

@@ -683,12 +683,37 @@ export interface Project {
   pinnedAt?: string
 }
 
+/**
+ * Where a subagent thread came from. Written when the child is created and backfilled for older
+ * children from the run store's `thread_lineage`; the run store stays the source of truth.
+ */
+export interface ThreadLineage {
+  parentThreadId: string
+  /** The thread at the top of the parent chain, the one a person started. */
+  rootThreadId: string
+  relationship: 'subagent'
+}
+
+/**
+ * The workspace a subagent was created on. Later turns use it as written instead of working it out
+ * again from the parent's current session.
+ */
+export interface SubagentWorkspaceBinding {
+  policy: 'shared' | 'isolated'
+  /** The parent's workspace path a `shared` child observes read-only. */
+  sharedPath?: string
+}
+
 export interface Thread {
   id: string
   name: string
   projectId?: string
   createdAt: string
   updatedAt: string
+  /** Set on a subagent thread: the thread that started it. Absent on every other thread. */
+  lineage?: ThreadLineage
+  /** Set on a subagent created after workspace bindings were recorded. */
+  workspaceBinding?: SubagentWorkspaceBinding
   /**
    * Explicit model selection for this thread; absent means use global settings. `instanceId` is
    * absent on threads saved before provider instances existed.

@@ -19,9 +19,11 @@ import type {
   NativeLlmContext,
   Project,
   QueuedMessage,
+  SubagentWorkspaceBinding,
   Task,
   Thread,
-  ThreadData
+  ThreadData,
+  ThreadLineage
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { parseMousseAgentSessions } from '../agents/MousseAgentService'
@@ -49,6 +51,8 @@ interface ThreadMeta {
   createdAt: string
   updatedAt: string
   modelOverride?: ModelOverride
+  lineage?: ThreadLineage
+  workspaceBinding?: SubagentWorkspaceBinding
   /** Opt-in isolated git worktree. OFF by default; undefined treated as false. */
   worktreeEnabled?: boolean
   order: number
@@ -236,7 +240,23 @@ export class ThreadDataStore extends EventEmitter {
     }
   }
 
-  createThread(name: string, projectId?: string, projectPath?: string, opts?: { worktreeEnabled?: boolean }): Thread {
+  /**
+   * `lineage`, `modelOverride` and `workspaceBinding` are written with the first `meta.json`, so a
+   * subagent never exists without them. `ownerThreadId` makes the new thread owned by that thread in
+   * the lifecycle store: trashing, restoring or purging the owner takes this thread along.
+   */
+  createThread(
+    name: string,
+    projectId?: string,
+    projectPath?: string,
+    opts?: {
+      worktreeEnabled?: boolean
+      lineage?: ThreadLineage
+      modelOverride?: ModelOverride
+      workspaceBinding?: SubagentWorkspaceBinding
+      ownerThreadId?: string
+    }
+  ): Thread {
     this.invalidateListCache()
     const now = new Date().toISOString()
     const id = uuidv4()
@@ -249,9 +269,15 @@ export class ThreadDataStore extends EventEmitter {
       order: this.nextThreadOrder(projectId, projectPath)
     }
     if (opts?.worktreeEnabled === true) meta.worktreeEnabled = true
+    if (opts?.lineage) meta.lineage = structuredClone(opts.lineage)
+    if (opts?.modelOverride) meta.modelOverride = structuredClone(opts.modelOverride)
+    if (opts?.workspaceBinding) meta.workspaceBinding = structuredClone(opts.workspaceBinding)
 
     const threadDir = this.resolveThreadDir(meta, projectPath)
-    this.lifecycleStore.registerTask({ taskId: id, location: threadDir, creating: true })
+    // An owner without a lifecycle record yet (an older thread) is registered first; the child's
+    // registration requires an active owner.
+    if (opts?.ownerThreadId) this.getThreadDir(opts.ownerThreadId)
+    this.lifecycleStore.registerTask({ taskId: id, location: threadDir, parentTaskId: opts?.ownerThreadId, creating: true })
     this.ensureThreadDir(threadDir)
 
     this.writeJsonAtomic(join(threadDir, 'meta.json'), meta)
@@ -274,17 +300,43 @@ export class ThreadDataStore extends EventEmitter {
    * Removes a thread `createThread` made moments ago whose creating command failed before anything
    * used it: its directory, standalone index entry and lifecycle registration. Refuses a thread
    * that already has messages (that is a real thread; trash it through the lifecycle coordinator).
+   * An owned subagent is discarded only while its registration still names the owner its lineage
+   * says started it; anything else is refused before a file is touched.
    */
   discardUnusedThread(id: string): void {
     const meta = this.getThread(id)
     if (!meta) return
     const threadDir = this.resolveThreadDir(meta)
+    const owner = this.lifecycleStore.get(id)?.parentTaskId
+    if (owner && owner !== meta.lineage?.parentThreadId)
+      throw new Error(`Thread ${id} is owned by ${owner}; only an unused new subagent can be discarded`)
     if (this.readJsonFile<unknown[]>(join(threadDir, 'messages.json'), []).length)
       throw new Error(`Thread ${id} has messages; only an unused new thread can be discarded`)
+    // The registration goes first: it is the step that can refuse, and a crash after it leaves an
+    // unowned empty thread that `discardOrphanedSubagents` removes at the next start, rather than a
+    // registration of a missing directory that would stall its owner's trash.
+    this.lifecycleStore.forgetCreatedTask(id, owner ? { ownedBy: owner } : undefined)
     if (!meta.projectId) this.removeFromStandaloneIndex(id)
     rmSync(threadDir, { recursive: true, force: true })
-    this.lifecycleStore.forgetCreatedTask(id)
     this.invalidateListCache()
+  }
+
+  /**
+   * Boot repair: a subagent thread whose creating command died before its run-store rows committed
+   * has lineage in its metadata but none in the run store. When it is still empty it is discarded.
+   * `hasLineageRow` is the run store's answer for a thread id. Returns the discarded ids.
+   */
+  discardOrphanedSubagents(hasLineageRow: (threadId: string) => boolean): string[] {
+    const discarded: string[] = []
+    for (const thread of this.listAllThreads().filter((entry) => entry.lineage && !hasLineageRow(entry.id))) {
+      try {
+        this.discardUnusedThread(thread.id)
+        discarded.push(thread.id)
+      } catch (error) {
+        console.warn('orphaned subagent thread kept', { threadId: thread.id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return discarded
   }
 
   /** Daemon-owned execution admission: retry/crash recovery keeps one thread and its data. */
@@ -405,9 +457,11 @@ export class ThreadDataStore extends EventEmitter {
     return undefined
   }
 
+  /** `touch: false` keeps `updatedAt`, for repairs that must not reorder the sidebar. */
   updateThreadMeta(
     id: string,
-    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'worktreeEnabled'>>
+    partial: Partial<Pick<Thread, 'name' | 'modelOverride' | 'worktreeEnabled' | 'lineage' | 'workspaceBinding'>>,
+    opts: { touch?: boolean } = {}
   ): Thread {
     const thread = this.getThread(id)
     if (!thread) {
@@ -417,7 +471,7 @@ export class ThreadDataStore extends EventEmitter {
     const updated: Thread = {
       ...thread,
       ...partial,
-      updatedAt: new Date().toISOString()
+      updatedAt: opts.touch === false ? thread.updatedAt : new Date().toISOString()
     }
 
     const threadDir = this.getThreadDir(id)
