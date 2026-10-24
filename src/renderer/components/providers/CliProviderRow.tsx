@@ -94,7 +94,11 @@ function CliDetails({
         indent
         title={managed && state.action === 'install' ? 'Install' : 'Sign-in'}
         description={withError(
-          installing ? (install?.progress ?? 'Installing…') : (state.detail ?? state.label),
+          installing
+            ? (install?.progress ?? 'Installing…')
+            : managed && state.action === 'install' && config?.binaryPath
+              ? `${state.detail ?? state.label}. Installing replaces your executable path.`
+              : (state.detail ?? state.label),
           signIn.error ?? install?.error ?? null
         )}
         control={

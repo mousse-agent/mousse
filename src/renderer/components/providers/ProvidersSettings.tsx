@@ -67,8 +67,6 @@ export function ProvidersSettings({
   const [cliConfigs, setCliConfigs] = useState<Partial<Record<CliProviderInstanceId, CliProviderConfig>>>({})
   const [loginActive, setLoginActive] = useState(false)
   const [pageError, setPageError] = useState<string | null>(null)
-  /** Antigravity's agent download; kept here so the row and the add step show the same one. */
-  const install = useCliInstall()
 
   const loadLoginOptions = useCallback(async () => {
     setLoginOptions(await window.mousse.providers.getLoginOptions())
@@ -84,6 +82,12 @@ export function ProvidersSettings({
     setCliConfigs(Object.fromEntries(loaded.filter(([, config]) => config)))
   }, [])
 
+  /** Sign-in and download state live in the daemon and change without this page (a revoked session, a download). */
+  const loadAntigravityConfig = useCallback(async () => {
+    const config = await window.mousse.providers.cliConfig('antigravity').catch(() => undefined)
+    if (config) setCliConfigs((current) => ({ ...current, antigravity: config }))
+  }, [])
+
   useEffect(() => {
     void loadLoginOptions().catch(() => {})
     loadStatuses()
@@ -91,8 +95,12 @@ export function ProvidersSettings({
     return window.mousse.providers.onChanged(() => {
       void loadLoginOptions().catch(() => {})
       loadStatuses()
+      void loadAntigravityConfig()
     })
-  }, [loadLoginOptions, loadStatuses, loadCliConfigs])
+  }, [loadLoginOptions, loadStatuses, loadCliConfigs, loadAntigravityConfig])
+
+  /** Antigravity's agent download; shared by the row and the add step. */
+  const install = useCliInstall(cliConfigs.antigravity, () => void loadAntigravityConfig())
 
   const instances = useMemo(() => readProviderInstances(settings.provider.instances), [settings.provider.instances])
   const cliEnabled = (id: string) => instances[id]?.enabled ?? true

@@ -58,7 +58,8 @@ function antigravityHealth(input: { config?: CliProviderConfig; configured: bool
           action: 'install'
         }
   }
-  return configured
+  // The service's own state: `configured` drops a provider that is switched off, which stays signed in.
+  return (config?.signedIn ?? configured)
     ? { health: 'ready', label: 'Ready', detail: 'Signed in', action: 'sign-out' }
     : {
         health: 'attention',

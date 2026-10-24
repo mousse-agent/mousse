@@ -40,6 +40,12 @@ describe('Antigravity health', () => {
     expect(health(installed, true)).toEqual({ health: 'ready', label: 'Ready', detail: 'Signed in', action: 'sign-out' })
   })
 
+  it('takes the sign-in from the service, so a switched-off signed-in provider can still sign out', () => {
+    // `configured` comes from the enabled providers; a disabled one is missing there but still signed in.
+    expect(health(agy({ resolvedBinaryPath: '/mousse/agy_acp_server', signedIn: true }), false)).toMatchObject({ label: 'Ready', action: 'sign-out' })
+    expect(health(agy({ resolvedBinaryPath: '/mousse/agy_acp_server', signedIn: false }), true)).toMatchObject({ label: 'Signed out', action: 'sign-in' })
+  })
+
   it('waits for the settings before judging, unless the daemon already lists it signed in', () => {
     expect(health(undefined, false)).toMatchObject({ label: 'Checking' })
     expect(health(undefined, true)).toMatchObject({ label: 'Ready' })
@@ -91,6 +97,12 @@ describe('Antigravity row actions', () => {
     expect(buttons(html)).toContain('Install')
   })
 
+  it('says that installing replaces a manual path that runs nothing', () => {
+    const html = antigravityRow(agy({ binaryPath: '/tmp/nope' }), false)
+    expect(html).toContain('Nothing runs at /tmp/nope. Installing replaces your executable path.')
+    expect(buttons(html)).toContain('Install')
+  })
+
   it('offers Sign in, and no Install, when installed and signed out', () => {
     const list = buttons(antigravityRow(installed, false))
     expect(list).toContain('Sign in')
@@ -129,6 +141,11 @@ describe('Add Antigravity step', () => {
     expect(buttons(html)).toEqual(['Use an existing agent binary', 'Install'])
     expect(html).not.toContain('executable path')
     expect(buttons(html)).not.toContain('Add')
+  })
+
+  it('says that installing replaces a manual path that runs nothing', () => {
+    expect(step(antigravity, agy({ binaryPath: '/tmp/nope' }))).toContain('Installing replaces your executable path.')
+    expect(step(antigravity, agy())).not.toContain('replaces')
   })
 
   it('shows progress and Cancel while installing', () => {

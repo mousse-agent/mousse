@@ -245,9 +245,11 @@ export function CliConnectStep({
 }) {
   const [path, setPath] = useState('')
   const [manual, setManual] = useState(false)
+  /** Install was chosen: its row stays up while the download and the add finish, so the path row never flashes in. */
+  const [started, setStarted] = useState(false)
   const detected = config?.resolvedBinaryPath
   const missing = config !== undefined && !detected
-  const offerInstall = cli.id === 'antigravity' && missing
+  const offerInstall = cli.id === 'antigravity' && (missing || started)
   const showPath = !offerInstall || manual
   const entered = path.trim()
   const canAdd = !disabled && (entered !== '' || !missing)
@@ -277,8 +279,12 @@ export function CliConnectStep({
               <span className="prov-error">{installError}</span>
             ) : install.busy ? (
               (install.progress ?? 'Installing…')
+            ) : busy ? (
+              'Adding…'
             ) : (
-              'Mousse downloads Google’s official Antigravity agent (several hundred MB). Your agy CLI isn’t used.'
+              `Mousse downloads Google’s official Antigravity agent (several hundred MB). Your agy CLI isn’t used.${
+                config?.binaryPath ? ' Installing replaces your executable path.' : ''
+              }`
             )
           }
           control={
@@ -291,7 +297,15 @@ export function CliConnectStep({
                 <button type="button" className="prov-link" disabled={disabled} onClick={() => setManual((open) => !open)}>
                   {manual ? 'Hide existing agent binary' : 'Use an existing agent binary'}
                 </button>
-                <button type="button" className="settings-btn" disabled={disabled} onClick={onInstall}>
+                <button
+                  type="button"
+                  className="settings-btn"
+                  disabled={disabled}
+                  onClick={() => {
+                    setStarted(true)
+                    onInstall()
+                  }}
+                >
                   Install
                 </button>
               </>
