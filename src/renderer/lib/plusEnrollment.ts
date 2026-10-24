@@ -31,7 +31,7 @@ export const decideEnrollmentRequest = (id: string, approve: boolean): Promise<u
 /** The request to ask about next: the oldest one still open that was not closed this session. */
 export function nextEnrollmentRequest(
   requests: readonly PlusEnrollmentRequestView[],
-  dismissed: ReadonlySet<string>,
+  dismissed: { has(id: string): boolean },
   now: number
 ): PlusEnrollmentRequestView | undefined {
   return requests

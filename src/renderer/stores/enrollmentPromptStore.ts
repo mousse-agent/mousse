@@ -8,10 +8,13 @@ export const ENROLLMENT_RECONCILE_MS = 30_000
 
 interface EnrollmentPromptState {
   requests: PlusEnrollmentRequestView[]
-  /** Requests closed without a choice, kept while the request is listed; Settings → Devices still lists them. */
-  dismissed: ReadonlySet<string>
-  /** Requests a system notification was already shown for. */
-  notified: ReadonlySet<string>
+  /**
+   * Requests closed without a choice, with the time each runs out; Settings → Devices still lists
+   * them. Kept across profile switches until then, so switching back does not ask again.
+   */
+  dismissed: ReadonlyMap<string, number>
+  /** Requests a system notification was already shown for, with the time each runs out. */
+  notified: ReadonlyMap<string, number>
   busy: boolean
   error: string
   /** Request the error belongs to, so it never shows on the next one. */
@@ -20,32 +23,48 @@ interface EnrollmentPromptState {
   decide: (id: string, approve: boolean) => Promise<void>
   dismiss: (id: string) => void
   markNotified: (id: string) => void
-  /** Drops requests whose time ran out, and the marks kept for them. */
+  /** Drops requests whose time ran out, and the marks kept for expired ones. */
   prune: (now?: number) => void
   reset: () => void
 }
 
 const message = (cause: unknown) => String((cause as Error | null)?.message ?? cause)
 
-/** Closed and notified marks only matter while their request is listed; drop the rest. */
-const forgetGone = (requests: readonly PlusEnrollmentRequestView[], marks: ReadonlySet<string>): ReadonlySet<string> => {
-  const kept = new Set(requests.map((row) => row.id).filter((id) => marks.has(id)))
+/** Closed and notified marks only matter until their request runs out; drop the rest. */
+const forgetExpired = (marks: ReadonlyMap<string, number>, now: number): ReadonlyMap<string, number> => {
+  const kept = new Map([...marks].filter(([, expiresAt]) => expiresAt > now))
   return kept.size === marks.size ? marks : kept
 }
 
-const withRequests = (state: Pick<EnrollmentPromptState, 'dismissed' | 'notified'>, requests: PlusEnrollmentRequestView[]) => ({
+const forgetId = (marks: ReadonlyMap<string, number>, id: string): ReadonlyMap<string, number> => {
+  if (!marks.has(id)) return marks
+  const kept = new Map(marks)
+  kept.delete(id)
+  return kept
+}
+
+const withRequests = (
+  state: Pick<EnrollmentPromptState, 'dismissed' | 'notified'>,
+  requests: PlusEnrollmentRequestView[],
+  now = Date.now()
+) => ({
   requests,
-  dismissed: forgetGone(requests, state.dismissed),
-  notified: forgetGone(requests, state.notified)
+  dismissed: forgetExpired(state.dismissed, now),
+  notified: forgetExpired(state.notified, now)
 })
+
+const markFor = (state: Pick<EnrollmentPromptState, 'requests'>, marks: ReadonlyMap<string, number>, id: string) => {
+  const expiresAt = state.requests.find((row) => row.id === id)?.expiresAt
+  return expiresAt === undefined ? marks : new Map(marks).set(id, expiresAt)
+}
 
 let loading: { owner: number; again: boolean; promise: Promise<void> } | undefined
 let generation = 0
 
 export const useEnrollmentPromptStore = create<EnrollmentPromptState>((set, get) => ({
   requests: [],
-  dismissed: new Set(),
-  notified: new Set(),
+  dismissed: new Map(),
+  notified: new Map(),
   busy: false,
   error: '',
 
@@ -76,7 +95,12 @@ export const useEnrollmentPromptStore = create<EnrollmentPromptState>((set, get)
     set({ busy: true, error: '', errorId: undefined })
     try {
       await decideEnrollmentRequest(id, approve)
-      if (owner === generation) set((state) => withRequests(state, state.requests.filter((row) => row.id !== id)))
+      if (owner === generation) {
+        set((state) => {
+          const next = withRequests(state, state.requests.filter((row) => row.id !== id))
+          return { ...next, dismissed: forgetId(next.dismissed, id), notified: forgetId(next.notified, id) }
+        })
+      }
     } catch (cause) {
       if (owner === generation) set({ error: message(cause), errorId: id })
     } finally {
@@ -86,16 +110,16 @@ export const useEnrollmentPromptStore = create<EnrollmentPromptState>((set, get)
 
   dismiss: (id) =>
     set((state) => ({
-      dismissed: new Set(state.dismissed).add(id),
+      dismissed: markFor(state, state.dismissed, id),
       ...(state.errorId === id ? { error: '', errorId: undefined } : {})
     })),
 
-  markNotified: (id) => set((state) => ({ notified: new Set(state.notified).add(id) })),
+  markNotified: (id) => set((state) => ({ notified: markFor(state, state.notified, id) })),
 
   prune: (now = Date.now()) => {
-    const { requests } = get()
-    const open = requests.filter((row) => row.expiresAt > now)
-    if (open.length !== requests.length) set((state) => withRequests(state, open))
+    const state = get()
+    const next = withRequests(state, state.requests.filter((row) => row.expiresAt > now), now)
+    if (next.requests.length !== state.requests.length || next.dismissed !== state.dismissed || next.notified !== state.notified) set(next)
   },
 
   reset: () => {

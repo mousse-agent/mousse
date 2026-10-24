@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -14,6 +15,7 @@ import {
   watchEnrollmentRequests
 } from '../../src/renderer/stores/enrollmentPromptStore'
 import { EnrollmentRequestPrompt } from '../../src/renderer/components/EnrollmentRequestPrompt'
+import { isTopDialog, registerDialog } from '../../src/renderer/components/ui/Modal'
 
 const now = 1_000_000
 const row = (id: string, extra: Partial<PlusEnrollmentRequestView> = {}): PlusEnrollmentRequestView => ({
@@ -62,7 +64,7 @@ const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 
 beforeEach(() => {
   useEnrollmentPromptStore.getState().reset()
-  useEnrollmentPromptStore.setState({ dismissed: new Set(), notified: new Set() })
+  useEnrollmentPromptStore.setState({ dismissed: new Map(), notified: new Map() })
 })
 
 afterEach(() => {
@@ -110,6 +112,11 @@ describe('choosing the next request', () => {
 })
 
 describe('request store', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(now)
+  })
+
   it('loads the daemon list', async () => {
     stubWindow({ 'net.plus.enrollment.requests': async () => ({ requests: [row('a')] }) })
     await useEnrollmentPromptStore.getState().load()
@@ -191,7 +198,7 @@ describe('request store', () => {
     expect(state.error).toBe('')
   })
 
-  it('forgets closed and notified marks once their request is gone, but not while it is listed', async () => {
+  it('keeps closed and notified marks while the request is live, even when a list omits it', async () => {
     let list = [row('a'), row('b')]
     stubWindow({ 'net.plus.enrollment.requests': async () => ({ requests: list }) })
     const store = useEnrollmentPromptStore.getState()
@@ -199,13 +206,15 @@ describe('request store', () => {
     store.dismiss('a')
     store.markNotified('a')
     store.markNotified('b')
+    list = []
     await store.load()
-    expect([...useEnrollmentPromptStore.getState().dismissed]).toEqual(['a'])
-    list = [row('b')]
+    store.reset()
+    list = [row('a'), row('b')]
     await store.load()
     const state = useEnrollmentPromptStore.getState()
-    expect([...state.dismissed]).toEqual([])
-    expect([...state.notified]).toEqual(['b'])
+    expect([...state.dismissed.keys()]).toEqual(['a'])
+    expect([...state.notified.keys()]).toEqual(['a', 'b'])
+    expect(currentEnrollmentRequest(state, now)?.id).toBe('b')
   })
 
   it('forgets marks of requests that ran out or were decided', async () => {
@@ -220,9 +229,33 @@ describe('request store', () => {
       store.markNotified(id)
     }
     store.prune(now + 10)
-    expect([...useEnrollmentPromptStore.getState().dismissed]).toEqual(['b'])
-    expect([...useEnrollmentPromptStore.getState().notified]).toEqual(['b'])
+    expect([...useEnrollmentPromptStore.getState().dismissed.keys()]).toEqual(['b'])
+    expect([...useEnrollmentPromptStore.getState().notified.keys()]).toEqual(['b'])
     await store.decide('b', true)
+    expect(useEnrollmentPromptStore.getState().dismissed.size).toBe(0)
+    expect(useEnrollmentPromptStore.getState().notified.size).toBe(0)
+  })
+
+  it('keeps a closed request hidden when switching to another profile and back', async () => {
+    let list = [row('a')]
+    stubWindow({ 'net.plus.enrollment.requests': async () => ({ requests: list }) })
+    const store = useEnrollmentPromptStore.getState()
+    await store.load()
+    store.dismiss('a')
+    store.markNotified('a')
+    store.reset()
+    list = []
+    await store.load()
+    store.reset()
+    list = [row('a')]
+    await store.load()
+    const state = useEnrollmentPromptStore.getState()
+    expect(currentEnrollmentRequest(state, now)).toBeUndefined()
+    expect(state.notified.has('a')).toBe(true)
+    // Once its time has passed, the other profile's marks are released.
+    list = []
+    vi.setSystemTime(now + 60_000)
+    await store.load()
     expect(useEnrollmentPromptStore.getState().dismissed.size).toBe(0)
     expect(useEnrollmentPromptStore.getState().notified.size).toBe(0)
   })
@@ -315,6 +348,46 @@ describe('request dialog', () => {
 
   it('names a computer request as a computer', () => {
     expect(render({ request: row('a', { kind: 'computer' }) })).toContain('Computer wants to join')
+  })
+})
+
+describe('dialog stacking', () => {
+  it('lets only the dialog opened last handle Tab and Escape', () => {
+    const lower = {} as HTMLElement
+    const upper = {} as HTMLElement
+    const releaseLower = registerDialog(lower)
+    expect(isTopDialog(lower)).toBe(true)
+    const releaseUpper = registerDialog(upper)
+    expect(isTopDialog(lower)).toBe(false)
+    expect(isTopDialog(upper)).toBe(true)
+    releaseUpper()
+    expect(isTopDialog(lower)).toBe(true)
+    releaseLower()
+    expect(isTopDialog(lower)).toBe(false)
+  })
+
+  it('hands back to the lower dialog even if it closes first', () => {
+    const lower = {} as HTMLElement
+    const upper = {} as HTMLElement
+    const releaseLower = registerDialog(lower)
+    const releaseUpper = registerDialog(upper)
+    releaseLower()
+    expect(isTopDialog(upper)).toBe(true)
+    releaseUpper()
+  })
+})
+
+describe('request dialog styles', () => {
+  it('declares the Settings tokens it uses, since it renders outside Settings', () => {
+    const css = readFileSync('src/renderer/styles/devices.css', 'utf8')
+    const start = css.indexOf('.modal-overlay.enrollment-prompt')
+    const block = css.slice(start, css.indexOf('}', start))
+    const used = [...css.slice(start).matchAll(/\.enrollment-prompt[^{]*\{([^}]*)\}/g)].flatMap((match) =>
+      [...match[1].matchAll(/var\((--(?:space|settings)-[a-z0-9-]+)\)/g)].map((token) => token[1])
+    )
+    expect(used.length).toBeGreaterThan(0)
+    // The Settings button's padding and gap, and the footer button height, read these as well.
+    for (const token of new Set([...used, '--space-4', '--space-12', '--settings-control-h'])) expect(block).toContain(`${token}:`)
   })
 })
 
