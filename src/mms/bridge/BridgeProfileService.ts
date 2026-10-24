@@ -167,7 +167,8 @@ export class BridgeProfileService {
       keys: rt.keys,
       clock: this.clock,
       source,
-      onDelta: (stream, data) => net.publishDelta(stream, data),
+      onDelta: (stream, data, key) => net.publishDelta(stream, data, key),
+      onDeltaDiscard: (stream, matches) => net.discardDeltas(stream, matches),
       onRecord: (stream, record) => {
         void this.track(net.publish(stream, record))
       },

@@ -183,6 +183,9 @@ export class NetSyncSession implements SyncSession {
   private estimate?: QualifiedClockEstimate
   private subscriptions = new Map<StreamId, SubscriptionReceiver>()
   private serving = new Map<StreamId, { cancelled: boolean; live: boolean }>()
+  /** Unsent display deltas by stream and key; at most one delta per session is being written. */
+  private deltas = new Map<string, { stream: StreamId; key: string; data: unknown }>()
+  private deltaSending = false
   private snapshotJobs = new Map<
     StreamId,
     { controller: AbortController; reader: SnapshotReader }
@@ -633,7 +636,7 @@ export class NetSyncSession implements SyncSession {
    * Display-only delta for a stream this session is live-serving. Peers that did not negotiate
    * presence.v1 or are not subscribed get nothing; deltas are never stored or replayed.
    */
-  publishDelta(stream: StreamId, data: unknown): void {
+  publishDelta(stream: StreamId, data: unknown, key = ''): void {
     if (
       this.currentState !== 'open' ||
       !this.negotiatedCaps.includes('presence.v1') ||
@@ -641,9 +644,40 @@ export class NetSyncSession implements SyncSession {
     )
       return
     this.authorizedRead(stream)
-    void this.send({ t: 'ephemeral', stream, kind: 'delta', data }).catch((error) =>
-      this.fail(error)
-    )
+    // One delta per session is written at a time, so deltas never hold more than one message in
+    // the control lane; newer ones replace older unsent ones with the same key. A slow link then
+    // sees fewer deltas instead of a full mux queue that would refuse pings and snapshot requests.
+    // Replacing a waiting delta keeps its place in line, so a thread that updates faster than the
+    // writer drains still gets its turn; a key that was just selected re-enters at the tail.
+    this.deltas.set(`${stream}\u0000${key}`, { stream, key, data })
+    if (!this.deltaSending) this.sendDeltas()
+  }
+  /**
+   * Drops unsent deltas a durable record supersedes. Called before that record is published, so a
+   * stale streaming update never reaches the phone after the settled one.
+   */
+  discardDeltas(stream: StreamId, matches: (key: string) => boolean): void {
+    for (const [id, delta] of this.deltas)
+      if (delta.stream === stream && matches(delta.key)) this.deltas.delete(id)
+  }
+  private sendDeltas(): void {
+    for (const [id, next] of this.deltas) {
+      this.deltas.delete(id)
+      if (this.currentState !== 'open' || !this.serving.get(next.stream)?.live) continue
+      this.deltaSending = true
+      void this.send({ t: 'ephemeral', stream: next.stream, kind: 'delta', data: next.data })
+        .catch((error) => {
+          // Deltas are best effort: a busy or cancelled send never ends the session.
+          if (error instanceof NetError && ['rate_limited', 'cancelled'].includes(error.code))
+            return
+          this.fail(error)
+        })
+        .finally(() => {
+          this.deltaSending = false
+          this.sendDeltas()
+        })
+      return
+    }
   }
   onEphemeral(
     listener: (message: Extract<WireMessage, { t: 'presence' | 'ephemeral' }>) => void
@@ -1972,6 +2006,7 @@ export class NetSyncSession implements SyncSession {
     this.subscriptions.clear()
     for (const attempt of this.serving.values()) attempt.cancelled = true
     this.serving.clear()
+    this.deltas.clear()
     for (const stream of [...this.snapshotJobs.keys()]) this.cancelSnapshot(stream)
     this.snapshotWaiting.clear()
     this.snapshotReceiving.clear()

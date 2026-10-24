@@ -1442,12 +1442,12 @@ export class NetService {
     )
   }
   /** Display-only thread deltas to sessions live-serving the stream; never stored or replayed. */
-  publishDelta(stream: StreamId, data: unknown): void {
+  publishDelta(stream: StreamId, data: unknown, key?: string): void {
     if (this.stopped || this.disabled || !this.config.enabled) return
     for (const session of this.sessions) {
       if (session.state() !== 'open') continue
       try {
-        session.publishDelta(stream, data)
+        session.publishDelta(stream, data, key)
       } catch (error) {
         if (
           error instanceof NetError &&
@@ -1463,6 +1463,16 @@ export class NetService {
         )
           continue
         throw error
+      }
+    }
+  }
+  /** Drops unsent deltas a durable record supersedes; best effort like `publishDelta`. */
+  discardDeltas(stream: StreamId, matches: (key: string) => boolean): void {
+    for (const session of this.sessions) {
+      try {
+        session.discardDeltas(stream, matches)
+      } catch {
+        // A closing session has nothing left to send.
       }
     }
   }

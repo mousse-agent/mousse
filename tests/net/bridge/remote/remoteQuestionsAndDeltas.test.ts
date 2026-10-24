@@ -23,7 +23,7 @@ import {
   type ThreadSourceEvent,
   type ThreadSourcePort
 } from '../../../../src/mms/bridge/remote'
-import { newId, type NodeDelegation, type WireMessage } from '../../../../src/shared/net'
+import { NetError, newId, type NodeDelegation, type WireMessage } from '../../../../src/shared/net'
 import { memoryPair } from '../../harness/MemoryTransport'
 
 const resources: Array<() => void | Promise<void>> = [],
@@ -422,5 +422,281 @@ describe('remote display deltas', () => {
     )
     expect(plain.a.state()).toBe('open')
     expect(plain.b.state()).toBe('open')
+  })
+
+  it('keeps the session open when deltas outpace the link, sending the newest per key', async () => {
+    // A reply with an applet streams ~32 KiB deltas every 100 ms, faster than a phone link drains.
+    const p = await setup(),
+      { source } = fakeSource('t1')
+    const adapter = new ThreadStreamAdapter({
+      db: p.aDb,
+      store: p.aStore,
+      generations: p.aStore,
+      identity: p.aIdentity,
+      keys: p.aKeys,
+      clock: systemClock,
+      source
+    })
+    resources.push(() => adapter.close())
+    const descriptor = adapter.activate('t1')
+    p.bStore.createStream(descriptor, 1)
+    const live = await p.connect(adapter.store, true),
+      received: unknown[] = []
+    live.b.onEphemeral((message) => received.push((message as { data?: unknown }).data))
+    await new Promise<void>((resolve, reject) =>
+      live.b.subscribe(descriptor.id, {
+        onRecord() {},
+        onCaughtUp: () => resolve(),
+        onSnapshotInstalled: () => resolve(),
+        onError: (code) => reject(new Error(code))
+      })
+    )
+    const questions = { threadId: 't1', type: 'questions.updated', data: { pending: [] } }
+    for (let i = 0; i < 40; i++)
+      live.a.publishDelta(
+        descriptor.id,
+        {
+          threadId: 't1',
+          type: 'thread.message-updated',
+          data: message('m1', `${i}`.padEnd(31 * 1024, 'x'))
+        },
+        'message:m1'
+      )
+    live.a.publishDelta(descriptor.id, questions, 'questions')
+    const last = message('m1', '39'.padEnd(31 * 1024, 'x'))
+    await vi.waitFor(() =>
+      expect(received).toContainEqual({
+        threadId: 't1',
+        type: 'thread.message-updated',
+        data: last
+      })
+    )
+    await vi.waitFor(() => expect(received).toContainEqual(questions))
+    expect(received.length).toBeLessThan(10)
+    expect(live.a.state()).toBe('open')
+    expect(live.b.state()).toBe('open')
+  })
+  /** A phone-side session subscribed to every stream, collecting what arrives in wire order. */
+  async function subscribed(
+    p: Awaited<ReturnType<typeof setup>>,
+    adapter: ThreadStreamAdapter,
+    threads: string[]
+  ) {
+    const descriptors = threads.map((id) => adapter.activate(id))
+    for (const descriptor of descriptors) p.bStore.createStream(descriptor, 1)
+    const live = await p.connect(adapter.store, true),
+      seen: string[] = []
+    live.b.onEphemeral((message) => {
+      const body = (message as { data?: { threadId?: string; type?: string; data?: unknown } }).data
+      seen.push(
+        body?.type === 'questions.updated'
+          ? `questions:${body.threadId}`
+          : `delta:${(body?.data as { message?: { content?: string } })?.message?.content?.slice(0, 3)}`
+      )
+    })
+    for (const descriptor of descriptors)
+      await new Promise<void>((resolve, reject) =>
+        live.b.subscribe(descriptor.id, {
+          onRecord: () => seen.push('record'),
+          onCaughtUp: () => resolve(),
+          onSnapshotInstalled: () => resolve(),
+          onError: (code) => reject(new Error(code))
+        })
+      )
+    seen.length = 0
+    return { live, descriptors, seen }
+  }
+  const multiSource = () => {
+    const listeners = new Map<string, (event: ThreadSourceEvent) => void>(),
+      source: ThreadSourcePort = {
+        snapshot: (id) => ({ thread: { id }, messages: [] }),
+        onThread: (id, listener) => {
+          listeners.set(id, listener)
+          return () => undefined
+        }
+      }
+    return { source, emit: (id: string, event: ThreadSourceEvent) => listeners.get(id)!(event) }
+  }
+
+  it('never delivers a streaming delta after the settled record of the same message', async () => {
+    const p = await setup(),
+      clock = manualClock(),
+      { source, emit } = multiSource()
+    let session: Awaited<ReturnType<typeof subscribed>>['live']['a'] | undefined
+    const adapter = new ThreadStreamAdapter({
+      db: p.aDb,
+      store: p.aStore,
+      generations: p.aStore,
+      identity: p.aIdentity,
+      keys: p.aKeys,
+      clock,
+      source,
+      onDelta: (stream, body, key) => session!.publishDelta(stream, body, key),
+      onDeltaDiscard: (stream, matches) => session!.discardDeltas(stream, matches),
+      onRecord: (stream, record) => void session?.publishRecord(stream, record)
+    })
+    resources.push(() => adapter.close())
+    const { live, seen } = await subscribed(p, adapter, ['t1'])
+    session = live.a
+    const streaming = (content: string) => ({
+      type: 'thread.message-updated' as const,
+      data: message('m1', content),
+      ephemeral: true as const
+    })
+    // 'Hel' and the questions update wait behind the delta being written when m1 settles.
+    emit('t1', streaming('Hxx'))
+    clock.flush()
+    emit('t1', {
+      type: 'questions.updated',
+      data: { threadId: 't1', pending: [] },
+      ephemeral: true
+    })
+    emit('t1', streaming('Hel'))
+    clock.flush()
+    emit('t1', { type: 'thread.message-updated', data: message('m1', 'Hello!', false) })
+    emit('t1', {
+      type: 'questions.updated',
+      data: { threadId: 't1', pending: [] },
+      ephemeral: true
+    })
+    clock.flush()
+    await vi.waitFor(() => expect(seen).toContain('record'))
+    // Wire order is FIFO, so once a marker queued after the record arrives, no stale delta is left.
+    emit('t1', {
+      type: 'questions.updated',
+      data: { threadId: 't1', pending: [] },
+      ephemeral: true
+    })
+    clock.flush()
+    await vi.waitFor(() =>
+      expect(seen.lastIndexOf('questions:t1')).toBeGreaterThan(seen.indexOf('record'))
+    )
+    expect(seen.filter((entry) => entry === 'delta:Hel')).toEqual([])
+    expect(seen.indexOf('delta:Hxx')).toBeLessThan(seen.indexOf('record'))
+    expect(live.a.state()).toBe('open')
+  })
+
+  it('bounds delta bytes per session, not per stream, so many live threads cannot fill the control lane', async () => {
+    const p = await setup(),
+      clock = manualClock(),
+      { source, emit } = multiSource(),
+      threads = Array.from({ length: 12 }, (_, i) => `t${i}`)
+    let session: Awaited<ReturnType<typeof subscribed>>['live']['a'] | undefined
+    const adapter = new ThreadStreamAdapter({
+      db: p.aDb,
+      store: p.aStore,
+      generations: p.aStore,
+      identity: p.aIdentity,
+      keys: p.aKeys,
+      clock,
+      source,
+      onDelta: (stream, body, key) => session!.publishDelta(stream, body, key)
+    })
+    resources.push(() => adapter.close())
+    const { live, seen } = await subscribed(p, adapter, threads)
+    session = live.a
+    let writing = 0,
+      peak = 0
+    const internals = live.a as unknown as { send(message: WireMessage): Promise<void> },
+      send = internals.send.bind(live.a)
+    internals.send = (message) => {
+      if (message.t !== 'ephemeral' || message.kind !== 'delta') return send(message)
+      peak = Math.max(peak, ++writing)
+      return send(message).finally(() => writing--)
+    }
+    threads.forEach((id, i) =>
+      emit(id, {
+        type: 'thread.message-updated',
+        data: {
+          threadId: id,
+          message: { ...message(`m${i}`, `${i}`.padEnd(31 * 1024, 'x')).message }
+        },
+        ephemeral: true
+      })
+    )
+    clock.flush()
+    await vi.waitFor(() => expect(seen).toHaveLength(threads.length))
+    expect(peak).toBe(1)
+    expect(live.a.state()).toBe('open')
+    expect(live.b.state()).toBe('open')
+  })
+
+  it('still sends a thread that keeps updating while another one streams, within a few writes', async () => {
+    const p = await setup(),
+      { source } = multiSource(),
+      adapter = new ThreadStreamAdapter({
+        db: p.aDb,
+        store: p.aStore,
+        generations: p.aStore,
+        identity: p.aIdentity,
+        keys: p.aKeys,
+        clock: manualClock(),
+        source
+      })
+    resources.push(() => adapter.close())
+    const { live, descriptors } = await subscribed(p, adapter, ['t1', 't2']),
+      [first, second] = descriptors.map((descriptor) => descriptor.id),
+      sent: string[] = [],
+      gates: Array<() => void> = [],
+      internals = live.a as unknown as { send(message: WireMessage): Promise<void> },
+      send = internals.send.bind(live.a)
+    // Every delta write stays open until the test completes it, like a slow phone link.
+    internals.send = (message) => {
+      if (message.t !== 'ephemeral' || message.kind !== 'delta') return send(message)
+      sent.push(message.stream)
+      return new Promise<void>((resolve) => gates.push(resolve)).then(() => send(message))
+    }
+    const publish = (stream: string, n: number) =>
+      live.a.publishDelta(
+        stream,
+        { type: 'thread.message-updated', data: message('m', `${n}`) },
+        'message:m'
+      )
+    publish(first, 0)
+    for (let n = 1; n <= 6; n++) {
+      // Both threads refresh in the same order before each write completes.
+      publish(first, n)
+      publish(second, n)
+      gates.shift()!()
+      await vi.waitFor(() => expect(sent).toHaveLength(n + 1))
+    }
+    expect(sent.slice(0, 4)).toContain(second)
+    gates.splice(0).forEach((open) => open())
+    expect(live.a.state()).toBe('open')
+  })
+
+  it('drops a delta the mux refuses and keeps both the session and later deltas', async () => {
+    const p = await setup(),
+      { source, emit } = multiSource()
+    let session: Awaited<ReturnType<typeof subscribed>>['live']['a'] | undefined
+    const clock = manualClock(),
+      adapter = new ThreadStreamAdapter({
+        db: p.aDb,
+        store: p.aStore,
+        generations: p.aStore,
+        identity: p.aIdentity,
+        keys: p.aKeys,
+        clock,
+        source,
+        onDelta: (stream, body, key) => session!.publishDelta(stream, body, key)
+      })
+    resources.push(() => adapter.close())
+    const { live, seen } = await subscribed(p, adapter, ['t1'])
+    session = live.a
+    let refused = 0
+    const internals = live.a as unknown as { send(message: WireMessage): Promise<void> },
+      send = internals.send.bind(live.a)
+    internals.send = (message) => {
+      if (message.t === 'ephemeral' && message.kind === 'delta' && refused++ === 0)
+        return Promise.reject(new NetError('rate_limited'))
+      return send(message)
+    }
+    emit('t1', { type: 'thread.message-updated', data: message('m1', 'one'), ephemeral: true })
+    clock.flush()
+    await vi.waitFor(() => expect(refused).toBe(1))
+    emit('t1', { type: 'thread.message-updated', data: message('m1', 'two'), ephemeral: true })
+    clock.flush()
+    await vi.waitFor(() => expect(seen).toEqual(['delta:two']))
+    expect(live.a.state()).toBe('open')
   })
 })
