@@ -110,7 +110,7 @@ describe('Claude subscription attachment', () => {
     chmodSync(binary, 0o755)
     const directory = join(home, 'providers', 'claude-subscription')
     mkdirSync(directory, { recursive: true })
-    writeFileSync(join(directory, 'settings.json'), JSON.stringify({ signedIn: true, binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
+    writeFileSync(join(directory, 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
     const questions = new UserQuestionService()
     const runAuth = vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
     return { home, questions, service: new ClaudeSubscriptionProviderService(home, questions, { query, runAuth }) }

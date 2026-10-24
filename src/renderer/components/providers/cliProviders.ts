@@ -60,11 +60,7 @@ export function cliHealth(
   }
   if (cli.id === 'claude') {
     if (!input.claude) return { health: 'unknown', label: 'Checking' }
-    return vendorHealth(
-      cli,
-      input.claude,
-      input.claude.loginPolicy === 'isolated' ? 'Separate sign-in for this profile' : 'Signed in through your terminal'
-    )
+    return vendorHealth(cli, input.claude, 'Signed in through your terminal')
   }
   if (cli.id === 'codex') {
     if (!input.codex) return { health: 'unknown', label: 'Checking' }

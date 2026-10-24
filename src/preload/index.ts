@@ -60,7 +60,6 @@ import type {
 } from '../shared/integrations'
 import type {
   AmbientProviderInfo,
-  ClaudeLoginPolicy,
   ClaudeSubscriptionStatus,
   CliProviderConfig,
   CliProviderConfigPatch,
@@ -792,8 +791,6 @@ const api = {
     /** Claude Subscription sign-in state; `recheck` skips the cached `claude auth status`. */
     claudeStatus: (recheck?: boolean): Promise<ClaudeSubscriptionStatus> =>
       ipcRenderer.invoke('providers:claudeStatus', recheck),
-    claudeSetLoginPolicy: (policy: ClaudeLoginPolicy): Promise<ClaudeSubscriptionStatus> =>
-      ipcRenderer.invoke('providers:claudeSetLoginPolicy', policy),
     /** Codex sign-in state; `recheck` skips the cached `account/read`. */
     codexStatus: (recheck?: boolean): Promise<CodexStatus> =>
       ipcRenderer.invoke('providers:codexStatus', recheck),

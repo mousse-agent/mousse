@@ -139,7 +139,7 @@ describe('Claude Subscription CLI config', () => {
     mkdirSync(directory, { recursive: true })
     writeFileSync(
       join(directory, 'settings.json'),
-      JSON.stringify({ signedIn: true, binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] })
+      JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] })
     )
     const captured: Options[] = []
     const query = (input: { options: Options }) => {
@@ -178,7 +178,7 @@ describe('Claude Subscription CLI config', () => {
       binaryPath: other,
       args: ['--add-dir', '/extra', '--verbose'],
       env: { HTTPS_PROXY: 'http://proxy', CLAUDE_CONFIG_DIR: '/user/override' },
-      signedIn: true
+      loginPolicy: 'cli'
     })
 
     await service.refreshModels(home)
