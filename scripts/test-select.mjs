@@ -39,6 +39,14 @@ const INERT = ['docs/**', '**/*.md', '.github/**', 'LICENSE*', '.gitignore', '.g
 const toPosix = (path) => path.split(sep).join('/')
 const match = (patterns) => picomatch(patterns, { dot: true })
 
+/**
+ * Vite and Vitest key modules by absolute path with forward slashes on every platform, so a native
+ * Windows path (`E:\repo\src\a.ts`) never matches the module graph. The root is the same one Vitest
+ * runs with, so the drive-letter case agrees by construction.
+ */
+export const moduleId = (path, root = projectRoot, { resolve: join = resolve, sep: separator = sep } = {}) =>
+  join(root, path).split(separator).join('/')
+
 export function loadManifest(root = projectRoot) {
   const path = resolve(root, 'tests/test-dependencies.json')
   const manifest = JSON.parse(readFileSync(path, 'utf8'))
@@ -151,7 +159,7 @@ async function main() {
   }
 
   const { createVitest } = await import('vitest/node')
-  const related = plan.graph.map((path) => resolve(projectRoot, path))
+  const related = plan.graph.map((path) => moduleId(path))
   const vitest = await createVitest('test', { run: true, watch: false, related, root: projectRoot })
   try {
     const all = await vitest.globTestSpecifications()
@@ -174,7 +182,7 @@ async function main() {
     const uncovered = []
     for (const path of plan.graph) {
       if (!path.startsWith('src/') && !path.startsWith('scripts/')) continue
-      const absolute = resolve(projectRoot, path)
+      const absolute = moduleId(path)
       const inGraph = vitest.projects.some((project) => project.vite.environments.ssr.moduleGraph.getModuleById(absolute))
       const byRule = manifest.rules.some((rule) => match(rule.when)(path))
       if (!inGraph && !byRule) uncovered.push(path)
