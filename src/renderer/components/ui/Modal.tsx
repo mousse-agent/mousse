@@ -88,21 +88,34 @@ const isInside = (dialog: HTMLElement, ancestor: HTMLElement): boolean => {
   return false
 }
 
+/** The page control a dialog closed under another one came from, kept for the dialog above it. */
+const inheritedOpeners = new WeakMap<HTMLElement, HTMLElement>()
+
 /**
  * Registers an open dialog; returns what unregisters it. Dialogs opened later sit above earlier
  * ones, and a dialog nested in another always sits above it, even when its effect ran first
- * because both mounted in the same commit.
+ * because both mounted in the same commit. `opener` is the control focused before it opened: if
+ * the dialog closes under another one, the dialog above inherits it as a place to return to.
  */
-export function registerDialog(dialog: HTMLElement, parent?: HTMLElement | null): () => void {
+export function registerDialog(dialog: HTMLElement, parent?: HTMLElement | null, opener?: HTMLElement | null): () => void {
   if (parent && parent !== dialog) parentDialogs.set(dialog, parent)
   const nested = openDialogs.findIndex((other) => isInside(other, dialog))
   openDialogs.splice(nested === -1 ? openDialogs.length : nested, 0, dialog)
   return () => {
     const index = openDialogs.indexOf(dialog)
-    if (index !== -1) openDialogs.splice(index, 1)
+    if (index !== -1) {
+      openDialogs.splice(index, 1)
+      const above = openDialogs[index]
+      const handoff = opener?.isConnected ? opener : inheritedOpeners.get(dialog)
+      if (above && handoff) inheritedOpeners.set(above, handoff)
+    }
     parentDialogs.delete(dialog)
+    inheritedOpeners.delete(dialog)
   }
 }
+
+/** The opener of a dialog that closed under this one, if any. */
+export const inheritedOpener = (dialog: HTMLElement): HTMLElement | undefined => inheritedOpeners.get(dialog)
 
 const topDialog = (): HTMLElement | undefined => openDialogs[openDialogs.length - 1]
 
@@ -112,11 +125,18 @@ export const isTopDialog = (dialog: HTMLElement): boolean => topDialog() === dia
 /**
  * Where focus goes when a dialog closes. Nowhere if another dialog sits above it: focus is already
  * there. Otherwise its opener, or, when the opener is outside the dialog now on top, that dialog.
+ * With no opener left and no dialog under it, the opener of a dialog that closed beneath it.
  */
-export function focusAfterClose(wasTop: boolean, previous: HTMLElement | null, next: HTMLElement | undefined): HTMLElement | null {
+export function focusAfterClose(
+  wasTop: boolean,
+  previous: HTMLElement | null,
+  next: HTMLElement | undefined,
+  inherited?: HTMLElement
+): HTMLElement | null {
   if (!wasTop) return null
   const target = next && !(previous && next.contains(previous)) ? initialDialogFocus(next) : previous
-  return target?.isConnected ? target : null
+  if (target?.isConnected) return target
+  return !next && inherited?.isConnected ? inherited : null
 }
 
 /** Escape presses a dialog already answered, so the dialog uncovered by its close does not close too. */
@@ -135,7 +155,7 @@ export function useDialogFocus(ref: RefObject<HTMLElement | null>, active: boole
     const dialog = ref.current
     if (!active || !dialog) return
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const unregister = registerDialog(dialog, parentRef?.current)
+    const unregister = registerDialog(dialog, parentRef?.current, previous)
     if (isTopDialog(dialog)) initialDialogFocus(dialog).focus({ preventScroll: true })
     const keyDown = (event: KeyboardEvent) => {
       if (!isTopDialog(dialog) || answeredEscapes.has(event)) return
@@ -153,8 +173,9 @@ export function useDialogFocus(ref: RefObject<HTMLElement | null>, active: boole
     return () => {
       document.removeEventListener('keydown', keyDown)
       const wasTop = isTopDialog(dialog)
+      const inherited = inheritedOpener(dialog)
       unregister()
-      focusAfterClose(wasTop, previous, topDialog())?.focus()
+      focusAfterClose(wasTop, previous, topDialog(), inherited)?.focus()
     }
   }, [ref, active, parentRef])
 }

@@ -183,9 +183,9 @@
   color: var(--text-secondary);
 }
 
-/* A phone asks to join over every screen, Settings included (above .settings-page). */
+/* A phone asks to join over every screen, Settings and floating dialogs (the quick action editor) included. */
 .modal-overlay.enrollment-prompt {
-  z-index: 1150;
+  z-index: calc(var(--z-floating, 50000) + 1);
   /* The prompt renders outside .settings-page, so it carries the tokens its content and buttons use. */
   --space-4: 4px;
   --space-12: 12px;

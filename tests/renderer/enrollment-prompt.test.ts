@@ -15,7 +15,7 @@ import {
   watchEnrollmentRequests
 } from '../../src/renderer/stores/enrollmentPromptStore'
 import { EnrollmentRequestPrompt } from '../../src/renderer/components/EnrollmentRequestPrompt'
-import { focusAfterClose, isTopDialog, registerDialog } from '../../src/renderer/components/ui/Modal'
+import { focusAfterClose, inheritedOpener, isTopDialog, registerDialog } from '../../src/renderer/components/ui/Modal'
 
 const now = 1_000_000
 const row = (id: string, extra: Partial<PlusEnrollmentRequestView> = {}): PlusEnrollmentRequestView => ({
@@ -418,6 +418,50 @@ describe('dialog stacking', () => {
     expect(focusAfterClose(true, { isConnected: false } as HTMLElement, undefined)).toBeNull()
   })
 
+  it('hands the opener of a dialog that closed underneath to the dialog above it', () => {
+    const pageOpener = { isConnected: true } as HTMLElement
+    const insideLower = { isConnected: false } as HTMLElement
+    const lower = {} as HTMLElement
+    const upper = {} as HTMLElement
+    const releaseLower = registerDialog(lower, null, pageOpener)
+    const releaseUpper = registerDialog(upper, null, insideLower)
+    expect(inheritedOpener(upper)).toBeUndefined()
+    releaseLower()
+    expect(inheritedOpener(upper)).toBe(pageOpener)
+    // The lower dialog's controls are gone, so the upper one returns to the page control it came from.
+    expect(focusAfterClose(true, insideLower, undefined, inheritedOpener(upper))).toBe(pageOpener)
+    releaseUpper()
+    expect(inheritedOpener(upper)).toBeUndefined()
+  })
+
+  it('keeps the inherited opener through a chain of dialogs closing underneath', () => {
+    const pageOpener = { isConnected: true } as HTMLElement
+    const insideRoot = { isConnected: true } as HTMLElement
+    const root = {} as HTMLElement
+    const middle = {} as HTMLElement
+    const top = {} as HTMLElement
+    const releaseRoot = registerDialog(root, null, pageOpener)
+    const releaseMiddle = registerDialog(middle, null, insideRoot)
+    const releaseTop = registerDialog(top)
+    releaseMiddle()
+    expect(inheritedOpener(top)).toBe(insideRoot)
+    insideRoot.isConnected = false
+    releaseRoot()
+    expect(inheritedOpener(top)).toBe(pageOpener)
+    releaseTop()
+  })
+
+  it('prefers the opener, then a surviving dialog, over the inherited opener', () => {
+    const opener = { isConnected: true } as HTMLElement
+    const inherited = { isConnected: true } as HTMLElement
+    const gone = { isConnected: false } as HTMLElement
+    expect(focusAfterClose(true, opener, undefined, inherited)).toBe(opener)
+    expect(focusAfterClose(true, gone, undefined, { isConnected: false } as HTMLElement)).toBeNull()
+    expect(focusAfterClose(false, gone, undefined, inherited)).toBeNull()
+    const next = { isConnected: true, contains: () => false, querySelector: () => null, querySelectorAll: () => [] } as unknown as HTMLElement
+    expect(focusAfterClose(true, gone, next, inherited)).toBe(next)
+  })
+
   it('returns focus into the dialog that is uncovered when the opener sits outside it', () => {
     const opener = { isConnected: true } as HTMLElement
     const insideParent = { isConnected: true } as HTMLElement
@@ -443,6 +487,12 @@ describe('request dialog styles', () => {
     expect(used.length).toBeGreaterThan(0)
     // The Settings button's padding and gap, and the footer button height, read these as well.
     for (const token of new Set([...used, '--space-4', '--space-12', '--settings-control-h'])) expect(block).toContain(`${token}:`)
+  })
+
+  it('paints above floating layers such as the quick action editor', () => {
+    const css = readFileSync('src/renderer/styles/devices.css', 'utf8')
+    const start = css.indexOf('.modal-overlay.enrollment-prompt')
+    expect(css.slice(start, css.indexOf('}', start))).toMatch(/z-index:\s*calc\(var\(--z-floating,\s*50000\)\s*\+\s*1\)/)
   })
 })
 
