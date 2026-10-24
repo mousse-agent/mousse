@@ -19,6 +19,7 @@ import { StorageSettings } from './StorageSettings'
 import { AgentsSettings } from './settings/AgentsSettings'
 import { GeneralSettings } from './settings/GeneralSettings'
 import { DownloadsIndicator } from './downloads/DownloadsIndicator'
+import { WindowCaptionButtons } from './WindowCaptionButtons'
 import { SkillsMcpSettings } from './settings/SkillsMcpSettings'
 import { createIntegrationPlatformClient } from '../services/integrationPlatformClient'
 import { confirmNavigation } from '../services/navigationGuards'
@@ -275,6 +276,10 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
         <ArrowLeft size={14} strokeWidth={2} />
       </button>
       <h1>Settings</h1>
+      {/* Settings covers the app title bar, so it carries the window buttons. */}
+      <div className="titlebar-controls overlay-titlebar-controls">
+        <WindowCaptionButtons />
+      </div>
     </header>
   )
 
