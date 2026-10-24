@@ -8,7 +8,7 @@
 //   node scripts/test-select.mjs --related a.ts b.ts  these source files
 //   add --list to print the selection and its reasons without running anything
 //
-// `npm test` stays the full run before a PR.
+// This selection is the usual check before a PR; `npm test` is for very large multi-module changes.
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'

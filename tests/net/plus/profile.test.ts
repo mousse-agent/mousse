@@ -197,7 +197,7 @@ function fakeClockController(
   host: Record<string, unknown> = {}
 ): HostedNetController {
   const controller = new HostedNetController({
-    clock: { now: () => Date.now() },
+    clock: { now: () => Date.now(), monotonic: () => Date.now() },
     signal: p.signal.signal,
     loadedRuntime: () => undefined,
     requireEnrolled: () => p.rt,
