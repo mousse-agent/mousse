@@ -31,11 +31,16 @@ export function useCliInstall(config: CliProviderConfig | undefined, reload: () 
   const reloadRef = useRef(reload)
   reloadRef.current = reload
   const busy = starting || config?.installing === true
+  const installingRef = useRef(config?.installing === true)
+  installingRef.current = config?.installing === true
 
   useEffect(
     () =>
       window.mousse.providers.onInstallEvent((event) => {
-        if (event.instanceId === 'antigravity' && event.type === 'progress') setLatest(event.message)
+        if (event.instanceId === 'antigravity' && event.type === 'progress') {
+          setLatest(event.message)
+          setError(null)
+        }
       }),
     []
   )
@@ -44,6 +49,11 @@ export function useCliInstall(config: CliProviderConfig | undefined, reload: () 
     if (busy) setError(null)
     else setLatest(null)
   }, [busy])
+  // The daemon reporting a download supersedes a refusal that arrived before the config reloaded.
+  const daemonInstalling = config?.installing === true
+  useEffect(() => {
+    if (daemonInstalling) setError(null)
+  }, [daemonInstalling])
 
   const start = useCallback(async () => {
     cancelled.current = false
@@ -55,7 +65,8 @@ export function useCliInstall(config: CliProviderConfig | undefined, reload: () 
     } catch (failure) {
       // A cancel from another window or profile ends this request too; the daemon's state is what counts.
       const message = errorText(failure)
-      if (!cancelled.current && !message.includes(INSTALL_CANCELLED)) setError(message)
+      // While the daemon reports a download (another window's, or after a reconnect) a refusal is not news.
+      if (!cancelled.current && !message.includes(INSTALL_CANCELLED) && !installingRef.current) setError(message)
       return undefined
     } finally {
       setStarting(false)
