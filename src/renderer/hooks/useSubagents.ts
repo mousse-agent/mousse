@@ -11,9 +11,14 @@ const sync = createSubagentsSync({
   apply: (threadId, subagents) => useAppStore.getState().setSubagents(threadId, subagents)
 })
 
+/** The list the store holds for `threadId`; one shared empty array until the daemon has answered. */
+export function selectSubagents(state: { subagentsByParent: Record<string, SubagentSummary[]> }, threadId: string | null | undefined): SubagentSummary[] {
+  return (threadId ? state.subagentsByParent[threadId] : undefined) ?? NONE
+}
+
 /** The subagents `threadId` started, refreshed as the daemon reports changes. Empty until the first reply. */
 export function useSubagents(threadId: string | null | undefined): SubagentSummary[] {
   const profileId = useAppStore((s) => s.profileId)
   useEffect(() => (threadId ? sync.watch(threadId) : undefined), [threadId, profileId])
-  return useAppStore((s) => (threadId ? s.subagentsByParent[threadId] ?? NONE : NONE))
+  return useAppStore((s) => selectSubagents(s, threadId))
 }
