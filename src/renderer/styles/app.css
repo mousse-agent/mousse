@@ -253,6 +253,17 @@ html.platform-darwin .titlebar-left {
   app-region: no-drag;
 }
 
+/* Window buttons on a full-window page sit where the app title bar's do:
+   cancel the header's 12px so only .titlebar-controls' own 4px remains. */
+.overlay-titlebar-controls {
+  margin-left: auto;
+  margin-right: -12px;
+}
+
+.overlay-titlebar-controls:empty {
+  display: none;
+}
+
 .titlebar-app-actions {
   display: flex;
   align-items: center;
