@@ -19,7 +19,8 @@ const READERS = {
   events: ['heartbeatToleranceMs'],
   containment: ['restoreMode'],
   historyInjection: ['handoffDelivery'],
-  mcp: ['mcpAttachable']
+  mcp: ['mcpAttachable'],
+  childPolicy: ['subagentTargetRefusal']
 } satisfies Record<keyof ProviderCapabilities, string[]>
 const CAPABILITY_KEYS = Object.keys(READERS) as Array<keyof ProviderCapabilities>
 

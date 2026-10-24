@@ -43,6 +43,8 @@ import {
 } from './metrics'
 import { parseClaudeSubscriptionUsage } from './usage'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
+import { claudeChildOptions } from './childPolicy'
+import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
 type SavedSession = {
@@ -84,6 +86,8 @@ export type ClaudeSubscriptionChatInput = {
   images?: ChatImageAttachment[]
   signal?: AbortSignal
   mode?: 'plan' | 'default'
+  /** Set for a delegated child's turns (first and resumed); see `claudeChildOptions`. */
+  child?: ChildTurnPolicy
   /** The Mousse MCP server for this run (SPEC §15.2); null attaches no server. */
   mcp?: { url: string; token: string } | null
   /** Mousse's own instructions, appended to Claude Code's system prompt. */
@@ -863,6 +867,9 @@ export class ClaudeSubscriptionProviderService {
       const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(selected.effort ?? '')
         ? selected.effort as Options['effort'] : undefined
       const planTurn = input.mode === 'plan'
+      const readOnlyChild = input.child?.readOnly === true
+      // Plan turns and read-only children route every call through canUseTool's read-only allowlist.
+      const restricted = planTurn || readOnlyChild
       const launchAppend = claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.settings)), input.cwd)
       const options: Options = {
         // Mousse's instructions first, then the user's own append text.
@@ -873,12 +880,16 @@ export class ClaudeSubscriptionProviderService {
         // Agent turns run unattended in the thread workspace, like Mousse's other agents.
         ...(planTurn
           ? { permissionMode: 'plan' as const }
-          : { permissionMode: 'bypassPermissions' as const, allowDangerouslySkipPermissions: true }),
-        // The Mousse server keeps its name: user servers are spread first.
+          : readOnlyChild
+            ? { permissionMode: 'default' as const }
+            : { permissionMode: 'bypassPermissions' as const, allowDangerouslySkipPermissions: true }),
+        ...claudeChildOptions(input.child),
+        // The Mousse server keeps its name: user servers are spread first. A read-only child gets
+        // only Mousse's own server.
         mcpServers: {
-          ...integrations?.mcpServers,
+          ...(readOnlyChild ? {} : integrations?.mcpServers),
           // Servers that sign in with OAuth run in this process and call Mousse's own connection.
-          ...Object.fromEntries(Object.entries(integrations?.proxiedServers ?? {}).map(([name, proxied]) => [name, claudeProxiedMcpServer(name, proxied)])),
+          ...Object.fromEntries(Object.entries(readOnlyChild ? {} : integrations?.proxiedServers ?? {}).map(([name, proxied]) => [name, claudeProxiedMcpServer(name, proxied)])),
           ...claudeMcpServers(input.mcp)
         },
         // The skills enabled in Mousse reach Claude as a local plugin, next to the user's own.
@@ -900,8 +911,8 @@ export class ClaudeSubscriptionProviderService {
                     }
                   if (event.hook_event_name === 'PreToolUse')
                     await editCounter.start(event.tool_use_id, event.tool_name, event.tool_input)
-                  // Plan turns route every call through canUseTool so its read-only allowlist holds.
-                  return planTurn
+                  // Restricted turns route every call through canUseTool so its read-only allowlist holds.
+                  return restricted
                     ? { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' } }
                     : {}
                 }
@@ -945,12 +956,14 @@ export class ClaudeSubscriptionProviderService {
           if (input.mcp && toolName === 'ToolSearch')
             return { behavior: 'allow', updatedInput: args }
           if (
-            planTurn &&
+            restricted &&
             !['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'].includes(toolName)
           )
             return {
               behavior: 'deny',
-              message: 'This turn is planning only; edits and shell commands are disabled.'
+              message: planTurn
+                ? 'This turn is planning only; edits and shell commands are disabled.'
+                : 'This subagent is read-only; edits and shell commands are disabled.'
             }
           try {
             if (toolName === 'AskUserQuestion') {
@@ -998,7 +1011,7 @@ export class ClaudeSubscriptionProviderService {
                 }
               }
             }
-            if (planTurn) return { behavior: 'allow', updatedInput: args }
+            if (restricted) return { behavior: 'allow', updatedInput: args }
             // Only calls Claude Code refuses to auto-approve even in bypass mode arrive here.
             const answer = await this.questions.requestAnswers(
               [

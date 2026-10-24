@@ -55,6 +55,8 @@ import {
   type TokenUsageBreakdown,
   type UserInput
 } from './protocol'
+import { codexChildConfigOverrides, codexTurnPolicy } from './childPolicy'
+import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
 
 export const CODEX_PROVIDER_ID = 'codex'
 /** How long a live `account/read` result stands before it is checked again. */
@@ -155,6 +157,8 @@ export type CodexChatInput = {
   images?: ChatImageAttachment[]
   signal?: AbortSignal
   mode?: 'plan' | 'default'
+  /** Set for a delegated child's turns (first and resumed); see `codexTurnPolicy`. */
+  child?: ChildTurnPolicy
   /** The Mousse MCP server for this run (SPEC §15.2); null attaches none. */
   mcp?: { url: string; token: string } | null
   /** Codex developer instructions for a new or resumed thread (SPEC §15.3). */
@@ -338,6 +342,11 @@ class TurnRun {
 
   cancelQuestions(): void {
     this.questionsDone.abort(new Error('The Codex turn ended'))
+  }
+
+  /** A read-only (`shared`) delegated child: every command and file change is declined, never asked. */
+  get readOnlyChild(): boolean {
+    return this.input.child?.readOnly === true
   }
 
   get text(): string {
@@ -527,7 +536,7 @@ export class CodexProviderService {
    * Only cold opens (start, resume of an unloaded thread, fork) record an entry: Codex applies
    * config overrides when it loads a thread and ignores them on an already-loaded one.
    */
-  private readonly loaded = new Map<string, { mcpToken: string | null; cwd: string }>()
+  private readonly loaded = new Map<string, { mcpToken: string | null; cwd: string; childKey: string }>()
   private readonly activeThreads = new Set<string>()
   private readonly controllers = new Set<AbortController>()
   private readonly readyToCommit = new Set<string>()
@@ -948,7 +957,7 @@ export class CodexProviderService {
       case 'item/commandExecution/requestApproval': {
         const approval = request.params as CodexServerRequestMap['item/commandExecution/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/commandExecution/requestApproval'>
-        if (run.mode === 'plan') return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
+        if (run.mode === 'plan' || run.readOnlyChild) return { decision: 'decline' } satisfies Result<'item/commandExecution/requestApproval'>
         const command = approval.command ?? (run.item(approval.itemId) as { command?: string } | undefined)?.command ?? 'a command'
         const decision = await this.approve(
           run,
@@ -959,7 +968,7 @@ export class CodexProviderService {
       case 'item/fileChange/requestApproval': {
         const approval = request.params as CodexServerRequestMap['item/fileChange/requestApproval']['params']
         if (!run || run.questionSignal.aborted) return { decision: 'cancel' } satisfies Result<'item/fileChange/requestApproval'>
-        if (run.mode === 'plan') return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
+        if (run.mode === 'plan' || run.readOnlyChild) return { decision: 'decline' } satisfies Result<'item/fileChange/requestApproval'>
         const changes = (run.item(approval.itemId) as { changes?: Array<{ path: string }> } | undefined)?.changes ?? []
         const decision = await this.approve(
           run,
@@ -1086,14 +1095,21 @@ export class CodexProviderService {
     const mcpToken = input.mcp?.token ?? null
     const overrides = codexMcpConfigOverrides(input.mcp) as ThreadConfig
     const { baseId } = parseThinkingSuffixFromModelId(input.model)
+    const policy = codexTurnPolicy(input.mode ?? 'default', input.child)
+    // A read-only child switches off every MCP server the user configured; they are listed from the
+    // effective config of its workspace.
+    const userMcpServers = input.child?.readOnly
+      ? Object.keys((await conn.request('config/read', { cwd }, { signal, timeoutMs: 15_000 })).config.mcp_servers ?? {})
+      : []
+    const childKey = input.child ? (input.child.readOnly ? 'read-only' : 'child') : ''
     const params = {
       cwd,
-      approvalPolicy: 'on-request' as const,
-      sandbox: input.mode === 'plan' ? ('read-only' as const) : ('workspace-write' as const),
+      approvalPolicy: policy.approvalPolicy,
+      sandbox: policy.sandbox,
       ...(baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}),
       // Pinned twice: the request field and the config layer above user and workspace config.
       modelProvider: CODEX_MODEL_PROVIDER,
-      config: { ...overrides, model_provider: CODEX_MODEL_PROVIDER },
+      config: { ...overrides, ...codexChildConfigOverrides(input.child, userMcpServers), model_provider: CODEX_MODEL_PROVIDER },
       ...(input.developerInstructions ? { developerInstructions: input.developerInstructions } : {})
     }
     // A Codex thread belongs to the instance that started it; another instance starts fresh.
@@ -1108,34 +1124,34 @@ export class CodexProviderService {
         if (this.turns.has(saved.codexThreadId)) throw new Error('The previous Codex turn on this thread is still running')
       }
       const loaded = this.loaded.get(saved.codexThreadId)
-      if (loaded && loaded.mcpToken === mcpToken && loaded.cwd === cwd)
+      if (loaded && loaded.mcpToken === mcpToken && loaded.cwd === cwd && loaded.childKey === childKey)
         return { codexThreadId: saved.codexThreadId, model: undefined, continued: true }
       if (loaded) {
-        // The attachment (or cwd) changed while the thread is loaded. A resume would keep the old
-        // MCP config, so fork it: Codex loads the history into a new thread with the new config,
-        // and the old thread is released.
+        // The attachment, cwd or child policy changed while the thread is loaded. A resume would
+        // keep the old config, so fork it: Codex loads the history into a new thread with the new
+        // config, and the old thread is released.
         const forked = chatgptProvider(await conn.request('thread/fork', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
         this.loaded.delete(saved.codexThreadId)
-        this.loaded.set(forked.thread.id, { mcpToken, cwd })
+        this.loaded.set(forked.thread.id, { mcpToken, cwd, childKey })
         await conn.request('thread/unsubscribe', { threadId: saved.codexThreadId }, { signal, timeoutMs: 5_000 }).catch(() => undefined)
         signal.throwIfAborted()
         return { codexThreadId: forked.thread.id, model: forked.model, continued: true }
       }
       try {
         const resumed = chatgptProvider(await conn.request('thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
-        this.loaded.set(resumed.thread.id, { mcpToken, cwd })
+        this.loaded.set(resumed.thread.id, { mcpToken, cwd, childKey })
         return { codexThreadId: resumed.thread.id, model: resumed.model, continued: true }
       } catch (error) {
         signal.throwIfAborted()
         conn.signal.throwIfAborted()
         if (!(error instanceof CodexRpcError)) throw error
         const fresh = chatgptProvider(await conn.request('thread/start', params, { signal }))
-        this.loaded.set(fresh.thread.id, { mcpToken, cwd })
+        this.loaded.set(fresh.thread.id, { mcpToken, cwd, childKey })
         return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false }
       }
     }
     const fresh = chatgptProvider(await conn.request('thread/start', params, { signal }))
-    this.loaded.set(fresh.thread.id, { mcpToken, cwd })
+    this.loaded.set(fresh.thread.id, { mcpToken, cwd, childKey })
     return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false }
   }
 
@@ -1184,12 +1200,11 @@ export class CodexProviderService {
       run = current
       this.turns.set(codexThreadId, current)
       const { baseId, effort } = parseThinkingSuffixFromModelId(input.model)
+      const policy = codexTurnPolicy(input.mode ?? 'default', input.child)
       const turnParams = {
         cwd: resolve(input.cwd),
-        approvalPolicy: 'on-request' as const,
-        sandboxPolicy: (input.mode === 'plan'
-          ? { type: 'readOnly', networkAccess: false }
-          : { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }) satisfies SandboxPolicy,
+        approvalPolicy: policy.approvalPolicy,
+        sandboxPolicy: policy.sandboxPolicy,
         ...(baseId !== CODEX_DEFAULT_MODEL_ID ? { model: baseId } : {}),
         ...(effort && EFFORTS.has(effort) ? { effort } : {})
       }

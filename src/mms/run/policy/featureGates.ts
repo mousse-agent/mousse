@@ -41,3 +41,22 @@ export function handoffDelivery(caps: ProviderCapabilities): HandoffDelivery {
 export function mcpAttachable(caps: ProviderCapabilities): boolean {
   return caps.mcp
 }
+
+/** A delegation the target cannot honour; `delegate_task` returns it instead of starting a child. */
+export interface SubagentRefusal {
+  code: 'provider_unsupported_for_subagents'
+  message: string
+}
+
+/**
+ * Issue #142: a delegated child must keep to its policy, so a provider that cannot hold it to
+ * read-only access (and cannot switch off its own native subagents) is refused as a target. `label`
+ * names the provider for the message.
+ */
+export function subagentTargetRefusal(caps: ProviderCapabilities, label: string): SubagentRefusal | null {
+  if (caps.childPolicy === 'enforced') return null
+  return {
+    code: 'provider_unsupported_for_subagents',
+    message: `${label} cannot run as a subagent: Mousse cannot keep it read-only or switch off its own native subagents. Choose another provider or model for this task.`
+  }
+}

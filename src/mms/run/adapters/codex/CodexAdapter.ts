@@ -38,7 +38,8 @@ export const CODEX_CAPABILITIES: ProviderCapabilities = Object.freeze({
   events: 'rich',
   containment: 'weak',
   historyInjection: 'prompt',
-  mcp: true
+  mcp: true,
+  childPolicy: 'enforced'
 })
 
 /**
@@ -84,6 +85,7 @@ export class CodexAdapter implements ProviderAdapter {
     }
     const chatInput = (): CodexChatInput => ({
       mode: input.mode === 'plan' ? 'plan' : 'default',
+      child: input.child,
       threadId: input.threadId,
       instanceId: input.instanceId,
       cwd,

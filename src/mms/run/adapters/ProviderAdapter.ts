@@ -41,6 +41,21 @@ export interface ProviderCapabilities {
   historyInjection: 'native' | 'prompt'
   /** `featureGates.mcpAttachable` (Phase 5). */
   mcp: boolean
+  /**
+   * `featureGates.subagentTargetRefusal`. `enforced`: the adapter holds a delegated child to its
+   * policy (read-only for a `shared` child, no provider-native subagents, no user MCP servers for a
+   * read-only child). `unenforceable`: it cannot, so it is refused as a delegation target.
+   */
+  childPolicy: 'enforced' | 'unenforceable'
+}
+
+/**
+ * The policy of a delegated child's turn (issue #142), absent for a thread that is not a subagent.
+ * Every turn of a child carries it, first or resumed. `readOnly` is a `shared` child, which
+ * observes its parent's workspace and must not change it.
+ */
+export interface ChildTurnPolicy {
+  readOnly: boolean
 }
 
 /** One provider turn, built by the `turn.start` executor from the thread's state. */
@@ -67,6 +82,8 @@ export interface TurnInput {
    */
   modelPinned: boolean
   mode: ChatMode
+  /** Set when the thread is a delegated child; adapters apply it on every turn of the thread. */
+  child?: ChildTurnPolicy
   /** Text of the admitted user message; prompt-based adapters send it as the turn's prompt. */
   prompt: string
   /** Active pi-ai transcript, ending with the admitted user message. */

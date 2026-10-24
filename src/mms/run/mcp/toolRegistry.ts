@@ -54,6 +54,11 @@ export interface MousseTool {
   description: string
   inputSchema: JsonSchema
   access: ToolAccess
+  /**
+   * A read-only (`shared`) delegated child may call this although it is not a `reads` tool: it
+   * changes nothing but the caller's own conversation.
+   */
+  readOnlySafe?: boolean
   handler(args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> | ToolOutcome
 }
 
@@ -61,6 +66,7 @@ export type McpToolErrorCode =
   | 'mousse_scope_denied'
   | 'mousse_caller_not_live'
   | 'mousse_ceiling_exceeded'
+  | 'mousse_read_only'
   | 'mousse_unknown_tool'
 
 /** A refusal the server reports as a JSON-RPC error, not as a tool result. */
@@ -81,6 +87,8 @@ export interface ToolRegistryOptions {
   activeRunId(threadId: string): string | null
   /** SPEC §12.6 tool ledger of the caller's run; undefined skips it. */
   toolLedger?(runId: string): ToolLedger | undefined
+  /** The thread is a read-only (`shared`) delegated child; it may call only `reads` and `readOnlySafe` tools. */
+  readOnlyThread?(threadId: string): boolean
 }
 
 /**
@@ -125,6 +133,8 @@ export class ToolRegistry {
     const tool = this.tools.get(name)
     if (!tool) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
     const ctx: ToolCallContext = { ...request, caller: assertLiveCaller(this.options.activeRunId(request.caller.threadId), request.caller) }
+    if (tool.access !== 'reads' && !tool.readOnlySafe && this.options.readOnlyThread?.(ctx.caller.threadId))
+      throw new McpToolError('mousse_read_only', `${name} can change threads or the workspace; a read-only subagent cannot call it.`)
     if (tool.access === 'writesThreads') callerThreadOnly(args, ctx.caller)
     if (tool.access === 'startsThreads' && ctx.caller.modeCeiling === 'plan')
       throw new McpToolError('mousse_ceiling_exceeded', `${name} starts threads; a plan ceiling cannot.`)
@@ -179,6 +189,7 @@ export interface MousseToolHost {
   listQueue(threadId: string): unknown[]
   enqueue(threadId: string, input: { content: string; mode: 'agent' | 'plan' }): unknown
   toolLedger?(runId: string): ToolLedger | undefined
+  readOnlyThread?(threadId: string): boolean
 }
 
 const CLIENT_REQUEST_ID_SCHEMA: JsonSchema = {
@@ -247,7 +258,8 @@ export function createMousseToolRegistry(deps: { engine: RunEngine; host: Mousse
   const { engine, host } = deps
   const registry = new ToolRegistry({
     activeRunId: (threadId) => engine.getActiveRun(threadId)?.runId ?? null,
-    toolLedger: host.toolLedger ? (runId) => host.toolLedger!(runId) : undefined
+    toolLedger: host.toolLedger ? (runId) => host.toolLedger!(runId) : undefined,
+    readOnlyThread: host.readOnlyThread ? (threadId) => host.readOnlyThread!(threadId) : undefined
   })
 
   const delegationTool = (tool: Tool, extra: Record<string, JsonSchema>, before?: (args: Record<string, unknown>, caller: McpCaller) => void): MousseTool => ({
@@ -296,6 +308,7 @@ export function createMousseToolRegistry(deps: { engine: RunEngine; host: Mousse
         : tool.description,
       inputSchema: plainSchema(tool),
       access: 'actsAsCaller',
+      readOnlySafe: true,
       handler: (args, ctx) => planTools(ctx.signal).execute(tool.name, args, ctx.caller.threadId)
     })
   }
