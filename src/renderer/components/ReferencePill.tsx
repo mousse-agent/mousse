@@ -13,46 +13,49 @@ const ICONS = {
   agent: Bot
 }
 
+/** Opens what a reference points at: file, project, thread, terminal, browser tab, or the thread an old agent reference belongs to. */
+export function openChatReference(reference: ChatReference): void {
+  const store = useAppStore.getState()
+  if (reference.kind === 'browser' && reference.url) {
+    routeLink(reference.url, reference)
+    return
+  }
+  if (reference.kind === 'project' && reference.projectId) {
+    void openProjectReference(reference.projectId).catch((error) => console.error('Failed to open referenced project', error))
+    return
+  }
+  if (reference.kind === 'thread' && reference.threadId) {
+    store.switchToThread(reference.threadId)
+    void window.mousse.threads.select(reference.threadId)
+    return
+  }
+  if (reference.kind === 'terminal' && reference.tabId) {
+    if (reference.threadId && reference.threadId !== store.activeThreadId) {
+      store.switchToThread(reference.threadId)
+      void window.mousse.threads.select(reference.threadId)
+    }
+    store.openSurfaceKind('terminal')
+    store.setActiveProjectTerminalTab(reference.threadId ?? store.activeThreadId, reference.tabId)
+    return
+  }
+  if (reference.kind === 'agent' && reference.threadId) {
+    // There is no Agents tab any more; an old agent reference opens the thread that owns it.
+    if (reference.threadId !== store.activeThreadId) {
+      store.switchToThread(reference.threadId)
+      void window.mousse.threads.select(reference.threadId)
+    }
+    return
+  }
+  if (reference.kind === 'file' && reference.path) {
+    routeLink(formatMousseFileLink(reference.path, reference.line, reference.column), reference)
+  }
+}
+
 export function ChatReferencePill({ reference: candidate, onRemove }: { reference: ChatReference; onRemove?: () => void }) {
   const reference = parseChatReference(candidate)
   if (!reference) return null
   const Icon = ICONS[reference.kind]
-  const open = () => {
-    const store = useAppStore.getState()
-    if (reference.kind === 'browser' && reference.url) {
-      routeLink(reference.url, reference)
-      return
-    }
-    if (reference.kind === 'project' && reference.projectId) {
-      void openProjectReference(reference.projectId).catch((error) => console.error('Failed to open referenced project', error))
-      return
-    }
-    if (reference.kind === 'thread' && reference.threadId) {
-      store.switchToThread(reference.threadId)
-      void window.mousse.threads.select(reference.threadId)
-      return
-    }
-    if (reference.kind === 'terminal' && reference.tabId) {
-      if (reference.threadId && reference.threadId !== store.activeThreadId) {
-        store.switchToThread(reference.threadId)
-        void window.mousse.threads.select(reference.threadId)
-      }
-      store.openSurfaceKind('terminal')
-      store.setActiveProjectTerminalTab(reference.threadId ?? store.activeThreadId, reference.tabId)
-      return
-    }
-    if (reference.kind === 'agent' && reference.threadId) {
-      // There is no Agents tab any more; an old agent reference opens the thread that owns it.
-      if (reference.threadId !== store.activeThreadId) {
-        store.switchToThread(reference.threadId)
-        void window.mousse.threads.select(reference.threadId)
-      }
-      return
-    }
-    if (reference.kind === 'file' && reference.path) {
-      routeLink(formatMousseFileLink(reference.path, reference.line, reference.column), reference)
-    }
-  }
+  const open = () => openChatReference(reference)
   return (
     <span className="composer-attachment-pill composer-reference-pill">
       <button type="button" className="composer-reference-link" onClick={open} title={reference.path ?? reference.metadataPath ?? reference.url ?? reference.title}>
