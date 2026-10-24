@@ -1160,14 +1160,7 @@ export class OrchestratorService extends EventEmitter {
       },
       tasks: (threadId) => this.getTasksForThread(threadId),
       listQueue: (threadId) => this.listQueue(threadId),
-      enqueue: (threadId, input) => {
-        this.assertQueueOpen(threadId)
-        const item = this.enqueueForThread(threadId, input, { source: 'mcp' })
-        const session = this.getOrCreateSession(threadId)
-        if (session.isTurnRunning() || session.turnAdmitted) session.drainAfterSettle = true
-        else this.scheduleQueueDrain(session)
-        return item
-      },
+      enqueue: (threadId, input) => this.enqueueAndDrain(threadId, input, 'mcp'),
       toolLedger: (runId) => this.toolLedgerFor(runId)
     }
   }
@@ -2668,6 +2661,19 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /**
+   * Queues a message and makes sure it runs: after the current turn settles (whoever owns it,
+   * including a channel or remote turn that suppresses its own drain), or now when the thread is idle.
+   */
+  enqueueAndDrain(threadId: string, input: OrchestratorSendInput, source: string): QueuedMessage {
+    this.assertQueueOpen(threadId)
+    const item = this.enqueueForThread(threadId, input, { source })
+    const session = this.getOrCreateSession(threadId)
+    if (session.isTurnRunning() || session.turnAdmitted) session.drainAfterSettle = true
+    else this.scheduleQueueDrain(session)
+    return item
+  }
+
   enqueueForThread(
     threadId: string,
     input: OrchestratorSendInput,
@@ -3832,6 +3838,7 @@ export class OrchestratorService extends EventEmitter {
       externalDrainSteer?: () => string | undefined
       modelOverride?: ModelOverride
       onTurnSettled?: (aborted: boolean) => void
+      onUserInputAccepted?: () => void
       /** The caller already admitted this session (see ThreadSession.turnAdmitted) and hands ownership to this turn. */
       admissionHeld?: boolean
       /** Run Engine run this turn executes; also used as the turn id. */
@@ -3881,6 +3888,16 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /** Tells an observer the user's input is stored; a throwing observer is logged and never aborts the accepted turn. */
+  private notifyUserInputAccepted(threadId: string, observer: (() => void) | undefined): void {
+    if (!observer) return
+    try {
+      observer()
+    } catch (error) {
+      logDebug('OrchestratorService', 'user input accepted observer failed', error, { threadId })
+    }
+  }
+
   /** Honor a stop that arrived while the turn was admitted but not yet running. */
   private applyRequestedAbort(session: ThreadSession, turn: { abort: AbortController }): void {
     if (!session.abortRequested) return
@@ -3897,7 +3914,7 @@ export class OrchestratorService extends EventEmitter {
   private async executeWorkflowChatTurn(
     session: ThreadSession,
     request: NormalizedOrchestratorSendRequest,
-    opts?: { queueItemId?: string; claimOwnerToken?: string; suppressAutoQueueDrain?: boolean; externalSignal?: AbortSignal; onTurnSettled?: (aborted: boolean) => void }
+    opts?: { queueItemId?: string; claimOwnerToken?: string; suppressAutoQueueDrain?: boolean; externalSignal?: AbortSignal; onTurnSettled?: (aborted: boolean) => void; onUserInputAccepted?: () => void }
   ): Promise<OrchestratorResponse> {
     if (!this.workflowChat) throw new Error('Workflow command execution is unavailable')
     const turn = { abort: new AbortController(), pendingSteer: [] as string[], promotedSteerIds: [] as string[] }
@@ -3917,6 +3934,7 @@ export class OrchestratorService extends EventEmitter {
         this.touchUserActivityAndNotify(session.threadId)
         this.acceptTurnUserInput(session, request.content, undefined, true, opts?.queueItemId, request.mode, run)
       }
+      this.notifyUserInputAccepted(session.threadId, opts?.onUserInputAccepted)
       if (!session.messages.some((message) => message.workflowRun?.runId === run.runId)) {
         const content = `Workflow: ${run.title}\nRun: ${run.runId}\nRevision: ${run.revisionId}\nState at admission: ${run.state}`
         const message: ChatMessage = { id: uuidv4(), role: 'assistant', content, workflowRun: run, timestamp: new Date().toISOString() }
@@ -3964,6 +3982,7 @@ export class OrchestratorService extends EventEmitter {
       externalDrainSteer?: () => string | undefined
       modelOverride?: ModelOverride
       onTurnSettled?: (aborted: boolean) => void
+      onUserInputAccepted?: () => void
       runId?: string
     }
   ): Promise<OrchestratorResponse> {
@@ -4138,6 +4157,7 @@ export class OrchestratorService extends EventEmitter {
             mode
           )
           claimAccepted = true
+          this.notifyUserInputAccepted(session.threadId, opts?.onUserInputAccepted)
         } catch (err) {
           if (queueItemId) {
             const status = this.inspectDurableQueueProvenance(
@@ -6266,6 +6286,11 @@ export class OrchestratorService extends EventEmitter {
       signal?: AbortSignal
       drainSteer?: () => string | undefined
       hostIngress?: ChannelWorkflowHostIngress
+      /** Remote sends choose a mode and attach images; channel turns run in agent mode without images. */
+      mode?: ChatMode
+      images?: ChatImageAttachment[]
+      /** Called once the user's message is stored on the thread; not called if the turn never starts. */
+      onUserInputAccepted?: () => void
     }
   ): Promise<BackgroundWorkflowTurnResult> {
     return this.lifecycle.run('channel-turn', () => this.runChannelTurnOwned(threadId, content, threadStore, opts))
@@ -6280,6 +6305,11 @@ export class OrchestratorService extends EventEmitter {
       signal?: AbortSignal
       drainSteer?: () => string | undefined
       hostIngress?: ChannelWorkflowHostIngress
+      /** Remote sends choose a mode and attach images; channel turns run in agent mode without images. */
+      mode?: ChatMode
+      images?: ChatImageAttachment[]
+      /** Called once the user's message is stored on the thread; not called if the turn never starts. */
+      onUserInputAccepted?: () => void
     }
   ): Promise<BackgroundWorkflowTurnResult> {
     const ownedTurn = !opts?.signal
@@ -6357,7 +6387,8 @@ export class OrchestratorService extends EventEmitter {
         signal,
         session,
         admissionHeld: true,
-        onAdmissionHandedOff: () => { admittedSession = null }
+        onAdmissionHandedOff: () => { admittedSession = null },
+        onUserInputAccepted: opts?.onUserInputAccepted
       })
       if (workflow) {
         this.releaseSessionExecutionLease(session)
@@ -6369,7 +6400,7 @@ export class OrchestratorService extends EventEmitter {
       admittedSession = null
       const result = await this.runTurnOnSession(
         session,
-        { content, mode: 'agent' },
+        { content, mode: opts?.mode ?? 'agent', ...(opts?.images?.length ? { images: opts.images } : {}) },
         false,
         true,
         {
@@ -6386,6 +6417,7 @@ export class OrchestratorService extends EventEmitter {
               }
             : undefined),
           modelOverride: opts?.modelOverride,
+          onUserInputAccepted: opts?.onUserInputAccepted,
           onTurnSettled: (aborted) => {
             wasAborted = aborted
             try {
@@ -6452,6 +6484,8 @@ export class OrchestratorService extends EventEmitter {
     /** The caller already admitted `session`; ownership passes to the workflow turn via onAdmissionHandedOff. */
     admissionHeld?: boolean
     onAdmissionHandedOff?: () => void
+    /** Called once the workflow command is stored on the thread. */
+    onUserInputAccepted?: () => void
   }): Promise<BackgroundWorkflowTurnResult | null> {
     if (!this.workflowChat || !input.content.startsWith('/') || !input.threadId) return null
     let prepared
@@ -6473,7 +6507,12 @@ export class OrchestratorService extends EventEmitter {
         { content: prepared.content, workflowInvocationId: prepared.workflowInvocationId },
         false,
         true,
-        { suppressAutoQueueDrain: true, externalSignal: input.signal, admissionHeld: input.admissionHeld }
+        {
+          suppressAutoQueueDrain: true,
+          externalSignal: input.signal,
+          admissionHeld: input.admissionHeld,
+          onUserInputAccepted: input.onUserInputAccepted
+        }
       )
       if (!response.workflowRun) return { text: response.message, silent: false, transcriptWritten: true }
       this.releaseSessionExecutionLease(session)
