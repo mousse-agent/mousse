@@ -207,6 +207,9 @@ function applyWindowAccentBackground(
   )
 }
 
+/** Longest delay a timer accepts (about 24 days): a request that effectively never times out. */
+const NO_REQUEST_TIMEOUT_MS = 2_147_483_647
+
 function normalizeSendContent(request: OrchestratorSendInput): {
   content: string
   requestId?: string
@@ -2110,6 +2113,17 @@ export function registerGuiIpc(
     )
     broadcast('providers:changed', res.providers)
     return res.config
+  })
+  // Progress reaches the renderer as `providers:install:event` through the protocol event bridge.
+  registerHandler('providers:installAntigravity', async () => {
+    // A slow connection may need hours; the daemon owns the download and cancel is explicit, so this request never times out.
+    // The daemon announces the change to every window of the profile when the install ends.
+    const res = await guiMms.request<{ config: unknown }>('providers.installAntigravity', {}, NO_REQUEST_TIMEOUT_MS)
+    return res.config
+  })
+  registerHandler('providers:cancelAntigravityInstall', async () => {
+    const res = await guiMms.request<{ cancelled: boolean }>('providers.cancelAntigravityInstall', {})
+    return res.cancelled
   })
   registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()

@@ -14,7 +14,10 @@ import { BridgeHub } from './hub'
 import { validateHubParams } from './hub/validation'
 import { MmsRemoteBackend, RemoteApi, ThreadStreamAdapter } from './remote'
 import { MmsThreadSource } from './remote/MmsThreadSource'
+import { LISTS_STREAM_THREAD_ID, MmsListsSource } from './remote/MmsListsSource'
+import { remoteListMethods } from './remote/RemoteLists'
 import { phoneSpeechMethods } from './remote/speech'
+import type { ThreadSourcePort } from './remote/ThreadStreamAdapter'
 import { DispatchService, mmsDispatchRuntime, type DispatchRuntime } from './dispatch'
 
 /** Actual profile services own Bridge; no received DTO supplies a backend or path. */
@@ -144,6 +147,19 @@ export class BridgeProfileService {
       },
       sendPresence: (message) => net.publishPresence(message)
     })
+    // One display stream per open thread, plus one reserved stream for the sidebar lists.
+    const threadSource = new MmsThreadSource(services),
+      listsSource = new MmsListsSource(services),
+      source: ThreadSourcePort = {
+        snapshot: (threadId) =>
+          threadId === LISTS_STREAM_THREAD_ID
+            ? listsSource.snapshot()
+            : threadSource.snapshot(threadId),
+        onThread: (threadId, listener, onError) =>
+          threadId === LISTS_STREAM_THREAD_ID
+            ? listsSource.watch(() => listener({ snapshot: true }), onError)
+            : threadSource.onThread(threadId, listener, onError)
+      }
     this.threads = new ThreadStreamAdapter({
       db: rt.db,
       store: this.spaces.store,
@@ -151,7 +167,7 @@ export class BridgeProfileService {
       identity: rt.identity,
       keys: rt.keys,
       clock: this.clock,
-      source: new MmsThreadSource(services),
+      source,
       onRecord: (stream, record) => {
         void this.track(net.publish(stream, record))
       },
@@ -179,10 +195,23 @@ export class BridgeProfileService {
       mutating: false,
       validate: (value) => validateHubParams('bridge.thread.open', value),
       handle: async (value) => {
-        const descriptor = this.threads.activate((value as { threadId: string }).threadId)
+        const threadId = (value as { threadId: string }).threadId
+        if (threadId === LISTS_STREAM_THREAD_ID) throw new NetError('stream_unknown')
+        const descriptor = this.threads.activate(threadId)
         return { descriptor, head: this.threads.store.head(descriptor.id) }
       }
     })
+    for (const method of remoteListMethods({
+      openLists: () => {
+        const descriptor = this.threads.activate(LISTS_STREAM_THREAD_ID)
+        return { descriptor, head: this.threads.store.head(descriptor.id) }
+      },
+      chats: () => services.platform.chats
+    }))
+      rt.rpc.register({
+        ...method,
+        handle: (params, context) => this.track(method.handle(params, context))
+      })
     this.hub = new BridgeHub({
       db: rt.db,
       identity: rt.identity,

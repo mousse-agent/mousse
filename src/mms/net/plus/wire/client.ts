@@ -143,7 +143,12 @@ export class HostedRelayTransport {
         if (!raw || !this.listening || this.stopped) { opened.ws.terminate(); return }
         try { this.accept?.(raw, { transport: this.id }) } catch { raw.destroy(); this.changed('degraded') }
         finally { void this.arm().catch(() => {}) }
-      }, () => { this.armed = false; this.rearm() })
+      }, error => {
+        this.armed = false
+        // Nobody dialed before the relay's waiting deadline: listen again at once, keeping the route.
+        if (error instanceof NetRelayError && error.code === 'deadline_exceeded') void this.arm().catch(() => {})
+        else this.rearm()
+      })
     } catch (error) { this.armed = false; this.rearm(); throw error }
   }
   private rearm(): void {

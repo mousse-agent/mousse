@@ -29,6 +29,7 @@ import { ApiProviderRow, type ApiProviderEntry } from './ApiProviderRow'
 import { CliProviderRow } from './CliProviderRow'
 import { CLI_LOGIN_IDS, CLI_PROVIDERS, cliHealth, type CliProviderDefinition } from './cliProviders'
 import { errorText } from './parts'
+import { useCliInstall } from './useCliInstall'
 import '../../styles/providers.css'
 
 export interface ProvidersSettingsProps {
@@ -81,6 +82,12 @@ export function ProvidersSettings({
     setCliConfigs(Object.fromEntries(loaded.filter(([, config]) => config)))
   }, [])
 
+  /** Sign-in and download state live in the daemon and change without this page (a revoked session, a download). */
+  const loadAntigravityConfig = useCallback(async () => {
+    const config = await window.mousse.providers.cliConfig('antigravity').catch(() => undefined)
+    if (config) setCliConfigs((current) => ({ ...current, antigravity: config }))
+  }, [])
+
   useEffect(() => {
     void loadLoginOptions().catch(() => {})
     loadStatuses()
@@ -88,8 +95,12 @@ export function ProvidersSettings({
     return window.mousse.providers.onChanged(() => {
       void loadLoginOptions().catch(() => {})
       loadStatuses()
+      void loadAntigravityConfig()
     })
-  }, [loadLoginOptions, loadStatuses, loadCliConfigs])
+  }, [loadLoginOptions, loadStatuses, loadCliConfigs, loadAntigravityConfig])
+
+  /** Antigravity's agent download; shared by the row and the add step. */
+  const install = useCliInstall(cliConfigs.antigravity, () => void loadAntigravityConfig())
 
   const instances = useMemo(() => readProviderInstances(settings.provider.instances), [settings.provider.instances])
   const cliEnabled = (id: string) => instances[id]?.enabled ?? true
@@ -172,6 +183,20 @@ export function ProvidersSettings({
   const signInCli = (cli: CliProviderDefinition) => async () => {
     ensureSignedIn(await runLogin(() => window.mousse.providers.loginOAuth(cli.providerId)), 'Sign-in failed.')
     await refreshAll()
+  }
+
+  /** Signing out forgets only the Google sign-in; the downloaded agent stays. */
+  const signOutCli = (cli: CliProviderDefinition) => async () => {
+    await window.mousse.providers.logout(cli.providerId)
+    await refreshAll()
+  }
+
+  /** Downloads the agent without signing in; true once it is installed. Failures show through `install.error`. */
+  const installCli = async (cli: CliProviderDefinition) => {
+    const config = await install.start()
+    if (!config) return false
+    setCliConfigs((current) => ({ ...current, [cli.id]: config }))
+    return true
   }
 
   const recheckCli = (cli: CliProviderDefinition) => async () => {
@@ -281,6 +306,10 @@ export function ProvidersSettings({
           cliConfigs={cliConfigs}
           apis={addableApis}
           onAddCli={addCli}
+          install={install}
+          onInstallCli={async (cli) => {
+            if (await installCli(cli)) await addCli(cli)
+          }}
           onApiConnected={apiConnected}
           runLogin={runLogin}
           onDone={() => setMode('list')}
@@ -313,6 +342,9 @@ export function ProvidersSettings({
                     onRefreshModels={refreshModels(cli.providerId)}
                     onSignIn={signInCli(cli)}
                     onRecheck={recheckCli(cli)}
+                    install={cli.id === 'antigravity' ? install : undefined}
+                    onInstall={cli.id === 'antigravity' ? async () => { if (await installCli(cli)) await refreshAll() } : undefined}
+                    onSignOut={cli.id === 'antigravity' ? signOutCli(cli) : undefined}
                   />
                 )
               })}

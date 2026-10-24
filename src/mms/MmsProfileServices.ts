@@ -225,6 +225,9 @@ export class MmsProfileServices {
       shared.installationHome,
       this.questions
     )
+    this.antigravity.hooks.changed = () => this.events.emit({ channel: 'providers:changed', data: undefined })
+    this.antigravity.hooks.installProgress = (message) =>
+      this.events.emit({ channel: 'providers:install', data: { instanceId: 'antigravity', type: 'progress', message } })
     // Every profile uses the terminal Claude sign-in, like Codex.
     this.claudeSubscription = new ClaudeSubscriptionProviderService(homeDir, this.questions)
     this.codex = createCodexProviderService(homeDir, this.questions)

@@ -27,15 +27,22 @@ function failAll(error: Error): void {
 }
 
 function createWorker(model: LocalSttModel): Worker {
-  return model.runtime === 'nemo-transducer'
-    ? new Worker(new URL('./parakeetWorker.ts', import.meta.url), { type: 'module' })
-    : new Worker(new URL('./moonshineWorker.ts', import.meta.url), { type: 'module' })
+  switch (model.runtime) {
+    case 'nemo-transducer':
+      return new Worker(new URL('./parakeetWorker.ts', import.meta.url), { type: 'module' })
+    case 'whisper':
+      return new Worker(new URL('./whisperWorker.ts', import.meta.url), { type: 'module' })
+    case 'moonshine':
+      return new Worker(new URL('./moonshineWorker.ts', import.meta.url), { type: 'module' })
+  }
 }
 
 function ensureWorker(model: LocalSttModel): Worker {
   if (worker?.modelId === model.id) return worker.worker
   disposeLocalEngine()
   const created = createWorker(model)
+  const init: LocalSttWorkerRequest = { type: 'init', modelId: model.id }
+  created.postMessage(init)
   serveModelFiles(created, (path) => window.mousse.dictation.readLocalModelFile(model.id, path))
   created.addEventListener('message', (event: MessageEvent<LocalSttWorkerEvent>) => {
     const message = event.data

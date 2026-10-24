@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { DictationSelection } from '../src/shared/dictation'
+import { LOCAL_STT_MODELS, type DictationSelection } from '../src/shared/dictation'
 import type { LocalModelStatus } from '../src/shared/localModels'
 import type { ReadAloudSelection } from '../src/shared/readAloud'
 import type { LlmProviderOption } from '../src/shared/settings'
@@ -76,9 +76,10 @@ describe('phone speech jobs', () => {
     expect(answer.ok).toBe(true)
     expect(answer.selection).toBeNull()
     expect(answer.providers).toEqual([{ providerId: 'openai', providerLabel: 'OpenAI', modelId: 'whisper-1', label: 'Whisper' }])
-    expect(answer.local.map((model: { id: string }) => model.id)).toEqual(['moonshine-base', 'parakeet-tdt-110m'])
-    expect(answer.local[0]).toMatchObject({ state: { status: 'downloaded' }, bytes: expect.any(Number), homepage: expect.stringMatching(/^https:/) })
-    expect(answer.local[1].state).toEqual({ status: 'not-downloaded' })
+    const local = answer.local as Array<{ id: string; state: unknown }>
+    expect(local.map((model) => model.id)).toEqual(LOCAL_STT_MODELS.map((model) => model.id))
+    expect(local.find((model) => model.id === 'moonshine-base')).toMatchObject({ state: { status: 'downloaded' }, bytes: expect.any(Number), homepage: expect.stringMatching(/^https:/) })
+    expect(local.find((model) => model.id === 'parakeet-tdt-110m')?.state).toEqual({ status: 'not-downloaded' })
   })
 
   it('saves a provider choice with the desktop label and refuses models the computer does not offer', async () => {
