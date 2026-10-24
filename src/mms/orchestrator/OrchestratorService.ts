@@ -77,6 +77,7 @@ import {
 } from '../run/types'
 import {
   isTerminalAgentStatus,
+  turnPhaseActivity,
   type Agent,
   type AgentStatus,
   type ChatImageAttachment,
@@ -96,7 +97,6 @@ import {
   type TurnPhase,
   type TurnState,
   type TurnStateSnapshot,
-  type ThreadActivityState,
   type UserQuestion,
   type UserQuestionAnswers
 } from '../../shared/types'
@@ -663,15 +663,8 @@ export class OrchestratorService extends EventEmitter {
   private featureFlags: MousseFeatureFlags = { ...DEFAULT_FEATURE_FLAGS }
   private turnStates = new Map<string, TurnState>()
 
-  private phaseToActivity(phase: TurnPhase): ThreadActivityState {
-    if (phase === 'awaiting_input') return 'awaiting_input'
-    if (phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing') return 'processing'
-    // Keep a finished turn completed until its runtime activity changes.
-    if (phase === 'completed') return 'completed'
-    return 'idle'
-  }
-
-  private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor'>>): void {
+  /** `blockedOnWait`: every running tool call only waits, so the thread shows Waiting. */
+  private setTurnPhase(threadId: string, phase: TurnPhase, patch?: Partial<Pick<TurnState, 'turnId' | 'activeMessageId' | 'error' | 'errorDescriptor'>> & { blockedOnWait?: boolean }): void {
     const now = new Date().toISOString()
     const existing = this.turnStates.get(threadId)
     const state: TurnState = {
@@ -693,7 +686,7 @@ export class OrchestratorService extends EventEmitter {
     if (HEARTBEAT_TURN_PHASES.has(phase)) this.heartbeatRun(state.turnId)
     else if (existing?.turnId) this.runHeartbeats.delete(existing.turnId)
     this.emit('turn-state', state)
-    this.runtimeManager?.setActivity(threadId, this.phaseToActivity(phase))
+    this.runtimeManager?.setActivity(threadId, turnPhaseActivity(phase, patch?.blockedOnWait))
   }
 
   /** Liveness touch for an engine run (SPEC §12.4 rule 2), at most once per throttle window. */
@@ -970,7 +963,13 @@ export class OrchestratorService extends EventEmitter {
         ...(request.workspace === 'shared' ? { sharedWorkspace: this.sharedWorkspaceOf(request.parentThreadId) } : {})
       })
     })
-    const onEvent = (event: ThreadEvent): void => { this.emit('run-event', event) }
+    const onEvent = (event: ThreadEvent): void => {
+      // Running delegated tasks wake the parent when they finish; until then its thread is Waiting.
+      if (event.type === 'delegation.status')
+        this.runtimeManager?.setPendingDelegations(event.threadId,
+          engine.delegations.listForParentThread(event.threadId).some((delegation) => delegation.status === 'running'))
+      this.emit('run-event', event)
+    }
     const onStop = (payload: { threadId: string; runId: string }): void => { this.emit('stop-requested', payload) }
     const onSteer = (payload: { threadId: string; runId: string }): void => { this.emit('steer-accepted', payload) }
     engine.on('event', onEvent)
