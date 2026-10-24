@@ -133,6 +133,25 @@ describe('Claude Subscription children', () => {
     expect(seen).toEqual([{ hook, canUse }, { hook, canUse }])
   })
 
+  it('the hook answers "ask" for a shared child exactly as for a plan turn, so the user\'s own allow rules cannot skip canUseTool', async () => {
+    const plan = fixture()
+    await plan.service.chat(plan.input({ mode: 'plan' }))
+    const shared = fixture()
+    await shared.service.chat(shared.input({ child: SHARED }))
+    const [planSeen, sharedSeen] = seen
+    // Every tool the read-only allowlist lets through is routed to canUseTool by an "ask" decision;
+    // without it, an allow rule in the user's settings.json would approve the call before the
+    // callback ran. The same decision for both kinds of turn.
+    for (const tool of ['Read', 'mcp__mousse__thread_read']) {
+      expect(planSeen.hook[tool], tool).toBe('ask')
+      expect(sharedSeen.hook[tool], tool).toBe('ask')
+    }
+    expect(sharedSeen.canUse.Read).toBe('allow')
+    expect(shared.options[0].canUseTool).toBeTypeOf('function')
+    // A tool outside the allowlist is denied by the hook itself, which also beats an allow rule.
+    for (const tool of ['Bash', 'Write', 'mcp__userserver__lookup', 'mcp__mousse__thread_fork']) expect(sharedSeen.hook[tool], tool).toBe('deny')
+  })
+
   it('an isolated child keeps write access and every MCP server but is denied the native subagent tool, first and resumed', async () => {
     const { service, options, input } = fixture()
     await service.chat(input({ child: ISOLATED }))
@@ -174,7 +193,7 @@ describe('Codex children', () => {
   })
 
   /** An app-server stand-in: a signed-in account, instant turns, and the feature pages in `pages`. */
-  function server(options: { approvalRequests?: boolean; pages?: Feature[][]; mcpServers?: Record<string, { enabled?: boolean } | null> } = {}) {
+  function server(options: { approvalRequests?: boolean; pages?: Feature[][]; mcpServers?: Record<string, { enabled?: boolean } | null>; layers?: Array<{ disabledReason: string | null; config?: unknown }>; configFails?: boolean; featuresFail?: boolean } = {}) {
     const messages: Message[] = []
     const pages = options.pages ?? [[{ name: 'multi_agent', enabled: false, defaultEnabled: true }]]
     const launch = (): CodexProcess => {
@@ -204,7 +223,8 @@ describe('Codex children', () => {
           const reply: Record<string, unknown> =
             message.method === 'initialize' ? { result: { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' } }
             : message.method === 'account/read' ? { result: { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, requiresOpenaiAuth: true } }
-            : message.method === 'config/read' ? { result: { config: { mcp_servers: options.mcpServers ?? {} } } }
+            : message.method === 'config/read' ? (options.configFails ? { error: { code: -32603, message: 'unreadable' } } : { result: { config: { mcp_servers: options.mcpServers ?? {} }, layers: options.layers ?? [] } })
+            : message.method === 'experimentalFeature/list' && options.featuresFail ? { error: { code: -32603, message: 'unreadable' } }
             : message.method === 'experimentalFeature/list' ? { result: { data: pages[page], nextCursor: page + 1 < pages.length ? String(page + 1) : null } }
             : ['thread/start', 'thread/resume', 'thread/fork'].includes(message.method) ? thread
             : message.method === 'turn/start' ? { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
@@ -293,49 +313,47 @@ describe('Codex children', () => {
       new CodexAdapter(() => create(s)).childPreflight({ workspace, cwd: home })
     const on = [[{ name: 'multi_agent', enabled: true, defaultEnabled: true }]]
     const off = [[{ name: 'multi_agent', enabled: false, defaultEnabled: true }, { name: 'multi_agent_v2', enabled: false, defaultEnabled: false }]]
+    const SHARED_REFUSED = 'shared_unsupported_for_provider'
+    const TARGET_REFUSED = 'provider_unsupported_for_subagents'
 
     it.each([
-      ['no MCP servers, native subagents off', off, {}, 'shared', null],
-      ['no MCP servers, native subagents off', off, {}, 'isolated', null],
-      ['only Mousse\'s own server and a disabled one', off, { mousse: { enabled: true }, old: { enabled: false } }, 'shared', null],
-      ['a user MCP server', off, { ext: { enabled: true } }, 'shared', 'shared_unsupported_for_provider'],
-      ['a user MCP server whose enabled flag is unset', off, { ext: {} }, 'shared', 'shared_unsupported_for_provider'],
-      ['a user MCP server, isolated child', off, { ext: { enabled: true } }, 'isolated', null],
-      ['native subagents on, shared child', on, {}, 'shared', 'provider_unsupported_for_subagents'],
-      ['native subagents on, isolated child', on, {}, 'isolated', 'provider_unsupported_for_subagents']
-    ] as const)('%s (%s workspace)', async (_name, pages, mcpServers, workspace, code) => {
-      const s = server({ pages: pages as never, mcpServers })
+      ['no MCP servers, native subagents off', {}, 'shared', null],
+      ['no MCP servers, native subagents off', {}, 'isolated', null],
+      ['a disabled server only', { mcpServers: { old: { enabled: false } } }, 'shared', null],
+      ['a user MCP server', { mcpServers: { ext: { enabled: true } } }, 'shared', SHARED_REFUSED],
+      ['a user MCP server whose enabled flag is unset', { mcpServers: { ext: {} } }, 'shared', SHARED_REFUSED],
+      ['a Mousse-managed server named mousse counts as external', { mcpServers: { mousse: { enabled: true } } }, 'shared', SHARED_REFUSED],
+      ['a user MCP server, isolated child', { mcpServers: { ext: { enabled: true } } }, 'isolated', null],
+      ['a server only in an applied config layer (project)', { layers: [{ disabledReason: null, config: { mcp_servers: { projsrv: {} } } }] }, 'shared', SHARED_REFUSED],
+      ['a server in a layer Codex switched off (untrusted project)', { layers: [{ disabledReason: 'trust this project', config: { mcp_servers: { projsrv: {} } } }] }, 'shared', null],
+      ['an unreadable config, shared child', { configFails: true }, 'shared', SHARED_REFUSED],
+      ['an unreadable config, isolated child (nothing detected)', { configFails: true }, 'isolated', null],
+      ['unreadable feature flags (nothing detected)', { featuresFail: true }, 'isolated', null]
+    ] as const)('%s (%s workspace)', async (_name, setup, workspace, code) => {
+      const s = server({ pages: off, ...setup })
       expect((await preflight(s, workspace))?.code ?? null).toBe(code)
-      // It only reads: no config write, no feature change.
+      // It only reads the user's setup.
       expect(s.messages.map((message) => message.method).filter((method) => /write|set|batch/i.test(method ?? ''))).toEqual([])
+    })
+
+    it.each(['shared', 'isolated'] as const)('native subagents detected on refuses a %s child, whatever else is configured', async (workspace) => {
+      const refusal = await preflight(server({ pages: on, configFails: true }), workspace)
+      expect(refusal?.code).toBe(TARGET_REFUSED)
+      expect(refusal?.message).toContain('features.multi_agent')
+    })
+
+    it.each([
+      ['multi_agent_v2 on', [[{ name: 'multi_agent', enabled: false, defaultEnabled: true }, { name: 'multi_agent_v2', enabled: true, defaultEnabled: false }]], TARGET_REFUSED],
+      ['on in a later page', [[{ name: 'apps', enabled: true, defaultEnabled: false }], [{ name: 'multi_agent', enabled: true, defaultEnabled: true }]], TARGET_REFUSED],
+      ['an unrelated feature on', [[{ name: 'apps', enabled: true, defaultEnabled: false }, { name: 'multi_agent', enabled: false, defaultEnabled: true }]], null]
+    ] as const)('feature flags: %s', async (_name, pages, code) => {
+      expect((await preflight(server({ pages: pages as never }), 'isolated'))?.code ?? null).toBe(code)
     })
 
     it('names the servers and points to isolated', async () => {
       const refusal = await preflight(server({ pages: off, mcpServers: { ext: {}, other: {} } }), 'shared')
       expect(refusal?.message).toContain('ext, other')
       expect(refusal?.message).toContain('"isolated"')
-    })
-
-    it('refuses when the setup cannot be read', async () => {
-      const refusal = await new CodexAdapter(() => ({ nativeSubagentsEnabled: async () => { throw new Error('down') } }) as never).childPreflight({ workspace: 'isolated', cwd: home })
-      expect(refusal?.code).toBe('provider_unsupported_for_subagents')
-    })
-  })
-
-  describe('native subagents (setup check)', () => {
-    const feature = (name: string, enabled: boolean): Feature => ({ name, enabled, defaultEnabled: name === 'multi_agent' })
-
-    it.each([
-      ['both off', [[feature('multi_agent', false), feature('multi_agent_v2', false)]], false],
-      ['multi_agent on (the Codex default)', [[feature('multi_agent', true)]], true],
-      ['multi_agent_v2 on', [[feature('multi_agent', false), feature('multi_agent_v2', true)]], true],
-      ['on in a later page', [[feature('apps', true)], [feature('multi_agent', true)]], true],
-      ['an unrelated feature on', [[feature('apps', true), feature('multi_agent', false)]], false]
-    ])('%s', async (_name, pages, enabled) => {
-      const s = server({ pages })
-      expect(await create(s).nativeSubagentsEnabled()).toBe(enabled)
-      // Read only: it never writes the user's config.
-      expect(s.messages.map((message) => message.method).filter((method) => /config|write/.test(method ?? ''))).toEqual([])
     })
   })
 })

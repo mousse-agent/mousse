@@ -22,7 +22,7 @@ import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
 /** The slice of the provider service a turn drives. */
 export type CodexClient = Pick<
   CodexProviderService,
-  'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'steer' | 'nativeSubagentsEnabled' | 'externalMcpServers'
+  'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'steer' | 'userSetup'
 >
 
 /**
@@ -71,26 +71,25 @@ export class CodexAdapter implements ProviderAdapter {
   /**
    * What the user's own Codex setup allows for a child; nothing is changed. Codex asks for no
    * approval before it starts a subagent of its own, so no permission decision of Mousse can stop
-   * one: a child runs on Codex only where `features.multi_agent` is off. Mousse also cannot deny a
-   * Codex MCP tool call (it answers command, file and permission approvals and elicitations, but a
-   * tool the user's server offers runs under Codex's own rules), so a `shared` child is refused
-   * while the user's config has any MCP server of its own; `isolated` still works.
+   * one, so Codex is refused as a subagent target when the setup is detected to have them on
+   * (`features.multi_agent`; a setup that cannot be read is not detected). Mousse also cannot deny
+   * a Codex MCP tool call (it answers command, file and permission approvals and elicitations, but
+   * a tool the user's server offers runs under Codex's own rules), so a `shared` child is refused
+   * while the config has any enabled MCP server, a Mousse-managed one included, or cannot be read;
+   * `isolated` still works.
    */
   async childPreflight(context: ChildPreflightContext): Promise<SubagentRefusal | null> {
     const service = this.service()
     if (!service) return null
-    const refuse = (message: string): SubagentRefusal => ({ code: 'provider_unsupported_for_subagents', message })
-    try {
-      if (await service.nativeSubagentsEnabled())
-        return refuse('Codex cannot run as a subagent while its own subagents are enabled: Mousse cannot stop Codex from starting them and does not change your Codex config. Turn them off yourself (`features.multi_agent = false` in your Codex config), or choose another provider or model for this task.')
-      if (context.workspace !== 'shared') return null
-      const servers = await service.externalMcpServers(context.cwd)
-      return servers.length
-        ? { code: 'shared_unsupported_for_provider', message: `A read-only (shared) Codex subagent is not possible while your Codex config has MCP servers (${servers.join(', ')}): Mousse cannot stop one of their tools from writing and does not change your Codex config. Use workspace "isolated", or choose another provider or model.` }
-        : null
-    } catch {
-      return refuse('Codex cannot run as a subagent: Mousse could not read the Codex setup to check it. Check that Codex is signed in, or choose another provider or model for this task.')
-    }
+    const setup = await service.userSetup(context.cwd)
+    if (setup.nativeSubagents)
+      return { code: 'provider_unsupported_for_subagents', message: 'Codex cannot run as a subagent while its own subagents are enabled: Mousse cannot stop Codex from starting them and does not change your Codex config. Turn them off yourself (`features.multi_agent = false` in your Codex config), or choose another provider or model for this task.' }
+    if (context.workspace !== 'shared') return null
+    if (setup.mcpServers === null)
+      return { code: 'shared_unsupported_for_provider', message: 'A read-only (shared) Codex subagent needs Mousse to read your Codex config, and it could not. Use workspace "isolated", or choose another provider or model.' }
+    return setup.mcpServers.length
+      ? { code: 'shared_unsupported_for_provider', message: `A read-only (shared) Codex subagent is not possible while your Codex config has MCP servers (${setup.mcpServers.join(', ')}): Mousse cannot stop one of their tools from writing and does not change your Codex config. Use workspace "isolated", or choose another provider or model.` }
+      : null
   }
 
   async startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {

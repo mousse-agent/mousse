@@ -172,10 +172,14 @@ export interface ExperimentalFeatureListResponse {
 export interface ConfigReadParams {
   /** Resolves project config layers as seen from this directory. */
   cwd?: string | null
+  includeLayers?: boolean
 }
+type McpServerEntry = { enabled?: boolean | null } | null
 export interface ConfigReadResponse {
   /** The effective config; Mousse reads only the entries under `mcp_servers`. */
-  config: { mcp_servers?: Record<string, { enabled?: boolean | null } | null> | null } & Record<string, unknown>
+  config: { mcp_servers?: Record<string, McpServerEntry> | null } & Record<string, unknown>
+  /** Each layer (user, system, project) with why it is switched off, when it is; requires `includeLayers`. */
+  layers?: Array<{ disabledReason: string | null; config?: { mcp_servers?: Record<string, McpServerEntry> | null } | null }> | null
 }
 
 /** Request methods Mousse calls, with their params and results. `account/logout` is deliberately absent. */
