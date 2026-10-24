@@ -17,7 +17,7 @@ import { acpMcpServers } from '../../run/mcp/attachment'
 import type { LoginSession } from '../LoginSession'
 import { applyCliConfigPatch, requireExecutable, sharedCliVersions, storedCliArgs, storedCliEnv, withUserEnv, type CliVersionCache } from '../cliConfig'
 import { directLaunch } from '../resolveWindowsShim'
-import { ANTIGRAVITY_RELEASE, antigravityInstallState, cancelAntigravityInstall, installAntigravity, installedAntigravityBinary, validateManualAntigravityBinary } from './installation'
+import { ANTIGRAVITY_RELEASE, antigravityInstallState, cancelAntigravityInstall, installAntigravity, installedAntigravityBinary, onAntigravityInstallEvent, validateManualAntigravityBinary } from './installation'
 
 export const ANTIGRAVITY_PROVIDER_ID = 'antigravity'
 type AcpProcess = { child: ChildProcessWithoutNullStreams; connection: ClientConnection; sessionId?: string; cwd?: string; threadId?: string; onUpdate?: (update: unknown) => void; turnSignal?: AbortSignal
@@ -54,6 +54,12 @@ const ISOLATED_KEYS = [
   'GEMINI_HOME', 'AGY_ACP_FORCE_FILE_STORAGE', 'ANTIGRAVITY_HARNESS_PATH', 'ELECTRON_RUN_AS_NODE',
   'BROWSER', 'PYTHONUNBUFFERED'
 ]
+
+/** ACP `authRequired`: JSON-RPC -32000 "Authentication required". */
+function isAuthRequired(error: unknown): boolean {
+  const { code, message } = (error ?? {}) as { code?: unknown; message?: unknown }
+  return code === -32000 && typeof message === 'string' && /auth/i.test(message)
+}
 
 function modelOptions(session: Pick<NewSessionResponse, 'configOptions'>): LlmModelOption[] {
   const selector = session.configOptions?.find((option) => option.id === 'model' && option.type === 'select')
@@ -136,6 +142,7 @@ export class AntigravityProviderService {
   private readonly turning = new Set<AcpProcess>()
   /** Aborts this service's own install when it stops. The installation allows one install at a time. */
   private installing?: AbortController
+  private readonly unsubscribeInstall: () => void
   /** Bumped when a sign-in succeeds, so an older process's late sign-in request is ignored. */
   private signInGeneration = 0
   /** Clients are told through these hooks, set by the profile services. */
@@ -147,6 +154,12 @@ export class AntigravityProviderService {
     this.settingsPath = join(this.profileDir, 'settings.json')
     try { this.settings = JSON.parse(readFileSync(this.settingsPath, 'utf8')) as ProfileSettings }
     catch { this.settings = {} }
+    // The download is shared by every profile of the installation; each tells its own clients.
+    this.unsubscribeInstall = onAntigravityInstallEvent(installationHome, (event) => {
+      if (event.type === 'progress') {
+        try { this.hooks.installProgress?.(event.message) } catch { /* progress is best effort */ }
+      } else this.notifyChanged()
+    })
   }
 
   private save(): void {
@@ -560,7 +573,7 @@ export class AntigravityProviderService {
       this.close(current)
       this.sessions.delete(input.threadId)
       if (steerFailure) throw steerFailure
-      throw error
+      throw this.authRequiredError(current, error) ?? error
     } finally {
       if (steerTimer) clearInterval(steerTimer)
       input.signal?.removeEventListener('abort', abort)
@@ -582,6 +595,8 @@ export class AntigravityProviderService {
       this.settings.models = models
       this.save()
       return models
+    } catch (error) {
+      throw this.authRequiredError(active, error) ?? error
     } finally { this.close(active) }
   }
 
@@ -658,6 +673,16 @@ export class AntigravityProviderService {
     this.notifyChanged()
   }
 
+  /**
+   * An agent request answered "authentication required": the saved sign-in is gone. Marks the profile
+   * signed out unless a sign-in finished after the process started, and returns the error to show.
+   */
+  private authRequiredError(process: AcpProcess, error: unknown): Error | undefined {
+    if (!isAuthRequired(error)) return undefined
+    if (process.signInGeneration === this.signInGeneration) this.markSignedOut()
+    return new Error(SIGN_IN_REQUIRED_MESSAGE)
+  }
+
   private notifyChanged(): void {
     try { this.hooks.changed?.() } catch { /* a listener must not break provider work */ }
   }
@@ -668,16 +693,11 @@ export class AntigravityProviderService {
    */
   async install(onProgress?: (message: string) => void): Promise<CliProviderConfig> {
     if (this.stopped) throw new Error('Antigravity provider is stopped')
+    if (this.installing) throw new Error('Antigravity is already being installed')
     const abort = new AbortController()
     this.installing = abort
     try {
-      const running = installAntigravity(this.installationHome, abort.signal, (message) => {
-        onProgress?.(message)
-        try { this.hooks.installProgress?.(message) } catch { /* progress is best effort */ }
-      })
-      // The installation now reports installing; clients read it from `cliConfig`.
-      this.notifyChanged()
-      await running
+      await installAntigravity(this.installationHome, abort.signal, onProgress)
       // A cancel that lands after the download leaves the settings alone.
       abort.signal.throwIfAborted()
       delete this.settings.binaryPath
@@ -689,6 +709,7 @@ export class AntigravityProviderService {
       throw error
     } finally {
       if (this.installing === abort) this.installing = undefined
+      // The install is over for every profile, but this one's settings changed just now.
       this.notifyChanged()
     }
   }
@@ -702,6 +723,7 @@ export class AntigravityProviderService {
   stop(): void {
     this.stopped = true
     this.installing?.abort()
+    this.unsubscribeInstall()
     for (const session of this.loginSessions) session.abort.abort()
     this.closeAll()
   }

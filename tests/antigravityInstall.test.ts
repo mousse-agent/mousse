@@ -78,16 +78,13 @@ describe('Antigravity install', () => {
       return join(home, 'agy_acp_server')
     })
     const messages: string[] = []
-    const hooked: string[] = []
     const changed = vi.fn()
     service.hooks.changed = changed
-    service.hooks.installProgress = (message) => hooked.push(message)
     const generation = (service as unknown as { launchGeneration: number }).launchGeneration
     const config = await service.install((message) => messages.push(message))
     expect(installMock).toHaveBeenCalledWith(home, expect.any(AbortSignal), expect.any(Function))
     expect(messages).toEqual(['Downloading Google Antigravity ACP agent…', 'Verifying agent and local harness…'])
-    expect(hooked).toEqual(messages)
-    expect(changed).toHaveBeenCalledTimes(2)
+    expect(changed).toHaveBeenCalledTimes(1)
     expect(config).toMatchObject({ instanceId: 'antigravity', args: [], env: {} })
     expect(config.binaryPath).toBeUndefined()
     expect(saved().binaryPath).toBeUndefined()
@@ -118,6 +115,18 @@ describe('Antigravity install', () => {
     expect(saved()).toEqual({ binaryPath: 'kept', signedIn: true })
   })
 
+  it('rejects a duplicate on the same service without orphaning the running install', async () => {
+    const { service } = setup()
+    pendingInstall()
+    const running = service.install()
+    const rejected = expect(running).rejects.toThrow('cancelled')
+    await vi.waitFor(() => expect(installMock).toHaveBeenCalledTimes(1))
+    await expect(service.install()).rejects.toThrow('already being installed')
+    expect(installMock).toHaveBeenCalledTimes(1)
+    service.stop() // still reaches the first install
+    await rejected
+  })
+
   it('aborts a running install when the provider stops', async () => {
     const { service } = setup()
     pendingInstall()
@@ -130,11 +139,9 @@ describe('Antigravity install', () => {
 })
 
 describe('Antigravity install requests', () => {
-  it('returns the new config and the provider list, leaving progress to the service hooks', async () => {
+  it('returns the new config and the provider list', async () => {
     const { service } = setup()
-    installMock.mockImplementation(async (_home, _signal, progress) => { progress?.('Downloading Google Antigravity ACP agent…'); return 'agy' })
-    const hooked: string[] = []
-    service.hooks.installProgress = (message) => hooked.push(message)
+    installMock.mockResolvedValue('agy')
     const providers = [{ id: 'antigravity' }]
     const context = {
       mms: { antigravity: service, providerInstances: { configuredProviders: () => providers } },
@@ -142,7 +149,6 @@ describe('Antigravity install requests', () => {
     } as unknown as HandlerContext
     const result = await dispatchMethod(context, 'providers.installAntigravity', {}) as { config: { instanceId: string }; providers: unknown[] }
     expect(result).toMatchObject({ config: { instanceId: 'antigravity' }, providers })
-    expect(hooked).toEqual(['Downloading Google Antigravity ACP agent…'])
     expect(await dispatchMethod(context, 'providers.cancelAntigravityInstall', {})).toEqual({ cancelled: false })
   })
 })

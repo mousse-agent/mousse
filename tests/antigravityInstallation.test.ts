@@ -77,20 +77,21 @@ describe('Antigravity install shared by two profiles', () => {
       const service = new AntigravityProviderService(newHome(), installation, new UserQuestionService())
       services.push(service)
       const progress: string[] = []
+      const changed = vi.fn()
       service.hooks.installProgress = (message) => progress.push(message)
-      return { service, progress }
+      service.hooks.changed = changed
+      return { service, progress, changed }
     }
-    return { installation, a: make(), b: make() }
+    return { installation, a: make(), b: make(), make }
   }
 
-  it('rejects the second profile, routes progress to the first and shows both the running install', async () => {
+  it('rejects the second profile and shows both the running install', async () => {
     const { a, b } = profiles()
     vi.spyOn(globalThis, 'fetch').mockImplementation(stalledDownload())
     const running = a.service.install()
     const rejected = expect(running).rejects.toThrow('Antigravity install cancelled')
     await expect(b.service.install()).rejects.toThrow('Antigravity is already being installed')
     expect(a.progress).toEqual(['Downloading Google Antigravity ACP agent…'])
-    expect(b.progress).toEqual([])
     // Every profile sees the download, and the installing flag survives a closed page.
     for (const { service } of [a, b]) {
       expect(await service.cliConfig()).toMatchObject({ installing: true, installProgress: 'Downloading Google Antigravity ACP agent…' })
@@ -100,16 +101,22 @@ describe('Antigravity install shared by two profiles', () => {
     expect((await a.service.cliConfig()).installing).toBeUndefined()
   })
 
-  it('tells clients when an install starts and ends', async () => {
-    const { a } = profiles()
+  it('tells every profile when the shared install starts, progresses and ends, and does not tell a stopped one', async () => {
+    const { a, b, make } = profiles()
+    const stopped = make()
+    stopped.service.stop()
     vi.spyOn(globalThis, 'fetch').mockImplementation(stalledDownload())
-    const changed = vi.fn()
-    a.service.hooks.changed = changed
     const running = a.service.install()
     const rejected = expect(running).rejects.toThrow('cancelled')
-    expect(changed).toHaveBeenCalledTimes(1)
+    for (const profile of [a, b]) {
+      expect(profile.changed).toHaveBeenCalledTimes(1)
+      expect(profile.progress).toEqual(['Downloading Google Antigravity ACP agent…'])
+    }
     a.service.cancelInstall()
     await rejected
-    expect(changed).toHaveBeenCalledTimes(2)
+    // Finished for everyone; the installing profile also reports its own settings change.
+    expect(b.changed).toHaveBeenCalledTimes(2)
+    expect(a.changed).toHaveBeenCalledTimes(3)
+    expect(stopped.changed).not.toHaveBeenCalled()
   })
 })

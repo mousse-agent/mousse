@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
+import { methods, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AntigravityProviderService } from '../src/mms/providers/antigravity/AntigravityProviderService'
 import { antigravityAssistantMessage, antigravityHistory } from '../src/mms/providers/antigravity/history'
@@ -20,7 +20,8 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-function fixture(blockMethod?: string, installed = false) {
+/** `fail` may return the error a request rejects with. */
+function fixture(blockMethod?: string, installed = false, fail?: (method: string) => unknown) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-acp-lifecycle-'))
   homes.push(home)
   const service = new AntigravityProviderService(home, home, new UserQuestionService())
@@ -35,11 +36,14 @@ function fixture(blockMethod?: string, installed = false) {
       child: { exitCode: 0, signalCode: null, kill: vi.fn() },
       // What `launch()` records: the launch-settings generation it started with.
       generation: (service as unknown as { launchGeneration: number }).launchGeneration,
+      signInGeneration: (service as unknown as { signInGeneration: number }).signInGeneration,
       connection: {
         signal: abort.signal,
         close: vi.fn(() => abort.abort(new Error('ACP closed'))),
         agent: {
           request: vi.fn(async (method: string, params: { prompt?: Array<{ text?: string }> }) => {
+            const failure = fail?.(method)
+            if (failure) throw failure
             if (method === blockMethod) {
               await new Promise<void>((resolve, reject) => {
                 if (method === methods.agent.session.prompt) finishPrompt = resolve
@@ -155,6 +159,56 @@ describe('Antigravity turn lifecycle', () => {
     expect(await service.login(session, input.cwd)).toEqual({ success: false, sessionId: 'setup', error: 'Install Antigravity first, then sign in' })
     expect(events).toEqual([])
     expect(processes).toHaveLength(0)
+  })
+})
+
+describe('Antigravity auth-required answers', () => {
+  const authRequired = () => RequestError.authRequired()
+  const signedInSettings = { signedIn: true, models: [{ id: 'account-model', label: 'Account Model' }] }
+  const arm = (service: AntigravityProviderService) => {
+    ;(service as unknown as { settings: unknown }).settings = { ...signedInSettings }
+    const changed = vi.fn()
+    service.hooks.changed = changed
+    const saved = () => JSON.parse(readFileSync(join((service as unknown as { profileDir: string }).profileDir, 'settings.json'), 'utf8'))
+    return { changed, saved }
+  }
+
+  it.each([methods.agent.session.new, methods.agent.session.setConfigOption, methods.agent.session.prompt])('marks the provider signed out when %s answers authentication required, keeping the chat error', async (method) => {
+    const { service, input } = fixture(undefined, false, (name) => name === method && authRequired())
+    const { changed, saved } = arm(service)
+    await expect(service.chat(input)).rejects.toThrow('Sign in to Antigravity in Settings before chatting')
+    expect(saved()).toMatchObject({ signedIn: false, models: [] })
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it('marks the provider signed out when a model refresh is asked to authenticate', async () => {
+    const { service, input } = fixture(undefined, false, (name) => name === methods.agent.session.new && authRequired())
+    const { changed, saved } = arm(service)
+    await expect(service.refreshModels(input.cwd)).rejects.toThrow('Sign in to Antigravity in Settings before chatting')
+    expect(saved()).toMatchObject({ signedIn: false, models: [] })
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not sign out for other agent errors', async () => {
+    const { service, input } = fixture(undefined, false, (name) => name === methods.agent.session.prompt && new RequestError(-32000, 'turn failed'))
+    const { changed } = arm(service)
+    await expect(service.chat(input)).rejects.toThrow('turn failed')
+    expect(changed).not.toHaveBeenCalled()
+    expect(service.llmProvider()).toBeDefined()
+  })
+
+  it('does not sign out for a request from before the latest sign-in', async () => {
+    let holder: AntigravityProviderService | undefined
+    const { service, input } = fixture(undefined, false, (name) => {
+      if (name !== methods.agent.session.new) return undefined
+      ;(holder as unknown as { signInGeneration: number }).signInGeneration += 1 // a login finishes during the request
+      return authRequired()
+    })
+    holder = service
+    const { changed } = arm(service)
+    await expect(service.chat(input)).rejects.toThrow('Sign in to Antigravity in Settings before chatting')
+    expect(changed).not.toHaveBeenCalled()
+    expect(service.llmProvider()).toBeDefined()
   })
 })
 

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, chmodSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { pipeline } from 'node:stream/promises'
@@ -57,6 +58,25 @@ function entryStream(zip: ZipFile, entry: Entry): Promise<NodeJS.ReadableStream>
 /** Installs running right now, keyed by release directory: a shared installation downloads once. */
 const activeInstalls = new Map<string, { abort: AbortController; progress?: string }>()
 
+export type AntigravityInstallEvent = { type: 'started' | 'finished' } | { type: 'progress'; message: string }
+const installEvents = new EventEmitter()
+
+/**
+ * Hears about installs into this installation, whichever profile started them: every profile
+ * shares the download, so each one tells its own clients. Returns the unsubscribe.
+ */
+export function onAntigravityInstallEvent(installationHome: string, listener: (event: AntigravityInstallEvent) => void): () => void {
+  const key = releaseDirectory(installationHome)
+  installEvents.on(key, listener)
+  return () => { installEvents.off(key, listener) }
+}
+
+function announce(key: string, event: AntigravityInstallEvent): void {
+  for (const listener of installEvents.listeners(key)) {
+    try { (listener as (event: AntigravityInstallEvent) => void)(event) } catch { /* a listener must not break the install */ }
+  }
+}
+
 /** Whether an install into this installation is running, with its latest progress line. */
 export function antigravityInstallState(installationHome: string): { installing: boolean; progress?: string } {
   const active = activeInstalls.get(releaseDirectory(installationHome))
@@ -87,14 +107,20 @@ export async function installAntigravity(installationHome: string, signal?: Abor
   if (activeInstalls.has(key)) throw new Error('Antigravity is already being installed')
   const active: { abort: AbortController; progress?: string } = { abort: new AbortController() }
   activeInstalls.set(key, active)
+  announce(key, { type: 'started' })
   const forward = () => active.abort.abort(signal?.reason)
   if (signal?.aborted) forward()
   else signal?.addEventListener('abort', forward, { once: true })
   try {
-    return await download(installationHome, pin, active.abort.signal, (message) => { active.progress = message; progress?.(message) }, options.fetch ?? fetch)
+    return await download(installationHome, pin, active.abort.signal, (message) => {
+      active.progress = message
+      progress?.(message)
+      announce(key, { type: 'progress', message })
+    }, options.fetch ?? fetch)
   } finally {
     signal?.removeEventListener('abort', forward)
     activeInstalls.delete(key)
+    announce(key, { type: 'finished' })
   }
 }
 
