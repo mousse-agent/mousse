@@ -397,20 +397,57 @@ describe('real identity + SQLite + TLS + mux sessions', () => {
           data: Buffer.alloc(32 * 1024, seq).toString('base64url')
         }
       })
+      const sig = p.aKeys.signAsNode(envelope)
       const position = p.aStore.appendAsAuthority(p.stream.id, {
         id: JSON.parse(Buffer.from(envelope).toString()).id,
         envelope,
-        sig: p.aKeys.signAsNode(envelope),
+        sig,
         recvTs: systemClock.now()
       })
-      rows.push({ ...position, envelope, sig: p.aKeys.signAsNode(envelope) })
+      rows.push({ ...position, envelope, sig })
     }
     const results = await Promise.allSettled(
       rows.map((row) => connection.a.publishRecord(p.stream.id, row))
     )
     expect(results.filter((result) => result.status === 'rejected')).toEqual([])
-    await vi.waitFor(() => expect(p.bStore.cursor(p.stream.id).seq).toBe(16))
+    await vi.waitFor(() => expect(p.bStore.cursor(p.stream.id).seq).toBe(16), { timeout: 10_000 })
     expect(h.onRecord.mock.calls.map(([row]) => row.seq)).toEqual(rows.map((row) => row.seq))
+    expect(connection.a.state()).toBe('open')
+    expect(connection.b.state()).toBe('open')
+  })
+  it('fails the stream with rate_limited instead of queueing live records without bound', async () => {
+    const p = await profiles(),
+      connection = await sessions(p)
+    await Promise.all([connection.a.opened, connection.b.opened])
+    const h = handlers()
+    connection.b.subscribe(p.stream.id, h)
+    await vi.waitFor(() => expect(h.onCaughtUp).toHaveBeenCalledOnce())
+    // A stalled link: the first send never completes, so every later record waits behind it.
+    let release!: () => void
+    const stalled = new Promise<void>((resolve) => (release = resolve))
+    const send = vi
+      .spyOn(connection.a as unknown as { sendRecords: () => Promise<void> }, 'sendRecords')
+      .mockImplementation(() => stalled)
+    const row = (seq: number): StoredRecord => ({
+      epoch: 1,
+      seq,
+      recvTs: systemClock.now(),
+      envelope: new Uint8Array(500 * 1024),
+      sig: new Uint8Array(64)
+    })
+    // 8 MiB of queued records is the cap: the 17th 500 KiB record overflows it.
+    const queued = Array.from({ length: 16 }, (_, i) =>
+      connection.a.publishRecord(p.stream.id, row(i + 1))
+    )
+    await vi.waitFor(() => expect(send).toHaveBeenCalledOnce())
+    await connection.a.publishRecord(p.stream.id, row(17))
+    await vi.waitFor(() => expect(h.onError).toHaveBeenCalledWith('rate_limited'))
+    release()
+    expect((await Promise.allSettled(queued)).map((result) => result.status)).toEqual(
+      Array(16).fill('fulfilled')
+    )
+    // Only the record already in flight went out; the dropped backlog never reached the mux.
+    expect(send).toHaveBeenCalledOnce()
     expect(connection.a.state()).toBe('open')
     expect(connection.b.state()).toBe('open')
   })

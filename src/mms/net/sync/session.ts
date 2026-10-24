@@ -32,6 +32,8 @@ import {
   PREAUTH_MAX_BYTES,
   SESSION_MAX_BLOB_TRANSFERS,
   SESSION_MAX_INFLIGHT_RPCS,
+  SESSION_MAX_LIVE_QUEUE_BYTES,
+  SESSION_MAX_LIVE_QUEUE_RECORDS,
   SESSION_MAX_SUBSCRIPTIONS,
   SESSION_PING_INTERVAL_MS,
   SESSION_MAX_SPACE_PROOFS,
@@ -143,6 +145,7 @@ type Upload = { upload: BlobUpload; stream: StreamId; size: number; sealed: bool
 type Download = { stream: StreamId; chunks: Buffer[]; bytes: number }
 type JobScope = { stream?: StreamId; space?: SpaceId; rpc?: boolean }
 type SessionJob = JobScope & { controller?: AbortController }
+type LiveQueue = { tail: Promise<void>; records: number; bytes: number; overflowed: boolean }
 const equalKey = (a: string, b: string): boolean => {
   const x = Buffer.from(a, 'base64url'),
     y = Buffer.from(b, 'base64url')
@@ -180,8 +183,8 @@ export class NetSyncSession implements SyncSession {
   private estimate?: QualifiedClockEstimate
   private subscriptions = new Map<StreamId, SubscriptionReceiver>()
   private serving = new Map<StreamId, { cancelled: boolean; live: boolean }>()
-  /** The last live publication queued per stream; the next one starts after it settles. */
-  private livePublishing = new Map<StreamId, Promise<void>>()
+  /** Live publications queued per stream; each starts after the previous one settles. */
+  private livePublishing = new Map<StreamId, LiveQueue>()
   private snapshotJobs = new Map<
     StreamId,
     { controller: AbortController; reader: SnapshotReader }
@@ -644,13 +647,35 @@ export class NetSyncSession implements SyncSession {
 
   /** After a local authority transaction commits; all serving sessions recheck ACLs. */
   publishRecord(stream: StreamId, record: StoredRecord): Promise<void> {
+    const size = record.envelope.length + record.sig.length
+    let queue = this.livePublishing.get(stream)
+    // A subscriber too slow to drain the backlog gets an error instead of unbounded memory: the
+    // queued records are dropped and it resubscribes, which resyncs from the current head.
+    if (
+      queue &&
+      (queue.records + 1 > SESSION_MAX_LIVE_QUEUE_RECORDS ||
+        queue.bytes + size > SESSION_MAX_LIVE_QUEUE_BYTES)
+    ) {
+      queue.overflowed = true
+      this.livePublishing.delete(stream)
+      return this.failServingStream(stream, 'rate_limited').catch(() => undefined)
+    }
     const controller = new AbortController()
     // One live record per stream at a time: a burst (a refreshed display snapshot is dozens of
     // ~44 KiB records) would otherwise overflow the mux waiting queue and drop records.
-    const previous = this.livePublishing.get(stream)
+    const current: LiveQueue = (queue ??= {
+      tail: Promise.resolve(),
+      records: 0,
+      bytes: 0,
+      overflowed: false
+    })
+    const previous = current.tail
+    current.records++
+    current.bytes += size
     const job = this.startJob(
       async () => {
         await previous
+        if (current.overflowed) return
         return this.publishRecordJob(stream, record, controller.signal)
       },
       { stream, controller }
@@ -659,9 +684,13 @@ export class NetSyncSession implements SyncSession {
       () => undefined,
       () => undefined
     )
-    this.livePublishing.set(stream, settled)
+    current.tail = settled
+    this.livePublishing.set(stream, current)
     void settled.then(() => {
-      if (this.livePublishing.get(stream) === settled) this.livePublishing.delete(stream)
+      current.records--
+      current.bytes -= size
+      if (this.livePublishing.get(stream) === current && current.tail === settled)
+        this.livePublishing.delete(stream)
     })
     return job
   }

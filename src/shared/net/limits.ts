@@ -49,6 +49,9 @@ export const SESSION_MAX_SUBSCRIPTIONS = 256
 export const SESSION_MAX_INFLIGHT_RPCS = 64
 export const SESSION_MAX_BLOB_TRANSFERS = 8
 export const SESSION_MAX_SPACE_PROOFS = 8
+/** Live records one session may hold queued for a single stream before it resyncs the subscriber. */
+export const SESSION_MAX_LIVE_QUEUE_RECORDS = 512
+export const SESSION_MAX_LIVE_QUEUE_BYTES = 8 * 1024 * 1024
 export const SPACE_PROOF_DEADLINE_MS = 30_000
 export const SPACE_DISCOVERY_MAX_CONTROLS = 64
 export const SPACE_DISCOVERY_MAX_CONTROL_BYTES = 128 * 1024
