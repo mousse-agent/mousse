@@ -5,7 +5,6 @@ import { GIT_NULL_DEVICE } from '../git/gitNullDevice'
 import { basename, dirname, join, relative, resolve, sep } from 'path'
 import { fileURLToPath } from 'url'
 import simpleGit, { SimpleGit } from 'simple-git'
-import { GitStateInspector } from './GitStateInspector'
 import { RepositoryContext } from './RepositoryContext'
 import { WorktreeIdentity } from './WorktreeIdentity'
 import { resolveRepositoryIdentity } from '../git/RepositoryIdentity'
@@ -390,10 +389,6 @@ export class WorktreeManager {
     } catch {
       return []
     }
-  }
-
-  async validateAgentReadiness(worktreeInfo: WorktreeInfo) {
-    return new GitStateInspector(await this.repositoryFor(worktreeInfo)).inspectWorker(worktreeInfo)
   }
 
   static resolveMacrosPath(): string {

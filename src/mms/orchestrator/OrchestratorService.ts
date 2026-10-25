@@ -453,7 +453,7 @@ export class OrchestratorService extends EventEmitter {
   private readonly lifecycle = new OwnedWorkBarrier()
 
   getOwnedActivity(): Record<string, number> {
-    return { ...this.lifecycle.snapshot(), nativeAgents: this.mousseAgents.getActiveCount() }
+    return this.lifecycle.snapshot()
   }
 
   beginShutdown(): void {
@@ -466,7 +466,6 @@ export class OrchestratorService extends EventEmitter {
     // The shutdown reason marks these turns as cut off by a restart, not stopped by a user.
     for (const session of new Set([this.boundSession, ...this.sessions.values()])) session.activeTurn?.abort.abort(this.lifecycle.signal.reason)
     for (const turn of this.channelTurns.values()) turn.abort.abort()
-    this.mousseAgents.beginShutdown()
     this.questions.shutdown()
   }
 
@@ -477,7 +476,7 @@ export class OrchestratorService extends EventEmitter {
 
   async shutdown(timeoutMs = 30_000): Promise<void> {
     this.beginShutdown()
-    await Promise.all([this.lifecycle.waitForIdle(timeoutMs), this.mousseAgents.shutdown(timeoutMs)])
+    await this.lifecycle.waitForIdle(timeoutMs)
     for (const timer of this.persistTimers.values()) clearTimeout(timer)
     this.persistTimers.clear()
     for (const session of new Set([this.boundSession, ...this.sessions.values()])) {
@@ -5691,22 +5690,12 @@ export class OrchestratorService extends EventEmitter {
     this.agents.updateStatus(agent.id, 'merging')
     const task = this.tasks.findByAgentId(agent.id)
 
-    // Stop all writers before cleanup or Git operations. Previously GUI work could keep
-    // running while its worktree was cleaned/merged, creating a destructive race.
+    // Stop all writers before cleanup or Git operations. A legacy GUI session has no live turn
+    // to stop; only headless processes and terminals can still be writing.
     if (agent.executionMode === 'headless' && agent.processId) {
       this.headlessRunner.kill(agent.processId)
       logs.push(`[headless] Stopped agent ${agent.id.slice(0, 8)}`)
-    } else if (agent.executionMode === 'gui') {
-      const stopped = await this.mousseAgents.abortAndWait(agent.id)
-      if (!stopped) {
-        logs.push(
-          `[mousse] Refused to finalize ${agent.id.slice(0, 8)} because its active turn did not stop.`
-        )
-        // Leave the agent in merging so the user can retry; do not pretend it is ready.
-        return logs
-      }
-      logs.push(`[mousse] Stopped agent ${agent.id.slice(0, 8)}`)
-    } else if (agent.ptyId) {
+    } else if (agent.executionMode !== 'gui' && agent.ptyId) {
       this.ptyManager.kill(agent.ptyId)
       logs.push(`[terminal] Closed agent ${agent.id.slice(0, 8)}`)
     }
@@ -5899,15 +5888,6 @@ export class OrchestratorService extends EventEmitter {
 
   listMousseAgentSessionIds(): string[] {
     return this.mousseAgents.listSessionIds()
-  }
-
-  hasRunningMousseAgentSessions(): boolean {
-    // Thread switching only needs to block for an actual in-process model turn. Persisted
-    // lifecycle labels can briefly remain "running" after completion/restoration and must
-    // not strand the user on the current thread.
-    return this.mousseAgents
-      .listSessionIds()
-      .some((agentId) => this.mousseAgents.isTurnActive(agentId))
   }
 
   setMousseAgentPersistCallback(fn: (immediate?: boolean) => void): void {

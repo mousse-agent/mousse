@@ -183,7 +183,6 @@ describe('Mousse durable subagent sessions', () => {
     expect(restored?.messages.find((message) => message.id === 'a1')?.incomplete).toBe(true)
     expect(lifecycle.some((event) => event.state === 'interrupted')).toBe(true)
     expect(restored?.history).toHaveLength(2)
-    expect(service.isTurnActive('agent-reload')).toBe(false)
   })
 
   it('validates corrupted and legacy durable session payloads', () => {

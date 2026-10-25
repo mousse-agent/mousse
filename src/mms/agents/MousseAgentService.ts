@@ -1,5 +1,4 @@
 import { EventEmitter } from 'events'
-import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import { v4 as uuidv4 } from 'uuid'
 import type {
   ChatMessage,
@@ -37,12 +36,10 @@ interface SessionState {
   task: string
   messages: ChatMessage[]
   nativeContext: NativeLlmContext
-  running: boolean
   runState: MousseAgentRunState
   lastError?: string
   usage?: MousseAgentSessionUsage
   warnings: string[]
-  activeAbort: AbortController | null
   assignment: Pick<SubagentAssignment, 'provider' | 'model' | 'effort'>
   updatedAt: string
   managedBinding?: MousseAgentSessionSnapshot['managedBinding']
@@ -202,19 +199,6 @@ export function parseMousseAgentSessions(raw: unknown): DurableMousseAgentSessio
 }
 
 export class MousseAgentService extends EventEmitter {
-  private readonly lifecycle = new OwnedWorkBarrier()
-
-  beginShutdown(): void {
-    this.lifecycle.beginShutdown()
-    for (const session of this.sessions.values()) session.activeAbort?.abort()
-  }
-
-  getActiveCount(): number { return this.lifecycle.count }
-
-  async shutdown(timeoutMs = 30_000): Promise<void> {
-    this.beginShutdown()
-    await this.lifecycle.waitForIdle(timeoutMs)
-  }
   private sessions = new Map<string, SessionState>()
   private persistFn?: (immediate?: boolean, agentId?: string) => void
 
@@ -224,40 +208,6 @@ export class MousseAgentService extends EventEmitter {
 
   private persist(immediate = false, agentId?: string): void {
     this.persistFn?.(immediate, agentId)
-  }
-
-  /** Abort only the active turn; the isolated worktree and branch are retained. */
-  abort(agentId: string): boolean {
-    const session = this.sessions.get(agentId)
-    if (!session?.running || !session.activeAbort || session.activeAbort.signal.aborted) {
-      return false
-    }
-    session.activeAbort.abort()
-    return true
-  }
-
-  /** Wait until an aborted turn has actually stopped using its worktree. */
-  async abortAndWait(agentId: string, timeoutMs = 10_000): Promise<boolean> {
-    const session = this.sessions.get(agentId)
-    if (!session?.running) return true
-
-    return new Promise<boolean>((resolve) => {
-      let settled = false
-      const finish = (stopped: boolean): void => {
-        if (settled) return
-        settled = true
-        clearTimeout(timeout)
-        this.off('idle', onIdle)
-        resolve(stopped)
-      }
-      const onIdle = ({ agentId: idleAgentId }: { agentId: string }): void => {
-        if (idleAgentId === agentId) finish(true)
-      }
-      const timeout = setTimeout(() => finish(false), timeoutMs)
-      this.on('idle', onIdle)
-
-      if (!this.abort(agentId) && !session.running) finish(true)
-    })
   }
 
   listSessionIds(): string[] {
@@ -282,7 +232,7 @@ export class MousseAgentService extends EventEmitter {
       // the lossless archive in the additive nativeContext field.
       history: projectLegacyHistory(session.nativeContext),
       nativeContext: structuredClone(session.nativeContext),
-      runState: session.runState === 'running' ? 'running' : session.runState,
+      runState: session.runState,
       usage: session.usage ? { ...session.usage } : undefined,
       warnings: session.warnings.length > 0 ? [...session.warnings] : undefined,
       lastError: session.lastError,
@@ -297,14 +247,10 @@ export class MousseAgentService extends EventEmitter {
    */
   restoreSessions(rawSessions: unknown, replaceAll = true): MousseAgentLifecycleEvent[] {
     const snapshots = parseMousseAgentSessions(rawSessions)
-    if (replaceAll) {
-      if ([...this.sessions.values()].some((session) => session.running)) throw new Error("Cannot replace running native sessions")
-      this.sessions.clear()
-    }
+    if (replaceAll) this.sessions.clear()
     const events: MousseAgentLifecycleEvent[] = []
 
     for (const snapshot of snapshots) {
-      if (this.sessions.get(snapshot.agentId)?.running) throw new Error('Cannot overwrite an active native session')
       const wasActive = snapshot.runState === 'running'
       const runState: MousseAgentRunState = wasActive
         ? 'interrupted'
@@ -352,12 +298,10 @@ export class MousseAgentService extends EventEmitter {
         nativeContext: snapshot.nativeContext
           ? structuredClone(snapshot.nativeContext)
           : migrateFlatHistory(structuredClone(snapshot.history ?? [])),
-        running: false,
         runState,
         lastError,
         usage: snapshot.usage ? { ...snapshot.usage } : undefined,
         warnings: [...(snapshot.warnings ?? [])],
-        activeAbort: null,
         assignment: { ...snapshot.assignment },
         updatedAt: snapshot.updatedAt
       }
@@ -379,10 +323,6 @@ export class MousseAgentService extends EventEmitter {
     }
 
     return events
-  }
-
-  isTurnActive(agentId: string): boolean {
-    return this.sessions.get(agentId)?.running === true
   }
 
   remove(agentId: string): void {

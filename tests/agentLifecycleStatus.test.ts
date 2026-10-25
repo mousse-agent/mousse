@@ -13,7 +13,7 @@ import {
   shouldFinalizeAgent
 } from '../src/mms/orchestrator/OrchestratorService'
 import { buildOrchestratorSystemPrompt, DELEGATION_PROMPT } from '../src/mms/orchestrator/systemPrompt'
-import { isMousseControlFile, LEGACY_AGENT_PROGRESS_FILE } from '../src/mms/worktree/GitStateInspector'
+import { LEGACY_AGENT_PROGRESS_FILE, MOUSSE_CONTROL_FILE_PATHS } from '../src/mms/worktree/controlFiles'
 import { TaskQueue } from '../src/mms/tasks/TaskQueue'
 import { HeadlessAgentRunner } from '../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../src/mms/terminals/PtyManager'
@@ -441,21 +441,18 @@ describe('orphan worktree detection', () => {
 })
 
 describe('legacy progress file', () => {
-  it('stays a recognised control file so pre-Phase-4 worktrees still validate and reconstruct', () => {
+  it('stays a recognised control file so pre-Phase-4 worktrees still reconstruct', () => {
     expect(LEGACY_AGENT_PROGRESS_FILE).toBe('.mousse/task-progress.json')
-    expect(isMousseControlFile(LEGACY_AGENT_PROGRESS_FILE)).toBe(true)
-    expect(isMousseControlFile('.mousse\\task-progress.json')).toBe(true)
-    expect(isMousseControlFile('src/task-progress.json')).toBe(false)
+    expect(MOUSSE_CONTROL_FILE_PATHS).toContain(LEGACY_AGENT_PROGRESS_FILE)
+    expect(MOUSSE_CONTROL_FILE_PATHS).not.toContain('src/task-progress.json')
   })
 })
 
 describe('complete_task wake messages', () => {
   it('wakes the parent after successful merges so multi-wave plans continue', () => {
     const logs = [
-      '[mousse] Stopped agent cec4da46',
       '[merge] Merged mousse/agent/cec4da46-4c4c-4b13-958b-816cf97ef862',
       '[mousse] Closed GUI agent cec4da46',
-      '[mousse] Stopped agent 72a089bb',
       '[merge] Merged mousse/agent/72a089bb-32d9-4234-a2ac-91c4410219b1',
       '[mousse] Closed GUI agent 72a089bb'
     ]
