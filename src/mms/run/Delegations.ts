@@ -82,6 +82,14 @@ export class Delegations {
       .map(toLineage)
   }
 
+  /** Every thread with the given relationship to a parent, oldest first. */
+  listLineage(relationship: LineageRelationship): LineageRecord[] {
+    return this.db
+      .statement('SELECT * FROM thread_lineage WHERE relationship = ? ORDER BY created_at, rowid')
+      .all(relationship)
+      .map(toLineage)
+  }
+
   create(input: {
     delegationId?: string
     parentRunId: string

@@ -8,7 +8,8 @@ export const GUI_REQUIRED_METHODS = [
   'actions.revertCode', 'actions.fork', 'actions.activateBranch', 'actions.getAffectedFiles',
   'actions.sweepRetention', 'actions.configureRetention', 'actions.pin',
   'operations.get', 'operations.abort', 'operations.recover', 'publish.status', 'publish.start',
-  'threads.inventory', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.configureTrash'
+  'threads.inventory', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.configureTrash',
+  'subagents.list'
 ] as const
 
 export async function assertGuiDaemonCompatible(client: LocalMmsClient, hello: ProtocolHelloOk, homeDir: string): Promise<void> {

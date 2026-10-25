@@ -7,6 +7,7 @@ import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, Provi
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
 import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../shared/updates'
+import type { SubagentSummary, SubagentsUpdatedEvent } from '../shared/subagents'
 import type {
   Agent,
   BrowserBounds,
@@ -308,6 +309,14 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, action: unknown) => cb(action)
       ipcRenderer.on('quickActions:created', handler)
       return () => ipcRenderer.removeListener('quickActions:created', handler)
+    }
+  },
+  subagents: {
+    list: (threadId: string): Promise<SubagentSummary[]> => ipcRenderer.invoke('subagents:list', threadId),
+    onUpdated: (cb: (payload: SubagentsUpdatedEvent) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, payload: SubagentsUpdatedEvent) => cb(payload)
+      ipcRenderer.on('subagents:updated', handler)
+      return () => ipcRenderer.removeListener('subagents:updated', handler)
     }
   },
   agents: {

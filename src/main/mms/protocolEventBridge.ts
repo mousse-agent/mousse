@@ -39,6 +39,11 @@ export function bridgeProtocolEvent(
       broadcast('threads:updated', threads)
       return true
     }
+    case 'subagents.updated': {
+      const parentThreadId = (event.data as { parentThreadId?: string } | null)?.parentThreadId
+      if (parentThreadId) broadcast('subagents:updated', { parentThreadId })
+      return true
+    }
     case 'thread.message': {
       const message = (event.data as { message?: unknown } | null)?.message
       if (threadId != null) {

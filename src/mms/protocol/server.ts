@@ -42,6 +42,8 @@ import { NET_LOCAL_CAPABILITY } from '../../shared/net/local'
 import { OutboundWriter } from './outboundWriter'
 import { envelopeFrames } from './envelopeChunks'
 import { MMS_PROTOCOL_MAX_CONNECTION_EVENT_BYTES } from './types'
+import { subagentAncestorsOf, subagentParentsOfEvent } from '../run/delegation/subagentEvents'
+import type { ThreadEvent } from '../run/types'
 
 
 export interface ProtocolServerOptions {
@@ -449,6 +451,31 @@ export class MmsProtocolServer {
     // Run Engine (SPEC §6): durable thread events and command acknowledgements.
     onOrch('run-event', (event: { threadId: string }) => {
       emitToSubscribers(this.ring.push('run.event', event, event.threadId))
+    })
+    // A parent's subagent list changes with its delegations, its children's runs, inbox rows and
+    // questions, and their titles. A change on a nested subagent also changes the rows of every
+    // ancestor above it (activity, `waitingOn`), so each is named. Clients refetch `subagents.list`
+    // for the named parent.
+    const pushSubagentsUpdated = (parentThreadIds: readonly string[]): void => {
+      for (const parentThreadId of new Set(parentThreadIds))
+        emitToSubscribers(this.ring.push('subagents.updated', { parentThreadId }, parentThreadId))
+    }
+    onOrch('run-event', (event: ThreadEvent) => {
+      try {
+        pushSubagentsUpdated(subagentParentsOfEvent(services.runEngine.delegations, event))
+      } catch (error) {
+        console.warn('subagents.updated could not be derived from a run event', { error: error instanceof Error ? error.message : String(error) })
+      }
+    })
+    for (const name of ['pending', 'cleared'] as const)
+      onEmitter(services.questions, name, (payload: { threadId: string }) => {
+        pushSubagentsUpdated(subagentAncestorsOf(services.runEngine.delegations, payload.threadId))
+      })
+    // Any update to a subagent thread (not only a rename) refreshes the lists above it; the
+    // clients' 150 ms debounce keeps that cheap.
+    onEmitter(services.threads, 'updated', (thread: { id?: string; lineage?: { parentThreadId: string; relationship: string } }) => {
+      if (thread.lineage?.relationship !== 'subagent') return
+      pushSubagentsUpdated([thread.lineage.parentThreadId, ...(thread.id ? subagentAncestorsOf(services.runEngine.delegations, thread.id) : [])])
     })
     onOrch('stop-requested', (payload: { threadId: string; runId: string }) => {
       emitToSubscribers(this.ring.push('run.stop-requested', payload, payload.threadId))
