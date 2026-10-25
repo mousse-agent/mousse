@@ -201,6 +201,14 @@ export class BackgroundObligations {
   }
 
   /**
+   * A wake that had started was cut off: the tasks it was opened for (`own`) were read by it and are
+   * `DISCARDED`; any other task it was assigned is still queued in Claude and `CARRIED`.
+   */
+  releaseWake(owner: unknown, own: ReadonlySet<string>): void {
+    for (const [id, consumer] of this.consumers) if (consumer === owner) this.consumers.set(id, own.has(id) ? DISCARDED : CARRIED)
+  }
+
+  /**
    * The cancel that went with an interrupt swept the whole queue, so every notification still queued for a
    * wake may be gone, not only those the cancelled run had read: every `CARRIED` task becomes `LOST`.
    */
@@ -312,6 +320,8 @@ export class LiveRun {
   deferredResult: SDKResultMessage | undefined
   /** The turn produced its first frame. */
   started = false
+  /** For a wake: the tasks it was opened for, the ones whose notifications it reads. */
+  readonly wakeTaskIds = new Set<string>()
   /** What a discarded wake had left when this turn began; it clears them when it commits. */
   discardedAtStart: string[] = []
   /** The host could not run this wake and it was discarded; its frames still arrive until its result. */
@@ -643,9 +653,12 @@ export class LiveSession<Turn = unknown> {
     const unclaimed = this.unclaimed.indexOf(run)
     if (unclaimed >= 0) this.unclaimed.splice(unclaimed, 1)
     // What a turn had read stays queued in Claude, which starts a wake turn for it (CARRIED), unless the
-    // cancel below also drops it (LOST). A wake that had started already read its notification: no
-    // second wake follows, so what it held is cleared by the next turn that commits (DISCARDED).
-    this.obligations.release(run, run.kind === 'continuation' && run.started ? 'discarded' : 'carried')
+    // cancel below also drops it (LOST). A wake that had started already read the notifications it was
+    // opened for: no second wake follows for those, so they are cleared by the next turn that commits
+    // (DISCARDED). A task that finished while the wake ran is only assigned to it and was not read yet:
+    // Claude still starts a wake for it, so it stays carried.
+    if (run.kind === 'continuation' && run.started) this.obligations.releaseWake(run, run.wakeTaskIds)
+    else this.obligations.release(run, 'carried')
     const query = this.query
     // A turn that pushed nothing has nothing in flight; one that did, or a wake, is interrupted. An
     // interrupt of an idle query is harmless, and one that fails leaves the next turn to find out.
@@ -841,7 +854,10 @@ export class LiveSession<Turn = unknown> {
     }
     const target = owner ?? this.frameTarget(message)
     if (!target) return
-    if (!target.started) {
+    // A turn Claude started on its own begins at its first root frame: a background agent's frames (they
+    // name a parent tool call) and tool results say nothing about whether the wake began.
+    const root = (message as { parent_tool_use_id?: unknown }).parent_tool_use_id == null && message.type !== 'user'
+    if (!target.started && (root || target.kind !== 'continuation')) {
       target.started = true
       if (target === this.continuation) this.clearWake()
     }
@@ -865,7 +881,7 @@ export class LiveSession<Turn = unknown> {
     return this.runs.find((run) => !run.abandoned && !run.settled)
   }
 
-  /** Every run that pushed one of `ids`, oldest first. */
+  /** Every run that pushed one of `ids`, oldest first. The open continuation is never in `runs` and always comes last, so it ranks newest. */
   private ownersOf(ids: readonly string[]): LiveRun[] {
     const candidates = this.continuation && !this.runs.includes(this.continuation) ? [...this.runs, this.continuation] : this.runs
     return candidates.filter((run) => ids.some((id) => run.ids.has(id)))
@@ -938,7 +954,10 @@ export class LiveSession<Turn = unknown> {
     this.clearIdle()
     this.armWake(run)
     // The tasks are the continuation's before the owner hears of it, so it can finish them at once.
-    for (const id of taskIds) this.obligations.consume(id, run)
+    for (const id of taskIds) {
+      run.wakeTaskIds.add(id)
+      this.obligations.consume(id, run)
+    }
     this.hooks.continuationStarted(run, { id: run.id, taskIds: [...taskIds], summaries })
     return run
   }

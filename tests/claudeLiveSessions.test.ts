@@ -1522,16 +1522,19 @@ describe('background helpers as the real Claude Code reports them', () => {
     expect(f.service.hasBackgroundWork('thread')).toBe(false)
   })
 
-  it('a shell that survived a cut-off turn is released by the four-hour cap, and Stop releases it at once', async () => {
+  it('a shell that survived a cut-off turn is released by the four-hour cap, however active the process is', async () => {
     vi.useFakeTimers()
     const f = fixture({ idleCloseMs: 1000, idleReleaseMs: 5000, maxPinMs: 12_000 })
     shell(f)
-    const first = await cutOff(f)
+    const process = await cutOff(f)
     // Provider activity does not move the cap, which counts from when the shell first became owed.
-    await vi.advanceTimersByTimeAsync(9000)
-    expect(first.closed).toBe(false)
-    await vi.advanceTimersByTimeAsync(4000)
-    expect(first.closed).toBe(true)
+    for (let elapsed = 0; elapsed < 10_000; elapsed += 1000) {
+      process.emit({ type: 'system', subtype: 'task_progress', session_id: SESSION, task_id: 'bash-1' })
+      await vi.advanceTimersByTimeAsync(1000)
+    }
+    expect(process.closed).toBe(false)
+    await vi.advanceTimersByTimeAsync(2500)
+    expect(process.closed).toBe(true)
     expect(f.service.hasBackgroundWork('thread')).toBe(false)
   })
 
@@ -1567,6 +1570,52 @@ describe('background helpers as the real Claude Code reports them', () => {
     expect(await f.turn({ history: '' })).toBe('next')
     expect(f.service.hasBackgroundWork('thread')).toBe(false)
     expect(f.host.continuationStarted).toHaveBeenCalledTimes(1)
+  })
+
+  it('a task that finished while a wake ran, and was not read yet, still gets its own wake when the first is cut off', async () => {
+    const f = fixture()
+    startedWith(f, { id: 'bash-1', type: 'local_bash' }, { id: 'bash-2', type: 'local_bash' })
+    await f.turn()
+    const process = f.cli.last
+    f.cli.reply = undefined
+    process.emit(notification('bash-1'), textDelta('reading the first report'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    // The second shell finishes while the wake runs: its notification is assigned to the wake.
+    process.emit(notification('bash-2'))
+    await later(20)
+    const abort = new AbortController()
+    const wake = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined, signal: abort.signal })
+    await later(20)
+    abort.abort()
+    await expect(wake).rejects.toThrow()
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    process.emit(resultFrame({ terminalReason: 'aborted_streaming', origin: 'task-notification' }))
+    // Claude had not read the second notification: it starts a wake for it, which must not run unseen.
+    process.emit(textDelta('The second shell finished.'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(2))
+    expect(f.host.continuationStarted).toHaveBeenLastCalledWith('thread', expect.objectContaining({ taskIds: ['bash-2'] }))
+  })
+
+  it('a background agent\'s frames do not count as the wake having begun: a wake cut off before its own first frame is still owed', async () => {
+    const f = fixture()
+    shell(f)
+    await f.turn()
+    const process = f.cli.last
+    f.cli.reply = undefined
+    process.emit(notification('bash-1'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    // An agent's frame (it names a parent tool call) arrives before Claude begins the wake turn.
+    process.emit(textDelta('agent talking', undefined, { parent_tool_use_id: 'tool-1' }))
+    await later(20)
+    const abort = new AbortController()
+    const wake = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined, signal: abort.signal })
+    await later(20)
+    abort.abort()
+    await expect(wake).rejects.toThrow()
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    // The wake never began, so Claude still runs it, and it opens a continuation again.
+    process.emit(textDelta('The shell finished.'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(2))
   })
 
   it('messages Claude read together are answered by one result: the newest live turn gets it and the cancelled one is finished', async () => {
