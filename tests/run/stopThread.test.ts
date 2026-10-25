@@ -12,7 +12,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Message } from '@earendil-works/pi-ai'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ProjectManager } from '../../src/mms/data/ProjectManager'
+import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
+import { childBusy } from '../../src/mms/run/delegation/hold'
 import type { DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
@@ -24,7 +27,7 @@ import { bumpStopGenerations, currentStopGeneration, isRunAdmissionStale, runSto
 import { isChildQuestionRow, type ChildQuestionPayload, type InboxRecord, type ProviderRef } from '../../src/mms/run/types'
 import { normalizeQueuedMessages } from '../../src/mms/queue/ThreadMessageQueue'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
-import { PI, phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
+import { PI, createOrchestrator, phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 describe('RunEngine.stopSubtree (issue #142)', () => {
   let f: DelegationFixture | undefined
@@ -193,6 +196,19 @@ describe('RunEngine.stopSubtree (issue #142)', () => {
     expect(f.engine.inbox.listForThread('int')).toEqual([])
   })
 
+  it('the owner\'s notice is written before its task leaves running, so a held task cannot publish an answer that predates the Stop', async () => {
+    // P -> C -> G. C's turn ended while G still works: P's task is held on C's own task.
+    const { c, g } = await tree()
+    f!.finish(c.childRunId, 'C: waiting for G')
+    expect(task(c.delegationId).status).toBe('running')
+    f!.engine.stopSubtree({ threadId: 'child-2', reason: 'user' })
+    expect(task(g.delegationId).status).toBe('cancelled')
+    // C is woken for the notice; until it has read it, P's task is still held and nothing was published.
+    expect(f!.engine.inbox.listPending('child-1').map((row) => (row.payload as { kind?: string }).kind)).toEqual(['delegation_stopped'])
+    expect(task(c.delegationId).status).toBe('running')
+    expect(f!.engine.inbox.listForThread('parent').filter((row) => row.kind === 'child_result')).toEqual([])
+  })
+
   describe('queued work', () => {
     const send = (threadId: string, source: string, clientRequestId: string, delegation?: { parentRunId: string }) =>
       f!.engine.dispatch({
@@ -206,16 +222,27 @@ describe('RunEngine.stopSubtree (issue #142)', () => {
         return result.runId
       })
 
-    it('ends the queued runs of a subagent; what a person queued on the thread the Stop was aimed at stays, unless asked', async () => {
+    it('ends the queued tasks of a subagent; what a person queued stays at every level, unless asked', async () => {
       const { parent } = await tree()
       const followUp = await send('child-1', 'delegation', 'follow-up', { parentRunId: parent.runId })
       const mine = await send('parent', 'gui', 'mine')
+      // A message a person typed to a subagent: it is tracked as a follow-up, and a Stop must not lose it.
+      const typed = await send('child-2', 'gui', 'typed')
       f!.engine.stopSubtree({ threadId: 'parent', reason: 'user' })
       expect(f!.engine.getRun(followUp)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'user' } })
       expect(f!.engine.getRun(mine)!.status).toBe('queued')
+      expect(f!.engine.getRun(typed)!.status).toBe('queued')
       const cleared = f!.engine.stopSubtree({ threadId: 'parent', reason: 'user', clearQueue: true })
-      expect(cleared.cancelledRuns.map((run) => run.runId)).toEqual([mine])
+      expect(cleared.cancelledRuns.map((run) => run.runId).sort()).toEqual([mine, typed].sort())
       expect(f!.engine.getRun(mine)!.status).toBe('cancelled')
+    })
+
+    it('a steer still waiting for a run of the stop set is cancelled with it', async () => {
+      const { parent } = await tree()
+      const steer = f!.outbox.enqueue({ threadId: 'parent', runId: parent.runId, kind: 'turn.steer', availableAt: new Date(Date.parse(f!.now()) + 3_600_000).toISOString(), payload: { runId: parent.runId, threadId: 'parent', text: 'late' } })
+      f!.engine.stopSubtree({ threadId: 'parent', reason: 'user' })
+      expect(f!.outbox.get(steer.effectId)!.status).toBe('cancelled')
+      expect(f!.engine.isStale(parent.runId)).toBe(true)
     })
 
     it('a person\'s message to a subagent after the Stop is not in the set: it survives and starts at the new generation', async () => {
@@ -438,7 +465,7 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
    * more work as soon as it is. The Worker answers its task when released (`childFinishes`: at once), and
    * any other prompt with `child said: <prompt>`. Every other parent turn (a wake) answers `parent reply`.
    */
-  const scene = async (options: { parentBlocks?: boolean; childFinishes?: boolean; queueFollowUp?: boolean; providerStop?: boolean; childScript?: HostScript } = {}) => {
+  const scene = async (options: { parentBlocks?: boolean; childFinishes?: boolean; queueFollowUp?: boolean; providerStop?: boolean; secondChild?: boolean; grandchild?: boolean; childScript?: HostScript } = {}) => {
     const gate = { parent: deferred(), child: deferred() }
     releases.push(gate.parent.resolve, gate.child.resolve)
     const out: Out = {}
@@ -448,6 +475,7 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
         if (input.prompt !== 'Delegate it') return 'parent reply'
         out.delegation = await delegation!.delegateTask({ prompt: 'Long child work', title: 'Worker', workspace: 'isolated' }, { toolCallId: 'call-1' })
         if (options.queueFollowUp) out.queued = await delegation!.continueSubagent({ subagent: 'Worker', prompt: 'Queued work' }, { toolCallId: 'call-q' })
+        if (options.secondChild) out.second = await delegation!.delegateTask({ prompt: 'Second long work', title: 'Second', workspace: 'isolated' }, { toolCallId: 'call-2nd' })
         if (options.parentBlocks === false) return 'parent delegated'
         await until(gate.parent.promise, input.signal)
         if (input.signal.aborted) {
@@ -457,8 +485,13 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
         }
         return 'parent done'
       }
+      if (input.prompt.includes('Second long work') || input.prompt.includes('Grand work')) {
+        await until(gate.child.promise, input.signal)
+        return input.signal.aborted ? '' : 'child done'
+      }
       if (options.childScript && !input.prompt.includes('Long child work')) return options.childScript(input, delegation)
       if (input.prompt.includes('Long child work')) {
+        if (options.grandchild) out.grand = await delegation!.delegateTask({ prompt: 'Grand work', title: 'Grand', workspace: 'isolated' }, { toolCallId: 'call-grand' })
         if (!options.childFinishes) await until(gate.child.promise, input.signal)
         return input.signal.aborted ? '' : 'child done'
       }
@@ -473,11 +506,14 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     d.orch.setThreadModelOverride(created.id, PI)
     parentId = created.id
     const sent = await d.orch.send('Delegate it', false, { threadId: parentId, clientRequestId: 'go', awaitMode: 'ack' })
-    await waitFor(() => Boolean(out.delegation?.delegationId) && (!options.queueFollowUp || Boolean(out.queued)), 'the parent to start its subagent')
+    await waitFor(() => Boolean(out.delegation?.delegationId) && (!options.queueFollowUp || Boolean(out.queued)) && (!options.secondChild || Boolean(out.second?.delegationId)), 'the parent to start its subagent')
     const delegation = d.engine.delegations.get(out.delegation.delegationId)!
     const childThreadId = delegation.childThreadId
     if (!options.childFinishes) await waitFor(() => d.engine.getRun(delegation.childRunId)?.status === 'running', 'the subagent\'s turn')
     else await waitFor(() => d.engine.getRun(delegation.childRunId)?.status === 'completed', 'the subagent to finish')
+    const running = (id: string): boolean => d.engine.getRun(id)?.status === 'running'
+    if (options.secondChild) await waitFor(() => running(d.engine.delegations.get(out.second.delegationId)!.childRunId), 'the second subagent\'s turn')
+    if (options.grandchild) await waitFor(() => Boolean(out.grand?.delegationId) && running(d.engine.delegations.get(out.grand.delegationId)!.childRunId), 'the grandchild\'s turn')
     const run = (id: string) => d.engine.getRun(id)!
     const terminal = (id: string) => ['completed', 'interrupted', 'failed', 'cancelled'].includes(run(id).status)
     const protocol = (method: string, params: Record<string, unknown>) =>
@@ -730,7 +766,154 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     })
   })
 
+  describe('Lineage\'s Stop all', () => {
+    it('stops every working subagent of the thread and everything below each, in one call, and leaves the thread\'s own turn running', async () => {
+      const s = await scene({ secondChild: true, grandchild: true })
+      const second = s.d.engine.delegations.get(s.out.second.delegationId)!
+      const grand = s.d.engine.delegations.get(s.out.grand.delegationId)!
+      const result = await s.protocol('subagents.stopAll', { threadId: s.parentId })
+      expect(result).toMatchObject({ threadId: s.parentId, ok: true })
+      expect((result as { stopped: string[] }).stopped.sort()).toEqual([s.childThreadId, second.childThreadId].sort())
+      await waitFor(() => [s.delegation.childRunId, second.childRunId, grand.childRunId].every((id) => s.terminal(id)), 'the subagents to stop')
+      for (const id of [s.delegation.childRunId, second.childRunId, grand.childRunId]) expect(s.run(id)).toMatchObject({ status: 'interrupted', outcome: { interruptedBy: 'user' } })
+      for (const id of [s.delegation.delegationId, second.delegationId, grand.delegationId]) expect(s.task(id).status).toBe('cancelled')
+      // The thread itself was not stopped: its turn runs on, and it is told what happened.
+      expect(s.run(s.parentRunId).status).toBe('running')
+      expect(s.run(s.parentRunId).outcome?.stopRequested).toBeUndefined()
+      expect(s.generation(s.parentId)).toBe(0)
+      expect(s.generation(s.childThreadId)).toBe(1)
+      expect(s.d.engine.inbox.listPending(s.parentId).filter((row) => (row.payload as { kind?: string }).kind === 'delegation_stopped')).toHaveLength(2)
+      // Nothing is left to stop.
+      expect(await s.protocol('subagents.stopAll', { threadId: s.parentId })).toMatchObject({ ok: false, stopped: [] })
+    })
+  })
+
+  describe('task_cancel repeated', () => {
+    it('does not touch newer work the subagent started after the task it names ended', async () => {
+      const newer = deferred()
+      releases.push(newer.resolve)
+      const s = await scene({ childScript: async (input) => { await until(newer.promise, input.signal); return 'newer done' } })
+      const first = await (s.d.orch as any).taskCancel(s.parentId, { delegationId: s.delegation.delegationId })
+      expect(first.cancelled).toEqual([s.delegation.delegationId])
+      await waitFor(() => s.terminal(s.delegation.childRunId), 'the cancelled task\'s run to end')
+      // Newer work on the same subagent: a person's message starts a new run.
+      const sent = await s.d.orch.send('newer work', false, { threadId: s.childThreadId, source: 'gui', clientRequestId: 'newer', awaitMode: 'ack' })
+      await waitFor(() => s.run(sent.runId!).status === 'running', 'the newer run to start')
+      const generation = s.generation(s.childThreadId)
+      expect(await (s.d.orch as any).taskCancel(s.parentId, { delegationId: s.delegation.delegationId })).toMatchObject({ status: 'cancelled', cancelled: [] })
+      expect(s.run(sent.runId!)).toMatchObject({ status: 'running' })
+      expect(s.run(sent.runId!).outcome?.stopRequested).toBeUndefined()
+      expect(s.generation(s.childThreadId)).toBe(generation)
+    })
+  })
+
+  describe('a steer of a run the Stop ended', () => {
+    it('delivers nothing and makes no work, and a late steer keeps the generation of the run it was meant for', async () => {
+      const s = await scene()
+      await s.d.orch.stopThread(s.parentId, 'user')
+      await waitFor(() => s.terminal(s.parentRunId), 'the parent to stop')
+      const orch = s.d.orch as any
+      const effect = { effectId: 'effect:late-steer', payload: { runId: s.parentRunId, threadId: s.parentId, text: 'a steer that outlived its run' } }
+      vi.spyOn(orch, 'scheduleQueueDrain').mockImplementation(() => undefined)
+      orch.executeTurnSteerEffect(effect)
+      expect(s.d.store.loadMessageQueue(s.parentId)).toEqual([])
+      // Whatever reaches the queue for that run is stamped older than the Stop, never with the new generation.
+      orch.enqueueLateSteer(s.parentId, 'late', undefined, undefined, s.parentRunId)
+      const [entry] = s.d.store.loadMessageQueue(s.parentId)
+      expect(entry).toMatchObject({ source: 'steer-late', stopGeneration: 0 })
+      expect(s.generation(s.parentId)).toBe(1)
+    })
+  })
+
+  describe('queue entries below the thread a Stop was aimed at', () => {
+    it('removes tasks, stale notices and entries that name no run, and keeps a message a person queued', async () => {
+      const s = await scene()
+      const orch = s.d.orch as any
+      // Queued behind the subagent's running task: a person's message (with its run), a steer that missed its turn
+      // (admitted before the Stop) and an entry that names no run.
+      const typed = await s.d.orch.send('typed to the worker', false, { threadId: s.childThreadId, source: 'gui', clientRequestId: 'typed', awaitMode: 'ack' })
+      const late = orch.enqueueForThread(s.childThreadId, { content: 'late notice' }, { source: 'steer-late' })
+      const nameless = orch.enqueueForThread(s.childThreadId, { content: 'no run' }, { source: 'gui' })
+      expect(s.d.orch.listQueue(s.childThreadId).map((item) => item.id).sort()).toEqual([typed.queueItem!.id, late.id, nameless.id].sort())
+      await s.d.orch.stopThread(s.parentId, 'user')
+      expect(s.d.orch.listQueue(s.childThreadId).map((item) => item.id)).toEqual([typed.queueItem!.id])
+      expect(s.run(typed.runId!).status).toBe('queued')
+      // It runs once the stopped task is over.
+      await waitFor(() => s.terminal(s.delegation.childRunId), 'the subagent to stop')
+      await waitFor(() => {
+        s.d.orch.recoverAndDrainPendingQueues()
+        return s.run(typed.runId!).status === 'completed'
+      }, 'the person\'s message to run', 15_000)
+      expect(s.childTurns().at(-1)).toContain('typed to the worker')
+    })
+  })
+
+  describe('a Stop without a run engine', () => {
+    it('ends the thread\'s turn and its channel turn both', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'mousse-stop-no-engine-'))
+      const previous = process.env.MOUSSE_HOME
+      try {
+        process.env.MOUSSE_HOME = dir
+        const orch = createOrchestrator(dir, new ThreadDataStore(new ProjectManager()))
+        const turn = vi.spyOn(orch, 'abortActiveTurn').mockReturnValue(true)
+        const channel = vi.spyOn(orch, 'abortChannelTurn').mockReturnValue(true)
+        await expect(orch.stopThread('thread-1', 'user')).resolves.toMatchObject({ ok: true, status: 'stopped' })
+        expect(turn).toHaveBeenCalledTimes(1)
+        expect(channel).toHaveBeenCalledTimes(1)
+      } finally {
+        if (previous === undefined) delete process.env.MOUSSE_HOME
+        else process.env.MOUSSE_HOME = previous
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  })
+
   describe('steers the subagent never read (follow-up from the hold review)', () => {
+    /** The subagent's first turn ends with a person's steer unread; its follow-up run is queued but not drained yet. */
+    const heldBySteer = async () => {
+      const s = await scene({
+        parentBlocks: false,
+        childScript: (input) => (input.prompt.includes('please also check the tests') ? 'I checked the tests too.' : `child said: ${input.prompt}`)
+      })
+      await waitFor(() => s.terminal(s.parentRunId), 'the parent to end its turn')
+      // Nothing drains the queue until the test says so.
+      vi.spyOn(s.d.orch as any, 'scheduleQueueDrain').mockImplementation(() => undefined)
+      expect(s.d.orch.steerThread(s.childThreadId, 'please also check the tests')).toBe(true)
+      s.gate.child.resolve()
+      await waitFor(() => s.d.engine.listRuns(s.childThreadId).some((run) => run.source === 'steer-followup'), 'the follow-up run to be queued')
+      const followUp = s.d.engine.listRuns(s.childThreadId).find((run) => run.source === 'steer-followup')!
+      return { s, followUp }
+    }
+
+    it('the follow-up is a queued run from the start: it holds the task by itself, with no session in memory, and survives a restart', async () => {
+      const { s, followUp } = await heldBySteer()
+      expect(followUp.status).toBe('queued')
+      expect(s.d.store.loadMessageQueue(s.childThreadId).map((item) => item.runId)).toEqual([followUp.runId])
+      expect(s.task(s.delegation.delegationId).status).toBe('running')
+      ;(s.d.orch as any).sessions.delete(s.childThreadId)
+      expect(childBusy(s.d.engine.store, s.childThreadId)).toBe(true)
+
+      // The daemon dies before the follow-up ran. Boot judges every running task: this one is still held.
+      const homeDir = home!
+      await s.d.crash()
+      const reborn = phase6Daemon(homeDir, [s.adapter])
+      daemon = reborn
+      expect(reborn.engine.delegations.get(s.delegation.delegationId)!.status).toBe('running')
+      expect(reborn.engine.getRun(followUp.runId)!.status).toBe('queued')
+      await waitFor(() => {
+        reborn.orch.recoverAndDrainPendingQueues()
+        return reborn.engine.delegations.get(s.delegation.delegationId)!.status === 'result_available'
+      }, 'the task to publish after the follow-up ran', 15_000)
+      expect(reborn.engine.delegations.get(s.delegation.delegationId)!.result).toMatchObject({ runStatus: 'completed', text: 'I checked the tests too.' })
+    })
+
+    it('the task is released as soon as the queued follow-up leaves without running', async () => {
+      const { s, followUp } = await heldBySteer()
+      expect(s.task(s.delegation.delegationId).status).toBe('running')
+      ;(s.d.orch as any).cancelQueuedRuns([followUp.runId])
+      expect(s.task(s.delegation.delegationId)).toMatchObject({ status: 'result_available', result: { runStatus: 'completed' } })
+    })
+
     it('a person\'s plain-text steer holds the subagent\'s task until the subagent has answered it', async () => {
       let delegationId = ''
       let statusWhenAnswering = ''

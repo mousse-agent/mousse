@@ -378,9 +378,31 @@ describe('remote composer methods', () => {
     expect(await call(api, 'orchestrator.abort', { threadId: 'thread-2', run: runContext.id })).toEqual({ ok: true })
     expect(stopped).toEqual(['thread-2'])
     await expect(pending).rejects.toMatchObject({ code: 'cancelled' })
-    // A run that is gone is not a Stop of anything.
+    // With no remote run left to end it is still a Stop of the thread (its subagents may be working under an idle
+    // parent); `ok` says whether it stopped anything.
     expect(await call(api, 'orchestrator.abort', { threadId: 'thread-2', run: runContext.id })).toEqual({ ok: false })
-    expect(stopped).toEqual(['thread-2'])
+    expect(stopped).toEqual(['thread-2', 'thread-2'])
+  })
+
+  it('a remote Stop with no remote run stops the thread\'s subagents and reports whether anything stopped', async () => {
+    const results: unknown[] = [{ ok: true }, { ok: false }]
+    const stopped: string[] = []
+    const backend: RemoteBackendPort = {
+      ...idleBackend,
+      stop: async (threadId) => {
+        stopped.push(threadId)
+        return results.shift()
+      }
+    }
+    const api = new RemoteApi(backend, clock)
+    resources.push(() => api.close())
+    expect(await call(api, 'orchestrator.abort', { threadId: 'idle-parent', run: newId('rpc') })).toEqual({ ok: true })
+    expect(await call(api, 'orchestrator.abort', { threadId: 'idle-parent', run: newId('rpc') })).toEqual({ ok: false })
+    expect(stopped).toEqual(['idle-parent', 'idle-parent'])
+    // A backend without the hook answers as before.
+    const bare = new RemoteApi(idleBackend, clock)
+    resources.push(() => bare.close())
+    expect(await call(bare, 'orchestrator.abort', { threadId: 'idle-parent', run: newId('rpc') })).toEqual({ ok: false })
   })
 
   it('gives staged images back when a send is cancelled before the message is stored', async () => {

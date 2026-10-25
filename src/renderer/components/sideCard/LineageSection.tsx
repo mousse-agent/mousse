@@ -113,13 +113,13 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
       title={lineageTitle(subagents)}
       threadId={threadId}
       action={
-        // Stop all is a Stop of this thread: it works on an idle parent and reaches every subagent below it.
+        // Stop all stops each subagent that is working, with everything below it, and leaves this thread's own turn running.
         threadId !== null && countRunningSubagents(subagents) > 0 ? (
           <button
             type="button"
             className="lineage-stop-all"
             aria-label="Stop all subagents"
-            onClick={() => void window.mousse.orchestrator.abort(threadId)}
+            onClick={() => void window.mousse.subagents.stopAll(threadId)}
           >
             Stop all
           </button>

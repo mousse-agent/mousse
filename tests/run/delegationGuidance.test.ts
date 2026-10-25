@@ -7,7 +7,6 @@ import { describe, expect, it, vi } from 'vitest'
 import { DELEGATION_PROMPT } from '../../src/mms/orchestrator/systemPrompt'
 import { delegationToolDefinitions, dispatchDelegationTool, LISTED_DELEGATION_TOOL_NAMES, type DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
 import {
-  ADVERTISE_NESTING,
   delegationGuidanceLines,
   mcpDelegationInstructions,
   piDelegationPrompt,
@@ -69,7 +68,6 @@ describe('subagent guidance', () => {
   })
 
   it('tells a subagent that it may start subagents of its own, and tells no one else', () => {
-    expect(ADVERTISE_NESTING).toBe(true)
     expect(subagentPreamble('Parent')).toContain('You may start your own subagents unless your instructions say not to.')
     // The main thread's guidance is about its own subagents; nesting is the subagent's preamble alone.
     const mainThread = [piDelegationPrompt(), mousseOrchestrationInstructions(), ...delegationGuidanceLines(), ...mcpDelegationInstructions()].join('\n')

@@ -1305,6 +1305,10 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ logs: string[] }>('agents.stop', { threadId, agentId })
     return res.logs
   })
+  registerHandler('subagents:stopAll', async (_e, threadId: string) => {
+    const res = await guiMms.request<{ ok: boolean }>('subagents.stopAll', { threadId })
+    return res.ok
+  })
   registerHandler('subagents:list', async (_e, threadId: string) => {
     const res = await guiMms.request<{ subagents: SubagentSummary[] }>('subagents.list', { threadId })
     return res.subagents

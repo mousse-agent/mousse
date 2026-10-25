@@ -1009,6 +1009,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       return { pending: ctx.mms.questions.listAllPending() }
     }
+    case 'subagents.stopAll': {
+      // Lineage's Stop all: every subagent of the thread that is working, each with its own subtree; the thread keeps running.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      return { threadId, ...(await ctx.mms.orchestrator.stopSubagents(threadId)) }
+    }
     case 'subagents.list': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId'])

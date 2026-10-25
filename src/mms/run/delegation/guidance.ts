@@ -8,9 +8,6 @@
  * start subagents of its own (issue #142).
  */
 
-/** Whether the guidance tells a subagent that it may start subagents of its own. */
-export const ADVERTISE_NESTING = true
-
 /** The model-facing delegation bullets, shared by pi and MCP. */
 export function delegationGuidanceLines(): string[] {
   return [
@@ -48,7 +45,7 @@ export function subagentGuidanceLines(parentTitle?: string): string[] {
   return [
     `You are a subagent${parentTitle ? ` of "${parentTitle}"` : ''}. Your final message is your result: keep it self-contained and bounded.`,
     'ask_user questions reach your parent and the user.',
-    ...(ADVERTISE_NESTING ? ['You may start your own subagents unless your instructions say not to.'] : [])
+    'You may start your own subagents unless your instructions say not to.'
   ]
 }
 

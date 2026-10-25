@@ -200,7 +200,12 @@ export class RemoteApi {
     }
     if (method === 'orchestrator.abort' || method === 'orchestrator.steer') {
       const run = this.runs.get(params.run as RpcId)
-      if (!run) return { ok: false }
+      if (!run) {
+        // No remote run to end: a Stop of the thread still ends its subagents and other work (an idle parent's).
+        if (method !== 'orchestrator.abort' || typeof params.threadId !== 'string') return { ok: false }
+        const stopped = (await this.backend.stop?.(params.threadId)) as { ok?: boolean } | undefined
+        return { ok: stopped?.ok === true }
+      }
       if (
         run.threadId !== params.threadId ||
         run.caller !== context.caller.node ||

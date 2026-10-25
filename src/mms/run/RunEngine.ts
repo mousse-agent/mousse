@@ -700,14 +700,17 @@ export class RunEngine extends EventEmitter {
       // Delegations first, top down: a thread is never judged idle while a task into it is still running.
       const running = this.runningDelegationsInto(threads).sort((a, b) => depths.get(a.childThreadId)! - depths.get(b.childThreadId)!)
       for (const delegation of running) {
+        // The owner's notice goes in first: leaving `running` re-evaluates the owner's own held tasks at once,
+        // and an owner that has not read the notice yet must still count as busy, or its task would publish the
+        // old text of a turn that predates the Stop.
+        if (!depths.has(delegation.parentThreadId) && delegation.parentThreadId !== request.requesterThreadId)
+          this.inbox.append({
+            threadId: delegation.parentThreadId,
+            runId: delegation.parentRunId,
+            kind: 'reconcile_notice',
+            payload: { kind: 'delegation_stopped', delegationId: delegation.delegationId, childThreadId: delegation.childThreadId }
+          })
         this.delegations.setStatus({ delegationId: delegation.delegationId, from: 'running', to: 'cancelled', completedAt: now })
-        if (depths.has(delegation.parentThreadId) || delegation.parentThreadId === request.requesterThreadId) continue
-        this.inbox.append({
-          threadId: delegation.parentThreadId,
-          runId: delegation.parentRunId,
-          kind: 'reconcile_notice',
-          payload: { kind: 'delegation_stopped', delegationId: delegation.delegationId, childThreadId: delegation.childThreadId }
-        })
       }
 
       // Nothing in the subtree is woken afterwards; a result already published keeps its delegation row.
@@ -723,7 +726,7 @@ export class RunEngine extends EventEmitter {
       const cancelledRuns: StopResult['cancelledRuns'] = []
       for (const run of this.store.listNonTerminalRuns().filter((entry) => depths.has(entry.threadId))) {
         if (run.status === 'queued') {
-          if (this.survivesStop(run, threadId, request.clearQueue === true)) continue
+          if (this.survivesStop(run, request.clearQueue === true)) continue
           if (this.cancelQueuedRunInTransaction(run, request.reason, { interruptedBy: 'user' }, claimed))
             cancelledRuns.push({ threadId: run.threadId, runId: run.runId })
           continue
@@ -733,6 +736,10 @@ export class RunEngine extends EventEmitter {
           const next = this.store.casRunOutcome({ runId: run.runId, expectedEpoch: run.epoch, outcomePatch: { stopRequested: true } })
           if (this.epochs.has(run.runId)) this.epochs.set(run.runId, next.epoch)
         }
+        // A steer still waiting for the run it was meant for is part of what the Stop ends (the executor
+        // also refuses a steer of a run older than the Stop, for one already claimed).
+        for (const effect of this.outbox.listForRun(run.runId))
+          if (effect.kind === 'turn.steer' && effect.status === 'pending') this.outbox.cancel(effect.effectId, now, request.reason)
         if (this.needsInterrupt(run.runId))
           this.outbox.enqueue({ threadId: run.threadId, runId: run.runId, kind: 'turn.interrupt', payload: { runId: run.runId, threadId: run.threadId } })
         activeRuns.push({ threadId: run.threadId, runId: run.runId })
@@ -805,13 +812,13 @@ export class RunEngine extends EventEmitter {
   }
 
   /**
-   * A queued run a Stop leaves alone: a run a person sent to the thread the Stop was aimed at, which
-   * the Stop does not clear unless asked (it keeps today's Stop). Everything else queued in the subtree
-   * belongs to the work being stopped: runs of subagents, wakes, steers and tasks.
+   * A queued run a Stop leaves alone: a run a person sent, at any level of the subtree. A message a person
+   * typed is never lost silently (their sends are never fenced), unless the Stop asked to clear the queue.
+   * Everything else queued in the subtree belongs to the work being stopped: tasks and follow-ups made on
+   * behalf of a parent, wakes, steers and integrations (`FENCED_SOURCES`).
    */
-  private survivesStop(run: RunRecord, rootThreadId: string, clearQueue: boolean): boolean {
-    if (clearQueue || run.threadId !== rootThreadId || isFencedSource(run.source)) return false
-    return this.delegations.listForChildThread(run.threadId).every((task) => task.childRunId !== run.runId)
+  private survivesStop(run: RunRecord, clearQueue: boolean): boolean {
+    return !clearQueue && !isFencedSource(run.source)
   }
 
   private putStopReceipt(key: string | null, commandKind: string, threadId: string, result: StopResult): void {
@@ -830,6 +837,11 @@ export class RunEngine extends EventEmitter {
     const stored = (receipt.result ?? {}) as Partial<StopResult> & { runId?: string }
     if (Array.isArray(stored.threads)) return { ...(stored as StopResult), replayed: true }
     return { ...empty, status: receipt.status === 'accepted' ? 'stopped' : 'ignored', ...(stored.runId ? { runId: stored.runId } : {}), ...(stored.reason ? { reason: stored.reason } : {}) }
+  }
+
+  /** Whether a Stop of the run's thread came after the run was admitted, whatever its source. */
+  isStale(runId: string): boolean {
+    return isRunAdmissionStale(this.store, runId)
   }
 
   /**
