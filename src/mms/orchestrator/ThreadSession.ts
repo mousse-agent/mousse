@@ -19,6 +19,8 @@ export interface ActiveTurnControl {
   promotedSteerIds: string[]
   /** Notices (subagent results) the steers in `pendingSteer` carry, until the model reads them or the turn ends. */
   carriedSteers?: Array<{ inboxIds: string[]; effectId: string; text: string; subagentNotice?: SubagentNoticeItem[] }>
+  /** What the last drain took (its texts and the carried entries among them), so a drained steer the provider could not take can be put back whole. */
+  lastDrained?: { parts: string[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> }
 }
 
 /** Mutable per-thread execution state owned by MMS. */

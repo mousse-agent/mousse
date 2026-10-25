@@ -177,6 +177,64 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     expect(service.hasBackgroundWork(thread.id)).toBe(false)
   }, 30_000)
 
+  it('Stop aimed at an old run leaves the process a newer run is using', async () => {
+    const { cli, d, thread, service } = await threadWithHelper()
+    const [older] = d.engine.listRuns(thread.id)
+    cli.reply = undefined
+    const second = d.orch.send('two', false, { threadId: thread.id, clientRequestId: 'turn-2' })
+    second.catch(() => undefined)
+    await waitFor(() => cli.last.inputs.length === 2, 'the second run to start')
+    const result = await d.orch.abortRun(older.runId, 'stale-stop', thread.id)
+    expect(result.status).toBe('ignored')
+    expect(cli.last.closed).toBe(false)
+    expect(service.hasBackgroundWork(thread.id)).toBe(true)
+    cli.last.answer(cli.last.uuid(1), 'second done')
+    await second
+  }, 30_000)
+
+  it('after a failed turn, a plain resend continues on the same process', async () => {
+    const { cli, d, thread } = await threadWithHelper()
+    cli.reply = (message, claude) => claude.emit(resultFrame({ uuids: [String(message.uuid)], error: 'rate limit' }))
+    await d.orch.send('two', false, { threadId: thread.id, clientRequestId: 'turn-2' }).catch(() => undefined)
+    await waitFor(() => d.engine.listRuns(thread.id).some((run) => run.status === 'failed'), 'the second run to fail')
+    cli.reply = (message, claude) => claude.answer(String(message.uuid), 'back again')
+    await d.orch.send('three', false, { threadId: thread.id, clientRequestId: 'turn-3' })
+    expect(cli.processes).toHaveLength(1)
+    expect(d.engine.listRuns(thread.id).filter((run) => run.status === 'completed')).toHaveLength(2)
+    expect(cli.last.text(2)).not.toContain('Previous conversation')
+  }, 30_000)
+
+  it('a steer Claude could not take goes back to the queue with its rows held, unread', async () => {
+    const { cli, d, thread } = await threadWithHelper()
+    cli.reply = undefined
+    const second = d.orch.send('two', false, { threadId: thread.id, clientRequestId: 'turn-2' })
+    second.catch(() => undefined)
+    await waitFor(() => cli.last.inputs.length === 2, 'the second run to start')
+    const claude = cli.last
+    claude.emit(textDelta('working', claude.uuid(1)))
+    const run = d.engine.listRuns(thread.id).find((candidate) => candidate.status === 'running')!
+    const row = d.engine.inbox.append({ threadId: thread.id, kind: 'reconcile_notice', payload: { text: 'A helper finished.' } })
+    const effect = d.engine.outbox.enqueue({ threadId: thread.id, runId: run.runId, kind: 'turn.steer', availableAt: new Date(Date.now() + 3_600_000).toISOString(), payload: { runId: run.runId, threadId: thread.id, text: 'notice', inboxIds: [row.inboxId] } })
+    d.engine.inbox.markDelivered([row.inboxId], effect.effectId)
+    let open!: () => void
+    claude.backgroundGate = new Promise<void>((resolve) => { open = resolve })
+    expect(d.orch.steerThread(thread.id, 'notice for the model', undefined, { inboxIds: [row.inboxId], effectId: effect.effectId })).toBe(true)
+    // The service drains the steer, marking its rows read, then waits for foreground work to move.
+    await waitFor(() => claude.backgrounded === 1, 'the steer to be drained')
+    expect(d.engine.inbox.get(row.inboxId)!.payload).toMatchObject({ steerTakenBy: effect.effectId })
+    // The turn's result lands first: the steer cannot be pushed.
+    claude.emit(resultFrame({ uuids: [claude.uuid(1)], text: 'working' }))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    open()
+    await second
+    // Its rows were held again, then ran as the next turn, which carries them.
+    await waitFor(() => claude.inputs.length === 3, 'the steer to run as the next turn')
+    // (a steer that carries rows is rebuilt from them when it runs)
+    expect(claude.text(2)).toContain('A helper finished.')
+    expect(d.engine.inbox.get(row.inboxId)!.payload).not.toMatchObject({ steerTakenBy: effect.effectId })
+    expect(d.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'delivered' })
+  }, 30_000)
+
   it('deleting the thread or switching its provider ends the process and its helpers', async () => {
     const deleted = await threadWithHelper()
     deleted.d.orch.markThreadDeleted(deleted.thread.id)

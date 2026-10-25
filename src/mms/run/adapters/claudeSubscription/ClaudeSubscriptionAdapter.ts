@@ -23,7 +23,7 @@ import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
 export type ClaudeSubscriptionClient = Pick<
   ClaudeSubscriptionProviderService,
   'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured'
-> & Partial<Pick<ClaudeSubscriptionProviderService, 'commitInterrupted' | 'stopThread'>>
+> & Partial<Pick<ClaudeSubscriptionProviderService, 'commitInterrupted' | 'commitFailed' | 'stopThread'>>
 
 export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'interrupt_restart',
@@ -174,7 +174,12 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       )
     } catch (error) {
       // A stopped turn keeps its native session: the next turn resumes it (the stopped request is in it).
-      if (input.signal.aborted && host.context.nativeHistoryNow) service.commitInterrupted?.(input.threadId, host.context.nativeHistoryNow())
+      if (host.context.nativeHistoryNow) {
+        const history = host.context.nativeHistoryNow()
+        if (input.signal.aborted) service.commitInterrupted?.(input.threadId, history)
+        // A turn that failed leaves the same boundary: the next request continues the live process from it.
+        else service.commitFailed?.(input.threadId, history)
+      }
       throw error
     }
     streams.thinking.complete()

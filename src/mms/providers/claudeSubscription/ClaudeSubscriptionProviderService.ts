@@ -131,6 +131,8 @@ export interface ClaudeLiveHost {
    * the thread, which calls `chat({ continuation: true })`.
    */
   continuationStarted?(threadId: string, info: { taskIds: string[]; summaries: string[] }): void
+  /** Something the thread's user should know: a helper's result may not have been delivered. */
+  notice?(threadId: string, text: string): void
 }
 /** What a turn's permission hooks and callback read: the turn running now, not the one that created the query. */
 type TurnContext = {
@@ -843,12 +845,24 @@ export class ClaudeSubscriptionProviderService {
    */
   commitInterrupted(threadId: string, history: string): void {
     this.liveCommits.delete(threadId)
+    this.recordBoundary(threadId, history)
     const sessionId = this.interruptedSessions.get(threadId)
     this.interruptedSessions.delete(threadId)
     const saved = this.settings.sessions?.[threadId]
     if (!sessionId || !saved || saved.sessionId !== sessionId) return
     saved.historyKey = historyKey(history)
     this.save()
+  }
+  /**
+   * A turn failed (not a stop) after its message reached Claude. `history` is the canonical history as
+   * the failed turn left it, which is what the next request will carry unless something is undone first.
+   */
+  commitFailed(threadId: string, history: string): void {
+    this.recordBoundary(threadId, history)
+  }
+  private recordBoundary(threadId: string, history: string): void {
+    const live = this.live.get(threadId)
+    if (live && !live.dead && live.meta.pushedFailed === true) live.meta.expectedKey = historyKey(history)
   }
   private commitObligations(threadId: string): void {
     const pending = this.liveCommits.get(threadId)
@@ -906,14 +920,17 @@ export class ClaudeSubscriptionProviderService {
    * The thread's live process when this turn can use it: it was started for the same instance, folder,
    * model, effort, instructions, credential and read-only policy, and its conversation is the one this
    * turn continues. That is so when the saved history fingerprint matches (`resume` is its session),
-   * or when the last turn on the process ended without saving one (a failure): the process holds
-   * exactly what that turn added, nothing was undone.
+   * or when the last turn on the process ended without saving one (a failure, a stop) and this
+   * request's history is the boundary that turn left: the process holds exactly that, nothing was undone.
    */
-  private reusableLive(threadId: string, hard: readonly unknown[], resume: string | undefined): LiveSession<TurnContext> | undefined {
+  private reusableLive(threadId: string, hard: readonly unknown[], resume: string | undefined, historyNow: string): LiveSession<TurnContext> | undefined {
     const live = this.live.get(threadId)
     if (!live || live.dead || live.sessionId === undefined) return undefined
     if (JSON.stringify(hard) !== JSON.stringify(live.meta.hardParts)) return undefined
-    return resume === live.sessionId || live.meta.pendingKey === true ? live : undefined
+    // The history this request carries must be the one the process holds: the saved fingerprint says
+    // so, or, after a turn that did not finish, the boundary that turn left (`expectedKey`). A history
+    // that differs (an undo, an edit) is not what the process remembers.
+    return resume === live.sessionId || (live.meta.expectedKey !== undefined && live.meta.expectedKey === historyNow) ? live : undefined
   }
   /**
    * The thread's live query for this turn: the open one when it is still the right one, a new one
@@ -923,7 +940,7 @@ export class ClaudeSubscriptionProviderService {
    */
   private async acquireLive(
     threadId: string,
-    key: { hard: readonly unknown[]; soft: string; mode: PermissionMode },
+    key: { hard: readonly unknown[]; soft: string; mode: PermissionMode; historyNow: string },
     resume: string | undefined,
     create: (live: LiveSession<TurnContext>) => Options
   ): Promise<LiveSession<TurnContext> | undefined> {
@@ -936,7 +953,7 @@ export class ClaudeSubscriptionProviderService {
     }
     if (live) {
       const working = live.obligations.size
-      const reusable = this.reusableLive(threadId, key.hard, resume)
+      const reusable = this.reusableLive(threadId, key.hard, resume, key.historyNow)
       // Launch settings and integrations apply the next time the process starts; pending work keeps this one.
       if (reusable && (live.meta.softKey === key.soft || working > 0)) return live
       if (working > 0) {
@@ -961,6 +978,7 @@ export class ClaudeSubscriptionProviderService {
       {
         backgroundWork: (active) => this.notifyHost(() => this.liveHost?.backgroundWork?.(threadId, active)),
         continuationStarted: (run, info) => this.continuationStarted(created, run, info),
+        notice: (text) => this.notifyHost(() => this.liveHost?.notice?.(threadId, text)),
         ended: () => {
           if (this.live.get(threadId) === created) this.live.delete(threadId)
         }
@@ -1299,7 +1317,8 @@ export class ClaudeSubscriptionProviderService {
         input.mcp ? [input.mcp.url, input.mcp.token] : null,
         readOnlyChild
       ]
-      const reuse = !input.continuation && this.reusableLive(input.threadId, hard, resume) !== undefined
+      const historyNow = historyKey(input.history ?? '')
+      const reuse = !input.continuation && this.reusableLive(input.threadId, hard, resume, historyNow) !== undefined
       const prompt = (input.appletInstructions ? input.appletInstructions + '\n\nCurrent request:\n' : '') +
         (!resume && !reuse && input.history
           ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
@@ -1369,7 +1388,7 @@ export class ClaudeSubscriptionProviderService {
         metrics.beginQuery(live.sessionId, saved?.usageBaseline)
         liveRun.attach((message) => frames.observe(message))
       } else {
-        const key = { hard, soft: this.launchKey(env, integrations), mode: permissionMode }
+        const key = { hard, soft: this.launchKey(env, integrations), mode: permissionMode, historyNow }
         live = await this.acquireLive(input.threadId, key, resume, (created) => {
           created.current = turn
           return buildOptions(created.lifetime, () => created.current ?? turn, true)
@@ -1417,7 +1436,8 @@ export class ClaudeSubscriptionProviderService {
         }
         frames.sessionId ??= live.sessionId
         success = true
-        live.meta.pendingKey = false
+        live.meta.expectedKey = undefined
+        live.meta.pushedFailed = false
       } else {
         // A one-shot query: the prompt ends with the turn, which ends the process.
         startSteering()
@@ -1495,9 +1515,10 @@ export class ClaudeSubscriptionProviderService {
         // A turn that ended without finishing still read what its result carried; a cancelled one did not.
         if (!liveRun.settled) live.abandon(liveRun)
         else if (!success) live.commit(liveRun)
-        // No history fingerprint was saved for a turn that did not finish: the next turn on this process
-        // continues what the process holds (see `reusableLive`).
-        if (!success) live.meta.pendingKey = true
+        // No history fingerprint was saved for a turn that did not finish. If its message reached the
+        // process, the adapter reports the history boundary it left (`commitFailed`, `commitInterrupted`),
+        // and only a request that starts from it continues on this process (see `reusableLive`).
+        if (!success && liveRun.ids.size > 0) live.meta.pushedFailed = true
       } else query?.close()
       this.queries.delete(input.threadId)
       this.controllers.delete(controller)

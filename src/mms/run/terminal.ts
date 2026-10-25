@@ -77,17 +77,22 @@ export function writeTerminalRun(
 
 /**
  * An integration run that ended without its executor writing the outcome (boot ending active runs and
- * cancelling queued ones, reconciler rule 2 after a lost lease, rule 3 after a Stop that did not land)
- * still owes its thread an outcome row, or the subagent whose last live work it was would publish an
+ * cancelling queued ones, reconciler rule 2 after a lost lease, a cancel) still owes its thread an outcome row, or the subagent whose last live work it was would publish an
  * answer that predates the integration. The merge may or may not have happened, so the row says
  * so. `delegationId` comes from the run's `turn.start` payload.
  *
  * A run the user stopped is left out on purpose: a user's Stop publishes right away (D2's rule for
- * every delivery the user stops), and the user already knows the integration did not finish. A run
- * that completed has its outcome written by the executor, and one that has none owes nothing.
+ * every delivery the user stops), and the user already knows the integration did not finish. That
+ * includes reconciler rule 3, which ends a Stop that did not land as `interruptedBy: 'user'`. A run
+ * that completed has its outcome written by the executor. A run that already has an `integration_*`
+ * row (the executor's own fallback wrote one before the run was ended) owes no second one.
  */
 function interruptedIntegrationNotice(store: RunStore, run: RunRecord): TerminalNotice | null {
   if (run.source !== 'integration' || run.status === 'completed' || run.outcome?.interruptedBy === 'user') return null
+  const written = store.db
+    .statement("SELECT 1 FROM inbox WHERE thread_id = ? AND run_id = ? AND kind = 'reconcile_notice' AND json_extract(payload, '$.type') IN ('integration_completed', 'integration_failed') LIMIT 1")
+    .get(run.threadId, run.runId)
+  if (written) return null
   const effect = store.db.statement("SELECT payload FROM effects WHERE run_id = ? AND kind = 'turn.start' ORDER BY rowid LIMIT 1").get(run.runId)
   let delegationId: string | undefined
   try {
@@ -101,6 +106,8 @@ function interruptedIntegrationNotice(store: RunStore, run: RunRecord): Terminal
     kind: 'reconcile_notice',
     payload: {
       type: 'integration_failed',
+      // Marks the row as the terminal write's, so the executor can correct it if the merge did finish.
+      interrupted: true,
       ...(delegationId ? { delegationId } : {}),
       text: `Integration of ${task} was interrupted before its outcome was known; check the workspace.`
     }

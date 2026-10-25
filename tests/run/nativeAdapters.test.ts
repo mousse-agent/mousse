@@ -247,12 +247,13 @@ describe('ClaudeSubscriptionAdapter', () => {
       expect(client.commitConversation).not.toHaveBeenCalled()
     })
 
-    it('does nothing for a turn that failed without being stopped', async () => {
-      const client = { ...claudeClient(async () => { throw new Error('boom') }), commitInterrupted: vi.fn() }
+    it('reports the history boundary of a turn that failed without being stopped, without fingerprinting it', async () => {
+      const client = { ...claudeClient(async () => { throw new Error('boom') }), commitInterrupted: vi.fn(), commitFailed: vi.fn() }
       await expect(
         new ClaudeSubscriptionAdapter(() => client).startTurn(input(), recordingSink(), control(), host({ nativeHistoryNow: () => 'history' }))
       ).rejects.toThrow('boom')
       expect(client.commitInterrupted).not.toHaveBeenCalled()
+      expect(client.commitFailed).toHaveBeenCalledExactlyOnceWith('thread-1', 'history')
     })
 
     it('cannot fingerprint without the host\'s history or the service\'s support, and still rethrows the stop', async () => {
