@@ -73,7 +73,7 @@ jobs:
   # or by the nightly and stable release workflows. The suite is split across four
   # runners so it finishes in about a quarter of the time.
   application:
-    name: Full test suite (${{ matrix.shard }}/4)
+    name: Full test suite
     if: github.event_name == 'workflow_dispatch' || inputs.full-suite
     runs-on: ubuntu-24.04
     timeout-minutes: 30
