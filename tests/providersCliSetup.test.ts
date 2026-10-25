@@ -7,6 +7,7 @@ import { AgentConnectStep, addChoices } from '../src/renderer/components/provide
 import { AccountRow, BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
 import { displayModels, movedOrder } from '../src/renderer/components/providers/ProviderModelsSection'
 import { ProviderListRow } from '../src/renderer/components/providers/parts'
+import { offersRedirectPaste, refusedText } from '../src/renderer/components/providers/SignInDialog'
 import { switchStateOf } from '../src/renderer/components/providers/providerView'
 import { model, snapshot, type SnapshotOverrides } from './providerSnapshotFixture'
 
@@ -248,5 +249,21 @@ describe('models section order', () => {
     expect(movedOrder(display, 'd', -1)).toEqual(['b', 'e', 'd', 'a', 'c'])
     expect(movedOrder(display, 'a', -1)).toBeNull()
     expect(movedOrder(display, 'c', -1)).toBeNull()
+  })
+})
+
+describe('Sign-in dialog', () => {
+  const link = (acceptsRedirectPaste?: boolean) =>
+    ({ promptId: 'p1', type: 'auth_url', url: 'https://example.test/auth', usesCallbackServer: true, ...(acceptsRedirectPaste === undefined ? {} : { acceptsRedirectPaste }) }) as const
+
+  it('offers the pasted address only while the sign-in accepts one', () => {
+    expect(offersRedirectPaste(link(true))).toBe(true)
+    expect(offersRedirectPaste(link(false))).toBe(false)
+    expect(offersRedirectPaste(link())).toBe(false)
+  })
+
+  it('says why a refused answer did nothing', () => {
+    expect(refusedText({ promptId: 'p1', kind: 'redirect_url', value: 'http://localhost/x' })).toContain('paste it here')
+    expect(refusedText({ promptId: 'p2', kind: 'input', value: 'x' })).toContain('Try again')
   })
 })

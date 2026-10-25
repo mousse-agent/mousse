@@ -5,6 +5,18 @@ import { useProviderSnapshotsStore } from '../../lib/providerSnapshots'
 import { Modal } from '../ui/Modal'
 import { errorText } from './parts'
 
+/** The pasted-address fallback shows only while the sign-in says it accepts one. */
+export function offersRedirectPaste(prompt: SignInPrompt): boolean {
+  return prompt.type === 'auth_url' && prompt.acceptsRedirectPaste === true
+}
+
+/** What to say when the sign-in refuses an answer. */
+export function refusedText(response: SignInResponse): string {
+  return response.kind === 'redirect_url'
+    ? "That address didn't finish the sign-in. Copy the full address from the browser again and paste it here."
+    : "The sign-in didn't take that answer. Try again."
+}
+
 /**
  * A provider sign-in started with `providers.instances.signIn`: shows the step the operation asks
  * for (a browser link, a device code, a field, a choice) and answers it with `respondSignIn`.
@@ -57,7 +69,15 @@ export function SignInDialog({ operationId, name, onClose }: { operationId: stri
     setError(null)
     if (response.promptId) setAnswered(response.promptId)
     setValue('')
-    void window.mousse.providers.instances.respondSignIn(operationId, response).catch((failure) => setError(errorText(failure)))
+    void window.mousse.providers.instances
+      .respondSignIn(operationId, response)
+      .then((accepted) => {
+        // Refused (a stale prompt, a wrong address): say so and show the step again.
+        if (accepted || response.kind === 'cancel') return
+        setAnswered(null)
+        setError(refusedText(response))
+      })
+      .catch((failure) => setError(errorText(failure)))
   }
   const cancel = () => {
     if (event?.phase !== 'failed') respond({ kind: 'cancel' })
@@ -95,7 +115,7 @@ export function SignInDialog({ operationId, name, onClose }: { operationId: stri
               <Loader2 size={16} className="icon-spin" />
               <span>Waiting for you to finish in the browser…</span>
             </div>
-            {(prompt.acceptsRedirectPaste ?? prompt.usesCallbackServer) && (
+            {offersRedirectPaste(prompt) && (
               <div className="provider-login-fallback">
                 {!showPaste ? (
                   <button type="button" className="provider-login-linkbutton" onClick={() => setShowPaste(true)}>
