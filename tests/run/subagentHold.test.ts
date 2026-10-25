@@ -366,6 +366,8 @@ describe('a subagent\'s result waits for its own subagents (issue #142)', () => 
       expect(steerId).toBeTruthy()
       f!.outbox.claimNext(OWNER, f!.now(), { lanes: ['control'] })
       f!.outbox.succeed(steerId, OWNER, f!.now())
+      // The live turn held the steer (`steerThread` marks it) but ended before the model read it.
+      f!.engine.inbox.markSteerHeld(f!.engine.inbox.listForThread(pc.childThreadId).map((row) => row.inboxId), steerId)
       // The turn ended without reading the steer: its rows are not acknowledged, and they still count.
       f!.engine.markTerminal(live.runId, 'completed', undefined, { resultText: 'C turn' })
       expect(f!.engine.inbox.listForThread(pc.childThreadId).map((row) => row.status)).toEqual(['delivered'])
@@ -378,7 +380,7 @@ describe('a subagent\'s result waits for its own subagents (issue #142)', () => 
       expect(task(pc.delegationId)).toMatchObject({ status: 'result_available', result: { text: 'C final' } })
     })
 
-    it('markSteerHeld, release and acknowledgeRows each end in a re-evaluation of the row's thread', async () => {
+    it('markSteerHeld, release and acknowledgeRows each end in a re-evaluation of the row thread', async () => {
       const { pc, cg } = await nested()
       f!.finish(cg.childRunId, 'G result')
       const [row] = f!.engine.inbox.listByStatus(pc.childThreadId, 'pending')
