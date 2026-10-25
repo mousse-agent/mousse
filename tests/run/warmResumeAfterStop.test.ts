@@ -235,6 +235,42 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     expect(d.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'delivered' })
   }, 30_000)
 
+  it('two steers in flight when the result lands are each handed back with their own rows', async () => {
+    const { cli, d, thread } = await threadWithHelper()
+    cli.reply = undefined
+    const second = d.orch.send('two', false, { threadId: thread.id, clientRequestId: 'turn-2' })
+    second.catch(() => undefined)
+    await waitFor(() => cli.last.inputs.length === 2, 'the second run to start')
+    const claude = cli.last
+    claude.emit(textDelta('working', claude.uuid(1)))
+    const run = d.engine.listRuns(thread.id).find((candidate) => candidate.status === 'running')!
+    const carry = (label: string) => {
+      const row = d.engine.inbox.append({ threadId: thread.id, kind: 'reconcile_notice', payload: { text: `Helper ${label} finished.` } })
+      const effect = d.engine.outbox.enqueue({ threadId: thread.id, runId: run.runId, kind: 'turn.steer', availableAt: new Date(Date.now() + 3_600_000).toISOString(), payload: { runId: run.runId, threadId: thread.id, text: label, inboxIds: [row.inboxId] } })
+      d.engine.inbox.markDelivered([row.inboxId], effect.effectId)
+      return { row, effect }
+    }
+    const taken = (item: { row: { inboxId: string }; effect: { effectId: string } }) =>
+      (d.engine.inbox.get(item.row.inboxId)!.payload as { steerTakenBy?: string }).steerTakenBy === item.effect.effectId
+    let open!: () => void
+    claude.backgroundGate = new Promise<void>((resolve) => { open = resolve })
+    const a = carry('A')
+    expect(d.orch.steerThread(thread.id, 'steer A', undefined, { inboxIds: [a.row.inboxId], effectId: a.effect.effectId })).toBe(true)
+    await waitFor(() => claude.backgrounded === 1, 'the first steer to be drained')
+    const b = carry('B')
+    expect(d.orch.steerThread(thread.id, 'steer B', undefined, { inboxIds: [b.row.inboxId], effectId: b.effect.effectId })).toBe(true)
+    await waitFor(() => claude.backgrounded === 2, 'the second steer to be drained')
+    expect([taken(a), taken(b)]).toEqual([true, true])
+    claude.emit(resultFrame({ uuids: [claude.uuid(1)], text: 'working' }))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    open()
+    await second
+    // Each drain gave back its own rows: neither stays marked as read.
+    expect([taken(a), taken(b)]).toEqual([false, false])
+    await waitFor(() => claude.inputs.length === 3, 'the first returned steer to run as the next turn')
+    expect(claude.text(2)).toContain('Helper A finished.')
+  }, 30_000)
+
   it('deleting the thread or switching its provider ends the process and its helpers', async () => {
     const deleted = await threadWithHelper()
     deleted.d.orch.markThreadDeleted(deleted.thread.id)

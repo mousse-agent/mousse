@@ -356,6 +356,16 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       expect(noticeTurns(w)).toHaveLength(1)
     })
 
+    it('a steer is marked in the transcript as joining the running turn, not starting one', async () => {
+      const w = await held()
+      expect(w.d.orch.steerThread(w.parent.id, 'also do X')).toBe(true)
+      const steer = w.d.orch.getMessages(w.parent.id).find((message) => message.role === 'user' && message.content === 'also do X')
+      expect(steer?.steered).toBe(true)
+      // The turn's own prompt is not a steer.
+      expect(w.d.orch.getMessages(w.parent.id).find((message) => message.role === 'user' && !message.steered)).toBeDefined()
+      await w.finish()
+    })
+
     it('a user steer and a result steer, both unread when the turn ends, each arrive once', async () => {
       const w = await held()
       // The user steers the live turn too; the scripted adapter reads neither.

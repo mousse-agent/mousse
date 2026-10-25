@@ -122,7 +122,9 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       systemPromptAppend: host.mcp ? mousseOrchestrationInstructions() : undefined,
       integrations,
       drainSteer: () => ctl.drainSteer(),
-      returnSteer: (text) => ctl.returnSteer?.(text),
+      drainSteerEntry: ctl.drainSteerEntry ? () => ctl.drainSteerEntry!() : undefined,
+      returnSteer: (text, token) => ctl.returnSteer?.(text, token),
+      steerTaken: (token) => ctl.steerTaken?.(token),
       onSteer: (text) => {
         progress()
         sink.steerAccepted(text)

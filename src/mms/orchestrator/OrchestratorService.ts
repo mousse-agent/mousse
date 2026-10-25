@@ -3717,7 +3717,8 @@ export class OrchestratorService extends EventEmitter {
     responseMetadata?: ChatMessage['responseMetadata'],
     queueItemId?: string,
     mode?: ChatMode,
-    subagentNotice?: SubagentNoticeItem[]
+    subagentNotice?: SubagentNoticeItem[],
+    steered?: boolean
   ): ChatMessage {
     const msg: ChatMessage = {
       id: uuidv4(),
@@ -3728,7 +3729,8 @@ export class OrchestratorService extends EventEmitter {
       responseMetadata,
       queueItemId: role === 'user' && queueItemId ? queueItemId : undefined,
       ...(role === 'user' && mode !== undefined ? { mode: normalizeChatMode(mode) } : {}),
-      ...(role === 'user' && subagentNotice?.length ? { subagentNotice } : {})
+      ...(role === 'user' && subagentNotice?.length ? { subagentNotice } : {}),
+      ...(role === 'user' && steered ? { steered: true } : {})
     }
     this.messages.push(msg)
     this.emitMessageAdded(msg)
@@ -4173,7 +4175,7 @@ export class OrchestratorService extends EventEmitter {
         // Mid-turn steers share the turn's mode — preserve tracking so the next
         // real turn does not mistake this UI echo for a legacy agent turn.
         const currentMode = getLastUserChatMode(this.messages)
-        this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice)
+        this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice, true)
       }
       if (this.sessionAls.getStore()?.threadId === threadId) {
         run()
@@ -5145,25 +5147,44 @@ export class OrchestratorService extends EventEmitter {
         providerMetrics: (metrics) => { promptMetrics = metrics },
         lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
       }
+      // Every drain is remembered under its own token until the provider has taken the text, so a drain
+      // the provider hands back restores exactly what that drain took, whatever was drained since.
+      const drained = new Map<string, { ownParts: string[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> }>()
+      let drains = 0
+      let returnedAhead = 0
+      const drainEntry = (): { text: string; token: string } | undefined => {
+        turn.lastDrained = undefined
+        const parts = [
+          opts?.externalDrainSteer?.()?.trim(),
+          this.drainSteerForSession(session, turn)?.trim()
+        ].filter((part): part is string => Boolean(part))
+        const taken = turn.lastDrained as ActiveTurnControl['lastDrained']
+        turn.lastDrained = undefined
+        if (parts.length === 0) return undefined
+        const token = `drain-${++drains}`
+        drained.set(token, { ownParts: taken?.parts ?? [], carried: taken?.carried ?? [] })
+        returnedAhead = 0
+        return { text: parts.join('\n'), token }
+      }
       const turnControl: TurnControl = {
-        drainSteer: () => {
-          const parts = [
-            opts?.externalDrainSteer?.()?.trim(),
-            this.drainSteerForSession(session, turn)?.trim()
-          ].filter((part): part is string => Boolean(part))
-          return parts.length > 0 ? parts.join('\n') : undefined
-        },
+        drainSteer: () => drainEntry()?.text,
+        drainSteerEntry: drainEntry,
+        steerTaken: (token) => { if (token) drained.delete(token) },
         // Text the provider could not give its turn waits for the turn to end, then runs as the next turn.
         // Rows a steer carried are held again, unread, and follow it into that turn.
-        returnSteer: (text) => {
-          const last = turn.lastDrained
-          turn.lastDrained = undefined
-          if (!last) return void turn.pendingSteer.unshift(text)
-          const rest = text.replace(last.parts.join('\n'), '').trim()
-          if (rest) turn.pendingSteer.unshift(rest)
-          turn.pendingSteer.unshift(...last.parts)
-          for (const entry of last.carried) this.runEngine?.inbox.unmarkSteerTaken(entry.inboxIds, entry.effectId)
-          turn.carriedSteers = [...last.carried, ...(turn.carriedSteers ?? [])]
+        returnSteer: (text, token) => {
+          const entry = token ? drained.get(token) : undefined
+          if (token) drained.delete(token)
+          // Returned drains go ahead of anything steered since, oldest first.
+          const put = (...items: string[]): void => {
+            turn.pendingSteer.splice(returnedAhead, 0, ...items)
+            returnedAhead += items.length
+          }
+          if (!entry) return put(text)
+          const rest = text.replace(entry.ownParts.join('\n'), '').trim()
+          put(...entry.ownParts, ...(rest ? [rest] : []))
+          for (const carried of entry.carried) this.runEngine?.inbox.unmarkSteerTaken(carried.inboxIds, carried.effectId)
+          turn.carriedSteers = [...entry.carried, ...(turn.carriedSteers ?? [])]
         },
         heartbeat: () => this.heartbeatRun(engineRunId)
       }

@@ -14,6 +14,11 @@ import {
   IconChecklist as ListTodo,
   IconLogout as LogOut,
 } from "../../../../lib/icons";
+import {
+  isRefusedSubagentResult,
+  readSubagentResult,
+  type SubagentToolName,
+} from "../../../../../shared/subagentTools";
 
 export type ToolVariant = "simple" | "collapsible";
 
@@ -79,7 +84,41 @@ function calculateDiffStats(oldString: string, newString: string) {
   return { addedLines, removedLines };
 }
 
+/** Row title of each Mousse subagent tool: while it runs, once it returned, and when it did not work. */
+const SUBAGENT_TOOL_TITLES: Record<SubagentToolName, readonly [pending: string, done: string, failed: string]> = {
+  delegate_task: ["Starting subagent", "Started subagent", "Couldn't start subagent"],
+  continue_subagent: ["Continuing subagent", "Continued subagent", "Couldn't continue subagent"],
+  answer_subagent: ["Answering subagent", "Answered subagent", "Couldn't answer subagent"],
+  task_status: ["Checking subagent", "Checked subagent", "Couldn't check subagent"],
+  task_cancel: ["Stopping subagent", "Stopped subagent", "Couldn't stop subagent"],
+  list_subagents: ["Listing subagents", "Listed subagents", "Couldn't list subagents"],
+  integrate_delegation: ["Merging subagent work", "Merged subagent work", "Couldn't merge subagent work"],
+};
+
+function isSubagentCallFailed(part: any): boolean {
+  return part.state === "output-error" || isRefusedSubagentResult(part.output);
+}
+
 export const toolRegistry: Record<string, ToolMeta> = {
+  "tool-Subagent": {
+    icon: Sparkles,
+    title: (part) => {
+      const titles = SUBAGENT_TOOL_TITLES[part.subagentTool as SubagentToolName];
+      if (!titles) return "Subagent";
+      if (isSubagentCallFailed(part)) return titles[2];
+      const isPending =
+        part.state !== "output-available" && part.state !== "output-error";
+      return isPending ? titles[0] : titles[1];
+    },
+    subtitle: (part) => {
+      const result = readSubagentResult(part.output);
+      const message = isSubagentCallFailed(part) && typeof result?.message === "string" ? result.message : "";
+      const name = part.input?.title ?? part.input?.subagent ?? part.input?.agent ?? "";
+      const text = String(message || name || "");
+      return text.length > 60 ? text.slice(0, 57) + "..." : text;
+    },
+    variant: "simple",
+  },
   "tool-Task": {
     icon: Sparkles,
     title: (part) => {

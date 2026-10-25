@@ -3,6 +3,7 @@ import { GripVertical, MoreHorizontal, Pencil, Trash2, X } from '../lib/icons'
 import type { QueuedMessage } from '../../shared/types'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { imagePayloadToDataUrl } from '../utils/imageAttachments'
+import { noticeSummary } from '../chat/adapters/subagentNotice'
 
 export interface QueuedMessagesProps {
   threadId: string | null
@@ -20,7 +21,9 @@ export function stripComposerTransportMarkers(content: string): string {
     .trim()
 }
 
-function previewText(item: QueuedMessage): string {
+/** A queued steer that delivers subagent results shows what it reports, never the text the model reads. */
+export function previewText(item: QueuedMessage): string {
+  if (item.subagentNotice?.length) return noticeSummary(item.subagentNotice)
   const raw =
     stripComposerTransportMarkers(item.content) ||
     (item.images?.length ? 'Image attachment' : 'Empty message')
@@ -398,7 +401,7 @@ export function QueuedMessages({
                 >
                   {isSteering ? 'Steering…' : 'Steer'}
                 </button>
-                {onEditItem && (
+                {onEditItem && !item.subagentNotice?.length && (
                   <button
                     type="button"
                     className="queued-messages-btn queued-messages-btn-icon"
