@@ -22,7 +22,7 @@ export interface AgentDefinitionExecutionContext {
 
 /**
  * Port for root to attach existing native/CLI runners.
- * Implementations must use existing AgentRegistry / MousseAgentService / CLI spawners.
+ * Implementations must use existing AgentRegistry / CLI spawners.
  * Do not invent a second native agent loop here.
  */
 export interface AgentRunnerPort {

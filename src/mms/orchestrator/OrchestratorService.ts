@@ -82,7 +82,6 @@ import {
   type ChatMessage,
   type CliType,
   type ContextUsageSnapshot,
-  type MousseAgentSessionSnapshot,
   type NativeLlmContext,
   type OrchestratorAction,
   type OrchestratorContextUsageInput,
@@ -174,10 +173,6 @@ import {
 import { ThreadSession } from './ThreadSession'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService } from './UserQuestionService'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
-import {
-  MousseAgentService,
-  type MousseAgentLifecycleEvent
-} from '../agents/MousseAgentService'
 import { ConnectionRetriesExhaustedError } from './connectionRetry'
 import { AppError, errorDiagnostic, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
 import {
@@ -600,7 +595,6 @@ export class OrchestratorService extends EventEmitter {
   private persistFn?: (threadId?: string | null) => void
   /** Per-thread delayed persist timers (concurrent turns must not suppress each other). */
   private persistTimers = new Map<string, ReturnType<typeof setTimeout>>()
-  private mousseAgents: MousseAgentService
   /** In-flight channel turns keyed by mousse thread id; `runId` once the turn is an engine run. */
   private channelTurns = new Map<
     string,
@@ -826,22 +820,6 @@ export class OrchestratorService extends EventEmitter {
       { questions: this.questions, modeRegistry: this.modeRegistry }
     )
 
-    this.mousseAgents = new MousseAgentService()
-
-    this.mousseAgents.on('lifecycle', (event: MousseAgentLifecycleEvent) => {
-      if (event.state === 'failed') {
-        this.reportGuiAgentFailure(
-          event.agentId,
-          event.reason ?? event.lastError ?? 'GUI subagent failed.'
-        )
-      } else if (event.state === 'interrupted') {
-        this.reportGuiAgentInterrupted(
-          event.agentId,
-          event.reason ?? event.lastError ?? 'GUI subagent session was interrupted.'
-        )
-      }
-    })
-
     this.headlessRunner.on('exit', ({ agentId, exitCode }) => {
       const owner = this.agentOwner(agentId)
       if (owner && owner !== this.session) {
@@ -878,10 +856,6 @@ export class OrchestratorService extends EventEmitter {
 
   setPersistCallback(fn: (threadId?: string | null) => void): void {
     this.persistFn = fn
-    this.mousseAgents.setPersistCallback((_immediate, agentId) => {
-      const threadId = agentId ? this.agentOwner(agentId)?.threadId : this.getBoundThreadId()
-      if (threadId) this.persistFn?.(threadId)
-    })
   }
 
   /** Optional ThreadDataStore for durable queue + cross-thread persistence. */
@@ -5407,19 +5381,6 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /**
-   * Orchestrator-facing API for GUI subagent terminal failures.
-   * Marks agent + task failed with the exact reason and never removes the worktree.
-   */
-  reportGuiAgentFailure(agentId: string, reason: string): void {
-    this.reportGuiAgentTerminalState(agentId, reason, 'failed')
-  }
-
-  /** Mark a lost GUI session as interrupted while retaining its recoverable worktree/history. */
-  reportGuiAgentInterrupted(agentId: string, reason: string): void {
-    this.reportGuiAgentTerminalState(agentId, reason, 'interrupted')
-  }
-
   private reportGuiAgentTerminalState(
     agentId: string,
     reason: string,
@@ -5751,19 +5712,6 @@ export class OrchestratorService extends EventEmitter {
       )
     }
 
-    if (agent.executionMode === 'gui') {
-      const finalStatus = this.agents.get(agent.id)?.status
-      // A failed merge leaves the agent ready for retry, so its durable transcript must
-      // remain available in the still-open tab. Removing it here produced a blank agent
-      // view and also discarded the only persisted GUI-session history.
-      if (finalStatus === 'completed' || finalStatus === 'cancelled') {
-        this.mousseAgents.remove(agent.id)
-        // Session removal can trigger a final renderer refresh that observes no messages.
-        // Re-emit the terminal registry state afterwards so a stale GUI tab cannot remain.
-        this.agents.updateStatus(agent.id, finalStatus)
-        logs.push(`[mousse] Closed GUI agent ${agent.id.slice(0, 8)}`)
-      }
-    }
     return logs
   }
 
@@ -5872,26 +5820,6 @@ export class OrchestratorService extends EventEmitter {
       this.persist(true)
       this.emitThreadMessages(threadId, session.messages, true)
     })
-  }
-
-  exportMousseAgentSessions(threadId?: string): MousseAgentSessionSnapshot[] {
-    const snapshots = this.mousseAgents.exportSessions()
-    if (!threadId) return snapshots
-    const ids = new Set(this.getAgentsForThread(threadId).list().map((agent) => agent.id))
-    return snapshots.filter((snapshot) => ids.has(snapshot.agentId))
-  }
-
-  restoreMousseAgentSessions(sessions: unknown): MousseAgentLifecycleEvent[] {
-    // Managed contexts hydrate only at explicit recall; compatibility snapshots are retained on disk.
-    return this.mousseAgents.restoreSessions(Array.isArray(sessions) ? sessions.filter((snapshot) => !snapshot?.managedBinding) : sessions, false)
-  }
-
-  listMousseAgentSessionIds(): string[] {
-    return this.mousseAgents.listSessionIds()
-  }
-
-  setMousseAgentPersistCallback(fn: (immediate?: boolean) => void): void {
-    this.mousseAgents.setPersistCallback(fn)
   }
 
   getActiveAgents(): Agent[] {
