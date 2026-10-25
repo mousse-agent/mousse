@@ -7,6 +7,7 @@ import {
   guessMimeTypeFromFilename,
   parseUserMessageContent,
 } from '../../utils/messageAttachments'
+import { subagentToolOfRecord } from '../../../shared/subagentTools'
 
 // Provider (ChatMessage.toolCall) -> standardize (UIMessage parts) -> 21st Agent Elements.
 
@@ -221,8 +222,19 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
       const toolName = normalizeToolName(rawName, msg.kind)
       const structuredInput = msg.toolCall.input ?? tryParseArgsJson(msg.toolCall.response)
 
+      // Mousse's own subagent tools get one row type whatever runtime called them; whether a row
+      // becomes a card is decided where the subagent list is known (the renderer shell).
+      const subagentTool = subagentToolOfRecord({
+        toolName: msg.toolCall.toolName,
+        title: msg.toolCall.title,
+        summary: msg.toolCall.summary,
+        details: msg.toolCall.details,
+      })
+
       let type: string
-      if (msg.kind === 'mcp_tool_call' || msg.kind === 'mcp_tool_result') {
+      if (subagentTool) {
+        type = 'tool-Subagent'
+      } else if (msg.kind === 'mcp_tool_call' || msg.kind === 'mcp_tool_result') {
         const server = extractServer(msg.toolCall.details)
         if (server) {
           // True MCP tool: Server + Tool details identify it.
@@ -246,7 +258,7 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
       // Prefer real args JSON. Only synthesize minimal display input when args were
       // already overwritten by complete-phase result text.
       let input: Record<string, unknown> = structuredInput ? { ...structuredInput } : {}
-      if (!structuredInput) {
+      if (!structuredInput && !subagentTool) {
         if (toolName === 'Bash') {
           // Never synthesize a command from the summary: provider summaries
           // are static sentences, not commands. Unknown stays empty so the
@@ -279,6 +291,7 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
         state: isErrorToolCall(msg) ? 'output-error' : toolState(msg.toolCall.status, msg.streaming),
         input,
         output,
+        ...(subagentTool ? { subagentTool } : {}),
       } as unknown as UIMessage['parts'][number]]
       out.push(base)
       lastAssistantText = null
@@ -343,7 +356,12 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
         displayText = text
       }
     }
-    if (!displayText.trim() && !msg.images?.length && extraFileNames.length === 0 && references.length === 0) {
+    // A message that delivers subagent results carries them structured; the transcript renders
+    // those, never the text, which stays what the model reads.
+    if (msg.role === 'user' && msg.steered) base.metadata = { ...(base.metadata as object | undefined), steered: true }
+    const subagentNotice = msg.role === 'user' && msg.subagentNotice?.length ? msg.subagentNotice : undefined
+    if (subagentNotice) base.metadata = { ...(base.metadata as object | undefined), subagentNotice }
+    if (!displayText.trim() && !msg.images?.length && extraFileNames.length === 0 && references.length === 0 && !subagentNotice) {
       continue
     }
     // Fold exact-duplicate consecutive assistant text (provider double-adds,

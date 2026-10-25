@@ -640,6 +640,29 @@ describe('result routing and steering edge cases', () => {
     expect(await b).toBe('B text')
   })
 
+  it('a live turn reports a Mousse subagent call with its bounded record: marked at the start, named once the input is known, closed with the result', async () => {
+    const f = fixture()
+    const events: Array<Record<string, unknown>> = []
+    f.cli.reply = (message, process) => {
+      const uuid = String(message.uuid)
+      const name = 'mcp__mousse__delegate_task'
+      process.emit(
+        toolStart('call-1', name, uuid),
+        { type: 'assistant', session_id: SESSION, parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'tool_use', id: 'call-1', name, input: { title: 'Reviewer' } }] } },
+        {
+          type: 'user', session_id: SESSION, parent_tool_use_id: null,
+          message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call-1', content: JSON.stringify({ started: true, delegationId: 'd-1', title: 'Reviewer' }) }] }
+        }
+      )
+      process.answer(uuid, 'delegated')
+    }
+    await f.chat({ onTool: (event) => events.push(event as never) })
+    expect(events.map((event) => event.phase)).toEqual(['start', 'start', 'complete'])
+    expect(events[0]).toMatchObject({ record: { input: { recordVersion: 1 } } })
+    expect(events[1]).toMatchObject({ record: { input: { title: 'Reviewer' } } })
+    expect(events[2]).toMatchObject({ record: { response: expect.stringContaining('d-1') } })
+  })
+
   it('routes the unstamped frames of a turn to it, and drops late ones that no turn is waiting for', async () => {
     const f = fixture()
     f.cli.reply = (message, process) => process.answer(String(message.uuid), 'abc', ['a', 'b', 'c'])

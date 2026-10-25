@@ -57,6 +57,7 @@ import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes
 import { resolveModelForMode, resolveTitleModel, normalizeContextSettings, resolveContextCompactionTokens } from '../../shared/settings'
 
 import { EFFORT_SUFFIXES, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
+import { recordSubagentCall } from '../../shared/subagentTools'
 
 import { getModelEffortLevels } from '../../shared/modelEfforts'
 
@@ -487,6 +488,9 @@ export interface StreamingLlmToolEvent extends LlmToolEvent {
   phase: 'start' | 'complete'
 
   callId?: string
+
+  /** The call's arguments when the runtime reports them apart from `response` (a bounded record, see `recordSubagentCall`). */
+  input?: Record<string, unknown>
 
 }
 
@@ -1349,7 +1353,7 @@ export class LlmClient {
             catch (error) { return toolResult(toolCall, error instanceof Error ? error.message : 'Invalid applet.', true) }
           }
           if (options.delegation && DELEGATION_TOOL_NAMES.has(toolCall.name)) {
-            return toolResult(toolCall, JSON.stringify(await dispatchDelegationTool(options.delegation, toolCall)), false)
+            return executeDelegationTool(options.delegation, toolCall, toolEvents, onToolEvent)
           }
           return this.executeToolCall(
           toolCall,
@@ -3025,6 +3029,50 @@ const DELEGATION_TOOL_NAMES: ReadonlySet<string> = new Set(DELEGATION_TOOLS.map(
  * dispatchable for replayed transcripts but are not listed.
  */
 export const LISTED_DELEGATION_TOOL_NAMES = ['delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'integrate_delegation'] as const
+
+/**
+ * Runs one delegation tool and writes it to the timeline as a Mousse MCP call, the shape Claude
+ * and Codex rows have, with the bounded record the app needs to tell which task it started
+ * (`recordSubagentCall`): never the prompt or the result text.
+ */
+export async function executeDelegationTool(
+  host: DelegationToolHost,
+  toolCall: ToolCall,
+  toolEvents: LlmToolEvent[],
+  onToolEvent?: LlmToolEventHandler
+): Promise<ToolResultMessage> {
+  const callEvent: LlmToolEvent = {
+    kind: 'mcp_tool_call',
+    title: `Called mousse.${toolCall.name}`,
+    summary: 'The orchestrator called a Mousse tool.',
+    details: ['Server: mousse', `Tool: ${toolCall.name}`]
+  }
+  const started = recordSubagentCall(toolCall.name, toolCall.arguments, {})
+  toolEvents.push(callEvent)
+  onToolEvent?.({ ...callEvent, phase: 'start', callId: toolCall.id, ...(started ? { input: started.input } : {}) })
+  const finish = (text: string, isError: boolean): void => {
+    const record = recordSubagentCall(toolCall.name, toolCall.arguments, { text, isError })
+    const resultEvent: LlmToolEvent = {
+      kind: 'mcp_tool_result',
+      title: callEvent.title,
+      summary: isError ? 'The MCP tool returned an error.' : 'The MCP tool returned successfully.',
+      details: callEvent.details,
+      ...(record?.response ? { response: record.response } : {})
+    }
+    toolEvents.push(resultEvent)
+    onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id, ...(record ? { input: record.input } : {}) })
+  }
+  let text: string
+  try {
+    text = JSON.stringify(await dispatchDelegationTool(host, toolCall))
+  } catch (error) {
+    // The caller turns a throw into the tool's error result; the row says so too.
+    finish(error instanceof Error ? error.message : String(error), true)
+    throw error
+  }
+  finish(text, false)
+  return toolResult(toolCall, text, false)
+}
 
 /** Definitions shared by the pi loop and the Mousse MCP server, so both offer identical schemas. */
 export function delegationToolDefinitions(names: readonly string[] = LISTED_DELEGATION_TOOL_NAMES): Tool[] {

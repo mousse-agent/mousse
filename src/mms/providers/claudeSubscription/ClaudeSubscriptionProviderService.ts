@@ -17,6 +17,7 @@ import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings
 import type { ChatImageAttachment } from '../../../shared/types'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
 import { AppError } from '../../../shared/errors'
+import type { recordSubagentCall } from '../../../shared/subagentTools'
 import { CLAUDE_INSTANCE_ID } from '../../../shared/providerInstances'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
@@ -121,6 +122,8 @@ export type ClaudeSubscriptionChatInput = {
     callId: string
     title: string
     toolName?: string
+    /** A Mousse subagent call's bounded record, set when the call completes. */
+    record?: NonNullable<ReturnType<typeof recordSubagentCall>>
   }) => void
 }
 /**

@@ -1,11 +1,19 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
+import { recordSubagentCall, toolResultText } from '../../../shared/subagentTools'
 import type { ClaudeMetricsCollector } from './metrics'
 
 /** Where a turn's frames are reported; the slice of the chat input the stream needs. */
 export interface TurnFrameSink {
   onText: (text: string) => void
   onThinking?: (text: string) => void
-  onTool?: (event: { phase: 'start' | 'complete'; callId: string; title: string; toolName?: string }) => void
+  onTool?: (event: {
+    phase: 'start' | 'complete'
+    callId: string
+    title: string
+    toolName?: string
+    /** A Mousse subagent call's bounded record (`recordSubagentCall`). */
+    record?: NonNullable<ReturnType<typeof recordSubagentCall>>
+  }) => void
 }
 
 /**
@@ -18,6 +26,7 @@ export class TurnFrames {
   thinking = ''
   sessionId: string | undefined
   readonly tools = new Map<string, string>()
+  private readonly toolInputs = new Map<string, unknown>()
   /** Where the text of the current segment starts (a steer starts a new one); a result fills it in when it streamed nothing. */
   segmentStart = 0
 
@@ -54,23 +63,37 @@ export class TurnFrames {
       }
       if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
         this.tools.set(event.content_block.id, event.content_block.name)
+        // A subagent call's row is marked as recorded from the start, before its arguments are known.
+        const record = recordSubagentCall(event.content_block.name, undefined, {})
         this.sink.onTool?.({
           phase: 'start',
           callId: event.content_block.id,
           title: event.content_block.name,
-          toolName: event.content_block.name
+          toolName: event.content_block.name,
+          ...(record ? { record } : {})
         })
       }
     }
+    // A tool_use block's arguments are complete only in the assistant message that holds it.
+    if (message.type === 'assistant' && Array.isArray(message.message.content))
+      for (const block of message.message.content)
+        if (block.type === 'tool_use' && this.tools.has(block.id)) {
+          this.toolInputs.set(block.id, block.input)
+          // The arguments are known now: a subagent call's row names its subagent before the call returns.
+          const record = recordSubagentCall(block.name, block.input, {})
+          if (record) this.sink.onTool?.({ phase: 'start', callId: block.id, title: this.tools.get(block.id)!, toolName: this.tools.get(block.id), record })
+        }
     if (message.type === 'user' && Array.isArray(message.message.content))
       for (const block of message.message.content) {
         if (block.type === 'tool_result' && this.tools.has(block.tool_use_id)) {
-          this.sink.onTool?.({
-            phase: 'complete',
-            callId: block.tool_use_id,
-            title: this.tools.get(block.tool_use_id)!
+          const title = this.tools.get(block.tool_use_id)!
+          const record = recordSubagentCall(title, this.toolInputs.get(block.tool_use_id), {
+            text: toolResultText(block.content),
+            isError: block.is_error === true
           })
+          this.sink.onTool?.({ phase: 'complete', callId: block.tool_use_id, title, ...(record ? { record } : {}) })
           this.tools.delete(block.tool_use_id)
+          this.toolInputs.delete(block.tool_use_id)
         }
       }
   }
