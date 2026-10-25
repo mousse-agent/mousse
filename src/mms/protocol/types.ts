@@ -235,6 +235,7 @@ export const PROTOCOL_METHODS = [
   'orchestrator.dismissQuestions',
   'orchestrator.pendingQuestions',
   'subagents.list',
+  'subagents.stopAll',
   'queue.list',
   'queue.enqueue',
   'queue.reorder',

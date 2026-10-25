@@ -1038,10 +1038,10 @@ export class ClaudeSubscriptionProviderService {
     // unattended, in bypass mode). Its tasks are discharged by the next turn that commits.
     live.discardContinuation(run)
   }
-  /** The turn Claude started on its own that is running now on the thread (see `LiveSession.inFlightContinuationId`). */
-  inFlightContinuation(threadId: string): string | undefined {
+  /** The turn Claude started on its own that is running now on the thread (see `LiveSession.inFlightContinuation`). */
+  inFlightContinuation(threadId: string): { id: string; discarded: boolean } | undefined {
     const live = this.live.get(threadId)
-    return live && !live.dead ? live.inFlightContinuationId() : undefined
+    return live && !live.dead ? live.inFlightContinuation() : undefined
   }
   /** Whether Claude started a turn of its own on the thread that no run has taken yet. */
   hasContinuation(threadId: string, id?: string): boolean {
@@ -1432,7 +1432,13 @@ export class ClaudeSubscriptionProviderService {
               this.save()
             }
             const refusing = this.live.get(input.threadId)
-            if (refusing && !refusing.dead) refusing.meta.pushedFailed = true
+            // Only when the history before the refused request is what the process holds (only the new message
+            // differs) may the next request continue from the boundary the refusal leaves. An undo or an edit
+            // changed what the process remembers: that stays refused until the helpers finish or Stop.
+            const historyHeld =
+              (savedHistoryKey !== undefined && savedHistoryKey === historyKey(input.history ?? '') && stored?.sessionId === refusing?.sessionId) ||
+              (refusing?.meta.expectedKey !== undefined && refusing.meta.expectedKey === historyKey(input.history ?? ''))
+            if (refusing && !refusing.dead && historyHeld) refusing.meta.pushedFailed = true
           }
           throw error
         }

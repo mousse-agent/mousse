@@ -314,6 +314,8 @@ export class LiveRun {
   started = false
   /** What a discarded wake had left when this turn began; it clears them when it commits. */
   discardedAtStart: string[] = []
+  /** The host could not run this wake and it was discarded; its frames still arrive until its result. */
+  discarded = false
   /** A discarded turn was interrupted. */
   interruptSent = false
   readonly buffered: SDKMessage[] = []
@@ -497,9 +499,10 @@ export class LiveSession<Turn = unknown> {
    * running: a Mousse tool call made now comes from it. When Claude runs a message of ours, nothing is
    * returned, whatever wakes wait to be run.
    */
-  inFlightContinuationId(): string | undefined {
+  inFlightContinuation(): { id: string; discarded: boolean } | undefined {
     const run = this.cursor
-    return run && run.kind === 'continuation' && !run.settled && !run.abandoned ? run.id : undefined
+    // A wake that was discarded but is not interrupted yet (another run is live) still runs tools.
+    return run && run.kind === 'continuation' && !run.settled && (!run.abandoned || run.discarded) ? { id: run.id, discarded: run.discarded } : undefined
   }
 
   /** A turn Claude started on its own waits for a run (the one `id` names, when given). */
@@ -520,6 +523,7 @@ export class LiveSession<Turn = unknown> {
     if (this.obligations.release(run, 'discarded').length > 0)
       this.hooks.notice?.('A background helper finished, but nothing could show its result. The next message clears it; Stop releases it now.')
     if (run.settled || run.abandoned) return
+    run.discarded = true
     // The turn may not have begun yet (the notification comes first): it stays the frames' target, so
     // everything it says is dropped, and it is interrupted as soon as its first frame shows it started.
     run.abandoned = true
@@ -720,6 +724,9 @@ export class LiveSession<Turn = unknown> {
    * with a message that says so; the next turn starts a fresh process.
    */
   private giveUpCancel(): void {
+    // Said now, not later: closing the process clears the delayed notes, and no caller may be left to see the error.
+    if (this.obligations.size > 0)
+      this.hooks.notice?.('Claude did not answer a cancel in time, so its process was closed and the background helpers it was running ended.')
     this.close('closed', new Error('Claude Code did not answer a cancel in time, so its process was closed (its background helpers ended with it). Send the message again.'))
   }
 

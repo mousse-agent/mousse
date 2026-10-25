@@ -1146,6 +1146,45 @@ describe('result routing and steering edge cases', () => {
     expect(await wake).toContain('the report is read')
   })
 
+  it('a cancel that never answers tells the thread its helpers ended, though no push is left waiting', async () => {
+    const f = fixture({ interruptTimeoutMs: 100 })
+    helper(f)
+    await f.turn({ history: 'h' }, 'h')
+    const process = f.cli.last
+    f.cli.reply = undefined
+    const abort = new AbortController()
+    const first = f.chat({
+      history: 'h',
+      signal: abort.signal,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('queued steer').mockReturnValue(undefined)
+    })
+    await inputs(f.cli, 3)
+    process.interruptGate = new Promise(() => undefined)
+    abort.abort()
+    await expect(first).rejects.toThrow()
+    await vi.waitFor(() => expect(process.closed).toBe(true))
+    expect(f.host.notice).toHaveBeenCalledExactlyOnceWith('thread', expect.stringContaining('background helpers it was running ended'))
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+  })
+
+  it('a refusal for an undone or edited conversation does not let the next request continue on the process', async () => {
+    const f = fixture()
+    helper(f)
+    await f.turn({ history: 'h' }, 'h')
+    f.cli.reply = undefined
+    // The conversation was edited: the history before this request is not what the process holds.
+    await expect(f.chat({ history: 'edited', model: 'sonnet' })).rejects.toMatchObject({ message: expect.stringContaining('conversation changed') })
+    f.service.commitFailed('thread', 'edited + the refused request')
+    await expect(f.chat({ history: 'edited + the refused request' })).rejects.toMatchObject({ message: expect.stringContaining('conversation changed') })
+    expect(f.cli.processes).toHaveLength(1)
+    // Whereas a refusal that only the new message caused leaves the boundary.
+    await expect(f.chat({ history: 'h', model: 'opus' })).rejects.toMatchObject({ message: expect.stringContaining('model changed') })
+    f.service.commitFailed('thread', 'h + refused')
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'ok')
+    expect(await f.chat({ history: 'h + refused' })).toBe('ok')
+    expect(f.cli.processes).toHaveLength(1)
+  })
+
   it('closing the process while a push waits on a cancel releases the push', async () => {
     const f = fixture({ interruptTimeoutMs: 600_000 })
     await cancelThatNeverAnswers(f)
@@ -1206,6 +1245,26 @@ describe('result routing and steering edge cases', () => {
     await run.done
     // The claimed wake has no turn of its own: it fails as folded, with no text to publish as "Done.".
     await expect(claimed).rejects.toMatchObject({ code: 'claude_continuation_folded' })
+  })
+
+  it('a discarded wake that is still in flight is reported, so its tool calls are refused', async () => {
+    const f = fixture()
+    f.host.continuationStarted.mockImplementation(() => {
+      throw new Error('no worker')
+    })
+    await withHelperTurn(f)
+    const process = f.cli.last
+    // The wake is reported and discarded; then a message of ours is pushed, so the wake is not interrupted at its first frame.
+    process.emit(notification('bash-1'))
+    await later(30)
+    const mine = f.chat({ prompt: 'mine', history: '' })
+    mine.catch(() => undefined)
+    await inputs(f.cli, 2)
+    process.emit(textDelta('hidden wake work'))
+    await vi.waitFor(() => expect(f.service.inFlightContinuation('thread')).toMatchObject({ discarded: true }))
+    expect(process.interrupts).toBe(0)
+    process.emit(textDelta('answer', process.uuid(1)), resultFrame({ uuids: [process.uuid(1)], text: 'answer' }))
+    await mine
   })
 
   it('a steered continuation ignores an abort result that echoes no id and ends at its own result', async () => {

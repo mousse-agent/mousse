@@ -29,6 +29,8 @@ export interface ChildBusyInputs {
   inFlightEffects?: boolean
   /** The provider reports background work for the child that a run does not cover. */
   providerBackgroundWork?: boolean
+  /** The child's live turn holds steers it has not read: they become a follow-up turn once the turn settles (`RunStore.setUnreadSteers`). */
+  unreadSteers?: boolean
 }
 
 /** A child is busy while a run is live, or any `ChildBusyInputs` holds. */
@@ -38,7 +40,8 @@ export function isChildBusy(runs: readonly Pick<RunRecord, 'status'>[], inputs: 
     inputs.runningOutboundDelegation ||
     inputs.unconsumedInbox ||
     inputs.inFlightEffects === true ||
-    inputs.providerBackgroundWork === true
+    inputs.providerBackgroundWork === true ||
+    inputs.unreadSteers === true
   )
 }
 
@@ -132,9 +135,10 @@ export function childBusyInputs(store: RunStore, threadId: string): ChildBusyInp
   )
   const unconsumedInbox = actionableInbox(store, threadId)
   const inFlightEffects = hasInFlightDeliveryEffect(store, threadId)
+  const unreadSteers = runningOutboundDelegation || unconsumedInbox || inFlightEffects ? false : store.hasUnreadSteers(threadId)
   const providerBackgroundWork =
-    runningOutboundDelegation || unconsumedInbox || inFlightEffects ? false : store.providerBackgroundWork(threadId)
-  return { runningOutboundDelegation, unconsumedInbox, inFlightEffects, providerBackgroundWork }
+    runningOutboundDelegation || unconsumedInbox || inFlightEffects || unreadSteers ? false : store.providerBackgroundWork(threadId)
+  return { runningOutboundDelegation, unconsumedInbox, inFlightEffects, providerBackgroundWork, unreadSteers }
 }
 
 /** Whether `threadId` is busy now: the hold of every delegation that waits on it. */

@@ -108,6 +108,19 @@
   font-weight: 600;
 }
 
+/* A heading with a control at its end: the control shares the baseline, the title loses its own margin. */
+.side-card-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.side-card-section-head .side-card-section-title {
+  margin: 0;
+}
+
 .side-card-placeholder {
   margin: 0;
   color: var(--text-secondary);

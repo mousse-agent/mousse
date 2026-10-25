@@ -296,6 +296,31 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       maximumBytes
     )
   }
+  isActive(threadId: string): boolean {
+    const o = this.services.orchestrator
+    const engine = this.services.runEngine
+    // A turn counts from the moment it is admitted (before it marks its run starting), and a queued run counts
+    // once its `turn.start` is claimed: the person's turn is on its way even when no check below sees it running.
+    return (
+      o.isTurnActive(threadId) ||
+      o.isActiveTurnRunning(threadId) ||
+      o.isChannelTurnActive(threadId) ||
+      engine.getActiveRun(threadId) !== null ||
+      engine.store.listQueuedRuns(threadId).some((run) => engine.outbox.listForRun(run.runId).some((effect) => effect.kind === 'turn.start' && effect.status === 'running'))
+    )
+  }
+  async stop(threadId: string): Promise<unknown> {
+    // The same inventory check as `execute`: a remote caller reaches only this profile's threads.
+    if (!this.services.threads.listAllThreads().some((thread) => thread.id === threadId))
+      throw new NetError('stream_unknown', 'Thread is outside this profile inventory.')
+    try {
+      return await this.services.orchestrator.stopThread(threadId, 'remote')
+    } catch (error) {
+      // The remote run was aborted already; a failure to reach the subagents is not the caller's error.
+      console.warn('remote stop could not reach the subagents of a thread', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return undefined
+    }
+  }
   async run(
     threadId: string,
     content: string,

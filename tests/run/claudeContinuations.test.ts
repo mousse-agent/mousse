@@ -366,13 +366,11 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     await new Promise((resolve) => setTimeout(resolve, 200))
     release()
     s.cli.last.emit(resultFrame({ text: 'The report is read.', origin: 'task-notification' }))
-    // The worker looks again (in the daemon its poll does) once the deferral has run out.
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    s.d.worker.notify()
+    // Nothing nudges the worker here: it wakes for the deferred continuation by itself, not at its 30 s poll.
     await waitFor(() => {
       const runs = s.d.engine.listRuns(s.childThread).filter((run) => run.source === 'provider-continuation' || run.source === 'queue' || run.source === 'gui')
       return runs.length === 2 && runs.every((run) => run.status === 'completed')
-    }, 'both turns to complete', 20_000)
+    }, 'both turns to complete', 8_000)
     const runs = s.d.engine.listRuns(s.childThread)
     const continuation = runs.find((run) => run.source === 'provider-continuation')!
     const queued = runs.find((run) => run.source !== 'provider-continuation' && run.source !== 'delegation')!
@@ -412,11 +410,14 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     orch.pendingContinuations.set('timed-out', hold(null))
     orch.pendingContinuations.set('active', hold('run-active'))
     const inFlight = vi.spyOn(s.service, 'inFlightContinuation')
-    inFlight.mockReturnValue('active')
+    inFlight.mockReturnValue({ id: 'active', discarded: false })
     await expect(orch.continuationGate(s.childThread)).resolves.toEqual({ runId: 'run-active' })
     inFlight.mockReturnValue(undefined)
     expect(orch.continuationGate(s.childThread)).toBeUndefined()
-    inFlight.mockReturnValue('timed-out')
+    inFlight.mockReturnValue({ id: 'timed-out', discarded: false })
+    await expect(orch.continuationGate(s.childThread)).resolves.toEqual({ runId: null })
+    // A discarded wake has no run at all, so its calls are refused whatever entry exists.
+    inFlight.mockReturnValue({ id: 'gone', discarded: true })
     await expect(orch.continuationGate(s.childThread)).resolves.toEqual({ runId: null })
     orch.pendingContinuations.clear()
   })

@@ -633,6 +633,12 @@ export interface QueuedMessage {
   inboxIds?: string[]
   /** The subagent results the item's message reports. */
   subagentNotice?: import('./subagents').SubagentNoticeItem[]
+  /**
+   * The thread's stop generation when the item was queued, for work that starts on behalf of a parent
+   * (a steer that missed its turn). Once a Stop raised the generation the item is refused when it would
+   * run. Absent for what a person queued, which a Stop never fences.
+   */
+  stopGeneration?: number
 }
 
 export interface ContextUsageCategory {

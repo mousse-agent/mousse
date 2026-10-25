@@ -240,5 +240,23 @@ ALTER TABLE delegations ADD COLUMN role TEXT;
 -- whose delivery failed or was cut off can go back to pending. NULL for older delivered rows.
 ALTER TABLE inbox ADD COLUMN delivered_by TEXT;
 `
+  },
+  {
+    version: 8,
+    sql: `
+-- The Stop fence (issue #142): each Stop of a thread (and of every subagent below it) raises that
+-- thread's generation. Work that starts something on behalf of a parent (a delegation, a follow-up
+-- to a subagent, a wake, a queued steer) records the generation it was admitted at and is refused
+-- at execution once the thread's generation is higher. Both live in the run database so a bump and
+-- an admission check serialize in one transaction.
+CREATE TABLE thread_stop_generations(
+  thread_id  TEXT PRIMARY KEY,
+  generation INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
+-- The generation of the run's own thread when the run was created; 0 for runs from before version 8.
+ALTER TABLE runs ADD COLUMN stop_generation INTEGER NOT NULL DEFAULT 0;
+`
   }
 ]

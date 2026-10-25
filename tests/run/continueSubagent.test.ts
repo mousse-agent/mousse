@@ -358,14 +358,14 @@ describe('continue_subagent and the title address (issue #142)', () => {
   })
 
   describe('the subagent\'s first prompt', () => {
-    it('tells it whose it is and where its result goes, then gives its task', async () => {
+    it('tells it whose it is, where its result goes and that it may start subagents, then gives its task', async () => {
       const { adapter, steps, out, say, start, settled } = world()
       steps['go'] = async (tools) => { out.first = await start(tools, 'API reviewer') }
       await say('go')
       await settled(out.first.childRunId)
       const first = adapter.turns.find((turn) => turn.threadId === out.first.childThreadId)!
       expect(first.prompt).toBe(`${subagentPreamble('Parent')}\n\nReview API reviewer`)
-      expect(first.prompt).not.toContain('own subagents')
+      expect(first.prompt).toContain('You may start your own subagents unless your instructions say not to.')
     })
   })
 })

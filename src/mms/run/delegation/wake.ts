@@ -215,6 +215,8 @@ export function wakeThreads(
           report.wakes.push(run.runId)
           return
         }
+        // A run that is being stopped takes no steer (its executor would drop it); the rows wait for the wake.
+        if (active.outcome?.stopRequested) return
         const caps = capabilitiesFor?.(threadId) ?? null
         // Only native steer joins the live turn without cancelling in-flight work.
         if (!caps || steerStrategy(caps, active) !== 'native') return

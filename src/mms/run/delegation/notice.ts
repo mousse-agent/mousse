@@ -1,5 +1,5 @@
 import type { SubagentNoticeItem } from '../../../shared/subagents'
-import type { ChildResultPayload, InboxRecord } from '../types'
+import { isChildQuestionRow, type ChildQuestionPayload, type ChildResultPayload, type InboxRecord } from '../types'
 
 /** Characters of one subagent's result a notice shows (issue #142: the result is inlined once). */
 export const NOTICE_TASK_CHARS = 4_000
@@ -7,9 +7,11 @@ export const NOTICE_TASK_CHARS = 4_000
 /** Characters of results one notice shows in all. */
 export const NOTICE_WAKE_CHARS = 16_000
 
-/** What a notice may name besides the rows: a subagent's current title. */
+/** What a notice may name besides the rows: a subagent's current title and what it is asking. */
 export interface NoticeContext {
   titleOf?(threadId: string): string | undefined
+  /** The prompts of the pending question `requestId`, or null when it is not pending any more. */
+  questionPrompts?(requestId: string): string[] | null
 }
 
 export interface PlannedNotice {
@@ -34,7 +36,7 @@ export function planWakeNotice(rows: readonly InboxRecord[], context: NoticeCont
   let budget = NOTICE_WAKE_CHARS
   const items: SubagentNoticeItem[] = []
   const lines = rows.map((row) => {
-    if (row.kind !== 'child_result') return noticeText(row)
+    if (row.kind !== 'child_result') return noticeText(row, context)
     const payload = row.payload as ChildResultPayload
     const { result } = payload
     const title = context.titleOf?.(payload.childThreadId) ?? null
@@ -56,10 +58,26 @@ export function planWakeNotice(rows: readonly InboxRecord[], context: NoticeCont
   return { text: lines.join('\n\n'), items }
 }
 
-/** A row that is not a child's result: its own text. */
-function noticeText(row: InboxRecord): string {
+/** A row that is not a child's result: its own text, or for a subagent's question the question itself. */
+function noticeText(row: InboxRecord, context: NoticeContext): string {
+  if (isChildQuestionRow(row)) return questionNotice(row.payload as ChildQuestionPayload, context)
+  const stopped = row.payload as { kind?: unknown; delegationId?: string; childThreadId?: string } | null
+  if (stopped?.kind === 'delegation_stopped' && stopped.childThreadId) {
+    const title = context.titleOf?.(stopped.childThreadId) ?? null
+    const who = title ? `Subagent "${title}" (thread ${stopped.childThreadId})` : `Subagent thread ${stopped.childThreadId}`
+    return `${who} was stopped before it finished task ${stopped.delegationId}.`
+  }
   const text = (row.payload as { text?: unknown } | null)?.text
   return typeof text === 'string' && text.trim() ? text.trim() : `Mousse notice ${row.inboxId}.`
+}
+
+/** What a parent is told when its subagent waits for an answer: who asks, what, and how to answer. */
+function questionNotice(payload: ChildQuestionPayload, context: NoticeContext): string {
+  const title = context.titleOf?.(payload.childThreadId) ?? null
+  const who = title ? `Subagent "${title}" (thread ${payload.childThreadId})` : `Subagent thread ${payload.childThreadId}`
+  const prompts = context.questionPrompts?.(payload.requestId) ?? []
+  const asking = prompts.length ? `\n${prompts.map((prompt) => head(prompt)).join('\n')}` : ''
+  return `${who} is waiting for an answer to question ${payload.requestId}.${asking}\nAnswer it with answer_subagent (subagent "${title ?? payload.childThreadId}", requestId ${payload.requestId}), or ask the user.`
 }
 
 /** One line per inbox row; server-authored, never model-supplied. */
