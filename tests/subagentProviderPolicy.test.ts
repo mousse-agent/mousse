@@ -27,7 +27,7 @@ const MOUSSE = { url: 'http://127.0.0.1:9/mcp', token: 'tok' }
 describe('policy table: permission decisions', () => {
   const READ_ONLY_BUILTINS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion', 'ToolSearch']
   // A read-only subagent may start (read-only) subagents; `delegate_task` itself limits them to read-only ones.
-  const MOUSSE_READS = ['mcp__mousse__thread_read', 'mcp__mousse__queue_list', 'mcp__mousse__ask_user', 'mcp__mousse__present_plan', 'mcp__mousse__delegate_task', 'mcp__mousse__task_status', 'mcp__mousse__task_cancel', 'mcp__mousse__list_delegations']
+  const MOUSSE_READS = ['mcp__mousse__thread_read', 'mcp__mousse__queue_list', 'mcp__mousse__ask_user', 'mcp__mousse__present_plan', 'mcp__mousse__delegate_task', 'mcp__mousse__continue_subagent', 'mcp__mousse__answer_subagent', 'mcp__mousse__task_status', 'mcp__mousse__task_cancel', 'mcp__mousse__list_subagents']
   const MOUSSE_WRITES = ['mcp__mousse__queue_enqueue', 'mcp__mousse__thread_fork', 'mcp__mousse__thread_merge_back', 'mcp__mousse__integrate_delegation', 'mcp__mousse__create_task']
   const WRITERS = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'PowerShell', 'BashOutput']
   const EXTERNAL = ['mcp__userserver__lookup', 'mcp__oauthserver__post']

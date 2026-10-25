@@ -21,10 +21,14 @@ export const scenario: Scenario = {
       parentRunId: run.runId,
       result: { runStatus: 'completed', text: 'Three modules: run, agents, orchestrator.' }
     })
-    const notice = messages.find((message) => message.role === 'user' && message.content.startsWith('Delegated task'))
+    const notice = messages.find((message) => message.role === 'user' && message.content.startsWith('Subagent'))
     expect(notice?.content).toBe(
-      `Delegated task ${delegations[0].delegationId} finished: Three modules: run, agents, orchestrator.. Use task_status for the full result.`
+      `Subagent "Module counter" (thread ${delegations[0].childThreadId}) finished task ${delegations[0].delegationId}.\nThree modules: run, agents, orchestrator.\nFull result above.`
     )
+    // The message carries what it reports, so the app never parses the text.
+    expect(notice?.subagentNotice).toEqual([
+      { delegationId: delegations[0].delegationId, childThreadId: delegations[0].childThreadId, title: 'Module counter', runStatus: 'completed', fullyShown: true }
+    ])
     expect(messages.at(-1)).toMatchObject({ role: 'assistant', content: 'The helper found three modules.' })
   }
 }

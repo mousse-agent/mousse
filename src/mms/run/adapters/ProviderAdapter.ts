@@ -252,6 +252,12 @@ export interface AdapterHost {
      * fingerprints for session resume (`commitConversation`).
      */
     nativeHistoryAfterTurn(text: string): string
+    /**
+     * The serialised canonical history as the next turn will see it, without appending a reply. A
+     * runtime that resumes a native session fingerprints it after a stopped turn, so the next turn
+     * can resume.
+     */
+    nativeHistoryNow?(): string
   }
 }
 

@@ -114,25 +114,6 @@ describe('delegation policy fixes', () => {
     expect(readOnly(adapter.turns.at(-1))).toEqual({ cwd: projectDir, write: false, read: true })
   })
 
-  it('recordDelegation of a follow-up that already ended publishes its final reply', async () => {
-    const { d } = setup()
-    const { parent, parentRunId } = await parentWithRun(d)
-    const child = d.store.createThread('Child')
-    d.orch.setThreadModelOverride(child.id, PI)
-    d.engine.delegations.createLineage({ threadId: child.id, parentThreadId: parent.id, parentRunId, relationship: 'subagent' })
-    const followUp = await d.orch.send('Summarise', false, { threadId: child.id, clientRequestId: 'child-1' })
-    expect(d.engine.getRun(followUp.runId!)!.status).toBe('completed')
-    const delegation = d.engine.recordDelegation({
-      parentThreadId: parent.id,
-      parentRunId,
-      childThreadId: child.id,
-      childRunId: followUp.runId!,
-      prompt: 'Summarise',
-      wake: 'always'
-    })
-    expect(delegation).toMatchObject({ status: 'result_available', result: { runStatus: 'completed', text: 'answer to Summarise' } })
-  })
-
   it('an integration run whose start throws ends failed and leaves an integration_failed notice', async () => {
     const { d } = setup()
     const parent = d.store.createThread('Parent')

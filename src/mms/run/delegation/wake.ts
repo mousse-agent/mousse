@@ -96,36 +96,78 @@ function hasQueuedWake(store: RunStore, threadId: string): boolean {
   )
 }
 
-/** Times a row may go back to pending after a failed or cut-off delivery before it stays delivered. */
+/** Times a row may go back to pending after a failed or cut-off delivery before delivery gives up. */
 export const MAX_INBOX_REDELIVERIES = 3
+
+/** The wait before a row's second and later redeliveries doubles from this, up to the cap. */
+export const REDELIVERY_BACKOFF_BASE_MS = 2_000
+export const REDELIVERY_BACKOFF_MAX_MS = 30_000
+
+/** How long a row that has been pending `attempts` times waits after its last failure; the first redelivery is immediate. */
+export function redeliveryDelayMs(attempts: number): number {
+  return attempts <= 1 ? 0 : Math.min(REDELIVERY_BACKOFF_BASE_MS * 2 ** (attempts - 2), REDELIVERY_BACKOFF_MAX_MS)
+}
 
 /**
  * SPEC §14.3 ("a parent never waits forever"): `delivered` rows whose delivery did not happen go
  * back to `pending` so rule 4 delivers them again. A row is returned when the effect that delivered
- * it (`deliveredBy`) ended `failed` or `cancelled`, or when that effect is a wake `turn.start` whose
- * wake run ended other than `completed` — except a wake the user stopped (they saw it start and
- * chose to stop it). A row returns at most `MAX_INBOX_REDELIVERIES` times, so a delivery that keeps
- * failing cannot loop. Joins the caller's transaction.
+ * it (`deliveredBy`) ended `failed` or `cancelled`, or when the run that effect belongs to (a wake
+ * run, the run a steer joined, a queued steer's run) ended other than `completed` — except a run
+ * the user stopped (they saw it start and chose to stop it). With `now`, later redeliveries back off
+ * (`redeliveryDelayMs`). A row returns at most `MAX_INBOX_REDELIVERIES` times; after that it stays
+ * `delivered` with `payload.deliveryFailed` set (attempts and the last error), and a
+ * `reconcile.delivery_failed` event tells the owner, so a delivery that keeps failing cannot loop and
+ * is never silently stuck. Joins the caller's transaction.
  */
-export function restoreUndeliveredRows(store: RunStore, outbox: EffectOutbox): string[] {
+export function restoreUndeliveredRows(store: RunStore, outbox: EffectOutbox, now?: string): string[] {
   const inbox = new Inbox(store)
   const restored: string[] = []
   for (const row of inbox.listDeliveredWithEffect()) {
     const effect = outbox.get(row.deliveredBy!)
-    if (!effect || !undelivered(store, effect)) continue
-    if (inbox.pendingCount(row.inboxId, row.threadId) > MAX_INBOX_REDELIVERIES) continue
+    if (!effect) continue
+    const failure = deliveryFailure(store, effect, row)
+    if (!failure) continue
+    const flagged = (row.payload as { deliveryFailed?: unknown } | null)?.deliveryFailed === true
+    if (flagged) continue
+    const attempts = inbox.pendingCount(row.inboxId, row.threadId)
+    if (attempts > MAX_INBOX_REDELIVERIES) {
+      inbox.patchPayload(row.inboxId, { deliveryFailed: true, attempts, lastError: failure.error })
+      store.appendEvent({
+        threadId: row.threadId,
+        runId: row.runId,
+        type: 'reconcile.delivery_failed',
+        payload: { inboxId: row.inboxId, delegationId: (row.payload as { delegationId?: unknown } | null)?.delegationId ?? null, attempts, lastError: failure.error }
+      })
+      continue
+    }
+    if (now !== undefined && Date.parse(now) - Date.parse(failure.at) < redeliveryDelayMs(attempts)) continue
     inbox.markPendingAgain([row.inboxId])
     restored.push(row.inboxId)
   }
   return restored
 }
 
-function undelivered(store: RunStore, effect: EffectRecord): boolean {
-  if (effect.status === 'failed' || effect.status === 'cancelled') return true
-  if (effect.kind !== 'turn.start' || !isWakeTurnPayload(effect.payload)) return false
-  const run = store.getRun(effect.payload.runId)
-  if (!run || !TERMINAL_RUN_STATUSES.has(run.status) || run.status === 'completed') return false
-  return run.outcome?.interruptedBy !== 'user'
+/** Why and when the delivery an effect carried did not happen, or null when it did (or may still). */
+function deliveryFailure(store: RunStore, effect: EffectRecord, row: InboxRecord): { at: string; error: string } | null {
+  const run = store.getRun(effect.runId ?? '')
+  if (effect.status === 'failed' || effect.status === 'cancelled')
+    return { at: effect.completedAt ?? effect.updatedAt, error: effect.lastError ?? `delivery ${effect.status}` }
+  // A steer the turn held but never read, on a run that ended: the follow-up turn that should have
+  // carried the rows was never queued (a crash between the run's end and the turn's settlement, a
+  // failed enqueue). Nothing else will deliver them, so they are delivered again. Only a row the
+  // turn marked as held (`steerHeldBy`) counts: a row of an older steer, which no code marked,
+  // may well have been read, and is left alone.
+  const marks = row.payload as { steerHeldBy?: unknown; steerTakenBy?: unknown } | null
+  if (
+    effect.kind === 'turn.steer' && effect.status === 'succeeded' && run?.status === 'completed' &&
+    marks?.steerHeldBy === effect.effectId && marks.steerTakenBy !== effect.effectId
+  )
+    return { at: run.completedAt ?? effect.updatedAt, error: 'the steer was never read' }
+  // Only an effect that carries a turn can have its run end without the notice being read.
+  if (effect.kind !== 'turn.start' && effect.kind !== 'turn.steer') return null
+  if (!run || !TERMINAL_RUN_STATUSES.has(run.status) || run.status === 'completed') return null
+  if (run.outcome?.interruptedBy === 'user') return null
+  return { at: run.completedAt ?? effect.updatedAt, error: run.outcome?.error ?? `the delivering run ${run.status}` }
 }
 
 /**
@@ -150,7 +192,7 @@ export function wakeThreads(
 ): WakeReport {
   const inbox = new Inbox(store)
   const delegations = new Delegations(store, inbox)
-  const restored = store.db.transaction(() => restoreUndeliveredRows(store, outbox))
+  const restored = store.db.transaction(() => restoreUndeliveredRows(store, outbox, now))
   const report: WakeReport = { wakes: [], steers: [], cancelled: cancelAcknowledgedWakes(store, outbox, now), restored }
   for (const threadId of inbox.listThreadsWithPending()) {
     try {

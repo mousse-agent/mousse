@@ -6,6 +6,7 @@ import type {
   Task,
   Thread
 } from '../../shared/types'
+import type { SubagentNoticeItem } from '../../shared/subagents'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import type { WorkspaceExecutionContext } from '../../shared/workspace'
 import { AgentRegistry } from '../agents/AgentRegistry'
@@ -16,6 +17,8 @@ export interface ActiveTurnControl {
   abort: AbortController
   pendingSteer: string[]
   promotedSteerIds: string[]
+  /** Notices (subagent results) the steers in `pendingSteer` carry, until the model reads them or the turn ends. */
+  carriedSteers?: Array<{ inboxIds: string[]; effectId: string; text: string; subagentNotice?: SubagentNoticeItem[] }>
 }
 
 /** Mutable per-thread execution state owned by MMS. */

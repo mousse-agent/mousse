@@ -211,6 +211,60 @@ describe('Claude Subscription native provider', () => {
     await switched.chat({ ...chatInput(home), instanceId: 'claude', history: 'history' })
     expect(inputs[3].options.resume).toBeUndefined()
   })
+  describe('a stopped turn keeps its native session (issue #142)', () => {
+    /** Turn 1 completes; turn 2 is stopped after `yielded` messages; the result is what turn 3 resumes. */
+    const stoppedThenContinued = async (yielded: number) => {
+      const inputs: Array<{ options: Options; prompt: unknown }> = []
+      const stop = new AbortController()
+      const { service, home } = fixture((input) => {
+        inputs.push(input)
+        if (inputs.length !== 2) return fakeQuery([result])
+        const events = (async function* () {
+          if (yielded > 0) yield { type: 'stream_event', session_id: 'vendor-session', parent_tool_use_id: null, event: { type: 'message_start' } }
+          stop.abort()
+          yield { type: 'stream_event', session_id: 'vendor-session', parent_tool_use_id: null, event: { type: 'message_stop' } }
+        })()
+        return Object.assign(events, { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
+      })
+      await service.chat({ ...chatInput(home), history: '' })
+      service.commitConversation('thread', 'H1')
+      await expect(service.chat({ ...chatInput(home), history: 'H1', signal: stop.signal })).rejects.toThrow()
+      // The adapter fingerprints the history as the stopped turn left it: H1 and the stopped request.
+      service.commitInterrupted('thread', 'H1 + stopped request')
+      await service.chat({ ...chatInput(home), history: 'H1 + stopped request' })
+      return inputs
+    }
+
+    it('resumes the same session on the next turn', async () => {
+      const inputs = await stoppedThenContinued(1)
+      expect(inputs[1].options.resume).toBe('vendor-session')
+      expect(inputs[2].options.resume).toBe('vendor-session')
+    })
+
+    it('starts fresh when the stop came before the SDK had a session', async () => {
+      const inputs = await stoppedThenContinued(0)
+      expect(inputs[2].options.resume).toBeUndefined()
+    })
+
+    it('does not resume when the history changed since the stop', async () => {
+      const inputs: Array<{ options: Options; prompt: unknown }> = []
+      const stop = new AbortController()
+      const { service, home } = fixture((input) => {
+        inputs.push(input)
+        if (inputs.length !== 1) return fakeQuery([result])
+        const events = (async function* () {
+          yield { type: 'stream_event', session_id: 'vendor-session', parent_tool_use_id: null, event: { type: 'message_start' } }
+          stop.abort()
+          yield { type: 'stream_event', session_id: 'vendor-session', parent_tool_use_id: null, event: { type: 'message_stop' } }
+        })()
+        return Object.assign(events, { close: vi.fn(), interrupt: vi.fn(async () => {}) }) as unknown as Query
+      })
+      await expect(service.chat({ ...chatInput(home), signal: stop.signal })).rejects.toThrow()
+      service.commitInterrupted('thread', 'what the stopped turn left')
+      await service.chat({ ...chatInput(home), history: 'something else' })
+      expect(inputs[1].options.resume).toBeUndefined()
+    })
+  })
   it("keeps the user's --append-system-prompt launch args by moving their text after Mousse's guidance", async () => {
     const inputs: Array<{ options: Options; prompt: unknown }> = []
     const { service, home } = fixture((input) => {

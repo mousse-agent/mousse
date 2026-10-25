@@ -165,56 +165,163 @@ describe('RunEngine delegation (SPEC §14.1-§14.2)', () => {
     expect(f.engine.inbox.listForDelegation(child.delegationId).map((row) => row.status)).toEqual(['acknowledged'])
   })
 
-  it('recordDelegation ties a follow-up run on an existing child thread to the parent run', async () => {
-    f = delegationFixture()
-    const parent = await f.runningRun('parent')
-    const first = await f.delegate(parent.runId, 'call-1')
-    f.finish(first.childRunId, 'first')
-    const followUp = f.store.createRun({ threadId: 'child-1', source: 'delegation' })
-    const recorded = f.engine.recordDelegation({ parentThreadId: 'parent', parentRunId: parent.runId, childThreadId: 'child-1', childRunId: followUp.runId, prompt: 'again', wake: 'always' })
-    expect(recorded.status).toBe('running')
-    f.finish(followUp.runId, 'second')
-    expect(f.engine.delegations.get(recorded.delegationId)!.result!.text).toBe('second')
-    expect(f.engine.inbox.listPending('parent')).toHaveLength(2)
-    expect(() => f!.engine.recordDelegation({ parentThreadId: 'other', parentRunId: parent.runId, childThreadId: 'child-1', childRunId: followUp.runId, prompt: 'x', wake: 'always' })).toThrow('not a subagent')
+  describe('a follow-up on an existing subagent (issue #142)', () => {
+    const followUp = (f: DelegationFixture, parentRunId: string, overrides: Record<string, unknown> = {}) => f.engine.dispatch({
+      kind: 'send',
+      threadId: 'child-1',
+      clientRequestId: 'follow-up',
+      source: 'delegation',
+      prompt: 'again',
+      delegation: { parentThreadId: 'parent', parentRunId, prompt: 'again', wake: 'always', ...overrides }
+    })
+
+    it('writes the run and its delegation row in one commit, copying the subagent\'s policy', async () => {
+      f = delegationFixture()
+      const parent = await f.runningRun('parent')
+      const first = await f.delegate(parent.runId, 'call-1', { workspace: 'shared', role: 'review', instanceId: 'pi:openai', model: 'gpt-x' })
+      f.finish(first.childRunId, 'first')
+      const sent = await followUp(f, parent.runId, { workspace: 'shared', role: 'review', provider: 'pi:openai', model: 'gpt-x', modeCeiling: 'plan' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      const task = f.engine.delegations.getByChildRun(sent.runId)!
+      expect(task).toMatchObject({ parentThreadId: 'parent', parentRunId: parent.runId, childThreadId: 'child-1', status: 'running', workspace: 'shared', role: 'review', provider: 'pi:openai', model: 'gpt-x', modeCeiling: 'plan' })
+      expect(task.delegationId).not.toBe(first.delegationId)
+      f.finish(sent.runId, 'second')
+      expect(f.engine.delegations.get(task.delegationId)!.result!.text).toBe('second')
+      expect(f.engine.inbox.listPending('parent')).toHaveLength(2)
+      // The first task's result is untouched.
+      expect(f.engine.delegations.get(first.delegationId)!.result!.text).toBe('first')
+    })
+
+    it('a retry with the same clientRequestId replays the first run and writes no second row', async () => {
+      f = delegationFixture()
+      const parent = await f.runningRun('parent')
+      await f.delegate(parent.runId, 'call-1')
+      const one = await followUp(f, parent.runId)
+      const two = await followUp(f, parent.runId)
+      expect(two).toMatchObject({ status: 'accepted', replayed: true, runId: one.status === 'accepted' ? one.runId : '' })
+      expect(f.engine.delegations.listForChildThread('child-1')).toHaveLength(2)
+      expect(f.engine.listRuns('child-1')).toHaveLength(2)
+    })
+
+    it('refuses a thread that is not the parent\'s subagent, or a parent run of another thread, and writes nothing', async () => {
+      f = delegationFixture()
+      const parent = await f.runningRun('parent')
+      const other = await f.runningRun('other')
+      await f.delegate(parent.runId, 'call-1')
+      const runs = f.engine.listRuns('child-1').length
+      await expect(followUp(f, parent.runId, { parentThreadId: 'other' })).rejects.toThrow('not a subagent')
+      await expect(followUp(f, other.runId)).rejects.toThrow('is not a run of thread parent')
+      expect(f.engine.listRuns('child-1')).toHaveLength(runs)
+      expect(f.engine.delegations.listForChildThread('child-1')).toHaveLength(1)
+      expect(f.store.getReceipt('follow-up')).toBeNull()
+    })
+
+    it('is refused, as parent_stopping, while the parent run is being stopped', async () => {
+      f = delegationFixture()
+      const parent = await f.runningRun('parent')
+      await f.delegate(parent.runId, 'call-1')
+      await f.engine.dispatch({ kind: 'stop', threadId: 'parent', runId: parent.runId, clientRequestId: 'stop-1' })
+      await expect(followUp(f, parent.runId)).rejects.toMatchObject({ reason: 'parent_stopping' })
+      expect(f.engine.delegations.listForChildThread('child-1')).toHaveLength(1)
+      expect(f.engine.listRuns('child-1')).toHaveLength(1)
+    })
   })
 
-  it('recordDelegation of a run that is already recorded returns that delegation without a second row or notice', async () => {
-    f = delegationFixture()
-    const parent = await f.runningRun('parent')
-    const first = await f.delegate(parent.runId, 'call-1')
-    f.finish(first.childRunId, 'first')
-    const followUp = f.store.createRun({ threadId: 'child-1', source: 'delegation' })
-    const input = { parentThreadId: 'parent', parentRunId: parent.runId, childThreadId: 'child-1', childRunId: followUp.runId, prompt: 'again', wake: 'always' as const }
-    const recorded = f.engine.recordDelegation(input)
-    const delegations = f.engine.delegations.listForParentRun(parent.runId).length
-    const notices = f.engine.inbox.listPending('parent').length
-    expect(f.engine.recordDelegation(input)).toEqual(recorded)
-    expect(f.engine.delegations.listForParentRun(parent.runId)).toHaveLength(delegations)
-    expect(f.engine.inbox.listPending('parent')).toHaveLength(notices)
+  describe('a person\'s message in a subagent\'s thread is tracked (issue #142, D2)', () => {
+    const send = (f: DelegationFixture, source: string, id = `send:${source}`) =>
+      f.engine.dispatch({ kind: 'send', threadId: 'child-1', clientRequestId: id, source, prompt: 'hello' })
+
+    it.each(['gui', 'cli', 'channel', 'internal'])('a %s message gets a delegation row tied to the parent\'s latest run, with the subagent\'s policy', async (source) => {
+      f = delegationFixture()
+      const parent = await f.runningRun('parent')
+      const first = await f.delegate(parent.runId, 'call-1', { workspace: 'shared', role: 'review', modeCeiling: 'plan' })
+      f.finish(first.childRunId, 'first')
+      f.engine.markTerminal(parent.runId, 'completed')
+      const latest = await f.runningRun('parent')
+      const sent = await send(f, source)
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      expect(f.engine.delegations.getByChildRun(sent.runId)).toMatchObject({
+        parentThreadId: 'parent', parentRunId: latest.runId, status: 'running', wake: 'always', workspace: 'shared', role: 'review', modeCeiling: 'plan'
+      })
+      f.finish(sent.runId, 'answer')
+      expect(f.engine.inbox.listPending('parent').map((row) => (row.payload as { result: { text: string } }).result.text)).toEqual(['first', 'answer'])
+    })
+
+    it.each(['delegation', 'wake', 'steer-late', 'steer-followup', 'integration', 'schedule', 'protocol', 'queue', 'lease-race'])(
+      'a %s run is not tracked',
+      async (source) => {
+        f = delegationFixture()
+        const parent = await f.runningRun('parent')
+        const first = await f.delegate(parent.runId, 'call-1')
+        f.finish(first.childRunId)
+        const sent = await send(f, source)
+        if (sent.status !== 'accepted') throw new Error('send rejected')
+        expect(f.engine.delegations.getByChildRun(sent.runId)).toBeNull()
+        expect(f.engine.delegations.listForChildThread('child-1')).toHaveLength(1)
+      }
+    )
+
+    it('is not tracked when the parent is gone, has no run, or the thread is not a subagent', async () => {
+      f = delegationFixture()
+      const parent = await f.runningRun('parent')
+      const first = await f.delegate(parent.runId, 'call-1')
+      f.finish(first.childRunId)
+      f.gone.add('parent')
+      const orphaned = await send(f, 'gui', 'orphaned')
+      if (orphaned.status !== 'accepted') throw new Error('send rejected')
+      expect(f.engine.delegations.getByChildRun(orphaned.runId)).toBeNull()
+      f.gone.clear()
+      const plain = await f.engine.dispatch({ kind: 'send', threadId: 'plain', clientRequestId: 'plain-1', source: 'gui' })
+      if (plain.status !== 'accepted') throw new Error('send rejected')
+      expect(f.engine.delegations.getByChildRun(plain.runId)).toBeNull()
+    })
+
+    it('a replayed send writes no second row', async () => {
+      f = delegationFixture()
+      const parent = await f.runningRun('parent')
+      const first = await f.delegate(parent.runId, 'call-1')
+      f.finish(first.childRunId)
+      await send(f, 'gui', 'same')
+      await send(f, 'gui', 'same')
+      expect(f.engine.delegations.listForChildThread('child-1')).toHaveLength(2)
+    })
   })
 
-  it('recordDelegation refuses a run that belongs to another thread', async () => {
-    f = delegationFixture()
-    const parent = await f.runningRun('parent')
-    await f.delegate(parent.runId, 'call-1')
-    const stranger = f.store.createRun({ threadId: 'unrelated', source: 'delegation' })
-    expect(() => f!.engine.recordDelegation({ parentThreadId: 'parent', parentRunId: parent.runId, childThreadId: 'child-1', childRunId: stranger.runId, prompt: 'x', wake: 'always' })).toThrow('is not a run of thread child-1')
-    expect(f.engine.delegations.getByChildRun(stranger.runId)).toBeNull()
-  })
+  describe('titles (issue #142, D4)', () => {
+    it('a taken title creates no thread; a retry replays its receipt before the title is checked', async () => {
+      f = delegationFixture()
+      const parent = await f.runningRun('parent')
+      const first = await f.delegate(parent.runId, 'call-1', { title: 'API reviewer' })
+      const created = f.requests.length
+      await expect(f.delegate(parent.runId, 'call-2', { title: '  api   REVIEWER ' })).rejects.toMatchObject({ reason: 'title_taken', childThreadIds: [first.childThreadId] })
+      // The conflict is found before a thread exists: nothing was created, so nothing needs deleting.
+      expect(f.requests).toHaveLength(created)
+      expect([...f.threads]).toEqual([first.childThreadId])
+      expect(f.deleted).toEqual([])
+      expect(f.engine.delegations.listForParentThread('parent')).toHaveLength(1)
+      // The same call again is the first call: its own receipt wins, even though the title is held now.
+      expect(await f.delegate(parent.runId, 'call-1', { title: 'API reviewer' })).toEqual({ ...first, replayed: true })
+    })
 
-  it('recordDelegation of a child run that already ended publishes its final transcript text', async () => {
-    f = delegationFixture()
-    const parent = await f.runningRun('parent')
-    const first = await f.delegate(parent.runId, 'call-1')
-    f.finish(first.childRunId, 'first')
-    const followUp = f.store.createRun({ threadId: 'child-1', source: 'delegation' })
-    f.finish(followUp.runId)
-    f.resultTexts.set(followUp.runId, 'the follow-up answer')
-    const recorded = f.engine.recordDelegation({ parentThreadId: 'parent', parentRunId: parent.runId, childThreadId: 'child-1', childRunId: followUp.runId, prompt: 'again', wake: 'always' })
-    expect(recorded).toMatchObject({ status: 'result_available', result: { runStatus: 'completed', text: 'the follow-up answer' } })
-    const notice = f.engine.inbox.listForDelegation(recorded.delegationId)
-    expect(notice.map((row) => (row.payload as { result: { text?: string } }).result.text)).toEqual(['the follow-up answer'])
+    it('another parent may use the same title, and a deleted subagent frees its title', async () => {
+      f = delegationFixture()
+      const a = await f.runningRun('parent-a')
+      const b = await f.runningRun('parent-b')
+      const mine = await f.delegate(a.runId, 'call-1', { title: 'API reviewer' })
+      await f.delegate(b.runId, 'call-1', { title: 'API reviewer' })
+      f.gone.add(mine.childThreadId)
+      await f.delegate(a.runId, 'call-2', { title: 'API reviewer' })
+      expect(f.engine.delegations.listForParentThread('parent-a')).toHaveLength(2)
+    })
+
+    it('a parent run that is being stopped cannot start subagents', async () => {
+      f = delegationFixture()
+      const parent = await f.runningRun('parent')
+      await f.engine.dispatch({ kind: 'stop', threadId: 'parent', runId: parent.runId, clientRequestId: 'stop-1' })
+      await expect(f.delegate(parent.runId, 'call-1', { title: 'API reviewer' })).rejects.toMatchObject({ reason: 'parent_stopping' })
+      expect(f.requests).toEqual([])
+      expect(f.engine.delegations.listForParentThread('parent')).toEqual([])
+    })
   })
 
   it('records the requested workspace and role on the delegation row', async () => {

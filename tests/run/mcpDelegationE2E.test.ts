@@ -107,27 +107,27 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
       if (input.prompt === 'Plan the refactor') {
         seen.token = mcp.token
         const started = await callTool(mcp, 'delegate_task', {
-          prompt: 'Survey the run engine', provider: 'openai', model: 'gpt-replay', workspace: 'shared', role: 'research', clientRequestId: 'survey-1'
+          prompt: 'Survey the run engine', title: 'Engine surveyor', provider: 'openai', model: 'gpt-replay', workspace: 'shared', role: 'research', clientRequestId: 'survey-1'
         })
         seen.started = started.value
         // A retry with the same clientRequestId replays the first delegation.
         const retried = await callTool(mcp, 'delegate_task', {
-          prompt: 'Survey the run engine', provider: 'openai', model: 'gpt-replay', workspace: 'shared', role: 'research', clientRequestId: 'survey-1'
+          prompt: 'Survey the run engine', title: 'Engine surveyor', provider: 'openai', model: 'gpt-replay', workspace: 'shared', role: 'research', clientRequestId: 'survey-1'
         }, 2)
         expect(retried.value.delegationId).toBe(started.value.delegationId)
         expect(retried.value.replayed).toBe(true)
         seen.firstStatus = (await callTool(mcp, 'task_status', { delegationId: started.value.delegationId }, 3)).value
-        seen.broader = await callTool(mcp, 'delegate_task', { prompt: 'Edit everything', workspace: 'isolated', modeCeiling: 'default' }, 4)
+        seen.broader = await callTool(mcp, 'delegate_task', { prompt: 'Edit everything', title: 'Editor', workspace: 'isolated', modeCeiling: 'default' }, 4)
         // SPEC §13.8: an unknown instance fails the tool call by name; nothing falls back to the pi loop.
         const raw = await fetch(mcp.url, {
           method: 'POST',
           headers: { Authorization: `Bearer ${mcp.token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
-          body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'delegate_task', arguments: { prompt: 'x', instanceId: 'nope', workspace: 'shared', role: 'research', clientRequestId: 'unknown-1' } } })
+          body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'delegate_task', arguments: { prompt: 'x', title: 'Ghost', instanceId: 'nope', workspace: 'shared', role: 'research', clientRequestId: 'unknown-1' } } })
         })
         seen.unknown = (await raw.json() as { result?: { content: Array<{ text: string }>; isError?: boolean } }).result
         return 'Delegated the survey.'
       }
-      if (input.prompt.startsWith('Delegated task')) {
+      if (input.prompt.startsWith('Subagent')) {
         seen.wakeStatus = (await callTool(mcp, 'task_status', { delegationId: seen.started.delegationId })).value
         return 'The survey is in.'
       }

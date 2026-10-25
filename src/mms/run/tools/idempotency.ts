@@ -41,6 +41,8 @@ export const NON_IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'recall_subagent',
   // Phase 4 delegation (SPEC §14.2). `task_status` acknowledges a published result.
   'delegate_task',
+  'continue_subagent',
+  'answer_subagent',
   'task_status',
   'task_cancel',
   'integrate_delegation',

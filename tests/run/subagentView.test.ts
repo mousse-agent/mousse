@@ -128,14 +128,25 @@ describe('subagent status model (plan §3.3)', () => {
     it('a follow-up run makes the child active again while the finished task keeps its outcome', async () => {
       const { child } = await started()
       f!.finish(child.childRunId)
+      // A person's message in the child's thread is a task of its own (issue #142, D2).
       const followUp = await f!.engine.dispatch({ kind: 'send', threadId: 'child-1', clientRequestId: 'follow-up', source: 'gui' })
       if (followUp.status !== 'accepted') throw new Error('send rejected')
       expect(only()).toMatchObject({ activity: 'queued', state: 'queued' })
-      expect(only().tasks[0]).toMatchObject({ outcome: 'done', continued: true })
+      expect(only().tasks.map((task) => [task.outcome, task.continued])).toEqual([['done', true], ['running', false]])
       running(followUp.runId)
       expect(only()).toMatchObject({ activity: 'working', state: 'working' })
       f!.finish(followUp.runId)
       expect(only()).toMatchObject({ activity: 'idle', state: 'done' })
+      expect(only().tasks.map((task) => [task.outcome, task.continued])).toEqual([['done', true], ['done', false]])
+    })
+
+    it('a run that is not a person\'s message (a wake) does not make the finished task continued', async () => {
+      const { child } = await started()
+      f!.finish(child.childRunId)
+      const wake = f!.store.createRun({ threadId: 'child-1', source: 'wake', clientRequestId: 'wake-1' })
+      expect(only().tasks).toHaveLength(1)
+      expect(only().tasks[0].continued).toBe(false)
+      running(wake.runId)
       expect(only().tasks[0].continued).toBe(false)
     })
 
@@ -144,9 +155,9 @@ describe('subagent status model (plan §3.3)', () => {
       f!.finish(child.childRunId)
       const second = await f!.engine.dispatch({ kind: 'send', threadId: 'child-1', clientRequestId: 'second', source: 'gui' })
       if (second.status !== 'accepted') throw new Error('send rejected')
-      const recorded = f!.engine.recordDelegation({
-        parentThreadId: 'parent', parentRunId: parent.runId, childThreadId: 'child-1', childRunId: second.runId, prompt: 'again', wake: 'always'
-      })
+      // A person's message is tracked as a task of its own.
+      const recorded = f!.engine.delegations.getByChildRun(second.runId)!
+      expect(recorded.parentRunId).toBe(parent.runId)
       running(second.runId)
       f!.engine.markTerminal(second.runId, 'failed')
       const row = only()
@@ -162,10 +173,12 @@ describe('subagent status model (plan §3.3)', () => {
     it('is not continued by the earlier task’s run, and is once a later run follows it', async () => {
       const { parent, child } = await started()
       running(child.childRunId)
-      const queuedRun = f!.store.createRun({ threadId: 'child-1', source: 'delegation', clientRequestId: 'queued-b' })
-      const queued = f!.engine.recordDelegation({
-        parentThreadId: 'parent', parentRunId: parent.runId, childThreadId: 'child-1', childRunId: queuedRun.runId, prompt: 'then this', wake: 'always'
+      const queuedRun = await f!.engine.dispatch({
+        kind: 'send', threadId: 'child-1', clientRequestId: 'queued-b', source: 'delegation',
+        delegation: { parentThreadId: 'parent', parentRunId: parent.runId, prompt: 'then this', wake: 'always' }
       })
+      if (queuedRun.status !== 'accepted') throw new Error('send rejected')
+      const queued = f!.engine.delegations.getByChildRun(queuedRun.runId)!
       expect(only().tasks.map((task) => [task.delegationId, task.continued])).toEqual([
         [child.delegationId, true],
         [queued.delegationId, false]

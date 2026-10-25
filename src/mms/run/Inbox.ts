@@ -113,6 +113,145 @@ export class Inbox {
   }
 
   /**
+   * Delivered rows whose delivery reached the run `runId`, oldest first: those of its wake `turn.start`
+   * (or of a queued steer's), and those of a `turn.steer` that the model read (`markSteerTaken`). A
+   * steer that has not run yet, or that the turn took but never read, has delivered nothing: the run
+   * may end first, and then the steer is queued as a turn of its own.
+   */
+  listDeliveredByRun(runId: string): InboxRecord[] {
+    return this.db
+      .statement(
+        `SELECT i.* FROM inbox i JOIN effects e ON e.effect_id = i.delivered_by
+         WHERE i.status = 'delivered' AND e.run_id = ?
+           AND (e.kind <> 'turn.steer' OR json_extract(i.payload, '$.steerTakenBy') = i.delivered_by)
+         ORDER BY i.created_at, i.rowid`
+      )
+      .all(runId)
+      .map(toInbox)
+  }
+
+  /** Delivered rows that a queue item carries (`queue:<itemId>`), oldest first. */
+  listDeliveredByQueue(): InboxRecord[] {
+    return this.db
+      .statement(`SELECT * FROM inbox WHERE status = 'delivered' AND delivered_by LIKE 'queue:%' ORDER BY created_at, rowid`)
+      .all()
+      .map(toInbox)
+  }
+
+  /**
+   * Gives rows back without a failure: delivered -> pending, not counted as a delivery attempt
+   * (`pendingCount` skips it), for a delivery that never started or was withdrawn (a queued
+   * notice the user removed). With `from`, only rows that owner still delivers move.
+   */
+  release(ids: readonly string[], from?: string): string[] {
+    return this.db.transaction(() => {
+      const moved: string[] = []
+      for (const id of ids) {
+        const current = this.get(id)
+        if (!current || current.status !== 'delivered') continue
+        if (from !== undefined && current.deliveredBy !== from) continue
+        // Recorded while the row is still delivered, so the pending write below is the only one counted.
+        this.patchPayload(id, { releases: Number((current.payload as { releases?: unknown } | null)?.releases ?? 0) + 1 })
+        this.markPendingAgain([id])
+        moved.push(id)
+      }
+      return moved
+    })
+  }
+
+  /**
+   * A delivery the user stopped: the rows stay `delivered` (as before) but belong to nothing, so
+   * neither the reconciler nor boot gives them back. With `from`, only rows that owner delivers.
+   */
+  detachDelivery(ids: readonly string[], from: string): void {
+    this.db.transaction(() => {
+      for (const id of ids) {
+        const current = this.get(id)
+        if (current?.status !== 'delivered' || current.deliveredBy !== from) continue
+        this.db.statement('UPDATE inbox SET delivered_by = NULL WHERE inbox_id = ? AND status = ?').run(id, 'delivered')
+        this.recorded({ ...current, deliveredBy: null })
+      }
+    })
+  }
+
+  /**
+   * The live turn holds the steer `effectId` carried (it is in the turn's pending steers, not read
+   * yet). Only code that holds steers writes this, so rows of a steer delivered before it existed
+   * (a native steer of an older version) are never mistaken for an unread one.
+   */
+  markSteerHeld(ids: readonly string[], effectId: string): void {
+    this.db.transaction(() => {
+      for (const id of ids) {
+        const current = this.get(id)
+        if (current?.status === 'delivered' && current.deliveredBy === effectId) this.patchPayload(id, { steerHeldBy: effectId })
+      }
+    })
+  }
+
+  /** The model read the steer `effectId` carried: its rows count as delivered to that run. */
+  markSteerTaken(ids: readonly string[], effectId: string): void {
+    this.db.transaction(() => {
+      for (const id of ids) {
+        const current = this.get(id)
+        if (current?.status === 'delivered' && current.deliveredBy === effectId) this.patchPayload(id, { steerTakenBy: effectId })
+      }
+    })
+  }
+
+  /**
+   * Records what the notice that delivers these rows showed (`noticeShown`: the task's whole result
+   * was in it), so that acknowledging them later marks as read exactly the tasks that were shown.
+   */
+  recordNoticeVisibility(rows: readonly InboxRecord[], items: ReadonlyArray<{ delegationId: string; fullyShown: boolean }>): void {
+    this.db.transaction(() => {
+      for (const row of rows) {
+        if (row.kind !== 'child_result') continue
+        const item = items.find((entry) => entry.delegationId === (row.payload as { delegationId?: string }).delegationId)
+        if (item) this.patchPayload(row.inboxId, { noticeShown: item.fullyShown })
+      }
+    })
+  }
+
+  /**
+   * A delivered row changes hands: its notice now rides another effect, or a queued turn
+   * (`queue:<itemId>`). With `from`, only a row that `from` still delivers moves, so a row some other
+   * delivery took over in the meantime is left alone. The row stays `delivered`.
+   */
+  redirectDelivery(ids: readonly string[], deliveredBy: string, from?: string): InboxRecord[] {
+    return this.db.transaction(() => {
+      const moved: InboxRecord[] = []
+      for (const id of ids) {
+        const current = this.get(id)
+        if (!current || current.status !== 'delivered' || current.deliveredBy === deliveredBy) continue
+        if (from !== undefined && current.deliveredBy !== from) continue
+        this.db.statement('UPDATE inbox SET delivered_by = ? WHERE inbox_id = ? AND status = ?').run(deliveredBy, id, 'delivered')
+        const next = { ...current, deliveredBy }
+        this.recorded(next)
+        moved.push(next)
+      }
+      return moved
+    })
+  }
+
+  /** Merges `patch` into the row's payload object (a `null` value removes the key). */
+  patchPayload(inboxId: string, patch: Record<string, unknown>): InboxRecord {
+    return this.db.transaction(() => {
+      const current = this.get(inboxId)
+      if (!current) fail('bad_request', `Unknown inbox row ${inboxId}.`)
+      const merged: Record<string, unknown> = { ...((current.payload as Record<string, unknown> | null) ?? {}) }
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === null) delete merged[key]
+        else merged[key] = value
+      }
+      const payload = JSON.parse(stableStringify(merged)) as unknown
+      this.db.statement('UPDATE inbox SET payload = ? WHERE inbox_id = ?').run(stableStringify(payload), inboxId)
+      const next = { ...current, payload }
+      this.recorded(next)
+      return next
+    })
+  }
+
+  /**
    * pending -> delivered by `deliveredBy` (the wake `turn.start` or `turn.steer` effect carrying the
    * rows), so a failed or cut-off delivery can return them to pending. Rows already past `pending`
    * are left alone.
@@ -139,7 +278,8 @@ export class Inbox {
            AND json_extract(payload, '$.inboxId') = ? AND json_extract(payload, '$.status') = 'pending'`
       )
       .get(threadId, inboxId)
-    return Number(row?.n ?? 0)
+    // Releases (a withdrawn delivery) are not attempts.
+    return Number(row?.n ?? 0) - Number((this.get(inboxId)?.payload as { releases?: unknown } | null)?.releases ?? 0)
   }
 
   /** pending|delivered -> acknowledged. */

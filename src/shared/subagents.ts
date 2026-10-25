@@ -73,6 +73,20 @@ export interface SubagentSummary {
   tasks: SubagentTaskSummary[]
 }
 
+/**
+ * One subagent task a delivered notice reports. A notice message carries these, so the app shows
+ * outcome cards without reading the notice text.
+ */
+export interface SubagentNoticeItem {
+  delegationId: string
+  childThreadId: string
+  title: string | null
+  /** The status of the run that produced the result (`completed`, `failed`, ...). */
+  runStatus: string
+  /** The whole result is in the notice; otherwise the rest is read with `task_status`. */
+  fullyShown: boolean
+}
+
 export interface SubagentsUpdatedEvent {
   parentThreadId: string
 }

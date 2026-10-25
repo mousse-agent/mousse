@@ -13,9 +13,11 @@ import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const PHASE5_TOOLS: Record<string, string> = {
   delegate_task: 'actsAsCaller',
+  continue_subagent: 'actsAsCaller',
+  answer_subagent: 'actsAsCaller',
   task_status: 'actsAsCaller',
   task_cancel: 'actsAsCaller',
-  list_delegations: 'actsAsCaller',
+  list_subagents: 'actsAsCaller',
   integrate_delegation: 'actsAsCaller',
   ask_user: 'actsAsCaller',
   present_plan: 'actsAsCaller',
@@ -33,11 +35,14 @@ const PHASE5_TOOLS: Record<string, string> = {
 function fakeHost() {
   const delegation: DelegationToolHost = {
     delegateTask: vi.fn(async (input) => ({ delegationId: 'd1', input })),
+    continueSubagent: vi.fn(async (input) => ({ delegationId: 'd2', input })),
+    answerSubagent: vi.fn((input) => ({ answered: true, input })),
     taskStatus: vi.fn(() => ({ status: 'running' })),
     taskCancel: vi.fn(async () => ({ cancelled: [] })),
     listDelegations: vi.fn(() => []),
+    listSubagents: vi.fn(() => []),
     integrateDelegation: vi.fn(async () => ({ status: 'queued' })),
-    named: { create: vi.fn(), createBatch: vi.fn(), recall: vi.fn(), integrate: vi.fn(), list: vi.fn() }
+    named: { create: vi.fn(), createBatch: vi.fn(), recall: vi.fn(), integrate: vi.fn() }
   }
   const tasks = new TaskQueue()
   const enqueued: Array<{ threadId: string; input: unknown }> = []
@@ -154,9 +159,9 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
   it('assertLiveCaller: the call acts as the thread\'s active run; none gives mousse_caller_not_live', async () => {
     const { fx, registry, run, ctx, host, delegation } = await setup()
     // The credential still names an older run; the call acts as the active one.
-    await registry.call('list_delegations', {}, ctx({ caller: { threadId: 'parent', runId: 'run:stale', provider: 'p', modeCeiling: 'default' } }))
+    await registry.call('list_subagents', {}, ctx({ caller: { threadId: 'parent', runId: 'run:stale', provider: 'p', modeCeiling: 'default' } }))
     expect(host.delegation).toHaveBeenLastCalledWith(expect.objectContaining({ runId: run.runId }))
-    expect(delegation.listDelegations).toHaveBeenCalled()
+    expect(delegation.listSubagents).toHaveBeenCalled()
     fx.engine.markTerminal(run.runId, 'completed')
     const error = await registry.call('list_tasks', {}, ctx()).catch((err) => err)
     expect(error).toBeInstanceOf(McpToolError)
@@ -165,9 +170,9 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
 
   it('children inherit the caller ceiling and cannot exceed it; a plan ceiling cannot integrate', async () => {
     const { registry, ctx, delegation } = await setup('plan')
-    await registry.call('delegate_task', { prompt: 'Look', workspace: 'shared', role: 'research' }, ctx({ toolCallId: 'mcp:a' }))
+    await registry.call('delegate_task', { prompt: 'Look', title: 'Looker', workspace: 'shared', role: 'research' }, ctx({ toolCallId: 'mcp:a' }))
     expect(delegation.delegateTask).toHaveBeenCalledWith(expect.objectContaining({ modeCeiling: 'plan' }), { toolCallId: 'mcp:a' })
-    const broader = await registry.call('delegate_task', { prompt: 'Edit', workspace: 'isolated', modeCeiling: 'default' }, ctx()).catch((error) => error)
+    const broader = await registry.call('delegate_task', { prompt: 'Edit', title: 'Editor', workspace: 'isolated', modeCeiling: 'default' }, ctx()).catch((error) => error)
     expect(broader.code).toBe('mousse_ceiling_exceeded')
     const integrate = await registry.call('integrate_delegation', { delegationId: 'd1' }, ctx()).catch((error) => error)
     expect(integrate.code).toBe('mousse_ceiling_exceeded')
