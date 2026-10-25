@@ -337,9 +337,23 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     expect(replay.threads).toEqual(first.threads)
     expect(cli.processes[1].closed).toBe(false)
     expect(service.hasBackgroundWork(thread.id)).toBe(true)
+    // The same for a Stop by run id that was ignored (the run had ended) and is replayed.
+    const [older] = d.engine.listRuns(thread.id).slice(-1)
+    const stale = await d.orch.abortRun(older.runId, 'stop-old-run', thread.id)
+    expect(stale.status).toBe('ignored')
+    expect(cli.processes[1].closed).toBe(true)
+    await d.orch.send('c', false, { threadId: thread.id, clientRequestId: 'turn-c' })
+    expect(cli.processes).toHaveLength(3)
+    const staleReplay = await d.orch.abortRun(older.runId, 'stop-old-run', thread.id)
+    expect(staleReplay.status).toBe('ignored')
+    expect(cli.processes[2].closed).toBe(false)
+    await d.orch.stopThread(thread.id, 'user', { clientRequestId: 'stop-c' })
+    expect(cli.processes[2].closed).toBe(true)
+    await d.orch.send('b2', false, { threadId: thread.id, clientRequestId: 'turn-b2' })
+    expect(cli.processes).toHaveLength(4)
     // A Stop that is new does end it.
     await d.orch.stopThread(thread.id, 'user', { clientRequestId: 'stop-b' })
-    expect(cli.processes[1].closed).toBe(true)
+    expect(cli.processes[3].closed).toBe(true)
   }, 30_000)
 
   it('deleting the thread or switching its provider ends the process and its helpers', async () => {

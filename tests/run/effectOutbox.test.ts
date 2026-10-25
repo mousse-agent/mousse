@@ -254,7 +254,7 @@ describe('EffectOutbox', () => {
       settled: true,
       effect: { status: 'failed', attempts: 5, lastError: 'final' }
     })
-    expect(outbox.nextAvailableAt()).toBeNull()
+    expect(outbox.nextFutureAvailableAt(new Date(now).toISOString())).toBeNull()
   })
 
   it('reclaims expired leases without an owner check', () => {
@@ -333,7 +333,7 @@ describe('EffectOutbox', () => {
       checkpointRunning.effectId,
       cleanupPending.effectId
     ])
-    expect(outbox.nextAvailableAt()).toBe(at(6))
+    expect(outbox.nextFutureAvailableAt(at(0))).toBe(at(6))
     // A due row blocked behind an earlier one does not count: the next claimable moment is the future one.
     expect(outbox.nextFutureAvailableAt(at(7))).toBe(at(60_000))
     expect(outbox.nextFutureAvailableAt(at(60_000))).toBeNull()

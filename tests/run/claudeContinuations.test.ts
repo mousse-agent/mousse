@@ -286,6 +286,50 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     expect(s.cli.last.closed).toBe(true)
   })
 
+  it('Stop aimed at a stale run id leaves the process alone when a continuation run is already claimed by the worker', async () => {
+    const s = await scene()
+    const [older] = s.d.engine.listRuns(s.childThread)
+    await s.d.worker.stop()
+    // A continuation run whose turn.start effect is claimed (running) but whose run is still queued: it is inside the turn.
+    const queued = s.d.engine.store.createRun({ threadId: s.childThread, source: 'provider-continuation', clientRequestId: 'continuation:claimed' })
+    s.d.engine.outbox.enqueue({ threadId: s.childThread, runId: queued.runId, kind: 'turn.start', payload: { kind: 'continuation', threadId: s.childThread, runId: queued.runId, continuationId: 'none', note: 'x' } })
+    const claimed = s.d.engine.outbox.claimNext(s.d.engine.leaseOwner, new Date().toISOString())
+    expect(claimed?.runId).toBe(queued.runId)
+    const result = await s.d.orch.abortRun(older.runId, 'stale-stop-claimed', s.childThread)
+    expect(result.status).toBe('ignored')
+    expect(s.cli.last.closed).toBe(false)
+    s.d.engine.markTerminal(queued.runId, 'cancelled')
+  })
+
+  it('the owner of a passed admission is not restored over an admission something else took meanwhile', async () => {
+    const s = await scene()
+    const session = s.d.orch.getOrCreateSession(s.childThread)
+    // After the continuation's turn ends, a queue drain has already re-admitted the thread for its own run.
+    const orch = s.d.orch as any
+    const real = orch.runTurnOnSession.bind(orch)
+    vi.spyOn(orch, 'runTurnOnSession').mockImplementation((async (...args: unknown[]) => {
+      const response = await real(...args)
+      session.turnAdmitted = true
+      session.admissionRunId = 'queued-drain-run'
+      return response
+    }) as never)
+    await s.d.worker.stop()
+    const sent = await s.d.engine.dispatch({ kind: 'send', threadId: s.childThread, clientRequestId: 'admitted-2', source: 'gui' })
+    if (sent.status !== 'accepted') throw new Error('send refused')
+    session.turnAdmitted = true
+    session.admissionRunId = sent.runId
+    s.cli.last.emit(notification('build-1'), textDelta('reading the report'))
+    await waitFor(() => s.d.engine.listRuns(s.childThread).some((run) => run.source === 'provider-continuation'), 'the continuation run')
+    // The admitted turn's effect is made after the continuation's, and waits (its own delay).
+    s.d.engine.outbox.enqueue({ threadId: s.childThread, runId: sent.runId, kind: 'turn.start', availableAt: new Date(Date.now() + 3_600_000).toISOString(), payload: { runId: sent.runId, threadId: s.childThread, input: { content: 'x', mode: 'agent' } } })
+    s.cli.last.emit(resultFrame({ text: 'The report is read.', origin: 'task-notification' }))
+    s.d.worker.start()
+    await waitFor(() => s.d.engine.listRuns(s.childThread).some((run) => run.source === 'provider-continuation' && run.status === 'completed'), 'the continuation to complete')
+    expect(session.admissionRunId).toBe('queued-drain-run')
+    session.turnAdmitted = false
+    s.d.engine.markTerminal(sent.runId, 'cancelled')
+  }, 40_000)
+
   it('a continuation that cannot be recorded discards only its own turn, not a sibling waiting on the thread', async () => {
     const s = await scene()
     const live = (s.service as any).live.get(s.childThread)

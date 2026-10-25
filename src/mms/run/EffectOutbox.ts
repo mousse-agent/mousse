@@ -334,7 +334,6 @@ export class EffectOutbox {
       .map(toEffect)
   }
 
-  /** Earliest `available_at` among pending effects (may already be due but lane-blocked). */
   /**
    * The earliest `available_at` after `now` among pending effects: the next moment something that is
    * waiting out a delay (a deferral, a backoff) can be claimed. A row that is already due but blocked by an
@@ -344,13 +343,6 @@ export class EffectOutbox {
     const row = this.db
       .statement(`SELECT MIN(available_at) AS next FROM effects WHERE status = 'pending' AND available_at > ?`)
       .get(now)
-    return typeof row?.next === 'string' ? row.next : null
-  }
-
-  nextAvailableAt(): string | null {
-    const row = this.db
-      .statement(`SELECT MIN(available_at) AS next FROM effects WHERE status = 'pending'`)
-      .get()
     return typeof row?.next === 'string' ? row.next : null
   }
 

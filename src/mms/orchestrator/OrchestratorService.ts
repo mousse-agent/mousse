@@ -1363,7 +1363,8 @@ export class OrchestratorService extends EventEmitter {
       // when no newer run on it is active or queued (a Stop aimed at an old run must not end the process a
       // newer one is using).
       const stale = engine.getRun(runId)
-      if (stale?.threadId === target && !engine.listRuns(target).some((run) => !TERMINAL_RUN_STATUSES.has(run.status) && !(run.status === 'queued' && run.source === 'provider-continuation'))) await this.stopProviderWork(target)
+      // A replay of that Stop already did this once; it does not do it again for what has started since.
+      if (!result.replayed && stale?.threadId === target && !engine.listRuns(target).some((run) => !TERMINAL_RUN_STATUSES.has(run.status) && !this.isWaitingContinuation(run, engine))) await this.stopProviderWork(target)
       return {
         status: 'ignored',
         reason: result.reason ?? 'run_not_active',
@@ -1432,13 +1433,24 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Whether the thread has a run admitted at or after the generation its Stop raised it to (any status):
-   * work the Stop did not cover. An unknown generation counts as newer work, so nothing is closed on a guess.
+   * Whether the thread has work the replayed Stop did not cover: a run admitted at or after the generation
+   * the Stop raised it to (any status; its process may still hold helpers), or any run that is still not
+   * terminal (the original Stop already ended its provider work once, and the stale-run Stop uses the same
+   * guard). An unknown generation counts as newer work, so nothing is closed on a guess.
    */
   private hasWorkAfterStop(threadId: string, generation: number | undefined): boolean {
     const engine = this.runEngine
     if (!engine || generation === undefined) return true
-    return engine.listRuns(threadId, { limit: 200 }).some((run) => runStopGeneration(engine.store, run.runId) >= generation)
+    return engine.listRuns(threadId, { limit: 200 }).some((run) => !TERMINAL_RUN_STATUSES.has(run.status) || runStopGeneration(engine.store, run.runId) >= generation)
+  }
+
+  /**
+   * A continuation run that Claude's own turn waits on and that nothing has started: queued, with its
+   * turn.start effect still pending (or none). Such a run is the process's turn, not newer work. One whose
+   * effect is claimed is inside the turn already, and counts as live work.
+   */
+  private isWaitingContinuation(run: RunRecord, engine: RunEngine): boolean {
+    return run.status === 'queued' && run.source === 'provider-continuation' && engine.outbox.listForRun(run.runId).every((effect) => effect.kind !== 'turn.start' || effect.status === 'pending')
   }
 
   /** A replayed Stop's interrupt, now: through the worker when there is one, else directly. True when a live turn was aborted. */
