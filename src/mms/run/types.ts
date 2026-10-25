@@ -259,6 +259,12 @@ export interface DelegationResult {
   runStatus: RunStatus
   text?: string
   error?: string
+  /**
+   * The run the result comes from: the subagent's latest conversational run when the task
+   * published, which is later than the task's own run when the subagent waited on its own subagents.
+   * Absent on results published before subagents could wait.
+   */
+  runId?: string
 }
 
 export interface DelegationRecord {

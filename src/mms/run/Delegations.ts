@@ -219,35 +219,25 @@ export class Delegations {
       if (Number(changed.changes) !== 1)
         fail('stale_write', `Delegation ${input.delegationId} changed while it was being updated.`)
       this.recorded(next)
+      // The delegating thread has one running delegation fewer: a task waiting on it may settle.
+      if (input.from === 'running') this.store.settleHold(next.parentThreadId)
       return next
     })
   }
 
   /**
-   * Publication gate (SPEC §14.1), called inside a run's terminal write. When `run` is the child
-   * run of a delegation on a `subagent` child thread and that delegation is still `running`, the
-   * delegation becomes `result_available` (child `completed`) or `failed` (child `failed`,
-   * `interrupted`, `uncertain` or `cancelled`) with the run's final text or failure, and one
-   * `child_result` inbox row is written for the parent thread, in the same transaction. A cancelled
-   * delegation publishes nothing: a late child can finish but not publish. Never throws for a run
-   * that is not a delegated child.
+   * Publication (SPEC §14.1), called only by `settleWaitingDelegations` once the child is no longer
+   * busy: the `running` delegation becomes `result_available` (the result's run `completed`) or
+   * `failed`, and one `child_result` inbox row is written for the parent thread, in the same
+   * transaction. `result` is the result of the child's latest conversational run, or the delivery
+   * failure that stands in for it.
    */
-  publishResult(run: RunRecord, resultText?: string): DelegationRecord | null {
+  publish(delegation: DelegationRecord, result: DelegationResult): DelegationRecord {
     return this.db.transaction(() => {
-      const lineage = this.getLineage(run.threadId)
-      if (!lineage || lineage.relationship !== 'subagent') return null
-      const delegation = this.getByChildRun(run.runId)
-      if (!delegation || delegation.childThreadId !== run.threadId || delegation.status !== 'running')
-        return null
-      const result = childResult(run, resultText)
-      const now = this.now()
-      const next = this.setStatus({
-        delegationId: delegation.delegationId,
-        from: 'running',
-        to: run.status === 'completed' ? 'result_available' : 'failed',
-        result,
-        completedAt: now
-      })
+      if (this.get(delegation.delegationId)?.status !== 'running')
+        fail('stale_write', `Delegation ${delegation.delegationId} is not running.`)
+      // The row first: leaving `running` re-evaluates the parent thread's own waiting tasks, and
+      // the row is what keeps that thread busy until it has read this result.
       const payload: ChildResultPayload = {
         delegationId: delegation.delegationId,
         childThreadId: delegation.childThreadId,
@@ -260,7 +250,13 @@ export class Delegations {
         kind: 'child_result',
         payload
       })
-      return next
+      return this.setStatus({
+        delegationId: delegation.delegationId,
+        from: 'running',
+        to: result.runStatus === 'completed' ? 'result_available' : 'failed',
+        result,
+        completedAt: this.now()
+      })
     })
   }
 
