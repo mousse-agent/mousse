@@ -15,6 +15,8 @@ import {
   cardTitle,
   isCardRunning,
   lastResultText,
+  LruCache,
+  RESULT_CACHE_LIMIT,
 } from "./subagent-card-logic";
 import "./subagent-card.css";
 
@@ -71,7 +73,7 @@ export function SubagentCardView({ card, now, result, onOpen }: SubagentCardView
 }
 
 /** Replies already read from subagent threads, so reopening a thread does not read them again. */
-const resultCache = new Map<string, string | null>();
+const resultCache = new LruCache<string | null>(RESULT_CACHE_LIMIT);
 
 function useOnceVisible(ref: RefObject<HTMLElement | null>): boolean {
   const [visible, setVisible] = useState(() => typeof IntersectionObserver === "undefined");

@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import type { UIMessage } from 'ai'
 import { collectSubagentCalls, joinSubagentCards, type SubagentCardModel } from '../chat/adapters/subagentCards'
 import { useAppStore } from '../stores/appStore'
@@ -15,10 +15,13 @@ export function useSubagentCardModels(threadId: string | null | undefined, messa
   const subagents = useSubagents(threadId)
   const loaded = useAppStore((s) => (threadId ? s.subagentsByParent[threadId] !== undefined : false))
   const previous = useRef<ReadonlyMap<string, SubagentCardModel>>(NONE)
-  return useMemo(() => {
+  const cards = useMemo(() => {
     const calls = collectSubagentCalls(messages)
-    const cards = calls.length === 0 ? NONE : joinSubagentCards(calls, subagents, { loaded, previous: previous.current })
-    previous.current = cards
-    return cards
+    return calls.length === 0 ? NONE : joinSubagentCards(calls, subagents, { loaded, previous: previous.current })
   }, [messages, subagents, loaded])
+  // Remembered once the render is committed, so a render never writes it.
+  useEffect(() => {
+    previous.current = cards
+  }, [cards])
+  return cards
 }

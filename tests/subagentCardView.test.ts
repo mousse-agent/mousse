@@ -11,7 +11,9 @@ import {
   cardGroupLabel,
   cardStatusLabel,
   formatElapsed,
-  lastResultText
+  lastResultText,
+  LruCache,
+  RESULT_CACHE_LIMIT
 } from '../src/renderer/chat/components/agent-elements/tools/subagent-card-logic'
 import { MessageList } from '../src/renderer/chat/components/agent-elements/message-list'
 import {
@@ -125,6 +127,28 @@ describe('card text', () => {
     ).toBe('Final answer with breaks')
     expect(lastResultText([{ role: 'user', content: 'hi' }])).toBeNull()
     expect(lastResultText([{ role: 'assistant', content: 'x'.repeat(400) }])!.length).toBe(280)
+  })
+})
+
+describe('the cache of subagent replies', () => {
+  it('holds at most its limit and drops the entry used longest ago', () => {
+    const cache = new LruCache<string | null>(3)
+    for (const key of ['a', 'b', 'c']) cache.set(key, key)
+    expect(cache.get('a')).toBe('a')
+    cache.set('d', 'd')
+    expect(cache.size).toBe(3)
+    expect([cache.has('a'), cache.has('b'), cache.has('c'), cache.has('d')]).toEqual([true, false, true, true])
+    cache.set('c', null)
+    expect(cache.has('c')).toBe(true)
+    expect(cache.get('c')).toBeNull()
+    expect(cache.get('missing')).toBeUndefined()
+  })
+
+  it('is bounded for the cards, not growing with every subagent read', () => {
+    expect(RESULT_CACHE_LIMIT).toBe(200)
+    const cache = new LruCache<string | null>(RESULT_CACHE_LIMIT)
+    for (let index = 0; index < 1000; index += 1) cache.set(`thread-${index}`, 'reply')
+    expect(cache.size).toBe(RESULT_CACHE_LIMIT)
   })
 })
 

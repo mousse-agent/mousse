@@ -82,3 +82,35 @@ export function lastResultText(
   }
   return null;
 }
+
+/** A map that keeps at most `limit` entries, dropping the one used longest ago. */
+export class LruCache<V> {
+  private readonly entries = new Map<string, V>();
+
+  constructor(private readonly limit: number) {}
+
+  has(key: string): boolean {
+    return this.entries.has(key);
+  }
+
+  get(key: string): V | undefined {
+    if (!this.entries.has(key)) return undefined;
+    const value = this.entries.get(key) as V;
+    this.entries.delete(key);
+    this.entries.set(key, value);
+    return value;
+  }
+
+  set(key: string, value: V): void {
+    this.entries.delete(key);
+    this.entries.set(key, value);
+    while (this.entries.size > this.limit) this.entries.delete(this.entries.keys().next().value as string);
+  }
+
+  get size(): number {
+    return this.entries.size;
+  }
+}
+
+/** Subagent replies kept for cards; older ones are read again if their card comes back on screen. */
+export const RESULT_CACHE_LIMIT = 200;
