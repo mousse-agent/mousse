@@ -14,6 +14,7 @@ import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
 import type { DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
+import { subagentPreamble } from '../../src/mms/run/delegation/guidance'
 import { AdapterRegistry } from '../../src/mms/run/adapters/AdapterRegistry'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
@@ -141,7 +142,7 @@ describe('delegation bridge (SPEC §14)', () => {
         state.delegationId = started.delegationId
         return 'Delegated the count.'
       }
-      if (input.prompt.startsWith('Delegated task')) {
+      if (input.prompt.startsWith('Subagent')) {
         state.status = await delegation!.taskStatus({ delegationId: state.delegationId! })
         return 'The child found three modules.'
       }
@@ -164,7 +165,9 @@ describe('delegation bridge (SPEC §14)', () => {
     expect(first.engine.delegations.getLineage(childThreadId)).toMatchObject({ parentThreadId: parent.id, relationship: 'subagent', parentRunId: response.runId })
     // The child's turn runs as its own run on its own thread and publishes to the parent's inbox.
     await waitFor(() => first.engine.getRun(delegation.childRunId)?.status === 'completed', 'the child run')
-    expect(first.adapter.turns.find((turn) => turn.threadId === childThreadId)?.prompt).toBe('List the modules')
+    // The subagent is told whose it is and where its result goes, then its task.
+    expect(first.adapter.turns.find((turn) => turn.threadId === childThreadId)?.prompt)
+      .toBe(`${subagentPreamble('Parent')}\n\nList the modules`)
     expect(first.engine.inbox.listPending(parent.id)).toHaveLength(1)
     await first.crash()
 

@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { DaemonEpoch } from './DaemonEpoch'
-import { fail, reject, RunStoreError } from './db/RunStoreError'
+import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreError'
+import { isFollowUpSource } from './delegation/sources'
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
 import { Delegations } from './Delegations'
 import { EffectOutbox } from './EffectOutbox'
@@ -21,6 +22,7 @@ import {
   type AttemptRecord,
   type DelegationRecord,
   type DelegationWake,
+  type DelegationWorkspace,
   type ModeCeiling,
   type ProviderRef,
   type ReceiptRecord,
@@ -42,9 +44,32 @@ export type RunCommand =
       continuationOfRunId?: string
       /** Required with `continuationOfRunId` when that run is `uncertain`. */
       acknowledgeUncertain?: boolean
+      /**
+       * A follow-up on a subagent's thread (`continue_subagent`): the run and its delegation row are
+       * written in one transaction. Without it, a run a person makes on a subagent's thread is
+       * tracked the same way (`FOLLOW_UP_SOURCES`).
+       */
+      delegation?: SendDelegation
+      /** The message text; kept only as the digest of a tracked delegation. */
+      prompt?: string
     }
   | { kind: 'stop'; threadId: string; clientRequestId: string; runId: string }
   | { kind: 'steer'; threadId: string; clientRequestId: string; runId: string }
+
+/** The delegation row a follow-up `send` writes with its run (the child thread is the command's). */
+export interface SendDelegation {
+  parentThreadId: string
+  parentRunId: string
+  prompt: string
+  wake: DelegationWake
+  /** The follow-up's ceiling: the caller's authority narrowed by the subagent's own policy. */
+  modeCeiling?: ModeCeiling
+  /** The subagent's workspace policy, role and selection, copied from its first task. */
+  workspace?: DelegationWorkspace | null
+  role?: string | null
+  provider?: string | null
+  model?: string | null
+}
 
 export type CommandResult =
   | { status: 'accepted'; runId: string; sequence: number; replayed: boolean }
@@ -188,6 +213,28 @@ export interface DelegationHost {
   readRunResultText?(runId: string): string | undefined
   /** Whether the fork point after `sourceRunId` has a code checkpoint (`ForkPointSeed`). */
   forkPointSeed?(sourceThreadId: string, sourceRunId: string): ForkPointSeed
+  /**
+   * The subagents of `parentThreadId` already titled `title` (compared normalized, trashed ones
+   * excluded), as child thread ids. Read under the parent's mutex, after the retry replay.
+   */
+  titleConflicts?(parentThreadId: string, title: string): string[]
+  /**
+   * Whether `threadId` still exists and is visible, so a follow-up a person makes on its subagent
+   * may be tracked. Read before the transaction; absent means every thread is live.
+   */
+  threadLive?(threadId: string): boolean
+}
+
+/** `delegate_task` found a subagent with the same title among the caller's subagents; nothing was created. */
+export class TitleTakenRejection extends CommandRejection {
+  constructor(
+    readonly title: string,
+    /** The subagents holding the title; more than one only for older duplicates. */
+    readonly childThreadIds: string[]
+  ) {
+    super('title_taken', `A subagent titled "${title}" already exists.`)
+    this.name = 'TitleTakenRejection'
+  }
 }
 
 const ACTIVE_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
@@ -580,6 +627,10 @@ export class RunEngine extends EventEmitter {
       if (!parent || parent.threadId !== input.parentThreadId)
         fail('bad_request', `Run ${input.parentRunId} is not a run of thread ${input.parentThreadId}.`)
       if (!input.prompt.trim()) fail('bad_request', 'A delegated task needs a prompt.')
+      if (parent.outcome?.stopRequested)
+        reject('parent_stopping', 'The calling run is being stopped; it cannot start subagents.')
+      const taken = input.title ? host.titleConflicts?.(input.parentThreadId, input.title) ?? [] : []
+      if (taken.length) throw new TitleTakenRejection(input.title!, taken)
       const { threadId: childThreadId } = host.createThread({ kind: 'delegation', request: input })
       return this.withCreatedThread(host, childThreadId, () =>
         this.store.db.transaction(() => this.commitDelegation(host, input, childThreadId)))
@@ -658,49 +709,6 @@ export class RunEngine extends EventEmitter {
     })
     this.store.db.checkpoint('delegation.beforeCommit')
     return { ...accepted, replayed: false }
-  }
-
-  /**
-   * A follow-up delegation on an existing child thread (named-agent `recall`): the child run was
-   * created by an ordinary send on the child thread; this ties it to the parent run. A child run
-   * that already ended publishes at once, with the final text the host reads from its transcript
-   * (`readRunResultText`).
-   */
-  recordDelegation(input: {
-    parentThreadId: string
-    parentRunId: string
-    childThreadId: string
-    childRunId: string
-    prompt: string
-    wake: DelegationWake
-    modeCeiling?: ModeCeiling
-  }): DelegationRecord {
-    return this.store.db.transaction(() => {
-      const lineage = this.delegations.getLineage(input.childThreadId)
-      if (!lineage || lineage.relationship !== 'subagent' || lineage.parentThreadId !== input.parentThreadId)
-        fail('bad_request', `Thread ${input.childThreadId} is not a subagent of ${input.parentThreadId}.`)
-      const existing = this.delegations.getByChildRun(input.childRunId)
-      if (existing) return existing
-      const child = this.store.getRun(input.childRunId)
-      if (!child || child.threadId !== input.childThreadId)
-        fail('bad_request', `Run ${input.childRunId} is not a run of thread ${input.childThreadId}.`)
-      const created = this.delegations.create({ ...input })
-      if (!TERMINAL_RUN_STATUSES.has(child.status)) return created
-      return this.delegations.publishResult(child, this.runResultText(child.runId)) ?? created
-    })
-  }
-
-  /** The host's view of a run's final assistant text; a failing read publishes without text. */
-  private runResultText(runId: string): string | undefined {
-    try {
-      return this.delegationHost?.readRunResultText?.(runId)
-    } catch (error) {
-      console.warn('[run-engine] could not read a run result', {
-        runId,
-        error: error instanceof Error ? error.message : String(error)
-      })
-      return undefined
-    }
   }
 
   /** `task_status` read: a published result becomes `acknowledged` with its inbox rows. */
@@ -1050,7 +1058,7 @@ export class RunEngine extends EventEmitter {
       return { status: 'rejected', reason: 'stale_sequence', sequence: seqBefore }
     let result: CommandResult
     try {
-      result = command.kind === 'send' ? this.commitSend(command) : this.commitControl(command)
+      result = command.kind === 'send' ? this.commitSend(command, this.trackedFollowUp(command)) : this.commitControl(command)
     } catch (error) {
       if (command.kind === 'stop' && error instanceof RunStoreError && error.code === 'stale_write')
         return { status: 'rejected', reason: 'stale_write', sequence: store.maxSeq(threadId) }
@@ -1059,12 +1067,43 @@ export class RunEngine extends EventEmitter {
     return result
   }
 
-  private commitSend(command: Extract<RunCommand, { kind: 'send' }>): CommandResult {
+  /**
+   * The delegation a `send` writes with its run: the explicit one (`continue_subagent`), or, for a
+   * run a person makes on a subagent's thread (D2: `FOLLOW_UP_SOURCES`), one tied to the latest run
+   * of the subagent's parent so the parent hears the result as a new completion. The task keeps the
+   * subagent's own policy (ceiling, workspace, role, selection), read from its first task. Nothing is
+   * tracked when the parent is gone or has no run. Decided before the transaction, so no host
+   * callback runs inside it.
+   */
+  private trackedFollowUp(command: Extract<RunCommand, { kind: 'send' }>): SendDelegation | undefined {
+    if (command.delegation) return command.delegation
+    if (!isFollowUpSource(command.source)) return undefined
+    const lineage = this.delegations.getLineage(command.threadId)
+    if (!lineage || lineage.relationship !== 'subagent') return undefined
+    if (this.delegationHost?.threadLive && !this.delegationHost.threadLive(lineage.parentThreadId)) return undefined
+    const first = this.delegations.listForChildThread(command.threadId).find((task) => task.parentThreadId === lineage.parentThreadId)
+    const parentRun = this.store.listRuns(lineage.parentThreadId, { limit: 1 })[0]
+    if (!first || !parentRun) return undefined
+    return {
+      parentThreadId: lineage.parentThreadId,
+      parentRunId: parentRun.runId,
+      prompt: command.prompt ?? '',
+      wake: 'always',
+      modeCeiling: first.modeCeiling ?? undefined,
+      workspace: first.workspace,
+      role: first.role,
+      provider: first.provider,
+      model: first.model
+    }
+  }
+
+  private commitSend(command: Extract<RunCommand, { kind: 'send' }>, tracked?: SendDelegation): CommandResult {
     const { store } = this
     return store.db.transaction((): CommandResult => {
       const refusal = this.continuationRefusal(command)
       // Not stored: the same `continue:<runId>` request succeeds once the user acknowledges.
       if (refusal) return { status: 'rejected', reason: refusal, sequence: store.maxSeq(command.threadId) }
+      if (command.delegation) this.checkFollowUp(command.threadId, command.delegation)
       const run = store.createRun({
         threadId: command.threadId,
         source: command.source,
@@ -1072,10 +1111,36 @@ export class RunEngine extends EventEmitter {
         userMessageId: command.userMessageId,
         ...(command.continuationOfRunId ? { outcome: { continuationOf: command.continuationOfRunId } } : {})
       })
+      if (tracked)
+        this.delegations.create({
+          parentRunId: tracked.parentRunId,
+          parentThreadId: tracked.parentThreadId,
+          childThreadId: command.threadId,
+          childRunId: run.runId,
+          provider: tracked.provider,
+          model: tracked.model,
+          prompt: tracked.prompt,
+          wake: tracked.wake,
+          modeCeiling: tracked.modeCeiling,
+          workspace: tracked.workspace,
+          role: tracked.role
+        })
       const sequence = store.maxSeq(command.threadId)
       this.putReceipt(command, 'accepted', { runId: run.runId, sequence })
       return { status: 'accepted', runId: run.runId, sequence, replayed: false }
     })
+  }
+
+  /** An explicit follow-up names a subagent of its parent and a parent run that is not being stopped. */
+  private checkFollowUp(childThreadId: string, delegation: SendDelegation): void {
+    const lineage = this.delegations.getLineage(childThreadId)
+    if (!lineage || lineage.relationship !== 'subagent' || lineage.parentThreadId !== delegation.parentThreadId)
+      fail('bad_request', `Thread ${childThreadId} is not a subagent of ${delegation.parentThreadId}.`)
+    const parent = this.store.getRun(delegation.parentRunId)
+    if (!parent || parent.threadId !== delegation.parentThreadId)
+      fail('bad_request', `Run ${delegation.parentRunId} is not a run of thread ${delegation.parentThreadId}.`)
+    if (parent.outcome?.stopRequested)
+      reject('parent_stopping', 'The calling run is being stopped; it cannot continue subagents.')
   }
 
   /** SPEC §16.4: a continuation names an ended run of the same thread; `uncertain` needs acknowledgement. */

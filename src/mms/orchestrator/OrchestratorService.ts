@@ -37,8 +37,11 @@ import type { ClaudeSubscriptionProviderService } from '../providers/claudeSubsc
 import type { ClaudeIntegrationSource } from '../providers/claudeSubscription/integrations'
 import type { AntigravityProviderService } from '../providers/antigravity/AntigravityProviderService'
 import { v4 as uuidv4 } from 'uuid'
-import type { CommandResult, RunEngine } from '../run/RunEngine'
-import { RunStoreError } from '../run/db/RunStoreError'
+import { TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation } from '../run/RunEngine'
+import { buildSubagentView } from '../run/delegation/subagentView'
+import { resolveSubagent, subagentsTitled, type SubagentAddressSources } from '../run/delegation/subagentAddress'
+import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/delegation/policy'
+import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { stopStrategy } from '../run/CommandPolicy'
 import { McpToolError } from '../run/mcp/toolRegistry'
@@ -107,7 +110,7 @@ import { WorktreeManager } from '../worktree/WorktreeManager'
 import { PtyManager } from '../terminals/PtyManager'
 import { HeadlessAgentRunner } from '../terminals/HeadlessAgentRunner'
 import { MacroEngine } from '../macros/MacroEngine'
-import { LlmClient, parseActions, stripActionBlocks, type StreamingLlmThinkingEvent, type StreamingLlmToolEvent, type LlmChatOptions, filterActionsForChatMode, rejectOrchestrationAction, type DelegateTaskInput, type DelegationToolCall, type DelegationToolHost, type NamedAgentToolRequest } from './LlmClient'
+import { LlmClient, parseActions, stripActionBlocks, type StreamingLlmThinkingEvent, type StreamingLlmToolEvent, type LlmChatOptions, filterActionsForChatMode, rejectOrchestrationAction, type DelegateTaskInput, type DelegationToolCall, type DelegationToolHost, type NamedAgentToolRequest, type SubagentRef } from './LlmClient'
 import type { BrowserRuntimePort } from '../../shared/browser/runtime'
 import {
   type BrowserExecutionBinding,
@@ -349,6 +352,8 @@ export interface OrchestratorSendOptions {
   continuationOfRunId?: string
   /** Required when `continuationOfRunId` names an `uncertain` run. */
   acknowledgeUncertain?: boolean
+  /** A follow-up on a subagent (`continue_subagent`): the run and its delegation row are written together. */
+  delegation?: SendDelegation
 }
 
 /**
@@ -379,6 +384,10 @@ interface TurnStartRequest {
   admissionHeld?: boolean
   /** A delegated `shared` child runs in its parent's workspace (SPEC §14.2). */
   sharedWorkspace?: ThreadSession['sharedWorkspace']
+  /** Inbox rows whose notice this turn delivers (a queued steer); they follow this run's outcome. */
+  inboxIds?: string[]
+  /** The subagent results the turn's message delivers. */
+  subagentNotice?: SubagentNoticeItem[]
 }
 
 /** Payload of a `turn.start` effect (SPEC §12.2). */
@@ -894,6 +903,7 @@ export class OrchestratorService extends EventEmitter {
   /** Optional ThreadDataStore for durable queue + cross-thread persistence. */
   setThreadStore(store: ThreadDataStore | null): void {
     this.threadStore = store
+    this.installTitleGuard()
   }
 
   /**
@@ -908,6 +918,7 @@ export class OrchestratorService extends EventEmitter {
     this.runEngine?.handoffs.setTranscriptSource(null)
     this.runEngine = engine
     if (!engine) return
+    this.installTitleGuard()
     this.attachInFlightCanceller()
     engine.handoffs.setTranscriptSource((threadId) => this.handoffTranscript(threadId))
     engine.setDelegationHost({
@@ -916,11 +927,13 @@ export class OrchestratorService extends EventEmitter {
       deleteThread: (threadId) => this.discardCreatedThread(threadId),
       readRunResultText: (runId) => this.runResultText(runId),
       forkPointSeed: (sourceThreadId, sourceRunId) => this.forkPointSeed(sourceThreadId, sourceRunId),
+      titleConflicts: (parentThreadId, title) => this.subagentTitleConflicts(parentThreadId, title),
+      threadLive: (threadId) => this.titleOf(threadId) !== undefined,
       buildChildTurnPayload: ({ childThreadId, childRunId, prompt, request }): TurnStartPayload => ({
         runId: childRunId,
         threadId: childThreadId,
-        // A plan-ceiling child plans only (SPEC §15.1).
-        input: { content: prompt, mode: request.modeCeiling === 'plan' ? 'plan' : 'agent' },
+        // A plan-ceiling child plans only (SPEC §15.1). The subagent is told where its result goes, then its task.
+        input: { content: `${subagentPreamble(this.titleOf(request.parentThreadId) ?? 'its parent')}\n\n${prompt}`, mode: request.modeCeiling === 'plan' ? 'plan' : 'agent' },
         reuseLastUser: false,
         displayUserMessage: true,
         source: 'delegation',
@@ -933,6 +946,7 @@ export class OrchestratorService extends EventEmitter {
       if (event.type === 'delegation.status')
         this.runtimeManager?.setPendingDelegations(event.threadId,
           engine.delegations.listForParentThread(event.threadId).some((delegation) => delegation.status === 'running'))
+      if (event.type === 'reconcile.delivery_failed') this.noteUndeliveredResult(event)
       this.emit('run-event', event)
     }
     const onStop = (payload: { threadId: string; runId: string }): void => { this.emit('stop-requested', payload) }
@@ -945,6 +959,33 @@ export class OrchestratorService extends EventEmitter {
       engine.off('stop-requested', onStop)
       engine.off('steer-accepted', onSteer)
     }
+  }
+
+  /**
+   * A subagent result could not be delivered after every attempt (`restoreUndeliveredRows`): the
+   * thread gets a visible notice, so the result is never silently lost. The result itself is intact
+   * and readable with `task_status`; `retrySubagentDelivery` delivers it again.
+   */
+  private noteUndeliveredResult(event: ThreadEvent): void {
+    try {
+      const { delegationId, attempts } = event.payload as { delegationId?: string | null; attempts?: number }
+      const delegation = delegationId ? this.runEngine?.delegations.get(delegationId) : null
+      const title = delegation ? this.titleOf(delegation.childThreadId) : undefined
+      const session = this.getOrCreateSession(event.threadId)
+      this.sessionAls.run(session, () => this.addSystemMessage(
+        `The result of ${title ? `subagent "${title}"` : 'a subagent'} could not be delivered after ${attempts ?? 'several'} attempts. Read it with task_status${delegationId ? ` (${delegationId})` : ''}, or retry delivery.`
+      ))
+    } catch (error) {
+      console.warn('undelivered result notice could not be written', { threadId: event.threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * Retry for a delivery that gave up: the thread's undeliverable subagent results are pending again,
+   * with a fresh set of attempts. Returns how many.
+   */
+  retrySubagentDelivery(threadId: string): number {
+    return retryUndeliverable(this.requireRunEngine().store, threadId).length
   }
 
   /** Boot reconciliation: runs the previous daemon left active become interrupted. */
@@ -1063,12 +1104,14 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * The credential ceiling of a run on `threadId`: `plan` for a plan-mode turn, and never above the
-   * ceiling the thread's latest delegation gave it (a delegated child inherits its parent's).
+   * ceiling its delegations gave it (a delegated child inherits its parent's). A subagent's own
+   * policy is that of its first task: a later follow-up may narrow it, never widen it.
    */
   private modeCeilingFor(threadId: string, mode: ChatMode): ModeCeiling {
     if (mode === 'plan') return 'plan'
     try {
-      return this.runEngine?.delegations.listForChildThread(threadId).at(-1)?.modeCeiling === 'plan' ? 'plan' : 'default'
+      const tasks = this.runEngine?.delegations.listForChildThread(threadId) ?? []
+      return narrowCeiling(tasks.at(0)?.modeCeiling, tasks.at(-1)?.modeCeiling) === 'plan' ? 'plan' : 'default'
     } catch {
       return 'plan'
     }
@@ -1158,7 +1201,8 @@ export class OrchestratorService extends EventEmitter {
         claimOwnerToken: payload.claimOwnerToken,
         suppressAutoQueueDrain: payload.suppressAutoQueueDrain,
         runId: payload.runId,
-        admissionHeld
+        admissionHeld,
+        subagentNotice: payload.subagentNotice
       }
     )
     const runId = payload.runId
@@ -1202,6 +1246,8 @@ export class OrchestratorService extends EventEmitter {
         kind: 'turn.start',
         payload: { ...payload, input: durableSendInput(payload.input) }
       }).effectId
+      // The notices this turn carries now follow its outcome: read when it completes, redelivered when it fails.
+      if (payload.inboxIds?.length) engine.inbox.redirectDelivery(payload.inboxIds, entry.effectId)
     } catch (error) {
       this.turnResults.delete(payload.runId)
       throw error
@@ -1241,7 +1287,8 @@ export class OrchestratorService extends EventEmitter {
           suppressAutoQueueDrain: payload.suppressAutoQueueDrain,
           runId: payload.runId,
           admissionHeld: payload.admissionHeld,
-          externalSignal: signal
+          externalSignal: signal,
+          subagentNotice: payload.subagentNotice
         }
       )
       entry?.resolve(response)
@@ -1314,20 +1361,42 @@ export class OrchestratorService extends EventEmitter {
 
   /** `turn.steer`: delivers to the live turn; a steer that missed it becomes a new turn (SPEC §5). */
   private executeTurnSteerEffect(effect: EffectRecord): void {
-    const { runId, threadId, text } = effect.payload as { runId: string; threadId: string; text: string }
+    const { runId, threadId, text, inboxIds } = effect.payload as { runId: string; threadId: string; text: string; inboxIds?: string[] }
+    let content = text
+    let notice: SubagentNoticeItem[] | undefined
+    let carried = inboxIds
+    if (inboxIds?.length) {
+      // A steer that carries notices is rebuilt now: a row acknowledged since it was scheduled (a
+      // `task_status` read) is dropped, and with none left there is nothing to deliver.
+      const rows = this.requireRunEngine().inbox.getMany(inboxIds).filter((row) => row.status !== 'acknowledged')
+      if (rows.length === 0) return
+      const planned = planWakeNotice(rows, this.noticeContext())
+      content = planned.text
+      notice = planned.items
+      carried = rows.map((row) => row.inboxId)
+    }
     const run = this.runEngine?.getRun(runId)
-    if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, text)) return
-    this.enqueueLateSteer(threadId, text)
+    if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, content, notice)) return
+    this.enqueueLateSteer(threadId, content, carried, notice)
   }
 
-  private enqueueLateSteer(threadId: string, text: string): void {
+  /** Titles for the notices this orchestrator writes. */
+  private noticeContext(): NoticeContext {
+    return { titleOf: (threadId) => this.titleOf(threadId) }
+  }
+
+  /**
+   * A steer that missed its turn runs as the next turn. It keeps the identity of the inbox rows it
+   * carries, so the rows follow that run's outcome and the text is rebuilt (or the turn skipped) when it starts.
+   */
+  private enqueueLateSteer(threadId: string, text: string, inboxIds?: string[], subagentNotice?: SubagentNoticeItem[]): void {
     const content = text.trim()
     const session = this.getOrCreateSession(threadId)
     if (!content || session.deleted) return
     this.enqueueForThread(
       threadId,
       { content, mode: getLastUserChatMode(session.messages) ?? 'agent' },
-      { source: 'steer-late' }
+      { source: 'steer-late', ...(inboxIds?.length ? { inboxIds, subagentNotice } : {}) }
     )
     if (session.isTurnRunning()) session.drainAfterSettle = true
     else this.scheduleQueueDrain(session)
@@ -1832,12 +1901,16 @@ export class OrchestratorService extends EventEmitter {
     const parentThreadId = session.threadId
     const delegateTask = (input: DelegateTaskInput, call: DelegationToolCall) =>
       this.delegateTask(parentThreadId, parentRunId, input, call, callerCeiling)
-    const integrateDelegation = async (delegationId: string, call: DelegationToolCall) => {
+    const continueSubagent = (input: { subagent: string; prompt: string }, call: DelegationToolCall) =>
+      this.continueSubagent(parentThreadId, parentRunId, input, call, callerCeiling)
+    const integrateDelegation = async (ref: SubagentRef, call: DelegationToolCall) => {
       if (this.isReadOnlyChild(parentThreadId))
         throw new McpToolError('mousse_read_only', 'Integration writes the workspace; a read-only subagent cannot integrate.')
       if (callerCeiling === 'plan')
         throw new McpToolError('mousse_ceiling_exceeded', 'Integration writes the workspace; a plan ceiling cannot integrate.')
-      return this.integrateDelegation(parentThreadId, parentRunId, delegationId, call)
+      const task = this.resolveTask(parentThreadId, ref, 'finished')
+      if (!task.ok) return task.refusal
+      return this.integrateDelegation(parentThreadId, parentRunId, task.delegation.delegationId, call)
     }
     const listDelegations = () => this.listDelegations(parentThreadId)
     const named = (request: NamedAgentToolRequest): DelegateTaskInput => {
@@ -1852,10 +1925,13 @@ export class OrchestratorService extends EventEmitter {
     }
     return {
       delegateTask,
-      taskStatus: ({ delegationId }) => this.taskStatus(parentThreadId, delegationId),
-      taskCancel: ({ delegationId }) => this.taskCancel(parentThreadId, delegationId),
+      continueSubagent,
+      answerSubagent: (input) => this.answerSubagent(parentThreadId, input),
+      taskStatus: (ref) => this.taskStatus(parentThreadId, ref),
+      taskCancel: (ref) => this.taskCancel(parentThreadId, ref),
       listDelegations,
-      integrateDelegation: ({ delegationId }, call) => integrateDelegation(delegationId, call),
+      listSubagents: () => this.listSubagents(parentThreadId),
+      integrateDelegation,
       named: {
         create: async (request, call) => ({ name: request.name, ...(await delegateTask(named(request), call)) }),
         createBatch: async (requests, call) => {
@@ -1871,36 +1947,9 @@ export class OrchestratorService extends EventEmitter {
           }
           return { results }
         },
-        recall: async (request, call) => {
-          const child = this.namedChild(parentThreadId, request.agent)
-          const response = await this.send({ content: request.task, mode: callerCeiling === 'plan' ? 'plan' : 'agent' }, false, {
-            threadId: child.threadId,
-            source: 'delegation',
-            clientRequestId: `recall:${parentRunId}:${call.toolCallId}`,
-            awaitMode: 'ack'
-          })
-          if (!response.runId) throw new Error('The follow-up was not recorded as a run')
-          const delegation = this.requireRunEngine().recordDelegation({
-            parentThreadId,
-            parentRunId,
-            childThreadId: child.threadId,
-            childRunId: response.runId,
-            prompt: request.task,
-            wake: 'always',
-            ...(callerCeiling ? { modeCeiling: callerCeiling } : {})
-          })
-          return { name: request.agent, delegationId: delegation.delegationId, childThreadId: child.threadId, childRunId: response.runId, status: delegation.status }
-        },
-        integrate: async ({ agent }, call) => {
-          const child = this.namedChild(parentThreadId, agent)
-          const finished = this.requireRunEngine().delegations.listForChildThread(child.threadId)
-            .filter((delegation) => delegation.parentThreadId === parentThreadId &&
-              (delegation.status === 'result_available' || delegation.status === 'acknowledged'))
-            .at(-1)
-          if (!finished) throw new Error(`Named agent ${agent} has no finished task to integrate`)
-          return integrateDelegation(finished.delegationId, call)
-        },
-        list: listDelegations
+        // The older name for `continue_subagent`.
+        recall: async (request, call) => ({ name: request.agent, ...(await continueSubagent({ subagent: request.agent, prompt: request.task }, call) as object) }),
+        integrate: ({ agent }, call) => integrateDelegation({ subagent: agent }, call)
       }
     }
   }
@@ -1911,7 +1960,7 @@ export class OrchestratorService extends EventEmitter {
     // SPEC §15.1: a child inherits its caller's ceiling and can never exceed it.
     if (callerCeiling === 'plan' && input.modeCeiling === 'default')
       throw new McpToolError('mousse_ceiling_exceeded', 'A plan-ceiling caller cannot start a child with the default ceiling.')
-    const modeCeiling = input.modeCeiling ?? callerCeiling
+    const modeCeiling = narrowCeiling(callerCeiling, input.modeCeiling)
     const role = input.role?.trim() || undefined
     if (input.workspace === 'shared' && !(role && SHARED_WORKSPACE_ROLES.has(role)))
       throw new Error('workspace "shared" is allowed only for read-only roles (role "research" or "review"); use workspace "isolated" for work that edits, builds or tests.')
@@ -1926,26 +1975,207 @@ export class OrchestratorService extends EventEmitter {
       return { started: false as const, code: 'read_only_caller_requires_shared' as const, message: 'You are a read-only subagent, so your own subagents must be read-only too: start them with workspace "shared" and role "research" or "review".' }
     const refusal = await this.delegationRefusal(parentThreadId, instanceId, input.workspace)
     if (refusal) return refusal
-    const accepted = await engine.requestDelegation({
-      parentThreadId,
-      parentRunId,
-      clientRequestId: `delegation:${parentRunId}:${call.toolCallId}`,
-      prompt: input.prompt,
-      instanceId,
-      model: input.model?.trim() || undefined,
-      role,
-      workspace: input.workspace,
-      wake: input.wake ?? 'always',
-      title: input.title,
-      ...(modeCeiling ? { modeCeiling } : {})
-    })
+    const title = input.title?.trim() || undefined
+    let accepted: Awaited<ReturnType<RunEngine['requestDelegation']>>
+    try {
+      accepted = await engine.requestDelegation({
+        parentThreadId,
+        parentRunId,
+        clientRequestId: delegationRequestKey(parentThreadId, parentRunId, call.toolCallId),
+        prompt: input.prompt,
+        instanceId,
+        model: input.model?.trim() || undefined,
+        role,
+        workspace: input.workspace,
+        wake: input.wake ?? 'always',
+        title,
+        ...(modeCeiling ? { modeCeiling } : {})
+      })
+    } catch (error) {
+      // A retry already replayed its receipt; what is left is a title that belongs to another subagent.
+      if (error instanceof TitleTakenRejection) return this.titleTakenValue(parentThreadId, error)
+      if (error instanceof CommandRejection && error.reason === 'parent_stopping')
+        return { started: false as const, code: 'parent_stopping' as const, message: error.message }
+      throw error
+    }
     return {
       delegationId: accepted.delegationId,
       childThreadId: accepted.childThreadId,
       childRunId: accepted.childRunId,
+      title: this.titleOf(accepted.childThreadId) ?? title ?? null,
       ...(accepted.replayed ? { replayed: true } : {}),
-      note: 'Started. Mousse notifies you when it finishes; then call task_status for the result.'
+      note: 'Started. Mousse sends you the result when it finishes; end your turn.'
     }
+  }
+
+  /** The value `delegate_task` returns when its title belongs to another of the caller's subagents. */
+  private titleTakenValue(parentThreadId: string, taken: TitleTakenRejection) {
+    const existing = taken.childThreadIds.map((childThreadId) => {
+      const row = this.subagentView(parentThreadId).find((subagent) => subagent.childThreadId === childThreadId)
+      return { childThreadId, title: this.titleOf(childThreadId) ?? taken.title, state: row?.state ?? 'unknown', latestDelegationId: row?.latestDelegationId ?? null }
+    })
+    return {
+      started: false as const,
+      code: 'title_taken' as const,
+      title: taken.title,
+      existing,
+      message: `You already have a subagent titled "${taken.title}" (${existing[0]?.state ?? 'unknown'}). Use continue_subagent with that title to give it more work, or start a new subagent under a different title.`
+    }
+  }
+
+  /** The rows of `subagents.list` for one thread: what each subagent is doing and how its tasks ended. */
+  private subagentView(parentThreadId: string) {
+    const engine = this.requireRunEngine()
+    return buildSubagentView({
+      delegations: engine.delegations,
+      inbox: engine.inbox,
+      store: engine.store,
+      thread: (threadId) => this.threadStore?.getThread(threadId),
+      hasPendingQuestion: (threadId) => this.questions.listPendingForThread(threadId).length > 0
+    }, parentThreadId)
+  }
+
+  private titleOf(threadId: string): string | undefined {
+    return this.threadStore?.getThread(threadId)?.name
+  }
+
+  private addressSources(): SubagentAddressSources {
+    return { delegations: this.requireRunEngine().delegations, titleOf: (threadId) => this.titleOf(threadId) }
+  }
+
+  /** The caller's subagents holding `title`, normalized (engine host callback and the rename guard). */
+  private subagentTitleConflicts(parentThreadId: string, title: string): string[] {
+    return subagentsTitled(this.addressSources(), parentThreadId, title)
+  }
+
+  /**
+   * Titles are the address of a subagent, so a rename may not give one subagent another's title.
+   * Installed on the thread store; every rename path goes through it.
+   */
+  private installTitleGuard(): void {
+    this.threadStore?.setNameGuard((thread, name) => {
+      let lineage: ReturnType<RunEngine['delegations']['getLineage']> = null
+      try {
+        lineage = this.runEngine?.delegations.getLineage(thread.id) ?? null
+      } catch {
+        return
+      }
+      if (lineage?.relationship !== 'subagent') return
+      const taken = this.subagentTitleConflicts(lineage.parentThreadId, name).filter((threadId) => threadId !== thread.id)
+      if (taken.length)
+        throw new DomainRpcError('title_taken', `Another subagent of the same thread is already titled "${name}".`, { title: name, threadIds: taken })
+    })
+  }
+
+  /** `continue_subagent` and `answer_subagent` act only on the caller's own direct subagent. */
+  private resolveSubagentTarget(parentThreadId: string, ref: string) {
+    const resolved = resolveSubagent(this.addressSources(), parentThreadId, ref)
+    return resolved.ok ? resolved : { ok: false as const, refusal: { started: false as const, code: resolved.code, message: resolved.message, ...(resolved.candidates ? { candidates: resolved.candidates } : {}) } }
+  }
+
+  /**
+   * `continue_subagent`: a follow-up on the subagent's own thread. It runs in the subagent's native
+   * session (the thread, provider, model and workspace never change), so what it read stays warm.
+   * The run and its delegation row are one transaction. A busy subagent runs the follow-up after its
+   * current task; one waiting for an answer is never auto-rejected, the caller gets the question.
+   */
+  private async continueSubagent(
+    parentThreadId: string,
+    parentRunId: string,
+    input: { subagent: string; prompt: string },
+    call: DelegationToolCall,
+    callerCeiling?: ModeCeiling
+  ) {
+    const engine = this.requireRunEngine()
+    if (!this.effectsEnabled()) throw new Error('Delegation needs the run engine worker')
+    const target = this.resolveSubagentTarget(parentThreadId, input.subagent)
+    if (!target.ok) return target.refusal
+    const childThreadId = target.childThreadId
+    const requestId = followUpRequestKey(parentThreadId, parentRunId, call.toolCallId)
+    // A retry of an accepted follow-up returns that task, whatever the subagent is doing now.
+    const prior = engine.store.getReceipt(requestId)
+    if (prior?.status === 'accepted' && prior.threadId === childThreadId) {
+      const runId = String((prior.result as { runId?: unknown } | null)?.runId ?? '')
+      const task = engine.delegations.getByChildRun(runId)
+      if (task) return this.followUpValue(task, target.title, { replayed: true })
+    }
+    const pending = this.questions.listPendingForThread(childThreadId)
+    if (pending.length)
+      return {
+        started: false as const,
+        code: 'needs_answer' as const,
+        subagent: target.title,
+        childThreadId,
+        questions: pending.map(({ requestId: id, questions }) => ({ requestId: id, questions })),
+        message: `"${target.title}" is waiting for an answer, so it cannot take new work. Answer it with answer_subagent (or ask the user), then continue it.`
+      }
+    if (engine.getRun(parentRunId)?.outcome?.stopRequested)
+      return { started: false as const, code: 'parent_stopping' as const, message: 'The calling run is being stopped; it cannot continue subagents.' }
+    // The follow-up is bound by the subagent's own policy and the caller's authority, whichever is narrower.
+    const first = engine.delegations.listForChildThread(childThreadId).find((task) => task.parentThreadId === parentThreadId)
+    const modeCeiling = narrowCeiling(callerCeiling, first?.modeCeiling)
+    let response: OrchestratorResponse
+    try {
+      response = await this.send({ content: input.prompt, mode: modeCeiling === 'plan' ? 'plan' : 'agent' }, false, {
+        threadId: childThreadId,
+        source: 'delegation',
+        clientRequestId: requestId,
+        awaitMode: 'ack',
+        delegation: {
+          parentThreadId,
+          parentRunId,
+          prompt: input.prompt,
+          wake: 'always',
+          ...(modeCeiling ? { modeCeiling } : {}),
+          workspace: first?.workspace,
+          role: first?.role,
+          provider: first?.provider,
+          model: first?.model
+        }
+      })
+    } catch (error) {
+      if (error instanceof CommandRejection && error.reason === 'parent_stopping')
+        return { started: false as const, code: 'parent_stopping' as const, message: error.message }
+      throw error
+    }
+    const task = response.runId ? engine.delegations.getByChildRun(response.runId) : null
+    if (!task) throw new Error('The follow-up was not recorded as a task')
+    return this.followUpValue(task, target.title, response.queued ? { queued: true } : {})
+  }
+
+  private followUpValue(task: DelegationRecord, title: string, extra: { queued?: boolean; replayed?: boolean }) {
+    return {
+      delegationId: task.delegationId,
+      childThreadId: task.childThreadId,
+      childRunId: task.childRunId,
+      title,
+      status: extra.queued ? 'queued' : 'started',
+      ...(extra.replayed ? { replayed: true } : {}),
+      note: extra.queued
+        ? `"${title}" is busy; the follow-up runs after its current task. Mousse sends you the result; end your turn.`
+        : 'Started. Mousse sends you the result when it finishes; end your turn.'
+    }
+  }
+
+  /**
+   * `answer_subagent`: the answer of a question one of the caller's subagents asked, in the shape the
+   * GUI answers with. The request must be pending on that subagent's thread.
+   */
+  private answerSubagent(parentThreadId: string, input: { subagent: string; requestId: string; answers: Record<string, string | string[]> }) {
+    const target = this.resolveSubagentTarget(parentThreadId, input.subagent)
+    if (!target.ok) return { answered: false as const, ...target.refusal }
+    const pending = this.questions.getPending(input.requestId)
+    if (!pending || pending.threadId !== target.childThreadId)
+      return {
+        answered: false as const,
+        code: 'no_such_question' as const,
+        message: `"${target.title}" has no pending question ${input.requestId}; it may have been answered or dismissed already.`
+      }
+    if (!this.questions.submitAnswers(input.requestId, input.answers))
+      return { answered: false as const, code: 'no_such_question' as const, message: `Question ${input.requestId} was answered or dismissed first.` }
+    // As in the GUI: the model gets the answers as the tool result; the transcript shows what was said.
+    this.recordQuestionResponseMessage(target.childThreadId, formatQuestionAnswersMessage(pending.questions, input.answers))
+    return { answered: true as const, subagent: target.title, childThreadId: target.childThreadId, requestId: input.requestId }
   }
 
   private ownedDelegation(parentThreadId: string, delegationId: string): DelegationRecord {
@@ -1955,29 +2185,64 @@ export class OrchestratorService extends EventEmitter {
     return delegation
   }
 
-  private taskStatus(parentThreadId: string, delegationId: string) {
+  /**
+   * The task a tool call names. A `delegationId` must be the caller's; a `subagent` is resolved to the
+   * caller's direct subagent and its latest task (`finished`: its latest published one). A name that
+   * resolves to nothing is a refusal value, not an error.
+   */
+  private resolveTask(parentThreadId: string, ref: SubagentRef, which: 'latest' | 'finished' = 'latest') {
+    if (ref.delegationId) return { ok: true as const, delegation: this.ownedDelegation(parentThreadId, ref.delegationId) }
+    const target = this.resolveSubagentTarget(parentThreadId, ref.subagent ?? '')
+    if (!target.ok) return { ok: false as const, refusal: target.refusal }
+    const tasks = this.requireRunEngine().delegations.listForChildThread(target.childThreadId).filter((task) => task.parentThreadId === parentThreadId)
+    const pick = which === 'finished'
+      ? tasks.filter((task) => task.status === 'result_available' || task.status === 'acknowledged').at(-1)
+      : tasks.at(-1)
+    if (!pick)
+      return { ok: false as const, refusal: { started: false as const, code: 'no_task' as const, message: which === 'finished' ? `"${target.title}" has no finished task yet.` : `"${target.title}" has no task.` } }
+    return { ok: true as const, delegation: pick }
+  }
+
+  private taskStatus(parentThreadId: string, ref: SubagentRef) {
     const engine = this.requireRunEngine()
-    let delegation = this.ownedDelegation(parentThreadId, delegationId)
+    const task = this.resolveTask(parentThreadId, ref)
+    if (!task.ok) return task.refusal
+    const delegationId = task.delegation.delegationId
+    let delegation = task.delegation
     if (delegation.status === 'result_available' || delegation.status === 'failed') delegation = engine.acknowledgeDelegation(delegationId)
+    const row = this.subagentView(parentThreadId).find((subagent) => subagent.childThreadId === delegation.childThreadId)
+    const pending = this.questions.listPendingForThread(delegation.childThreadId)
     return {
       delegationId,
       childThreadId: delegation.childThreadId,
+      title: this.titleOf(delegation.childThreadId) ?? null,
       status: delegation.status,
       childRunStatus: engine.getRun(delegation.childRunId)?.status ?? null,
+      ...(row ? { state: row.state } : {}),
+      ...(pending.length ? { pendingQuestion: pending.map(({ requestId, questions }) => ({ requestId, questions })) } : {}),
       ...(delegation.result ? { result: delegation.result } : {})
     }
   }
 
-  private async taskCancel(parentThreadId: string, delegationId: string) {
+  private async taskCancel(parentThreadId: string, ref: SubagentRef) {
     const engine = this.requireRunEngine()
-    this.ownedDelegation(parentThreadId, delegationId)
-    const cancelled = await engine.cancelDelegation(delegationId)
-    return { delegationId, status: engine.delegations.get(delegationId)?.status, cancelled }
+    if (ref.delegationId) {
+      const delegationId = this.ownedDelegation(parentThreadId, ref.delegationId).delegationId
+      const cancelled = await engine.cancelDelegation(delegationId)
+      return { delegationId, status: engine.delegations.get(delegationId)?.status, cancelled }
+    }
+    // A subagent title cancels everything that subagent still has open.
+    const target = this.resolveSubagentTarget(parentThreadId, ref.subagent ?? '')
+    if (!target.ok) return target.refusal
+    const open = engine.delegations.listForChildThread(target.childThreadId).filter((task) => task.parentThreadId === parentThreadId && task.status === 'running')
+    const cancelled: string[] = []
+    for (const task of open) cancelled.push(...await engine.cancelDelegation(task.delegationId))
+    return { subagent: target.title, childThreadId: target.childThreadId, cancelled, ...(open.length ? {} : { note: `"${target.title}" has no open task.` }) }
   }
 
   /** Cancels one of `parentThreadId`'s delegations and everything below it (host API and tests). */
   cancelDelegation(parentThreadId: string, delegationId: string) {
-    return this.taskCancel(parentThreadId, delegationId)
+    return this.taskCancel(parentThreadId, { delegationId })
   }
 
   /** The delegations a thread made, oldest first. */
@@ -1994,15 +2259,19 @@ export class OrchestratorService extends EventEmitter {
     }))
   }
 
-  /** Named wrappers address a child thread by title (case-insensitive) or id; the latest wins. */
-  private namedChild(parentThreadId: string, agent: string): { threadId: string } {
-    const wanted = agent.trim().toLowerCase()
-    const match = this.requireRunEngine().delegations.listChildThreads(parentThreadId)
-      .filter((lineage) => lineage.relationship === 'subagent')
-      .filter((lineage) => lineage.threadId === agent || this.threadStore?.getThread(lineage.threadId)?.name.trim().toLowerCase() === wanted)
-      .at(-1)
-    if (!match) throw new Error(`No delegated child named ${agent} in this thread`)
-    return { threadId: match.threadId }
+  /** `list_subagents`: one row per subagent, from the same read model the app shows. */
+  private listSubagents(parentThreadId: string) {
+    return this.subagentView(parentThreadId).map((row) => ({
+      title: row.title,
+      childThreadId: row.childThreadId,
+      state: row.state,
+      latestDelegationId: row.latestDelegationId,
+      unread: row.unread,
+      workspace: row.workspace,
+      role: row.role,
+      provider: row.provider,
+      model: row.model
+    }))
   }
 
   /**
@@ -2091,12 +2360,13 @@ export class OrchestratorService extends EventEmitter {
       if (!pinned) throw new Error('The delegated task left no code checkpoint to integrate.')
       return await new ChildAgentIntegrationService(parentDirectory).integrate({
         agentId: delegation.childThreadId,
-        operationId: `delegation-integration:${delegationId}:${workerHead}`,
+        operationId: `delegation-integration:${delegationId}:${pinned}`,
         actor: { kind: 'agent', id: delegation.childThreadId },
         workerWorktree: child.worktreePath,
         workerBranch: child.branch,
         spawnBaseSha: child.baseSha,
-        expectedWorkerHead: workerHead,
+        expectedWorkerHead: pinned,
+        pinnedWorkerSha: pinned,
         threadWorkspace: target.workspacePath,
         heldThreadLease: lease,
         signal,
@@ -2144,13 +2414,14 @@ export class OrchestratorService extends EventEmitter {
       }
       throw new EffectDeferredError(this.wakeBusyDeferMs, 'thread_busy')
     }
+    const notice = planWakeNotice(rows, this.noticeContext())
     try {
       await this.runTurnOnSession(
         session,
-        { content: formatWakeNotice(rows), mode: getLastUserChatMode(session.messages) ?? 'agent' },
+        { content: notice.text, mode: getLastUserChatMode(session.messages) ?? 'agent' },
         false,
         true,
-        { source: 'wake', runId: payload.runId, externalSignal: signal }
+        { source: 'wake', runId: payload.runId, externalSignal: signal, subagentNotice: notice.items }
       )
     } catch (error) {
       const run = engine.getRun(payload.runId)
@@ -2717,7 +2988,7 @@ export class OrchestratorService extends EventEmitter {
   enqueueForThread(
     threadId: string,
     input: OrchestratorSendInput,
-    opts?: { source?: string; intent?: 'normal' | 'steer'; internal?: boolean; runId?: string }
+    opts?: { source?: string; intent?: 'normal' | 'steer'; internal?: boolean; runId?: string; inboxIds?: string[]; subagentNotice?: SubagentNoticeItem[] }
   ): QueuedMessage {
     if (this.threadStore && !this.threadStore.getThread(threadId)) {
       throw new QueueValidationError(`Thread not found: ${threadId}`)
@@ -2744,7 +3015,9 @@ export class OrchestratorService extends EventEmitter {
           intent: opts?.intent ?? 'normal',
           source: opts?.source,
           internal: opts?.internal,
-          runId: opts?.runId
+          runId: opts?.runId,
+          inboxIds: opts?.inboxIds,
+          subagentNotice: opts?.subagentNotice
         })
         item = result.item
         return result.items
@@ -2762,7 +3035,9 @@ export class OrchestratorService extends EventEmitter {
       intent: opts?.intent ?? 'normal',
       source: opts?.source,
       internal: opts?.internal,
-      runId: opts?.runId
+      runId: opts?.runId,
+      inboxIds: opts?.inboxIds,
+      subagentNotice: opts?.subagentNotice
     })
     session.queue = result.items
     item = result.item
@@ -3174,7 +3449,8 @@ export class OrchestratorService extends EventEmitter {
     images?: ChatImageAttachment[],
     responseMetadata?: ChatMessage['responseMetadata'],
     queueItemId?: string,
-    mode?: ChatMode
+    mode?: ChatMode,
+    subagentNotice?: SubagentNoticeItem[]
   ): ChatMessage {
     const msg: ChatMessage = {
       id: uuidv4(),
@@ -3184,7 +3460,8 @@ export class OrchestratorService extends EventEmitter {
       images: images?.length ? images : undefined,
       responseMetadata,
       queueItemId: role === 'user' && queueItemId ? queueItemId : undefined,
-      ...(role === 'user' && mode !== undefined ? { mode: normalizeChatMode(mode) } : {})
+      ...(role === 'user' && mode !== undefined ? { mode: normalizeChatMode(mode) } : {}),
+      ...(role === 'user' && subagentNotice?.length ? { subagentNotice } : {})
     }
     this.messages.push(msg)
     this.emitMessageAdded(msg)
@@ -3257,7 +3534,8 @@ export class OrchestratorService extends EventEmitter {
     displayUserMessage: boolean,
     queueItemId?: string,
     mode?: ChatMode,
-    workflowRun?: WorkflowChatRun
+    workflowRun?: WorkflowChatRun,
+    subagentNotice?: SubagentNoticeItem[]
   ): { claimAccepted: boolean } {
     const messagesBefore = this.messages.length
     const nativeBefore = structuredClone(this.nativeContext)
@@ -3288,6 +3566,7 @@ export class OrchestratorService extends EventEmitter {
       images: images?.length ? images : undefined,
       queueItemId: queueItemId || undefined,
       workflowInvocationId: workflowRun?.invocationId,
+      ...(subagentNotice?.length ? { subagentNotice } : {}),
       hidden: displayUserMessage ? undefined : true,
       ...(displayUserMessage && mode !== undefined
         ? { mode: normalizeChatMode(mode) }
@@ -3577,7 +3856,7 @@ export class OrchestratorService extends EventEmitter {
     return this.steerThread(threadId ?? this.getBoundThreadId() ?? undefined, text)
   }
 
-  steerThread(threadId: string | undefined, text: string): boolean {
+  steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[]): boolean {
     const trimmed = text.trim()
     if (!trimmed || !threadId) return false
     const session =
@@ -3591,7 +3870,7 @@ export class OrchestratorService extends EventEmitter {
         // Mid-turn steers share the turn's mode — preserve tracking so the next
         // real turn does not mistake this UI echo for a legacy agent turn.
         const currentMode = getLastUserChatMode(this.messages)
-        this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode)
+        this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice)
       }
       if (this.sessionAls.getStore()?.threadId === threadId) {
         run()
@@ -3740,6 +4019,8 @@ export class OrchestratorService extends EventEmitter {
         threadId,
         clientRequestId: opts?.clientRequestId ?? uuidv4(),
         source: opts?.source ?? 'protocol',
+        prompt: normalizeSendRequest(input).content,
+        ...(opts?.delegation ? { delegation: opts.delegation } : {}),
         ...(opts?.continuationOfRunId ? { continuationOfRunId: opts.continuationOfRunId, acknowledgeUncertain: opts.acknowledgeUncertain === true } : {})
       })
       if (result.status === 'rejected' && CONTINUATION_REFUSALS.has(result.reason))
@@ -3759,7 +4040,8 @@ export class OrchestratorService extends EventEmitter {
       run = { runId: result.runId, sequence: result.sequence }
     }
 
-    if (!opts?.forceQueue) {
+    // A follow-up from a parent (`continue_subagent`) never answers the subagent's question for it.
+    if (!opts?.forceQueue && !opts?.delegation) {
       const preempted = this.questions.autoRejectPendingForThread(threadId)
       if (preempted.answered + preempted.dismissed > 0 && session.isTurnRunning()) {
         this.abortActiveTurn(threadId)
@@ -3883,6 +4165,8 @@ export class OrchestratorService extends EventEmitter {
       admissionHeld?: boolean
       /** Run Engine run this turn executes; also used as the turn id. */
       runId?: string
+      /** The subagent results this turn's message delivers (a wake, a queued steer). */
+      subagentNotice?: SubagentNoticeItem[]
     }
   ): Promise<OrchestratorResponse> {
     // Admission is synchronous, before any await, so a concurrent send always observes it.
@@ -4024,6 +4308,7 @@ export class OrchestratorService extends EventEmitter {
       onTurnSettled?: (aborted: boolean) => void
       onUserInputAccepted?: () => void
       runId?: string
+      subagentNotice?: SubagentNoticeItem[]
     }
   ): Promise<OrchestratorResponse> {
     const session = this.session
@@ -4194,7 +4479,9 @@ export class OrchestratorService extends EventEmitter {
             images,
             displayUserMessage,
             queueItemId,
-            mode
+            mode,
+            undefined,
+            opts?.subagentNotice
           )
           claimAccepted = true
           this.notifyUserInputAccepted(session.threadId, opts?.onUserInputAccepted)
@@ -4613,7 +4900,8 @@ export class OrchestratorService extends EventEmitter {
           nativeHistoryAfterTurn: (text) => {
             commitPromptTurn(text)
             return nativeAgentHistory(this.nativeContext)
-          }
+          },
+          nativeHistoryNow: () => nativeAgentHistory(this.nativeContext)
         }
       }
       const result = await adapter.startTurn(turnInput, turnSink, turnControl, adapterHost)
@@ -5055,8 +5343,7 @@ export class OrchestratorService extends EventEmitter {
           )
           if (ambiguous) {
             throw new Error(`QUEUE_PROVENANCE_UNAVAILABLE:${ambiguous.id}`)
-          },
-          nativeHistoryNow: () => nativeAgentHistory(this.nativeContext)
+          }
           const acceptedIds = new Set(
             data.messages
               .filter((message) =>
@@ -5102,24 +5389,38 @@ export class OrchestratorService extends EventEmitter {
       settle('idle')
       return
     }
-    const item = claimed as QueuedMessage
+    let item = claimed as QueuedMessage
     const managedByStartup = opts?.managedByStartup === true
+    if (item.inboxIds?.length && this.runEngine) {
+      // A queued steer that carries notices is rebuilt now: a row acknowledged since it was queued
+      // (a `task_status` read) is dropped, and with none left there is nothing to deliver.
+      const rows = this.runEngine.inbox.getMany(item.inboxIds).filter((row) => row.status !== 'acknowledged')
+      if (rows.length === 0) {
+        this.completeSessionClaim(session, item.id, claimToken)
+        this.scheduleQueueDrain(session, opts)
+        return
+      }
+      const planned = planWakeNotice(rows, this.noticeContext())
+      item = { ...item, content: planned.text, inboxIds: rows.map((row) => row.inboxId), subagentNotice: planned.items }
+    }
+    const queued = item
     const startClaimed = (runId: string | undefined, admissionHeld: boolean): Promise<OrchestratorResponse> => this.startTurn(session, {
       runId,
       threadId: session.threadId,
       input: {
-        content: item.content,
-        workflowInvocationId: item.workflowInvocationId,
-        mode: item.mode,
-        images: item.images
+        content: queued.content,
+        workflowInvocationId: queued.workflowInvocationId,
+        mode: queued.mode,
+        images: queued.images
       },
       reuseLastUser: false,
-      displayUserMessage: !item.internal,
-      queueItemId: item.id,
+      displayUserMessage: !queued.internal,
+      queueItemId: queued.id,
       claimOwnerToken: claimToken,
-      source: item.source,
+      source: queued.source,
       suppressAutoQueueDrain: managedByStartup,
-      admissionHeld
+      admissionHeld,
+      ...(queued.inboxIds?.length ? { inboxIds: queued.inboxIds, subagentNotice: queued.subagentNotice } : {})
     })
     let started: Promise<OrchestratorResponse>
     if (!item.runId && this.runEngine) {

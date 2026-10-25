@@ -512,6 +512,16 @@ export class ThreadDataStore extends EventEmitter {
     return undefined
   }
 
+  /**
+   * Runs before any rename: it throws to refuse. A subagent's title is its address among its
+   * parent's subagents, so the orchestrator installs a guard that keeps those titles unique.
+   */
+  setNameGuard(guard: ((thread: Thread, name: string) => void) | null): void {
+    this.nameGuard = guard
+  }
+
+  private nameGuard: ((thread: Thread, name: string) => void) | null = null
+
   /** `touch: false` keeps `updatedAt`, for repairs that must not reorder the sidebar. */
   updateThreadMeta(
     id: string,
@@ -522,6 +532,7 @@ export class ThreadDataStore extends EventEmitter {
     if (!thread) {
       throw new Error(`Thread not found: ${id}`)
     }
+    if (partial.name !== undefined && partial.name !== thread.name) this.nameGuard?.(thread, partial.name)
 
     const updated: Thread = {
       ...thread,

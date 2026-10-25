@@ -7,6 +7,7 @@ import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox } from '../../src/mms/run/EffectOutbox'
 import { Reconciler } from '../../src/mms/run/Reconciler'
 import { RunEngine, type DelegationRequest } from '../../src/mms/run/RunEngine'
+import { normalizeSubagentTitle } from '../../src/mms/run/delegation/subagentAddress'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 
@@ -43,6 +44,10 @@ export function delegationFixture(
   /** Child threads the host holds (created and not deleted). */
   const threads = new Set<string>()
   const deleted: string[] = []
+  /** Titles the host holds for its child threads, by thread id, with the parent that asked for them. */
+  const titled = new Map<string, { parentThreadId: string; title: string }>()
+  /** Whether a thread still exists for the host (`threadLive`); every thread does by default. */
+  const gone = new Set<string>()
   /** Final texts `readRunResultText` returns, by run id. */
   const resultTexts = new Map<string, string>()
   let children = 0
@@ -52,12 +57,18 @@ export function delegationFixture(
       children += 1
       const threadId = `${input.kind === 'fork' ? 'fork' : 'child'}-${children}`
       threads.add(threadId)
+      if (input.kind === 'delegation' && input.request.title) titled.set(threadId, { parentThreadId: input.request.parentThreadId, title: input.request.title })
       return { threadId }
     },
     deleteThread: (threadId) => {
       threads.delete(threadId)
+      titled.delete(threadId)
       deleted.push(threadId)
     },
+    titleConflicts: (parentThreadId, title) => [...titled]
+      .filter(([threadId, held]) => !gone.has(threadId) && held.parentThreadId === parentThreadId && normalizeSubagentTitle(held.title) === normalizeSubagentTitle(title))
+      .map(([threadId]) => threadId),
+    threadLive: (threadId) => !gone.has(threadId),
     buildChildTurnPayload: ({ childThreadId, childRunId, prompt }) => ({ threadId: childThreadId, runId: childRunId, prompt }),
     readRunResultText: (runId) => resultTexts.get(runId)
   })
@@ -102,6 +113,7 @@ export function delegationFixture(
     requests,
     threads,
     deleted,
+    gone,
     resultTexts,
     now,
     advance: (ms: number) => {

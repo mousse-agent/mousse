@@ -297,7 +297,7 @@ describe('delegated child policy', () => {
       expect(turn.delegation).toBeDefined()
       for (const tool of ['write_file', 'edit_file', 'bash', 'integrate_delegation', 'create_task', 'queue_enqueue', 'thread_fork', 'thread_merge_back'])
         expect(turn.toolAccess?.allows(tool), tool).toBe(false)
-      for (const tool of ['read_file', 'delegate_task', 'task_status', 'task_cancel', 'list_delegations']) expect(turn.toolAccess?.allows(tool), tool).toBe(true)
+      for (const tool of ['read_file', 'delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'list_delegations']) expect(turn.toolAccess?.allows(tool), tool).toBe(true)
     }
   }, 30_000)
 
@@ -352,7 +352,7 @@ describe('delegated child policy', () => {
         ['queue_enqueue', { content: 'write more' }],
         ['thread_fork', {}],
         ['thread_merge_back', {}],
-        ['delegate_task', { prompt: 'x', workspace: 'isolated', role: 'implement', instanceId: 'claude' }],
+        ['delegate_task', { prompt: 'x', title: 'Writer', workspace: 'isolated', role: 'implement', instanceId: 'claude' }],
         ['integrate_delegation', { delegationId: 'delegation:any' }],
         ['create_task', { title: 't' }]
       ] as const) {
@@ -360,7 +360,7 @@ describe('delegated child policy', () => {
           .then((outcome) => tool === 'delegate_task' ? (JSON.parse(outcome.text).code ?? 'started') : 'allowed', (error: { code?: string }) => error.code ?? 'error')
       }
       // A read-only child may start a read-only subagent through the MCP server.
-      const nestedShared = await tools.call('delegate_task', { prompt: 'sub', workspace: 'shared', role: 'research', instanceId: 'claude' }, { caller, toolCallId: `${name}-nested`, signal: new AbortController().signal })
+      const nestedShared = await tools.call('delegate_task', { prompt: 'sub', title: 'Looker', workspace: 'shared', role: 'research', instanceId: 'claude' }, { caller, toolCallId: `${name}-nested`, signal: new AbortController().signal })
       results[name].delegate_shared = JSON.parse(nestedShared.text).code ?? 'started'
       return 'Probed.'
     }

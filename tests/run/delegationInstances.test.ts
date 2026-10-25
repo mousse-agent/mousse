@@ -94,7 +94,7 @@ describe('delegate_task by provider instance', () => {
     expect(d.store.getThread(delegation.childThreadId)?.modelOverride).toEqual({ instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
     await waitFor(() => d.engine.getRun(delegation.childRunId)?.status === 'completed', 'the child run')
     expect(d.claude.turns).toHaveLength(1)
-    expect(d.claude.turns[0]).toMatchObject({ threadId: delegation.childThreadId, instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet', prompt: 'Review it' })
+    expect(d.claude.turns[0]).toMatchObject({ threadId: delegation.childThreadId, instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet', prompt: expect.stringMatching(/Review it$/) })
     expect(d.parent.turns.some((turn) => turn.threadId === delegation.childThreadId)).toBe(false)
   }
 
