@@ -80,6 +80,56 @@ describe('Git foundation pinned child results', () => {
     expect(new ChangeReceiptService(f.thread).list()).toHaveLength(1)
   }, 30_000)
 
+  describe('a delegated task pinned to its own checkpoint (issue #142)', () => {
+    /** Task A finished at `pinned`; the subagent then continued: a later commit, and uncommitted work. */
+    const continuedAfterTask = () => {
+      const child = f.child()
+      const pinned = f.commit(child, 'task A\n')
+      const later = f.commit(child, 'task B, committed\n')
+      writeFileSync(join(child, 'value.txt'), 'task B, still being written\n')
+      return { child, pinned, later }
+    }
+    const pinnedRequest = (child: string, pinned: string, operationId = 'integrate-task-a') => ({
+      ...request(child, pinned, operationId), pinnedWorkerSha: pinned
+    })
+
+    it('merges exactly the checkpoint, however far the live worktree has moved, and leaves that worktree alone', async () => {
+      const { child, pinned, later } = continuedAfterTask()
+      const integrated = await new ChildAgentIntegrationService(f.thread).integrate(pinnedRequest(child, pinned))
+      expect(integrated.workerHeadSha).toBe(pinned)
+      expect(git(f.repo, 'rev-list', '--parents', '-n', '1', 'HEAD').split(/\s+/)).toEqual([integrated.integrationSha, f.baseSha, pinned])
+      expect(f.read(f.repo)).toBe('task A\n')
+      expect(new ChangeReceiptService(f.thread).list()[0].contributions).toMatchObject([{ actorId: 'child', baseSha: f.baseSha, resultSha: pinned }])
+      expect(git(f.repo, 'rev-parse', 'refs/mousse/agents/child')).toBe(pinned)
+      // The subagent keeps running where it was: its commit and its unsaved work are untouched.
+      expect(git(child, 'rev-parse', 'HEAD')).toBe(later)
+      expect(f.read(child)).toBe('task B, still being written\n')
+    })
+
+    it('a retry returns the same record; the same pin under another operation does not merge twice', async () => {
+      const { child, pinned } = continuedAfterTask()
+      const service = new ChildAgentIntegrationService(f.thread)
+      const integrated = await service.integrate(pinnedRequest(child, pinned))
+      expect(await service.integrate(pinnedRequest(child, pinned))).toEqual(integrated)
+      expect(new ChangeReceiptService(f.thread).list()).toHaveLength(1)
+    })
+
+    it('still refuses a destination that moved, a pin outside the repository and a pin with no authored commit', async () => {
+      const { child, pinned } = continuedAfterTask()
+      const service = new ChildAgentIntegrationService(f.thread)
+      await expect(service.integrate(pinnedRequest(child, f.baseSha, 'no-commit'))).rejects.toThrow(/no authored commit/)
+      await expect(service.integrate(pinnedRequest(child, '0123456789abcdef0123456789abcdef01234567', 'missing'))).rejects.toThrow(/no longer in the repository/)
+      f.commit(f.repo, 'parent\n', 'parent.txt')
+      await expect(service.integrate(pinnedRequest(child, pinned, 'moved'))).rejects.toThrow(/destination HEAD changed/)
+      expect(new ChangeReceiptService(f.thread).list()).toEqual([])
+    })
+
+    it('without a pin the live worktree is still validated: a dirty or moved worker is refused', async () => {
+      const { child, pinned } = continuedAfterTask()
+      await expect(new ChildAgentIntegrationService(f.thread).integrate(request(child, pinned))).rejects.toThrow(/clean|dirty|uncommitted/i)
+    })
+  })
+
   it('rejects dirty child results without committing or discarding their work', async () => {
     const child = f.child()
     const result = f.commit(child, 'committed\n')

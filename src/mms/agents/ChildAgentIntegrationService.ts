@@ -25,6 +25,13 @@ export interface ChildIntegrationRequest {
   workerBranch: string
   spawnBaseSha: string
   expectedWorkerHead?: string
+  /**
+   * Merge exactly this commit of the worker instead of the worktree's live HEAD (a delegated task's
+   * checkpoint). The worker may have moved on or hold uncommitted changes, so its clean-worktree,
+   * branch and HEAD checks are skipped; repository, ancestry, the merge and recovery are still checked.
+   * Set it together with `expectedWorkerHead`.
+   */
+  pinnedWorkerSha?: string
   threadWorkspace: string
   actionId?: string
   signal?: AbortSignal
@@ -64,12 +71,19 @@ export class ChildAgentIntegrationService {
         // Git was not applied. An explicit retry may execute this same pinned intent once.
       }
       if (resolveRepositoryIdentity(request.workerWorktree).key !== resolveRepositoryIdentity(request.threadWorkspace).key) throw new Error('Worker belongs to a different repository.')
-      requireClean(request.workerWorktree, 'Worker worktree')
       requireClean(request.threadWorkspace, 'Thread workspace')
-      const actualBranch = git(request.workerWorktree, ['branch', '--show-current'])
-      if (actualBranch !== request.workerBranch) throw new Error(`Worker branch changed: expected ${request.workerBranch}, found ${actualBranch}`)
-      const workerHeadSha = git(request.workerWorktree, ['rev-parse', 'HEAD'])
-      if (request.expectedWorkerHead && request.expectedWorkerHead !== workerHeadSha) throw new Error('Worker HEAD changed after readiness validation.')
+      let workerHeadSha: string
+      if (request.pinnedWorkerSha) {
+        // A pinned result does not depend on the live worktree, which may be running or dirty.
+        if (!tryGit(request.workerWorktree, ['cat-file', '-e', `${request.pinnedWorkerSha}^{commit}`]).ok) throw new Error('The delegated result is no longer in the repository.')
+        workerHeadSha = git(request.workerWorktree, ['rev-parse', request.pinnedWorkerSha])
+      } else {
+        requireClean(request.workerWorktree, 'Worker worktree')
+        const actualBranch = git(request.workerWorktree, ['branch', '--show-current'])
+        if (actualBranch !== request.workerBranch) throw new Error(`Worker branch changed: expected ${request.workerBranch}, found ${actualBranch}`)
+        workerHeadSha = git(request.workerWorktree, ['rev-parse', 'HEAD'])
+        if (request.expectedWorkerHead && request.expectedWorkerHead !== workerHeadSha) throw new Error('Worker HEAD changed after readiness validation.')
+      }
       if (workerHeadSha === request.spawnBaseSha) throw new Error('Worker produced no authored commit.')
       const preMergeSha = git(request.threadWorkspace, ['rev-parse', 'HEAD'])
       if (preMergeSha !== expectedDestination) throw new Error('Integration destination HEAD changed after readiness validation.')

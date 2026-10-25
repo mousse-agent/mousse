@@ -52,7 +52,11 @@ import { CodexAdapter, type CodexClient } from '../run/adapters/codex'
 import type { AdapterHost, ChildTurnPolicy, ProviderAdapter, ProviderCapabilities, ProviderMetrics, RecoveredContext, TurnControl, TurnInput, TurnSink } from '../run/adapters/ProviderAdapter'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { McpCaller, MousseToolHost } from '../run/mcp/toolRegistry'
-import { formatWakeNotice } from '../run/delegation/notice'
+import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
+import { retryUndeliverable } from '../run/delegation/wake'
+import { taskCheckpoint } from '../run/delegation/checkpoint'
+import { subagentPreamble } from '../run/delegation/guidance'
+import type { SubagentNoticeItem } from '../../shared/subagents'
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
@@ -2082,7 +2086,9 @@ export class OrchestratorService extends EventEmitter {
     try {
       const target = await new WorkspaceResolver(parentDirectory, parentThreadId, project).resolve('agent', 'main', signal, lease)
       if (!target.capability.checkpointable) throw new Error('Integration requires an owned Git workspace')
-      const workerHead = actionGit(child.worktreePath, ['rev-parse', 'HEAD'])
+      // The task's own checkpoint, not the worktree as it is now: the subagent may have worked on since.
+      const pinned = taskCheckpoint(new ThreadActionService(childDirectory).list(), delegation.childRunId)
+      if (!pinned) throw new Error('The delegated task left no code checkpoint to integrate.')
       return await new ChildAgentIntegrationService(parentDirectory).integrate({
         agentId: delegation.childThreadId,
         operationId: `delegation-integration:${delegationId}:${workerHead}`,
