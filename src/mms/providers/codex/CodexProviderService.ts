@@ -1007,7 +1007,9 @@ export class CodexProviderService {
     const result = this.probeResult?.result
     if (result?.kind !== 'signed_in') return undefined
     const email = result.email?.trim().toLowerCase()
-    return { label: `ChatGPT ${result.planType}`, ...(email ? { subject: `chatgpt:${email}` } : {}) }
+    // Codex reports the plan in lower case (`plus`, `pro`); the page names it as ChatGPT does.
+    const plan = result.planType ? `${result.planType[0]!.toUpperCase()}${result.planType.slice(1)}` : ''
+    return { label: plan ? `ChatGPT ${plan}` : 'ChatGPT', ...(email ? { subject: `chatgpt:${email}` } : {}) }
   }
 
   /** Disconnects this profile in Mousse only; the terminal sign-in is never logged out. */

@@ -50,7 +50,7 @@ describe('describeStatus', () => {
     ['broken install', { install: { state: 'broken', canInstall: true } }, { headline: 'Install is broken', tone: 'error', action: 'install' }],
     ['binary exits on start', { runs: { state: 'no', failure: 'exited', message: 'claude exited with code 1' } }, { headline: 'Unavailable', tone: 'error', action: 'recheck' }],
     ['signed out is neutral', { auth: { state: 'signed_out', account: undefined } }, { headline: 'Not signed in', tone: 'neutral', action: 'sign_in' }],
-    ['signed out names the method', { auth: { state: 'signed_out', account: undefined, methodLabel: 'Claude subscription' } }, { headline: 'Not signed in · Claude subscription', tone: 'neutral', action: 'sign_in' }],
+    ['signed out does not repeat the method', { auth: { state: 'signed_out', account: undefined, methodLabel: 'Claude Code sign-in' } }, { headline: 'Not signed in', tone: 'neutral', action: 'sign_in' }],
     ['expired sign-in', { auth: { state: 'expired' } }, { headline: 'Sign-in expired', tone: 'warning', action: 'sign_in' }],
     ['refreshing sign-in', { auth: { state: 'refreshing' } }, { headline: 'Refreshing sign-in', tone: 'neutral', action: null }],
     ['sign-in not checked', { auth: { state: 'unknown', account: undefined } }, { headline: 'Installed · Sign-in not checked', tone: 'neutral', action: 'recheck' }],

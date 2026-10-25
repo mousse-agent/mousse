@@ -65,7 +65,8 @@ describe('Codex account subject', () => {
       const a = service.account()
       ;(service as unknown as { probeResult: unknown }).probeResult = { at, result: { kind: 'signed_in', planType: 'plus', email: 'b@example.com' } }
       const b = service.account()
-      expect(a?.label).toBe(b?.label)
+      expect(a?.label).toBe('ChatGPT Plus')
+      expect(b?.label).toBe('ChatGPT Plus')
       expect(a?.subject).not.toBe(b?.subject)
       ;(service as unknown as { probeResult: unknown }).probeResult = { at, result: { kind: 'signed_in', planType: 'plus', email: null } }
       expect(service.account()?.subject).toBeUndefined()

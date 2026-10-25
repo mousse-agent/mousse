@@ -253,7 +253,7 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
 
   if (auth.state === 'signed_out') {
     return {
-      headline: withLabel('Not signed in', auth.methodLabel),
+      headline: 'Not signed in',
       detail: auth.message ?? staleDetail,
       tone: 'neutral',
       nextStep: step(snapshot, 'sign_in')
