@@ -607,6 +607,14 @@ describe('a subagent\'s result waits for its own subagents (issue #142)', () => 
       expect(task(pc.delegationId).status === 'running').toBe(owes)
     })
 
+    it('an integration run whose executor already wrote its outcome owes no second row when it is ended later', async () => {
+      const { pc, integrationRunId } = await integrating()
+      f!.engine.inbox.append({ threadId: pc.childThreadId, runId: integrationRunId, kind: 'reconcile_notice', payload: { type: 'integration_completed', delegationId: 'delegation:merged-work', text: 'finished' } })
+      f!.engine.markTerminal(integrationRunId, 'interrupted', { interruptedBy: 'provider' })
+      expect(outcomeRows(pc.childThreadId)).toHaveLength(1)
+      expect(outcomeRows(pc.childThreadId)[0].payload).toMatchObject({ type: 'integration_completed' })
+    })
+
     it('a run that is not an integration owes none', async () => {
       const pc = await holdBy((x, threadId) => {
         const run = x.store.createRun({ threadId, source: 'gui' })
