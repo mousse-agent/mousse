@@ -201,47 +201,47 @@ const CLAUDE_AUTH_METHOD_LABELS: Record<string, string> = {
  */
 export type ClaudeAccount = { label?: string; subject?: string }
 
-/** Variables that pick the credential or cloud account Claude Code runs with. */
+/** Variables that carry the credential Claude Code runs with, ahead of a stored sign-in. */
 const CLAUDE_CREDENTIAL_VARIABLES = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
   'CLAUDE_CODE_OAUTH_TOKEN',
-  'ANTHROPIC_BASE_URL',
-  'CLAUDE_CODE_USE_BEDROCK',
   'AWS_PROFILE',
   'AWS_ACCESS_KEY_ID',
-  'CLAUDE_CODE_USE_VERTEX',
   'ANTHROPIC_VERTEX_PROJECT_ID',
   'GOOGLE_APPLICATION_CREDENTIALS'
 ]
+/** Variables that route the credential elsewhere (a proxy, a cloud provider). */
+const CLAUDE_ROUTING_VARIABLES = ['ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX']
 
 /**
- * A stable id of the account Claude Code runs as, from what it reads (never shown or stored; the
- * gateway hashes it). A claude.ai sign-in is its account and organization uuid in the home's
- * `.claude.json`; another method is the method and a hash of the credential variables. Undefined
- * when neither can be read: the caller then treats the account as unknown.
+ * A stable id of the account Claude Code runs as, read from what it reads, without starting it
+ * (never shown or stored; the gateway hashes it). A credential variable wins over a stored sign-in,
+ * as in Claude Code: a hash of the credential and routing variables. Otherwise the claude.ai sign-in
+ * stored in the home's `.claude.json`: its account and organization uuid. Undefined when neither is
+ * there (the caller then treats the account as unknown).
  */
 export function claudeAccountSubject(
-  status: { authMethod?: string; apiProvider?: string },
   env: NodeJS.ProcessEnv,
   readText: (path: string) => string = (path) => readFileSync(path, 'utf8')
 ): string | undefined {
-  const method = status.authMethod ?? 'unknown'
-  if (method === 'claude.ai') {
-    const configDir = env.CLAUDE_CONFIG_DIR?.trim()
-    try {
-      const config = JSON.parse(readText(configDir ? join(configDir, '.claude.json') : join(homedir(), '.claude.json'))) as { oauthAccount?: { accountUuid?: unknown; organizationUuid?: unknown } }
-      const account = config.oauthAccount?.accountUuid
-      if (typeof account !== 'string' || !account) return undefined
-      const organization = config.oauthAccount?.organizationUuid
-      return `claude.ai:${account}:${typeof organization === 'string' ? organization : ''}`
-    } catch {
-      return undefined
-    }
+  const value = (name: string) => env[name]?.trim()
+  const credentials = CLAUDE_CREDENTIAL_VARIABLES.filter((name) => value(name))
+  if (credentials.length) {
+    const lines = [...credentials, ...CLAUDE_ROUTING_VARIABLES.filter((name) => value(name))].map((name) => `${name}=${value(name)}`)
+    return `env:${createHash('sha256').update(lines.join('\n')).digest('hex')}`
   }
-  const credentials = CLAUDE_CREDENTIAL_VARIABLES.flatMap((name) => (env[name]?.trim() ? [`${name}=${env[name]!.trim()}`] : []))
-  if (!credentials.length) return undefined
-  return `${method}:${status.apiProvider ?? ''}:${createHash('sha256').update(credentials.join('\n')).digest('hex')}`
+  const configDir = value('CLAUDE_CONFIG_DIR')
+  try {
+    const config = JSON.parse(readText(configDir ? join(configDir, '.claude.json') : join(homedir(), '.claude.json'))) as { oauthAccount?: { accountUuid?: unknown; organizationUuid?: unknown } }
+    const account = config.oauthAccount?.accountUuid
+    if (typeof account !== 'string' || !account) return undefined
+    const organization = config.oauthAccount?.organizationUuid
+    const routing = CLAUDE_ROUTING_VARIABLES.filter((name) => value(name)).map((name) => `${name}=${value(name)}`).join('\n')
+    return `claude.ai:${account}:${typeof organization === 'string' ? organization : ''}${routing ? `:${createHash('sha256').update(routing).digest('hex')}` : ''}`
+  } catch {
+    return undefined
+  }
 }
 type AuthProbe =
   | { kind: 'signed_in'; account?: ClaudeAccount }
@@ -250,8 +250,6 @@ type AuthProbe =
 
 /** How long a live `claude auth status` result stands before it is checked again. */
 export const CLAUDE_AUTH_STATUS_TTL_MS = 5 * 60_000
-/** A signed-in result this recent stands for a turn's own check (no second `claude auth status`). */
-const CLAUDE_AUTH_REUSE_MS = 5_000
 const FALLBACK_MODELS: LlmModelOption[] = ['sonnet', 'opus', 'haiku'].map((id) => ({
   id,
   label: `Claude ${id[0].toUpperCase()}${id.slice(1)}`
@@ -607,7 +605,7 @@ export class ClaudeSubscriptionProviderService {
       if (typeof stdout !== 'string' || !stdout.trim()) return unreadable
       output = stdout
     }
-    let status: { loggedIn?: unknown; authMethod?: unknown; apiProvider?: unknown; subscriptionType?: unknown }
+    let status: { loggedIn?: unknown; authMethod?: unknown; subscriptionType?: unknown }
     try {
       status = JSON.parse(output) as typeof status
     } catch {
@@ -623,7 +621,7 @@ export class ClaudeSubscriptionProviderService {
     const method = text(status.authMethod)
     const plan = text(status.subscriptionType)
     const label = plan ? `Claude ${plan[0].toUpperCase()}${plan.slice(1)}` : method && (CLAUDE_AUTH_METHOD_LABELS[method] ?? method)
-    const subject = claudeAccountSubject({ ...(method ? { authMethod: method } : {}), ...(text(status.apiProvider) ? { apiProvider: text(status.apiProvider) } : {}) }, env)
+    const subject = claudeAccountSubject(env)
     return { kind: 'signed_in', account: { ...(label ? { label } : {}), ...(subject ? { subject } : {}) } }
   }
   /** The account of the last live sign-in check, when it was signed in and named one. */
@@ -631,12 +629,13 @@ export class ClaudeSubscriptionProviderService {
     const result = this.cliProbe?.result
     return result?.kind === 'signed_in' ? result.account : undefined
   }
+  /** The account this instance runs as (`claudeAccountSubject`), read without starting Claude Code. */
+  accountSubject(): string | undefined {
+    return claudeAccountSubject(this.environment())
+  }
   /** Checks the sign-in with the environment the caller captured for its turn. */
   private async authenticated(signal?: AbortSignal, env = this.environment()): Promise<boolean> {
     if (!this.binary()) return false
-    // The gateway checks the account as it admits a turn; that check serves the turn's own.
-    const recent = this.cliProbe
-    if (recent?.result.kind === 'signed_in' && Date.now() - recent.at < CLAUDE_AUTH_REUSE_MS) return true
     const result = await this.probe(env, signal)
     signal?.throwIfAborted()
     this.cliProbe = { at: Date.now(), result }

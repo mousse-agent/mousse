@@ -560,10 +560,11 @@ export class Harness implements HarnessGateway {
       }, this.options.accountCheckMs ?? TURN_ACCOUNT_CHECK_MS)
       timer.unref?.()
     })
-    const checking = Promise.race([
-      record.runtime.auth({ force: true, signal: controller.signal }).then((reading) => this.noteAuth(record, reading)),
-      deadline
-    ])
+    const runtime = record.runtime
+    const check = runtime.identity
+      ? runtime.identity(controller.signal).then((subject) => this.noteSubject(record, subject))
+      : runtime.auth({ force: true, signal: controller.signal }).then((reading) => this.noteAuth(record, reading))
+    const checking = Promise.race([check, deadline])
       .catch((error) => {
         console.warn('[harness] account check failed', { instanceId: record.instanceId, error: errorText(error) })
         return undefined
@@ -589,8 +590,13 @@ export class Harness implements HarnessGateway {
       if (!state.result.timedOut) state.lastGood = state.result
       if (!this.stopped && !state.probing) this.changed(record.instanceId, { legacy: false })
     }
-    if (reading.state !== 'signed_in' || !reading.subject) return undefined
-    const accountId = this.counters.accountIdentity(record.env.homeId, reading.subject)
+    return reading.state === 'signed_in' ? this.noteSubject(record, reading.subject) : undefined
+  }
+
+  /** Records the account `subject` names; a different one than last time moves the generation on. */
+  private noteSubject(record: InstanceRecord, subject: string | undefined): string | undefined {
+    if (!subject) return undefined
+    const accountId = this.counters.accountIdentity(record.env.homeId, subject)
     this.counters.noteAccount(record.instanceId, accountId)
     return accountId
   }

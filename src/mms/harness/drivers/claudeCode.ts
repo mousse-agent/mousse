@@ -126,6 +126,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
             }
           : {}),
         auth: async ({ force }) => readAuth(service, await service.status({ force }), signInCommand),
+        // Read from the home and the variables Claude Code reads; `claude auth status` is the turn's own check.
+        identity: async () => service.accountSubject(),
         refreshModels: async (cwd) => {
           await service.status()
           await service.refreshModels(cwd)

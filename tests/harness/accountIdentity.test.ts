@@ -29,30 +29,38 @@ const claudeJson = (accountUuid: string, organizationUuid = 'org-1') =>
   JSON.stringify({ oauthAccount: { accountUuid, organizationUuid, emailAddress: `${accountUuid}@example.com`, organizationName: 'Acme' } })
 
 describe('Claude account subject', () => {
+  const read = (files: Record<string, string>) => (path: string) => {
+    const text = files[path]
+    if (text === undefined) throw new Error('ENOENT')
+    return text
+  }
+  const home = (text: string) => read({ [join('/homes/work', '.claude.json')]: text })
+
   it('tells two claude.ai users of one organization apart, from the home Claude Code reads', () => {
-    const read = (files: Record<string, string>) => (path: string) => {
-      const text = files[path]
-      if (text === undefined) throw new Error('ENOENT')
-      return text
-    }
     const env = { CLAUDE_CONFIG_DIR: '/homes/work' }
-    const a = claudeAccountSubject({ authMethod: 'claude.ai' }, env, read({ [join('/homes/work', '.claude.json')]: claudeJson('user-a') }))
-    const b = claudeAccountSubject({ authMethod: 'claude.ai' }, env, read({ [join('/homes/work', '.claude.json')]: claudeJson('user-b') }))
+    const a = claudeAccountSubject(env, home(claudeJson('user-a')))
+    const b = claudeAccountSubject(env, home(claudeJson('user-b')))
     expect(a).toBeDefined()
     expect(b).toBeDefined()
     expect(a).not.toBe(b)
     // No account recorded in the home: unknown, never a shared placeholder.
-    expect(claudeAccountSubject({ authMethod: 'claude.ai' }, env, read({}))).toBeUndefined()
-    expect(claudeAccountSubject({ authMethod: 'claude.ai' }, env, read({ [join('/homes/work', '.claude.json')]: '{}' }))).toBeUndefined()
+    expect(claudeAccountSubject(env, read({}))).toBeUndefined()
+    expect(claudeAccountSubject(env, home('{}'))).toBeUndefined()
   })
 
-  it('keys a token or key sign-in by its credential, without exposing it', () => {
-    const one = claudeAccountSubject({ authMethod: 'oauth_token', apiProvider: 'firstParty' }, { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat-one' })
-    const two = claudeAccountSubject({ authMethod: 'oauth_token', apiProvider: 'firstParty' }, { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat-two' })
+  it('keys a token or key sign-in by its credential, ahead of a stored sign-in, without exposing it', () => {
+    const stored = home(claudeJson('user-a'))
+    const one = claudeAccountSubject({ CLAUDE_CONFIG_DIR: '/homes/work', CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat-one' }, stored)
+    const two = claudeAccountSubject({ CLAUDE_CONFIG_DIR: '/homes/work', CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat-two' }, stored)
     expect(one).not.toBe(two)
     expect(one).not.toContain('sk-ant')
-    // A method whose credential Mousse cannot see is unknown.
-    expect(claudeAccountSubject({ authMethod: 'api_key' }, {})).toBeUndefined()
+    expect(one).not.toBe(claudeAccountSubject({ CLAUDE_CONFIG_DIR: '/homes/work' }, stored))
+    // A proxy alone is not a credential: the stored account still decides, and the route is part of it.
+    const proxied = claudeAccountSubject({ CLAUDE_CONFIG_DIR: '/homes/work', ANTHROPIC_BASE_URL: 'https://proxy.example' }, stored)
+    expect(proxied).toMatch(/^claude\.ai:user-a:/)
+    expect(proxied).not.toBe(claudeAccountSubject({ CLAUDE_CONFIG_DIR: '/homes/work' }, stored))
+    // Nothing Mousse can see: unknown.
+    expect(claudeAccountSubject({ CLAUDE_CONFIG_DIR: '/homes/work' }, read({}))).toBeUndefined()
   })
 })
 

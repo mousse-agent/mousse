@@ -89,8 +89,13 @@ export interface DriverRuntime {
   launch?(): StoredCliConfig
   /** Saves launch settings of a built-in instance; added instances are configured by the gateway. */
   setLaunch?(patch: CliProviderConfigPatch): Promise<void>
-  /** `force` skips the runtime's own cache (the gateway's turn admission and Recheck use it). */
+  /** `force` skips the runtime's own cache (Recheck; turn admission without `identity`). */
   auth(options: { force: boolean; signal?: AbortSignal }): Promise<AuthReading>
+  /**
+   * The account the runtime would run as now (`AuthReading.subject`), read cheaply at every turn
+   * admission: no model call, no runtime start. Without it the gateway uses `auth({ force: true })`.
+   */
+  identity?(signal: AbortSignal): Promise<string | undefined>
   refreshModels?(cwd: string): Promise<void>
   signIn?(session: LoginSession, cwd: string, method?: string): Promise<ProviderLoginResult>
   signOut?(): Promise<void>

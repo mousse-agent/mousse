@@ -103,7 +103,7 @@ describe('legacy profiles', () => {
         builtIn: true,
         binary: { path: binary.endsWith('.cmd') ? expect.stringMatching(/cli\.js$/) : binary, source: 'override', version: '2.1.300' },
         config: { home: 'default', binaryPath: binary, args: ['--verbose'], env: { FOO: 'bar' } },
-        auth: { state: 'signed_in', account: { id: 'org-1', label: 'Claude Max' }, canSignOut: false },
+        auth: { state: 'signed_in', account: { id: expect.any(String), label: 'Claude Max' }, canSignOut: false },
         compatibility: { state: 'tested' }
       })
       expect(describeStatus(claude).headline).toBe('Signed in · Claude Max')
