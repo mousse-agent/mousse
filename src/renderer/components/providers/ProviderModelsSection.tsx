@@ -41,6 +41,16 @@ export function movedOrder(display: readonly InstanceModel[], id: string, direct
   return order
 }
 
+/**
+ * "Hide all" or "Show all": an edit of the built-in models only, so a custom model's stored hidden
+ * flag is left as it is.
+ */
+export function bulkVisibilityPatch(entries: readonly InstanceModel[]): ModelPrefsPatch {
+  const builtIn = entries.filter((model) => model.source !== 'custom')
+  const ids = builtIn.map((model) => model.id)
+  return builtIn.length > 0 && builtIn.every((model) => model.hidden) ? { unhide: ids } : { hide: ids }
+}
+
 function customOf(entries: readonly InstanceModel[]): CustomModel[] {
   return entries
     .filter((model) => model.source === 'custom')
@@ -120,7 +130,7 @@ export function ProviderModelsSection({
         )}
         <span className="prov-models-meta">
           {builtIn.length > 0 && (
-            <button type="button" className="prov-ghost-btn" onClick={() => write({ hidden: allHidden ? [] : builtIn.map((model) => model.id) })}>
+            <button type="button" className="prov-ghost-btn" onClick={() => write(bulkVisibilityPatch(entries))}>
               {allHidden ? 'Show all' : 'Hide all'}
             </button>
           )}

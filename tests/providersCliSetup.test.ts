@@ -5,7 +5,7 @@ import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/sta
 import type { ProviderLoginOption } from '../src/shared/providerAuth'
 import { AgentConnectStep, addChoices } from '../src/renderer/components/providers/AddProviderDialog'
 import { AccountRow, BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
-import { ProviderModelsSection, displayModels, movedOrder } from '../src/renderer/components/providers/ProviderModelsSection'
+import { ProviderModelsSection, bulkVisibilityPatch, displayModels, movedOrder } from '../src/renderer/components/providers/ProviderModelsSection'
 import { AgentEditor, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow } from '../src/renderer/components/providers/parts'
 import { offersRedirectPaste, refusedText } from '../src/renderer/components/providers/SignInDialog'
@@ -296,6 +296,12 @@ describe('models section switches', () => {
     expect(shown(html, 'Alpha')).toBe('false')
     expect(shown(html, 'Beta')).toBe('true')
     expect(shown(html, 'Gamma')).toBe('false')
+  })
+
+  it('"Hide all" and "Show all" change the built-in models only, leaving a hidden custom model hidden', () => {
+    const custom = model('mine', { source: 'custom', hidden: true })
+    expect(bulkVisibilityPatch([model('a'), model('b', { hidden: true }), custom])).toEqual({ hide: ['a', 'b'] })
+    expect(bulkVisibilityPatch([model('a', { hidden: true }), model('b', { hidden: true }), custom])).toEqual({ unhide: ['a', 'b'] })
   })
 })
 
