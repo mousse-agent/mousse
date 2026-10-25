@@ -38,15 +38,14 @@ const WORK = { instanceId: 'claude:work', llmProvider: 'claude-subscription', mo
 const LEGACY = { llmProvider: 'claude-subscription', model: 'sonnet' }
 
 /**
- * A profile with Claude Code (built-in and Work) and OpenAI as an API provider. Titles run on API
- * providers; `openai` lists a fast model Automatic prefers.
+ * A profile with Claude Code (built-in and Work) and OpenAI as an API provider; titles run on API
+ * providers.
  */
-async function titleProfile(options: { openai?: boolean; work?: boolean } = {}) {
+async function titleProfile(options: { work?: boolean } = {}) {
   const piProviders = [{ id: 'openai', label: 'OpenAI', models: [{ id: 'gpt-big', label: 'GPT Big' }, { id: 'gpt-mini', label: 'GPT Mini' }] }]
   let stored: unknown = {
     claude: { driver: 'claude', enabled: true },
-    'claude:work': { driver: 'claude', enabled: options.work ?? true, config: { displayName: 'Work' } },
-    ...(options.openai === false ? { 'pi:openai': { driver: 'pi', enabled: false } } : {})
+    'claude:work': { driver: 'claude', enabled: options.work ?? true, config: { displayName: 'Work' } }
   }
   const instances = new ProviderInstanceService({
     store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } },
@@ -75,27 +74,12 @@ function titleOrchestrator(harness: unknown, title: MousseSettings['title']) {
 }
 
 describe('chat title model', () => {
-  it('Automatic (the default setting) names chats with a connected API provider, admitted through the gateway', async () => {
+  it('Automatic (the default setting) names chats from their first line, with no model call', async () => {
     const { harness } = await titleProfile()
-    const automatic = getDefaultSettings().title
-    const { orch, generateTitle } = titleOrchestrator(harness, automatic)
-    // Regenerating a title runs the model, not the first-line fallback.
-    expect(await orch.generateThreadTitle([{ role: 'user', content: 'hello there' }])).toBe('A title')
-    expect(generateTitle).toHaveBeenCalledWith('hello there', undefined, undefined, { instanceId: 'pi:openai', llmProvider: 'openai', model: 'gpt-mini' })
-  })
-
-  it('Automatic picks only what the gateway admits: no hidden model, disabled instance or agent runtime', async () => {
-    const hidden = await titleProfile()
-    await hidden.harness.instances.setModelPrefs('pi:openai', { hidden: ['gpt-mini'] })
-    const visible = titleOrchestrator(hidden.harness, getDefaultSettings().title)
-    await visible.orch.generateTitleText('hello', undefined, undefined)
-    expect(visible.generateTitle).toHaveBeenCalledWith('hello', undefined, undefined, OPENAI_BIG)
-
-    // Only Claude Code is left: Automatic names the chat from its first line.
-    const none = titleOrchestrator((await titleProfile({ openai: false })).harness, getDefaultSettings().title)
-    await expect(none.orch.generateTitleText('hello', undefined, undefined)).rejects.toThrow(/Connect an API provider/)
-    expect(await none.orch.generateThreadTitle([{ role: 'user', content: 'hello there' }])).toBe('hello there')
-    expect(none.generateTitle).not.toHaveBeenCalled()
+    const { orch, generateTitle } = titleOrchestrator(harness, getDefaultSettings().title)
+    // Even with an API provider connected, as on master.
+    expect(await orch.generateThreadTitle([{ role: 'user', content: 'hello there' }])).toBe('hello there')
+    expect(generateTitle).not.toHaveBeenCalled()
   })
 
   it('a chosen model runs exactly as chosen; a legacy record resolves to its instance', async () => {

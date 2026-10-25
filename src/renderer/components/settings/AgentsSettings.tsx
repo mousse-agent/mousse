@@ -1,5 +1,5 @@
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
-import { CONTEXT_COMPACTION_OPTIONS, isAutomaticTitle, normalizeContextSettings, type ContextCompactionTokens } from '../../../shared/settings'
+import { CONTEXT_COMPACTION_OPTIONS, normalizeContextSettings, type ContextCompactionTokens } from '../../../shared/settings'
 import { piProviderIdOf } from '../../../shared/providerInstances'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { SettingsModelPicker } from './SettingsModelPicker'
@@ -29,7 +29,7 @@ export function AgentsSettings({
   // model at send time). Show the saved mode, not the resolved fallback.
   const titleProvider = settings.title?.llmProvider ?? ''
   const titleModel = settings.title?.model ?? ''
-  const titleIsAutomatic = isAutomaticTitle(settings.title)
+  const titleIsAutomatic = !titleProvider || !titleModel
 
   const context = normalizeContextSettings(settings.context)
 

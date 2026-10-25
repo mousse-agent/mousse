@@ -14,7 +14,7 @@ import { AsyncLocalStorage } from 'async_hooks'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { readFileSync } from 'node:fs'
-import { isAutomaticTitle, normalizeContextSettings, resolveContextCompactionTokens, resolveModelForMode, resolveTitleModel } from '../../shared/settings'
+import { normalizeContextSettings, resolveContextCompactionTokens, resolveModelForMode } from '../../shared/settings'
 import { piInstanceId, type ModelOverride } from '../../shared/providerInstances'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { customModelDefinition } from '../harness/catalog'
@@ -49,7 +49,7 @@ import { stopStrategy } from '../run/CommandPolicy'
 import { McpToolError } from '../run/mcp/toolRegistry'
 import { stableStringify } from '../run/json'
 import { formatRestartNote } from '../run/restartNote'
-import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type ResolveStoredOptions, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
+import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piLegacyDriver } from '../harness/drivers/piLegacy'
 import { contextGauge } from '../harness/policy'
 import type { ExecutionBinding, HarnessCaps, ProviderScope } from '../../shared/harness/types'
@@ -3950,6 +3950,11 @@ export class OrchestratorService extends EventEmitter {
     }
     const heuristic =
       firstUser.content.trim().split('\n')[0]?.trim().slice(0, 60).slice(0, 80) || 'New Chat'
+    const titleSettings = this.settingsStore.get().title
+    const hasExplicitTitleModel = Boolean(titleSettings.llmProvider?.trim() && titleSettings.model?.trim())
+    if (!hasExplicitTitleModel) {
+      return heuristic
+    }
     try {
       return await this.generateTitleText(firstUser.content, firstAssistant?.content, threadId)
     } catch {
@@ -3958,35 +3963,16 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Names a chat with the title model. Titles run on an API provider (the pi loop's models).
-   * Automatic (a blank setting) picks a fast model among the API listings this scope may use;
-   * otherwise the stored selection names its instance (a legacy record maps to its built-in
-   * instance). Either way the selection is resolved through the gateway and exactly that selection
-   * runs: a disabled instance, a hidden model or an instance titles cannot run on is refused by its
-   * typed error, never swapped for another provider.
+   * Names a chat with the chosen title model (Automatic never reaches here: it names the chat from
+   * its first line). The selection is resolved through the gateway like any other: the instance the
+   * picker chose (a legacy record maps to its built-in instance), and exactly that selection runs.
+   * A disabled instance, a hidden model or an agent runtime (titles run on API providers) is
+   * refused by its typed error, never swapped for another provider.
    */
   private async generateTitleText(userRequest: string, firstResponse: string | undefined, threadId: string | undefined): Promise<string> {
-    const options = { purpose: 'title' as const, ...(threadId ? { scope: this.threadScope(threadId) } : {}) }
-    const stored = this.settingsStore.get().title
-    const selection = isAutomaticTitle(stored) ? this.automaticTitleModel(options) : stored
-    const resolved = this.harness.resolveStored(selection, options)
-    return this.llm.generateTitle(userRequest, firstResponse, threadId, { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model: selection.model })
-  }
-
-  /** The title model Automatic runs: a fast model of a listing the gateway admits for titles. */
-  private automaticTitleModel(options: ResolveStoredOptions): ModelOverride {
-    const eligible = this.harness.legacy.llmProviders().filter((listing) => {
-      if (!listing.instanceId) return false
-      try {
-        this.harness.resolveStored({ instanceId: listing.instanceId, llmProvider: listing.id, model: '' }, options)
-        return true
-      } catch {
-        return false
-      }
-    })
-    const picked = resolveTitleModel({ ...this.settingsStore.get(), title: { llmProvider: '', model: '' } }, eligible)
-    if (!picked.llmProvider || !picked.model) throw new Error('Connect an API provider to name chats with a model.')
-    return { ...(picked.instanceId ? { instanceId: picked.instanceId } : {}), llmProvider: picked.llmProvider, model: picked.model }
+    const title = this.settingsStore.get().title
+    const resolved = this.harness.resolveStored(title, { purpose: 'title', ...(threadId ? { scope: this.threadScope(threadId) } : {}) })
+    return this.llm.generateTitle(userRequest, firstResponse, threadId, { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model: title.model })
   }
 
   /**
@@ -4042,17 +4028,23 @@ export class OrchestratorService extends EventEmitter {
     // transient title-provider failure on the next send without renaming user titles.
     if (!thread || !isDefaultThreadName(thread.name)) return
 
+    const titleSettings = this.settingsStore.get().title
+    const hasExplicitTitleModel = Boolean(titleSettings.llmProvider?.trim() && titleSettings.model?.trim())
     const heuristic = (userContent.trim().split('\n')[0]?.trim().slice(0, 60) || 'New Chat').slice(0, 80)
+    if (!hasExplicitTitleModel) {
+      if (!heuristic || isDefaultThreadName(heuristic)) return
+      const updated = this.threadStore.updateThreadMeta(threadId, { name: heuristic })
+      this.emit('thread-title-updated', { threadId, thread: updated })
+      return
+    }
     let title: string | null = null
     try {
       title = await this.generateTitleText(userContent, undefined, threadId)
     } catch (error) {
-      // Automatic without an API provider names the chat from its first line, which is no failure.
-      if (!isAutomaticTitle(this.settingsStore.get().title))
-        this.emit('thread-title-generation-failed', {
-          threadId,
-          error: error instanceof Error ? error.message : String(error)
-        })
+      this.emit('thread-title-generation-failed', {
+        threadId,
+        error: error instanceof Error ? error.message : String(error)
+      })
     }
     const finalTitle = (title?.trim() ? title.trim() : heuristic).slice(0, 80)
     if (!finalTitle || isDefaultThreadName(finalTitle)) return
