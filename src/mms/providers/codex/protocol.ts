@@ -155,9 +155,43 @@ export interface TurnSteerResponse {
 
 export interface TurnInterruptParams {
   threadId: string
+  /**
+   * The turn to stop. An empty string submits an interrupt of whatever turn the thread is running
+   * (a no-op on an idle thread); the reply only says the interrupt was submitted, not that the
+   * turn stopped.
+   */
   turnId: string
 }
 export type TurnInterruptResponse = Record<string, never>
+
+/** What a thread is doing, as the server reports it (`thread.status.type`). */
+export type ThreadStatusType = 'idle' | 'active' | 'notLoaded' | 'systemError'
+export const THREAD_STATUS_TYPES: readonly string[] = ['idle', 'active', 'notLoaded', 'systemError']
+
+/**
+ * `thread/list` filters are experimental (`experimentalApi: true` at `initialize`); an older server
+ * ignores them. `parentThreadId` and `ancestorThreadId` exclude each other. `ancestorThreadId`
+ * lists the thread's descendants at any depth. Rows are typed loosely: `helperTree` validates them.
+ */
+export interface ThreadListParams {
+  ancestorThreadId?: string | null
+  parentThreadId?: string | null
+  /** Skip the JSONL scan; relation filters need the state database anyway. */
+  useStateDbOnly?: boolean
+  limit?: number | null
+  cursor?: string | null
+}
+export interface ThreadListResponse {
+  data: unknown[]
+  nextCursor?: string | null
+}
+export interface ThreadReadParams {
+  threadId: string
+}
+export interface ThreadReadResponse {
+  /** `id`, `status.type`, `parentThreadId` (null for a root thread) and `createdAt` (unix seconds). */
+  thread: unknown
+}
 
 export interface ConfigReadParams {
   /** Resolves project config layers as seen from this directory. */
@@ -185,6 +219,8 @@ export interface CodexRequestMap {
   'turn/start': { params: TurnStartParams; result: TurnStartResponse }
   'turn/steer': { params: TurnSteerParams; result: TurnSteerResponse }
   'turn/interrupt': { params: TurnInterruptParams; result: TurnInterruptResponse }
+  'thread/list': { params: ThreadListParams; result: ThreadListResponse }
+  'thread/read': { params: ThreadReadParams; result: ThreadReadResponse }
 }
 export type CodexMethod = keyof CodexRequestMap
 
@@ -237,6 +273,9 @@ export interface CodexNotificationMap {
   }
   error: { threadId: string; turnId: string; error: TurnError; willRetry: boolean }
   'account/updated': { authMode: string | null; planType?: string | null }
+  /** Broadcast to every connection, not only subscribers of the thread. */
+  'thread/status/changed': { threadId: string; status: { type: string } }
+  'thread/closed': { threadId: string }
 }
 
 export interface CodexNotification {
