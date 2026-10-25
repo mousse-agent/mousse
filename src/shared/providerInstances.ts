@@ -130,6 +130,25 @@ export function legacyProviderForInstance(instanceId: string, entry: Pick<Provid
   return entry.driver === 'pi' ? piProviderIdOf(instanceId) : LEGACY_PROVIDER_BY_DRIVER[entry.driver]
 }
 
+/**
+ * Whether a picker listing (`llmProviders` entry) serves a selection: by instance when both name
+ * one (two Claude instances share `llmProvider`), else by the legacy provider name.
+ */
+export function listingServes(listing: { id: string; instanceId?: string }, selection: { instanceId?: string; llmProvider?: string }): boolean {
+  const instanceId = selection.instanceId?.trim()
+  return instanceId && listing.instanceId ? listing.instanceId === instanceId : listing.id === selection.llmProvider
+}
+
+/** The selection one model of a picker listing makes: its instance, provider name and model. */
+export function selectionFromListing(listing: { id: string; instanceId?: string }, model: string): ModelOverride {
+  return { ...(listing.instanceId ? { instanceId: listing.instanceId } : {}), llmProvider: listing.id, model }
+}
+
+/** Stable key of a picker listing: its instance id, else its provider name. */
+export function listingKey(listing: { id: string; instanceId?: string }): string {
+  return listing.instanceId ?? listing.id
+}
+
 export function isProviderInstanceConfig(value: unknown): value is ProviderInstanceConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const entry = value as Record<string, unknown>

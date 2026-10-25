@@ -4,6 +4,7 @@
  */
 
 import { formatThreadList, resolveThreadSelection } from '../../shared/threadSelection'
+import { listingKey, listingServes, selectionFromListing } from '../../shared/providerInstances'
 import type { LlmProviderOption } from '../../shared/settings'
 import type { ContextUsageSnapshot } from '../../shared/types'
 
@@ -13,6 +14,8 @@ export interface SessionThread {
 }
 
 export interface SessionModel {
+  /** The provider instance (two Claude instances share `llmProvider`); absent on older selections. */
+  instanceId?: string
   llmProvider: string
   model: string
 }
@@ -231,11 +234,11 @@ function formatModelList(ctx: InteractiveCommandContext): string {
   for (const provider of providers) total += provider.models.length
 
   outer: for (const provider of providers) {
-    lines.push(`${provider.label} (${provider.id}):`)
+    lines.push(`${provider.label} (${listingKey(provider)}):`)
     for (const model of provider.models) {
       if (shown >= maxModels) break outer
       const marker =
-        model.id === current.model && provider.id === current.llmProvider ? ' *' : ''
+        model.id === current.model && listingServes(provider, current) ? ' *' : ''
       lines.push(`  ${model.id}${marker}`)
       shown++
     }
@@ -254,28 +257,30 @@ function findModel(
 ): SessionModel | undefined {
   const q = query.trim()
   if (!q) return undefined
-  const currentProvider =
-    ctx.state.modelOverride?.llmProvider ?? ctx.getGlobalModel().llmProvider
+  const current = ctx.state.modelOverride ?? ctx.getGlobalModel()
 
-  type Hit = SessionModel & { score: number }
+  // Each hit keeps the instance that lists it: a model only one of two Claude instances lists
+  // selects that instance.
+  type Hit = { provider: LlmProviderOption; model: string; score: number }
   const hits: Hit[] = []
   for (const provider of providers) {
     for (const model of provider.models) {
       if (model.id === q) {
-        hits.push({ llmProvider: provider.id, model: model.id, score: 0 })
+        hits.push({ provider, model: model.id, score: 0 })
       } else if (model.id.toLowerCase() === q.toLowerCase()) {
-        hits.push({ llmProvider: provider.id, model: model.id, score: 1 })
+        hits.push({ provider, model: model.id, score: 1 })
       } else if (model.label.toLowerCase() === q.toLowerCase()) {
-        hits.push({ llmProvider: provider.id, model: model.id, score: 2 })
+        hits.push({ provider, model: model.id, score: 2 })
       }
     }
   }
   if (hits.length === 0) return undefined
+  const isCurrent = (hit: Hit) => listingServes(hit.provider, current)
   hits.sort((a, b) => {
     if (a.score !== b.score) return a.score - b.score
-    if (a.llmProvider === currentProvider && b.llmProvider !== currentProvider) return -1
-    if (b.llmProvider === currentProvider && a.llmProvider !== currentProvider) return 1
+    if (isCurrent(a) && !isCurrent(b)) return -1
+    if (isCurrent(b) && !isCurrent(a)) return 1
     return 0
   })
-  return { llmProvider: hits[0]!.llmProvider, model: hits[0]!.model }
+  return selectionFromListing(hits[0]!.provider, hits[0]!.model)
 }

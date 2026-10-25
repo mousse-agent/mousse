@@ -153,9 +153,20 @@ describe('harness gateway: scope and model prefs', () => {
     const { harness } = full(instances(undefined, []), { models: { claude: [{ id: 'opus', label: 'Opus' }, { id: 'sonnet', label: 'Sonnet' }] } })
     void store
     await harness.instances.setModelPrefs('claude', { hidden: ['opus'], order: ['sonnet'], favorites: ['sonnet'], custom: [{ id: 'opus-x', capabilities: { efforts: ['high'], images: true } }] })
+    // Every effort representation of the hidden base: a suffix on the id, or the effort field.
+    const representations = [
+      { model: 'opus' },
+      ...['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((effort) => ({ model: `opus:${effort}` })),
+      { model: 'opus', effort: 'high' }
+    ]
     for (const purpose of ['composer', 'default', 'delegate_task', 'definition', 'workflow', 'channel_model', 'cli_model', 'turn'] as const)
-      expect(codeOf(() => harness.resolve({ instanceId: 'claude', model: 'opus' }, { kind: 'device' }, purpose)), purpose).toBe('model_hidden')
-    expect(codeOf(() => harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'opus' }, { purpose: 'turn' }))).toBe('model_hidden')
+      for (const selection of representations)
+        expect(codeOf(() => harness.resolve({ instanceId: 'claude', ...selection }, { kind: 'device' }, purpose)), `${purpose} ${JSON.stringify(selection)}`).toBe('model_hidden')
+    for (const selection of representations)
+      expect(codeOf(() => harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: selection.model }, { purpose: 'turn' }))).toBe('model_hidden')
+    // Another model at an effort still resolves; a colon that is not an effort is part of the id.
+    expect(harness.resolve({ instanceId: 'claude', model: 'sonnet:high' }, { kind: 'device' }, 'turn').driver).toBe('claude')
+    expect(harness.resolve({ instanceId: 'claude', model: 'opus:thinking' }, { kind: 'device' }, 'turn').driver).toBe('claude')
     // Stopping or reading running work still resolves it.
     expect(harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'opus' }, { purpose: 'turn', allowDisabled: true }).driver).toBe('claude')
 

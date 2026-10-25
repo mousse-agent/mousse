@@ -39,7 +39,7 @@ import {
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
-import { modelsWithPrefs, ModelPrefsService, visibleProviderOption, type ModelPrefsStore } from './catalog'
+import { hidesModel, modelsWithPrefs, ModelPrefsService, visibleProviderOption, type ModelPrefsStore } from './catalog'
 import type { AuthReading, DriverRuntime, HarnessDriver, InstanceConfig, LiveProcessHost } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, type InstanceEnv } from './env'
 import { addedInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
@@ -472,7 +472,7 @@ export class Harness implements HarnessGateway {
     if (!options.allowDisabled) {
       if (options.scope?.kind === 'project' && !this.scopes.enabled(resolved.instanceId, true, options.scope).effective)
         harnessFail('instance_disabled', `Provider instance "${resolved.instanceId}" is turned off for this project. Turn it on or choose another model.`, resolved.instanceId)
-      if (selection.model && this.prefs.get(resolved.instanceId).hidden.includes(selection.model))
+      if (selection.model && hidesModel(this.prefs.get(resolved.instanceId), selection.model))
         harnessFail('model_hidden', `The model "${selection.model}" is hidden. Show it in Settings → Providers or choose another model.`, resolved.instanceId)
     }
     const config = driver.decodeConfig(resolved.entry.config)
@@ -576,7 +576,7 @@ export class Harness implements HarnessGateway {
       try {
         const record = this.record(instanceId)
         const llmProvider = legacyProviderForInstance(instanceId, entry)
-        if (llmProvider && record.runtime.configured()) ids.push(llmProvider)
+        if (llmProvider && record.runtime.configured() && !ids.includes(llmProvider)) ids.push(llmProvider)
       } catch {
         // An instance whose driver is missing offers nothing.
       }

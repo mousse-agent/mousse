@@ -1,4 +1,5 @@
 import type { CustomModel, InstanceModel, ModelCapabilities, ModelPrefs, ModelPrefsPatch } from '../../shared/harness/types'
+import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 
 /**
@@ -90,6 +91,16 @@ export class ModelPrefsService {
     delete all[instanceId]
     this.store.write(all)
   }
+}
+
+/**
+ * Whether prefs hide the model a selection names. A selection carries its effort in the id
+ * (`opus:high` is `opus` at high effort), so the canonical model behind it counts, not the string.
+ */
+export function hidesModel(prefs: ModelPrefs, model: string): boolean {
+  if (prefs.hidden.includes(model)) return true
+  const { baseId } = parseThinkingSuffixFromModelId(model)
+  return baseId !== model && prefs.hidden.includes(baseId)
 }
 
 /** Capabilities of a listed model: its efforts; images and window are unknown for listed models. */
