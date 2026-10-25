@@ -132,6 +132,12 @@ const DISCARDED = Symbol('discarded')
 export class BackgroundObligations {
   private readonly tasks = new Map<string, BackgroundTask>()
   private readonly consumers = new Map<string, unknown>()
+  /**
+   * `CARRIED` tasks whose wake may never come: a cut-off wake was assigned them, and Claude may have handed
+   * the notification to a turn that was still running. They stay carried (a wake that comes opens a
+   * continuation) but, like `DISCARDED` ones, the next turn that begins afterwards and commits clears them.
+   */
+  private readonly unsure = new Set<string>()
 
   get size(): number {
     return this.tasks.size
@@ -163,6 +169,7 @@ export class BackgroundObligations {
   /** The notification of `taskId` is being consumed by `owner`; the obligation stays until `commit(owner)`. */
   consume(taskId: string, owner: unknown): void {
     if (this.tasks.has(taskId)) this.consumers.set(taskId, owner)
+    this.unsure.delete(taskId)
   }
 
   consumed(taskId: string): boolean {
@@ -170,8 +177,15 @@ export class BackgroundObligations {
   }
 
   /** What `from` consumed now belongs to `to` (a wake that folded a Mousse prompt in). */
-  reassign(from: unknown, to: unknown): void {
-    for (const [id, consumer] of this.consumers) if (consumer === from) this.consumers.set(id, to)
+  reassign(from: unknown, to: unknown): string[] {
+    const moved: string[] = []
+    for (const [id, consumer] of this.consumers)
+      if (consumer === from) {
+        this.consumers.set(id, to)
+        this.unsure.delete(id)
+        moved.push(id)
+      }
+    return moved
   }
 
   /** `owner` committed: the tasks it consumed are done. Returns whether the set changed. */
@@ -180,6 +194,7 @@ export class BackgroundObligations {
     for (const [id, consumer] of this.consumers) {
       if (consumer !== owner) continue
       this.consumers.delete(id)
+      this.unsure.delete(id)
       changed = this.tasks.delete(id) || changed
     }
     return changed
@@ -202,10 +217,15 @@ export class BackgroundObligations {
 
   /**
    * A wake that had started was cut off: the tasks it was opened for (`own`) were read by it and are
-   * `DISCARDED`; any other task it was assigned is still queued in Claude and `CARRIED`.
+   * `DISCARDED`; any other task it was assigned is still queued in Claude and `CARRIED`, though its wake
+   * may never come (see `unsure`).
    */
   releaseWake(owner: unknown, own: ReadonlySet<string>): void {
-    for (const [id, consumer] of this.consumers) if (consumer === owner) this.consumers.set(id, own.has(id) ? DISCARDED : CARRIED)
+    for (const [id, consumer] of this.consumers)
+      if (consumer === owner) {
+        this.consumers.set(id, own.has(id) ? DISCARDED : CARRIED)
+        if (!own.has(id)) this.unsure.add(id)
+      }
   }
 
   /**
@@ -222,17 +242,22 @@ export class BackgroundObligations {
     return count
   }
 
-  /** Tasks a discarded wake left (see `DISCARDED`). */
+  /** Tasks a discarded wake left (see `DISCARDED`), and carried ones whose wake may never come (see `unsure`). */
   discardedIds(): string[] {
-    return [...this.consumers].filter(([, consumer]) => consumer === DISCARDED).map(([id]) => id)
+    return [...this.consumers].filter(([id, consumer]) => this.clearable(id, consumer)).map(([id]) => id)
+  }
+
+  private clearable(id: string, consumer: unknown): boolean {
+    return consumer === DISCARDED || (consumer === CARRIED && this.unsure.has(id))
   }
 
   /** A turn that began after `ids` were discarded and committed: Claude has read them, so they are done. */
   clearDiscarded(ids: readonly string[]): boolean {
     let changed = false
     for (const id of ids)
-      if (this.consumers.get(id) === DISCARDED) {
+      if (this.clearable(id, this.consumers.get(id))) {
         this.consumers.delete(id)
+        this.unsure.delete(id)
         changed = this.tasks.delete(id) || changed
       }
     return changed
@@ -245,8 +270,8 @@ export class BackgroundObligations {
   }
 
   /** A turn whose result came from the wake that folded its message in saw the notifications a cut-off turn left: they are its to commit. */
-  adoptCarried(owner: unknown): void {
-    this.reassign(CARRIED, owner)
+  adoptCarried(owner: unknown): string[] {
+    return this.reassign(CARRIED, owner)
   }
 
   /** The tasks a cut-off turn left for the wake turn Claude is expected to start. */
@@ -256,6 +281,7 @@ export class BackgroundObligations {
 
   discard(taskId: string): boolean {
     this.consumers.delete(taskId)
+    this.unsure.delete(taskId)
     return this.tasks.delete(taskId)
   }
 
@@ -263,6 +289,7 @@ export class BackgroundObligations {
     const had = this.tasks.size > 0
     this.tasks.clear()
     this.consumers.clear()
+    this.unsure.clear()
     return had
   }
 }
@@ -662,11 +689,20 @@ export class LiveSession<Turn = unknown> {
     const query = this.query
     // A turn that pushed nothing has nothing in flight; one that did, or a wake, is interrupted. An
     // interrupt of an idle query is harmless, and one that fails leaves the next turn to find out.
-    if (query && !this.dead && (run.ids.size > 0 || run.kind === 'continuation')) void this.interruptFor(run, query)
+    if (query && !this.dead && (run.ids.size > 0 || run.kind === 'continuation')) {
+      // The interrupt is sent: a frame of the wake that arrives later must not send another.
+      if (run.kind === 'continuation') run.interruptSent = true
+      void this.interruptFor(run, query)
+    }
     // A run that was never answered keeps owning its ids until each has its result or was cancelled; a
     // wake that owns a steer keeps its place among the runs for that, whatever started it.
-    if (run.owned.size === 0) this.finishCancelled(run)
-    else if (run === this.continuation) {
+    if (run.owned.size === 0) {
+      // A wake that began stays the cursor and the continuation until its own result arrives (like a
+      // cut-off prompt it owes that result): the frames it already wrote are dropped, and the wake Claude
+      // may owe for a task it had not read opens only after this one is over (`routeResult`).
+      if (run.kind === 'continuation' && run.started && run === this.continuation) this.clearWake()
+      else this.finishCancelled(run)
+    } else if (run === this.continuation) {
       this.continuation = undefined
       this.clearWake()
       if (!this.runs.includes(run)) this.runs.push(run)
@@ -862,7 +898,9 @@ export class LiveSession<Turn = unknown> {
       if (target === this.continuation) this.clearWake()
     }
     // A turn nobody will read (its host could not run it) is stopped the moment it shows itself.
-    if (target.abandoned && target.kind === 'continuation') this.interruptDiscarded(target)
+    // A frame that does not begin the turn (a background agent's) does not stop a wake that has not begun:
+    // that would stop the agents with it.
+    if (target.abandoned && target.kind === 'continuation' && target.started) this.interruptDiscarded(target)
     target.deliver(message)
   }
 
@@ -1024,12 +1062,15 @@ export class LiveSession<Turn = unknown> {
 
   /** `target`'s result came from a wake turn: it read what that wake read, and the wake's own run is over. */
   private foldWake(target: LiveRun): void {
-    this.obligations.adoptCarried(target)
+    // What a wake adopts is read by that wake, so a cut-off wake discards it.
+    const adopted = this.obligations.adoptCarried(target)
+    if (target.kind === 'continuation') for (const id of adopted) target.wakeTaskIds.add(id)
     const continuation = this.continuation
     if (!continuation || continuation === target) return
     if (continuation.abandoned) this.finishCancelled(continuation)
     else {
-      this.obligations.reassign(continuation, target)
+      const moved = this.obligations.reassign(continuation, target)
+      if (target.kind === 'continuation') for (const id of moved) target.wakeTaskIds.add(id)
       this.endContinuation(continuation, 'folded')
     }
   }

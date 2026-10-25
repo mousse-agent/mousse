@@ -1589,11 +1589,109 @@ describe('background helpers as the real Claude Code reports them', () => {
     abort.abort()
     await expect(wake).rejects.toThrow()
     await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    // Frames the cut-off wake had already written arrive before its aborted result: they are dropped, and
+    // do not open the wake that is owed for the second shell.
+    process.emit(textDelta('leftover of the first wake'))
+    await later(30)
+    expect(f.host.continuationStarted).toHaveBeenCalledTimes(1)
+    expect(process.interrupts).toBe(1)
     process.emit(resultFrame({ terminalReason: 'aborted_streaming', origin: 'task-notification' }))
     // Claude had not read the second notification: it starts a wake for it, which must not run unseen.
     process.emit(textDelta('The second shell finished.'))
     await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(2))
     expect(f.host.continuationStarted).toHaveBeenLastCalledWith('thread', expect.objectContaining({ taskIds: ['bash-2'] }))
+    const second = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined })
+    process.emit(resultFrame({ text: 'The second shell finished.', origin: 'task-notification' }))
+    expect(await second).toBe('The second shell finished.')
+  })
+
+  it.each([
+    ['after the wake began', true],
+    ['before the wake began', false]
+  ])('a task assigned to a wake that was cut off %s, whose own wake never comes, is cleared by the next turn that commits', async (_when, afterFirstFrame) => {
+    const f = fixture()
+    startedWith(f, { id: 'bash-1', type: 'local_bash' }, { id: 'bash-2', type: 'local_bash' })
+    await f.turn()
+    const process = f.cli.last
+    f.cli.reply = undefined
+    if (afterFirstFrame) {
+      process.emit(notification('bash-1'), textDelta('reading the first report'))
+      await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+      process.emit(notification('bash-2'))
+    } else {
+      // Both notifications arrive before Claude begins the wake turn; the second is assigned to the wake.
+      process.emit(notification('bash-1'), notification('bash-2'))
+      await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+      process.emit(textDelta('reading the reports'))
+    }
+    await later(20)
+    const abort = new AbortController()
+    const wake = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined, signal: abort.signal })
+    await later(20)
+    abort.abort()
+    await expect(wake).rejects.toThrow()
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    process.emit(resultFrame({ terminalReason: 'aborted_streaming', origin: 'task-notification' }))
+    await later(30)
+    // No wake follows (Claude may have handed the notification to the turn that was running).
+    expect(f.host.continuationStarted).toHaveBeenCalledTimes(1)
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    f.service.commitInterrupted('thread', '')
+    f.cli.reply = (message, self) => self.answer(String(message.uuid), 'next')
+    expect(await f.turn({ history: '' })).toBe('next')
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+    expect(f.host.backgroundWork).toHaveBeenLastCalledWith('thread', false)
+  })
+
+  it('a background agent\'s frame does not stop a discarded wake that has not begun; its own first frame does', async () => {
+    const f = fixture()
+    f.service.setLiveHost(null)
+    shell(f)
+    await f.turn()
+    const process = f.cli.last
+    f.cli.reply = undefined
+    process.emit(notification('bash-1'))
+    await later(30)
+    process.emit(textDelta('agent talking', undefined, { parent_tool_use_id: 'tool-1' }))
+    await later(30)
+    expect(process.interrupts).toBe(0)
+    process.emit(textDelta('hidden work'))
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+  })
+
+  it('what a wake adopts from a cut-off turn is read by that wake: cutting the wake off discards it instead of carrying it', async () => {
+    const hooks = { backgroundWork: vi.fn(), continuationStarted: vi.fn(), ended: vi.fn() }
+    const session = new LiveSession('thread', hooks)
+    const cli = new FakeClaudeCli()
+    cli.reply = undefined
+    session.attach(cli.query({ prompt: session.queue, options: {} as never }))
+    const process = cli.last
+    process.emit(roster({ id: 'bash-1' }, { id: 'bash-2' }))
+    await vi.waitFor(() => expect(session.obligations.size).toBe(2))
+    // A cut-off turn left bash-2 for the wake Claude owes.
+    const cutOffTurn = {}
+    session.obligations.consume('bash-2', cutOffTurn)
+    session.obligations.release(cutOffTurn, 'carried')
+    // The wake for bash-1 begins and takes a steer, which Claude answers in the wake's result.
+    process.emit(notification('bash-1'), textDelta('reading the report'))
+    await vi.waitFor(() => expect(hooks.continuationStarted).toHaveBeenCalledTimes(1))
+    const wake = hooks.continuationStarted.mock.calls[0][0] as ReturnType<typeof session.beginRun>
+    await session.steer(wake, 'first steer')
+    const steerId = process.uuid(0)
+    // A second steer is still waiting for foreground work, so the wake is not settled by the result.
+    let open!: () => void
+    process.backgroundGate = new Promise<void>((resolve) => { open = resolve })
+    const waiting = session.steer(wake, 'second steer')
+    process.emit(resultFrame({ uuids: [steerId], text: 'done', origin: 'task-notification' }))
+    await later(30)
+    expect(session.obligations.carriedIds()).toEqual([])
+    session.abandon(wake)
+    // Both tasks were read by the wake: nothing is carried for a second wake.
+    expect(session.obligations.carriedIds()).toEqual([])
+    expect(session.obligations.discardedIds().sort()).toEqual(['bash-1', 'bash-2'])
+    open()
+    await waiting
+    session.close()
   })
 
   it('a background agent\'s frames do not count as the wake having begun: a wake cut off before its own first frame is still owed', async () => {
