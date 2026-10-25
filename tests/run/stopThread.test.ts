@@ -892,11 +892,11 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
   })
 
   describe('queue entries below the thread a Stop was aimed at', () => {
-    it('removes tasks, stale notices and run-less entries that are internal, and keeps a message a person queued, with a run or without', async () => {
+    it('removes tasks and stale notices, and keeps what a person queued, with a run or without, the internal fallback entry of their steer included', async () => {
       const s = await scene()
       const orch = s.d.orch as any
       // Queued behind the subagent's running task: a person's message (with its run), a steer that missed its turn
-      // (admitted before the Stop), an internal entry that names no run, and two a person queued that name no run
+      // (admitted before the Stop), the internal entry a steer falls back to when its run cannot be created, and two a person queued that name no run
       // (the composer's queue and a steer sent while another process held the thread).
       const typed = await s.d.orch.send('typed to the worker', false, { threadId: s.childThreadId, source: 'gui', clientRequestId: 'typed', awaitMode: 'ack' })
       const late = orch.enqueueForThread(s.childThreadId, { content: 'late notice' }, { source: 'steer-late' })
@@ -906,7 +906,7 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
       const ids = () => s.d.store.loadMessageQueue(s.childThreadId).map((item) => item.id).sort()
       expect(ids()).toEqual([typed.queueItem!.id, late.id, internal.id, nameless.id, external.id].sort())
       await s.d.orch.stopThread(s.parentId, 'user')
-      expect(ids()).toEqual([typed.queueItem!.id, nameless.id, external.id].sort())
+      expect(ids()).toEqual([typed.queueItem!.id, internal.id, nameless.id, external.id].sort())
       expect(s.run(typed.runId!).status).toBe('queued')
       // It runs once the stopped task is over.
       await waitFor(() => s.terminal(s.delegation.childRunId), 'the subagent to stop')

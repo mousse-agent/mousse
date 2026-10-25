@@ -106,10 +106,19 @@ export function lineageModelLabel(subagent: Pick<SubagentSummary, 'provider' | '
   return label || null
 }
 
+/** The error of a daemon that does not know the method (the code survives the socket; over IPC only the message does). */
+function isUnknownMethod(error: unknown): boolean {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+  if (code === 'method_not_found' || code === 'method_not_available' || code === 'unknown_method') return true
+  return /method_not_found|method_not_available|unknown_method|unknown method/i.test(error instanceof Error ? error.message : String(error))
+}
+
 /**
- * Lineage's Stop all: one call that stops every working subagent (`subagents.stopAll`). A daemon that does
- * not have it, or a call that fails, falls back to stopping each working subagent on its own, which is the
- * same Stop; the thread's own turn is never stopped.
+ * Lineage's Stop all: one call to the daemon (`subagents.stopAll`) that stops every working subagent, each
+ * with its own subagents, and never the thread's own turn. Only a daemon that does not have the method (an
+ * older one) falls back to stopping each working subagent on its own, which is the same Stop for those
+ * subagents but, unlike the call, can wake an idle parent with a notice; that is acceptable there. Any other
+ * failure (a timeout, where the call may already have run on the daemon) is not retried from this list.
  */
 export async function stopAllSubagents(
   api: { stopAll(threadId: string): Promise<unknown>; abort(threadId: string): Promise<unknown> },
@@ -118,7 +127,11 @@ export async function stopAllSubagents(
 ): Promise<void> {
   try {
     await api.stopAll(threadId)
-  } catch {
+  } catch (error) {
+    if (!isUnknownMethod(error)) {
+      console.warn('Stop all failed', error)
+      return
+    }
     await Promise.allSettled(subagents.filter(isRunningSubagent).map((row) => api.abort(row.childThreadId)))
   }
 }

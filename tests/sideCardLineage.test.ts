@@ -1,6 +1,6 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { LineageList, LineageSection } from '../src/renderer/components/sideCard/LineageSection'
 import {
   LINEAGE_COLLAPSED_COUNT,
@@ -252,10 +252,22 @@ describe('stopAllSubagents', () => {
     expect(aborted).toEqual([])
   })
 
-  it('falls back to stopping each working subagent when the daemon cannot (an older daemon, a failed call), never the thread', async () => {
-    const { aborted, api } = fakeApi(async () => { throw new Error('unknown method') })
+  it.each([
+    ['a daemon error code', Object.assign(new Error('nope'), { code: 'method_not_found' })],
+    ['a message over IPC', new Error("Error invoking remote method 'subagents:stopAll': Error: unknown method subagents.stopAll")]
+  ])('falls back to stopping each working subagent for an older daemon (%s), never the thread', async (_name, error) => {
+    const { aborted, api } = fakeApi(async () => { throw error })
     await stopAllSubagents(api, 't1', [subagent('a'), subagent('b', { state: 'done' }), subagent('c', { state: 'waiting' })])
     expect(aborted.sort()).toEqual(['a', 'c'])
+  })
+
+  it('does not retry from its own list after any other failure: the call may already have run on the daemon', async () => {
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { aborted, api } = fakeApi(async () => { throw new Error('request timed out') })
+    await stopAllSubagents(api, 't1', [subagent('a')])
+    expect(aborted).toEqual([])
+    expect(warned).toHaveBeenCalled()
+    warned.mockRestore()
   })
 })
 

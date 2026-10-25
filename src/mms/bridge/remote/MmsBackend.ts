@@ -296,6 +296,10 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       maximumBytes
     )
   }
+  isActive(threadId: string): boolean {
+    const o = this.services.orchestrator
+    return o.isTurnActive(threadId) || o.isChannelTurnActive(threadId) || this.services.runEngine.getActiveRun(threadId) !== null
+  }
   async stop(threadId: string): Promise<unknown> {
     // The same inventory check as `execute`: a remote caller reaches only this profile's threads.
     if (!this.services.threads.listAllThreads().some((thread) => thread.id === threadId))

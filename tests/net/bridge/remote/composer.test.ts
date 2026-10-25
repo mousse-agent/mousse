@@ -722,6 +722,33 @@ describe('remote composer methods on a real profile', () => {
     expect(messages[0].images[0].data).toHaveLength(REMOTE_MESSAGE_IMAGES_MAX_CHARS)
   })
 
+  it('a remote Stop with no run of its own does not end a turn someone else is running', async () => {
+    const stopped: string[] = []
+    let active = true
+    const backend: RemoteBackendPort = { ...idleBackend, isActive: () => active, stop: async (threadId) => { stopped.push(threadId); return { ok: true } } }
+    const api = new RemoteApi(backend, clock)
+    resources.push(() => api.close())
+    // The desktop user's (or a CLI's, channel's, schedule's) turn is live: a remote caller's Stop is refused like a steer.
+    expect(await call(api, 'orchestrator.abort', { threadId: 'busy', run: newId('rpc') })).toEqual({ ok: false })
+    expect(stopped).toEqual([])
+    // The thread itself is idle (an idle parent whose subagents work): the Stop goes through.
+    active = false
+    expect(await call(api, 'orchestrator.abort', { threadId: 'busy', run: newId('rpc') })).toEqual({ ok: true })
+    expect(stopped).toEqual(['busy'])
+  })
+
+  it('a profile backend says a thread is active while any turn of it is live', async () => {
+    const { mms } = await profile()
+    const backend = new MmsRemoteBackend(mms)
+    const thread = mms.threads.createThread('Active')
+    expect(backend.isActive(thread.id)).toBe(false)
+    const turn = vi.spyOn(mms.orchestrator, 'isTurnActive').mockReturnValue(true)
+    expect(backend.isActive(thread.id)).toBe(true)
+    turn.mockRestore()
+    vi.spyOn(mms.orchestrator, 'isChannelTurnActive').mockReturnValue(true)
+    expect(backend.isActive(thread.id)).toBe(true)
+  })
+
   it('a remote Stop reaches only the threads of this profile', async () => {
     const { mms } = await profile()
     const backend = new MmsRemoteBackend(mms)

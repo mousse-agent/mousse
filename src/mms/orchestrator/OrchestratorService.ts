@@ -1239,13 +1239,13 @@ export class OrchestratorService extends EventEmitter {
       const generation = this.runEngine ? currentStopGeneration(this.runEngine.store, id) : 0
       // What a Stop removes: entries of the runs it cancelled, notices that missed their turn, work started on
       // behalf of a parent before the Stop (a stale `stopGeneration`), and, below the thread it was aimed at,
-      // run-less entries that are internal or not a person's. A message a person queued stays, at any level, unless asked to clear.
+      // run-less entries of work started on behalf of a parent. A message a person queued stays, at any level, unless asked to clear.
       const removable = (item: QueuedMessage): boolean => {
         if (item.state === 'claimed') return false
         if (item.runId && cancelled.has(item.runId)) return true
         if (item.inboxIds?.length) return true
         if (isFencedSource(item.source) && (item.stopGeneration === undefined || item.stopGeneration < generation)) return true
-        if (!isRoot && !item.runId && (item.internal || isFencedSource(item.source))) return true
+        if (!isRoot && !item.runId && isFencedSource(item.source)) return true
         return clearQueue && !item.internal
       }
       try {
