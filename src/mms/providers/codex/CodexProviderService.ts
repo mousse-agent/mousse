@@ -1002,11 +1002,11 @@ export class CodexProviderService {
     if (run) return run.handle(notification)
     // A native helper's own thread: its turn belongs to the run that started it.
     const owner = [...this.turns.values()].find((candidate) => candidate.helpers.has(threadId))
-    if (owner) return owner.helpers.handle(notification)
-    const orphan = [...this.orphans].find((helpers) => helpers.has(threadId))
-    if (orphan) {
-      orphan.handle(notification)
-      if (!orphan.awaitingTurn()) this.orphans.delete(orphan)
+    const tracker = owner?.helpers ?? [...this.orphans].find((helpers) => helpers.has(threadId))
+    if (tracker) {
+      tracker.handle(notification)
+      // A stopped tracker is kept only while a helper still lacks its turn id, whichever path resolved it.
+      if (!tracker.awaitingTurn()) this.orphans.delete(tracker)
       return
     }
     this.noteStray(notification, threadId)

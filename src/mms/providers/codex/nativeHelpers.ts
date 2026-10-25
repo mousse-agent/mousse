@@ -72,6 +72,9 @@ export class NativeHelpers {
     const threadId = params?.threadId
     const helper = threadId ? this.helpers.get(threadId) : undefined
     if (!threadId || !helper) return
+    // A stopped tracker claims at most one turn per helper: the first, for a helper that had none when
+    // Stop landed. Later turns (work a later run sends the helper) are not its own.
+    if (this.stopWith && notification.method === 'turn/started' && helper.turnId && helper.turnId !== params?.turn?.id) return
     this.lastActivityAt = Date.now()
     if (notification.method === 'turn/started' && params?.turn?.id) {
       helper.turnId = params.turn.id

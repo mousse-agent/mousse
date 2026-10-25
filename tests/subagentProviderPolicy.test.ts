@@ -465,6 +465,47 @@ describe('Codex children', () => {
       await vi.waitFor(() => expect(interrupts(s)).toContain(`${HELPER}/h-turn-1`))
     })
 
+    it("a later run that reuses a helper is not interrupted by the stopped run's tracker, even when the helper's first turn ended before the parent was released", async () => {
+      let turns = 0
+      const later = { method: 'turn/started', params: { threadId: HELPER, turn: { id: 'h-turn-2', status: 'inProgress', error: null } } }
+      const s = server({
+        onTurnStart: (send) => {
+          turns += 1
+          if (turns === 1) setImmediate(() => send(spawned('subAgentActivity')))
+          else
+            setImmediate(() => {
+              // The helper's new turn starts before the item that names it reaches the parent's thread.
+              send(later)
+              send(spawned('subAgentActivity'))
+              send(completed(PARENT, 'turn-1'))
+            })
+        }
+      })
+      const service = create(s)
+      const internals = service as unknown as { turns: Map<string, unknown>; orphans: Set<unknown> }
+      const stop = new AbortController()
+      const first = chat(service, { child: SHARED, signal: stop.signal })
+      first.catch(() => undefined)
+      await vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(1))
+      await new Promise((done) => setTimeout(done, 50))
+      stop.abort(new Error('Stopped'))
+      await expect(first).rejects.toThrow('Stopped')
+      // The helper had no turn id at Stop; its turn starts and ends while the parent is still registered.
+      expect(internals.turns.size).toBe(1)
+      s.emit(helperTurn)
+      await vi.waitFor(() => expect(interrupts(s)).toContain(`${HELPER}/h-turn-1`))
+      s.emit(completed(HELPER, 'h-turn-1', 'interrupted'))
+      await vi.waitFor(() => expect(internals.orphans.size).toBe(0))
+      s.emit(completed(PARENT, 'turn-1', 'interrupted'))
+      await vi.waitFor(() => expect(internals.turns.size).toBe(0))
+
+      const second = chat(service, { child: SHARED })
+      expect(await state(second)).toBe('pending')
+      expect(interrupts(s)).not.toContain(`${HELPER}/h-turn-2`)
+      s.emit(completed(HELPER, 'h-turn-2'))
+      await expect(second).resolves.toMatchObject({ codexThreadId: PARENT })
+    })
+
     it('a failed parent turn stops the helpers it started', async () => {
       const s = server({
         onTurnStart: (send) =>
