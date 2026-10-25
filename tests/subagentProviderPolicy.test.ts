@@ -372,6 +372,12 @@ describe('Codex children', () => {
   })
 
   describe("native helpers (Codex's own subagents) of a child's turn", () => {
+    // The scripted server answers thread/list with an empty result: the fallback, and its one warning, in every test here.
+    beforeEach(() => {
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    })
+    afterEach(() => vi.restoreAllMocks())
+
     const PARENT = 'thr-1'
     const HELPER = 'helper-1'
     const completed = (threadId: string, id: string, status = 'completed') => ({ method: 'turn/completed', params: { threadId, turn: { id, status, error: null } } })
@@ -417,6 +423,18 @@ describe('Codex children', () => {
 
     it('a child with no helper completes as soon as its own turn does', async () => {
       await expect(chat(create(server()), { child: SHARED })).resolves.toMatchObject({ codexThreadId: PARENT })
+    })
+
+    it('against a server that does not list descendants the direct helpers named by items are what is followed (the fallback), and the process says so once', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      try {
+        const service = create(server())
+        await chat(service, { child: SHARED })
+        expect((service as unknown as { app?: { tree?: string } }).app?.tree).toBe('off')
+        expect(warn).toHaveBeenCalledTimes(1)
+      } finally {
+        warn.mockRestore()
+      }
     })
 
     it("a helper that finished before the parent's item named it does not hold the run", async () => {
@@ -1055,6 +1073,23 @@ describe('Codex children', () => {
         w.set(PARENT, 'idle')
         s.emit(completedNote(PARENT, 'completed', 'mine'))
         await expect(running).resolves.toMatchObject({ turnId: 'mine' })
+      })
+
+      it.each([
+        ['completed', undefined],
+        ['failed', 'boom']
+      ])("Mousse's own turn that ends before its turn/start answer is read still settles the run, with its own status (%s)", async (status, failure) => {
+        const { s } = tree({
+          answer: (message, send) => {
+            if (message.method !== 'turn/start') return undefined
+            send(startedNote(PARENT, 'mine'))
+            send(completedNote(PARENT, status, 'mine', failure ? { message: failure } : null))
+            return { result: { turn: { id: 'mine', status: 'inProgress', error: null } } }
+          }
+        })
+        const running = chat(createFast(s), { child: SHARED })
+        if (failure) await expect(running).rejects.toThrow(failure)
+        else await expect(running).resolves.toMatchObject({ turnId: 'mine' })
       })
 
       it('a steer that arrives with no turn open starts a turn; the wait resumes after it and no helper is interrupted', async () => {
