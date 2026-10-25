@@ -132,4 +132,33 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
     await waitFor(() => s.task(s.coordinator.delegationId).status !== 'running', 'the task to publish')
     expect(s.task(s.coordinator.delegationId).status).toBe('result_available')
   })
+
+  describe('a queued turn that ran without an effect settles its own rows (settleCarriedRows)', () => {
+    const carried = async () => {
+      const s = await scene()
+      s.release()
+      await s.settled(s.reader.childRunId)
+      const [row] = s.d.engine.inbox.listByStatus(s.coordinator.childThreadId, 'pending')
+      s.d.engine.inbox.markDelivered([row.inboxId], 'queue:item-1')
+      expect(s.task(s.coordinator.delegationId).status).toBe('running')
+      const payload = { inboxIds: [row.inboxId], queueItemId: 'item-1' }
+      return { s, row, payload }
+    }
+
+    it('a turn that ends cleanly reads the rows, and the task publishes', async () => {
+      const { s, row, payload } = await carried()
+      await (s.d.orch as any).settleCarriedRows(payload, Promise.resolve({ message: 'ok', actions: [] }))
+      expect(s.d.engine.inbox.get(row.inboxId)!.status).toBe('acknowledged')
+      expect(s.task(s.coordinator.delegationId).status).not.toBe('running')
+    })
+
+    it('a turn that fails or throws gives the rows back: they keep holding the task and are delivered again', async () => {
+      for (const outcome of [() => Promise.resolve({ message: '', actions: [], error: 'boom' }), () => Promise.reject(new Error('boom'))]) {
+        const { s, row, payload } = await carried()
+        await (s.d.orch as any).settleCarriedRows(payload, outcome()).catch(() => undefined)
+        expect(s.d.engine.inbox.get(row.inboxId)!.status).toBe('pending')
+        expect(s.task(s.coordinator.delegationId).status).toBe('running')
+      }
+    })
+  })
 })

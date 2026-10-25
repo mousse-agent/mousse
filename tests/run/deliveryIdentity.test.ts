@@ -276,7 +276,8 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       expect(w.d.engine.inbox.get(w.row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: w.steer.effectId })
       await w.release()
       await w.settled(w.run.runId)
-      // The row travels with the queued follow-up now: the reconciler must not hand it to a wake as well.
+      // The row travels with the queued follow-up now. (No reconciler pass here: one between the run's end
+      // and its settlement would legitimately deliver the row by a wake instead, which a test cannot time.)
       await waitFor(() => noticeTurns(w).length === 1, 'the follow-up turn')
       await waitFor(() => w.d.engine.inbox.get(w.row.inboxId)!.status === 'acknowledged', 'the result to be read')
       w.reconciler.runOnce()
@@ -288,7 +289,7 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
   })
 
   describe('an unread steer when its run ends (recovery)', () => {
-    const held = async (outcome: 'completed' | 'failed' = 'completed') => {
+    const held = async (outcome: 'completed' | 'failed' = 'completed', options: { manual?: boolean } = {}) => {
       let release!: () => void
       const gate = new Promise<void>((resolve) => { release = resolve })
       const w = await finished('All modules look fine.', undefined)
@@ -300,10 +301,10 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       turn.catch(() => undefined)
       await waitFor(() => w.d.engine.getActiveRun(w.parent.id) !== null, 'the parent turn to start')
       const run = w.d.engine.getActiveRun(w.parent.id)!
-      // Due now: the effect worker runs the steer, and the live turn takes it without reading it.
-      const steer = w.d.engine.outbox.enqueue({ threadId: w.parent.id, runId: run.runId, kind: 'turn.steer', payload: { runId: run.runId, threadId: w.parent.id, text: 'x', inboxIds: [w.row.inboxId] } })
+      // Due now: the effect worker runs the steer, and the live turn takes it without reading it (`manual`: the test runs it).
+      const steer = w.d.engine.outbox.enqueue({ threadId: w.parent.id, runId: run.runId, kind: 'turn.steer', ...(options.manual ? { availableAt: new Date(Date.now() + 3_600_000).toISOString() } : {}), payload: { runId: run.runId, threadId: w.parent.id, text: 'x', inboxIds: [w.row.inboxId] } })
       w.d.engine.inbox.markDelivered([w.row.inboxId], steer.effectId)
-      await waitFor(() => w.d.engine.outbox.get(steer.effectId)?.status === 'succeeded', 'the steer to run')
+      if (!options.manual) await waitFor(() => w.d.engine.outbox.get(steer.effectId)?.status === 'succeeded', 'the steer to run')
       return { ...w, run, steer, finish: async () => { release(); await turn.catch(() => undefined); await w.settled(run.runId) } }
     }
     const noticeTurns = (w: { adapter: { turns: Array<{ threadId: string; prompt: string }> }; parent: { id: string } }) =>
@@ -329,6 +330,16 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       expect(noticeTurns(w)).toHaveLength(1)
       expect(w.d.engine.inbox.get(w.row.inboxId)!.status).toBe('acknowledged')
       expect(w.d.engine.delegations.get(w.out.first.delegationId)!.status).toBe('acknowledged')
+    })
+
+    it('unread steers go on in the order they arrived: the user\'s text before and after a result steer', async () => {
+      const w = await held('completed', { manual: true })
+      expect(w.d.orch.steerThread(w.parent.id, 'first plain')).toBe(true)
+      ;(w.d.orch as any).executeTurnSteerEffect(w.steer)
+      expect(w.d.orch.steerThread(w.parent.id, 'last plain')).toBe(true)
+      await w.finish()
+      await waitFor(() => w.adapter.turns.filter((turn) => turn.threadId === w.parent.id).length >= 5, 'the three follow-ups')
+      expect(w.adapter.turns.filter((turn) => turn.threadId === w.parent.id).slice(2).map((turn) => (turn.prompt.startsWith('Subagent') ? 'result' : turn.prompt))).toEqual(['first plain', 'result', 'last plain'])
     })
 
     it('the follow-up turn cannot be queued: the rows go back to pending and rule 4 delivers them once', async () => {
@@ -357,6 +368,39 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       expect(noticeTurns(w)).toHaveLength(1)
       expect(w.adapter.turns.filter((turn) => turn.threadId === w.parent.id && turn.prompt === 'also do X')).toHaveLength(1)
       expect(w.d.engine.listRuns(w.parent.id).filter((run) => run.source === 'wake')).toEqual([])
+    })
+  })
+
+  describe('a queued result that runs without a turn.start effect', () => {
+    const drainDirect = async (parentReply?: Parameters<typeof world>[1]) => {
+      const w = await finished('All modules look fine.', parentReply)
+      const run = w.d.engine.listRuns(w.parent.id)[0]
+      const effect = w.d.engine.outbox.enqueue({ threadId: w.parent.id, runId: run.runId, kind: 'turn.steer', availableAt: new Date(Date.now() + 3_600_000).toISOString(), payload: { runId: run.runId, threadId: w.parent.id, text: 'x', inboxIds: [w.row.inboxId] } })
+      w.d.engine.inbox.markDelivered([w.row.inboxId], effect.effectId)
+      const session = w.d.orch.getOrCreateSession(w.parent.id)
+      session.turnAdmitted = true
+      ;(w.d.orch as any).enqueueLateSteer(w.parent.id, 'x', { inboxIds: [w.row.inboxId], effectId: effect.effectId })
+      // Recording the effect fails, so the item runs directly.
+      vi.spyOn(w.d.orch as any, 'enqueueTurnStart').mockImplementation(() => { throw new Error('outbox unavailable') })
+      session.turnAdmitted = false
+      ;(w.d.orch as any).scheduleQueueDrain(session)
+      await waitFor(() => w.d.orch.listQueue(w.parent.id).length === 0 && w.adapter.turns.some((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith('Subagent')), 'the direct turn')
+      return w
+    }
+
+    it('acknowledges the rows, and the task its notice showed whole, when the turn ends cleanly; boot does not deliver them again', async () => {
+      const w = await drainDirect()
+      await waitFor(() => w.d.engine.inbox.get(w.row.inboxId)!.status === 'acknowledged', 'the rows to be acknowledged')
+      expect(w.d.engine.delegations.get(w.out.first.delegationId)!.status).toBe('acknowledged')
+      ;(w.d.orch as any).recoverQueuedRows()
+      w.reconciler.runOnce()
+      expect(w.d.engine.listRuns(w.parent.id).filter((run) => run.source === 'wake')).toEqual([])
+    })
+
+    it('gives the rows back when the turn fails, so rule 4 delivers them', async () => {
+      const w = await drainDirect(() => { throw new Error('provider error') })
+      await waitFor(() => w.d.engine.inbox.get(w.row.inboxId)!.status === 'pending', 'the rows to be given back')
+      expect(w.d.engine.delegations.get(w.out.first.delegationId)!.status).toBe('result_available')
     })
   })
 

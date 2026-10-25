@@ -159,6 +159,20 @@ export class Inbox {
     })
   }
 
+  /**
+   * The live turn holds the steer `effectId` carried (it is in the turn's pending steers, not read
+   * yet). Only code that holds steers writes this, so rows of a steer delivered before it existed
+   * (a native steer of an older version) are never mistaken for an unread one.
+   */
+  markSteerHeld(ids: readonly string[], effectId: string): void {
+    this.db.transaction(() => {
+      for (const id of ids) {
+        const current = this.get(id)
+        if (current?.status === 'delivered' && current.deliveredBy === effectId) this.patchPayload(id, { steerHeldBy: effectId })
+      }
+    })
+  }
+
   /** The model read the steer `effectId` carried: its rows count as delivered to that run. */
   markSteerTaken(ids: readonly string[], effectId: string): void {
     this.db.transaction(() => {

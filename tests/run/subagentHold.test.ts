@@ -5,10 +5,11 @@
  * re-evaluates it, driven on the real engine, outbox and reconciler over a fake clock. The same rule
  * through a real orchestrator and scripted providers is `subagentHoldIntegration.test.ts`.
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { childBusy, NO_FINAL_MESSAGE, settleWaitingDelegations } from '../../src/mms/run/delegation/hold'
 import { MAX_INBOX_REDELIVERIES } from '../../src/mms/run/delegation/wake'
 import { EFFECT_LEASE_GRACE_MS } from '../../src/mms/run/EffectOutbox'
+import { acknowledgeRows } from '../../src/mms/run/terminal'
 import { EFFECT_KIND_SPEC, type ChildResultPayload } from '../../src/mms/run/types'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -355,6 +356,27 @@ describe('a subagent\'s result waits for its own subagents (issue #142)', () => 
       expect(task(pc.delegationId).status).toBe('failed')
     })
 
+    it('a legacy steer row (master-shaped: succeeded steer, completed run, no steerHeldBy or steerTakenBy) is consumed: it does not hold the task', async () => {
+      const { pc, cg } = await nested()
+      f!.finish(cg.childRunId, 'G result')
+      const live = f!.store.createRun({ threadId: pc.childThreadId, source: 'gui' })
+      f!.engine.markStarting(live.runId)
+      f!.engine.markRunning(live.runId)
+      const steerId = f!.reconciler.runOnce().wakes.steers[0]
+      f!.outbox.claimNext(OWNER, f!.now(), { lanes: ['control'] })
+      f!.outbox.succeed(steerId, OWNER, f!.now())
+      // Nothing marked the steer: an older version delivered it, and its run ended without a way to read it.
+      expect(f!.engine.inbox.listForThread(pc.childThreadId)[0].payload).not.toHaveProperty('steerHeldBy')
+      expect(task(pc.delegationId).status).toBe('running')
+      f!.engine.markTerminal(live.runId, 'completed', undefined, { resultText: 'C turn' })
+      const [row] = f!.engine.inbox.listForThread(pc.childThreadId)
+      expect(row.status).toBe('delivered')
+      // The delivery rules leave it alone, and so does the hold: the task publishes.
+      expect(f!.reconciler.runOnce().wakes.restored).toEqual([])
+      expect(childBusy(f!.store, pc.childThreadId)).toBe(false)
+      expect(task(pc.delegationId)).toMatchObject({ status: 'result_available', result: { text: 'C turn' } })
+    })
+
     it('a steer that succeeded but was never read, on a run that completed, holds until the row is restored and delivered again', async () => {
       const { pc, cg } = await nested()
       f!.finish(cg.childRunId, 'G result')
@@ -365,6 +387,8 @@ describe('a subagent\'s result waits for its own subagents (issue #142)', () => 
       expect(steerId).toBeTruthy()
       f!.outbox.claimNext(OWNER, f!.now(), { lanes: ['control'] })
       f!.outbox.succeed(steerId, OWNER, f!.now())
+      // The live turn held the steer (`steerThread` marks it) but ended before the model read it.
+      f!.engine.inbox.markSteerHeld(f!.engine.inbox.listForThread(pc.childThreadId).map((row) => row.inboxId), steerId)
       // The turn ended without reading the steer: its rows are not acknowledged, and they still count.
       f!.engine.markTerminal(live.runId, 'completed', undefined, { resultText: 'C turn' })
       expect(f!.engine.inbox.listForThread(pc.childThreadId).map((row) => row.status)).toEqual(['delivered'])
@@ -375,6 +399,30 @@ describe('a subagent\'s result waits for its own subagents (issue #142)', () => 
       f!.engine.markTerminal(wakeRunId, 'completed', undefined, { resultText: 'C final' })
       f!.outbox.cancel(wakeEffect(wakeRunId).effectId, f!.now(), 'settled')
       expect(task(pc.delegationId)).toMatchObject({ status: 'result_available', result: { text: 'C final' } })
+    })
+
+    it('markSteerHeld, release and acknowledgeRows each end in a re-evaluation of the row thread', async () => {
+      const { pc, cg } = await nested()
+      f!.finish(cg.childRunId, 'G result')
+      const [row] = f!.engine.inbox.listByStatus(pc.childThreadId, 'pending')
+      f!.engine.inbox.markDelivered([row.inboxId], 'effect:steer-1')
+      const settled = vi.spyOn(f!.store, 'settleHold')
+      f!.engine.inbox.markSteerHeld([row.inboxId], 'effect:steer-1')
+      expect(settled).toHaveBeenCalledWith(pc.childThreadId)
+      expect(f!.engine.inbox.get(row.inboxId)!.payload).toMatchObject({ steerHeldBy: 'effect:steer-1' })
+      expect(task(pc.delegationId).status).toBe('running')
+      settled.mockClear()
+      f!.engine.inbox.redirectDelivery([row.inboxId], 'queue:item-1', 'effect:steer-1')
+      f!.engine.inbox.release([row.inboxId], 'queue:item-1')
+      expect(settled).toHaveBeenCalledWith(pc.childThreadId)
+      expect(task(pc.delegationId).status).toBe('running')
+      settled.mockClear()
+      f!.engine.inbox.markDelivered([row.inboxId], 'queue:item-2')
+      settled.mockClear()
+      f!.store.db.transaction(() => acknowledgeRows(f!.store, f!.engine.inbox.getMany([row.inboxId])))
+      expect(settled).toHaveBeenCalledWith(pc.childThreadId)
+      // Reading the last row lets the task publish at that moment.
+      expect(task(pc.delegationId)).toMatchObject({ status: 'result_available', result: { text: 'C started G' } })
     })
 
     it('internal steer-followup runs are result runs: the subagent answers a notice through one', async () => {
