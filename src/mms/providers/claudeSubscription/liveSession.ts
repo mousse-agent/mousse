@@ -705,6 +705,9 @@ export class LiveSession<Turn = unknown> {
    * with a message that says so; the next turn starts a fresh process.
    */
   private giveUpCancel(): void {
+    // Said now, not later: closing the process clears the delayed notes, and no caller may be left to see the error.
+    if (this.obligations.size > 0)
+      this.hooks.notice?.('Claude did not answer a cancel in time, so its process was closed and the background helpers it was running ended.')
     this.close('closed', new Error('Claude Code did not answer a cancel in time, so its process was closed (its background helpers ended with it). Send the message again.'))
   }
 

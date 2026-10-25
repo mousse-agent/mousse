@@ -1419,7 +1419,13 @@ export class ClaudeSubscriptionProviderService {
               this.save()
             }
             const refusing = this.live.get(input.threadId)
-            if (refusing && !refusing.dead) refusing.meta.pushedFailed = true
+            // Only when the history before the refused request is what the process holds (only the new message
+            // differs) may the next request continue from the boundary the refusal leaves. An undo or an edit
+            // changed what the process remembers: that stays refused until the helpers finish or Stop.
+            const historyHeld =
+              (savedHistoryKey !== undefined && savedHistoryKey === historyKey(input.history ?? '') && stored?.sessionId === refusing?.sessionId) ||
+              (refusing?.meta.expectedKey !== undefined && refusing.meta.expectedKey === historyKey(input.history ?? ''))
+            if (refusing && !refusing.dead && historyHeld) refusing.meta.pushedFailed = true
           }
           throw error
         }

@@ -1338,8 +1338,6 @@ export class OrchestratorService extends EventEmitter {
           console.warn('adapter interrupt failed', { runId, error: error instanceof Error ? error.message : String(error) })
         }
       }
-      // Stop ends the provider's process too: its background agents and shells end with it.
-      await this.stopProviderWork(threadId)
     }
     if (live) return
     console.warn('stop settled locally: nothing live for the run', { runId, strategy })
