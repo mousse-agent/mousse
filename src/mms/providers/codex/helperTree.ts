@@ -70,9 +70,9 @@ export class TreeOff extends Error {
 
 export interface TreePorts {
   /** `thread/read`: the `thread` object as the server sent it. An error response throws `RpcRefused`. */
-  read(threadId: string): Promise<unknown>
+  read(threadId: string, signal?: AbortSignal): Promise<unknown>
   /** Every page of `thread/list` with `ancestorThreadId`, merged. An error response throws `RpcRefused`. */
-  list(ancestorThreadId: string): Promise<unknown[]>
+  list(ancestorThreadId: string, signal?: AbortSignal): Promise<unknown[]>
   /** Fire and forget `turn/interrupt`; `''` stops whatever turn the thread runs. */
   interrupt(threadId: string, turnId: string): void
   now(): number
@@ -166,8 +166,10 @@ export interface Snapshot {
   rootBusy: boolean
   /** Sorted ids of every member: listed or placed. */
   members: string[]
-  /** Members that are busy. */
+  /** Members that are busy: they hold the pair. */
   busy: string[]
+  /** The busy members a sweep may interrupt: those whose place under the root is established. */
+  targets: string[]
   /** When the first busy newborn stops counting, if one does. */
   newbornAt?: number
   unknownActive: boolean
@@ -211,6 +213,8 @@ export class HelperTree {
   private inflight: Promise<Check> | undefined
   /** Bumped when a sweep gives up on a snapshot in flight; that snapshot then changes nothing. */
   private epoch = 0
+  /** Cancels the requests of the snapshot in flight when it is given up on. */
+  private cancelSnapshot: AbortController | undefined
   /** The last snapshot that completed. */
   last: Snapshot | undefined
   /** When the root or a member last reported anything (the idle cap reads this). */
@@ -304,13 +308,19 @@ export class HelperTree {
 
   private abandon(): void {
     this.epoch += 1
+    this.cancelSnapshot?.abort(new Abandoned())
+    this.cancelSnapshot = undefined
     this.inflight = undefined
     this.previous = undefined
   }
 
   private async takeCheck(): Promise<Check> {
     const epoch = this.epoch
-    const snapshot = await this.snapshot(epoch)
+    const cancel = new AbortController()
+    this.cancelSnapshot = cancel
+    const snapshot = await this.snapshot(epoch, cancel.signal).finally(() => {
+      if (this.cancelSnapshot === cancel) this.cancelSnapshot = undefined
+    })
     const before = this.previous
     const quiescent =
       before !== undefined &&
@@ -324,19 +334,21 @@ export class HelperTree {
     return { snapshot, quiescent }
   }
 
-  private async snapshot(epoch: number): Promise<Snapshot> {
+  /**
+   * One read of the tree. Once a sweep gives up on it (`epoch` moved, `signal` aborted) it sends no further
+   * request and applies nothing: every answer is checked before it is used.
+   */
+  private async snapshot(epoch: number, signal: AbortSignal): Promise<Snapshot> {
     const live = (): void => {
-      if (epoch !== this.epoch) throw new Abandoned()
+      if (epoch !== this.epoch || signal.aborted) throw new Abandoned()
     }
     const startedAt = this.ports.now()
     const startSeq = this.voidSeq
     // Cleared now: a wake-up during the reads asks for another scan.
     this.woke = false
 
-    const root = await this.readRoot()
-    live()
-    const { rows, parents } = await this.readRows()
-    live()
+    const root = await this.readRoot(signal, live)
+    const { rows, parents } = await this.readRows(signal, live)
     this.listed.clear()
     for (const [id, row] of rows) {
       this.listed.set(id, row)
@@ -345,37 +357,53 @@ export class HelperTree {
     }
     // A row whose parent the listing lacks (a helper whose own row is not written yet, or one archived) is
     // fine when the parent leads back to the root; only one that provably belongs to another thread is not.
+    // When the walk cannot tell, the row still holds the pair while it is busy, but it is not interrupted
+    // until its place under the root is established.
+    const unverified = new Set<string>()
+    const verdicts = new Map<string, 'in' | 'inconclusive'>()
     for (const parent of new Set(parents.values())) {
       if (parent === this.rootId || this.listed.has(parent)) continue
-      const walked = await this.walk(parent)
-      live()
+      const walked = await this.walk(parent, signal, live)
       if (walked.verdict === 'out') throw new TreeOff('a listed thread descends from another thread')
       if (walked.verdict === 'in') this.rule(walked.chain, 'in')
+      verdicts.set(parent, walked.verdict)
+    }
+    for (const [id, parent] of parents) if (verdicts.get(parent) === 'inconclusive') unverified.add(id)
+    // Whatever hangs below an unverified row is unverified too.
+    for (let changed = true; changed; ) {
+      changed = false
+      for (const [id, parent] of parents) if (!unverified.has(id) && unverified.has(parent)) changed = !!unverified.add(id)
     }
     for (const id of [...this.placed.keys()]) {
-      this.placed.set(id, await this.refresh(id))
-      live()
+      const status = await this.refresh(id, signal, live)
+      this.placed.set(id, status)
     }
     this.collectUnknown()
-    for (const id of [...this.unknown]) {
-      await this.place(id)
-      live()
-    }
+    for (const id of [...this.unknown]) await this.place(id, signal, live)
 
     const now = this.ports.now()
     const busy: string[] = []
+    const targets: string[] = []
     let newbornAt: number | undefined
     for (const [id, row] of this.listed) {
-      if (this.busyStatus(id, row.status)) busy.push(id)
+      let isBusy = false
+      if (this.busyStatus(id, row.status)) isBusy = true
       else if (row.status === 'idle' && row.createdAt !== undefined && !this.hasBeenActive(id)) {
         const expires = row.createdAt * 1000 + this.timing.newbornMs
         if (now < expires) {
-          busy.push(id)
+          isBusy = true
           newbornAt = Math.min(newbornAt ?? expires, expires)
         }
       }
+      if (!isBusy) continue
+      busy.push(id)
+      if (!unverified.has(id)) targets.push(id)
     }
-    for (const [id, status] of this.placed) if (this.busyStatus(id, status)) busy.push(id)
+    for (const [id, status] of this.placed)
+      if (this.busyStatus(id, status)) {
+        busy.push(id)
+        targets.push(id)
+      }
 
     const rootBusy = this.busyStatus(this.rootId, root)
     const unknownActive = [...this.unknown].some((id) => {
@@ -391,6 +419,7 @@ export class HelperTree {
       rootBusy,
       members: [...this.listed.keys(), ...this.placed.keys()].sort(),
       busy,
+      targets,
       ...(newbornAt !== undefined ? { newbornAt } : {}),
       unknownActive,
       floorRunning,
@@ -411,28 +440,32 @@ export class HelperTree {
     return status === 'active' || (status === 'systemError' && this.statuses.turnOpen(threadId))
   }
 
-  private async readRoot(): Promise<ThreadStatusType> {
+  private async readRoot(signal: AbortSignal, live: () => void): Promise<ThreadStatusType> {
     let raw: unknown
     try {
-      raw = await this.ports.read(this.rootId)
+      raw = await this.ports.read(this.rootId, signal)
     } catch (error) {
+      live()
       if (error instanceof RpcRefused) throw new TreeOff(`thread/read of the run's thread was refused: ${error.message}`)
       throw error
     }
+    live()
     const status = parseThread(raw).status
     if (!status) throw new TreeOff("thread/read of the run's thread has no known status")
     return status
   }
 
   /** The descendants the server lists, checked for shape; `snapshot` checks that their parents lead to the root. */
-  private async readRows(): Promise<{ rows: Map<string, ListedRow>; parents: Map<string, string> }> {
+  private async readRows(signal: AbortSignal, live: () => void): Promise<{ rows: Map<string, ListedRow>; parents: Map<string, string> }> {
     let rows: unknown[]
     try {
-      rows = await this.ports.list(this.rootId)
+      rows = await this.ports.list(this.rootId, signal)
     } catch (error) {
+      live()
       if (error instanceof RpcRefused) throw new TreeOff(`thread/list was refused: ${error.message}`)
       throw error
     }
+    live()
     const parents = new Map<string, string>()
     const result = new Map<string, ListedRow>()
     for (const raw of rows) {
@@ -449,10 +482,13 @@ export class HelperTree {
   }
 
   /** A placed member's status. An error response means the thread is gone from the server: use what it last announced. */
-  private async refresh(threadId: string): Promise<ThreadStatusType> {
+  private async refresh(threadId: string, signal: AbortSignal, live: () => void): Promise<ThreadStatusType> {
     try {
-      return parseThread(await this.ports.read(threadId)).status ?? this.statuses.get(threadId) ?? 'notLoaded'
+      const raw = await this.ports.read(threadId, signal)
+      live()
+      return parseThread(raw).status ?? this.statuses.get(threadId) ?? 'notLoaded'
     } catch (error) {
+      live()
       if (error instanceof RpcRefused) return this.statuses.get(threadId) ?? 'notLoaded'
       throw error
     }
@@ -463,7 +499,11 @@ export class HelperTree {
    * way); reaching a root thread of its own, or a thread ruled out, is `out`. Anything else (a refused
    * read, a read without a parent, too many hops) is `inconclusive`: nothing is concluded from a failure.
    */
-  private async walk(start: string): Promise<{ verdict: 'in' | 'out' | 'inconclusive'; chain: Array<{ id: string; status: ThreadStatusType }> }> {
+  private async walk(
+    start: string,
+    signal: AbortSignal,
+    live: () => void
+  ): Promise<{ verdict: 'in' | 'out' | 'inconclusive'; chain: Array<{ id: string; status: ThreadStatusType }> }> {
     const chain: Array<{ id: string; status: ThreadStatusType }> = []
     if (start === this.rootId || this.isMember(start)) return { verdict: 'in', chain }
     if (this.ruledOut.has(start)) return { verdict: 'out', chain }
@@ -471,8 +511,11 @@ export class HelperTree {
     for (let hop = 0; hop < MAX_HOPS; hop += 1) {
       let thread: ReturnType<typeof parseThread>
       try {
-        thread = parseThread(await this.ports.read(current))
+        const raw = await this.ports.read(current, signal)
+        live()
+        thread = parseThread(raw)
       } catch (error) {
+        live()
         if (error instanceof RpcRefused) return { verdict: 'inconclusive', chain }
         throw error
       }
@@ -490,12 +533,12 @@ export class HelperTree {
    * Places an unknown thread. `in`: it and the threads on the way become placed members. `out`: they are
    * ruled out. Otherwise it stays unknown and is tried again at the next snapshot.
    */
-  private async place(start: string): Promise<void> {
+  private async place(start: string, signal: AbortSignal, live: () => void): Promise<void> {
     if (this.knows(start)) {
       this.unknown.delete(start)
       return
     }
-    const walked = await this.walk(start)
+    const walked = await this.walk(start, signal, live)
     if (walked.verdict !== 'inconclusive') this.rule(walked.chain, walked.verdict)
   }
 
@@ -550,7 +593,7 @@ export class HelperTree {
 
   /** The members to interrupt: busy ones. Never `notLoaded`, a settled `systemError`, or an unknown or ruled-out thread. */
   private targets(snapshot: Snapshot | undefined): string[] {
-    return snapshot?.busy ?? []
+    return snapshot?.targets ?? []
   }
 
   /**
@@ -585,7 +628,7 @@ export class HelperTree {
       const now = this.ports.now()
       if (outcome.kind === 'timeout' || now >= options.deadlineAt) return 'deadline'
       await this.pause(Math.min(this.timing.sweepRoundMs, options.deadlineAt - now), options.signal, true)
-      await this.pause(this.timing.pairGapMs - (this.ports.now() - roundStart), options.signal, false)
+      await this.pause(Math.min(this.timing.pairGapMs - (this.ports.now() - roundStart), options.deadlineAt - this.ports.now()), options.signal, false)
     }
   }
 
@@ -604,12 +647,13 @@ export class HelperTree {
       const onAbort = (): void => finish({ kind: 'aborted' })
       const timer = setTimeout(() => finish({ kind: 'timeout' }), Math.max(0, ms))
       timer.unref?.()
-      if (signal?.aborted) return onAbort()
-      signal?.addEventListener('abort', onAbort, { once: true })
+      // Handlers first: a promise that rejects after an early return must not go unhandled.
       promise.then(
         (value) => finish({ kind: 'done', value }),
         (error: unknown) => finish({ kind: 'error', error })
       )
+      if (signal?.aborted) return onAbort()
+      signal?.addEventListener('abort', onAbort, { once: true })
     })
   }
 }

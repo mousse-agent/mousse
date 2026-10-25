@@ -248,7 +248,9 @@ describe('Codex children', () => {
             : message.method === 'turn/start' ? { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
             : { result: {} })
           if ((reply as { silent?: boolean }).silent) continue
-          send({ id: message.id, ...reply })
+          const { delayMs, ...answered } = reply as { delayMs?: number } & Record<string, unknown>
+          if (delayMs) setTimeout(() => send({ id: message.id, ...answered }), delayMs)
+          else send({ id: message.id, ...answered })
           if (message.method === 'turn/interrupt') options.onInterrupt?.(send, message.params ?? {})
           if (message.method === 'turn/start' && options.onTurnStart) options.onTurnStart(send, message.params ?? {})
           else if (message.method === 'turn/start') {
@@ -759,9 +761,9 @@ describe('Codex children', () => {
       s.emit(statusNote(id, 'active'))
       s.emit(startedNote(id))
     }
-    const end = (w: World, s: Server, id: string, status = 'completed') => {
+    const end = (w: World, s: Server, id: string, status = 'completed', turn?: string) => {
       w.set(id, 'idle')
-      s.emit(completedNote(id, status))
+      s.emit(completedNote(id, status, turn))
       s.emit(statusNote(id, 'idle'))
     }
 
@@ -810,7 +812,9 @@ describe('Codex children', () => {
         onInterrupt: (_send, params) => {
           const id = asString(params.threadId)
           if (options.stubborn?.includes(id) || w.status(id) !== 'active') return
-          setTimeout(() => w.status(id) === 'active' && end(w, s, id, 'interrupted'), options.stopDelay ?? 0)
+          // The turn that was interrupted is the one that ends (an empty turn id means the thread's current turn).
+          const turn = asString(params.turnId) || undefined
+          setTimeout(() => w.status(id) === 'active' && end(w, s, id, 'interrupted', turn), options.stopDelay ?? 0)
         }
       })
       return { w, s }
@@ -978,6 +982,29 @@ describe('Codex children', () => {
         await expect(second).resolves.toBeTruthy()
       })
 
+      it('a listing page that answers after the sweep gave up does not lead to a request for the next page', async () => {
+        let slow = false
+        const { w, s } = tree({
+          open: (index) => index === 0,
+          answer: (message, _send, w) => {
+            if (message.method !== 'thread/list' || !slow || message.params!.ancestorThreadId === NIL) return undefined
+            return { ...w.answer(message), delayMs: 700 }
+          }
+        })
+        for (let i = 0; i < 130; i += 1) w.add(`h${i}`, PARENT, 'idle')
+        const service = createFast(s, { helperSweepMs: 300 })
+        const stop = new AbortController()
+        const first = chat(service, { child: SHARED, signal: stop.signal })
+        first.catch(noop)
+        await vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(1))
+        slow = true
+        await stopped(first, stop)
+        await vi.waitFor(() => expect(internals(service).pendingSweeps.size).toBe(0), { timeout: 2_000 })
+        // The first page is answered only now, after the run was released.
+        await settle(800)
+        expect(listsOf(s).filter((message) => message.params!.cursor)).toEqual([])
+      })
+
       it('a steer held while a cap sweeps still gets its turn, and the helpers of that turn are swept before the run ends', async () => {
         const { s } = tree({
           stubborn: ['h1'],
@@ -1138,6 +1165,36 @@ describe('Codex children', () => {
         w.set(PARENT, 'idle')
         s.emit(completedNote(PARENT, 'completed', 'mine'))
         await expect(running).resolves.toMatchObject({ turnId: 'mine' })
+      })
+
+      it('an adopted turn that reports its failure after Mousse started its own turn does not fail that turn', async () => {
+        const { w, s, serverTurn, send, drain } = adoptedScenario({ turnStartAnswers: ['mine'] })
+        const running = chat(createFast(s), { child: SHARED, drainSteer: drain })
+        await serverTurn()
+        send('go on')
+        await vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(2))
+        s.emit(completedNote(PARENT, 'failed', 'srv-turn', { message: 'late failure' }))
+        await settle(30)
+        end(w, s, 'h1')
+        w.set(PARENT, 'idle')
+        s.emit(completedNote(PARENT, 'completed', 'mine'))
+        await expect(running).resolves.toMatchObject({ turnId: 'mine' })
+      })
+
+      it('the wait for an adopted turn to fail is dropped when the hold ends another way', async () => {
+        const { w, s, send, drain } = adoptedScenario({ turnStartAnswers: ['mine'] })
+        const service = createFast(s)
+        const running = chat(service, { child: SHARED, drainSteer: drain })
+        const waiters = () => ((internals(service).turns.get(PARENT) as unknown as { adoptedFailureWaiters: unknown[] } | undefined)?.adoptedFailureWaiters.length)
+        await vi.waitFor(() => expect(waiters()).toBe(1))
+        // A steer with no turn open ends the hold; the run starts a turn.
+        send('new work')
+        await vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(2))
+        expect(waiters()).toBe(0)
+        end(w, s, 'h1')
+        w.set(PARENT, 'idle')
+        s.emit(completedNote(PARENT, 'completed', 'mine'))
+        await expect(running).resolves.toBeTruthy()
       })
 
       it.each([
@@ -1470,7 +1527,7 @@ describe('Codex children', () => {
         }
       })
 
-      it('a cap sweep interrupts the parent too when a turn of it is active', async () => {
+      it('a cap sweep interrupts the parent too when a turn of it is active, and the run still ends done with the note', async () => {
         const { w, s } = tree({ script: (w, _send, s) => begin(w, s, 'h1', PARENT) })
         const running = chat(createFast(s, { helperIdleCapMs: 300 }), { child: SHARED })
         await vi.waitFor(() => expect(listsOf(s).length).toBeGreaterThan(0))

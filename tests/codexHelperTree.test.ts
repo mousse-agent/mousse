@@ -497,6 +497,103 @@ describe('listed rows whose parent the listing lacks', () => {
   })
 })
 
+describe('listed rows whose ancestry is not established', () => {
+  it('an active one holds the pair but is never interrupted, nor is anything below it; once its ancestry is read it is', async () => {
+    const { tree, world } = build()
+    world.add('mid', ROOT, 'idle', { edge: false, unreadable: true })
+    world.add('leaf', 'mid', 'active')
+    world.add('leaf2', 'leaf', 'active')
+    const check = await tree.check()
+    expect(check.snapshot.busy.sort()).toEqual(['leaf', 'leaf2'])
+    expect(check.snapshot.targets).toEqual([])
+    expect(check.snapshot.calm).toBe(false)
+    let outcome: string | undefined
+    void tree.sweep(sweepOptions({ deadlineAt: Date.now() + 800 })).then((value) => (outcome = value))
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(outcome).toBe('deadline')
+    expect(world.interrupts).toEqual([])
+    // The intermediate can be read now: the rows are in the tree, and a sweep may stop them.
+    world.threads.get('mid')!.unreadable = false
+    expect((await tree.check()).snapshot.targets.sort()).toEqual(['leaf', 'leaf2'])
+  })
+})
+
+describe('a snapshot the sweep gave up on', () => {
+  /** Reads of the ids in `held` wait until `release()`. */
+  function gated(world: World, held: string[]) {
+    const pending: Array<() => void> = []
+    let gate = false
+    const ports: Partial<TreePorts> = {
+      read: (id) => (gate && held.includes(id) ? new Promise((resolve) => pending.push(() => resolve(world.read(id)))) : Promise.resolve(world.read(id)))
+    }
+    return { ports, close: () => void (gate = true), release: () => pending.splice(0).forEach((answer) => answer()) }
+  }
+  const members = (tree: HelperTree) => tree as unknown as { placed: Map<string, string> }
+
+  it('asks for nothing more and places nothing when a walk is answered after the release', async () => {
+    const world = new World()
+    world.add('p2', ROOT, 'idle', { edge: false })
+    world.add('p1', 'p2', 'idle', { edge: false })
+    world.add('leaf', 'p1', 'active')
+    const gate = gated(world, ['p1'])
+    const { tree } = build(world, { ports: gate.ports })
+    gate.close()
+    let outcome: string | undefined
+    void tree.sweep(sweepOptions({ deadlineAt: Date.now() + 500 })).then((value) => (outcome = value))
+    await vi.advanceTimersByTimeAsync(700)
+    expect(outcome).toBe('deadline')
+    gate.release()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(world.reads).not.toContain('p2')
+    expect(members(tree).placed.size).toBe(0)
+  })
+
+  it('changes no placed status when a refresh is answered after the release', async () => {
+    const world = new World()
+    world.add('ghost', ROOT, 'active', { edge: false })
+    const gate = gated(world, ['ghost'])
+    const { tree, hear } = build(world, { ports: gate.ports })
+    hear(started('ghost'))
+    await tree.check()
+    expect(members(tree).placed.get('ghost')).toBe('active')
+    gate.close()
+    let outcome: string | undefined
+    void tree.sweep(sweepOptions({ deadlineAt: Date.now() + 500 })).then((value) => (outcome = value))
+    await vi.advanceTimersByTimeAsync(700)
+    expect(outcome).toBe('deadline')
+    world.set('ghost', 'idle')
+    gate.release()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(members(tree).placed.get('ghost')).toBe('active')
+  })
+
+  it('an already aborted signal does not leave the promise it waited on unhandled', async () => {
+    vi.useRealTimers()
+    const unhandled: unknown[] = []
+    const listen = (reason: unknown): void => void unhandled.push(reason)
+    process.on('unhandledRejection', listen)
+    try {
+      const { tree } = build()
+      const abort = new AbortController()
+      abort.abort()
+      const within = (tree as unknown as { within(promise: Promise<unknown>, ms: number, signal: AbortSignal): Promise<{ kind: string }> }).within
+      expect((await within.call(tree, Promise.reject(new Error('late')), 50, abort.signal)).kind).toBe('aborted')
+      await new Promise((done) => setTimeout(done, 30))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', listen)
+    }
+  })
+
+  it('the pause that ends a sweep round does not run past the deadline', async () => {
+    const { tree } = build(undefined, { timing: { pairGapMs: 5_000, sweepRoundMs: 100 } })
+    let outcome: string | undefined
+    void tree.sweep(sweepOptions({ deadlineAt: Date.now() + 600 })).then((value) => (outcome = value))
+    await vi.advanceTimersByTimeAsync(700)
+    expect(outcome).toBe('deadline')
+  })
+})
+
 describe('sweep deadline', () => {
   it('a read that hangs near the deadline does not hold the sweep past it; what it answers later is dropped', async () => {
     const world = new World()

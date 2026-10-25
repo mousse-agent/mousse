@@ -366,6 +366,8 @@ class TurnRun {
   /** An adopted turn that ended `failed` or `interrupted`: the run fails with it. */
   adoptedFailure: CodexTurn | undefined
   private adoptedFailureWaiters: Array<() => void> = []
+  /** The run has interrupted its own thread (Stop, a cap or a failure sweep): an `interrupted` turn is then expected. */
+  selfInterrupted = false
   /** The chat returned; late events only settle the turn and reach nobody. */
   private muted = false
   private readonly questionsDone = new AbortController()
@@ -435,6 +437,8 @@ class TurnRun {
     this.turnId = turn.id
     // The input was steered into a turn the run had adopted: that is Mousse's own turn now, and it settles the run.
     if (this.adoptedTurn === turn.id) this.adoptedTurn = undefined
+    // A failure noted for an earlier adopted turn does not fail this one.
+    if (this.adoptedFailure && this.adoptedFailure.id !== turn.id) this.adoptedFailure = undefined
     this.startInFlight = false
     // A `turn/completed` that came while the response was on its way was held back; only this turn settles the run.
     const done = this.completedTurns.get(turn.id)
@@ -446,8 +450,21 @@ class TurnRun {
   }
 
   /** Resolves when an adopted turn has ended `failed` or `interrupted` (at once if one already has). */
-  whenAdoptedFails(): Promise<void> {
-    return this.adoptedFailure ? Promise.resolve() : new Promise((done) => this.adoptedFailureWaiters.push(done))
+  whenAdoptedFails(signal: AbortSignal): Promise<void> {
+    if (this.adoptedFailure) return Promise.resolve()
+    return new Promise((done) => {
+      const finish = (): void => {
+        signal.removeEventListener('abort', leave)
+        done()
+      }
+      // The hold ended another way: the waiter goes with it.
+      const leave = (): void => {
+        const index = this.adoptedFailureWaiters.indexOf(finish)
+        if (index !== -1) this.adoptedFailureWaiters.splice(index, 1)
+      }
+      this.adoptedFailureWaiters.push(finish)
+      signal.addEventListener('abort', leave, { once: true })
+    })
   }
 
   /** Something concerning this run happened; a sweep waiting for news looks again. */
@@ -538,9 +555,12 @@ class TurnRun {
       this.completedTurns.set(completed.turn.id, completed.turn)
       if (this.adoptedTurn === completed.turn.id) {
         this.adoptedTurn = undefined
-        // Mousse's own turn may be running by now; it keeps its turn open.
-        if (this.turnId === completed.turn.id) this.turnOpen = false
-        if (completed.turn.status === 'failed' || completed.turn.status === 'interrupted') {
+        // Mousse's own turn may be running by now; it keeps its turn open, and this one's end is not its news.
+        const current = this.turnId === completed.turn.id
+        if (current) this.turnOpen = false
+        // An interruption this run asked for itself (a cap or a Stop sweep) is how the run ends, not a failure.
+        const failed = completed.turn.status === 'failed' || (completed.turn.status === 'interrupted' && !this.selfInterrupted)
+        if (current && failed) {
           this.adoptedFailure = completed.turn
           for (const waiter of this.adoptedFailureWaiters.splice(0)) waiter()
         }
@@ -1302,6 +1322,7 @@ export class CodexProviderService {
    * that same interrupt, and every later round sends again (a stopped turn can be followed by a queued one).
    */
   private interruptTurn(run: TurnRun, conn: CodexConnection, turnId: string, round?: number): void {
+    run.selfInterrupted = true
     if (round === 0 && run.stopInterrupt === turnId) return
     void conn.request('turn/interrupt', { threadId: run.codexThreadId, turnId }, { timeoutMs: INTERRUPT_TIMEOUT_MS }).catch(() => {
       /* the turn ended meanwhile, or the process is gone */
@@ -1358,22 +1379,24 @@ export class CodexProviderService {
     const timeout = this.dependencies.requestTimeoutMs ?? TREE_REQUEST_MS
     return {
       now: () => Date.now(),
-      read: async (threadId) => {
+      // A snapshot the tree gave up on aborts `signal`: its pending request fails and no further page is asked.
+      read: async (threadId, signal) => {
         try {
-          return (await conn.request('thread/read', { threadId }, { timeoutMs: timeout })).thread
+          return (await conn.request('thread/read', { threadId }, { timeoutMs: timeout, ...(signal ? { signal } : {}) })).thread
         } catch (error) {
           throw refused(error)
         }
       },
-      list: async (ancestorThreadId) => {
+      list: async (ancestorThreadId, signal) => {
         const rows: unknown[] = []
         let cursor: string | null | undefined
         try {
           for (let page = 0; page < TREE_MAX_PAGES; page += 1) {
+            signal?.throwIfAborted()
             const response = await conn.request(
               'thread/list',
               { ancestorThreadId, limit: 100, useStateDbOnly: true, ...(cursor ? { cursor } : {}) },
-              { timeoutMs: timeout }
+              { timeoutMs: timeout, ...(signal ? { signal } : {}) }
             )
             if (!Array.isArray(response?.data)) throw new RpcRefused('thread/list returned no data')
             rows.push(...response.data)
@@ -1848,7 +1871,7 @@ export class CodexProviderService {
     beat.unref?.()
     run.holding = true
     try {
-      return await Promise.race([quiet, steerArrived.then(() => undefined), run.whenAdoptedFails().then(() => undefined), cap.expired, aborted, gone])
+      return await Promise.race([quiet, steerArrived.then(() => undefined), run.whenAdoptedFails(stop.signal).then(() => undefined), cap.expired, aborted, gone])
     } finally {
       run.holding = false
       stop.abort()
