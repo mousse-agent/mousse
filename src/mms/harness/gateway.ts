@@ -15,7 +15,7 @@ import type {
   RunPolicy,
   SignInResponse
 } from '../../shared/harness/types'
-import type { CliProviderConfig, CliProviderConfigPatch, CliProviderInstanceId, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
+import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
 import type { ModelOverride } from '../../shared/providerInstances'
 import type { LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
@@ -154,8 +154,6 @@ export interface LegacyProviders {
   logout(providerId: string): Promise<boolean>
   /** Undefined when `providerId` is not a vendor instance. */
   login(providerId: string, session: LoginSession, cwd: string): Promise<ProviderLoginResult> | undefined
-  cliConfig(instanceId: CliProviderInstanceId): Promise<CliProviderConfig>
-  setCliConfig(instanceId: CliProviderInstanceId, patch: CliProviderConfigPatch): Promise<CliProviderConfig>
 }
 
 /** Who is resolving; recorded for diagnostics, and the same rules apply to all. */
@@ -301,8 +299,6 @@ interface Operation {
   cancel(): boolean
 }
 
-const BUILT_IN_LEGACY_IDS: Record<CliProviderInstanceId, true> = { claude: true, codex: true, antigravity: true }
-
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -431,20 +427,6 @@ export class Harness implements HarnessGateway {
         const record = this.legacyRecord(providerId)
         if (!record?.runtime.signIn) return undefined
         return record.runtime.signIn(session, cwd).finally(() => void this.probe(record.instanceId, true))
-      },
-      cliConfig: async (instanceId) => {
-        const runtime = this.record(this.builtInCli(instanceId), { allowDisabled: true }).runtime
-        if (!runtime.cliConfig) return harnessFail('unsupported', 'This provider has no launch settings.', instanceId)
-        return runtime.cliConfig()
-      },
-      setCliConfig: async (instanceId, patch) => {
-        const id = this.builtInCli(instanceId)
-        const runtime = this.record(id, { allowDisabled: true }).runtime
-        if (!runtime.setLaunch || !runtime.cliConfig) return harnessFail('unsupported', 'This provider has no launch settings.', instanceId)
-        await runtime.setLaunch(patch)
-        this.counters.bumpConfig(id)
-        void this.probe(id, true)
-        return runtime.cliConfig()
       }
     }
   }
@@ -733,11 +715,6 @@ export class Harness implements HarnessGateway {
     }
     const record = this.recordOrUndefined(instanceId)
     return record && record.entry.driver !== 'pi' ? record : undefined
-  }
-
-  private builtInCli(instanceId: CliProviderInstanceId): string {
-    if (!BUILT_IN_LEGACY_IDS[instanceId]) harnessFail('instance_unknown', `Unknown provider instance "${instanceId}".`, instanceId)
-    return instanceId
   }
 
   // -- Snapshots and probes ---------------------------------------------------------------------

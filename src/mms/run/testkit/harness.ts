@@ -10,7 +10,7 @@ import type { ProviderAdapter } from '../adapters/ProviderAdapter'
 
 /**
  * Test drivers over a plain `ProviderAdapter` (scripted, fake or replay adapters), so run-engine
- * tests drive the orchestrator through the real gateway. Capabilities are the adapter's eight plus
+ * tests drive the orchestrator through the real gateway. Capabilities are the adapter's own plus
  * the gateway's two, derived the way the PR 1 drivers derive them.
  */
 export function adapterDriver(adapter: ProviderAdapter, extra: Partial<HarnessCaps> & { runtime?: Partial<DriverRuntime> } = {}): HarnessDriver {

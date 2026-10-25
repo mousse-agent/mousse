@@ -209,9 +209,6 @@ function applyWindowAccentBackground(
   )
 }
 
-/** Longest delay a timer accepts (about 24 days): a request that effectively never times out. */
-const NO_REQUEST_TIMEOUT_MS = 2_147_483_647
-
 function normalizeSendContent(request: OrchestratorSendInput): {
   content: string
   requestId?: string
@@ -2051,45 +2048,6 @@ export function registerGuiIpc(
       providerId
     })
     broadcast('providers:changed', res.providers)
-  })
-  registerHandler('providers:claudeStatus', async (_e, recheck?: boolean) => {
-    const res = await guiMms.request<{ status: unknown; providers: unknown[] }>(
-      'providers.claudeStatus',
-      { recheck: recheck === true }
-    )
-    if (recheck === true) broadcast('providers:changed', res.providers)
-    return res.status
-  })
-  registerHandler('providers:codexStatus', async (_e, recheck?: boolean) => {
-    const res = await guiMms.request<{ status: unknown; providers: unknown[] }>(
-      'providers.codexStatus',
-      { recheck: recheck === true }
-    )
-    if (recheck === true) broadcast('providers:changed', res.providers)
-    return res.status
-  })
-  registerHandler('providers:cliConfig', async (_e, instanceId: string) => {
-    const res = await guiMms.request<{ config: unknown }>('providers.cliConfig', { instanceId })
-    return res.config
-  })
-  registerHandler('providers:setCliConfig', async (_e, instanceId: string, patch: unknown) => {
-    const res = await guiMms.request<{ config: unknown; providers: unknown[] }>(
-      'providers.setCliConfig',
-      { instanceId, patch }
-    )
-    broadcast('providers:changed', res.providers)
-    return res.config
-  })
-  // Progress reaches the renderer as `providers:install:event` through the protocol event bridge.
-  registerHandler('providers:installAntigravity', async () => {
-    // A slow connection may need hours; the daemon owns the download and cancel is explicit, so this request never times out.
-    // The daemon announces the change to every window of the profile when the install ends.
-    const res = await guiMms.request<{ config: unknown }>('providers.installAntigravity', {}, NO_REQUEST_TIMEOUT_MS)
-    return res.config
-  })
-  registerHandler('providers:cancelAntigravityInstall', async () => {
-    const res = await guiMms.request<{ cancelled: boolean }>('providers.cancelAntigravityInstall', {})
-    return res.cancelled
   })
   // Harness gateway. Changes reach every window as `providers:snapshots` and operation progress as
   // `providers:operation` through the protocol event bridge; long operations return an id at once.

@@ -63,12 +63,7 @@ import type {
 } from '../shared/integrations'
 import type {
   AmbientProviderInfo,
-  ClaudeSubscriptionStatus,
   CliInstallEvent,
-  CliProviderConfig,
-  CliProviderConfigPatch,
-  CliProviderInstanceId,
-  CodexStatus,
   ConfiguredProvider,
   ProviderLoginEvent,
   ProviderLoginOption,
@@ -754,27 +749,6 @@ const api = {
       ipcRenderer.invoke('providers:verifyAmbient', providerId),
     logout: (providerId: string): Promise<void> =>
       ipcRenderer.invoke('providers:logout', providerId),
-    /** Claude Subscription sign-in state; `recheck` skips the cached `claude auth status`. */
-    claudeStatus: (recheck?: boolean): Promise<ClaudeSubscriptionStatus> =>
-      ipcRenderer.invoke('providers:claudeStatus', recheck),
-    /** Codex sign-in state; `recheck` skips the cached `account/read`. */
-    codexStatus: (recheck?: boolean): Promise<CodexStatus> =>
-      ipcRenderer.invoke('providers:codexStatus', recheck),
-    /** Executable path, launch args, environment and installed version of a CLI provider. */
-    cliConfig: (instanceId: CliProviderInstanceId): Promise<CliProviderConfig> =>
-      ipcRenderer.invoke('providers:cliConfig', instanceId),
-    /** Saves CLI launch settings; new sessions use them. Rejects invalid input. */
-    setCliConfig: (
-      instanceId: CliProviderInstanceId,
-      patch: CliProviderConfigPatch
-    ): Promise<CliProviderConfig> => ipcRenderer.invoke('providers:setCliConfig', instanceId, patch),
-    /**
-     * Downloads Google's verified Antigravity agent and resolves with the new config. Progress
-     * arrives through `onInstallEvent`. Never signs in; rejects when cancelled or already running.
-     */
-    installAntigravity: (): Promise<CliProviderConfig> => ipcRenderer.invoke('providers:installAntigravity'),
-    /** Stops a running Antigravity install; resolves false when none is running. */
-    cancelAntigravityInstall: (): Promise<boolean> => ipcRenderer.invoke('providers:cancelAntigravityInstall'),
     onInstallEvent: (cb: (event: CliInstallEvent) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, event: CliInstallEvent) => cb(event)
       ipcRenderer.on('providers:install:event', handler)

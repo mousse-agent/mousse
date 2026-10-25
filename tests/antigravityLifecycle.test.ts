@@ -255,7 +255,7 @@ describe('Antigravity profile admission', () => {
     const host = { activeProfileCount: () => 2, manager: { get: () => ({ id: 'personal', status: 'active' }) }, getProfileServices: vi.fn(async () => personal) }
     const installation = { getInstallationHost: () => host } as unknown as MmsProfileServices
     const args = { installation, binding: { profileId: 'personal', epoch: 1 }, capabilities: new Set([PROFILES_V1_CAPABILITY]) }
-    for (const method of ['providers.listConfigured', 'providers.getLoginOptions', 'providers.refreshModels', 'providers.loginOAuth', 'providers.logout', 'providers.claudeStatus','providers.codexStatus', 'providers.cliConfig', 'providers.setCliConfig', 'providers.installAntigravity', 'providers.cancelAntigravityInstall']) {
+    for (const method of ['providers.listConfigured', 'providers.getLoginOptions', 'providers.refreshModels', 'providers.loginOAuth', 'providers.logout']) {
       expect((await resolveBoundServices({ ...args, method })).services, method).toBe(personal)
     }
     expect((await resolveBoundServices({ ...args, method: 'providers.setApiKey' })).services).toBe(installation)

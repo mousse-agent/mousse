@@ -61,7 +61,6 @@ export function codexDriver(options: { builtIn: () => CodexProviderService }): H
         models: () => service.models(),
         launch: () => service.storedLaunch(),
         setLaunch: async (patch) => void (await service.setCliConfig(patch)),
-        cliConfig: () => service.cliConfig(),
         auth: async ({ force }) => readAuth(service, await service.status({ force })),
         refreshModels: async () => {
           await service.status()

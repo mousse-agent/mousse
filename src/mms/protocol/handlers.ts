@@ -27,7 +27,6 @@ import type { ChatMessage, NativeLlmContext, OrchestratorSendInput, Orchestrator
 import { listClaimedQueue } from '../queue/ThreadMessageQueue'
 import { formatQuestionAnswersMessage, formatQuestionDismissMessage } from '../orchestrator/OrchestratorService'
 import type { ModelOverride } from '../../shared/providerInstances'
-import type { CliProviderInstanceId } from '../../shared/providerAuth'
 import {
   ACCENT_COLORS,
   THEME_OPTIONS,
@@ -72,7 +71,6 @@ import {
 import { PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
 import { buildSubagentView } from '../run/delegation/subagentView'
 import { visibleThreadsFor } from './threadVisibility'
-import { asCliProviderInstanceId, parseCliConfigPatch } from '../providers/cliConfig'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
@@ -1746,43 +1744,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.mms.providerAuth.endSession(sessionId)
       return { ok: true }
     }
-    case 'providers.claudeStatus': {
-      const p = isObject(params) ? params : {}
-      // `recheck` bypasses the cached `claude auth status` result.
-      const status = await ctx.mms.claudeSubscription.status({ force: p.recheck === true })
-      const providers = ctx.mms.providerInstances.configuredProviders()
-      if (p.recheck === true) ctx.emitEvent?.('providers.changed', { providers })
-      return { status, providers }
-    }
-    case 'providers.codexStatus': {
-      const p = isObject(params) ? params : {}
-      // `recheck` bypasses the cached `account/read` result.
-      const status = await ctx.mms.codex.status({ force: p.recheck === true })
-      const providers = ctx.mms.providerInstances.configuredProviders()
-      if (p.recheck === true) ctx.emitEvent?.('providers.changed', { providers })
-      return { status, providers }
-    }
-    case 'providers.cliConfig': {
-      const p = isObject(params) ? params : {}
-      return { config: await harnessGateway(ctx).legacy.cliConfig(asCliProviderInstanceId(p.instanceId)) }
-    }
-    case 'providers.setCliConfig': {
-      const p = isObject(params) ? params : {}
-      const config = await harnessGateway(ctx).legacy.setCliConfig(asCliProviderInstanceId(p.instanceId), parseCliConfigPatch(p.patch))
-      const providers = ctx.mms.providerInstances.configuredProviders()
-      ctx.emitEvent?.('providers.changed', { providers })
-      return { config, providers }
-    }
-    case 'providers.installAntigravity': {
-      // Streams `providers.install-event` until the verified agent is in place.
-      // It never starts a sign-in.
-      // Progress and the start and end of the install reach clients from the service itself,
-      // so a page that closed or a request that timed out still sees them.
-      const config = await ctx.mms.antigravity.install()
-      return { config, providers: ctx.mms.providerInstances.configuredProviders() }
-    }
-    case 'providers.cancelAntigravityInstall':
-      return { cancelled: ctx.mms.antigravity.cancelInstall() }
     case 'providers.snapshots': {
       const p = isObject(params) ? params : {}
       const scope = asProviderScope(p.scope)

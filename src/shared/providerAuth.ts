@@ -126,7 +126,6 @@ export interface ProvidersUsageResponse {
 
 /** Provider instances that run a local vendor CLI (Settings → Providers). */
 export type CliProviderInstanceId = 'claude' | 'codex' | 'antigravity'
-export const CLI_PROVIDER_INSTANCE_IDS: readonly CliProviderInstanceId[] = ['claude', 'codex', 'antigravity']
 
 export interface CliProviderConfig {
   instanceId: CliProviderInstanceId

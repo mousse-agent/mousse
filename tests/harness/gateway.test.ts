@@ -236,6 +236,37 @@ describe('harness gateway: instances', () => {
     expect(answer).toBe('check')
     expect(await harness.instances.respondSignIn(started.operationId, { kind: 'cancel' })).toBe(false)
   })
+
+  it('runs install as an operation: an id at once, progress as events, cancel ends it', async () => {
+    const antigravity = fake('antigravity')
+    let release: (() => void) | undefined
+    let cancelled = false
+    const driver = adapterDriver(antigravity, {
+      runtime: {
+        install: (onProgress) => new Promise<void>((resolve, reject) => {
+          onProgress('Downloading')
+          release = () => (cancelled ? reject(new Error('Install cancelled')) : resolve())
+        }),
+        cancelInstall: () => {
+          cancelled = true
+          release?.()
+          return true
+        }
+      }
+    })
+    const harness = testHarness({ drivers: [adapterDriver(pi()), adapterDriver(fake('claude')), driver], instances: instances(), profileHome: home() })
+    const events: HarnessGatewayEvent[] = []
+    harness.instances.subscribe((event) => events.push(event))
+    expect(await harness.instances.cancelInstall('no-such-operation')).toBe(false)
+    const started = await harness.instances.install('antigravity')
+    expect(started).toMatchObject({ instanceId: 'antigravity', kind: 'install' })
+    await expect(harness.instances.install('antigravity')).rejects.toMatchObject({ code: 'operation_busy' })
+    await waitFor(() => events.some((event) => event.type === 'operation' && event.data.phase === 'progress'))
+    expect(await harness.instances.cancelInstall(started.operationId)).toBe(true)
+    await waitFor(() => events.some((event) => event.type === 'operation' && event.data.phase === 'cancelled'))
+    expect(await harness.instances.cancelInstall(started.operationId)).toBe(false)
+    await expect(harness.instances.install('claude')).rejects.toMatchObject({ code: 'unsupported' })
+  })
 })
 
 async function waitFor(condition: () => boolean, timeoutMs = 2_000): Promise<void> {

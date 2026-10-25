@@ -1,6 +1,6 @@
 import type { AuthState, InstallOwner } from '../../shared/harness/status'
 import type { HarnessCaps, HarnessDriverKind } from '../../shared/harness/types'
-import type { CliProviderConfig, CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
+import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import type { StoredCliConfig } from '../providers/cliConfig'
@@ -82,8 +82,6 @@ export interface DriverRuntime {
   launch?(): StoredCliConfig
   /** Saves launch settings of a built-in instance; added instances are configured by the gateway. */
   setLaunch?(patch: CliProviderConfigPatch): Promise<void>
-  /** The old `providers.cliConfig` view of a built-in instance. */
-  cliConfig?(): Promise<CliProviderConfig>
   auth(options: { force: boolean; signal?: AbortSignal }): Promise<AuthReading>
   refreshModels?(cwd: string): Promise<void>
   signIn?(session: LoginSession, cwd: string, method?: string): Promise<ProviderLoginResult>
