@@ -29,10 +29,19 @@ export class NativeHelpers {
   /** When a helper last reported anything: a spawn, or any event of its thread (the idle cap reads this). */
   lastActivityAt = Date.now()
 
-  constructor(private readonly stray: (threadId: string) => StrayThread | undefined = () => undefined) {}
+  constructor(
+    private readonly stray: (threadId: string) => StrayThread | undefined = () => undefined,
+    /** The Codex thread whose turn started the helpers. */
+    readonly parentThreadId?: string
+  ) {}
 
   has(threadId: string): boolean {
     return this.helpers.has(threadId)
+  }
+
+  /** Whether `threadId` is the parent's thread or one of the helpers' threads. */
+  owns(threadId: string): boolean {
+    return threadId === this.parentThreadId || this.helpers.has(threadId)
   }
 
   /** Helper threads still running. */
@@ -70,6 +79,12 @@ export class NativeHelpers {
   handle(notification: CodexNotification): void {
     const params = notification.params as { threadId?: string; turn?: { id?: string }; status?: { type?: string }; item?: { type?: string } } | undefined
     const threadId = params?.threadId
+    // The stopped parent thread: only its spawn items matter (a helper named after Stop is still stopped).
+    if (threadId && threadId === this.parentThreadId) {
+      if ((notification.method === 'item/started' || notification.method === 'item/completed') && typeof params?.item?.type === 'string')
+        this.noteItem(params.item as { type: string } & Record<string, unknown>)
+      return
+    }
     const helper = threadId ? this.helpers.get(threadId) : undefined
     if (!threadId || !helper) return
     this.lastActivityAt = Date.now()

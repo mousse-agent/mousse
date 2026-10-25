@@ -541,7 +541,7 @@ describe('Codex children', () => {
         await vi.waitFor(() => expect([...interrupts(s)].sort()).toEqual([`${GRAND}/g-turn-1`, `${HELPER}/h-turn-1`].sort()))
       })
 
-      it('a helper spawned by a helper after the parent turn completed and Stop was pressed is interrupted, and the run is released only once the tree settles', async () => {
+      it('a helper spawned by a helper after the parent turn completed and Stop was pressed is interrupted, though the run is already released', async () => {
         // The helper's interrupt stays pending (no reply), so it is still running when it spawns.
         const s = server({ onTurnStart: parentCompletesFirst('subAgentActivity') })
         const service = create(s)
@@ -552,19 +552,72 @@ describe('Codex children', () => {
         stop.abort(new Error('Stopped'))
         await expect(running).rejects.toThrow('Stopped')
         await vi.waitFor(() => expect(interrupts(s)).toEqual([`${HELPER}/h-turn-1`]))
-        const turns = (service as unknown as { turns: Map<string, unknown> }).turns
-        expect(turns.size).toBe(1)
+        // The parent's turn had settled, so the run is released at once; the tree is routed through orphans.
+        const internals = service as unknown as { turns: Map<string, unknown>; orphans: Set<unknown> }
+        await vi.waitFor(() => expect(internals.turns.size).toBe(0))
+        expect(internals.orphans.size).toBe(1)
 
         s.emit(grandSpawned('subAgentActivity'))
         s.emit(grandTurn)
         await vi.waitFor(() => expect(interrupts(s)).toContain(`${GRAND}/g-turn-1`))
-        // The tree is still running, so the run keeps its routing.
-        expect(turns.size).toBe(1)
-        s.emit(completed(HELPER, 'h-turn-1', 'interrupted'))
-        await new Promise((done) => setTimeout(done, 50))
-        expect(turns.size).toBe(1)
-        s.emit(completed(GRAND, 'g-turn-1', 'interrupted'))
-        await vi.waitFor(() => expect(turns.size).toBe(0))
+      })
+
+      it('a message on the thread right after Stop is not blocked by a helper that ignores its interrupt', async () => {
+        const s = server({ onTurnStart: parentCompletesFirst('subAgentActivity') })
+        const service = create(s)
+        const stop = new AbortController()
+        const first = chat(service, { child: SHARED, signal: stop.signal })
+        first.catch(() => undefined)
+        expect(await state(first)).toBe('pending')
+        stop.abort(new Error('Stopped'))
+        await expect(first).rejects.toThrow('Stopped')
+        service.commitConversation('child', '')
+        // Same parent thread, helper still running and ignoring the interrupt: the next turn starts at once.
+        const again = new AbortController()
+        const second = chat(service, { child: SHARED, signal: again.signal })
+        second.catch(() => undefined)
+        await vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(2), { timeout: 3_000 })
+        again.abort(new Error('Stopped'))
+        await expect(second).rejects.toThrow('Stopped')
+      })
+
+      it('a stray spawn is replayed once: a second run that names the same helper does not inherit it', async () => {
+        let turns = 0
+        let finishGrand: () => void = () => undefined
+        const s = server({
+          onTurnStart: (send) => {
+            turns += 1
+            if (turns === 1) {
+              finishGrand = () => send(completed(GRAND, 'g-turn-1'))
+              setImmediate(() => {
+                // The helper speaks first (its own helper, then its turn); only then the parent names it.
+                send(grandSpawned('subAgentActivity'))
+                send(grandTurn)
+                send(helperTurn)
+                send(spawned('subAgentActivity'))
+                send(completed(HELPER, 'h-turn-1'))
+                send(completed(PARENT, 'turn-1'))
+              })
+            } else
+              setImmediate(() => {
+                // The parent names the same helper again; the helper ends at once and nothing else reports.
+                send(spawned('subAgentActivity'))
+                send(helperTurn)
+                send(completed(HELPER, 'h-turn-1'))
+                send(completed(PARENT, 'turn-1'))
+              })
+          }
+        })
+        const service = create(s)
+        const first = chat(service, { child: SHARED })
+        expect(await state(first)).toBe('pending')
+        finishGrand()
+        await first
+        service.commitConversation('child', '')
+        const second = chat(service, { child: SHARED })
+        // Without a stale grandhelper, the second run ends with its own turn and helper.
+        expect(await state(second)).toBe('settled')
+        expect((service as unknown as { strays: Map<string, unknown> }).strays.size).toBe(0)
       })
 
       it("a helper's spawn item that arrives before the parent's item names that helper is still tracked", async () => {
@@ -632,6 +685,73 @@ describe('Codex children', () => {
       })
     })
 
+    describe('a spawn report that lands after Stop, a failure or a cap', () => {
+      const LATE = 'helper-late'
+      const lateSpawn = (kind: 'subAgentActivity' | 'collabAgentToolCall' = 'collabAgentToolCall') => ({
+        method: 'item/completed',
+        params: {
+          threadId: PARENT,
+          turnId: 'turn-1',
+          item:
+            kind === 'subAgentActivity'
+              ? { type: 'subAgentActivity', id: 'spawn-late', kind: 'started', agentThreadId: LATE }
+              : { type: 'collabAgentToolCall', id: 'spawn-late', tool: 'spawnAgent', status: 'completed', receiverThreadIds: [LATE], agentsStates: { [LATE]: { status: 'running', message: null } } }
+        }
+      })
+      const lateTurn = { method: 'turn/started', params: { threadId: LATE, turn: { id: 'late-turn', status: 'inProgress', error: null } } }
+      const started = (s: ReturnType<typeof server>) => vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(1))
+
+      it('Stop while the spawn item is pending: the helper it names is registered and interrupted', async () => {
+        // The parent's own interrupt is not answered, so the stopped run is still registered while the item lands.
+        const s = server({ onTurnStart: () => undefined, onInterrupt: (send, params) => params.threadId === LATE && send(completed(LATE, 'late-turn', 'interrupted')) })
+        const service = create(s)
+        const stop = new AbortController()
+        const running = chat(service, { child: SHARED, signal: stop.signal })
+        running.catch(() => undefined)
+        await started(s)
+        stop.abort(new Error('Stopped'))
+        await expect(running).rejects.toThrow('Stopped')
+        const internals = service as unknown as { turns: Map<string, unknown>; strays: Map<string, unknown> }
+        expect(internals.turns.size).toBe(1)
+
+        // The muted run still follows the spawn item.
+        s.emit(lateSpawn())
+        s.emit(lateTurn)
+        await vi.waitFor(() => expect(interrupts(s)).toContain(`${LATE}/late-turn`))
+        // Both ends are routed to the tree, not to strays; the run is released when the parent's turn settles.
+        s.emit(completed(PARENT, 'turn-1', 'interrupted'))
+        await vi.waitFor(() => expect(internals.turns.size).toBe(0))
+        s.emit(completed(LATE, 'late-turn', 'interrupted'))
+        await new Promise((done) => setTimeout(done, 50))
+        expect(internals.strays.has(LATE)).toBe(false)
+      })
+
+      it('the run was already released: the item still registers the helper and it is interrupted when its turn starts', async () => {
+        const s = server({ onTurnStart: () => undefined, onInterrupt: (send, params) => params.threadId === PARENT && send(completed(PARENT, 'turn-1', 'interrupted')) })
+        const service = create(s)
+        const stop = new AbortController()
+        const running = chat(service, { child: SHARED, signal: stop.signal })
+        running.catch(() => undefined)
+        await started(s)
+        stop.abort(new Error('Stopped'))
+        await expect(running).rejects.toThrow('Stopped')
+        const turns = (service as unknown as { turns: Map<string, unknown> }).turns
+        await vi.waitFor(() => expect(turns.size).toBe(0))
+        s.emit(lateSpawn())
+        s.emit(lateTurn)
+        await vi.waitFor(() => expect(interrupts(s)).toContain(`${LATE}/late-turn`))
+      })
+
+      it('a failed turn: a spawn item reported afterwards is interrupted too', async () => {
+        const s = server({ onTurnStart: (send) => setImmediate(() => send(completed(PARENT, 'turn-1', 'failed'))) })
+        const service = create(s)
+        await expect(chat(service, { child: SHARED })).rejects.toThrow()
+        s.emit(lateSpawn())
+        s.emit(lateTurn)
+        await vi.waitFor(() => expect(interrupts(s)).toContain(`${LATE}/late-turn`))
+      })
+    })
+
     describe('idle cap', () => {
       const withCaps = (s: ReturnType<typeof server>, caps: { helperIdleCapMs?: number; helperPinCapMs?: number }) => {
         mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
@@ -687,15 +807,50 @@ describe('Codex children', () => {
         expect(interrupts(s)).toEqual([`${HELPER}/h-turn-1`])
       })
 
+      it('a turn that runs after the cap (a held steer) runs without helpers: one it spawns is interrupted, not awaited', async () => {
+        let turns = 0
+        const s = server({
+          onTurnStart: (send) => {
+            turns += 1
+            if (turns === 1) parentCompletesFirst('subAgentActivity')(send)
+            else
+              setImmediate(() => {
+                send({ method: 'item/completed', params: { threadId: PARENT, turnId: 'turn-1', item: { type: 'subAgentActivity', id: 'spawn-x', kind: 'started', agentThreadId: 'helper-x' } } })
+                send({ method: 'turn/started', params: { threadId: 'helper-x', turn: { id: 'hx-turn', status: 'inProgress', error: null } } })
+                send(completed(PARENT, 'turn-1'))
+              })
+          }
+        })
+        const service = withCaps(s, { helperIdleCapMs: 60 })
+        let pending: string | undefined
+        vi.spyOn(service as unknown as { holdForHelpers(): Promise<string> }, 'holdForHelpers').mockImplementation(async () => {
+          pending = 'one more thing'
+          await new Promise((done) => setTimeout(done, 180))
+          return 'Some helpers were abandoned after 1 minute without activity'
+        })
+        const result = await chat(service, { child: SHARED, drainSteer: () => { const text = pending; pending = undefined; return text } })
+        expect(result.text).toBe('Some helpers were abandoned after 1 minute without activity')
+        await vi.waitFor(() => expect(interrupts(s)).toEqual(expect.arrayContaining([`${HELPER}/h-turn-1`, 'helper-x/hx-turn'])))
+      })
+
       it('after the cap, the abandoned helper\'s final events are still routed to the run', async () => {
         const s = server({ onTurnStart: parentCompletesFirst('subAgentActivity') })
         const service = withCaps(s, { helperIdleCapMs: 60 })
         await chat(service, { child: SHARED })
-        const orphans = (service as unknown as { orphans: Set<unknown> }).orphans
-        expect(orphans.size).toBe(1)
+        const internals = service as unknown as { orphans: Set<unknown>; strays: Map<string, unknown> }
+        expect(internals.orphans.size).toBe(1)
         s.emit(completed(HELPER, 'h-turn-1', 'interrupted'))
-        await vi.waitFor(() => expect(orphans.size).toBe(0))
-        expect((service as unknown as { strays: Map<string, { completed: boolean }> }).strays.get(HELPER)?.completed).toBeUndefined()
+        await new Promise((done) => setTimeout(done, 50))
+        expect(internals.strays.has(HELPER)).toBe(false)
+      })
+
+      it('after the cap, a helper that a late spawn item names on the parent thread is interrupted', async () => {
+        const s = server({ onTurnStart: parentCompletesFirst('subAgentActivity') })
+        const service = withCaps(s, { helperIdleCapMs: 60 })
+        await chat(service, { child: SHARED })
+        s.emit({ method: 'item/completed', params: { threadId: PARENT, turnId: 'turn-1', item: { type: 'subAgentActivity', id: 'spawn-9', kind: 'started', agentThreadId: 'helper-9' } } })
+        s.emit({ method: 'turn/started', params: { threadId: 'helper-9', turn: { id: 'h9-turn', status: 'inProgress', error: null } } })
+        await vi.waitFor(() => expect(interrupts(s)).toContain('helper-9/h9-turn'))
       })
 
       it('helper activity restarts the idle clock', async () => {
