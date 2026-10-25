@@ -115,7 +115,25 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
       await waitFor(() => s.task(s.coordinator.delegationId).status !== 'running', 'the task to publish')
       expect(s.task(s.coordinator.delegationId).result?.text).toContain('Coordinator final')
     })
-  })
+ 
+    it('a release that fails is tried again, so the rows do not wait for the next boot', async () => {
+      const { s, row, item } = await queued()
+      vi.useFakeTimers({ toFake: ['setTimeout'] })
+      try {
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+        vi.spyOn(s.d.engine.inbox, 'release').mockImplementationOnce(() => { throw new Error('database busy') })
+        s.d.orch.removeQueuedItem(s.coordinator.childThreadId, item.id)
+        // The item is gone and the first release failed: the rows still hold the task...
+        expect(s.d.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: `queue:${item.id}` })
+        expect(s.task(s.coordinator.delegationId).status).toBe('running')
+        // ...until the retry gives them back.
+        vi.advanceTimersByTime(2_000)
+      } finally {
+        vi.useRealTimers()
+      }
+      expect(s.d.engine.inbox.get(row.inboxId)!.status).toBe('pending')
+    })
+ })
 
   it('boot recovers a row whose queue item is gone: back to pending, the task keeps waiting, and the wake ends it', async () => {
     const s = await scene()
@@ -192,7 +210,7 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
      * The Coordinator is woken for its Reader's result and asks to integrate it; the integration
      * run ends the Coordinator's work. (The Reader is shared, so the integration fails: nothing to merge.)
      */
-    const integrating = async () => {
+    const integrating = async (beforeWake?: (w: ReturnType<typeof world>) => void) => {
       const w = world((input, delegation: DelegationToolHost | undefined) => {
         if (input.prompt.includes('Review Coordinator')) return w.start(delegation!, 'Reader', {}, 'start:Reader').then((reader) => { w.out.reader = reader; return 'Coordinator started the Reader.' })
         if (input.prompt.includes('Review Reader')) return 'Reader result.'
@@ -210,6 +228,7 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
       await w.settled(w.out.reader.childRunId)
       const task = () => w.d.engine.delegations.get(coordinator.delegationId)!
       const coordinatorRuns = () => w.d.engine.listRuns(coordinator.childThreadId)
+      beforeWake?.(w)
       const wake = w.reconciler.runOnce().wakes.wakes.find((id) => w.d.engine.getRun(id)!.threadId === coordinator.childThreadId)!
       const integrationRun = async () => {
         await waitFor(() => coordinatorRuns().some((run) => run.source === 'integration' && ['completed', 'failed'].includes(run.status)), 'the integration run to end')
@@ -234,6 +253,43 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
       expect(published.result).toMatchObject({ text: 'Coordinator final after the integration notice.', runId: wake })
       expect(s.d.engine.getRun(wake)!.ordinal).toBeGreaterThan(integration.ordinal)
       expect(s.d.engine.inbox.listForThread(s.coordinator.childThreadId).every((row) => row.status === 'acknowledged')).toBe(true)
+    })
+  })
+
+  describe('an integration that merged is reported as merged (issue #142)', () => {
+    it('even when its run was ended while the merge committed and cannot be marked completed', async () => {
+      const merged = { workerHeadSha: 'a'.repeat(40), integrationSha: 'b'.repeat(40), changedPaths: ['x.txt'] }
+      const w = world((input, delegation: DelegationToolHost | undefined) => {
+        if (input.prompt.includes('Review Coordinator')) return w.start(delegation!, 'Reader', {}, 'start:Reader').then(() => 'Coordinator started the Reader.')
+        if (input.prompt.includes('Review Reader')) return 'Reader result.'
+        if (input.prompt.startsWith('Subagent "Reader"')) {
+          const delegationId = /finished task (delegation:[0-9a-f-]+)/.exec(input.prompt)![1]
+          return delegation!.integrateDelegation({ delegationId } as never, { toolCallId: 'integrate-1' }).then(() => 'Coordinator is integrating.')
+        }
+        return 'Coordinator final.'
+      })
+      w.steps.go = async (tools) => { w.out.coordinator = await w.start(tools, 'Coordinator') }
+      await w.say('go')
+      const coordinator = w.out.coordinator
+      await waitFor(() => w.d.engine.delegations.listForParentThread(coordinator.childThreadId).length > 0, 'the Reader to start')
+      const reader = w.d.engine.delegations.listForParentThread(coordinator.childThreadId)[0]
+      await w.settled(coordinator.childRunId)
+      await w.settled(reader.childRunId)
+      // The merge commits; the run cannot be marked completed (something else ended it first).
+      ;(w.d.orch as any).integrateDelegationResult = async () => merged
+      const original = w.d.engine.markTerminal.bind(w.d.engine)
+      vi.spyOn(w.d.engine, 'markTerminal').mockImplementation(((runId: string, status: string, ...rest: unknown[]) => {
+        if (status === 'completed' && w.d.engine.getRun(runId)?.source === 'integration') throw new Error('stale_write: the run ended while it merged')
+        return (original as (...args: unknown[]) => unknown)(runId, status, ...rest)
+      }) as never)
+      w.reconciler.runOnce()
+      await waitFor(() => w.d.engine.inbox.listForThread(coordinator.childThreadId).some((row) => row.kind === 'reconcile_notice'), 'the outcome row')
+      const [row] = w.d.engine.inbox.listForThread(coordinator.childThreadId).filter((entry) => entry.kind === 'reconcile_notice')
+      expect(row.payload).toMatchObject({ type: 'integration_completed' })
+      expect((row.payload as { text: string }).text).toContain('finished: merged aaaaaaaaaaaa as bbbbbbbbbbbb')
+      expect((row.payload as { text: string }).text).not.toContain('failed')
+      const message = w.d.orch.getMessages(coordinator.childThreadId).find((entry) => entry.role === 'system' && entry.content.startsWith('Integration of delegated task'))
+      expect(message?.content).toContain('finished: merged')
     })
   })
 
