@@ -896,7 +896,6 @@ export class OrchestratorService extends EventEmitter {
       createThread: (creation) =>
         creation.kind === 'delegation' ? this.createChildThread(creation.request) : this.createForkThread(creation),
       deleteThread: (threadId) => this.discardCreatedThread(threadId),
-      readRunResultText: (runId) => this.runResultText(runId),
       forkPointSeed: (sourceThreadId, sourceRunId) => this.forkPointSeed(sourceThreadId, sourceRunId),
       titleConflicts: (parentThreadId, title) => this.subagentTitleConflicts(parentThreadId, title),
       threadLive: (threadId) => this.titleOf(threadId) !== undefined,
@@ -1518,26 +1517,6 @@ export class OrchestratorService extends EventEmitter {
   ): Promise<SubagentRefusal | null> {
     return subagentTargetRefusal(target.adapter.capabilities, target.entry.driver, workspace)
       ?? await target.adapter.childPreflight?.({ workspace, cwd }) ?? null
-  }
-
-  /**
-   * Engine host callback (SPEC §14.1): the final assistant reply of `runId` in its thread's
-   * transcript. The run's messages start at its admitted user message (`turnId === runId`) and end
-   * where another run's message begins.
-   */
-  private runResultText(runId: string): string | undefined {
-    const threadId = this.runEngine?.getRun(runId)?.threadId
-    if (!threadId) return undefined
-    const messages = this.getMessagesForPersistence(threadId)
-    const start = messages.findIndex((message) => message.turnId === runId)
-    if (start < 0) return undefined
-    let text: string | undefined
-    for (const message of messages.slice(start)) {
-      if (message.turnId && message.turnId !== runId) break
-      if (message.role !== 'assistant' || message.hidden || (message.kind && message.kind !== 'plan_card')) continue
-      if (message.content.trim()) text = message.content
-    }
-    return text
   }
 
   /**

@@ -209,8 +209,6 @@ export interface DelegationHost {
   deleteThread(threadId: string): void
   /** The `turn.start` payload that runs `prompt` as the child run's turn (inside the transaction). */
   buildChildTurnPayload(input: { childThreadId: string; childRunId: string; prompt: string; request: DelegationRequest }): unknown
-  /** The final assistant text `runId` left in its thread's transcript, when it has one. */
-  readRunResultText?(runId: string): string | undefined
   /** Whether the fork point after `sourceRunId` has a code checkpoint (`ForkPointSeed`). */
   forkPointSeed?(sourceThreadId: string, sourceRunId: string): ForkPointSeed
   /**

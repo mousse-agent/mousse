@@ -329,7 +329,7 @@ describe('prompt consistency', () => {
   })
 
   it('tells the delegating model to include the plan, acceptance criteria and focused validation', () => {
-    expect(DELEGATION_PROMPT).toMatch(/plan\/spec body or a readable path/i)
+    expect(DELEGATION_PROMPT).toMatch(/plan or spec body \(or a readable path\)/i)
     expect(DELEGATION_PROMPT).toMatch(/acceptance criteria/i)
     expect(DELEGATION_PROMPT).toMatch(/focused validation/i)
     expect(DELEGATION_PROMPT).toMatch(/do not wait or poll/i)
@@ -338,20 +338,20 @@ describe('prompt consistency', () => {
 
 describe('delegation guidance', () => {
   // spawn_agents (cliType assignments) is retired (SPEC §14.5); delegation is delegate_task.
-  it('describes delegation as delegate_task child threads', () => {
+  it('describes delegation as delegate_task subagents', () => {
     expect(DELEGATION_PROMPT).toContain('delegate_task')
-    expect(DELEGATION_PROMPT).toContain('child thread')
+    expect(DELEGATION_PROMPT).toContain('subagent')
   })
 
   it('defaults delegated children to the current connected model', () => {
-    expect(DELEGATION_PROMPT).toContain('provider and model default to yours')
+    expect(DELEGATION_PROMPT).toContain('instanceId and model default to yours')
     expect(DELEGATION_PROMPT).toContain('explicitly requests an override')
     expect(DELEGATION_PROMPT).toContain('Never copy example or guessed model identifiers')
   })
 
   it('reserves the shared workspace for read-only roles and isolates writers', () => {
-    expect(DELEGATION_PROMPT).toMatch(/"shared" is only for read-only roles \(role "research" or "review"\)/)
-    expect(DELEGATION_PROMPT).toMatch(/"isolated" gives the child its own worktree/)
+    expect(DELEGATION_PROMPT).toMatch(/"shared" only for read-only roles \(role "research" or "review"\)/)
+    expect(DELEGATION_PROMPT).toMatch(/workspace "isolated" for work that edits, builds or tests/)
   })
 
   it('requires an explicit integration of isolated results', () => {

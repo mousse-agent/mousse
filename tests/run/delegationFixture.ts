@@ -48,8 +48,6 @@ export function delegationFixture(
   const titled = new Map<string, { parentThreadId: string; title: string }>()
   /** Whether a thread still exists for the host (`threadLive`); every thread does by default. */
   const gone = new Set<string>()
-  /** Final texts `readRunResultText` returns, by run id. */
-  const resultTexts = new Map<string, string>()
   let children = 0
   engine.setDelegationHost({
     createThread: (input) => {
@@ -69,8 +67,7 @@ export function delegationFixture(
       .filter(([threadId, held]) => !gone.has(threadId) && held.parentThreadId === parentThreadId && normalizeSubagentTitle(held.title) === normalizeSubagentTitle(title))
       .map(([threadId]) => threadId),
     threadLive: (threadId) => !gone.has(threadId),
-    buildChildTurnPayload: ({ childThreadId, childRunId, prompt }) => ({ threadId: childThreadId, runId: childRunId, prompt }),
-    readRunResultText: (runId) => resultTexts.get(runId)
+    buildChildTurnPayload: ({ childThreadId, childRunId, prompt }) => ({ threadId: childThreadId, runId: childRunId, prompt })
   })
 
   /** A parent run in `running` on `threadId`. */
@@ -114,7 +111,6 @@ export function delegationFixture(
     threads,
     deleted,
     gone,
-    resultTexts,
     now,
     advance: (ms: number) => {
       clock += ms
