@@ -5049,7 +5049,8 @@ export class OrchestratorService extends EventEmitter {
           )
           if (ambiguous) {
             throw new Error(`QUEUE_PROVENANCE_UNAVAILABLE:${ambiguous.id}`)
-          }
+          },
+          nativeHistoryNow: () => nativeAgentHistory(this.nativeContext)
           const acceptedIds = new Set(
             data.messages
               .filter((message) =>

@@ -208,6 +208,44 @@ describe('ClaudeSubscriptionAdapter', () => {
     expect(streamed.chat).toHaveBeenCalledOnce()
     expect(untouched).not.toHaveBeenCalled()
   })
+
+  describe('a stopped turn (issue #142)', () => {
+    const stopped = () => {
+      const stop = new AbortController()
+      const client = { ...claudeClient(async () => { stop.abort(); throw new Error('aborted') }), commitInterrupted: vi.fn() }
+      return { stop, client }
+    }
+
+    it('fingerprints the history as the stopped turn left it, so the next turn can resume the session', async () => {
+      const { stop, client } = stopped()
+      await expect(
+        new ClaudeSubscriptionAdapter(() => client).startTurn(input({ signal: stop.signal }), recordingSink(), control(), host({ nativeHistoryNow: () => 'history up to the stopped request' }))
+      ).rejects.toThrow('aborted')
+      expect(client.commitInterrupted).toHaveBeenCalledWith('thread-1', 'history up to the stopped request')
+      expect(client.commitConversation).not.toHaveBeenCalled()
+    })
+
+    it('does nothing for a turn that failed without being stopped', async () => {
+      const client = { ...claudeClient(async () => { throw new Error('boom') }), commitInterrupted: vi.fn() }
+      await expect(
+        new ClaudeSubscriptionAdapter(() => client).startTurn(input(), recordingSink(), control(), host({ nativeHistoryNow: () => 'history' }))
+      ).rejects.toThrow('boom')
+      expect(client.commitInterrupted).not.toHaveBeenCalled()
+    })
+
+    it('cannot fingerprint without the host\'s history or the service\'s support, and still rethrows the stop', async () => {
+      const { stop, client } = stopped()
+      await expect(
+        new ClaudeSubscriptionAdapter(() => client).startTurn(input({ signal: stop.signal }), recordingSink(), control(), host())
+      ).rejects.toThrow('aborted')
+      expect(client.commitInterrupted).not.toHaveBeenCalled()
+      const plain = new AbortController()
+      const bare = claudeClient(async () => { plain.abort(); throw new Error('aborted') })
+      await expect(
+        new ClaudeSubscriptionAdapter(() => bare).startTurn(input({ signal: plain.signal }), recordingSink(), control(), host({ nativeHistoryNow: () => 'history' }))
+      ).rejects.toThrow('aborted')
+    })
+  })
 })
 
 describe('AntigravityAdapter', () => {

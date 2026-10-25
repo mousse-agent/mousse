@@ -23,7 +23,7 @@ import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
 export type ClaudeSubscriptionClient = Pick<
   ClaudeSubscriptionProviderService,
   'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured'
->
+> & Partial<Pick<ClaudeSubscriptionProviderService, 'commitInterrupted'>>
 
 export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'interrupt_restart',
@@ -155,16 +155,23 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       },
       onLineEdits: (lines) => sink.lineEdits(lines)
     })
-    const text = await retryContextOverflowOnce(
-      () => service.chat(chatInput()),
-      () => {
-        const recovered = host.context.recoverOverflow()
-        if (!recovered) return false
-        history = recovered.nativeHistory
-        return true
-      },
-      () => !progressed && !toolStarted && !input.signal.aborted
-    )
+    let text: string
+    try {
+      text = await retryContextOverflowOnce(
+        () => service.chat(chatInput()),
+        () => {
+          const recovered = host.context.recoverOverflow()
+          if (!recovered) return false
+          history = recovered.nativeHistory
+          return true
+        },
+        () => !progressed && !toolStarted && !input.signal.aborted
+      )
+    } catch (error) {
+      // A stopped turn keeps its native session: the next turn resumes it (the stopped request is in it).
+      if (input.signal.aborted && host.context.nativeHistoryNow) service.commitInterrupted?.(input.threadId, host.context.nativeHistoryNow())
+      throw error
+    }
     streams.thinking.complete()
     service.commitConversation(input.threadId, host.context.nativeHistoryAfterTurn(text))
     streams.text.complete(text)

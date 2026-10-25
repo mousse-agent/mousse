@@ -281,6 +281,8 @@ export class ClaudeSubscriptionProviderService {
   private stopped = false
   private readonly queries = new Map<string, Query>()
   private readonly readyToCommit = new Set<string>()
+  /** Threads whose last turn was stopped after the SDK had a session, by that session id (`commitInterrupted`). */
+  private readonly interruptedSessions = new Map<string, string>()
   private readonly loginSessions = new Set<LoginSession>()
   private readonly controllers = new Set<AbortController>()
   private readonly activeThreads = new Set<string>()
@@ -783,6 +785,20 @@ export class ClaudeSubscriptionProviderService {
       this.save()
     }
   }
+  /**
+   * A stopped turn leaves its session resumable. `history` is the canonical history exactly as the
+   * stopped turn left it (its request included, no reply), which is what the next turn will send
+   * as its history; saving its fingerprint with the session lets that turn resume the native
+   * session instead of replaying the conversation. A stop before the SDK had a session saves nothing.
+   */
+  commitInterrupted(threadId: string, history: string): void {
+    const sessionId = this.interruptedSessions.get(threadId)
+    this.interruptedSessions.delete(threadId)
+    const saved = this.settings.sessions?.[threadId]
+    if (!sessionId || !saved || saved.sessionId !== sessionId) return
+    saved.historyKey = historyKey(history)
+    this.save()
+  }
   async chat(input: ClaudeSubscriptionChatInput): Promise<string> {
     input.signal?.throwIfAborted()
     if (this.checkDue()) {
@@ -814,6 +830,7 @@ export class ClaudeSubscriptionProviderService {
     }
     input.signal?.addEventListener('abort', cancel, { once: true })
     this.readyToCommit.delete(input.threadId)
+    this.interruptedSessions.delete(input.threadId)
     const instanceId = input.instanceId ?? CLAUDE_INSTANCE_ID
     // A native session belongs to one instance; another instance starts fresh.
     const stored = this.settings.sessions?.[input.threadId]
@@ -1187,19 +1204,25 @@ export class ClaudeSubscriptionProviderService {
       const report = metrics.report()
       try {
         const baseline = metrics.snapshot()
-        if (baseline && this.configured()) {
+        // A turn the user stopped once the SDK had a session: the adapter may fingerprint it (`commitInterrupted`).
+        const stopped = !success && sessionId !== undefined && input.signal?.aborted === true
+        const savedSessionId = baseline?.sessionId ?? (stopped ? sessionId : undefined)
+        if (savedSessionId && this.configured()) {
           const current = this.settings.sessions?.[input.threadId]
           this.settings.sessions = {
             ...this.settings.sessions,
             [input.threadId]: {
-              ...(current?.sessionId === baseline.sessionId ? current : {}),
-              sessionId: baseline.sessionId,
+              ...(current?.sessionId === savedSessionId ? current : {}),
+              sessionId: savedSessionId,
               cwd: resolve(input.cwd),
-              usageBaseline: baseline,
+              // A stopped turn saves no model of its own, and the next turn resumes only on the same one.
+              model: parseThinkingSuffixFromModelId(input.model).baseId,
+              ...(baseline ? { usageBaseline: baseline } : {}),
               instanceId
             }
           }
           this.save()
+          if (stopped) this.interruptedSessions.set(input.threadId, savedSessionId)
         }
       } finally {
         input.onMetrics?.(report)
