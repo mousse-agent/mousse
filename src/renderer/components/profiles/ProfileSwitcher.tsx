@@ -3,6 +3,7 @@ import { Check, ChevronRight, ChevronUp, Logout, Pencil, Plus, Settings, UserCir
 import type { ProfilePublicDto } from '../../../shared/profiles/types'
 import { confirmNavigation } from '../../services/navigationGuards'
 import { migrateLegacyProfilePreferences } from '../../lib/profilePreferences'
+import { beginProfileSwitch } from '../../lib/providerSnapshots'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
 import { useAppStore } from '../../stores/appStore'
 import { mousseIdName, useMousseId, useMousseIdAvailable } from '../../stores/mousseIdStore'
@@ -129,8 +130,12 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
     const epoch = ++requestEpoch.current
     setBusy(true)
     setError(null)
+    // Provider requests of the profile being left must not reach the one being bound.
+    const endSwitch = beginProfileSwitch()
+    let switched = false
     try {
       const result = await window.mousse.profiles.bind(ref)
+      switched = true
       if (epoch !== requestEpoch.current) return
       setCurrent(result.profile.id)
       setOpen(false)
@@ -139,6 +144,7 @@ export function ProfileSwitcher({ onSwitched, variant = 'titlebar' }: ProfileSwi
     } catch (cause) {
       if (epoch === requestEpoch.current) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
+      endSwitch(switched)
       if (epoch === requestEpoch.current) setBusy(false)
     }
   }

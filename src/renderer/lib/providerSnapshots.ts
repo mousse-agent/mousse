@@ -77,10 +77,56 @@ export function applySnapshotsEvent(event: ProviderSnapshotsEvent): void {
   }
 }
 
-/** The snapshot a command returned, merged into its scope (it reaches other scopes by event). */
-export function applySnapshot(snapshot: InstanceSnapshot): void {
+/**
+ * The profile binding of this window when a request was made. The window can be bound to another
+ * profile without reloading the renderer, so a deferred request or a late reply checks it first.
+ */
+export interface ProfileBinding {
+  readonly profileId: string
+  readonly epoch: number
+}
+
+let bindingEpoch = 0
+let switchingProfiles = 0
+useAppStore.subscribe((state, previous) => {
+  if (state.profileId !== previous.profileId) bindingEpoch += 1
+})
+
+export function currentProfileBinding(): ProfileBinding {
+  return { profileId: useAppStore.getState().profileId, epoch: bindingEpoch }
+}
+
+/** Still the window's binding: no profile switch since, and none under way. */
+export function isCurrentProfileBinding(binding: ProfileBinding): boolean {
+  return switchingProfiles === 0 && binding.epoch === bindingEpoch && binding.profileId === useAppStore.getState().profileId
+}
+
+/**
+ * The window starts binding another profile: requests made before are dropped, and so are those
+ * made until the switch ends. Call the returned function when it ends, saying whether it switched.
+ */
+export function beginProfileSwitch(): (switched: boolean) => void {
+  bindingEpoch += 1
+  switchingProfiles += 1
+  let ended = false
+  return (switched) => {
+    if (ended) return
+    ended = true
+    switchingProfiles -= 1
+    if (switched) bindingEpoch += 1
+  }
+}
+
+/**
+ * The snapshot a command returned, merged into its scope (it reaches other scopes by event). With
+ * the binding the command was sent in, a reply from before a profile switch is dropped.
+ */
+export function applySnapshot(snapshot: InstanceSnapshot, binding?: ProfileBinding): void {
+  if (binding && !isCurrentProfileBinding(binding)) return
+  const state = useProviderSnapshotsStore.getState()
+  if (state.profileId !== useAppStore.getState().profileId) return
   const key = scopeKey(snapshot.scope)
-  const current = useProviderSnapshotsStore.getState().scopes[key]?.snapshots
+  const current = state.scopes[key]?.snapshots
   if (!current) return
   const index = current.findIndex((entry) => entry.instanceId === snapshot.instanceId)
   const next = index < 0 ? [...current, snapshot] : current.map((entry, at) => (at === index ? snapshot : entry))

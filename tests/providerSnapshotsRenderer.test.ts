@@ -8,7 +8,17 @@ import {
   planLegacyFavoritesImport,
   saveModelPrefs
 } from '../src/renderer/lib/modelFavorites'
-import { instanceBadges, modelDisplayName, pickerIdFor, pickerProviders, showsContextGauge, sortInstances, useProviderSnapshotsStore } from '../src/renderer/lib/providerSnapshots'
+import {
+  beginProfileSwitch,
+  instanceBadges,
+  modelDisplayName,
+  pickerIdFor,
+  pickerProviders,
+  showsContextGauge,
+  sortInstances,
+  useProviderSnapshotsStore
+} from '../src/renderer/lib/providerSnapshots'
+import { useAppStore } from '../src/renderer/stores/appStore'
 import { sendErrorLine } from '../src/renderer/lib/errorText'
 import { getGroupedModelButtonParts, sortPickerEntries } from '../src/renderer/components/ModelFamilyMenu'
 import { profilePreferenceKey } from '../src/renderer/lib/profilePreferences'
@@ -154,6 +164,77 @@ describe('favorites', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+
+  describe('a profile switch while saves wait', () => {
+    const SAVED_IN_A = 'claude-opus-4'
+    const setup = () => {
+      const calls: Array<{ profile: string; patch: unknown }> = []
+      let release!: () => void
+      const setModelPrefs = async (_id: string, patch: unknown) => {
+        calls.push({ profile: useAppStore.getState().profileId, patch })
+        if (calls.length === 1) await new Promise<void>((resolve) => (release = resolve))
+        return snapshot({ models: { entries: [model(SAVED_IN_A, { favorite: true })], source: 'live' } })
+      }
+      vi.stubGlobal('window', { mousse: { providers: { instances: { setModelPrefs } } } })
+      useAppStore.setState({ profileId: 'a' })
+      useProviderSnapshotsStore.setState({ profileId: 'a', scopes: { device: { loading: false, snapshots: [snapshot()] } } })
+      return { calls, release: () => release() }
+    }
+    const bindB = () => {
+      useAppStore.setState({ profileId: 'b' })
+      useProviderSnapshotsStore.setState({ profileId: 'b', scopes: { device: { loading: false, snapshots: [snapshot()] } } })
+    }
+    const deviceModels = () => useProviderSnapshotsStore.getState().scopes.device?.snapshots?.[0]?.models.entries.map((entry) => entry.id)
+
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      useAppStore.setState({ profileId: 'default' })
+      useProviderSnapshotsStore.setState({ profileId: null, scopes: {} })
+    })
+
+    it('drops the save queued behind a pending one, and the pending reply, once the window is bound to another profile', async () => {
+      const { calls, release } = setup()
+      const first = saveModelPrefs('claude', { star: ['sonnet'] })
+      await vi.waitFor(() => expect(calls).toHaveLength(1))
+      const second = saveModelPrefs('claude', { hide: ['opus'] })
+      bindB()
+      release()
+      await Promise.all([first, second])
+      expect(calls).toEqual([{ profile: 'a', patch: { star: ['sonnet'] } }])
+      // Profile A's reply is not merged into profile B's snapshots.
+      expect(deviceModels()).not.toContain(SAVED_IN_A)
+      // A save made in profile B is sent there and shown.
+      await saveModelPrefs('claude', { star: ['x'] })
+      expect(calls[1]).toEqual({ profile: 'b', patch: { star: ['x'] } })
+      expect(deviceModels()).toContain(SAVED_IN_A)
+    })
+
+    it('drops a queued save as soon as the switch starts, before the renderer learns the new profile', async () => {
+      const { calls, release } = setup()
+      const first = saveModelPrefs('claude', { star: ['sonnet'] })
+      await vi.waitFor(() => expect(calls).toHaveLength(1))
+      const second = saveModelPrefs('claude', { hide: ['opus'] })
+      const endSwitch = beginProfileSwitch()
+      release()
+      await Promise.all([first, second])
+      // A save made while the switch is under way is not sent either.
+      await saveModelPrefs('claude', { unhide: ['opus'] })
+      endSwitch(true)
+      bindB()
+      expect(calls).toEqual([{ profile: 'a', patch: { star: ['sonnet'] } }])
+    })
+
+    it('a switch that fails leaves later saves going to the same profile', async () => {
+      const { calls, release } = setup()
+      beginProfileSwitch()(false)
+      const saving = saveModelPrefs('claude', { star: ['sonnet'] })
+      await vi.waitFor(() => expect(calls).toHaveLength(1))
+      release()
+      await saving
+      expect(calls).toEqual([{ profile: 'a', patch: { star: ['sonnet'] } }])
+      expect(deviceModels()).toContain(SAVED_IN_A)
+    })
   })
 
   it('plans the import of legacy keys onto the instance serving each provider', () => {

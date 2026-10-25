@@ -3,7 +3,15 @@ import type { InstanceSnapshot } from '../../shared/harness/status'
 import type { ModelPrefsPatch } from '../../shared/harness/types'
 import { groupModelsByFamily, type ModelFamily } from '../../shared/modelVariants'
 import { useAppStore } from '../stores/appStore'
-import { DEVICE_SCOPE, applySnapshot, llmProviderOf, modelPrefsByInstance, useProviderSnapshots } from './providerSnapshots'
+import {
+  DEVICE_SCOPE,
+  applySnapshot,
+  currentProfileBinding,
+  isCurrentProfileBinding,
+  llmProviderOf,
+  modelPrefsByInstance,
+  useProviderSnapshots
+} from './providerSnapshots'
 import { profilePreferenceKey } from './profilePreferences'
 
 /**
@@ -130,16 +138,23 @@ const savingPrefs = new Map<string, Promise<void>>()
 
 /**
  * Writes model prefs and shows the result at once (the pushed change follows). Saves of one
- * instance run one after another, so an older reply never replaces a newer one on screen.
+ * instance run one after another, so an older reply never replaces a newer one on screen. A save
+ * belongs to the profile binding it was made in: once the window switches profile, a save still
+ * waiting is dropped rather than sent to the new profile, and a late reply is not shown.
  */
 export function saveModelPrefs(instanceId: string, patch: ModelPrefsPatch): Promise<void> {
-  const previous = savingPrefs.get(instanceId) ?? Promise.resolve()
+  const binding = currentProfileBinding()
+  const key = `${binding.profileId}\0${binding.epoch}\0${instanceId}`
+  const previous = savingPrefs.get(key) ?? Promise.resolve()
   const saving = previous
     .catch(() => undefined)
-    .then(async () => applySnapshot(await window.mousse.providers.instances.setModelPrefs(instanceId, patch)))
-  savingPrefs.set(instanceId, saving)
+    .then(async () => {
+      if (!isCurrentProfileBinding(binding)) return
+      applySnapshot(await window.mousse.providers.instances.setModelPrefs(instanceId, patch), binding)
+    })
+  savingPrefs.set(key, saving)
   const settled = () => {
-    if (savingPrefs.get(instanceId) === saving) savingPrefs.delete(instanceId)
+    if (savingPrefs.get(key) === saving) savingPrefs.delete(key)
   }
   saving.then(settled, settled)
   return saving
