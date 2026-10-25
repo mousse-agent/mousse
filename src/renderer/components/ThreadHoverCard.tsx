@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { Bot, GitBranch, Sparkles } from '../lib/icons'
 import type { Thread } from '../../shared/types'
-import { isActiveAgentStatus } from '../../shared/types'
+import { isRunningSubagent } from '../../shared/subagents'
 import {
   formatEffortLabel,
   parseThinkingSuffixFromModelId
 } from '../../shared/modelVariants'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { ProviderIcon } from '../lib/providerIcons'
-import { useAppStore } from '../stores/appStore'
+import { useSubagents } from '../hooks/useSubagents'
 
 const HOVER_OPEN_DELAY_MS = 420
 const HOVER_CLOSE_DELAY_MS = 120
@@ -69,10 +69,8 @@ export function ThreadHoverCard({ thread, enabled = true, children }: ThreadHove
   const [open, setOpen] = useState(false)
   const [defaultModel, setDefaultModel] = useState<DefaultModel | null>(null)
   const [workspace, setWorkspace] = useState<WorkspaceHoverInfo | null>(null)
-  const [agentCount, setAgentCount] = useState<number | null>(null)
-
-  const activeThreadId = useAppStore((s) => s.activeThreadId)
-  const activeAgents = useAppStore((s) => s.agents)
+  // The subagents this thread started, from the daemon's read model; watched only while the card is open.
+  const subagentCount = useSubagents(open ? thread.id : null).filter(isRunningSubagent).length
 
   const providerId = thread.modelOverride?.llmProvider || defaultModel?.llmProvider || ''
   const modelId = thread.modelOverride?.model || defaultModel?.model || ''
@@ -85,7 +83,7 @@ export function ThreadHoverCard({ thread, enabled = true, children }: ThreadHove
     contentRef: cardRef,
     placement: 'right-start',
     gap: 10,
-    deps: [thread.id, thread.name, modelLabel, workspace?.branchLabel, agentCount]
+    deps: [thread.id, thread.name, modelLabel, workspace?.branchLabel, subagentCount]
   })
 
   const clearTimers = () => {
@@ -147,23 +145,6 @@ export function ThreadHoverCard({ thread, enabled = true, children }: ThreadHove
       if (requestId !== requestIdRef.current) return
       setWorkspace(null)
     }
-
-    // Subagent count — use live store for the active thread.
-    if (threadId === activeThreadId) {
-      const count = activeAgents.filter((agent) => isActiveAgentStatus(agent.status)).length
-      if (requestId !== requestIdRef.current) return
-      setAgentCount(count)
-      return
-    }
-
-    try {
-      const agents = await window.mousse.agents.list(threadId)
-      if (requestId !== requestIdRef.current) return
-      setAgentCount(agents.filter((agent) => isActiveAgentStatus(agent.status)).length)
-    } catch {
-      if (requestId !== requestIdRef.current) return
-      setAgentCount(null)
-    }
   }
 
   const scheduleOpen = () => {
@@ -192,12 +173,6 @@ export function ThreadHoverCard({ thread, enabled = true, children }: ThreadHove
       setOpen(false)
     }, HOVER_CLOSE_DELAY_MS)
   }
-
-  // Keep active-thread agent count live while open.
-  useEffect(() => {
-    if (!open || thread.id !== activeThreadId) return
-    setAgentCount(activeAgents.filter((agent) => isActiveAgentStatus(agent.status)).length)
-  }, [open, thread.id, activeThreadId, activeAgents])
 
   // Force-close when disabled (drag / context menu).
   useEffect(() => {
@@ -309,16 +284,16 @@ export function ThreadHoverCard({ thread, enabled = true, children }: ThreadHove
                 </div>
               </div>
 
-              {agentCount !== null && agentCount > 0 && (
+              {subagentCount > 0 && (
                 <div className="thread-hover-card-row">
                   <span className="thread-hover-card-icon" aria-hidden="true">
                     <Bot size={13} strokeWidth={2} />
                   </span>
                   <div className="thread-hover-card-row-text">
                     <span className="thread-hover-card-row-label">
-                      {agentCount} {agentCount === 1 ? 'subagent' : 'subagents'}
+                      {subagentCount} {subagentCount === 1 ? 'subagent' : 'subagents'}
                     </span>
-                    <span className="thread-hover-card-row-detail">Active</span>
+                    <span className="thread-hover-card-row-detail">Running</span>
                   </div>
                 </div>
               )}

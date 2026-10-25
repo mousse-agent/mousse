@@ -78,9 +78,11 @@ import {
 } from '../windowState'
 import { applyWindowMaterial, attachWindowFocusListeners, setWindowProfileSettings } from '../windowMaterial'
 import {
+  SUBAGENT_QUESTION_BODY,
   getThreadNotificationPresentation,
   type ThreadNotificationKind
 } from '../notifications/threadNotification'
+import { NotificationThreadIndex } from '../notifications/threadNotificationTarget'
 import { playThreadCompletionSound } from '../notifications/completionSound'
 import type {
   BrowserBounds,
@@ -93,12 +95,14 @@ import type {
   OrchestratorSendInput,
   ScheduledJob,
   ThreadActivitySnapshot,
+  Thread,
   ThreadActivityState,
   TurnState,
   TurnStateSnapshot,
   UserQuestionAnswers
 } from '../../shared/types'
 import { isThreadActivityActive } from '../../shared/types'
+import { visibleThreads } from '../../shared/threadLineage'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import type {
   GitHubCloneRepositoryInput,
@@ -317,6 +321,9 @@ export function registerGuiIpc(
     return state
   }
 
+  // Thread rows the main process has seen, so a notification knows whether its thread is a subagent.
+  const notificationThreads = new NotificationThreadIndex()
+
   const broadcast = (channel: string, data: unknown, profileId?: string): void => {
     const senderId = guiMms.getCurrentSenderId()
     const senderProfile = senderId === null ? undefined : guiMms.getWindowBindingForSender(senderId)?.profileId
@@ -324,6 +331,7 @@ export function registerGuiIpc(
     // that binding as the default for personal replies; daemon events supply
     // activeEventProfileId instead. Installation-wide listeners remain global.
     const targetProfileId = profileId ?? activeEventProfileId ?? senderProfile
+    if (channel === 'threads:updated') notificationThreads.note(targetProfileId ?? currentProfileKey(), data)
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) {
         if (targetProfileId) {
@@ -340,12 +348,16 @@ export function registerGuiIpc(
     kind: ThreadNotificationKind,
     activeThreadId: string | null,
     targetWindow = getWindow(),
-    profileSettings = settings.get()
+    profileSettings = settings.get(),
+    profileId = currentProfileKey()
   ): void => {
+    // Subagents are quiet; one that asks a question is announced under its parent's name.
+    const about = notificationThreads.resolve(profileId, threadId, kind)
+    if (!about) return
     const content = getThreadNotificationPresentation(kind, profileSettings)
     const win = targetWindow
     const isFocused = win?.isFocused() ?? false
-    if (isFocused && activeThreadId === threadId) {
+    if (isFocused && (activeThreadId === about.threadId || (about.viaThreadId !== undefined && activeThreadId === about.viaThreadId))) {
       // Banner is suppressed while viewing the thread, but the completion
       // sound is still expected — play the platform completion sound explicitly since no
       // banner exists to carry it (the default alert beep is too harsh).
@@ -358,8 +370,9 @@ export function registerGuiIpc(
     }
     const useWindowsCompletionSound = process.platform === 'win32' && !content.silent
     const notification = new Notification({
-      title: 'Mousse',
+      title: about.parentName ?? 'Mousse',
       ...content,
+      ...(about.viaThreadId ? { body: SUBAGENT_QUESTION_BODY } : {}),
       // Unpackaged Windows Electron notifications do not reliably play their toast
       // sound. Play Mousse's softer completion chime below and avoid a double sound.
       silent: useWindowsCompletionSound ? true : content.silent
@@ -660,6 +673,7 @@ export function registerGuiIpc(
       ? tracker.getState(event.threadId)
       : undefined
     routeWindowState(event, binding.profileId, target)
+    if (event.type === 'threads.updated') notificationThreads.note(binding.profileId, event.data)
     bridgeProtocolEvent(event, target, presentationForSender(senderId))
     if (event.type === 'activity' && event.threadId) {
       const state = (event.data as { state?: ThreadActivityState } | null)?.state
@@ -675,7 +689,8 @@ export function registerGuiIpc(
           kind,
           presentationForSender(senderId).getActiveThreadId(),
           win,
-          windowSettings.get(senderId) ?? settings.get()
+          windowSettings.get(senderId) ?? settings.get(),
+          binding.profileId
         )
       }
     }
@@ -687,7 +702,8 @@ export function registerGuiIpc(
         'question',
         presentationForSender(senderId).getActiveThreadId(),
         win,
-        windowSettings.get(senderId) ?? settings.get()
+        windowSettings.get(senderId) ?? settings.get(),
+        binding.profileId
       )
     }
     if (event.type === 'settings.changed') {
@@ -1069,7 +1085,9 @@ export function registerGuiIpc(
       return !event.sender.isDestroyed() && current?.profileId === binding.profileId && current.epoch === binding.epoch
     }
     const target = (channel: string, data: unknown): void => {
-      if (isCurrent()) event.sender.send(channel, data)
+      if (!isCurrent()) return
+      if (channel === 'threads:updated') notificationThreads.note(binding.profileId, data)
+      event.sender.send(channel, data)
     }
     const promise = bootstrapPresentation(guiMms, currentPresentation(), target, {
       isCurrent,
@@ -1173,13 +1191,14 @@ export function registerGuiIpc(
   })
 
   registerStorageHandler('threads:delete', async (_e, threadId: string) => {
-    const res = await guiMms.request<{ threads: { id: string; settledAt?: string }[] }>(
+    const res = await guiMms.request<{ threads: Pick<Thread, 'id' | 'settledAt' | 'lineage'>[] }>(
       'threads.delete',
       { threadId }
     )
     broadcast('threads:updated', res.threads)
     if (currentPresentation().getActiveThreadId() === threadId) {
-      const next = res.threads.find((t) => !t.settledAt)
+      // Never fall back to a subagent: it sits under its parent in the sidebar.
+      const next = visibleThreads(res.threads).find((t) => !t.settledAt)
       if (next) await selectThread(next.id)
       else {
         const created = await guiMms.request<{ thread: { id: string } }>('threads.create', {

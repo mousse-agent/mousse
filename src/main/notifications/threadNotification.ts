@@ -15,6 +15,9 @@ const THREAD_NOTIFICATION_BODIES: Record<ThreadNotificationKind, string> = {
   idle: 'Agent paused'
 }
 
+/** Body of a subagent's question, announced under its parent's name. */
+export const SUBAGENT_QUESTION_BODY = 'A subagent has a question for you'
+
 /**
  * Build platform notification content and apply the completion-sound preference.
  * Any thread that stops doing work and needs the user — finished, asking a

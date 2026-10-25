@@ -76,3 +76,11 @@ export interface SubagentSummary {
 export interface SubagentsUpdatedEvent {
   parentThreadId: string
 }
+
+/** States of a subagent that has not finished: it is working, queued, needs input, or waits on its own subagents. */
+const RUNNING_SUBAGENT_STATES: ReadonlySet<SubagentState> = new Set<SubagentState>(['needs_input', 'queued', 'starting', 'working', 'waiting'])
+
+/** True while a subagent is still going, so a list can count it as "running". */
+export function isRunningSubagent(subagent: Pick<SubagentSummary, 'state'>): boolean {
+  return RUNNING_SUBAGENT_STATES.has(subagent.state)
+}

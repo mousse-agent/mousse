@@ -49,6 +49,30 @@ describe('subscribed window presentation bootstrap', () => {
     expect(gui.snapshotThread).toHaveBeenCalledTimes(1)
   })
 
+  describe('startup selection', () => {
+    const subagent = (id: string, parentThreadId: string) => ({ id, lineage: { parentThreadId, rootThreadId: parentThreadId, relationship: 'subagent' } })
+    const selectFrom = async (threads: unknown[], saved?: string) => {
+      const gui = controller()
+      gui.request.mockImplementation(async (method: string) => method === 'threads.list' ? { threads } : { projects: [] })
+      const state = new PresentationState()
+      if (saved) state.setActiveThreadId(saved)
+      await bootstrapPresentation(gui as unknown as GuiMmsController, state, vi.fn())
+      return state.getActiveThreadId()
+    }
+
+    it('never selects a subagent when it picks the first thread', async () => {
+      expect(await selectFrom([subagent('child', 'parent'), subagent('grandchild', 'child'), { id: 'parent' }])).toBe('parent')
+    })
+
+    it('still selects a subagent whose parent is gone, as the list shows it', async () => {
+      expect(await selectFrom([subagent('orphan', 'trashed'), { id: 'other' }])).toBe('orphan')
+    })
+
+    it('keeps a restored selection that is a subagent', async () => {
+      expect(await selectFrom([{ id: 'parent' }, subagent('child', 'parent')], 'child')).toBe('child')
+    })
+  })
+
   it('does not overwrite a manual selection while restoration is in flight', async () => {
     const pending = deferred<typeof snapshot>()
     const requested = deferred<void>()

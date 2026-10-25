@@ -1,3 +1,5 @@
+import type { Thread } from '../../shared/types'
+import { visibleThreads } from '../../shared/threadLineage'
 import type { GuiMmsController } from './GuiMmsController'
 import type { PresentationState } from './PresentationState'
 import { broadcastThreadSnapshot } from './protocolEventBridge'
@@ -12,7 +14,7 @@ export async function bootstrapPresentation(
   const isCurrent = opts?.isCurrent ?? (() => true)
   const initialActiveId = presentation.getActiveThreadId()
   const [threadsRes, projectsRes] = await Promise.all([
-    guiMms.request<{ threads: { id: string; settledAt?: string; name?: string }[] }>('threads.list'),
+    guiMms.request<{ threads: Pick<Thread, 'id' | 'settledAt' | 'name' | 'lineage'>[] }>('threads.list'),
     guiMms.request<{ projects: unknown[] }>('projects.list')
   ])
   if (!isCurrent()) return
@@ -23,8 +25,10 @@ export async function bootstrapPresentation(
   const usable = threadsRes.threads.filter((t) => !t.settledAt)
   if (activeId === initialActiveId && activeId && !usable.some((t) => t.id === activeId)) activeId = null
   if (!activeId) {
-    if (usable.length > 0) {
-      activeId = usable[0].id
+    // Startup never opens a subagent: it sits under its parent, which is what the sidebar lists.
+    const selectable = visibleThreads(usable, threadsRes.threads)
+    if (selectable.length > 0) {
+      activeId = selectable[0].id
     } else {
       const created = await guiMms.request<{ thread: { id: string } }>('threads.create', { name: 'New Chat' })
       if (!isCurrent()) return

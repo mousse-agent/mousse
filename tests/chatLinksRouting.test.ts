@@ -50,6 +50,22 @@ describe('project reference routing', () => {
     expect(api.threads.select).toHaveBeenCalledWith(referenced.id)
   })
 
+  it('never lands on a subagent of the referenced project, cached or daemon-listed', async () => {
+    const api = setup()
+    const parent = { id: 'parent', projectId: 'project-b' } as Thread
+    const child = { id: 'child', projectId: 'project-b', lineage: { parentThreadId: 'parent', rootThreadId: 'parent', relationship: 'subagent' } } as Thread
+    useAppStore.setState({ threads: [original, child, parent] })
+    await openProjectReference('project-b')
+    expect(api.threads.select).toHaveBeenCalledWith('parent')
+
+    api.threads.select.mockClear()
+    useAppStore.setState({ threads: [original], activeThreadId: original.id })
+    api.projects.listThreads.mockResolvedValue([child, parent])
+    await openProjectReference('project-b')
+    expect(api.threads.select).toHaveBeenCalledWith('parent')
+    expect(api.threads.create).not.toHaveBeenCalled()
+  })
+
   it('does not activate a created draft after the profile changes', async () => {
     const api = setup()
     api.threads.create.mockImplementation(async () => {

@@ -14,6 +14,7 @@ Use these terms in issues, PRs, comments, and docs. If you need a term that is n
 - **Provider instance:** one configured provider a profile can pick, with a stable id such as `claude`, `codex` or `pi:openai`. Every caller chooses an agent by instance id and model.
 - **Agent:** a model working in a thread, including any subagents it starts.
 - **Subagent:** a thread the main thread of a conversation starts to do part of its work. It has its own thread and history, runs with its own model and workspace, and reports its result back to the thread that started it (its parent).
+- **Lineage:** the section of the thread side card that lists the subagents a thread started, with their status and model. A subagent does not appear in thread lists (the sidebar, search, the CLI, channels); the desktop app shows it under its parent, and a parent row shows what its subagents are doing.
 - **Delegation:** one task handed to a subagent, with its own ID and result. Giving the same subagent a second task is a second delegation on the same thread. A delegation ends as done, failed, stopped or interrupted, and that outcome does not change once the result is read.
 - **Workflow:** a published sequence of steps that can run from the canvas, chat, CLI, channels, or schedules.
 - **Channel:** an outside chat connection, such as Telegram, Discord, or a webhook, that sends messages to Mousse and gets replies.

@@ -1,40 +1,41 @@
-import { isTerminalAgentStatus, type Agent } from '../../../shared/types'
+import { isRunningSubagent, type SubagentSummary } from '../../../shared/subagents'
 
 /** Rows shown before the list asks to be expanded. */
 export const LINEAGE_COLLAPSED_COUNT = 5
 
-type LineageAgent = Pick<Agent, 'status' | 'createdAt' | 'idleAt' | 'exitedAt'>
+type LineageSubagent = Pick<SubagentSummary, 'childThreadId' | 'state' | 'createdAt' | 'updatedAt'>
 
-/** Agent is doing work right now, as opposed to waiting on a merge or finished. */
-export function isWorkingLineageAgent(agent: Pick<Agent, 'status'>): boolean {
-  return agent.status === 'starting' || agent.status === 'running'
-}
-
-function timeOf(value: string | undefined): number | null {
-  if (!value) return null
+function timeOf(value: string | undefined): number {
+  if (!value) return 0
   const parsed = Date.parse(value)
-  return Number.isFinite(parsed) ? parsed : null
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
-/** When the agent finished, falling back to when it last went idle, then to when it started. */
-export function lineageFinishedAt(agent: LineageAgent): number {
-  return timeOf(agent.exitedAt) ?? timeOf(agent.idleAt) ?? timeOf(agent.createdAt) ?? 0
+/** Subagents still going: working, queued, asking something, or waiting on their own subagents. */
+export function countRunningSubagents(subagents: readonly Pick<SubagentSummary, 'state'>[]): number {
+  return subagents.filter(isRunningSubagent).length
+}
+
+/** Heading of the section: "Lineage · 2 running" while any subagent is going, otherwise "Lineage". */
+export function lineageTitle(subagents: readonly Pick<SubagentSummary, 'state'>[]): string {
+  const running = countRunningSubagents(subagents)
+  return running > 0 ? `Lineage · ${running} running` : 'Lineage'
 }
 
 /**
- * Working agents come first, then agents waiting on a merge, each newest first;
- * finished agents follow, most recently finished first.
+ * Running subagents come first, newest first; finished ones follow, most recently finished first.
+ * Needing input is the one running state that sorts ahead of the rest: it is waiting on the user.
  */
-export function orderLineageAgents<T extends LineageAgent>(agents: readonly T[]): T[] {
-  const active: T[] = []
+export function orderLineageSubagents<T extends LineageSubagent>(subagents: readonly T[]): T[] {
+  const running: T[] = []
   const finished: T[] = []
-  for (const agent of agents) (isTerminalAgentStatus(agent.status) ? finished : active).push(agent)
-  active.sort((left, right) => {
-    const working = Number(isWorkingLineageAgent(right)) - Number(isWorkingLineageAgent(left))
-    return working || (timeOf(right.createdAt) ?? 0) - (timeOf(left.createdAt) ?? 0)
+  for (const subagent of subagents) (isRunningSubagent(subagent) ? running : finished).push(subagent)
+  running.sort((left, right) => {
+    const asking = Number(right.state === 'needs_input') - Number(left.state === 'needs_input')
+    return asking || timeOf(right.createdAt) - timeOf(left.createdAt)
   })
-  finished.sort((left, right) => lineageFinishedAt(right) - lineageFinishedAt(left))
-  return [...active, ...finished]
+  finished.sort((left, right) => timeOf(right.updatedAt) - timeOf(left.updatedAt))
+  return [...running, ...finished]
 }
 
 export interface LineageSlice<T> {
@@ -63,30 +64,44 @@ export function formatAgo(timestamp: number, now: number): string {
   return months < 12 ? `${months}mo ago` : `${Math.floor(days / 365)}y ago`
 }
 
-const ACTIVE_LABELS: Record<string, string> = {
+const RUNNING_LABELS: Record<string, string> = {
+  needs_input: 'Needs input',
+  queued: 'Queued',
   starting: 'Starting',
-  running: 'Running',
-  ready: 'Ready',
-  merging: 'Merging',
-  conflict: 'Conflict'
+  working: 'Working'
 }
 
-const FINISHED_PREFIX: Record<string, string> = {
+const FINISHED_LABELS: Record<string, string> = {
   failed: 'Failed',
-  cancelled: 'Stopped',
+  stopped: 'Stopped',
   interrupted: 'Interrupted'
 }
 
-/** Muted text on the right of a row: the status while active, otherwise how long ago it finished. */
-export function lineageStatusLabel(agent: LineageAgent & Pick<Agent, 'status'>, now: number): string {
-  if (!isTerminalAgentStatus(agent.status)) return ACTIVE_LABELS[agent.status] ?? agent.status
-  const ago = formatAgo(lineageFinishedAt(agent), now)
-  const prefix = FINISHED_PREFIX[agent.status]
-  if (!prefix) return ago
+/** What a subagent waits on: its own subagents when they are known, else just "subagents". */
+function waitingLabel(subagent: Pick<SubagentSummary, 'waitingOn'>): string {
+  const count = subagent.waitingOn.length
+  return count > 0 ? `Waiting on ${count} ${count === 1 ? 'subagent' : 'subagents'}` : 'Waiting on subagents'
+}
+
+/** Muted text on the right of a row: the state while running, otherwise how long ago it finished. */
+export function lineageStatusLabel(subagent: Pick<SubagentSummary, 'state' | 'updatedAt' | 'waitingOn'>, now: number): string {
+  if (subagent.state === 'waiting') return waitingLabel(subagent)
+  const running = RUNNING_LABELS[subagent.state]
+  if (running) return running
+  const updated = Date.parse(subagent.updatedAt)
+  const ago = Number.isFinite(updated) ? formatAgo(updated, now) : ''
+  const prefix = FINISHED_LABELS[subagent.state]
+  if (!prefix) return ago || 'Idle'
   return ago ? `${prefix} ${ago}` : prefix
 }
 
-/** One-line name for a row: the task with whitespace collapsed, or the agent type when there is none. */
-export function lineageAgentName(agent: Pick<Agent, 'task' | 'cliType'>): string {
-  return agent.task.replace(/\s+/g, ' ').trim() || agent.cliType
+/** One-line name for a row: the title with whitespace collapsed. */
+export function lineageSubagentName(subagent: Pick<SubagentSummary, 'title'>): string {
+  return subagent.title.replace(/\s+/g, ' ').trim() || 'Subagent'
+}
+
+/** Provider and model a subagent was asked to run on, or null when it inherited its parent's. */
+export function lineageModelLabel(subagent: Pick<SubagentSummary, 'provider' | 'model'>): string | null {
+  const label = [subagent.provider, subagent.model].filter(Boolean).join(' · ')
+  return label || null
 }
