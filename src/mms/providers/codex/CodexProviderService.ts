@@ -435,6 +435,18 @@ class TurnRun {
     }
   }
 
+  /** A `spawnAgent` call is open: the item naming its helper can still arrive. */
+  hasPendingSpawn(): boolean {
+    return [...this.items.values()].some((item) => item.type === 'collabAgentToolCall' &&
+      (item as { tool?: string }).tool === 'spawnAgent' && (item as { status?: string }).status === 'inProgress')
+  }
+
+  /** A Codex turn of this run on the parent thread; its id also tells which run a late spawn item belongs to. */
+  startedTurn(turnId: string): void {
+    this.turnId ??= turnId
+    this.helpers.noteParentTurn(turnId)
+  }
+
   /** Adds a closing note to the reply (after the Codex text), streamed like any other text. */
   addNote(note: string): void {
     const id = `mousse-note-${this.order.length}`
@@ -451,7 +463,7 @@ class TurnRun {
   handle(notification: CodexNotification): void {
     const started = notificationParams(notification, 'turn/started')
     if (started) {
-      this.turnId ??= started.turn.id
+      this.startedTurn(started.turn.id)
       return
     }
     const completed = notificationParams(notification, 'turn/completed')
@@ -1004,14 +1016,30 @@ export class CodexProviderService {
     }
     const threadId = (notification.params as { threadId?: unknown } | undefined)?.threadId
     if (typeof threadId !== 'string') return
+    // A spawn item on a parent thread belongs to the run of the turn it came from, not to whichever
+    // run holds the thread now: a stopped run's late item must not join the next run, and a later
+    // run's item must not join a stopped tree. A notification without a turn id falls back to the
+    // thread alone (the live run, else the oldest stopped tree on it).
+    const params = notification.params as { turnId?: unknown }
+    const spawnTurn = (notification.method === 'item/started' || notification.method === 'item/completed') && typeof params.turnId === 'string' ? params.turnId : undefined
     const run = this.turns.get(threadId)
-    if (run) return run.handle(notification)
-    // A native helper's own thread: its turn belongs to the run that started it.
+    if (run) {
+      if (spawnTurn && !run.helpers.ownsTurn(spawnTurn)) {
+        const stopped = [...this.orphans].find((helpers) => helpers.parentThreadId === threadId && helpers.ownsTurn(spawnTurn))
+        if (stopped) return stopped.handle(notification)
+      }
+      return run.handle(notification)
+    }
+    // A native helper's own thread: its turn belongs to the run that started it. A helper thread
+    // belongs to one tree (thread ids are not reused), so its own spawn items need no turn match.
     const owner = [...this.turns.values()].find((candidate) => candidate.helpers.has(threadId))
     if (owner) return owner.helpers.handle(notification)
     // A stopped, failed or abandoned run's tree: its helper threads, and its parent thread for a
-    // spawn item that lands late. Kept for a bounded time (see `stopHelpers`).
-    const orphan = [...this.orphans].find((helpers) => helpers.owns(threadId))
+    // spawn item that lands late, matched by turn. Kept for a bounded time (see `stopHelpers`). A new
+    // turn on one of its helper threads (work a later run sent it) is not the tree's: it goes on to
+    // `noteStray`, where the run that names the helper claims it.
+    const orphan = [...this.orphans].find((helpers) =>
+      helpers.claims(notification) || (helpers.parentThreadId === threadId && (spawnTurn ? helpers.ownsTurn(spawnTurn) : true)))
     if (orphan) return orphan.handle(notification)
     this.noteStray(notification, threadId)
   }
@@ -1184,7 +1212,8 @@ export class CodexProviderService {
     // running yet: a helper whose turn has not started is interrupted when it does, a helper that
     // spawns another while its own interrupt is pending gets that one interrupted too, and a spawn
     // item that names a helper after Stop registers it into the tree and interrupts it.
-    if (!this.orphans.has(run.helpers)) {
+    // Not created for an empty tree with no spawn in flight: nothing could be named later.
+    if (!this.orphans.has(run.helpers) && (run.helpers.size() || run.hasPendingSpawn())) {
       this.orphans.add(run.helpers)
       setTimeout(() => this.orphans.delete(run.helpers), STOPPED_HELPER_TREE_MS).unref?.()
     }
@@ -1395,7 +1424,7 @@ export class CodexProviderService {
         // Recorded even when Stop wins the race below, so the interrupt still reaches the turn.
         const starting = conn.request('turn/start', { threadId: codexThreadId, input: nextInput, ...turnParams }).then(
           (started) => {
-            current.turnId ??= started.turn.id
+            current.startedTurn(started.turn.id)
             current.startInFlight = false
             current.wakeIdle()
             if (current.interruptRequested) this.sendInterrupt(current)

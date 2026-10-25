@@ -23,6 +23,7 @@ type HelperState = { turnId?: string; running: boolean; seenActive: boolean; int
  */
 export class NativeHelpers {
   private readonly helpers = new Map<string, HelperState>()
+  private readonly parentTurns = new Set<string>()
   private waiters: Array<{ resolve: () => void; reject: (error: unknown) => void }> = []
   private stopWith: ((threadId: string, turnId: string) => void) | undefined
   private closed: { reason: unknown } | undefined
@@ -39,9 +40,37 @@ export class NativeHelpers {
     return this.helpers.has(threadId)
   }
 
+  /** A turn of the parent's thread that belongs to this tree; spawn items on that thread are matched to it by turn id. */
+  noteParentTurn(turnId: string): void {
+    this.parentTurns.add(turnId)
+  }
+
+  ownsTurn(turnId: string): boolean {
+    return this.parentTurns.has(turnId)
+  }
+
+  /**
+   * Whether a stopped tree takes this notification of one of its helper threads. A stopped tree owns
+   * a helper thread only for the turn it saw (or the first turn, when none was seen yet): a new turn
+   * on that thread, such as later work a new run sends the helper, is not its own and must not be
+   * interrupted by it. A notification without a turn id is taken (the thread alone decides).
+   */
+  claims(notification: CodexNotification): boolean {
+    const params = notification.params as { threadId?: string; turnId?: string; turn?: { id?: string } } | undefined
+    const helper = params?.threadId ? this.helpers.get(params.threadId) : undefined
+    if (!helper) return false
+    const turnId = params?.turnId ?? params?.turn?.id
+    return !turnId || !helper.turnId || helper.turnId === turnId
+  }
+
   /** Whether `threadId` is the parent's thread or one of the helpers' threads. */
   owns(threadId: string): boolean {
     return threadId === this.parentThreadId || this.helpers.has(threadId)
+  }
+
+  /** Helpers named so far, running or not. */
+  size(): number {
+    return this.helpers.size
   }
 
   /** Helper threads still running. */

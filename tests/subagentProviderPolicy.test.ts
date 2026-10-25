@@ -196,8 +196,9 @@ describe('Codex children', () => {
   })
 
   /** An app-server stand-in: a signed-in account, instant turns, and the feature pages in `pages`. */
-  function server(options: { approvalRequests?: boolean; pages?: Feature[][]; mcpServers?: Record<string, { enabled?: boolean } | null>; layers?: Array<{ disabledReason: string | null; config?: unknown }>; configFails?: boolean; onTurnStart?: (send: (value: unknown) => void) => void; onInterrupt?: (send: (value: unknown) => void, params: Record<string, unknown>) => void } = {}) {
+  function server(options: { distinctTurns?: boolean; approvalRequests?: boolean; pages?: Feature[][]; mcpServers?: Record<string, { enabled?: boolean } | null>; layers?: Array<{ disabledReason: string | null; config?: unknown }>; configFails?: boolean; onTurnStart?: (send: (value: unknown) => void) => void; onInterrupt?: (send: (value: unknown) => void, params: Record<string, unknown>) => void } = {}) {
     const messages: Message[] = []
+    let turnCount = 0
     let latest: PassThrough | undefined
     const launch = (): CodexProcess => {
       const stdout = new PassThrough()
@@ -228,7 +229,7 @@ describe('Codex children', () => {
             : message.method === 'account/read' ? { result: { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, requiresOpenaiAuth: true } }
             : message.method === 'config/read' ? (options.configFails ? { error: { code: -32603, message: 'unreadable' } } : { result: { config: { mcp_servers: options.mcpServers ?? {} }, layers: options.layers ?? [] } })
             : ['thread/start', 'thread/resume', 'thread/fork'].includes(message.method) ? thread
-            : message.method === 'turn/start' ? { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
+            : message.method === 'turn/start' ? { result: { turn: { id: options.distinctTurns ? `turn-${++turnCount}` : 'turn-1', status: 'inProgress', error: null } } }
             : { result: {} }
           send({ id: message.id, ...reply })
           if (message.method === 'turn/interrupt') options.onInterrupt?.(send, message.params ?? {})
@@ -687,31 +688,41 @@ describe('Codex children', () => {
 
     describe('a spawn report that lands after Stop, a failure or a cap', () => {
       const LATE = 'helper-late'
-      const lateSpawn = (kind: 'subAgentActivity' | 'collabAgentToolCall' = 'collabAgentToolCall') => ({
+      /** The parent's `spawnAgent` call is open: the item naming its helper has not arrived. */
+      const pendingSpawn = (turnId = 'turn-1') => ({
+        method: 'item/started',
+        params: { threadId: PARENT, turnId, item: { type: 'collabAgentToolCall', id: 'spawn-late', tool: 'spawnAgent', status: 'inProgress', receiverThreadIds: [], agentsStates: {} } }
+      })
+      const lateSpawn = (kind: 'subAgentActivity' | 'collabAgentToolCall' = 'collabAgentToolCall', turnId = 'turn-1', helper = LATE) => ({
         method: 'item/completed',
         params: {
           threadId: PARENT,
-          turnId: 'turn-1',
+          turnId,
           item:
             kind === 'subAgentActivity'
-              ? { type: 'subAgentActivity', id: 'spawn-late', kind: 'started', agentThreadId: LATE }
-              : { type: 'collabAgentToolCall', id: 'spawn-late', tool: 'spawnAgent', status: 'completed', receiverThreadIds: [LATE], agentsStates: { [LATE]: { status: 'running', message: null } } }
+              ? { type: 'subAgentActivity', id: 'spawn-late', kind: 'started', agentThreadId: helper }
+              : { type: 'collabAgentToolCall', id: 'spawn-late', tool: 'spawnAgent', status: 'completed', receiverThreadIds: [helper], agentsStates: { [helper]: { status: 'running', message: null } } }
         }
       })
-      const lateTurn = { method: 'turn/started', params: { threadId: LATE, turn: { id: 'late-turn', status: 'inProgress', error: null } } }
-      const started = (s: ReturnType<typeof server>) => vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(1))
+      const turnStarted = (threadId: string, id: string) => ({ method: 'turn/started', params: { threadId, turn: { id, status: 'inProgress', error: null } } })
+      const lateTurn = turnStarted(LATE, 'late-turn')
+      const started = (s: ReturnType<typeof server>, count = 1) => vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(count))
+      type Internals = { turns: Map<string, { helpers: { has(id: string): boolean } }>; strays: Map<string, unknown>; orphans: Set<{ has(id: string): boolean; ownsTurn(id: string): boolean }> }
+      /** The parent's turn is answered when it is interrupted, so a stopped run is released at once. */
+      const answerParent = (send: (value: unknown) => void, params: Record<string, unknown>) => params.threadId === PARENT && send(completed(PARENT, params.turnId as string, 'interrupted'))
 
       it('Stop while the spawn item is pending: the helper it names is registered and interrupted', async () => {
         // The parent's own interrupt is not answered, so the stopped run is still registered while the item lands.
-        const s = server({ onTurnStart: () => undefined, onInterrupt: (send, params) => params.threadId === LATE && send(completed(LATE, 'late-turn', 'interrupted')) })
+        const s = server({ onTurnStart: (send) => setImmediate(() => send(pendingSpawn())), onInterrupt: (send, params) => params.threadId === LATE && send(completed(LATE, 'late-turn', 'interrupted')) })
         const service = create(s)
         const stop = new AbortController()
         const running = chat(service, { child: SHARED, signal: stop.signal })
         running.catch(() => undefined)
         await started(s)
+        await new Promise((done) => setTimeout(done, 50))
         stop.abort(new Error('Stopped'))
         await expect(running).rejects.toThrow('Stopped')
-        const internals = service as unknown as { turns: Map<string, unknown>; strays: Map<string, unknown> }
+        const internals = service as unknown as Internals
         expect(internals.turns.size).toBe(1)
 
         // The muted run still follows the spawn item.
@@ -727,15 +738,16 @@ describe('Codex children', () => {
       })
 
       it('the run was already released: the item still registers the helper and it is interrupted when its turn starts', async () => {
-        const s = server({ onTurnStart: () => undefined, onInterrupt: (send, params) => params.threadId === PARENT && send(completed(PARENT, 'turn-1', 'interrupted')) })
+        const s = server({ onTurnStart: (send) => setImmediate(() => send(pendingSpawn())), onInterrupt: answerParent })
         const service = create(s)
         const stop = new AbortController()
         const running = chat(service, { child: SHARED, signal: stop.signal })
         running.catch(() => undefined)
         await started(s)
+        await new Promise((done) => setTimeout(done, 50))
         stop.abort(new Error('Stopped'))
         await expect(running).rejects.toThrow('Stopped')
-        const turns = (service as unknown as { turns: Map<string, unknown> }).turns
+        const turns = (service as unknown as Internals).turns
         await vi.waitFor(() => expect(turns.size).toBe(0))
         s.emit(lateSpawn())
         s.emit(lateTurn)
@@ -743,12 +755,134 @@ describe('Codex children', () => {
       })
 
       it('a failed turn: a spawn item reported afterwards is interrupted too', async () => {
-        const s = server({ onTurnStart: (send) => setImmediate(() => send(completed(PARENT, 'turn-1', 'failed'))) })
+        const s = server({ onTurnStart: (send) => setImmediate(() => { send(pendingSpawn()); send(completed(PARENT, 'turn-1', 'failed')) }) })
         const service = create(s)
         await expect(chat(service, { child: SHARED })).rejects.toThrow()
         s.emit(lateSpawn())
         s.emit(lateTurn)
         await vi.waitFor(() => expect(interrupts(s)).toContain(`${LATE}/late-turn`))
+      })
+
+      it('an empty tree with no spawn in flight leaves no routing behind', async () => {
+        const s = server({ onTurnStart: () => undefined, onInterrupt: answerParent })
+        const service = create(s)
+        const stop = new AbortController()
+        const running = chat(service, { child: SHARED, signal: stop.signal })
+        running.catch(() => undefined)
+        await started(s)
+        stop.abort(new Error('Stopped'))
+        await expect(running).rejects.toThrow('Stopped')
+        expect((service as unknown as Internals).orphans.size).toBe(0)
+      })
+
+      describe('consecutive runs on one parent thread (late reports are matched by turn)', () => {
+        const LATE_A = 'helper-a'
+        const LATE_B = 'helper-b'
+        /** Run A (turn-1) has a spawn in flight and is stopped; run B (turn-2) then starts on the same parent thread. */
+        const stoppedThenNext = async (secondTurn: (send: (value: unknown) => void) => void) => {
+          let turns = 0
+          const s = server({
+            distinctTurns: true,
+            onTurnStart: (send) => {
+              turns += 1
+              if (turns === 1) setImmediate(() => send(pendingSpawn('turn-1')))
+              else secondTurn(send)
+            },
+            onInterrupt: answerParent
+          })
+          const service = create(s)
+          const stopA = new AbortController()
+          const runA = chat(service, { child: SHARED, signal: stopA.signal })
+          runA.catch(() => undefined)
+          await started(s)
+          await new Promise((done) => setTimeout(done, 50))
+          stopA.abort(new Error('Stopped'))
+          await expect(runA).rejects.toThrow('Stopped')
+          await vi.waitFor(() => expect((service as unknown as Internals).turns.size).toBe(0))
+          return { s, service, internals: service as unknown as Internals }
+        }
+
+        it("a stopped run's delayed spawn does not join the run that started after it, and is interrupted", async () => {
+          const { s, service, internals } = await stoppedThenNext(() => undefined)
+          const runB = chat(service, { child: SHARED })
+          await started(s, 2)
+          s.emit(lateSpawn('collabAgentToolCall', 'turn-1', LATE_A))
+          s.emit(turnStarted(LATE_A, 'a-turn'))
+          await vi.waitFor(() => expect(interrupts(s)).toContain(`${LATE_A}/a-turn`))
+          expect(internals.turns.get(PARENT)!.helpers.has(LATE_A)).toBe(false)
+          // B is unaffected: its own turn ends it, it does not wait for A's helper.
+          s.emit(completed(PARENT, 'turn-2'))
+          await expect(runB).resolves.toMatchObject({ codexThreadId: PARENT })
+        })
+
+        it("a later run's delayed spawn does not join the earlier stopped tree and is not interrupted by it", async () => {
+          const { s, service, internals } = await stoppedThenNext((send) => setImmediate(() => send(completed(PARENT, 'turn-2'))))
+          await chat(service, { child: SHARED })
+          expect(interrupts(s)).toEqual([`${PARENT}/turn-1`])
+          const stoppedTree = [...internals.orphans].find((tree) => tree.ownsTurn('turn-1'))!
+          expect(stoppedTree.ownsTurn('turn-2')).toBe(false)
+          s.emit(lateSpawn('collabAgentToolCall', 'turn-2', LATE_B))
+          s.emit(turnStarted(LATE_B, 'b-turn'))
+          await new Promise((done) => setTimeout(done, 80))
+          expect(interrupts(s)).toEqual([`${PARENT}/turn-1`])
+          expect(stoppedTree.has(LATE_B)).toBe(false)
+        })
+
+        it("a later stopped run's own delayed spawn joins its own tree", async () => {
+          const { s, service } = await stoppedThenNext((send) => setImmediate(() => send(pendingSpawn('turn-2'))))
+          const stopB = new AbortController()
+          const runB = chat(service, { child: SHARED, signal: stopB.signal })
+          runB.catch(() => undefined)
+          await started(s, 2)
+          await new Promise((done) => setTimeout(done, 50))
+          stopB.abort(new Error('Stopped'))
+          await expect(runB).rejects.toThrow('Stopped')
+          const orphans = [...(service as unknown as Internals).orphans]
+          expect(orphans).toHaveLength(2)
+          s.emit(lateSpawn('collabAgentToolCall', 'turn-2', LATE_B))
+          s.emit(lateSpawn('collabAgentToolCall', 'turn-1', LATE_A))
+          await vi.waitFor(() => {
+            expect(orphans.find((tree) => tree.ownsTurn('turn-2'))!.has(LATE_B)).toBe(true)
+            expect(orphans.find((tree) => tree.ownsTurn('turn-1'))!.has(LATE_A)).toBe(true)
+          })
+          expect(orphans.find((tree) => tree.ownsTurn('turn-2'))!.has(LATE_A)).toBe(false)
+          expect(orphans.find((tree) => tree.ownsTurn('turn-1'))!.has(LATE_B)).toBe(false)
+        })
+
+        it('a stopped tree does not take a new turn on a helper thread that a later run sends more work; the run waits for it', async () => {
+          // Run A: a helper with a running turn; Stop. Run B: the parent sends that helper more work, and the
+          // helper's new turn starts before the item that names it reaches the parent's thread.
+          let turns = 0
+          const s = server({
+            distinctTurns: true,
+            onTurnStart: (send) => {
+              turns += 1
+              if (turns === 1) parentCompletesFirst('subAgentActivity')(send)
+              else
+                setImmediate(() => {
+                  send(turnStarted(HELPER, 'h-turn-2'))
+                  send({ method: 'item/completed', params: { threadId: PARENT, turnId: 'turn-2', item: { type: 'subAgentActivity', id: 'interact-1', kind: 'interacted', agentThreadId: HELPER } } })
+                  send(completed(PARENT, 'turn-2'))
+                })
+            },
+            onInterrupt: answerParent
+          })
+          const service = create(s)
+          const stopA = new AbortController()
+          const runA = chat(service, { child: SHARED, signal: stopA.signal })
+          runA.catch(() => undefined)
+          expect(await state(runA)).toBe('pending')
+          stopA.abort(new Error('Stopped'))
+          await expect(runA).rejects.toThrow('Stopped')
+          await vi.waitFor(() => expect(interrupts(s)).toEqual([`${HELPER}/h-turn-1`]))
+
+          const runB = chat(service, { child: SHARED })
+          // B's parent turn is over, and only the helper's new turn holds it open.
+          expect(await state(runB)).toBe('pending')
+          expect(interrupts(s)).toEqual([`${HELPER}/h-turn-1`])
+          s.emit(completed(HELPER, 'h-turn-2'))
+          await expect(runB).resolves.toMatchObject({ codexThreadId: PARENT })
+        })
       })
     })
 
