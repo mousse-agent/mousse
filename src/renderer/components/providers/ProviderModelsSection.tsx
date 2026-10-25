@@ -13,7 +13,12 @@ type ModelGroup = 'favorite' | 'visible' | 'hidden'
 /** T3 Code's grouping: favorites, then the rest, then models hidden from the picker. */
 export function modelGroupOf(model: Pick<InstanceModel, 'favorite' | 'hidden' | 'source'>): ModelGroup {
   if (model.favorite) return 'favorite'
-  return model.source !== 'custom' && model.hidden ? 'hidden' : 'visible'
+  return isHiddenInPicker(model) ? 'hidden' : 'visible'
+}
+
+/** Hidden from the picker; custom models are always shown. */
+export function isHiddenInPicker(model: Pick<InstanceModel, 'hidden' | 'source'>): boolean {
+  return model.source !== 'custom' && model.hidden
 }
 
 /** The snapshot's models (already in the saved order) grouped for display. */
@@ -144,8 +149,9 @@ export function ProviderModelsSection({
           const previous = visible[index - 1]
           const next = visible[index + 1]
           const startsGroup = previous === undefined || modelGroupOf(previous) !== group
-          const isHidden = group === 'hidden'
           const custom = model.source === 'custom'
+          // A hidden favorite stays in Favorites, so its own flag says whether it is hidden.
+          const isHidden = isHiddenInPicker(model)
           const capabilities = describeCapabilities(model.capabilities)
           return (
             <div key={`${model.source}:${model.id}`}>
@@ -172,7 +178,7 @@ export function ProviderModelsSection({
                   <span className="prov-model-caps">{capabilities}</span>
                 </span>
                 <span className="prov-model-actions">
-                  {!isHidden && !filtering && (
+                  {group !== 'hidden' && !filtering && (
                     <>
                       <button
                         type="button"

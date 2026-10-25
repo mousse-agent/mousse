@@ -5,7 +5,7 @@ import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/sta
 import type { ProviderLoginOption } from '../src/shared/providerAuth'
 import { AgentConnectStep, addChoices } from '../src/renderer/components/providers/AddProviderDialog'
 import { AccountRow, BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
-import { displayModels, movedOrder } from '../src/renderer/components/providers/ProviderModelsSection'
+import { ProviderModelsSection, displayModels, movedOrder } from '../src/renderer/components/providers/ProviderModelsSection'
 import { AgentEditor, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow } from '../src/renderer/components/providers/parts'
 import { offersRedirectPaste, refusedText } from '../src/renderer/components/providers/SignInDialog'
@@ -280,6 +280,22 @@ describe('models section order', () => {
     expect(movedOrder(display, 'd', -1)).toEqual(['b', 'e', 'd', 'a', 'c'])
     expect(movedOrder(display, 'a', -1)).toBeNull()
     expect(movedOrder(display, 'c', -1)).toBeNull()
+  })
+})
+
+describe('models section switches', () => {
+  const section = (entries: ReturnType<typeof model>[]) =>
+    renderToStaticMarkup(createElement(ProviderModelsSection, { snapshot: snapshot({ models: { entries, source: 'live' } }), allowCustom: true, onSave: noop, onRefresh: noop }))
+  const shown = (html: string, label: string) => {
+    const match = html.match(new RegExp(`<button[^>]*role="switch"[^>]*aria-checked="(true|false)"[^>]*aria-label="Show ${label} in the model picker"`))
+    return match?.[1]
+  }
+
+  it('a hidden favorite reads as hidden, so its switch shows it', () => {
+    const html = section([model('a', { label: 'Alpha', favorite: true, hidden: true }), model('b', { label: 'Beta', favorite: true }), model('c', { label: 'Gamma', hidden: true })])
+    expect(shown(html, 'Alpha')).toBe('false')
+    expect(shown(html, 'Beta')).toBe('true')
+    expect(shown(html, 'Gamma')).toBe('false')
   })
 })
 
