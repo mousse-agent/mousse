@@ -26,6 +26,7 @@ import { ComposerQuestionModal } from './ComposerQuestionModal'
 import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile } from '../utils/imageAttachments'
 import { stripComposerTransportMarkers } from './QueuedMessages'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
+import { SubagentParentBar } from './SubagentParentBar'
 import { mousseToUIMessages, chatStatusFromPhase } from '../chat/adapters/mousseToUI'
 import {
   findQuickActionCardForApproval,
@@ -843,6 +844,7 @@ export function OrchestratorChat() {
 
   return (
     <div className={`chat${emptyThread ? ' chat--empty' : ''}`} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+      <SubagentParentBar />
       <MousseAgentChatShell
         key={activeThreadId ?? 'no-thread'}
         threadId={activeThreadId}

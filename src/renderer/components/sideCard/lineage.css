@@ -1,4 +1,4 @@
-/* Lineage: one quiet line per agent the thread started. */
+/* Lineage: one quiet row per subagent the thread started. */
 
 .lineage-collapsed {
   padding-block: 9px;
@@ -26,8 +26,8 @@
   gap: 8px;
   width: 100%;
   min-width: 0;
-  height: 26px;
-  padding: 0 6px;
+  min-height: 26px;
+  padding: 3px 6px;
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -37,7 +37,11 @@
   text-align: left;
 }
 
-/* Only "Show more" is a button today; the Lineage rewrite makes agent rows buttons again and uses these rules. */
+/* Rows and "Show more" are buttons: a row opens the subagent's thread. */
+.lineage-item {
+  position: relative;
+}
+
 button.lineage-row {
   cursor: pointer;
 }
@@ -55,12 +59,25 @@ button.lineage-row:focus-visible {
   color: var(--text-primary);
 }
 
-.lineage-name {
+.lineage-text {
+  display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.lineage-name,
+.lineage-model {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.lineage-model {
+  color: var(--ui-faint);
+  font-size: 11px;
+  line-height: 1.3;
 }
 
 .lineage-status {
@@ -68,6 +85,44 @@ button.lineage-row:focus-visible {
   color: var(--ui-faint);
   font-size: 11px;
   white-space: nowrap;
+}
+
+/* Stop takes the place of the status while the pointer or focus is on a running row. */
+.lineage-stop {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: var(--ui-hover);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.lineage-item:hover .lineage-stop,
+.lineage-item:focus-within .lineage-stop {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.lineage-item:hover .lineage-status,
+.lineage-item:focus-within .lineage-status {
+  visibility: hidden;
+}
+
+.lineage-stop:hover {
+  background: var(--ui-pressed);
+}
+
+.lineage-stop:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
 }
 
 .lineage-more {
