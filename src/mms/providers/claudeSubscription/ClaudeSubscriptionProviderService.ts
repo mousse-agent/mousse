@@ -111,7 +111,11 @@ export type ClaudeSubscriptionChatInput = {
   /** A drained steer was pushed to Claude. */
   onSteer?: (text: string) => void
   /** A drained steer could not be pushed because the turn's result had already arrived: it is the next turn. */
-  returnSteer?: (text: string) => void
+  returnSteer?: (text: string, token?: string) => void
+  /** A drained steer was pushed to Claude: its token is spent. */
+  steerTaken?: (token?: string) => void
+  /** `drainSteer` with a token that `returnSteer` gets back, so several steers in flight are returned each with its own rows. */
+  drainSteerEntry?: () => { text: string; token: string } | undefined
   onTool?: (event: {
     phase: 'start' | 'complete'
     callId: string
@@ -1240,6 +1244,9 @@ export class ClaudeSubscriptionProviderService {
     this.interruptedSessions.delete(input.threadId)
     // A turn that finished but was never committed still consumed its notifications.
     this.commitObligations(input.threadId)
+    // What this turn leaves behind is its own: a turn that fails before pushing leaves nothing to continue from.
+    const previous = this.live.get(input.threadId)
+    if (previous && !input.continuation) previous.meta.pushedFailed = false
     const instanceId = input.instanceId ?? CLAUDE_INSTANCE_ID
     // A native session belongs to one instance; another instance starts fresh.
     const stored = this.settings.sessions?.[input.threadId]
@@ -1262,7 +1269,8 @@ export class ClaudeSubscriptionProviderService {
     const collectSteer = () => {
       if (controller.signal.aborted) return
       if (liveRun && (liveRun.settled || liveRun.abandoned || liveRun.resultSeen)) return
-      const steer = input.drainSteer?.()?.trim()
+      const drained = input.drainSteerEntry ? input.drainSteerEntry() : undefined
+      const steer = (drained ? drained.text : input.drainSteer?.())?.trim()
       if (!steer) return
       if (live && liveRun) {
         // A live turn is steered without interrupting it: the text joins the stream as an immediate
@@ -1270,9 +1278,10 @@ export class ClaudeSubscriptionProviderService {
         this.questions.autoRejectPendingForThread(input.threadId)
         void live.steer(liveRun, steer).then((pushed) => {
           if (pushed) {
+            input.steerTaken?.(drained?.token)
             input.onSteer?.(steer)
             frames.breakParagraph()
-          } else input.returnSteer?.(steer)
+          } else input.returnSteer?.(steer, drained?.token)
         }, () => cancel())
         return
       }

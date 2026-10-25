@@ -16,6 +16,7 @@ import {
 import { LiveSession, type LiveTimings } from '../src/mms/providers/claudeSubscription/liveSession'
 import { FakeClaudeCli, notification, resultFrame, roster, SESSION, textDelta, toolResult, toolStart } from './run/fakeClaudeCli'
 
+const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 const homes: string[] = []
 afterEach(() => {
   vi.useRealTimers()
@@ -33,7 +34,7 @@ function fixture(timings: Partial<LiveTimings> = {}, cli = new FakeClaudeCli()) 
   const questions = new UserQuestionService()
   const service = new ClaudeSubscriptionProviderService(home, questions, {
     query: cli.query,
-    live: timings,
+    live: { noticeDelayMs: 10, ...timings },
     runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
   })
   const host = { backgroundWork: vi.fn<(threadId: string, active: boolean) => void>(), continuationStarted: vi.fn<NonNullable<ClaudeLiveHost['continuationStarted']>>(), notice: vi.fn<NonNullable<ClaudeLiveHost['notice']>>() }
@@ -416,14 +417,16 @@ describe('background work', () => {
     expect(denied).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } })
   })
 
-  it('without a host a wake is stopped the moment it starts, so no hidden turn runs, and its task is done', async () => {
+  it('without a host a wake is stopped the moment it starts, so no hidden turn runs, and nothing it would have read is discharged', async () => {
     const f = fixture()
     f.service.setLiveHost(null)
     await withHelper(f)
     const process = f.cli.last
     expect(f.service.hasBackgroundWork('thread')).toBe(true)
     process.emit(notification('bash-1'))
-    await vi.waitFor(() => expect(f.service.hasBackgroundWork('thread')).toBe(false))
+    await later(30)
+    // Nobody read the report, so the task is still owed (the idle caps end it); a discard never discharges.
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
     expect(process.interrupts).toBe(0)
     // Claude starts its own turn; nobody could read it, so it is interrupted at its first frame.
     process.emit(textDelta('hidden work'))
@@ -612,7 +615,6 @@ describe('result routing and steering edge cases', () => {
       process.answer(String(message.uuid), 'started')
     }
   }
-  const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
   /** One finished turn that left a shell running; the process then answers nothing on its own. */
   const withHelperTurn = async (f: ReturnType<typeof fixture>) => {
     helper(f)
@@ -683,7 +685,7 @@ describe('result routing and steering edge cases', () => {
     open()
     expect(await turn).toBe('answer')
     expect(process.inputs).toHaveLength(1)
-    expect(returnSteer).toHaveBeenCalledExactlyOnceWith('late steer')
+    expect(returnSteer).toHaveBeenCalledExactlyOnceWith('late steer', undefined)
     expect(onSteer).not.toHaveBeenCalled()
   })
 
@@ -776,7 +778,7 @@ describe('result routing and steering edge cases', () => {
     await expect(second).rejects.toThrow()
     f.service.commitInterrupted('thread', 'h')
     expect(process.interruptOptions).toEqual([{ cancelQueued: true }])
-    expect(f.host.notice).toHaveBeenCalledExactlyOnceWith('thread', expect.stringContaining('may not have been delivered'))
+    await vi.waitFor(() => expect(f.host.notice).toHaveBeenCalledExactlyOnceWith('thread', expect.stringContaining('may not have been delivered')))
     f.cli.reply = (message, self) => {
       self.emit(resultFrame({ uuids: [self.uuid(1)], terminalReason: 'aborted_streaming' }))
       self.answer(String(message.uuid), 'third')
@@ -784,6 +786,128 @@ describe('result routing and steering edge cases', () => {
     await f.turn({ history: 'h' }, 'h')
     expect(f.service.hasBackgroundWork('thread')).toBe(true)
     expect(f.host.continuationStarted).not.toHaveBeenCalled()
+  })
+
+  it('a discarded wake never discharges anything, not even what a cut-off turn left for it', async () => {
+    const f = fixture()
+    const process = await cutOffAfterNotification(f)
+    f.service.setLiveHost(null)
+    process.emit(resultFrame({ uuids: [process.uuid(1)], terminalReason: 'aborted_streaming' }))
+    // The wake Claude owes for the notification starts; there is no host to run it, so it is stopped.
+    process.emit(textDelta('hidden work'))
+    await vi.waitFor(() => expect(process.interrupts).toBe(2))
+    process.emit(resultFrame({ text: 'hidden work', origin: 'task-notification' }))
+    await later(30)
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    await vi.waitFor(() => expect(f.host.notice).not.toHaveBeenCalled())
+  })
+
+  it('a steer still queued when a steered continuation is cancelled is cancelled with it, or stays owned', async () => {
+    for (const receipts of [true, false]) {
+      const f = fixture()
+      await withHelperTurn(f)
+      const process = f.cli.last
+      process.receipts = receipts
+      process.emit(notification('bash-1'), textDelta('reading the report'))
+      await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+      const abort = new AbortController()
+      const continuation = f.service.chat({
+        threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined, signal: abort.signal,
+        drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('queued steer').mockReturnValue(undefined)
+      })
+      // The steer reaches Claude's queue; Claude has not started it.
+      await inputs(f.cli, 2)
+      const steer = process.uuid(1)
+      abort.abort()
+      await expect(continuation).rejects.toThrow()
+      await vi.waitFor(() => expect(process.interrupts).toBe(1))
+      // Claude is asked to cancel it; a Claude that cannot says so, and the cancelled wake keeps owning it.
+      expect(process.interruptOptions).toEqual([{ cancelQueued: true }])
+      const session = (f.service as unknown as { live: Map<string, { owedResults: number }> }).live.get('thread')!
+      if (receipts) {
+        expect(process.queued).toEqual([])
+        expect(session.owedResults).toBe(0)
+      } else {
+        expect(session.owedResults).toBe(1)
+        // The steer's own result belongs to the cancelled wake, not to the next turn.
+        f.service.commitInterrupted('thread', '')
+        f.cli.reply = undefined
+        let done = false
+        const next = f.chat({ history: '' }).then((text) => { done = true; return text })
+        await inputs(f.cli, 3)
+        process.emit(resultFrame({ uuids: [steer], text: 'stray' }))
+        await later(30)
+        expect(done).toBe(false)
+        process.answer(process.uuid(2), 'next')
+        expect(await next).toBe('next')
+      }
+    }
+  })
+
+  it('a turn that failed before pushing leaves no boundary: the next request does not reuse the process', async () => {
+    const f = fixture()
+    helper(f)
+    await f.turn({ history: 'h' }, 'h')
+    f.cli.reply = (message, process) => process.emit(resultFrame({ uuids: [String(message.uuid)], error: 'rate limit' }))
+    await expect(f.chat({ history: 'h' })).rejects.toThrow('rate limit')
+    f.service.commitFailed('thread', 'h + A')
+    // Turn B fails before it pushes anything (an image Claude cannot take).
+    await expect(f.chat({ history: 'h + A', images: [{ name: 'x.bmp', mimeType: 'image/bmp', data: 'AAAA' }] as never })).rejects.toThrow('Unsupported Claude image')
+    f.service.commitFailed('thread', 'h + A + B')
+    // Claude never saw B, so a request that carries B must not continue on the process.
+    await expect(f.chat({ history: 'h + A + B' })).rejects.toMatchObject({ message: expect.stringContaining('conversation changed') })
+  })
+
+  it('a message pushed before the wake that folds the cut-off notification in sees it, and commits it', async () => {
+    const f = fixture()
+    const process = await cutOffAfterNotification(f)
+    f.cli.reply = undefined
+    const mine = f.chat({ prompt: 'mine', history: 'h' })
+    await inputs(f.cli, 3)
+    process.emit(resultFrame({ uuids: [process.uuid(1)], terminalReason: 'aborted_streaming' }))
+    // The wake Claude owed folds the message in.
+    process.emit(textDelta('report and answer', process.uuid(2)), resultFrame({ uuids: [process.uuid(2)], text: 'report and answer', origin: 'task-notification' }))
+    expect(await mine).toBe('report and answer')
+    f.service.commitConversation('thread', 'h')
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+  })
+
+  it('Stop right after a cancel that dropped queued messages posts no note: the helpers it ended have no result to miss', async () => {
+    const f = fixture()
+    helper(f)
+    await f.turn({ history: 'h' }, 'h')
+    const process = f.cli.last
+    f.cli.reply = undefined
+    const abort = new AbortController()
+    const second = f.chat({
+      history: 'h',
+      signal: abort.signal,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('queued steer').mockReturnValue(undefined)
+    })
+    await inputs(f.cli, 2)
+    process.emit(textDelta('working', process.uuid(1)), notification('bash-1'))
+    await inputs(f.cli, 3)
+    abort.abort()
+    await expect(second).rejects.toThrow()
+    expect(f.service.stopThread('thread')).toBe('stopped')
+    await later(60)
+    expect(f.host.notice).not.toHaveBeenCalled()
+  })
+
+  it('tells the drain token to the provider when a steer is pushed, so the drain is never restored', async () => {
+    const f = fixture()
+    silent(f.cli)
+    const steerTaken = vi.fn()
+    const turn = f.chat({
+      drainSteer: () => undefined,
+      drainSteerEntry: vi.fn<() => { text: string; token: string } | undefined>().mockReturnValueOnce({ text: 'steer', token: 'drain-1' }).mockReturnValue(undefined),
+      steerTaken
+    })
+    await inputs(f.cli, 2)
+    expect(steerTaken).toHaveBeenCalledExactlyOnceWith('drain-1')
+    const process = f.cli.last
+    process.emit(resultFrame({ uuids: [process.uuid(0), process.uuid(1)], text: 'ok' }))
+    await turn
   })
 
   it('a steered continuation ignores an abort result that echoes no id and ends at its own result', async () => {
@@ -812,7 +936,7 @@ describe('result routing and steering edge cases', () => {
     await withHelperTurn(f)
     const process = f.cli.last
     process.emit(notification('bash-1'))
-    await vi.waitFor(() => expect(f.service.hasBackgroundWork('thread')).toBe(false))
+    await later(30)
     f.cli.reply = undefined
     const mine = f.chat({ prompt: 'mine', history: '' })
     await inputs(f.cli, 2)
@@ -823,6 +947,7 @@ describe('result routing and steering edge cases', () => {
     process.emit(textDelta('answer to mine', process.uuid(1)), resultFrame({ uuids: [process.uuid(1)], text: 'answer to mine', origin: 'task-notification' }))
     expect(await mine).toBe('answer to mine')
     expect(process.interrupts).toBe(0)
+    f.service.commitConversation('thread', '')
     // The abandoned wake is over: the next turn's unstamped frames are its own.
     f.cli.reply = (message, self) => self.answer(String(message.uuid), 'next', ['n', 'ext'])
     expect(await f.turn({ history: '' })).toBe('next')

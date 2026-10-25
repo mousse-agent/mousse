@@ -36,6 +36,8 @@ export interface LiveTimings {
   maxSessions: number
   wakeDeadlineMs: number
   backgroundMoveMs: number
+  /** How long a "result may not have arrived" note waits, so a Stop that follows the cancel can drop it. */
+  noticeDelayMs: number
 }
 
 export const DEFAULT_LIVE_TIMINGS: LiveTimings = {
@@ -44,7 +46,8 @@ export const DEFAULT_LIVE_TIMINGS: LiveTimings = {
   maxPinMs: LIVE_MAX_PIN_MS,
   maxSessions: LIVE_MAX_SESSIONS,
   wakeDeadlineMs: WAKE_TURN_START_DEADLINE_MS,
-  backgroundMoveMs: STEER_BACKGROUND_MOVE_MS
+  backgroundMoveMs: STEER_BACKGROUND_MOVE_MS,
+  noticeDelayMs: 1_000
 }
 
 /** The input stream of a live query. It ends only when closed. */
@@ -181,6 +184,11 @@ export class BackgroundObligations {
         count++
       }
     return count
+  }
+
+  /** A turn whose result came from the wake that folded its message in saw the notifications a cut-off turn left: they are its to commit. */
+  adoptCarried(owner: unknown): void {
+    this.reassign(CARRIED, owner)
   }
 
   /** The tasks a cut-off turn left for the wake turn Claude is expected to start. */
@@ -338,6 +346,7 @@ export class LiveSession<Turn = unknown> {
   private cursor: LiveRun | undefined
   /** Turns about to use the session (see `reserve`). */
   private reserved = 0
+  private readonly noticeTimers = new Set<ReturnType<typeof setTimeout>>()
   private idleTimer: ReturnType<typeof setTimeout> | undefined
   private wakeTimer: ReturnType<typeof setTimeout> | undefined
   private pinnedSince: number | undefined
@@ -413,15 +422,16 @@ export class LiveSession<Turn = unknown> {
   }
 
   /**
-   * The host did not run the turn Claude started on its own: the tasks it announced are done (and only
-   * those: what a cut-off turn left stays as it was), and a turn still in flight is interrupted, since
-   * nobody would see it.
+   * The host did not run the turn Claude started on its own, and a turn still in flight is interrupted,
+   * since nobody would see it. Nothing it was to read is discharged: no one saw the report, so the tasks
+   * (those it announced and any a cut-off turn had left it) stay owed under the idle caps, and the
+   * thread is told. A discarded wake never commits anything.
    */
   discardContinuation(run: LiveRun): void {
     const index = this.unclaimed.indexOf(run)
     if (index >= 0) this.unclaimed.splice(index, 1)
-    this.obligations.commit(run)
-    this.backgroundChanged()
+    if (this.obligations.release(run, 'lost') > 0)
+      this.hooks.notice?.('A background helper finished, but its result could not be read; it may not have been delivered.')
     if (run.settled || run.abandoned) return
     // The turn may not have begun yet (the notification comes first): it stays the frames' target, so
     // everything it says is dropped, and it is interrupted as soon as its first frame shows it started.
@@ -515,16 +525,22 @@ export class LiveSession<Turn = unknown> {
     // so what the run had read may never be delivered (LOST); a plain interrupt keeps them queued, and
     // Claude starts a wake turn for them (CARRIED).
     const unnamed = [...run.owned].some((id) => !run.seen.has(id))
-    const cancel = unnamed && run.kind === 'prompt'
+    const cancel = unnamed
     const left = this.obligations.release(run, cancel ? 'lost' : 'carried')
     if (cancel && left > 0)
-      this.hooks.notice?.('A background helper finished while a message was being cancelled; its result may not have been delivered.')
+      this.noticeLater('A background helper finished while a message was being cancelled; its result may not have been delivered.')
     const query = this.query
     // A turn that pushed nothing has nothing in flight; one that did, or a wake, is interrupted. An
     // interrupt of an idle query is harmless, and one that fails leaves the next turn to find out.
     if (query && !this.dead && (run.ids.size > 0 || run.kind === 'continuation')) void this.interruptFor(run, query, cancel)
-    // A run that was never answered keeps owning its ids until the result the interrupt produces.
-    if (run.owned.size === 0 || run.kind === 'continuation') this.finishCancelled(run)
+    // A run that was never answered keeps owning its ids until each has its result or was cancelled; a
+    // wake that owns a steer keeps its place among the runs for that, whatever started it.
+    if (run.owned.size === 0) this.finishCancelled(run)
+    else if (run === this.continuation) {
+      this.continuation = undefined
+      this.clearWake()
+      if (!this.runs.includes(run)) this.runs.push(run)
+    }
   }
 
   /**
@@ -550,6 +566,19 @@ export class LiveSession<Turn = unknown> {
       return
     }
     if (run.kind === 'prompt' && !run.started && !run.settled && run.owned.size > 0 && this.obligations.size === 0) this.close('closed')
+  }
+
+  /**
+   * The note waits a moment: a Stop closes the process right after the cancel it causes, and a helper
+   * that Stop ended has no result to miss. If the process is gone by then, nothing is said.
+   */
+  private noticeLater(text: string): void {
+    const timer = setTimeout(() => {
+      this.noticeTimers.delete(timer)
+      if (!this.dead) this.hooks.notice?.(text)
+    }, this.timings.noticeDelayMs)
+    timer.unref?.()
+    this.noticeTimers.add(timer)
   }
 
   private finishCancelled(run: LiveRun): void {
@@ -744,7 +773,9 @@ export class LiveSession<Turn = unknown> {
       return void target.deliver(message)
     }
     // A wake that folded this run's prompt in consumed the task notifications too, and the
-    // continuation it opened for them has nothing left to say.
+    // continuation it opened for them has nothing left to say. This run read the notifications a
+    // cut-off turn had left, so it commits those as well.
+    if (echoed.length && isTaskOrigin(message)) this.obligations.adoptCarried(target)
     const continuation = this.continuation
     if (continuation && continuation !== target && echoed.length && isTaskOrigin(message)) {
       if (continuation.abandoned) this.finishCancelled(continuation)
@@ -858,6 +889,8 @@ export class LiveSession<Turn = unknown> {
     this.dead = true
     this.clearIdle()
     this.clearWake()
+    for (const timer of this.noticeTimers) clearTimeout(timer)
+    this.noticeTimers.clear()
     this.queue.close()
     this.lifetime.abort()
     try {
