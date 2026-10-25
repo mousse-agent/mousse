@@ -113,32 +113,8 @@ export function bridgeProtocolEvent(
       }
       return true
     }
-    case 'agent.activated': {
-      if (isSelected) broadcast('agent:activated', event.data)
-      return true
-    }
     case 'terminal.activated': {
       if (isSelected) broadcast('pty:activated', event.data)
-      return true
-    }
-    case 'mousse-agent.message': {
-      if (isSelected) broadcast('mousse-agent:message', event.data)
-      return true
-    }
-    case 'mousse-agent.message-updated': {
-      if (isSelected) broadcast('mousse-agent:message-updated', event.data)
-      return true
-    }
-    case 'mousse-agent.messages-sync': {
-      if (isSelected) broadcast('mousse-agent:messages-sync', event.data)
-      return true
-    }
-    case 'mousse-agent.complete': {
-      if (isSelected) broadcast('mousse-agent:complete', event.data)
-      return true
-    }
-    case 'mousse-agent.connection-failed': {
-      if (isSelected) broadcast('mousse-agent:connection-failed', event.data)
       return true
     }
     case 'pty.data': {
@@ -166,6 +142,10 @@ export function bridgeProtocolEvent(
       return true
     }
     case 'ui.notify': {
+      return true
+    }
+    case 'net.updated': {
+      broadcast('net:updated', event.data)
       return true
     }
     case 'scheduled.updated': {
@@ -213,6 +193,11 @@ export function bridgeProtocolEvent(
     case 'providers.login-event': {
       const data = event.data as { event?: unknown }
       if (data?.event) broadcast('providers:login:event', data.event)
+      return true
+    }
+    case 'providers.install-event': {
+      const data = event.data as { event?: unknown }
+      if (data?.event) broadcast('providers:install:event', data.event)
       return true
     }
     case 'mcp.changed': {

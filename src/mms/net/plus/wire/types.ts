@@ -39,5 +39,11 @@ export interface NetRelayPolicy {
   renew(input: { admissionId: string; generation: number; now: number }): Promise<RelayAdmission>
   charge(input: { admissionId: string; generation: number; direction: 'ingress'; bytes: number; now: number }): Promise<void>
   release(input: { admissionId: string; generation: number; reason: string }): Promise<void>
+  /**
+   * Whether a failed renew, renewCircuit or charge only means the policy could not decide for now
+   * (its store was busy or unreachable). The gateway then keeps the connection and tries again
+   * until the current lease ends, instead of closing it as if the policy had refused.
+   */
+  retryable?(error: unknown): boolean
 }
 export interface HostedRelayRendezvous { transport: string; relay: string; ticket: string; expiresAt: number }

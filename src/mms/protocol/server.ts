@@ -343,6 +343,13 @@ export class MmsProtocolServer {
     onEmitter(services.events, 'net:updated', (status: import('../../shared/net').NetStatus) => {
       emitToSubscribers(this.ring.push('net.updated', status))
     })
+    // Sign-in and install changes that happen outside a request (a revoked Google session, a download).
+    onEmitter(services.events, 'providers:changed', () => {
+      emitToSubscribers(this.ring.push('providers.changed', { providers: services.providerInstances.configuredProviders() }))
+    })
+    onEmitter(services.events, 'providers:install', (event: import('../../shared/providerAuth').CliInstallEvent) => {
+      emitToSubscribers(this.ring.push('providers.install-event', { event }))
+    })
     // Some daemon-owned producers (Telegram/Discord/webhooks and scheduled jobs)
     // create threads directly rather than through a protocol request. Fan those
     // creations out through the same sequenced event consumed by the GUI.
@@ -487,44 +494,6 @@ export class MmsProtocolServer {
       )
     })
 
-    // Mousse subagent events
-    onOrch(
-      'mousse-agent-message',
-      (payload: { threadId: string; agentId: string; message: unknown }) => {
-        emitToSubscribers(this.ring.push('mousse-agent.message', payload, payload.threadId))
-      }
-    )
-    onOrch(
-      'mousse-agent-message-updated',
-      (payload: { threadId: string; agentId: string; message: unknown }) => {
-        emitToSubscribers(
-          this.ring.push('mousse-agent.message-updated', payload, payload.threadId)
-        )
-      }
-    )
-    onOrch(
-      'mousse-agent-messages-sync',
-      (payload: { threadId: string; agentId: string; messages: unknown }) => {
-        emitToSubscribers(
-          this.ring.push('mousse-agent.messages-sync', payload, payload.threadId)
-        )
-      }
-    )
-    onOrch(
-      'mousse-agent-complete',
-      (payload: { threadId: string; agentId: string; summary?: string }) => {
-        emitToSubscribers(this.ring.push('mousse-agent.complete', payload, payload.threadId))
-      }
-    )
-    onOrch(
-      'mousse-agent-connection-failed',
-      (payload: { threadId: string; agentId: string }) => {
-        emitToSubscribers(
-          this.ring.push('mousse-agent.connection-failed', payload, payload.threadId)
-        )
-      }
-    )
-
     // UI capability intents (Electron decides focus/open/notify)
     onOrch('document-opened', (payload: unknown) => {
       emitToSubscribers(this.ring.push('ui.document-open', payload, undefined))
@@ -643,16 +612,6 @@ export class MmsProtocolServer {
             : payload
         emitToSubscribers(
           this.ring.push('agent.spawned', { agent, threadId }, threadId)
-        )
-      }
-    )
-    onOrch(
-      'agent-activated',
-      (payload: { agentId: string; threadId?: string }) => {
-        const threadId =
-          payload.threadId ?? services.orchestrator.getBoundThreadId() ?? undefined
-        emitToSubscribers(
-          this.ring.push('agent.activated', payload, threadId)
         )
       }
     )
@@ -1032,6 +991,12 @@ export class MmsProtocolServer {
               this.ring.push(type, data, threadId, profileId),
               profileId ?? null
             )
+            // In-daemon watchers (the phone's live lists) learn of project and thread list
+            // changes made through requests, which reach no service event of their own.
+            if (profileId && type === 'projects.updated')
+              resolved.services.events.broadcast('projects:updated', data)
+            else if (profileId && type === 'threads.updated')
+              resolved.services.events.broadcast('threads:updated', data)
           }
         },
         method,

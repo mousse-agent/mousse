@@ -7,13 +7,13 @@ How the suite is organised, which command to run while working, and what must st
 | Command | Runs | When |
 |---|---|---|
 | `npm run test:changed` | Tests related to the working tree (staged, unstaged, untracked) | While editing |
-| `npm run test:branch` | Tests related to everything since the branch left the remote default branch, plus the working tree | Before pushing |
+| `npm run test:branch` | Tests related to everything since the branch left the remote default branch, plus the working tree | Before pushing or opening a PR |
 | `npm run test:related -- <files>` | Tests related to the named source files | Checking one module |
 | `npm run test:plan` | Prints what `test:changed` would run and why, runs nothing | Checking the selection |
-| `npm test` | Everything | Once before a PR, see `docs/team-workflow.md` |
+| `npm test` | Everything | Only for very large changes that affect multiple modules, see `docs/team-workflow.md` |
 | `npm run test:unit`, `npm run test:process` | In-process or both process projects | Narrowing a failure |
 
-`npm test` stays the gate before a PR. The related commands exist for the loop before that.
+Before a PR, run the related tests for the change (`test:branch` or `test:related`). `npm test` is only for very large changes that affect multiple modules.
 
 ## How related tests are chosen
 

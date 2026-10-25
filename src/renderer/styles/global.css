@@ -421,6 +421,8 @@ html.platform-darwin .overlay-titlebar {
   will-change: auto;
 }
 
+/* Six :not() classes of specificity on purpose: sideCard.css beats this rule by one class.
+   .agents-tasks-task-icon-spin matches nothing now but still counts toward that six. */
 @media (prefers-reduced-motion: reduce) {
   *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.channels-spin):not(.channels-spinner):not(.shimmer-text),
   *:not(.icon-spin):not(.spin):not(.agents-tasks-task-icon-spin):not(.channels-spin):not(.channels-spinner):not(.shimmer-text)::before,

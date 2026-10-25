@@ -5,7 +5,7 @@ import { Modal } from './ui/Modal'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './settings/SettingsRow'
 import { CopyButton } from './settings/IconButtons'
 import { mousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
-import { readDevices, type Device } from '../lib/netDevices'
+import { listedDevices, readDevices, type Device } from '../lib/netDevices'
 import type { NetDoctor, NetStatus } from '../../shared/net'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
@@ -26,7 +26,6 @@ function networkingLine(status?: NetStatus): string {
 }
 
 function deviceLine(device: Device): string {
-  if (device.revoked) return 'Revoked'
   const state = device.state === 'open' ? 'Online' : device.state === 'connecting' ? 'Connecting' : 'Offline'
   return device.caps.length ? `${state} · can ${device.caps.join(', ')}` : state
 }
@@ -125,7 +124,7 @@ export function NetDevicesSection() {
 
   const self = status?.self
   const selfDevice = devices.find((device) => device.self)
-  const others = devices.filter((device) => !device.self)
+  const others = listedDevices(devices).filter((device) => !device.self)
   const unlocked = status?.keystore === 'unlocked'
   const authority = !!self?.isAuthority
 
@@ -217,7 +216,7 @@ export function NetDevicesSection() {
             key={device.node}
             title={device.name}
             description={deviceLine(device)}
-            control={authority && !device.revoked && <DeviceMenu name={device.name} disabled={busy} onRevoke={() => setRevoking(device)} />}
+            control={authority && <DeviceMenu name={device.name} disabled={busy} onRevoke={() => setRevoking(device)} />}
           />
         ))}
         {self && unlocked && !others.length && <p className="settings-muted devices-note">No other devices yet.</p>}

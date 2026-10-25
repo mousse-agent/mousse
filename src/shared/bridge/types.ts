@@ -21,6 +21,13 @@ export interface BridgeDispatchInput {
   fetch?: boolean
   push?: boolean
 }
+/** A remote send or queued message: text, optional chat mode, and images staged with `attachments.stage`. */
+export interface BridgeChatInput {
+  threadId: string
+  content: string
+  mode?: string | { type: 'skill'; skillId: string }
+  attachments?: string[]
+}
 export interface BridgeRemoteParams {
   'projects.list': Record<string, never>
   'threads.list': {
@@ -53,9 +60,40 @@ export interface BridgeRemoteParams {
     threadId: string
     settled: boolean
   }
-  'orchestrator.send': {
+  'orchestrator.send': BridgeChatInput
+  'queue.enqueue': BridgeChatInput
+  'queue.list': {
     threadId: string
-    content: string
+  }
+  'queue.remove': {
+    threadId: string
+    itemId: string
+  }
+  'queue.reorder': {
+    threadId: string
+    /** Queued message ids in their new order. */
+    orderedIds: string[]
+  }
+  'queue.promoteToSteer': {
+    threadId: string
+    itemId: string
+  }
+  'composer.options': {
+    threadId?: string
+  }
+  'threads.setModel': {
+    threadId: string
+    model: { instanceId?: string; llmProvider?: string; model: string }
+  }
+  'attachments.stage': {
+    /** Caller-chosen id the send names in `attachments`. */
+    upload: string
+    index: number
+    total: number
+    name: string
+    mimeType: string
+    /** One slice of the image's base64. */
+    data: string
   }
   'orchestrator.steer': {
     threadId: string
@@ -71,6 +109,18 @@ export interface BridgeRemoteParams {
   }
   'orchestrator.contextUsage': {
     threadId: string
+  }
+  'orchestrator.pendingQuestions': {
+    threadId: string
+  }
+  'orchestrator.answerQuestions': {
+    threadId: string
+    requestId: string
+    answers: Record<string, string | string[]>
+  }
+  'orchestrator.dismissQuestions': {
+    threadId: string
+    requestId: string
   }
   'bridge.thread.open': {
     threadId: string

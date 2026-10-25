@@ -1,5 +1,7 @@
 # Mousse Subagent and Thread Undo Implementation Plan
 
+> **Note:** the Agents tab (`AgentsPanel`, `AgentsTasksView`, `NamedAgents`), the Agents & Tasks window (`agentsTasksWindow.ts`) and `MousseAgentChat` were removed in #143. Findings below that name them are kept for history.
+
 **Source documents:** `docs/SUBAGENT_AUDIT.md`, `docs/thread-undo-architecture.md`  
 **Planning basis:** current repository state; preserve completed fixes and implement only open or partial work  
 **Delivery model:** gated milestones, with thread workspaces and undo disabled until their exit gates pass
@@ -33,7 +35,7 @@ The remaining delta is:
 | Transactional spawning | Open | Failures after task/worktree allocation can orphan tasks, configs, branches, worktrees, monitors, or processes. Add an allocation ledger and rollback policy. |
 | CLI agent management | Partial | CLI now uses the daemon and `agents.list`/`agents.stop` protocol methods exist, but CLI `spawn` and `stop` are disabled and protocol stop lacks thread/merge validation. Implement the documented commands. |
 | Non-finite progress | Partial | `TaskQueue` guards non-finite input, but `TaskProgressMonitor` can still propagate `NaN`. Reject invalid values at the protocol boundary and monitor parser. |
-| Renderer/scrollback retention | Partial | PTY scrollback is bounded; `AgentsPanel` does not dispose removed xterm instances and headless output is unbounded. Dispose and cap both. |
+| Renderer/scrollback retention | Partial | PTY scrollback is bounded; `AgentsPanel` (removed) does not dispose removed xterm instances and headless output is unbounded. Dispose and cap both. |
 | Worktree identity/safety foundation | Open | Worktree and branch names use eight-character IDs; `WorktreeManager` has mutable repository root, recursive deletes, unconditional prune, and branch force-delete paths. Replace these before durable thread worktrees. |
 | Repository identity/lease | Open | Only per-thread execution/data locks exist. Add stable repository identity and an asynchronous repository mutation lease. |
 | Runtime data relocation | Open | Project thread data still lives at `<project>/.mousse/.data`. Move it outside repositories with verified lazy migration. |
@@ -237,7 +239,7 @@ For each assignment, `AgentSpawnTransaction` records allocated task, worktree, g
 
 ### 6.5 Fix GUI subagent send and transcript behavior
 
-**Files:** `src/mms/agents/MousseAgentService.ts`, `src/mms/orchestrator/OrchestratorService.ts`, `src/mms/protocol/handlers.ts`, `src/mms/protocol/types.ts`, `src/main/ipc/registerGuiIpc.ts`, `src/preload/index.ts`, `src/renderer/components/MousseAgentChat.tsx`, `src/renderer/components/AgentsPanel.tsx`.
+**Files:** `src/mms/agents/MousseAgentService.ts`, `src/mms/orchestrator/OrchestratorService.ts`, `src/mms/protocol/handlers.ts`, `src/mms/protocol/types.ts`, `src/main/ipc/registerGuiIpc.ts`, `src/preload/index.ts`, `src/renderer/components/MousseAgentChat.tsx` (removed), `src/renderer/components/AgentsPanel.tsx` (removed).
 
 1. Require `threadId` for every Mousse-agent protocol request and lifecycle event.
 2. Key runtime sessions by `(threadId, agentId)` or instantiate one session store per `ThreadRuntime`; do not use one globally exported session map.
@@ -245,7 +247,7 @@ For each assignment, `AgentSpawnTransaction` records allocated task, worktree, g
 4. Persist checkpoints directly to the owning thread generation, independent of selected thread.
 5. Return `MousseAgentSendResult` from service through protocol and IPC.
 6. Reject busy, missing, ready, completed, cancelled, and unrecoverable sessions explicitly.
-7. In `MousseAgentChat`, clear input/attachments only after `accepted`; preserve text and show the reason for `busy`/`terminal`/`missing`.
+7. In `MousseAgentChat` (removed), clear input/attachments only after `accepted`; preserve text and show the reason for `busy`/`terminal`/`missing`.
 8. Keep loading until a thread-scoped idle, completed, failed, or interrupted lifecycle event arrives, not until IPC acknowledgement returns.
 9. Disable the composer for `ready` and terminal sessions. Show status and recovery/integration guidance.
 10. Retain completed/closed transcript snapshots until thread trash GC. Remove only active runtime handles at integration.

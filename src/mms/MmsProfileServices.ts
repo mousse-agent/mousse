@@ -68,6 +68,8 @@ import { existsSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
+import { SpeechRelay } from './speech/SpeechRelay'
+import { systemClock } from './net/clock'
 
 const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.delete',
@@ -75,6 +77,9 @@ const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.restore',
   'threads.purge'
 ])
+
+/** Long-poll requests that sit open while nothing happens; they are not owned profile work. */
+const IDLE_WAIT_METHODS = new Set(['speech.host.wait'])
 
 function containsProfileBusy(error: unknown): boolean {
   if (
@@ -111,6 +116,13 @@ export class MmsProfileServices {
   readonly net: NetService
   readonly chatNetwork: ChatNetworkBindingService
   private bridgeService?: BridgeProfileService
+  private speechRelayInstance?: SpeechRelay
+
+  /** Phone speech requests waiting for, or served by, this profile's Mousse windows. */
+  get speechRelay(): SpeechRelay {
+    this.speechRelayInstance ??= new SpeechRelay(systemClock)
+    return this.speechRelayInstance
+  }
 
   private domainService(): BridgeProfileService {
     this.net.runtime()
@@ -217,6 +229,9 @@ export class MmsProfileServices {
       shared.installationHome,
       this.questions
     )
+    this.antigravity.hooks.changed = () => this.events.emit({ channel: 'providers:changed', data: undefined })
+    this.antigravity.hooks.installProgress = (message) =>
+      this.events.emit({ channel: 'providers:install', data: { instanceId: 'antigravity', type: 'progress', message } })
     // Every profile uses the terminal Claude sign-in, like Codex.
     this.claudeSubscription = new ClaudeSubscriptionProviderService(homeDir, this.questions)
     this.codex = createCodexProviderService(homeDir, this.questions)
@@ -608,7 +623,13 @@ export class MmsProfileServices {
 
   async runOwnedRequest<T>(method: string, work: () => T | Promise<T>): Promise<T> {
     const label = `rpc:${method}`
+    // An idle window's wait holds no profile state and ends when the relay closes, so it must not
+    // make storage changes or shutdown wait for it. It is still refused once the profile drains.
     try {
+      if (IDLE_WAIT_METHODS.has(method)) {
+        this.requests.assertAccepting()
+        return await work()
+      }
       return await this.requests.run(label, async () => {
         if (!STORAGE_LIFECYCLE_METHODS.has(method)) return work()
         // Let short GUI polls and writes settle without exempting their ownership.
@@ -667,6 +688,9 @@ export class MmsProfileServices {
     void this.undoRetention.stop()
     void this.lifecycle.cleanup.stop()
     this.requests.beginShutdown()
+    // Ends open and late window speech waits now, even when Net never started and so never closes
+    // the relay.
+    this.speechRelay.shutdown()
     this.mcpManager.beginShutdown()
     this.channels.beginShutdown()
     this.chatNetwork?.beginShutdown()

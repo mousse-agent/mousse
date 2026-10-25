@@ -7,7 +7,6 @@ import { enableVersionedLifecycleWriter } from '../queue/ThreadLifecycleAdmissio
 import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
 import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
-import { lifecycleGit, readDirectLifecycleRef, WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 /**
  * Method handlers against daemon-owned MousseMainService.
  * All nested mutable payloads are validated before service calls.
@@ -1026,66 +1025,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       return { agents: ctx.mms.threadRuntimes.listAgents(threadId), threadId }
     }
-    case 'agents.listNamed': {
-      const p = isObject(params) ? params : {}
-      return ctx.mms.orchestrator.listNamedAgents(asString(p.threadId, 'threadId', 256))
-    }
-    case 'agents.reviewNamed': {
-      const p = isObject(params) ? params : {}, lookup = threadLookupContext(ctx, p)
-      const agentId = asString(p.agent, 'agent', 128), episodeId = asString(p.episodeId, 'episodeId', 128)
-      const state = ctx.mms.orchestrator.listNamedAgents(lookup.threadId)
-      const episode = state.episodes.find((entry) => entry.id === episodeId && entry.agentId === agentId)
-      const workspace = new ThreadWorkspaceManager(lookup.threadDirectory).load()
-      if (!episode || episode.policy.workspace !== 'isolated' || episode.policy.access !== 'write' || !['completed', 'failed', 'interrupted'].includes(episode.state) || !workspace || !lookup.projectPath) throw new Error('Only a settled isolated write result can be reviewed')
-      const resultSha = episode.result?.resultSha, baseSha = episode.binding.integrationBaseSha ?? episode.binding.baseSha
-      if (!resultSha || !baseSha || ![resultSha, baseSha].every((sha) => /^[a-f0-9]{40,64}$/.test(sha))) throw new Error('Episode has no verified result boundary')
-      const retirement = new WorktreeRetirementService(ctx.mms.threads.lifecycleStore)
-      const manifestPath = retirement.pathFor(lookup.threadId, episode.binding.worktreePath)
-      if (existsSync(manifestPath)) {
-        const manifest = retirement.load(manifestPath); retirement.verifyPins(manifest)
-        if (manifest.resultSha !== resultSha || manifest.branch !== episode.binding.branch) throw new Error('Retained result no longer matches the episode')
-      } else if (readDirectLifecycleRef(lookup.projectPath, `refs/heads/${episode.binding.branch}`) !== resultSha) throw new Error('Episode result branch changed')
-      const destinationSha = readDirectLifecycleRef(lookup.projectPath, `refs/heads/${workspace.branch}`)
-      if (!destinationSha) throw new Error('Task destination revision is unavailable')
-      try {
-        return { episodeId, resultSha, baseSha, destinationSha,
-          summary: lifecycleGit(lookup.projectPath, ['diff', '--no-ext-diff', '--no-textconv', '--stat', baseSha, resultSha, '--'], undefined, 128 * 1024),
-          diff: lifecycleGit(lookup.projectPath, ['diff', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3', baseSha, resultSha, '--'], undefined, 512 * 1024) }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOBUFS') throw new Error('Result exceeds the desktop review size limit. Inspect the retained result commit in Git before requesting integration through the API.')
-        throw error
-      }
-    }
-    case 'agents.createNamed':
-    case 'agents.recallNamed': {
-      const p = isObject(params) ? params : {}
-      const allowed = new Set(['threadId', 'name', 'task', 'operationId', 'workspace', 'access', 'provider', 'model', 'effort', ...(method === 'agents.recallNamed' ? ['agent', 'expectedAgentGeneration', 'contextMode', 'resumeResult'] : [])])
-      for (const key of Object.keys(p)) if (!allowed.has(key)) throw new Error(`${key} is not allowed`)
-      if (p.workspace !== undefined && p.workspace !== 'shared' && p.workspace !== 'isolated') throw new Error('Invalid workspace policy')
-      if (p.access !== undefined && p.access !== 'read-only' && p.access !== 'write') throw new Error('Invalid access policy')
-      return ctx.mms.orchestrator.createNamedAgent(asString(p.threadId, 'threadId', 256), {
-        name: asString(method === 'agents.recallNamed' ? p.agent : p.name, 'agent name or ID', 128), task: asString(p.task, 'task'),
-        resumeResult: asOptionalBoolean(p.resumeResult, 'resumeResult'),
-        expectedAgentGeneration: method === 'agents.recallNamed' ? asBoundedInt(p.expectedAgentGeneration, 'expectedAgentGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER }) : undefined,
-        contextMode: p.contextMode === undefined || p.contextMode === 'continue' ? undefined : p.contextMode === 'fresh' ? 'fresh' : (() => { throw new Error('Invalid recall context mode') })(),
-        operationId: asString(p.operationId, 'operationId', 128),
-        policy: { version: 1, workspace: p.workspace, access: p.access },
-        provider: asOptionalString(p.provider, 256), model: asOptionalString(p.model, 512), effort: asOptionalString(p.effort, 64)
-      })
-    }
-    case 'agents.integrateNamed': {
-      const p = isObject(params) ? params : {}
-      return ctx.mms.orchestrator.integrateNamedAgent(asString(p.threadId, 'threadId', 256), {
-        agent: asString(p.agent, 'agent', 128), episodeId: asString(p.episodeId, 'episodeId', 128), operationId: asString(p.operationId, 'operationId', 128),
-        expectedResultSha: asString(p.expectedResultSha, 'expectedResultSha', 64), expectedDestinationSha: asString(p.expectedDestinationSha, 'expectedDestinationSha', 64)
-      })
-    }
     case 'agents.spawn': {
       const p = isObject(params) ? params : {}
       const threadId = asString(p.threadId, 'threadId', 256)
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
       // SPEC §14.5: one delegation path. Children are started by a turn's `delegate_task`.
-      throw new DomainRpcError('deprecated', 'agents.spawn is retired; delegate from a turn with delegate_task (or agents.createNamed).', { threadId })
+      throw new DomainRpcError('deprecated', 'agents.spawn is retired; delegate from a turn with delegate_task.', { threadId })
     }
     case 'agents.stop': {
       const p = isObject(params) ? params : {}
@@ -1132,67 +1077,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         agentId: p.agentId === null ? null : asOptionalString(p.agentId, 256)
       })
       return { task, tasks: ctx.mms.threadRuntimes.listTasks(threadId), threadId }
-    }
-    case 'mousseAgent.getMessages': {
-      const p = isObject(params) ? params : {}
-      const threadId = asString(p.threadId, 'threadId', 256)
-      const agentId = asString(p.agentId, 'agentId', 256)
-      if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
-        return { threadId, agentId, messages: [] }
-      }
-      return {
-        threadId,
-        agentId,
-        messages: ctx.mms.orchestrator.getMousseAgentMessages(agentId)
-      }
-    }
-    case 'mousseAgent.getAssignment': {
-      const p = isObject(params) ? params : {}
-      const agentId = asString(p.agentId, 'agentId', 256)
-      return {
-        agentId,
-        assignment: ctx.mms.orchestrator.getMousseAgentAssignment(agentId)
-      }
-    }
-    case 'mousseAgent.contextUsage': {
-      const p = isObject(params) ? params : {}
-      const threadId = asString(p.threadId, 'threadId', 256)
-      const agentId = asString(p.agentId, 'agentId', 256)
-      const draftInput = asOptionalString(p.draftInput) ?? ''
-      if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
-        return { threadId, agentId, usage: undefined }
-      }
-      return {
-        threadId,
-        agentId,
-        usage: await ctx.mms.orchestrator.getMousseAgentContextUsage(agentId, draftInput)
-      }
-    }
-    case 'mousseAgent.send': {
-      const p = isObject(params) ? params : {}
-      const threadId = asString(p.threadId, 'threadId', 256)
-      const agentId = asString(p.agentId, 'agentId', 256)
-      const content = asString(p.content, 'content')
-      const images = asOptionalChatImages(p.images, 'images')
-      if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
-        return { threadId, agentId, accepted: false, reason: 'missing' }
-      }
-      return { threadId, agentId, ...(await ctx.mms.orchestrator.sendMousseAgentMessage(agentId, content, images)) }
-    }
-    case 'mousseAgent.retry': {
-      const p = isObject(params) ? params : {}
-      const threadId = asString(p.threadId, 'threadId', 256)
-      const agentId = asString(p.agentId, 'agentId', 256)
-      if (!ctx.mms.threadRuntimes.listAgents(threadId).some((agent) => agent.id === agentId)) {
-        return { threadId, agentId, ok: false }
-      }
-      ctx.mms.orchestrator.retryMousseAgent(agentId)
-      return { threadId, agentId, ok: true }
-    }
-    case 'mousseAgent.abort': {
-      const p = isObject(params) ? params : {}
-      const agentId = asString(p.agentId, 'agentId', 256)
-      return { agentId, aborted: ctx.mms.orchestrator.abortMousseAgent(agentId) }
     }
     case 'pty.list': {
       const p = isObject(params) ? params : {}
@@ -1878,6 +1762,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('providers.changed', { providers })
       return { config, providers }
     }
+    case 'providers.installAntigravity': {
+      // Streams `providers.install-event` until the verified agent is in place.
+      // It never starts a sign-in.
+      // Progress and the start and end of the install reach clients from the service itself,
+      // so a page that closed or a request that timed out still sees them.
+      const config = await ctx.mms.antigravity.install()
+      return { config, providers: ctx.mms.providerInstances.configuredProviders() }
+    }
+    case 'providers.cancelAntigravityInstall':
+      return { cancelled: ctx.mms.antigravity.cancelInstall() }
     case 'workspace.getStatus': {
       const p = isObject(params) ? params : {}
       const lookup = threadLookupContext(ctx, p)

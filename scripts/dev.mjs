@@ -10,6 +10,8 @@
  * Usage: npm run dev
  * Env:   MOUSSE_HOME (defaults to this worktree's .mousse-dev/runtime)
  *        MOUSSE_RENDERER_PORT, MOUSSE_ELECTRON_USER_DATA (optional overrides)
+ *        MOUSSE_DEV_USE_GLOBAL=1 shares ~/.mousse with the installed app (0 forces isolation;
+ *        `.mousse-dev/dev.json` `{ "useGlobalHome": true }` makes it this checkout's default)
  */
 
 import { spawn, spawnSync } from 'child_process'
@@ -23,14 +25,15 @@ import { ensureNodePtyHelperExecutable } from './ensure-native-executables.mjs'
 import { ensureNodePty } from './ensure-node-pty.mjs'
 import { probeMmsActiveTurn } from './mms-dev-probe.mjs'
 import electronPath from 'electron'
-import { developmentRuntime, developmentDaemonInvocation } from './development-runtime.mjs'
+import { developmentDaemonInvocation, developmentEnv } from './development-runtime.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const nodeCmd = process.execPath
 const cliEntry = resolve(root, 'out/cli/index.js')
 const electronViteEntry = resolve(root, 'node_modules/electron-vite/bin/electron-vite.js')
-const isolatedRuntime = developmentRuntime(root)
-const homeDir = isolatedRuntime.homeDir
+const daemonInvocation = developmentDaemonInvocation(root)
+const runtime = daemonInvocation.runtime
+const homeDir = runtime.homeDir
 
 const READY_TIMEOUT_MS = 45_000
 const READY_POLL_MS = 200
@@ -46,14 +49,9 @@ const STOP_TERM_WAIT_MS = 3_000
 const STOP_KILL_WAIT_MS = 2_000
 const STOP_POLL_MS = 100
 
-const daemonInvocation = developmentDaemonInvocation(root)
 const baseEnv = {
-  ...daemonInvocation.env,
-  MOUSSE_HOME: homeDir,
-  MOUSSE_ELECTRON_USER_DATA: isolatedRuntime.electronUserData,
-  MOUSSE_RENDERER_PORT: String(isolatedRuntime.rendererPort),
-  MOUSSE_BROWSER_ROOT: isolatedRuntime.browserRoot,
-  MOUSSE_ARTIFACT_ROOT: isolatedRuntime.artifactRoot,
+  ...developmentEnv(runtime),
+  MOUSSE_RENDERER_PORT: String(runtime.rendererPort),
   // GUI must not spawn a competing Electron dual-mode daemon while we own it.
   MOUSSE_DEV_MANAGED_DAEMON: '1'
 }
@@ -236,6 +234,14 @@ function startDaemonProcess() {
 async function ensureDaemonRunning() {
   // Always run a daemon from this workspace's freshly built CLI so dev matches the branch.
   const status = daemonStatus()
+  if (runtime.sharedGlobalHome && (status.running || status.ready)) {
+    // Never stop the installed app's daemon: its GUI would respawn one and split clients.
+    logErr(
+      `Mousse is already running on the shared home (MMS pid ${status.pid ?? '?'}). ` +
+        'Quit Mousse (stable or nightly) first, or set MOUSSE_DEV_USE_GLOBAL=0 for an isolated session.'
+    )
+    process.exit(1)
+  }
   if (status.running || status.ready || existsSync(join(homeDir, 'mms.owner.json'))) {
     log(
       status.running
@@ -411,7 +417,13 @@ process.on('SIGHUP', () => void shutdown(0))
 
 // --- main ---
 log(`MOUSSE_HOME=${homeDir}`)
-log(`Renderer port=${isolatedRuntime.rendererPort}; Electron userData=${isolatedRuntime.electronUserData}`)
+log(`Renderer port=${runtime.rendererPort}; Electron userData=${runtime.electronUserData ?? 'installed app default'}`)
+if (runtime.sharedGlobalHome) {
+  logErr(
+    'WARNING: sharing your real Mousse profile (chats, sign-ins, schedules). Branch code can change ' +
+      'or migrate this data, and stable may not read it afterwards. Only one Mousse can run at a time.'
+  )
+}
 try {
   ensureElectron()
   ensureNodePty()

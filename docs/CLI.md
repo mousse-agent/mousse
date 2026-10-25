@@ -264,7 +264,7 @@ mousse-cli service install
 | Secrets | `~/.mousse/auth.json` | Same file |
 | Orchestrator chat | Renderer UI | Interactive TUI (TTY) or `-p` one-shot |
 | Channels / scheduler | Settings panels | `channels`, `schedule` subcommands |
-| Agents | Agents panel + terminals | `agents` subcommands |
+| Agents | Try Agent in Automations, terminals | `agents` subcommands |
 | Startup | Optional MMS autostart | `service install` |
 
 Run both on the same machine by pointing them at the same `MOUSSE_HOME`. Avoid running two MMS daemons (`service run`) against one home directory.

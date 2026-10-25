@@ -68,8 +68,8 @@ jobs:
       - name: Build application, CLI, and browser worker
         run: npm run build
 
-  # The full suite is run locally before a PR is opened (docs/team-workflow.md,
-  # "Testing scope"). This job is the same suite on a hosted runner, started by hand
+  # PRs are gated on the relevant tests run locally (docs/team-workflow.md,
+  # "Testing scope"). This job runs the full suite on a hosted runner, started by hand
   # or by the nightly and stable release workflows.
   application:
     name: Full test suite

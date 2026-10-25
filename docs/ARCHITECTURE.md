@@ -65,7 +65,6 @@ Production `src/main/**` never constructs or owns MMS. GUI quit disconnects the 
 | `mms/PresentationState.ts` | Selected thread / presentation only |
 | `mms/protocolEventBridge.ts` | One typed map: protocol event → preload IPC channels |
 | `ipc/registerGuiIpc.ts` | Renderer IPC → protocol methods; Electron-local files/git/browser/window |
-| `agentsTasksWindow.ts` | Secondary window; same sandboxed preload (`contextIsolation`, no `nodeIntegration`) |
 
 ### Settings split
 

@@ -1,4 +1,3 @@
-import { AgentsPanel } from './AgentsPanel'
 import { ProjectTerminalPanel } from './ProjectTerminalPanel'
 import { BrowserPanel } from './BrowserPanel'
 import { FilesPanel } from './FilesPanel'
@@ -14,7 +13,6 @@ export function MainViewPanel() {
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
   const overlayOpen = useAppStore((s) => s.settingsOpen || s.scheduledOpen || s.channelsOpen)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
-  const hasAgents = useAppStore((s) => s.agents.length > 0)
   const opened = useAppStore((s) => s.openedSurfaceKinds)
   const terminals = useAppStore((s) => s.projectTerminalTabs)
   const browsers = useAppStore((s) => s.browserTabs)
@@ -22,7 +20,6 @@ export function MainViewPanel() {
   const documentsTabVisible = useAppStore((s) => s.documentsTabVisible)
   const documents = documentsTabVisible ? documentTabs : []
   const items = surfaceTabItems({
-    hasAgents,
     opened,
     terminals: terminals.filter((tab) => tab.ownerThreadId === activeThreadId || tab.ownerThreadId === null),
     browsers: browsers.filter((tab) => tab.ownerThreadId === activeThreadId || tab.ownerThreadId === null),
@@ -53,13 +50,10 @@ export function MainViewPanel() {
       <KeepMounted active={mainView === 'terminal'} className="keep-mounted-pane">
         <ProjectTerminalPanel />
       </KeepMounted>
-      <KeepMounted active={mainView === 'agents'} className="keep-mounted-pane">
-        <AgentsPanel />
-      </KeepMounted>
       <KeepMounted active={mainView === 'browser'} preserveLayout className="keep-mounted-pane">
         <BrowserPanel active={mainView === 'browser' && mainAreaOpen && !overlayOpen} />
       </KeepMounted>
-      {mainView !== 'files' && mainView !== 'terminal' && mainView !== 'agents' && mainView !== 'browser' && (
+      {mainView !== 'files' && mainView !== 'terminal' && mainView !== 'browser' && (
         <div className="keep-mounted-pane">{transientPanel}</div>
       )}
     </KeepMountedStack>

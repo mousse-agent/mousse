@@ -107,11 +107,6 @@ interface AppState {
   messages: ChatMessage[]
   agents: Agent[]
   tasks: Task[]
-  activePtyId: string | null
-  activeAgentId: string | null
-  /** Spawned-agent session shown in the center chat. Null is the main agent. */
-  centerAgentId: string | null
-  setCenterAgentId: (centerAgentId: string | null) => void
   sidebarWidth: number
   threadsSidebarWidth: number
   usageOpen: boolean
@@ -176,8 +171,6 @@ interface AppState {
   updateMessage: (message: ChatMessage) => void
   setAgents: (agents: Agent[]) => void
   setTasks: (tasks: Task[]) => void
-  setActivePtyId: (ptyId: string | null) => void
-  setActiveAgentId: (agentId: string | null) => void
   setSidebarWidth: (width: number) => void
   setThreadsSidebarWidth: (width: number) => void
   setSettingsOpen: (open: boolean) => void
@@ -314,6 +307,19 @@ const personalWorkspaceKeys = [
 ] as const
 let profileActivated = false
 
+/** The view a fresh profile starts on; the empty main area shows the surface picker until one opens. */
+const DEFAULT_MAIN_VIEW: MainView = 'browser'
+
+/** Workspaces saved before the Agents tab was removed still name it as the view or an open surface. */
+export function sanitizeSavedWorkspace<T extends { mainView: MainView; openedSurfaceKinds: MainView[] }>(workspace: T): T {
+  const retired = (view: unknown) => view === 'agents'
+  const openedSurfaceKinds = Array.isArray(workspace.openedSurfaceKinds)
+    ? workspace.openedSurfaceKinds.filter((kind) => !retired(kind))
+    : []
+  const mainView = retired(workspace.mainView) ? openedSurfaceKinds[0] ?? DEFAULT_MAIN_VIEW : workspace.mainView
+  return { ...workspace, mainView, openedSurfaceKinds }
+}
+
 function savePersonalWorkspace(state: AppState): void {
   if (typeof window === 'undefined') return
   try {
@@ -331,10 +337,6 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   messages: [],
   agents: [],
   tasks: [],
-  activePtyId: null,
-  activeAgentId: null,
-  centerAgentId: null,
-  setCenterAgentId: (centerAgentId) => set({ centerAgentId }),
   sidebarWidth: 30,
   threadsSidebarWidth: 260,
   usageOpen: false,
@@ -356,7 +358,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setSubagents: (parentThreadId, subagents) =>
     set((s) => ({ subagentsByParent: { ...s.subagentsByParent, [parentThreadId]: subagents } })),
   turnStates: {},
-  mainView: 'agents',
+  mainView: DEFAULT_MAIN_VIEW,
   openedSurfaceKinds: [],
   openSurfaceKind: (kind) => set((state) => ({
     openedSurfaceKinds: state.openedSurfaceKinds.includes(kind)
@@ -369,7 +371,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   closeSurfaceKind: (kind) => set((state) => {
     const openedSurfaceKinds = state.openedSurfaceKinds.filter((entry) => entry !== kind)
     const mainView = state.mainView === kind
-      ? (state.agents.length > 0 ? 'agents' : openedSurfaceKinds[0] ?? state.mainView)
+      ? openedSurfaceKinds[0] ?? state.mainView
       : state.mainView
     return { openedSurfaceKinds, mainView }
   }),
@@ -431,15 +433,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
       return { messages }
     }),
-  setAgents: (agents) => set((state) => ({
-    agents,
-    centerAgentId: state.centerAgentId && agents.some((agent) => agent.id === state.centerAgentId)
-      ? state.centerAgentId
-      : null
-  })),
+  setAgents: (agents) => set({ agents }),
   setTasks: (tasks) => set({ tasks }),
-  setActivePtyId: (activePtyId) => set({ activePtyId }),
-  setActiveAgentId: (activeAgentId) => set({ activeAgentId }),
   setSidebarWidth: (sidebarWidth) => set({ sidebarWidth }),
   setThreadsSidebarWidth: (threadsSidebarWidth) => set({ threadsSidebarWidth }),
   setSettingsOpen: (settingsOpen) => set(settingsOpen ? { settingsOpen, scheduledOpen: false, channelsOpen: false } : { settingsOpen }),
@@ -456,7 +451,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   setActiveThreadId: (activeThreadId) => set({ activeThreadId }),
   switchToThread: (id) =>
     set((s) => {
-      if (s.activeThreadId === id) return { sidebarMode: 'projects', centerAgentId: null }
+      if (s.activeThreadId === id) return { sidebarMode: 'projects' }
       if (s.activeThreadId && s.messages.length > 0) {
         rememberMessages(s.activeThreadId, s.messages)
       }
@@ -468,7 +463,6 @@ export const useAppStore = create<AppState>()(persist((set) => ({
         // Agents/tasks are always re-fetched with the snapshot (small, thread-scoped).
         agents: [],
         tasks: [],
-        centerAgentId: null,
         loading: false
       }
     }),
@@ -480,15 +474,11 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       const messagesUnchanged = sameMessageSnapshot(s.messages, reconciled)
       const agents = view.agents ?? s.agents
       const tasks = view.tasks ?? s.tasks
-      const centerAgentId = s.centerAgentId && agents.some((agent) => agent.id === s.centerAgentId)
-        ? s.centerAgentId
-        : null
-      if (messagesUnchanged && agents === s.agents && tasks === s.tasks && centerAgentId === s.centerAgentId) return s
+      if (messagesUnchanged && agents === s.agents && tasks === s.tasks) return s
       return {
         messages: messagesUnchanged ? s.messages : reconciled,
         agents,
-        tasks,
-        centerAgentId
+        tasks
       }
     }),
   setProjects: (projects) => set({ projects }),
@@ -572,7 +562,9 @@ export const useAppStore = create<AppState>()(persist((set) => ({
         documentTabs,
         activeDocumentTabId,
         documentsTabVisible: documentTabs.length > 0,
-        mainView: documentTabs.length === 0 && s.mainView === 'documents' ? 'agents' : s.mainView
+        mainView: documentTabs.length === 0 && s.mainView === 'documents'
+          ? s.openedSurfaceKinds[0] ?? DEFAULT_MAIN_VIEW
+          : s.mainView
       }
     }),
   setActiveDocumentTab: (activeDocumentTabId) => set({ activeDocumentTabId }),
@@ -593,7 +585,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       composerDrafts: {},
       composerReferences: {},
       sidebarMode: 'projects' as 'projects' | 'chats',
-      mainView: 'agents' as MainView,
+      mainView: DEFAULT_MAIN_VIEW as MainView,
       openedSurfaceKinds: [] as MainView[],
       sidebarWidth: 30,
       threadsSidebarWidth: 260,
@@ -604,7 +596,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
     if (typeof window !== 'undefined') {
       try {
         const raw = window.localStorage.getItem(`mousse-profile-${profileId}-workspace`)
-        if (raw) next = { ...next, ...JSON.parse(raw) }
+        if (raw) next = sanitizeSavedWorkspace({ ...next, ...JSON.parse(raw) })
       } catch { /* malformed profile-local state is discarded */ }
     }
     messageCache.clear()
@@ -619,9 +611,6 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       messages: [],
       agents: [],
       tasks: [],
-      activePtyId: null,
-      activeAgentId: null,
-      centerAgentId: null,
       activeThreadId: null,
       projects: [],
       threads: [],

@@ -6,6 +6,11 @@ import { decodeBase64, isNodeId, ticketHash } from './crypto.js'
 import { isRelayErrorCode, NetRelayError } from './errors.js'
 import { AUTH_MAX_BYTES, canonicalAudience, FRAME_MAX_BYTES, hostedRelayProofBytes } from './protocol.js'
 import type { HostedRelayAuth, HostedRelayRegistration, HostedRelayRendezvous, RelayIdentity, RelayRole } from './types.js'
+/**
+ * How long a waiting listener goes without a ping before it listens again. The relay pings at every
+ * admission renewal (30 s); an older relay that never pings ends the wait itself after 60 s.
+ */
+const LISTENER_SILENCE_MS = 90_000
 
 export interface HostedRelayTransportOptions {
   id?: string
@@ -86,7 +91,9 @@ export class HostedRelayTransport {
       const paired = new Promise<Duplex | undefined>((res, rej) => { resolvePaired = res; rejectPaired = rej }); void paired.catch(() => {})
       let timer = setTimeout(() => fail(new NetRelayError('deadline_exceeded')), 5000)
       const abort = () => fail(new NetRelayError('cancelled'))
-      const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort) }
+      // A waiting listener hears a ping from the relay at every admission renewal; silence means the socket is gone.
+      const alive = () => { if (state !== 'ready') return; clearTimeout(timer); timer = setTimeout(() => fail(new NetRelayError('deadline_exceeded')), LISTENER_SILENCE_MS) }
+      const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); ws.removeListener('ping', alive) }
       const fail = (error: unknown) => {
         if (state === 'failed') return
         const ready = state === 'ready' || state === 'paired'; state = 'failed'; cleanup(); rejectPaired(error); if (!ready) reject(error); ws.terminate()
@@ -115,7 +122,9 @@ export class HostedRelayTransport {
           } else if (value.t === 'registered' && role === 'register' && state === 'auth' && Object.keys(value).length === 2) {
             state = 'paired'; cleanup(); resolvePaired(); resolve({ ws, paired }); ws.close()
           } else if (value.t === 'ready' && role !== 'register' && state === 'auth' && Object.keys(value).length === 2) {
-            state = 'ready'; clearTimeout(timer); timer = setTimeout(() => fail(new NetRelayError('deadline_exceeded')), 60_000); resolve({ ws, paired })
+            state = 'ready'; clearTimeout(timer)
+            if (role === 'listen') { ws.on('ping', alive); alive() } else timer = setTimeout(() => fail(new NetRelayError('deadline_exceeded')), 60_000)
+            resolve({ ws, paired })
           } else if (value.t === 'paired' && state === 'ready' && Object.keys(value).sort().join(',') === 'circuitId,peer,t,v' && isNodeId(value.peer) && (role === 'listen' || value.peer === target) && typeof value.circuitId === 'string' && value.circuitId.length <= 128) {
             state = 'paired'; cleanup(); ws.removeListener('message', message); resolvePaired(rawStream(ws))
           } else throw new NetRelayError('bad_request')
@@ -143,7 +152,12 @@ export class HostedRelayTransport {
         if (!raw || !this.listening || this.stopped) { opened.ws.terminate(); return }
         try { this.accept?.(raw, { transport: this.id }) } catch { raw.destroy(); this.changed('degraded') }
         finally { void this.arm().catch(() => {}) }
-      }, () => { this.armed = false; this.rearm() })
+      }, error => {
+        this.armed = false
+        // Nobody dialed before the relay's waiting deadline: listen again at once, keeping the route.
+        if (error instanceof NetRelayError && error.code === 'deadline_exceeded') void this.arm().catch(() => {})
+        else this.rearm()
+      })
     } catch (error) { this.armed = false; this.rearm(); throw error }
   }
   private rearm(): void {

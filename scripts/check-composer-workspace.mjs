@@ -55,7 +55,7 @@ try {
       fixture.reset = (thread=null) => {
         fixture.calls=[];fixture.selectError=false;fixture.createError=false;fixture.toggleError=false;fixture.pendingCreate=false;fixture.modelError=false;fixture.sendError=false;fixture.referenceError=false;fixture.pendingPath=false;fixture.pendingSend=false;fixture.turnRunning=false;fixture.sendResolved=false;fixture.resumeSend=null;
         useAppStore.setState({activeThreadId:thread?.id ?? null,threads:thread?[thread]:[],projects,
-          profileReady:true,workspaceReady:true,messages:[],loading:false,mainView:'agents',turnStates:{},composerDrafts:{},composerReferences:{},composerWorkspaceDrafts:{},browserElementAttachmentsByThread:{}})
+          profileReady:true,workspaceReady:true,messages:[],loading:false,mainView:'browser',turnStates:{},composerDrafts:{},composerReferences:{},composerWorkspaceDrafts:{},browserElementAttachmentsByThread:{}})
       }
       fixture.reset()
       createRoot(document.getElementById('root')).render(<><MainViewTabs /><OrchestratorChat /></>)
@@ -247,7 +247,7 @@ try {
         await evaluate('fixture.resumePath()');await pause(100)
         assert.equal(await evaluate('fixture.store.getState().mainView'),'files')
         await evaluate('fixture.reset()');await pause(120)
-        assert.equal(await evaluate('fixture.store.getState().mainView'),'agents')
+        assert.equal(await evaluate('fixture.store.getState().mainView'),'browser')
         console.log('PASS: Files remains selected during a pending project-path lookup')
         // Draft choices survive both thread switching and profile-local persistence.
         await evaluate('fixture.reset('+JSON.stringify(draft)+');fixture.store.getState().activateProfile("toolbar-profile")');await pause(100)

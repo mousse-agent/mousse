@@ -17,3 +17,14 @@ reference-aware and refuses dirty worktrees; see `WorkspaceGcService`.
 
 Run `npm run disk:report` for a read-only category report. Symbolic links are not followed,
 so a shared worktree dependency tree is counted once instead of once per agent.
+
+## Old named agents
+
+Named agents (created from the former Agents tab) no longer exist, and nothing creates new ones.
+Data from earlier versions stays where it was: a task's `agent-episodes.json`, its saved agent
+contexts, and the result branch of each isolated write episode. Lifecycle code still reads these
+files, so Storage lists and protects the branches and trash and purge handle them like any other
+task data. Nothing merges them automatically. To keep an old result, merge its retained branch by
+hand, for example `git merge mousse/agent/<id>` from the project checkout (the branch name is in
+`agent-episodes.json` under the episode's `binding.branch`, and `git branch --list "mousse/agent/*"`
+shows what is left).

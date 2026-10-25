@@ -84,15 +84,6 @@ export function mainWindowLoadTarget(): WindowLoadTarget {
   }
 }
 
-export function agentsTasksLoadTarget(): WindowLoadTarget {
-  return {
-    devUrl: process.env.ELECTRON_RENDERER_URL
-      ? `${process.env.ELECTRON_RENDERER_URL}/agentsTasks.html`
-      : undefined,
-    prodFile: join(__dirname, '../renderer/agentsTasks.html')
-  }
-}
-
 export function attachWindowWebContentsRecovery(
   win: BrowserWindow,
   target: WindowLoadTarget

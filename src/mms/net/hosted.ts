@@ -7,6 +7,7 @@ import type { NodeInviteInput } from './enrollment/service'
 import type { RelayIdentity, RelayRendezvous } from './relay/protocol'
 import type { TransportConfiguration } from './transports/registry'
 import type { NetRuntime } from './NetService'
+import type { DirectPathConfig } from './transports/phoneWebRtc'
 
 /**
  * The seam between core Net and the optional Mousse ID module (`./plus`). Core Net builds,
@@ -62,6 +63,8 @@ export interface HostedNetHost {
   suspendHostedTransport(): Promise<void>
   /** A hosted relay listener currently has routes. */
   hostedListening(): boolean
+  /** Mousse ID's direct-path configuration changed (the kill switch or the STUN servers). */
+  directPathChanged(): void
   relayIdentity(): RelayIdentity
   issueRendezvousInvite(
     input: NodeInviteInput
@@ -92,6 +95,13 @@ export interface HostedNet {
   prepareSpaceRendezvous(expiresAt: number, uses: number): Promise<RelayRendezvous | undefined>
   /** Space membership changed; re-check consent for hosted routes. */
   membershipChanged(): void
+  /**
+   * This user's roster changed (for example, a device was revoked). Sends it to Mousse ID now
+   * instead of at the next scheduled renewal, so the hosted relay stops admitting revoked devices.
+   */
+  rosterChanged(): void
+  /** The direct-path fields of Mousse ID's configuration document, last known. */
+  directPath?(): DirectPathConfig
 }
 
 /** `net.plus.status` when the module is absent or the profile cannot use it yet. */
