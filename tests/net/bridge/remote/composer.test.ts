@@ -377,7 +377,7 @@ describe('remote composer methods', () => {
     expect(stopped).toEqual([])
     expect(await call(api, 'orchestrator.abort', { threadId: 'thread-2', run: runContext.id })).toEqual({ ok: true })
     expect(stopped).toEqual(['thread-2'])
-    await pending
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' })
     // A run that is gone is not a Stop of anything.
     expect(await call(api, 'orchestrator.abort', { threadId: 'thread-2', run: runContext.id })).toEqual({ ok: false })
     expect(stopped).toEqual(['thread-2'])
