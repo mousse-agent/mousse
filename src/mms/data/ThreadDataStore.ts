@@ -11,7 +11,7 @@ import {
 } from 'fs'
 import { join } from 'path'
 import { EventEmitter } from 'events'
-import { v4 as uuidv4, v5 as uuidv5 } from 'uuid'
+import { v4 as uuidv4, v5 as uuidv5, validate as uuidValidate, version as uuidVersion } from 'uuid'
 import type {
   Agent,
   ChatMessage,
@@ -325,6 +325,10 @@ export class ThreadDataStore extends EventEmitter {
    * Boot repair: a subagent thread whose creating command died before its run-store rows committed
    * has lineage in its metadata but none in the run store. When it is still empty it is discarded.
    * `hasLineageRow` is the run store's answer for a thread id. Returns the discarded ids.
+   *
+   * `createThread` registers ownership before it writes `meta.json` and the standalone index entry
+   * (the writes need the registration), so a death in between leaves an owned lifecycle record no
+   * thread listing shows. Those records are found through the lifecycle inventory and discarded too.
    */
   discardOrphanedSubagents(hasLineageRow: (threadId: string) => boolean): string[] {
     const discarded: string[] = []
@@ -336,6 +340,42 @@ export class ThreadDataStore extends EventEmitter {
         console.warn('orphaned subagent thread kept', { threadId: thread.id, error: error instanceof Error ? error.message : String(error) })
       }
     }
+    discarded.push(...this.discardHalfCreatedOwnedThreads(hasLineageRow))
+    return discarded
+  }
+
+  /**
+   * Owned threads whose creation died after registration: no `meta.json`, or (standalone) a
+   * `meta.json` that never reached the index. Only an empty one without a run-store row, under an
+   * owner chain that is still active, is removed: its registration, directory and index entry.
+   */
+  private discardHalfCreatedOwnedThreads(hasLineageRow: (threadId: string) => boolean): string[] {
+    const discarded: string[] = []
+    let indexed: Set<string> | undefined
+    for (const record of this.lifecycleStore.list()) {
+      if (!record.parentTaskId || record.state !== 'active') continue
+      const id = record.taskId
+      // Workflow execution threads (v5 ids) are owned too, but their admission retries and keeps them.
+      if (!uuidValidate(id) || uuidVersion(id) !== 4) continue
+      try {
+        if (hasLineageRow(id) || !this.isLifecycleVisible(id)) continue
+        const metaPath = join(record.location, 'meta.json')
+        const meta = existsSync(metaPath) ? this.readJsonFile<ThreadMeta | null>(metaPath, null) : null
+        if (meta) {
+          indexed ??= new Set(this.readStandaloneIndexRaw().map((entry) => entry.id))
+          // Project threads are listed by scanning their directories, so only a standalone one can miss.
+          if (meta.projectId || indexed.has(id)) continue
+        }
+        if (this.readJsonFile<unknown[]>(join(record.location, 'messages.json'), []).length) continue
+        this.lifecycleStore.forgetCreatedTask(id, { ownedBy: record.parentTaskId })
+        if (meta && !meta.projectId) this.removeFromStandaloneIndex(id)
+        rmSync(record.location, { recursive: true, force: true })
+        discarded.push(id)
+      } catch (error) {
+        console.warn('half-created owned thread kept', { threadId: id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    if (discarded.length) this.invalidateListCache()
     return discarded
   }
 

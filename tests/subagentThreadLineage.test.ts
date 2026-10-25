@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -192,6 +192,64 @@ describe('failed creation of a subagent', () => {
       expect(existsSync(dir)).toBe(false)
       expect(restarted.getThread(sub.id)).toBeUndefined()
       expect(restarted.listAllThreads().map((thread) => thread.id)).toEqual([parent.id])
+    })
+
+    it('a creation that died after registering ownership, before meta.json, is discarded at the next start and does not block the owner', async () => {
+      const f = fixture()
+      const parent = f.threads.createThread('Parent')
+      const sub = child(f.threads, parent.id)
+      // The registration and the directory exist; nothing was written into it.
+      const dir = f.threads.getThreadDir(sub.id)
+      for (const entry of ['meta.json', 'messages.json', 'agents.json', 'tasks.json']) rmSync(join(dir, entry))
+      const index = join(f.home, 'threads-index.json')
+      writeFileSync(index, JSON.stringify(JSON.parse(readFileSync(index, 'utf8')).filter((entry: { id: string }) => entry.id !== sub.id)))
+      expect(f.threads.lifecycleStore.require(sub.id).parentTaskId).toBe(parent.id)
+
+      const restarted = open(f.home)
+      expect(restarted.threads.listAllThreads().map((thread) => thread.id)).not.toContain(sub.id)
+      expect(restarted.threads.discardOrphanedSubagents(() => false)).toEqual([sub.id])
+      expect(existsSync(dir)).toBe(false)
+      expect(restarted.threads.lifecycleStore.get(sub.id)).toBeUndefined()
+      expect(restarted.threads.discardOrphanedSubagents(() => false)).toEqual([])
+      await restarted.coordinator.trash({ taskId: parent.id, operationId: 'trash' })
+      await restarted.coordinator.restore({ taskId: parent.id, operationId: 'restore' })
+      expect(restarted.threads.getThread(parent.id)?.id).toBe(parent.id)
+    })
+
+    it('a creation that died after meta.json, before the standalone index entry, is discarded at the next start', () => {
+      const f = fixture()
+      const parent = f.threads.createThread('Parent')
+      const sub = child(f.threads, parent.id)
+      const dir = f.threads.getThreadDir(sub.id)
+      const index = join(f.home, 'threads-index.json')
+      writeFileSync(index, JSON.stringify(JSON.parse(readFileSync(index, 'utf8')).filter((entry: { id: string }) => entry.id !== sub.id)))
+      expect(existsSync(join(dir, 'meta.json'))).toBe(true)
+
+      const restarted = open(f.home).threads
+      expect(restarted.discardOrphanedSubagents(() => false)).toEqual([sub.id])
+      expect(existsSync(dir)).toBe(false)
+      expect(restarted.lifecycleStore.get(sub.id)).toBeUndefined()
+      expect(restarted.listAllThreads().map((thread) => thread.id)).toEqual([parent.id])
+    })
+
+    it('keeps a metadata-less child that has a run-store row', () => {
+      const f = fixture()
+      const parent = f.threads.createThread('Parent')
+      const sub = child(f.threads, parent.id)
+      rmSync(join(f.threads.getThreadDir(sub.id), 'meta.json'))
+      expect(open(f.home).threads.discardOrphanedSubagents((id) => id === sub.id)).toEqual([])
+      expect(f.threads.lifecycleStore.get(sub.id)).toBeDefined()
+    })
+
+    it('leaves the children of a trashed owner alone', async () => {
+      const f = fixture()
+      const parent = f.threads.createThread('Parent')
+      const sub = child(f.threads, parent.id)
+      await f.coordinator.trash({ taskId: parent.id, operationId: 'trash' })
+      const restarted = open(f.home)
+      expect(restarted.threads.discardOrphanedSubagents(() => false)).toEqual([])
+      await restarted.coordinator.restore({ taskId: parent.id, operationId: 'restore' })
+      expect(restarted.threads.getThread(sub.id)).toBeDefined()
     })
 
     it('keeps an orphan that has messages and does not throw', () => {
