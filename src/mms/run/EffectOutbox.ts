@@ -475,7 +475,11 @@ export class EffectOutbox {
       )
     if (Number(result.changes) !== 1)
       fail('stale_write', `Effect ${current.effectId} changed while it was being settled.`)
-    return this.recorded(next)
+    this.recorded(next)
+    // The one place an effect changes status (succeed, fail, cancel, defer, lease reclaim, boot): a
+    // wake or steer for the thread that is no longer in flight stops holding its tasks.
+    this.store.settleHold(next.threadId)
+    return next
   }
 
   /** Appends `effect.status`; `notify` wakes subscribers after commit (a lane may have freed). */

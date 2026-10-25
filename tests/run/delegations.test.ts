@@ -56,7 +56,7 @@ describe('Delegations (SPEC §14.1)', () => {
     f.engine.markRunning(child.runId)
     f.engine.markTerminal(child.runId, 'completed', undefined, { resultText: 'Found two bugs' })
     const published = delegations.get(delegation.delegationId)!
-    expect(published).toMatchObject({ status: 'result_available', result: { runStatus: 'completed', text: 'Found two bugs' } })
+    expect(published).toMatchObject({ status: 'result_available', result: { runStatus: 'completed', text: 'Found two bugs', runId: child.runId } })
     expect(published.completedAt).toBeTruthy()
     const rows = f.engine.inbox.listPending('parent')
     expect(rows).toHaveLength(1)
@@ -65,20 +65,21 @@ describe('Delegations (SPEC §14.1)', () => {
       delegationId: delegation.delegationId,
       childThreadId: 'child',
       childRunId: child.runId,
-      result: { runStatus: 'completed', text: 'Found two bugs' }
+      result: { runStatus: 'completed', text: 'Found two bugs', runId: child.runId }
     })
     // The run, the delegation and the inbox row were one transaction: the run's terminal event
-    // and the publication events are contiguous.
+    // and the publication events are contiguous. The row is written first, so the parent is never
+    // judged idle between the status change and its notice.
     const childStatus = f.store.listEvents('child').filter((event) => event.type === 'run.status').at(-1)!
     const parentEvents = f.store.listEvents('parent').filter((event) => event.seq > childStatus.seq)
-    expect(parentEvents.map((event) => event.type)).toEqual(['delegation.status', 'inbox.status'])
+    expect(parentEvents.map((event) => event.type)).toEqual(['inbox.status', 'delegation.status'])
   })
 
   it('publication gate: a failed child publishes its failure', () => {
     const { f, delegations, child, delegation } = seeded()
     f.engine.markStarting(child.runId)
     f.engine.markTerminal(child.runId, 'failed', { error: 'provider exploded' })
-    expect(delegations.get(delegation.delegationId)!.result).toEqual({ runStatus: 'failed', error: 'provider exploded' })
+    expect(delegations.get(delegation.delegationId)!.result).toEqual({ runStatus: 'failed', error: 'provider exploded', runId: child.runId })
     expect(f.engine.inbox.listPending('parent')).toHaveLength(1)
   })
 

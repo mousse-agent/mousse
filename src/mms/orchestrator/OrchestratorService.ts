@@ -628,6 +628,12 @@ export class OrchestratorService extends EventEmitter {
   private mcpAttachment: McpAttachmentProvider | null = null
   /** Pending results of `turn.start` effects, keyed by runId (SPEC §12.7). */
   private readonly turnResults = new Map<string, TurnResult>()
+  /**
+   * Threads whose provider reports background work that outlives their runs (input 4 of the hold
+   * predicate). No adapter reports any yet: a Codex turn stays open while its helpers run, and the
+   * Claude and Antigravity adapters report nothing, so this stays empty until one does.
+   */
+  private readonly providerBackground = new Set<string>()
   /** Last run heartbeat (ms) per run; throttles `RunEngine.heartbeat` writes. */
   private readonly runHeartbeats = new Map<string, number>()
   /** Optional multi-tenant runtime manager (Phase 4). */
@@ -886,11 +892,14 @@ export class OrchestratorService extends EventEmitter {
     this.runEngineUnsubscribe = null
     this.runEngine?.setDelegationHost(null)
     this.runEngine?.setInFlightCanceller(null)
+    this.runEngine?.store.setProviderBackgroundWork(null)
     this.runEngine?.handoffs.setTranscriptSource(null)
     this.runEngine = engine
     if (!engine) return
     this.installTitleGuard()
     this.attachInFlightCanceller()
+    // Input (4) of the hold predicate: synchronous, in memory, never throws (it is read inside transactions).
+    engine.store.setProviderBackgroundWork((threadId) => this.providerBackground.has(threadId))
     engine.handoffs.setTranscriptSource((threadId) => this.handoffTranscript(threadId))
     engine.setDelegationHost({
       createThread: (creation) =>
@@ -929,6 +938,18 @@ export class OrchestratorService extends EventEmitter {
       engine.off('stop-requested', onStop)
       engine.off('steer-accepted', onSteer)
     }
+  }
+
+  /**
+   * A provider's background work for `threadId` started (`active`) or finished (including an idle-cap
+   * expiry). While it runs, the tasks waiting on the thread stay `running`; when it ends they are
+   * evaluated again. Called by the adapter that owns the work; nothing calls it yet.
+   */
+  setProviderBackgroundWork(threadId: string, active: boolean): void {
+    if (active === this.providerBackground.has(threadId)) return
+    if (active) this.providerBackground.add(threadId)
+    else this.providerBackground.delete(threadId)
+    if (!active) this.runEngine?.store.settleHold(threadId)
   }
 
   /**
@@ -2169,6 +2190,10 @@ export class OrchestratorService extends EventEmitter {
       status: delegation.status,
       childRunStatus: engine.getRun(delegation.childRunId)?.status ?? null,
       ...(row ? { state: row.state } : {}),
+      // A task whose subagent is waiting on its own subagents is still `running`; it has no result yet.
+      ...(row?.tasks.find((entry) => entry.delegationId === delegationId)?.outcome === 'waiting_for_subagents'
+        ? { workState: 'waiting_for_subagents' as const, waitingOn: row.waitingOn }
+        : {}),
       ...(pending.length ? { pendingQuestion: pending.map(({ requestId, questions }) => ({ requestId, questions })) } : {}),
       ...(delegation.result ? { result: delegation.result } : {})
     }
@@ -3013,7 +3038,27 @@ export class OrchestratorService extends EventEmitter {
     }
     this.emitQueueUpdated(threadId, session.queue)
     this.cancelQueuedRuns([(removed as QueuedMessage | null)?.runId])
+    this.releaseQueueNotices([removed as QueuedMessage | null], false)
     return removed
+  }
+
+  /**
+   * Subagent notices a queue entry carried (a steer that missed its turn) when the entry leaves the
+   * queue without running. A removal returns the rows to the inbox as `pending`, so they still hold
+   * the tasks waiting on this thread and are delivered again; a removal that is part of a Stop
+   * (`clearQueue`) reads them, so nothing waits on a delivery the user cancelled.
+   */
+  private releaseQueueNotices(items: ReadonlyArray<QueuedMessage | null | undefined>, stop: boolean): void {
+    const engine = this.runEngine
+    const ids = items.flatMap((item) => item?.inboxIds ?? [])
+    if (!engine || ids.length === 0) return
+    try {
+      const rows = engine.inbox.getMany(ids).filter((row) => row.status !== 'acknowledged').map((row) => row.inboxId)
+      if (stop) engine.inbox.markAcknowledged(rows)
+      else engine.inbox.markPendingAgain(rows)
+    } catch (error) {
+      console.warn('queue notices could not be released', { error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   reorderQueue(threadId: string, orderedIds: string[]): QueuedMessage[] {
@@ -3092,6 +3137,9 @@ export class OrchestratorService extends EventEmitter {
           tracker.promotedSteerIds.push(item!.id)
         }
       }
+      // The notices this entry carried now sit in the live turn: nothing is left to deliver (the
+      // results stay readable with `task_status`), and a delivered row no run would read must not hold its tasks.
+      this.releaseQueueNotices([item!], true)
       this.emitQueueUpdated(threadId, session.queue)
       return true
     }
@@ -3715,10 +3763,12 @@ export class OrchestratorService extends EventEmitter {
     }
     if (opts?.clearQueue && id) {
       let clearedRunIds: Array<string | undefined> = []
+      let cleared: QueuedMessage[] = []
       const clear = (items: QueuedMessage[]): QueuedMessage[] => {
         const retained = clearPendingQueue(items)
         const retainedIds = new Set(retained.map((item) => item.id))
-        clearedRunIds = items.filter((item) => !retainedIds.has(item.id)).map((item) => item.runId)
+        cleared = items.filter((item) => !retainedIds.has(item.id))
+        clearedRunIds = cleared.map((item) => item.runId)
         for (const item of items) {
           if (item.workflowInvocationId && !retainedIds.has(item.id)) {
             if (!this.workflowChat) throw new Error('Workflow queue cancellation is unavailable')
@@ -3735,6 +3785,7 @@ export class OrchestratorService extends EventEmitter {
       }
       this.emitQueueUpdated(id, session.queue)
       this.cancelQueuedRuns(clearedRunIds)
+      this.releaseQueueNotices(cleared, true)
     }
     this.emit('turn-aborted', { threadId: id ?? undefined })
     return true

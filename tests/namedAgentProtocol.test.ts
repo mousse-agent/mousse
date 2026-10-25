@@ -148,8 +148,9 @@ it('starts every valid parallel assignment without waiting and reports a failed 
   } finally { release() }
 }, 45_000)
 // Phase 4: task_cancel stops a child and everything it delegated, depth-first; a cancelled
-// descendant cannot publish its late result. The child's own delegation may already be read (its
-// result was delivered and acknowledged before the cancel), so only the descendant is asserted.
+// descendant cannot publish its late result. The child ended its turn while its own subagent still
+// runs, so its task is held (issue #142): it has not published, nothing woke the parent, and the
+// cancel reaches both tasks.
 it('cancels a delegated child and its nested delegation depth-first, aborting the live grandchild', async () => {
   const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Cancel descendants', project.id)
   let release!: () => void, observeAbort!: () => void
@@ -177,8 +178,10 @@ it('cancels a delegated child and its nested delegation depth-first, aborting th
     const [child] = mms.orchestrator.listDelegations(thread.id)
     const [grandchild] = mms.orchestrator.listDelegations(child.childThreadId)
     expect(grandchild).toMatchObject({ title: 'Nested cancel', status: 'running' })
+    await vi.waitFor(() => expect(mms.orchestrator.listDelegations(thread.id)[0].childRunStatus).toBe('completed'), { timeout: 15_000, interval: 50 })
+    expect(mms.orchestrator.listDelegations(thread.id)[0]).toMatchObject({ status: 'running' })
     const cancelled = await mms.orchestrator.cancelDelegation(thread.id, child.delegationId)
-    expect(cancelled.cancelled[0]).toBe(grandchild.delegationId)
+    expect(cancelled.cancelled).toEqual([grandchild.delegationId, child.delegationId])
     await Promise.race([aborted, new Promise((_, reject) => setTimeout(() => reject(new Error('Descendant did not receive cancellation')), 5_000))])
     release()
     await vi.waitFor(() => {
@@ -186,6 +189,7 @@ it('cancels a delegated child and its nested delegation depth-first, aborting th
       expect(nested.status).toBe('cancelled')
       expect(['interrupted', 'cancelled']).toContain(nested.childRunStatus)
     }, { timeout: 15_000, interval: 50 })
+    expect(mms.orchestrator.listDelegations(thread.id)[0].status).toBe('cancelled')
   } finally { release() }
 }, 45_000)
 

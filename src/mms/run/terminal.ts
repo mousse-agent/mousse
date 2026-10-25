@@ -1,4 +1,5 @@
 import { Delegations } from './Delegations'
+import { recordRunResultText } from './delegation/hold'
 import { fullyShownDelegations } from './delegation/notice'
 import { Inbox } from './Inbox'
 import { stableStringify } from './json'
@@ -18,8 +19,10 @@ const LIVE_ATTEMPT_STATUSES: ReadonlySet<AttemptStatus> = new Set<AttemptStatus>
  * Attempts have no `uncertain` status: the attempt of an uncertain run was cut off, so it is
  * `interrupted`. Joins the caller's transaction or opens one.
  *
- * Publication gate (SPEC §14.1): when the run is a delegated child run, its result (`resultText`
- * or the failure) and the parent's `child_result` inbox row are written in this transaction.
+ * Publication gate (SPEC §14.1): when the run is a run of a subagent, its final text is kept
+ * (`recordRunResultText`) and the tasks waiting on that subagent are re-evaluated
+ * (`settleWaitingDelegations`): each publishes, with the parent's `child_result` inbox row, in this
+ * transaction once the subagent is no longer busy, and otherwise stays `running` until it is.
  */
 export function writeTerminalRun(
   store: RunStore,
@@ -50,8 +53,11 @@ export function writeTerminalRun(
         status: status === 'uncertain' ? 'interrupted' : status,
         completedAt
       })
-    new Delegations(store).publishResult(next, options.resultText)
+    recordRunResultText(store, next, options.resultText)
+    // Rows this run delivered are acknowledged first (inside, the thread is evaluated as they move)...
     acknowledgeDeliveredRows(store, next)
+    // ...then, whatever moved or not, once more with the run's own end.
+    store.settleHold(next.threadId)
     return next
   })
 }

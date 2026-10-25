@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { buildSubagentView, childActivity, isChildBusy, outcomeOfRun, taskOutcome } from '../../src/mms/run/delegation/subagentView'
+import { isChildBusy } from '../../src/mms/run/delegation/hold'
+import { buildSubagentView, childActivity, outcomeOfRun, taskOutcome } from '../../src/mms/run/delegation/subagentView'
 import { subagentAncestorsOf, subagentParentsOfEvent } from '../../src/mms/run/delegation/subagentEvents'
 import type { DelegationRecord, RunRecord } from '../../src/mms/run/types'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
@@ -227,9 +228,11 @@ describe('subagent status model (plan §3.3)', () => {
 
   describe('a child that ended its run while still busy (plan v4–v6, read side)', () => {
     /**
-     * Master publishes a child's result in its terminal write, so a `running` delegation with a
-     * terminal run is seeded: the child finishes, then the delegation row is put back to `running`
-     * the way a held delegation stays until the child is no longer busy.
+     * The read side is tested apart from the publication (`tests/run/subagentHold.test.ts` drives
+     * the real hold): a child with nothing to wait for publishes in its terminal write, so a
+     * `running` delegation with a terminal run is seeded here. The child finishes, then the
+     * delegation row is put back to `running` the way a held delegation stays until the child is no
+     * longer busy.
      */
     const held = async () => {
       const { parent, child } = await started()

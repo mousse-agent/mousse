@@ -3,6 +3,7 @@ import type { ProfileDatabase } from './db/ProfileDatabase'
 import { RUN_MIGRATIONS } from './db/migrations'
 import { json, str, type Row } from './db/rows'
 import { fail } from './db/RunStoreError'
+import { settleWaitingDelegations } from './delegation/hold'
 import { stableStringify } from './json'
 import {
   TERMINAL_RUN_STATUSES,
@@ -32,9 +33,55 @@ const TERMINAL_PLACEHOLDERS = TERMINAL_LIST.map(() => '?').join(',')
  */
 export class RunStore {
   private readonly eventListeners = new Set<(event: ThreadEvent) => void>()
+  /** Threads whose waiting tasks `settleHold` still has to look at, and whether it is looking now. */
+  private readonly settleQueue = new Set<string>()
+  private settling = false
+  private providerBackground: ((threadId: string) => boolean) | null = null
 
   constructor(readonly db: ProfileDatabase) {
     db.migrate(RUN_MIGRATIONS)
+  }
+
+  /**
+   * Input (4) of the hold predicate (`childBusy`): whether the provider still runs background work
+   * for a thread after its runs ended. The host supplies it; it must be synchronous and in memory,
+   * because the predicate reads it inside transactions. Absent means no thread has any.
+   */
+  setProviderBackgroundWork(read: ((threadId: string) => boolean) | null): void {
+    this.providerBackground = read
+  }
+
+  /** Never throws: a provider that cannot answer has no background work to wait for. */
+  providerBackgroundWork(threadId: string): boolean {
+    try {
+      return this.providerBackground?.(threadId) === true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Something `settleWaitingDelegations` reads for `threadId` changed: a run ended, an inbox row or
+   * a delivery effect changed status, a delegation of the thread left `running`, a queue entry was
+   * removed, the provider's background work changed. Publishes the tasks waiting on the thread that
+   * are no longer held, inside the caller's transaction (or one of its own). A call made while a
+   * settlement is running (publishing one task changes the next thread's inputs) is queued and
+   * handled after the current thread is done, so no thread is judged on a half-written state.
+   */
+  settleHold(threadId: string): void {
+    this.settleQueue.add(threadId)
+    if (this.settling) return
+    this.settling = true
+    try {
+      while (this.settleQueue.size) {
+        const [next] = this.settleQueue
+        this.settleQueue.delete(next)
+        settleWaitingDelegations(this, next)
+      }
+    } finally {
+      this.settling = false
+      this.settleQueue.clear()
+    }
   }
 
   /**
