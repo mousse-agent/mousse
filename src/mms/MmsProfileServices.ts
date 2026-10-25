@@ -10,6 +10,7 @@ import { ClaudeSubscriptionProviderService } from './providers/claudeSubscriptio
 import { ClaudeIntegrationResolver } from './providers/claudeSubscription/integrations'
 import { AntigravityProviderService } from './providers/antigravity/AntigravityProviderService'
 import { ProviderInstanceService } from './providers/ProviderInstanceService'
+import type { HarnessGateway } from './harness/gateway'
 import { createCodexProviderService, type CodexProviderService } from './run/adapters/codex'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
@@ -102,6 +103,8 @@ export class MmsProfileServices {
   readonly codex: CodexProviderService
   /** Provider instances of this profile: the agents callers pick by `{ instanceId, model }`. */
   readonly providerInstances: ProviderInstanceService
+  /** The harness gateway; unset until it is composed here, so its protocol methods report `not_implemented`. */
+  harness?: HarnessGateway
   readonly projects: ProjectManager
   readonly applets: AppletStore
   readonly threads: ThreadDataStore

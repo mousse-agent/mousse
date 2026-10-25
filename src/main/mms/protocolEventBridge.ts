@@ -200,6 +200,15 @@ export function bridgeProtocolEvent(
       if (data?.event) broadcast('providers:install:event', data.event)
       return true
     }
+    case 'providers.snapshots': {
+      broadcast('providers:snapshots', event.data)
+      return true
+    }
+    case 'providers.operation': {
+      const data = event.data as { event?: unknown }
+      if (data?.event) broadcast('providers:operation', data.event)
+      return true
+    }
     case 'mcp.changed': {
       broadcast('mcp:changed', null)
       return true

@@ -2091,6 +2091,52 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ cancelled: boolean }>('providers.cancelAntigravityInstall', {})
     return res.cancelled
   })
+  // Harness gateway. Changes reach every window as `providers:snapshots` and operation progress as
+  // `providers:operation` through the protocol event bridge; long operations return an id at once.
+  registerHandler('providers:snapshots', async (_e, scope: unknown) => {
+    const res = await guiMms.request<{ snapshots: unknown[] }>('providers.snapshots', { scope })
+    return res.snapshots
+  })
+  const instanceCommand = <K extends string>(method: string, key: K) =>
+    async (params: Record<string, unknown>): Promise<unknown> =>
+      (await guiMms.request<Record<K, unknown>>(method, params))[key]
+  const addInstance = instanceCommand('providers.instances.add', 'snapshot')
+  const configureInstance = instanceCommand('providers.instances.configure', 'snapshot')
+  const setInstanceEnabled = instanceCommand('providers.instances.setEnabled', 'snapshot')
+  const installInstance = instanceCommand('providers.instances.install', 'operation')
+  const cancelInstanceInstall = instanceCommand('providers.instances.cancelInstall', 'cancelled')
+  const updateInstance = instanceCommand('providers.instances.update', 'operation')
+  const uninstallInstance = instanceCommand('providers.instances.uninstall', 'snapshot')
+  const signInInstance = instanceCommand('providers.instances.signIn', 'operation')
+  const respondInstanceSignIn = instanceCommand('providers.instances.respondSignIn', 'ok')
+  const signOutInstance = instanceCommand('providers.instances.signOut', 'snapshot')
+  const recheckInstance = instanceCommand('providers.instances.recheck', 'snapshot')
+  const refreshInstanceModels = instanceCommand('providers.instances.refreshModels', 'snapshot')
+  const setInstanceModelPrefs = instanceCommand('providers.instances.setModelPrefs', 'snapshot')
+  // The daemon validates every payload.
+  registerHandler('providers:instances:add', async (_e, input: Record<string, unknown>) => addInstance(input))
+  registerHandler('providers:instances:remove', async (_e, instanceId: string) => {
+    await guiMms.request('providers.instances.remove', { instanceId })
+  })
+  registerHandler('providers:instances:configure', async (_e, instanceId: string, patch: unknown) =>
+    configureInstance({ instanceId, patch }))
+  registerHandler('providers:instances:setEnabled', async (_e, instanceId: string, scope: unknown, enabled: unknown) =>
+    setInstanceEnabled({ instanceId, scope, enabled }))
+  registerHandler('providers:instances:install', async (_e, instanceId: string) => installInstance({ instanceId }))
+  registerHandler('providers:instances:cancelInstall', async (_e, operationId: string) =>
+    cancelInstanceInstall({ operationId }))
+  registerHandler('providers:instances:update', async (_e, instanceId: string) => updateInstance({ instanceId }))
+  registerHandler('providers:instances:uninstall', async (_e, instanceId: string) => uninstallInstance({ instanceId }))
+  registerHandler('providers:instances:signIn', async (_e, instanceId: string, method?: string) =>
+    signInInstance({ instanceId, method }))
+  registerHandler('providers:instances:respondSignIn', async (_e, operationId: string, response: unknown) =>
+    respondInstanceSignIn({ operationId, response }))
+  registerHandler('providers:instances:signOut', async (_e, instanceId: string) => signOutInstance({ instanceId }))
+  registerHandler('providers:instances:recheck', async (_e, instanceId: string) => recheckInstance({ instanceId }))
+  registerHandler('providers:instances:refreshModels', async (_e, instanceId: string) =>
+    refreshInstanceModels({ instanceId }))
+  registerHandler('providers:instances:setModelPrefs', async (_e, instanceId: string, patch: unknown) =>
+    setInstanceModelPrefs({ instanceId, patch }))
   registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
     return pickExecutable((options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)), request)

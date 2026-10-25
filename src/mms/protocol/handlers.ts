@@ -35,9 +35,18 @@ import {
   lastUsedChatModel,
   type MousseSettingsUpdate
 } from '../../shared/settings'
+import type { HarnessGateway } from '../harness/gateway'
+import { harnessAppError } from '../../shared/harness/types'
 import {
+  asAddInstanceInput,
   asAfterSequence,
   asAnswersMap,
+  asEnabledForScope,
+  asInstanceConfigPatch,
+  asInstanceId,
+  asModelPrefsPatch,
+  asProviderScope,
+  asSignInResponse,
   asBoolean,
   asChannelConfigPatch,
   asChannelPlatform,
@@ -443,6 +452,12 @@ export async function dispatchMethod(
     return ctx.mms.runOwnedRequest(method, () => dispatchOwnedMethod(ctx, method, params))
   }
   return dispatchOwnedMethod(ctx, method, params)
+}
+
+/** The profile's harness gateway; `not_implemented` until it is composed. */
+function harnessGateway(ctx: HandlerContext): HarnessGateway {
+  if (ctx.mms.harness) return ctx.mms.harness
+  throw harnessAppError({ code: 'not_implemented', message: 'Provider instances are not available in this build yet.' })
 }
 
 /** The vendor driver that owns a CLI provider instance's launch settings. */
@@ -1787,6 +1802,76 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'providers.cancelAntigravityInstall':
       return { cancelled: ctx.mms.antigravity.cancelInstall() }
+    case 'providers.snapshots': {
+      const p = isObject(params) ? params : {}
+      const scope = asProviderScope(p.scope)
+      return { scope, snapshots: await harnessGateway(ctx).instances.snapshots(scope) }
+    }
+    case 'providers.instances.add':
+      return { snapshot: await harnessGateway(ctx).instances.add(asAddInstanceInput(params)) }
+    case 'providers.instances.remove': {
+      const p = isObject(params) ? params : {}
+      await harnessGateway(ctx).instances.remove(asInstanceId(p.instanceId))
+      return { ok: true }
+    }
+    case 'providers.instances.configure': {
+      const p = isObject(params) ? params : {}
+      const instanceId = asInstanceId(p.instanceId)
+      return { snapshot: await harnessGateway(ctx).instances.configure(instanceId, asInstanceConfigPatch(p.patch)) }
+    }
+    case 'providers.instances.setEnabled': {
+      const p = isObject(params) ? params : {}
+      const instanceId = asInstanceId(p.instanceId)
+      const scope = asProviderScope(p.scope)
+      const enabled = asEnabledForScope(p.enabled, scope)
+      return { snapshot: await harnessGateway(ctx).instances.setEnabled(instanceId, scope, enabled) }
+    }
+    // Install, update and sign-in return an operation id at once; progress, prompts and the
+    // outcome arrive as `providers.operation` events, so no request waits on them.
+    case 'providers.instances.install': {
+      const p = isObject(params) ? params : {}
+      return { operation: await harnessGateway(ctx).instances.install(asInstanceId(p.instanceId)) }
+    }
+    case 'providers.instances.cancelInstall': {
+      const p = isObject(params) ? params : {}
+      return { cancelled: await harnessGateway(ctx).instances.cancelInstall(asString(p.operationId, 'operationId', 256)) }
+    }
+    case 'providers.instances.update': {
+      const p = isObject(params) ? params : {}
+      return { operation: await harnessGateway(ctx).instances.update(asInstanceId(p.instanceId)) }
+    }
+    case 'providers.instances.uninstall': {
+      const p = isObject(params) ? params : {}
+      return { snapshot: await harnessGateway(ctx).instances.uninstall(asInstanceId(p.instanceId)) }
+    }
+    case 'providers.instances.signIn': {
+      const p = isObject(params) ? params : {}
+      const instanceId = asInstanceId(p.instanceId)
+      const method = asOptionalString(p.method, 64)
+      return { operation: await harnessGateway(ctx).instances.signIn(instanceId, method) }
+    }
+    case 'providers.instances.respondSignIn': {
+      const p = isObject(params) ? params : {}
+      const operationId = asString(p.operationId, 'operationId', 256)
+      return { ok: await harnessGateway(ctx).instances.respondSignIn(operationId, asSignInResponse(p.response)) }
+    }
+    case 'providers.instances.signOut': {
+      const p = isObject(params) ? params : {}
+      return { snapshot: await harnessGateway(ctx).instances.signOut(asInstanceId(p.instanceId)) }
+    }
+    case 'providers.instances.recheck': {
+      const p = isObject(params) ? params : {}
+      return { snapshot: await harnessGateway(ctx).instances.recheck(asInstanceId(p.instanceId)) }
+    }
+    case 'providers.instances.refreshModels': {
+      const p = isObject(params) ? params : {}
+      return { snapshot: await harnessGateway(ctx).instances.refreshModels(asInstanceId(p.instanceId)) }
+    }
+    case 'providers.instances.setModelPrefs': {
+      const p = isObject(params) ? params : {}
+      const instanceId = asInstanceId(p.instanceId)
+      return { snapshot: await harnessGateway(ctx).instances.setModelPrefs(instanceId, asModelPrefsPatch(p.patch)) }
+    }
     case 'workspace.getStatus': {
       const p = isObject(params) ? params : {}
       const lookup = threadLookupContext(ctx, p)

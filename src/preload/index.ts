@@ -75,6 +75,16 @@ import type {
   ProviderLoginResponse,
   ProviderLoginResult
 } from '../shared/providerAuth'
+import type { InstanceSnapshot, ProviderSnapshotsEvent } from '../shared/harness/status'
+import type {
+  AddInstanceInput,
+  InstanceConfigPatch,
+  ModelPrefsPatch,
+  ProviderOperationEvent,
+  ProviderOperationStarted,
+  ProviderScope,
+  SignInResponse
+} from '../shared/harness/types'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
 import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
@@ -790,6 +800,60 @@ const api = {
         cb(providers)
       ipcRenderer.on('providers:changed', handler)
       return () => ipcRenderer.removeListener('providers:changed', handler)
+    },
+    /** Status of every provider instance in `scope` (device, or a project's overrides on top). */
+    snapshots: (scope: ProviderScope): Promise<InstanceSnapshot[]> =>
+      ipcRenderer.invoke('providers:snapshots', scope),
+    /** Pushed on every change; a page showing another scope refetches with `snapshots`. */
+    onSnapshots: (cb: (event: ProviderSnapshotsEvent) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: ProviderSnapshotsEvent) => cb(event)
+      ipcRenderer.on('providers:snapshots', handler)
+      return () => ipcRenderer.removeListener('providers:snapshots', handler)
+    },
+    /** Progress, sign-in prompts and the outcome of install, update and sign-in operations. */
+    onOperation: (cb: (event: ProviderOperationEvent) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: ProviderOperationEvent) => cb(event)
+      ipcRenderer.on('providers:operation', handler)
+      return () => ipcRenderer.removeListener('providers:operation', handler)
+    },
+    /**
+     * Provider instance commands. Mutations resolve with the instance's snapshot; install, update
+     * and sign-in resolve at once with an operation id and report through `onOperation`.
+     */
+    instances: {
+      add: (input: AddInstanceInput): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:add', input),
+      /** Built-in instances cannot be removed. */
+      remove: (instanceId: string): Promise<void> => ipcRenderer.invoke('providers:instances:remove', instanceId),
+      configure: (instanceId: string, patch: InstanceConfigPatch): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:configure', instanceId, patch),
+      /** `null` clears a project override; the device scope takes a boolean. */
+      setEnabled: (instanceId: string, scope: ProviderScope, enabled: boolean | null): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:setEnabled', instanceId, scope, enabled),
+      install: (instanceId: string): Promise<ProviderOperationStarted> =>
+        ipcRenderer.invoke('providers:instances:install', instanceId),
+      /** Cancels a running install or update; false when it is not running. */
+      cancelInstall: (operationId: string): Promise<boolean> =>
+        ipcRenderer.invoke('providers:instances:cancelInstall', operationId),
+      update: (instanceId: string): Promise<ProviderOperationStarted> =>
+        ipcRenderer.invoke('providers:instances:update', instanceId),
+      uninstall: (instanceId: string): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:uninstall', instanceId),
+      signIn: (instanceId: string, method?: string): Promise<ProviderOperationStarted> =>
+        ipcRenderer.invoke('providers:instances:signIn', instanceId, method),
+      /** Answers a sign-in prompt, or cancels the sign-in with `{ kind: 'cancel' }`. */
+      respondSignIn: (operationId: string, response: SignInResponse): Promise<boolean> =>
+        ipcRenderer.invoke('providers:instances:respondSignIn', operationId, response),
+      signOut: (instanceId: string): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:signOut', instanceId),
+      /** Checks again, bypassing the cached status. */
+      recheck: (instanceId: string): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:recheck', instanceId),
+      refreshModels: (instanceId: string): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:refreshModels', instanceId),
+      /** Each present field replaces the stored one. */
+      setModelPrefs: (instanceId: string, patch: ModelPrefsPatch): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:setModelPrefs', instanceId, patch)
     }
   },
   readAloud: {

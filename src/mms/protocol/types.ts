@@ -338,6 +338,23 @@ export const PROTOCOL_METHODS = [
   'providers.setCliConfig',
   'providers.installAntigravity',
   'providers.cancelAntigravityInstall',
+  // Harness gateway: instance snapshots and commands. Long operations return an operation id
+  // and report through `providers.operation` events.
+  'providers.snapshots',
+  'providers.instances.add',
+  'providers.instances.remove',
+  'providers.instances.configure',
+  'providers.instances.setEnabled',
+  'providers.instances.install',
+  'providers.instances.cancelInstall',
+  'providers.instances.update',
+  'providers.instances.uninstall',
+  'providers.instances.signIn',
+  'providers.instances.respondSignIn',
+  'providers.instances.signOut',
+  'providers.instances.recheck',
+  'providers.instances.refreshModels',
+  'providers.instances.setModelPrefs',
   'webTools.getCredentialStatus',
   'webTools.setApiKey',
   'webTools.clearApiKey',
@@ -449,6 +466,8 @@ export type ProtocolEventType =
   | 'providers.changed'
   | 'providers.login-event'
   | 'providers.install-event'
+  | 'providers.snapshots'
+  | 'providers.operation'
   | 'mcp.changed'
   | 'turn.interrupted'
   | 'turn.aborted'
