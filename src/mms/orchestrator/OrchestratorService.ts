@@ -57,7 +57,7 @@ import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/Ru
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
 import { TranscriptAssembler } from '../run/adapters/shared/TranscriptAssembler'
-import { forkStrategy, handoffDelivery, mcpAttachable, subagentTargetRefusal } from '../run/policy/featureGates'
+import { forkStrategy, handoffDelivery, mcpAttachable, subagentTargetRefusal, type SubagentRefusal } from '../run/policy/featureGates'
 import { isContextOverflowError, retryContextOverflowOnce } from '../run/adapters/shared/retryContextOverflow'
 import {
   TERMINAL_RUN_STATUSES,
@@ -178,7 +178,7 @@ import {
   type MousseAgentLifecycleEvent
 } from '../agents/MousseAgentService'
 import { ConnectionRetriesExhaustedError } from './connectionRetry'
-import { errorDiagnostic, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
+import { AppError, errorDiagnostic, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
 import {
   compactMessagesAtSafeBoundary,
   commitNativeMessages,
@@ -1451,10 +1451,18 @@ export class OrchestratorService extends EventEmitter {
       // An unresolvable target fails loudly when the child is created, as before.
       return null
     }
-    // The static check of the adapter's capabilities, then the adapter's look at the user's setup.
-    const refusal = subagentTargetRefusal(target.adapter.capabilities, target.entry.driver, workspace)
-      ?? await target.adapter.childPreflight?.({ workspace, cwd: this.sharedWorkspaceOf(parentThreadId)?.path ?? null }) ?? null
+    const refusal = await this.targetRefusal(target, workspace, this.sharedWorkspaceOf(parentThreadId)?.path ?? null)
     return refusal ? { started: false as const, ...refusal } : null
+  }
+
+  /** The static check of the adapter's capabilities, then the adapter's look at the user's setup. */
+  private async targetRefusal(
+    target: ReturnType<OrchestratorService['adapterForThread']>,
+    workspace: 'shared' | 'isolated',
+    cwd: string | null
+  ): Promise<SubagentRefusal | null> {
+    return subagentTargetRefusal(target.adapter.capabilities, target.entry.driver, workspace)
+      ?? await target.adapter.childPreflight?.({ workspace, cwd }) ?? null
   }
 
   /**
@@ -4392,6 +4400,13 @@ export class OrchestratorService extends EventEmitter {
       // override, fails the turn here.
       const instance = this.adapters.resolveSelection(selectedModel, { unselectedDefault: !(opts?.modelOverride ?? session.modelOverride) })
       const adapter = instance.adapter
+      // Issue #142: a read-only child is checked on every turn, not only when it was created. Its
+      // provider may have been switched, or the user's setup changed, since then.
+      if (session.sharedWorkspace) {
+        const refusal = await this.targetRefusal(instance, 'shared', session.sharedWorkspace.path)
+        // A known error keeps its message; an unknown one would reach the thread as a generic failure.
+        if (refusal) throw new AppError({ code: refusal.code, message: refusal.message, errorInfo: { category: 'unavailable', retryable: false } })
+      }
       // A transcript-native runtime (the pi loop) is sent Mousse's transcript and tools, so Mousse
       // keeps that transcript within the window before the turn. A prompt-injected runtime owns its
       // loop, context and tools and receives prior turns as a prompt preamble.

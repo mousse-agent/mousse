@@ -194,6 +194,26 @@ describe('delegated child policy', () => {
       expect(codex.turns).toEqual([])
     }, 30_000)
 
+    it("refuses a later turn of a shared child once the user's setup gains an MCP server", async () => {
+      let refuse = false
+      const { d, thread, codex, outcomes } = codexDaemon(() => refuse
+        ? { code: 'shared_unsupported_for_provider', message: 'not possible while your Codex config has MCP servers (ext)' }
+        : null)
+      await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
+      const child = outcomes.shared as unknown as { childThreadId: string; childRunId: string }
+      await waitFor(() => d.engine.getRun(child.childRunId)?.status === 'completed', 'the shared child run')
+      const turnsOf = () => codex.turns.filter((turn) => turn.input.threadId === child.childThreadId).length
+      expect(turnsOf()).toBe(1)
+
+      await d.orch.send('Look again', false, { threadId: child.childThreadId, clientRequestId: 'ok-again' })
+      expect(turnsOf()).toBe(2)
+
+      refuse = true
+      await d.orch.send('And again', false, { threadId: child.childThreadId, clientRequestId: 'refused' }).catch(() => undefined)
+      expect(turnsOf()).toBe(2)
+      expect(d.orch.getMessagesForPersistence(child.childThreadId).map((message) => message.content).join('\n')).toContain('MCP servers (ext)')
+    }, 30_000)
+
     it('starts the child when the adapter finds nothing in the setup', async () => {
       const { d, thread, codex, outcomes } = codexDaemon(() => null)
       await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
@@ -225,6 +245,27 @@ describe('delegated child policy', () => {
     expect(turnsOf(started.isolated.childThreadId)[1].input.child).toEqual({ readOnly: false })
     // The parent is not a subagent.
     expect(claude.turns.every((turn) => turn.input.threadId !== thread.id)).toBe(true)
+  }, 30_000)
+
+  it('a shared child switched to Antigravity is refused on its next turn, and an isolated one is not', async () => {
+    const started: Record<string, { childThreadId: string; childRunId: string }> = {}
+    const { d, claude, antigravity, thread } = daemon(async (delegation) => {
+      started.shared = await delegate(delegation, { workspace: 'shared', role: 'research' }, 'shared') as never
+      started.isolated = await delegate(delegation, { workspace: 'isolated', role: 'implement' }, 'isolated') as never
+    })
+    await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
+    for (const child of Object.values(started)) await waitFor(() => d.engine.getRun(child.childRunId)?.status === 'completed', 'a child run')
+    for (const child of Object.values(started))
+      d.orch.setThreadModelOverride(child.childThreadId, { instanceId: 'antigravity', llmProvider: 'antigravity', model: 'agent' })
+
+    const shared = await d.orch.send('Look again', false, { threadId: started.shared.childThreadId, clientRequestId: 'again-shared' }).catch((error: Error) => error)
+    // Nothing ran on Antigravity (it would have had write access), and the reason is on the thread.
+    expect(antigravity.turns.filter((turn) => turn.input.threadId === started.shared.childThreadId)).toEqual([])
+    expect(JSON.stringify(shared) + d.orch.getMessagesForPersistence(started.shared.childThreadId).map((message) => message.content).join('\n')).toContain('cannot run a read-only (shared) subagent')
+    expect(claude.turns.filter((turn) => turn.input.threadId === started.shared.childThreadId)).toHaveLength(1)
+
+    await d.orch.send('Look again', false, { threadId: started.isolated.childThreadId, clientRequestId: 'again-isolated' })
+    expect(antigravity.turns.filter((turn) => turn.input.threadId === started.isolated.childThreadId)).toHaveLength(1)
   }, 30_000)
 
   it('shared and isolated children both get the delegation tools', async () => {
