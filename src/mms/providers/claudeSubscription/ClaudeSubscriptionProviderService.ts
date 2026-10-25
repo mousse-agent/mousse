@@ -107,7 +107,7 @@ export type ClaudeSubscriptionChatInput = {
     title: string
     toolName?: string
     /** A Mousse subagent call's bounded record, set when the call completes. */
-    record?: ReturnType<typeof recordSubagentCall>
+    record?: NonNullable<ReturnType<typeof recordSubagentCall>>
   }) => void
 }
 type Dependencies = {

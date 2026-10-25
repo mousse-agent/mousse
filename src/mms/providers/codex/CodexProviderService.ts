@@ -161,7 +161,7 @@ export interface CodexToolEvent {
   title: string
   toolName?: string
   /** A Mousse subagent call's bounded record (`recordSubagentCall`). */
-  record?: ReturnType<typeof recordSubagentCall>
+  record?: NonNullable<ReturnType<typeof recordSubagentCall>>
 }
 
 export interface CodexTurnUsage {
