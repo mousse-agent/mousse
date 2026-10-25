@@ -358,6 +358,7 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
     }
     // A message that delivers subagent results carries them structured; the transcript renders
     // those, never the text, which stays what the model reads.
+    if (msg.role === 'user' && msg.steered) base.metadata = { ...(base.metadata as object | undefined), steered: true }
     const subagentNotice = msg.role === 'user' && msg.subagentNotice?.length ? msg.subagentNotice : undefined
     if (subagentNotice) base.metadata = { ...(base.metadata as object | undefined), subagentNotice }
     if (!displayText.trim() && !msg.images?.length && extraFileNames.length === 0 && references.length === 0 && !subagentNotice) {

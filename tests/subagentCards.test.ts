@@ -389,6 +389,73 @@ describe('joinSubagentCards', () => {
       })
     })
 
+    describe('a reused title', () => {
+      // A subagent was trashed; a new one is started under the same title.
+      const input = { recordVersion: 1, title: 'Reviewer' }
+      const old = () => recorded('old', 'delegate_task', { input, inLastTurn: false })
+      const fresh = (patch: Partial<SubagentCall> = {}) => recorded('new', 'delegate_task', { input, ...patch })
+      const reviewer = (...tasks: SubagentTaskSummary[]) => [subagent('r2', tasks, { title: 'Reviewer' })]
+
+      it('never lets an old unfinished call take the new subagent`s task', () => {
+        const cards = join([old(), fresh()], reviewer(task('d-new', 9)), { turnActive: true })
+        expect(cards.has('old')).toBe(false)
+        expect(cards.get('new')).toMatchObject({ delegationId: 'd-new', exact: false })
+      })
+
+      it('leaves two live calls under one title pending until their results name their tasks', () => {
+        const calls = [fresh(), recorded('also', 'delegate_task', { input })]
+        const cards = join(calls, reviewer(task('d-new', 9)), { turnActive: true })
+        expect([cards.get('new')!.pending, cards.get('also')!.pending]).toEqual([true, true])
+      })
+
+      it('does not turn a title match into a certain task, so the result replaces it', () => {
+        const provisional = join([old(), fresh()], reviewer(task('d-new', 9)), { turnActive: true })
+        const settled = join([old(), fresh({ pending: false, output: { delegationId: 'd-new' } })], reviewer(task('d-new', 9)), { previous: provisional, turnActive: true })
+        expect([...settled.values()].filter((card) => card.delegationId === 'd-new')).toHaveLength(1)
+        expect(settled.get('new')).toMatchObject({ delegationId: 'd-new', exact: true })
+        expect(settled.has('old')).toBe(false)
+      })
+
+      it('takes a certain task from any card that held it before', () => {
+        // An old row joined by order held d-new; the new call's own result now names it.
+        const before = join([call('legacy', 'delegate_task', 1)], reviewer(task('d-new', 9)))
+        expect(before.get('legacy')).toMatchObject({ delegationId: 'd-new', exact: true })
+        const calls = [call('legacy', 'delegate_task', 1), fresh({ pending: false, output: { delegationId: 'd-new' } })]
+        const after = join(calls, reviewer(task('d-new', 9)), { previous: before })
+        expect(after.get('new')!.delegationId).toBe('d-new')
+        expect(after.has('legacy')).toBe(false)
+        expect([...after.values()].filter((card) => card.delegationId === 'd-new')).toHaveLength(1)
+      })
+    })
+
+    describe('a steer in the middle of a turn', () => {
+      const message = (id: string, role: 'user' | 'assistant', parts: unknown[] = [], metadata?: unknown) =>
+        ({ id, role, parts, createdAt: at(1), metadata }) as unknown as UIMessage
+      const pendingPart = { type: 'tool-Subagent', toolCallId: 'live', subagentTool: 'delegate_task', state: 'input-available', input: { recordVersion: 1 } }
+
+      it('does not start a turn, so a call before it is still in the running turn', () => {
+        const messages = [message('u1', 'user'), message('a1', 'assistant', [pendingPart]), message('steer', 'user', [], { steered: true })]
+        const [live] = collectSubagentCalls(messages)
+        expect(live!.inLastTurn).toBe(true)
+        expect(join([live!], subagents, { turnActive: true }).get('live')).toMatchObject({ pending: true, state: 'starting' })
+      })
+
+      it('still ends at a user message that is not a steer', () => {
+        const [stale] = collectSubagentCalls([message('u1', 'user'), message('a1', 'assistant', [pendingPart]), message('u2', 'user')])
+        expect(stale!.inLastTurn).toBe(false)
+        expect(join([stale!], subagents, { turnActive: true }).has('live')).toBe(false)
+      })
+
+      it('is marked on the message by the transcript adapter', () => {
+        const out = mousseToUIMessages([
+          row({ id: 'steer', role: 'user', content: 'also check the docs', steered: true }),
+          row({ id: 'plain', role: 'user', content: 'hello' })
+        ])
+        expect((out[0]!.metadata as { steered?: boolean }).steered).toBe(true)
+        expect((out[1]!.metadata as { steered?: boolean } | undefined)?.steered).toBeUndefined()
+      })
+    })
+
     describe('a call that never returned', () => {
       const stale = () => recorded('c1', 'delegate_task')
 
@@ -404,9 +471,12 @@ describe('joinSubagentCards', () => {
         expect(join([named], subagents, { turnActive: false }).has('c1')).toBe(false)
       })
 
-      it('still joins a task it names after the turn ended', () => {
+      it('takes no task by its title after the turn ended, which another subagent may have reused', () => {
         const named = recorded('c1', 'delegate_task', { input: { recordVersion: 1, title: 'Subagent docs' } })
-        expect(join([named], subagents, { turnActive: false }).get('c1')!.delegationId).toBe('d-docs')
+        expect(join([named], subagents, { turnActive: false }).has('c1')).toBe(false)
+        // Once it has returned with its own result, the result names the task.
+        const returned = { ...named, pending: false, output: { delegationId: 'd-docs' } }
+        expect(join([returned], subagents, { turnActive: false }).get('c1')!.delegationId).toBe('d-docs')
       })
 
       it('is found by the transcript as in the last turn only after the last user message', () => {

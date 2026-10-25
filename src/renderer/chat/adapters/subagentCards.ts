@@ -63,7 +63,9 @@ function timeOf(value: unknown): number | null {
 /** The start-a-task calls in `messages`, in transcript order. */
 export function collectSubagentCalls(messages: readonly UIMessage[]): SubagentCall[] {
   const calls: SubagentCall[] = []
-  const lastUser = messages.reduce((found, message, index) => (message.role === 'user' ? index : found), -1)
+  // A steer is a user message inside a running turn, not the start of a new one.
+  const startsTurn = (message: UIMessage): boolean => message.role === 'user' && !(message.metadata as { steered?: unknown } | undefined)?.steered
+  const lastUser = messages.reduce((found, message, index) => (startsTurn(message) ? index : found), -1)
   for (const [messageIndex, message] of messages.entries()) {
     for (const raw of message.parts ?? []) {
       const part = raw as Part
@@ -211,9 +213,12 @@ export function joinSubagentCards(calls: readonly SubagentCall[], subagents: rea
     const id = readSubagentResult(call.output)?.delegationId
     return typeof id === 'string' && id ? id : null
   }
+  const turnActive = options.turnActive ?? true
+  const starting = (call: SubagentCall): boolean => turnActive && call.inLastTurn
   const live = calls.filter((call) => !call.failed)
 
-  // 1. A recorded result names its task outright, and always wins over any other match.
+  // 1. A recorded result names its task outright. Only this, and an old row joined by order, is
+  //    certain; it always wins, and no other card keeps a task it names.
   for (const call of live) {
     const id = recordedId(call)
     if (id) take(call, byDelegation.get(id), true)
@@ -221,37 +226,37 @@ export function joinSubagentCards(calls: readonly SubagentCall[], subagents: rea
 
   // 2. A call that already has a card for a certain task keeps it, listed or not, before any other
   //    call is matched: a task that dropped out of the list must not be handed to a neighbour. A
-  //    provisional match is not kept; it is worked out again from what is known now.
+  //    provisional match is not kept; it is worked out again from what is known now. A certain task
+  //    that another call has claimed is lost to it, so two cards never hold one task.
   const reserved = new Set<string>()
   for (const call of live) {
     if (assigned.has(call.toolCallId)) continue
     const before = options.previous?.get(call.toolCallId)
     if (!before || before.pending || !before.exact || !before.delegationId) continue
-    reserved.add(call.toolCallId)
-    take(call, byDelegation.get(before.delegationId), true)
+    const listed = byDelegation.get(before.delegationId)
+    if (!listed) reserved.add(call.toolCallId)
+    else if (take(call, listed, true)) reserved.add(call.toolCallId)
   }
 
-  // 3. A recorded input names the subagent. A started subagent is found by its title, which is
-  //    unique. A follow-up takes that subagent's later task only when no other unresolved follow-up
-  //    names the same subagent and exactly one task is a candidate; otherwise it stays pending until
-  //    its own result arrives, never given a task from list order.
-  const unresolved = live.filter((call) => !assigned.has(call.toolCallId) && !reserved.has(call.toolCallId) && !recordedId(call))
+  // 3. A recorded input names the subagent. This is provisional, because a title can be reused (a
+  //    subagent trashed and started again under its name): a started subagent is found by its title,
+  //    a follow-up takes that subagent's later task only when exactly one task is a candidate, and
+  //    neither is matched while another unresolved call names the same subagent. Such a call waits for
+  //    its own result. A call that never returned and is not running takes nothing.
+  const open = (call: SubagentCall): boolean => !(call.pending && !starting(call))
+  const unresolved = live.filter((call) => !assigned.has(call.toolCallId) && !reserved.has(call.toolCallId) && !recordedId(call) && open(call))
   const subagentsNamed = (call: SubagentCall): Set<string> =>
     new Set(entries.filter((entry) => namesSubagent(call, entry) === true).map((entry) => entry.subagent.childThreadId))
   for (const call of unresolved) {
     const named = entries.filter((entry) => namesSubagent(call, entry) === true && !claimed.has(entry.task.delegationId))
-    if (call.tool === 'delegate_task') {
-      take(call, named.find((entry) => entry.index === 0), true)
-      continue
-    }
-    const later = named.filter((entry) => entry.index >= 1 && (call.startedAt === null || entry.at >= call.startedAt - START_SLACK_MS))
+    const later = call.tool === 'delegate_task' ? named.filter((entry) => entry.index === 0) : named.filter((entry) => entry.index >= 1 && (call.startedAt === null || entry.at >= call.startedAt - START_SLACK_MS))
     if (!call.recorded) {
       take(call, later[0], false)
       continue
     }
     const mine = subagentsNamed(call)
     const rivals = unresolved.some(
-      (other) => other !== call && other.recorded && other.tool === 'continue_subagent' && !assigned.has(other.toolCallId) && [...subagentsNamed(other)].some((id) => mine.has(id))
+      (other) => other !== call && other.recorded && other.tool === call.tool && !assigned.has(other.toolCallId) && namesAnySubagent(other) && [...subagentsNamed(other)].some((id) => mine.has(id))
     )
     if (!rivals && later.length === 1) take(call, later[0], false)
   }
@@ -261,7 +266,7 @@ export function joinSubagentCards(calls: readonly SubagentCall[], subagents: rea
   //    two calls started together cannot swap children. A row that names its task or subagent is
   //    not matched this way either, so it cannot take another call's task.
   for (const call of live) {
-    if (assigned.has(call.toolCallId) || reserved.has(call.toolCallId) || call.recorded || recordedId(call) || namesAnySubagent(call)) continue
+    if (assigned.has(call.toolCallId) || reserved.has(call.toolCallId) || call.recorded || recordedId(call) || namesAnySubagent(call) || !open(call)) continue
     take(
       call,
       entries.find(
@@ -274,8 +279,6 @@ export function joinSubagentCards(calls: readonly SubagentCall[], subagents: rea
     )
   }
 
-  const turnActive = options.turnActive ?? true
-  const starting = (call: SubagentCall): boolean => turnActive && call.inLastTurn
   const cards = new Map<string, SubagentCardModel>()
   for (const call of calls) {
     const match = assigned.get(call.toolCallId)
@@ -285,7 +288,8 @@ export function joinSubagentCards(calls: readonly SubagentCall[], subagents: rea
     }
     if (call.failed) continue
     const kept = options.previous?.get(call.toolCallId)
-    if (kept && !kept.pending && kept.exact) cards.set(call.toolCallId, kept)
+    // A kept card never holds a task another call has claimed.
+    if (kept && !kept.pending && kept.exact && !(kept.delegationId && claimed.has(kept.delegationId))) cards.set(call.toolCallId, kept)
     else if (call.pending ? starting(call) : !options.loaded) cards.set(call.toolCallId, pendingModel(call))
   }
   return cards
