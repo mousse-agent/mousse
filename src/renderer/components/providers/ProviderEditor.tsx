@@ -128,6 +128,11 @@ export function AgentEditor({
   )
 }
 
+/** Custom models only where the runtime can run one by id: the daemon says so; older daemons by driver. */
+export function allowsCustomModels(snapshot: InstanceSnapshot): boolean {
+  return snapshot.models.canAddCustom ?? DRIVER_INFO[snapshot.driver].customModels
+}
+
 export function ModelsEditorSection({
   snapshot,
   onSave,
@@ -142,7 +147,7 @@ export function ModelsEditorSection({
       <div className="prov-models-wrap">
         <ProviderModelsSection
           snapshot={snapshot}
-          allowCustom={DRIVER_INFO[snapshot.driver].customModels}
+          allowCustom={allowsCustomModels(snapshot)}
           onSave={onSave}
           onRefresh={onRefresh}
         />

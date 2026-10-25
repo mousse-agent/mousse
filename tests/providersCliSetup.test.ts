@@ -6,6 +6,7 @@ import type { ProviderLoginOption } from '../src/shared/providerAuth'
 import { AgentConnectStep, addChoices } from '../src/renderer/components/providers/AddProviderDialog'
 import { AccountRow, BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
 import { displayModels, movedOrder } from '../src/renderer/components/providers/ProviderModelsSection'
+import { allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow } from '../src/renderer/components/providers/parts'
 import { offersRedirectPaste, refusedText } from '../src/renderer/components/providers/SignInDialog'
 import { switchStateOf } from '../src/renderer/components/providers/providerView'
@@ -90,7 +91,7 @@ describe('Setup row: the status and its one next step', () => {
   })
 
   it('shows the signed-in status and nothing more when ready (D7)', () => {
-    const html = setupRow({ auth: { account: { id: 'a', label: 'ChatGPT plus' } } })
+    const html = setupRow({ auth: { account: { id: 'a', label: 'ChatGPT Plus' } } })
     expect(html).toContain('Signed in · ChatGPT Plus')
     expect(buttons(html)).toEqual([])
     expect(labels(html)).toContain('Check again')
@@ -185,6 +186,13 @@ describe('Sign-out', () => {
     expect(buttons(accountRow({ auth: { canSignOut: true } }))).toEqual(['Sign out'])
     expect(accountRow({ auth: { state: 'signed_out', account: undefined, canSignOut: true } })).toBe('')
   })
+
+  it('shows the account by its label, never its hashed id', () => {
+    expect(accountRow({ auth: { account: { id: 'h4sh', label: 'ChatGPT Plus' }, methodLabel: 'ChatGPT sign-in' } })).toContain('ChatGPT Plus · ChatGPT sign-in')
+    const unlabelled = accountRow({ auth: { account: { id: 'h4sh' }, methodLabel: 'Claude Code sign-in' } })
+    expect(unlabelled).not.toContain('h4sh')
+    expect(unlabelled).toContain('Claude Code sign-in')
+  })
 })
 
 const loginOption = (id: string, patch: Partial<ProviderLoginOption> = {}): ProviderLoginOption =>
@@ -234,6 +242,14 @@ describe('Add provider choices', () => {
     expect(html).toContain('placeholder="/usr/local/bin/claude"')
     expect(html).toContain('Optional. Leave empty to use the one Mousse finds.')
     expect(buttons(html)).toEqual(['Add'])
+  })
+})
+
+describe('custom models', () => {
+  it('are offered only where the daemon says the runtime can run one', () => {
+    expect(allowsCustomModels(snapshot({ models: { canAddCustom: false } }))).toBe(false)
+    expect(allowsCustomModels(snapshot({ models: { canAddCustom: true } }))).toBe(true)
+    expect(allowsCustomModels(snapshot({ driver: 'antigravity' }))).toBe(false)
   })
 })
 

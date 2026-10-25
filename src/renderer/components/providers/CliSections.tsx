@@ -3,7 +3,7 @@ import type { InstanceSnapshot, StatusDescription } from '../../../shared/harnes
 import type { InstanceConfigPatch, ProviderOperationEvent } from '../../../shared/harness/types'
 import { Download, Plus, RotateCcw, X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
-import { BrowseButton, CommandBox, RefreshButton, displayLabel, statusText, useAsyncAction } from './parts'
+import { BrowseButton, CommandBox, RefreshButton, statusText, useAsyncAction } from './parts'
 import {
   DRIVER_INFO,
   binaryOverrideOf,
@@ -143,13 +143,15 @@ export function SetupRow({
   )
 }
 
-/** The signed-in account, keyed by id; sign-out only where the daemon says Mousse owns the sign-in. */
+/**
+ * The signed-in account by its label (the id is an opaque hash, never shown); sign-out only where
+ * the daemon says Mousse owns the sign-in.
+ */
 export function AccountRow({ snapshot, actions }: { snapshot: InstanceSnapshot; actions: InstanceActions }) {
   const { busy, error, run } = useAsyncAction()
   const { auth } = snapshot
   if (auth.state !== 'signed_in' && auth.state !== 'expired') return null
-  const who = auth.account?.label ?? auth.account?.id
-  const description = displayLabel([who, auth.methodLabel].filter(Boolean).join(' · ') || 'Signed in')
+  const description = [auth.account?.label, auth.methodLabel].filter(Boolean).join(' · ') || 'Signed in'
   return (
     <SettingsRow
       title="Account"
