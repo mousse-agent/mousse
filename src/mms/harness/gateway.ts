@@ -25,7 +25,7 @@ import type { AdapterHost, TurnControl, TurnInput, TurnResult, TurnSink } from '
 import type { ChildPreflightContext, SubagentRefusal } from '../run/policy/featureGates'
 import type { ProviderRef } from '../run/types'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstanceConfigView, NextStep } from '../../shared/harness/status'
 import { harnessAppError, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
@@ -294,6 +294,8 @@ interface InstanceRecord {
   /** Turns running on this runtime; a replaced runtime stops once they end. */
   active: number
   retired?: boolean
+  /** A removed instance: its state directory is deleted once its runtime stops. */
+  removeStateDir?: string
 }
 
 interface ProbeState {
@@ -817,6 +819,14 @@ export class Harness implements HarnessGateway {
       } catch (error) {
         console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })
       }
+      if (record.removeStateDir) {
+        try {
+          rmSync(record.removeStateDir, { recursive: true, force: true })
+        } catch (error) {
+          // A re-added instance never reuses a directory left behind (`add`).
+          console.warn('[harness] could not delete the files of a removed instance', { instanceId: record.instanceId, error: errorText(error) })
+        }
+      }
     }
   }
 
@@ -988,7 +998,13 @@ export class Harness implements HarnessGateway {
     if (!driver) return harnessFail('unsupported', `Mousse cannot add a ${input.driver} instance.`)
     if (!driver.multiInstance) return harnessFail('unsupported', `${driver.label} supports one instance in this version.`)
     const patch = input.config ?? {}
-    const instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, Object.keys(this.instanceMap.list()))
+    // An id whose state directory is still on disk (a removal that could not delete it) is taken.
+    const taken = new Set(Object.keys(this.instanceMap.list()))
+    let instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken)
+    while (existsSync(instanceStateDir(this.options.profileHome, instanceId))) {
+      taken.add(instanceId)
+      instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken)
+    }
     const config = this.applyConfigPatch({ home: driver.privateHome ? 'private' : 'default' }, patch, driver)
     this.instanceMap.setEntry(instanceId, { driver: driver.kind, enabled: true, config })
     mkdirSync(instanceStateDir(this.options.profileHome, instanceId), { recursive: true, mode: 0o700 })
@@ -1001,13 +1017,15 @@ export class Harness implements HarnessGateway {
     const record = this.record(instanceId, { allowDisabled: true })
     if (record.builtIn) harnessFail('unsupported', 'Built-in providers cannot be removed. Turn them off instead.', instanceId)
     this.records.delete(instanceId)
-    this.retire(record)
     this.instanceMap.removeEntry(instanceId)
     this.prefs.remove(instanceId)
     this.scopes.forgetInstance(instanceId)
     this.counters.forget(instanceId)
     this.probes.delete(instanceId)
-    // The instance's home (and any sign-in in it) stays on disk; Mousse never deletes credentials.
+    // The state directory is Mousse's own (its private home, the sign-in in it, saved sessions):
+    // it goes with the instance, once the turns still running on it end.
+    record.removeStateDir = instanceStateDir(this.options.profileHome, instanceId)
+    this.retire(record)
     this.emitSnapshots({ kind: 'device' })
     this.options.onProvidersChanged?.()
   }

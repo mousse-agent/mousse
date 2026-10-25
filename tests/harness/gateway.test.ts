@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -9,6 +9,7 @@ import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import type { HarnessGatewayEvent } from '../../src/mms/harness/gateway'
 import { decodeInstanceConfig } from '../../src/mms/harness/driver'
+import { instanceStateDir } from '../../src/mms/harness/instances'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 
 const pi = (): PiLoopAdapter => new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
@@ -203,9 +204,20 @@ describe('harness gateway: instances', () => {
       .resolves.toMatchObject({ instanceId: 'claude:work', driver: 'claude', homeId: 'private:claude:work', configRevision: 1, accountGeneration: 0 })
 
     await expect(harness.instances.remove('claude')).rejects.toMatchObject({ code: 'unsupported' })
+    // The private home and the sign-in in it go with the instance.
+    const stateDir = instanceStateDir(profileHome, 'claude:work')
+    mkdirSync(join(stateDir, 'home'), { recursive: true })
+    writeFileSync(join(stateDir, 'home', '.claude.json'), '{"oauthAccount":{"accountUuid":"old"}}')
     await harness.instances.remove('claude:work')
     expect((stored as Record<string, unknown>)['claude:work']).toBeUndefined()
+    expect(existsSync(stateDir)).toBe(false)
     expect(codeOf(() => harness.resolveStored({ instanceId: 'claude:work', llmProvider: '', model: 'm' }, { purpose: 'turn' }))).toBe('provider_instance_unknown')
+    // Re-adding starts signed out in a fresh home.
+    expect((await harness.instances.add({ driver: 'claude', config: { displayName: 'Work' } })).instanceId).toBe('claude:work')
+    expect(existsSync(join(stateDir, 'home', '.claude.json'))).toBe(false)
+    // Files a removal could not delete are never reused: the new instance gets another id.
+    mkdirSync(instanceStateDir(profileHome, 'claude:other'), { recursive: true })
+    expect((await harness.instances.add({ driver: 'claude', config: { displayName: 'Other' } })).instanceId).toBe('claude:other-2')
   })
 
   it('rejects a second instance of a single-instance driver', async () => {
