@@ -16,6 +16,8 @@ export interface SubagentCall {
   startedAt: number | null
   /** The call has not returned yet. */
   pending: boolean
+  /** The row carries the daemon's record of the call (even if empty so far), so it joins only by what the record names. */
+  recorded: boolean
   /** The call errored or was refused, so no task came of it and its raw row stays. */
   failed: boolean
   input: Record<string, unknown>
@@ -66,6 +68,7 @@ export function collectSubagentCalls(messages: readonly UIMessage[]): SubagentCa
         tool: part.subagentTool,
         startedAt: timeOf((message as { createdAt?: unknown }).createdAt),
         pending: state !== 'output-available' && state !== 'output-error',
+        recorded: typeof input.recordVersion === 'number',
         failed: state === 'output-error' || isRefusedSubagentResult(part.output),
         input,
         output: part.output
@@ -193,29 +196,42 @@ export function joinSubagentCards(calls: readonly SubagentCall[], subagents: rea
   }
   const live = calls.filter((call) => !call.failed)
 
+  // 0. A call that already has a card keeps its task, listed or not, before any other call is
+  //    matched: a task that dropped out of the list must not be handed to a neighbour.
+  const reserved = new Set<string>()
+  for (const call of live) {
+    const before = options.previous?.get(call.toolCallId)
+    if (!before || before.pending || !before.delegationId) continue
+    reserved.add(call.toolCallId)
+    take(call, byDelegation.get(before.delegationId))
+  }
+
   // 1. A recorded result names its task outright.
   for (const call of live) {
     const id = recordedId(call)
-    if (id) take(call, byDelegation.get(id))
+    if (id && !reserved.has(call.toolCallId)) take(call, byDelegation.get(id))
   }
 
   // 2. A recorded input names the subagent: a started subagent by its title, a follow-up by the
-  //    subagent it names, taking that subagent's earliest later task no other call has taken.
+  //    subagent it names, taking that subagent's earliest later task no other call has taken. A
+  //    recorded follow-up with several candidate tasks waits for its result rather than guess.
   for (const call of live) {
-    if (assigned.has(call.toolCallId) || recordedId(call)) continue
+    if (assigned.has(call.toolCallId) || reserved.has(call.toolCallId) || recordedId(call)) continue
     const named = entries.filter((entry) => namesSubagent(call, entry) === true && !claimed.has(entry.task.delegationId))
-    take(
-      call,
-      call.tool === 'delegate_task'
-        ? named.find((entry) => entry.index === 0)
-        : named.find((entry) => entry.index >= 1 && (call.startedAt === null || entry.at >= call.startedAt - START_SLACK_MS))
-    )
+    if (call.tool === 'delegate_task') {
+      take(call, named.find((entry) => entry.index === 0))
+      continue
+    }
+    const later = named.filter((entry) => entry.index >= 1 && (call.startedAt === null || entry.at >= call.startedAt - START_SLACK_MS))
+    if (later.length === 1 || (later.length > 1 && !call.recorded)) take(call, later[0])
   }
 
-  // 3. Rows that record neither (written before the daemon kept them) join by order and time. A row
-  //    that names its task or subagent is never matched this way, so it cannot take another call's task.
+  // 3. Rows written before the daemon kept a record join by order and time. A recorded row never
+  //    does, whatever it has named so far: until its result or title arrives it stays pending, so two
+  //    calls started together cannot swap children. A row that names its task or subagent is
+  //    not matched this way either, so it cannot take another call's task.
   for (const call of live) {
-    if (assigned.has(call.toolCallId) || recordedId(call) || namesAnySubagent(call)) continue
+    if (assigned.has(call.toolCallId) || reserved.has(call.toolCallId) || call.recorded || recordedId(call) || namesAnySubagent(call)) continue
     take(
       call,
       entries.find(

@@ -17,7 +17,7 @@ describe('recordSubagentCall', () => {
     )!
     expect(record.failed).toBe(false)
     expect((record.input.title as string).length).toBe(200)
-    expect(Object.keys(record.input)).toEqual(['title'])
+    expect(record.input).toEqual({ recordVersion: 1, title: expect.any(String) })
     expect(JSON.parse(record.response!)).toEqual({ delegationId: 'd1', childThreadId: 't1', title: 'API reviewer', status: 'started' })
     expect(JSON.stringify(record)).not.toMatch(/SECRET PROMPT|LONG NOTE|childRunId/)
   })
@@ -64,7 +64,7 @@ describe('the pi loop writes subagent tools to the timeline', () => {
       ['start', 'call-1', 'mcp_tool_call', ['Server: mousse', 'Tool: delegate_task']],
       ['complete', 'call-1', 'mcp_tool_result', ['Server: mousse', 'Tool: delegate_task']]
     ])
-    expect(events[0]!.input).toEqual({ title: 'API reviewer' })
+    expect(events[0]!.input).toEqual({ recordVersion: 1, title: 'API reviewer' })
     expect(JSON.parse(events[1]!.response!)).toEqual({ delegationId: 'd1', childThreadId: 't1', title: 'API reviewer' })
     expect(JSON.stringify(events)).not.toContain('SECRET')
     expect(log).toHaveLength(2)
@@ -181,6 +181,58 @@ describe('two subagent calls started in the same instant', () => {
     expect(calls.map((entry) => entry.input)).toEqual([{ title: 'API reviewer' }, { title: 'Docs' }])
     const cards = joinSubagentCards(calls, subagents, { loaded: true })
     expect([...cards.values()].map((card) => card.delegationId)).toEqual(['d-api', 'd-docs'])
+  })
+
+  it('never show each other`s child while live Claude calls start, learn their input and return', () => {
+    const name = 'mcp__mousse__delegate_task'
+    const event = (phase: 'start' | 'complete', callId: string, record?: ReturnType<typeof recordSubagentCall>) =>
+      runtimeToolEvent({ phase, callId, title: name, toolName: phase === 'start' ? name : undefined, ...(record ? { record } : {}) })
+    const events: StreamingLlmToolEvent[] = []
+    const messages: ChatMessage[] = []
+    const state: TranscriptStreamState = { activeAssistantMessageId: null, activeThinkingMessageId: null, activeToolCallMessageIds: new Map() }
+    const assembler = new TranscriptAssembler(
+      {
+        getMessage: (id) => messages.find((message) => message.id === id),
+        addMessage: (message) => void messages.push(message),
+        updateMessage: (message) => void (messages[messages.findIndex((entry) => entry.id === message.id)] = message),
+        removeMessage: () => undefined,
+        emitAdded: () => undefined,
+        emitUpdated: () => undefined,
+        persist: () => undefined,
+        setPhase: () => undefined
+      },
+      state
+    )
+    const feed = (next: StreamingLlmToolEvent) => {
+      events.push(next)
+      assembler.tool(next)
+    }
+    const children = () => {
+      const cards = joinSubagentCards(collectSubagentCalls(mousseToUIMessages(messages)), subagents, { loaded: true })
+      return messages.map((message) => cards.get(message.id))
+    }
+    const api = { title: 'API reviewer' }
+    const docs = { title: 'Docs' }
+
+    // Both calls start; the model's arguments are still streaming.
+    feed(event('start', 'first', recordSubagentCall(name, undefined, {})))
+    feed(event('start', 'second', recordSubagentCall(name, undefined, {})))
+    expect(messages).toHaveLength(2)
+    expect(children().map((card) => [card?.pending, card?.childThreadId])).toEqual([[true, null], [true, null]])
+
+    // The arguments are complete: each row names its subagent, and no row is added.
+    feed(event('start', 'first', recordSubagentCall(name, { ...api, prompt: 'p' }, {})))
+    feed(event('start', 'second', recordSubagentCall(name, { ...docs, prompt: 'p' }, {})))
+    expect(messages).toHaveLength(2)
+    expect(children().map((card) => card?.childThreadId)).toEqual(['t-api', 't-docs'])
+
+    // Results arrive, the second call's first.
+    feed(event('complete', 'second', recordSubagentCall(name, docs, { text: JSON.stringify({ delegationId: 'd-docs', childThreadId: 't-docs' }) })))
+    expect(children().map((card) => card?.childThreadId)).toEqual(['t-api', 't-docs'])
+    feed(event('complete', 'first', recordSubagentCall(name, api, { text: JSON.stringify({ delegationId: 'd-api', childThreadId: 't-api' }) })))
+    expect(children().map((card) => card?.childThreadId)).toEqual(['t-api', 't-docs'])
+    expect(messages.map((message) => message.toolCall?.status)).toEqual(['complete', 'complete'])
+    expect(messages[0]!.toolCall!.input).toEqual({ recordVersion: 1, title: 'API reviewer' })
   })
 
   it('keep the pi row shape: input and result recorded through the same row type', async () => {

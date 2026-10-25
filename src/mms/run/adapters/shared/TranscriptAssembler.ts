@@ -142,6 +142,17 @@ export class TranscriptAssembler {
           : event.kind
 
     if (event.phase === 'start' && event.callId) {
+      // A runtime that learns a running call's arguments after it started repeats the start with
+      // them: that fills in the call's row, it does not open another.
+      const openId = this.state.activeToolCallMessageIds.get(event.callId)
+      const open = openId ? this.hooks.getMessage(openId) : undefined
+      if (open?.toolCall && event.input) {
+        const updated: ChatMessage = { ...open, toolCall: { ...open.toolCall, input: { ...open.toolCall.input, ...event.input } } }
+        this.hooks.updateMessage(updated)
+        this.hooks.emitUpdated(updated)
+        this.hooks.persist(false)
+        return
+      }
       const parsed = parseProviderToolCall(event)
       const message = this.addTimeline(kind, {
         title: event.title,
@@ -173,7 +184,7 @@ export class TranscriptAssembler {
               status: 'complete',
               // Preserve start-phase args: complete events carry result text, not args JSON.
               toolName: parsed.toolName ?? existing.toolCall?.toolName,
-              input: existing.toolCall?.input ?? event.input ?? parsed.input
+              input: event.input ? { ...existing.toolCall?.input, ...event.input } : (existing.toolCall?.input ?? parsed.input)
             }
           }
           this.hooks.updateMessage(updated)

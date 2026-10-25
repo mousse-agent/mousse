@@ -1120,18 +1120,27 @@ export class ClaudeSubscriptionProviderService {
               }
               if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
                 tools.set(event.content_block.id, event.content_block.name)
+                // A subagent call's row is marked as recorded from the start, before its arguments are known.
+                const record = recordSubagentCall(event.content_block.name, undefined, {})
                 input.onTool?.({
                   phase: 'start',
                   callId: event.content_block.id,
                   title: event.content_block.name,
-                  toolName: event.content_block.name
+                  toolName: event.content_block.name,
+                  ...(record ? { record } : {})
                 })
               }
             }
             // A tool_use block's arguments are complete only in the assistant message that holds it.
             if (message.type === 'assistant' && Array.isArray(message.message.content))
               for (const block of message.message.content)
-                if (block.type === 'tool_use' && tools.has(block.id)) toolInputs.set(block.id, block.input)
+                if (block.type === 'tool_use' && tools.has(block.id)) {
+                  toolInputs.set(block.id, block.input)
+                  // The arguments are known now: a subagent call's row names its subagent before the call returns.
+                  const record = recordSubagentCall(block.name, block.input, {})
+                  if (record)
+                    input.onTool?.({ phase: 'start', callId: block.id, title: tools.get(block.id)!, toolName: tools.get(block.id), record })
+                }
             if (message.type === 'user' && Array.isArray(message.message.content))
               for (const block of message.message.content) {
                 if (block.type === 'tool_result' && tools.has(block.tool_use_id)) {

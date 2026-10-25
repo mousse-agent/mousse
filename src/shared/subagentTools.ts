@@ -110,6 +110,12 @@ export function isRefusedSubagentResult(output: unknown): boolean {
   return result !== null && (result.started === false || result.answered === false)
 }
 
+/**
+ * Marks a row whose daemon kept the call's record. The app joins such a row to its task only by what
+ * the record names, never by order and time, so a call that has not named its task yet stays pending.
+ */
+export const SUBAGENT_RECORD_VERSION = 1
+
 /** Longest text the app keeps from one field of a subagent tool call. */
 const RECORD_TEXT_CHARS = 200
 
@@ -133,7 +139,7 @@ export function toolResultText(content: unknown): string | undefined {
 /**
  * What a transcript row keeps of a Mousse subagent tool call, so the app can tell which task a
  * card is for without guessing. Only the fields that name the subagent or task go in, each
- * clipped: the call's title, subagent and delegation id, and the result's delegation id, thread,
+ * clipped, and a version that marks the row as recorded: the call's title, subagent and delegation id, and the result's delegation id, thread,
  * title, status and, for a refusal or error, its code and a short message. The prompt, the answers
  * and the result text never do. Null for any other tool.
  */
@@ -144,7 +150,7 @@ export function recordSubagentCall(
 ): { input: Record<string, unknown>; response?: string; failed: boolean } | null {
   if (!subagentToolName(rawName)) return null
   const args = input && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>) : {}
-  const keptInput: Record<string, unknown> = {}
+  const keptInput: Record<string, unknown> = { recordVersion: SUBAGENT_RECORD_VERSION }
   for (const key of ['title', 'subagent', 'delegationId'] as const) {
     const value = clip(args[key])
     if (value !== undefined) keptInput[key] = value

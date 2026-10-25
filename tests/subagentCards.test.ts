@@ -167,6 +167,7 @@ const call = (toolCallId: string, tool: SubagentCall['tool'], startedSeconds: nu
   tool,
   startedAt: Date.parse(at(startedSeconds)),
   pending: false,
+  recorded: false,
   failed: false,
   input: {},
   output: undefined,
@@ -277,6 +278,68 @@ describe('joinSubagentCards', () => {
   it('carries the reason a task did not finish', () => {
     const failed = subagent('a', [task('da', 2, { outcome: 'failed', error: 'boom', completedAt: at(3) })], { state: 'failed', activity: 'idle' })
     expect(join([call('c1', 'delegate_task', 1)], [failed]).get('c1')).toMatchObject({ state: 'failed', error: 'boom' })
+  })
+
+  describe('a card keeps the task it showed', () => {
+    it('keeps task A when A drops out of the list, and hands it to no other call', () => {
+      // Two rows from before the daemon kept records, joined to A and B by order and time.
+      const calls = [call('c1', 'delegate_task', 1), call('c2', 'delegate_task', 1)]
+      const a = subagent('a', [task('da', 2)], { state: 'done', activity: 'idle' })
+      const b = subagent('b', [task('db', 3)])
+      const before = join(calls, [a, b])
+      expect(before.get('c1')!.delegationId).toBe('da')
+      expect(before.get('c2')!.delegationId).toBe('db')
+      const after = join(calls, [b], { previous: before })
+      expect(after.get('c1')).toBe(before.get('c1'))
+      expect(after.get('c1')).toMatchObject({ delegationId: 'da', childThreadId: 'a', state: 'done' })
+      expect(after.get('c2')!.delegationId).toBe('db')
+    })
+
+    it('still refreshes a card whose task is listed', () => {
+      const calls = [call('c1', 'delegate_task', 1)]
+      const before = join(calls, [subagent('a', [task('da', 2)])])
+      const after = join(calls, [subagent('a', [task('da', 2, { outcome: 'done', completedAt: at(9) })], { state: 'done', activity: 'idle' })], { previous: before })
+      expect(after.get('c1')!.state).toBe('done')
+    })
+  })
+
+  describe('a row with a record from the daemon', () => {
+    const recorded = (toolCallId: string, tool: SubagentCall['tool'], patch: Partial<SubagentCall> = {}) =>
+      call(toolCallId, tool, 5, { recorded: true, pending: true, input: { recordVersion: 1 }, ...patch })
+    const subagents = [subagent('docs', [task('d-docs', 6)]), subagent('api', [task('d-api', 7)])]
+
+    it('is never joined by order and time: until it names its task it is a pending card', () => {
+      const cards = join([recorded('c1', 'delegate_task'), recorded('c2', 'delegate_task')], subagents)
+      for (const id of ['c1', 'c2']) expect(cards.get(id)).toMatchObject({ pending: true, childThreadId: null, delegationId: null })
+    })
+
+    it('joins by title as soon as the input arrives, before the result', () => {
+      const cards = join(
+        [recorded('c1', 'delegate_task', { input: { recordVersion: 1, title: 'API reviewer' } }), recorded('c2', 'delegate_task')],
+        [subagent('docs', [task('d-docs', 6)], { title: 'Docs' }), subagent('api', [task('d-api', 7)], { title: 'API reviewer' })]
+      )
+      expect(cards.get('c1')).toMatchObject({ delegationId: 'd-api', pending: false })
+      expect(cards.get('c2')).toMatchObject({ pending: true, childThreadId: null })
+    })
+
+    it('does not guess between two follow-ups to one subagent until their results arrive', () => {
+      const tasks = [task('d1', 1, { outcome: 'done' }), task('d2', 6), task('d3', 7)]
+      const input = { recordVersion: 1, subagent: 'Subagent a' }
+      const calls = [recorded('c1', 'continue_subagent', { input }), recorded('c2', 'continue_subagent', { input })]
+      const waiting = join(calls, [subagent('a', tasks)])
+      expect(waiting.get('c1')!.pending).toBe(true)
+      expect(waiting.get('c2')!.pending).toBe(true)
+      const answered = join(
+        [{ ...calls[0]!, pending: false, output: { delegationId: 'd3' } }, { ...calls[1]!, pending: false, output: { delegationId: 'd2' } }],
+        [subagent('a', tasks)]
+      )
+      expect(answered.get('c1')!.delegationId).toBe('d3')
+      expect(answered.get('c2')!.delegationId).toBe('d2')
+    })
+
+    it('keeps its raw row when it finished without naming a task', () => {
+      expect(join([recorded('c1', 'delegate_task', { pending: false })], subagents).has('c1')).toBe(false)
+    })
   })
 
   describe('a call that started nothing', () => {

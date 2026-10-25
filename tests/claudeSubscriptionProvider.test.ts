@@ -151,13 +151,18 @@ describe('Claude Subscription native provider', () => {
     const onTool = vi.fn()
     await service.chat({ ...chatInput(home), onTool })
     const complete = (callId: string) => onTool.mock.calls.map(([event]) => event).find((event) => event.phase === 'complete' && event.callId === callId)
+    // Every subagent row is marked as recorded from the first start, and repeats its start once the arguments are known.
+    const starts = (callId: string) => onTool.mock.calls.map(([event]) => event).filter((event) => event.phase === 'start' && event.callId === callId)
+    expect(starts('sub1').map((event) => event.record?.input)).toEqual([{ recordVersion: 1 }, { recordVersion: 1, title: 'API reviewer' }])
+    expect(starts('sub2').map((event) => event.record?.input)).toEqual([{ recordVersion: 1 }, { recordVersion: 1, title: 'Docs' }])
+    expect(starts('read1')).toEqual([{ phase: 'start', callId: 'read1', title: 'Read', toolName: 'Read' }])
     expect(complete('sub2').record).toEqual({
-      input: { title: 'Docs' },
+      input: { recordVersion: 1, title: 'Docs' },
       response: JSON.stringify({ delegationId: 'd2', childThreadId: 't2', title: 'Docs' }),
       failed: false
     })
     const refused = complete('sub1').record
-    expect(refused.input).toEqual({ title: 'API reviewer' })
+    expect(refused.input).toEqual({ recordVersion: 1, title: 'API reviewer' })
     expect(JSON.parse(refused.response)).toEqual({ started: false, code: 'title_taken', message: 'You already have a subagent titled "API reviewer".' })
     expect(JSON.stringify(onTool.mock.calls)).not.toContain('SECRET PROMPT TEXT')
     expect(complete('read1')).toEqual({ phase: 'complete', callId: 'read1', title: 'Read' })
