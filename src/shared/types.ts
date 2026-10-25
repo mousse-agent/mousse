@@ -438,6 +438,11 @@ export interface ChatMessage {
    * steer): the tasks it reports, so the app never parses the text.
    */
   subagentNotice?: import('./subagents').SubagentNoticeItem[]
+  /**
+   * A user message added to a turn that was already running (a steer), so it does not start a turn.
+   * Older transcripts do not carry it.
+   */
+  steered?: boolean
   /** Durable model-context input that is intentionally omitted from the user-facing transcript. */
   hidden?: boolean
   /** Original presentation visibility while a conversation-undo is active. */

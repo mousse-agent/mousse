@@ -1,0 +1,138 @@
+import { readFileSync } from 'node:fs'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { SubagentComposerBanner, SubagentComposerBannerView } from '../src/renderer/components/SubagentComposerBanner'
+import { collectNeedingInput, composerBanner, needingInputLabel, waitingBannerLabel } from '../src/renderer/components/subagentBannerLogic'
+import { useAppStore } from '../src/renderer/stores/appStore'
+import type { SubagentState, SubagentSummary } from '../src/shared/subagents'
+
+const subagent = (id: string, state: SubagentState, patch: Partial<SubagentSummary> = {}): SubagentSummary => ({
+  childThreadId: id,
+  title: `Subagent ${id}`,
+  activity: 'working',
+  state,
+  latestDelegationId: `d-${id}`,
+  unread: false,
+  provider: null,
+  model: null,
+  workspace: 'shared',
+  role: null,
+  createdAt: '2026-10-25T12:00:00.000Z',
+  updatedAt: '2026-10-25T12:00:00.000Z',
+  waitingOn: [],
+  tasks: [],
+  ...patch
+})
+
+describe('collectNeedingInput', () => {
+  it('lists the subagents of the thread that ask a question, and nothing else', () => {
+    const found = collectNeedingInput({ p: [subagent('a', 'needs_input'), subagent('b', 'working'), subagent('c', 'done')] }, 'p')
+    expect(found).toEqual([{ childThreadId: 'a', title: 'Subagent a', via: null }])
+  })
+
+  it('finds a question asked deeper down, under the subagent of this thread it belongs to', () => {
+    const found = collectNeedingInput(
+      { p: [subagent('a', 'waiting')], a: [subagent('g', 'needs_input')] },
+      'p'
+    )
+    expect(found).toEqual([{ childThreadId: 'g', title: 'Subagent g', via: 'Subagent a' }])
+  })
+
+  it('does not look under a subagent that has finished, past the depth limit, or around a cycle', () => {
+    expect(collectNeedingInput({ p: [subagent('a', 'done')], a: [subagent('g', 'needs_input')] }, 'p')).toEqual([])
+    expect(
+      collectNeedingInput({ p: [subagent('a', 'working')], a: [subagent('b', 'working')], b: [subagent('c', 'working')], c: [subagent('d', 'needs_input')] }, 'p')
+    ).toEqual([])
+    expect(collectNeedingInput({ p: [subagent('a', 'working')], a: [subagent('p', 'working')] }, 'p')).toEqual([])
+  })
+
+  it('has nothing for no thread or an unloaded list', () => {
+    expect(collectNeedingInput({}, 'p')).toEqual([])
+    expect(collectNeedingInput({ p: [subagent('a', 'needs_input')] }, null)).toEqual([])
+  })
+
+  it('words a row by the subagent that asks and where it hangs', () => {
+    expect(needingInputLabel({ childThreadId: 'a', title: 'API reviewer', via: null })).toBe('API reviewer has a question')
+    expect(needingInputLabel({ childThreadId: 'g', title: 'Linter', via: 'API reviewer' })).toBe('Linter has a question, via API reviewer')
+  })
+})
+
+describe('waitingBannerLabel', () => {
+  it('says which subagents a waiting thread waits on, else background work', () => {
+    expect(waitingBannerLabel('waiting', [subagent('a', 'working'), subagent('b', 'waiting'), subagent('c', 'done')])).toBe('Waiting on 2 subagents')
+    expect(waitingBannerLabel('waiting', [subagent('a', 'working')])).toBe('Waiting on 1 subagent')
+    expect(waitingBannerLabel('waiting', [subagent('a', 'done')])).toBe('Waiting on background work')
+    expect(waitingBannerLabel('waiting', [])).toBe('Waiting on background work')
+  })
+
+  it('is silent for any other activity', () => {
+    for (const activity of ['idle', 'processing', 'awaiting_input', 'completed', undefined] as const)
+      expect(waitingBannerLabel(activity, [subagent('a', 'working')])).toBeNull()
+  })
+})
+
+describe('the composer banner', () => {
+  const html = (props: Parameters<typeof SubagentComposerBannerView>[0]) => renderToStaticMarkup(createElement(SubagentComposerBannerView, props))
+
+  it('shows a row that opens the question in the subagent, and hides without one', () => {
+    const shown = html({ asking: [{ childThreadId: 'a', title: 'API reviewer', via: null }], waiting: null, onOpen: () => undefined })
+    expect(shown).toContain('API reviewer has a question')
+    expect(shown).toContain('title="Open API reviewer"')
+    expect(html({ asking: [], waiting: null, onOpen: () => undefined })).toBe('')
+  })
+
+  it('shows what the thread waits on only while no subagent asks', () => {
+    expect(html({ asking: [], waiting: 'Waiting on background work', onOpen: () => undefined })).toContain('Waiting on background work')
+    const both = html({ asking: [{ childThreadId: 'a', title: 'A', via: null }], waiting: 'Waiting on 1 subagent', onOpen: () => undefined })
+    expect(both).toContain('A has a question')
+    expect(both).not.toContain('Waiting on')
+  })
+
+  // A server render reads a store's initial state, so the rows are checked through the same
+  // function the connected banner uses, fed from the store's live state.
+  describe('for a thread in the store', () => {
+    const banner = () => {
+      const state = useAppStore.getState()
+      const { asking, waiting } = composerBanner({ lists: state.subagentsByParent, activity: state.threadActivity.p, threadId: 'p' })
+      return html({ asking, waiting, onOpen: () => undefined })
+    }
+
+    beforeEach(() => {
+      useAppStore.setState({ subagentsByParent: {}, threadActivity: {} })
+    })
+
+    it('renders nothing before the daemon has answered', () => {
+      expect(renderToStaticMarkup(createElement(SubagentComposerBanner, { threadId: 'p' }))).toBe('')
+      expect(banner()).toBe('')
+    })
+
+    it('shows when a subagent of the thread needs input and hides once it is answered', () => {
+      useAppStore.getState().setSubagents('p', [subagent('a', 'needs_input')])
+      expect(banner()).toContain('Subagent a has a question')
+      useAppStore.getState().setSubagents('p', [subagent('a', 'working')])
+      expect(banner()).toBe('')
+    })
+
+    it('does not show another thread`s subagent', () => {
+      useAppStore.getState().setSubagents('other', [subagent('a', 'needs_input')])
+      expect(banner()).toBe('')
+    })
+
+    it('shows that the thread is waiting on background work from its activity, and hides when it stops', () => {
+      useAppStore.setState({ threadActivity: { p: 'waiting' } })
+      expect(banner()).toContain('Waiting on background work')
+      useAppStore.setState({ threadActivity: { p: 'idle' } })
+      expect(banner()).toBe('')
+    })
+  })
+})
+
+describe('the banner styles', () => {
+  it('highlight by background only, with no side or edge bar', () => {
+    const css = readFileSync(new URL('../src/renderer/components/subagentComposerBanner.css', import.meta.url), 'utf8')
+    expect(css).not.toMatch(/border-(left|right|inline-start|inline-end)\s*:/)
+    expect(css).not.toMatch(/inset\s+-?[1-9]\d*px\s+0/)
+    expect(css).not.toMatch(/::(before|after)/)
+  })
+})

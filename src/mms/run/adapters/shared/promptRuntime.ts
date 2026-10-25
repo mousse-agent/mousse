@@ -47,16 +47,20 @@ export interface RuntimeToolEvent {
   callId: string
   title: string
   toolName?: string
+  /** A Mousse subagent call's bounded record (`recordSubagentCall`), set when the call completes. */
+  record?: { input: Record<string, unknown>; response?: string; failed: boolean }
 }
 
 export function runtimeToolEvent(event: RuntimeToolEvent): StreamingLlmToolEvent {
+  const { record } = event
   return {
     kind: 'mcp_tool_call',
     phase: event.phase,
     callId: event.callId,
     title: event.title,
-    summary: event.toolName ?? event.title,
-    details: []
+    summary: record?.failed ? 'The MCP tool returned an error.' : (event.toolName ?? event.title),
+    details: [],
+    ...(record ? { input: record.input, ...(record.response ? { response: record.response } : {}) } : {})
   }
 }
 

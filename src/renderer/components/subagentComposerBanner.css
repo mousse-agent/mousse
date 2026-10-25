@@ -1,0 +1,68 @@
+/* Top of the composer: a subagent has a question, or the thread is still waiting. */
+
+.composer-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--ui-line);
+}
+
+.composer-banner-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+}
+
+button.composer-banner-row {
+  cursor: pointer;
+}
+
+button.composer-banner-row:hover {
+  background: var(--ui-hover);
+}
+
+button.composer-banner-row:active {
+  background: var(--ui-pressed);
+}
+
+button.composer-banner-row:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.composer-banner-row.is-quiet {
+  color: var(--ui-faint);
+}
+
+.composer-banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-banner-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+}
+
+.composer-banner-chevron {
+  flex: 0 0 auto;
+  color: var(--ui-faint);
+}

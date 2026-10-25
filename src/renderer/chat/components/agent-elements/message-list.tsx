@@ -27,6 +27,10 @@ import {
 } from "../../../utils/assistantMessageActions";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { ToolCallsGroup } from "./tools/tool-calls-group";
+import { SubagentCardGroup } from "./tools/SubagentCard";
+import { SubagentNotice } from "./tools/SubagentNotice";
+import { useSubagentCards } from "./tools/subagent-cards-context";
+import { readSubagentNotice } from "../../adapters/subagentNotice";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer";
 import {
   activityGroupLabel,
@@ -601,7 +605,8 @@ export const PromptMarkersOverlay = memo(function PromptMarkersOverlay({
       const containerRect = container.getBoundingClientRect();
       for (const turn of groupMessagesIntoTurns(normalizeMessages(messages))) {
         const userMsg = turn.userMsg;
-        if (!userMsg) continue;
+        // A message that delivers subagent results is not a prompt the user wrote.
+        if (!userMsg || readSubagentNotice(userMsg)) continue;
         const target: Element | null = content.querySelector(
           `[data-prompt-id="${escapeId(userMsg.id)}"]`,
         );
@@ -839,6 +844,12 @@ export const MessageList = memo(function MessageList({
 
   const CustomUserMessage = slots?.UserMessage || UserMessage;
   const CustomToolRenderer = slots?.ToolRenderer || DefaultToolRenderer;
+  // Tool calls drawn as subagent cards: they stay out of the collapsed activity groups.
+  const subagentCards = useSubagentCards();
+  const subagentCardIds = useMemo(
+    () => new Set(subagentCards.keys()),
+    [subagentCards],
+  );
 
   const markCopied = useCallback((id: string) => {
     setActiveCopyId(id);
@@ -1245,6 +1256,15 @@ export const MessageList = memo(function MessageList({
               <div key={turnKey} className="relative space-y-2">
                 {turn.userMsg &&
                   (() => {
+                    // Subagent results delivered to this thread (a wake turn or a steer).
+                    const notice = readSubagentNotice(turn.userMsg);
+                    if (notice) {
+                      return (
+                        <div data-notice-id={turn.userMsg.id}>
+                          <SubagentNotice items={notice} />
+                        </div>
+                      );
+                    }
                     const text = getTextFromParts(
                       turn.userMsg!.parts ?? [],
                       "",
@@ -1348,12 +1368,39 @@ export const MessageList = memo(function MessageList({
                               analyzeAssistantMessage(
                                 msg.parts ?? [],
                                 suppressQuestionTool,
+                                subagentCardIds,
                               ),
                             );
                             const segments = partitionTurnSegments(
                               analyses.map((a) => a.toolsOnly),
+                              analyses.map((a) => a.cardsOnly),
                             );
                             return segments.map((segment) => {
+                              if (segment.kind === "cards") {
+                                const cardParts = segment.msgIndices.flatMap(
+                                  (msgIndex) => analyses[msgIndex]!.cardParts,
+                                );
+                                const chatStreamingStatus = isTurnStreaming
+                                  ? "streaming"
+                                  : undefined;
+                                return (
+                                  <SubagentCardGroup
+                                    key={`${turn.assistantMsgs[segment.msgIndices[0]!]!.id}-subagents`}
+                                    toolCallIds={cardParts.map(
+                                      (part) => part.toolCallId!,
+                                    )}
+                                  >
+                                    {cardParts.map((part) => (
+                                      <CustomToolRenderer
+                                        key={part.toolCallId}
+                                        part={part}
+                                        chatStatus={chatStreamingStatus}
+                                        toolRenderers={toolRenderers}
+                                      />
+                                    ))}
+                                  </SubagentCardGroup>
+                                );
+                              }
                               if (segment.kind === "message") {
                                 const msg =
                                   turn.assistantMsgs[segment.msgIndex]!;
