@@ -10,6 +10,7 @@ import type { Delegations } from '../Delegations'
 import type { Inbox } from '../Inbox'
 import type { RunStore } from '../RunStore'
 import { TERMINAL_RUN_STATUSES, type DelegationRecord, type RunRecord, type RunStatus } from '../types'
+import { childBusyInputs, isChildBusy, type ChildBusyInputs } from './hold'
 
 /** What the view reads besides the run store. */
 export interface SubagentViewSources {
@@ -65,19 +66,6 @@ export function taskOutcome(delegation: DelegationRecord, childRun: RunRecord | 
   return delegation.status === 'failed' ? 'failed' : 'done'
 }
 
-/** What keeps a child busy after its own runs ended. */
-export interface ChildBusyInputs {
-  /** The child has a delegation of its own that is still `running`. */
-  runningOutboundDelegation: boolean
-  /** The child has an inbox row (any kind) that is not `acknowledged`. */
-  unconsumedInbox: boolean
-}
-
-/** A child is busy while a run is live, or any `ChildBusyInputs` holds. */
-export function isChildBusy(runs: readonly RunRecord[], inputs: ChildBusyInputs): boolean {
-  return runs.some((run) => !TERMINAL_RUN_STATUSES.has(run.status)) || inputs.runningOutboundDelegation || inputs.unconsumedInbox
-}
-
 /**
  * The child's own state from its runs, pending questions and busy inputs, whatever its tasks say.
  * A child with no live run that is still busy is `waiting`.
@@ -119,11 +107,8 @@ function summarize(
 ): SubagentSummary {
   const runs = sources.store.listRuns(childThreadId)
   const runById = new Map(runs.map((run) => [run.runId, run]))
-  const busyInputs: ChildBusyInputs = {
-    runningOutboundDelegation: sources.delegations.listForParentThread(childThreadId).some((task) => task.status === 'running'),
-    unconsumedInbox:
-      sources.inbox.listByStatus(childThreadId, 'pending').length > 0 || sources.inbox.listByStatus(childThreadId, 'delivered').length > 0
-  }
+  // The same inputs the engine publishes by (`settleWaitingDelegations`), so the row and the task agree.
+  const busyInputs = childBusyInputs(sources.store, childThreadId)
   const busy = isChildBusy(runs, busyInputs)
   const activity = childActivity(runs, sources.hasPendingQuestion(childThreadId), busyInputs)
   const continuingOrdinals = runs

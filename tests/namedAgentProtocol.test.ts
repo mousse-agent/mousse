@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Context, AssistantMessage } from '@earendil-works/pi-ai'
 import { MousseMainService } from '../src/mms/MousseMainService'
@@ -95,6 +95,56 @@ it('delegates main to an isolated writer thread, wakes main with its result and 
   expect(f.read(f.repo)).toBe('base\n')
   expect(seen).toContain('Write value#0')
 }, 45_000)
+// Issue #142, nested results: P -> Coordinator -> Reader, all isolated. The Coordinator integrates the
+// Reader's work in later runs of its own, and P integrates the Coordinator. The task P holds
+// publishes the answer of the Coordinator's last run, so P merges the checkpoint of that run, not
+// the Coordinator's first one, which does not have the Reader's work.
+it('integrates, at depth, the checkpoint of the run whose answer the task published, after the integration outcome was read', async () => {
+  const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Nested integration', project.id)
+  let integrationNotices = 0
+  vi.mocked(mms.providerAuth.models.streamSimple).mockImplementation((_model, context) => {
+    captured.push(structuredClone(context))
+    const prompt = lastUserText(context), results = toolResultsSinceUser(context)
+    if (prompt === 'Delegate the coordination.') return streamOf(results.length ? text('Main delegated') : toolCall('create-coordinator', 'create_subagent', { name: 'Coordinator', task: 'Coordinate the reading', access: 'write' })) as never
+    if (prompt === 'Coordinate the reading') return streamOf(results.length ? text('Coordinator started the Reader') : toolCall('create-reader', 'create_subagent', { name: 'Reader', task: 'Write g.txt', access: 'write' })) as never
+    if (prompt === 'Write g.txt') return streamOf(results.length ? text('Reader done') : toolCall('reader-write', 'write', { path: 'g.txt', content: 'reader work\n' })) as never
+    const finished = DELEGATION_ID.exec(prompt)?.[1]
+    if (prompt.startsWith('Subagent "Reader"') && finished) {
+      // The Coordinator's wake: integrate the Reader's work, which runs as an integration run of its own.
+      return streamOf(results.length ? text('Coordinator is integrating') : toolCall('coordinator-integrate', 'integrate_delegation', { delegationId: finished })) as never
+    }
+    if (prompt.startsWith('Integration of delegated task')) {
+      // The first outcome is the Coordinator's: its last run adds a file of its own, then answers.
+      if (results.length === 0) integrationNotices += 1
+      if (integrationNotices === 1) return streamOf(results.length ? text("Coordinator final: the Reader's work is merged") : toolCall('coordinator-write', 'write', { path: 'c.txt', content: 'coordinator work\n' })) as never
+      return streamOf(text('Main integrated')) as never
+    }
+    if (prompt.startsWith('Subagent "Coordinator"') && finished) {
+      return streamOf(results.length ? text('Main is integrating') : toolCall('main-integrate', 'integrate_delegation', { delegationId: finished })) as never
+    }
+    return streamOf(text('unexpected')) as never
+  })
+  const result = await client.request<{ message: string }>('orchestrator.send', { threadId: thread.id, content: 'Delegate the coordination.', mode: 'agent' })
+  expect(result.message).toBe('Main delegated')
+  await vi.waitFor(() => {
+    expect(mms.orchestrator.getMessages(thread.id).some((message) => message.role === 'assistant' && message.content === 'Main integrated')).toBe(true)
+  }, { timeout: 60_000, interval: 100 })
+  const [task] = mms.orchestrator.listDelegations(thread.id)
+  const engine = (mms.orchestrator as any).runEngine
+  const coordinatorRuns = engine.listRuns(task.childThreadId) as Array<{ runId: string; ordinal: number; source: string; status: string }>
+  const integration = coordinatorRuns.find((run) => run.source === 'integration')!
+  const published = engine.delegations.get(task.delegationId).result as { runId: string; text: string }
+  // The task published after the Coordinator read the integration outcome, from the run that answered it.
+  expect(integration.status).toBe('completed')
+  expect(published.text).toBe("Coordinator final: the Reader's work is merged")
+  expect(coordinatorRuns.find((run) => run.runId === published.runId)!.ordinal).toBeGreaterThan(integration.ordinal)
+  expect(published.runId).not.toBe(engine.delegations.get(task.delegationId).childRunId)
+  // Main merged that run's checkpoint: the Reader's work (integrated into the Coordinator later) and the Coordinator's own.
+  const mainWorkspace = new ThreadWorkspaceManager(mms.threads.getThreadDir(thread.id)).load()!
+  expect(readFileSync(join(mainWorkspace.worktreePath, 'g.txt'), 'utf8')).toBe('reader work\n')
+  expect(readFileSync(join(mainWorkspace.worktreePath, 'c.txt'), 'utf8')).toBe('coordinator work\n')
+  expect(f.read(f.repo)).toBe('base\n')
+}, 90_000)
 it('provisions first-use task editor writes and commits only in the owned checkout', async () => {
   const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('First editor save', project.id)
   await client.request('files.write', { threadId: thread.id, path: 'value.txt', content: 'editor-owned\n' })
@@ -148,8 +198,9 @@ it('starts every valid parallel assignment without waiting and reports a failed 
   } finally { release() }
 }, 45_000)
 // Phase 4: task_cancel stops a child and everything it delegated, depth-first; a cancelled
-// descendant cannot publish its late result. The child's own delegation may already be read (its
-// result was delivered and acknowledged before the cancel), so only the descendant is asserted.
+// descendant cannot publish its late result. The child ended its turn while its own subagent still
+// runs, so its task is held (issue #142): it has not published, nothing woke the parent, and the
+// cancel reaches both tasks.
 it('cancels a delegated child and its nested delegation depth-first, aborting the live grandchild', async () => {
   const project = mms.projects.openProject(f.repo), thread = mms.threads.createThread('Cancel descendants', project.id)
   let release!: () => void, observeAbort!: () => void
@@ -177,8 +228,10 @@ it('cancels a delegated child and its nested delegation depth-first, aborting th
     const [child] = mms.orchestrator.listDelegations(thread.id)
     const [grandchild] = mms.orchestrator.listDelegations(child.childThreadId)
     expect(grandchild).toMatchObject({ title: 'Nested cancel', status: 'running' })
+    await vi.waitFor(() => expect(mms.orchestrator.listDelegations(thread.id)[0].childRunStatus).toBe('completed'), { timeout: 15_000, interval: 50 })
+    expect(mms.orchestrator.listDelegations(thread.id)[0]).toMatchObject({ status: 'running' })
     const cancelled = await mms.orchestrator.cancelDelegation(thread.id, child.delegationId)
-    expect(cancelled.cancelled[0]).toBe(grandchild.delegationId)
+    expect(cancelled.cancelled).toEqual([grandchild.delegationId, child.delegationId])
     await Promise.race([aborted, new Promise((_, reject) => setTimeout(() => reject(new Error('Descendant did not receive cancellation')), 5_000))])
     release()
     await vi.waitFor(() => {
@@ -186,6 +239,7 @@ it('cancels a delegated child and its nested delegation depth-first, aborting th
       expect(nested.status).toBe('cancelled')
       expect(['interrupted', 'cancelled']).toContain(nested.childRunStatus)
     }, { timeout: 15_000, interval: 50 })
+    expect(mms.orchestrator.listDelegations(thread.id)[0].status).toBe('cancelled')
   } finally { release() }
 }, 45_000)
 

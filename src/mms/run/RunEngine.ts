@@ -12,7 +12,7 @@ import { DEFAULT_HEARTBEAT_MS } from './Reconciler'
 import type { RestartNote } from './restartNote'
 import type { RunStore } from './RunStore'
 import { strandedQueuedRuns } from './strandedRuns'
-import { writeTerminalRun, type RunTerminalStatus } from './terminal'
+import { writeTerminalRun, type RunTerminalStatus, type TerminalNotice } from './terminal'
 import { ThreadMutex } from './ThreadMutex'
 import { ToolInvocations } from './ToolInvocations'
 import {
@@ -367,10 +367,10 @@ export class RunEngine extends EventEmitter {
     runId: string,
     status: RunTerminalStatus,
     outcome?: RunOutcome,
-    options: { resultText?: string } = {}
+    options: { resultText?: string; notice?: TerminalNotice } = {}
   ): RunRecord {
     return this.mark(runId, false, (run, expectedEpoch) =>
-      this.writeTerminal(run, expectedEpoch, status, outcome, options.resultText)
+      this.writeTerminal(run, expectedEpoch, status, outcome, options.resultText, options.notice)
     )
   }
 
@@ -473,10 +473,27 @@ export class RunEngine extends EventEmitter {
       }
       for (const [threadId, note] of notes)
         this.store.appendEvent({ threadId, type: 'restart.note', payload: { ...note, epoch } })
+      this.settleAllWaitingDelegations()
       return { interrupted, uncertain, epoch, orphanedChildren, recoveredWakes, strandedQueued }
     })
     this.daemonEpoch = report.epoch
     return report
+  }
+
+  /**
+   * Boot: every `running` delegation goes through the hold predicate once the rest of recovery has
+   * settled what it reads (interrupted runs, cancelled effects, restored rows). A task whose subagent
+   * is still busy stays `running` and publishes when its own wake or run ends; one the daemon's stop
+   * left with nothing to wait for publishes now. Also the whole-database form of
+   * `settleWaitingDelegations`, for a host that changed what the predicate reads without an event.
+   */
+  settleAllWaitingDelegations(): void {
+    this.store.db.transaction(() => {
+      const rows = this.store.db
+        .statement(`SELECT DISTINCT child_thread_id FROM delegations WHERE status = 'running' ORDER BY child_thread_id`)
+        .all()
+      for (const row of rows) this.store.settleHold(String(row.child_thread_id))
+    })
   }
 
   /**
@@ -1226,9 +1243,10 @@ export class RunEngine extends EventEmitter {
     expectedEpoch: number,
     status: RunTerminalStatus,
     outcome?: RunOutcome,
-    resultText?: string
+    resultText?: string,
+    notice?: TerminalNotice
   ): RunRecord {
-    return writeTerminalRun(this.store, run, expectedEpoch, status, outcome, this.now(), { resultText })
+    return writeTerminalRun(this.store, run, expectedEpoch, status, outcome, this.now(), { resultText, notice })
   }
 
   /**

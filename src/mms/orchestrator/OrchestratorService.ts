@@ -406,6 +406,10 @@ function isIntegrationTurnPayload(payload: unknown): payload is IntegrationTurnP
 /** Who delivers inbox rows while a queue item carries them (no effect: the reconciler leaves them alone). */
 const queueOwner = (itemId: string): string => `queue:${itemId}`
 
+/** A queue item's rows that could not be given back when it was removed: tries and the wait between them. */
+const QUEUED_ROW_RELEASE_ATTEMPTS = 4
+const QUEUED_ROW_RELEASE_RETRY_MS = 2_000
+
 /** Tool access of a delegated child in its parent's workspace: read-only roles only. */
 const SHARED_READER_POLICY: AgentWorkspacePolicy = { version: 1, workspace: 'shared', access: 'read-only' }
 /** Roles allowed `workspace: 'shared'` (SPEC §14.2: read-only roles). */
@@ -470,6 +474,8 @@ export class OrchestratorService extends EventEmitter {
 
   beginShutdown(): void {
     this.lifecycle.beginShutdown()
+    for (const retry of this.releaseRetries) clearTimeout(retry)
+    this.releaseRetries.clear()
     for (const [runId, entry] of [...this.turnResults]) {
       if (!entry.started) this.abandonTurnStart(runId, entry)
     }
@@ -632,6 +638,14 @@ export class OrchestratorService extends EventEmitter {
   private mcpAttachment: McpAttachmentProvider | null = null
   /** Pending results of `turn.start` effects, keyed by runId (SPEC §12.7). */
   private readonly turnResults = new Map<string, TurnResult>()
+  /**
+   * Threads whose provider reports background work that outlives their runs (input 4 of the hold
+   * predicate). No adapter reports any yet: a Codex turn stays open while its helpers run, and the
+   * Claude and Antigravity adapters report nothing, so this stays empty until one does.
+   */
+  private readonly providerBackground = new Set<string>()
+  /** Pending retries of a queue item's row release (`releaseQueuedRows`); a shutdown clears them. */
+  private readonly releaseRetries = new Set<ReturnType<typeof setTimeout>>()
   /** Last run heartbeat (ms) per run; throttles `RunEngine.heartbeat` writes. */
   private readonly runHeartbeats = new Map<string, number>()
   /** Optional multi-tenant runtime manager (Phase 4). */
@@ -890,11 +904,14 @@ export class OrchestratorService extends EventEmitter {
     this.runEngineUnsubscribe = null
     this.runEngine?.setDelegationHost(null)
     this.runEngine?.setInFlightCanceller(null)
+    this.runEngine?.store.setProviderBackgroundWork(null)
     this.runEngine?.handoffs.setTranscriptSource(null)
     this.runEngine = engine
     if (!engine) return
     this.installTitleGuard()
     this.attachInFlightCanceller()
+    // Input (4) of the hold predicate: synchronous, in memory, never throws (it is read inside transactions).
+    engine.store.setProviderBackgroundWork((threadId) => this.providerBackground.has(threadId))
     engine.handoffs.setTranscriptSource((threadId) => this.handoffTranscript(threadId))
     engine.setDelegationHost({
       createThread: (creation) =>
@@ -933,6 +950,18 @@ export class OrchestratorService extends EventEmitter {
       engine.off('stop-requested', onStop)
       engine.off('steer-accepted', onSteer)
     }
+  }
+
+  /**
+   * A provider's background work for `threadId` started (`active`) or finished (including an idle-cap
+   * expiry). While it runs, the tasks waiting on the thread stay `running`; when it ends they are
+   * evaluated again. Called by the adapter that owns the work; nothing calls it yet.
+   */
+  setProviderBackgroundWork(threadId: string, active: boolean): void {
+    if (active === this.providerBackground.has(threadId)) return
+    if (active) this.providerBackground.add(threadId)
+    else this.providerBackground.delete(threadId)
+    if (!active) this.runEngine?.store.settleHold(threadId)
   }
 
   /**
@@ -1447,7 +1476,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** A queue item that carried notices is gone without running: its rows are pending again, for rule 4. */
-  private releaseQueuedRows(items: ReadonlyArray<QueuedMessage | null | undefined>): void {
+  private releaseQueuedRows(items: ReadonlyArray<QueuedMessage | null | undefined>, attempt = 1): void {
     const engine = this.runEngine
     if (!engine) return
     for (const item of items) {
@@ -1456,7 +1485,20 @@ export class OrchestratorService extends EventEmitter {
         const own = engine.inbox.getMany(item.inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === queueOwner(item.id))
         if (own.length) engine.inbox.release(own.map((row) => row.inboxId), queueOwner(item.id))
       } catch (error) {
-        console.warn('queued notice rows could not be released', { itemId: item.id, error: error instanceof Error ? error.message : String(error) })
+        console.warn('queued notice rows could not be released', { itemId: item.id, attempt, error: error instanceof Error ? error.message : String(error) })
+        // The item is gone and its rows belong to nothing that will ever run: they hold the tasks
+        // waiting on this thread until they are given back, so the release is tried again. Only this
+        // item's own rows move, so it cannot touch the rows of a turn that is running.
+        if (attempt < QUEUED_ROW_RELEASE_ATTEMPTS && !this.lifecycle.stopping) {
+          const retry = setTimeout(() => {
+            this.releaseRetries.delete(retry)
+            // A shutdown that began since owns the rows: boot gives back what is left.
+            if (this.lifecycle.stopping) return
+            this.releaseQueuedRows([item], attempt + 1)
+          }, QUEUED_ROW_RELEASE_RETRY_MS)
+          retry.unref?.()
+          this.releaseRetries.add(retry)
+        }
       }
     }
   }
@@ -2258,6 +2300,10 @@ export class OrchestratorService extends EventEmitter {
       status: delegation.status,
       childRunStatus: engine.getRun(delegation.childRunId)?.status ?? null,
       ...(row ? { state: row.state } : {}),
+      // A task whose subagent is waiting on its own subagents is still `running`; it has no result yet.
+      ...(row?.tasks.find((entry) => entry.delegationId === delegationId)?.outcome === 'waiting_for_subagents'
+        ? { workState: 'waiting_for_subagents' as const, waitingOn: row.waitingOn }
+        : {}),
       ...(pending.length ? { pendingQuestion: pending.map(({ requestId, questions }) => ({ requestId, questions })) } : {}),
       ...(delegation.result ? { result: delegation.result } : {})
     }
@@ -2346,23 +2392,37 @@ export class OrchestratorService extends EventEmitter {
   private async executeIntegrationEffect(payload: IntegrationTurnPayload, signal: AbortSignal): Promise<void> {
     const engine = this.requireRunEngine()
     if (engine.getRun(payload.runId)?.status !== 'queued') return
+    // The outcome is a row for this thread, written with the run's terminal state: the thread stays
+    // busy until its model reads it, so a task waiting on this thread (it may be a subagent that
+    // integrates its own subagent's work) never publishes an answer that predates the outcome.
+    const outcomeRow = (text: string, type: 'integration_completed' | 'integration_failed') => ({
+      kind: 'reconcile_notice' as const,
+      payload: { type, delegationId: payload.delegationId, text }
+    })
+    // Success is the merge, not the run's terminal write: a run something else ended while the merge
+    // was committing (a stop, the reconciler) cannot be marked completed, and the merge still happened.
+    let merged: Awaited<ReturnType<OrchestratorService['integrateDelegationResult']>> | undefined
     let notice: string
-    let failed = false
     try {
       engine.markStarting(payload.runId)
       engine.markRunning(payload.runId)
-      const record = await this.lifecycle.run('delegation-integration', () =>
+      merged = await this.lifecycle.run('delegation-integration', () =>
         this.integrateDelegationResult(payload.threadId, payload.delegationId, payload.runId, AbortSignal.any([signal, this.lifecycle.signal])))
-      notice = `Integration of delegated task ${payload.delegationId} finished: merged ${record.workerHeadSha.slice(0, 12)} as ${record.integrationSha.slice(0, 12)} (${record.changedPaths.length} path(s)).`
-      engine.markTerminal(payload.runId, 'completed', undefined, { resultText: notice })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      failed = true
       notice = `Integration of delegated task ${payload.delegationId} failed: ${message}`
       this.markRun(payload.runId, (runs, id) => {
         const run = runs.getRun(id)
-        if (run && !TERMINAL_RUN_STATUSES.has(run.status)) runs.markTerminal(id, 'failed', { error: message })
+        if (run && !TERMINAL_RUN_STATUSES.has(run.status)) runs.markTerminal(id, 'failed', { error: message }, { notice: outcomeRow(notice, 'integration_failed') })
       })
+    }
+    if (merged) {
+      notice = `Integration of delegated task ${payload.delegationId} finished: merged ${merged.workerHeadSha.slice(0, 12)} as ${merged.integrationSha.slice(0, 12)} (${merged.changedPaths.length} path(s)).`
+      try {
+        engine.markTerminal(payload.runId, 'completed', undefined, { resultText: notice, notice: outcomeRow(notice, 'integration_completed') })
+      } catch (error) {
+        console.warn('integration run could not be marked completed; its merge stands', { runId: payload.runId, error: error instanceof Error ? error.message : String(error) })
+      }
     }
     try {
       const session = this.getOrCreateSession(payload.threadId)
@@ -2370,13 +2430,49 @@ export class OrchestratorService extends EventEmitter {
     } catch (error) {
       console.warn('integration notice could not reach the transcript', { runId: payload.runId, error: error instanceof Error ? error.message : String(error) })
     }
-    engine.inbox.append({
-      threadId: payload.threadId,
-      runId: payload.runId,
-      kind: 'reconcile_notice',
-      payload: failed
-        ? { type: 'integration_failed', delegationId: payload.delegationId, text: notice }
-        : { type: 'integration_completed', delegationId: payload.delegationId, text: notice }
+    this.settleIntegrationOutcome(payload, notice!, merged !== undefined)
+  }
+
+  /**
+   * Makes sure the thread has exactly one right outcome row for an integration run. Normally the
+   * terminal write has written it. A run something else ended while the merge was still going
+   * (reconciler rule 2, boot) has an "interrupted before its outcome was known" row instead
+   * (`writeTerminalRun`), and the merge may then have finished:
+   * - the row is still `pending`: it is rewritten in place to the `integration_completed` outcome, in
+   *   one write, so the thread never has two rows for one run and never reads the wrong one;
+   * - it has been delivered or read already: its text cannot be taken back, so a short correction row
+   *   follows, which is actionable and so keeps the thread busy until it has been read.
+   * Residual: the thread may have read the interrupted row and the task waiting on it published
+   * before the merge returned. That needs a reconciler interrupt in the middle of a live merge.
+   * With no row at all (the terminal write failed for another reason) the outcome row is appended.
+   */
+  private settleIntegrationOutcome(payload: IntegrationTurnPayload, notice: string, merged: boolean): void {
+    const engine = this.requireRunEngine()
+    const outcomeRow = (text: string, type: 'integration_completed' | 'integration_failed') => ({
+      kind: 'reconcile_notice' as const,
+      payload: { type, delegationId: payload.delegationId, text }
+    })
+    engine.store.db.transaction(() => {
+      const rows = engine.inbox.listForThread(payload.threadId).filter((row) => row.runId === payload.runId && row.kind === 'reconcile_notice')
+      const typeOf = (row: InboxRecord): string => String((row.payload as { type?: unknown } | null)?.type)
+      if (!merged) {
+        if (!rows.some((row) => typeOf(row).startsWith('integration_')))
+          engine.inbox.append({ threadId: payload.threadId, runId: payload.runId, ...outcomeRow(notice, 'integration_failed') })
+        return
+      }
+      if (rows.some((row) => typeOf(row) === 'integration_completed')) return
+      const interrupted = rows.find((row) => typeOf(row) === 'integration_failed' && (row.payload as { interrupted?: unknown }).interrupted === true)
+      if (!interrupted) {
+        engine.inbox.append({ threadId: payload.threadId, runId: payload.runId, ...outcomeRow(notice, 'integration_completed') })
+      } else if (interrupted.status === 'pending') {
+        engine.inbox.patchPayload(interrupted.inboxId, { type: 'integration_completed', text: notice, interrupted: null })
+      } else {
+        engine.inbox.append({
+          threadId: payload.threadId,
+          runId: payload.runId,
+          ...outcomeRow(`The integration did finish, after the notice that it was interrupted: ${notice.replace(/^Integration of delegated task \S+ finished: /, '')}`, 'integration_completed')
+        })
+      }
     })
   }
 
@@ -2395,7 +2491,9 @@ export class OrchestratorService extends EventEmitter {
       const target = await new WorkspaceResolver(parentDirectory, parentThreadId, project).resolve('agent', 'main', signal, lease)
       if (!target.capability.checkpointable) throw new Error('Integration requires an owned Git workspace')
       // The task's own checkpoint, not the worktree as it is now: the subagent may have worked on since.
-      const pinned = taskCheckpoint(new ThreadActionService(childDirectory).list(), delegation.childRunId)
+      // The run whose text the task published (it can be a later run than the task's own, once the
+      // subagent had waited on its own subagents), and the task's own run for a result that predates `runId`.
+      const pinned = taskCheckpoint(new ThreadActionService(childDirectory).list(), delegation.result?.runId ?? delegation.childRunId)
       if (!pinned) throw new Error('The delegated task left no code checkpoint to integrate.')
       return await new ChildAgentIntegrationService(parentDirectory).integrate({
         agentId: delegation.childThreadId,

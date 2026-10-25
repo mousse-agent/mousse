@@ -170,6 +170,8 @@ export class Inbox {
         if (current?.status !== 'delivered' || current.deliveredBy !== from) continue
         this.db.statement('UPDATE inbox SET delivered_by = NULL WHERE inbox_id = ? AND status = ?').run(id, 'delivered')
         this.recorded({ ...current, deliveredBy: null })
+        // Owned by nothing now: it no longer holds the tasks waiting on its thread.
+        this.store.settleHold(current.threadId)
       }
     })
   }
@@ -229,6 +231,7 @@ export class Inbox {
         this.recorded(next)
         moved.push(next)
       }
+      for (const threadId of new Set(moved.map((row) => row.threadId))) this.store.settleHold(threadId)
       return moved
     })
   }
@@ -247,6 +250,8 @@ export class Inbox {
       this.db.statement('UPDATE inbox SET payload = ? WHERE inbox_id = ?').run(stableStringify(payload), inboxId)
       const next = { ...current, payload }
       this.recorded(next)
+      // A delivery that gave up (`deliveryFailed`) no longer holds the thread's tasks.
+      this.store.settleHold(next.threadId)
       return next
     })
   }
@@ -310,6 +315,8 @@ export class Inbox {
         this.recorded(next)
         moved.push(next)
       }
+      // Any move can change what keeps the thread busy (an acknowledged row stops holding its tasks).
+      for (const threadId of new Set(moved.map((row) => row.threadId))) this.store.settleHold(threadId)
       return moved
     })
   }
