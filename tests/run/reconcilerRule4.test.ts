@@ -3,7 +3,8 @@ import { ANTIGRAVITY_CAPABILITIES } from '../../src/mms/run/adapters/antigravity
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import { NOTICE_TASK_CHARS } from '../../src/mms/run/delegation/notice'
-import { redeliveryDelayMs, retryUndeliverable } from '../../src/mms/run/delegation/wake'
+import { planWakeNotice } from '../../src/mms/run/delegation/notice'
+import { redeliveryDelayMs } from '../../src/mms/run/delegation/wake'
 import type { WakeTurnPayload } from '../../src/mms/run/types'
 import { delegationFixture, QUEUE_ONLY_CAPABILITIES, type DelegationFixture } from './delegationFixture'
 
@@ -224,7 +225,7 @@ describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () 
     expect(events[0].payload).toMatchObject({ inboxId: row.inboxId, attempts: 4 })
   })
 
-  it('later redeliveries back off, and retrying a failed delivery gives the row a fresh set of attempts', async () => {
+  it('later redeliveries back off', async () => {
     const { f, parent } = await childFinished({ parentStaysActive: true })
     const [row] = f.engine.inbox.listPending('parent')
     // The first redelivery is immediate; the second waits.
@@ -234,24 +235,15 @@ describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () 
     tick(f, parent.runId, redeliveryDelayMs(2) - 1)
     expect(f.reconciler.runOnce().wakes.restored).toEqual([])
     tick(f, parent.runId, 1)
-    const third = f.reconciler.runOnce().wakes
-    expect(third).toMatchObject({ restored: [row.inboxId], steers: [expect.any(String)] })
-
-    f.outbox.cancel(third.steers[0], f.now(), 'test')
-    tick(f, parent.runId, 60_000)
-    failSteers(f, parent.runId, 6)
-    expect(f.engine.inbox.get(row.inboxId)!.payload).toMatchObject({ deliveryFailed: true })
-    expect(retryUndeliverable(f.store, 'parent')).toEqual([row.inboxId])
-    expect(f.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'pending', deliveredBy: null })
-    expect(f.engine.inbox.get(row.inboxId)!.payload).not.toHaveProperty('deliveryFailed')
-    // A fresh set: the row is delivered again, and again after one more failure.
-    const again = f.reconciler.runOnce().wakes.steers[0]
-    expect(again).toBeTruthy()
-    f.outbox.cancel(again, f.now(), 'test')
-    expect(f.reconciler.runOnce().wakes.restored).toEqual([row.inboxId])
+    expect(f.reconciler.runOnce().wakes).toMatchObject({ restored: [row.inboxId], steers: [expect.any(String)] })
   })
 
   describe('acknowledge on delivery', () => {
+    /** What the executor does when it builds a notice: records what the notice showed whole. */
+    const recordShown = (f: DelegationFixture) => {
+      const rows = f.engine.inbox.listByStatus('parent', 'delivered')
+      f.engine.inbox.recordNoticeVisibility(rows, planWakeNotice(rows).items)
+    }
     /** A parent whose child finished; its wake run is started and returned. */
     const wakeStarted = async (text = 'All tests pass') => {
       f = delegationFixture()
@@ -260,6 +252,7 @@ describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () 
       f.engine.markTerminal(parent.runId, 'completed')
       f.finish(accepted.childRunId, text)
       const wakeRunId = f.reconciler.runOnce().wakes.wakes[0]
+      recordShown(f)
       f.engine.markStarting(wakeRunId)
       f.engine.markRunning(wakeRunId)
       return { f, accepted, wakeRunId }
@@ -290,13 +283,56 @@ describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () 
       expect(f.reconciler.runOnce().wakes.restored).toHaveLength(1)
     })
 
-    it('a steered run that completes acknowledges the rows its steer delivered', async () => {
+    it('a steered run that completes acknowledges the rows once its steer was taken, and the task the notice showed whole', async () => {
       const { f, parent, accepted } = await childFinished({ parentStaysActive: true })
-      f.reconciler.runOnce()
-      expect(f.engine.inbox.listForThread('parent').map((row) => row.status)).toEqual(['delivered'])
+      const steerId = f.reconciler.runOnce().wakes.steers[0]
+      const [row] = f.engine.inbox.listByStatus('parent', 'delivered')
+      recordShown(f)
+      // The model read the steer (the turn marks it when it drains it), then the run ends.
+      f.engine.inbox.markSteerTaken([row.inboxId], steerId)
       f.engine.markTerminal(parent.runId, 'completed')
-      expect(f.engine.inbox.listForThread('parent').map((row) => row.status)).toEqual(['acknowledged'])
+      expect(f.engine.inbox.listForThread('parent').map((entry) => entry.status)).toEqual(['acknowledged'])
       expect(f.engine.delegations.get(accepted.delegationId)!.status).toBe('acknowledged')
+    })
+
+    it('a steer that has not run when its run ends has delivered nothing: the rows and the task stay, until the steer runs', async () => {
+      const { f, parent, accepted } = await childFinished({ parentStaysActive: true })
+      const steerId = f.reconciler.runOnce().wakes.steers[0]
+      const [row] = f.engine.inbox.listByStatus('parent', 'delivered')
+      recordShown(f)
+      expect(f.outbox.get(steerId)!.status).toBe('pending')
+      f.engine.markTerminal(parent.runId, 'completed')
+      expect(f.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: steerId })
+      expect(f.engine.delegations.get(accepted.delegationId)!.status).toBe('result_available')
+      // Even a steer effect that succeeded has delivered nothing until the model read it.
+      f.outbox.claimNext('1:1', f.now(), { lanes: ['control'] })
+      f.outbox.succeed(steerId, '1:1', f.now())
+      expect(f.engine.inbox.listDeliveredByRun(parent.runId)).toEqual([])
+      f.engine.inbox.markSteerTaken([row.inboxId], steerId)
+      expect(f.engine.inbox.listDeliveredByRun(parent.runId).map((entry) => entry.inboxId)).toEqual([row.inboxId])
+    })
+
+    it('acknowledges only the tasks whose result the notice showed whole, whatever is read in between', async () => {
+      f = delegationFixture()
+      const parent = await f.runningRun('parent')
+      const text = 'y'.repeat(NOTICE_TASK_CHARS)
+      const tasks = []
+      for (const n of [1, 2, 3, 4, 5]) {
+        const accepted = await f.delegate(parent.runId, `call-${n}`)
+        f.finish(accepted.childRunId, text)
+        tasks.push(accepted)
+      }
+      f.engine.markTerminal(parent.runId, 'completed')
+      const wakeRunId = f.reconciler.runOnce().wakes.wakes[0]
+      // Four results fit the notice; the fifth is cut by its budget.
+      recordShown(f)
+      f.engine.markStarting(wakeRunId)
+      f.engine.markRunning(wakeRunId)
+      // The model reads the first with task_status while the wake turn runs: the fifth is not shown whole by that.
+      f.engine.acknowledgeDelegation(tasks[0].delegationId)
+      f.engine.markTerminal(wakeRunId, 'completed')
+      expect(tasks.map((task) => f!.engine.delegations.get(task.delegationId)!.status)).toEqual(['acknowledged', 'acknowledged', 'acknowledged', 'acknowledged', 'result_available'])
+      expect(f.engine.inbox.listForThread('parent').every((row) => row.status === 'acknowledged')).toBe(true)
     })
 
     it('a steered run that failed returns the rows it delivered', async () => {
@@ -314,7 +350,11 @@ describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () 
       const late = await f.engine.dispatch({ kind: 'send', threadId: 'parent', clientRequestId: 'late', source: 'steer-late' })
       if (late.status !== 'accepted') throw new Error('send rejected')
       const effect = f.outbox.enqueue({ threadId: 'parent', runId: late.runId, kind: 'turn.start', payload: { runId: late.runId, threadId: 'parent', input: 'notice' } })
-      f.engine.inbox.redirectDelivery([row.inboxId], effect.effectId)
+      // The row is the queue item's while it waits, and the late run's once it starts.
+      recordShown(f)
+      f.engine.inbox.redirectDelivery([row.inboxId], 'queue:item-1', f.outbox.listForRun(parent.runId).find((entry) => entry.kind === 'turn.steer')!.effectId)
+      expect(f.engine.inbox.redirectDelivery([row.inboxId], effect.effectId, 'queue:somebody-else')).toEqual([])
+      expect(f.engine.inbox.redirectDelivery([row.inboxId], effect.effectId, 'queue:item-1')).toHaveLength(1)
       expect(f.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: effect.effectId })
       // The steered run's end does not acknowledge a notice it no longer carries.
       f.engine.markTerminal(parent.runId, 'completed')

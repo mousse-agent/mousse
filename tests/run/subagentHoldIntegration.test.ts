@@ -98,7 +98,9 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
       const [row] = s.d.engine.inbox.listByStatus(s.coordinator.childThreadId, 'pending')
       expect(row).toBeTruthy()
       s.d.engine.inbox.markDelivered([row.inboxId], 'effect:late-steer')
+      // The steer missed its turn: the queue item owns the row now (`queue:<id>`).
       const item = (s.d.orch as any).enqueueForThread(s.coordinator.childThreadId, { content: 'queued notice' }, { source: 'steer-late', inboxIds: [row.inboxId] })
+      s.d.engine.inbox.redirectDelivery([row.inboxId], `queue:${item.id}`, 'effect:late-steer')
       expect(s.task(s.coordinator.delegationId).status).toBe('running')
       return { s, row, item }
     }
@@ -112,13 +114,6 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
       await waitFor(() => s.d.engine.getRun(wake)?.status === 'completed', 'the Coordinator\'s wake')
       await waitFor(() => s.task(s.coordinator.delegationId).status !== 'running', 'the task to publish')
       expect(s.task(s.coordinator.delegationId).result?.text).toContain('Coordinator final')
-    })
-
-    it('a removal that is part of a Stop reads the rows, so nothing waits on a delivery the user cancelled', async () => {
-      const { s, row, item } = await queued()
-      ;(s.d.orch as any).releaseQueueNotices([item], true)
-      expect(s.d.engine.inbox.get(row.inboxId)!.status).toBe('acknowledged')
-      expect(s.task(s.coordinator.delegationId).status).not.toBe('running')
     })
   })
 })

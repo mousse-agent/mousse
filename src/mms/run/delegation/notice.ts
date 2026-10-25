@@ -72,10 +72,3 @@ export function formatWakeNotice(rows: readonly InboxRecord[], context: NoticeCo
   return planWakeNotice(rows, context).text
 }
 
-/**
- * The tasks of `rows` whose result a delivering run showed whole. Only these are marked read when
- * that run completes; a result that was cut stays unread until the model reads the rest.
- */
-export function fullyShownDelegations(rows: readonly InboxRecord[]): Set<string> {
-  return new Set(planWakeNotice(rows).items.filter((item) => item.fullyShown).map((item) => item.delegationId))
-}

@@ -94,7 +94,7 @@ export class ChildAgentIntegrationService {
         operationType: 'child-integration',
         state: 'prepared',
         expectedPreState: { preMergeSha, workerHeadSha, spawnBaseSha: request.spawnBaseSha },
-        details: { request: { agentId: request.agentId, retainedResultId: request.retainedResultId, operationId, workerWorktree: request.workerWorktree, workerBranch: request.workerBranch, spawnBaseSha: request.spawnBaseSha, expectedWorkerHead: workerHeadSha, expectedDestinationHead: preMergeSha, threadWorkspace: request.threadWorkspace, actionId: request.actionId, actor: request.actor, externalEffects: request.externalEffects, runId: request.runId, turnId: request.turnId } }
+        details: { request: { agentId: request.agentId, retainedResultId: request.retainedResultId, operationId, workerWorktree: request.workerWorktree, workerBranch: request.workerBranch, spawnBaseSha: request.spawnBaseSha, expectedWorkerHead: workerHeadSha, ...(request.pinnedWorkerSha ? { pinnedWorkerSha: request.pinnedWorkerSha } : {}), expectedDestinationHead: preMergeSha, threadWorkspace: request.threadWorkspace, actionId: request.actionId, actor: request.actor, externalEffects: request.externalEffects, runId: request.runId, turnId: request.turnId } }
       })
       const merge = tryGit(request.threadWorkspace, ['merge', '--no-ff', '--no-edit', workerHeadSha], MOUSSE_COMMIT_ENV)
       if (!merge.ok) {

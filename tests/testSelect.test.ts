@@ -1,6 +1,6 @@
 import { posix, win32 } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { FULL_RUN_TRIGGERS, classifyChanges, loadManifest, moduleId } from '../scripts/test-select.mjs'
+import { FULL_RUN_TRIGGERS, classifyChanges, loadManifest, moduleId, runSpecifications } from '../scripts/test-select.mjs'
 
 const manifest = loadManifest()
 
@@ -89,6 +89,32 @@ describe('change-based test selection plan', () => {
     expect(moduleId('src\\shared\\chatMode.ts', 'E:\\repo', win32)).toBe('E:/repo/src/shared/chatMode.ts')
     expect(moduleId('src/shared/chatMode.ts', 'e:\\repo', win32)).toBe('e:/repo/src/shared/chatMode.ts')
     expect(moduleId('src/shared/chatMode.ts', '/repo', posix)).toBe('/repo/src/shared/chatMode.ts')
+  })
+
+  it('initializes the reporters before running the selected files', async () => {
+    // createVitest never calls the reporters' onInit; running without standalone() leaves their
+    // ctx undefined and the summary crashes with "Cannot read properties of undefined (reading 'logger')".
+    let reporterCtx: object | undefined
+    const calls: string[] = []
+    const vitest = {
+      async standalone() {
+        calls.push('standalone')
+        reporterCtx = {}
+      },
+      async runTestSpecifications(specs: unknown[]) {
+        calls.push('run')
+        if (!reporterCtx) throw new TypeError("Cannot read properties of undefined (reading 'logger')")
+        return { testModules: specs.map(() => ({ ok: () => true })), unhandledErrors: [] }
+      }
+    }
+    await expect(runSpecifications(vitest, [{}, {}])).resolves.toBe(false)
+    expect(calls).toEqual(['standalone', 'run'])
+  })
+
+  it('reports a failed test module or an unhandled error as a failed run', async () => {
+    const run = (result: object) => ({ standalone: async () => undefined, runTestSpecifications: async () => result })
+    expect(await runSpecifications(run({ testModules: [{ ok: () => false }], unhandledErrors: [] }), [{}])).toBe(true)
+    expect(await runSpecifications(run({ testModules: [{ ok: () => true }], unhandledErrors: [new Error('x')] }), [{}])).toBe(true)
   })
 
   it('keeps the trigger list in step with the vitest configuration', async () => {

@@ -239,6 +239,35 @@ describe('continue_subagent and the title address (issue #142)', () => {
     })
   })
 
+  describe('integrate_delegation by title', () => {
+    it('picks the latest task that completed, not a later one that failed', async () => {
+      const { d, parent, steps, out, say, start, settled } = world((input) => {
+        if (input.prompt.includes('Round two')) throw new Error('provider error')
+        return 'done'
+      })
+      steps['go'] = async (tools) => { out.first = await start(tools, 'API reviewer', { workspace: 'isolated', role: 'implement' }) }
+      steps['again'] = async (tools) => { out.second = await tools.continueSubagent({ subagent: 'API reviewer', prompt: 'Round two' }, { toolCallId: 'c1' }) as Json }
+      await say('go')
+      await settled(out.first.childRunId)
+      await say('again')
+      await settled(out.second.childRunId)
+      expect(d.engine.delegations.get(out.second.delegationId)).toMatchObject({ status: 'failed', result: { runStatus: 'failed' } })
+      const picked = (d.orch as any).resolveTask(parent.id, { subagent: 'API reviewer' }, 'finished')
+      expect(picked.delegation.delegationId).toBe(out.first.delegationId)
+      // A failed task is still addressable by its own id.
+      const only = (d.orch as any).resolveTask(parent.id, { delegationId: out.second.delegationId })
+      expect(only.delegation.delegationId).toBe(out.second.delegationId)
+    })
+
+    it('says there is no completed task when every task failed', async () => {
+      const { d, parent, steps, out, say, start, settled } = world(() => { throw new Error('provider error') })
+      steps['go'] = async (tools) => { out.first = await start(tools, 'API reviewer', { workspace: 'isolated', role: 'implement' }) }
+      await say('go')
+      await settled(out.first.childRunId)
+      expect((d.orch as any).resolveTask(parent.id, { subagent: 'API reviewer' }, 'finished').refusal).toMatchObject({ code: 'no_task', message: expect.stringContaining('no completed task') })
+    })
+  })
+
   describe('nested subagents (issue #142)', () => {
     it('a subagent starts subagents of its own, and its authority only narrows down the tree', async () => {
       const seen: Json = {}

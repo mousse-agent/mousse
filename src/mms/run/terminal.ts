@@ -1,6 +1,5 @@
 import { Delegations } from './Delegations'
 import { recordRunResultText } from './delegation/hold'
-import { fullyShownDelegations } from './delegation/notice'
 import { Inbox } from './Inbox'
 import { stableStringify } from './json'
 import type { RunStore } from './RunStore'
@@ -70,19 +69,20 @@ export function writeTerminalRun(
  * leaves its rows `delivered`: the reconciler returns them to `pending` (`restoreUndeliveredRows`),
  * except for a run the user stopped, which keeps them as before.
  */
-function acknowledgeDeliveredRows(store: RunStore, run: RunRecord): void {
+export function acknowledgeDeliveredRows(store: RunStore, run: RunRecord): void {
   if (run.status !== 'completed') return
   const inbox = new Inbox(store)
   const rows = inbox.listDeliveredByRun(run.runId)
   if (rows.length === 0) return
   inbox.markAcknowledged(rows.map((row) => row.inboxId))
-  const shown = fullyShownDelegations(rows)
   const delegations = new Delegations(store, inbox)
   for (const row of rows) {
     if (row.kind !== 'child_result') continue
     const { delegationId } = row.payload as ChildResultPayload
     const delegation = delegations.get(delegationId)
-    if (shown.has(delegationId) && delegation && (delegation.status === 'result_available' || delegation.status === 'failed'))
+    // What the notice showed was recorded when it was built (`noticeShown`); a row with no record showed nothing.
+    const shown = (row.payload as { noticeShown?: unknown }).noticeShown === true
+    if (shown && delegation && (delegation.status === 'result_available' || delegation.status === 'failed'))
       delegations.setStatus({ delegationId, from: delegation.status, to: 'acknowledged' })
   }
 }

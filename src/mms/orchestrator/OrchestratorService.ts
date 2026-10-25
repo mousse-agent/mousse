@@ -56,7 +56,7 @@ import type { AdapterHost, ChildTurnPolicy, ProviderAdapter, ProviderCapabilitie
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { McpCaller, MousseToolHost } from '../run/mcp/toolRegistry'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
-import { retryUndeliverable } from '../run/delegation/wake'
+import { acknowledgeDeliveredRows } from '../run/terminal'
 import { taskCheckpoint } from '../run/delegation/checkpoint'
 import { subagentPreamble } from '../run/delegation/guidance'
 import type { SubagentNoticeItem } from '../../shared/subagents'
@@ -177,7 +177,7 @@ import {
   reclaimAbandonedClaimsDurable,
   releaseClaimDurable
 } from '../queue/durableQueue'
-import { ThreadSession } from './ThreadSession'
+import { ThreadSession, type ActiveTurnControl } from './ThreadSession'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService } from './UserQuestionService'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 import { ConnectionRetriesExhaustedError } from './connectionRetry'
@@ -401,6 +401,9 @@ interface IntegrationTurnPayload {
 function isIntegrationTurnPayload(payload: unknown): payload is IntegrationTurnPayload {
   return Boolean(payload) && typeof payload === 'object' && (payload as { kind?: unknown }).kind === 'integration'
 }
+
+/** Who delivers inbox rows while a queue item carries them (no effect: the reconciler leaves them alone). */
+const queueOwner = (itemId: string): string => `queue:${itemId}`
 
 /** Tool access of a delegated child in its parent's workspace: read-only roles only. */
 const SHARED_READER_POLICY: AgentWorkspacePolicy = { version: 1, workspace: 'shared', access: 'read-only' }
@@ -912,7 +915,7 @@ export class OrchestratorService extends EventEmitter {
         runId: childRunId,
         threadId: childThreadId,
         // A plan-ceiling child plans only (SPEC §15.1). The subagent is told where its result goes, then its task.
-        input: { content: `${subagentPreamble(this.titleOf(request.parentThreadId) ?? 'its parent')}\n\n${prompt}`, mode: request.modeCeiling === 'plan' ? 'plan' : 'agent' },
+        input: { content: `${subagentPreamble(this.titleOf(request.parentThreadId))}\n\n${prompt}`, mode: request.modeCeiling === 'plan' ? 'plan' : 'agent' },
         reuseLastUser: false,
         displayUserMessage: true,
         source: 'delegation',
@@ -955,7 +958,7 @@ export class OrchestratorService extends EventEmitter {
   /**
    * A subagent result could not be delivered after every attempt (`restoreUndeliveredRows`): the
    * thread gets a visible notice, so the result is never silently lost. The result itself is intact
-   * and readable with `task_status`; `retrySubagentDelivery` delivers it again.
+   * and readable with `task_status`.
    */
   private noteUndeliveredResult(event: ThreadEvent): void {
     try {
@@ -964,19 +967,11 @@ export class OrchestratorService extends EventEmitter {
       const title = delegation ? this.titleOf(delegation.childThreadId) : undefined
       const session = this.getOrCreateSession(event.threadId)
       this.sessionAls.run(session, () => this.addSystemMessage(
-        `The result of ${title ? `subagent "${title}"` : 'a subagent'} could not be delivered after ${attempts ?? 'several'} attempts. Read it with task_status${delegationId ? ` (${delegationId})` : ''}, or retry delivery.`
+        `The result of ${title ? `subagent "${title}"` : 'a subagent'} could not be delivered after ${attempts ?? 'several'} attempts. Read it with task_status${delegationId ? ` (${delegationId})` : ''}.`
       ))
     } catch (error) {
       console.warn('undelivered result notice could not be written', { threadId: event.threadId, error: error instanceof Error ? error.message : String(error) })
     }
-  }
-
-  /**
-   * Retry for a delivery that gave up: the thread's undeliverable subagent results are pending again,
-   * with a fresh set of attempts. Returns how many.
-   */
-  retrySubagentDelivery(threadId: string): number {
-    return retryUndeliverable(this.requireRunEngine().store, threadId).length
   }
 
   /** Boot reconciliation: runs the previous daemon left active become interrupted. */
@@ -1238,7 +1233,7 @@ export class OrchestratorService extends EventEmitter {
         payload: { ...payload, input: durableSendInput(payload.input) }
       }).effectId
       // The notices this turn carries now follow its outcome: read when it completes, redelivered when it fails.
-      if (payload.inboxIds?.length) engine.inbox.redirectDelivery(payload.inboxIds, entry.effectId)
+      if (payload.inboxIds?.length && payload.queueItemId) engine.inbox.redirectDelivery(payload.inboxIds, entry.effectId, queueOwner(payload.queueItemId))
     } catch (error) {
       this.turnResults.delete(payload.runId)
       throw error
@@ -1350,24 +1345,32 @@ export class OrchestratorService extends EventEmitter {
     return Boolean(session?.activeTurn || session?.turnAdmitted || this.channelTurns.has(threadId))
   }
 
-  /** `turn.steer`: delivers to the live turn; a steer that missed it becomes a new turn (SPEC §5). */
+  /**
+   * `turn.steer`: delivers to the live turn; a steer that missed it becomes a new turn (SPEC §5).
+   * A steer that carries notices owns only the rows it still delivers: it is rebuilt now from those
+   * (a row read since, or taken over by another delivery, is dropped), and with none left nothing is
+   * delivered. A live turn that takes it marks the rows delivered to that run; one that does not
+   * hands the rows to the queued turn it becomes.
+   */
   private executeTurnSteerEffect(effect: EffectRecord): void {
     const { runId, threadId, text, inboxIds } = effect.payload as { runId: string; threadId: string; text: string; inboxIds?: string[] }
+    const engine = this.requireRunEngine()
     let content = text
     let notice: SubagentNoticeItem[] | undefined
-    let carried = inboxIds
+    let carried: { inboxIds: string[]; effectId: string } | undefined
     if (inboxIds?.length) {
-      // A steer that carries notices is rebuilt now: a row acknowledged since it was scheduled (a
-      // `task_status` read) is dropped, and with none left there is nothing to deliver.
-      const rows = this.requireRunEngine().inbox.getMany(inboxIds).filter((row) => row.status !== 'acknowledged')
+      const rows = engine.inbox.getMany(inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === effect.effectId)
       if (rows.length === 0) return
       const planned = planWakeNotice(rows, this.noticeContext())
+      engine.inbox.recordNoticeVisibility(rows, planned.items)
       content = planned.text
       notice = planned.items
-      carried = rows.map((row) => row.inboxId)
+      carried = { inboxIds: rows.map((row) => row.inboxId), effectId: effect.effectId }
     }
-    const run = this.runEngine?.getRun(runId)
-    if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, content, notice)) return
+    // The rows stay the steer's until the model reads the text (`drainSteerForSession`) or the turn ends
+    // without reading it, when the follow-up turn it leaves takes them.
+    const run = engine.getRun(runId)
+    if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, content, notice, carried)) return
     this.enqueueLateSteer(threadId, content, carried, notice)
   }
 
@@ -1377,20 +1380,63 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * A steer that missed its turn runs as the next turn. It keeps the identity of the inbox rows it
-   * carries, so the rows follow that run's outcome and the text is rebuilt (or the turn skipped) when it starts.
+   * A steer that missed its turn runs as the next turn. The inbox rows it carries move to the queue
+   * item (`queue:<id>`), so exactly one delivery owns them at a time: the reconciler does not hand
+   * them to a wake, and the item rebuilds its text from the rows that are still its own when it runs.
    */
-  private enqueueLateSteer(threadId: string, text: string, inboxIds?: string[], subagentNotice?: SubagentNoticeItem[]): void {
+  private enqueueLateSteer(threadId: string, text: string, carried?: { inboxIds: string[]; effectId: string }, subagentNotice?: SubagentNoticeItem[]): void {
     const content = text.trim()
     const session = this.getOrCreateSession(threadId)
     if (!content || session.deleted) return
-    this.enqueueForThread(
-      threadId,
-      { content, mode: getLastUserChatMode(session.messages) ?? 'agent' },
-      { source: 'steer-late', ...(inboxIds?.length ? { inboxIds, subagentNotice } : {}) }
-    )
+    this.enqueueCarrying(threadId, { content, mode: getLastUserChatMode(session.messages) ?? 'agent' }, { source: 'steer-late' }, carried ? [carried] : [], subagentNotice)
     if (session.isTurnRunning()) session.drainAfterSettle = true
     else this.scheduleQueueDrain(session)
+  }
+
+  /** Queues a turn that delivers notices: the rows it carries are its own until it runs or is removed. */
+  private enqueueCarrying(
+    threadId: string,
+    input: OrchestratorSendInput,
+    opts: { source: string; internal?: boolean },
+    carried: ReadonlyArray<{ inboxIds: string[]; effectId: string }>,
+    subagentNotice: SubagentNoticeItem[] | undefined
+  ): QueuedMessage {
+    const inboxIds = carried.flatMap((entry) => entry.inboxIds)
+    const item = this.enqueueForThread(threadId, input, { ...opts, ...(inboxIds.length ? { inboxIds, subagentNotice } : {}) })
+    // Only rows the carrying steer still delivers move: one a wake took over in the meantime stays that wake's.
+    for (const entry of carried) this.requireRunEngine().inbox.redirectDelivery(entry.inboxIds, queueOwner(item.id), entry.effectId)
+    return item
+  }
+
+  /** A queue item that carried notices is gone without running: its rows are pending again, for rule 4. */
+  private releaseQueuedRows(items: ReadonlyArray<QueuedMessage | null | undefined>): void {
+    const engine = this.runEngine
+    if (!engine) return
+    for (const item of items) {
+      if (!item?.inboxIds?.length) continue
+      try {
+        const own = engine.inbox.getMany(item.inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === queueOwner(item.id))
+        if (own.length) engine.inbox.markPendingAgain(own.map((row) => row.inboxId))
+      } catch (error) {
+        console.warn('queued notice rows could not be released', { itemId: item.id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+  }
+
+  /**
+   * A queue item promoted to a steer was taken into the live turn: the rows it carried are read, so
+   * a delivery nothing will ever finish cannot hold the tasks waiting on this thread. The results
+   * stay readable with `task_status`.
+   */
+  private acknowledgeQueuedRows(item: QueuedMessage): void {
+    const engine = this.runEngine
+    if (!engine || !item.inboxIds?.length) return
+    try {
+      const own = engine.inbox.getMany(item.inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === queueOwner(item.id))
+      if (own.length) engine.inbox.markAcknowledged(own.map((row) => row.inboxId))
+    } catch (error) {
+      console.warn('promoted notice rows could not be read', { itemId: item.id, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /** Enqueues a control effect, or runs `fallback` directly without effects or when the write fails. */
@@ -2158,7 +2204,7 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * The task a tool call names. A `delegationId` must be the caller's; a `subagent` is resolved to the
-   * caller's direct subagent and its latest task (`finished`: its latest published one). A name that
+   * caller's direct subagent and its latest task (`finished`: its latest task that completed). A name that
    * resolves to nothing is a refusal value, not an error.
    */
   private resolveTask(parentThreadId: string, ref: SubagentRef, which: 'latest' | 'finished' = 'latest') {
@@ -2167,10 +2213,10 @@ export class OrchestratorService extends EventEmitter {
     if (!target.ok) return { ok: false as const, refusal: target.refusal }
     const tasks = this.requireRunEngine().delegations.listForChildThread(target.childThreadId).filter((task) => task.parentThreadId === parentThreadId)
     const pick = which === 'finished'
-      ? tasks.filter((task) => task.status === 'result_available' || task.status === 'acknowledged').at(-1)
+      ? tasks.filter((task) => (task.status === 'result_available' || task.status === 'acknowledged') && task.result?.runStatus === 'completed').at(-1)
       : tasks.at(-1)
     if (!pick)
-      return { ok: false as const, refusal: { started: false as const, code: 'no_task' as const, message: which === 'finished' ? `"${target.title}" has no finished task yet.` : `"${target.title}" has no task.` } }
+      return { ok: false as const, refusal: { started: false as const, code: 'no_task' as const, message: which === 'finished' ? `"${target.title}" has no completed task to integrate yet.` : `"${target.title}" has no task.` } }
     return { ok: true as const, delegation: pick }
   }
 
@@ -2390,6 +2436,7 @@ export class OrchestratorService extends EventEmitter {
       throw new EffectDeferredError(this.wakeBusyDeferMs, 'thread_busy')
     }
     const notice = planWakeNotice(rows, this.noticeContext())
+    engine.inbox.recordNoticeVisibility(rows, notice.items)
     try {
       await this.runTurnOnSession(
         session,
@@ -3038,27 +3085,8 @@ export class OrchestratorService extends EventEmitter {
     }
     this.emitQueueUpdated(threadId, session.queue)
     this.cancelQueuedRuns([(removed as QueuedMessage | null)?.runId])
-    this.releaseQueueNotices([removed as QueuedMessage | null], false)
+    this.releaseQueuedRows([removed as QueuedMessage | null])
     return removed
-  }
-
-  /**
-   * Subagent notices a queue entry carried (a steer that missed its turn) when the entry leaves the
-   * queue without running. A removal returns the rows to the inbox as `pending`, so they still hold
-   * the tasks waiting on this thread and are delivered again; a removal that is part of a Stop
-   * (`clearQueue`) reads them, so nothing waits on a delivery the user cancelled.
-   */
-  private releaseQueueNotices(items: ReadonlyArray<QueuedMessage | null | undefined>, stop: boolean): void {
-    const engine = this.runEngine
-    const ids = items.flatMap((item) => item?.inboxIds ?? [])
-    if (!engine || ids.length === 0) return
-    try {
-      const rows = engine.inbox.getMany(ids).filter((row) => row.status !== 'acknowledged').map((row) => row.inboxId)
-      if (stop) engine.inbox.markAcknowledged(rows)
-      else engine.inbox.markPendingAgain(rows)
-    } catch (error) {
-      console.warn('queue notices could not be released', { error: error instanceof Error ? error.message : String(error) })
-    }
   }
 
   reorderQueue(threadId: string, orderedIds: string[]): QueuedMessage[] {
@@ -3139,7 +3167,7 @@ export class OrchestratorService extends EventEmitter {
       }
       // The notices this entry carried now sit in the live turn: nothing is left to deliver (the
       // results stay readable with `task_status`), and a delivered row no run would read must not hold its tasks.
-      this.releaseQueueNotices([item!], true)
+      this.acknowledgeQueuedRows(item!)
       this.emitQueueUpdated(threadId, session.queue)
       return true
     }
@@ -3763,12 +3791,12 @@ export class OrchestratorService extends EventEmitter {
     }
     if (opts?.clearQueue && id) {
       let clearedRunIds: Array<string | undefined> = []
-      let cleared: QueuedMessage[] = []
+      let clearedItems: QueuedMessage[] = []
       const clear = (items: QueuedMessage[]): QueuedMessage[] => {
         const retained = clearPendingQueue(items)
         const retainedIds = new Set(retained.map((item) => item.id))
-        cleared = items.filter((item) => !retainedIds.has(item.id))
-        clearedRunIds = cleared.map((item) => item.runId)
+        clearedItems = items.filter((item) => !retainedIds.has(item.id))
+        clearedRunIds = clearedItems.map((item) => item.runId)
         for (const item of items) {
           if (item.workflowInvocationId && !retainedIds.has(item.id)) {
             if (!this.workflowChat) throw new Error('Workflow queue cancellation is unavailable')
@@ -3785,7 +3813,7 @@ export class OrchestratorService extends EventEmitter {
       }
       this.emitQueueUpdated(id, session.queue)
       this.cancelQueuedRuns(clearedRunIds)
-      this.releaseQueueNotices(cleared, true)
+      this.releaseQueuedRows(clearedItems)
     }
     this.emit('turn-aborted', { threadId: id ?? undefined })
     return true
@@ -3812,14 +3840,19 @@ export class OrchestratorService extends EventEmitter {
     const wasAborted = aborted || turn.abort.signal.aborted
     if (!wasAborted && turn.pendingSteer.length > 0) {
       const leftover = turn.pendingSteer.join('\n').trim()
+      // The notices a steer carried that the turn never read go with the follow-up turn.
+      const carried = turn.carriedSteers ?? []
       turn.pendingSteer = []
       turn.promotedSteerIds = []
+      turn.carriedSteers = []
       if (leftover && session.threadId !== '__unbound__' && !session.deleted) {
         try {
-          this.enqueueForThread(
+          this.enqueueCarrying(
             session.threadId,
             { content: leftover, mode: getLastUserChatMode(session.messages) ?? 'agent' },
-            { source: 'steer-followup', internal: true }
+            { source: 'steer-followup', internal: true },
+            carried,
+            carried.flatMap((entry) => entry.subagentNotice ?? [])
           )
         } catch {
           // Best-effort: settlement must not fail if the follow-up cannot queue.
@@ -3857,7 +3890,7 @@ export class OrchestratorService extends EventEmitter {
     return this.steerThread(threadId ?? this.getBoundThreadId() ?? undefined, text)
   }
 
-  steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[]): boolean {
+  steerThread(threadId: string | undefined, text: string, subagentNotice?: SubagentNoticeItem[], carried?: { inboxIds: string[]; effectId: string }): boolean {
     const trimmed = text.trim()
     if (!trimmed || !threadId) return false
     const session =
@@ -3866,6 +3899,7 @@ export class OrchestratorService extends EventEmitter {
         : this.sessions.get(threadId) ?? null
     if (session?.activeTurn && !session.activeTurn.abort.signal.aborted) {
       session.activeTurn.pendingSteer.push(trimmed)
+      if (carried) (session.activeTurn.carriedSteers ??= []).push({ ...carried, subagentNotice })
       // Prefer ALS when already inside the turn; otherwise annotate bound if matching.
       const run = (): void => {
         // Mid-turn steers share the turn's mode — preserve tracking so the next
@@ -5210,12 +5244,15 @@ export class OrchestratorService extends EventEmitter {
    */
   private drainSteerForSession(
     session: ThreadSession,
-    turn: { pendingSteer: string[]; promotedSteerIds: string[] }
+    turn: { pendingSteer: string[]; promotedSteerIds: string[]; carriedSteers?: ActiveTurnControl['carriedSteers'] }
   ): string | undefined {
     const parts: string[] = []
     if (turn.pendingSteer.length > 0) {
       parts.push(...turn.pendingSteer)
       turn.pendingSteer = []
+      // The model reads them now: the rows their steers carried are delivered to this run.
+      for (const entry of turn.carriedSteers ?? []) this.runEngine?.inbox.markSteerTaken(entry.inboxIds, entry.effectId)
+      turn.carriedSteers = []
     }
 
     const localPromoted = new Set<string>(turn.promotedSteerIds ?? [])
@@ -5395,13 +5432,14 @@ export class OrchestratorService extends EventEmitter {
     if (item.inboxIds?.length && this.runEngine) {
       // A queued steer that carries notices is rebuilt now: a row acknowledged since it was queued
       // (a `task_status` read) is dropped, and with none left there is nothing to deliver.
-      const rows = this.runEngine.inbox.getMany(item.inboxIds).filter((row) => row.status !== 'acknowledged')
+      const rows = this.runEngine.inbox.getMany(item.inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === queueOwner(item.id))
       if (rows.length === 0) {
         this.completeSessionClaim(session, item.id, claimToken)
         this.scheduleQueueDrain(session, opts)
         return
       }
       const planned = planWakeNotice(rows, this.noticeContext())
+      this.runEngine.inbox.recordNoticeVisibility(rows, planned.items)
       item = { ...item, content: planned.text, inboxIds: rows.map((row) => row.inboxId), subagentNotice: planned.items }
     }
     const queued = item

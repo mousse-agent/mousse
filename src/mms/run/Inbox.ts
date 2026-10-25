@@ -112,32 +112,60 @@ export class Inbox {
       .map(toInbox)
   }
 
-  /** Delivered rows whose delivering effect belongs to `runId` (the wake run, or the run a steer joined), oldest first. */
+  /**
+   * Delivered rows whose delivery reached the run `runId`, oldest first: those of its wake `turn.start`
+   * (or of a queued steer's), and those of a `turn.steer` that the model read (`markSteerTaken`). A
+   * steer that has not run yet, or that the turn took but never read, has delivered nothing: the run
+   * may end first, and then the steer is queued as a turn of its own.
+   */
   listDeliveredByRun(runId: string): InboxRecord[] {
     return this.db
       .statement(
         `SELECT i.* FROM inbox i JOIN effects e ON e.effect_id = i.delivered_by
-         WHERE i.status = 'delivered' AND e.run_id = ? ORDER BY i.created_at, i.rowid`
+         WHERE i.status = 'delivered' AND e.run_id = ?
+           AND (e.kind <> 'turn.steer' OR json_extract(i.payload, '$.steerTakenBy') = i.delivered_by)
+         ORDER BY i.created_at, i.rowid`
       )
       .all(runId)
       .map(toInbox)
   }
 
-  /** Delivered rows of a thread whose delivery gave up (`payload.deliveryFailed`), oldest first. */
-  listUndeliverable(threadId: string): InboxRecord[] {
-    return this.listByStatus(threadId, 'delivered').filter((row) => (row.payload as { deliveryFailed?: unknown } | null)?.deliveryFailed === true)
+  /** The model read the steer `effectId` carried: its rows count as delivered to that run. */
+  markSteerTaken(ids: readonly string[], effectId: string): void {
+    this.db.transaction(() => {
+      for (const id of ids) {
+        const current = this.get(id)
+        if (current?.status === 'delivered' && current.deliveredBy === effectId) this.patchPayload(id, { steerTakenBy: effectId })
+      }
+    })
   }
 
   /**
-   * A delivered row changes hands: its notice now rides another effect (a steer that missed its turn
-   * became a queued turn). The row stays `delivered`.
+   * Records what the notice that delivers these rows showed (`noticeShown`: the task's whole result
+   * was in it), so that acknowledging them later marks as read exactly the tasks that were shown.
    */
-  redirectDelivery(ids: readonly string[], deliveredBy: string): InboxRecord[] {
+  recordNoticeVisibility(rows: readonly InboxRecord[], items: ReadonlyArray<{ delegationId: string; fullyShown: boolean }>): void {
+    this.db.transaction(() => {
+      for (const row of rows) {
+        if (row.kind !== 'child_result') continue
+        const item = items.find((entry) => entry.delegationId === (row.payload as { delegationId?: string }).delegationId)
+        if (item) this.patchPayload(row.inboxId, { noticeShown: item.fullyShown })
+      }
+    })
+  }
+
+  /**
+   * A delivered row changes hands: its notice now rides another effect, or a queued turn
+   * (`queue:<itemId>`). With `from`, only a row that `from` still delivers moves, so a row some other
+   * delivery took over in the meantime is left alone. The row stays `delivered`.
+   */
+  redirectDelivery(ids: readonly string[], deliveredBy: string, from?: string): InboxRecord[] {
     return this.db.transaction(() => {
       const moved: InboxRecord[] = []
       for (const id of ids) {
         const current = this.get(id)
         if (!current || current.status !== 'delivered' || current.deliveredBy === deliveredBy) continue
+        if (from !== undefined && current.deliveredBy !== from) continue
         this.db.statement('UPDATE inbox SET delivered_by = ? WHERE inbox_id = ? AND status = ?').run(deliveredBy, id, 'delivered')
         const next = { ...current, deliveredBy }
         this.recorded(next)
