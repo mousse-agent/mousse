@@ -4,8 +4,6 @@ import type { CodexNotification } from './protocol'
 export interface StrayThread {
   turnId?: string
   completed: boolean
-  /** Spawn items the thread emitted before any run named it; replayed when it is registered as a helper. */
-  spawns?: Array<{ type: string } & Record<string, unknown>>
 }
 
 type HelperState = { turnId?: string; running: boolean; seenActive: boolean; interruptedTurn?: string }
@@ -18,59 +16,26 @@ type HelperState = { turnId?: string; running: boolean; seenActive: boolean; int
  * keep the child's run open until they settle and to stop them with the child.
  *
  * A helper is named by a `subAgentActivity` item (`kind: 'started'`) or a `collabAgentToolCall`
- * `spawnAgent` item (`receiverThreadIds`) on the parent's thread, or on a helper's own thread
- * (helpers can start helpers).
+ * `spawnAgent` item (`receiverThreadIds`) on the parent's thread, while the run is live.
+ *
+ * Known gaps (a follow-up handles them):
+ * - Only direct helpers are tracked. A helper that starts a helper of its own is not noticed, so the
+ *   run does not wait for it and Stop does not interrupt it.
+ * - A helper whose spawn is reported after Stop, or after the run was released, is never registered,
+ *   so it is not interrupted.
  */
 export class NativeHelpers {
   private readonly helpers = new Map<string, HelperState>()
-  private readonly parentTurns = new Set<string>()
   private waiters: Array<{ resolve: () => void; reject: (error: unknown) => void }> = []
   private stopWith: ((threadId: string, turnId: string) => void) | undefined
   private closed: { reason: unknown } | undefined
   /** When a helper last reported anything: a spawn, or any event of its thread (the idle cap reads this). */
   lastActivityAt = Date.now()
 
-  constructor(
-    private readonly stray: (threadId: string) => StrayThread | undefined = () => undefined,
-    /** The Codex thread whose turn started the helpers. */
-    readonly parentThreadId?: string
-  ) {}
+  constructor(private readonly stray: (threadId: string) => StrayThread | undefined = () => undefined) {}
 
   has(threadId: string): boolean {
     return this.helpers.has(threadId)
-  }
-
-  /** A turn of the parent's thread that belongs to this tree; spawn items on that thread are matched to it by turn id. */
-  noteParentTurn(turnId: string): void {
-    this.parentTurns.add(turnId)
-  }
-
-  ownsTurn(turnId: string): boolean {
-    return this.parentTurns.has(turnId)
-  }
-
-  /**
-   * Whether a stopped tree takes this notification of one of its helper threads. A stopped tree owns
-   * a helper thread only for the turn it saw (or the first turn, when none was seen yet): a new turn
-   * on that thread, such as later work a new run sends the helper, is not its own and must not be
-   * interrupted by it. A notification without a turn id is taken (the thread alone decides).
-   */
-  claims(notification: CodexNotification): boolean {
-    const params = notification.params as { threadId?: string; turnId?: string; turn?: { id?: string } } | undefined
-    const helper = params?.threadId ? this.helpers.get(params.threadId) : undefined
-    if (!helper) return false
-    const turnId = params?.turnId ?? params?.turn?.id
-    return !turnId || !helper.turnId || helper.turnId === turnId
-  }
-
-  /** Whether `threadId` is the parent's thread or one of the helpers' threads. */
-  owns(threadId: string): boolean {
-    return threadId === this.parentThreadId || this.helpers.has(threadId)
-  }
-
-  /** Helpers named so far, running or not. */
-  size(): number {
-    return this.helpers.size
   }
 
   /** Helper threads still running. */
@@ -101,26 +66,13 @@ export class NativeHelpers {
     }
   }
 
-  /**
-   * A notification of a helper's own thread. Its spawn items name helpers of its own; they are
-   * tracked in the same set, so the run waits for, and Stop interrupts, the whole tree.
-   */
+  /** A notification of a helper's own thread. */
   handle(notification: CodexNotification): void {
-    const params = notification.params as { threadId?: string; turn?: { id?: string }; status?: { type?: string }; item?: { type?: string } } | undefined
+    const params = notification.params as { threadId?: string; turn?: { id?: string }; status?: { type?: string } } | undefined
     const threadId = params?.threadId
-    // The stopped parent thread: only its spawn items matter (a helper named after Stop is still stopped).
-    if (threadId && threadId === this.parentThreadId) {
-      if ((notification.method === 'item/started' || notification.method === 'item/completed') && typeof params?.item?.type === 'string')
-        this.noteItem(params.item as { type: string } & Record<string, unknown>)
-      return
-    }
     const helper = threadId ? this.helpers.get(threadId) : undefined
     if (!threadId || !helper) return
     this.lastActivityAt = Date.now()
-    if ((notification.method === 'item/started' || notification.method === 'item/completed') && typeof params?.item?.type === 'string') {
-      this.noteItem(params.item as { type: string } & Record<string, unknown>)
-      return
-    }
     if (notification.method === 'turn/started' && params?.turn?.id) {
       helper.turnId = params.turn.id
       helper.seenActive = true
@@ -171,8 +123,6 @@ export class NativeHelpers {
     const helper: HelperState = { running: !seen?.completed, seenActive: Boolean(seen), ...(seen?.turnId ? { turnId: seen.turnId } : {}) }
     this.helpers.set(threadId, helper)
     this.interrupt(threadId, helper)
-    // What the helper already spawned, in order: its helpers are tracked from here on.
-    for (const item of seen?.spawns ?? []) this.noteItem(item)
   }
 
   private set(_threadId: string, helper: HelperState, running: boolean): void {

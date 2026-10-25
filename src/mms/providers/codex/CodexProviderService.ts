@@ -81,10 +81,6 @@ const INTERRUPT_TIMEOUT_MS = 5_000
 const PREVIOUS_TURN_SETTLE_MS = 10_000
 /** How long a stopped turn's routing is kept while the server settles it. */
 const STOPPED_TURN_RELEASE_MS = 30_000
-/** Spawn items kept per thread no run has named yet (the thread map itself holds 64). */
-const MAX_STRAY_SPAWNS = 32
-/** How long the routing of a stopped or abandoned helper tree is kept for helpers that have not settled. */
-const STOPPED_HELPER_TREE_MS = 10 * 60_000
 /** The app-server process is closed once it has been unused this long after a turn... */
 export const CODEX_IDLE_CLOSE_MS = 60_000
 /** ...or after a sign-in check or model listing that started it. */
@@ -357,7 +353,7 @@ class TurnRun {
     private readonly input: CodexChatInput,
     stray?: (threadId: string) => StrayThread | undefined
   ) {
-    this.helpers = new NativeHelpers(stray, codexThreadId)
+    this.helpers = new NativeHelpers(stray)
     this.finished = new Promise((done) => (this.finish = done))
     this.questionSignal = AbortSignal.any([signal, this.questionsDone.signal])
   }
@@ -435,18 +431,6 @@ class TurnRun {
     }
   }
 
-  /** A `spawnAgent` call is open: the item naming its helper can still arrive. */
-  hasPendingSpawn(): boolean {
-    return [...this.items.values()].some((item) => item.type === 'collabAgentToolCall' &&
-      (item as { tool?: string }).tool === 'spawnAgent' && (item as { status?: string }).status === 'inProgress')
-  }
-
-  /** A Codex turn of this run on the parent thread; its id also tells which run a late spawn item belongs to. */
-  startedTurn(turnId: string): void {
-    this.turnId ??= turnId
-    this.helpers.noteParentTurn(turnId)
-  }
-
   /** Adds a closing note to the reply (after the Codex text), streamed like any other text. */
   addNote(note: string): void {
     const id = `mousse-note-${this.order.length}`
@@ -463,7 +447,7 @@ class TurnRun {
   handle(notification: CodexNotification): void {
     const started = notificationParams(notification, 'turn/started')
     if (started) {
-      this.startedTurn(started.turn.id)
+      this.turnId ??= started.turn.id
       return
     }
     const completed = notificationParams(notification, 'turn/completed')
@@ -476,12 +460,8 @@ class TurnRun {
       this.wakeIdle()
       return
     }
-    // Helper lifecycle is followed even after Stop (and for a failed or abandoned run): a helper
-    // named by an item that lands late must still be registered, and so interrupted.
-    const spawnItem = notificationParams(notification, 'item/started') ?? notificationParams(notification, 'item/completed')
-    if (spawnItem) this.helpers.noteItem(spawnItem.item as never)
     if (this.muted) return
-    const delta =notificationParams(notification, 'item/agentMessage/delta')
+    const delta = notificationParams(notification, 'item/agentMessage/delta')
     if (delta) {
       if (!this.parts.has(delta.itemId)) this.order.push(delta.itemId)
       this.parts.set(delta.itemId, (this.parts.get(delta.itemId) ?? '') + delta.delta)
@@ -500,6 +480,7 @@ class TurnRun {
     const itemStarted = notificationParams(notification, 'item/started')
     if (itemStarted) {
       const { item } = itemStarted
+      this.helpers.noteItem(item as never)
       this.items.set(item.id, item)
       if (item.type === 'agentMessage' && !this.parts.has(item.id)) {
         this.order.push(item.id)
@@ -515,6 +496,7 @@ class TurnRun {
     const itemCompleted = notificationParams(notification, 'item/completed')
     if (itemCompleted) {
       const { item } = itemCompleted
+      this.helpers.noteItem(item as never)
       this.items.set(item.id, item)
       if (item.type === 'agentMessage') {
         const text = (item as { text?: string }).text ?? ''
@@ -1016,31 +998,17 @@ export class CodexProviderService {
     }
     const threadId = (notification.params as { threadId?: unknown } | undefined)?.threadId
     if (typeof threadId !== 'string') return
-    // A spawn item on a parent thread belongs to the run of the turn it came from, not to whichever
-    // run holds the thread now: a stopped run's late item must not join the next run, and a later
-    // run's item must not join a stopped tree. A notification without a turn id falls back to the
-    // thread alone (the live run, else the oldest stopped tree on it).
-    const params = notification.params as { turnId?: unknown }
-    const spawnTurn = (notification.method === 'item/started' || notification.method === 'item/completed') && typeof params.turnId === 'string' ? params.turnId : undefined
     const run = this.turns.get(threadId)
-    if (run) {
-      if (spawnTurn && !run.helpers.ownsTurn(spawnTurn)) {
-        const stopped = [...this.orphans].find((helpers) => helpers.parentThreadId === threadId && helpers.ownsTurn(spawnTurn))
-        if (stopped) return stopped.handle(notification)
-      }
-      return run.handle(notification)
-    }
-    // A native helper's own thread: its turn belongs to the run that started it. A helper thread
-    // belongs to one tree (thread ids are not reused), so its own spawn items need no turn match.
+    if (run) return run.handle(notification)
+    // A native helper's own thread: its turn belongs to the run that started it.
     const owner = [...this.turns.values()].find((candidate) => candidate.helpers.has(threadId))
     if (owner) return owner.helpers.handle(notification)
-    // A stopped, failed or abandoned run's tree: its helper threads, and its parent thread for a
-    // spawn item that lands late, matched by turn. Kept for a bounded time (see `stopHelpers`). A new
-    // turn on one of its helper threads (work a later run sent it) is not the tree's: it goes on to
-    // `noteStray`, where the run that names the helper claims it.
-    const orphan = [...this.orphans].find((helpers) =>
-      helpers.claims(notification) || (helpers.parentThreadId === threadId && (spawnTurn ? helpers.ownsTurn(spawnTurn) : true)))
-    if (orphan) return orphan.handle(notification)
+    const orphan = [...this.orphans].find((helpers) => helpers.has(threadId))
+    if (orphan) {
+      orphan.handle(notification)
+      if (!orphan.awaitingTurn()) this.orphans.delete(orphan)
+      return
+    }
     this.noteStray(notification, threadId)
   }
 
@@ -1160,29 +1128,12 @@ export class CodexProviderService {
     }
   }
 
-  /**
-   * What was seen of a thread before a run named it as a helper. Consumed: the run that registers the
-   * helper owns it from then on, so a later run that names the same thread again does not replay
-   * stale state (a spawn already reported, a turn that has since ended).
-   */
-  private takeStray(threadId: string): StrayThread | undefined {
-    const stray = this.strays.get(threadId)
-    this.strays.delete(threadId)
-    return stray
-  }
-
   /** Remembers the turn of a thread no run owns yet: a helper's first events can beat the item that names it. */
   private noteStray(notification: CodexNotification, threadId: string): void {
-    const params = notification.params as { turn?: { id?: string }; item?: { type?: string } } | undefined
-    const turn = params?.turn
-    const spawn = (notification.method === 'item/started' || notification.method === 'item/completed') &&
-      (params?.item?.type === 'subAgentActivity' || params?.item?.type === 'collabAgentToolCall')
-    if (notification.method !== 'turn/started' && notification.method !== 'turn/completed' && !spawn) return
+    const turn = (notification.params as { turn?: { id?: string } } | undefined)?.turn
+    if (notification.method !== 'turn/started' && notification.method !== 'turn/completed') return
     const stray = this.strays.get(threadId) ?? { completed: false }
-    if (spawn) {
-      // Replayed when a run names this thread as a helper; a few per thread, the newest kept.
-      stray.spawns = [...(stray.spawns ?? []), params!.item as { type: string } & Record<string, unknown>].slice(-MAX_STRAY_SPAWNS)
-    } else if (notification.method === 'turn/started' && turn?.id) Object.assign(stray, { turnId: turn.id, completed: false })
+    if (notification.method === 'turn/started' && turn?.id) Object.assign(stray, { turnId: turn.id, completed: false })
     else if (notification.method === 'turn/completed') stray.completed = true
     this.strays.delete(threadId)
     this.strays.set(threadId, stray)
@@ -1208,15 +1159,10 @@ export class CodexProviderService {
         /* the helper ended meanwhile, or the process is gone */
       })
     })
-    // Routing for the stopped tree outlives this chat for a bounded time, even with no helper
-    // running yet: a helper whose turn has not started is interrupted when it does, a helper that
-    // spawns another while its own interrupt is pending gets that one interrupted too, and a spawn
-    // item that names a helper after Stop registers it into the tree and interrupts it.
-    // Not created for an empty tree with no spawn in flight: nothing could be named later.
-    if (!this.orphans.has(run.helpers) && (run.helpers.size() || run.hasPendingSpawn())) {
-      this.orphans.add(run.helpers)
-      setTimeout(() => this.orphans.delete(run.helpers), STOPPED_HELPER_TREE_MS).unref?.()
-    }
+    // A known helper whose turn has not started is interrupted when it does, even after this chat ended.
+    // Known gaps (see `NativeHelpers`): a helper whose spawn is reported after Stop, or after the run
+    // was released, is not registered and so not interrupted; nor are helpers of helpers.
+    if (run.helpers.awaitingTurn()) this.orphans.add(run.helpers)
   }
 
   private sendInterrupt(run: TurnRun): void {
@@ -1339,7 +1285,7 @@ export class CodexProviderService {
       this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID } }
       this.save()
       input.onSession?.({ codexThreadId })
-      const current = new TurnRun(codexThreadId, input.threadId, input.mode ?? 'default', signal, input, (id) => this.takeStray(id))
+      const current = new TurnRun(codexThreadId, input.threadId, input.mode ?? 'default', signal, input, (id) => this.strays.get(id))
       run = current
       this.turns.set(codexThreadId, current)
       const { baseId, effort } = parseThinkingSuffixFromModelId(input.model)
@@ -1424,7 +1370,7 @@ export class CodexProviderService {
         // Recorded even when Stop wins the race below, so the interrupt still reaches the turn.
         const starting = conn.request('turn/start', { threadId: codexThreadId, input: nextInput, ...turnParams }).then(
           (started) => {
-            current.startedTurn(started.turn.id)
+            current.turnId ??= started.turn.id
             current.startInFlight = false
             current.wakeIdle()
             if (current.interruptRequested) this.sendInterrupt(current)
@@ -1474,8 +1420,8 @@ export class CodexProviderService {
         }
         nextInput = [textInput(undelivered.splice(0).join('\n'))]
       }
-      // A turn that ran after the cap (a held steer) runs without helpers: the tree was stopped, so
-      // any helper it spawns is interrupted as soon as it is named (see `stopHelpers`), never awaited.
+      // A turn that ran after the cap (a held steer) does not wait for helpers: the tree was stopped, so
+      // one it spawns while the run is live is interrupted when named (see `stopHelpers` for the gaps).
       if (abandoned) current.addNote(abandoned)
       this.turns.delete(codexThreadId)
       current.settled()
@@ -1514,9 +1460,7 @@ export class CodexProviderService {
           if (this.turns.get(pending.codexThreadId) === pending) this.turns.delete(pending.codexThreadId)
           pending.settled()
         }
-        // Released once the server settled the turn. The helper tree is not waited for: `stopHelpers`
-        // keeps routing for it (its helper threads and the parent thread's late spawn items) through
-        // `orphans`, so a new message on this thread is never blocked by a helper that ignores its interrupt.
+        // Released once the server settled the turn; the helpers are not waited for.
         if (pending.isIdle() || !this.app) release()
         else
           void Promise.race([pending.whenIdle(), new Promise((done) => setTimeout(done, STOPPED_TURN_RELEASE_MS).unref?.())]).then(
