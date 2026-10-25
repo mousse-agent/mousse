@@ -1287,7 +1287,8 @@ export class CodexProviderService {
    */
   private interruptTurn(run: TurnRun, conn: CodexConnection, turnId: string): void {
     const now = Date.now()
-    if (run.lastInterrupt && run.lastInterrupt.turnId === turnId && now - run.lastInterrupt.at < CODEX_SWEEP_ROUND_MS) return
+    const round = this.dependencies.helperTiming?.sweepRoundMs ?? CODEX_SWEEP_ROUND_MS
+    if (run.lastInterrupt && run.lastInterrupt.turnId === turnId && now - run.lastInterrupt.at < round) return
     run.lastInterrupt = { turnId, at: now }
     void conn.request('turn/interrupt', { threadId: run.codexThreadId, turnId }, { timeoutMs: INTERRUPT_TIMEOUT_MS }).catch(() => {
       /* the turn ended meanwhile, or the process is gone */
@@ -1321,7 +1322,7 @@ export class CodexProviderService {
 
   private async probeTree(conn: CodexConnection, app: NonNullable<typeof this.app>): Promise<void> {
     const probeId = TREE_PROBE_THREAD_ID
-    const options = { timeoutMs: TREE_REQUEST_MS }
+    const options = { timeoutMs: this.dependencies.requestTimeoutMs ?? TREE_REQUEST_MS }
     try {
       try {
         await conn.request('thread/list', { parentThreadId: probeId, ancestorThreadId: probeId, limit: 1 }, options)
@@ -1341,11 +1342,12 @@ export class CodexProviderService {
 
   private treePorts(conn: CodexConnection): TreePorts {
     const refused = (error: unknown): unknown => (error instanceof CodexRpcError ? new RpcRefused(error.message) : error)
+    const timeout = this.dependencies.requestTimeoutMs ?? TREE_REQUEST_MS
     return {
       now: () => Date.now(),
       read: async (threadId) => {
         try {
-          return (await conn.request('thread/read', { threadId }, { timeoutMs: TREE_REQUEST_MS })).thread
+          return (await conn.request('thread/read', { threadId }, { timeoutMs: timeout })).thread
         } catch (error) {
           throw refused(error)
         }
@@ -1358,7 +1360,7 @@ export class CodexProviderService {
             const response = await conn.request(
               'thread/list',
               { ancestorThreadId, limit: 100, useStateDbOnly: true, ...(cursor ? { cursor } : {}) },
-              { timeoutMs: TREE_REQUEST_MS }
+              { timeoutMs: timeout }
             )
             if (!Array.isArray(response?.data)) throw new RpcRefused('thread/list returned no data')
             rows.push(...response.data)

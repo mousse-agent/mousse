@@ -196,9 +196,23 @@ describe('Codex children', () => {
   })
 
   /** An app-server stand-in: a signed-in account, instant turns, and the feature pages in `pages`. */
-  function server(options: { approvalRequests?: boolean; pages?: Feature[][]; mcpServers?: Record<string, { enabled?: boolean } | null>; layers?: Array<{ disabledReason: string | null; config?: unknown }>; configFails?: boolean; onTurnStart?: (send: (value: unknown) => void) => void; onInterrupt?: (send: (value: unknown) => void, params: Record<string, unknown>) => void } = {}) {
+  function server(options: {
+    approvalRequests?: boolean
+    pages?: Feature[][]
+    mcpServers?: Record<string, { enabled?: boolean } | null>
+    layers?: Array<{ disabledReason: string | null; config?: unknown }>
+    configFails?: boolean
+    onTurnStart?: (send: (value: unknown) => void, params: Record<string, unknown>) => void
+    onInterrupt?: (send: (value: unknown) => void, params: Record<string, unknown>) => void
+    /** Answers a request itself (a `{ result }` or `{ error }`), or leaves it to the default; may write notifications first. */
+    answer?: (message: Message, send: (value: unknown) => void) => Record<string, unknown> | undefined
+    /** The Codex thread ids `thread/start` hands out, in turn; `thr-1` after that. */
+    threads?: string[]
+  } = {}) {
     const messages: Message[] = []
     let latest: PassThrough | undefined
+    let latestProcess: EventEmitter | undefined
+    let started = 0
     const launch = (): CodexProcess => {
       const stdout = new PassThrough()
       const stdin = new PassThrough()
@@ -213,6 +227,7 @@ describe('Codex children', () => {
       })
       const send = (value: unknown) => stdout.write(JSON.stringify(value) + '\n')
       latest = stdout
+      latestProcess = process
       let pending = ''
       stdin.on('data', (chunk: Buffer) => {
         pending += chunk.toString()
@@ -222,17 +237,19 @@ describe('Codex children', () => {
           pending = pending.slice(end + 1)
           messages.push(message)
           if (message.id === undefined || !message.method) continue
-          const thread = { result: { thread: { id: 'thr-1' }, model: 'gpt-x', modelProvider: CODEX_MODEL_PROVIDER, cwd: home } }
+          const threadId = ['thread/start', 'thread/resume', 'thread/fork'].includes(message.method) ? (options.threads?.[started++] ?? 'thr-1') : 'thr-1'
+          const thread = { result: { thread: { id: threadId }, model: 'gpt-x', modelProvider: CODEX_MODEL_PROVIDER, cwd: home } }
           const reply: Record<string, unknown> =
-            message.method === 'initialize' ? { result: { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' } }
+            options.answer?.(message, send) ??
+            (message.method === 'initialize' ? { result: { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' } }
             : message.method === 'account/read' ? { result: { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, requiresOpenaiAuth: true } }
             : message.method === 'config/read' ? (options.configFails ? { error: { code: -32603, message: 'unreadable' } } : { result: { config: { mcp_servers: options.mcpServers ?? {} }, layers: options.layers ?? [] } })
             : ['thread/start', 'thread/resume', 'thread/fork'].includes(message.method) ? thread
             : message.method === 'turn/start' ? { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
-            : { result: {} }
+            : { result: {} })
           send({ id: message.id, ...reply })
           if (message.method === 'turn/interrupt') options.onInterrupt?.(send, message.params ?? {})
-          if (message.method === 'turn/start' && options.onTurnStart) options.onTurnStart(send)
+          if (message.method === 'turn/start' && options.onTurnStart) options.onTurnStart(send, message.params ?? {})
           else if (message.method === 'turn/start') {
             if (options.approvalRequests) {
               send({ id: 99, method: 'item/commandExecution/requestApproval', params: { threadId: 'thr-1', itemId: 'cmd-1', command: 'rm -rf build' } })
@@ -246,7 +263,14 @@ describe('Codex children', () => {
       })
       return process as unknown as CodexProcess
     }
-    return { launch: launch as (spec: CodexLaunch) => CodexProcess, messages, emit: (value: unknown) => latest?.write(JSON.stringify(value) + '\n'), requests: (method: string) => messages.filter((message) => message.method === method) }
+    return {
+      launch: launch as (spec: CodexLaunch) => CodexProcess,
+      messages,
+      emit: (value: unknown) => latest?.write(JSON.stringify(value) + '\n'),
+      /** The app-server process dies. */
+      crash: () => void latestProcess?.emit('exit', 1, null),
+      requests: (method: string) => messages.filter((message) => message.method === method)
+    }
   }
 
   const create = (s: ReturnType<typeof server>) => {
