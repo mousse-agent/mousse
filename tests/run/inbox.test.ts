@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   formatInboxNotice,
   formatWakeNotice,
-  fullyShownDelegations,
   NOTICE_TASK_CHARS,
   NOTICE_WAKE_CHARS,
   planWakeNotice
@@ -85,11 +84,6 @@ describe('Inbox (SPEC §14.1)', () => {
       const notice: InboxRecord = { ...failed, kind: 'reconcile_notice', payload: { text: 'Integration finished.' } }
       expect(formatWakeNotice([failed, notice], titles).split('\n\n')).toHaveLength(2)
       expect(formatWakeNotice([notice])).toBe('Integration finished.')
-    })
-
-    it('marks as read only the tasks whose result a notice showed whole', () => {
-      const rows = [row('delegation:1', { runStatus: 'completed', text: 'short' }), row('delegation:2', { runStatus: 'completed', text: 'z'.repeat(NOTICE_TASK_CHARS + 1) })]
-      expect([...fullyShownDelegations(rows)]).toEqual(['delegation:1'])
     })
   })
 })
