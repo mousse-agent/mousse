@@ -822,9 +822,7 @@ export class MmsProfileServices {
         messages: this.orchestrator.getMessagesForPersistence(id),
         agents,
         tasks,
-        llmContext: this.orchestrator.getNativeContext(id),
-        mousseAgentSessions:
-          this.orchestrator.exportMousseAgentSessions?.(id) ?? current.mousseAgentSessions
+        llmContext: this.orchestrator.getNativeContext(id)
       }
     })
   }

@@ -19,7 +19,7 @@
     {
       "name": "run engine, orchestrator and MCP reach the run and MCP process contracts",
       "when": ["src/mms/run/**", "src/mms/orchestrator/**", "src/mms/integrations/mcp/**", "src/shared/run/**"],
-      "run": ["tests/run/**/*.test.ts", "tests/platformMcpLifecycleDrain.test.ts", "tests/platformIntegrationMcpRuntime.test.ts", "tests/mousseAgentDurableSessions.test.ts"]
+      "run": ["tests/run/**/*.test.ts", "tests/platformMcpLifecycleDrain.test.ts", "tests/platformIntegrationMcpRuntime.test.ts"]
     },
     {
       "name": "network, bridge, bots, spaces and chats reach the bundled net daemons and crash children",

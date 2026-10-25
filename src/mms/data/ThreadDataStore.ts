@@ -27,7 +27,7 @@ import type {
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { visibleThreads } from '../../shared/threadLineage'
-import { parseMousseAgentSessions } from '../agents/MousseAgentService'
+import { parseMousseAgentSessions } from '../agents/legacyAgentSessions'
 import { normalizeQueuedMessages } from '../queue/ThreadMessageQueue'
 import { withThreadDataMutationLock } from '../queue/ThreadExecutionLease'
 import type { ProjectManager } from './ProjectManager'
