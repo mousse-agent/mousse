@@ -7,6 +7,7 @@ import { Archive, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, Folder
 import { isThreadActivityActive, type Thread, type ThreadActivityState } from '../../shared/types'
 import { findUnstartedThread, isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { sortSidebarThreads } from '../../shared/threadSidebarSort'
+import { openSubagentParentRow, rollUpActivities, visibleThreads } from '../../shared/threadLineage'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
@@ -359,28 +360,39 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
+  // Subagent threads sit under their parent, not beside it: the list holds the threads people started.
+  const listedThreads = useMemo(() => visibleThreads(threads), [threads])
+  // A parent row shows what its subagents are doing, however deep they are nested.
+  const rolledUpActivity = useMemo(() => rollUpActivities(threads, threadActivity), [threads, threadActivity])
+  // While a subagent's thread is open, the row it sits under is highlighted instead.
+  const openSubagentParentId = useMemo(
+    () => (activeThreadId ? openSubagentParentRow(activeThreadId, threads) : null),
+    [activeThreadId, threads]
+  )
+
   // Empty drafts are composer state, not conversations. They become visible
   // only when the first message is committed.
   const availableThreads = useMemo(
-    () => sortSidebarThreads(threads.filter((thread) => !thread.settledAt && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
-    [threads, agentThreadIds]
+    () => sortSidebarThreads(listedThreads.filter((thread) => !thread.settledAt && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
+    [listedThreads, agentThreadIds]
   )
   const settledThreads = useMemo(
-    () => sortSidebarThreads(threads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
-    [threads, agentThreadIds]
+    () => sortSidebarThreads(listedThreads.filter((thread) => Boolean(thread.settledAt) && isThreadStarted(thread) && !agentThreadIds.has(thread.id))),
+    [listedThreads, agentThreadIds]
   )
   const orphanThreads = availableThreads.filter((thread) => !thread.projectId)
 
   useEffect(() => {
     if (!activeThreadId) return
-    const activeThread = threads.find((thread) => thread.id === activeThreadId)
-    const projectId = activeThread?.projectId
+    // The project to reveal is the one the highlighted row is in, which for a subagent is its parent's.
+    const shownThread = threads.find((thread) => thread.id === (openSubagentParentId ?? activeThreadId))
+    const projectId = shownThread?.projectId
     if (!projectId) return
     setExpandedProjects((prev) => {
       if (prev.has(projectId)) return prev
       return new Set(prev).add(projectId)
     })
-  }, [activeThreadId, threads])
+  }, [activeThreadId, openSubagentParentId, threads])
 
   const toggleProject = (projectId: string) => {
 
@@ -443,13 +455,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const createThread = async () => {
     useAppStore.getState().setThreadsSidebarView('threads')
-    const thread = findUnstartedThread(threads) ?? await window.mousse.threads.create()
+    const thread = findUnstartedThread(listedThreads) ?? await window.mousse.threads.create()
     upsertThread(thread)
     await selectThread(thread.id)
   }
 
   const createProjectThread = async (projectId: string) => {
-    const thread = findUnstartedThread(threads, projectId) ??
+    const thread = findUnstartedThread(listedThreads, projectId) ??
       await window.mousse.threads.create(undefined, projectId)
 
     // Do not depend on the asynchronous threads:updated broadcast to attach
@@ -679,7 +691,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
   const renderThreadStatus = (threadId: string) => {
-    const state = threadActivity[threadId]
+    const state = rolledUpActivity[threadId] ?? threadActivity[threadId]
     if (!state || state === 'idle') return null
 
     if (state === 'processing') {
@@ -818,7 +830,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         className={`threads-sidebar-thread${layout === 'card' ? ' threads-sidebar-card' : ''}${root ? ' threads-sidebar-thread-root' : ''}${
 
-          activeThreadId === thread.id ? ' active' : ''
+          activeThreadId === thread.id ? ' active' : openSubagentParentId === thread.id ? ' has-open-subagent' : ''
 
         }${thread.pinnedAt ? ' pinned' : ''}${isSettled ? ' settled' : ''}`}
 
@@ -875,7 +887,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           <ThreadCardBody
             thread={thread}
             projectName={thread.projectId ? projects.find((project) => project.id === thread.projectId)?.name : undefined}
-            activity={threadActivity[thread.id]}
+            activity={rolledUpActivity[thread.id] ?? threadActivity[thread.id]}
             startedAt={turnStates[thread.id]?.startedAt}
             isRenaming={isRenaming}
             renamingName={renaming?.name ?? ''}

@@ -372,6 +372,12 @@ html[data-theme='high-contrast'] {
   font-weight: 500;
 }
 
+/* A subagent's thread is open: its parent row is highlighted. Background only, no marker. */
+.app .threads-sidebar-thread.has-open-subagent {
+  background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised));
+  color: var(--text-primary);
+}
+
 .app .threads-sidebar-thread.threads-sidebar-card {
   height: auto;
   align-items: start;
