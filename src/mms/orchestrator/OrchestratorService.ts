@@ -474,6 +474,8 @@ export class OrchestratorService extends EventEmitter {
 
   beginShutdown(): void {
     this.lifecycle.beginShutdown()
+    for (const retry of this.releaseRetries) clearTimeout(retry)
+    this.releaseRetries.clear()
     for (const [runId, entry] of [...this.turnResults]) {
       if (!entry.started) this.abandonTurnStart(runId, entry)
     }
@@ -642,6 +644,8 @@ export class OrchestratorService extends EventEmitter {
    * Claude and Antigravity adapters report nothing, so this stays empty until one does.
    */
   private readonly providerBackground = new Set<string>()
+  /** Pending retries of a queue item's row release (`releaseQueuedRows`); a shutdown clears them. */
+  private readonly releaseRetries = new Set<ReturnType<typeof setTimeout>>()
   /** Last run heartbeat (ms) per run; throttles `RunEngine.heartbeat` writes. */
   private readonly runHeartbeats = new Map<string, number>()
   /** Optional multi-tenant runtime manager (Phase 4). */
@@ -1509,8 +1513,14 @@ export class OrchestratorService extends EventEmitter {
         // waiting on this thread until they are given back, so the release is tried again. Only this
         // item's own rows move, so it cannot touch the rows of a turn that is running.
         if (attempt < QUEUED_ROW_RELEASE_ATTEMPTS && !this.lifecycle.stopping) {
-          const retry = setTimeout(() => this.releaseQueuedRows([item], attempt + 1), QUEUED_ROW_RELEASE_RETRY_MS)
+          const retry = setTimeout(() => {
+            this.releaseRetries.delete(retry)
+            // A shutdown that began since owns the rows: boot gives back what is left.
+            if (this.lifecycle.stopping) return
+            this.releaseQueuedRows([item], attempt + 1)
+          }, QUEUED_ROW_RELEASE_RETRY_MS)
           retry.unref?.()
+          this.releaseRetries.add(retry)
         }
       }
     }
@@ -2443,19 +2453,50 @@ export class OrchestratorService extends EventEmitter {
     } catch (error) {
       console.warn('integration notice could not reach the transcript', { runId: payload.runId, error: error instanceof Error ? error.message : String(error) })
     }
-    // Normally written with the terminal state above. A run something else had already ended still
-    // owes the thread the outcome: a merge that happened says so even if the run's own end wrote an
-    // "interrupted" row (`writeTerminalRun`), and a failure is covered by any integration row.
-    const type = merged ? 'integration_completed' : 'integration_failed'
-    const written = engine.inbox.listForThread(payload.threadId).some((row) => {
-      if (row.runId !== payload.runId || row.kind !== 'reconcile_notice') return false
-      const rowType = String((row.payload as { type?: unknown } | null)?.type)
-      return merged ? rowType === 'integration_completed' : rowType.startsWith('integration_')
+    this.settleIntegrationOutcome(payload, notice!, merged !== undefined)
+  }
+
+  /**
+   * Makes sure the thread has exactly one right outcome row for an integration run. Normally the
+   * terminal write has written it. A run something else ended while the merge was still going
+   * (reconciler rule 2, boot) has an "interrupted before its outcome was known" row instead
+   * (`writeTerminalRun`), and the merge may then have finished:
+   * - the row is still `pending`: it is rewritten in place to the `integration_completed` outcome, in
+   *   one write, so the thread never has two rows for one run and never reads the wrong one;
+   * - it has been delivered or read already: its text cannot be taken back, so a short correction row
+   *   follows, which is actionable and so keeps the thread busy until it has been read.
+   * Residual: the thread may have read the interrupted row and the task waiting on it published
+   * before the merge returned. That needs a reconciler interrupt in the middle of a live merge.
+   * With no row at all (the terminal write failed for another reason) the outcome row is appended.
+   */
+  private settleIntegrationOutcome(payload: IntegrationTurnPayload, notice: string, merged: boolean): void {
+    const engine = this.requireRunEngine()
+    const outcomeRow = (text: string, type: 'integration_completed' | 'integration_failed') => ({
+      kind: 'reconcile_notice' as const,
+      payload: { type, delegationId: payload.delegationId, text }
     })
-    if (!written) {
-      const row = outcomeRow(notice!, type)
-      engine.inbox.append({ threadId: payload.threadId, runId: payload.runId, kind: row.kind, payload: row.payload })
-    }
+    engine.store.db.transaction(() => {
+      const rows = engine.inbox.listForThread(payload.threadId).filter((row) => row.runId === payload.runId && row.kind === 'reconcile_notice')
+      const typeOf = (row: InboxRecord): string => String((row.payload as { type?: unknown } | null)?.type)
+      if (!merged) {
+        if (!rows.some((row) => typeOf(row).startsWith('integration_')))
+          engine.inbox.append({ threadId: payload.threadId, runId: payload.runId, ...outcomeRow(notice, 'integration_failed') })
+        return
+      }
+      if (rows.some((row) => typeOf(row) === 'integration_completed')) return
+      const interrupted = rows.find((row) => typeOf(row) === 'integration_failed' && (row.payload as { interrupted?: unknown }).interrupted === true)
+      if (!interrupted) {
+        engine.inbox.append({ threadId: payload.threadId, runId: payload.runId, ...outcomeRow(notice, 'integration_completed') })
+      } else if (interrupted.status === 'pending') {
+        engine.inbox.patchPayload(interrupted.inboxId, { type: 'integration_completed', text: notice, interrupted: null })
+      } else {
+        engine.inbox.append({
+          threadId: payload.threadId,
+          runId: payload.runId,
+          ...outcomeRow(`The integration did finish, after the notice that it was interrupted: ${notice.replace(/^Integration of delegated task \S+ finished: /, '')}`, 'integration_completed')
+        })
+      }
+    })
   }
 
   private async integrateDelegationResult(parentThreadId: string, delegationId: string, runId: string, signal: AbortSignal) {

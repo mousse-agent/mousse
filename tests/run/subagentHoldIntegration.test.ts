@@ -6,6 +6,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import type { DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
+import { childBusy } from '../../src/mms/run/delegation/hold'
 import { waitFor } from './phase6Fixture'
 import { useSubagentWorld, type Json } from './subagentWorld'
 
@@ -115,7 +116,7 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
       await waitFor(() => s.task(s.coordinator.delegationId).status !== 'running', 'the task to publish')
       expect(s.task(s.coordinator.delegationId).result?.text).toContain('Coordinator final')
     })
- 
+
     it('a release that fails is tried again, so the rows do not wait for the next boot', async () => {
       const { s, row, item } = await queued()
       vi.useFakeTimers({ toFake: ['setTimeout'] })
@@ -133,7 +134,7 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
       }
       expect(s.d.engine.inbox.get(row.inboxId)!.status).toBe('pending')
     })
- })
+  })
 
   it('boot recovers a row whose queue item is gone: back to pending, the task keeps waiting, and the wake ends it', async () => {
     const s = await scene()
@@ -210,7 +211,9 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
      * The Coordinator is woken for its Reader's result and asks to integrate it; the integration
      * run ends the Coordinator's work. (The Reader is shared, so the integration fails: nothing to merge.)
      */
-    const integrating = async (beforeWake?: (w: ReturnType<typeof world>) => void) => {
+    const MERGED = { workerHeadSha: 'a'.repeat(40), integrationSha: 'b'.repeat(40), changedPaths: ['x.txt'] }
+    /** With `mergeGate`, the merge is stubbed: it waits for the gate, then commits `MERGED`. */
+    const integrating = async (mergeGate?: Promise<void>) => {
       const w = world((input, delegation: DelegationToolHost | undefined) => {
         if (input.prompt.includes('Review Coordinator')) return w.start(delegation!, 'Reader', {}, 'start:Reader').then((reader) => { w.out.reader = reader; return 'Coordinator started the Reader.' })
         if (input.prompt.includes('Review Reader')) return 'Reader result.'
@@ -228,7 +231,7 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
       await w.settled(w.out.reader.childRunId)
       const task = () => w.d.engine.delegations.get(coordinator.delegationId)!
       const coordinatorRuns = () => w.d.engine.listRuns(coordinator.childThreadId)
-      beforeWake?.(w)
+      if (mergeGate) (w.d.orch as any).integrateDelegationResult = () => mergeGate.then(() => MERGED)
       const wake = w.reconciler.runOnce().wakes.wakes.find((id) => w.d.engine.getRun(id)!.threadId === coordinator.childThreadId)!
       const integrationRun = async () => {
         await waitFor(() => coordinatorRuns().some((run) => run.source === 'integration' && ['completed', 'failed'].includes(run.status)), 'the integration run to end')
@@ -253,6 +256,76 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
       expect(published.result).toMatchObject({ text: 'Coordinator final after the integration notice.', runId: wake })
       expect(s.d.engine.getRun(wake)!.ordinal).toBeGreaterThan(integration.ordinal)
       expect(s.d.engine.inbox.listForThread(s.coordinator.childThreadId).every((row) => row.status === 'acknowledged')).toBe(true)
+    })
+
+    describe('the reconciler interrupts an integration run in the middle of a live merge (issue #142)', () => {
+      /** The merge is stalled; rule 2 ends the run with its "interrupted" row; then the merge returns. */
+      const interrupted = async () => {
+        let release!: () => void
+        const gate = new Promise<void>((resolve) => { release = resolve })
+        const s = await integrating(gate)
+        await waitFor(() => s.coordinatorRuns().some((run) => run.source === 'integration' && run.status === 'running'), 'the integration run to start merging')
+        const run = s.coordinatorRuns().find((entry) => entry.source === 'integration')!
+        s.d.engine.markTerminal(run.runId, 'interrupted', { interruptedBy: 'provider', error: 'no terminal event' })
+        const rows = () => s.d.engine.inbox.listForThread(s.coordinator.childThreadId).filter((row) => row.kind === 'reconcile_notice')
+        const [first] = rows()
+        expect(first).toMatchObject({ status: 'pending', payload: { type: 'integration_failed', interrupted: true } })
+        expect(s.task().status).toBe('running')
+        return { s, release, rows, first, run }
+      }
+
+      it('the interrupted row is still unread when the merge returns: it becomes the completed outcome, in place, and there is one row', async () => {
+        const { s, release, rows, first } = await interrupted()
+        release()
+        await waitFor(() => String((rows()[0].payload as { type?: string }).type) === 'integration_completed', 'the outcome to be corrected')
+        expect(rows()).toHaveLength(1)
+        expect(rows()[0]).toMatchObject({ inboxId: first.inboxId, status: 'pending' })
+        expect((rows()[0].payload as { text: string; interrupted?: boolean }).text).toContain('finished: merged aaaaaaaaaaaa as bbbbbbbbbbbb')
+        expect(rows()[0].payload).not.toHaveProperty('interrupted')
+        expect(s.task().status).toBe('running')
+      })
+
+      it('the interrupted row was already read: a correction row follows, which is actionable and keeps the thread busy', async () => {
+        const { s, release, rows, first } = await interrupted()
+        s.d.engine.inbox.markAcknowledged([first.inboxId])
+        release()
+        await waitFor(() => rows().length === 2, 'the correction row')
+        expect(rows()[0]).toMatchObject({ inboxId: first.inboxId, status: 'acknowledged', payload: { type: 'integration_failed' } })
+        expect(rows()[1]).toMatchObject({ status: 'pending', payload: { type: 'integration_completed' } })
+        expect((rows()[1].payload as { text: string }).text).toMatch(/^The integration did finish, after the notice that it was interrupted: merged aaaaaaaaaaaa as bbbbbbbbbbbb/)
+        expect(childBusy(s.d.engine.store, s.coordinator.childThreadId)).toBe(true)
+      })
+    })
+  })
+
+  describe('a release retry does not outlive a shutdown (issue #142)', () => {
+    it('shutdown clears the pending retry, and a callback that fires anyway touches no inbox', async () => {
+      const w = world((input) => (input.prompt.includes('Review Reader') ? 'Reader result.' : 'Done.'))
+      w.steps.go = async (tools) => { w.out.reader = await w.start(tools, 'Reader') }
+      await w.say('go')
+      await w.settled(w.out.reader.childRunId)
+      const [row] = w.d.engine.inbox.listPending(w.parent.id)
+      w.d.engine.inbox.markDelivered([row.inboxId], 'queue:item-1')
+      const item = (w.d.orch as any).enqueueForThread(w.parent.id, { content: 'queued notice' }, { source: 'steer-late', inboxIds: [row.inboxId] })
+      w.d.engine.inbox.redirectDelivery([row.inboxId], `queue:${item.id}`, 'queue:item-1')
+      // Timers are captured, not run, for the length of this synchronous section.
+      const handle = { unref: () => undefined }
+      const scheduled: Array<() => void> = []
+      const cleared: unknown[] = []
+      vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void) => { scheduled.push(fn); return handle }) as never)
+      vi.spyOn(globalThis, 'clearTimeout').mockImplementation(((timer: unknown) => { cleared.push(timer) }) as never)
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const getMany = vi.spyOn(w.d.engine.inbox, 'getMany')
+      vi.spyOn(w.d.engine.inbox, 'release').mockImplementationOnce(() => { throw new Error('database busy') })
+      w.d.orch.removeQueuedItem(w.parent.id, item.id)
+      expect(scheduled).toHaveLength(1)
+      w.d.orch.beginShutdown()
+      expect(cleared).toContain(handle)
+      // Even a callback that fires after the shutdown began (the timer was already due) does nothing.
+      getMany.mockClear()
+      scheduled[0]()
+      expect(getMany).not.toHaveBeenCalled()
+      vi.restoreAllMocks()
     })
   })
 
