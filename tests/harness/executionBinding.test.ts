@@ -157,6 +157,18 @@ describe('execution bindings', () => {
     }
   })
 
+  it('a message for a hidden model or a turned-off provider is refused before it is a run or a transcript entry', async () => {
+    const thread = store.createThread('refused')
+    orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'haiku:low' })
+    await harness.instances.setModelPrefs('claude', { hide: ['haiku'] })
+    await expect(orch.send('hi', false, { threadId: thread.id, clientRequestId: 'send-hidden' })).rejects.toMatchObject({ code: 'model_hidden' })
+    await harness.instances.setEnabled('claude', { kind: 'device' }, false)
+    await expect(orch.send('hi', false, { threadId: thread.id, clientRequestId: 'send-off' })).rejects.toMatchObject({ code: 'provider_instance_disabled' })
+    expect(engine.listRuns(thread.id)).toEqual([])
+    expect(orch.getOrCreateSession(thread.id).messages.filter((message) => message.role === 'user')).toEqual([])
+    expect(adapter.turns).toEqual([])
+  })
+
   it('a config change during an active turn applies to the next attempt only', async () => {
     const thread = store.createThread('config change')
     orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })

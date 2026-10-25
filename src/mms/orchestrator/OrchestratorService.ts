@@ -15,7 +15,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { readFileSync } from 'node:fs'
 import { normalizeContextSettings, resolveContextCompactionTokens, resolveModelForMode } from '../../shared/settings'
-import { piInstanceId, type ModelOverride } from '../../shared/providerInstances'
+import { piInstanceId, PROVIDER_INSTANCE_ERROR_CODES, type ModelOverride } from '../../shared/providerInstances'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { customModelDefinition } from '../harness/catalog'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
@@ -4846,6 +4846,36 @@ export class OrchestratorService extends EventEmitter {
     return this.lifecycle.run('send', () => this.sendOwned(input, reuseLastUser, opts))
   }
 
+  /** The model a new turn of the session runs: the given or thread override, else the mode's default. */
+  private turnSelection(session: ThreadSession, mode: ChatMode, override?: ModelOverride): ModelOverride {
+    return this.harness.instanceMap.migrate(override ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
+      ...(this.providerAuth.credentials?.listProviderIds() ?? []),
+      ...this.harness.configuredProviderIds()
+    ]))
+  }
+
+  /**
+   * Refuses a new message whose turn could not start because the user hid its model or turned its
+   * provider off for the project. Refused before it is a run or a transcript entry, the sender
+   * keeps the message and says why, instead of the transcript holding a prompt with no reply.
+   * Other resolution failures still fail the turn as before.
+   */
+  private assertSendableSelection(session: ThreadSession, input: OrchestratorSendInput): void {
+    const request = normalizeSendRequest(input)
+    if (request.workflowInvocationId) return
+    const explicit = session.modelOverride
+    try {
+      this.harness.resolveStored(this.turnSelection(session, request.mode), {
+        purpose: 'turn',
+        scope: this.threadScope(session.threadId),
+        unselectedDefault: !explicit
+      })
+    } catch (error) {
+      const code = (error as { code?: unknown } | undefined)?.code
+      if (code === 'model_hidden' || code === 'instance_disabled' || code === PROVIDER_INSTANCE_ERROR_CODES.disabled) throw error
+    }
+  }
+
   private async sendOwned(
     input: OrchestratorSendInput,
     reuseLastUser = false,
@@ -4868,6 +4898,8 @@ export class OrchestratorService extends EventEmitter {
 
     // SPEC §16.2: a send that would queue behind a pending merge-back is refused before it is a run.
     if (opts?.forceQueue || session.isTurnRunning()) this.assertQueueOpen(threadId)
+    if (!reuseLastUser && !opts?.continuationOfRunId && opts?.source !== 'wake')
+      this.assertSendableSelection(session, input)
 
     // The run is durable before any queue/run decision or provider I/O (SPEC §2.1).
     let run: { runId: string; sequence: number } | undefined
@@ -5492,10 +5524,7 @@ export class OrchestratorService extends EventEmitter {
     // selection. Otherwise migrated to the instance shape (SPEC §13.8): `llmProvider` is
     // re-derived from a known instance.
     const runBinding = engineRunId ? this.runEngine?.bindingForRun(engineRunId) : undefined
-    const selectedModel = runBinding ? this.harness.selectionOf(runBinding) : this.harness.instanceMap.migrate(opts?.modelOverride ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
-      ...(this.providerAuth.credentials?.listProviderIds() ?? []),
-      ...this.harness.configuredProviderIds()
-    ]))
+    const selectedModel = runBinding ? this.harness.selectionOf(runBinding) : this.turnSelection(session, mode, opts?.modelOverride)
     if (displayUserMessage && !reuseLastUser) {
       const selection = { provider: selectedModel.llmProvider, model: selectedModel.model }
       const admittedUser = session.messages.slice(turnPresentationStart).find(message => message.role === 'user' && !message.hidden)
