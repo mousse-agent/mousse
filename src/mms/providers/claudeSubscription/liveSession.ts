@@ -963,17 +963,37 @@ export class LiveSession<Turn = unknown> {
     // A stray frame with nothing carried opens nothing: no task announced it, and nothing would end it.
     const carried = this.obligations.carriedIds()
     const root = (message as { parent_tool_use_id?: unknown }).parent_tool_use_id == null && message.type !== 'user'
-    if (carried.length > 0 && root) return (this.cursor = this.startContinuation(carried, this.obligations.takeSummaries(carried)))
+    // Until a cut-off turn's result arrives, what Claude writes without naming a message is that turn's
+    // leftover: it opens no wake.
+    const old = this.owingResult()
+    if (carried.length > 0 && root && !old) return (this.cursor = this.startContinuation(carried, this.obligations.takeSummaries(carried)))
     // The wake for a task the last committed turn cleared on a guess may still come: with no turn of ours
     // in flight, no wake and no cut-off turn owing a result, a root frame is that wake.
-    if (root && this.runs.length === 0) {
+    if (root && !old && this.runs.length === 0) {
       const recent = this.obligations.recentlyCleared()
       if (recent.length > 0) {
         this.obligations.forget(recent)
         return (this.cursor = this.startContinuation(recent))
       }
     }
-    return this.runs.find((run) => !run.abandoned && !run.settled)
+    const live = this.runs.find((run) => !run.abandoned && !run.settled)
+    return live ?? (old ? (this.cursor = old) : undefined)
+  }
+
+  /**
+   * A turn that was cut off and still owes its result, so the frames Claude writes for it until then are
+   * its leftovers: the abandoned continuation (a wake nobody ran, or one that began), a wake that owns an
+   * unanswered steer, or a prompt Claude had started. Its result is not the result of any later turn.
+   */
+  private owingResult(): LiveRun | undefined {
+    const candidates = this.continuation ? [this.continuation, ...this.runs] : this.runs
+    return candidates.find(
+      (run) =>
+        run.abandoned &&
+        !run.settled &&
+        !run.resultSeen &&
+        (run === this.continuation || (run.kind === 'continuation' ? run.started : run.seen.size > 0 && run.owned.size > 0))
+    )
   }
 
   /** Every run that pushed one of `ids`, oldest first. The open continuation is never in `runs` and always comes last, so it ranks newest. */
@@ -1028,11 +1048,10 @@ export class LiveSession<Turn = unknown> {
       this.obligations.consume(taskId, owner)
       return
     }
-    // A wake that was cut off (or discarded) still owes its aborted result, and everything Claude writes
-    // until then is its own. Its result must not settle the wake this task needs, so that wake is not
-    // opened now: the task is owed, and Claude's next turn for it opens the continuation once the old one is over.
-    const old = this.continuation
-    if (old && old.abandoned && !old.settled) {
+    // A turn that was cut off (or a wake nobody could run) still owes its aborted result, and everything
+    // Claude writes until then is its own. Its result must not settle the wake this task needs, so that wake
+    // is not opened now: the task is owed, and Claude's next turn for it opens the continuation once the old one is over.
+    if (this.owingResult()) {
       this.obligations.carry(taskId, summary)
       return
     }

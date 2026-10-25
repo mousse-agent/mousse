@@ -1514,6 +1514,8 @@ describe('background helpers as the real Claude Code reports them', () => {
     expect(f.service.hasBackgroundWork('thread')).toBe(true)
     expect(process.closed).toBe(false)
     expect(f.host.continuationStarted).not.toHaveBeenCalled()
+    // The cut-off turn's aborted result comes first, then the shell ends.
+    process.emit(resultFrame({ uuids: [process.uuid(1)], terminalReason: 'aborted_streaming' }))
     process.finishTask('bash-1')
     await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
     process.emit(textDelta('The shell finished.'), resultFrame({ text: 'The shell finished.', origin: 'task-notification' }))
@@ -1671,6 +1673,60 @@ describe('background helpers as the real Claude Code reports them', () => {
     const wakeB = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined })
     process.emit(resultFrame({ text: 'B text', origin: 'task-notification' }))
     expect(await wakeB).toBe('B text')
+  })
+
+  it('a wake cut off while it owns an unanswered steer still owes its result: a task that finishes meanwhile waits for its own wake', async () => {
+    const f = fixture()
+    startedWith(f, { id: 'bash-1', type: 'local_bash' }, { id: 'bash-2', type: 'local_bash' })
+    await f.turn()
+    const process = f.cli.last
+    f.cli.reply = undefined
+    process.emit(notification('bash-1'), textDelta('reading the first report'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    const abort = new AbortController()
+    const wakeA = f.service.chat({
+      threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined, signal: abort.signal,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('a steer').mockReturnValue(undefined)
+    })
+    await inputs(f.cli, 2)
+    // Claude took the steer into the turn: nothing is queued, so the cancel is the plain interrupt, and it answers late.
+    const steerId = process.uuid(1)
+    process.markStarted(steerId)
+    let open!: () => void
+    process.interruptGate = new Promise<void>((resolve) => { open = resolve })
+    abort.abort()
+    await expect(wakeA).rejects.toThrow()
+    // The second shell finishes, and the cut-off wake's leftovers arrive, before its aborted result.
+    process.emit(notification('bash-2'))
+    process.emit(textDelta('leftover of wake A'))
+    await later(30)
+    expect(f.host.continuationStarted).toHaveBeenCalledTimes(1)
+    process.emit(resultFrame({ uuids: [steerId], terminalReason: 'aborted_streaming', origin: 'task-notification' }))
+    open()
+    await later(30)
+    process.emit(textDelta('B text'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(2))
+    const wakeB = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined })
+    process.emit(resultFrame({ text: 'B text', origin: 'task-notification' }))
+    expect(await wakeB).toBe('B text')
+    expect(f.host.continuationStarted).toHaveBeenCalledTimes(2)
+  })
+
+  it('a cut-off turn Claude had started still owes its result: a task that finishes meanwhile waits for its own wake', async () => {
+    const f = fixture()
+    shell(f)
+    const process = await cutOff(f)
+    // The aborted result has not arrived yet; the shell finishes and the turn's leftovers arrive.
+    process.finishTask('bash-1')
+    process.emit(textDelta('leftover of the cut-off turn'))
+    await later(30)
+    expect(f.host.continuationStarted).not.toHaveBeenCalled()
+    process.emit(resultFrame({ uuids: [process.uuid(1)], terminalReason: 'aborted_streaming' }))
+    process.emit(textDelta('B text'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    const wake = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined })
+    process.emit(resultFrame({ text: 'B text', origin: 'task-notification' }))
+    expect(await wake).toBe('B text')
   })
 
   it('a cut-off wake whose result was already held back for a steer ends at once, so the next wake is not dropped', async () => {
