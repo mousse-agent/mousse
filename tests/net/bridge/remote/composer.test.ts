@@ -354,6 +354,80 @@ describe('remote composer methods', () => {
     expect(time.pending()).toBe(0)
   })
 
+  it('a remote Stop ends the remote turn and also Stops the thread, so the subagents it started end too', async () => {
+    const stopped: string[] = []
+    const backend: RemoteBackendPort = {
+      ...idleBackend,
+      run: (_threadId, _content, control) =>
+        new Promise((resolve) => {
+          control.signal.addEventListener('abort', () => resolve({ text: '', silent: true, aborted: true }), { once: true })
+        }),
+      stop: async (threadId) => {
+        stopped.push(threadId)
+      }
+    }
+    const api = new RemoteApi(backend, clock)
+    resources.push(() => api.close())
+    const runContext = context()
+    const entry = api.methods().find((row) => row.method === 'orchestrator.send')!
+    const pending = Promise.resolve(entry.handle({ threadId: 'thread-2', content: 'work' }, runContext))
+    // Another caller cannot stop it.
+    const stranger = { node: newId('node') as NodeId, user: newId('user') as UserId }
+    await expect(call(api, 'orchestrator.abort', { threadId: 'thread-2', run: runContext.id }, stranger)).rejects.toMatchObject({ code: 'forbidden' })
+    expect(stopped).toEqual([])
+    expect(await call(api, 'orchestrator.abort', { threadId: 'thread-2', run: runContext.id })).toEqual({ ok: true })
+    expect(stopped).toEqual(['thread-2'])
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' })
+    // With no remote run left to end it is still a Stop of the thread (its subagents may be working under an idle
+    // parent); `ok` says whether it stopped anything.
+    expect(await call(api, 'orchestrator.abort', { threadId: 'thread-2', run: runContext.id })).toEqual({ ok: false })
+    expect(stopped).toEqual(['thread-2', 'thread-2'])
+  })
+
+  it('a remote Stop with no remote run stops the thread\'s subagents and reports whether anything stopped', async () => {
+    const results: unknown[] = [{ ok: true }, { ok: false }]
+    const stopped: string[] = []
+    const backend: RemoteBackendPort = {
+      ...idleBackend,
+      stop: async (threadId) => {
+        stopped.push(threadId)
+        return results.shift()
+      }
+    }
+    const api = new RemoteApi(backend, clock)
+    resources.push(() => api.close())
+    expect(await call(api, 'orchestrator.abort', { threadId: 'idle-parent', run: newId('rpc') })).toEqual({ ok: true })
+    expect(await call(api, 'orchestrator.abort', { threadId: 'idle-parent', run: newId('rpc') })).toEqual({ ok: false })
+    expect(stopped).toEqual(['idle-parent', 'idle-parent'])
+    // Another caller's live remote run on the thread is not this caller's to end, whatever run id it names.
+    const owned: string[] = []
+    const guarded = new RemoteApi({
+      ...idleBackend,
+      run: (_threadId, _content, control) => new Promise((resolve) => control.signal.addEventListener('abort', () => resolve({ text: '', silent: true, aborted: true }), { once: true })),
+      stop: async (threadId) => {
+        owned.push(threadId)
+        return { ok: true }
+      }
+    }, clock)
+    resources.push(() => guarded.close())
+    const runContext = context()
+    const entry = guarded.methods().find((row) => row.method === 'orchestrator.send')!
+    const running = Promise.resolve(entry.handle({ threadId: 'busy', content: 'work' }, runContext)).catch((error: unknown) => error)
+    const stranger = { node: newId('node') as NodeId, user: newId('user') as UserId }
+    await expect(call(guarded, 'orchestrator.abort', { threadId: 'busy', run: newId('rpc') }, stranger)).rejects.toMatchObject({ code: 'forbidden' })
+    expect(owned).toEqual([])
+    // The owner's own Stop with a fresh id, and anyone's Stop of a thread nobody runs remotely, still work.
+    expect(await call(guarded, 'orchestrator.abort', { threadId: 'busy', run: newId('rpc') })).toEqual({ ok: true })
+    expect(await call(guarded, 'orchestrator.abort', { threadId: 'idle', run: newId('rpc') }, stranger)).toEqual({ ok: true })
+    expect(owned).toEqual(['busy', 'idle'])
+    await call(guarded, 'orchestrator.abort', { threadId: 'busy', run: runContext.id })
+    await running
+    // A backend without the hook answers as before.
+    const bare = new RemoteApi(idleBackend, clock)
+    resources.push(() => bare.close())
+    expect(await call(bare, 'orchestrator.abort', { threadId: 'idle-parent', run: newId('rpc') })).toEqual({ ok: false })
+  })
+
   it('gives staged images back when a send is cancelled before the message is stored', async () => {
     let accept = false
     const backend: RemoteBackendPort = {
@@ -646,6 +720,61 @@ describe('remote composer methods on a real profile', () => {
     expect(snapshot.messages[0].images).toEqual([{ name: 'old.png', mimeType: 'image/png' }])
     // The stored messages themselves are untouched.
     expect(messages[0].images[0].data).toHaveLength(REMOTE_MESSAGE_IMAGES_MAX_CHARS)
+  })
+
+  it('a remote Stop with no run of its own does not end a turn someone else is running', async () => {
+    const stopped: string[] = []
+    let active = true
+    const backend: RemoteBackendPort = { ...idleBackend, isActive: () => active, stop: async (threadId) => { stopped.push(threadId); return { ok: true } } }
+    const api = new RemoteApi(backend, clock)
+    resources.push(() => api.close())
+    // The desktop user's (or a CLI's, channel's, schedule's) turn is live: a remote caller's Stop is refused like a steer.
+    expect(await call(api, 'orchestrator.abort', { threadId: 'busy', run: newId('rpc') })).toEqual({ ok: false })
+    expect(stopped).toEqual([])
+    // The thread itself is idle (an idle parent whose subagents work): the Stop goes through.
+    active = false
+    expect(await call(api, 'orchestrator.abort', { threadId: 'busy', run: newId('rpc') })).toEqual({ ok: true })
+    expect(stopped).toEqual(['busy'])
+  })
+
+  it('a profile backend says a thread is active while any turn of it is live', async () => {
+    const { mms } = await profile()
+    const backend = new MmsRemoteBackend(mms)
+    const thread = mms.threads.createThread('Active')
+    expect(backend.isActive(thread.id)).toBe(false)
+    const turn = vi.spyOn(mms.orchestrator, 'isTurnActive').mockReturnValue(true)
+    expect(backend.isActive(thread.id)).toBe(true)
+    turn.mockRestore()
+    vi.spyOn(mms.orchestrator, 'isChannelTurnActive').mockReturnValue(true)
+    expect(backend.isActive(thread.id)).toBe(true)
+  })
+
+  it('a thread whose turn is admitted or claimed but not running yet is active too', async () => {
+    const { mms } = await profile()
+    const backend = new MmsRemoteBackend(mms)
+    const admitted = mms.threads.createThread('Admitted')
+    expect(backend.isActive(admitted.id)).toBe(false)
+    // Admission, queue promotion and workspace setup happen before the run is marked starting.
+    mms.orchestrator.getOrCreateSession(admitted.id).turnAdmitted = true
+    expect(backend.isActive(admitted.id)).toBe(true)
+    mms.orchestrator.getOrCreateSession(admitted.id).turnAdmitted = false
+
+    const claimed = mms.threads.createThread('Claimed')
+    const sent = await mms.runEngine.dispatch({ kind: 'send', threadId: claimed.id, clientRequestId: 'send-claimed', source: 'gui' })
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    mms.runEngine.outbox.enqueue({ threadId: claimed.id, runId: sent.runId, kind: 'turn.start', payload: { threadId: claimed.id, runId: sent.runId } })
+    expect(backend.isActive(claimed.id)).toBe(false)
+    expect(mms.runEngine.outbox.claimNext(mms.runEngine.leaseOwner, new Date().toISOString(), { lanes: ['turn'] })).not.toBeNull()
+    expect(mms.runEngine.getRun(sent.runId)!.status).toBe('queued')
+    expect(backend.isActive(claimed.id)).toBe(true)
+  })
+
+  it('a remote Stop reaches only the threads of this profile', async () => {
+    const { mms } = await profile()
+    const backend = new MmsRemoteBackend(mms)
+    await expect(backend.stop('no-such-thread')).rejects.toMatchObject({ code: 'stream_unknown' })
+    const thread = mms.threads.createThread('Stoppable')
+    await expect(backend.stop(thread.id)).resolves.toMatchObject({ status: 'stopped' })
   })
 
   it('sets one thread model without changing the computer default', async () => {

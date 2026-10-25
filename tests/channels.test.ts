@@ -578,6 +578,7 @@ describe('ChannelRouter slash commands', () => {
       let signal: AbortSignal | undefined
       let resolveTurn: ((value: { text: string; silent: boolean; aborted?: boolean }) => void) | undefined
 
+      const stoppedThreads: string[] = []
       const runner = {
         runChannelTurn: vi.fn(
           async (
@@ -594,7 +595,11 @@ describe('ChannelRouter slash commands', () => {
               resolveTurn = resolve
             })
           }
-        )
+        ),
+        // `/stop` is a Stop of the thread (`OrchestratorService.stopThread`): its subagents end with it.
+        stopThread: vi.fn(async (threadId: string) => {
+          stoppedThreads.push(threadId)
+        })
       }
       const sent: string[] = []
       const adapter: ChannelAdapter = {
@@ -644,6 +649,9 @@ describe('ChannelRouter slash commands', () => {
       await router.handleInbound({ ...baseMsg, text: '/stop' })
       expect(sent.at(-1)).toContain('Stop requested')
       expect(signal?.aborted).toBe(true)
+      // The thread the channel session is bound to is Stopped as a whole, once.
+      expect(stoppedThreads).toHaveLength(1)
+      expect(stoppedThreads[0]).toBe(runner.runChannelTurn.mock.calls[0][0])
 
       resolveTurn?.({ text: 'should not deliver', silent: false, aborted: true })
       await turnPromise

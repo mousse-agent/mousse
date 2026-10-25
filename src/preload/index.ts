@@ -313,6 +313,7 @@ const api = {
   },
   subagents: {
     list: (threadId: string): Promise<SubagentSummary[]> => ipcRenderer.invoke('subagents:list', threadId),
+    stopAll: (threadId: string): Promise<boolean> => ipcRenderer.invoke('subagents:stopAll', threadId),
     onUpdated: (cb: (payload: SubagentsUpdatedEvent) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, payload: SubagentsUpdatedEvent) => cb(payload)
       ipcRenderer.on('subagents:updated', handler)

@@ -37,7 +37,9 @@ import type { ClaudeSubscriptionProviderService } from '../providers/claudeSubsc
 import type { ClaudeIntegrationSource } from '../providers/claudeSubscription/integrations'
 import type { AntigravityProviderService } from '../providers/antigravity/AntigravityProviderService'
 import { v4 as uuidv4 } from 'uuid'
-import { TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation } from '../run/RunEngine'
+import { TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
+import { isFencedSource } from '../run/delegation/sources'
+import { currentStopGeneration, runStopGeneration } from '../run/stopGeneration'
 import { buildSubagentView } from '../run/delegation/subagentView'
 import { resolveSubagent, subagentsTitled, type SubagentAddressSources } from '../run/delegation/subagentAddress'
 import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/delegation/policy'
@@ -59,7 +61,7 @@ import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
 import { taskCheckpoint } from '../run/delegation/checkpoint'
 import { subagentPreamble } from '../run/delegation/guidance'
-import type { SubagentNoticeItem } from '../../shared/subagents'
+import { isRunningSubagent, type SubagentNoticeItem } from '../../shared/subagents'
 import type { DelegationRequest, ForkPointSeed, ThreadCreation } from '../run/RunEngine'
 import type { HandoffItem } from '../run/handoff/budget'
 import { committedTransfers, TurnHandoffs, type PlannedHandoff } from './turnHandoffs'
@@ -68,7 +70,9 @@ import { forkStrategy, handoffDelivery, mcpAttachable, subagentTargetRefusal, ty
 import { isContextOverflowError, retryContextOverflowOnce } from '../run/adapters/shared/retryContextOverflow'
 import {
   TERMINAL_RUN_STATUSES,
+  isChildQuestionRow,
   isWakeTurnPayload,
+  type ChildQuestionPayload,
   type DelegationRecord,
   type EffectKind,
   type InboxRecord,
@@ -350,6 +354,18 @@ export interface OrchestratorSendOptions {
   acknowledgeUncertain?: boolean
   /** A follow-up on a subagent (`continue_subagent`): the run and its delegation row are written together. */
   delegation?: SendDelegation
+}
+
+/** What `OrchestratorService.stopThread` did: `ok` is true when anything was running or waiting. */
+export interface StopThreadOutcome extends Partial<StopResult> {
+  ok: boolean
+  status: StopResult['status']
+  replayed: boolean
+  threadId: string
+  threads: string[]
+  activeRuns: StopResult['activeRuns']
+  cancelledRuns: StopResult['cancelledRuns']
+  delegations: string[]
 }
 
 /**
@@ -644,6 +660,8 @@ export class OrchestratorService extends EventEmitter {
    * Claude and Antigravity adapters report nothing, so this stays empty until one does.
    */
   private readonly providerBackground = new Set<string>()
+  /** Removes the listeners that route a subagent's questions to its parent (`routeSubagentQuestions`). */
+  private questionRouterOff: (() => void) | null = null
   /** Pending retries of a queue item's row release (`releaseQueuedRows`); a shutdown clears them. */
   private readonly releaseRetries = new Set<ReturnType<typeof setTimeout>>()
   /** Last run heartbeat (ms) per run; throttles `RunEngine.heartbeat` writes. */
@@ -905,6 +923,9 @@ export class OrchestratorService extends EventEmitter {
     this.runEngine?.setDelegationHost(null)
     this.runEngine?.setInFlightCanceller(null)
     this.runEngine?.store.setProviderBackgroundWork(null)
+    this.runEngine?.store.setUnreadSteers(null)
+    this.questionRouterOff?.()
+    this.questionRouterOff = null
     this.runEngine?.handoffs.setTranscriptSource(null)
     this.runEngine = engine
     if (!engine) return
@@ -912,6 +933,9 @@ export class OrchestratorService extends EventEmitter {
     this.attachInFlightCanceller()
     // Input (4) of the hold predicate: synchronous, in memory, never throws (it is read inside transactions).
     engine.store.setProviderBackgroundWork((threadId) => this.providerBackground.has(threadId))
+    // Input (5): steers a live turn has not read yet become a follow-up turn only after its terminal write.
+    engine.store.setUnreadSteers((threadId) => this.hasUnreadSteers(threadId))
+    this.questionRouterOff = this.routeSubagentQuestions(engine)
     engine.handoffs.setTranscriptSource((threadId) => this.handoffTranscript(threadId))
     engine.setDelegationHost({
       createThread: (creation) =>
@@ -965,6 +989,78 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * A subagent's question reaches its parent (issue #142). Every question the daemon asks on a
+   * subagent's thread (the model's own `ask_user`, a plan question, a provider's approval such as
+   * Codex's command approval; they all go through `UserQuestionService`) writes a `child_question`
+   * row (a `reconcile_notice`) into the parent's inbox, and rule 4 wakes or steers the parent with
+   * it: it answers with `answer_subagent` or asks the user. The user still sees the question under
+   * the top-level thread. When the question is answered, dismissed or times out, its row is
+   * acknowledged on the `cleared` event; one left from a previous process is acknowledged at boot.
+   * Returns the function that removes the listeners.
+   */
+  private routeSubagentQuestions(engine: RunEngine): () => void {
+    const onPending = (event: { requestId: string; threadId: string }): void => {
+      try {
+        const lineage = engine.delegations.getLineage(event.threadId)
+        if (!lineage || lineage.relationship !== 'subagent' || this.titleOf(lineage.parentThreadId) === undefined) return
+        const task = engine.delegations.listForChildThread(event.threadId).filter((entry) => entry.parentThreadId === lineage.parentThreadId && entry.status === 'running').at(-1)
+        const payload: ChildQuestionPayload = {
+          kind: 'child_question',
+          childThreadId: event.threadId,
+          childRunId: engine.getActiveRun(event.threadId)?.runId ?? null,
+          requestId: event.requestId,
+          ...(task ? { delegationId: task.delegationId } : {})
+        }
+        engine.inbox.append({ threadId: lineage.parentThreadId, runId: task?.parentRunId ?? null, kind: 'reconcile_notice', payload })
+      } catch (error) {
+        console.warn('a subagent\'s question could not be routed to its parent', { threadId: event.threadId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    const onCleared = (event: { requestId: string; threadId: string }): void => {
+      try {
+        const open = engine.inbox
+          .listForChildThread(event.threadId, 'child_question')
+          .filter((row) => row.status !== 'acknowledged' && (row.payload as ChildQuestionPayload).requestId === event.requestId)
+        if (open.length) engine.store.db.transaction(() => engine.inbox.markAcknowledged(open.map((row) => row.inboxId)))
+      } catch (error) {
+        console.warn('a cleared question\'s notice could not be acknowledged', { threadId: event.threadId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    this.questions.on('pending', onPending)
+    this.questions.on('cleared', onCleared)
+    return () => {
+      this.questions.off('pending', onPending)
+      this.questions.off('cleared', onCleared)
+    }
+  }
+
+  /**
+   * Before a delivery: a row about a question that is not pending any more (answered, dismissed, timed
+   * out, or lost with a restart) is acknowledged instead of delivered, so the parent is never told to
+   * answer what nobody can. Returns the rows that are still worth delivering.
+   */
+  private dropStaleQuestionRows(rows: InboxRecord[]): InboxRecord[] {
+    const engine = this.runEngine
+    if (!engine) return rows
+    const stale = rows.filter((row) => isChildQuestionRow(row) && !this.questions.getPending((row.payload as ChildQuestionPayload).requestId))
+    if (stale.length === 0) return rows
+    engine.store.db.transaction(() => engine.inbox.markAcknowledged(stale.map((row) => row.inboxId)))
+    return rows.filter((row) => !stale.includes(row))
+  }
+
+  /**
+   * Whether the thread's live turn holds steers nobody has read yet, so its tasks must not publish: a
+   * person's plain-text steer lives only in the turn's memory until the turn settles and queues it as a
+   * follow-up run (`RunStore.setUnreadSteers`). Once queued, the follow-up is a run of the engine, which
+   * holds the thread on its own and survives a restart.
+   */
+  private hasUnreadSteers(threadId: string): boolean {
+    const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
+    const turn = session?.activeTurn
+    return Boolean(turn && !turn.abort.signal.aborted && turn.pendingSteer.length > 0)
+  }
+
+  /**
    * A subagent result could not be delivered after every attempt (`restoreUndeliveredRows`): the
    * thread gets a visible notice, so the result is never silently lost. The result itself is intact
    * and readable with `task_status`.
@@ -992,7 +1088,32 @@ export class OrchestratorService extends EventEmitter {
       this.emit('run-interrupted-on-boot', { threadId: engine.getRun(runId)?.threadId, runId })
     }
     this.recoverQueuedRows()
+    this.recoverOrphanedFollowUps()
     return interrupted
+  }
+
+  /**
+   * Boot: the follow-up of a steer a turn never read is a queued run created just before its queue entry
+   * is saved. A crash between the two leaves a queued `steer-followup` run that no queue entry and no
+   * `turn.start` will ever start, which would hold its subagent's task for ever. Such a run is cancelled
+   * (the steer it was for lived only in the dead process), which releases the hold.
+   */
+  private recoverOrphanedFollowUps(): void {
+    const engine = this.runEngine
+    const store = this.threadStore
+    if (!engine || !store) return
+    for (const run of engine.store.listNonTerminalRuns()) {
+      if (run.status !== 'queued' || run.source !== 'steer-followup') continue
+      if (engine.outbox.listForRun(run.runId).some((effect) => effect.kind === 'turn.start')) continue
+      try {
+        if (readDurableQueue(store, run.threadId).some((item) => item.runId === run.runId)) continue
+      } catch {
+        continue
+      }
+      this.markRun(run.runId, (runs, id) => {
+        if (runs.getRun(id)?.status === 'queued') runs.markTerminal(id, 'cancelled', { interruptedBy: 'daemon_restart', error: 'The daemon stopped before the follow-up was queued.' })
+      })
+    }
   }
 
   /**
@@ -1019,29 +1140,172 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Stop a specific run. Only the thread's active run is aborted; anything else is ignored. The
-   * interrupt follows `CommandPolicy.stopStrategy` (`interruptRun`). A replay of an accepted stop
-   * (same `clientRequestId`) enqueues the interrupt again when the run is still active and none is
-   * pending or running (M4).
+   * Stop a specific run. Only the thread's active run is the target; any other run is ignored without
+   * cascading. A live target stops like any Stop (`stopThread`): the thread and every subagent below
+   * it. The interrupt follows `CommandPolicy.stopStrategy` (`interruptRun`). A replay of an accepted
+   * stop (same `clientRequestId`) enqueues the interrupt again when the run is still active and none
+   * is pending or running (M4).
    */
   async abortRun(runId: string, clientRequestId: string, threadId?: string): Promise<CommandResult> {
     const engine = this.requireRunEngine()
     const target = threadId ?? engine.getRun(runId)?.threadId
     if (!target) return { status: 'ignored', reason: 'run_not_found', runId, sequence: 0 }
-    const result = await engine.dispatch({ kind: 'stop', threadId: target, clientRequestId, runId })
-    if (result.status === 'accepted' && (!result.replayed || engine.needsInterrupt(runId))) {
-      this.enqueueControlEffect('turn.interrupt', target, runId, { runId, threadId: target }, () => {
-        void this.interruptRun(runId, target)
-      })
-    } else if (result.status !== 'accepted') {
-      // The run is not active (its turn ended): Stop still reaches the provider's process, which may be
-      // running background work for the thread. Only a run of this thread, and only when no newer run on
-      // it is active or queued: a Stop aimed at an old run must not end the process a newer one is using.
-      // The check and the stop run in the same tick, so nothing starts in between.
+    const result = await this.stopThread(target, 'user', { runId, clientRequestId })
+    const sequence = engine.maxSeq(target)
+    if (result.status === 'rejected') return { status: 'rejected', reason: result.reason ?? 'rejected', sequence, replayed: result.replayed }
+    if (result.status === 'ignored') {
+      // The run is not active (its turn ended), so the Stop does not cascade. It still reaches the provider's
+      // process, which may be running background work for the thread: only for a run of this thread, and only
+      // when no newer run on it is active or queued (a Stop aimed at an old run must not end the process a
+      // newer one is using).
       const stale = engine.getRun(runId)
       if (stale?.threadId === target && !engine.listRuns(target).some((run) => !TERMINAL_RUN_STATUSES.has(run.status))) await this.stopProviderWork(target)
+      return {
+        status: 'ignored',
+        reason: result.reason ?? 'run_not_active',
+        runId,
+        activeRunId: engine.getActiveRun(target)?.runId ?? null,
+        sequence,
+        ...(result.replayed ? { replayed: true } : {})
+      }
     }
-    return result
+    return { status: 'accepted', runId, sequence, replayed: result.replayed }
+  }
+
+  /**
+   * The one Stop (issue #142): every public Stop (the protocol's `orchestrator.abort`, with or without
+   * a `runId`, `abortRun`, the CLI, a channel's `/stop`, the remote hub, Lineage's Stop and Stop all,
+   * `task_cancel`, deleting or settling a thread) comes here, and so does nothing else. An internal
+   * abort (a steer that restarts the turn, a question that preempts it, a shutdown) stays local, on
+   * `abortActiveTurn`, which this wraps and which never calls back.
+   *
+   * Everything the Stop cancels is decided in one run-store transaction before any await
+   * (`RunEngine.stopSubtree`): the subtree of subagents, a higher stop generation for each thread in
+   * it, its running delegations, queued runs, active runs and inbox rows. After that, by id: the
+   * active runs are aborted locally (only those runs, so a message sent to a subagent after the
+   * transaction survives), the queue entries of the subtree are removed, and the providers are told to
+   * end what they still run for each thread, whether or not a turn is live. `ok` is true when
+   * anything was running or waiting. A stale `runId` returns its outcome and does not cascade; a
+   * repeated `clientRequestId` returns the first result.
+   */
+  async stopThread(
+    threadId: string,
+    reason: string,
+    opts: { runId?: string; clientRequestId?: string; clearQueue?: boolean; requesterThreadId?: string } = {}
+  ): Promise<StopThreadOutcome> {
+    const engine = this.runEngine
+    if (!engine) {
+      // Without a run engine there is only the local turn and its queue.
+      const turnAborted = this.abortActiveTurn(threadId, { clearQueue: opts.clearQueue })
+      const channelAborted = this.abortChannelTurn(threadId)
+      const aborted = turnAborted || channelAborted
+      return { ok: aborted, status: 'stopped', replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
+    }
+    const result = engine.stopSubtree({ threadId, reason, ...opts })
+    if (result.status !== 'stopped') return { ok: false, ...result }
+    let aborted = false
+    if (result.replayed) {
+      // The first Stop's interrupt may have ended without stopping the run (M4).
+      for (const run of engine.reinterruptStopped(result)) aborted = this.interruptNow(run.runId, run.threadId) || aborted
+    } else {
+      for (const run of result.activeRuns) {
+        aborted = this.abortActiveTurn(run.threadId, { runId: run.runId }) || aborted
+        // The worker runs the interrupt effect `stopSubtree` queued; without one, the interrupt runs now.
+        if (!this.effectsEnabled()) void this.interruptRun(run.runId, run.threadId)
+      }
+      // A live turn that is not an engine run (a legacy turn, a channel turn) is still the Stop's to end,
+      // for the thread the Stop was aimed at; nothing can have started since the transaction.
+      if (!result.activeRuns.some((run) => run.threadId === threadId)) aborted = this.abortActiveTurn(threadId) || aborted
+      for (const id of result.threads) aborted = this.abortChannelTurn(id) || aborted
+      this.removeStoppedQueueEntries(result, opts.clearQueue === true)
+    }
+    const worked = await Promise.all(result.threads.map((id) => this.stopProviderWork(id)))
+    const stoppedAnything = aborted || worked.some(Boolean) || result.activeRuns.length + result.cancelledRuns.length + result.delegations.length > 0
+    return { ok: stoppedAnything, ...result }
+  }
+
+  /** A replayed Stop's interrupt, now: through the worker when there is one, else directly. True when a live turn was aborted. */
+  private interruptNow(runId: string, threadId: string): boolean {
+    const aborted = this.abortActiveTurn(threadId, { runId })
+    if (!this.effectsEnabled()) void this.interruptRun(runId, threadId)
+    return aborted
+  }
+
+  /**
+   * After a Stop's transaction: the queue entries that belong to the work it stopped leave the
+   * durable queues of the subtree, under each thread's queue lock and after the generation was
+   * raised. In a subagent everything queued goes; in the thread the Stop was aimed at only what
+   * delivers a subagent's result (a steer that missed its turn, whose notice rows the Stop
+   * acknowledged) and the entries of runs it cancelled; what a person queued there stays unless
+   * `clearQueue` (as a Stop always did).
+   */
+  private removeStoppedQueueEntries(result: StopResult, clearQueue: boolean): void {
+    const cancelled = new Set(result.cancelledRuns.map((run) => run.runId))
+    for (const id of result.threads) {
+      const isRoot = id === result.threadId
+      const generation = this.runEngine ? currentStopGeneration(this.runEngine.store, id) : 0
+      // What a Stop removes: entries of the runs it cancelled, notices that missed their turn, work started on
+      // behalf of a parent before the Stop (a stale `stopGeneration`), and, below the thread it was aimed at,
+      // run-less entries of work started on behalf of a parent. A message a person queued stays, at any level, unless asked to clear.
+      const removable = (item: QueuedMessage): boolean => {
+        if (item.state === 'claimed') return false
+        if (item.runId && cancelled.has(item.runId)) return true
+        if (item.inboxIds?.length) return true
+        if (isFencedSource(item.source) && (item.stopGeneration === undefined || item.stopGeneration < generation)) return true
+        if (!isRoot && !item.runId && isFencedSource(item.source)) return true
+        return clearQueue && !item.internal
+      }
+      try {
+        this.mutateQueue(id, (items) => {
+          const gone = items.filter(removable)
+          if (gone.length === 0) return items
+          // Their rows were acknowledged by the Stop; any a Stop did not reach go back to pending.
+          this.releaseQueuedRows(gone)
+          for (const item of gone) if (item.workflowInvocationId) this.workflowChat?.abandon(item.workflowInvocationId, id)
+          this.cancelQueuedRuns(gone.map((item) => item.runId))
+          return items.filter((item) => !gone.includes(item))
+        })
+      } catch (error) {
+        console.warn('a stopped thread\'s queue could not be cleared', { threadId: id, error: error instanceof Error ? error.message : String(error) })
+      }
+      // A queued follow-up that left held the thread's tasks (`hasUnreadSteers`).
+      this.reevaluateHold(id)
+    }
+  }
+
+  /** A claimed entry the Stop fence refuses: the notice rows it carried are acknowledged, its claim completes and its run ends. */
+  private refuseFencedQueueItem(session: ThreadSession, item: QueuedMessage, claimToken: string | undefined): void {
+    const engine = this.runEngine
+    try {
+      if (engine && item.inboxIds?.length) {
+        const own = engine.inbox.getMany(item.inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === queueOwner(item.id))
+        engine.store.db.transaction(() => engine.inbox.markAcknowledged(own.map((row) => row.inboxId)))
+      }
+    } catch (error) {
+      console.warn('fenced queue entry rows could not be acknowledged', { itemId: item.id, error: error instanceof Error ? error.message : String(error) })
+    }
+    this.completeSessionClaim(session, item.id, claimToken)
+    this.cancelQueuedRuns([item.runId])
+  }
+
+  /** Rewrites a thread's queue (durable under its lock when there is a store) and tells listeners when it changed. */
+  private mutateQueue(threadId: string, mutate: (items: QueuedMessage[]) => QueuedMessage[]): void {
+    const loaded = threadId === this.boundSession.threadId ? this.boundSession : this.sessions.get(threadId)
+    let before = 0
+    let after: QueuedMessage[]
+    if (this.threadStore) {
+      after = mutateDurableQueue(this.threadStore, threadId, (items) => {
+        before = items.length
+        return mutate(items)
+      })
+    } else {
+      if (!loaded) return
+      before = loaded.queue.length
+      after = mutate(loaded.queue)
+    }
+    if (after.length === before) return
+    if (loaded) loaded.queue = after
+    this.emitQueueUpdated(threadId, after)
   }
 
   /**
@@ -1057,7 +1321,8 @@ export class OrchestratorService extends EventEmitter {
     if (run && TERMINAL_RUN_STATUSES.has(run.status)) return
     const caps = this.capabilitiesForThread(threadId)
     const strategy = caps ? stopStrategy(caps, run) : run ? 'interrupt' : 'noop'
-    const abortedLocally = this.abortActiveTurn(threadId)
+    // Only this run's turn: a later turn of the thread (a message sent after the Stop) is not its to abort.
+    const abortedLocally = this.abortActiveTurn(threadId, { runId })
     if (strategy === 'noop' || !engine || !run) return
     // A turn of this process (live, admitted or unwinding) writes the run's terminal state itself.
     let live = abortedLocally || this.hasLocalTurn(threadId)
@@ -1344,6 +1609,14 @@ export class OrchestratorService extends EventEmitter {
       this.skipUnstartableTurn(entry?.payload ?? stored, entry, run)
       return
     }
+    // The Stop fence at execution: work that starts on behalf of a parent and was admitted before a Stop of its thread is refused.
+    if (run && this.runEngine?.isFenced(run.runId)) {
+      this.markRun(run.runId, (engine, id) => {
+        if (engine.getRun(id)?.status === 'queued') engine.markTerminal(id, 'cancelled', { interruptedBy: 'user' })
+      })
+      this.skipUnstartableTurn(entry?.payload ?? stored, entry, this.runEngine.getRun(run.runId) ?? run)
+      return
+    }
     if (entry) entry.started = true
     // The in-memory payload keeps image data the durable payload omits. Without it the sender is
     // gone (another orchestrator instance), so this executor does not inherit its admission.
@@ -1445,11 +1718,18 @@ export class OrchestratorService extends EventEmitter {
   private executeTurnSteerEffect(effect: EffectRecord): void {
     const { runId, threadId, text, inboxIds } = effect.payload as { runId: string; threadId: string; text: string; inboxIds?: string[] }
     const engine = this.requireRunEngine()
+    // A steer of a run that a Stop came after belongs to the work that was stopped: it delivers nothing and
+    // makes no work (its rows were acknowledged by the Stop).
+    if (engine.isStale(runId)) {
+      // Rows that reached it after the Stop (newer work) are not part of what the Stop ended: they go back to be delivered.
+      if (inboxIds?.length) engine.inbox.release(inboxIds, effect.effectId)
+      return
+    }
     let content = text
     let notice: SubagentNoticeItem[] | undefined
     let carried: { inboxIds: string[]; effectId: string } | undefined
     if (inboxIds?.length) {
-      const rows = engine.inbox.getMany(inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === effect.effectId)
+      const rows = this.dropStaleQuestionRows(engine.inbox.getMany(inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === effect.effectId))
       if (rows.length === 0) return
       const planned = planWakeNotice(rows, this.noticeContext())
       engine.inbox.recordNoticeVisibility(rows, planned.items)
@@ -1461,12 +1741,15 @@ export class OrchestratorService extends EventEmitter {
     // without reading it, when the follow-up turn it leaves takes them.
     const run = engine.getRun(runId)
     if (run && !TERMINAL_RUN_STATUSES.has(run.status) && this.steerThread(threadId, content, notice, carried)) return
-    this.enqueueLateSteer(threadId, content, carried, notice)
+    this.enqueueLateSteer(threadId, content, carried, notice, runId)
   }
 
   /** Titles for the notices this orchestrator writes. */
   private noticeContext(): NoticeContext {
-    return { titleOf: (threadId) => this.titleOf(threadId) }
+    return {
+      titleOf: (threadId) => this.titleOf(threadId),
+      questionPrompts: (requestId) => this.questions.getPending(requestId)?.questions.map((question) => question.prompt) ?? null
+    }
   }
 
   /**
@@ -1474,11 +1757,14 @@ export class OrchestratorService extends EventEmitter {
    * item (`queue:<id>`), so exactly one delivery owns them at a time: the reconciler does not hand
    * them to a wake, and the item rebuilds its text from the rows that are still its own when it runs.
    */
-  private enqueueLateSteer(threadId: string, text: string, carried?: { inboxIds: string[]; effectId: string }, subagentNotice?: SubagentNoticeItem[]): void {
+  private enqueueLateSteer(threadId: string, text: string, carried?: { inboxIds: string[]; effectId: string }, subagentNotice?: SubagentNoticeItem[], runId?: string): void {
     const content = text.trim()
     const session = this.getOrCreateSession(threadId)
     if (!content || session.deleted) return
-    this.enqueueCarrying(threadId, { content, mode: getLastUserChatMode(session.messages) ?? 'agent' }, { source: 'steer-late' }, carried ? [carried] : [], subagentNotice)
+    // Stamped with the generation of the run it was meant for, never the current one: the Stop fence must
+    // still see a steer of an older run as older.
+    const stopGeneration = runId && this.runEngine ? runStopGeneration(this.runEngine.store, runId) : undefined
+    this.enqueueCarrying(threadId, { content, mode: getLastUserChatMode(session.messages) ?? 'agent' }, { source: 'steer-late', ...(stopGeneration !== undefined ? { stopGeneration } : {}) }, carried ? [carried] : [], subagentNotice)
     if (session.isTurnRunning()) session.drainAfterSettle = true
     else this.scheduleQueueDrain(session)
   }
@@ -1487,7 +1773,7 @@ export class OrchestratorService extends EventEmitter {
   private enqueueCarrying(
     threadId: string,
     input: OrchestratorSendInput,
-    opts: { source: string; internal?: boolean },
+    opts: { source: string; internal?: boolean; stopGeneration?: number },
     carried: ReadonlyArray<{ inboxIds: string[]; effectId: string }>,
     subagentNotice: SubagentNoticeItem[] | undefined
   ): QueuedMessage {
@@ -2332,20 +2618,55 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /**
+   * `task_cancel` is a Stop of the subagent (`stopThread`): it ends the subagent's work and everything
+   * the subagent started. The caller asked, so it gets no notice row for it. A task whose result the
+   * caller has not read yet is the exception: naming it explicitly drops that result, as before.
+   */
   private async taskCancel(parentThreadId: string, ref: SubagentRef) {
     const engine = this.requireRunEngine()
     if (ref.delegationId) {
-      const delegationId = this.ownedDelegation(parentThreadId, ref.delegationId).delegationId
-      const cancelled = await engine.cancelDelegation(delegationId)
-      return { delegationId, status: engine.delegations.get(delegationId)?.status, cancelled }
+      const task = this.ownedDelegation(parentThreadId, ref.delegationId)
+      // A task that is still running stops its subagent. A cancelled one stops it again only while the run
+      // that task started is still live (a repeat after a partial failure): once that run ended, whatever the
+      // subagent does now is newer work (a follow-up) that a repeated cancel must not touch.
+      if (task.status === 'running' || (task.status === 'cancelled' && this.isRunLive(task.childRunId))) {
+        const stopped = await this.stopThread(task.childThreadId, 'task_cancel', { requesterThreadId: parentThreadId })
+        return { delegationId: task.delegationId, status: engine.delegations.get(task.delegationId)?.status, cancelled: stopped.delegations }
+      }
+      if (task.status === 'cancelled') return { delegationId: task.delegationId, status: task.status, cancelled: [] }
+      const cancelled = await engine.cancelDelegation(task.delegationId)
+      return { delegationId: task.delegationId, status: engine.delegations.get(task.delegationId)?.status, cancelled }
     }
     // A subagent title cancels everything that subagent still has open.
     const target = this.resolveSubagentTarget(parentThreadId, ref.subagent ?? '')
     if (!target.ok) return target.refusal
-    const open = engine.delegations.listForChildThread(target.childThreadId).filter((task) => task.parentThreadId === parentThreadId && task.status === 'running')
-    const cancelled: string[] = []
-    for (const task of open) cancelled.push(...await engine.cancelDelegation(task.delegationId))
-    return { subagent: target.title, childThreadId: target.childThreadId, cancelled, ...(open.length ? {} : { note: `"${target.title}" has no open task.` }) }
+    const tasks = engine.delegations.listForChildThread(target.childThreadId).filter((task) => task.parentThreadId === parentThreadId)
+    const open = tasks.filter((task) => task.status === 'running')
+    // Nothing is stopped when no task is open: a repeat must not touch newer work.
+    if (open.length === 0)
+      return { subagent: target.title, childThreadId: target.childThreadId, cancelled: [], note: `"${target.title}" has no open task.` }
+    const stopped = await this.stopThread(target.childThreadId, 'task_cancel', { requesterThreadId: parentThreadId })
+    return { subagent: target.title, childThreadId: target.childThreadId, cancelled: stopped.delegations }
+  }
+
+  private isRunLive(runId: string): boolean {
+    const run = this.runEngine?.getRun(runId)
+    return Boolean(run && !TERMINAL_RUN_STATUSES.has(run.status))
+  }
+
+  /**
+   * Lineage's Stop all: a Stop of each subagent of `parentThreadId` that is still working, in one call. Each
+   * one cascades to its own subagents; the parent's own turn keeps running (it is told, as for a row's Stop).
+   */
+  async stopSubagents(parentThreadId: string, reason = 'user'): Promise<{ ok: boolean; stopped: string[] }> {
+    const running = this.subagentView(parentThreadId).filter(isRunningSubagent).map((row) => row.childThreadId)
+    // A parent with no turn running is told nothing: the person who pressed the button is the one who asked.
+    const requesterThreadId = this.runEngine?.getActiveRun(parentThreadId) ? undefined : parentThreadId
+    const outcomes = await Promise.allSettled(running.map((childThreadId) => this.stopThread(childThreadId, reason, { requesterThreadId })))
+    for (const outcome of outcomes)
+      if (outcome.status === 'rejected') console.warn('a subagent could not be stopped', { parentThreadId, error: outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason) })
+    return { ok: outcomes.some((outcome) => outcome.status === 'fulfilled' && outcome.value.ok), stopped: running }
   }
 
   /** Cancels one of `parentThreadId`'s delegations and everything below it (host API and tests). */
@@ -2552,13 +2873,21 @@ export class OrchestratorService extends EventEmitter {
   private async executeWakeEffect(effect: EffectRecord, payload: WakeTurnPayload, signal: AbortSignal): Promise<void> {
     const engine = this.requireRunEngine()
     if (engine.getRun(payload.runId)?.status !== 'queued') return
-    const rows = engine.inbox.getMany(payload.inboxIds).filter((row) => row.status !== 'acknowledged')
+    const rows = this.dropStaleQuestionRows(engine.inbox.getMany(payload.inboxIds).filter((row) => row.status !== 'acknowledged'))
     const session = this.getOrCreateSession(payload.threadId)
     const cancelWake = (restore: boolean): void => {
       engine.store.db.transaction(() => {
         engine.markTerminal(payload.runId, 'cancelled')
         if (restore && rows.length) engine.inbox.markPendingAgain(rows.map((row) => row.inboxId))
       })
+    }
+    if (engine.isFenced(payload.runId)) {
+      // A Stop of this thread came after the wake was admitted: its notices belong to the work that was stopped.
+      engine.store.db.transaction(() => {
+        engine.markTerminal(payload.runId, 'cancelled', { interruptedBy: 'user' })
+        engine.inbox.markAcknowledged(rows.map((row) => row.inboxId))
+      })
+      return
     }
     if (rows.length === 0 || session.deleted) {
       cancelWake(!session.deleted)
@@ -3008,18 +3337,15 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Mark thread deleted so pending work will not execute. The run engine cancels what the thread
-   * still has in flight (H7): its delegations and their children depth-first, its queued runs and
-   * wakes with their effects, a stop for its active run; the live turn is aborted here and its MCP
+   * Mark thread deleted so pending work will not execute. Deleting is a Stop of the thread and every
+   * subagent below it (`stopThread`, H7), queue included; the live turn is aborted here and its MCP
    * credentials revoked.
    */
   markThreadDeleted(threadId: string): void {
     this.revokeMcp(threadId)
-    void this.stopProviderWork(threadId)
-    const engine = this.runEngine
-    if (engine)
-      void engine.cancelThreadWork(threadId).catch((error: unknown) => {
-        console.warn('run engine could not cancel a deleted thread\'s work', { threadId, error: error instanceof Error ? error.message : String(error) })
+    if (this.runEngine)
+      void this.stopThread(threadId, 'thread_deleted', { clearQueue: true }).catch((error: unknown) => {
+        console.warn('a deleted thread\'s work could not be stopped', { threadId, error: error instanceof Error ? error.message : String(error) })
       })
     const session = this.sessions.get(threadId)
     if (session) {
@@ -3152,7 +3478,7 @@ export class OrchestratorService extends EventEmitter {
   enqueueForThread(
     threadId: string,
     input: OrchestratorSendInput,
-    opts?: { source?: string; intent?: 'normal' | 'steer'; internal?: boolean; runId?: string; inboxIds?: string[]; subagentNotice?: SubagentNoticeItem[] }
+    opts?: { source?: string; intent?: 'normal' | 'steer'; internal?: boolean; runId?: string; inboxIds?: string[]; subagentNotice?: SubagentNoticeItem[]; stopGeneration?: number }
   ): QueuedMessage {
     if (this.threadStore && !this.threadStore.getThread(threadId)) {
       throw new QueueValidationError(`Thread not found: ${threadId}`)
@@ -3166,6 +3492,8 @@ export class OrchestratorService extends EventEmitter {
       this.touchUserActivityAndNotify(threadId)
     }
     const request = normalizeSendRequest(input)
+    // Work that starts on behalf of a parent remembers the Stop generation it was queued at (the Stop fence).
+    const stopGeneration = opts?.stopGeneration ?? (this.runEngine && isFencedSource(opts?.source) ? currentStopGeneration(this.runEngine.store, threadId) : undefined)
     let item: QueuedMessage
     if (this.threadStore) {
       // Cross-process RMW: load disk, enqueue, save under mutation lock.
@@ -3181,7 +3509,8 @@ export class OrchestratorService extends EventEmitter {
           internal: opts?.internal,
           runId: opts?.runId,
           inboxIds: opts?.inboxIds,
-          subagentNotice: opts?.subagentNotice
+          subagentNotice: opts?.subagentNotice,
+          stopGeneration
         })
         item = result.item
         return result.items
@@ -3201,7 +3530,8 @@ export class OrchestratorService extends EventEmitter {
       internal: opts?.internal,
       runId: opts?.runId,
       inboxIds: opts?.inboxIds,
-      subagentNotice: opts?.subagentNotice
+      subagentNotice: opts?.subagentNotice,
+      stopGeneration
     })
     session.queue = result.items
     item = result.item
@@ -3916,9 +4246,11 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * Abort the active GUI/CLI orchestrator turn for a thread (defaults to bound thread).
-   * Does not clear the durable normal message queue unless clearQueue is true.
+   * Does not clear the durable normal message queue unless clearQueue is true. With `runId` only that
+   * run's turn is aborted: a Stop of a run must not reach a later turn of the thread (a fresh message
+   * sent after the Stop). This is the internal primitive; a public Stop is `stopThread`, which wraps it.
    */
-  abortActiveTurn(threadId?: string, opts?: { clearQueue?: boolean }): boolean {
+  abortActiveTurn(threadId?: string, opts?: { clearQueue?: boolean; runId?: string }): boolean {
     const id = threadId ?? this.getBoundThreadId()
     const session = id
       ? this.boundSession.threadId === id
@@ -3928,11 +4260,14 @@ export class OrchestratorService extends EventEmitter {
     if (!session) return false
     const active = session.activeTurn
     if (!active && session.turnAdmitted && !session.abortRequested) {
-      // Admitted but still in recovery/workspace setup: abort as soon as the turn starts.
+      // Admitted but still in recovery/workspace setup: abort as soon as the turn starts. A turn that has
+      // not marked its run starting yet is a queued run, which a Stop cancels by id instead.
+      if (opts?.runId && id && this.runEngine?.getActiveRun(id)?.runId !== opts.runId) return false
       session.abortRequested = true
     } else if (!active || active.abort.signal.aborted) {
       return false
     } else {
+      if (opts?.runId && active.runId && active.runId !== opts.runId) return false
       active.pendingSteer = []
       active.promotedSteerIds = []
       active.abort.abort()
@@ -3987,7 +4322,8 @@ export class OrchestratorService extends EventEmitter {
     failed = false
   ): void {
     const wasAborted = aborted || turn.abort.signal.aborted
-    if (!wasAborted && turn.pendingSteer.length > 0) {
+    const hadUnreadSteers = !wasAborted && turn.pendingSteer.length > 0
+    if (hadUnreadSteers) {
       const pending = turn.pendingSteer
       const carried = turn.carriedSteers ?? []
       turn.pendingSteer = []
@@ -4005,10 +4341,18 @@ export class OrchestratorService extends EventEmitter {
           const leftover = plain.join('\n').trim()
           plain = []
           if (!leftover) return
+          // The follow-up is a queued run from the start, so the thread stays held without memory (a restart included).
+          let runId: string | undefined
           try {
-            this.enqueueForThread(session.threadId, { content: leftover, mode }, { source: 'steer-followup', internal: true })
+            runId = this.runEngine?.store.createRun({ threadId: session.threadId, source: 'steer-followup' }).runId
+          } catch {
+            // Without a run the person's text is still queued; the thread is just not held for it.
+          }
+          try {
+            this.enqueueForThread(session.threadId, { content: leftover, mode }, { source: 'steer-followup', internal: true, runId })
           } catch {
             // Best-effort: settlement must not fail if the follow-up cannot queue.
+            this.cancelQueuedRuns([runId])
           }
         }
         for (const text of pending) {
@@ -4031,10 +4375,22 @@ export class OrchestratorService extends EventEmitter {
       }
     }
     if (session.activeTurn === turn) session.activeTurn = null
+    // The turn's terminal write saw its unread steers and held the thread's tasks. They are queued as a
+    // follow-up turn now (which keeps holding them), or were dropped (which releases them).
+    if (hadUnreadSteers) this.reevaluateHold(session.threadId)
     opts?.onTurnSettled?.(wasAborted)
     this.emit(wasAborted ? 'turn-interrupted' : failed ? 'turn-failed' : 'turn-completed', {
       threadId: session.threadId
     })
+  }
+
+  /** The thread's inputs to the hold predicate changed outside the run store: publish the tasks that are no longer held. */
+  private reevaluateHold(threadId: string): void {
+    try {
+      this.runEngine?.store.settleHold(threadId)
+    } catch (error) {
+      console.warn('held tasks could not be re-evaluated', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   isActiveTurnRunning(threadId?: string): boolean {
@@ -4763,7 +5119,8 @@ export class OrchestratorService extends EventEmitter {
     const turn: ActiveTurnControl = {
       abort: new AbortController(),
       pendingSteer: [] as string[],
-      promotedSteerIds: [] as string[]
+      promotedSteerIds: [] as string[],
+      ...(engineRunId ? { runId: engineRunId } : {})
     }
     const turnAuthority = session.executionLease ? new TaskWriterAuthority(session.executionLease) : undefined
     const turnWriter = turnAuthority?.issue(turnId, { version: 1, workspace: 'shared', access: 'write' })
@@ -5638,10 +5995,17 @@ export class OrchestratorService extends EventEmitter {
     }
     let item = claimed as QueuedMessage
     const managedByStartup = opts?.managedByStartup === true
+    // The Stop fence at promotion: an entry that starts work on behalf of a parent and was queued before a
+    // Stop of its thread is refused (a Stop removes such entries itself; this catches one that outlived it).
+    if (item.stopGeneration !== undefined && this.runEngine && item.stopGeneration < currentStopGeneration(this.runEngine.store, session.threadId)) {
+      this.refuseFencedQueueItem(session, item, claimToken)
+      this.scheduleQueueDrain(session, opts)
+      return
+    }
     if (item.inboxIds?.length && this.runEngine) {
       // A queued steer that carries notices is rebuilt now: a row acknowledged since it was queued
       // (a `task_status` read) is dropped, and with none left there is nothing to deliver.
-      const rows = this.runEngine.inbox.getMany(item.inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === queueOwner(item.id))
+      const rows = this.dropStaleQuestionRows(this.runEngine.inbox.getMany(item.inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === queueOwner(item.id)))
       if (rows.length === 0) {
         this.completeSessionClaim(session, item.id, claimToken)
         this.scheduleQueueDrain(session, opts)

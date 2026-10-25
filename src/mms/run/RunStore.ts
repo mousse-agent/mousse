@@ -5,6 +5,7 @@ import { json, str, type Row } from './db/rows'
 import { fail } from './db/RunStoreError'
 import { settleWaitingDelegations } from './delegation/hold'
 import { stableStringify } from './json'
+import { currentStopGeneration } from './stopGeneration'
 import {
   TERMINAL_RUN_STATUSES,
   attemptId as makeAttemptId,
@@ -37,6 +38,7 @@ export class RunStore {
   private readonly settleQueue = new Set<string>()
   private settling = false
   private providerBackground: ((threadId: string) => boolean) | null = null
+  private unreadSteers: ((threadId: string) => boolean) | null = null
 
   constructor(readonly db: ProfileDatabase) {
     db.migrate(RUN_MIGRATIONS)
@@ -55,6 +57,26 @@ export class RunStore {
   providerBackgroundWork(threadId: string): boolean {
     try {
       return this.providerBackground?.(threadId) === true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Input (5) of the hold predicate (`childBusy`): whether the thread's live turn holds steers it has
+   * not read yet. A person's plain-text steer lives only in the turn's memory until the turn settles
+   * and queues it as a follow-up turn, which happens after the turn's terminal write; without this the
+   * thread would look idle in between and its task would publish before the thread answered the steer.
+   * Synchronous and in memory, like `setProviderBackgroundWork`. Absent means no thread has any.
+   */
+  setUnreadSteers(read: ((threadId: string) => boolean) | null): void {
+    this.unreadSteers = read
+  }
+
+  /** Never throws: a host that cannot answer has no unread steers to wait for. */
+  hasUnreadSteers(threadId: string): boolean {
+    try {
+      return this.unreadSteers?.(threadId) === true
     } catch {
       return false
     }
@@ -128,10 +150,10 @@ export class RunStore {
       this.db
         .statement(
           `INSERT INTO runs(run_id, thread_id, ordinal, status, epoch, active_attempt_id, source,
-             client_request_id, user_message_id, requested_at, started_at, completed_at, outcome)
-           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             client_request_id, user_message_id, requested_at, started_at, completed_at, outcome, stop_generation)
+           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
-        .run(...runParams(record))
+        .run(...runParams(record), currentStopGeneration(this, record.threadId))
       this.appendEvent({
         threadId: record.threadId,
         runId: record.runId,

@@ -49,9 +49,9 @@ describe('ProfileDatabase', () => {
     expect(statSync(database.path).mode & 0o777).toBe(0o600)
     database.migrate(RUN_MIGRATIONS)
     database.migrate(RUN_MIGRATIONS)
-    expect(database.userVersion()).toBe(7)
+    expect(database.userVersion()).toBe(8)
     const applied = database.database.prepare('SELECT version FROM run_schema_migrations').all()
-    expect(applied).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }])
+    expect(applied).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }])
     const journal = database.database.prepare('PRAGMA journal_mode').get()!
     expect(journal.journal_mode).toBe('wal')
   })
@@ -59,7 +59,7 @@ describe('ProfileDatabase', () => {
   it('refuses a database whose schema is newer than the known migrations', () => {
     const database = open()
     database.migrate(RUN_MIGRATIONS)
-    database.database.exec('PRAGMA user_version=8')
+    database.database.exec('PRAGMA user_version=9')
     expect(codeOf(() => database.migrate(RUN_MIGRATIONS))).toBe('downgrade_unsupported')
   })
 

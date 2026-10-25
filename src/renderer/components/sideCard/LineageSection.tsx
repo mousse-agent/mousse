@@ -3,12 +3,14 @@ import { isRunningSubagent, type SubagentSummary } from '../../../shared/subagen
 import { useSubagents } from '../../hooks/useSubagents'
 import { openThread } from '../../lib/openThread'
 import {
+  countRunningSubagents,
   lineageModelLabel,
   lineageStatusLabel,
   lineageSubagentName,
   lineageTitle,
   orderLineageSubagents,
-  sliceLineage
+  sliceLineage,
+  stopAllSubagents
 } from './lineageLogic'
 import { SideCardSection, type SideCardSectionContext } from './SideCardSection'
 import './lineage.css'
@@ -108,7 +110,25 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
   }
 
   return (
-    <SideCardSection title={lineageTitle(subagents)} threadId={threadId}>
+    <SideCardSection
+      title={lineageTitle(subagents)}
+      threadId={threadId}
+      action={
+        // Stop all stops each subagent that is working, with everything below it, and leaves this thread's own turn running.
+        threadId !== null && countRunningSubagents(subagents) > 0 ? (
+          <button
+            type="button"
+            className="lineage-stop-all"
+            aria-label="Stop all subagents"
+            onClick={() =>
+              void stopAllSubagents({ stopAll: window.mousse.subagents.stopAll, abort: window.mousse.orchestrator.abort }, threadId, subagents)
+            }
+          >
+            Stop all
+          </button>
+        ) : undefined
+      }
+    >
       <LineageList
         subagents={subagents}
         now={now}
