@@ -961,7 +961,31 @@ export class OrchestratorService extends EventEmitter {
     for (const runId of interrupted) {
       this.emit('run-interrupted-on-boot', { threadId: engine.getRun(runId)?.threadId, runId })
     }
+    this.recoverQueuedRows()
     return interrupted
+  }
+
+  /**
+   * Boot: a row a queue item carries (`queue:<id>`) whose item is gone (removed or cleared, then a
+   * crash) has no delivery left; it goes back to pending for rule 4. A row whose item exists stays with it.
+   */
+  private recoverQueuedRows(): void {
+    const engine = this.runEngine
+    const store = this.threadStore
+    if (!engine || !store) return
+    const items = new Map<string, Set<string>>()
+    for (const row of engine.inbox.listDeliveredByQueue()) {
+      let ids = items.get(row.threadId)
+      if (!ids) {
+        try {
+          ids = new Set(readDurableQueue(store, row.threadId).map((item) => item.id))
+        } catch {
+          continue
+        }
+        items.set(row.threadId, ids)
+      }
+      if (!ids.has(row.deliveredBy!.slice('queue:'.length))) engine.inbox.release([row.inboxId], row.deliveredBy!)
+    }
   }
 
   /**
@@ -1395,7 +1419,7 @@ export class OrchestratorService extends EventEmitter {
       if (!item?.inboxIds?.length) continue
       try {
         const own = engine.inbox.getMany(item.inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === queueOwner(item.id))
-        if (own.length) engine.inbox.markPendingAgain(own.map((row) => row.inboxId))
+        if (own.length) engine.inbox.release(own.map((row) => row.inboxId), queueOwner(item.id))
       } catch (error) {
         console.warn('queued notice rows could not be released', { itemId: item.id, error: error instanceof Error ? error.message : String(error) })
       }
@@ -3034,17 +3058,19 @@ export class OrchestratorService extends EventEmitter {
         const result = removeQueuedMessage(diskItems, itemId)
         if (result.removed?.workflowInvocationId) this.workflowChat?.abandon(result.removed.workflowInvocationId, threadId)
         removed = result.removed
+        // Before the removal is saved: a crash in between leaves an item that finds it owns no rows and is skipped.
+        this.releaseQueuedRows([result.removed])
         return result.items
       })
     } else {
       const result = removeQueuedMessage(session.queue, itemId)
       if (result.removed?.workflowInvocationId) this.workflowChat?.abandon(result.removed.workflowInvocationId, threadId)
+      this.releaseQueuedRows([result.removed])
       session.queue = result.items
       removed = result.removed
     }
     this.emitQueueUpdated(threadId, session.queue)
     this.cancelQueuedRuns([(removed as QueuedMessage | null)?.runId])
-    this.releaseQueuedRows([removed as QueuedMessage | null])
     return removed
   }
 
@@ -3070,6 +3096,8 @@ export class OrchestratorService extends EventEmitter {
    */
   promoteQueueItemToSteer(threadId: string, itemId: string): boolean {
     const session = this.getOrCreateSession(threadId)
+    if (session.queue.find((entry) => entry.id === itemId)?.inboxIds?.length)
+      throw new QueueValidationError('A queued subagent result is delivered as its own turn; it cannot be sent as a steer.')
     const localActive = session.isTurnActive() || this.isChannelTurnActive(threadId)
     const externalActive = this.isThreadLeaseHeldExternally(
       threadId,
@@ -3082,6 +3110,9 @@ export class OrchestratorService extends EventEmitter {
     let promotedRunId: string | undefined
     // A steer joins the active run, so the promoted item no longer owns a run of its own.
     const promote = (items: QueuedMessage[]): QueuedMessage[] => {
+      // A queued result notice is rebuilt when it runs and owns its rows; its stale text must not be sent as a steer.
+      if (items.find((entry) => entry.id === itemId)?.inboxIds?.length)
+        throw new QueueValidationError('A queued subagent result is delivered as its own turn; it cannot be sent as a steer.')
       const result = promoteQueuedMessageToSteer(items, itemId)
       promotedRunId = result.item.runId
       if (!promotedRunId) {
@@ -3753,6 +3784,8 @@ export class OrchestratorService extends EventEmitter {
         const retainedIds = new Set(retained.map((item) => item.id))
         clearedItems = items.filter((item) => !retainedIds.has(item.id))
         clearedRunIds = clearedItems.map((item) => item.runId)
+        // Before the clear is saved (see removeQueuedItem).
+        this.releaseQueuedRows(clearedItems)
         for (const item of items) {
           if (item.workflowInvocationId && !retainedIds.has(item.id)) {
             if (!this.workflowChat) throw new Error('Workflow queue cancellation is unavailable')
@@ -3769,7 +3802,6 @@ export class OrchestratorService extends EventEmitter {
       }
       this.emitQueueUpdated(id, session.queue)
       this.cancelQueuedRuns(clearedRunIds)
-      this.releaseQueuedRows(clearedItems)
     }
     this.emit('turn-aborted', { threadId: id ?? undefined })
     return true
@@ -3795,23 +3827,38 @@ export class OrchestratorService extends EventEmitter {
   ): void {
     const wasAborted = aborted || turn.abort.signal.aborted
     if (!wasAborted && turn.pendingSteer.length > 0) {
-      const leftover = turn.pendingSteer.join('\n').trim()
-      // The notices a steer carried that the turn never read go with the follow-up turn.
+      const pending = turn.pendingSteer
       const carried = turn.carriedSteers ?? []
       turn.pendingSteer = []
       turn.promotedSteerIds = []
       turn.carriedSteers = []
-      if (leftover && session.threadId !== '__unbound__' && !session.deleted) {
-        try {
-          this.enqueueCarrying(
-            session.threadId,
-            { content: leftover, mode: getLastUserChatMode(session.messages) ?? 'agent' },
-            { source: 'steer-followup', internal: true },
-            carried,
-            carried.flatMap((entry) => entry.subagentNotice ?? [])
-          )
-        } catch {
-          // Best-effort: settlement must not fail if the follow-up cannot queue.
+      if (session.threadId !== '__unbound__' && !session.deleted) {
+        const mode = getLastUserChatMode(session.messages) ?? 'agent'
+        // What the turn never read goes on as turns of their own. A steer that carried subagent
+        // results is one turn per steer (it owns its rows and is rebuilt when it runs); the user's
+        // own text is a plain follow-up that nothing rebuilds.
+        const unmatched = carried.map((entry) => entry.text)
+        const plain: string[] = []
+        for (const text of pending) {
+          const at = unmatched.indexOf(text)
+          if (at >= 0) unmatched.splice(at, 1)
+          else plain.push(text)
+        }
+        for (const entry of carried) {
+          try {
+            this.enqueueCarrying(session.threadId, { content: entry.text, mode }, { source: 'steer-followup', internal: true }, [entry], entry.subagentNotice)
+          } catch {
+            // Settlement must not fail; the rows go back to pending so rule 4 delivers them instead.
+            this.runEngine?.inbox.release(entry.inboxIds, entry.effectId)
+          }
+        }
+        const leftover = plain.join('\n').trim()
+        if (leftover) {
+          try {
+            this.enqueueForThread(session.threadId, { content: leftover, mode }, { source: 'steer-followup', internal: true })
+          } catch {
+            // Best-effort: settlement must not fail if the follow-up cannot queue.
+          }
         }
       }
     }
@@ -3855,7 +3902,7 @@ export class OrchestratorService extends EventEmitter {
         : this.sessions.get(threadId) ?? null
     if (session?.activeTurn && !session.activeTurn.abort.signal.aborted) {
       session.activeTurn.pendingSteer.push(trimmed)
-      if (carried) (session.activeTurn.carriedSteers ??= []).push({ ...carried, subagentNotice })
+      if (carried) (session.activeTurn.carriedSteers ??= []).push({ ...carried, text: trimmed, subagentNotice })
       // Prefer ALS when already inside the turn; otherwise annotate bound if matching.
       const run = (): void => {
         // Mid-turn steers share the turn's mode — preserve tracking so the next
@@ -3873,8 +3920,9 @@ export class OrchestratorService extends EventEmitter {
       this.emit('turn-steered', { threadId, text: trimmed })
       return true
     }
-    // Local channel turn for this thread.
-    if (this.steerChannelTurn(threadId, trimmed)) {
+    // Local channel turn for this thread. A steer that carries notices is not given to it: the turn
+    // would take the text without the rows' identity, so it is queued as a turn of its own instead.
+    if (!carried && this.steerChannelTurn(threadId, trimmed)) {
       this.emit('turn-steered', { threadId, text: trimmed })
       return true
     }

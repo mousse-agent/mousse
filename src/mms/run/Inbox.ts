@@ -130,6 +130,35 @@ export class Inbox {
       .map(toInbox)
   }
 
+  /** Delivered rows that a queue item carries (`queue:<itemId>`), oldest first. */
+  listDeliveredByQueue(): InboxRecord[] {
+    return this.db
+      .statement(`SELECT * FROM inbox WHERE status = 'delivered' AND delivered_by LIKE 'queue:%' ORDER BY created_at, rowid`)
+      .all()
+      .map(toInbox)
+  }
+
+  /**
+   * Gives rows back without a failure: delivered -> pending, not counted as a delivery attempt
+   * (`pendingCount` skips it), for a delivery that never started or was withdrawn (a queued
+   * notice the user removed). With `from`, only rows that owner still delivers move.
+   */
+  release(ids: readonly string[], from?: string): string[] {
+    return this.db.transaction(() => {
+      const moved: string[] = []
+      for (const id of ids) {
+        const current = this.get(id)
+        if (!current || current.status !== 'delivered') continue
+        if (from !== undefined && current.deliveredBy !== from) continue
+        // Recorded while the row is still delivered, so the pending write below is the only one counted.
+        this.patchPayload(id, { releases: Number((current.payload as { releases?: unknown } | null)?.releases ?? 0) + 1 })
+        this.markPendingAgain([id])
+        moved.push(id)
+      }
+      return moved
+    })
+  }
+
   /** The model read the steer `effectId` carried: its rows count as delivered to that run. */
   markSteerTaken(ids: readonly string[], effectId: string): void {
     this.db.transaction(() => {
@@ -220,7 +249,8 @@ export class Inbox {
            AND json_extract(payload, '$.inboxId') = ? AND json_extract(payload, '$.status') = 'pending'`
       )
       .get(threadId, inboxId)
-    return Number(row?.n ?? 0)
+    // Releases (a withdrawn delivery) are not attempts.
+    return Number(row?.n ?? 0) - Number((this.get(inboxId)?.payload as { releases?: unknown } | null)?.releases ?? 0)
   }
 
   /** pending|delivered -> acknowledged. */
