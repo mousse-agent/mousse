@@ -1643,6 +1643,56 @@ describe('background helpers as the real Claude Code reports them', () => {
     expect(f.host.backgroundWork).toHaveBeenLastCalledWith('thread', false)
   })
 
+  it('a task that finishes while a cut-off wake still owes its result gets its own wake afterwards, and the old result does not settle it', async () => {
+    const f = fixture()
+    startedWith(f, { id: 'bash-1', type: 'local_bash' }, { id: 'bash-2', type: 'local_bash' })
+    await f.turn()
+    const process = f.cli.last
+    f.cli.reply = undefined
+    process.emit(notification('bash-1'), textDelta('reading the first report'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    const abort = new AbortController()
+    const wakeA = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined, signal: abort.signal })
+    await later(20)
+    abort.abort()
+    await expect(wakeA).rejects.toThrow()
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    // The second shell finishes before the cut-off wake's aborted result: no wake opens for it yet.
+    process.emit(notification('bash-2'))
+    process.emit(textDelta('leftover of wake A'))
+    await later(30)
+    expect(f.host.continuationStarted).toHaveBeenCalledTimes(1)
+    process.emit(resultFrame({ terminalReason: 'aborted_streaming', origin: 'task-notification' }))
+    // Claude's turn for the second shell opens its own continuation, which only that turn's text and result settle.
+    process.emit(textDelta('B text'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(2))
+    expect(f.host.continuationStarted).toHaveBeenLastCalledWith('thread', expect.objectContaining({ taskIds: ['bash-2'] }))
+    const wakeB = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined })
+    process.emit(resultFrame({ text: 'B text', origin: 'task-notification' }))
+    expect(await wakeB).toBe('B text')
+  })
+
+  it('the same for a wake nobody could run: a later task\'s wake opens after the discarded one is over', async () => {
+    const f = fixture()
+    f.service.setLiveHost(null)
+    startedWith(f, { id: 'bash-1', type: 'local_bash' }, { id: 'bash-2', type: 'local_bash' })
+    await f.turn()
+    const process = f.cli.last
+    f.cli.reply = undefined
+    process.emit(notification('bash-1'))
+    await later(30)
+    process.emit(textDelta('hidden work of A'))
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    // The second shell finishes before the discarded wake's result.
+    process.emit(notification('bash-2'))
+    await later(30)
+    process.emit(resultFrame({ terminalReason: 'aborted_streaming', origin: 'task-notification' }))
+    await later(30)
+    // Claude's turn for the second shell is a wake of its own, and it is stopped at its first frame like the first.
+    process.emit(textDelta('hidden work of B'))
+    await vi.waitFor(() => expect(process.interrupts).toBe(2))
+  })
+
   it('a background agent\'s frame does not stop a discarded wake that has not begun; its own first frame does', async () => {
     const f = fixture()
     f.service.setLiveHost(null)

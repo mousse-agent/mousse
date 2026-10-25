@@ -172,6 +172,16 @@ export class BackgroundObligations {
     this.unsure.delete(taskId)
   }
 
+  /**
+   * The task finished while a wake that was cut off still owed its result: Claude starts its own turn for it
+   * later, so it is `CARRIED`, and `unsure` since that turn may never come.
+   */
+  carry(taskId: string): void {
+    if (!this.tasks.has(taskId)) return
+    this.consumers.set(taskId, CARRIED)
+    this.unsure.add(taskId)
+  }
+
   consumed(taskId: string): boolean {
     return this.consumers.has(taskId)
   }
@@ -969,6 +979,14 @@ export class LiveSession<Turn = unknown> {
     const owner = this.notificationOwner()
     if (owner) {
       this.obligations.consume(taskId, owner)
+      return
+    }
+    // A wake that was cut off (or discarded) still owes its aborted result, and everything Claude writes
+    // until then is its own. Its result must not settle the wake this task needs, so that wake is not
+    // opened now: the task is owed, and Claude's next turn for it opens the continuation once the old one is over.
+    const old = this.continuation
+    if (old && old.abandoned && !old.settled) {
+      this.obligations.carry(taskId)
       return
     }
     this.startContinuation([taskId], summary ? [summary] : [])
