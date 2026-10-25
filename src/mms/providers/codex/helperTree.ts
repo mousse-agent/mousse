@@ -184,6 +184,9 @@ export interface Check {
   quiescent: boolean
 }
 
+/** The threads on the way up from an unknown thread, each with the parent it names. */
+type Chain = Array<{ id: string; status: ThreadStatusType; parent?: string }>
+
 type ListedRow = { status: ThreadStatusType; createdAt?: number }
 
 export interface SweepOptions {
@@ -202,6 +205,8 @@ export interface SweepOptions {
 export class HelperTree {
   private readonly listed = new Map<string, ListedRow>()
   private readonly placed = new Map<string, ThreadStatusType>()
+  /** The parent each placed member was found under, to tell whether its way up to the root is established. */
+  private readonly placedParent = new Map<string, string>()
   private readonly unknown = new Set<string>()
   private readonly ruledOut = new Set<string>()
   private readonly seenActive = new Set<string>()
@@ -336,7 +341,7 @@ export class HelperTree {
 
   /**
    * One read of the tree. Once a sweep gives up on it (`epoch` moved, `signal` aborted) it sends no further
-   * request and applies nothing: every answer is checked before it is used.
+   * request and applies nothing more: every answer is checked before it is used (what it applied earlier stays).
    */
   private async snapshot(epoch: number, signal: AbortSignal): Promise<Snapshot> {
     const live = (): void => {
@@ -353,6 +358,7 @@ export class HelperTree {
     for (const [id, row] of rows) {
       this.listed.set(id, row)
       this.placed.delete(id)
+      this.placedParent.delete(id)
       if (row.status === 'active') this.seenActive.add(id)
     }
     // A row whose parent the listing lacks (a helper whose own row is not written yet, or one archived) is
@@ -369,17 +375,19 @@ export class HelperTree {
       verdicts.set(parent, walked.verdict)
     }
     for (const [id, parent] of parents) if (verdicts.get(parent) === 'inconclusive') unverified.add(id)
-    // Whatever hangs below an unverified row is unverified too.
-    for (let changed = true; changed; ) {
-      changed = false
-      for (const [id, parent] of parents) if (!unverified.has(id) && unverified.has(parent)) changed = !!unverified.add(id)
-    }
     for (const id of [...this.placed.keys()]) {
       const status = await this.refresh(id, signal, live)
       this.placed.set(id, status)
     }
     this.collectUnknown()
     for (const id of [...this.unknown]) await this.place(id, signal, live)
+    // Whatever hangs below an unverified thread, listed or placed, is unverified too.
+    for (let changed = true; changed; ) {
+      changed = false
+      for (const [id, parent] of parents) if (!unverified.has(id) && unverified.has(parent)) changed = !!unverified.add(id)
+      for (const [id, parent] of this.placedParent)
+        if (this.placed.has(id) && !unverified.has(id) && unverified.has(parent)) changed = !!unverified.add(id)
+    }
 
     const now = this.ports.now()
     const busy: string[] = []
@@ -402,7 +410,7 @@ export class HelperTree {
     for (const [id, status] of this.placed)
       if (this.busyStatus(id, status)) {
         busy.push(id)
-        targets.push(id)
+        if (!unverified.has(id)) targets.push(id)
       }
 
     const rootBusy = this.busyStatus(this.rootId, root)
@@ -503,8 +511,8 @@ export class HelperTree {
     start: string,
     signal: AbortSignal,
     live: () => void
-  ): Promise<{ verdict: 'in' | 'out' | 'inconclusive'; chain: Array<{ id: string; status: ThreadStatusType }> }> {
-    const chain: Array<{ id: string; status: ThreadStatusType }> = []
+  ): Promise<{ verdict: 'in' | 'out' | 'inconclusive'; chain: Chain }> {
+    const chain: Chain = []
     if (start === this.rootId || this.isMember(start)) return { verdict: 'in', chain }
     if (this.ruledOut.has(start)) return { verdict: 'out', chain }
     let current = start
@@ -519,7 +527,7 @@ export class HelperTree {
         if (error instanceof RpcRefused) return { verdict: 'inconclusive', chain }
         throw error
       }
-      chain.push({ id: current, status: thread.status ?? this.statuses.get(current) ?? 'notLoaded' })
+      chain.push({ id: current, status: thread.status ?? this.statuses.get(current) ?? 'notLoaded', ...(typeof thread.parent === 'string' ? { parent: thread.parent } : {}) })
       if (thread.parent === null) return { verdict: 'out', chain }
       if (typeof thread.parent !== 'string') return { verdict: 'inconclusive', chain }
       if (thread.parent === this.rootId || this.isMember(thread.parent)) return { verdict: 'in', chain }
@@ -542,10 +550,13 @@ export class HelperTree {
     if (walked.verdict !== 'inconclusive') this.rule(walked.chain, walked.verdict)
   }
 
-  private rule(chain: Array<{ id: string; status: ThreadStatusType }>, verdict: 'in' | 'out'): void {
-    for (const { id, status } of chain) {
+  private rule(chain: Chain, verdict: 'in' | 'out'): void {
+    for (const { id, status, parent } of chain) {
       this.unknown.delete(id)
-      if (verdict === 'in') this.placed.set(id, status)
+      if (verdict === 'in') {
+        this.placed.set(id, status)
+        if (parent) this.placedParent.set(id, parent)
+      }
       else this.ruledOut.add(id)
     }
   }

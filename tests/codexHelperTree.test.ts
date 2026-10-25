@@ -518,6 +518,40 @@ describe('listed rows whose ancestry is not established', () => {
   })
 })
 
+describe('threads placed under a row of unestablished ancestry', () => {
+  async function sweepsNothingUntilEstablished(tree: HelperTree, world: World, expected: string[]) {
+    const check = await tree.check()
+    expect(check.snapshot.calm).toBe(false)
+    expect(check.snapshot.targets).toEqual([])
+    let outcome: string | undefined
+    void tree.sweep(sweepOptions({ deadlineAt: Date.now() + 800 })).then((value) => (outcome = value))
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(outcome).toBe('deadline')
+    expect(world.interrupts).toEqual([])
+    // The parent can be read now: the whole chain is established and may be stopped.
+    world.threads.get('gone')!.unreadable = false
+    expect((await tree.check()).snapshot.targets.sort()).toEqual(expected)
+  }
+
+  it('an unlisted helper below an unverified listed row holds the pair but is never interrupted, until the parent read succeeds', async () => {
+    const { tree, world, hear } = build()
+    world.add('gone', ROOT, 'idle', { edge: false, unreadable: true })
+    world.add('L', 'gone', 'active')
+    world.add('U', 'L', 'active', { edge: false })
+    hear(started('U'))
+    await sweepsNothingUntilEstablished(tree, world, ['L', 'U'])
+  })
+
+  it('a listed row below an unlisted thread that hangs under an unverified row is unverified too', async () => {
+    const { tree, world } = build()
+    world.add('gone', ROOT, 'idle', { edge: false, unreadable: true })
+    world.add('L', 'gone', 'active')
+    world.add('M', 'L', 'idle', { edge: false })
+    world.add('R', 'M', 'active')
+    await sweepsNothingUntilEstablished(tree, world, ['L', 'R'])
+  })
+})
+
 describe('a snapshot the sweep gave up on', () => {
   /** Reads of the ids in `held` wait until `release()`. */
   function gated(world: World, held: string[]) {
