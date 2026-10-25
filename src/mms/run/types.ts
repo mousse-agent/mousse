@@ -328,6 +328,23 @@ export interface ChildResultPayload {
   result: DelegationResult
 }
 
+/**
+ * Payload of a `reconcile_notice` row that tells a subagent's parent the subagent is waiting for an
+ * answer (issue #142). `requestId` names the pending question; it lives in the daemon's memory only, so
+ * the row is stale once the question is answered, dismissed or the daemon restarts.
+ */
+export interface ChildQuestionPayload {
+  kind: 'child_question'
+  childThreadId: string
+  childRunId: string | null
+  requestId: string
+  delegationId?: string
+}
+
+export function isChildQuestionRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'child_question'
+}
+
 /** Payload of a `turn.start` effect that wakes a thread for its pending inbox rows (rule 4). */
 export interface WakeTurnPayload {
   kind: 'wake'
