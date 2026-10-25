@@ -1155,9 +1155,10 @@ export class OrchestratorService extends EventEmitter {
     if (!hold?.reserved) {
       const busy = session.isTurnRunning() || engine.getActiveRun(payload.threadId)
       if (busy) {
-        // Only the turn whose own send holds the admission, whose effect is still waiting behind this one,
-        // may be passed. An admission held by a queue drain or a channel turn belongs to a turn the engine
-        // does not schedule: it finishes first.
+        // Only a turn whose own turn.start effect holds the admission and is still waiting behind this one
+        // may be passed: a send's turn, or a queue drain's (the drain gets its effect with the admission held,
+        // and startTurn records that run as the owner). An admission with no owner effect belongs to a turn
+        // that does not run through the engine (a channel turn): it finishes first.
         const owner = session.admissionRunId
         const waiting =
           owner !== undefined &&
