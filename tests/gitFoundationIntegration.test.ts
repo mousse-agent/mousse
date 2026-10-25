@@ -1,6 +1,6 @@
 import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChildAgentIntegrationService } from '../src/mms/agents/ChildAgentIntegrationService'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
@@ -122,6 +122,25 @@ describe('Git foundation pinned child results', () => {
       f.commit(f.repo, 'parent\n', 'parent.txt')
       await expect(service.integrate(pinnedRequest(child, pinned, 'moved'))).rejects.toThrow(/destination HEAD changed/)
       expect(new ChangeReceiptService(f.thread).list()).toEqual([])
+    })
+
+    it('a crash after the intent was written recovers the pinned merge, even though the subagent has moved on', async () => {
+      const { child, pinned, later } = continuedAfterTask()
+      const append = ThreadJournal.prototype.append
+      const crashed = vi.spyOn(ThreadJournal.prototype, 'append').mockImplementation(function (this: ThreadJournal, entry) {
+        const written = append.call(this, entry)
+        if (entry.state === 'prepared') throw new Error('crash after the intent')
+        return written
+      })
+      await expect(new ChildAgentIntegrationService(f.thread).integrate(pinnedRequest(child, pinned))).rejects.toThrow('crash after the intent')
+      crashed.mockRestore()
+      expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.baseSha)
+      // The durable request carries the pin, so recovery does not apply the live-worktree checks to a worker that kept going.
+      await new ChildAgentIntegrationService(f.thread).recoverPending(f.repo)
+      expect(git(f.repo, 'rev-list', '--parents', '-n', '1', 'HEAD').split(/\s+/).slice(1)).toEqual([f.baseSha, pinned])
+      expect(new ChangeReceiptService(f.thread).list()[0].contributions).toMatchObject([{ resultSha: pinned }])
+      expect(git(child, 'rev-parse', 'HEAD')).toBe(later)
+      expect(f.read(child)).toBe('task B, still being written\n')
     })
 
     it('without a pin the live worktree is still validated: a dirty or moved worker is refused', async () => {

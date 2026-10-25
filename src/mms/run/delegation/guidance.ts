@@ -42,16 +42,16 @@ export function mcpDelegationInstructions(): string[] {
   ]
 }
 
-/** What a subagent is told, in addition to its task: where its result goes. */
-export function subagentGuidanceLines(parentTitle: string): string[] {
+/** What a subagent is told, in addition to its task: where its result goes. `parentTitle` is absent when the parent has no title. */
+export function subagentGuidanceLines(parentTitle?: string): string[] {
   return [
-    `You are a subagent of "${parentTitle}". Your final message is your result: keep it self-contained and bounded.`,
+    `You are a subagent${parentTitle ? ` of "${parentTitle}"` : ''}. Your final message is your result: keep it self-contained and bounded.`,
     'ask_user questions reach your parent and the user.',
     ...(ADVERTISE_NESTING ? ['You may start your own subagents unless your instructions say not to.'] : [])
   ]
 }
 
 /** The first prompt of a subagent: its guidance, then the task. */
-export function subagentPreamble(parentTitle: string): string {
+export function subagentPreamble(parentTitle?: string): string {
   return subagentGuidanceLines(parentTitle).join(' ')
 }

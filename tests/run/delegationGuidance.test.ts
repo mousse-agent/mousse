@@ -59,6 +59,9 @@ describe('subagent guidance', () => {
   it('what a subagent is told in its first prompt', () => {
     expect(subagentPreamble('API reviewer')).toBe('You are a subagent of "API reviewer". Your final message is your result: keep it self-contained and bounded. ask_user questions reach your parent and the user.')
     expect(subagentGuidanceLines('Parent')).toHaveLength(2)
+    // A parent with no title reads naturally, not as a subagent of "its parent".
+    expect(subagentPreamble()).toBe('You are a subagent. Your final message is your result: keep it self-contained and bounded. ask_user questions reach your parent and the user.')
+    expect(subagentPreamble('')).toBe(subagentPreamble())
   })
 
   it('does not tell models about nested subagents yet', () => {

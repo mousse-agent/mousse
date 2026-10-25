@@ -129,7 +129,7 @@ export function restoreUndeliveredRows(store: RunStore, outbox: EffectOutbox, no
     if (!failure) continue
     const flagged = (row.payload as { deliveryFailed?: unknown } | null)?.deliveryFailed === true
     if (flagged) continue
-    const attempts = inbox.pendingCount(row.inboxId, row.threadId) - Number((row.payload as { attemptsBefore?: unknown } | null)?.attemptsBefore ?? 0)
+    const attempts = inbox.pendingCount(row.inboxId, row.threadId)
     if (attempts > MAX_INBOX_REDELIVERIES) {
       inbox.patchPayload(row.inboxId, { deliveryFailed: true, attempts, lastError: failure.error })
       store.appendEvent({
@@ -145,22 +145,6 @@ export function restoreUndeliveredRows(store: RunStore, outbox: EffectOutbox, no
     restored.push(row.inboxId)
   }
   return restored
-}
-
-/**
- * Re-arms rows whose delivery gave up: they are pending again, with a fresh set of attempts. Returns
- * their ids. Joins the caller's transaction.
- */
-export function retryUndeliverable(store: RunStore, threadId: string): string[] {
-  const inbox = new Inbox(store)
-  return store.db.transaction(() => {
-    const rows = inbox.listUndeliverable(threadId)
-    for (const row of rows) {
-      inbox.patchPayload(row.inboxId, { deliveryFailed: null, lastError: null, attempts: null, attemptsBefore: inbox.pendingCount(row.inboxId, row.threadId) })
-      inbox.markPendingAgain([row.inboxId])
-    }
-    return rows.map((row) => row.inboxId)
-  })
 }
 
 /** Why and when the delivery an effect carried did not happen, or null when it did (or may still). */
