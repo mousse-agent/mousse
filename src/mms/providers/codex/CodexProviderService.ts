@@ -85,6 +85,13 @@ const STOPPED_TURN_RELEASE_MS = 30_000
 export const CODEX_IDLE_CLOSE_MS = 60_000
 /** ...or after a sign-in check or model listing that started it. */
 export const CODEX_CHECK_CLOSE_MS = 5_000
+/**
+ * A chat held open only by its native helpers is released when none of them has reported anything
+ * for this long (the helpers are stopped, the run ends with its own text and a note)...
+ */
+export const CODEX_HELPER_IDLE_CAP_MS = 30 * 60_000
+/** ...or when they have held it this long in total, however active they are. */
+export const CODEX_HELPER_PIN_CAP_MS = 4 * 60 * 60_000
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 
 type SavedThread = {
@@ -123,6 +130,9 @@ export type CodexServiceDependencies = {
   requestTimeoutMs?: number
   /** Overrides both idle-close delays (tests). */
   idleCloseMs?: number
+  /** Overrides how long native helpers may be silent / hold a chat open (tests). */
+  helperIdleCapMs?: number
+  helperPinCapMs?: number
   /** `codex --version` lookups (tests). */
   versions?: CliVersionCache
 }
@@ -419,6 +429,14 @@ class TurnRun {
       totalTokens: turn.totalTokens ?? 0,
       context: { ...context, ...(this.usageEnd.window ? { contextWindow: this.usageEnd.window } : {}) }
     }
+  }
+
+  /** Adds a closing note to the reply (after the Codex text), streamed like any other text. */
+  addNote(note: string): void {
+    const id = `mousse-note-${this.order.length}`
+    this.order.push(id)
+    this.parts.set(id, note)
+    this.input.onText(this.text)
   }
 
   closeTools(): void {
@@ -959,6 +977,7 @@ export class CodexProviderService {
     if (this.app?.conn !== conn) return
     this.app = undefined
     this.loaded.clear()
+    this.orphans.clear()
     // The next process must prove its own sign-in before it gets a turn.
     this.probeResult = undefined
     for (const [threadId, run] of [...this.turns]) {
@@ -1282,17 +1301,23 @@ export class CodexProviderService {
       const undelivered: string[] = []
       let steering: Promise<void> = Promise.resolve()
       let turnOpen = false
+      // Wakes the wait for native helpers when a steer has to start a turn of its own.
+      let steerWake: (() => void) | undefined
+      const hold = (text: string): void => {
+        undelivered.push(text)
+        steerWake?.()
+      }
       const deliver = (text: string): void => {
         steering = steering.then(async () => {
           if (!turnOpen || !current.turnId || signal.aborted) {
-            undelivered.push(text)
+            hold(text)
             return
           }
           try {
             await conn.request('turn/steer', { threadId: codexThreadId, expectedTurnId: current.turnId, input: [textInput(text)] }, { signal })
           } catch (error) {
             if (!(error instanceof CodexRpcError)) throw error
-            undelivered.push(text)
+            hold(text)
           }
         })
         steering.catch(() => controller.abort(new Error('Codex steer delivery failed')))
@@ -1328,6 +1353,8 @@ export class CodexProviderService {
           : '')
       let nextInput: UserInput[] = [textInput(preamble + (input.prompt || '(image attachment)')), ...images]
       let lastTurn: CodexTurn | undefined
+      // When native helpers first held this chat open; the pin cap counts from here.
+      let pinnedSince: number | undefined
       for (;;) {
         // Stop may have landed before this run existed (its handler then had nothing to
         // interrupt); a turn started now could never be stopped.
@@ -1369,21 +1396,25 @@ export class CodexProviderService {
           signal.throwIfAborted()
           throw new Error('Codex interrupted the turn')
         }
-        if (!undelivered.length) break
-        nextInput = [textInput(undelivered.splice(0).join('\n'))]
-      }
-      // Codex completes the parent's turn while the helpers it started keep running, so this chat (the
-      // child's run) stays open until they settle; Stop interrupts them and ends the wait.
-      if (current.helpers.running().length) {
-        const beat = setInterval(() => input.onHeartbeat?.(), 5_000)
-        beat.unref?.()
-        try {
-          await Promise.race([current.helpers.whenSettled(), aborted])
-        } finally {
-          clearInterval(beat)
+        if (!undelivered.length) {
+          // Codex completes the parent's turn while the helpers it started keep running, so this chat
+          // (the child's run) stays open until they settle. Stop interrupts them and ends the wait; a
+          // steer that arrives meanwhile starts a turn; helpers silent for too long are abandoned.
+          if (current.helpers.running().length) {
+            pinnedSince ??= Date.now()
+            const held = await this.holdForHelpers(current, input, aborted, new Promise<void>((wake) => (steerWake = wake)), pinnedSince)
+            steerWake = undefined
+            // Stop interrupts the helpers, and their end can be reported before the abort is seen.
+            signal.throwIfAborted()
+            if (held) {
+              this.stopHelpers(current)
+              current.addNote(held)
+              break
+            }
+          }
+          if (!undelivered.length) break
         }
-        // Stop interrupts the helpers, and their end can be reported before the abort is seen.
-        signal.throwIfAborted()
+        nextInput = [textInput(undelivered.splice(0).join('\n'))]
       }
       this.turns.delete(codexThreadId)
       current.settled()
@@ -1428,6 +1459,49 @@ export class CodexProviderService {
             release
           )
       }
+    }
+  }
+
+  /**
+   * Holds a chat whose own turn is done while its native helpers run. Returns when they have all
+   * settled or a steer wants a turn (nothing returned), or when the cap expires: no helper has
+   * reported anything for the idle cap, or they have held the chat for the pin cap in total (the
+   * note to end the reply with). Stop rejects through `aborted`. Heartbeats keep the run alive.
+   */
+  private async holdForHelpers(
+    run: TurnRun,
+    input: CodexChatInput,
+    aborted: Promise<never>,
+    steerArrived: Promise<void>,
+    pinnedSince: number
+  ): Promise<string | undefined> {
+    const idleCap = this.dependencies.helperIdleCapMs ?? CODEX_HELPER_IDLE_CAP_MS
+    const pinCap = this.dependencies.helperPinCapMs ?? CODEX_HELPER_PIN_CAP_MS
+    const enteredAt = Date.now()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expired = new Promise<string>((done) => {
+      const check = (): void => {
+        const now = Date.now()
+        const idleFor = now - Math.max(run.helpers.lastActivityAt, enteredAt)
+        const pinned = now - pinnedSince
+        const minutes = (ms: number): string => {
+          const count = Math.max(1, Math.round(ms / 60_000))
+          return `${count} minute${count === 1 ? '' : 's'}`
+        }
+        if (pinned >= pinCap) return done(`Some helpers were abandoned after ${minutes(pinned)}`)
+        if (idleFor >= idleCap) return done(`Some helpers were abandoned after ${minutes(idleFor)} without activity`)
+        timer = setTimeout(check, Math.max(1, Math.min(idleCap - idleFor, pinCap - pinned)))
+        timer.unref?.()
+      }
+      check()
+    })
+    const beat = setInterval(() => input.onHeartbeat?.(), 5_000)
+    beat.unref?.()
+    try {
+      return await Promise.race([run.helpers.whenSettled().then(() => undefined), steerArrived.then(() => undefined), expired, aborted])
+    } finally {
+      clearInterval(beat)
+      clearTimeout(timer)
     }
   }
 

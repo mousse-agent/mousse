@@ -477,5 +477,199 @@ describe('Codex children', () => {
       await expect(chat(create(s), { child: SHARED })).rejects.toThrow()
       await vi.waitFor(() => expect(interrupts(s)).toEqual([`${HELPER}/h-turn-1`]))
     })
+
+    describe('helpers that start helpers', () => {
+      const GRAND = 'grand-1'
+      const grandSpawned = (kind: 'subAgentActivity' | 'collabAgentToolCall') => ({
+        method: 'item/completed',
+        params: {
+          threadId: HELPER,
+          turnId: 'h-turn-1',
+          item:
+            kind === 'subAgentActivity'
+              ? { type: 'subAgentActivity', id: 'spawn-2', kind: 'started', agentThreadId: GRAND }
+              : { type: 'collabAgentToolCall', id: 'spawn-2', tool: 'spawnAgent', status: 'completed', receiverThreadIds: [GRAND], agentsStates: { [GRAND]: { status: 'running', message: null } } }
+        }
+      })
+      const grandTurn = { method: 'turn/started', params: { threadId: GRAND, turn: { id: 'g-turn-1', status: 'inProgress', error: null } } }
+      const turnOf = (threadId: string): string => (threadId === HELPER ? 'h-turn-1' : threadId === GRAND ? 'g-turn-1' : 'turn-1')
+      const reply = (send: (value: unknown) => void, params: Record<string, unknown>) => send(completed(params.threadId as string, turnOf(params.threadId as string), 'interrupted'))
+      /** The parent and its helper finish; the helper's own helper goes on. */
+      const grandhelperRuns = (kind: 'subAgentActivity' | 'collabAgentToolCall') => (send: (value: unknown) => void) =>
+        setImmediate(() => {
+          send(spawned('subAgentActivity'))
+          send(helperTurn)
+          send(grandSpawned(kind))
+          send(grandTurn)
+          send(completed(HELPER, 'h-turn-1'))
+          send(completed(PARENT, 'turn-1'))
+        })
+
+      it.each(['subAgentActivity', 'collabAgentToolCall'] as const)('the run is not settled while a helper (%s) of a helper is running', async (kind) => {
+        let finishGrand: () => void = () => undefined
+        const s = server({
+          onTurnStart: (send) => {
+            finishGrand = () => send(completed(GRAND, 'g-turn-1'))
+            grandhelperRuns(kind)(send)
+          }
+        })
+        const running = chat(create(s), { child: SHARED })
+        // The parent and the helper are done; only the helper's helper is left.
+        expect(await state(running)).toBe('pending')
+        finishGrand()
+        await expect(running).resolves.toMatchObject({ codexThreadId: PARENT })
+      })
+
+      it('Stop interrupts the helper and the helper of the helper', async () => {
+        const s = server({
+          onTurnStart: (send) =>
+            setImmediate(() => {
+              send(spawned('subAgentActivity'))
+              send(helperTurn)
+              send(grandSpawned('subAgentActivity'))
+              send(grandTurn)
+              send(completed(PARENT, 'turn-1'))
+            }),
+          onInterrupt: reply
+        })
+        const stop = new AbortController()
+        const running = chat(create(s), { child: SHARED, signal: stop.signal })
+        running.catch(() => undefined)
+        expect(await state(running)).toBe('pending')
+        stop.abort(new Error('Stopped'))
+        await expect(running).rejects.toThrow('Stopped')
+        await vi.waitFor(() => expect([...interrupts(s)].sort()).toEqual([`${GRAND}/g-turn-1`, `${HELPER}/h-turn-1`].sort()))
+      })
+
+      it("a helper's helper whose turn starts after Stop is interrupted when it does", async () => {
+        const s = server({
+          onTurnStart: (send) =>
+            setImmediate(() => {
+              send(spawned('subAgentActivity'))
+              send(helperTurn)
+              send(grandSpawned('subAgentActivity'))
+            }),
+          onInterrupt: reply
+        })
+        const stop = new AbortController()
+        const running = chat(create(s), { child: ISOLATED, signal: stop.signal })
+        running.catch(() => undefined)
+        await vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(1))
+        await new Promise((done) => setTimeout(done, 80))
+        stop.abort(new Error('Stopped'))
+        await expect(running).rejects.toThrow()
+        s.emit(grandTurn)
+        await vi.waitFor(() => expect(interrupts(s)).toContain(`${GRAND}/g-turn-1`))
+      })
+    })
+
+    describe('idle cap', () => {
+      const withCaps = (s: ReturnType<typeof server>, caps: { helperIdleCapMs?: number; helperPinCapMs?: number }) => {
+        mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
+        writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: join(home, 'codex') }))
+        const service = new CodexProviderService(home, questions, { launch: s.launch, ...caps })
+        services.push(service)
+        return service
+      }
+
+      it('a helper silent past the idle cap is stopped and the run ends done with its own text and a note', async () => {
+        const s = server({ onTurnStart: parentCompletesFirst('subAgentActivity'), onInterrupt: (send, params) => params.threadId === HELPER && interruptReply(send, params) })
+        const texts: string[] = []
+        const result = await chat(withCaps(s, { helperIdleCapMs: 60 }), { child: SHARED, onText: (text) => texts.push(text) })
+        expect(result.text).toBe('Some helpers were abandoned after 1 minute without activity')
+        expect(texts.at(-1)).toBe(result.text)
+        expect(interrupts(s)).toEqual([`${HELPER}/h-turn-1`])
+      })
+
+      it('the note follows the parent\'s own final text', async () => {
+        const s = server({
+          onTurnStart: (send) =>
+            setImmediate(() => {
+              send({ method: 'item/completed', params: { threadId: PARENT, turnId: 'turn-1', item: { type: 'agentMessage', id: 'msg-1', text: 'Here is what I found.' } } })
+              send(spawned('subAgentActivity'))
+              send(helperTurn)
+              send(completed(PARENT, 'turn-1'))
+            })
+        })
+        const result = await chat(withCaps(s, { helperIdleCapMs: 60 }), { child: SHARED })
+        expect(result.text).toBe('Here is what I found.\n\nSome helpers were abandoned after 1 minute without activity')
+      })
+
+      it('helper activity restarts the idle clock', async () => {
+        const s = server({ onTurnStart: parentCompletesFirst('subAgentActivity') })
+        const running = chat(withCaps(s, { helperIdleCapMs: 150 }), { child: SHARED })
+        for (let i = 0; i < 6; i += 1) {
+          await new Promise((done) => setTimeout(done, 50))
+          s.emit({ method: 'item/agentMessage/delta', params: { threadId: HELPER, itemId: 'm', delta: '.' } })
+        }
+        // 300ms in, past the cap if activity did not count; the helper has spoken within the last 50ms.
+        expect(await Promise.race([running.then(() => 'ended'), new Promise((done) => setTimeout(() => done('open'), 20))])).toBe('open')
+        await expect(running).resolves.toMatchObject({ text: expect.stringContaining('without activity') })
+      })
+
+      it('helpers that keep working are abandoned at the pin cap', async () => {
+        const s = server({ onTurnStart: parentCompletesFirst('subAgentActivity') })
+        const running = chat(withCaps(s, { helperIdleCapMs: 10_000, helperPinCapMs: 200 }), { child: SHARED })
+        const chatter = setInterval(() => s.emit({ method: 'item/agentMessage/delta', params: { threadId: HELPER, itemId: 'm', delta: '.' } }), 30)
+        try {
+          const result = await running
+          expect(result.text).toBe('Some helpers were abandoned after 1 minute')
+        } finally {
+          clearInterval(chatter)
+        }
+        expect(interrupts(s)).toEqual([`${HELPER}/h-turn-1`])
+      })
+
+      it('a helper that finishes in time ends the run normally, without a note', async () => {
+        const s = server({ onTurnStart: parentCompletesFirst('subAgentActivity') })
+        const running = chat(withCaps(s, { helperIdleCapMs: 500 }), { child: SHARED })
+        setTimeout(() => s.emit(completed(HELPER, 'h-turn-1')), 40)
+        await expect(running).resolves.toMatchObject({ text: '' })
+      })
+    })
+
+    describe('a steer that arrives while the run only waits for helpers', () => {
+      it('starts a turn on the Codex thread with the steer text, then keeps waiting for the helper', async () => {
+        let turns = 0
+        let finishHelper: () => void = () => undefined
+        const s = server({
+          onTurnStart: (send) => {
+            turns += 1
+            if (turns === 1) {
+              finishHelper = () => send(completed(HELPER, 'h-turn-1'))
+              parentCompletesFirst('subAgentActivity')(send)
+            } else setImmediate(() => send(completed(PARENT, 'turn-1')))
+          }
+        })
+        let pending: string | undefined
+        const steered: string[] = []
+        const running = chat(create(s), { child: SHARED, drainSteer: () => { const text = pending; pending = undefined; return text }, onSteer: (text) => steered.push(text) })
+        expect(await state(running)).toBe('pending')
+        pending = 'also check the tests'
+        await vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(2))
+        expect(s.requests('turn/start')[1].params!.input).toEqual([{ type: 'text', text: 'also check the tests', text_elements: [] }])
+        expect(steered).toEqual(['also check the tests'])
+        // The helper still holds the run open after the steer's turn.
+        expect(await state(running)).toBe('pending')
+        finishHelper()
+        await expect(running).resolves.toMatchObject({ codexThreadId: PARENT })
+      })
+    })
+
+    it('losing the process forgets the helpers of finished chats that still awaited a turn id', async () => {
+      const s = server({ onTurnStart: (send) => setImmediate(() => send(spawned('subAgentActivity'))), onInterrupt: interruptReply })
+      const stop = new AbortController()
+      const service = create(s)
+      const running = chat(service, { child: ISOLATED, signal: stop.signal })
+      running.catch(() => undefined)
+      await vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(1))
+      await new Promise((done) => setTimeout(done, 80))
+      stop.abort(new Error('Stopped'))
+      await expect(running).rejects.toThrow()
+      const orphans = (service as unknown as { orphans: Set<unknown> }).orphans
+      expect(orphans.size).toBe(1)
+      service.stop()
+      await vi.waitFor(() => expect(orphans.size).toBe(0))
+    })
   })
 })

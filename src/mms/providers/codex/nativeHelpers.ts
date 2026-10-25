@@ -16,13 +16,16 @@ type HelperState = { turnId?: string; running: boolean; seenActive: boolean }
  * keep the child's run open until they settle and to stop them with the child.
  *
  * A helper is named by a `subAgentActivity` item (`kind: 'started'`) or a `collabAgentToolCall`
- * `spawnAgent` item (`receiverThreadIds`) on the parent's thread.
+ * `spawnAgent` item (`receiverThreadIds`) on the parent's thread, or on a helper's own thread
+ * (helpers can start helpers).
  */
 export class NativeHelpers {
   private readonly helpers = new Map<string, HelperState>()
   private waiters: Array<{ resolve: () => void; reject: (error: unknown) => void }> = []
   private stopWith: ((threadId: string, turnId: string) => void) | undefined
   private closed: { reason: unknown } | undefined
+  /** When a helper last reported anything: a spawn, or any event of its thread (the idle cap reads this). */
+  lastActivityAt = Date.now()
 
   constructor(private readonly stray: (threadId: string) => StrayThread | undefined = () => undefined) {}
 
@@ -58,12 +61,20 @@ export class NativeHelpers {
     }
   }
 
-  /** A notification of a helper's own thread. */
+  /**
+   * A notification of a helper's own thread. Its spawn items name helpers of its own; they are
+   * tracked in the same set, so the run waits for, and Stop interrupts, the whole tree.
+   */
   handle(notification: CodexNotification): void {
-    const params = notification.params as { threadId?: string; turn?: { id?: string }; status?: { type?: string } } | undefined
+    const params = notification.params as { threadId?: string; turn?: { id?: string }; status?: { type?: string }; item?: { type?: string } } | undefined
     const threadId = params?.threadId
     const helper = threadId ? this.helpers.get(threadId) : undefined
     if (!threadId || !helper) return
+    this.lastActivityAt = Date.now()
+    if ((notification.method === 'item/started' || notification.method === 'item/completed') && typeof params?.item?.type === 'string') {
+      this.noteItem(params.item as { type: string } & Record<string, unknown>)
+      return
+    }
     if (notification.method === 'turn/started' && params?.turn?.id) {
       helper.turnId = params.turn.id
       helper.seenActive = true
@@ -102,6 +113,7 @@ export class NativeHelpers {
 
   private register(threadId: string): void {
     if (this.helpers.has(threadId)) return
+    this.lastActivityAt = Date.now()
     const seen = this.stray(threadId)
     const helper: HelperState = { running: !seen?.completed, seenActive: Boolean(seen), ...(seen?.turnId ? { turnId: seen.turnId } : {}) }
     this.helpers.set(threadId, helper)
