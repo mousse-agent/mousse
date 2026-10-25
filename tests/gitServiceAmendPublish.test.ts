@@ -14,7 +14,7 @@ const git = (cwd: string, ...args: string[]): string => execFileSync('git', args
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'mousse-git-amend-')); roots.push(root)
   const origin = join(root, 'origin.git'), cwd = join(root, 'work')
-  git(root, 'init', '--bare', origin)
+  git(root, 'init', '--bare', '-b', 'main', origin)
   git(root, 'init', '-b', 'main', cwd)
   git(cwd, 'config', 'user.name', 'Amend fixture'); git(cwd, 'config', 'user.email', 'git-fixture@example.invalid')
   git(cwd, 'config', 'commit.gpgsign', 'false'); git(cwd, 'config', 'core.hooksPath', join(root, 'no-hooks'))
@@ -141,7 +141,7 @@ describe('GitService rejected push', () => {
   it('reports a push the remote refused because it has newer commits', async () => {
     const { root, cwd, origin } = fixture(); git(cwd, 'remote', 'add', 'origin', origin)
     commitFile(cwd, 'a.txt', 'first'); git(cwd, 'push', '-u', 'origin', 'main')
-    const other = join(root, 'other'); git(root, 'clone', '-q', origin, other)
+    const other = join(root, 'other'); git(root, 'clone', '-q', '-b', 'main', origin, other)
     git(other, 'config', 'user.name', 'Other'); git(other, 'config', 'user.email', 'other@example.invalid'); git(other, 'config', 'commit.gpgsign', 'false')
     commitFile(other, 'b.txt', 'theirs'); git(other, 'push', '-q')
     commitFile(cwd, 'c.txt', 'mine')
