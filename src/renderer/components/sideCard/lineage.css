@@ -111,8 +111,8 @@ button.lineage-row:focus-visible {
   pointer-events: auto;
 }
 
-.lineage-item:hover .lineage-status,
-.lineage-item:focus-within .lineage-status {
+.lineage-item:has(.lineage-stop):hover .lineage-status,
+.lineage-item:has(.lineage-stop):focus-within .lineage-status {
   visibility: hidden;
 }
 

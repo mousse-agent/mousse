@@ -133,10 +133,31 @@ describe('phone sidebar lists', () => {
       thread('grandchild', subagentOf('child')),
       thread('orphan', subagentOf('trashed'))
     ]
-    f.runtimes.activity = { parent: 'idle', child: 'processing', orphan: 'processing' }
+    f.runtimes.activity = { parent: 'idle', child: 'idle', grandchild: 'idle', orphan: 'processing' }
     const lists = new MmsListsSource(f.services).snapshot()
     expect(lists.threads.map((entry) => entry.id)).toEqual(['parent', 'orphan'])
     expect(Object.keys(lists.status)).toEqual(['orphan'])
+  })
+
+  it('shows a parent as running or asking while a subagent, at any depth, is', () => {
+    const f = fakeServices()
+    const subagentOf = (parentThreadId: string) => ({ lineage: { parentThreadId, rootThreadId: 'parent', relationship: 'subagent' as const } })
+    f.threads.list = [
+      thread('parent'),
+      thread('child', subagentOf('parent')),
+      thread('grandchild', subagentOf('child')),
+      thread('quiet'),
+      thread('quiet-child', { lineage: { parentThreadId: 'quiet', rootThreadId: 'quiet', relationship: 'subagent' as const } })
+    ]
+    const status = (activity: Record<string, ThreadActivityState>) => {
+      f.runtimes.activity = activity
+      return new MmsListsSource(f.services).snapshot().status
+    }
+    expect(status({ grandchild: 'processing' })).toEqual({ parent: { state: 'processing' } })
+    expect(status({ child: 'processing', grandchild: 'awaiting_input' })).toEqual({ parent: { state: 'awaiting_input' } })
+    // A finished subagent adds nothing, and the parent keeps its own state.
+    expect(status({ child: 'completed' })).toEqual({})
+    expect(status({ parent: 'completed', child: 'idle' })).toEqual({ parent: { state: 'completed' } })
   })
 
   it('reports a change once per burst, and only when the lists changed', () => {

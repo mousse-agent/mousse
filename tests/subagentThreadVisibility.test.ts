@@ -79,17 +79,15 @@ describe('subagent threads in protocol thread lists', () => {
     expect(names(mms.threads.listAllThreads())).toEqual(all)
   })
 
-  it('filters before searching so hidden threads never use up result slots', async () => {
+  it('hides subagents from search for every client, and filters before the limit', async () => {
     seed()
-    const gui = await connect('gui', false)
-    const cli = await connect('cli', false)
-    const search = async (client: LocalMmsClient, limit: number) =>
-      (await client.request<{ results: Array<{ threadName: string }> }>('threads.search', { query: 'alpha', limit })).results.map((result) => result.threadName)
-    expect((await search(gui, 10)).sort()).toEqual(all)
-    expect((await search(cli, 10)).sort()).toEqual(shown)
-    // "Alpha child" sorts first, so a limit applied before the filter would return nothing for the CLI.
-    expect(await search(gui, 1)).toEqual(['Alpha child'])
-    expect(await search(cli, 1)).toEqual(['Alpha orphan'])
+    const search = async (clientType: ProtocolClientType, limit: number) =>
+      (await (await connect(clientType, false)).request<{ results: Array<{ threadName: string }> }>('threads.search', { query: 'alpha', limit })).results.map((result) => result.threadName)
+    for (const clientType of ['gui', 'cli', 'test', 'unknown'] as const) {
+      expect((await search(clientType, 10)).sort(), clientType).toEqual(shown)
+      // "Alpha child" sorts first, so a limit applied before the filter would leave nothing to return.
+      expect(await search(clientType, 1), clientType).toEqual(['Alpha orphan'])
+    }
   })
 
   it('answers every thread mutation with the list the caller is allowed to see', async () => {

@@ -62,7 +62,7 @@ import {
 } from './validators'
 import { PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
 import { buildSubagentView } from '../run/delegation/subagentView'
-import { connectionSeesSubagents, visibleThreadsFor } from './threadVisibility'
+import { visibleThreadsFor } from './threadVisibility'
 import { asCliProviderInstanceId, parseCliConfigPatch } from '../providers/cliConfig'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
@@ -643,7 +643,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         typeof p.limit === 'number' && Number.isFinite(p.limit) && p.limit > 0
           ? Math.min(Math.floor(p.limit), 200)
           : 50
-      return { results: ctx.mms.threads.searchThreads(query, limit, { hideSubagents: !connectionSeesSubagents(ctx.connection) }) }
+      // Search hides subagents for every client, the desktop app included: a subagent is reached
+      // through its parent's Lineage, not as a result of its own.
+      return { results: ctx.mms.threads.searchThreads(query, limit, { hideSubagents: true }) }
     }
     case 'thread.snapshot': {
       const p = isObject(params) ? params : {}
