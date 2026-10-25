@@ -7,7 +7,7 @@ import {
   isFamilyFavorite,
   planLegacyFavoritesImport
 } from '../src/renderer/lib/modelFavorites'
-import { offersPlanMode, pickerIdFor, pickerProviders, showsContextGauge } from '../src/renderer/lib/providerSnapshots'
+import { pickerIdFor, pickerProviders, showsContextGauge } from '../src/renderer/lib/providerSnapshots'
 import { profilePreferenceKey } from '../src/renderer/lib/profilePreferences'
 import { model, snapshot } from './providerSnapshotFixture'
 
@@ -50,12 +50,10 @@ describe('composer picker from snapshots', () => {
     expect(pickerIdFor({ llmProvider: 'claude-subscription' }, [entry])).toBe('claude-subscription')
   })
 
-  it('reads Plan mode and the context gauge from caps, keeping today’s menu when unknown', () => {
+  it('reads the context gauge from caps, keeping it when unknown', () => {
     const caps = snapshot().caps
-    expect(offersPlanMode({ id: 'x', label: 'x', models: [], caps: { ...caps, planMode: false } })).toBe(false)
     expect(showsContextGauge({ id: 'x', label: 'x', models: [], caps: { ...caps, contextUsage: 'none' } })).toBe(false)
     expect(showsContextGauge({ id: 'x', label: 'x', models: [], caps: { ...caps, contextUsage: 'measured' } })).toBe(true)
-    expect(offersPlanMode(undefined)).toBe(true)
     expect(showsContextGauge(undefined)).toBe(true)
   })
 })

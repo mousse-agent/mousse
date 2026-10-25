@@ -173,11 +173,6 @@ export interface PickerProvider extends LlmProviderOption {
   status?: StatusDescription
 }
 
-/** The composer offers Plan mode unless the instance reports it cannot plan. */
-export function offersPlanMode(provider: ProviderWithStatus | undefined): boolean {
-  return provider?.caps?.planMode !== false
-}
-
 /** The context gauge shows unless the instance reports no context usage (never a made-up figure). */
 export function showsContextGauge(provider: ProviderWithStatus | undefined): boolean {
   return provider?.caps?.contextUsage !== 'none'
