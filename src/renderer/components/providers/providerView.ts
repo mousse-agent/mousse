@@ -172,20 +172,6 @@ export function lastCheckedAt(snapshots: readonly InstanceSnapshot[]): number | 
   return latest
 }
 
-/** List order: agents first in their seeded order, then added agents, then model APIs by name. */
-export function sortSnapshots(snapshots: readonly InstanceSnapshot[]): InstanceSnapshot[] {
-  const rank = (snapshot: InstanceSnapshot) => (isApiInstance(snapshot) ? 2 : snapshot.builtIn ? 0 : 1)
-  return snapshots
-    .map((snapshot, index) => ({ snapshot, index }))
-    .sort((a, b) => {
-      const byRank = rank(a.snapshot) - rank(b.snapshot)
-      if (byRank !== 0) return byRank
-      if (rank(a.snapshot) === 2) return a.snapshot.displayName.localeCompare(b.snapshot.displayName, undefined, { sensitivity: 'base' })
-      return a.index - b.index
-    })
-    .map((entry) => entry.snapshot)
-}
-
 /** A label for a new instance that no other instance uses ("Claude Code 2"). */
 export function nextInstanceLabel(base: string, snapshots: readonly InstanceSnapshot[]): string {
   const taken = new Set(snapshots.map((snapshot) => snapshot.displayName.trim().toLowerCase()))

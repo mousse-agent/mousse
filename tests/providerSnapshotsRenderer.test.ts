@@ -7,7 +7,8 @@ import {
   isFamilyFavorite,
   planLegacyFavoritesImport
 } from '../src/renderer/lib/modelFavorites'
-import { pickerIdFor, pickerProviders, showsContextGauge } from '../src/renderer/lib/providerSnapshots'
+import { instanceBadges, pickerIdFor, pickerProviders, showsContextGauge, sortInstances } from '../src/renderer/lib/providerSnapshots'
+import { sortPickerEntries } from '../src/renderer/components/ModelFamilyMenu'
 import { profilePreferenceKey } from '../src/renderer/lib/profilePreferences'
 import { model, snapshot } from './providerSnapshotFixture'
 
@@ -48,6 +49,44 @@ describe('composer picker from snapshots', () => {
     expect(entry).toMatchObject({ id: 'claude:work', instanceId: 'claude:work', llmProvider: 'claude-subscription' })
     expect(pickerIdFor({ instanceId: 'claude:work', llmProvider: 'claude-subscription' }, [entry])).toBe('claude:work')
     expect(pickerIdFor({ llmProvider: 'claude-subscription' }, [entry])).toBe('claude-subscription')
+  })
+
+  it('orders providers as Settings does: Claude Code and its accounts, Codex, Antigravity, then APIs by name (D8)', () => {
+    const order = sortInstances([
+      snapshot({ instanceId: 'pi:zai', driver: 'pi', displayName: 'Z.ai' }),
+      snapshot({ instanceId: 'antigravity', driver: 'antigravity', displayName: 'Antigravity' }),
+      snapshot({ instanceId: 'claude:work', displayName: 'Claude Code 2', builtIn: false }),
+      snapshot({ instanceId: 'pi:anthropic', driver: 'pi', displayName: 'Anthropic' }),
+      snapshot({ instanceId: 'codex', driver: 'codex', displayName: 'Codex' }),
+      snapshot()
+    ])
+    expect(order.map((entry) => entry.instanceId)).toEqual(['claude', 'claude:work', 'codex', 'antigravity', 'pi:anthropic', 'pi:zai'])
+    const providers = pickerProviders(
+      [snapshot({ instanceId: 'codex', driver: 'codex', displayName: 'Codex', models: { entries: [model('gpt-5')], source: 'live' } }), snapshot({ models: { entries: claudeModels, source: 'live' } })],
+      []
+    )
+    expect(providers.map((entry) => entry.instanceId)).toEqual(['claude', 'codex'])
+  })
+
+  it('keeps the saved model order and puts favorites first in the picker (D6)', () => {
+    const entries = [
+      { id: 'a', providerRank: 0, familyRank: 0 },
+      { id: 'b', providerRank: 0, familyRank: 1 },
+      { id: 'c', providerRank: 1, familyRank: 0 },
+      { id: 'd', providerRank: 1, familyRank: 1 }
+    ]
+    expect(sortPickerEntries(entries, () => false).map((entry) => entry.id)).toEqual(['a', 'b', 'c', 'd'])
+    expect(sortPickerEntries([...entries].reverse(), (entry) => entry.id === 'd').map((entry) => entry.id)).toEqual(['d', 'a', 'b', 'c'])
+  })
+
+  it('badges a second account that shares a logo with what sets its name apart (D5)', () => {
+    const badges = instanceBadges([
+      { key: 'claude-subscription', iconKey: 'claude', label: 'Claude Code' },
+      { key: 'codex', iconKey: 'openai', label: 'Codex' },
+      { key: 'claude:work', iconKey: 'claude', label: 'Claude Code 2' },
+      { key: 'claude:team', iconKey: 'claude', label: 'Team Max' }
+    ])
+    expect(Object.fromEntries(badges)).toEqual({ 'claude:work': '2', 'claude:team': 'TM' })
   })
 
   it('reads the context gauge from caps, keeping it when unknown', () => {

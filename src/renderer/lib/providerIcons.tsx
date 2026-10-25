@@ -248,7 +248,7 @@ function ProviderAssetIcon({
  * (`codex`, `claude-subscription`), provider instance ids (`claude`,
  * `antigravity`, `codex`, `pi:<provider>`, added `<driver>:<slug>`) and pi-ai provider ids.
  */
-function normalizeProviderId(providerId: string): string {
+export function normalizeProviderId(providerId: string): string {
   let id = providerId.trim().toLowerCase()
   if (id.startsWith('pi:') && id.length > 3) id = id.slice(3)
   // Added instances are `<driver>:<slug>` (a second Claude Code account is `claude:work`).

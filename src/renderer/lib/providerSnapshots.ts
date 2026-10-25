@@ -1,7 +1,7 @@
 import { useCallback, useEffect } from 'react'
 import { create } from 'zustand'
 import { describeStatus, type InstanceSnapshot, type ProviderSnapshotsEvent, type StatusDescription } from '../../shared/harness/status'
-import type { HarnessCaps, ProviderOperationEvent, ProviderScope, SignInPrompt } from '../../shared/harness/types'
+import type { HarnessCaps, HarnessDriverKind, ProviderOperationEvent, ProviderScope, SignInPrompt } from '../../shared/harness/types'
 import { legacyProviderForInstance } from '../../shared/providerInstances'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import { useAppStore } from '../stores/appStore'
@@ -201,15 +201,35 @@ function pickerModel(model: InstanceSnapshot['models']['entries'][number], catal
   }
 }
 
+/** Mousse's provider order, the same on the providers page and in every model picker. */
+const DRIVER_ORDER: Record<HarnessDriverKind, number> = { claude: 0, codex: 1, antigravity: 2, pi: 3 }
+
 /**
- * The composer picker's providers: every instance switched on in the scope, with its models less
- * the hidden ones. Before the first snapshot arrives (or when the daemon cannot report one) the
+ * Instances in display order: agents by driver (Claude Code, Codex, Antigravity), each seeded
+ * instance before the accounts added after it, then model APIs by name.
+ */
+export function sortInstances<T extends Pick<InstanceSnapshot, 'driver' | 'builtIn' | 'displayName'>>(snapshots: readonly T[]): T[] {
+  return snapshots
+    .map((snapshot, index) => ({ snapshot, index }))
+    .sort((a, b) => {
+      const byDriver = DRIVER_ORDER[a.snapshot.driver] - DRIVER_ORDER[b.snapshot.driver]
+      if (byDriver !== 0) return byDriver
+      if (a.snapshot.driver === 'pi') return a.snapshot.displayName.localeCompare(b.snapshot.displayName, undefined, { sensitivity: 'base' })
+      if (a.snapshot.builtIn !== b.snapshot.builtIn) return a.snapshot.builtIn ? -1 : 1
+      return a.index - b.index
+    })
+    .map((entry) => entry.snapshot)
+}
+
+/**
+ * The composer picker's providers: every instance switched on in the scope, in display order, with
+ * its models less the hidden ones in the saved order. Before the first snapshot arrives (or when the daemon cannot report one) the
  * daemon's catalog is shown as it is.
  */
 export function pickerProviders(snapshots: readonly InstanceSnapshot[] | undefined, catalog: readonly LlmProviderOption[]): PickerProvider[] {
   if (!snapshots) return catalog.map((provider) => ({ ...provider, llmProvider: provider.id }))
   const providers: PickerProvider[] = []
-  for (const snapshot of snapshots) {
+  for (const snapshot of sortInstances(snapshots)) {
     if (!snapshot.enabled.effective) continue
     const listed = catalog.find((provider) => provider.instanceId === snapshot.instanceId)
     const models = snapshot.models.entries
@@ -248,4 +268,36 @@ export function modelPrefsByInstance(snapshots: readonly InstanceSnapshot[] | un
     })
   }
   return prefs
+}
+
+/** Initials for a name: "Work" → "W", "Personal Max" → "PM", "2" → "2". */
+function initials(words: readonly string[]): string {
+  if (words.length === 1 && /^\d+$/.test(words[0]!)) return words[0]!.slice(0, 2)
+  return words
+    .slice(0, 2)
+    .map((word) => Array.from(word)[0]?.toUpperCase() ?? '')
+    .join('')
+}
+
+/**
+ * T3 Code's instance badge: where two picker entries share a logo (two Claude Code accounts), every
+ * entry after the first gets a small badge with what sets its name apart ("Claude Code 2" → "2").
+ * Keyed by entry key; entries with a logo of their own get none.
+ */
+export function instanceBadges(entries: ReadonlyArray<{ key: string; iconKey: string; label: string }>): Map<string, string> {
+  const badges = new Map<string, string>()
+  const firstByIcon = new Map<string, string>()
+  for (const entry of entries) {
+    const first = firstByIcon.get(entry.iconKey)
+    if (first === undefined) {
+      firstByIcon.set(entry.iconKey, entry.label)
+      continue
+    }
+    const words = entry.label.trim().split(/\s+/u).filter(Boolean)
+    const shared = new Set(first.trim().toLowerCase().split(/\s+/u))
+    const distinct = words.filter((word) => !shared.has(word.toLowerCase()))
+    const badge = initials(distinct.length > 0 ? distinct : words)
+    if (badge) badges.set(entry.key, badge)
+  }
+  return badges
 }

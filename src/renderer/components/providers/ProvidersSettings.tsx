@@ -12,6 +12,7 @@ import {
   loadProviderSnapshots,
   projectScope,
   removeSnapshot,
+  sortInstances,
   useProviderSnapshots,
   useProviderSnapshotsStore,
   useRunningOperation
@@ -24,7 +25,7 @@ import { ApiSetupRow } from './ApiSections'
 import type { InstanceActions } from './CliSections'
 import { AgentEditor, ApiEditor } from './ProviderEditor'
 import { ProviderListRow, errorText, useAsyncAction, useRelativeTime } from './parts'
-import { formatVersion, iconIdOf, isApiInstance, lastCheckedAt, sortSnapshots, switchStateOf } from './providerView'
+import { formatVersion, iconIdOf, isApiInstance, lastCheckedAt, switchStateOf } from './providerView'
 import { SignInDialog } from './SignInDialog'
 import '../../styles/providers.css'
 
@@ -85,7 +86,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
     []
   )
 
-  const sorted = sortSnapshots(snapshots ?? [])
+  const sorted = sortInstances(snapshots ?? [])
   const selected = sorted.find((snapshot) => snapshot.instanceId === selectedId) ?? sorted[0] ?? null
   const operation = useRunningOperation(selected?.instanceId ?? '')
 
