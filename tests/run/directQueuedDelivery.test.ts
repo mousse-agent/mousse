@@ -90,15 +90,16 @@ describe('a queued result that runs directly (issue #142)', () => {
     return { ...w, run }
   }
 
-  it('a turn the user stopped leaves the rows delivered and owned by nothing: no redelivery behind a Stop, not even at boot', async () => {
+  it('a turn the user stopped has its rows acknowledged by the Stop: no redelivery behind a Stop, not even at boot, and the result stays readable', async () => {
     const w = await heldDirect('user')
     expect(w.d.engine.getRun(w.run.runId)!.outcome?.interruptedBy).toBe('user')
     await new Promise((resolve) => setTimeout(resolve, 50))
-    expect(w.d.engine.inbox.get(w.row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: null })
+    // A Stop acknowledges the inbox rows of the thread it stops (`RunEngine.stopSubtree`); the task keeps its result.
+    expect(w.d.engine.inbox.get(w.row.inboxId)).toMatchObject({ status: 'acknowledged' })
     expect(w.d.engine.delegations.get(w.out.first.delegationId)!.status).toBe('result_available')
     ;(w.d.orch as any).recoverQueuedRows()
     w.reconciler.runOnce()
-    expect(w.d.engine.inbox.get(w.row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: null })
+    expect(w.d.engine.inbox.get(w.row.inboxId)).toMatchObject({ status: 'acknowledged' })
     expect(w.d.engine.listRuns(w.parent.id).filter((run) => run.source === 'wake')).toEqual([])
     expect(w.noticeTurns()).toHaveLength(1)
   })
