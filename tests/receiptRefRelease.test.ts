@@ -10,10 +10,10 @@ import { ReceiptRefReleaseService } from '../src/mms/actions/ReceiptRefReleaseSe
 import { CodeRevertService } from '../src/mms/actions/CodeRevertService'
 import { ConversationBranchService } from '../src/mms/actions/ConversationBranchService'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
-import { AgentEpisodeStore } from '../src/mms/agents/AgentEpisodeStore'
 import { ProfileManager } from '../src/mms/profiles/ProfileManager'
 import { createInstallationPaths } from '../src/mms/profiles/paths'
 import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { seedLegacyNamedEpisode } from './fixtures/legacy-named-agent'
 
 let f: ReturnType<typeof gitFoundationFixture>
 beforeEach(() => { f = gitFoundationFixture() })
@@ -109,11 +109,8 @@ it('admits history honestly after expired code objects are genuinely collected i
 
 it('protects the actual named-agent latest episode receipt across logical Undo expiry', async () => {
   const { workspace, receipt, release } = await fixture()
-  const agents = new AgentEpisodeStore(f.thread), agent = agents.create('Reviewer')
-  const episode = agents.begin({ id: 'review-episode', agentId: agent.id, policy: { version: 1, workspace: 'shared', access: 'read-only' },
-    binding: { workspaceId: workspace.workspaceId!, generation: workspace.generation ?? 0, worktreePath: workspace.worktreePath, consistency: 'moving' },
-    parentConversation: { branchId: 'main', boundary: 0 }, contextGeneration: 0, task: 'Review retained result' })
-  agents.complete(episode.id, 0, { receiptId: receipt.id, resultSha: receipt.afterSha })
+  seedLegacyNamedEpisode(f.thread, { name: 'Reviewer', episodeId: 'review-episode', worktreePath: workspace.worktreePath,
+    receiptId: receipt.id, resultSha: receipt.afterSha })
   const result = await release.release(workspace.worktreePath)
   expect(result.releasedRefs).toEqual([])
   expect(result.retained[0]?.reason).toContain('claim')

@@ -6,12 +6,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
 import { MacroEngine } from '../src/mms/macros/MacroEngine'
 import {
+  buildCompleteTaskFailureWake,
+  buildCompleteTaskSuccessWake,
   OrchestratorService,
   requiresMergeCandidateToFinalize,
   shouldFinalizeAgent
 } from '../src/mms/orchestrator/OrchestratorService'
 import { buildOrchestratorSystemPrompt, DELEGATION_PROMPT } from '../src/mms/orchestrator/systemPrompt'
-import { isMousseControlFile, LEGACY_AGENT_PROGRESS_FILE } from '../src/mms/worktree/GitStateInspector'
+import { LEGACY_AGENT_PROGRESS_FILE, MOUSSE_CONTROL_FILE_PATHS } from '../src/mms/worktree/controlFiles'
 import { TaskQueue } from '../src/mms/tasks/TaskQueue'
 import { HeadlessAgentRunner } from '../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../src/mms/terminals/PtyManager'
@@ -204,54 +206,28 @@ describe('cancellation vs completed', () => {
   })
 })
 
-describe('GUI failure propagation', () => {
-  it('marks agent and task failed with the exact reason and does not remove the worktree', async () => {
+describe('legacy agent failure propagation', () => {
+  it('marks agent and task failed with the exit reason and does not remove the worktree', async () => {
     const root = makeTempRoot()
-    const { orchestrator, agents, tasks, worktrees } = createOrchestrator(root)
+    const { agents, tasks, worktrees, headlessRunner } = createOrchestrator(root)
     await worktrees.init()
     const wt = await worktrees.createWorktree('22222222-2222-2222-2222-222222222222')
     const { agent } = seedRunningGuiAgent(agents, tasks, {
       worktreePath: wt.path,
-      branch: wt.branch
+      branch: wt.branch,
+      executionMode: 'headless'
     })
 
-    orchestrator.reportGuiAgentFailure(agent.id, 'Provider rate limit exceeded')
+    headlessRunner.emit('exit', { agentId: agent.id, exitCode: 7 })
 
     expect(agents.get(agent.id)?.status).toBe('failed')
     const task = tasks.findByAgentId(agent.id)
     expect(task?.status).toBe('failed')
-    expect(task?.progressMessage).toBe('Provider rate limit exceeded')
+    expect(task?.progressMessage).toBe('Headless agent exited with code 7.')
     expect(existsSync(wt.path)).toBe(true)
-    // Second report is a no-op for terminal agents.
-    orchestrator.reportGuiAgentFailure(agent.id, 'another reason')
-    expect(task?.progressMessage).toBe('Provider rate limit exceeded')
-  })
-})
-
-describe('startup reconciliation', () => {
-  it('routes a restored running Mousse session to interrupted, not failed', () => {
-    const root = makeTempRoot()
-    const { orchestrator, agents, tasks } = createOrchestrator(root)
-    const { agent } = seedRunningGuiAgent(agents, tasks)
-
-    const events = orchestrator.restoreMousseAgentSessions([
-      {
-        version: 1,
-        agentId: agent.id,
-        worktreePath: agent.worktreePath,
-        task: agent.task,
-        assignment: {},
-        messages: [],
-        history: [],
-        runState: 'running',
-        updatedAt: new Date().toISOString()
-      }
-    ])
-
-    expect(events).toHaveLength(1)
-    expect(events[0]?.state).toBe('interrupted')
-    expect(agents.get(agent.id)?.status).toBe('interrupted')
-    expect(tasks.findByAgentId(agent.id)?.status).toBe('interrupted')
+    // A second exit is a no-op for terminal agents.
+    headlessRunner.emit('exit', { agentId: agent.id, exitCode: 9 })
+    expect(task?.progressMessage).toBe('Headless agent exited with code 7.')
   })
 })
 
@@ -313,16 +289,16 @@ describe('legacy agent settlement', () => {
   // status and wakes nothing.
   it('settles failed and cancelled legacy agents without a batch wake', async () => {
     const root = makeTempRoot()
-    const { orchestrator, agents, tasks } = createOrchestrator(root)
+    const { orchestrator, agents, tasks, headlessRunner } = createOrchestrator(root)
     expect(isDelegationSettledStatus('ready')).toBe(true)
     expect(isDelegationSettledStatus('failed')).toBe(true)
     expect(isDelegationSettledStatus('cancelled')).toBe(true)
     expect(isDelegationSettledStatus('interrupted')).toBe(true)
-    const first = seedRunningGuiAgent(agents, tasks, { worktreePath: '/batch-1', branch: 'mousse/agent-batch001' })
+    const first = seedRunningGuiAgent(agents, tasks, { worktreePath: '/batch-1', branch: 'mousse/agent-batch001', executionMode: 'headless' })
     const second = seedRunningGuiAgent(agents, tasks, { worktreePath: '/batch-2', branch: 'mousse/agent-batch002' })
     const sendSpy = vi.spyOn(orchestrator, 'send').mockResolvedValue({ message: 'ok', actions: [] })
 
-    orchestrator.reportGuiAgentFailure(first.agent.id, 'first failed')
+    headlessRunner.emit('exit', { agentId: first.agent.id, exitCode: 1 })
     await orchestrator.stopAgent(second.agent.id, false)
 
     expect(agents.get(first.agent.id)?.status).toBe('failed')
@@ -361,6 +337,18 @@ describe('prompt consistency', () => {
 })
 
 describe('delegation guidance', () => {
+  // spawn_agents (cliType assignments) is retired (SPEC §14.5); delegation is delegate_task.
+  it('describes delegation as delegate_task child threads', () => {
+    expect(DELEGATION_PROMPT).toContain('delegate_task')
+    expect(DELEGATION_PROMPT).toContain('child thread')
+  })
+
+  it('defaults delegated children to the current connected model', () => {
+    expect(DELEGATION_PROMPT).toContain('provider and model default to yours')
+    expect(DELEGATION_PROMPT).toContain('explicitly requests an override')
+    expect(DELEGATION_PROMPT).toContain('Never copy example or guessed model identifiers')
+  })
+
   it('reserves the shared workspace for read-only roles and isolates writers', () => {
     expect(DELEGATION_PROMPT).toMatch(/"shared" is only for read-only roles \(role "research" or "review"\)/)
     expect(DELEGATION_PROMPT).toMatch(/"isolated" gives the child its own worktree/)
@@ -427,10 +415,32 @@ describe('orphan worktree detection', () => {
 })
 
 describe('legacy progress file', () => {
-  it('stays a recognised control file so pre-Phase-4 worktrees still validate and reconstruct', () => {
+  it('stays a recognised control file so pre-Phase-4 worktrees still reconstruct', () => {
     expect(LEGACY_AGENT_PROGRESS_FILE).toBe('.mousse/task-progress.json')
-    expect(isMousseControlFile(LEGACY_AGENT_PROGRESS_FILE)).toBe(true)
-    expect(isMousseControlFile('.mousse\\task-progress.json')).toBe(true)
-    expect(isMousseControlFile('src/task-progress.json')).toBe(false)
+    expect(MOUSSE_CONTROL_FILE_PATHS).toContain(LEGACY_AGENT_PROGRESS_FILE)
+    expect(MOUSSE_CONTROL_FILE_PATHS).not.toContain('src/task-progress.json')
+  })
+})
+
+describe('complete_task wake messages', () => {
+  it('wakes the parent after successful merges so multi-wave plans continue', () => {
+    const logs = [
+      '[merge] Merged mousse/agent/cec4da46-4c4c-4b13-958b-816cf97ef862',
+      '[merge] Merged mousse/agent/72a089bb-32d9-4234-a2ac-91c4410219b1'
+    ]
+    const ids = ['cec4da46-4c4c-4b13-958b-816cf97ef862', '72a089bb-32d9-4234-a2ac-91c4410219b1']
+
+    expect(buildCompleteTaskFailureWake(ids, logs)).toBeUndefined()
+    const wake = buildCompleteTaskSuccessWake(ids, logs)
+    expect(wake).toMatch(/Integration finished/)
+    expect(wake).toMatch(/Continue the user plan/)
+    expect(wake).toContain('[merge] Merged mousse/agent/cec4da46-4c4c-4b13-958b-816cf97ef862')
+  })
+
+  it('does not emit a success wake when merges failed', () => {
+    const logs = ['[merge] Failed for mousse/agent/x: dirty index']
+    const ids = ['x']
+    expect(buildCompleteTaskSuccessWake(ids, logs)).toBeUndefined()
+    expect(buildCompleteTaskFailureWake(ids, logs)).toMatch(/was not merged/)
   })
 })

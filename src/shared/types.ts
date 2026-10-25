@@ -818,12 +818,6 @@ export type MousseAgentRunState =
   | 'interrupted'
   | 'completed'
 
-/** Result of attempting to deliver a turn to a Mousse agent. */
-export interface MousseAgentSendResult {
-  accepted: boolean
-  reason?: 'missing' | 'busy' | 'terminal' | 'empty'
-}
-
 /** Provider/model selection captured when a Mousse subagent is launched. */
 export interface MousseAgentAssignment {
   provider?: string

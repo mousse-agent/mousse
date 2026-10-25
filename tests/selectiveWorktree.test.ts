@@ -88,10 +88,6 @@ describe('selective worktrees', () => {
     mkdirSync(join(worktree.path, '.mousse'), { recursive: true })
     writeFileSync(join(worktree.path, '.mousse', 'task-progress.json'), '{"status":"working"}\n')
     expect((await simpleGit(worktree.path).status()).isClean()).toBe(true)
-    writeFileSync(join(worktree.path, 'src', 'new-helper.ts'), 'export const created = true\n')
-    await simpleGit(worktree.path).add(['src/new-helper.ts'])
-    await simpleGit(worktree.path).commit('add declared file')
-    expect((await manager.validateAgentReadiness(worktree)).changedFiles).toContain('src/new-helper.ts')
 
     const cleanup = await manager.cleanupValidatedAgentWorktree(worktree)
     expect(cleanup.success).toBe(true)

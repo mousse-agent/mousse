@@ -17,7 +17,7 @@ afterEach(() => {
 })
 
 describe('completed worktree integration', () => {
-  it('uses complete agent ids and rejects no-op, dirty, and empty-only agent completions', async () => {
+  it('uses complete agent ids for the worktree branch and path', async () => {
     const root = mkdtempSync(join(tmpdir(), 'mousse-readiness-'))
     tempRoots.push(root)
     process.env.MOUSSE_HOME = join(root, 'home')
@@ -32,27 +32,9 @@ describe('completed worktree integration', () => {
     const manager = new WorktreeManager(root)
     await manager.init()
 
-    const noOp = await manager.createWorktree('no-op-agent-123456789')
-    expect(noOp.branch).toBe('mousse/agent/no-op-agent-123456789')
-    expect(noOp.path).toContain('no-op-agent-123456789')
-    expect(await manager.validateAgentReadiness(noOp)).toMatchObject({
-      ready: false,
-      reason: 'Agent completed without creating a worker-authored commit.'
-    })
-
-    const dirty = await manager.createWorktree('dirty-agent')
-    writeFileSync(join(dirty.path, 'unfinished.txt'), 'not committed\n')
-    expect(await manager.validateAgentReadiness(dirty)).toMatchObject({
-      ready: false,
-      changedFiles: ['unfinished.txt']
-    })
-
-    const empty = await manager.createWorktree('empty-agent')
-    await simpleGit(empty.path).raw(['commit', '--allow-empty', '-m', 'empty result'])
-    expect(await manager.validateAgentReadiness(empty)).toMatchObject({
-      ready: false,
-      reason: 'Agent created only empty commits; the branch has no changes.'
-    })
+    const worktree = await manager.createWorktree('no-op-agent-123456789')
+    expect(worktree.branch).toBe('mousse/agent/no-op-agent-123456789')
+    expect(worktree.path).toContain('no-op-agent-123456789')
   }, 15_000)
 
   it('reports a merge candidate only while both the agent branch and its directory exist', async () => {

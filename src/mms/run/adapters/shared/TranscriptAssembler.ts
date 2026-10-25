@@ -8,9 +8,9 @@ import type {
 } from '../../../orchestrator/LlmClient'
 
 /**
- * Where an assembler keeps its open-message bookkeeping. The orchestrator's `ThreadSession` and
- * `MousseAgentService`'s session state already carry these fields, so the assembler works on them
- * in place and their other readers keep working.
+ * Where an assembler keeps its open-message bookkeeping. The orchestrator's `ThreadSession`
+ * already carries these fields, so the assembler works on them in place and its other readers
+ * keep working.
  */
 export interface TranscriptStreamState {
   activeAssistantMessageId: string | null

@@ -106,7 +106,7 @@ describe('thread-scoped orchestrator conversation events', () => {
       cliType: 'mousse',
       worktreePath: '/tmp/background-agent',
       branch: 'mousse/agent-background',
-      executionMode: 'gui',
+      executionMode: 'headless',
       status: 'running',
       task: 'background task'
     })
@@ -114,12 +114,13 @@ describe('thread-scoped orchestrator conversation events', () => {
     const internal = orch as unknown as { scheduleQueueDrain: (session: typeof owner) => void }
     const drainSpy = vi.spyOn(internal, 'scheduleQueueDrain').mockImplementation(() => undefined)
 
-    orch.reportGuiAgentFailure(agent.id, 'provider stream failed')
+    const internalRunner = orch as unknown as { headlessRunner: { emit: (event: 'exit', payload: { agentId: string; exitCode: number }) => boolean } }
+    internalRunner.headlessRunner.emit('exit', { agentId: agent.id, exitCode: 2 })
     await new Promise((resolve) => setTimeout(resolve, 150))
 
     expect(owner.agents.get(agent.id)?.status).toBe('failed')
     expect(owner.tasks.findByAgentId(agent.id)?.status).toBe('failed')
-    expect(orch.getMessages(background.id).some((message) => message.content.includes('provider stream failed'))).toBe(true)
+    expect(orch.getMessages(background.id).some((message) => message.content.includes('Headless agent exited with code 2.'))).toBe(true)
     expect(orch.getMessages(selected.id)).toEqual([])
     expect(owner.queue).toEqual([])
     expect(drainSpy).not.toHaveBeenCalled()

@@ -89,7 +89,6 @@ import {
   type ChatMessage,
   type CliType,
   type ContextUsageSnapshot,
-  type MousseAgentSessionSnapshot,
   type NativeLlmContext,
   type OrchestratorAction,
   type OrchestratorContextUsageInput,
@@ -181,10 +180,6 @@ import {
 import { ThreadSession } from './ThreadSession'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService } from './UserQuestionService'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
-import {
-  MousseAgentService,
-  type MousseAgentLifecycleEvent
-} from '../agents/MousseAgentService'
 import { ConnectionRetriesExhaustedError } from './connectionRetry'
 import { AppError, errorDiagnostic, normalizeAppError, serializeAppError, type AppErrorShape } from '../../shared/errors'
 import {
@@ -466,7 +461,7 @@ export class OrchestratorService extends EventEmitter {
   private readonly lifecycle = new OwnedWorkBarrier()
 
   getOwnedActivity(): Record<string, number> {
-    return { ...this.lifecycle.snapshot(), nativeAgents: this.mousseAgents.getActiveCount() }
+    return this.lifecycle.snapshot()
   }
 
   beginShutdown(): void {
@@ -479,7 +474,6 @@ export class OrchestratorService extends EventEmitter {
     // The shutdown reason marks these turns as cut off by a restart, not stopped by a user.
     for (const session of new Set([this.boundSession, ...this.sessions.values()])) session.activeTurn?.abort.abort(this.lifecycle.signal.reason)
     for (const turn of this.channelTurns.values()) turn.abort.abort()
-    this.mousseAgents.beginShutdown()
     this.questions.shutdown()
   }
 
@@ -490,7 +484,7 @@ export class OrchestratorService extends EventEmitter {
 
   async shutdown(timeoutMs = 30_000): Promise<void> {
     this.beginShutdown()
-    await Promise.all([this.lifecycle.waitForIdle(timeoutMs), this.mousseAgents.shutdown(timeoutMs)])
+    await this.lifecycle.waitForIdle(timeoutMs)
     for (const timer of this.persistTimers.values()) clearTimeout(timer)
     this.persistTimers.clear()
     for (const session of new Set([this.boundSession, ...this.sessions.values()])) {
@@ -614,7 +608,6 @@ export class OrchestratorService extends EventEmitter {
   private persistFn?: (threadId?: string | null) => void
   /** Per-thread delayed persist timers (concurrent turns must not suppress each other). */
   private persistTimers = new Map<string, ReturnType<typeof setTimeout>>()
-  private mousseAgents: MousseAgentService
   /** In-flight channel turns keyed by mousse thread id; `runId` once the turn is an engine run. */
   private channelTurns = new Map<
     string,
@@ -840,24 +833,6 @@ export class OrchestratorService extends EventEmitter {
       { questions: this.questions, modeRegistry: this.modeRegistry }
     )
 
-    this.mousseAgents = new MousseAgentService(this.llm, {
-      completeAgent: (agentId, merge, summary) => this.completeMousseAgent(agentId, merge, summary)
-    })
-
-    this.mousseAgents.on('lifecycle', (event: MousseAgentLifecycleEvent) => {
-      if (event.state === 'failed') {
-        this.reportGuiAgentFailure(
-          event.agentId,
-          event.reason ?? event.lastError ?? 'GUI subagent failed.'
-        )
-      } else if (event.state === 'interrupted') {
-        this.reportGuiAgentInterrupted(
-          event.agentId,
-          event.reason ?? event.lastError ?? 'GUI subagent session was interrupted.'
-        )
-      }
-    })
-
     this.headlessRunner.on('exit', ({ agentId, exitCode }) => {
       const owner = this.agentOwner(agentId)
       if (owner && owner !== this.session) {
@@ -894,10 +869,6 @@ export class OrchestratorService extends EventEmitter {
 
   setPersistCallback(fn: (threadId?: string | null) => void): void {
     this.persistFn = fn
-    this.mousseAgents.setPersistCallback((_immediate, agentId) => {
-      const threadId = agentId ? this.agentOwner(agentId)?.threadId : this.getBoundThreadId()
-      if (threadId) this.persistFn?.(threadId)
-    })
   }
 
   /** Optional ThreadDataStore for durable queue + cross-thread persistence. */
@@ -5718,19 +5689,6 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /**
-   * Orchestrator-facing API for GUI subagent terminal failures.
-   * Marks agent + task failed with the exact reason and never removes the worktree.
-   */
-  reportGuiAgentFailure(agentId: string, reason: string): void {
-    this.reportGuiAgentTerminalState(agentId, reason, 'failed')
-  }
-
-  /** Mark a lost GUI session as interrupted while retaining its recoverable worktree/history. */
-  reportGuiAgentInterrupted(agentId: string, reason: string): void {
-    this.reportGuiAgentTerminalState(agentId, reason, 'interrupted')
-  }
-
   private reportGuiAgentTerminalState(
     agentId: string,
     reason: string,
@@ -6001,22 +5959,12 @@ export class OrchestratorService extends EventEmitter {
     this.agents.updateStatus(agent.id, 'merging')
     const task = this.tasks.findByAgentId(agent.id)
 
-    // Stop all writers before cleanup or Git operations. Previously GUI work could keep
-    // running while its worktree was cleaned/merged, creating a destructive race.
+    // Stop all writers before cleanup or Git operations. A legacy GUI session has no live turn
+    // to stop; only headless processes and terminals can still be writing.
     if (agent.executionMode === 'headless' && agent.processId) {
       this.headlessRunner.kill(agent.processId)
       logs.push(`[headless] Stopped agent ${agent.id.slice(0, 8)}`)
-    } else if (agent.executionMode === 'gui') {
-      const stopped = await this.mousseAgents.abortAndWait(agent.id)
-      if (!stopped) {
-        logs.push(
-          `[mousse] Refused to finalize ${agent.id.slice(0, 8)} because its active turn did not stop.`
-        )
-        // Leave the agent in merging so the user can retry; do not pretend it is ready.
-        return logs
-      }
-      logs.push(`[mousse] Stopped agent ${agent.id.slice(0, 8)}`)
-    } else if (agent.ptyId) {
+    } else if (agent.executionMode !== 'gui' && agent.ptyId) {
       this.ptyManager.kill(agent.ptyId)
       logs.push(`[terminal] Closed agent ${agent.id.slice(0, 8)}`)
     }
@@ -6072,19 +6020,6 @@ export class OrchestratorService extends EventEmitter {
       )
     }
 
-    if (agent.executionMode === 'gui') {
-      const finalStatus = this.agents.get(agent.id)?.status
-      // A failed merge leaves the agent ready for retry, so its durable transcript must
-      // remain available in the still-open tab. Removing it here produced a blank agent
-      // view and also discarded the only persisted GUI-session history.
-      if (finalStatus === 'completed' || finalStatus === 'cancelled') {
-        this.mousseAgents.remove(agent.id)
-        // Session removal can trigger a final renderer refresh that observes no messages.
-        // Re-emit the terminal registry state afterwards so a stale GUI tab cannot remain.
-        this.agents.updateStatus(agent.id, finalStatus)
-        logs.push(`[mousse] Closed GUI agent ${agent.id.slice(0, 8)}`)
-      }
-    }
     return logs
   }
 
@@ -6192,77 +6127,6 @@ export class OrchestratorService extends EventEmitter {
       session.nativeContext = normalizeNativeContext(nativeContext)
       this.persist(true)
       this.emitThreadMessages(threadId, session.messages, true)
-    })
-  }
-
-  exportMousseAgentSessions(threadId?: string): MousseAgentSessionSnapshot[] {
-    const snapshots = this.mousseAgents.exportSessions()
-    if (!threadId) return snapshots
-    const ids = new Set(this.getAgentsForThread(threadId).list().map((agent) => agent.id))
-    return snapshots.filter((snapshot) => ids.has(snapshot.agentId))
-  }
-
-  restoreMousseAgentSessions(sessions: unknown): MousseAgentLifecycleEvent[] {
-    // Managed contexts hydrate only at explicit recall; compatibility snapshots are retained on disk.
-    return this.mousseAgents.restoreSessions(Array.isArray(sessions) ? sessions.filter((snapshot) => !snapshot?.managedBinding) : sessions, false)
-  }
-
-  listMousseAgentSessionIds(): string[] {
-    return this.mousseAgents.listSessionIds()
-  }
-
-  hasRunningMousseAgentSessions(): boolean {
-    // Thread switching only needs to block for an actual in-process model turn. Persisted
-    // lifecycle labels can briefly remain "running" after completion/restoration and must
-    // not strand the user on the current thread.
-    return this.mousseAgents
-      .listSessionIds()
-      .some((agentId) => this.mousseAgents.isTurnActive(agentId))
-  }
-
-  setMousseAgentPersistCallback(fn: (immediate?: boolean) => void): void {
-    this.mousseAgents.setPersistCallback(fn)
-  }
-
-  /**
-   * A legacy GUI agent (created by an earlier version) ran `complete_task`. Its branch is checked
-   * once; there is no progress file and no correction retry any more (SPEC §14.5).
-   */
-  private async completeMousseAgent(
-    agentId: string,
-    _merge: boolean,
-    summary: string
-  ): Promise<void> {
-    if (this.lifecycle.stopping) return
-    const owner = this.agentOwner(agentId) ?? this.session
-    await this.sessionAls.run(owner, async () => {
-      const agent = this.agents.get(agentId)
-      const task = this.tasks.findByAgentId(agentId)
-      if (!agent || !task || isTerminalAgentStatus(agent.status) || agent.status === 'merging') return
-      let inspected = await this.worktrees.validateAgentReadiness({
-        path: agent.worktreePath,
-        branch: agent.branch,
-        repositoryRoot: agent.repositoryRoot
-      })
-      if (inspected.ready && inspected.changedFiles?.length && agent.declaredFiles?.length) {
-        const unauthorized = filesOutsideDeclaration(inspected.changedFiles, agent.declaredFiles)
-        if (unauthorized.length > 0)
-          inspected = { ready: false, reason: `Agent changed files outside its discovery declaration: ${unauthorized.join(', ')}.` }
-      }
-      const current = this.agents.get(agentId)
-      if (!current || isTerminalAgentStatus(current.status) || current.status === 'merging') return
-      if (!inspected.ready || !inspected.commit) {
-        const reason = inspected.reason || 'Agent branch failed readiness validation.'
-        this.agents.updateStatus(agentId, 'failed')
-        this.tasks.updateProgress(task.id, { message: reason })
-        this.tasks.updateStatus(task.id, 'failed')
-        this.addSystemMessage(`[Agent ${agentId.slice(0, 8)} failed] ${reason}`)
-        return
-      }
-      this.agents.updateStatus(agentId, 'ready')
-      this.tasks.updateProgress(task.id, { progress: 100, summary })
-      this.tasks.updateStatus(task.id, 'completed')
-      this.addSystemMessage(`[Agent ${agentId.slice(0, 8)} ready for merge] ${summary || agent.task}`)
     })
   }
 
@@ -6601,11 +6465,4 @@ export class OrchestratorService extends EventEmitter {
       releaseExecutionLeaseHandle(lease)
     }
   }
-}
-
-/** Select the repository owned by the spawning thread, never the daemon cwd when known. */
-
-export function filesOutsideDeclaration(changedFiles: string[], declaredFiles: string[]): string[] {
-  const allowed = new Set(declaredFiles.map((file) => file.replace(/\\/g, '/')))
-  return changedFiles.filter((file) => !allowed.has(file.replace(/\\/g, '/')))
 }
