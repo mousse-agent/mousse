@@ -41,6 +41,8 @@ export interface ChannelTurnRunner {
     }
   ): Promise<{ text: string; silent: boolean; error?: string; aborted?: boolean; waiting?: boolean }>
   abortChannelTurn?: (threadId: string) => boolean
+  /** `/stop`: Stops the thread and every subagent below it (the subagents' work is not a channel turn). */
+  stopThread?: (threadId: string) => Promise<unknown> | unknown
   steerChannelTurn?: (threadId: string, text: string) => boolean
   isChannelTurnActive?: (threadId: string) => boolean
   /** Optional future MMS thread-runtime surface (feature-detected). */
@@ -158,6 +160,10 @@ export class ChannelRouter extends EventEmitter {
     if (this.threadControls.abort(threadId)) {
       aborted = true
     }
+    // `/stop` is a Stop of the thread: the subagents it started end with it.
+    void Promise.resolve(this.runner.stopThread?.(threadId)).catch((error: unknown) => {
+      console.warn('channel stop could not reach the subagents of a thread', { threadId, error: error instanceof Error ? error.message : String(error) })
+    })
     return aborted
   }
 

@@ -623,6 +623,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const settled = asOptionalBoolean(p.settled, 'settled') === true
       const thread = ctx.mms.threads.setThreadSettled(threadId, settled)
+      // Settling a thread (the sidebar's archive) is a Stop: what it still runs ends with it.
+      if (settled)
+        await ctx.mms.orchestrator.stopThread(threadId, 'settled').catch((error: unknown) => {
+          console.warn('settling a thread could not stop its work', { threadId, error: error instanceof Error ? error.message : String(error) })
+        })
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
@@ -781,8 +786,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
         return runCommandResponse(await ctx.mms.orchestrator.abortRun(runId, clientRequestId, threadId), runId)
       }
-      const ok = ctx.mms.orchestrator.abortActiveTurn(threadId, { clearQueue })
-      return { ok }
+      // With or without a runId a Stop is `stopThread`: the thread and every subagent below it.
+      const stopped = await ctx.mms.orchestrator.stopThread(threadId, 'user', { clearQueue, clientRequestId: asOptionalClientRequestId(p.clientRequestId) })
+      return { ok: stopped.ok }
     }
     case 'orchestrator.steer': {
       const p = isObject(params) ? params : {}

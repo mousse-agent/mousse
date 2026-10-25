@@ -296,6 +296,15 @@ export class MmsRemoteBackend implements RemoteBackendPort {
       maximumBytes
     )
   }
+  async stop(threadId: string): Promise<unknown> {
+    try {
+      return await this.services.orchestrator.stopThread(threadId, 'remote')
+    } catch (error) {
+      // The remote run was aborted already; a failure to reach the subagents is not the caller's error.
+      console.warn('remote stop could not reach the subagents of a thread', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return undefined
+    }
+  }
   async run(
     threadId: string,
     content: string,

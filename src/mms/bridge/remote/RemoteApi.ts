@@ -37,6 +37,8 @@ export interface RemoteBackendPort {
     control: { signal: AbortSignal; drainSteer(): string | undefined; onAccepted(): void },
     extras?: RemoteChatExtras
   ): Promise<unknown>
+  /** A remote Stop also stops the thread and every subagent below it (the run's own signal ends only the turn it carries). */
+  stop?(threadId: string): Promise<unknown>
 }
 
 /** How long a staged image waits for the send that uses it. */
@@ -207,6 +209,8 @@ export class RemoteApi {
         throw new NetError('forbidden')
       if (method === 'orchestrator.abort') {
         run.abort.abort()
+        // The remote turn ends with its signal; the subagents the thread started end with the Stop.
+        await this.backend.stop?.(run.threadId)
         return { ok: true }
       }
       if (run.abort.signal.aborted) return { ok: false }
