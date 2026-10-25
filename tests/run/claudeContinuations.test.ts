@@ -151,6 +151,13 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     expect(manager.getActivity(s.childThread)).toBe('completed')
   })
 
+  it('writes a note into the thread when Claude says a helper\'s result may not have arrived', async () => {
+    const s = await scene()
+    ;(s.service as any).liveHost.notice(s.childThread, 'A helper finished while a message was being cancelled; its result may not have been delivered.')
+    const messages = s.d.orch.getOrCreateSession(s.childThread).messages
+    expect(messages.some((message) => message.content.includes('may not have been delivered'))).toBe(true)
+  })
+
   it('boot cancels a continuation run whose effect died with the daemon', async () => {
     const s = await scene()
     const run = s.d.engine.store.createRun({ threadId: s.childThread, source: 'provider-continuation', clientRequestId: 'continuation:orphan' })

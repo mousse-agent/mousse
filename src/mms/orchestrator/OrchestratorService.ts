@@ -479,7 +479,8 @@ export class OrchestratorService extends EventEmitter {
     // Claude's live processes report their background work and the turns they start themselves here.
     provider.setLiveHost({
       backgroundWork: (threadId, active) => this.setProviderBackgroundWork(threadId, active),
-      continuationStarted: (threadId, info) => this.startProviderContinuation(threadId, info)
+      continuationStarted: (threadId, info) => this.startProviderContinuation(threadId, info),
+      notice: (threadId, text) => this.noteProviderNotice(threadId, text)
     })
   }
   private codex?: CodexClient
@@ -988,6 +989,16 @@ export class OrchestratorService extends EventEmitter {
       console.warn('background work activity could not be updated', { threadId, error: error instanceof Error ? error.message : String(error) })
     }
     if (!active) this.runEngine?.store.settleHold(threadId)
+  }
+
+  /** A line in the thread about its provider's process (a helper's result that may not have arrived). */
+  private noteProviderNotice(threadId: string, text: string): void {
+    try {
+      const session = this.getOrCreateSession(threadId)
+      this.sessionAls.run(session, () => this.addSystemMessage(text))
+    } catch (error) {
+      console.warn('provider notice could not be written', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /**

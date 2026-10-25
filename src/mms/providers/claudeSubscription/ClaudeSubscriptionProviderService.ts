@@ -1262,8 +1262,6 @@ export class ClaudeSubscriptionProviderService {
     const collectSteer = () => {
       if (controller.signal.aborted) return
       if (liveRun && (liveRun.settled || liveRun.abandoned || liveRun.resultSeen)) return
-      // A turn Claude started itself owns no message of ours to steer; the text stays queued as the next turn.
-      if (liveRun?.kind === 'continuation') return
       const steer = input.drainSteer?.()?.trim()
       if (!steer) return
       if (live && liveRun) {
