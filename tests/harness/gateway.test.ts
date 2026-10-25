@@ -260,6 +260,41 @@ describe('harness gateway: instances', () => {
     expect(await harness.instances.respondSignIn(started.operationId, { kind: 'cancel' })).toBe(false)
   })
 
+  it('accepts a pasted redirect URL from the browser-link prompt when the code prompt came first (and after a link retry)', async () => {
+    let pasted: string | undefined
+    const driver = adapterDriver(fake('antigravity'), {
+      runtime: {
+        // As Antigravity: the pasted-URL fallback waits before the agent prints its link, and the
+        // link is printed again on a retry.
+        signIn: async (session) => {
+          const callback = session.waitForCallbackUrl()
+          const notify = session.createAuthCallbacks().notify
+          notify({ type: 'auth_url', url: 'https://accounts.example/auth?try=1' })
+          notify({ type: 'auth_url', url: 'https://accounts.example/auth?try=2' })
+          pasted = await callback
+          return { success: pasted.includes('code=abc') }
+        }
+      }
+    })
+    const harness = testHarness({ drivers: [adapterDriver(pi()), driver], instances: instances(), profileHome: home() })
+    const events: HarnessGatewayEvent[] = []
+    harness.instances.subscribe((event) => events.push(event))
+    const started = await harness.instances.signIn('antigravity')
+    const prompts = () => events.flatMap((event) => (event.type === 'operation' && event.data.phase === 'prompt' ? [event.data.prompt] : []))
+    await waitFor(() => prompts().filter((prompt) => prompt.type === 'auth_url').length === 2)
+    const [input, , retry] = prompts()
+    expect(input.type).toBe('input')
+    expect(retry).toMatchObject({ type: 'auth_url', url: 'https://accounts.example/auth?try=2', acceptsRedirectPaste: true })
+    // A prompt of another operation's numbering is refused, and says so.
+    expect(await harness.instances.respondSignIn(started.operationId, { promptId: 'other', kind: 'redirect_url', value: 'x' })).toBe(false)
+    // The dialog answers the link it shows.
+    expect(await harness.instances.respondSignIn(started.operationId, { promptId: retry.promptId, kind: 'redirect_url', value: 'http://localhost:1/cb?code=abc' })).toBe(true)
+    await waitFor(() => events.some((event) => event.type === 'operation' && event.data.phase === 'completed'))
+    expect(pasted).toBe('http://localhost:1/cb?code=abc')
+    // Nothing waits any more.
+    expect(await harness.instances.respondSignIn(started.operationId, { promptId: retry.promptId, kind: 'redirect_url', value: 'again' })).toBe(false)
+  })
+
   it('runs install as an operation: an id at once, progress as events, cancel ends it', async () => {
     const antigravity = fake('antigravity')
     let release: (() => void) | undefined

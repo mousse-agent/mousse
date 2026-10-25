@@ -314,7 +314,15 @@ interface ProbeState {
 interface Operation {
   started: ProviderOperationStarted
   session?: LoginSession
-  prompt?: { promptId: string; kind: 'prompt' | 'select' | 'manual_code' }
+  /** The prompt or choice the sign-in waits on. */
+  prompt?: { promptId: string; kind: 'prompt' | 'select' }
+  /**
+   * The pasted-code fallback the sign-in waits on alongside (a redirect URL or code). It may be
+   * answered from its own prompt or from any browser-link prompt of the operation, which is where
+   * the page offers "paste the redirect URL", whichever came first.
+   */
+  manualCode?: string
+  urlPrompts: string[]
   prompts: number
   progress?: { message: string; fraction?: number }
   cancel(): boolean
@@ -1136,7 +1144,7 @@ export class Harness implements HarnessGateway {
     if ([...this.operations.values()].some((entry) => entry.started.instanceId === instanceId && entry.started.kind !== 'sign_in'))
       return harnessFail('operation_busy', `${record.driver.label} is already being installed.`, instanceId)
     const started: ProviderOperationStarted = { operationId: randomUUID(), instanceId, kind }
-    const operation: Operation = { started, prompts: 0, cancel: () => runtime.cancelInstall?.() ?? false }
+    const operation: Operation = { started, prompts: 0, urlPrompts: [], cancel: () => runtime.cancelInstall?.() ?? false }
     this.operations.set(started.operationId, operation)
     queueMicrotask(() => {
       void runtime.install!((message) => {
@@ -1179,6 +1187,7 @@ export class Harness implements HarnessGateway {
       started,
       session,
       prompts: 0,
+      urlPrompts: [],
       cancel: () => {
         session.abort.abort()
         return true
@@ -1213,7 +1222,15 @@ export class Harness implements HarnessGateway {
     let prompt: SignInPrompt | undefined
     switch (event.type) {
       case 'auth_url':
-        prompt = { promptId: promptId(), type: 'auth_url', url: event.url, ...(event.instructions ? { instructions: event.instructions } : {}), usesCallbackServer: event.usesCallbackServer }
+        prompt = {
+          promptId: promptId(),
+          type: 'auth_url',
+          url: event.url,
+          ...(event.instructions ? { instructions: event.instructions } : {}),
+          usesCallbackServer: event.usesCallbackServer,
+          ...(operation.manualCode ? { acceptsRedirectPaste: true } : {})
+        }
+        operation.urlPrompts.push(prompt.promptId)
         break
       case 'device_code':
         prompt = { promptId: promptId(), type: 'device_code', userCode: event.userCode, verificationUri: event.verificationUri, ...(event.expiresInSeconds ? { expiresInSeconds: event.expiresInSeconds } : {}) }
@@ -1224,7 +1241,7 @@ export class Harness implements HarnessGateway {
         break
       case 'manual_code':
         prompt = { promptId: promptId(), type: 'input', secret: false, message: event.message }
-        operation.prompt = { promptId: prompt.promptId, kind: 'manual_code' }
+        operation.manualCode = prompt.promptId
         break
       case 'select':
         prompt = { promptId: promptId(), type: 'select', message: event.message, options: event.options.map((option) => ({ id: option.id, label: option.label, ...(option.description ? { description: option.description } : {}) })) }
@@ -1247,11 +1264,19 @@ export class Harness implements HarnessGateway {
       session.respond({ sessionId: operationId, kind: 'cancel' })
       return true
     }
+    const value = response.value !== undefined ? { value: response.value } : {}
+    // The pasted redirect URL or code: from its own prompt or from a browser-link prompt.
+    if (response.kind === 'redirect_url' || (response.promptId !== undefined && response.promptId === operation.manualCode)) {
+      const target = operation.manualCode
+      if (!target || (response.promptId && response.promptId !== target && !operation.urlPrompts.includes(response.promptId))) return false
+      operation.manualCode = undefined
+      session.respond({ sessionId: operationId, kind: 'manual_code', ...value })
+      return true
+    }
     const waiting = operation.prompt
     if (!waiting || (response.promptId && response.promptId !== waiting.promptId)) return false
-    const kind = response.kind === 'redirect_url' ? 'manual_code' : response.kind === 'select' ? 'select' : waiting.kind
     operation.prompt = undefined
-    session.respond({ sessionId: operationId, kind, ...(response.value !== undefined ? { value: response.value } : {}) })
+    session.respond({ sessionId: operationId, kind: response.kind === 'select' ? 'select' : waiting.kind, ...value })
     return true
   }
 
