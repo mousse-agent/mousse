@@ -6,21 +6,6 @@ const READ_TOOLS = new Set(['read', 'read_file', 'ls', 'list_dir', 'find', 'grep
 // A read-only agent may start subagents; `delegateTask` lets it start only read-only (shared) ones, and
 // `integrate_delegation` (which merges into the workspace) stays out.
 const DELEGATION_TOOLS = new Set(['delegate_task', 'task_status', 'task_cancel', 'list_delegations', 'create_subagent', 'create_subagents', 'list_subagents', 'recall_subagent'])
-export function resolveAgentWorkspacePolicy(
-  requested: Partial<AgentWorkspacePolicy> | undefined,
-  options: { legacy?: boolean; inherited?: AgentWorkspacePolicy; adapter: string }
-): AgentWorkspacePolicy {
-  if (requested?.version !== undefined && requested.version !== 1) throw new Error('Unsupported workspace policy version')
-  const policy: AgentWorkspacePolicy = {
-    version: 1,
-    workspace: requested?.workspace ?? (options.legacy ? 'isolated' : 'shared'),
-    access: requested?.access ?? (options.legacy ? 'write' : 'read-only')
-  }
-  if (!['shared', 'isolated'].includes(policy.workspace) || !['read-only', 'write'].includes(policy.access)) throw new Error('Invalid workspace/access policy')
-  if (options.inherited?.access === 'read-only' && policy.access === 'write') throw new Error('Child access cannot broaden inherited read-only authority')
-  if (options.adapter !== 'mousse' && (policy.workspace === 'shared' || policy.access === 'read-only')) throw new Error('This adapter cannot enforce requested shared/read-only access')
-  return policy
-}
 
 /** Internal capability: callers cannot manufacture this object over JSON/RPC. */
 export interface AgentToolAccess {
