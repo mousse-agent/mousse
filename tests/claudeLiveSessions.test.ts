@@ -103,7 +103,8 @@ describe('a live Claude query', () => {
     abort.abort()
     await expect(turn).rejects.toThrow()
     // The interrupt asks Claude to drop what it has queued; the process is not closed for it.
-    await vi.waitFor(() => expect(process.interruptOptions).toEqual([{ cancelQueued: true }]))
+    // A plain interrupt first; its receipt names the prompt as still queued, so it is cancelled by id.
+    await vi.waitFor(() => expect(process.interruptOptions).toEqual([undefined, { cancelQueued: true }]))
     expect(process.closed).toBe(false)
     expect(process.queued).toEqual([])
     cli.reply = (message, self) => self.answer(String(message.uuid), 'next')
@@ -126,7 +127,7 @@ describe('a live Claude query', () => {
     // The prompt is queued and Claude has not echoed it yet: this is the startup window.
     abort.abort()
     await expect(second).rejects.toThrow()
-    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    await vi.waitFor(() => expect(process.interrupts).toBe(receipts ? 2 : 1))
     await new Promise((resolve) => setTimeout(resolve, 30))
     expect(process.closed).toBe(false)
     expect(f.service.hasBackgroundWork('thread')).toBe(true)
@@ -555,7 +556,7 @@ describe('idle release and the cap on live processes', () => {
     expect(f.cli.last.text(0)).toContain('earlier turns')
   })
 
-  it('keeps the process while background work is pending, up to the pin cap, and provider activity restarts the cap', async () => {
+  it('keeps the process while background work is pending, and releases it at the pin cap counted from when it became owed, however active the process is', async () => {
     vi.useFakeTimers()
     const f = fixture({ idleCloseMs: 1000, idleReleaseMs: 5000, maxPinMs: 12_000 })
     f.cli.reply = (message, process) => {
@@ -567,12 +568,13 @@ describe('idle release and the cap on live processes', () => {
     // The short idle close does not apply while work is pending.
     await vi.advanceTimersByTimeAsync(4000)
     expect(process.closed).toBe(false)
-    // Provider activity at 9s starts the budget over.
-    await vi.advanceTimersByTimeAsync(5000)
-    process.emit({ type: 'system', subtype: 'task_progress', session_id: SESSION, task_id: 'bash-1' })
-    await vi.advanceTimersByTimeAsync(15_000)
+    // Provider activity keeps the idle clock going but does not move the cap.
+    for (let elapsed = 4000; elapsed < 11_000; elapsed += 1000) {
+      process.emit({ type: 'system', subtype: 'task_progress', session_id: SESSION, task_id: 'bash-1' })
+      await vi.advanceTimersByTimeAsync(1000)
+    }
     expect(process.closed).toBe(false)
-    await vi.advanceTimersByTimeAsync(10_000)
+    await vi.advanceTimersByTimeAsync(1500)
     expect(process.closed).toBe(true)
     expect(f.service.hasBackgroundWork('thread')).toBe(false)
     expect(f.host.backgroundWork).toHaveBeenLastCalledWith('thread', false)
@@ -800,7 +802,7 @@ describe('result routing and steering edge cases', () => {
     abort.abort()
     await expect(second).rejects.toThrow()
     f.service.commitInterrupted('thread', 'h')
-    expect(process.interruptOptions).toEqual([{ cancelQueued: true }])
+    expect(process.interruptOptions).toEqual([undefined, { cancelQueued: true }])
     await vi.waitFor(() => expect(f.host.notice).toHaveBeenCalledExactlyOnceWith('thread', expect.stringContaining('may not have been delivered')))
     f.cli.reply = (message, self) => {
       self.emit(resultFrame({ uuids: [self.uuid(1)], terminalReason: 'aborted_streaming' }))
@@ -809,6 +811,79 @@ describe('result routing and steering edge cases', () => {
     await f.turn({ history: 'h' }, 'h')
     expect(f.service.hasBackgroundWork('thread')).toBe(true)
     expect(f.host.continuationStarted).not.toHaveBeenCalled()
+  })
+
+  it('a steer Claude already folded into the turn is not queued: Stop interrupts plainly, the notification survives and its wake runs', async () => {
+    const f = fixture()
+    helper(f)
+    await f.turn({ history: 'h' }, 'h')
+    const process = f.cli.last
+    f.cli.reply = undefined
+    const abort = new AbortController()
+    const second = f.chat({
+      history: 'h',
+      signal: abort.signal,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('steer').mockReturnValue(undefined)
+    })
+    await inputs(f.cli, 2)
+    process.emit(textDelta('working', process.uuid(1)), notification('bash-1'))
+    await inputs(f.cli, 3)
+    // Claude took the steer into the running turn; later frames carry only the prompt's id.
+    process.markStarted(process.uuid(2))
+    abort.abort()
+    await expect(second).rejects.toThrow()
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    expect(process.interruptOptions).toEqual([undefined])
+    await later(30)
+    expect(f.host.notice).not.toHaveBeenCalled()
+    // The notification was not dropped: Claude starts the wake it owes, and it opens a continuation.
+    process.emit(resultFrame({ uuids: [process.uuid(1), process.uuid(2)], terminalReason: 'aborted_streaming' }))
+    process.emit(textDelta('The helper finished.'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+  })
+
+  it('the wake a cut-off turn owes is not swallowed by a message pushed before it', async () => {
+    const f = fixture()
+    const process = await cutOffAfterNotification(f)
+    f.cli.reply = undefined
+    let done = false
+    const mine = f.chat({ prompt: 'mine', history: 'h' }).then((text) => { done = true; return text })
+    await inputs(f.cli, 3)
+    process.emit(resultFrame({ uuids: [process.uuid(1)], terminalReason: 'aborted_streaming' }))
+    // The wake begins before Claude takes the message: its first frame names no one.
+    process.emit(textDelta('wake text'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    process.emit(resultFrame({ text: 'wake text', origin: 'task-notification' }))
+    await later(30)
+    expect(done).toBe(false)
+    process.answer(process.uuid(2), 'my answer')
+    expect(await mine).toBe('my answer')
+    const wake = await f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined })
+    expect(wake).toBe('wake text')
+  })
+
+  it('a blocking error for a lost task says the result may never arrive and that Stop releases it', async () => {
+    const f = fixture()
+    helper(f)
+    await f.turn({ history: 'h' }, 'h')
+    const process = f.cli.last
+    f.cli.reply = undefined
+    const abort = new AbortController()
+    const second = f.chat({
+      history: 'h',
+      signal: abort.signal,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('queued steer').mockReturnValue(undefined)
+    })
+    await inputs(f.cli, 2)
+    process.emit(textDelta('working', process.uuid(1)), notification('bash-1'))
+    await inputs(f.cli, 3)
+    abort.abort()
+    await expect(second).rejects.toThrow()
+    f.service.commitInterrupted('thread', 'h')
+    await expect(f.chat({ history: 'h', model: 'opus' })).rejects.toMatchObject({
+      message: expect.stringMatching(/may never arrive.*Press Stop to release it now/)
+    })
+    await expect(f.chat({ history: 'h', model: 'opus' })).rejects.not.toMatchObject({ message: expect.stringContaining('Wait for it to finish') })
   })
 
   it('a discarded wake never discharges anything, not even what a cut-off turn left for it', async () => {
@@ -843,9 +918,9 @@ describe('result routing and steering edge cases', () => {
       const steer = process.uuid(1)
       abort.abort()
       await expect(continuation).rejects.toThrow()
-      await vi.waitFor(() => expect(process.interrupts).toBe(1))
+      await vi.waitFor(() => expect(process.interrupts).toBe(receipts ? 2 : 1))
       // Claude is asked to cancel it; a Claude that cannot says so, and the cancelled wake keeps owning it.
-      expect(process.interruptOptions).toEqual([{ cancelQueued: true }])
+      expect(process.interruptOptions).toEqual(receipts ? [undefined, { cancelQueued: true }] : [undefined])
       const session = (f.service as unknown as { live: Map<string, { owedResults: number }> }).live.get('thread')!
       if (receipts) {
         expect(process.queued).toEqual([])

@@ -174,16 +174,33 @@ export class BackgroundObligations {
 
   /**
    * `owner` was cut off without committing, so what it consumed is committed by no turn (see
-   * `CARRIED` and `LOST`). Returns how many tasks that left.
+   * `CARRIED` and `LOST`). Returns the tasks that left.
    */
-  release(owner: unknown, mode: 'carried' | 'lost'): number {
-    let count = 0
+  release(owner: unknown, mode: 'carried' | 'lost'): string[] {
+    const ids: string[] = []
     for (const [id, consumer] of this.consumers)
       if (consumer === owner) {
         this.consumers.set(id, mode === 'carried' ? CARRIED : LOST)
+        ids.push(id)
+      }
+    return ids
+  }
+
+  /** The cancel that went with an interrupt may have dropped these tasks' notifications: they are `LOST`. */
+  lose(ids: readonly string[]): number {
+    let count = 0
+    for (const id of ids)
+      if (this.consumers.get(id) === CARRIED) {
+        this.consumers.set(id, LOST)
         count++
       }
     return count
+  }
+
+  /** Some task's result may never arrive. */
+  hasLost(): boolean {
+    for (const consumer of this.consumers.values()) if (consumer === LOST) return true
+    return false
   }
 
   /** A turn whose result came from the wake that folded its message in saw the notifications a cut-off turn left: they are its to commit. */
@@ -349,7 +366,8 @@ export class LiveSession<Turn = unknown> {
   private readonly noticeTimers = new Set<ReturnType<typeof setTimeout>>()
   private idleTimer: ReturnType<typeof setTimeout> | undefined
   private wakeTimer: ReturnType<typeof setTimeout> | undefined
-  private pinnedSince: number | undefined
+  /** When the process first had background work to wait for; the cap counts from here and activity does not move it. */
+  private capTimer: ReturnType<typeof setTimeout> | undefined
   private reportedBackground = false
   lastUsed = Date.now()
 
@@ -430,7 +448,7 @@ export class LiveSession<Turn = unknown> {
   discardContinuation(run: LiveRun): void {
     const index = this.unclaimed.indexOf(run)
     if (index >= 0) this.unclaimed.splice(index, 1)
-    if (this.obligations.release(run, 'lost') > 0)
+    if (this.obligations.release(run, 'lost').length > 0)
       this.hooks.notice?.('A background helper finished, but its result could not be read; it may not have been delivered.')
     if (run.settled || run.abandoned) return
     // The turn may not have begun yet (the notification comes first): it stays the frames' target, so
@@ -520,19 +538,13 @@ export class LiveSession<Turn = unknown> {
     run.consumer = undefined
     const unclaimed = this.unclaimed.indexOf(run)
     if (unclaimed >= 0) this.unclaimed.splice(unclaimed, 1)
-    // Queued messages are cancelled only when the run still owns one no frame has named: a never-started
-    // prompt or steer. That cancel also dequeues commands without an id, task notifications among them,
-    // so what the run had read may never be delivered (LOST); a plain interrupt keeps them queued, and
-    // Claude starts a wake turn for them (CARRIED).
-    const unnamed = [...run.owned].some((id) => !run.seen.has(id))
-    const cancel = unnamed
-    const left = this.obligations.release(run, cancel ? 'lost' : 'carried')
-    if (cancel && left > 0)
-      this.noticeLater('A background helper finished while a message was being cancelled; its result may not have been delivered.')
+    // What the run had read stays queued in Claude, which starts a wake turn for it (CARRIED), unless the
+    // cancel below also drops it (LOST).
+    const released = this.obligations.release(run, 'carried')
     const query = this.query
     // A turn that pushed nothing has nothing in flight; one that did, or a wake, is interrupted. An
     // interrupt of an idle query is harmless, and one that fails leaves the next turn to find out.
-    if (query && !this.dead && (run.ids.size > 0 || run.kind === 'continuation')) void this.interruptFor(run, query, cancel)
+    if (query && !this.dead && (run.ids.size > 0 || run.kind === 'continuation')) void this.interruptFor(run, query, released)
     // A run that was never answered keeps owning its ids until each has its result or was cancelled; a
     // wake that owns a steer keeps its place among the runs for that, whatever started it.
     if (run.owned.size === 0) this.finishCancelled(run)
@@ -544,28 +556,43 @@ export class LiveSession<Turn = unknown> {
   }
 
   /**
-   * Interrupts the turn and cancels the messages the run pushed that Claude has not started: a prompt
-   * or steer left in Claude's input queue would otherwise run later with nobody owning it. What the
-   * receipt names as cancelled is released; what it says will still run stays owned by the cancelled
-   * run, so its result is not given to anyone else. A Claude Code that sends no receipt cannot cancel
-   * a prompt it never started; only closing the process drops it, which is not done while the process
-   * has background work (the prompt then runs and its result is dropped).
+   * Interrupts the turn, with a plain interrupt first: it keeps queued task notifications, so the wake
+   * turns they cause still happen. Its receipt names the messages that will still run
+   * (`still_queued`); only when one of them is a message this run pushed (a prompt or steer Claude has
+   * not started, which would otherwise run later with nobody owning it) is a second interrupt sent that
+   * cancels the queue. That cancel also drops notifications, so the tasks the run had read become
+   * `LOST` and the thread is told. What the receipt names as cancelled is released; what is left stays
+   * owned by the cancelled run, so its result is not given to anyone else. A Claude Code that sends no
+   * receipt cannot cancel a prompt it never started; only closing the process drops it, which is not done
+   * while the process has background work (the prompt then runs and its result is dropped).
    */
-  private async interruptFor(run: LiveRun, query: Query, cancel: boolean): Promise<void> {
-    let receipt: { cancelled?: string[] } | undefined
+  private async interruptFor(run: LiveRun, query: Query, released: readonly string[]): Promise<void> {
+    type Receipt = { still_queued?: string[]; cancelled?: string[] } | undefined
+    const target = query as { interrupt(options?: { cancelQueued?: boolean }): Promise<Receipt> }
+    let receipt: Receipt
     try {
-      const interrupt = query as { interrupt(options?: { cancelQueued?: boolean }): Promise<{ cancelled?: string[] } | undefined> }
-      receipt = (await interrupt.interrupt(cancel ? { cancelQueued: true } : undefined)) ?? undefined
+      receipt = (await target.interrupt()) ?? undefined
     } catch {
       return
     }
-    if (this.dead || !cancel) return
-    if (receipt?.cancelled) {
-      for (const id of receipt.cancelled) run.owned.delete(id)
-      if (run.owned.size === 0 && !run.settled) this.finishCancelled(run)
+    if (this.dead) return
+    if (!receipt) {
+      if (run.kind === 'prompt' && !run.started && !run.settled && run.owned.size > 0 && this.obligations.size === 0) this.close('closed')
       return
     }
-    if (run.kind === 'prompt' && !run.started && !run.settled && run.owned.size > 0 && this.obligations.size === 0) this.close('closed')
+    const queued = (receipt.still_queued ?? []).filter((id) => run.owned.has(id))
+    if (queued.length === 0) return
+    let cancelled: Receipt
+    try {
+      cancelled = (await target.interrupt({ cancelQueued: true })) ?? undefined
+    } catch {
+      return
+    }
+    if (this.dead) return
+    if (this.obligations.lose(released) > 0)
+      this.noticeLater('A background helper finished while a message was being cancelled; its result may not have been delivered. The thread stays waiting for it until the helpers finish or the idle limit releases them; Stop releases it now.')
+    for (const id of cancelled?.cancelled ?? []) run.owned.delete(id)
+    if (run.owned.size === 0 && !run.settled) this.finishCancelled(run)
   }
 
   /**
@@ -658,16 +685,14 @@ export class LiveSession<Turn = unknown> {
     if (this.cursor && !this.cursor.settled) return this.cursor
     this.cursor = undefined
     if (this.continuation && !this.continuation.settled) return (this.cursor = this.continuation)
-    const waiting = this.runs.find((run) => !run.abandoned && !run.settled)
-    if (waiting) return waiting
-    // Frames no run waits for are dropped, with one exception: a turn cut off after Claude read a task's
-    // notification leaves Claude a wake turn to run for it, and that turn must not run unseen. Its first
-    // root frame opens the continuation. A stray frame with nothing carried opens nothing: no task
-    // announced it, and nothing would end it.
+    // A turn cut off after Claude read a task's notification leaves Claude a wake turn to run for it, and
+    // that turn must not run unseen: its first root frame opens the continuation, ahead of any waiting
+    // run (a typed prompt's own first frame names it, so a waiting run only gets what names no one).
+    // A stray frame with nothing carried opens nothing: no task announced it, and nothing would end it.
     const carried = this.obligations.carriedIds()
     const root = (message as { parent_tool_use_id?: unknown }).parent_tool_use_id == null && message.type !== 'user'
     if (carried.length > 0 && root) return (this.cursor = this.startContinuation(carried))
-    return undefined
+    return this.runs.find((run) => !run.abandoned && !run.settled)
   }
 
   private ownerOf(ids: readonly string[]): LiveRun | undefined {
@@ -838,6 +863,13 @@ export class LiveSession<Turn = unknown> {
       this.reportedBackground = active
       this.hooks.backgroundWork(active)
     }
+    if (active && !this.capTimer) {
+      this.capTimer = setTimeout(() => this.onCap(), this.timings.maxPinMs)
+      this.capTimer.unref?.()
+    } else if (!active && this.capTimer) {
+      clearTimeout(this.capTimer)
+      this.capTimer = undefined
+    }
     if (!this.busy) this.armIdle()
   }
 
@@ -845,11 +877,23 @@ export class LiveSession<Turn = unknown> {
     if (!this.busy && !this.dead) this.armIdle()
   }
 
-  /** Provider activity: the idle clock and the pin budget start over. */
+  /** Provider activity restarts the idle clock. It does not move the cap on how long work may stay owed. */
   private touch(): void {
     this.lastUsed = Date.now()
-    this.pinnedSince = undefined
     if (!this.busy) this.armIdle()
+  }
+
+  /** The longest background work may stay owed has passed, however active the process was: it is released. */
+  private onCap(): void {
+    this.capTimer = undefined
+    if (this.dead || this.obligations.size === 0) return
+    // A turn in flight is not cut off for it; the check comes again soon.
+    if (this.busy || this.reserved > 0) {
+      this.capTimer = setTimeout(() => this.onCap(), Math.min(60_000, this.timings.maxPinMs))
+      this.capTimer.unref?.()
+      return
+    }
+    this.close('idle-cap')
   }
 
   private clearIdle(): void {
@@ -872,14 +916,8 @@ export class LiveSession<Turn = unknown> {
       this.close('idle')
       return
     }
-    // Background work is pending: keep the process, up to the pin cap without any provider activity.
-    const now = Date.now()
-    this.pinnedSince ??= now
-    if (now - this.pinnedSince < this.timings.maxPinMs) {
-      this.armIdle()
-      return
-    }
-    this.close('idle-cap')
+    // Background work is pending: the process stays; the cap on how long it may stay owed is `onCap`.
+    this.armIdle()
   }
 
   // ---- end ----
@@ -889,6 +927,8 @@ export class LiveSession<Turn = unknown> {
     this.dead = true
     this.clearIdle()
     this.clearWake()
+    if (this.capTimer) clearTimeout(this.capTimer)
+    this.capTimer = undefined
     for (const timer of this.noticeTimers) clearTimeout(timer)
     this.noticeTimers.clear()
     this.queue.close()

@@ -966,13 +966,15 @@ export class ClaudeSubscriptionProviderService {
       if (working > 0) {
         const previous = (live.meta.hardParts as readonly unknown[] | undefined) ?? []
         const changed = HARD_PARTS.filter((_, index) => JSON.stringify(previous[index]) !== JSON.stringify(key.hard[index]))
+        const cause = changed.length
+          ? `The ${changed.join(' and ')} changed, which needs a new Claude process`
+          : 'The conversation changed outside that process (an undo, an edit or a fork), so it cannot continue it'
+        const tasks = working === 1 ? 'a background task' : `${working} background tasks`
         throw new AppError({
           code: 'claude_background_work_blocks_change',
-          message: `Claude is still running ${working === 1 ? 'a background task' : `${working} background tasks`} for this thread. ${
-            changed.length
-              ? `The ${changed.join(' and ')} changed, which needs a new Claude process`
-              : 'The conversation changed outside that process (an undo, an edit or a fork), so it cannot continue it'
-          } and would end that work. Wait for it to finish or press Stop, then send again.`,
+          message: live.obligations.hasLost()
+            ? `Claude is still holding ${tasks} for this thread whose result may never arrive. ${cause} and would end that work. Press Stop to release it now, then send again.`
+            : `Claude is still running ${tasks} for this thread. ${cause} and would end that work. Wait for it to finish or press Stop, then send again.`,
           errorInfo: { category: 'unavailable', retryable: false }
         })
       }

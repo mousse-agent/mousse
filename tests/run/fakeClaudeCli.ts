@@ -164,6 +164,11 @@ export class FakeClaudeProcess {
     )
   }
 
+  /** The process took this message into the turn it is running (folded in) without a frame naming it. */
+  markStarted(uuid: string): void {
+    this.started.add(uuid)
+  }
+
   /** The uuids of messages the process read that no frame has named yet: still in its input queue. */
   get queued(): string[] {
     return this.inputs.map((message) => String(message.uuid)).filter((id) => !this.started.has(id) && !this.cancelled.has(id))
