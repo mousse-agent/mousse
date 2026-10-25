@@ -77,13 +77,14 @@
   cursor: default;
 }
 
-/* The two panes share one group surface. */
+/* The two panes share one group surface and grow with the editor; the settings page scrolls, as
+   on General. `clip` (not `hidden`) keeps the list's sticky position working. */
 
 .prov-pane {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  overflow: hidden;
+  overflow: clip;
   border-radius: var(--ui-card-radius);
   background: var(--settings-surface);
   box-shadow: var(--settings-surface-edge);
@@ -110,18 +111,19 @@
   .prov-pane {
     display: grid;
     grid-template-columns: 17rem minmax(0, 1fr);
-    height: min(44rem, calc(100dvh - 11rem));
-    min-height: 32rem;
+    align-items: start;
   }
 
+  /* The list stays in view while a long editor scrolls with the page. */
   .prov-pane-list {
-    overflow-y: auto;
+    position: sticky;
+    top: 0;
     border-bottom: 0;
-    border-right: 1px solid var(--ui-line);
   }
 
   .prov-pane-editor {
-    overflow-y: auto;
+    align-self: stretch;
+    border-left: 1px solid var(--ui-line);
   }
 }
 
@@ -737,13 +739,18 @@
 
 .prov-wizard-overlay .modal {
   width: 720px;
+  /* One height for every step, so Back and Next stay where they are. */
+  height: min(80vh, 720px);
+}
+
+.prov-wizard-overlay .modal-body {
+  flex: 1;
 }
 
 .prov-wizard {
   display: flex;
   flex-direction: column;
   gap: var(--space-12);
-  min-height: 22rem;
 }
 
 .prov-wizard-desc {

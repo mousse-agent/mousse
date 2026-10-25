@@ -36,6 +36,9 @@ export interface ProvidersSettingsProps {
   ensureValidProviderSelection: (next: MousseSettings, providers?: LlmProviderOption[]) => Promise<MousseSettings>
 }
 
+/** The scope last chosen on this page, kept while the app runs. */
+let lastScopeId = ''
+
 function ensureSignedIn(result: ProviderLoginResult, fallback: string): void {
   if (!result.success) throw new Error(result.error ?? fallback)
 }
@@ -50,8 +53,13 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
   settingsRef.current = settings
   const projects = useAppStore((state) => state.projects)
 
-  /** '' is this device; otherwise a project id. */
-  const [scopeId, setScopeId] = useState('')
+  /** '' is this device; otherwise a project id. A removed project falls back to the device. */
+  const [chosenScopeId, setChosenScopeId] = useState(lastScopeId)
+  const scopeId = chosenScopeId && projects.some((project) => project.id === chosenScopeId) ? chosenScopeId : ''
+  const setScopeId = (next: string) => {
+    lastScopeId = next
+    setChosenScopeId(next)
+  }
   const scope: ProviderScope = projectScope(scopeId || null)
   const { snapshots, error: loadError, loading, reload } = useProviderSnapshots(scope)
   const { snapshots: deviceSnapshots } = useProviderSnapshots(DEVICE_SCOPE)
@@ -278,9 +286,6 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
             <RefreshCw size={13} className={refreshing.busy ? 'icon-spin' : undefined} />
             <span className="sr-only">Refresh provider status</span>
             <span>{refreshing.busy ? 'Refreshing providers' : checkedLabel ? `Checked ${checkedLabel}` : 'Checking'}</span>
-          </button>
-          <button type="button" className="settings-icon-btn" title="Add provider" aria-label="Add provider" onClick={openAdd}>
-            <Plus size={14} />
           </button>
         </span>
       </div>

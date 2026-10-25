@@ -53,7 +53,7 @@ export function describeCapabilities(capabilities: ModelCapabilities): string {
 
 /**
  * T3 Code's provider Models section on the instance's snapshot: counter, filter past eight models,
- * favorites first, a show-in-picker switch and move up/down per model, bulk enable/disable, and
+ * favorites first, a show-in-picker switch and move up/down per model, bulk hide/show, and
  * custom models with their capabilities stated. Every change is saved to the daemon's model prefs.
  */
 export function ProviderModelsSection({
@@ -118,7 +118,7 @@ export function ProviderModelsSection({
         <span className="prov-models-meta">
           {builtIn.length > 0 && (
             <button type="button" className="prov-ghost-btn" onClick={() => write({ hidden: allHidden ? [] : builtIn.map((model) => model.id) })}>
-              {allHidden ? 'Enable all' : 'Disable all'}
+              {allHidden ? 'Show all' : 'Hide all'}
             </button>
           )}
           <span className="prov-models-count">
