@@ -811,8 +811,6 @@ const api = {
         ipcRenderer.invoke('providers:instances:cancelInstall', operationId),
       update: (instanceId: string): Promise<ProviderOperationStarted> =>
         ipcRenderer.invoke('providers:instances:update', instanceId),
-      uninstall: (instanceId: string): Promise<InstanceSnapshot> =>
-        ipcRenderer.invoke('providers:instances:uninstall', instanceId),
       signIn: (instanceId: string, method?: string): Promise<ProviderOperationStarted> =>
         ipcRenderer.invoke('providers:instances:signIn', instanceId, method),
       /** Answers a sign-in prompt, or cancels the sign-in with `{ kind: 'cancel' }`. */

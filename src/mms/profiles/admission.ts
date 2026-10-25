@@ -29,7 +29,7 @@ const PROFILE_PROVIDER_METHODS = new Set([
   'providers.loginOAuth', 'providers.logout',
   'providers.snapshots', 'providers.instances.add', 'providers.instances.remove',
   'providers.instances.configure', 'providers.instances.setEnabled', 'providers.instances.install',
-  'providers.instances.cancelInstall', 'providers.instances.update', 'providers.instances.uninstall',
+  'providers.instances.cancelInstall', 'providers.instances.update',
   'providers.instances.signIn', 'providers.instances.respondSignIn', 'providers.instances.signOut',
   'providers.instances.recheck', 'providers.instances.refreshModels', 'providers.instances.setModelPrefs'
 ])

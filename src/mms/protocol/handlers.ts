@@ -1789,10 +1789,6 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       return { operation: await harnessGateway(ctx).instances.update(asInstanceId(p.instanceId)) }
     }
-    case 'providers.instances.uninstall': {
-      const p = isObject(params) ? params : {}
-      return { snapshot: await harnessGateway(ctx).instances.uninstall(asInstanceId(p.instanceId)) }
-    }
     case 'providers.instances.signIn': {
       const p = isObject(params) ? params : {}
       const instanceId = asInstanceId(p.instanceId)

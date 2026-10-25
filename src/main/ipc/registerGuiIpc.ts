@@ -2064,7 +2064,6 @@ export function registerGuiIpc(
   const installInstance = instanceCommand('providers.instances.install', 'operation')
   const cancelInstanceInstall = instanceCommand('providers.instances.cancelInstall', 'cancelled')
   const updateInstance = instanceCommand('providers.instances.update', 'operation')
-  const uninstallInstance = instanceCommand('providers.instances.uninstall', 'snapshot')
   const signInInstance = instanceCommand('providers.instances.signIn', 'operation')
   const respondInstanceSignIn = instanceCommand('providers.instances.respondSignIn', 'ok')
   const signOutInstance = instanceCommand('providers.instances.signOut', 'snapshot')
@@ -2084,7 +2083,6 @@ export function registerGuiIpc(
   registerHandler('providers:instances:cancelInstall', async (_e, operationId: string) =>
     cancelInstanceInstall({ operationId }))
   registerHandler('providers:instances:update', async (_e, instanceId: string) => updateInstance({ instanceId }))
-  registerHandler('providers:instances:uninstall', async (_e, instanceId: string) => uninstallInstance({ instanceId }))
   registerHandler('providers:instances:signIn', async (_e, instanceId: string, method?: string) =>
     signInInstance({ instanceId, method }))
   registerHandler('providers:instances:respondSignIn', async (_e, operationId: string, response: unknown) =>

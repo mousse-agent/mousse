@@ -9,7 +9,13 @@ export const GUI_REQUIRED_METHODS = [
   'actions.sweepRetention', 'actions.configureRetention', 'actions.pin',
   'operations.get', 'operations.abort', 'operations.recover', 'publish.status', 'publish.start',
   'threads.inventory', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.configureTrash',
-  'subagents.list'
+  'subagents.list',
+  // Settings → Providers runs on the harness gateway; an older service lacks it.
+  'providers.snapshots', 'providers.instances.add', 'providers.instances.remove', 'providers.instances.configure',
+  'providers.instances.setEnabled', 'providers.instances.install', 'providers.instances.cancelInstall',
+  'providers.instances.update', 'providers.instances.signIn', 'providers.instances.respondSignIn',
+  'providers.instances.signOut', 'providers.instances.recheck', 'providers.instances.refreshModels',
+  'providers.instances.setModelPrefs'
 ] as const
 
 export async function assertGuiDaemonCompatible(client: LocalMmsClient, hello: ProtocolHelloOk, homeDir: string): Promise<void> {

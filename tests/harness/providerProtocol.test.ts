@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import type { HarnessGateway, HarnessInstances } from '../../src/mms/harness/gateway'
 import { isInstallationMethod } from '../../src/mms/profiles/admission'
 import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
-import { PROTOCOL_METHODS } from '../../src/mms/protocol/types'
+import { MMS_PROTOCOL_VERSION, PROTOCOL_METHODS } from '../../src/mms/protocol/types'
+import { assertGuiDaemonCompatible, GUI_REQUIRED_METHODS } from '../../src/main/mms/guiDaemonCompatibility'
 
 const HARNESS_METHODS = PROTOCOL_METHODS.filter((method) => method === 'providers.snapshots' || method.startsWith('providers.instances.'))
 
@@ -13,7 +14,17 @@ function context(instances?: Partial<HarnessInstances>): HandlerContext {
 
 describe('harness provider protocol', () => {
   it('declares the full command set', () => {
-    expect(HARNESS_METHODS).toHaveLength(15)
+    expect(HARNESS_METHODS).toHaveLength(14)
+  })
+
+  it('the GUI refuses, with recovery steps, a running service that predates the provider methods', async () => {
+    expect(GUI_REQUIRED_METHODS.filter((method) => HARNESS_METHODS.includes(method as never))).toHaveLength(HARNESS_METHODS.length)
+    const current = [...PROTOCOL_METHODS, ...GUI_REQUIRED_METHODS]
+    const older = current.filter((method) => !HARNESS_METHODS.includes(method as never))
+    const client = (methods: readonly string[]) => ({ request: async () => ({ protocolVersion: MMS_PROTOCOL_VERSION, methods }) }) as never
+    const hello = { protocolVersion: MMS_PROTOCOL_VERSION } as never
+    await expect(assertGuiDaemonCompatible(client(older), hello, '/home/me')).rejects.toThrow(/Missing APIs: providers\.snapshots, providers\.instances\.add/)
+    await expect(assertGuiDaemonCompatible(client(current), hello, '/home/me')).resolves.toBeUndefined()
   })
 
   it('serves every method from the bound profile', () => {

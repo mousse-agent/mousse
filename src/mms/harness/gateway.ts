@@ -203,7 +203,6 @@ export interface HarnessInstances {
   /** Cancels a running install or update; false when it is not running. */
   cancelInstall(operationId: string): Promise<boolean>
   update(instanceId: string): Promise<ProviderOperationStarted>
-  uninstall(instanceId: string): Promise<InstanceSnapshot>
   /** `method` picks one of the driver's sign-in methods; absent = its default. */
   signIn(instanceId: string, method?: string): Promise<ProviderOperationStarted>
   /** False when the operation or prompt is no longer waiting. */
@@ -415,10 +414,6 @@ export class Harness implements HarnessGateway {
       install: (instanceId) => this.install(instanceId, 'install'),
       cancelInstall: async (operationId) => this.operations.get(operationId)?.cancel() ?? false,
       update: (instanceId) => this.update(instanceId),
-      uninstall: async (instanceId) => {
-        this.record(instanceId, { allowDisabled: true })
-        return harnessFail('unsupported', 'Mousse does not uninstall CLIs it did not install. Remove it with the tool that installed it.', instanceId)
-      },
       signIn: (instanceId, method) => this.signIn(instanceId, method),
       respondSignIn: async (operationId, response) => this.respondSignIn(operationId, response),
       signOut: (instanceId) => this.signOut(instanceId),

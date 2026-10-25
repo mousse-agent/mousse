@@ -340,7 +340,6 @@ export const PROTOCOL_METHODS = [
   'providers.instances.install',
   'providers.instances.cancelInstall',
   'providers.instances.update',
-  'providers.instances.uninstall',
   'providers.instances.signIn',
   'providers.instances.respondSignIn',
   'providers.instances.signOut',
