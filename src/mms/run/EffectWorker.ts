@@ -189,13 +189,14 @@ export class EffectWorker {
   private idleDelay(now: string): number {
     let next: string | null = null
     try {
-      next = this.outbox.nextAvailableAt()
+      next = this.outbox.nextFutureAvailableAt(now)
     } catch {
       return this.pollMs
     }
     if (!next) return this.pollMs
     const delay = Date.parse(next) - Date.parse(now)
-    // A due row we could not claim is lane-blocked; a settlement or the poll will wake us.
+    // A due row we could not claim is lane-blocked behind an earlier one; that one (or a settlement, or the
+    // poll) frees it. So the wake is for the next row that is waiting out a delay, which may be that head.
     return delay > 0 ? Math.min(this.pollMs, delay) : this.pollMs
   }
 

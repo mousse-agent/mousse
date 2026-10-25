@@ -104,6 +104,8 @@ export type ClaudeSubscriptionChatInput = {
    * the thread's live query and pushes no prompt.
    */
   continuation?: boolean
+  /** Which of the thread's turns Claude started itself this is (`ClaudeLiveHost.continuationStarted`); absent takes the oldest. */
+  continuationId?: string
   onText: (text: string) => void
   onThinking?: (text: string) => void
   onMetrics?: (report: ClaudeSubscriptionMetrics) => void
@@ -135,9 +137,9 @@ export interface ClaudeLiveHost {
   backgroundWork?(threadId: string, active: boolean): void
   /**
    * Claude started a turn of its own because background tasks finished. The host runs it as a run of
-   * the thread, which calls `chat({ continuation: true })`.
+   * the thread, which calls `chat({ continuation: true, continuationId: info.id })`.
    */
-  continuationStarted?(threadId: string, info: { taskIds: string[]; summaries: string[] }): void
+  continuationStarted?(threadId: string, info: { id: string; taskIds: string[]; summaries: string[] }): void
   /** Something the thread's user should know: a helper's result may not have been delivered. */
   notice?(threadId: string, text: string): void
 }
@@ -1022,7 +1024,7 @@ export class ClaudeSubscriptionProviderService {
    * thread; without a host it is stopped, and its tasks stay owed until the next committed turn on the
    * process clears them (Claude has read them by then) or Stop or the cap ends the process.
    */
-  private continuationStarted(live: LiveSession<TurnContext>, run: LiveRun, info: { taskIds: string[]; summaries: string[] }): void {
+  private continuationStarted(live: LiveSession<TurnContext>, run: LiveRun, info: { id: string; taskIds: string[]; summaries: string[] }): void {
     const host = this.liveHost
     if (host?.continuationStarted) {
       try {
@@ -1036,15 +1038,26 @@ export class ClaudeSubscriptionProviderService {
     // unattended, in bypass mode). Its tasks are discharged by the next turn that commits.
     live.discardContinuation(run)
   }
-  /** Whether Claude started a turn of its own on the thread that no run has taken yet. */
-  hasContinuation(threadId: string): boolean {
+  /** The turn Claude started on its own that is running now on the thread (see `LiveSession.inFlightContinuation`). */
+  inFlightContinuation(threadId: string): { id: string; discarded: boolean } | undefined {
     const live = this.live.get(threadId)
-    return Boolean(live && !live.dead && live.hasUnclaimedContinuation())
+    return live && !live.dead ? live.inFlightContinuation() : undefined
+  }
+  /** Whether Claude started a turn of its own on the thread that no run has taken yet. */
+  hasContinuation(threadId: string, id?: string): boolean {
+    const live = this.live.get(threadId)
+    return Boolean(live && !live.dead && live.hasUnclaimedContinuation(id))
   }
   /** The host could not run the turn Claude started on its own: it is stopped and dropped. */
-  discardContinuations(threadId: string): void {
+  discardContinuations(threadId: string, id?: string): void {
     const live = this.live.get(threadId)
     if (!live) return
+    // Only the turn the failing run belongs to: another waiting turn is another run's to take.
+    if (id !== undefined) {
+      const run = live.claimContinuation(id)
+      if (run) live.discardContinuation(run)
+      return
+    }
     for (let run = live.claimContinuation(); run; run = live.claimContinuation()) live.discardContinuation(run)
   }
   /** Mousse's side of one turn's permission decisions; a live query reads the current turn's, not the first's. */
@@ -1395,7 +1408,7 @@ export class ClaudeSubscriptionProviderService {
       if (input.continuation) {
         // Claude started this turn itself: it joins the one already in flight and pushes no prompt.
         live = this.live.get(input.threadId)
-        const wake = live && !live.dead ? live.claimContinuation() : undefined
+        const wake = live && !live.dead ? live.claimContinuation(input.continuationId) : undefined
         if (!live || !wake) throw new Error('Claude has no turn of its own to continue for this thread')
         liveRun = wake
         live.current = turn
@@ -1483,6 +1496,13 @@ export class ClaudeSubscriptionProviderService {
             frames.text += result.result
             input.onText(frames.text)
           }
+        } else if (outcome.reason === 'folded') {
+          // A wake Claude folded a message of ours into has no turn of its own; the message got the answer.
+          throw new AppError({
+            code: 'claude_continuation_folded',
+            message: 'Claude answered this wake together with a message of yours; it has no turn of its own.',
+            errorInfo: { category: 'cancelled', retryable: false }
+          })
         } else if (outcome.reason === 'deadline') {
           frames.text = 'A background task finished, but Claude did not respond to it.'
           input.onText(frames.text)

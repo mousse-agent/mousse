@@ -82,9 +82,22 @@ export class McpToolError extends Error {
 
 type ToolLedger = NonNullable<LlmChatOptions['toolLedger']>
 
+/**
+ * What a call that waited for a run the provider started (`awaitLiveRun`) learns: the run it must act as,
+ * or `null` when that run never became active (it timed out, was cancelled or its thread was deleted).
+ */
+export interface LiveRunGate {
+  runId: string | null
+}
+
 export interface ToolRegistryOptions {
   /** The thread's active run (`starting|running|finalizing`), or null when it has none. */
   activeRunId(threadId: string): string | null
+  /**
+   * A run is about to become the thread's active one (a turn its provider started itself, not yet
+   * running): a call waits for it, so it acts as that run and not as the one that just ended.
+   */
+  awaitLiveRun?(threadId: string): Promise<LiveRunGate | undefined> | undefined
   /** SPEC §12.6 tool ledger of the caller's run; undefined skips it. */
   toolLedger?(runId: string): ToolLedger | undefined
   /** The thread is a read-only (`shared`) delegated child; it may call only `reads` and `readOnlySafe` tools. */
@@ -132,7 +145,13 @@ export class ToolRegistry {
   async call(name: string, args: Record<string, unknown>, request: ToolCallContext): Promise<ToolOutcome> {
     const tool = this.tools.get(name)
     if (!tool) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
-    const ctx: ToolCallContext = { ...request, caller: assertLiveCaller(this.options.activeRunId(request.caller.threadId), request.caller) }
+    const gate = await this.options.awaitLiveRun?.(request.caller.threadId)
+    const active = this.options.activeRunId(request.caller.threadId)
+    // A call that waited for a particular run acts as that run or not at all: never as another one that
+    // happens to be active (a person's turn stuck in its sign-in check, say).
+    if (gate && (gate.runId === null || gate.runId !== active))
+      throw new McpToolError('mousse_caller_not_live', `The turn Claude started for thread ${request.caller.threadId} did not become active; its tools are closed.`)
+    const ctx: ToolCallContext = { ...request, caller: assertLiveCaller(active, request.caller) }
     if (tool.access !== 'reads' && !tool.readOnlySafe && this.options.readOnlyThread?.(ctx.caller.threadId))
       throw new McpToolError('mousse_read_only', `${name} can change threads or the workspace; a read-only subagent cannot call it.`)
     if (tool.access === 'writesThreads') callerThreadOnly(args, ctx.caller)
@@ -190,6 +209,7 @@ export interface MousseToolHost {
   enqueue(threadId: string, input: { content: string; mode: 'agent' | 'plan' }): unknown
   toolLedger?(runId: string): ToolLedger | undefined
   readOnlyThread?(threadId: string): boolean
+  awaitLiveRun?(threadId: string): Promise<LiveRunGate | undefined> | undefined
 }
 
 const CLIENT_REQUEST_ID_SCHEMA: JsonSchema = {
@@ -258,6 +278,7 @@ export function createMousseToolRegistry(deps: { engine: RunEngine; host: Mousse
   const { engine, host } = deps
   const registry = new ToolRegistry({
     activeRunId: (threadId) => engine.getActiveRun(threadId)?.runId ?? null,
+    awaitLiveRun: host.awaitLiveRun ? (threadId) => host.awaitLiveRun!(threadId) : undefined,
     toolLedger: host.toolLedger ? (runId) => host.toolLedger!(runId) : undefined,
     readOnlyThread: host.readOnlyThread ? (threadId) => host.readOnlyThread!(threadId) : undefined
   })

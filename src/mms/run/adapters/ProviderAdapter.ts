@@ -85,6 +85,14 @@ export interface TurnInput {
   mode: ChatMode
   /** Set when the thread is a delegated child; adapters apply it on every turn of the thread. */
   child?: ChildTurnPolicy
+  /**
+   * The provider started this turn itself (a background task finished and its runtime woke the
+   * thread): the turn reads what the runtime is already doing and `prompt` is only the note shown in
+   * the transcript. Set for runs with source `provider-continuation`.
+   */
+  continuation?: boolean
+  /** Which turn the provider started this run is for, when it started several. */
+  continuationId?: string
   /** Text of the admitted user message; prompt-based adapters send it as the turn's prompt. */
   prompt: string
   /** Active pi-ai transcript, ending with the admitted user message. */

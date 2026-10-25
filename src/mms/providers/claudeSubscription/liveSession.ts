@@ -287,6 +287,8 @@ export class CancelInProgress extends Error {
 }
 
 export class LiveRun {
+  /** Names this turn to the host that is asked to run it. */
+  readonly id = randomUUID()
   /** Gates this turn's permission prompts, hooks and cancellation; the query itself never sees it. */
   readonly controller = new AbortController()
   /** Every message id this run pushed; a frame or result that echoes one belongs to the run. */
@@ -312,6 +314,8 @@ export class LiveRun {
   started = false
   /** What a discarded wake had left when this turn began; it clears them when it commits. */
   discardedAtStart: string[] = []
+  /** The host could not run this wake and it was discarded; its frames still arrive until its result. */
+  discarded = false
   /** A discarded turn was interrupted. */
   interruptSent = false
   readonly buffered: SDKMessage[] = []
@@ -358,7 +362,7 @@ export interface LiveSessionHooks {
   /** The thread's set of obligations became non-empty (`true`) or empty. */
   backgroundWork(active: boolean): void
   /** Claude started a turn of its own: `taskIds` finished and nobody was waiting for them. */
-  continuationStarted(run: LiveRun, info: { taskIds: string[]; summaries: string[] }): void
+  continuationStarted(run: LiveRun, info: { id: string; taskIds: string[]; summaries: string[] }): void
   /** Something the thread's user should know about the process (a helper's result that may be lost). */
   notice?(text: string): void
   /** The process ended or was released. */
@@ -484,12 +488,26 @@ export class LiveSession<Turn = unknown> {
    * The oldest turn Claude started on its own that no run has taken yet, whether it is still in flight
    * or already over (its frames and result wait for the run). The run that takes it reads them.
    */
-  claimContinuation(): LiveRun | undefined {
-    return this.unclaimed.shift()
+  claimContinuation(id?: string): LiveRun | undefined {
+    if (id === undefined) return this.unclaimed.shift()
+    const index = this.unclaimed.findIndex((run) => run.id === id)
+    return index >= 0 ? this.unclaimed.splice(index, 1)[0] : undefined
   }
 
-  hasUnclaimedContinuation(): boolean {
-    return this.unclaimed.length > 0
+  /**
+   * The turn Claude started on its own whose frames are in flight right now, if that is the turn it is
+   * running: a Mousse tool call made now comes from it. When Claude runs a message of ours, nothing is
+   * returned, whatever wakes wait to be run.
+   */
+  inFlightContinuation(): { id: string; discarded: boolean } | undefined {
+    const run = this.cursor
+    // A wake that was discarded but is not interrupted yet (another run is live) still runs tools.
+    return run && run.kind === 'continuation' && !run.settled && (!run.abandoned || run.discarded) ? { id: run.id, discarded: run.discarded } : undefined
+  }
+
+  /** A turn Claude started on its own waits for a run (the one `id` names, when given). */
+  hasUnclaimedContinuation(id?: string): boolean {
+    return id === undefined ? this.unclaimed.length > 0 : this.unclaimed.some((run) => run.id === id)
   }
 
   /**
@@ -505,6 +523,7 @@ export class LiveSession<Turn = unknown> {
     if (this.obligations.release(run, 'discarded').length > 0)
       this.hooks.notice?.('A background helper finished, but nothing could show its result. The next message clears it; Stop releases it now.')
     if (run.settled || run.abandoned) return
+    run.discarded = true
     // The turn may not have begun yet (the notification comes first): it stays the frames' target, so
     // everything it says is dropped, and it is interrupted as soon as its first frame shows it started.
     run.abandoned = true
@@ -894,7 +913,7 @@ export class LiveSession<Turn = unknown> {
     this.armWake(run)
     // The tasks are the continuation's before the owner hears of it, so it can finish them at once.
     for (const id of taskIds) this.obligations.consume(id, run)
-    this.hooks.continuationStarted(run, { taskIds: [...taskIds], summaries })
+    this.hooks.continuationStarted(run, { id: run.id, taskIds: [...taskIds], summaries })
     return run
   }
 
@@ -973,6 +992,12 @@ export class LiveSession<Turn = unknown> {
   private endContinuation(run: LiveRun, reason: 'deadline' | 'folded'): void {
     if (run.settled) return
     this.remove(run)
+    // A wake that folded a message of ours in has no turn of its own to run: no run may claim it. One that
+    // never started keeps its place, so the run that was opened for it ends with the note.
+    if (reason === 'folded') {
+      const unclaimed = this.unclaimed.indexOf(run)
+      if (unclaimed >= 0) this.unclaimed.splice(unclaimed, 1)
+    }
     run.resolve({ result: null, reason })
     this.afterRunEnded()
   }

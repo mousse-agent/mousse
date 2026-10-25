@@ -39,6 +39,8 @@ export class ThreadSession {
    * it is assigned after several awaits and cleared before the post-turn phase.
    */
   turnAdmitted = false
+  /** The run whose send reserved `turnAdmitted` and whose `turn.start` effect will run it; absent when a queue drain or a channel turn holds it. */
+  admissionRunId: string | undefined
   /** A queue drain requested while the turn was still settling; run once admission is cleared. */
   drainAfterSettle = false
   /** Stop requested after admission but before the turn created its abort controller. */
