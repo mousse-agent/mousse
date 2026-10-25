@@ -19,8 +19,10 @@ const SIGN_IN_COMMAND = 'codex login'
 function readAuth(service: CodexProviderService, status: Awaited<ReturnType<CodexProviderService['status']>>): AuthReading {
   const methodLabel = 'ChatGPT sign-in'
   switch (status.state) {
-    case 'connected':
-      return { state: 'signed_in', methodLabel, ...(service.account() ? { account: service.account() } : {}) }
+    case 'connected': {
+      const account = service.account()
+      return { state: 'signed_in', methodLabel, ...(account?.label ? { account: { label: account.label } } : {}), ...(account?.subject ? { subject: account.subject } : {}) }
+    }
     case 'signed_out':
     case 'disconnected':
       return { state: 'signed_out', methodLabel, message: status.message, signInCommand: SIGN_IN_COMMAND }

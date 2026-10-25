@@ -43,8 +43,10 @@ export interface ClaudeCodeDriverOptions {
 function readAuth(service: ClaudeSubscriptionProviderService, status: Awaited<ReturnType<ClaudeSubscriptionProviderService['status']>>, signInCommand: string): AuthReading {
   const methodLabel = 'Claude Code sign-in'
   switch (status.state) {
-    case 'connected':
-      return { state: 'signed_in', methodLabel, ...(service.account() ? { account: service.account() } : {}) }
+    case 'connected': {
+      const account = service.account()
+      return { state: 'signed_in', methodLabel, ...(account?.label ? { account: { label: account.label } } : {}), ...(account?.subject ? { subject: account.subject } : {}) }
+    }
     case 'signed_out':
       return { state: 'signed_out', methodLabel, message: status.message, signInCommand }
     case 'disconnected':

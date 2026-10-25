@@ -88,6 +88,12 @@ export interface ExecutionBinding {
   homeId: string
   /** Bumped when the instance config changes. */
   configRevision: number
+  /**
+   * The signed-in account when the binding was made: a salted one-way hash of the vendor's stable
+   * account id and the home, never the id or email itself. Absent when the account could not be
+   * established; a native session is then never resumed (the history is handed over instead).
+   */
+  accountId?: string
   model: string
   effort?: string
   policy: RunPolicy
@@ -113,7 +119,9 @@ export const HARNESS_ERROR_CODES = [
   'protocol',
   'timeout',
   'cancelled',
-  'not_implemented'
+  'not_implemented',
+  /** A retry or recovery cannot run on its run's binding: the instance's config, home or account changed. */
+  'binding_stale'
 ] as const
 export type HarnessErrorCode = (typeof HARNESS_ERROR_CODES)[number]
 
@@ -146,7 +154,8 @@ const HARNESS_ERROR_CATEGORY: Record<HarnessErrorCode, ErrorCategory> = {
   protocol: 'internal',
   timeout: 'timeout',
   cancelled: 'cancelled',
-  not_implemented: 'unsupported'
+  not_implemented: 'unsupported',
+  binding_stale: 'conflict'
 }
 
 /** The protocol-safe error for a `HarnessError` (its message is audited text, never vendor output). */

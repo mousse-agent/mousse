@@ -30,7 +30,7 @@ import { getDefaultSettings } from '../../src/shared/settings'
 
 /** A Claude-like runtime whose turns wait for `release()`; records forgotten sessions. */
 class GatedClaude implements ProviderAdapter {
-  readonly driver = 'claude' as const
+  constructor(readonly driver: 'claude' | 'codex' = 'claude') {}
   readonly capabilities = CLAUDE_SUBSCRIPTION_CAPABILITIES
   readonly turns: TurnInput[] = []
   private gates: Array<() => void> = []
@@ -63,6 +63,14 @@ describe('execution bindings', () => {
   let adapter: GatedClaude
   let harness: Harness
   let forgotten: string[]
+  let codexForgotten: string[]
+  let codex: GatedClaude
+  /** The account the instances report; `undefined` = signed in, identity unknown. */
+  let subject: string | undefined
+  let authChecks: number
+  let clock: number
+  /** Moves the clock past the account check's freshness window. */
+  const later = () => { clock += 60_000 }
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'mousse-binding-'))
@@ -80,11 +88,26 @@ describe('execution bindings', () => {
       chat: async () => { throw new Error('unused') }
     }
     adapter = new GatedClaude()
+    codex = new GatedClaude('codex')
     forgotten = []
-    let stored: unknown = { claude: { driver: 'claude', enabled: true } }
+    codexForgotten = []
+    subject = 'account-a'
+    authChecks = 0
+    clock = Date.now()
+    let stored: unknown = { claude: { driver: 'claude', enabled: true }, codex: { driver: 'codex', enabled: true } }
     const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
-    const claude = adapterDriver(adapter, { runtime: { forgetConversation: (threadId) => forgotten.push(threadId), signOut: async () => {} } })
-    harness = testHarness({ drivers: [{ ...claude, decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }) }], instances, profileHome: home })
+    const auth = async () => {
+      authChecks += 1
+      return { state: 'signed_in' as const, ...(subject ? { subject } : {}) }
+    }
+    const claude = adapterDriver(adapter, { runtime: { auth, forgetConversation: (threadId) => forgotten.push(threadId), signOut: async () => {}, setLaunch: async () => {} } })
+    const codexDriver = adapterDriver(codex, { runtime: { auth, forgetConversation: (threadId) => codexForgotten.push(threadId) } })
+    harness = testHarness({
+      drivers: [{ ...claude, decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }) }, codexDriver],
+      instances,
+      profileHome: home,
+      now: () => clock
+    })
     orch.setHarness(harness)
     engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })) })
     orch.setRunEngine(engine)
@@ -114,8 +137,11 @@ describe('execution bindings', () => {
     const [run] = engine.listRuns(thread.id)
     expect(bindingOf(run.runId)).toEqual({
       instanceId: 'claude', driver: 'claude', accountGeneration: 0, homeId: 'default', configRevision: 0, model: 'sonnet',
+      accountId: expect.stringMatching(/^[0-9a-f]{32}$/),
       policy: { mode: 'default', approvals: 'ask' }
     })
+    // The account is a salted hash, never the vendor's id.
+    expect(JSON.stringify(bindingOf(run.runId))).not.toContain('account-a')
     // A binding is immutable: a second write keeps the first.
     const attemptId = engine.getRun(run.runId)!.activeAttemptId!
     engine.store.setAttemptBinding(attemptId, { ...bindingOf(run.runId)!, model: 'opus' })
@@ -137,7 +163,7 @@ describe('execution bindings', () => {
     adapter.gated = true
     const first = orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
     await waitFor(() => adapter.turns.length === 1)
-    await harness.instances.configure('claude', { displayName: 'Renamed' })
+    await harness.instances.configure('claude', { env: { FOO: '1' } })
     const [active] = engine.listRuns(thread.id)
     expect(bindingOf(active.runId)?.configRevision).toBe(0)
     adapter.gated = false
@@ -158,14 +184,116 @@ describe('execution bindings', () => {
     expect(forgotten).toEqual([])
     // Signing out moves the account generation on.
     await harness.instances.signOut('claude')
+    later()
     await orch.send('two', false, { threadId: thread.id, clientRequestId: 'send-b' })
     const [latest, previous] = engine.listRuns(thread.id)
     expect(bindingOf(previous.runId)?.accountGeneration).toBe(0)
     expect(bindingOf(latest.runId)?.accountGeneration).toBe(1)
     expect(forgotten).toEqual([thread.id])
     // The same account again: nothing is dropped.
+    later()
     await orch.send('three', false, { threadId: thread.id, clientRequestId: 'send-c' })
     expect(forgotten).toEqual([thread.id])
+  })
+
+  it('an account switched in a terminal between two turns is noticed at the next turn, with no Settings visit', async () => {
+    const thread = store.createThread('terminal switch')
+    orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
+    await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
+    later()
+    await orch.send('two', false, { threadId: thread.id, clientRequestId: 'send-b' })
+    expect(forgotten).toEqual([])
+    const checks = authChecks
+    // `claude auth logout` / `claude auth login` as someone else; no probe, no snapshots request.
+    subject = 'account-b'
+    later()
+    await orch.send('three', false, { threadId: thread.id, clientRequestId: 'send-c' })
+    expect(authChecks).toBeGreaterThan(checks)
+    const [latest, previous] = engine.listRuns(thread.id)
+    expect(bindingOf(latest.runId)?.accountGeneration).toBe(bindingOf(previous.runId)!.accountGeneration + 1)
+    expect(bindingOf(latest.runId)?.accountId).not.toBe(bindingOf(previous.runId)?.accountId)
+    expect(forgotten).toEqual([thread.id])
+  })
+
+  it('an account the instance cannot identify never resumes a native session', async () => {
+    const thread = store.createThread('unknown identity')
+    orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
+    subject = undefined
+    await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
+    later()
+    await orch.send('two', false, { threadId: thread.id, clientRequestId: 'send-b' })
+    const [latest] = engine.listRuns(thread.id)
+    expect(bindingOf(latest.runId)?.accountId).toBeUndefined()
+    expect(forgotten).toEqual([thread.id])
+  })
+
+  it('a config change between completed turns hands the history over instead of resuming', async () => {
+    const thread = store.createThread('config revision')
+    orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
+    await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
+    await harness.instances.configure('claude', { args: ['--verbose'] })
+    later()
+    await orch.send('two', false, { threadId: thread.id, clientRequestId: 'send-b' })
+    expect(forgotten).toEqual([thread.id])
+    // Renaming is not a config change.
+    await harness.instances.configure('claude', { displayName: 'Mine' })
+    later()
+    await orch.send('three', false, { threadId: thread.id, clientRequestId: 'send-c' })
+    expect(forgotten).toEqual([thread.id])
+  })
+
+  it('resume compares against the last run on the same instance, not the last run of the thread', async () => {
+    const thread = store.createThread('claude codex claude')
+    orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
+    await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
+    orch.setThreadModelOverride(thread.id, { instanceId: 'codex', llmProvider: 'codex', model: 'gpt' })
+    later()
+    await orch.send('two', false, { threadId: thread.id, clientRequestId: 'send-b' })
+    subject = 'account-b'
+    orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
+    later()
+    await orch.send('three', false, { threadId: thread.id, clientRequestId: 'send-c' })
+    expect(adapter.turns.map((turn) => turn.model)).toEqual(['sonnet', 'sonnet'])
+    expect(forgotten).toEqual([thread.id])
+  })
+
+  it('a replacement attempt runs its run binding (runtime and input) and records it, not the current selection', async () => {
+    const thread = store.createThread('retry')
+    orch.setThreadModelOverride(thread.id, { instanceId: 'codex', llmProvider: 'codex', model: 'mutable-model' })
+    const bound = await harness.bind(harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'bound-model' }, { purpose: 'turn' }), { mode: 'agent' })
+    let retryAttempt: string | undefined
+    const markStarting = engine.markStarting.bind(engine)
+    engine.markStarting = (runId) => {
+      const run = markStarting(runId)
+      // The first attempt ran on `bound`; a retry replaces it.
+      engine.store.setAttemptBinding(run.activeAttemptId!, bound)
+      retryAttempt = engine.store.createAttempt({ runId, reason: 'retry' }).attemptId
+      return engine.getRun(runId)!
+    }
+    await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
+    expect(codex.turns).toEqual([])
+    expect(adapter.turns).toHaveLength(1)
+    expect(adapter.turns[0]).toMatchObject({ instanceId: 'claude', model: 'bound-model' })
+    expect(engine.store.getAttempt(retryAttempt!)?.executionBinding).toEqual(bound)
+  })
+
+  it('a recovery attempt whose binding no longer matches the instance config fails typed instead of running', async () => {
+    const thread = store.createThread('stale')
+    orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
+    const bound = await harness.bind(harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'sonnet' }, { purpose: 'turn' }), { mode: 'agent' })
+    await harness.instances.configure('claude', { env: { CHANGED: '1' } })
+    const markStarting = engine.markStarting.bind(engine)
+    engine.markStarting = (runId) => {
+      const run = markStarting(runId)
+      engine.store.setAttemptBinding(run.activeAttemptId!, bound)
+      engine.store.createAttempt({ runId, reason: 'recovery' })
+      return engine.getRun(runId)!
+    }
+    await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
+    expect(adapter.turns).toEqual([])
+    const [run] = engine.listRuns(thread.id)
+    expect(run.status).toBe('failed')
+    expect(run.outcome?.error).toMatch(/settings of this provider changed/)
   })
 
   it('Stop reaches the instance named by the binding', async () => {

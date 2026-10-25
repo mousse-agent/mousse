@@ -474,14 +474,17 @@ export class RunEngine extends EventEmitter {
     return undefined
   }
 
-  /** The binding of the latest earlier run on the thread that recorded one. */
-  previousBinding(threadId: string, beforeRunId: string): ExecutionBinding | undefined {
+  /**
+   * The binding of the latest earlier run on the thread that recorded one, on `instanceId` when
+   * given (the run that last used the instance's native session of the thread).
+   */
+  previousBinding(threadId: string, beforeRunId: string, instanceId?: string): ExecutionBinding | undefined {
     const runs = this.store.listRuns(threadId)
     const before = runs.find((run) => run.runId === beforeRunId)?.ordinal ?? Number.POSITIVE_INFINITY
     for (const run of [...runs].sort((a, b) => b.ordinal - a.ordinal)) {
       if (run.ordinal >= before) continue
       const binding = this.bindingForRun(run.runId)
-      if (binding) return binding
+      if (binding && (instanceId === undefined || binding.instanceId === instanceId)) return binding
     }
     return undefined
   }

@@ -188,8 +188,8 @@ describe('harness gateway: instances', () => {
 
     const configured = await harness.instances.configure('claude:work', { args: ['--verbose'], env: { A: '1' } })
     expect(configured.config).toMatchObject({ args: ['--verbose'], env: { A: '1' } })
-    expect(harness.bind(harness.resolveStored({ instanceId: 'claude:work', llmProvider: '', model: 'm' }, { purpose: 'turn' }), { mode: 'agent' }))
-      .toMatchObject({ instanceId: 'claude:work', driver: 'claude', homeId: 'private:claude:work', configRevision: 1, accountGeneration: 0 })
+    await expect(harness.bind(harness.resolveStored({ instanceId: 'claude:work', llmProvider: '', model: 'm' }, { purpose: 'turn' }), { mode: 'agent' }))
+      .resolves.toMatchObject({ instanceId: 'claude:work', driver: 'claude', homeId: 'private:claude:work', configRevision: 1, accountGeneration: 0 })
 
     await expect(harness.instances.remove('claude')).rejects.toMatchObject({ code: 'unsupported' })
     await harness.instances.remove('claude:work')

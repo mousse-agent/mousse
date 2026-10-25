@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { HarnessDriverKind } from '../../shared/harness/types'
@@ -47,12 +48,14 @@ export function instanceStateDir(profileHome: string, instanceId: string): strin
 export interface InstanceCounters {
   configRevision: number
   accountGeneration: number
-  /** Last account id the instance reported (never an email). */
+  /** Last account the instance reported, as `accountIdentity()` hashes it (never an email). */
   accountId?: string
 }
 
 interface StateFile {
   version: 1
+  /** Per-profile salt of account hashes, so the same account reads differently in another profile. */
+  salt?: string
   instances: Record<string, InstanceCounters>
 }
 
@@ -77,6 +80,16 @@ export class InstanceCounterStore {
 
   get(instanceId: string): InstanceCounters {
     return this.read().instances[instanceId] ?? { configRevision: 0, accountGeneration: 0 }
+  }
+
+  /**
+   * The account identity of `subject` (the vendor's stable account id, never shown or stored) in
+   * the home `homeId`: a salted one-way hash.
+   */
+  accountIdentity(homeId: string, subject: string): string {
+    const state = this.read()
+    if (!state.salt) this.write({ ...state, salt: randomBytes(16).toString('hex') })
+    return createHash('sha256').update(`${this.read().salt}|${homeId}|${subject}`).digest('hex').slice(0, 32)
   }
 
   bumpConfig(instanceId: string): InstanceCounters {
@@ -108,14 +121,15 @@ export class InstanceCounterStore {
     const state = this.read()
     if (!state.instances[instanceId]) return
     const { [instanceId]: _removed, ...rest } = state.instances
-    this.write({ version: 1, instances: rest })
+    this.write({ ...state, instances: rest })
   }
 
   private read(): StateFile {
     if (this.state) return this.state
     const state: StateFile = { version: 1, instances: {} }
     try {
-      const raw = JSON.parse(readFileSync(this.path, 'utf8')) as { instances?: Record<string, unknown> }
+      const raw = JSON.parse(readFileSync(this.path, 'utf8')) as { salt?: unknown; instances?: Record<string, unknown> }
+      if (typeof raw.salt === 'string' && /^[0-9a-f]{32}$/.test(raw.salt)) state.salt = raw.salt
       for (const [instanceId, value] of Object.entries(raw.instances ?? {})) {
         const entry = counters(value)
         if (entry && instanceId !== '__proto__') state.instances[instanceId] = entry
@@ -129,7 +143,8 @@ export class InstanceCounterStore {
 
   private update(instanceId: string, change: (current: InstanceCounters) => InstanceCounters): InstanceCounters {
     const next = change(this.get(instanceId))
-    this.write({ version: 1, instances: { ...this.read().instances, [instanceId]: next } })
+    const state = this.read()
+    this.write({ ...state, instances: { ...state.instances, [instanceId]: next } })
     return next
   }
 

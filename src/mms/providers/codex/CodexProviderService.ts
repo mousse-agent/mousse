@@ -998,10 +998,16 @@ export class CodexProviderService {
     this.save()
   }
 
-  /** The plan of the last live sign-in check, when it was a ChatGPT sign-in (never the email). */
-  account(): { id: string; label?: string } | undefined {
+  /**
+   * The account of the last live sign-in check, when it was a ChatGPT sign-in: the plan for display
+   * and `subject`, the account's email as Codex reports it, which the gateway only hashes (never
+   * shown or stored). No subject when Codex reports no email.
+   */
+  account(): { label?: string; subject?: string } | undefined {
     const result = this.probeResult?.result
-    return result?.kind === 'signed_in' ? { id: `chatgpt:${result.planType}`, label: `ChatGPT ${result.planType}` } : undefined
+    if (result?.kind !== 'signed_in') return undefined
+    const email = result.email?.trim().toLowerCase()
+    return { label: `ChatGPT ${result.planType}`, ...(email ? { subject: `chatgpt:${email}` } : {}) }
   }
 
   /** Disconnects this profile in Mousse only; the terminal sign-in is never logged out. */

@@ -40,7 +40,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { modelsWithPrefs, ModelPrefsService, visibleProviderOption, type ModelPrefsStore } from './catalog'
-import type { DriverRuntime, HarnessDriver, InstanceConfig, LiveProcessHost } from './driver'
+import type { AuthReading, DriverRuntime, HarnessDriver, InstanceConfig, LiveProcessHost } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, type InstanceEnv } from './env'
 import { addedInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
 import { checkPolicy } from './policy'
@@ -96,8 +96,15 @@ export interface HarnessGateway {
    * reports the missing default itself.
    */
   resolveStored(selection: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>, options: ResolveStoredOptions): ResolvedTurnSelection
-  /** The immutable binding of one attempt, from a resolved selection and the current counters. */
-  bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string }): ExecutionBinding
+  /**
+   * The immutable binding of one attempt, from a resolved selection and the current counters. A
+   * runtime with native sessions has its account checked first (single-flight, bounded), so a
+   * sign-in changed in a terminal since the last check moves the account generation on before the
+   * binding records it.
+   */
+  bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string }): Promise<ExecutionBinding>
+  /** The selection a binding runs: a retry or recovery of a run executes its binding, never the current selection. */
+  selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>
   /**
    * Issue #142: the instance's look at the user's own setup before a delegated child runs on it
    * (`ProviderAdapter.childPreflight`); null when nothing stands in the way. Reads, never changes.
@@ -221,8 +228,9 @@ export interface HarnessCatalog {
 export interface TurnSpec {
   binding: ExecutionBinding
   /**
-   * The binding of the thread's previous attempt. A native session made on another account or
-   * home of the same instance is never resumed: the turn hands the history over instead.
+   * The binding of the thread's previous run on the same instance. Its native session is resumed
+   * only when that binding has the same home, account (generation and identity) and config
+   * revision; otherwise the turn hands the history over instead.
    */
   previous?: ExecutionBinding
   input: TurnInput
@@ -247,6 +255,10 @@ export interface TurnHandle {
 export const PROBE_TTL_MS = 10 * 60_000
 /** How long a probe waits for the login-shell PATH before searching the inherited PATH only. */
 const SHELL_PATH_WAIT_MS = 3_000
+/** How long turn admission waits for the account check; past it the account counts as unknown. */
+export const TURN_ACCOUNT_CHECK_MS = 10_000
+/** An account check this recent serves the next admission (bind, then start, of one turn). */
+const ACCOUNT_CHECK_FRESH_MS = 5_000
 
 export interface HarnessGatewayOptions {
   profileHome: string
@@ -265,6 +277,8 @@ export interface HarnessGatewayOptions {
   /** Old clients refresh their provider lists on this (the `providers:changed` event). */
   onProvidersChanged?: () => void
   now?: () => number
+  /** Test seam: the turn-admission account check deadline (`TURN_ACCOUNT_CHECK_MS`). */
+  accountCheckMs?: number
 }
 
 interface InstanceRecord {
@@ -288,6 +302,8 @@ interface ProbeState {
   checkedAtMs?: number
   probing?: Promise<void>
   models?: { refreshedAt?: string; error?: string; live?: boolean }
+  /** The last turn-admission account check (`accountId` absent = unknown). */
+  account?: { checkedAtMs: number; accountId?: string; checking?: Promise<string | undefined> }
 }
 
 interface Operation {
@@ -468,8 +484,9 @@ export class Harness implements HarnessGateway {
     return checkPolicy(this.resolve(selection, { kind: 'device' }, 'turn').caps, policy, selection.instanceId)
   }
 
-  bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string }): ExecutionBinding {
-    const record = resolved.driver === 'pi' ? undefined : this.recordOrUndefined(resolved.instanceId)
+  async bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string }): Promise<ExecutionBinding> {
+    const record = resolved.instanceId === PI_DRIVER_ID ? undefined : this.recordOrUndefined(resolved.instanceId)
+    const accountId = record ? await this.currentAccount(record) : undefined
     const counters = this.counters.get(resolved.instanceId)
     return {
       instanceId: resolved.instanceId,
@@ -477,10 +494,79 @@ export class Harness implements HarnessGateway {
       accountGeneration: counters.accountGeneration,
       homeId: record?.env.homeId ?? DEFAULT_HOME_ID,
       configRevision: counters.configRevision,
+      ...(accountId ? { accountId } : {}),
       model: resolved.model,
       ...(input.effort ? { effort: input.effort } : {}),
       policy: { mode: input.mode === 'plan' ? 'plan' : 'default', approvals: 'ask' }
     }
+  }
+
+  selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'> {
+    if (binding.instanceId === PI_DRIVER_ID) return { instanceId: PI_DRIVER_ID, llmProvider: '', model: binding.model }
+    const entry = this.instanceMap.list()[binding.instanceId]
+    return { instanceId: binding.instanceId, llmProvider: (entry && legacyProviderForInstance(binding.instanceId, entry)) || '', model: binding.model }
+  }
+
+  /**
+   * The instance's signed-in account right now, as `accountIdentity` hashes it; undefined when it
+   * cannot be established in time. One check runs at a time per instance, and a check of the last
+   * few seconds serves the next caller. Only runtimes with native sessions are checked: the
+   * account decides whether a session may be resumed.
+   */
+  private currentAccount(record: InstanceRecord): Promise<string | undefined> {
+    if (!record.runtime.forgetConversation) return Promise.resolve(undefined)
+    const state = this.probeState(record.instanceId)
+    const last = state.account
+    if (last?.checking) return last.checking
+    if (last && this.now() - last.checkedAtMs < ACCOUNT_CHECK_FRESH_MS) return Promise.resolve(last.accountId)
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort()
+        resolve(undefined)
+      }, this.options.accountCheckMs ?? TURN_ACCOUNT_CHECK_MS)
+      timer.unref?.()
+    })
+    const checking = Promise.race([
+      record.runtime.auth({ force: true, signal: controller.signal }).then((reading) => this.noteAuth(record, reading)),
+      deadline
+    ])
+      .catch((error) => {
+        console.warn('[harness] account check failed', { instanceId: record.instanceId, error: errorText(error) })
+        return undefined
+      })
+      .then((accountId) => {
+        clearTimeout(timer)
+        state.account = { checkedAtMs: this.now(), ...(accountId ? { accountId } : {}) }
+        return accountId
+      })
+    state.account = { checkedAtMs: last?.checkedAtMs ?? 0, ...(last?.accountId ? { accountId: last.accountId } : {}), checking }
+    return checking
+  }
+
+  /**
+   * Feeds a sign-in reading into the instance's account state: a different account than the last
+   * one moves the account generation on. Returns the reading's account identity, if it has one.
+   */
+  private noteAuth(record: InstanceRecord, reading: AuthReading): string | undefined {
+    // The page shows what a turn's check found without waiting for the next probe.
+    const state = this.probeState(record.instanceId)
+    if (state.result && (state.result.auth.state !== reading.state || state.result.auth.subject !== reading.subject)) {
+      state.result = { ...state.result, auth: reading }
+      if (!state.result.timedOut) state.lastGood = state.result
+      if (!this.stopped && !state.probing) this.changed(record.instanceId, { legacy: false })
+    }
+    if (reading.state !== 'signed_in' || !reading.subject) return undefined
+    const accountId = this.counters.accountIdentity(record.env.homeId, reading.subject)
+    this.counters.noteAccount(record.instanceId, accountId)
+    return accountId
+  }
+
+  private probeState(instanceId: string): ProbeState {
+    const state = this.probes.get(instanceId) ?? {}
+    this.probes.set(instanceId, state)
+    return state
   }
 
   configuredProviderIds(): string[] {
@@ -501,23 +587,14 @@ export class Harness implements HarnessGateway {
   // -- Turns ------------------------------------------------------------------------------------
 
   startTurn(spec: TurnSpec): TurnHandle {
-    const { binding, previous } = spec
-    const record = this.turnRecord(binding)
-    // A native session belongs to the account and home it was made on; another one never resumes it.
-    if (previous && previous.instanceId === binding.instanceId &&
-        (previous.accountGeneration !== binding.accountGeneration || previous.homeId !== binding.homeId)) {
-      try {
-        record.runtime.forgetConversation?.(spec.input.threadId)
-      } catch (error) {
-        console.warn('[harness] could not drop a native session from another account', { instanceId: binding.instanceId, error: errorText(error) })
-      }
-    }
+    const record = this.turnRecord(spec.binding)
     let ref: ProviderRef | undefined
     let ended = false
     const sink: TurnSink = { ...spec.sink, providerRef: (next) => { ref = next; spec.sink.providerRef(next) } }
     record.active += 1
     const result = (async () => {
       try {
+        await this.admitTurn(record, spec)
         return await record.runtime.adapter.startTurn(spec.input, sink, spec.control, spec.host)
       } finally {
         ended = true
@@ -535,6 +612,43 @@ export class Harness implements HarnessGateway {
         return { delivery: 'queued' }
       }
     }
+  }
+
+  /**
+   * Runs a turn on its binding or not at all: the input names the binding's instance and model,
+   * the instance can enforce its policy, and its config, home and account are still the ones the
+   * binding recorded (a retry or recovery after a change fails with `binding_stale`). Then decides
+   * whether the thread's native session may be resumed.
+   */
+  private async admitTurn(record: InstanceRecord, spec: TurnSpec): Promise<void> {
+    const { binding, previous, input } = spec
+    if (input.instanceId !== binding.instanceId || input.model !== binding.model)
+      harnessFail('protocol', `The turn names ${input.instanceId ?? 'no instance'}/${input.model} but its binding is ${binding.instanceId}/${binding.model}.`, binding.instanceId)
+    const enforceable = checkPolicy(this.recordCaps(record), binding.policy, binding.instanceId)
+    if (!enforceable.ok) throw harnessAppError(enforceable.error)
+    const stale = (what: string) => harnessFail('binding_stale', `This run started before ${what} of this provider changed, so it cannot continue on it. Send the message again.`, binding.instanceId)
+    if (record.env.homeId !== binding.homeId) stale('the home')
+    if (this.counters.get(binding.instanceId).configRevision !== binding.configRevision) stale('the settings')
+    const accountId = await this.currentAccount(record)
+    if (this.counters.get(binding.instanceId).accountGeneration !== binding.accountGeneration ||
+        (binding.accountId && accountId && accountId !== binding.accountId)) stale('the signed-in account')
+    // A native session belongs to the home, account and config it was made with. Sessions from
+    // before bindings existed resume only in the user's own home.
+    const resumable = previous !== undefined && previous.instanceId === binding.instanceId &&
+      previous.homeId === binding.homeId && previous.configRevision === binding.configRevision &&
+      previous.accountGeneration === binding.accountGeneration &&
+      binding.accountId !== undefined && previous.accountId === binding.accountId
+    if (resumable || (!previous && binding.homeId === DEFAULT_HOME_ID)) return
+    try {
+      record.runtime.forgetConversation?.(input.threadId)
+    } catch (error) {
+      console.warn('[harness] could not drop a native session', { instanceId: binding.instanceId, error: errorText(error) })
+    }
+  }
+
+  /** Capabilities of a record's instance at its last known version. */
+  private recordCaps(record: InstanceRecord): HarnessCaps {
+    return record.driver.caps(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version)
   }
 
   async childPreflight(instanceId: string, context: ChildPreflightContext): Promise<SubagentRefusal | null> {
@@ -762,7 +876,7 @@ export class Harness implements HarnessGateway {
       state.checkedAtMs = this.now()
       if (!result.timedOut) state.lastGood = result
       // A different account than the last check: sessions made on the old one are not resumed.
-      if (result.auth.state === 'signed_in' && result.auth.account?.id) this.counters.noteAccount(instanceId, result.auth.account.id)
+      this.noteAuth(record, result.auth)
     }
     state.probing = run()
       .catch((error) => {
@@ -809,7 +923,8 @@ export class Harness implements HarnessGateway {
       runs: shown?.runs ?? { state: 'unknown' },
       auth: {
         state: auth.state,
-        ...(auth.account ? { account: auth.account } : {}),
+        // Keyed by its salted hash: the vendor's account id never leaves the gateway.
+        ...(auth.account?.label ? { account: { id: auth.subject ? this.counters.accountIdentity(record.env.homeId, auth.subject) : 'unknown', label: auth.account.label } } : {}),
         ...(auth.methodLabel ?? driver.methodLabel ? { methodLabel: auth.methodLabel ?? driver.methodLabel } : {}),
         ...(auth.message ? { message: auth.message } : {}),
         canSignOut: Boolean(runtime.signOut) && (auth.state === 'signed_in' || auth.state === 'expired') && this.ownsSignIn(record)
@@ -927,9 +1042,12 @@ export class Harness implements HarnessGateway {
       const config = this.applyConfigPatch(stored, patch, record.driver)
       this.instanceMap.setEntry(instanceId, { ...record.entry, config })
     }
-    this.counters.bumpConfig(instanceId)
+    // A new name changes nothing a turn runs with: the runtime and its sessions stay.
+    if (Object.keys(patch).some((key) => key !== 'displayName')) {
+      this.counters.bumpConfig(instanceId)
+      void this.probe(instanceId, true)
+    }
     this.changed(instanceId)
-    void this.probe(instanceId, true)
     return this.snapshot(instanceId, { kind: 'device' })
   }
 
@@ -1043,7 +1161,11 @@ export class Harness implements HarnessGateway {
       void runtime.signIn!(session, this.cwd(), method)
         .then((result) => {
           if (session.abort.signal.aborted) this.emit({ type: 'operation', data: { ...started, phase: 'cancelled' } })
-          else if (result.success) this.emit({ type: 'operation', data: { ...started, phase: 'completed' } })
+          else if (result.success) {
+            // A completed sign-in may be another account: sessions made before it are not resumed.
+            this.counters.bumpAccount(instanceId)
+            this.emit({ type: 'operation', data: { ...started, phase: 'completed' } })
+          }
           else this.emit({ type: 'operation', data: { ...started, phase: 'failed', error: { code: 'signed_out', message: result.error ?? 'Sign-in failed.', instanceId } } })
         })
         .catch((error) => this.emit({ type: 'operation', data: { ...started, phase: 'failed', error: { code: 'protocol', message: errorText(error), instanceId } } }))

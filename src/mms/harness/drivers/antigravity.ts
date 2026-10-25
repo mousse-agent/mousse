@@ -42,10 +42,12 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
         models: () => service.models(),
         launch: () => service.storedLaunch(),
         setLaunch: async (patch) => void (await service.setCliConfig(patch)),
-        // The sign-in is the profile's saved Google session; checking it would start the agent.
+        // The sign-in is the profile's saved Google session; checking it would start the agent. It
+        // changes only through Mousse's own sign-in and sign-out, which move the account generation
+        // on, so the session itself is the account's identity.
         auth: async () =>
           service.signedIn()
-            ? { state: 'signed_in', methodLabel: 'Google sign-in' }
+            ? { state: 'signed_in', methodLabel: 'Google sign-in', subject: 'mousse-google-sign-in' }
             : { state: 'signed_out', methodLabel: 'Google sign-in' },
         refreshModels: async (cwd) => void (await service.refreshModels(cwd)),
         signIn: (session, cwd) => service.login(session, cwd),

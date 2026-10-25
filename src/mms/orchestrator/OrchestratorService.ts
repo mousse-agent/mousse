@@ -47,7 +47,7 @@ import { stopStrategy } from '../run/CommandPolicy'
 import { McpToolError } from '../run/mcp/toolRegistry'
 import { stableStringify } from '../run/json'
 import { formatRestartNote } from '../run/restartNote'
-import { createHarnessGateway, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
+import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piLegacyDriver } from '../harness/drivers/piLegacy'
 import { contextGauge } from '../harness/policy'
 import type { ExecutionBinding, HarnessCaps, ProviderScope } from '../../shared/harness/types'
@@ -2104,13 +2104,12 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * The execution binding of a turn: the one its run already recorded (a retry or restart of the
-   * run), else a new one from the resolved selection, recorded on the active attempt.
+   * run; `resolved` was built from it), else a new one from the resolved selection. Either way it
+   * is recorded on the active attempt, so a replacement attempt keeps its run's binding.
    */
-  private bindTurn(runId: string | undefined, resolved: ResolvedTurnSelection, mode: ChatMode): ExecutionBinding {
+  private async bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: ResolvedTurnSelection, mode: ChatMode): Promise<ExecutionBinding> {
     const engine = this.runEngine
-    const existing = runId ? engine?.bindingForRun(runId) : undefined
-    if (existing) return existing
-    const binding = this.harness.bind(resolved, { mode })
+    const binding = existing ?? await this.harness.bind(resolved, { mode })
     if (runId && engine) {
       try {
         return engine.recordExecutionBinding(runId, binding)
@@ -5459,8 +5458,11 @@ export class OrchestratorService extends EventEmitter {
     let failureDiagnostic: Record<string, unknown> | undefined
     let compactionNote: ChatMessage | undefined
     let switchMarker: ChatMessage | undefined
-    // Migrated to the instance shape (SPEC §13.8): `llmProvider` is re-derived from a known instance.
-    const selectedModel = this.harness.instanceMap.migrate(opts?.modelOverride ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
+    // A retry or recovery of a run executes the binding its run recorded, never the current
+    // selection. Otherwise migrated to the instance shape (SPEC §13.8): `llmProvider` is
+    // re-derived from a known instance.
+    const runBinding = engineRunId ? this.runEngine?.bindingForRun(engineRunId) : undefined
+    const selectedModel = runBinding ? this.harness.selectionOf(runBinding) : this.harness.instanceMap.migrate(opts?.modelOverride ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
       ...(this.providerAuth.credentials?.listProviderIds() ?? []),
       ...this.harness.configuredProviderIds()
     ]))
@@ -5549,7 +5551,7 @@ export class OrchestratorService extends EventEmitter {
       const instance = this.harness.resolveStored(selectedModel, {
         purpose: 'turn',
         scope: this.threadScope(session.threadId),
-        unselectedDefault: !(opts?.modelOverride ?? session.modelOverride)
+        unselectedDefault: runBinding ? runBinding.instanceId === PI_DRIVER_ID : !(opts?.modelOverride ?? session.modelOverride)
       })
       // Issue #142: a read-only child is checked on every turn, not only when it was created. Its
       // provider may have been switched, or the user's setup changed, since then.
@@ -5559,7 +5561,7 @@ export class OrchestratorService extends EventEmitter {
         if (refusal) throw new AppError({ code: refusal.code, message: refusal.message, errorInfo: { category: 'unavailable', retryable: false } })
       }
       // The attempt's immutable binding; a retry of the same run keeps the one it already has.
-      const binding = this.bindTurn(engineRunId, instance, mode)
+      const binding = await this.bindTurn(engineRunId, runBinding, instance, mode)
       // A transcript-native runtime (the pi loop) is sent Mousse's transcript and tools, so Mousse
       // keeps that transcript within the window before the turn. A prompt-injected runtime owns its
       // loop, context and tools and receives prior turns as a prompt preamble.
@@ -5778,7 +5780,7 @@ export class OrchestratorService extends EventEmitter {
           nativeHistoryNow: () => nativeAgentHistory(this.nativeContext)
         }
       }
-      const previous = engineRunId ? this.runEngine?.previousBinding(session.threadId, engineRunId) : undefined
+      const previous = engineRunId ? this.runEngine?.previousBinding(session.threadId, engineRunId, binding.instanceId) : undefined
       const result = await this.harness.startTurn({
         binding,
         ...(previous ? { previous } : {}),

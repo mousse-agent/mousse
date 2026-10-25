@@ -102,7 +102,7 @@ describe('two Claude Code instances', () => {
       expect(before.config).toMatchObject({ home: 'private', binaryPath: binary })
       signedIn = true
       const after = await harness.instances.recheck('claude:work')
-      expect(after.auth).toMatchObject({ state: 'signed_in', account: { id: 'org-claude:work' }, canSignOut: true })
+      expect(after.auth).toMatchObject({ state: 'signed_in', canSignOut: true })
       const own = await harness.instances.recheck('claude')
       expect(own.auth).toMatchObject({ state: 'signed_in', canSignOut: false })
       expect(own.config?.home).toBe('default')
@@ -110,7 +110,7 @@ describe('two Claude Code instances', () => {
       // A turn on each instance.
       for (const instanceId of ['claude:work', 'claude']) {
         const resolved = harness.resolveStored({ instanceId, llmProvider: '', model: 'sonnet' }, { purpose: 'turn' })
-        const spec = turnSpec(instanceId, harness.bind(resolved, { mode: 'agent' }), tempDir('mousse-cwd-'))
+        const spec = turnSpec(instanceId, await harness.bind(resolved, { mode: 'agent' }), tempDir('mousse-cwd-'))
         await harness.startTurn(spec).result.catch(() => undefined)
       }
     } finally {
@@ -135,6 +135,69 @@ describe('two Claude Code instances', () => {
     expect(workEnv).toBeTruthy()
     expect(claudeLoadsSkill({ source: 'claude-global' }, workEnv!())).toBe(false)
     expect(claudeLoadsSkill({ source: 'claude-global' }, ownEnv!())).toBe(!process.env.CLAUDE_CONFIG_DIR)
+  }, 30_000)
+})
+
+describe('native resume on a real Claude service', () => {
+  it('resumes on the same binding, and a launch-settings change makes the next SDK query start fresh', async () => {
+    const profileHome = tempDir('mousse-claude-resume-')
+    const binary = fakeClaude()
+    const questions = new UserQuestionService()
+    const privateHome = join(instanceStateDir(profileHome, 'claude:work'), 'home')
+    mkdirSync(privateHome, { recursive: true })
+    writeFileSync(join(privateHome, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'user-a', organizationUuid: 'org-1' } }))
+    const resumes: Array<string | undefined> = []
+    let sessions = 0
+    const query = (input: { options: { resume?: string; tools?: unknown[] } }) => {
+      // Model discovery (no tools, no prompt) is not a turn.
+      if (Array.isArray(input.options.tools) && !input.options.tools.length)
+        return Object.assign((async function* () {})(), { close: () => {}, interrupt: async () => {}, supportedModels: async () => [] })
+      resumes.push(input.options.resume)
+      const sessionId = input.options.resume ?? `session-${++sessions}`
+      return Object.assign((async function* () {
+        yield { type: 'system', subtype: 'init', session_id: sessionId }
+        yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', session_id: sessionId }
+      })(), { close: () => {}, interrupt: async () => {} })
+    }
+    let stored: unknown = {
+      'claude:work': { driver: 'claude', enabled: true, config: { home: 'private', displayName: 'Work', binaryPath: binary } }
+    }
+    const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
+    const harness = createHarnessGateway({
+      profileHome,
+      installationHome: profileHome,
+      instanceMap: instances,
+      questions,
+      shellPath: async () => ({ entries: [], source: 'failed' }),
+      drivers: [
+        claudeCodeDriver({
+          createService: (context, options) => new ClaudeSubscriptionProviderService(context.profileHome, questions, {
+            ...options,
+            runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }),
+            query: query as never
+          })
+        })
+      ]
+    })
+    const cwd = tempDir('mousse-cwd-')
+    let previous: TurnSpec['binding'] | undefined
+    const turn = async () => {
+      const resolved = harness.resolveStored({ instanceId: 'claude:work', llmProvider: '', model: 'sonnet' }, { purpose: 'turn' })
+      const binding = await harness.bind(resolved, { mode: 'agent' })
+      const spec = { ...turnSpec('claude:work', binding, cwd), ...(previous ? { previous } : {}) }
+      await harness.startTurn(spec).result
+      previous = binding
+    }
+    try {
+      await turn()
+      await turn()
+      expect(resumes).toEqual([undefined, 'session-1'])
+      await harness.instances.configure('claude:work', { env: { CLAUDE_CODE_MAX_OUTPUT_TOKENS: '4000' } })
+      await turn()
+      expect(resumes).toEqual([undefined, 'session-1', undefined])
+    } finally {
+      harness.stop()
+    }
   }, 30_000)
 })
 

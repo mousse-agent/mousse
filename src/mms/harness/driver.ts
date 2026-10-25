@@ -33,7 +33,14 @@ export interface InstanceConfig {
 /** What the driver's sign-in check says, before the gateway adds timing and staleness. */
 export interface AuthReading {
   state: AuthState
-  account?: { id: string; label?: string }
+  /** What the page shows about the account (plan, organization); never identifies it. */
+  account?: { label?: string }
+  /**
+   * The vendor's stable id of the signed-in account (or of the credential it runs with). The
+   * gateway only hashes it with a per-profile salt and the home; it is never shown or stored.
+   * Absent when the driver cannot establish it: native sessions are then not resumed.
+   */
+  subject?: string
   methodLabel?: string
   message?: string
   /** The terminal command that signs the instance in, when sign-in happens outside Mousse. */
@@ -82,6 +89,7 @@ export interface DriverRuntime {
   launch?(): StoredCliConfig
   /** Saves launch settings of a built-in instance; added instances are configured by the gateway. */
   setLaunch?(patch: CliProviderConfigPatch): Promise<void>
+  /** `force` skips the runtime's own cache (the gateway's turn admission and Recheck use it). */
   auth(options: { force: boolean; signal?: AbortSignal }): Promise<AuthReading>
   refreshModels?(cwd: string): Promise<void>
   signIn?(session: LoginSession, cwd: string, method?: string): Promise<ProviderLoginResult>
