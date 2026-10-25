@@ -1,0 +1,174 @@
+import type {
+  CompatibilityState,
+  InstallState,
+  InstanceBinary,
+  RunsFailure,
+  RunsState,
+  UpdateAffordance
+} from '../../shared/harness/status'
+import { parseCliVersion } from '../providers/cliConfig'
+import { compareVersions, installOwner, type AuthReading, type DriverRuntime, type HarnessDriver } from './driver'
+import { resolveBinary, type InstanceEnv } from './env'
+import { runHarness } from './spawn'
+
+/** Deadlines of one probe. A version check is a few hundred ms; a sign-in check may start the CLI. */
+export const PROBE_TIMEOUTS = { versionMs: 8_000, authMs: 20_000 }
+
+/** What one probe found, before the gateway applies staleness and the instance's scope. */
+export interface ProbeResult {
+  checkedAt: string
+  install: InstallState
+  runs: { state: RunsState; failure?: RunsFailure; message?: string }
+  auth: AuthReading
+  compatibility: { state: CompatibilityState; testedRange?: string }
+  update?: UpdateAffordance
+  binary?: InstanceBinary
+  /** A phase hit its deadline; the gateway keeps the last good values and marks the snapshot stale. */
+  timedOut: boolean
+}
+
+export function testedRange(driver: HarnessDriver): string | undefined {
+  const tested = driver.testedVersions
+  if (!tested) return undefined
+  return tested.min === tested.max ? tested.min : `${tested.min} – ${tested.max}`
+}
+
+export function compatibilityOf(driver: HarnessDriver, version: string | undefined): ProbeResult['compatibility'] {
+  const tested = driver.testedVersions
+  const range = testedRange(driver)
+  if (!tested) return { state: 'tested' }
+  if (!version) return { state: 'unknown', ...(range ? { testedRange: range } : {}) }
+  const state: CompatibilityState =
+    compareVersions(version, tested.min) < 0 ? 'too_old' : compareVersions(version, tested.max) > 0 ? 'newer_than_tested' : 'tested'
+  return { state, ...(range ? { testedRange: range } : {}) }
+}
+
+/**
+ * One-click update only when Mousse owns the install; otherwise the owner's command to copy.
+ * Offered when the version is older than tested (Mousse has no other proof that an update exists).
+ */
+export function updateAffordance(driver: HarnessDriver, binary: InstanceBinary | undefined, compatibility: ProbeResult['compatibility']): UpdateAffordance | undefined {
+  if (!binary || (compatibility.state !== 'too_old' && compatibility.state !== 'known_broken')) return undefined
+  const owner = binary.owner ?? 'unknown'
+  if (owner === 'managed' && driver.canInstall) return { kind: 'one_click', owner }
+  const command = driver.updateCommand?.(owner)
+  return command ? { kind: 'advisory', command } : undefined
+}
+
+function withDeadline<T>(work: Promise<T>, ms: number): Promise<{ value: T } | { timedOut: true }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve({ timedOut: true }), ms)
+    timer.unref?.()
+    work.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve({ value })
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      }
+    )
+  })
+}
+
+/**
+ * Checks one instance: which binary would run, whether it starts (`--version`, never a model turn
+ * or the heavy runtime), its version against the tested range, and its sign-in. Each phase has a
+ * hard deadline; a version check that hangs is killed with its process tree.
+ */
+export async function probeInstance(input: {
+  driver: HarnessDriver
+  runtime: DriverRuntime
+  env: InstanceEnv
+  /** The explicit executable, when one is set. */
+  override?: string
+  force: boolean
+  timeouts?: Partial<typeof PROBE_TIMEOUTS>
+  now?: () => Date
+}): Promise<ProbeResult> {
+  const { driver, runtime, env } = input
+  const timeouts = { ...PROBE_TIMEOUTS, ...input.timeouts }
+  const checkedAt = (input.now?.() ?? new Date()).toISOString()
+  const notChecked: AuthReading = { state: 'unknown', ...(driver.methodLabel ? { methodLabel: driver.methodLabel } : {}) }
+
+  // A runtime Mousse hosts itself (the pi loop) has no binary to find.
+  if (!driver.binaryNames.length && !runtime.managed && !driver.canInstall) {
+    const auth = await runtime.auth({ force: input.force })
+    return { checkedAt, install: 'installed', runs: { state: 'yes' }, auth, compatibility: { state: 'tested' }, binary: { source: 'bundled' }, timedOut: false }
+  }
+
+  const managed = runtime.managed?.()
+  const resolved = resolveBinary({
+    override: input.override,
+    validateOverride: runtime.validateOverride,
+    managed: managed?.path,
+    names: driver.binaryNames,
+    env
+  })
+  const installing = runtime.installState?.().installing === true
+  if (resolved.overrideMissing) {
+    return {
+      checkedAt,
+      install: installing ? 'installing' : 'unknown',
+      runs: { state: 'no', failure: 'override_not_found', message: `Mousse cannot run ${resolved.path}.` },
+      auth: notChecked,
+      compatibility: compatibilityOf(driver, undefined),
+      binary: { path: resolved.path, source: 'override' },
+      timedOut: false
+    }
+  }
+  if (!resolved.launch) {
+    return {
+      checkedAt,
+      install: installing ? 'installing' : 'not_installed',
+      runs: {
+        state: 'no',
+        failure: 'not_on_path',
+        message: driver.canInstall ? `${driver.label} is not installed.` : 'CLI not detected on PATH.'
+      },
+      auth: notChecked,
+      compatibility: compatibilityOf(driver, undefined),
+      timedOut: false
+    }
+  }
+
+  const binary: InstanceBinary = { path: resolved.launch.path, source: resolved.source, owner: installOwner(resolved.launch.path, resolved.source) }
+  let runs: ProbeResult['runs'] = { state: 'yes' }
+  let install: InstallState = installing ? 'installing' : 'installed'
+  let timedOut = false
+  if (managed?.version && resolved.source === 'managed') binary.version = managed.version
+  else {
+    const result = await runHarness(env, 'version', resolved.launch.command, [...resolved.launch.args, '--version'], { timeoutMs: timeouts.versionMs, maxBytes: 64 * 1024 })
+    if (result.timedOut) {
+      timedOut = true
+      runs = { state: 'unknown', failure: 'timeout', message: `${driver.label} did not answer --version in time.` }
+    } else if (result.spawnError) {
+      install = 'broken'
+      runs = { state: 'no', failure: 'spawn_failed', message: `${driver.label} could not start (${result.spawnError}).` }
+    } else if (result.code !== 0) {
+      install = 'broken'
+      runs = { state: 'no', failure: 'exited', message: `${driver.label} exited with code ${result.code} when asked for its version.` }
+    } else {
+      const version = parseCliVersion(`${result.stdout}\n${result.stderr}`)
+      if (version) binary.version = version
+      else runs = { state: 'yes', failure: 'bad_version', message: `Mousse could not read the ${driver.label} version.` }
+    }
+  }
+
+  let auth = notChecked
+  if (runs.state !== 'no') {
+    try {
+      const reading = await withDeadline(runtime.auth({ force: input.force }), timeouts.authMs)
+      if ('timedOut' in reading) {
+        timedOut = true
+        auth = { ...notChecked, message: 'The sign-in check did not finish.' }
+      } else auth = reading.value
+    } catch (error) {
+      auth = { ...notChecked, message: error instanceof Error ? error.message : String(error) }
+    }
+  }
+  const compatibility = compatibilityOf(driver, binary.version)
+  const update = updateAffordance(driver, binary, compatibility)
+  return { checkedAt, install, runs, auth, compatibility, ...(update ? { update } : {}), binary, timedOut }
+}

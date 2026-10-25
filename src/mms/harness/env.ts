@@ -1,0 +1,137 @@
+import { accessSync, constants } from 'node:fs'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
+import type { BinarySource } from '../../shared/harness/status'
+import type { HarnessDriverKind } from '../../shared/harness/types'
+import { cliLaunch, withUserEnv, type CliLaunch } from '../providers/cliConfig'
+import { resolveWindowsShim } from '../providers/resolveWindowsShim'
+
+/**
+ * The environment of one instance at one config revision: where its binary is, which home it
+ * uses, and the variables every process of the instance starts with. Computed once per revision
+ * (and when the login-shell PATH arrives); every harness spawn takes it.
+ */
+export interface InstanceEnv {
+  instanceId: string
+  driver: HarnessDriverKind
+  configRevision: number
+  /** `default` for the user's own vendor home; `private:<instanceId>` for a Mousse-owned one. */
+  homeId: string
+  /** The Mousse-owned home directory, when the instance has one. */
+  home?: string
+  /**
+   * The base variables: Mousse's own environment with the instance's home variable set. The
+   * user's launch variables are applied on top by the services, as before.
+   */
+  env: NodeJS.ProcessEnv
+  /** PATH entries to search for the binary after the inherited PATH (the login shell's). */
+  searchPath: string[]
+}
+
+export const DEFAULT_HOME_ID = 'default'
+
+export function privateHomeId(instanceId: string): string {
+  return `private:${instanceId}`
+}
+
+/** The variable that points a driver at another home, when it has one. */
+export const HOME_VARIABLES: Partial<Record<HarnessDriverKind, string>> = {
+  claude: 'CLAUDE_CONFIG_DIR',
+  codex: 'CODEX_HOME'
+}
+
+export function instanceEnv(input: {
+  instanceId: string
+  driver: HarnessDriverKind
+  configRevision: number
+  /** Absolute Mousse-owned home; absent = the user's own home. */
+  home?: string
+  searchPath: readonly string[]
+  base?: NodeJS.ProcessEnv
+}): InstanceEnv {
+  const base = input.base ?? process.env
+  const variable = HOME_VARIABLES[input.driver]
+  const env = input.home && variable ? withUserEnv(base, { [variable]: input.home }) : { ...base }
+  return {
+    instanceId: input.instanceId,
+    driver: input.driver,
+    configRevision: input.configRevision,
+    homeId: input.home ? privateHomeId(input.instanceId) : DEFAULT_HOME_ID,
+    ...(input.home ? { home: input.home } : {}),
+    env,
+    searchPath: [...input.searchPath]
+  }
+}
+
+export interface ResolvedBinary {
+  /** What the snapshot shows: the override as typed, or the program found. */
+  path?: string
+  launch?: CliLaunch
+  source: BinarySource
+  /** Set when the explicit override cannot run (no fallback to PATH). */
+  overrideMissing?: boolean
+}
+
+function executable(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Finds `names` on the inherited PATH and `~/.local/bin` first (where the services always looked),
+ * then on the login-shell PATH. A Windows npm `.cmd` shim counts only once it resolves to the
+ * program it runs.
+ */
+export function findOnPath(names: readonly string[], env: Pick<InstanceEnv, 'env' | 'searchPath'>, platform: NodeJS.Platform = process.platform): string | undefined {
+  const inherited = (env.env.PATH ?? env.env.Path ?? '').split(platform === 'win32' ? ';' : ':')
+  const directories = [...inherited, join(homedir(), '.local', 'bin'), ...env.searchPath]
+  const seen = new Set<string>()
+  for (const directory of directories) {
+    if (!directory || seen.has(directory)) continue
+    seen.add(directory)
+    for (const name of names) {
+      const candidate = resolve(directory, name)
+      if (!executable(candidate)) continue
+      if (resolveWindowsShim(candidate, { platform, env: env.env })) return candidate
+    }
+  }
+  return undefined
+}
+
+/** Executable names of a CLI on this platform (`claude.exe`, then an npm `claude.cmd` shim). */
+export function cliNames(name: string, platform: NodeJS.Platform = process.platform): string[] {
+  return platform === 'win32' ? [`${name}.exe`, `${name}.cmd`] : [name]
+}
+
+/**
+ * The binary an instance runs: an explicit override (which never falls back), a Mousse-managed
+ * install, or the CLI found on PATH.
+ */
+export function resolveBinary(input: {
+  override?: string
+  /** Extra check for an override (e.g. Antigravity's helper beside it); throws when invalid. */
+  validateOverride?: (path: string) => void
+  managed?: string
+  names: readonly string[]
+  env: Pick<InstanceEnv, 'env' | 'searchPath'>
+}): ResolvedBinary {
+  if (input.override) {
+    let launch = cliLaunch(input.override)
+    if (launch && input.validateOverride) {
+      try {
+        input.validateOverride(input.override)
+      } catch {
+        launch = undefined
+      }
+    }
+    return launch ? { path: input.override, launch, source: 'override' } : { path: input.override, source: 'override', overrideMissing: true }
+  }
+  if (input.managed) return { path: input.managed, launch: cliLaunch(input.managed), source: 'managed' }
+  const found = input.names.length ? findOnPath(input.names, input.env) : undefined
+  const launch = found ? cliLaunch(found) : undefined
+  return launch ? { path: launch.path, launch, source: 'path' } : { source: 'path' }
+}

@@ -56,6 +56,17 @@ export interface InstanceEnabled {
   setBy: 'device' | 'project'
 }
 
+/** An instance's settings as stored: the editor's name, account home, executable, args and variables. */
+export interface InstanceConfigView {
+  displayName?: string
+  home: 'default' | 'private'
+  /** The explicit executable; absent = found on PATH (or Mousse's own install). */
+  binaryPath?: string
+  args: string[]
+  env: Record<string, string>
+  loginMethod?: string
+}
+
 export interface InstanceSnapshot {
   instanceId: string
   driver: HarnessDriverKind
@@ -80,11 +91,18 @@ export interface InstanceSnapshot {
     /** How the instance signs in (e.g. "Claude subscription", "API key"). */
     methodLabel?: string
     message?: string
+    /**
+     * Mousse owns this sign-in (a private home, a Mousse-managed agent, a Mousse-held key), so it
+     * may sign out. False for the user's own CLI login, which Mousse never signs out.
+     */
+    canSignOut?: boolean
   }
   compatibility: { state: CompatibilityState; testedRange?: string }
   update?: UpdateAffordance
   binary?: InstanceBinary
   caps: HarnessCaps
+  /** The stored settings the editor shows; present on daemons with the harness gateway. */
+  config?: InstanceConfigView
   models: {
     entries: InstanceModel[]
     source: 'live' | 'cached' | 'manifest' | 'none'

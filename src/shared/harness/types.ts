@@ -40,6 +40,15 @@ export interface HarnessCaps {
   contextUsage: 'measured' | 'reported' | 'none'
 }
 
+/**
+ * The capability keys the run engine reads (`CommandPolicy`, `policy/featureGates`, handoffs): the
+ * first eight of `HarnessCaps`, the same as an adapter's `ProviderCapabilities`.
+ */
+export type RunCapabilities = Pick<
+  HarnessCaps,
+  'steer' | 'interrupt' | 'rollback' | 'fork' | 'events' | 'containment' | 'historyInjection' | 'mcp'
+>
+
 export const HARNESS_CAP_KEYS = [
   'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'planMode', 'contextUsage'
 ] as const satisfies ReadonlyArray<keyof HarnessCaps>

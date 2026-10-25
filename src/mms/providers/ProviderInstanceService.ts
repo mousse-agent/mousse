@@ -67,6 +67,10 @@ export class ProviderInstanceService {
   /** Last state read from (or written to) the store; the working copy after a failed read. */
   private memory: StoredProviderInstances = {}
   private readonly vendors = new Map<ProviderDriverKind, VendorProviderListing>()
+  /** Per-instance listings (the harness gateway); replaces the one-listing-per-driver map. */
+  private instanceListing?: (instanceId: string, entry: ProviderInstanceConfig) => VendorProviderListing | undefined
+  /** Applied to every picker listing: hidden models leave, custom models join. */
+  private modelView?: (option: LlmProviderOption & { instanceId: string }) => LlmProviderOption & { instanceId: string }
   private writeFailed = false
   private readError?: string
 
@@ -75,6 +79,19 @@ export class ProviderInstanceService {
   /** Lists a vendor driver's provider in `configuredProviders()` / `llmProviders()`. */
   registerVendor(driver: Exclude<ProviderDriverKind, 'pi'>, listing: VendorProviderListing): this {
     this.vendors.set(driver, listing)
+    return this
+  }
+
+  /**
+   * Lists every enabled vendor instance from its own runtime (several instances of one driver
+   * each get an entry), and passes picker listings through `view` (model prefs).
+   */
+  setListings(
+    listing: (instanceId: string, entry: ProviderInstanceConfig) => VendorProviderListing | undefined,
+    view?: (option: LlmProviderOption & { instanceId: string }) => LlmProviderOption & { instanceId: string }
+  ): this {
+    this.instanceListing = listing
+    this.modelView = view
     return this
   }
 
@@ -90,6 +107,36 @@ export class ProviderInstanceService {
     const changed = seeded.added.length > 0 || seeded.upgraded.length > 0 || stored.seedVersion !== seeded.seedVersion
     if (changed && readable) this.writeStored({ instances: seeded.instances, seedVersion: seeded.seedVersion })
     return readProviderInstances(seeded.instances)
+  }
+
+  /**
+   * Stores one entry (an added instance, a device toggle, instance config). Fields of the stored
+   * entry this version does not know are kept, so an older or newer build reads it unchanged.
+   * Throws while the stored map cannot be read: nothing is written over it.
+   */
+  setEntry(instanceId: string, entry: ProviderInstanceConfig): void {
+    if (!instanceId || instanceId === '__proto__' || instanceId === 'constructor' || instanceId === 'prototype')
+      throw new Error(`Invalid provider instance id "${instanceId}"`)
+    const { stored, readable } = this.readStored()
+    if (!readable) throw new Error(this.readError ?? 'The provider instances could not be read')
+    const seeded = seedProviderInstances(stored.instances, this.credentialedPiProviders(), stored.seedVersion)
+    const previous = seeded.instances[instanceId]
+    const next: Record<string, unknown> = { ...(isRecord(previous) ? previous : {}), driver: entry.driver, enabled: entry.enabled }
+    if (entry.config && Object.keys(entry.config).length) next.config = { ...entry.config }
+    else delete next.config
+    this.writeStored({ instances: { ...seeded.instances, [instanceId]: next }, seedVersion: seeded.seedVersion })
+    if (this.writeFailed) throw new Error('Mousse could not save the provider instances')
+  }
+
+  /** Removes a stored entry; seeded ids come back on the next read, so callers remove added ones only. */
+  removeEntry(instanceId: string): void {
+    const { stored, readable } = this.readStored()
+    if (!readable) throw new Error(this.readError ?? 'The provider instances could not be read')
+    const seeded = seedProviderInstances(stored.instances, this.credentialedPiProviders(), stored.seedVersion)
+    if (!Object.prototype.hasOwnProperty.call(seeded.instances, instanceId)) return
+    const { [instanceId]: _removed, ...rest } = seeded.instances
+    this.writeStored({ instances: rest, seedVersion: seeded.seedVersion })
+    if (this.writeFailed) throw new Error('Mousse could not save the provider instances')
   }
 
   /** Why the stored instance map could not be read, while that lasts. */
@@ -174,7 +221,9 @@ export class ProviderInstanceService {
     const pi = (this.options.providerAuth?.getConfiguredLlmProviders?.() ?? [])
       .map((provider) => ({ ...provider, instanceId: piInstanceId(provider.id) }))
       .filter((provider) => instances[provider.instanceId]?.enabled !== false)
-    return [...pi, ...this.vendorEntries(instances, (listing) => listing.llmProvider())]
+    const all = [...pi, ...this.vendorEntries(instances, (listing) => listing.llmProvider())]
+    const view = this.modelView
+    return view ? all.map((option) => view(option)) : all
   }
 
   /** One entry per vendor driver (v1 has one instance per driver), from its first enabled instance. */
@@ -183,6 +232,16 @@ export class ProviderInstanceService {
     pick: (listing: VendorProviderListing) => T | undefined
   ): Array<T & { instanceId: string }> {
     const entries: Array<T & { instanceId: string }> = []
+    const perInstance = this.instanceListing
+    if (perInstance) {
+      for (const [instanceId, entry] of Object.entries(instances)) {
+        if (entry.driver === 'pi' || !entry.enabled) continue
+        const listing = perInstance(instanceId, entry)
+        const value = listing ? pick(listing) : undefined
+        if (value) entries.push({ ...value, instanceId })
+      }
+      return entries
+    }
     const listed = new Set<ProviderDriverKind>()
     for (const [instanceId, entry] of Object.entries(instances)) {
       if (entry.driver === 'pi' || !entry.enabled || listed.has(entry.driver)) continue

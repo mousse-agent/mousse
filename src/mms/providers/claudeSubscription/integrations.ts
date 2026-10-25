@@ -121,6 +121,11 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
     secrets: IntegrationSecretAdapter
     /** Directory for generated skill plugins, owned by Mousse. */
     pluginRoot: string
+    /**
+     * The environment the instance starts Claude Code with (its `InstanceEnv`), which decides
+     * whether Claude loads `~/.claude/skills` itself; default `process.env`.
+     */
+    env?: () => NodeJS.ProcessEnv
   }) {}
 
   async resolve(projectPath?: string): Promise<ClaudeTurnIntegrations> {
@@ -138,7 +143,7 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
 
     try {
       const snapshot = await this.deps.skillsRegistry.discover({ projectPath })
-      const skills = resolveEffectiveSkills({ snapshot, settings: settings.skills, actor }).filter((skill) => !claudeLoadsSkill(skill))
+      const skills = resolveEffectiveSkills({ snapshot, settings: settings.skills, actor }).filter((skill) => !claudeLoadsSkill(skill, this.deps.env?.()))
       if (skills.length > 0) result.pluginPath = await this.buildPlugin(skills, result.warnings)
     } catch (error) {
       result.warnings.push(`Skills were not attached: ${message(error)}`)
