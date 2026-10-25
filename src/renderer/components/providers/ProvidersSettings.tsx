@@ -10,6 +10,7 @@ import {
   DEVICE_SCOPE,
   applySnapshot,
   loadProviderSnapshots,
+  modelPrefsByInstance,
   projectScope,
   removeSnapshot,
   sortInstances,
@@ -38,6 +39,17 @@ export interface ProvidersSettingsProps {
 
 /** The scope last chosen on this page, kept while the app runs. */
 let lastScopeId = ''
+
+/** The catalog less the models hidden in Settings, as the pickers offer it. */
+function withoutHiddenModels(providers: LlmProviderOption[]): LlmProviderOption[] {
+  const prefs = modelPrefsByInstance(useProviderSnapshotsStore.getState().scopes.device?.snapshots)
+  return providers
+    .map((provider) => {
+      const hidden = provider.instanceId ? prefs.get(provider.instanceId)?.hidden : undefined
+      return hidden?.size ? { ...provider, models: provider.models.filter((model) => !hidden.has(model.id)) } : provider
+    })
+    .filter((provider) => provider.models.length > 0)
+}
 
 function ensureSignedIn(result: ProviderLoginResult, fallback: string): void {
   if (!result.success) throw new Error(result.error ?? fallback)
@@ -98,11 +110,11 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
   const selected = sorted.find((snapshot) => snapshot.instanceId === selectedId) ?? sorted[0] ?? null
   const operation = useRunningOperation(selected?.instanceId ?? '')
 
-  /** Keep the default model on an instance that is still on. */
+  /** Keep the default model on an instance that is still on, and on a model it still offers. */
   const reconcileSelection = async () => {
     const { opts } = await refreshProviderData()
     const current = settingsRef.current
-    const next = await ensureValidProviderSelection(current, opts.llmProviders)
+    const next = await ensureValidProviderSelection(current, withoutHiddenModels(opts.llmProviders))
     if (next.provider.llmProvider === current.provider.llmProvider && next.provider.model === current.provider.model) return
     await updateSettings({ provider: { llmProvider: next.provider.llmProvider, model: next.provider.model } })
   }
@@ -197,7 +209,11 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
 
   const renderEditor = (snapshot: InstanceSnapshot) => {
     const status = describeStatus(snapshot)
-    const onSaveModelPrefs = (patch: Parameters<typeof saveModelPrefs>[1]) => saveModelPrefs(snapshot.instanceId, patch)
+    // Hiding a model may hide the default one; move the default to a model that is still offered.
+    const onSaveModelPrefs = async (patch: Parameters<typeof saveModelPrefs>[1]) => {
+      await saveModelPrefs(snapshot.instanceId, patch)
+      if (patch.hidden) await reconcileSelection()
+    }
     if (isApiInstance(snapshot)) {
       const providerId = piProviderIdOf(snapshot.instanceId) ?? snapshot.instanceId
       const option =
