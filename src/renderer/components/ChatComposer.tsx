@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { Loader2, Mic, X } from '../lib/icons'
 import { SpeechWave } from '../speech/SpeechWave'
 import type { LlmProviderOption } from '../../shared/settings'
@@ -76,6 +77,8 @@ export interface ChatComposerProps {
   onStop?: () => void
   /** When true, `/skills` is treated as literal text instead of opening the skill picker. */
   disableSkillsPicker?: boolean
+  /** A row above the input, such as a subagent asking a question; it brings its own layout. */
+  banner?: ReactNode
 }
 
 function formatDuration(seconds: number): string {
@@ -114,7 +117,8 @@ export function ChatComposer({
   placeholder = 'Describe a task or ask a question',
   onSend,
   onStop,
-  disableSkillsPicker = false
+  disableSkillsPicker = false,
+  banner
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
@@ -451,6 +455,7 @@ export function ChatComposer({
 
   return (
     <div className="composer" onDragOver={handleDragOver} onDrop={handleDrop}>
+      {banner}
       {pendingReferences > 0 && <div className="composer-attachments" role="status">Attaching reference…</div>}
       {(hasAttachments || isRecording || transcribing) && (
         <div className="composer-attachments">
