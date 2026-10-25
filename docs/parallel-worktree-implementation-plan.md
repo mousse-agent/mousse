@@ -1,5 +1,7 @@
 # Mousse Parallel AI Workgroup Implementation Plan
 
+> **Note:** the Agents tab (`AgentsPanel`, `AgentsTasksView`, `NamedAgents`), the Agents & Tasks window (`agentsTasksWindow.ts`) and `MousseAgentChat` were removed in #143. Findings below that name them are kept for history.
+
 ## 1. Delivery objective
 
 Implement the [Agents, Workflows, Profiles, Integrations, and Browser Use architecture](agents-workflows-profiles-browser-architecture.md) through bounded AI workgroups working in separate Git worktrees. This plan specifies execution order, branch ownership, shared contracts, acceptance evidence, integration rules, and recovery from stalled or conflicting work.

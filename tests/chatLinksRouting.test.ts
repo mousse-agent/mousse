@@ -19,7 +19,7 @@ function setup() {
 }
 
 beforeEach(() => {
-  useAppStore.setState({ profileId: 'one', activeThreadId: original.id, threads: [original], mainView: 'agents', mainAreaOpen: false, messages: [] })
+  useAppStore.setState({ profileId: 'one', activeThreadId: original.id, threads: [original], mainView: 'browser', mainAreaOpen: false, messages: [] })
 })
 
 describe('project reference routing', () => {
@@ -58,7 +58,7 @@ describe('project reference routing', () => {
     })
     await openProjectReference('project-b')
     expect(api.threads.select).not.toHaveBeenCalled()
-    expect(useAppStore.getState()).toMatchObject({ profileId: 'two', threads: [], mainView: 'agents', mainAreaOpen: false })
+    expect(useAppStore.getState()).toMatchObject({ profileId: 'two', threads: [], mainView: 'browser', mainAreaOpen: false })
   })
 
   it('does not create or navigate after the user switches threads during the lookup', async () => {
@@ -70,6 +70,6 @@ describe('project reference routing', () => {
     await openProjectReference('project-b')
     expect(api.threads.create).not.toHaveBeenCalled()
     expect(api.threads.select).not.toHaveBeenCalled()
-    expect(useAppStore.getState()).toMatchObject({ activeThreadId: 'elsewhere', mainView: 'agents', mainAreaOpen: false })
+    expect(useAppStore.getState()).toMatchObject({ activeThreadId: 'elsewhere', mainView: 'browser', mainAreaOpen: false })
   })
 })

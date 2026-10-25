@@ -28,14 +28,12 @@ function useLineageNow(enabled: boolean): number {
 interface LineageListProps {
   agents: readonly Agent[]
   now: number
-  centerAgentId: string | null
   expanded: boolean
   onExpand: () => void
-  onOpen: (agentId: string) => void
 }
 
 /** Agents this thread started: active ones first, then finished ones. Renders nothing for an empty list; the section collapses instead. */
-export function LineageList({ agents, now, centerAgentId, expanded, onExpand, onOpen }: LineageListProps) {
+export function LineageList({ agents, now, expanded, onExpand }: LineageListProps) {
   if (agents.length === 0) return null
 
   const { visible, hiddenCount } = sliceLineage(orderLineageAgents(agents), expanded)
@@ -44,21 +42,14 @@ export function LineageList({ agents, now, centerAgentId, expanded, onExpand, on
       {visible.map((agent) => {
         const name = lineageAgentName(agent)
         const working = isWorkingLineageAgent(agent)
-        const current = centerAgentId === agent.id
         const status = lineageStatusLabel(agent, now)
         return (
           <li key={agent.id}>
-            <button
-              type="button"
-              className={`lineage-row${current ? ' is-current' : ''}${working ? ' is-working' : ''}`}
-              aria-current={current ? 'true' : undefined}
-              title={name}
-              onClick={() => onOpen(agent.id)}
-            >
+            <div className={`lineage-row${working ? ' is-working' : ''}`} title={name}>
               {working && <span className="lineage-live" role="img" aria-label="Running" />}
               <span className="lineage-name">{name}</span>
               <span className="lineage-status">{status}</span>
-            </button>
+            </div>
           </li>
         )
       })}
@@ -73,11 +64,9 @@ export function LineageList({ agents, now, centerAgentId, expanded, onExpand, on
   )
 }
 
-/** Lists the agents the selected thread started and opens one on click. */
+/** Lists the agents the selected thread started. */
 export function LineageSection({ threadId }: SideCardSectionContext) {
   const agents = useAppStore((s) => s.agents)
-  const centerAgentId = useAppStore((s) => s.centerAgentId)
-  const setCenterAgentId = useAppStore((s) => s.setCenterAgentId)
   // Remembering which thread was expanded resets the list on a thread change
   // without an effect.
   const [expandedThreadId, setExpandedThreadId] = useState<string | null>(null)
@@ -99,10 +88,8 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
       <LineageList
         agents={agents}
         now={now}
-        centerAgentId={centerAgentId}
         expanded={expanded}
         onExpand={() => setExpandedThreadId(threadId)}
-        onOpen={setCenterAgentId}
       />
     </SideCardSection>
   )

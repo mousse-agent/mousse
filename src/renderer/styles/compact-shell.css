@@ -125,10 +125,6 @@ html:not(.platform-darwin) .app {
 
 .app .panel-toolbar .btn-sm { min-height: 26px; padding: 4px 7px; border-radius: 5px; }
 .app .panel-toolbar .icon-btn-ghost { width: 28px; height: 28px; }
-.app .terminal-tabs { padding: 4px 6px 0; gap: 2px; backdrop-filter: none; -webkit-backdrop-filter: none; }
-.app .terminal-tab-select { min-height: 28px; padding: 5px 6px 5px 9px; }
-.app button.terminal-tab { min-height: 28px; padding: 5px 10px; }
-.app .terminal-tab-add { width: 28px; height: 28px; margin-block: 0; }
 .app .browser-tabs { min-height: 31px; padding: 3px 6px 0; }
 .app .browser-tab { border-radius: 5px 5px 0 0; }
 .app .file-tree-root-label { padding: 4px 10px 5px; }

@@ -1,5 +1,5 @@
 import type { ModelOverride } from './providerInstances'
-export type MainView = 'agents' | 'browser' | 'terminal' | 'files' | 'git' | 'documents'
+export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'documents'
 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
 
@@ -357,7 +357,6 @@ export function isDelegationSettledStatus(status: AgentStatus): boolean {
 }
 
 export interface Agent {
-  namedIdentityId?: string
   episodeId?: string
   workspacePolicy?: import('./agentEpisodes').AgentWorkspacePolicy
   id: string
