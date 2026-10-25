@@ -102,6 +102,28 @@ describe('thread activity ownership', () => {
     expect(manager.getActivity('thread-a')).toBe('completed')
   })
 
+  it('holds a finished turn in waiting while the provider runs background work, and clears it when the work ends', () => {
+    expect(deriveThreadActivity('completed', [], false, true)).toBe('waiting')
+    expect(deriveThreadActivity('processing', [], false, true)).toBe('processing')
+    const manager = new ThreadRuntimeManager()
+    manager.getOrHydrate('thread-a')
+    const states: string[] = []
+    manager.on('activity', (event: { state: string }) => states.push(event.state))
+    manager.setActivity('thread-a', 'completed')
+
+    manager.setPendingBackgroundWork('thread-a', true)
+    expect(manager.getActivity('thread-a')).toBe('waiting')
+    // A turn that runs meanwhile shows Working, then Waiting again.
+    manager.setActivity('thread-a', 'processing')
+    expect(manager.getActivity('thread-a')).toBe('processing')
+    manager.setActivity('thread-a', 'completed')
+    expect(manager.getActivity('thread-a')).toBe('waiting')
+
+    manager.setPendingBackgroundWork('thread-a', false)
+    expect(manager.getActivity('thread-a')).toBe('completed')
+    expect(states.at(-1)).toBe('completed')
+  })
+
   it('keeps activity isolated to the thread that owns the running agent', () => {
     const manager = new ThreadRuntimeManager()
     const first = manager.getOrHydrate('thread-a')

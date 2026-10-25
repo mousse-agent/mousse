@@ -403,6 +403,21 @@ function isIntegrationTurnPayload(payload: unknown): payload is IntegrationTurnP
   return Boolean(payload) && typeof payload === 'object' && (payload as { kind?: unknown }).kind === 'integration'
 }
 
+/**
+ * `turn.start` payload of a `provider-continuation` run: the turn a provider's runtime started on
+ * its own after a background task finished. `note` is the line the transcript shows for it.
+ */
+interface ContinuationTurnPayload {
+  kind: 'continuation'
+  threadId: string
+  runId: string
+  note: string
+}
+
+function isContinuationTurnPayload(payload: unknown): payload is ContinuationTurnPayload {
+  return Boolean(payload) && typeof payload === 'object' && (payload as { kind?: unknown }).kind === 'continuation'
+}
+
 /** Who delivers inbox rows while a queue item carries them (no effect: the reconciler leaves them alone). */
 const queueOwner = (itemId: string): string => `queue:${itemId}`
 
@@ -454,8 +469,14 @@ export class OrchestratorService extends EventEmitter {
   private claudeSubscription?: ClaudeSubscriptionProviderService
   private claudeIntegrations?: ClaudeIntegrationSource
   setClaudeSubscriptionProvider(provider: ClaudeSubscriptionProviderService, integrations?: ClaudeIntegrationSource): void {
+    this.claudeSubscription?.setLiveHost(null)
     this.claudeSubscription = provider
     this.claudeIntegrations = integrations
+    // Claude's live processes report their background work and the turns they start themselves here.
+    provider.setLiveHost({
+      backgroundWork: (threadId, active) => this.setProviderBackgroundWork(threadId, active),
+      continuationStarted: (threadId, info) => this.startProviderContinuation(threadId, info)
+    })
   }
   private codex?: CodexClient
   /** The profile's Codex service (`codex` driver); read by the Codex adapter on every turn. */
@@ -946,14 +967,76 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * A provider's background work for `threadId` started (`active`) or finished (including an idle-cap
-   * expiry). While it runs, the tasks waiting on the thread stay `running`; when it ends they are
-   * evaluated again. Called by the adapter that owns the work; nothing calls it yet.
+   * expiry). While it runs, the tasks waiting on the thread stay `running`, and the thread shows
+   * Waiting; when it ends they are evaluated again. Called by the provider that owns the work.
    */
   setProviderBackgroundWork(threadId: string, active: boolean): void {
     if (active === this.providerBackground.has(threadId)) return
     if (active) this.providerBackground.add(threadId)
     else this.providerBackground.delete(threadId)
+    try {
+      this.runtimeManager?.setPendingBackgroundWork(threadId, active)
+    } catch (error) {
+      console.warn('background work activity could not be updated', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
     if (!active) this.runEngine?.store.settleHold(threadId)
+  }
+
+  /**
+   * Claude started a turn of its own because background tasks finished (`ClaudeLiveHost`): it
+   * becomes a `provider-continuation` run of the thread, queued like a wake. The run and its
+   * `turn.start` effect are written in the engine; the effect runs the turn when the thread is free.
+   * A host that cannot record the run throws, and the provider reads and drops the turn instead.
+   */
+  private startProviderContinuation(threadId: string, info: { taskIds: string[]; summaries: string[] }): void {
+    const engine = this.runEngine
+    if (!engine || !this.effectsEnabled()) throw new Error('Continuation turns need the run engine worker')
+    const note = info.summaries.length
+      ? `A background task finished: ${info.summaries.join('; ').slice(0, 600)}`
+      : 'A background task finished.'
+    void engine.dispatch({ kind: 'send', threadId, clientRequestId: `continuation:${uuidv4()}`, source: 'provider-continuation' })
+      .then((result) => {
+        if (result.status !== 'accepted') throw new Error(result.reason)
+        const payload: ContinuationTurnPayload = { kind: 'continuation', threadId, runId: result.runId, note }
+        engine.outbox.enqueue({ effectId: `effect:${result.runId}:turn.start:1`, threadId, runId: result.runId, kind: 'turn.start', payload })
+      })
+      .catch((error: unknown) => {
+        console.warn('a provider continuation could not be recorded', { threadId, error: error instanceof Error ? error.message : String(error) })
+        this.claudeSubscription?.discardContinuations(threadId)
+      })
+  }
+
+  /**
+   * A `provider-continuation` run: the turn Claude started itself, run as an ordinary visible turn
+   * of the thread. A run that is no longer queued (stopped, thread deleted), or whose turn Claude no
+   * longer holds, ends without running. On a busy thread the effect waits, like a wake: Claude's own
+   * turn is already in its stream, so a message queued meanwhile runs after it.
+   */
+  private async executeContinuationEffect(payload: ContinuationTurnPayload, signal: AbortSignal): Promise<void> {
+    const engine = this.requireRunEngine()
+    if (engine.getRun(payload.runId)?.status !== 'queued') {
+      this.claudeSubscription?.discardContinuations(payload.threadId)
+      return
+    }
+    const session = this.getOrCreateSession(payload.threadId)
+    if (session.deleted || !this.claudeSubscription?.hasContinuation(payload.threadId)) {
+      this.markRun(payload.runId, (runs, id) => runs.markTerminal(id, 'cancelled'))
+      return
+    }
+    if (session.turnAdmitted || session.isTurnRunning() || engine.getActiveRun(payload.threadId))
+      throw new EffectDeferredError(this.wakeBusyDeferMs, 'thread_busy')
+    try {
+      await this.runTurnOnSession(
+        session,
+        { content: payload.note, mode: getLastUserChatMode(session.messages) ?? 'agent' },
+        false,
+        true,
+        { source: 'provider-continuation', runId: payload.runId, externalSignal: signal }
+      )
+    } catch (error) {
+      const run = engine.getRun(payload.runId)
+      if (!run || !TERMINAL_RUN_STATUSES.has(run.status)) throw error
+    }
   }
 
   /**
@@ -1311,6 +1394,7 @@ export class OrchestratorService extends EventEmitter {
   private async executeTurnStartEffect(effect: EffectRecord, signal: AbortSignal): Promise<void> {
     if (isWakeTurnPayload(effect.payload)) return this.executeWakeEffect(effect, effect.payload, signal)
     if (isIntegrationTurnPayload(effect.payload)) return this.executeIntegrationEffect(effect.payload, signal)
+    if (isContinuationTurnPayload(effect.payload)) return this.executeContinuationEffect(effect.payload, signal)
     const stored = effect.payload as TurnStartPayload
     const entry = this.turnResults.get(stored.runId)
     if (entry?.abandoned) return
@@ -2858,6 +2942,8 @@ export class OrchestratorService extends EventEmitter {
     const pending = switched ? this.runEngine?.handoffs.pendingForThread(threadId) : null
     if (pending)
       throw new DomainRpcError('handoff_pending', `Thread ${threadId} is still handing its context to ${pending.toRef.provider}; switch providers after that turn.`, { handoffId: pending.handoffId })
+    // The old provider's process is stopped while the thread still resolves to it; its helpers end with it.
+    if (switched) void this.stopProviderWork(threadId)
     session.modelOverride = next ? structuredClone(next) : undefined
     if (this.threadStore) {
       this.threadStore.updateThreadMeta(threadId, { modelOverride: session.modelOverride })
@@ -2925,6 +3011,7 @@ export class OrchestratorService extends EventEmitter {
    */
   markThreadDeleted(threadId: string): void {
     this.revokeMcp(threadId)
+    void this.stopProviderWork(threadId)
     const engine = this.runEngine
     if (engine)
       void engine.cancelThreadWork(threadId).catch((error: unknown) => {
@@ -4895,6 +4982,7 @@ export class OrchestratorService extends EventEmitter {
         modelPinned: Boolean(modelOverride),
         mode,
         child: this.childTurnPolicy(session),
+        ...(opts?.source === 'provider-continuation' ? { continuation: true } : {}),
         prompt: handoffs ? handoffs.prompt(userContent) : userContent,
         messages: handoffs ? handoffs.messages(activeMessages) : activeMessages,
         // A switch handoff stands in for the transcript, including its compaction memory.

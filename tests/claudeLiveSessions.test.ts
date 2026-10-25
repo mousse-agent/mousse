@@ -378,6 +378,25 @@ describe('background work', () => {
     expect(denied).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } })
   })
 
+  it('a wake the host cannot record, or never runs, is read and dropped, and its task is done', async () => {
+    const f = fixture()
+    f.host.continuationStarted.mockImplementation(() => {
+      throw new Error('no worker')
+    })
+    await withHelper(f)
+    f.cli.last.emit(notification('bash-1'), textDelta('lost'), resultFrame({ text: 'lost', origin: 'task-notification' }))
+    await vi.waitFor(() => expect(f.service.hasBackgroundWork('thread')).toBe(false))
+
+    const g = fixture()
+    await withHelper(g, 'bash-2')
+    g.cli.last.emit(notification('bash-2'), resultFrame({ text: 'unread', origin: 'task-notification' }))
+    await vi.waitFor(() => expect(g.service.hasContinuation('thread')).toBe(true))
+    expect(g.service.hasBackgroundWork('thread')).toBe(true)
+    g.service.discardContinuations('thread')
+    expect(g.service.hasContinuation('thread')).toBe(false)
+    await vi.waitFor(() => expect(g.service.hasBackgroundWork('thread')).toBe(false))
+  })
+
   it('without a host a wake is read and dropped, and its task is done', async () => {
     const f = fixture()
     f.service.setLiveHost(null)

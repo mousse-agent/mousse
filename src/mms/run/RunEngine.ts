@@ -1274,11 +1274,13 @@ export class RunEngine extends EventEmitter {
 
   /**
    * Boot: queued child runs of running delegations whose `turn.start` is gone publish a failure;
-   * queued `integration` runs whose effect is gone end `cancelled` (the parent may request again).
+   * queued `integration` runs whose effect is gone end `cancelled` (the parent may request again), and
+   * so do queued `provider-continuation` runs: the process whose turn they would read died with the
+   * daemon, and so did the background work that woke it.
    */
   private settleOrphanedChildren(): string[] {
     for (const run of this.store.listNonTerminalRuns())
-      if (run.status === 'queued' && run.source === 'integration' && !this.hasLiveTurnStart(run.runId))
+      if (run.status === 'queued' && (run.source === 'integration' || run.source === 'provider-continuation') && !this.hasLiveTurnStart(run.runId))
         this.writeTerminal(run, run.epoch, 'cancelled', { interruptedBy: 'daemon_restart' })
     const settled: string[] = []
     const rows = this.store.db

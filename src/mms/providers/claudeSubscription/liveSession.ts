@@ -345,6 +345,10 @@ export class LiveSession<Turn = unknown> {
     return this.unclaimed.shift()
   }
 
+  hasUnclaimedContinuation(): boolean {
+    return this.unclaimed.length > 0
+  }
+
   /** Pushes a message a run owns. Returns the id it will be echoed under. */
   push(run: LiveRun, message: SDKUserMessage): string {
     const uuid = randomUUID()

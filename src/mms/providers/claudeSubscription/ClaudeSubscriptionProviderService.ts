@@ -863,6 +863,23 @@ export class ClaudeSubscriptionProviderService {
     const live = this.live.get(threadId)
     return Boolean(live && !live.dead && live.obligations.size > 0)
   }
+  /** Whether Claude started a turn of its own on the thread that no run has taken yet. */
+  hasContinuation(threadId: string): boolean {
+    const live = this.live.get(threadId)
+    return Boolean(live && !live.dead && live.hasUnclaimedContinuation())
+  }
+  /**
+   * The host could not run the turn Claude started on its own: it is read and dropped, and the
+   * notifications it consumed are done.
+   */
+  discardContinuations(threadId: string): void {
+    const live = this.live.get(threadId)
+    for (let run = live?.claimContinuation(); live && run; run = live.claimContinuation()) {
+      run.attach(() => undefined)
+      const claimed = run
+      void claimed.done.then(() => live.commit(claimed), () => undefined)
+    }
+  }
   /**
    * Stop reaches Claude's process: the live query is closed, which ends its background agents and
    * shells, and the thread's obligations end with it. Works on a thread whose turn already ended.
@@ -1208,6 +1225,8 @@ export class ClaudeSubscriptionProviderService {
     const collectSteer = () => {
       if (controller.signal.aborted) return
       if (liveRun && (liveRun.settled || liveRun.abandoned)) return
+      // A turn Claude started itself owns no message of ours to steer; the text stays queued as the next turn.
+      if (liveRun?.kind === 'continuation') return
       const steer = input.drainSteer?.()?.trim()
       if (!steer) return
       if (live && liveRun) {

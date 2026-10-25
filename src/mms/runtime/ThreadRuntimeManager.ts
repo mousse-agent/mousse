@@ -22,16 +22,18 @@ const BUSY_AGENT_STATUSES: ReadonlySet<AgentStatus> = new Set([
 
 /**
  * A live turn keeps its own state (Working, Waiting on a wait tool, or Input). Once it ends,
- * thread-owned agents or delegated tasks that are still running hold the thread in Waiting
- * instead of Done, since they report back to it.
+ * thread-owned agents, delegated tasks or provider background work (Claude's background agents and
+ * shells) that are still running hold the thread in Waiting instead of Done, since they report back
+ * to it.
  */
 export function deriveThreadActivity(
   turnActivity: ThreadActivityState,
   agents: ReadonlyArray<Pick<Agent, 'status'>>,
-  hasPendingDelegations = false
+  hasPendingDelegations = false,
+  hasBackgroundWork = false
 ): ThreadActivityState {
   if (turnActivity !== 'idle' && turnActivity !== 'completed') return turnActivity
-  return hasPendingDelegations || agents.some((agent) => BUSY_AGENT_STATUSES.has(agent.status))
+  return hasPendingDelegations || hasBackgroundWork || agents.some((agent) => BUSY_AGENT_STATUSES.has(agent.status))
     ? 'waiting'
     : turnActivity
 }
@@ -48,6 +50,8 @@ export class ThreadRuntimeManager extends EventEmitter {
   private readonly turnActivity = new Map<string, ThreadActivityState>()
   /** Threads with delegated tasks still running. */
   private readonly pendingDelegations = new Set<string>()
+  /** Threads whose provider still runs background work (Claude's agents and shells). */
+  private readonly pendingBackgroundWork = new Set<string>()
   private threadStore: ThreadDataStore | null = null
   private orchestrator: OrchestratorService | null = null
   private ptyManager: PtyManager | null = null
@@ -206,6 +210,14 @@ export class ThreadRuntimeManager extends EventEmitter {
     this.publishDerivedActivity(threadId, this.getOrHydrate(threadId))
   }
 
+  /** Whether the thread's provider still runs background work for it; the thread shows Waiting meanwhile. */
+  setPendingBackgroundWork(threadId: string, pending: boolean): void {
+    if (pending === this.pendingBackgroundWork.has(threadId)) return
+    if (pending) this.pendingBackgroundWork.add(threadId)
+    else this.pendingBackgroundWork.delete(threadId)
+    this.publishDerivedActivity(threadId, this.getOrHydrate(threadId))
+  }
+
   private publishDerivedActivity(
     threadId: string,
     rt: ThreadRuntime,
@@ -214,7 +226,8 @@ export class ThreadRuntimeManager extends EventEmitter {
     const state = deriveThreadActivity(
       this.turnActivity.get(threadId) ?? rt.activity,
       rt.agents.list(),
-      this.pendingDelegations.has(threadId)
+      this.pendingDelegations.has(threadId),
+      this.pendingBackgroundWork.has(threadId)
     )
     if (!force && state === rt.activity) return
     if (state !== rt.activity) rt.setActivity(state)
@@ -286,6 +299,7 @@ export class ThreadRuntimeManager extends EventEmitter {
     this.runtimes.delete(threadId)
     this.turnActivity.delete(threadId)
     this.pendingDelegations.delete(threadId)
+    this.pendingBackgroundWork.delete(threadId)
   }
 
   /**
