@@ -2605,8 +2605,8 @@ export class OrchestratorService extends EventEmitter {
     if (!target.ok) return target.refusal
     const tasks = engine.delegations.listForChildThread(target.childThreadId).filter((task) => task.parentThreadId === parentThreadId)
     const open = tasks.filter((task) => task.status === 'running')
-    // Nothing is stopped when no task is open (a cancelled one whose run is still live is a repeat to finish).
-    if (open.length === 0 && !tasks.some((task) => task.status === 'cancelled' && this.isRunLive(task.childRunId)))
+    // Nothing is stopped when no task is open: a repeat must not touch newer work.
+    if (open.length === 0)
       return { subagent: target.title, childThreadId: target.childThreadId, cancelled: [], note: `"${target.title}" has no open task.` }
     const stopped = await this.stopThread(target.childThreadId, 'task_cancel', { requesterThreadId: parentThreadId })
     return { subagent: target.title, childThreadId: target.childThreadId, cancelled: stopped.delegations }
