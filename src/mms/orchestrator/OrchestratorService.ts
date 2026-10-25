@@ -5233,20 +5233,20 @@ export class OrchestratorService extends EventEmitter {
       }
       // Every drain is remembered under its own token until the provider has taken the text, so a drain
       // the provider hands back restores exactly what that drain took, whatever was drained since.
-      const drained = new Map<string, { ownParts: string[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> }>()
+      const drained = new Map<string, { external?: string; ownParts: string[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> }>()
       let drains = 0
       let returnedAhead = 0
       const drainEntry = (): { text: string; token: string } | undefined => {
         turn.lastDrained = undefined
-        const parts = [
-          opts?.externalDrainSteer?.()?.trim(),
-          this.drainSteerForSession(session, turn)?.trim()
-        ].filter((part): part is string => Boolean(part))
+        const external = opts?.externalDrainSteer?.()?.trim() || undefined
+        const own = this.drainSteerForSession(session, turn)?.trim() || undefined
         const taken = turn.lastDrained as ActiveTurnControl['lastDrained']
         turn.lastDrained = undefined
+        const parts = [external, own].filter((part): part is string => Boolean(part))
         if (parts.length === 0) return undefined
         const token = `drain-${++drains}`
-        drained.set(token, { ownParts: taken?.parts ?? [], carried: taken?.carried ?? [] })
+        // Each source is kept as it was drained, so a return restores them whole, never by cutting text apart.
+        drained.set(token, { external, ownParts: taken?.parts ?? (own ? [own] : []), carried: taken?.carried ?? [] })
         returnedAhead = 0
         return { text: parts.join('\n'), token }
       }
@@ -5265,8 +5265,7 @@ export class OrchestratorService extends EventEmitter {
             returnedAhead += items.length
           }
           if (!entry) return put(text)
-          const rest = text.replace(entry.ownParts.join('\n'), '').trim()
-          put(...entry.ownParts, ...(rest ? [rest] : []))
+          put(...entry.ownParts, ...(entry.external ? [entry.external] : []))
           for (const carried of entry.carried) this.runEngine?.inbox.unmarkSteerTaken(carried.inboxIds, carried.effectId)
           turn.carriedSteers = [...entry.carried, ...(turn.carriedSteers ?? [])]
         },

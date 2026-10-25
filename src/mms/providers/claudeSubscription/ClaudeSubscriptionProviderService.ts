@@ -45,7 +45,7 @@ import {
 import { parseClaudeSubscriptionUsage } from './usage'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
 import { claudeChildToolDenial } from './childPolicy'
-import { DEFAULT_LIVE_TIMINGS, LiveSession, type LiveRun, type LiveTimings } from './liveSession'
+import { CancelInProgress, DEFAULT_LIVE_TIMINGS, LiveSession, type LiveRun, type LiveTimings } from './liveSession'
 import { TurnFrames } from './turnFrames'
 import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
 
@@ -975,7 +975,7 @@ export class ClaudeSubscriptionProviderService {
         throw new AppError({
           code: 'claude_background_work_blocks_change',
           message: live.obligations.hasLost()
-            ? `Claude is still holding ${tasks} for this thread whose result may never arrive. ${cause} and would end that work. Press Stop to release it now, then send again.`
+            ? `Claude is still holding ${tasks} for this thread whose result may not arrive. ${cause} and would end that work. Press Stop to release it now, then send again.`
             : `Claude is still running ${tasks} for this thread. ${cause} and would end that work. Wait for it to finish or press Stop, then send again.`,
           errorInfo: { category: 'unavailable', retryable: false }
         })
@@ -1021,7 +1021,8 @@ export class ClaudeSubscriptionProviderService {
   }
   /**
    * Claude started a turn of its own: a background task finished. The host runs it as a run of the
-   * thread; without a host it is stopped, and nothing it was to read is discharged.
+   * thread; without a host it is stopped, and its tasks stay owed until the next committed turn on the
+   * process clears them (Claude has read them by then) or Stop or the cap ends the process.
    */
   private continuationStarted(live: LiveSession<TurnContext>, run: LiveRun, info: { id: string; taskIds: string[]; summaries: string[] }): void {
     const host = this.liveHost
@@ -1034,7 +1035,7 @@ export class ClaudeSubscriptionProviderService {
       }
     }
     // Nothing can run the turn, so nobody would see it: it is stopped (Claude would otherwise run it
-    // unattended, in bypass mode), and what it read is done.
+    // unattended, in bypass mode). Its tasks are discharged by the next turn that commits.
     live.discardContinuation(run)
   }
   /** Whether Claude started a turn of its own on the thread that no run has taken yet. */
@@ -1270,6 +1271,7 @@ export class ClaudeSubscriptionProviderService {
         : undefined
     const metrics = new ClaudeMetricsCollector(resume, saved?.usageBaseline)
     const editCounter = new ClaudeNativeEditCounter(input.cwd, input.onLineEdits)
+    const savedHistoryKey = stored?.historyKey
     if (stored) {
       delete stored.historyKey
       this.save()
@@ -1409,10 +1411,19 @@ export class ClaudeSubscriptionProviderService {
         liveRun.attach((message) => frames.observe(message))
       } else {
         const key = { hard, soft: this.launchKey(env, integrations), mode: permissionMode, historyNow }
-        live = await this.acquireLive(input.threadId, key, resume, (created) => {
-          created.current = turn
-          return buildOptions(created.lifetime, () => created.current ?? turn, true)
-        })
+        try {
+          live = await this.acquireLive(input.threadId, key, resume, (created) => {
+            created.current = turn
+            return buildOptions(created.lifetime, () => created.current ?? turn, true)
+          })
+        } catch (error) {
+          // A refused change started nothing: the conversation is as it was, so the next request can resume it.
+          if (error instanceof AppError && error.code === 'claude_background_work_blocks_change' && stored && savedHistoryKey) {
+            stored.historyKey = savedHistoryKey
+            this.save()
+          }
+          throw error
+        }
         // Held until the run exists, so the idle release cannot close the process in between.
         const hold = live?.reserve()
         try {
@@ -1426,7 +1437,17 @@ export class ClaudeSubscriptionProviderService {
               controller.signal.throwIfAborted()
             }
             liveRun = live.beginRun((message) => frames.observe(message))
-            live.push(liveRun, userMessage(live.sessionId ?? resume ?? ''))
+            // A cancel under way (another turn was cut off) would sweep this prompt up; wait for it.
+            for (;;) {
+              try {
+                live.push(liveRun, userMessage(live.sessionId ?? resume ?? ''))
+                break
+              } catch (error) {
+                if (!(error instanceof CancelInProgress)) throw error
+                await live.afterCancel()
+                controller.signal.throwIfAborted()
+              }
+            }
           }
         } finally {
           hold?.()

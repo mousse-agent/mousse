@@ -881,9 +881,47 @@ describe('result routing and steering edge cases', () => {
     await expect(second).rejects.toThrow()
     f.service.commitInterrupted('thread', 'h')
     await expect(f.chat({ history: 'h', model: 'opus' })).rejects.toMatchObject({
-      message: expect.stringMatching(/may never arrive.*Press Stop to release it now/)
+      message: expect.stringMatching(/may not arrive.*Press Stop to release it now/)
     })
     await expect(f.chat({ history: 'h', model: 'opus' })).rejects.not.toMatchObject({ message: expect.stringContaining('Wait for it to finish') })
+  })
+
+  it('what a discarded wake left is cleared by the next turn that begins afterwards and commits, not before', async () => {
+    const f = fixture()
+    f.service.setLiveHost(null)
+    await withHelperTurn(f)
+    const process = f.cli.last
+    process.emit(notification('bash-1'))
+    await later(30)
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    // The model may not be changed meanwhile, and the error says what to do.
+    await expect(f.chat({ history: '', model: 'opus' })).rejects.toMatchObject({ message: expect.stringContaining('Press Stop') })
+    f.cli.reply = (message, self) => self.answer(String(message.uuid), 'next')
+    expect(await f.chat({ history: '' })).toBe('next')
+    // Not committed yet: the turn has to commit.
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    f.service.commitConversation('thread', '')
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+  })
+
+  it('a cancel that swept the queue makes every carried task lost, not only the ones the cancelled turn read', async () => {
+    const f = fixture()
+    const process = await cutOffAfterNotification(f)
+    f.cli.reply = undefined
+    const abort = new AbortController()
+    // A later turn, which read nothing, is cancelled with a steer Claude has not started.
+    const third = f.chat({
+      history: 'h',
+      signal: abort.signal,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('queued steer').mockReturnValue(undefined)
+    })
+    await inputs(f.cli, 4)
+    abort.abort()
+    await expect(third).rejects.toThrow()
+    f.service.commitInterrupted('thread', 'h')
+    await vi.waitFor(() => expect(process.interruptOptions).toEqual([undefined, undefined, { cancelQueued: true }].filter((entry, index) => index > 0 || entry === undefined)))
+    await vi.waitFor(() => expect(f.host.notice).toHaveBeenCalledExactlyOnceWith('thread', expect.stringContaining('four-hour limit')))
+    await expect(f.chat({ history: 'h', model: 'opus' })).rejects.toMatchObject({ message: expect.stringMatching(/may not arrive/) })
   })
 
   it('a discarded wake never discharges anything, not even what a cut-off turn left for it', async () => {
@@ -1006,6 +1044,61 @@ describe('result routing and steering edge cases', () => {
     const process = f.cli.last
     process.emit(resultFrame({ uuids: [process.uuid(0), process.uuid(1)], text: 'ok' }))
     await turn
+  })
+
+  it('a result held back for a steer still lets the folded run adopt the cut-off notification', async () => {
+    const f = fixture()
+    const process = await cutOffAfterNotification(f)
+    f.cli.reply = undefined
+    let open!: () => void
+    process.backgroundGate = new Promise<void>((resolve) => { open = resolve })
+    const mine = f.chat({
+      prompt: 'mine',
+      history: 'h',
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('late steer').mockReturnValue(undefined),
+      returnSteer: vi.fn()
+    })
+    await inputs(f.cli, 3)
+    await vi.waitFor(() => expect(process.backgrounded).toBe(1))
+    const uuid = process.uuid(2)
+    // The wake that folds the message in answers while the steer still waits for foreground work to move.
+    process.emit(resultFrame({ uuids: [process.uuid(1)], terminalReason: 'aborted_streaming' }))
+    process.emit(textDelta('report and answer', uuid), resultFrame({ uuids: [uuid], text: 'report and answer', origin: 'task-notification' }))
+    await later(30)
+    open()
+    expect(await mine).toBe('report and answer')
+    f.service.commitConversation('thread', 'h')
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+  })
+
+  it('a prompt pushed while a cancel waits for its receipt is not swept up by it', async () => {
+    const f = fixture()
+    await f.turn({ history: 'h' }, 'h')
+    const process = f.cli.last
+    f.cli.reply = undefined
+    const abort = new AbortController()
+    const first = f.chat({
+      history: 'h',
+      signal: abort.signal,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('queued steer').mockReturnValue(undefined)
+    })
+    await inputs(f.cli, 3)
+    // The first interrupt's receipt is slow.
+    let release!: () => void
+    process.interruptGate = new Promise<void>((resolve) => { release = resolve })
+    abort.abort()
+    await expect(first).rejects.toThrow()
+    f.service.commitInterrupted('thread', 'h')
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    // A new turn starts meanwhile: its prompt waits for the cancel to finish instead of racing it.
+    f.cli.reply = (message, self) => self.answer(String(message.uuid), 'second answer')
+    const second = f.chat({ history: 'h' })
+    await later(150)
+    expect(process.inputs).toHaveLength(3)
+    process.interruptGate = undefined
+    release()
+    expect(await second).toBe('second answer')
+    expect(process.interruptOptions).toEqual([undefined, { cancelQueued: true }])
   })
 
   it('a steered continuation ignores an abort result that echoes no id and ends at its own result', async () => {

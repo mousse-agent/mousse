@@ -20,7 +20,11 @@ import type { Query, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthr
 export const LIVE_IDLE_CLOSE_MS = 3 * 60_000
 /** With background work pending: how long the thread may be silent before the release is reconsidered. */
 export const LIVE_IDLE_RELEASE_MS = 30 * 60_000
-/** With background work pending: the longest the release is deferred without any provider activity. */
+/**
+ * With background work pending: the longest it may stay owed. The count starts when work first became owed
+ * and activity never moves it; at the cap the process is closed (ending every helper), waiting only for a
+ * turn that is in flight.
+ */
 export const LIVE_MAX_PIN_MS = 4 * 60 * 60_000
 /** Live Claude processes across threads. Beyond it a turn runs as a one-shot query, as before. */
 export const LIVE_MAX_SESSIONS = 4
@@ -108,6 +112,12 @@ interface BackgroundTask {
  */
 const CARRIED = Symbol('carried')
 const LOST = Symbol('lost')
+/**
+ * A wake nobody could run (no host) was stopped: Claude read those tasks' reports, but no turn of Mousse
+ * showed them to anyone. The next turn that begins afterwards and commits clears them, since Claude has
+ * them in its context by then.
+ */
+const DISCARDED = Symbol('discarded')
 
 /**
  * The background tasks of one Claude process that still owe the thread something (issue #142, plan
@@ -176,30 +186,50 @@ export class BackgroundObligations {
    * `owner` was cut off without committing, so what it consumed is committed by no turn (see
    * `CARRIED` and `LOST`). Returns the tasks that left.
    */
-  release(owner: unknown, mode: 'carried' | 'lost'): string[] {
+  release(owner: unknown, mode: 'carried' | 'lost' | 'discarded'): string[] {
+    const state = mode === 'carried' ? CARRIED : mode === 'lost' ? LOST : DISCARDED
     const ids: string[] = []
     for (const [id, consumer] of this.consumers)
       if (consumer === owner) {
-        this.consumers.set(id, mode === 'carried' ? CARRIED : LOST)
+        this.consumers.set(id, state)
         ids.push(id)
       }
     return ids
   }
 
-  /** The cancel that went with an interrupt may have dropped these tasks' notifications: they are `LOST`. */
-  lose(ids: readonly string[]): number {
+  /**
+   * The cancel that went with an interrupt swept the whole queue, so every notification still queued for a
+   * wake may be gone, not only those the cancelled run had read: every `CARRIED` task becomes `LOST`.
+   */
+  loseCarried(): number {
     let count = 0
-    for (const id of ids)
-      if (this.consumers.get(id) === CARRIED) {
+    for (const [id, consumer] of this.consumers)
+      if (consumer === CARRIED) {
         this.consumers.set(id, LOST)
         count++
       }
     return count
   }
 
+  /** Tasks a discarded wake left (see `DISCARDED`). */
+  discardedIds(): string[] {
+    return [...this.consumers].filter(([, consumer]) => consumer === DISCARDED).map(([id]) => id)
+  }
+
+  /** A turn that began after `ids` were discarded and committed: Claude has read them, so they are done. */
+  clearDiscarded(ids: readonly string[]): boolean {
+    let changed = false
+    for (const id of ids)
+      if (this.consumers.get(id) === DISCARDED) {
+        this.consumers.delete(id)
+        changed = this.tasks.delete(id) || changed
+      }
+    return changed
+  }
+
   /** Some task's result may never arrive. */
   hasLost(): boolean {
-    for (const consumer of this.consumers.values()) if (consumer === LOST) return true
+    for (const consumer of this.consumers.values()) if (consumer === LOST || consumer === DISCARDED) return true
     return false
   }
 
@@ -239,6 +269,13 @@ export type FrameConsumer = (message: SDKMessage) => void
  * and its steers) and ends at the result that echoes them. A continuation is a turn Claude started
  * itself, after a background task finished; it ends at the next result that echoes none of ours.
  */
+/** A push met a cancel in progress; the caller waits for `afterCancel()` and pushes again. */
+export class CancelInProgress extends Error {
+  constructor() {
+    super('A cancel is in progress')
+  }
+}
+
 export class LiveRun {
   /** Names this turn to the host that is asked to run it. */
   readonly id = randomUUID()
@@ -265,6 +302,8 @@ export class LiveRun {
   deferredResult: SDKResultMessage | undefined
   /** The turn produced its first frame. */
   started = false
+  /** What a discarded wake had left when this turn began; it clears them when it commits. */
+  discardedAtStart: string[] = []
   /** A discarded turn was interrupted. */
   interruptSent = false
   readonly buffered: SDKMessage[] = []
@@ -365,6 +404,9 @@ export class LiveSession<Turn = unknown> {
   private cursor: LiveRun | undefined
   /** Turns about to use the session (see `reserve`). */
   private reserved = 0
+  /** Cancel sequences under way (`interruptFor`); pushes wait for them. */
+  private cancelling = 0
+  private cancelWaiters: Array<() => void> = []
   private readonly noticeTimers = new Set<ReturnType<typeof setTimeout>>()
   private idleTimer: ReturnType<typeof setTimeout> | undefined
   private wakeTimer: ReturnType<typeof setTimeout> | undefined
@@ -403,6 +445,7 @@ export class LiveSession<Turn = unknown> {
 
   beginRun(consumer: FrameConsumer): LiveRun {
     const run = new LiveRun('prompt', consumer)
+    run.discardedAtStart = this.obligations.discardedIds()
     this.runs.push(run)
     this.clearIdle()
     return run
@@ -453,8 +496,9 @@ export class LiveSession<Turn = unknown> {
   discardContinuation(run: LiveRun): void {
     const index = this.unclaimed.indexOf(run)
     if (index >= 0) this.unclaimed.splice(index, 1)
-    if (this.obligations.release(run, 'lost').length > 0)
-      this.hooks.notice?.('A background helper finished, but its result could not be read; it may not have been delivered.')
+    // The tasks are not shown to anyone, but Claude read them: the next turn that commits clears them.
+    if (this.obligations.release(run, 'discarded').length > 0)
+      this.hooks.notice?.('A background helper finished, but nothing could show its result. The next message clears it; Stop releases it now.')
     if (run.settled || run.abandoned) return
     // The turn may not have begun yet (the notification comes first): it stays the frames' target, so
     // everything it says is dropped, and it is interrupted as soon as its first frame shows it started.
@@ -473,10 +517,27 @@ export class LiveSession<Turn = unknown> {
     void Promise.resolve(this.query.interrupt()).catch(() => undefined)
   }
 
+  /** Resolves once no cancel sequence is under way; pushes (and steers) wait here instead of racing the cancel. */
+  afterCancel(): Promise<void> {
+    if (this.cancelling === 0) return Promise.resolve()
+    return new Promise((resolve) => this.cancelWaiters.push(resolve))
+  }
+
+  private cancelFinished(): void {
+    this.cancelling--
+    if (this.cancelling > 0) return
+    const waiters = this.cancelWaiters
+    this.cancelWaiters = []
+    for (const resolve of waiters) resolve()
+  }
+
   /** Pushes a message a run owns. Returns the id it will be echoed under. */
   push(run: LiveRun, message: SDKUserMessage): string {
     const uuid = randomUUID()
     if (run.settled || this.dead) throw new Error('Claude Code ended before completing the turn')
+    // While a cancel is under way every queued message is at risk: a push now could be swept up by it.
+    // The caller retries once the cancel is over (`afterCancel`).
+    if (this.cancelling > 0) throw new CancelInProgress()
     run.owned.add(uuid)
     run.ids.add(uuid)
     if (!this.queue.push({ ...message, uuid })) {
@@ -511,14 +572,23 @@ export class LiveSession<Turn = unknown> {
       }
       // The turn's result may have arrived while the foreground work moved; settling waited for this
       // steer, but a steer never starts a turn the run no longer owns: it is the next queued turn.
-      if (run.settled || run.resultSeen || run.abandoned || this.dead || this.query !== query) return false
-      this.push(run, {
-        type: 'user',
-        message: { role: 'user', content: text },
-        parent_tool_use_id: null,
-        priority: 'now',
-        session_id: this.sessionId ?? ''
-      })
+      // A cancel under way could sweep the steer up; it waits, then looks again.
+      for (;;) {
+        await this.afterCancel()
+        if (run.settled || run.resultSeen || run.abandoned || this.dead || this.query !== query) return false
+        try {
+          this.push(run, {
+            type: 'user',
+            message: { role: 'user', content: text },
+            parent_tool_use_id: null,
+            priority: 'now',
+            session_id: this.sessionId ?? ''
+          })
+          break
+        } catch (error) {
+          if (!(error instanceof CancelInProgress)) throw error
+        }
+      }
       run.steered = true
       run.deferredResult = undefined
       return true
@@ -545,11 +615,11 @@ export class LiveSession<Turn = unknown> {
     if (unclaimed >= 0) this.unclaimed.splice(unclaimed, 1)
     // What the run had read stays queued in Claude, which starts a wake turn for it (CARRIED), unless the
     // cancel below also drops it (LOST).
-    const released = this.obligations.release(run, 'carried')
+    this.obligations.release(run, 'carried')
     const query = this.query
     // A turn that pushed nothing has nothing in flight; one that did, or a wake, is interrupted. An
     // interrupt of an idle query is harmless, and one that fails leaves the next turn to find out.
-    if (query && !this.dead && (run.ids.size > 0 || run.kind === 'continuation')) void this.interruptFor(run, query, released)
+    if (query && !this.dead && (run.ids.size > 0 || run.kind === 'continuation')) void this.interruptFor(run, query)
     // A run that was never answered keeps owning its ids until each has its result or was cancelled; a
     // wake that owns a steer keeps its place among the runs for that, whatever started it.
     if (run.owned.size === 0) this.finishCancelled(run)
@@ -571,7 +641,16 @@ export class LiveSession<Turn = unknown> {
    * receipt cannot cancel a prompt it never started; only closing the process drops it, which is not done
    * while the process has background work (the prompt then runs and its result is dropped).
    */
-  private async interruptFor(run: LiveRun, query: Query, released: readonly string[]): Promise<void> {
+  private async interruptFor(run: LiveRun, query: Query): Promise<void> {
+    this.cancelling++
+    try {
+      await this.interruptSequence(run, query)
+    } finally {
+      this.cancelFinished()
+    }
+  }
+
+  private async interruptSequence(run: LiveRun, query: Query): Promise<void> {
     type Receipt = { still_queued?: string[]; cancelled?: string[] } | undefined
     const target = query as { interrupt(options?: { cancelQueued?: boolean }): Promise<Receipt> }
     let receipt: Receipt
@@ -594,10 +673,33 @@ export class LiveSession<Turn = unknown> {
       return
     }
     if (this.dead) return
-    if (this.obligations.lose(released) > 0)
-      this.noticeLater('A background helper finished while a message was being cancelled; its result may not have been delivered. The thread stays waiting for it until the helpers finish or the idle limit releases them; Stop releases it now.')
-    for (const id of cancelled?.cancelled ?? []) run.owned.delete(id)
+    if (this.obligations.loseCarried() > 0)
+      this.noticeLater('A background helper finished while a message was being cancelled, and its result may not have been delivered. The thread stays waiting until the four-hour limit; Stop releases it now.')
+    // Every cancelled id is reconciled against the run that owns it: the cancel swept the whole queue.
+    for (const id of cancelled?.cancelled ?? []) this.cancelId(id)
     if (run.owned.size === 0 && !run.settled) this.finishCancelled(run)
+  }
+
+  /**
+   * Claude cancelled the queued message `id`: its owner will never get a result for it. A cancelled run is
+   * finished; a live run whose only outstanding message it was fails clearly instead of waiting for ever.
+   */
+  private cancelId(id: string): void {
+    const owner = this.ownerOf([id])
+    if (!owner) return
+    owner.owned.delete(id)
+    if (owner.abandoned) {
+      if (owner.owned.size === 0) this.finishCancelled(owner)
+      return
+    }
+    if (owner.owned.size === 0 && owner.steerInFlight === 0 && !owner.settled)
+      this.failCancelled(owner, new Error('Claude Code cancelled the message before it started; send it again'))
+  }
+
+  private failCancelled(run: LiveRun, error: Error): void {
+    this.remove(run)
+    run.reject(error)
+    this.afterRunEnded()
   }
 
   /**
@@ -622,7 +724,12 @@ export class LiveSession<Turn = unknown> {
 
   /** A Mousse run's consumption of its notifications committed: its obligations are done. */
   commit(owner: unknown): void {
-    if (this.obligations.commit(owner)) this.backgroundChanged()
+    let changed = this.obligations.commit(owner)
+    if (owner instanceof LiveRun && owner.discardedAtStart.length > 0) {
+      changed = this.obligations.clearDiscarded(owner.discardedAtStart) || changed
+      owner.discardedAtStart = []
+    }
+    if (changed) this.backgroundChanged()
   }
 
   /** The process is released or closed on purpose (Stop, idle, replacement): everything it owed ends with it. */
@@ -796,25 +903,30 @@ export class LiveSession<Turn = unknown> {
     const queued = (message as { queued_turn_count?: number }).queued_turn_count ?? 0
     if (target.owned.size > 0 && queued > 0) return void target.deliver(message)
     target.resultSeen = true
+    // A wake that folded this run's prompt in consumed the task notifications too, and the
+    // continuation it opened for them has nothing left to say. This run read the notifications a
+    // cut-off turn had left, so it commits those as well. This is done when the result arrives, so a
+    // result held back for a steer (below) has already done it.
+    if (echoed.length && isTaskOrigin(message)) this.foldWake(target)
     // A steer still waiting for foreground work to move cannot be pushed any more; the run settles
     // when that steer has been turned away.
     if (target.steerInFlight > 0) {
       target.deferredResult = message
       return void target.deliver(message)
     }
-    // A wake that folded this run's prompt in consumed the task notifications too, and the
-    // continuation it opened for them has nothing left to say. This run read the notifications a
-    // cut-off turn had left, so it commits those as well.
-    if (echoed.length && isTaskOrigin(message)) this.obligations.adoptCarried(target)
-    const continuation = this.continuation
-    if (continuation && continuation !== target && echoed.length && isTaskOrigin(message)) {
-      if (continuation.abandoned) this.finishCancelled(continuation)
-      else {
-        this.obligations.reassign(continuation, target)
-        this.endContinuation(continuation, 'folded')
-      }
-    }
     this.settle(target, message)
+  }
+
+  /** `target`'s result came from a wake turn: it read what that wake read, and the wake's own run is over. */
+  private foldWake(target: LiveRun): void {
+    this.obligations.adoptCarried(target)
+    const continuation = this.continuation
+    if (!continuation || continuation === target) return
+    if (continuation.abandoned) this.finishCancelled(continuation)
+    else {
+      this.obligations.reassign(continuation, target)
+      this.endContinuation(continuation, 'folded')
+    }
   }
 
   private settle(run: LiveRun, result: SDKResultMessage): void {

@@ -84,6 +84,8 @@ export class FakeClaudeProcess {
   receipts = true
   /** While set, `setPermissionMode` and `backgroundTasks` wait for it. */
   permissionGate: Promise<unknown> | undefined
+  /** While set, `interrupt()` waits for it before it answers (a slow receipt). */
+  interruptGate: Promise<unknown> | undefined
   backgroundGate: Promise<unknown> | undefined
   private readonly started = new Set<string>()
   private readonly cancelled = new Set<string>()
@@ -202,6 +204,7 @@ export class FakeClaudeProcess {
         this.interrupts++
         this.interruptOptions.push(options)
         this.onInterrupt?.(this)
+        await this.interruptGate
         if (!this.receipts) return undefined
         const queued = this.queued
         if (!options?.cancelQueued) return { still_queued: queued }
