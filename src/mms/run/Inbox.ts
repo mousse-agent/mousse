@@ -170,6 +170,8 @@ export class Inbox {
         if (current?.status !== 'delivered' || current.deliveredBy !== from) continue
         this.db.statement('UPDATE inbox SET delivered_by = NULL WHERE inbox_id = ? AND status = ?').run(id, 'delivered')
         this.recorded({ ...current, deliveredBy: null })
+        // Owned by nothing now: it no longer holds the tasks waiting on its thread.
+        this.store.settleHold(current.threadId)
       }
     })
   }

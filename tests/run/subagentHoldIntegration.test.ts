@@ -145,17 +145,42 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
       return { s, row, payload }
     }
 
-    it('a turn that ends cleanly reads the rows, and the task publishes', async () => {
+    /** A run of the Coordinator that carried the rows (a queue item's turn, run without an effect), ended as `end` says. */
+    const ended = (s: Awaited<ReturnType<typeof carried>>['s'], end: (runId: string) => void) => {
+      const run = s.d.engine.store.createRun({ threadId: s.coordinator.childThreadId, source: 'steer-late' })
+      s.d.engine.markStarting(run.runId)
+      s.d.engine.markRunning(run.runId)
+      end(run.runId)
+      return run.runId
+    }
+    const settle = (s: Awaited<ReturnType<typeof carried>>['s'], payload: object, runId: string, turn: Promise<unknown> = Promise.resolve({ message: '', actions: [] })) =>
+      (s.d.orch as any).settleCarriedRows({ ...payload, runId }, turn).catch(() => undefined)
+
+    it('a turn that completed reads the rows, and the task publishes once they are read', async () => {
       const { s, row, payload } = await carried()
-      await (s.d.orch as any).settleCarriedRows(payload, Promise.resolve({ message: 'ok', actions: [] }))
+      const runId = ended(s, (id) => s.d.engine.markTerminal(id, 'completed', undefined, { resultText: 'Coordinator read it.' }))
+      // The run ended, but its rows were still its queue item's: the task keeps waiting until they are settled.
+      expect(s.task(s.coordinator.delegationId).status).toBe('running')
+      await settle(s, payload, runId)
       expect(s.d.engine.inbox.get(row.inboxId)!.status).toBe('acknowledged')
+      expect(s.task(s.coordinator.delegationId)).toMatchObject({ status: 'result_available', result: { text: 'Coordinator read it.' } })
+    })
+
+    it('a turn the user stopped detaches the rows: nothing redelivers them, and the task is not held', async () => {
+      const { s, row, payload } = await carried()
+      const runId = ended(s, (id) => s.d.engine.markTerminal(id, 'interrupted', { interruptedBy: 'user' }))
+      expect(s.task(s.coordinator.delegationId).status).toBe('running')
+      await settle(s, payload, runId)
+      expect(s.d.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: null })
+      expect(s.reconciler.runOnce().wakes.restored).toEqual([])
       expect(s.task(s.coordinator.delegationId).status).not.toBe('running')
     })
 
-    it('a turn that fails or throws gives the rows back: they keep holding the task and are delivered again', async () => {
-      for (const outcome of [() => Promise.resolve({ message: '', actions: [], error: 'boom' }), () => Promise.reject(new Error('boom'))]) {
+    it('a turn that failed, or whose delivery threw, gives the rows back: they keep holding the task and are delivered again', async () => {
+      for (const turn of [() => Promise.resolve({ message: '', actions: [] }), () => Promise.reject(new Error('boom'))]) {
         const { s, row, payload } = await carried()
-        await (s.d.orch as any).settleCarriedRows(payload, outcome()).catch(() => undefined)
+        const runId = ended(s, (id) => s.d.engine.markTerminal(id, 'failed', { error: 'boom' }))
+        await settle(s, payload, runId, turn())
         expect(s.d.engine.inbox.get(row.inboxId)!.status).toBe('pending')
         expect(s.task(s.coordinator.delegationId).status).toBe('running')
       }
