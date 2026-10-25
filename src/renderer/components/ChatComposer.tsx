@@ -54,8 +54,6 @@ export interface ChatComposerProps {
   onAddReference?: (reference: ChatReference) => void | Promise<void>
   onRemoveReference?: (id: string) => void
   onReferenceError?: (message: string) => void
-  chatMode: ChatMode
-  onChatModeChange: (mode: ChatMode) => void
   enabledSkills: SkillDescriptor[]
   providers: LlmProviderOption[]
   selectedProviderId: string
@@ -76,9 +74,7 @@ export interface ChatComposerProps {
    * prompt in skill mode without flipping the global chat mode. */
   onSend: (skillMode?: SkillChatMode) => void
   onStop?: () => void
-  hideModePicker?: boolean
-  /** When true, `/skills` is treated as literal text instead of opening the skill picker.
-   * Defaults to `hideModePicker` (subagent composers never switch the global chat mode). */
+  /** When true, `/skills` is treated as literal text instead of opening the skill picker. */
   disableSkillsPicker?: boolean
 }
 
@@ -101,8 +97,6 @@ export function ChatComposer({
   onAddReference = () => {},
   onRemoveReference = () => {},
   onReferenceError = () => {},
-  chatMode,
-  onChatModeChange,
   enabledSkills,
   providers,
   selectedProviderId,
@@ -120,8 +114,7 @@ export function ChatComposer({
   placeholder = 'Describe a task or ask a question',
   onSend,
   onStop,
-  hideModePicker = false,
-  disableSkillsPicker
+  disableSkillsPicker = false
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
@@ -171,9 +164,8 @@ export function ChatComposer({
   const dictation = useDictation({ disabled, loading, onTranscript: insertDictation })
   const { isRecording, recordingPending, transcribing, recordingDuration } = dictation
   const [pendingReferences, setPendingReferences] = useState(0)
-  // Subagent composers (hideModePicker) never switch the global chat mode:
-  // `/skills` stays literal text so it is sent to the agent as a prompt.
-  const skillsPickerDisabled = disableSkillsPicker ?? hideModePicker
+  // With the picker disabled, `/skills` stays literal text so it is sent to the agent as a prompt.
+  const skillsPickerDisabled = disableSkillsPicker
   // Inline `@skill` token embedded in the typed text (painted as a pill by
   // the input backdrop). The global chat mode is untouched: the skill applies
   // to the submitted prompt only (passed to onSend as a mode override), and
@@ -325,14 +317,6 @@ export function ChatComposer({
       ? { type: 'skill', skillId: skillToken.skillId }
       : undefined
     onSend(skillMode)
-  }
-
-  const handleChatModeChange = (mode: ChatMode) => {
-    // Explicit mode switches drop the inline skill token.
-    if (skillToken) {
-      onInputChange(input.slice(0, skillToken.index) + input.slice(skillToken.index + skillToken.length))
-    }
-    onChatModeChange(mode)
   }
 
   const handleInputScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
@@ -652,18 +636,12 @@ export function ChatComposer({
         <button type="button" className="btn btn-ghost btn-sm" onClick={dictation.dismissError}>Dismiss</button>
       </div>}
       <ComposerFooter
-        chatMode={chatMode}
-        onChatModeChange={handleChatModeChange}
-        enabledSkills={enabledSkills}
         providers={providers}
         selectedProviderId={selectedProviderId}
         selectedModelId={selectedModelId}
         modelMenuOpen={modelMenuOpen}
         onModelMenuOpenChange={onModelMenuOpenChange}
-        onModelSelect={(providerId, modelId) => {
-          if (providerId === 'antigravity' && chatMode === 'plan') handleChatModeChange('agent')
-          onModelSelect(providerId, modelId)
-        }}
+        onModelSelect={onModelSelect}
         modelReadOnly={modelReadOnly}
         onOpenSettings={onOpenSettings}
         contextUsage={contextUsage}
@@ -680,7 +658,6 @@ export function ChatComposer({
         onStop={handleStop}
         onStartRecording={dictation.start}
         onStopRecording={dictation.stop}
-        hideModePicker={hideModePicker}
         allowAttachWhileLoading
       />
     </div>
