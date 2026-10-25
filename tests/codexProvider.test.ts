@@ -178,6 +178,27 @@ describe('CodexProviderService', () => {
     expect(server.launches).toHaveLength(1)
   })
 
+  it('keeps Codex listed while a forced check (a turn\'s account check) waits for its answer', async () => {
+    let held: Message | undefined
+    let hold = false
+    const server = scriptedServer((message) => {
+      if (message.method !== 'account/read') return { result: {} }
+      if (!hold) return chatgpt
+      held = message
+      return undefined
+    })
+    const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X' }] })
+    await service.status()
+    hold = true
+    const forced = service.status({ force: true })
+    await vi.waitFor(() => expect(held).toBeDefined())
+    expect(service.configured()).toBe(true)
+    expect(service.llmProvider()?.id).toBe('codex')
+    server.processes.at(-1)!.stdout.write(JSON.stringify({ id: held!.id, result: { account: null, requiresOpenaiAuth: true } }) + '\n')
+    expect(await forced).toMatchObject({ state: 'signed_out' })
+    expect(service.configured()).toBe(false)
+  })
+
   it('refuses an API-key sign-in so turns never bill an API key', async () => {
     const server = scriptedServer(() => ({ result: { account: { type: 'apiKey' }, requiresOpenaiAuth: true } }))
     const service = create(server)

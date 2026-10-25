@@ -808,9 +808,9 @@ export class CodexProviderService {
     }
   }
 
-  private checkDue(): boolean {
+  private checkDue(force = false): boolean {
     if (this.stopped || this.settingsError || this.settings.disconnected) return false
-    return !this.probeResult || Date.now() - this.probeResult.at >= CODEX_ACCOUNT_TTL_MS
+    return force || !this.probeResult || Date.now() - this.probeResult.at >= CODEX_ACCOUNT_TTL_MS
   }
 
   private async probe(): Promise<AccountProbe> {
@@ -850,14 +850,13 @@ export class CodexProviderService {
 
   /**
    * Checks the terminal sign-in with a live `account/read` when the cached result is missing,
-   * older than five minutes, or `force` (Recheck) is set.
+   * older than five minutes, or `force` (Recheck, a turn's account check) is set. The last result
+   * stays the synchronous view (`configured()`, listings) until the new one arrives.
    */
   async status(options: { force?: boolean } = {}): Promise<CodexStatus> {
-    if (options.force) {
-      await this.probing
-      this.probeResult = undefined
-    }
-    if (this.binary() && this.checkDue()) {
+    // A check already running may have read the sign-in before it changed: wait, then check again.
+    if (options.force) await this.probing
+    if (this.binary() && this.checkDue(options.force)) {
       this.probing ??= (async () => {
         const result = await this.probe()
         if (this.stopped) return
