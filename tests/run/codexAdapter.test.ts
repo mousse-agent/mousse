@@ -27,15 +27,23 @@ const note = (method: string, params: unknown): TranscriptFrame => inn({ method,
 const text = (value: string) => [{ type: 'text', text: value, text_elements: [] }]
 const WORKSPACE_WRITE = { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
 
+/**
+ * A new process: `initialize`, the sign-in check and, before the first turn, the check whether the server
+ * lists a thread's helpers by ancestor. This server ignores the filters (it answers a listing), so Codex's
+ * helpers are tracked from the thread's items alone.
+ */
+const NIL_THREAD = '00000000-0000-0000-0000-000000000000'
 function handshake(firstId = 1, probe = true): TranscriptFrame[] {
   return [
-    out({ id: firstId, method: 'initialize', params: { clientInfo: { name: 'mousse', title: 'Mousse', version: '0.1.1' }, capabilities: { experimentalApi: false, requestAttestation: false } } }),
+    out({ id: firstId, method: 'initialize', params: { clientInfo: { name: 'mousse', title: 'Mousse', version: '0.1.1' }, capabilities: { experimentalApi: true, requestAttestation: false } } }),
     inn({ id: firstId, result: { userAgent: 'replay', codexHome: '/home/replay/.codex', platformFamily: 'unix', platformOs: 'macos' } }),
     out({ method: 'initialized' }),
     ...(probe
       ? [
           out({ id: firstId + 1, method: 'account/read', params: { refreshToken: false } }),
-          inn({ id: firstId + 1, result: { account: { type: 'chatgpt', email: null, planType: 'plus' }, requiresOpenaiAuth: true } })
+          inn({ id: firstId + 1, result: { account: { type: 'chatgpt', email: null, planType: 'plus' }, requiresOpenaiAuth: true } }),
+          out({ id: firstId + 2, method: 'thread/list', params: { parentThreadId: NIL_THREAD, ancestorThreadId: NIL_THREAD, limit: 1 } }),
+          inn({ id: firstId + 2, result: { data: [], nextCursor: null } })
         ]
       : [])
   ]
@@ -235,8 +243,8 @@ describe('CodexAdapter', () => {
   it('runs a turn: text, thinking, tools, edits, usage and the thread reference', async () => {
     const replay = transport([
       ...handshake(),
-      ...threadStart(3),
-      ...turnStart(4, 'hello'),
+      ...threadStart(4),
+      ...turnStart(5, 'hello'),
       note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'reasoning', id: 'r-1', summary: [], content: [] } }),
       note('item/reasoning/summaryTextDelta', { threadId: T, turnId: 'turn-1', itemId: 'r-1', delta: 'Thinking', summaryIndex: 0 }),
       note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'commandExecution', id: 'cmd-1', command: 'ls', status: 'inProgress' } }),
@@ -309,8 +317,8 @@ describe('CodexAdapter', () => {
 
   it('continues the loaded thread, resumes it from a new process, and starts fresh when resume fails', async () => {
     // Same process: the committed thread is still loaded, so the turn starts directly.
-    const first = transport([...handshake(), ...threadStart(3), ...turnStart(4, 'hello'), ...message('msg-1', ['one']), completed('completed'),
-      ...turnStart(5, 'again', 'turn-2'), ...message('msg-2', ['two'], 'turn-2'), completed('completed', 'turn-2')])
+    const first = transport([...handshake(), ...threadStart(4), ...turnStart(5, 'hello'), ...message('msg-1', ['one']), completed('completed'),
+      ...turnStart(6, 'again', 'turn-2'), ...message('msg-2', ['two'], 'turn-2'), completed('completed', 'turn-2')])
     const codex = service(first)
     const adapter = new CodexAdapter(() => codex)
     await adapter.startTurn(input(), recordingSink(), control(), host())
@@ -322,9 +330,9 @@ describe('CodexAdapter', () => {
     // New process: `thread/resume` with the saved id, no history preamble.
     const resumed = transport([
       ...handshake(),
-      out({ id: 3, method: 'thread/resume', params: { threadId: T, excludeTurns: true, ...threadParams() } }),
-      inn({ id: 3, result: threadResult() }),
-      ...turnStart(4, 'third', 'turn-3'),
+      out({ id: 4, method: 'thread/resume', params: { threadId: T, excludeTurns: true, ...threadParams() } }),
+      inn({ id: 4, result: threadResult() }),
+      ...turnStart(5, 'third', 'turn-3'),
       ...message('msg-3', ['three'], 'turn-3'),
       completed('completed', 'turn-3')
     ])
@@ -338,12 +346,12 @@ describe('CodexAdapter', () => {
     // Resume fails: a fresh thread and the history as a preamble; the new thread replaces the saved one.
     const broken = transport([
       ...handshake(),
-      out({ id: 3, method: 'thread/resume', params: { threadId: T, excludeTurns: true, ...threadParams() } }),
-      inn({ id: 3, error: { code: -32600, message: `no rollout found for thread id ${T}` } }),
-      out({ id: 4, method: 'thread/start', params: threadParams() }),
-      inn({ id: 4, result: threadResult('thr-2') }),
-      out({ id: 5, method: 'turn/start', params: { threadId: 'thr-2', input: text('Previous conversation (context only; do not repeat earlier actions):\nhistory+three\n\nCurrent request:\nfourth'), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
-      inn({ id: 5, result: { turn: { id: 'turn-4', status: 'inProgress', error: null } } }),
+      out({ id: 4, method: 'thread/resume', params: { threadId: T, excludeTurns: true, ...threadParams() } }),
+      inn({ id: 4, error: { code: -32600, message: `no rollout found for thread id ${T}` } }),
+      out({ id: 5, method: 'thread/start', params: threadParams() }),
+      inn({ id: 5, result: threadResult('thr-2') }),
+      out({ id: 6, method: 'turn/start', params: { threadId: 'thr-2', input: text('Previous conversation (context only; do not repeat earlier actions):\nhistory+three\n\nCurrent request:\nfourth'), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
+      inn({ id: 6, result: { turn: { id: 'turn-4', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-4', item: { type: 'agentMessage', id: 'msg-4', text: 'four' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-4', status: 'completed', error: null } })
     ])
@@ -359,7 +367,7 @@ describe('CodexAdapter', () => {
   it('pins the ChatGPT provider and refuses a thread that resolves to another one', async () => {
     // A user or workspace config with a custom `model_provider` would change the effective
     // provider; the pin overrides it, and a thread that still reports another provider never runs.
-    const replay = transport([...handshake(), out({ id: 3, method: 'thread/start', params: threadParams() }), inn({ id: 3, result: threadResult(T, 'custom') })])
+    const replay = transport([...handshake(), out({ id: 4, method: 'thread/start', params: threadParams() }), inn({ id: 4, result: threadResult(T, 'custom') })])
     const codex = service(replay)
     await expect(new CodexAdapter(() => codex).startTurn(input(), recordingSink(), control(), host())).rejects.toMatchObject({
       code: 'codex_provider_not_chatgpt'
@@ -369,7 +377,7 @@ describe('CodexAdapter', () => {
 
   it('never echoes the model provider the process reported in the refusal', async () => {
     const canary = 'C'.repeat(21) + '_-' + 'z'.repeat(20)
-    const replay = transport([...handshake(), out({ id: 3, method: 'thread/start', params: threadParams() }), inn({ id: 3, result: threadResult(T, canary) })])
+    const replay = transport([...handshake(), out({ id: 4, method: 'thread/start', params: threadParams() }), inn({ id: 4, result: threadResult(T, canary) })])
     const codex = service(replay)
     const error = await new CodexAdapter(() => codex).startTurn(input(), recordingSink(), control(), host()).catch((caught: unknown) => caught) as AppError
     expect(error).toMatchObject({ code: 'codex_provider_not_chatgpt' })
@@ -382,7 +390,7 @@ describe('CodexAdapter', () => {
     const replay = transport([
       ...handshake(),
       ...threadStart(
-        3,
+        4,
         threadParams({
           config: {
             model_provider: 'openai',
@@ -394,7 +402,7 @@ describe('CodexAdapter', () => {
           developerInstructions: mousseOrchestrationInstructions()
         })
       ),
-      ...turnStart(4, 'hello'),
+      ...turnStart(5, 'hello'),
       ...message('msg-1', ['ok']),
       completed('completed')
     ])
@@ -414,22 +422,22 @@ describe('CodexAdapter', () => {
     const developerInstructions = mousseOrchestrationInstructions()
     const replay = transport([
       ...handshake(),
-      ...threadStart(3, threadParams({ config: mcpConfig('old'), developerInstructions })),
-      ...turnStart(4, 'hello'),
+      ...threadStart(4, threadParams({ config: mcpConfig('old'), developerInstructions })),
+      ...turnStart(5, 'hello'),
       ...message('msg-1', ['one']),
       completed('completed'),
       // New token while the thread is still loaded: fork with the new config, release the old thread.
-      out({ id: 5, method: 'thread/fork', params: { threadId: T, excludeTurns: true, ...threadParams({ config: mcpConfig('new'), developerInstructions }) } }),
-      inn({ id: 5, result: threadResult('thr-2') }),
-      out({ id: 6, method: 'thread/unsubscribe', params: { threadId: T } }),
-      inn({ id: 6, result: { status: 'unsubscribed' } }),
-      out({ id: 7, method: 'turn/start', params: { threadId: 'thr-2', input: text('again'), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
-      inn({ id: 7, result: { turn: { id: 'turn-2', status: 'inProgress', error: null } } }),
+      out({ id: 6, method: 'thread/fork', params: { threadId: T, excludeTurns: true, ...threadParams({ config: mcpConfig('new'), developerInstructions }) } }),
+      inn({ id: 6, result: threadResult('thr-2') }),
+      out({ id: 7, method: 'thread/unsubscribe', params: { threadId: T } }),
+      inn({ id: 7, result: { status: 'unsubscribed' } }),
+      out({ id: 8, method: 'turn/start', params: { threadId: 'thr-2', input: text('again'), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
+      inn({ id: 8, result: { turn: { id: 'turn-2', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-2', item: { type: 'agentMessage', id: 'msg-2', text: 'two' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-2', status: 'completed', error: null } }),
       // Same token again: the forked thread is reused as loaded.
-      out({ id: 8, method: 'turn/start', params: { threadId: 'thr-2', input: text('third'), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
-      inn({ id: 8, result: { turn: { id: 'turn-3', status: 'inProgress', error: null } } }),
+      out({ id: 9, method: 'turn/start', params: { threadId: 'thr-2', input: text('third'), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
+      inn({ id: 9, result: { turn: { id: 'turn-3', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-3', item: { type: 'agentMessage', id: 'msg-3', text: 'three' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-3', status: 'completed', error: null } })
     ])
@@ -448,8 +456,8 @@ describe('CodexAdapter', () => {
   it('routes command, patch and user-input requests to Mousse questions', async () => {
     const replay = transport([
       ...handshake(),
-      ...threadStart(3),
-      ...turnStart(4, 'clean up'),
+      ...threadStart(4),
+      ...turnStart(5, 'clean up'),
       inn({ id: 'srv-1', method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: 'cmd-1', startedAtMs: 0, environmentId: null, command: 'rm -rf build', cwd: '/w', reason: null } }),
       out({ id: 'srv-1', result: { decision: 'accept' } }),
       note('item/started', { threadId: T, turnId: 'turn-1', item: { type: 'fileChange', id: 'patch-1', changes: [{ path: 'src/a.ts', kind: { type: 'update' }, diff: '' }], status: 'inProgress' } }),
@@ -483,8 +491,8 @@ describe('CodexAdapter', () => {
   it('runs plan turns read-only and declines approvals without asking', async () => {
     const replay = transport([
       ...handshake(),
-      ...threadStart(3, threadParams({ sandbox: 'read-only' })),
-      ...turnStart(4, 'plan it', 'turn-1', { sandboxPolicy: { type: 'readOnly', networkAccess: false } }),
+      ...threadStart(4, threadParams({ sandbox: 'read-only' })),
+      ...turnStart(5, 'plan it', 'turn-1', { sandboxPolicy: { type: 'readOnly', networkAccess: false } }),
       inn({ id: 'srv-1', method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: 'cmd-1', startedAtMs: 0, environmentId: null, command: 'touch x' } }),
       out({ id: 'srv-1', result: { decision: 'decline' } }),
       ...message('msg-1', ['Plan']),
@@ -502,12 +510,12 @@ describe('CodexAdapter', () => {
     const replay = transport(
       [
         ...handshake(),
-        ...threadStart(3),
-        ...turnStart(4, 'hello'),
+        ...threadStart(4),
+        ...turnStart(5, 'hello'),
         note('item/agentMessage/delta', { threadId: T, turnId: 'turn-1', itemId: 'msg-1', delta: 'Part' }),
         cue({ action: 'stop' }),
-        out({ id: 5, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),
-        inn({ id: 5, result: {} }),
+        out({ id: 6, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),
+        inn({ id: 6, result: {} }),
         // Output the server flushes before it settles never reaches the finished turn.
         note('item/agentMessage/delta', { threadId: T, turnId: 'turn-1', itemId: 'msg-1', delta: ' late' }),
         completed('interrupted')
@@ -531,12 +539,12 @@ describe('CodexAdapter', () => {
     const replay = transport(
       [
         ...handshake(),
-        ...threadStart(3),
-        out({ id: 4, method: 'turn/start', params: { threadId: T, input: text('hello'), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
+        ...threadStart(4),
+        out({ id: 5, method: 'turn/start', params: { threadId: T, input: text('hello'), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
         cue({ action: 'stop' }),
-        inn({ id: 4, result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }),
-        out({ id: 5, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),
-        inn({ id: 5, result: {} }),
+        inn({ id: 5, result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }),
+        out({ id: 6, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),
+        inn({ id: 6, result: {} }),
         completed('interrupted')
       ],
       () => controller.abort(new Error('stopped early'))
@@ -549,7 +557,7 @@ describe('CodexAdapter', () => {
 
   it('never starts a turn once Stop arrived right after the thread opened', async () => {
     const controller = new AbortController()
-    const replay = transport([...handshake(), ...threadStart(3)])
+    const replay = transport([...handshake(), ...threadStart(4)])
     const codex = service(replay)
     const sink = recordingSink()
     // Stop lands when the thread is known but before turn/start is sent.
@@ -570,18 +578,18 @@ describe('CodexAdapter', () => {
     const replay = transport(
       [
         ...handshake(),
-        ...threadStart(3),
-        ...turnStart(4, 'hello'),
+        ...threadStart(4),
+        ...turnStart(5, 'hello'),
         ...message('msg-1', ['Working']),
         cue({ steer: 'Focus on tests' }),
-        out({ id: 5, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Focus on tests') } }),
-        inn({ id: 5, result: { turnId: 'turn-1' } }),
+        out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Focus on tests') } }),
+        inn({ id: 6, result: { turnId: 'turn-1' } }),
         ...message('msg-2', ['Tests pass']),
         cue({ steer: 'And lint' }),
-        out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('And lint') } }),
+        out({ id: 7, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('And lint') } }),
         completed('completed'),
-        inn({ id: 6, error: { code: -32600, message: 'no active turn to steer' } }),
-        ...turnStart(7, 'And lint', 'turn-2'),
+        inn({ id: 7, error: { code: -32600, message: 'no active turn to steer' } }),
+        ...turnStart(8, 'And lint', 'turn-2'),
         ...message('msg-3', ['Lint clean'], 'turn-2'),
         completed('completed', 'turn-2')
       ],
@@ -601,11 +609,11 @@ describe('CodexAdapter', () => {
     const replay = transport(
       [
         ...handshake(),
-        ...threadStart(3),
-        ...turnStart(4, 'hello'),
+        ...threadStart(4),
+        ...turnStart(5, 'hello'),
         ...message('msg-1', ['Working']),
         cue({ steer: 'Focus' }),
-        out({ id: 5, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Focus') } }),
+        out({ id: 6, method: 'turn/steer', params: { threadId: T, expectedTurnId: 'turn-1', input: text('Focus') } }),
         completed('completed'),
         // The steer is never answered; Stop must settle without its 60 s timeout or an interrupt.
         cue({ stop: true })
@@ -628,14 +636,14 @@ describe('CodexAdapter', () => {
   it('fails the turn when the app-server exits mid-turn and restarts it for the next one', async () => {
     const replay = transport([
       ...handshake(),
-      ...threadStart(3),
-      ...turnStart(4, 'hello'),
+      ...threadStart(4),
+      ...turnStart(5, 'hello'),
       note('item/agentMessage/delta', { threadId: T, turnId: 'turn-1', itemId: 'msg-1', delta: 'Par' }),
       inn({ kind: 'exit', code: 1 }),
       // A new process proves its own sign-in first; the uncommitted thread is not resumed.
       ...handshake(1, true),
-      ...threadStart(3, threadParams(), 'thr-1'),
-      ...turnStart(4, 'Previous conversation (context only; do not repeat earlier actions):\nprior\n\nCurrent request:\nretry'),
+      ...threadStart(4, threadParams(), 'thr-1'),
+      ...turnStart(5, 'Previous conversation (context only; do not repeat earlier actions):\nprior\n\nCurrent request:\nretry'),
       ...message('msg-1', ['ok']),
       completed('completed')
     ])
@@ -653,8 +661,8 @@ describe('CodexAdapter', () => {
     const replay = transport(
       [
         ...handshake(),
-        ...threadStart(3),
-        ...turnStart(4, 'hello'),
+        ...threadStart(4),
+        ...turnStart(5, 'hello'),
         inn({ id: 'srv-1', method: 'item/commandExecution/requestApproval', params: { kind: 'command', threadId: T, turnId: 'turn-1', itemId: 'cmd-1', startedAtMs: 0, environmentId: null, command: 'make' } }),
         cue({ wait: 'question' }),
         inn({ kind: 'exit', code: 1 })
@@ -672,8 +680,8 @@ describe('CodexAdapter', () => {
   it('never sends a turn to a replacement process before it reports a ChatGPT account', async () => {
     const replay = transport([
       ...handshake(),
-      ...threadStart(3),
-      ...turnStart(4, 'hello'),
+      ...threadStart(4),
+      ...turnStart(5, 'hello'),
       inn({ kind: 'exit', code: 1 }),
       ...handshake(1, false),
       out({ id: 2, method: 'account/read', params: { refreshToken: false } }),
@@ -692,8 +700,8 @@ describe('CodexAdapter', () => {
   it('fails a turn the server reports as failed', async () => {
     const replay = transport([
       ...handshake(),
-      ...threadStart(3),
-      ...turnStart(4, 'hello'),
+      ...threadStart(4),
+      ...turnStart(5, 'hello'),
       note('error', { threadId: T, turnId: 'turn-1', error: { message: 'Reconnecting', codexErrorInfo: null }, willRetry: true }),
       note('error', { threadId: T, turnId: 'turn-1', error: { message: 'Upstream overloaded', codexErrorInfo: null }, willRetry: false }),
       completed('failed', 'turn-1', { message: 'Upstream overloaded', codexErrorInfo: null })

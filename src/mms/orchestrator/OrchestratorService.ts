@@ -1215,9 +1215,14 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * A queued turn that runs without a `turn.start` effect (effects are off, or recording the effect
-   * failed) has no effect for its rows to follow, so they follow the turn itself: acknowledged
-   * when it ends cleanly, given back when it fails. Without this they would stay on the queue
-   * item, which is removed when the turn is accepted.
+   * failed) has no effect for its rows to follow, so they follow the turn's run. Only its outcome
+   * counts, never the shape of the response:
+   * - `completed`: the turn consumed the notice; the rows are acknowledged;
+   * - not terminal (a lease race put the item back in the queue, or no run was recorded): the rows
+   *   stay with the item, which delivers them when it drains again;
+   * - interrupted by the user: the rows stay `delivered` and belong to nothing, as a stopped delivery
+   *   always has (no redelivery behind a Stop);
+   * - anything else (failed, cancelled, cut off by a restart or shutdown): given back, so rule 4 delivers them.
    */
   private settleCarriedRows(payload: TurnStartRequest, turn: Promise<OrchestratorResponse>): Promise<OrchestratorResponse> {
     const engine = this.runEngine
@@ -1227,8 +1232,11 @@ export class OrchestratorService extends EventEmitter {
     const give = (): void => { engine.inbox.release(own().map((row) => row.inboxId), owner) }
     return turn.then((response) => {
       try {
-        if (response.error) give()
-        else engine.store.db.transaction(() => acknowledgeRows(engine.store, own()))
+        const run = payload.runId ? engine.getRun(payload.runId) : null
+        if (!run || !TERMINAL_RUN_STATUSES.has(run.status)) return response
+        if (run.status === 'completed') engine.store.db.transaction(() => acknowledgeRows(engine.store, own()))
+        else if (run.status === 'interrupted' && run.outcome?.interruptedBy === 'user') engine.inbox.detachDelivery(own().map((row) => row.inboxId), owner)
+        else give()
       } catch (error) {
         console.warn('queued notice rows could not be settled', { error: error instanceof Error ? error.message : String(error) })
       }
