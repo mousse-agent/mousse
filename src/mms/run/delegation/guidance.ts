@@ -3,12 +3,13 @@
  * Mousse MCP server's instructions and the first prompt of a subagent all read it from here, so the
  * surfaces cannot drift apart (pinned by `tests/run/delegationGuidance.test.ts`).
  *
- * Nested subagents work, but the guidance does not mention them yet: models are told only after
- * results wait for a subagent's own subagents and Stop reaches the whole tree (issue #142, D and E).
+ * Nested subagents are advertised: results wait for a subagent's own subagents (D) and Stop reaches
+ * the whole tree and the questions of every level reach the parent (E), so a subagent is told it may
+ * start subagents of its own (issue #142).
  */
 
 /** Whether the guidance tells a subagent that it may start subagents of its own. */
-export const ADVERTISE_NESTING = false
+export const ADVERTISE_NESTING = true
 
 /** The model-facing delegation bullets, shared by pi and MCP. */
 export function delegationGuidanceLines(): string[] {
