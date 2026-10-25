@@ -552,6 +552,49 @@ describe('threads placed under a row of unestablished ancestry', () => {
   })
 })
 
+describe('ancestry that was never established', () => {
+  it('a placed thread stays out of the targets when the unverified ancestor it was found under leaves the listing, until the chain leads to the root', async () => {
+    const { tree, world, hear } = build()
+    world.add('gone', ROOT, 'idle', { edge: false, unreadable: true })
+    world.add('L', 'gone', 'active')
+    world.add('U', 'L', 'active', { edge: false })
+    hear(started('U'))
+    const first = await tree.check()
+    expect(first.snapshot.busy.sort()).toEqual(['L', 'U'])
+    expect(first.snapshot.targets).toEqual([])
+    // L is archived: neither listed nor readable. U was placed under it earlier and is still active.
+    const l = world.threads.get('L')!
+    l.edge = false
+    l.unreadable = true
+    const second = await tree.check()
+    expect(second.snapshot.busy).toEqual(['U'])
+    expect(second.snapshot.targets).toEqual([])
+    expect(second.snapshot.calm).toBe(false)
+    let outcome: string | undefined
+    void tree.sweep(sweepOptions({ deadlineAt: Date.now() + 800 })).then((value) => (outcome = value))
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(outcome).toBe('deadline')
+    expect(world.interrupts).toEqual([])
+    // L can be read again but still hangs below the unreadable thread: nothing is established yet.
+    l.unreadable = false
+    expect((await tree.check()).snapshot.targets).toEqual([])
+    // The chain now leads to the root.
+    world.threads.get('gone')!.unreadable = false
+    expect((await tree.check()).snapshot.targets.sort()).toEqual(['L', 'U'])
+  })
+
+  it('a normal tree is fully established: every busy helper at every depth is a target', async () => {
+    const { tree, world, hear } = build()
+    world.add('h1', ROOT, 'active')
+    world.add('h2', 'h1', 'active')
+    world.add('ghost', 'h2', 'active', { edge: false })
+    hear(started('ghost'))
+    const check = await tree.check()
+    expect(check.snapshot.targets.sort()).toEqual(['ghost', 'h1', 'h2'])
+    expect(check.snapshot.busy.sort()).toEqual(['ghost', 'h1', 'h2'])
+  })
+})
+
 describe('a snapshot the sweep gave up on', () => {
   /** Reads of the ids in `held` wait until `release()`. */
   function gated(world: World, held: string[]) {

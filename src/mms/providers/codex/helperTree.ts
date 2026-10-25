@@ -363,30 +363,43 @@ export class HelperTree {
     }
     // A row whose parent the listing lacks (a helper whose own row is not written yet, or one archived) is
     // fine when the parent leads back to the root; only one that provably belongs to another thread is not.
-    // When the walk cannot tell, the row still holds the pair while it is busy, but it is not interrupted
-    // until its place under the root is established.
-    const unverified = new Set<string>()
-    const verdicts = new Map<string, 'in' | 'inconclusive'>()
     for (const parent of new Set(parents.values())) {
       if (parent === this.rootId || this.listed.has(parent)) continue
       const walked = await this.walk(parent, signal, live)
       if (walked.verdict === 'out') throw new TreeOff('a listed thread descends from another thread')
       if (walked.verdict === 'in') this.rule(walked.chain, 'in')
-      verdicts.set(parent, walked.verdict)
     }
-    for (const [id, parent] of parents) if (verdicts.get(parent) === 'inconclusive') unverified.add(id)
     for (const id of [...this.placed.keys()]) {
       const status = await this.refresh(id, signal, live)
       this.placed.set(id, status)
     }
     this.collectUnknown()
     for (const id of [...this.unknown]) await this.place(id, signal, live)
-    // Whatever hangs below an unverified thread, listed or placed, is unverified too.
+    // A placed thread whose parent is neither listed nor placed any more (it was archived, say) is walked
+    // up again; it is established only if that leads back to the root.
+    for (const [id, parent] of [...this.placedParent]) {
+      if (!this.placed.has(id) || parent === this.rootId || this.isMember(parent)) continue
+      const walked = await this.walk(parent, signal, live)
+      if (walked.verdict === 'in') this.rule(walked.chain, 'in')
+      else if (walked.verdict === 'out') {
+        this.rule(walked.chain, 'out')
+        this.placed.delete(id)
+        this.placedParent.delete(id)
+        this.ruledOut.add(id)
+      }
+    }
+    // Established ancestry, worked out from the root outward: a thread is verified when its parent link (as
+    // listed, or as it was found when it was placed) names the root or a thread verified in this snapshot.
+    // Everything else still holds the pair while it is busy, but a sweep never interrupts it.
+    const verified = new Set<string>()
+    const parentOf = (id: string): string | undefined => (this.listed.has(id) ? parents.get(id) : this.placedParent.get(id))
     for (let changed = true; changed; ) {
       changed = false
-      for (const [id, parent] of parents) if (!unverified.has(id) && unverified.has(parent)) changed = !!unverified.add(id)
-      for (const [id, parent] of this.placedParent)
-        if (this.placed.has(id) && !unverified.has(id) && unverified.has(parent)) changed = !!unverified.add(id)
+      for (const id of [...this.listed.keys(), ...this.placed.keys()]) {
+        if (verified.has(id)) continue
+        const parent = parentOf(id)
+        if (parent !== undefined && (parent === this.rootId || verified.has(parent))) changed = !!verified.add(id)
+      }
     }
 
     const now = this.ports.now()
@@ -405,12 +418,12 @@ export class HelperTree {
       }
       if (!isBusy) continue
       busy.push(id)
-      if (!unverified.has(id)) targets.push(id)
+      if (verified.has(id)) targets.push(id)
     }
     for (const [id, status] of this.placed)
       if (this.busyStatus(id, status)) {
         busy.push(id)
-        if (!unverified.has(id)) targets.push(id)
+        if (verified.has(id)) targets.push(id)
       }
 
     const rootBusy = this.busyStatus(this.rootId, root)
