@@ -196,7 +196,6 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
       return (
         <ApiEditor
           snapshot={snapshot}
-          status={status}
           removeHint={option?.ambient ? undefined : option?.authType === 'oauth' ? 'Signs out' : 'Deletes the saved key'}
           onRemove={async () => {
             await window.mousse.providers.logout(providerId)

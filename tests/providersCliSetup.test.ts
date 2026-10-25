@@ -66,6 +66,17 @@ describe('Setup row: the status and its one next step', () => {
     expect(labels(html)).toContain('Check again')
   })
 
+  it('says a terminal sign-in once: the short status, then the command (D4)', () => {
+    const command = '$env:CLAUDE_CONFIG_DIR="C:\h"; claude auth login'
+    const html = setupRow({
+      auth: { state: 'signed_out', account: undefined, methodLabel: 'Claude Code sign-in', message: `Claude Code isn't signed in. Run \`${command}\` in a terminal, then check again.` },
+      nextStep: { action: 'sign_in', label: 'Sign in', command }
+    })
+    expect(html).not.toContain('isn&#x27;t signed in')
+    expect(html.split('claude auth login').length - 1).toBe(2) // the code text and its title
+    expect(html).toContain('Run this in a terminal, then check again.')
+  })
+
   it('offers to clear or change an override that does not run', () => {
     const html = setupRow({ runs: { state: 'no', failure: 'override_not_found' }, binary: { path: 'C:\\tools\\claude.exe', source: 'override' } })
     expect(html).toContain('Mousse cannot run C:\\tools\\claude.exe')
@@ -77,8 +88,9 @@ describe('Setup row: the status and its one next step', () => {
     expect(buttons(setupRow({ enabled: { device: false, effective: false, setBy: 'device' } }))).toEqual(['Turn on'])
   })
 
-  it('says nothing more than the status when ready', () => {
-    const html = setupRow({})
+  it('shows the signed-in status and nothing more when ready (D7)', () => {
+    const html = setupRow({ auth: { account: { id: 'a', label: 'ChatGPT plus' } } })
+    expect(html).toContain('Signed in · ChatGPT Plus')
     expect(buttons(html)).toEqual([])
     expect(labels(html)).toContain('Check again')
   })

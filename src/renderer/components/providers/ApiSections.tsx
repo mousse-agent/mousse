@@ -3,7 +3,7 @@ import type { StatusDescription } from '../../../shared/harness/status'
 import type { ProviderLoginOption } from '../../../shared/providerAuth'
 import { Check, Pencil, X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
-import { useAsyncAction } from './parts'
+import { statusText, useAsyncAction } from './parts'
 
 /**
  * The Setup row of a model API: replace the key, sign in again, or the cloud credentials it reuses.
@@ -46,17 +46,17 @@ export function ApiSetupRow({
       setKey('')
     })
   const errorLine = error ? <span className="prov-error">{error}</span> : null
-  const statusText = status.detail ?? status.headline
+  const statusLine = statusText(status)
 
   if (ambient) {
-    return <SettingsRow title="Cloud credentials" description={errorLine ?? (instructions.join(' ') || statusText)} />
+    return <SettingsRow title="Cloud credentials" description={errorLine ?? (instructions.join(' ') || statusLine)} />
   }
 
   if (option?.authType === 'oauth') {
     return (
       <SettingsRow
         title="Account"
-        description={errorLine ?? statusText}
+        description={errorLine ?? statusLine}
         control={
           <button type="button" className="settings-btn" disabled={busy !== null} onClick={() => void run('signin', onSignIn)}>
             Sign in again
@@ -69,7 +69,7 @@ export function ApiSetupRow({
   return (
     <SettingsRow
       title="API key"
-      description={errorLine ?? (editingKey ? 'Leave blank for guided setup' : statusText)}
+      description={errorLine ?? (editingKey ? 'Leave blank for guided setup' : statusLine)}
       control={
         editingKey ? (
           <span className="settings-icon-actions">

@@ -34,15 +34,33 @@ export function useAsyncAction() {
   return { busy, error, setError, run }
 }
 
+const CHATGPT_PLAN = /\bChatGPT (free|go|plus|pro|team|business|enterprise|edu)\b/gi
+
+/** Account wording as people write it: a raw plan id ("ChatGPT plus") becomes "ChatGPT Plus". */
+export function displayLabel(text: string): string {
+  return text.replace(CHATGPT_PLAN, (_match, plan: string) => `ChatGPT ${plan[0]!.toUpperCase()}${plan.slice(1).toLowerCase()}`)
+}
+
+/**
+ * The status said once: the headline, and the detail unless it only repeats the command shown
+ * below the row (a terminal sign-in's message names the command it asks for).
+ */
+export function statusText(status: StatusDescription): string {
+  const headline = displayLabel(status.headline)
+  const command = status.nextStep?.command
+  const detail = status.detail && status.detail !== status.headline && !(command && status.detail.includes(command)) ? status.detail : null
+  return detail ? `${headline} · ${detail}` : headline
+}
+
 /** "Not signed in · Run claude to sign in": a dot only when the provider needs attention. */
-export function StatusLine({ status, full }: { status: StatusDescription; full?: boolean }) {
+export function StatusLine({ status }: { status: StatusDescription }) {
   const attention = needsAttention(status)
-  const detail = status.detail && (full || attention) && status.detail !== status.headline ? status.detail : undefined
+  const detail = status.detail && attention && status.detail !== status.headline ? status.detail : undefined
   return (
     <span className="prov-status" aria-live="polite">
       {attention && <span className={`prov-dot is-${status.tone}`} aria-hidden="true" />}
       <span className="prov-status-text">
-        {status.headline}
+        {displayLabel(status.headline)}
         {detail ? ` · ${detail}` : null}
       </span>
     </span>

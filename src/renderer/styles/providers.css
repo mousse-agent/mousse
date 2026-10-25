@@ -194,14 +194,18 @@
   min-width: 0;
 }
 
+/* The name comes first: a version that does not fit beside it moves to its own line. */
 .prov-item-title {
   display: flex;
-  align-items: center;
-  gap: var(--space-8);
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--space-8);
   min-width: 0;
 }
 
 .prov-item-name {
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -646,6 +650,13 @@
   border-radius: var(--ui-control-radius);
   background: var(--ui-hover);
   box-shadow: inset 0 0 0 1px var(--ui-line);
+}
+
+.prov-command-hint {
+  display: block;
+  margin-bottom: var(--space-4);
+  font-size: var(--settings-fs-small);
+  color: var(--text-secondary);
 }
 
 .prov-command-text {

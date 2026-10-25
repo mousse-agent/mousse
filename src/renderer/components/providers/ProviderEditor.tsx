@@ -5,23 +5,21 @@ import { ProviderIcon } from '../../lib/providerIcons'
 import { SettingsRow } from '../settings/SettingsRow'
 import { AccountRow, ArgsRow, BinaryRow, EnvRow, ExecutableRow, HomeRow, SetupRow, UpdateRow, type InstanceActions } from './CliSections'
 import { ProviderModelsSection } from './ProviderModelsSection'
-import { EditorSection, RemoveButton, StatusLine, useAsyncAction } from './parts'
+import { EditorSection, RemoveButton, useAsyncAction } from './parts'
 import { DRIVER_INFO, formatVersion, iconIdOf } from './providerView'
 
 /**
  * The editor's first section, as in T3 Code: the provider's logo and name as the heading, its
- * version and delete on the right, then the Display name row carrying the status line.
+ * version and delete on the right, then the Display name row. The status lives in Setup → Status.
  */
 export function EditorHeader({
   snapshot,
-  status,
   removeLabel,
   removeHint,
   onRemove,
   onRename
 }: {
   snapshot: InstanceSnapshot
-  status: StatusDescription
   removeLabel?: string
   removeHint?: string
   onRemove?: () => Promise<void>
@@ -59,12 +57,7 @@ export function EditorHeader({
     >
       <SettingsRow
         title="Display name"
-        description={
-          <>
-            <StatusLine status={status} full />
-            {(removal.error ?? rename.error) && <span className="prov-error">{removal.error ?? rename.error}</span>}
-          </>
-        }
+        description={(removal.error ?? rename.error) && <span className="prov-error">{removal.error ?? rename.error}</span>}
         control={
           <input
             className="settings-input"
@@ -111,7 +104,6 @@ export function AgentEditor({
     <>
       <EditorHeader
         snapshot={snapshot}
-        status={status}
         removeLabel={onRemove ? 'Remove provider' : undefined}
         removeHint={onRemove ? 'Removes this instance and its private home' : undefined}
         onRemove={onRemove}
@@ -162,7 +154,6 @@ export function ModelsEditorSection({
 /** The editor of a model API: header, its Setup row, then Models. */
 export function ApiEditor({
   snapshot,
-  status,
   setup,
   removeHint,
   onRemove,
@@ -170,7 +161,6 @@ export function ApiEditor({
   onRefreshModels
 }: {
   snapshot: InstanceSnapshot
-  status: StatusDescription
   setup: ReactNode
   removeHint?: string
   onRemove: () => Promise<void>
@@ -179,7 +169,7 @@ export function ApiEditor({
 }) {
   return (
     <>
-      <EditorHeader snapshot={snapshot} status={status} removeLabel="Remove provider" removeHint={removeHint} onRemove={onRemove} />
+      <EditorHeader snapshot={snapshot} removeLabel="Remove provider" removeHint={removeHint} onRemove={onRemove} />
       <EditorSection title="Setup">{setup}</EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} />
     </>

@@ -3,7 +3,7 @@ import type { InstanceSnapshot, StatusDescription } from '../../../shared/harnes
 import type { InstanceConfigPatch, ProviderOperationEvent } from '../../../shared/harness/types'
 import { Download, Plus, RotateCcw, X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
-import { BrowseButton, CommandBox, RefreshButton, useAsyncAction } from './parts'
+import { BrowseButton, CommandBox, RefreshButton, displayLabel, statusText, useAsyncAction } from './parts'
 import {
   DRIVER_INFO,
   binaryOverrideOf,
@@ -104,8 +104,14 @@ export function SetupRow({
         )
         break
       case 'sign_in':
-        if (step.command) below = <CommandBox command={step.command} />
-        else control = button('signin', step.label, actions.signIn)
+        if (step.command) {
+          below = (
+            <>
+              <span className="prov-command-hint">Run this in a terminal, then check again.</span>
+              <CommandBox command={step.command} />
+            </>
+          )
+        } else control = button('signin', step.label, actions.signIn)
         break
       case 'update':
         if (step.command) below = <CommandBox command={step.command} label="Copy update command" />
@@ -124,7 +130,7 @@ export function SetupRow({
   return (
     <SettingsRow
       title="Status"
-      description={withError(progress ?? status.detail ?? (status.tone === 'ready' ? null : status.headline), error)}
+      description={withError(progress ?? statusText(status), error)}
       control={
         <>
           {recheck}
@@ -143,7 +149,7 @@ export function AccountRow({ snapshot, actions }: { snapshot: InstanceSnapshot; 
   const { auth } = snapshot
   if (auth.state !== 'signed_in' && auth.state !== 'expired') return null
   const who = auth.account?.label ?? auth.account?.id
-  const description = [who, auth.methodLabel].filter(Boolean).join(' · ') || 'Signed in'
+  const description = displayLabel([who, auth.methodLabel].filter(Boolean).join(' · ') || 'Signed in')
   return (
     <SettingsRow
       title="Account"
