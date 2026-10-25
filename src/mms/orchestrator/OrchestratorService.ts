@@ -827,9 +827,7 @@ export class OrchestratorService extends EventEmitter {
       { questions: this.questions, modeRegistry: this.modeRegistry }
     )
 
-    this.mousseAgents = new MousseAgentService(this.llm, {
-      completeAgent: (agentId, merge, summary) => this.completeMousseAgent(agentId, merge, summary)
-    })
+    this.mousseAgents = new MousseAgentService()
 
     this.mousseAgents.on('lifecycle', (event: MousseAgentLifecycleEvent) => {
       if (event.state === 'failed') {
@@ -5916,48 +5914,6 @@ export class OrchestratorService extends EventEmitter {
     this.mousseAgents.setPersistCallback(fn)
   }
 
-  /**
-   * A legacy GUI agent (created by an earlier version) ran `complete_task`. Its branch is checked
-   * once; there is no progress file and no correction retry any more (SPEC §14.5).
-   */
-  private async completeMousseAgent(
-    agentId: string,
-    _merge: boolean,
-    summary: string
-  ): Promise<void> {
-    if (this.lifecycle.stopping) return
-    const owner = this.agentOwner(agentId) ?? this.session
-    await this.sessionAls.run(owner, async () => {
-      const agent = this.agents.get(agentId)
-      const task = this.tasks.findByAgentId(agentId)
-      if (!agent || !task || isTerminalAgentStatus(agent.status) || agent.status === 'merging') return
-      let inspected = await this.worktrees.validateAgentReadiness({
-        path: agent.worktreePath,
-        branch: agent.branch,
-        repositoryRoot: agent.repositoryRoot
-      })
-      if (inspected.ready && inspected.changedFiles?.length && agent.declaredFiles?.length) {
-        const unauthorized = filesOutsideDeclaration(inspected.changedFiles, agent.declaredFiles)
-        if (unauthorized.length > 0)
-          inspected = { ready: false, reason: `Agent changed files outside its discovery declaration: ${unauthorized.join(', ')}.` }
-      }
-      const current = this.agents.get(agentId)
-      if (!current || isTerminalAgentStatus(current.status) || current.status === 'merging') return
-      if (!inspected.ready || !inspected.commit) {
-        const reason = inspected.reason || 'Agent branch failed readiness validation.'
-        this.agents.updateStatus(agentId, 'failed')
-        this.tasks.updateProgress(task.id, { message: reason })
-        this.tasks.updateStatus(task.id, 'failed')
-        this.addSystemMessage(`[Agent ${agentId.slice(0, 8)} failed] ${reason}`)
-        return
-      }
-      this.agents.updateStatus(agentId, 'ready')
-      this.tasks.updateProgress(task.id, { progress: 100, summary })
-      this.tasks.updateStatus(task.id, 'completed')
-      this.addSystemMessage(`[Agent ${agentId.slice(0, 8)} ready for merge] ${summary || agent.task}`)
-    })
-  }
-
   getActiveAgents(): Agent[] {
     return this.agents.list().filter((a) => a.status === 'running' || a.status === 'starting')
   }
@@ -6293,11 +6249,4 @@ export class OrchestratorService extends EventEmitter {
       releaseExecutionLeaseHandle(lease)
     }
   }
-}
-
-/** Select the repository owned by the spawning thread, never the daemon cwd when known. */
-
-export function filesOutsideDeclaration(changedFiles: string[], declaredFiles: string[]): string[] {
-  const allowed = new Set(declaredFiles.map((file) => file.replace(/\\/g, '/')))
-  return changedFiles.filter((file) => !allowed.has(file.replace(/\\/g, '/')))
 }

@@ -1,10 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
 import { dispatchDelegationTool, parseActions, type DelegationToolHost } from '../src/mms/orchestrator/LlmClient'
-import {
-  filesOutsideDeclaration,
-  shouldFinalizeAgent
-} from '../src/mms/orchestrator/OrchestratorService'
+import { shouldFinalizeAgent } from '../src/mms/orchestrator/OrchestratorService'
 import { getToolCallDisplay } from '../src/shared/toolCallDisplay'
 
 /**
@@ -59,13 +56,6 @@ describe('agent spawning', () => {
     const { host, calls } = fakeHost()
     await dispatchDelegationTool(host, call('delegate_task', { prompt: 'Implement the login form component', workspace: 'isolated', provider: 'openai', model: 'gpt-x' }))
     expect(calls[0].input).toMatchObject({ provider: 'openai', model: 'gpt-x', workspace: 'isolated' })
-  })
-
-  it('rejects completion changes outside the discovery declaration', () => {
-    expect(filesOutsideDeclaration(
-      ['src/allowed.ts', 'tests/unapproved.test.ts'],
-      ['src\\allowed.ts']
-    )).toEqual(['tests/unapproved.test.ts'])
   })
 
   it('keeps the named-agent tools as wrappers over the same host', async () => {

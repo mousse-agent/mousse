@@ -1,18 +1,22 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import type { AssistantMessage, Message, ToolResultMessage } from '@earendil-works/pi-ai'
+import type { AssistantMessage, ToolResultMessage } from '@earendil-works/pi-ai'
 import {
-  extractPartialNativeMessages,
-  isSafetyLimitError,
   MousseAgentService,
   parseMousseAgentSessionSnapshot,
   parseMousseAgentSessions
 } from '../src/mms/agents/MousseAgentService'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
-import { compactMessagesAtSafeBoundary, userMessage } from '../src/mms/orchestrator/nativeContext'
+import {
+  commitNativeMessages,
+  compactMessagesAtSafeBoundary,
+  createNativeContext,
+  getActiveMessages,
+  userMessage
+} from '../src/mms/orchestrator/nativeContext'
 import type { MousseAgentSessionSnapshot } from '../src/shared/types'
 
 const usage = {
@@ -54,61 +58,8 @@ const toolResult: ToolResultMessage = {
   timestamp: 3
 }
 
-function makeService(llm: {
-  chat: (...args: never[]) => Promise<unknown>
-}): MousseAgentService {
-  return new MousseAgentService(llm as never, {
-    completeAgent: async () => undefined
-  })
-}
-
 describe('Mousse durable subagent sessions', () => {
-  it('checkpoints native history via onNativeMessages during a turn', async () => {
-    const checkpoints: Message[][] = []
-    let persistCount = 0
-    const historyAfterTool: Message[] = [
-      userMessage('Implement it'),
-      assistantToolCall(),
-      toolResult
-    ]
-
-    const llm = {
-      chat: async (
-        _history: Message[],
-        _onTool: unknown,
-        options: { onNativeMessages?: (messages: Message[]) => void }
-      ) => {
-        options.onNativeMessages?.(historyAfterTool.slice(0, 2))
-        options.onNativeMessages?.(historyAfterTool)
-        return {
-          text: 'Done.',
-          aborted: false,
-          nativeMessages: historyAfterTool,
-          modelName: 'test',
-          totalResponseTimeMs: 10,
-          totalTokensUsed: 15,
-          tokensPerSecond: 1
-        }
-      }
-    }
-
-    const service = makeService(llm as never)
-    service.setPersistCallback(() => {
-      persistCount += 1
-      checkpoints.push(structuredClone(service.exportSessions()[0]?.history ?? []))
-    })
-
-    service.start('agent-cp', 'Implement it', '/tmp/wt')
-    await new Promise((resolve) => setTimeout(resolve, 0))
-
-    expect(persistCount).toBeGreaterThanOrEqual(2)
-    expect(checkpoints.some((history) => history.length === 2)).toBe(true)
-    expect(checkpoints.some((history) => history.length === 3)).toBe(true)
-    expect(service.exportSessions()[0]?.history).toEqual(historyAfterTool)
-    expect(service.getRunState('agent-cp')).toBe('idle')
-  })
-
-  it('persists a lossless v2 archive and restores its active compaction boundary', async () => {
+  it('round-trips a lossless v2 archive and its active compaction boundary through export and restore', () => {
     const progress: AssistantMessage = {
       role: 'assistant',
       api: 'anthropic-messages',
@@ -119,41 +70,31 @@ describe('Mousse durable subagent sessions', () => {
       stopReason: 'stop',
       timestamp: 2
     }
-    let compactedOnce = false
-    const llm = {
-      chat: async (
-        history: Message[],
-        _onTool: unknown,
-        options: {
-          onNativeMessages?: (
-            messages: Message[],
-            checkpoint?: ReturnType<typeof compactMessagesAtSafeBoundary>['checkpoint']
-          ) => void
-        }
-      ) => {
-        const archive = [history[0], progress, userMessage('Keep the final behavior stable.')]
-        options.onNativeMessages?.(archive)
-        const compacted = compactMessagesAtSafeBoundary(archive, 1)
-        expect(compacted.changed).toBe(true)
-        options.onNativeMessages?.(compacted.messages, compacted.checkpoint)
-        compactedOnce = true
-        return {
-          text: 'Done.',
-          aborted: false,
-          modelName: 'test',
-          totalResponseTimeMs: 10,
-          totalTokensUsed: 15,
-          tokensPerSecond: 1
-        }
-      }
-    }
+    const task = userMessage(`Implement it carefully. ${'requirement '.repeat(2_000)}`)
+    const archive = [task, progress, userMessage('Keep the final behavior stable.')]
+    const compacted = compactMessagesAtSafeBoundary(archive, 1)
+    expect(compacted.changed).toBe(true)
+    const nativeContext = commitNativeMessages(
+      commitNativeMessages(createNativeContext(), archive),
+      compacted.messages,
+      compacted.checkpoint
+    )
 
-    const service = makeService(llm as never)
-    service.start('agent-v2-archive', `Implement it carefully. ${'requirement '.repeat(2_000)}`, '/tmp/wt')
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    const service = new MousseAgentService()
+    service.restoreSessions([{
+      version: 2,
+      agentId: 'agent-v2-archive',
+      worktreePath: '/tmp/wt',
+      task: 'Implement it carefully.',
+      assignment: {},
+      messages: [],
+      history: getActiveMessages(nativeContext),
+      nativeContext,
+      runState: 'idle',
+      updatedAt: new Date().toISOString()
+    }])
 
     const snapshot = service.exportSessions()[0]
-    expect(compactedOnce).toBe(true)
     expect(snapshot?.version).toBe(2)
     expect(snapshot?.nativeContext?.messages).toHaveLength(3)
     expect(snapshot?.nativeContext?.activeStartIndex).toBe(2)
@@ -161,7 +102,7 @@ describe('Mousse durable subagent sessions', () => {
     expect(snapshot?.history?.[0]).toMatchObject({ role: 'user' })
     expect((snapshot?.history?.[0] as { content?: string })?.content).toContain('[Compacted conversation summary]')
 
-    const restored = makeService({ chat: vi.fn() } as never)
+    const restored = new MousseAgentService()
     restored.restoreSessions([snapshot!])
     const reloaded = restored.exportSessions()[0]
     expect(reloaded?.nativeContext).toEqual(snapshot?.nativeContext)
@@ -171,7 +112,7 @@ describe('Mousse durable subagent sessions', () => {
   it('migrates a compacted v1 flat transcript without pretending the lost prefix is native', () => {
     const summary = 'Original task: preserve the public API.'
     const recent = userMessage('Continue with the tests.')
-    const service = makeService({ chat: vi.fn() } as never)
+    const service = new MousseAgentService()
 
     service.restoreSessions([{
       version: 1,
@@ -199,334 +140,8 @@ describe('Mousse durable subagent sessions', () => {
     ])
   })
 
-  it('meters the assigned subagent model and worktree independently from processed usage', async () => {
-    const getContextInputs = vi.fn(async () => ({
-      signature: 'sig-1',
-      modelKey: 'openai:model-a',
-      systemPromptText: 'subagent system prompt',
-      mcpToolsText: 'mcp schema',
-      otherToolsText: 'coding tools'
-    }))
-    const service = makeService({
-      chat: vi.fn(),
-      getSelectedModelContextLimit: () => ({ limit: 64_000, modelName: 'model-a' }),
-      getContextInputs
-    } as never)
-    service.restoreSessions([{
-      version: 2,
-      agentId: 'agent-meter',
-      worktreePath: '/tmp/agent-meter',
-      task: 'Measure me',
-      assignment: { provider: 'openai', model: 'model-a', effort: 'high' },
-      messages: [],
-      history: [userMessage('Measure me')],
-      nativeContext: {
-        version: 2,
-        messages: [userMessage('Archived setup'), userMessage('Measure me')],
-        fidelity: 'native',
-        activeStartIndex: 1,
-        revision: 3,
-        compaction: {
-          generation: 1,
-          summary: 'The archived setup selected strict compatibility.',
-          tokensBefore: 100,
-          tokensAfter: 50,
-          createdAt: 1
-        }
-      },
-      runState: 'idle',
-      usage: { totalTokens: 250_000 },
-      updatedAt: new Date().toISOString()
-    }])
-
-    const result = await service.getContextUsage('agent-meter', 'draft')
-    expect(getContextInputs).toHaveBeenCalledWith('build', 'draft', {
-      llmProvider: 'openai',
-      model: 'model-a',
-      effort: 'high',
-      projectPath: '/tmp/agent-meter',
-      subagent: true,
-      contextSummary: 'The archived setup selected strict compatibility.'
-    })
-    expect(result).toMatchObject({
-      limit: 64_000,
-      modelLimit: 64_000,
-      modelName: 'model-a',
-      processedTokens: 250_000,
-      source: 'estimated'
-    })
-    expect(result!.used).toBeLessThan(result!.processedTokens!)
-  })
-
-  it('uses the configured threshold and subagent worktree inputs for preflight compaction', async () => {
-    const oldDirective = userMessage('Keep the API stable.')
-    const priorResponse: AssistantMessage = {
-      role: 'assistant',
-      api: 'anthropic-messages',
-      provider: 'anthropic',
-      model: 'claude-test',
-      content: [{ type: 'text', text: `Prior implementation details. ${'detail '.repeat(20_000)}` }],
-      usage,
-      stopReason: 'stop',
-      timestamp: 2
-    }
-    const recentDirective = userMessage('Continue from the verified checkpoint.')
-    const recentResponse: AssistantMessage = {
-      ...priorResponse,
-      content: [{ type: 'text', text: `Verified current implementation. ${'current '.repeat(10_000)}` }],
-      timestamp: 4
-    }
-    const getContextInputs = vi.fn(async () => ({
-      signature: 'sig-preflight',
-      modelKey: 'openai:model-a',
-      systemPromptText: '',
-      mcpToolsText: '',
-      otherToolsText: ''
-    }))
-    const chat = vi.fn(async (history: Message[], _onTool: unknown, options: { contextSummary?: string }) => ({
-      text: 'Done.',
-      aborted: false,
-      nativeMessages: history,
-      modelName: 'model-a',
-      totalResponseTimeMs: 1,
-      totalTokensUsed: 1,
-      tokensPerSecond: 1,
-      contextInputs: { signature: 'sig-preflight', modelKey: 'openai:model-a' }
-    }))
-    const service = makeService({
-      chat,
-      getContextCompactionThreshold: () => 40_000,
-      getSelectedModelContextLimit: () => ({ limit: 128_000, modelName: 'model-a' }),
-      getContextInputs
-    } as never)
-    service.restoreSessions([{
-      version: 2,
-      agentId: 'agent-preflight',
-      worktreePath: '/tmp/agent-preflight',
-      task: 'Continue',
-      assignment: { provider: 'openai', model: 'model-a' },
-      messages: [],
-      history: [oldDirective, priorResponse, recentDirective, recentResponse],
-      nativeContext: {
-        version: 2,
-        messages: [oldDirective, priorResponse, recentDirective, recentResponse],
-        fidelity: 'native',
-        activeStartIndex: 0,
-        revision: 0
-      },
-      runState: 'idle',
-      updatedAt: new Date().toISOString()
-    }])
-
-    expect(await service.send('agent-preflight', 'Finish the tests.')).toMatchObject({ accepted: true })
-    expect(getContextInputs).toHaveBeenCalledWith('build', 'Finish the tests.', {
-      llmProvider: 'openai',
-      model: 'model-a',
-      effort: undefined,
-      projectPath: '/tmp/agent-preflight',
-      subagent: true
-    })
-    expect(chat).toHaveBeenCalledWith(
-      expect.arrayContaining([recentResponse]),
-      expect.any(Function),
-      expect.objectContaining({
-        projectPath: '/tmp/agent-preflight',
-        subagent: true,
-        contextSummary: expect.stringContaining('Keep the API stable')
-      }),
-      expect.any(Function),
-      expect.any(Function)
-    )
-    const persisted = service.exportSessions()[0]?.nativeContext
-    expect(persisted?.messages).toHaveLength(5)
-    expect(persisted?.activeStartIndex).toBe(2)
-    expect(persisted?.compaction?.tokensAfter).toBeLessThan(persisted?.compaction?.tokensBefore ?? 0)
-  })
-
-  it('aborts an active subagent turn and retains it as interrupted', async () => {
-    let toolSignal: AbortSignal | undefined
-    let signalReady!: () => void
-    const ready = new Promise<void>((resolve) => {
-      signalReady = resolve
-    })
-    const llm = {
-      chat: async (
-        history: Message[],
-        _onTool: unknown,
-        options: { signal?: AbortSignal }
-      ) => {
-        toolSignal = options.signal
-        signalReady()
-        await new Promise<void>((resolve) => {
-          options.signal?.addEventListener('abort', () => resolve(), { once: true })
-        })
-        return {
-          text: '',
-          aborted: true,
-          nativeMessages: history,
-          modelName: 'test',
-          totalResponseTimeMs: 10,
-          totalTokensUsed: 15,
-          tokensPerSecond: 1
-        }
-      }
-    }
-    const service = makeService(llm as never)
-    const interrupted = new Promise<void>((resolve) => {
-      service.on('lifecycle', (event) => {
-        if (event.state === 'interrupted') resolve()
-      })
-    })
-
-    service.start('agent-stop', 'Implement it', '/tmp/wt')
-    await ready
-
-    expect(service.abort('agent-stop')).toBe(true)
-    expect(toolSignal?.aborted).toBe(true)
-    expect(service.abort('agent-stop')).toBe(false)
-    await interrupted
-
-    expect(service.getRunState('agent-stop')).toBe('interrupted')
-    expect(service.getMessages('agent-stop').some((message) =>
-      message.content.includes('worktree and branch were retained')
-    )).toBe(true)
-  })
-
-  it('preserves partial native transcript and emits lifecycle events on safety failure', async () => {
-    const partial: Message[] = [userMessage('Implement it'), assistantToolCall(), toolResult]
-    const lifecycle: Array<{ state: string; reason?: string }> = []
-    const failed: Array<{ state: string }> = []
-
-    const safetyError = Object.assign(
-      new Error(
-        'Agent stopped before producing a final response: tool loop reached its safety limit of 24 model calls.'
-      ),
-      {
-        name: 'ToolLoopSafetyError',
-        nativeMessages: partial,
-        usage: { totalTokens: 99, modelName: 'test-model' },
-        warnings: ['Approaching tool-loop token budget']
-      }
-    )
-
-    const llm = {
-      chat: async (
-        _history: Message[],
-        _onTool: unknown,
-        options: { onNativeMessages?: (messages: Message[]) => void }
-      ) => {
-        options.onNativeMessages?.(partial)
-        throw safetyError
-      }
-    }
-
-    const service = makeService(llm as never)
-    service.on('lifecycle', (event) => lifecycle.push(event))
-    service.on('failed', (event) => failed.push(event))
-
-    service.start('agent-safety', 'Implement it', '/tmp/wt')
-    await new Promise((resolve) => setTimeout(resolve, 0))
-
-    expect(isSafetyLimitError(safetyError)).toBe(true)
-    expect(extractPartialNativeMessages(safetyError)).toEqual(partial)
-    expect(service.getRunState('agent-safety')).toBe('failed')
-    expect(service.getLastError('agent-safety')).toMatch(/safety limit/i)
-    expect(service.exportSessions()[0]?.history).toEqual(partial)
-    expect(service.exportSessions()[0]?.usage?.totalTokens).toBe(99)
-
-    const messages = service.getMessages('agent-safety')
-    expect(messages.some((message) => message.kind === 'warning')).toBe(true)
-    expect(messages.some((message) => message.role === 'assistant' && message.content.includes('Error:'))).toBe(
-      true
-    )
-    expect(messages.every((message) => message.streaming !== true)).toBe(true)
-    expect(failed.some((event) => event.state === 'failed')).toBe(true)
-    expect(lifecycle.some((event) => event.state === 'failed')).toBe(true)
-  })
-
-  it('captures processed-token usage from the typed tool-loop safety error', async () => {
-    const partial: Message[] = [userMessage('Implement it'), assistantToolCall()]
-    const llm = {
-      chat: async () => {
-        throw Object.assign(new Error('processed-token safety budget exceeded'), {
-          name: 'ToolLoopSafetyError',
-          partialNativeMessages: partial,
-          accumulatedUsage: {
-            processedTokens: 260_000,
-            input: 250_000,
-            output: 10_000,
-            cacheRead: 0,
-            cacheWrite: 0
-          }
-        })
-      }
-    }
-    const service = makeService(llm as never)
-
-    service.start('agent-typed-budget', 'Implement it', '/tmp/wt')
-    await new Promise((resolve) => setTimeout(resolve, 0))
-
-    expect(service.exportSessions()[0]?.usage?.totalTokens).toBe(260_000)
-    expect(service.exportSessions()[0]?.history).toEqual(partial)
-  })
-
-  it('retries from checkpointed transcript without duplicating the last user task', async () => {
-    const partial: Message[] = [userMessage('Implement the feature'), assistantToolCall()]
-    const chatHistories: Message[][] = []
-    let call = 0
-
-    const llm = {
-      chat: async (
-        history: Message[],
-        _onTool: unknown,
-        options: { onNativeMessages?: (messages: Message[]) => void }
-      ) => {
-        chatHistories.push(structuredClone(history))
-        call += 1
-        if (call === 1) {
-          options.onNativeMessages?.(partial)
-          const err = Object.assign(new Error('tool loop reached its safety limit of 24 model calls.'), {
-            nativeMessages: partial
-          })
-          throw err
-        }
-        options.onNativeMessages?.([...history, toolResult])
-        return {
-          text: 'Finished after retry.',
-          aborted: false,
-          nativeMessages: [...history, toolResult],
-          modelName: 'test',
-          totalResponseTimeMs: 5,
-          totalTokensUsed: 20,
-          tokensPerSecond: 2
-        }
-      }
-    }
-
-    const service = makeService(llm as never)
-    service.start('agent-retry', 'Implement the feature', '/tmp/wt')
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(service.getRunState('agent-retry')).toBe('failed')
-
-    service.retry('agent-retry')
-    await new Promise((resolve) => setTimeout(resolve, 0))
-
-    expect(call).toBe(2)
-    expect(chatHistories[1]).toEqual(partial)
-    const userTurns = chatHistories[1].filter((message) => message.role === 'user')
-    expect(userTurns).toHaveLength(1)
-    expect(service.getMessages('agent-retry').filter((message) => message.role === 'user')).toHaveLength(1)
-    expect(service.getRunState('agent-retry')).toBe('idle')
-    expect(service.getMessages('agent-retry').some((message) => message.content.includes('Finished after retry'))).toBe(
-      true
-    )
-  })
-
-  it('restores sessions on reload as interrupted without auto-restarting model work', async () => {
-    const chat = vi.fn(async () => {
-      throw new Error('should not auto-restart')
-    })
-    const service = makeService({ chat } as never)
+  it('restores sessions on reload as interrupted without auto-restarting model work', () => {
+    const service = new MousseAgentService()
     const lifecycle: Array<{ state: string; reason?: string }> = []
     service.on('lifecycle', (event) => lifecycle.push(event))
 
@@ -558,16 +173,17 @@ describe('Mousse durable subagent sessions', () => {
     }
 
     const events = service.restoreSessions([snapshot])
-    expect(chat).not.toHaveBeenCalled()
     expect(events).toHaveLength(1)
     expect(events[0]?.state).toBe('interrupted')
-    expect(service.getRunState('agent-reload')).toBe('interrupted')
-    expect(service.getAssignment('agent-reload')).toEqual({ provider: 'openai', model: 'gpt-test' })
-    expect(service.getMessages('agent-reload').some((message) => message.streaming)).toBe(false)
-    expect(service.getMessages('agent-reload').some((message) => message.kind === 'warning')).toBe(true)
-    expect(service.getMessages('agent-reload').find((message) => message.id === 'a1')?.incomplete).toBe(true)
+    const restored = service.exportSessions()[0]
+    expect(restored?.runState).toBe('interrupted')
+    expect(restored?.assignment).toEqual({ provider: 'openai', model: 'gpt-test' })
+    expect(restored?.messages.some((message) => message.streaming)).toBe(false)
+    expect(restored?.messages.some((message) => message.kind === 'warning')).toBe(true)
+    expect(restored?.messages.find((message) => message.id === 'a1')?.incomplete).toBe(true)
     expect(lifecycle.some((event) => event.state === 'interrupted')).toBe(true)
-    expect(service.exportSessions()[0]?.history).toHaveLength(2)
+    expect(restored?.history).toHaveLength(2)
+    expect(service.isTurnActive('agent-reload')).toBe(false)
   })
 
   it('validates corrupted and legacy durable session payloads', () => {
@@ -709,49 +325,5 @@ describe('Mousse durable subagent sessions', () => {
       else process.env.MOUSSE_HOME = previousHome
       rmSync(root, { recursive: true, force: true })
     }
-  })
-
-  it('surfaces budget warnings as presentation-only progress messages', () => {
-    const service = makeService({
-      chat: async () => ({
-        text: 'ok',
-        aborted: false,
-        nativeMessages: [],
-        modelName: 't',
-        totalResponseTimeMs: 1,
-        totalTokensUsed: 1,
-        tokensPerSecond: 1
-      })
-    } as never)
-
-    // Seed a session without running the model.
-    service.restoreSessions([
-      {
-        version: 1,
-        agentId: 'agent-warn',
-        worktreePath: '/tmp',
-        task: 't',
-        assignment: {},
-        messages: [],
-        history: [userMessage('t')],
-        runState: 'idle',
-        updatedAt: new Date().toISOString()
-      }
-    ])
-
-    service.pushProgressMessage('agent-warn', 'Token budget is 80% used', 'warning')
-    const messages = service.getMessages('agent-warn')
-    expect(messages).toEqual([
-      expect.objectContaining({
-        role: 'system',
-        kind: 'warning',
-        content: 'Token budget is 80% used'
-      })
-    ])
-    const history = service.exportSessions()[0]?.history ?? []
-    expect(history).toHaveLength(1)
-    expect(history[0]).toMatchObject({ role: 'user', content: 't' })
-    expect(JSON.stringify(history)).not.toContain('Token budget')
-    expect(service.exportSessions()[0]?.warnings).toContain('Token budget is 80% used')
   })
 })

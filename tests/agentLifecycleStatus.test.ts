@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentRegistry } from '../src/mms/agents/AgentRegistry'
 import { MacroEngine } from '../src/mms/macros/MacroEngine'
 import {
+  buildCompleteTaskFailureWake,
+  buildCompleteTaskSuccessWake,
   OrchestratorService,
   requiresMergeCandidateToFinalize,
   shouldFinalizeAgent
@@ -361,6 +363,18 @@ describe('prompt consistency', () => {
 })
 
 describe('delegation guidance', () => {
+  // spawn_agents (cliType assignments) is retired (SPEC §14.5); delegation is delegate_task.
+  it('describes delegation as delegate_task child threads', () => {
+    expect(DELEGATION_PROMPT).toContain('delegate_task')
+    expect(DELEGATION_PROMPT).toContain('child thread')
+  })
+
+  it('defaults delegated children to the current connected model', () => {
+    expect(DELEGATION_PROMPT).toContain('provider and model default to yours')
+    expect(DELEGATION_PROMPT).toContain('explicitly requests an override')
+    expect(DELEGATION_PROMPT).toContain('Never copy example or guessed model identifiers')
+  })
+
   it('reserves the shared workspace for read-only roles and isolates writers', () => {
     expect(DELEGATION_PROMPT).toMatch(/"shared" is only for read-only roles \(role "research" or "review"\)/)
     expect(DELEGATION_PROMPT).toMatch(/"isolated" gives the child its own worktree/)
@@ -432,5 +446,32 @@ describe('legacy progress file', () => {
     expect(isMousseControlFile(LEGACY_AGENT_PROGRESS_FILE)).toBe(true)
     expect(isMousseControlFile('.mousse\\task-progress.json')).toBe(true)
     expect(isMousseControlFile('src/task-progress.json')).toBe(false)
+  })
+})
+
+describe('complete_task wake messages', () => {
+  it('wakes the parent after successful merges so multi-wave plans continue', () => {
+    const logs = [
+      '[mousse] Stopped agent cec4da46',
+      '[merge] Merged mousse/agent/cec4da46-4c4c-4b13-958b-816cf97ef862',
+      '[mousse] Closed GUI agent cec4da46',
+      '[mousse] Stopped agent 72a089bb',
+      '[merge] Merged mousse/agent/72a089bb-32d9-4234-a2ac-91c4410219b1',
+      '[mousse] Closed GUI agent 72a089bb'
+    ]
+    const ids = ['cec4da46-4c4c-4b13-958b-816cf97ef862', '72a089bb-32d9-4234-a2ac-91c4410219b1']
+
+    expect(buildCompleteTaskFailureWake(ids, logs)).toBeUndefined()
+    const wake = buildCompleteTaskSuccessWake(ids, logs)
+    expect(wake).toMatch(/Integration finished/)
+    expect(wake).toMatch(/Continue the user plan/)
+    expect(wake).toContain('[merge] Merged mousse/agent/cec4da46-4c4c-4b13-958b-816cf97ef862')
+  })
+
+  it('does not emit a success wake when merges failed', () => {
+    const logs = ['[merge] Failed for mousse/agent/x: dirty index']
+    const ids = ['x']
+    expect(buildCompleteTaskSuccessWake(ids, logs)).toBeUndefined()
+    expect(buildCompleteTaskFailureWake(ids, logs)).toMatch(/was not merged/)
   })
 })
