@@ -1447,22 +1447,6 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /**
-   * A queue item promoted to a steer was taken into the live turn: the rows it carried are read, so
-   * a delivery nothing will ever finish cannot hold the tasks waiting on this thread. The results
-   * stay readable with `task_status`.
-   */
-  private acknowledgeQueuedRows(item: QueuedMessage): void {
-    const engine = this.runEngine
-    if (!engine || !item.inboxIds?.length) return
-    try {
-      const own = engine.inbox.getMany(item.inboxIds).filter((row) => row.status === 'delivered' && row.deliveredBy === queueOwner(item.id))
-      if (own.length) engine.inbox.markAcknowledged(own.map((row) => row.inboxId))
-    } catch (error) {
-      console.warn('promoted notice rows could not be read', { itemId: item.id, error: error instanceof Error ? error.message : String(error) })
-    }
-  }
-
   /** Enqueues a control effect, or runs `fallback` directly without effects or when the write fails. */
   private enqueueControlEffect(
     kind: 'turn.interrupt' | 'turn.steer',
@@ -3196,9 +3180,6 @@ export class OrchestratorService extends EventEmitter {
           tracker.promotedSteerIds.push(item!.id)
         }
       }
-      // The notices this entry carried now sit in the live turn: nothing is left to deliver (the
-      // results stay readable with `task_status`), and a delivered row no run would read must not hold its tasks.
-      this.acknowledgeQueuedRows(item!)
       this.emitQueueUpdated(threadId, session.queue)
       return true
     }

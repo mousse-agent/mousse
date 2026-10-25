@@ -327,6 +327,68 @@ describe('a subagent\'s result waits for its own subagents (issue #142)', () => 
     })
   })
 
+  describe('under the delivery ownership rules (one owner per row)', () => {
+    it('a row given back without a failure (Inbox.release) keeps holding, counts no attempt, and ends in a re-evaluation', async () => {
+      const { pc, cg } = await nested()
+      f!.finish(cg.childRunId, 'G result')
+      const [row] = f!.engine.inbox.listByStatus(pc.childThreadId, 'pending')
+      f!.engine.inbox.markDelivered([row.inboxId], 'queue:item-1')
+      expect(f!.engine.inbox.pendingCount(row.inboxId, pc.childThreadId)).toBe(1)
+      expect(f!.engine.inbox.release([row.inboxId], 'queue:item-1')).toEqual([row.inboxId])
+      expect(f!.engine.inbox.get(row.inboxId)!.status).toBe('pending')
+      expect(f!.engine.inbox.pendingCount(row.inboxId, pc.childThreadId)).toBe(1)
+      expect(task(pc.delegationId).status).toBe('running')
+      // The rows went back for rule 4: the wake delivers them and the task publishes after it.
+      const wakeRunId = wakeRunning(pc.childThreadId)
+      f!.engine.markTerminal(wakeRunId, 'completed', undefined, { resultText: 'C final' })
+      f!.outbox.cancel(wakeEffect(wakeRunId).effectId, f!.now(), 'settled')
+      expect(task(pc.delegationId)).toMatchObject({ status: 'result_available', result: { text: 'C final' } })
+    })
+
+    it('a release that lets the last holder go publishes: nothing else is left to wait for', async () => {
+      const { pc, cg } = await nested()
+      f!.finish(cg.childRunId, 'G result')
+      const [row] = f!.engine.inbox.listByStatus(pc.childThreadId, 'pending')
+      f!.engine.inbox.markDelivered([row.inboxId], 'queue:item-1')
+      // The row the queue item owned is exhausted by an earlier failure; releasing it is a re-evaluation too.
+      f!.engine.inbox.patchPayload(row.inboxId, { deliveryFailed: true, attempts: 4, lastError: 'x' })
+      expect(task(pc.delegationId).status).toBe('failed')
+    })
+
+    it('a steer that succeeded but was never read, on a run that completed, holds until the row is restored and delivered again', async () => {
+      const { pc, cg } = await nested()
+      f!.finish(cg.childRunId, 'G result')
+      const live = f!.store.createRun({ threadId: pc.childThreadId, source: 'gui' })
+      f!.engine.markStarting(live.runId)
+      f!.engine.markRunning(live.runId)
+      const steerId = f!.reconciler.runOnce().wakes.steers[0]
+      expect(steerId).toBeTruthy()
+      f!.outbox.claimNext(OWNER, f!.now(), { lanes: ['control'] })
+      f!.outbox.succeed(steerId, OWNER, f!.now())
+      // The turn ended without reading the steer: its rows are not acknowledged, and they still count.
+      f!.engine.markTerminal(live.runId, 'completed', undefined, { resultText: 'C turn' })
+      expect(f!.engine.inbox.listForThread(pc.childThreadId).map((row) => row.status)).toEqual(['delivered'])
+      expect(task(pc.delegationId).status).toBe('running')
+      // Restoring them (rule 4) is a trigger: the rows are pending, so the task keeps waiting, and the wake ends it.
+      const wakeRunId = wakeRunning(pc.childThreadId)
+      expect(f!.engine.inbox.listForThread(pc.childThreadId).map((row) => row.status)).toEqual(['delivered'])
+      f!.engine.markTerminal(wakeRunId, 'completed', undefined, { resultText: 'C final' })
+      f!.outbox.cancel(wakeEffect(wakeRunId).effectId, f!.now(), 'settled')
+      expect(task(pc.delegationId)).toMatchObject({ status: 'result_available', result: { text: 'C final' } })
+    })
+
+    it('internal steer-followup runs are result runs: the subagent answers a notice through one', async () => {
+      const pc = await holdBy((x, threadId) => {
+        const run = x.store.createRun({ threadId, source: 'steer-followup' })
+        x.engine.markStarting(run.runId)
+        x.engine.markRunning(run.runId)
+        x.engine.markTerminal(run.runId, 'completed', undefined, { resultText: 'answered the steer' })
+      })
+      f!.store.settleHold(pc.childThreadId)
+      expect(task(pc.delegationId).result).toMatchObject({ text: 'answered the steer' })
+    })
+  })
+
   describe('never held forever', () => {
     it('a wake the user stopped leaves its rows delivered and does not hold the task', async () => {
       const { pc, cg } = await nested()
