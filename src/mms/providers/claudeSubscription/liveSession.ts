@@ -720,7 +720,9 @@ export class LiveSession<Turn = unknown> {
       if (owner.owned.size === 0) this.finishCancelled(owner)
       return
     }
-    if (owner.owned.size === 0 && owner.steerInFlight === 0 && !owner.settled)
+    // A wake owns only the steers it received: a sweep that took them does not end the wake, which Claude
+    // is still running and which ends at its own result.
+    if (owner.kind === 'prompt' && owner.owned.size === 0 && owner.steerInFlight === 0 && !owner.settled)
       this.failCancelled(owner, new Error('Claude Code cancelled the message before it started; send it again'))
   }
 

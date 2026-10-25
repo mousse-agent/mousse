@@ -299,8 +299,26 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     await turn
     await waitFor(() => claude.inputs.length === 3, 'the returned steer to run as the next turn')
     // (the message content is JSON text here, so a newline shows as a backslash and an n)
-    expect(claude.text(2)).toContain('inspect\\nplease inspect')
+    expect(claude.text(2)).toContain('please inspect\\ninspect')
     expect(claude.text(2)).not.toContain('please \\n')
+  }, 30_000)
+
+  it('a refused model change leaves the process usable: the next plain message runs on it', async () => {
+    const { cli, d, thread } = await threadWithHelper()
+    d.orch.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'opus' })
+    await d.orch.send('two', false, { threadId: thread.id, clientRequestId: 'turn-2' }).catch(() => undefined)
+    await waitFor(() => d.engine.listRuns(thread.id).some((run) => run.status === 'failed'), 'the refused run to fail')
+    expect(cli.processes).toHaveLength(1)
+    // The user goes back to the model the process runs, and sends a plain message.
+    d.orch.setThreadModelOverride(thread.id, CLAUDE)
+    cli.reply = (message, claude) => claude.answer(String(message.uuid), 'back on sonnet')
+    await d.orch.send('three', false, { threadId: thread.id, clientRequestId: 'turn-3' })
+    expect(cli.processes).toHaveLength(1)
+    expect(cli.last.closed).toBe(false)
+    expect(d.engine.listRuns(thread.id).filter((run) => run.status === 'completed')).toHaveLength(2)
+    // The refused message was never sent to Claude, and nothing was replayed.
+    expect(cli.last.inputs).toHaveLength(2)
+    expect(cli.last.text(1)).not.toContain('Previous conversation')
   }, 30_000)
 
   it('deleting the thread or switching its provider ends the process and its helpers', async () => {

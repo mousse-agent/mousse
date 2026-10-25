@@ -921,7 +921,7 @@ describe('result routing and steering edge cases', () => {
     abort.abort()
     await expect(third).rejects.toThrow()
     f.service.commitInterrupted('thread', 'h')
-    await vi.waitFor(() => expect(process.interruptOptions).toEqual([undefined, undefined, { cancelQueued: true }].filter((entry, index) => index > 0 || entry === undefined)))
+    await vi.waitFor(() => expect(process.interruptOptions).toEqual([undefined, undefined, { cancelQueued: true }]))
     await vi.waitFor(() => expect(f.host.notice).toHaveBeenCalledExactlyOnceWith('thread', expect.stringContaining('four-hour limit')))
     await expect(f.chat({ history: 'h', model: 'opus' })).rejects.toMatchObject({ message: expect.stringMatching(/may not arrive/) })
   })
@@ -1105,6 +1105,45 @@ describe('result routing and steering edge cases', () => {
     f.cli.reply = (message, self) => self.answer(String(message.uuid), 'fresh')
     expect(await f.chat({ history: 'h' })).toBe('fresh')
     expect(f.cli.processes).toHaveLength(2)
+  })
+
+  it('cancelling a turn that waits on a cancel frees its call at once', async () => {
+    const f = fixture({ interruptTimeoutMs: 600_000 })
+    await cancelThatNeverAnswers(f)
+    const abort = new AbortController()
+    const second = f.chat({ history: 'h', signal: abort.signal })
+    second.catch(() => undefined)
+    await later(100)
+    expect(f.cli.last.inputs).toHaveLength(3)
+    const before = Date.now()
+    abort.abort()
+    await expect(second).rejects.toThrow()
+    expect(Date.now() - before).toBeLessThan(1000)
+    // The process is not closed for it: the first cancel is still unanswered, and Stop ends it.
+    expect(f.cli.last.closed).toBe(false)
+  })
+
+  it('a sweep that took a wake\'s steer does not fail the wake that is still running', async () => {
+    const f = fixture()
+    await withHelperTurn(f)
+    const process = f.cli.last
+    process.emit(notification('bash-1'), textDelta('reading the report'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    const id = f.host.continuationStarted.mock.calls[0][1].id
+    let ended = false
+    const wake = f.service.chat({
+      threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, continuationId: id, onText: () => undefined,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('steer for the wake').mockReturnValue(undefined)
+    }).finally(() => { ended = true })
+    await inputs(f.cli, 2)
+    const steerId = process.uuid(1)
+    // Another run's cancel sweeps the wake's queued steer up.
+    const live = (f.service as unknown as { live: Map<string, { cancelId(id: string): void }> }).live.get('thread')!
+    live.cancelId(steerId)
+    await later(50)
+    expect(ended).toBe(false)
+    process.emit(textDelta('the report is read'), resultFrame({ text: 'the report is read', origin: 'task-notification' }))
+    expect(await wake).toContain('the report is read')
   })
 
   it('closing the process while a push waits on a cancel releases the push', async () => {
