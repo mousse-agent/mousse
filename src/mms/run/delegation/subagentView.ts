@@ -60,7 +60,9 @@ export function taskOutcome(delegation: DelegationRecord, childRun: RunRecord | 
     const outcome = outcomeOfRun(childRun.status, interruptedBy)
     return outcome !== 'running' && busy ? 'waiting_for_subagents' : outcome
   }
-  return 'done'
+  // Published (`result_available`, `acknowledged`) tasks carry a result and returned above, so what
+  // is left is a task that failed without one.
+  return delegation.status === 'failed' ? 'failed' : 'done'
 }
 
 /** What keeps a child busy after its own runs ended. */
@@ -124,9 +126,9 @@ function summarize(
   }
   const busy = isChildBusy(runs, busyInputs)
   const activity = childActivity(runs, sources.hasPendingQuestion(childThreadId), busyInputs)
-  const continuingRunIds = new Set(
-    runs.filter((run) => !TERMINAL_RUN_STATUSES.has(run.status) && !NON_CONTINUATION_SOURCES.has(run.source)).map((run) => run.runId)
-  )
+  const continuingOrdinals = runs
+    .filter((run) => !TERMINAL_RUN_STATUSES.has(run.status) && !NON_CONTINUATION_SOURCES.has(run.source))
+    .map((run) => run.ordinal)
   const tasks: SubagentTaskSummary[] = delegations.map((delegation, index) => {
     const outcome = taskOutcome(delegation, runById.get(delegation.childRunId) ?? null, busy)
     const error = outcome === 'done' || outcome === 'running' || outcome === 'waiting_for_subagents' ? undefined : delegation.result?.error
@@ -135,8 +137,11 @@ function summarize(
       childRunId: delegation.childRunId,
       outcome,
       unread: delegation.status === 'result_available' || delegation.status === 'failed',
-      // Newer work: a later task, or a live run that is neither this task's own nor a delivery.
-      continued: index < delegations.length - 1 || [...continuingRunIds].some((runId) => runId !== delegation.childRunId),
+      // Newer work: a later task, or a live run ordered after this task's own run that is not a
+      // delivery. A run before it (task A running while B is queued) is older work, not a follow-up.
+      continued:
+        index < delegations.length - 1 ||
+        continuingOrdinals.some((ordinal) => ordinal > (runById.get(delegation.childRunId)?.ordinal ?? Number.NEGATIVE_INFINITY)),
       createdAt: delegation.createdAt,
       completedAt: delegation.completedAt,
       ...(error ? { error } : {})

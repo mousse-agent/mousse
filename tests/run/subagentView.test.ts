@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { buildSubagentView, childActivity, isChildBusy, outcomeOfRun, taskOutcome } from '../../src/mms/run/delegation/subagentView'
-import { subagentParentOfEvent } from '../../src/mms/run/delegation/subagentEvents'
-import type { RunRecord } from '../../src/mms/run/types'
+import { subagentAncestorsOf, subagentParentsOfEvent } from '../../src/mms/run/delegation/subagentEvents'
+import type { DelegationRecord, RunRecord } from '../../src/mms/run/types'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 describe('subagent status model (plan §3.3)', () => {
@@ -107,6 +107,13 @@ describe('subagent status model (plan §3.3)', () => {
       expect(only()).toMatchObject({ state: 'stopped', unread: false })
     })
 
+    it('a failed task without a result is failed, not done', async () => {
+      const { child } = await started()
+      const delegation = { ...f!.engine.delegations.get(child.delegationId)!, status: 'failed', result: null } as DelegationRecord
+      expect(taskOutcome(delegation, null)).toBe('failed')
+      expect(taskOutcome({ ...delegation, status: 'acknowledged' }, null)).toBe('done')
+    })
+
     it('a task whose child run ended before it published follows the run', async () => {
       const { child } = await started()
       const delegation = f!.engine.delegations.get(child.delegationId)!
@@ -148,6 +155,26 @@ describe('subagent status model (plan §3.3)', () => {
         [recorded.delegationId, 'failed', false]
       ])
       expect(row).toMatchObject({ state: 'failed', latestDelegationId: recorded.delegationId, unread: true })
+    })
+  })
+
+  describe('a task queued behind a running one on the same child', () => {
+    it('is not continued by the earlier task’s run, and is once a later run follows it', async () => {
+      const { parent, child } = await started()
+      running(child.childRunId)
+      const queuedRun = f!.store.createRun({ threadId: 'child-1', source: 'delegation', clientRequestId: 'queued-b' })
+      const queued = f!.engine.recordDelegation({
+        parentThreadId: 'parent', parentRunId: parent.runId, childThreadId: 'child-1', childRunId: queuedRun.runId, prompt: 'then this', wake: 'always'
+      })
+      expect(only().tasks.map((task) => [task.delegationId, task.continued])).toEqual([
+        [child.delegationId, true],
+        [queued.delegationId, false]
+      ])
+      f!.store.createRun({ threadId: 'child-1', source: 'gui', clientRequestId: 'later-c' })
+      expect(only().tasks.map((task) => [task.delegationId, task.continued])).toEqual([
+        [child.delegationId, true],
+        [queued.delegationId, true]
+      ])
     })
   })
 
@@ -382,15 +409,29 @@ describe('subagent status model (plan §3.3)', () => {
 
   describe('which run-store events change a parent’s list', () => {
     it.each([
-      ['delegation.status', 'parent', { parentThreadId: 'parent' }, 'parent'],
-      ['run.created', 'child-1', {}, 'parent'],
-      ['run.status', 'child-1', {}, 'parent'],
-      ['run.status', 'parent', {}, undefined],
-      ['tool.status', 'child-1', {}, undefined],
-      ['inbox.status', 'parent', {}, undefined]
+      ['delegation.status', 'parent', { parentThreadId: 'parent' }, ['parent']],
+      ['run.created', 'child-1', {}, ['parent']],
+      ['run.status', 'child-1', {}, ['parent']],
+      ['inbox.status', 'child-1', {}, ['parent']],
+      ['run.status', 'parent', {}, []],
+      ['tool.status', 'child-1', {}, []],
+      ['inbox.status', 'parent', {}, []]
     ])('%s on %s', async (type, threadId, payload, expected) => {
       await started()
-      expect(subagentParentOfEvent(f!.engine.delegations, { type, threadId, payload })).toBe(expected)
+      expect(subagentParentsOfEvent(f!.engine.delegations, { type, threadId, payload })).toEqual(expected)
+    })
+
+    it('a change on a nested subagent names every ancestor, nearest first, once', async () => {
+      const { child } = await started()
+      const g = await f!.delegate(child.childRunId, 'g1')
+      expect(subagentAncestorsOf(f!.engine.delegations, g.childThreadId)).toEqual(['child-1', 'parent'])
+      for (const type of ['run.status', 'inbox.status'])
+        expect(subagentParentsOfEvent(f!.engine.delegations, { type, threadId: g.childThreadId, payload: {} })).toEqual(['child-1', 'parent'])
+      // The delegation to G is written on C's thread and changes C's row and P's row for C.
+      expect(
+        subagentParentsOfEvent(f!.engine.delegations, { type: 'delegation.status', threadId: 'child-1', payload: { parentThreadId: 'child-1' } })
+      ).toEqual(['child-1', 'parent'])
+      expect(subagentAncestorsOf(f!.engine.delegations, 'parent')).toEqual([])
     })
   })
 })
