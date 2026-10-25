@@ -18,7 +18,10 @@ type HelperState = { turnId?: string; running: boolean; seenActive: boolean; int
  * A helper is named by a `subAgentActivity` item (`kind: 'started'`) or a `collabAgentToolCall`
  * `spawnAgent` item (`receiverThreadIds`) on the parent's thread, while the run is live.
  *
- * Known gaps (a follow-up handles them):
+ * This is the tracking the service falls back to when the app-server cannot list a thread's descendants
+ * (an older Codex, or no state database), and the floor under the listed tree (`helperTree.ts`) when it
+ * can. The tree reads every helper at any depth from the server, so a nested helper, or one whose spawn
+ * is reported late, is covered there. On its own this tracker has two gaps:
  * - Only direct helpers are tracked. A helper that starts a helper of its own is not noticed, so the
  *   run does not wait for it and Stop does not interrupt it.
  * - A helper whose spawn is reported after Stop, or after the run was released, is never registered,

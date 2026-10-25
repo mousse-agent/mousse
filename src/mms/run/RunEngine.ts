@@ -13,7 +13,7 @@ import type { RestartNote } from './restartNote'
 import type { RunStore } from './RunStore'
 import { bumpStopGenerations, currentStopGeneration, isRunAdmissionStale } from './stopGeneration'
 import { strandedQueuedRuns } from './strandedRuns'
-import { writeTerminalRun, type RunTerminalStatus } from './terminal'
+import { writeTerminalRun, type RunTerminalStatus, type TerminalNotice } from './terminal'
 import { ThreadMutex } from './ThreadMutex'
 import { ToolInvocations } from './ToolInvocations'
 import {
@@ -417,10 +417,10 @@ export class RunEngine extends EventEmitter {
     runId: string,
     status: RunTerminalStatus,
     outcome?: RunOutcome,
-    options: { resultText?: string } = {}
+    options: { resultText?: string; notice?: TerminalNotice } = {}
   ): RunRecord {
     return this.mark(runId, false, (run, expectedEpoch) =>
-      this.writeTerminal(run, expectedEpoch, status, outcome, options.resultText)
+      this.writeTerminal(run, expectedEpoch, status, outcome, options.resultText, options.notice)
     )
   }
 
@@ -1469,9 +1469,10 @@ export class RunEngine extends EventEmitter {
     expectedEpoch: number,
     status: RunTerminalStatus,
     outcome?: RunOutcome,
-    resultText?: string
+    resultText?: string,
+    notice?: TerminalNotice
   ): RunRecord {
-    return writeTerminalRun(this.store, run, expectedEpoch, status, outcome, this.now(), { resultText })
+    return writeTerminalRun(this.store, run, expectedEpoch, status, outcome, this.now(), { resultText, notice })
   }
 
   /**

@@ -101,8 +101,10 @@ export class RunStore {
         settleWaitingDelegations(this, next)
       }
     } finally {
+      // A throw leaves the threads still queued for the next call: settling is idempotent, so a
+      // thread whose turn did not come is judged then. (Inside a transaction the throw rolls back
+      // what was written, and the next evaluation reads the committed state.)
       this.settling = false
-      this.settleQueue.clear()
     }
   }
 
