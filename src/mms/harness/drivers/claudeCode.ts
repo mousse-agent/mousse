@@ -23,11 +23,15 @@ export const CLAUDE_CODE_CAPS: HarnessCaps = Object.freeze({
   contextUsage: 'reported'
 })
 
-/** The terminal sign-in command for an instance: its own home is passed as `CLAUDE_CONFIG_DIR`. */
+/**
+ * The terminal sign-in command for an instance: its own home is passed as `CLAUDE_CONFIG_DIR`. On
+ * Windows it runs through `cmd /c`, which works the same pasted into Command Prompt or PowerShell
+ * and leaves the terminal's own environment unchanged.
+ */
 export function claudeSignInCommand(home: string | undefined, platform: NodeJS.Platform = process.platform): string {
   if (!home) return 'claude auth login'
   return platform === 'win32'
-    ? `$env:CLAUDE_CONFIG_DIR="${home}"; claude auth login`
+    ? `cmd /c "set CLAUDE_CONFIG_DIR=${home}&& claude auth login"`
     : `CLAUDE_CONFIG_DIR='${home.replace(/'/g, `'\\''`)}' claude auth login`
 }
 

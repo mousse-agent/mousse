@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
+import { claudeCodeDriver, claudeSignInCommand } from '../../src/mms/harness/drivers/claudeCode'
 import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
 import { createHarnessGateway, type TurnSpec } from '../../src/mms/harness/gateway'
 import { instanceStateDir } from '../../src/mms/harness/instances'
@@ -199,6 +199,14 @@ describe('native resume on a real Claude service', () => {
       harness.stop()
     }
   }, 30_000)
+})
+
+describe('sign-in command of a private home', () => {
+  it('runs in Command Prompt and PowerShell alike on Windows, and quotes the home elsewhere', () => {
+    expect(claudeSignInCommand(undefined, 'win32')).toBe('claude auth login')
+    expect(claudeSignInCommand('C:\\Users\\me\\Mousse Profiles\\home', 'win32')).toBe('cmd /c "set CLAUDE_CONFIG_DIR=C:\\Users\\me\\Mousse Profiles\\home&& claude auth login"')
+    expect(claudeSignInCommand("/home/me/it's/home", 'linux')).toBe("CLAUDE_CONFIG_DIR='/home/me/it'\\''s/home' claude auth login")
+  })
 })
 
 describe('instance environments', () => {

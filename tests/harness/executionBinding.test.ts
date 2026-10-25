@@ -296,6 +296,11 @@ describe('execution bindings', () => {
     expect(run.outcome?.error).toMatch(/settings of this provider changed/)
   })
 
+  it('the context gauge of a fresh profile with no model selected is empty, not an error', async () => {
+    ;(orch as any).llm.getContextInputs = async () => { throw new Error('Unknown model "" for provider ""') }
+    await expect(orch.getContextUsage('')).resolves.toMatchObject({ percent: 0, used: 0, limit: 0, categories: [] })
+  })
+
   it('Stop reaches the instance named by the binding', async () => {
     const thread = store.createThread('stop')
     orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })

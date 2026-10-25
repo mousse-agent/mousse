@@ -878,9 +878,12 @@ export class OrchestratorService extends EventEmitter {
     runtime?: { questions?: UserQuestionService; modeRegistry?: ModeRegistry }
   ) {
     super()
+    // Until `setHarness` binds the profile's gateway: the pi loop only, over a per-process scratch
+    // home (nothing is written there unless a caller changes instance state).
+    const unboundHome = join(tmpdir(), `mousse-unbound-harness-${process.pid}`)
     this.harness = createHarnessGateway({
-      profileHome: join(tmpdir(), 'mousse-unbound-harness'),
-      installationHome: join(tmpdir(), 'mousse-unbound-harness'),
+      profileHome: unboundHome,
+      installationHome: unboundHome,
       instanceMap: new ProviderInstanceService({ providerAuth }),
       drivers: [piLegacyDriver({ client: () => this.llm, credentials: () => this.providerAuth })],
       questions: runtime?.questions ?? defaultUserQuestionService,
@@ -4092,6 +4095,9 @@ export class OrchestratorService extends EventEmitter {
         ...(this.providerAuth.credentials?.listProviderIds() ?? []),
         ...this.harness.configuredProviderIds()
       ])
+      // Nothing to measure against before a model is chosen (a fresh profile): an empty gauge.
+      if (!selectedModel.model?.trim() || !(selectedModel.instanceId?.trim() || selectedModel.llmProvider?.trim()))
+        return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model ?? '', source: 'estimated', categories: [] }
       // The gauge never fails: a selection that cannot be resolved is measured like the pi loop's.
       let caps: HarnessCaps | undefined
       try {
