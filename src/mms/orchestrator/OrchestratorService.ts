@@ -56,7 +56,7 @@ import type { AdapterHost, ChildTurnPolicy, ProviderAdapter, ProviderCapabilitie
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { McpCaller, MousseToolHost } from '../run/mcp/toolRegistry'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
-import { acknowledgeDeliveredRows } from '../run/terminal'
+import { acknowledgeRows } from '../run/terminal'
 import { taskCheckpoint } from '../run/delegation/checkpoint'
 import { subagentPreamble } from '../run/delegation/guidance'
 import type { SubagentNoticeItem } from '../../shared/subagents'
@@ -71,6 +71,7 @@ import {
   isWakeTurnPayload,
   type DelegationRecord,
   type EffectKind,
+  type InboxRecord,
   type EffectRecord,
   type ModeCeiling,
   type ProviderRef,
@@ -1200,7 +1201,7 @@ export class OrchestratorService extends EventEmitter {
    * so a concurrent send still queues.
    */
   private startTurn(session: ThreadSession, payload: TurnStartRequest): Promise<OrchestratorResponse> {
-    const direct = (admissionHeld: boolean | undefined): Promise<OrchestratorResponse> => this.runTurnOnSession(
+    const direct = (admissionHeld: boolean | undefined): Promise<OrchestratorResponse> => this.settleCarriedRows(payload, this.runTurnOnSession(
       session,
       payload.input,
       payload.reuseLastUser,
@@ -1214,7 +1215,7 @@ export class OrchestratorService extends EventEmitter {
         admissionHeld,
         subagentNotice: payload.subagentNotice
       }
-    )
+    ))
     const runId = payload.runId
     if (!runId || !this.effectsEnabled()) return direct(payload.admissionHeld)
     if (!payload.admissionHeld) {
@@ -1231,6 +1232,32 @@ export class OrchestratorService extends EventEmitter {
       })
       return direct(true)
     }
+  }
+
+  /**
+   * A queued turn that runs without a `turn.start` effect (effects are off, or recording the effect
+   * failed) has no effect for its rows to follow, so they follow the turn itself: acknowledged
+   * when it ends cleanly, given back when it fails. Without this they would stay on the queue
+   * item, which is removed when the turn is accepted.
+   */
+  private settleCarriedRows(payload: TurnStartRequest, turn: Promise<OrchestratorResponse>): Promise<OrchestratorResponse> {
+    const engine = this.runEngine
+    if (!engine || !payload.inboxIds?.length || !payload.queueItemId) return turn
+    const owner = queueOwner(payload.queueItemId)
+    const own = (): InboxRecord[] => engine.inbox.getMany(payload.inboxIds!).filter((row) => row.status === 'delivered' && row.deliveredBy === owner)
+    const give = (): void => { engine.inbox.release(own().map((row) => row.inboxId), owner) }
+    return turn.then((response) => {
+      try {
+        if (response.error) give()
+        else engine.store.db.transaction(() => acknowledgeRows(engine.store, own()))
+      } catch (error) {
+        console.warn('queued notice rows could not be settled', { error: error instanceof Error ? error.message : String(error) })
+      }
+      return response
+    }, (error: unknown) => {
+      try { give() } catch { /* the rows stay with the item; boot releases them if it is gone */ }
+      throw error
+    })
   }
 
   /**
@@ -3862,14 +3889,27 @@ export class OrchestratorService extends EventEmitter {
         // What the turn never read goes on as turns of their own. A steer that carried subagent
         // results is one turn per steer (it owns its rows and is rebuilt when it runs); the user's
         // own text is a plain follow-up that nothing rebuilds.
-        const unmatched = carried.map((entry) => entry.text)
-        const plain: string[] = []
-        for (const text of pending) {
-          const at = unmatched.indexOf(text)
-          if (at >= 0) unmatched.splice(at, 1)
-          else plain.push(text)
+        // They are queued in the order they arrived.
+        const remaining = [...carried]
+        let plain: string[] = []
+        const flush = (): void => {
+          const leftover = plain.join('\n').trim()
+          plain = []
+          if (!leftover) return
+          try {
+            this.enqueueForThread(session.threadId, { content: leftover, mode }, { source: 'steer-followup', internal: true })
+          } catch {
+            // Best-effort: settlement must not fail if the follow-up cannot queue.
+          }
         }
-        for (const entry of carried) {
+        for (const text of pending) {
+          const at = remaining.findIndex((entry) => entry.text === text)
+          if (at < 0) {
+            plain.push(text)
+            continue
+          }
+          flush()
+          const [entry] = remaining.splice(at, 1)
           try {
             this.enqueueCarrying(session.threadId, { content: entry.text, mode }, { source: 'steer-followup', internal: true }, [entry], entry.subagentNotice)
           } catch {
@@ -3877,14 +3917,8 @@ export class OrchestratorService extends EventEmitter {
             this.runEngine?.inbox.release(entry.inboxIds, entry.effectId)
           }
         }
-        const leftover = plain.join('\n').trim()
-        if (leftover) {
-          try {
-            this.enqueueForThread(session.threadId, { content: leftover, mode }, { source: 'steer-followup', internal: true })
-          } catch {
-            // Best-effort: settlement must not fail if the follow-up cannot queue.
-          }
-        }
+        flush()
+        for (const entry of remaining) this.runEngine?.inbox.release(entry.inboxIds, entry.effectId)
       }
     }
     if (session.activeTurn === turn) session.activeTurn = null
@@ -3927,7 +3961,11 @@ export class OrchestratorService extends EventEmitter {
         : this.sessions.get(threadId) ?? null
     if (session?.activeTurn && !session.activeTurn.abort.signal.aborted) {
       session.activeTurn.pendingSteer.push(trimmed)
-      if (carried) (session.activeTurn.carriedSteers ??= []).push({ ...carried, text: trimmed, subagentNotice })
+      if (carried) {
+        (session.activeTurn.carriedSteers ??= []).push({ ...carried, text: trimmed, subagentNotice })
+        // Marked before the turn can end: from here an unread steer is recoverable (`deliveryFailure`).
+        this.runEngine?.inbox.markSteerHeld(carried.inboxIds, carried.effectId)
+      }
       // Prefer ALS when already inside the turn; otherwise annotate bound if matching.
       const run = (): void => {
         // Mid-turn steers share the turn's mode — preserve tracking so the next

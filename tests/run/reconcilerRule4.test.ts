@@ -238,6 +238,43 @@ describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () 
     expect(f.reconciler.runOnce().wakes).toMatchObject({ restored: [row.inboxId], steers: [expect.any(String)] })
   })
 
+  describe('rows an older version delivered by native steer', () => {
+    /** The state master leaves: a steer that succeeded, a run that completed, no marker, row `delivered`. */
+    const legacy = async (marker?: 'steerHeldBy') => {
+      const { f, parent } = await childFinished({ parentStaysActive: true })
+      const steerId = f.reconciler.runOnce().wakes.steers[0]
+      const [row] = f.engine.inbox.listByStatus('parent', 'delivered')
+      f.outbox.claimNext('1:1', f.now(), { lanes: ['control'] })
+      f.outbox.succeed(steerId, '1:1', f.now())
+      if (marker) f.engine.inbox.markSteerHeld([row.inboxId], steerId)
+      f.engine.markTerminal(parent.runId, 'completed')
+      return { f, steerId, row }
+    }
+    const boot = (f: DelegationFixture) => {
+      const home = f.profileHome
+      f.dispose(true)
+      const next = delegationFixture({ profileHome: home, pid: 2 })
+      next.engine.reconcileOnBoot()
+      return next
+    }
+
+    it('are left alone at the first boot after upgrade: no wake, no change', async () => {
+      const legacyState = await legacy()
+      expect(legacyState.f.engine.inbox.get(legacyState.row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: legacyState.steerId })
+      f = boot(legacyState.f)
+      expect(f.engine.inbox.get(legacyState.row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: legacyState.steerId })
+      expect(f.reconciler.runOnce().wakes).toEqual({ wakes: [], steers: [], cancelled: [], restored: [] })
+      expect(f.engine.listRuns('parent').filter((run) => run.source === 'wake')).toEqual([])
+    })
+
+    it('a steer this version held and never read is delivered again at boot', async () => {
+      const held = await legacy('steerHeldBy')
+      f = boot(held.f)
+      expect(f.engine.inbox.get(held.row.inboxId)).toMatchObject({ status: 'pending', deliveredBy: null })
+      expect(f.reconciler.runOnce().wakes.wakes).toHaveLength(1)
+    })
+  })
+
   describe('acknowledge on delivery', () => {
     /** What the executor does when it builds a notice: records what the notice showed whole. */
     const recordShown = (f: DelegationFixture) => {
