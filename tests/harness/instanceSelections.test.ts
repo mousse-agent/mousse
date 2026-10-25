@@ -37,6 +37,28 @@ async function twoClaudes(work: { enabled: boolean } = { enabled: true }) {
 const WORK = { instanceId: 'claude:work', llmProvider: 'claude-subscription', model: 'sonnet' }
 const LEGACY = { llmProvider: 'claude-subscription', model: 'sonnet' }
 
+/**
+ * A profile with Claude Code (built-in and Work) and OpenAI as an API provider. Titles run on API
+ * providers; `openai` lists a fast model Automatic prefers.
+ */
+async function titleProfile(options: { openai?: boolean; work?: boolean } = {}) {
+  const piProviders = [{ id: 'openai', label: 'OpenAI', models: [{ id: 'gpt-big', label: 'GPT Big' }, { id: 'gpt-mini', label: 'GPT Mini' }] }]
+  let stored: unknown = {
+    claude: { driver: 'claude', enabled: true },
+    'claude:work': { driver: 'claude', enabled: options.work ?? true, config: { displayName: 'Work' } },
+    ...(options.openai === false ? { 'pi:openai': { driver: 'pi', enabled: false } } : {})
+  }
+  const instances = new ProviderInstanceService({
+    store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } },
+    providerAuth: { getConfiguredLlmProviders: () => piProviders, credentials: { listProviderIds: () => ['openai'] } } as never
+  })
+  const claudeListing = { id: 'claude-subscription', label: 'Claude Code', models: [{ id: 'haiku', label: 'Haiku' }, { id: 'sonnet', label: 'Sonnet' }] }
+  const harness = testHarness({ drivers: [adapterDriver(pi), adapterDriver(claude, { runtime: { llmProvider: () => claudeListing } })], instances })
+  return { harness, instances }
+}
+
+const OPENAI_BIG = { instanceId: 'pi:openai', llmProvider: 'openai', model: 'gpt-big' }
+
 /** The orchestrator's title path over a real gateway; the pi call itself is a spy. */
 function titleOrchestrator(harness: unknown, title: MousseSettings['title']) {
   const settings = { ...getDefaultSettings(), title }
@@ -45,30 +67,57 @@ function titleOrchestrator(harness: unknown, title: MousseSettings['title']) {
     harness,
     settingsStore: { get: () => settings },
     llm: { generateTitle }
-  }) as { generateTitleText: (request: string, first: string | undefined, threadId: string | undefined) => Promise<string> }
+  }) as {
+    generateTitleText: (request: string, first: string | undefined, threadId: string | undefined) => Promise<string>
+    generateThreadTitle: (messages: Array<{ role: 'user' | 'assistant'; content: string }>) => Promise<string>
+  }
   return { orch, generateTitle }
 }
 
 describe('chat title model', () => {
-  it('runs on the instance the picker chose', async () => {
-    const { harness } = await twoClaudes()
-    const { orch, generateTitle } = titleOrchestrator(harness, WORK)
-    await orch.generateTitleText('hello', undefined, undefined)
-    expect(generateTitle).toHaveBeenCalledWith('hello', undefined, undefined, WORK)
+  it('Automatic (the default setting) names chats with a connected API provider, admitted through the gateway', async () => {
+    const { harness } = await titleProfile()
+    const automatic = getDefaultSettings().title
+    const { orch, generateTitle } = titleOrchestrator(harness, automatic)
+    // Regenerating a title runs the model, not the first-line fallback.
+    expect(await orch.generateThreadTitle([{ role: 'user', content: 'hello there' }])).toBe('A title')
+    expect(generateTitle).toHaveBeenCalledWith('hello there', undefined, undefined, { instanceId: 'pi:openai', llmProvider: 'openai', model: 'gpt-mini' })
   })
 
-  it('a legacy record resolves to the built-in instance', async () => {
-    const { harness } = await twoClaudes()
-    const { orch, generateTitle } = titleOrchestrator(harness, LEGACY)
-    await orch.generateTitleText('hello', undefined, undefined)
-    expect(generateTitle).toHaveBeenCalledWith('hello', undefined, undefined, { instanceId: 'claude', ...LEGACY })
+  it('Automatic picks only what the gateway admits: no hidden model, disabled instance or agent runtime', async () => {
+    const hidden = await titleProfile()
+    await hidden.harness.instances.setModelPrefs('pi:openai', { hidden: ['gpt-mini'] })
+    const visible = titleOrchestrator(hidden.harness, getDefaultSettings().title)
+    await visible.orch.generateTitleText('hello', undefined, undefined)
+    expect(visible.generateTitle).toHaveBeenCalledWith('hello', undefined, undefined, OPENAI_BIG)
+
+    // Only Claude Code is left: Automatic names the chat from its first line.
+    const none = titleOrchestrator((await titleProfile({ openai: false })).harness, getDefaultSettings().title)
+    await expect(none.orch.generateTitleText('hello', undefined, undefined)).rejects.toThrow(/Connect an API provider/)
+    expect(await none.orch.generateThreadTitle([{ role: 'user', content: 'hello there' }])).toBe('hello there')
+    expect(none.generateTitle).not.toHaveBeenCalled()
   })
 
-  it('a disabled instance or hidden model is refused with its code, never run elsewhere', async () => {
-    const disabled = titleOrchestrator((await twoClaudes({ enabled: false })).harness, WORK)
+  it('a chosen model runs exactly as chosen; a legacy record resolves to its instance', async () => {
+    const { harness } = await titleProfile()
+    const chosen = titleOrchestrator(harness, OPENAI_BIG)
+    await chosen.orch.generateTitleText('hello', undefined, undefined)
+    expect(chosen.generateTitle).toHaveBeenCalledWith('hello', undefined, undefined, OPENAI_BIG)
+    const legacy = titleOrchestrator(harness, { llmProvider: 'openai', model: 'gpt-big' })
+    await legacy.orch.generateTitleText('hello', undefined, undefined)
+    expect(legacy.generateTitle).toHaveBeenCalledWith('hello', undefined, undefined, OPENAI_BIG)
+  })
+
+  it('an agent runtime, a disabled instance or a hidden model is refused with its code, never run elsewhere', async () => {
+    const vendor = titleOrchestrator((await titleProfile()).harness, WORK)
+    await expect(vendor.orch.generateTitleText('hello', undefined, undefined)).rejects.toMatchObject({ code: 'unsupported' })
+    expect(vendor.generateTitle).not.toHaveBeenCalled()
+    const disabled = titleOrchestrator((await titleProfile({ work: false })).harness, WORK)
     await expect(disabled.orch.generateTitleText('hello', undefined, undefined)).rejects.toMatchObject({ code: 'provider_instance_disabled' })
     expect(disabled.generateTitle).not.toHaveBeenCalled()
-    const hidden = titleOrchestrator((await twoClaudes()).harness, { ...WORK, model: 'opus' })
+    const profile = await titleProfile()
+    await profile.harness.instances.setModelPrefs('pi:openai', { hidden: ['gpt-big'] })
+    const hidden = titleOrchestrator(profile.harness, OPENAI_BIG)
     await expect(hidden.orch.generateTitleText('hello', undefined, undefined)).rejects.toMatchObject({ code: 'model_hidden' })
     expect(hidden.generateTitle).not.toHaveBeenCalled()
   })

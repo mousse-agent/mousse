@@ -1495,8 +1495,9 @@ export class LlmClient {
 
 
   /**
-   * `selection` is the title model as the harness gateway resolved it (its instance's provider);
-   * absent, the stored title setting is read as is.
+   * `selection` is the title model the harness gateway resolved and admitted (an API provider's
+   * model); it runs as is. Absent, the stored title setting is resolved against the configured
+   * providers.
    */
   async generateTitle(
     userRequest: string,
@@ -1504,12 +1505,7 @@ export class LlmClient {
     threadId?: string,
     selection?: { instanceId?: string; llmProvider: string; model: string }
   ): Promise<string> {
-    const configuredProviders = this.providerAuth.getConfiguredLlmProviders()
-    const settings = this.settingsStore.get()
-    const { llmProvider, model: selectedModelId } = resolveTitleModel(
-      selection ? { ...settings, title: selection } : settings,
-      configuredProviders
-    )
+    const { llmProvider, model: selectedModelId } = selection ?? resolveTitleModel(this.settingsStore.get(), this.providerAuth.getConfiguredLlmProviders())
     if (!llmProvider || !selectedModelId) {
       throw new Error('Connect a provider with a title model before generating a chat title.')
     }

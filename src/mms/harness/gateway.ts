@@ -514,6 +514,9 @@ export class Harness implements HarnessGateway {
     const resolved = this.instanceMap.resolve(this.instanceMap.instanceIdOf(selection), { allowDisabled: options.allowDisabled })
     const driver = this.drivers.get(resolved.entry.driver)
     if (!driver) fail('bad_request', `No provider adapter for driver ${resolved.entry.driver} (instance ${resolved.instanceId}).`)
+    // Chat titles are a one-shot completion of an API provider's model; agent runtimes run turns only.
+    if (options.purpose === 'title' && driver.kind !== 'pi')
+      harnessFail('unsupported', `${driver.label} cannot name chats. Choose an API provider's model for chat titles, or Automatic.`, resolved.instanceId)
     if (!options.allowDisabled) {
       if (options.scope?.kind === 'project' && !this.scopes.enabled(resolved.instanceId, true, options.scope).effective)
         harnessFail('instance_disabled', `Provider instance "${resolved.instanceId}" is turned off for this project. Turn it on or choose another model.`, resolved.instanceId)

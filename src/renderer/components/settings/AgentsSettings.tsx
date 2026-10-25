@@ -1,5 +1,6 @@
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
-import { CONTEXT_COMPACTION_OPTIONS, normalizeContextSettings, type ContextCompactionTokens } from '../../../shared/settings'
+import { CONTEXT_COMPACTION_OPTIONS, isAutomaticTitle, normalizeContextSettings, type ContextCompactionTokens } from '../../../shared/settings'
+import { piProviderIdOf } from '../../../shared/providerInstances'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { SettingsModelPicker } from './SettingsModelPicker'
 import { Select } from '../ui/Select'
@@ -21,12 +22,14 @@ export function AgentsSettings({
 }) {
   const providers = options.llmProviders
   const hasProviders = providers.length > 0
+  // Titles run on an API provider; agent runtimes (Claude Code, Codex) cannot name chats.
+  const titleProviders = providers.filter((provider) => !provider.instanceId || piProviderIdOf(provider.instanceId))
 
   // Blank title keys mean "Automatic" (resolveTitleModel picks a connected
   // model at send time). Show the saved mode, not the resolved fallback.
   const titleProvider = settings.title?.llmProvider ?? ''
   const titleModel = settings.title?.model ?? ''
-  const titleIsAutomatic = !titleProvider || !titleModel
+  const titleIsAutomatic = isAutomaticTitle(settings.title)
 
   const context = normalizeContextSettings(settings.context)
 
@@ -74,7 +77,7 @@ export function AgentsSettings({
               id="agents-title-model"
               ariaLabel="Chat title model"
               placeholder="Automatic"
-              providers={providers}
+              providers={titleProviders}
               providerId={titleIsAutomatic ? '' : titleProvider}
               instanceId={titleIsAutomatic ? undefined : settings.title?.instanceId}
               modelId={titleIsAutomatic ? '' : titleModel}

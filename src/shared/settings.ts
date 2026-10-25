@@ -533,10 +533,15 @@ export function resolveTitleModel(
     const name = `${provider.id} ${provider.label}`.toLowerCase()
     return /openai/.test(name) && provider.models.some((model) => /luna/i.test(`${model.id} ${model.label}`))
   })
-  const provider = openAi ?? providers.find((candidate) => candidate.id === settings.provider?.llmProvider) ?? providers[0]
+  const provider = openAi ?? providers.find((candidate) => listingServes(candidate, settings.provider ?? {})) ?? providers[0]
   return provider
-    ? { llmProvider: provider.id, model: preferredTitleModel(provider) }
+    ? { ...(provider.instanceId ? { instanceId: provider.instanceId } : {}), llmProvider: provider.id, model: preferredTitleModel(provider) }
     : { llmProvider: '', model: '' }
+}
+
+/** A title setting that names no model: Automatic (`resolveTitleModel` picks one). */
+export function isAutomaticTitle(title: { instanceId?: string; llmProvider?: string; model?: string } | undefined): boolean {
+  return !(title?.instanceId?.trim() || title?.llmProvider?.trim()) || !title?.model?.trim()
 }
 
 function parseTitleModelId(modelId: string): { baseId: string } {
