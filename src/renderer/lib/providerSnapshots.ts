@@ -201,8 +201,16 @@ function pickerModel(model: InstanceSnapshot['models']['entries'][number], catal
   }
 }
 
-/** Mousse's provider order, the same on the providers page and in every model picker. */
-const DRIVER_ORDER: Record<HarnessDriverKind, number> = { claude: 0, codex: 1, antigravity: 2, pi: 3 }
+/**
+ * Mousse's provider order, the same on the providers page and in every model picker. A data
+ * table: model APIs (many instances of one driver) sort by name, agents keep their seeded order.
+ */
+const DRIVER_ORDER: Record<HarnessDriverKind, { rank: number; byName: boolean }> = {
+  claude: { rank: 0, byName: false },
+  codex: { rank: 1, byName: false },
+  antigravity: { rank: 2, byName: false },
+  pi: { rank: 3, byName: true }
+}
 
 /**
  * Instances in display order: agents by driver (Claude Code, Codex, Antigravity), each seeded
@@ -212,9 +220,10 @@ export function sortInstances<T extends Pick<InstanceSnapshot, 'driver' | 'built
   return snapshots
     .map((snapshot, index) => ({ snapshot, index }))
     .sort((a, b) => {
-      const byDriver = DRIVER_ORDER[a.snapshot.driver] - DRIVER_ORDER[b.snapshot.driver]
+      const order = DRIVER_ORDER[a.snapshot.driver]
+      const byDriver = order.rank - DRIVER_ORDER[b.snapshot.driver].rank
       if (byDriver !== 0) return byDriver
-      if (a.snapshot.driver === 'pi') return a.snapshot.displayName.localeCompare(b.snapshot.displayName, undefined, { sensitivity: 'base' })
+      if (order.byName) return a.snapshot.displayName.localeCompare(b.snapshot.displayName, undefined, { sensitivity: 'base' })
       if (a.snapshot.builtIn !== b.snapshot.builtIn) return a.snapshot.builtIn ? -1 : 1
       return a.index - b.index
     })
