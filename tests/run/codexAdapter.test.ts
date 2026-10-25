@@ -211,8 +211,8 @@ describe('CodexAdapter', () => {
     const delegated = mcp('sub-1', 'mousse', 'delegate_task', { arguments: { title: 'API reviewer', prompt: 'SECRET PROMPT', workspace: 'shared' } })
     const replay = transport([
       ...handshake(),
-      ...threadStart(3),
-      ...turnStart(4, 'hello'),
+      ...threadStart(4),
+      ...turnStart(5, 'hello'),
       note('item/started', { threadId: T, turnId: 'turn-1', item: { ...delegated, status: 'inProgress' } }),
       note('item/completed', {
         threadId: T,
