@@ -8,7 +8,7 @@ const render = (providerId: string) => renderToStaticMarkup(createElement(Provid
 
 describe('ProviderIcon colours', () => {
   it('draws the Claude and Anthropic marks in Claude orange', () => {
-    for (const id of ['claude', 'claude-subscription', 'anthropic', 'pi:anthropic']) {
+    for (const id of ['claude', 'claude-subscription', 'anthropic', 'pi:anthropic', 'claude:work']) {
       const markup = render(id)
       expect(markup, id).toContain('data-provider-mark="mono"')
       expect(markup, id).toContain('background-color:#D97757')

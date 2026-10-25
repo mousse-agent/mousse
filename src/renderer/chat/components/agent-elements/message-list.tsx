@@ -1706,7 +1706,8 @@ function AssistantParts({
   if (handoff) {
     const iconId = (selection: { provider: string; model: string }) => {
       const brand = inferModelBrand(selection.model, undefined, selection.provider).brandId;
-      return brand === 'anthropic' || selection.provider === 'claude-subscription' ? 'claude' : brand;
+      // An unknown model falls back to its provider's id, which ProviderIcon maps to the vendor logo.
+      return brand === 'anthropic' ? 'claude' : brand;
     };
     return <div role="status" aria-label={`Context handoff: ${handoff.from.model} to ${handoff.to.model}`}
       className="flex w-full items-center justify-center gap-2 py-1 text-xs text-muted-foreground">

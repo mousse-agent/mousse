@@ -35,6 +35,7 @@ import {
 } from '../chat/components/agent-elements/tools/quick-action-approval'
 import '../chat/components/agent-elements/agent-ui.css'
 import { prepareComposerThread } from '../lib/createComposerThread'
+import { pickerIdFor, pickerProviders, projectScope, useProviderSnapshots } from '../lib/providerSnapshots'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending } from '../lib/newThread'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
@@ -125,13 +126,18 @@ export function OrchestratorChat() {
     const current = state.composerDrafts[threadId ?? '__blank__'] ?? ''
     setComposerDraft(threadId, typeof value === 'function' ? value(current) : value)
   }, [setComposerDraft])
-  const [providers, setProviders] = useState<LlmProviderOption[]>([])
-  /** The provider instance serving a listed provider; the daemon maps a bare provider id otherwise. */
-  const instanceSelection = (providerId: string): { instanceId?: string } => {
-    const instanceId = providers.find((provider) => provider.id === providerId)?.instanceId
-    return instanceId ? { instanceId } : {}
+  const [catalog, setCatalog] = useState<LlmProviderOption[]>([])
+  // The picker lists the instances the thread's project allows, from the daemon's snapshots.
+  const { snapshots: providerSnapshots } = useProviderSnapshots(projectScope(workspace.projectId))
+  const providers = useMemo(() => pickerProviders(providerSnapshots, catalog), [providerSnapshots, catalog])
+  /** The selection a picker entry stores: its instance and the provider name that instance reports. */
+  const selectionFor = (pickerId: string): { instanceId?: string; llmProvider: string } => {
+    const provider = providers.find((entry) => entry.id === pickerId)
+    return provider ? { ...(provider.instanceId ? { instanceId: provider.instanceId } : {}), llmProvider: provider.llmProvider } : { llmProvider: pickerId }
   }
-  const [selectedProviderId, setSelectedProviderId] = useState('')
+  const [selectedLlmProvider, setSelectedLlmProvider] = useState('')
+  const [selectedInstanceId, setSelectedInstanceId] = useState<string | undefined>(undefined)
+  const selectedProviderId = pickerIdFor({ instanceId: selectedInstanceId, llmProvider: selectedLlmProvider }, providers)
   const [selectedModelId, setSelectedModelId] = useState('')
   const [enabledSkills, setEnabledSkills] = useState<SkillDescriptor[]>([])
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
@@ -369,9 +375,10 @@ export function OrchestratorChat() {
       window.mousse.settings.get(),
       window.mousse.settings.getOptions()
     ])
-    setProviders(options.llmProviders)
+    setCatalog(options.llmProviders)
     const selectedModel = activeThreadModelOverride ?? settings.provider
-    setSelectedProviderId(selectedModel.llmProvider)
+    setSelectedLlmProvider(selectedModel.llmProvider)
+    setSelectedInstanceId(selectedModel.instanceId)
     setSelectedModelId(selectedModel.model)
 
     const skillsSnapshot = await skillsRequest
@@ -770,8 +777,7 @@ export function OrchestratorChat() {
       // shared settings default used by other threads.
       if (selectedProviderId && selectedModelId) {
         const updated = await window.mousse.threads.setModel(id, {
-          ...instanceSelection(selectedProviderId),
-          llmProvider: selectedProviderId,
+          ...selectionFor(selectedProviderId),
           model: selectedModelId
         })
         if (!stillVisible()) return
@@ -809,15 +815,16 @@ export function OrchestratorChat() {
 
   const handleModelSelect = async (providerId: string, modelId: string) => {
     setModelMenuOpen(false)
-    const instance = instanceSelection(providerId)
-    setSelectedProviderId(providerId)
+    const instance = selectionFor(providerId)
+    setSelectedLlmProvider(instance.llmProvider)
+    setSelectedInstanceId(instance.instanceId)
     setSelectedModelId(modelId)
 
     // Persist as last-used default for new threads. Existing chats keep their
     // own modelOverride, which is stamped at create time from this value.
     if (!activeThreadId) {
       void window.mousse.settings.set({
-        provider: { ...instance, llmProvider: providerId, model: modelId }
+        provider: { ...instance, model: modelId }
       })
       return
     }
@@ -827,14 +834,13 @@ export function OrchestratorChat() {
     if (current) {
       useAppStore.getState().upsertThread({
         ...current,
-        modelOverride: { ...instance, llmProvider: providerId, model: modelId },
+        modelOverride: { ...instance, model: modelId },
         updatedAt: new Date().toISOString()
       })
     }
 
     const updated = await window.mousse.threads.setModel(activeThreadId, {
       ...instance,
-      llmProvider: providerId,
       model: modelId
     })
     if (updated) useAppStore.getState().upsertThread(updated)

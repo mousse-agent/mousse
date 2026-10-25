@@ -1593,6 +1593,19 @@ html.platform-darwin .titlebar-left {
   font-weight: 600;
 }
 
+/* The selected instance needs attention (not found, sign-in expired): a dot, as in Settings. */
+.composer-model-btn-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--warning);
+}
+
+.composer-model-btn-dot.is-error {
+  background: var(--danger);
+}
+
 .composer-model-btn-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1933,6 +1946,18 @@ html[data-theme='high-contrast'] .model-picker-row.selected {
 .model-picker-row-chevron {
   flex-shrink: 0;
   color: var(--ui-faint);
+}
+
+/* The instance needs a step first ("Claude Code: Not signed in"), from its snapshot. */
+.model-picker-row-status {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-picker-row-status::before {
+  content: '·';
+  margin-right: 5px;
 }
 
 /* Shortcut hints and stars are quiet chrome: faint, no fill, no colour. */
