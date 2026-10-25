@@ -399,6 +399,29 @@ describe('remote composer methods', () => {
     expect(await call(api, 'orchestrator.abort', { threadId: 'idle-parent', run: newId('rpc') })).toEqual({ ok: true })
     expect(await call(api, 'orchestrator.abort', { threadId: 'idle-parent', run: newId('rpc') })).toEqual({ ok: false })
     expect(stopped).toEqual(['idle-parent', 'idle-parent'])
+    // Another caller's live remote run on the thread is not this caller's to end, whatever run id it names.
+    const owned: string[] = []
+    const guarded = new RemoteApi({
+      ...idleBackend,
+      run: (_threadId, _content, control) => new Promise((resolve) => control.signal.addEventListener('abort', () => resolve({ text: '', silent: true, aborted: true }), { once: true })),
+      stop: async (threadId) => {
+        owned.push(threadId)
+        return { ok: true }
+      }
+    }, clock)
+    resources.push(() => guarded.close())
+    const runContext = context()
+    const entry = guarded.methods().find((row) => row.method === 'orchestrator.send')!
+    const running = Promise.resolve(entry.handle({ threadId: 'busy', content: 'work' }, runContext)).catch((error: unknown) => error)
+    const stranger = { node: newId('node') as NodeId, user: newId('user') as UserId }
+    await expect(call(guarded, 'orchestrator.abort', { threadId: 'busy', run: newId('rpc') }, stranger)).rejects.toMatchObject({ code: 'forbidden' })
+    expect(owned).toEqual([])
+    // The owner's own Stop with a fresh id, and anyone's Stop of a thread nobody runs remotely, still work.
+    expect(await call(guarded, 'orchestrator.abort', { threadId: 'busy', run: newId('rpc') })).toEqual({ ok: true })
+    expect(await call(guarded, 'orchestrator.abort', { threadId: 'idle', run: newId('rpc') }, stranger)).toEqual({ ok: true })
+    expect(owned).toEqual(['busy', 'idle'])
+    await call(guarded, 'orchestrator.abort', { threadId: 'busy', run: runContext.id })
+    await running
     // A backend without the hook answers as before.
     const bare = new RemoteApi(idleBackend, clock)
     resources.push(() => bare.close())

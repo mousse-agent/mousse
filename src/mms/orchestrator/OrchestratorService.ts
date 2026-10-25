@@ -1088,7 +1088,32 @@ export class OrchestratorService extends EventEmitter {
       this.emit('run-interrupted-on-boot', { threadId: engine.getRun(runId)?.threadId, runId })
     }
     this.recoverQueuedRows()
+    this.recoverOrphanedFollowUps()
     return interrupted
+  }
+
+  /**
+   * Boot: the follow-up of a steer a turn never read is a queued run created just before its queue entry
+   * is saved. A crash between the two leaves a queued `steer-followup` run that no queue entry and no
+   * `turn.start` will ever start, which would hold its subagent's task for ever. Such a run is cancelled
+   * (the steer it was for lived only in the dead process), which releases the hold.
+   */
+  private recoverOrphanedFollowUps(): void {
+    const engine = this.runEngine
+    const store = this.threadStore
+    if (!engine || !store) return
+    for (const run of engine.store.listNonTerminalRuns()) {
+      if (run.status !== 'queued' || run.source !== 'steer-followup') continue
+      if (engine.outbox.listForRun(run.runId).some((effect) => effect.kind === 'turn.start')) continue
+      try {
+        if (readDurableQueue(store, run.threadId).some((item) => item.runId === run.runId)) continue
+      } catch {
+        continue
+      }
+      this.markRun(run.runId, (runs, id) => {
+        if (runs.getRun(id)?.status === 'queued') runs.markTerminal(id, 'cancelled', { interruptedBy: 'daemon_restart', error: 'The daemon stopped before the follow-up was queued.' })
+      })
+    }
   }
 
   /**

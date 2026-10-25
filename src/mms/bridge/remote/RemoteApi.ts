@@ -203,6 +203,9 @@ export class RemoteApi {
       if (!run) {
         // No remote run to end: a Stop of the thread still ends its subagents and other work (an idle parent's).
         if (method !== 'orchestrator.abort' || typeof params.threadId !== 'string') return { ok: false }
+        // Another caller's remote run on this thread is not this caller's to end, whatever run id it names.
+        if ([...this.runs.values()].some((other) => other.threadId === params.threadId && (other.caller !== context.caller.node || other.user !== context.caller.user)))
+          throw new NetError('forbidden')
         const stopped = (await this.backend.stop?.(params.threadId)) as { ok?: boolean } | undefined
         return { ok: stopped?.ok === true }
       }

@@ -907,6 +907,31 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
       expect(reborn.engine.delegations.get(s.delegation.delegationId)!.result).toMatchObject({ runStatus: 'completed', text: 'I checked the tests too.' })
     })
 
+    it('a crash between the follow-up run and its queue entry leaves no run that holds the task for ever: boot cancels it and the task publishes', async () => {
+      const { s, followUp } = await heldBySteer()
+      expect(s.task(s.delegation.delegationId).status).toBe('running')
+      // The process died after the run was written and before the entry was saved.
+      s.d.store.saveMessageQueue(s.childThreadId, [])
+      const homeDir = home!
+      await s.d.crash()
+      const reborn = phase6Daemon(homeDir, [s.adapter])
+      daemon = reborn
+      reborn.orch.recoverRunEngineOnBoot()
+      expect(reborn.engine.getRun(followUp.runId)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'daemon_restart' } })
+      expect(reborn.engine.delegations.get(s.delegation.delegationId)).toMatchObject({ status: 'result_available', result: { runStatus: 'completed' } })
+    })
+
+    it('boot leaves a follow-up whose queue entry exists', async () => {
+      const { s, followUp } = await heldBySteer()
+      const homeDir = home!
+      await s.d.crash()
+      const reborn = phase6Daemon(homeDir, [s.adapter])
+      daemon = reborn
+      reborn.orch.recoverRunEngineOnBoot()
+      expect(reborn.engine.getRun(followUp.runId)!.status).toBe('queued')
+      expect(reborn.engine.delegations.get(s.delegation.delegationId)!.status).toBe('running')
+    })
+
     it('the task is released as soon as the queued follow-up leaves without running', async () => {
       const { s, followUp } = await heldBySteer()
       expect(s.task(s.delegation.delegationId).status).toBe('running')
