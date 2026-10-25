@@ -125,11 +125,11 @@ function Fixture() {
     </nav>
     {view === 'voice' && <ChatComposer input={input} onInputChange={setInput} attachedFiles={[]}
       onAttachedFilesChange={() => {}} voiceMessages={voices} onVoiceMessagesChange={setVoices}
-      chatMode="agent" onChatModeChange={() => {}} enabledSkills={[]} providers={[]}
+      enabledSkills={[]} providers={[]}
       selectedProviderId="" selectedModelId="" modelMenuOpen={false} onModelMenuOpenChange={() => {}}
       onModelSelect={() => {}} onOpenSettings={() => {}} contextOpen={false} onContextOpenChange={() => {}}
       contextUsage={{ percent: 0, used: 0, limit: 100, modelName: null, source: 'estimated', categories: [] }}
-      onSend={() => {}} hideModePicker />}
+      onSend={() => {}} disableSkillsPicker />}
     {view === 'storage' && <StorageSettings />}
     {view === 'chat' && <OrchestratorChat />}
     <output data-voice-count>{voices.length} voice attachments</output>

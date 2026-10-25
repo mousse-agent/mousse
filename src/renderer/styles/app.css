@@ -2063,11 +2063,6 @@ html[data-theme='high-contrast'] .model-picker-row.selected {
   color: var(--text-primary);
 }
 
-.composer-mode-picker {
-  position: relative;
-  flex-shrink: 0;
-}
-
 .composer-mode-details {
   position: relative;
 }

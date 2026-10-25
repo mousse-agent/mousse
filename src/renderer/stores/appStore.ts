@@ -310,14 +310,15 @@ let profileActivated = false
 /** The view a fresh profile starts on; the empty main area shows the surface picker until one opens. */
 const DEFAULT_MAIN_VIEW: MainView = 'browser'
 
-/** Workspaces saved before the Agents tab was removed still name it as the view or an open surface. */
-export function sanitizeSavedWorkspace<T extends { mainView: MainView; openedSurfaceKinds: MainView[] }>(workspace: T): T {
+/** Workspaces saved before the Agents tab was removed still name it as the view or an open surface,
+ * and ones saved before the composer mode picker was removed may hold Plan or Build with no way back. */
+export function sanitizeSavedWorkspace<T extends { mainView: MainView; openedSurfaceKinds: MainView[]; chatMode?: ChatMode }>(workspace: T): T {
   const retired = (view: unknown) => view === 'agents'
   const openedSurfaceKinds = Array.isArray(workspace.openedSurfaceKinds)
     ? workspace.openedSurfaceKinds.filter((kind) => !retired(kind))
     : []
   const mainView = retired(workspace.mainView) ? openedSurfaceKinds[0] ?? DEFAULT_MAIN_VIEW : workspace.mainView
-  return { ...workspace, mainView, openedSurfaceKinds }
+  return { ...workspace, mainView, openedSurfaceKinds, ...('chatMode' in workspace ? { chatMode: DEFAULT_CHAT_MODE } : {}) }
 }
 
 function savePersonalWorkspace(state: AppState): void {
