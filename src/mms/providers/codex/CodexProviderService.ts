@@ -81,6 +81,10 @@ const INTERRUPT_TIMEOUT_MS = 5_000
 const PREVIOUS_TURN_SETTLE_MS = 10_000
 /** How long a stopped turn's routing is kept while the server settles it. */
 const STOPPED_TURN_RELEASE_MS = 30_000
+/** Spawn items kept per thread no run has named yet (the thread map itself holds 64). */
+const MAX_STRAY_SPAWNS = 32
+/** How long the routing of a stopped or abandoned helper tree is kept for helpers that have not settled. */
+const STOPPED_HELPER_TREE_MS = 10 * 60_000
 /** The app-server process is closed once it has been unused this long after a turn... */
 export const CODEX_IDLE_CLOSE_MS = 60_000
 /** ...or after a sign-in check or model listing that started it. */
@@ -1006,7 +1010,7 @@ export class CodexProviderService {
     const orphan = [...this.orphans].find((helpers) => helpers.has(threadId))
     if (orphan) {
       orphan.handle(notification)
-      if (!orphan.awaitingTurn()) this.orphans.delete(orphan)
+      if (!orphan.running().length) this.orphans.delete(orphan)
       return
     }
     this.noteStray(notification, threadId)
@@ -1130,10 +1134,16 @@ export class CodexProviderService {
 
   /** Remembers the turn of a thread no run owns yet: a helper's first events can beat the item that names it. */
   private noteStray(notification: CodexNotification, threadId: string): void {
-    const turn = (notification.params as { turn?: { id?: string } } | undefined)?.turn
-    if (notification.method !== 'turn/started' && notification.method !== 'turn/completed') return
+    const params = notification.params as { turn?: { id?: string }; item?: { type?: string } } | undefined
+    const turn = params?.turn
+    const spawn = (notification.method === 'item/started' || notification.method === 'item/completed') &&
+      (params?.item?.type === 'subAgentActivity' || params?.item?.type === 'collabAgentToolCall')
+    if (notification.method !== 'turn/started' && notification.method !== 'turn/completed' && !spawn) return
     const stray = this.strays.get(threadId) ?? { completed: false }
-    if (notification.method === 'turn/started' && turn?.id) Object.assign(stray, { turnId: turn.id, completed: false })
+    if (spawn) {
+      // Replayed when a run names this thread as a helper; a few per thread, the newest kept.
+      stray.spawns = [...(stray.spawns ?? []), params!.item as { type: string } & Record<string, unknown>].slice(-MAX_STRAY_SPAWNS)
+    } else if (notification.method === 'turn/started' && turn?.id) Object.assign(stray, { turnId: turn.id, completed: false })
     else if (notification.method === 'turn/completed') stray.completed = true
     this.strays.delete(threadId)
     this.strays.set(threadId, stray)
@@ -1159,8 +1169,13 @@ export class CodexProviderService {
         /* the helper ended meanwhile, or the process is gone */
       })
     })
-    // A helper whose turn has not started yet is interrupted when it does, even after this chat ended.
-    if (run.helpers.awaitingTurn()) this.orphans.add(run.helpers)
+    // Routing for the stopped tree outlives this chat until every helper has settled: a helper
+    // whose turn has not started is interrupted when it does, and a helper that spawns another
+    // while its own interrupt is pending gets that one interrupted too.
+    if (run.helpers.running().length && !this.orphans.has(run.helpers)) {
+      this.orphans.add(run.helpers)
+      setTimeout(() => this.orphans.delete(run.helpers), STOPPED_HELPER_TREE_MS).unref?.()
+    }
   }
 
   private sendInterrupt(run: TurnRun): void {
@@ -1355,6 +1370,8 @@ export class CodexProviderService {
       let lastTurn: CodexTurn | undefined
       // When native helpers first held this chat open; the pin cap counts from here.
       let pinnedSince: number | undefined
+      // Set when a cap stopped the helpers: the note that ends the reply, once any held steer has run.
+      let abandoned: string | undefined
       for (;;) {
         // Stop may have landed before this run existed (its handler then had nothing to
         // interrupt); a turn started now could never be stopped.
@@ -1400,22 +1417,23 @@ export class CodexProviderService {
           // Codex completes the parent's turn while the helpers it started keep running, so this chat
           // (the child's run) stays open until they settle. Stop interrupts them and ends the wait; a
           // steer that arrives meanwhile starts a turn; helpers silent for too long are abandoned.
-          if (current.helpers.running().length) {
+          if (current.helpers.running().length && !abandoned) {
             pinnedSince ??= Date.now()
             const held = await this.holdForHelpers(current, input, aborted, new Promise<void>((wake) => (steerWake = wake)), pinnedSince)
             steerWake = undefined
             // Stop interrupts the helpers, and their end can be reported before the abort is seen.
             signal.throwIfAborted()
             if (held) {
+              // A steer that arrived in the same tick still gets its turn before the run ends.
               this.stopHelpers(current)
-              current.addNote(held)
-              break
+              abandoned = held
             }
           }
           if (!undelivered.length) break
         }
         nextInput = [textInput(undelivered.splice(0).join('\n'))]
       }
+      if (abandoned) current.addNote(abandoned)
       this.turns.delete(codexThreadId)
       current.settled()
       current.closeTools()
@@ -1453,11 +1471,15 @@ export class CodexProviderService {
           if (this.turns.get(pending.codexThreadId) === pending) this.turns.delete(pending.codexThreadId)
           pending.settled()
         }
-        if (pending.isIdle() || !this.app) release()
+        // Released once the server settled the turn and the stopped helper tree has too: until then
+        // the run owns its helpers' threads, so a helper spawned while Stop is pending is found.
+        const treeSettled = (): boolean => !pending.helpers.running().length
+        if ((pending.isIdle() && treeSettled()) || !this.app) release()
         else
-          void Promise.race([pending.whenIdle(), new Promise((done) => setTimeout(done, STOPPED_TURN_RELEASE_MS).unref?.())]).then(
-            release
-          )
+          void Promise.race([
+            pending.whenIdle().then(() => pending.helpers.whenSettled()).catch(() => undefined),
+            new Promise((done) => setTimeout(done, STOPPED_TURN_RELEASE_MS).unref?.())
+          ]).then(release)
       }
     }
   }

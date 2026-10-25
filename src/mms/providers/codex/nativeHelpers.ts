@@ -4,9 +4,11 @@ import type { CodexNotification } from './protocol'
 export interface StrayThread {
   turnId?: string
   completed: boolean
+  /** Spawn items the thread emitted before any run named it; replayed when it is registered as a helper. */
+  spawns?: Array<{ type: string } & Record<string, unknown>>
 }
 
-type HelperState = { turnId?: string; running: boolean; seenActive: boolean }
+type HelperState = { turnId?: string; running: boolean; seenActive: boolean; interruptedTurn?: string }
 
 /**
  * The native helpers (Codex's own subagents, separate Codex threads) one Codex turn started.
@@ -79,7 +81,7 @@ export class NativeHelpers {
       helper.turnId = params.turn.id
       helper.seenActive = true
       this.set(threadId, helper, true)
-      this.stopWith?.(threadId, params.turn.id)
+      this.interrupt(threadId, helper)
     } else if (notification.method === 'turn/completed') this.set(threadId, helper, false)
     else if (notification.method === 'thread/status/changed') {
       if (params?.status?.type === 'active') helper.seenActive = true
@@ -95,7 +97,14 @@ export class NativeHelpers {
   /** Interrupts every running helper now, and any that starts its turn later. `send` issues `turn/interrupt`. */
   stopAll(send: (threadId: string, turnId: string) => void): void {
     this.stopWith = send
-    for (const [threadId, helper] of this.helpers) if (helper.running && helper.turnId) send(threadId, helper.turnId)
+    for (const [threadId, helper] of this.helpers) this.interrupt(threadId, helper)
+  }
+
+  /** Interrupts a running helper whose turn id is known, once per turn, if a stop was requested. */
+  private interrupt(threadId: string, helper: HelperState): void {
+    if (!this.stopWith || !helper.running || !helper.turnId || helper.interruptedTurn === helper.turnId) return
+    helper.interruptedTurn = helper.turnId
+    this.stopWith(threadId, helper.turnId)
   }
 
   /** Resolves when no helper is running; rejects when the process is lost (`close`). */
@@ -117,7 +126,9 @@ export class NativeHelpers {
     const seen = this.stray(threadId)
     const helper: HelperState = { running: !seen?.completed, seenActive: Boolean(seen), ...(seen?.turnId ? { turnId: seen.turnId } : {}) }
     this.helpers.set(threadId, helper)
-    if (helper.running && helper.turnId) this.stopWith?.(threadId, helper.turnId)
+    this.interrupt(threadId, helper)
+    // What the helper already spawned, in order: its helpers are tracked from here on.
+    for (const item of seen?.spawns ?? []) this.noteItem(item)
   }
 
   private set(_threadId: string, helper: HelperState, running: boolean): void {
