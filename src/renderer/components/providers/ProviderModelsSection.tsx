@@ -165,12 +165,14 @@ export function ProviderModelsSection({
                 >
                   <Star size={13} />
                 </button>
-                <span className="prov-model-text">
-                  <span className="prov-model-name">{model.label}</span>
-                  {model.label !== model.id && <code className="prov-model-detail">{model.id}</code>}
-                  {custom && <span className="prov-model-detail">custom</span>}
+                <span className="prov-model-main">
+                  <span className="prov-model-text">
+                    <span className="prov-model-name">{model.label}</span>
+                    {model.label !== model.id && <code className="prov-model-detail">{model.id}</code>}
+                    {custom && <span className="prov-model-detail">custom</span>}
+                  </span>
+                  <span className="prov-model-caps">{capabilities}</span>
                 </span>
-                <span className="prov-model-caps">{capabilities}</span>
                 <span className="prov-model-actions">
                   {!isHidden && !filtering && (
                     <>
