@@ -33,7 +33,8 @@ export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.fre
   events: 'rich',
   containment: 'weak',
   historyInjection: 'prompt',
-  mcp: true
+  mcp: true,
+  childPolicy: 'enforced'
 })
 
 /**
@@ -99,6 +100,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
     }
     const chatInput = (): ClaudeSubscriptionChatInput => ({
       mode: input.mode === 'plan' ? 'plan' : 'default',
+      child: input.child,
       threadId: input.threadId,
       instanceId: input.instanceId,
       cwd,

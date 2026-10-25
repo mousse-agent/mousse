@@ -43,6 +43,8 @@ import {
 } from './metrics'
 import { parseClaudeSubscriptionUsage } from './usage'
 import { claudeMcpToolBlocked, claudeProxiedMcpServer, type ClaudeTurnIntegrations } from './integrations'
+import { claudeChildToolDenial } from './childPolicy'
+import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
 type SavedSession = {
@@ -84,6 +86,8 @@ export type ClaudeSubscriptionChatInput = {
   images?: ChatImageAttachment[]
   signal?: AbortSignal
   mode?: 'plan' | 'default'
+  /** Set for a delegated child's turns (first and resumed); see `claudeChildToolDenial`. */
+  child?: ChildTurnPolicy
   /** The Mousse MCP server for this run (SPEC §15.2); null attaches no server. */
   mcp?: { url: string; token: string } | null
   /** Mousse's own instructions, appended to Claude Code's system prompt. */
@@ -881,6 +885,11 @@ export class ClaudeSubscriptionProviderService {
       const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(selected.effort ?? '')
         ? selected.effort as Options['effort'] : undefined
       const planTurn = input.mode === 'plan'
+      const readOnlyChild = input.child?.readOnly === true
+      // Plan turns and read-only children route every call through the hook and canUseTool's
+      // read-only allowlist. A read-only child keeps the default permission mode: plan mode would
+      // inject its planning and ExitPlanMode flow into a research or review task.
+      const restricted = planTurn || readOnlyChild
       const launchAppend = claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.settings)), input.cwd)
       const options: Options = {
         // Mousse's instructions first, then the user's own append text.
@@ -891,7 +900,9 @@ export class ClaudeSubscriptionProviderService {
         // Agent turns run unattended in the thread workspace, like Mousse's other agents.
         ...(planTurn
           ? { permissionMode: 'plan' as const }
-          : { permissionMode: 'bypassPermissions' as const, allowDangerouslySkipPermissions: true }),
+          : readOnlyChild
+            ? { permissionMode: 'default' as const }
+            : { permissionMode: 'bypassPermissions' as const, allowDangerouslySkipPermissions: true }),
         // The Mousse server keeps its name: user servers are spread first.
         mcpServers: {
           ...integrations?.mcpServers,
@@ -916,10 +927,20 @@ export class ClaudeSubscriptionProviderService {
                         permissionDecisionReason: 'This tool is turned off for this MCP server in Mousse.'
                       }
                     }
+                  // A delegated child's policy (no native subagents; read-only for a shared child).
+                  const childDenial = event.hook_event_name === 'PreToolUse' ? claudeChildToolDenial(input.child, event.tool_name) : undefined
+                  if (childDenial)
+                    return {
+                      hookSpecificOutput: {
+                        hookEventName: 'PreToolUse',
+                        permissionDecision: 'deny',
+                        permissionDecisionReason: childDenial
+                      }
+                    }
                   if (event.hook_event_name === 'PreToolUse')
                     await editCounter.start(event.tool_use_id, event.tool_name, event.tool_input)
-                  // Plan turns route every call through canUseTool so its read-only allowlist holds.
-                  return planTurn
+                  // Restricted turns route every call through canUseTool so its read-only allowlist holds.
+                  return restricted
                     ? { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' } }
                     : {}
                 }
@@ -952,6 +973,8 @@ export class ClaudeSubscriptionProviderService {
         canUseTool: async (toolName, args, context) => {
           if (controller.signal.aborted || context.signal.aborted)
             return { behavior: 'deny', message: 'Turn cancelled' }
+          const childDenial = claudeChildToolDenial(input.child, toolName)
+          if (childDenial) return { behavior: 'deny', message: childDenial }
           // Mousse's own tools are scoped by the run's credential (mode ceiling, caller thread);
           // the server refuses what the run may not do, so they need no extra prompt.
           if (input.mcp && toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX))
@@ -962,6 +985,7 @@ export class ClaudeSubscriptionProviderService {
           // tool it reveals is still checked here (or by the user's rules) when it is called.
           if (input.mcp && toolName === 'ToolSearch')
             return { behavior: 'allow', updatedInput: args }
+          // (A read-only child's own allowlist is `claudeChildToolDenial`, above.)
           if (
             planTurn &&
             !['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'AskUserQuestion'].includes(toolName)
@@ -1016,7 +1040,7 @@ export class ClaudeSubscriptionProviderService {
                 }
               }
             }
-            if (planTurn) return { behavior: 'allow', updatedInput: args }
+            if (restricted) return { behavior: 'allow', updatedInput: args }
             // Only calls Claude Code refuses to auto-approve even in bypass mode arrive here.
             const answer = await this.questions.requestAnswers(
               [

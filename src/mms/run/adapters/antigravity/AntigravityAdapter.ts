@@ -16,6 +16,11 @@ import { promptStreams, runtimeToolEvent, withAppletGuidance } from '../shared/p
 /** The slice of the provider service a turn drives. */
 export type AntigravityClient = Pick<AntigravityProviderService, 'chat' | 'commitConversation' | 'configured'>
 
+/**
+ * `childPolicy: 'isolated_only'`: the ACP agent rejects plan mode, so a `shared` (read-only) child
+ * cannot be held to read-only. An `isolated` child runs; any native `start_subagent` it makes is only
+ * observed (the provider service reports it), not controlled.
+ */
 export const ANTIGRAVITY_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'interrupt_restart',
   interrupt: true,
@@ -24,7 +29,8 @@ export const ANTIGRAVITY_CAPABILITIES: ProviderCapabilities = Object.freeze({
   events: 'sparse',
   containment: 'weak',
   historyInjection: 'prompt',
-  mcp: true
+  mcp: true,
+  childPolicy: 'isolated_only'
 })
 
 /**

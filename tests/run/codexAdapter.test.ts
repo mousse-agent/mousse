@@ -189,7 +189,8 @@ describe('CodexAdapter', () => {
       events: 'rich',
       containment: 'weak',
       historyInjection: 'prompt',
-      mcp: true
+      mcp: true,
+      childPolicy: 'enforced'
     })
     expect(adapter.describe('gpt-x')).toEqual({ contextUsage: 'reported' })
     expect(adapter.configured()).toBe(false)

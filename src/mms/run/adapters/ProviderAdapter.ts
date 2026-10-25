@@ -9,6 +9,7 @@ import type {
   ToolLoopSafetyOptions
 } from '../../orchestrator/LlmClient'
 import type { NativeMessageCheckpoint } from '../../orchestrator/nativeContext'
+import type { ChildPreflightContext, SubagentRefusal } from '../policy/featureGates'
 import type { ProviderRef } from '../types'
 
 /**
@@ -41,6 +42,21 @@ export interface ProviderCapabilities {
   historyInjection: 'native' | 'prompt'
   /** `featureGates.mcpAttachable` (Phase 5). */
   mcp: boolean
+  /**
+   * `featureGates.subagentTargetRefusal`. `enforced`: the adapter holds a delegated child to its
+   * policy (read-only for a `shared` child, no provider-native subagents, no user MCP servers for a
+   * read-only child). `isolated_only`: it cannot hold a child to read-only, so it is refused as the target of a `shared` child and still runs `isolated` ones.
+   */
+  childPolicy: 'enforced' | 'isolated_only'
+}
+
+/**
+ * The policy of a delegated child's turn (issue #142), absent for a thread that is not a subagent.
+ * Every turn of a child carries it, first or resumed. `readOnly` is a `shared` child, which
+ * observes its parent's workspace and must not change it.
+ */
+export interface ChildTurnPolicy {
+  readOnly: boolean
 }
 
 /** One provider turn, built by the `turn.start` executor from the thread's state. */
@@ -67,6 +83,8 @@ export interface TurnInput {
    */
   modelPinned: boolean
   mode: ChatMode
+  /** Set when the thread is a delegated child; adapters apply it on every turn of the thread. */
+  child?: ChildTurnPolicy
   /** Text of the admitted user message; prompt-based adapters send it as the turn's prompt. */
   prompt: string
   /** Active pi-ai transcript, ending with the admitted user message. */
@@ -255,6 +273,13 @@ export interface ProviderAdapter {
   describe?(model: string): ModelInfo
   /** The runtime is signed in and installed, so its models can be selected by default. */
   configured?(): boolean
+  /**
+   * Issue #142: a check of the user's own setup before a child is created on this adapter, for
+   * shared and isolated children alike. Returns why the child cannot be held to its policy (the
+   * runtime's native subagents are enabled, or a read-only child would sit beside MCP servers whose
+   * tool calls Mousse cannot deny), or null. It reads the setup and never changes it.
+   */
+  childPreflight?(context: ChildPreflightContext): Promise<SubagentRefusal | null>
   /**
    * Runs one turn. Settling is the turn's terminal signal for every adapter: the vendor runtimes
    * resolve when their stream closes, so there is no separate "stream closed without a terminal

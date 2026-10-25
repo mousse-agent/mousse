@@ -23,7 +23,8 @@ export const PI_LOOP_CAPABILITIES: ProviderCapabilities = Object.freeze({
   events: 'rich',
   containment: 'strong',
   historyInjection: 'native',
-  mcp: false
+  mcp: false,
+  childPolicy: 'enforced'
 })
 
 /**

@@ -33,6 +33,7 @@ export const MCP_ERROR_CODES: Record<McpToolErrorCode | 'mousse_unauthorized', n
   mousse_caller_not_live: -32002,
   mousse_scope_denied: -32003,
   mousse_ceiling_exceeded: -32004,
+  mousse_read_only: -32005,
   mousse_unknown_tool: -32601
 }
 
