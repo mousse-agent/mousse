@@ -64,7 +64,27 @@ export function hasLiveRun(store: RunStore, threadId: string): boolean {
 export function isActionableRow(store: RunStore, row: InboxRecord): boolean {
   if (row.status === 'acknowledged') return false
   if (isExhaustedRow(row)) return false
-  return !(row.status === 'delivered' && deliveryStoppedByUser(store, row))
+  if (row.status !== 'delivered') return true
+  return !deliveryStoppedByUser(store, row) && !isLegacySteerRow(store, row)
+}
+
+/**
+ * A row from before the delivery rules of this version: delivered by a `turn.steer` that succeeded
+ * on a run that has completed, with neither `steerHeldBy` nor `steerTakenBy`. Only code that holds a
+ * steer writes those markers, so such a row is a native steer of an older version, which acknowledged
+ * its rows when the run ended. The delivery rules never restore it, on purpose (`deliveryFailure` in
+ * `wake.ts` requires `steerHeldBy`, so a row that predates it is not mistaken for an unread steer).
+ * Nothing will ever consume it, so it must not hold a task that was running at upgrade time. A row
+ * carrying a marker is a steer this version held: it counts until it is read or restored.
+ */
+function isLegacySteerRow(store: RunStore, row: InboxRecord): boolean {
+  if (!row.deliveredBy) return false
+  const payload = row.payload as { steerHeldBy?: unknown; steerTakenBy?: unknown } | null
+  if (payload?.steerHeldBy !== undefined || payload?.steerTakenBy !== undefined) return false
+  const effect = store.db.statement('SELECT kind, status, run_id FROM effects WHERE effect_id = ?').get(row.deliveredBy)
+  if (!effect || effect.kind !== 'turn.steer' || effect.status !== 'succeeded') return false
+  const run = typeof effect.run_id === 'string' ? store.getRun(effect.run_id) : null
+  return run?.status === 'completed'
 }
 
 /** A row whose redelivery gave up (`restoreUndeliveredRows` flags it `deliveryFailed`). */

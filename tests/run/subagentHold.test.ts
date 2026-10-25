@@ -356,6 +356,27 @@ describe('a subagent\'s result waits for its own subagents (issue #142)', () => 
       expect(task(pc.delegationId).status).toBe('failed')
     })
 
+    it('a legacy steer row (master-shaped: succeeded steer, completed run, no steerHeldBy or steerTakenBy) is consumed: it does not hold the task', async () => {
+      const { pc, cg } = await nested()
+      f!.finish(cg.childRunId, 'G result')
+      const live = f!.store.createRun({ threadId: pc.childThreadId, source: 'gui' })
+      f!.engine.markStarting(live.runId)
+      f!.engine.markRunning(live.runId)
+      const steerId = f!.reconciler.runOnce().wakes.steers[0]
+      f!.outbox.claimNext(OWNER, f!.now(), { lanes: ['control'] })
+      f!.outbox.succeed(steerId, OWNER, f!.now())
+      // Nothing marked the steer: an older version delivered it, and its run ended without a way to read it.
+      expect(f!.engine.inbox.listForThread(pc.childThreadId)[0].payload).not.toHaveProperty('steerHeldBy')
+      expect(task(pc.delegationId).status).toBe('running')
+      f!.engine.markTerminal(live.runId, 'completed', undefined, { resultText: 'C turn' })
+      const [row] = f!.engine.inbox.listForThread(pc.childThreadId)
+      expect(row.status).toBe('delivered')
+      // The delivery rules leave it alone, and so does the hold: the task publishes.
+      expect(f!.reconciler.runOnce().wakes.restored).toEqual([])
+      expect(childBusy(f!.store, pc.childThreadId)).toBe(false)
+      expect(task(pc.delegationId)).toMatchObject({ status: 'result_available', result: { text: 'C turn' } })
+    })
+
     it('a steer that succeeded but was never read, on a run that completed, holds until the row is restored and delivered again', async () => {
       const { pc, cg } = await nested()
       f!.finish(cg.childRunId, 'G result')
