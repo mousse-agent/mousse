@@ -56,7 +56,7 @@ import {
   type UserInput
 } from './protocol'
 import { codexTurnPolicy } from './childPolicy'
-import { CODEX_SWEEP_ROUND_MS, DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
+import { DEFAULT_TREE_TIMING, HelperTree, RpcRefused, ThreadStatuses, TreeOff, isWakeUp, type TreePorts, type TreeTiming } from './helperTree'
 import { NativeHelpers, type StrayThread } from './nativeHelpers'
 import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
 import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
@@ -357,12 +357,15 @@ class TurnRun {
   tree: HelperTree | undefined
   /** Set once the run is being stopped: interrupting everything under the thread, then releasing it. */
   sweeping: Promise<void> | undefined
-  /** The last `turn/interrupt` sent for the thread's own turn. */
-  lastInterrupt: { turnId: string; at: number } | undefined
+  /** The turn Stop interrupted itself (the sweep's first round does not send it again). */
+  stopInterrupt: string | undefined
   /** The app-server process this run talks to; a sweep never reaches into a replacement process. */
   conn: CodexConnection | undefined
   /** A turn the server started on its own while the run waited for its helpers. */
   private adoptedTurn: string | undefined
+  /** An adopted turn that ended `failed` or `interrupted`: the run fails with it. */
+  adoptedFailure: CodexTurn | undefined
+  private adoptedFailureWaiters: Array<() => void> = []
   /** The chat returned; late events only settle the turn and reach nobody. */
   private muted = false
   private readonly questionsDone = new AbortController()
@@ -430,6 +433,8 @@ class TurnRun {
   /** The `turn/start` response named the turn Mousse's input went into (a running server turn takes it as a steer). */
   turnStarted(turn: CodexTurn): void {
     this.turnId = turn.id
+    // The input was steered into a turn the run had adopted: that is Mousse's own turn now, and it settles the run.
+    if (this.adoptedTurn === turn.id) this.adoptedTurn = undefined
     this.startInFlight = false
     // A `turn/completed` that came while the response was on its way was held back; only this turn settles the run.
     const done = this.completedTurns.get(turn.id)
@@ -438,6 +443,11 @@ class TurnRun {
       this.settle = undefined
     }
     this.wakeIdle()
+  }
+
+  /** Resolves when an adopted turn has ended `failed` or `interrupted` (at once if one already has). */
+  whenAdoptedFails(): Promise<void> {
+    return this.adoptedFailure ? Promise.resolve() : new Promise((done) => this.adoptedFailureWaiters.push(done))
   }
 
   /** Something concerning this run happened; a sweep waiting for news looks again. */
@@ -528,7 +538,12 @@ class TurnRun {
       this.completedTurns.set(completed.turn.id, completed.turn)
       if (this.adoptedTurn === completed.turn.id) {
         this.adoptedTurn = undefined
-        this.turnOpen = false
+        // Mousse's own turn may be running by now; it keeps its turn open.
+        if (this.turnId === completed.turn.id) this.turnOpen = false
+        if (completed.turn.status === 'failed' || completed.turn.status === 'interrupted') {
+          this.adoptedFailure = completed.turn
+          for (const waiter of this.adoptedFailureWaiters.splice(0)) waiter()
+        }
       } else if (!this.startInFlight && (!this.turnId || completed.turn.id === this.turnId)) {
         // While a `turn/start` is on its way, any turn of the thread may complete: `turnStarted` settles.
         this.settle?.resolve(completed.turn)
@@ -1273,23 +1288,21 @@ export class CodexProviderService {
   private sendInterrupt(run: TurnRun): void {
     const conn = run.conn
     if (!conn || conn.signal.aborted || !run.turnId || run.turnCompleted()) return
+    run.stopInterrupt = run.turnId
     this.interruptTurn(run, conn, run.turnId)
   }
 
   /** Interrupts the run's own thread: its turn by id when one is known and running, else whatever turn it runs. */
-  private interruptRoot(run: TurnRun, conn: CodexConnection): void {
-    this.interruptTurn(run, conn, run.turnId && !run.turnCompleted() ? run.turnId : '')
+  private interruptRoot(run: TurnRun, conn: CodexConnection, round: number): void {
+    this.interruptTurn(run, conn, run.turnId && !run.turnCompleted() ? run.turnId : '', round)
   }
 
   /**
-   * `turn/interrupt` on the run's thread. The same interrupt is not repeated within a sweep round, so Stop's
-   * first interrupt and the sweep's first round are one request.
+   * `turn/interrupt` on the run's thread. Stop sends its own first; the sweep's first round does not repeat
+   * that same interrupt, and every later round sends again (a stopped turn can be followed by a queued one).
    */
-  private interruptTurn(run: TurnRun, conn: CodexConnection, turnId: string): void {
-    const now = Date.now()
-    const round = this.dependencies.helperTiming?.sweepRoundMs ?? CODEX_SWEEP_ROUND_MS
-    if (run.lastInterrupt && run.lastInterrupt.turnId === turnId && now - run.lastInterrupt.at < round) return
-    run.lastInterrupt = { turnId, at: now }
+  private interruptTurn(run: TurnRun, conn: CodexConnection, turnId: string, round?: number): void {
+    if (round === 0 && run.stopInterrupt === turnId) return
     void conn.request('turn/interrupt', { threadId: run.codexThreadId, turnId }, { timeoutMs: INTERRUPT_TIMEOUT_MS }).catch(() => {
       /* the turn ended meanwhile, or the process is gone */
     })
@@ -1404,12 +1417,13 @@ export class CodexProviderService {
     const conn = run.conn
     if (!app || !conn || app.conn !== conn || conn.signal.aborted) return
     const deadlineAt = Date.now() + (this.dependencies.helperSweepMs ?? CODEX_SWEEP_MS)
+    let fellBack = false
     if (app.tree === 'on') {
       try {
         const outcome = await this.treeOf(run, conn, app).sweep({
           deadlineAt,
           ...(signal ? { signal } : {}),
-          interruptRoot: () => this.interruptRoot(run, conn),
+          interruptRoot: (round) => this.interruptRoot(run, conn, round),
           interruptFloor: () => this.stopHelpers(run, true),
           dead: () => conn.signal.aborted
         })
@@ -1419,20 +1433,22 @@ export class CodexProviderService {
         if (!(error instanceof TreeOff)) throw error
         this.treeOff(app, error.message)
         run.tree = undefined
+        fellBack = true
       }
     }
-    for (;;) {
+    // A sweep that fell back from the tree has already interrupted the root once.
+    for (let round = fellBack ? 1 : 0; ; round += 1) {
       if (conn.signal.aborted || signal?.aborted) return
       this.stopHelpers(run)
       // Master's view: the turn Mousse knows. A turn still starting is interrupted when its id arrives.
-      if (run.turnId && !run.turnCompleted()) this.interruptTurn(run, conn, run.turnId)
+      if (run.turnId && !run.turnCompleted()) this.interruptTurn(run, conn, run.turnId, round)
       if (run.isIdle() && run.helpers.running().length === 0) return
       const left = deadlineAt - Date.now()
       if (left <= 0) {
         console.warn('[codex] a thread or helper did not stop after being interrupted; releasing the run')
         return
       }
-      await run.nextActivity(Math.min(500, left), signal)
+      await run.nextActivity(Math.min(this.dependencies.helperTiming?.sweepRoundMs ?? 500, left), signal)
     }
   }
 
@@ -1705,6 +1721,7 @@ export class CodexProviderService {
             steerWake = undefined
             // Stop interrupts the helpers, and their end can be reported before the abort is seen.
             signal.throwIfAborted()
+            this.throwAdoptedFailure(current, signal)
             if (held) {
               // A steer that arrived in the same tick still gets its turn before the run ends.
               await this.stopAbandoned(current, conn, signal)
@@ -1718,6 +1735,7 @@ export class CodexProviderService {
       }
       // A turn that ran after the cap (a held steer) does not wait for helpers; its own are interrupted
       // before the run ends.
+      this.throwAdoptedFailure(current, signal)
       if (afterCap) await this.stopAbandoned(current, conn, signal)
       if (abandoned) current.addNote(abandoned)
       this.release(current)
@@ -1782,6 +1800,15 @@ export class CodexProviderService {
     return run.helpers.running().length ? this.holdForHelpers(run, input, aborted, steerArrived, pinnedSince) : undefined
   }
 
+  /** A turn the run adopted ended `failed` or `interrupted`: the run fails like one of Mousse's own turns, and its sweep follows. */
+  private throwAdoptedFailure(run: TurnRun, signal: AbortSignal): void {
+    const turn = run.adoptedFailure
+    if (!turn) return
+    if (turn.status === 'failed') throw new Error(this.redact(turn.error?.message ?? run.lastError ?? 'Codex turn failed'))
+    signal.throwIfAborted()
+    throw new Error('Codex interrupted the turn')
+  }
+
   /** Ends the helpers a cap gave up on: swept in tree mode, interrupted as master did otherwise. */
   private async stopAbandoned(run: TurnRun, conn: CodexConnection, signal: AbortSignal): Promise<void> {
     if (this.app?.conn === conn && this.app.tree === 'on') await abortable(this.sweep(run, signal), signal)
@@ -1821,7 +1848,7 @@ export class CodexProviderService {
     beat.unref?.()
     run.holding = true
     try {
-      return await Promise.race([quiet, steerArrived.then(() => undefined), cap.expired, aborted, gone])
+      return await Promise.race([quiet, steerArrived.then(() => undefined), run.whenAdoptedFails().then(() => undefined), cap.expired, aborted, gone])
     } finally {
       run.holding = false
       stop.abort()

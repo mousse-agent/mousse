@@ -702,7 +702,7 @@ describe('Codex children', () => {
     /** Short waits, so a run settles in tens of milliseconds. */
     const FAST = { pairGapMs: 15, scanMinMs: 15, safetyTickMs: 250, sweepRoundMs: 30, newbornMs: 40 }
     type Node = { parent: string | null; status: string; createdAt: number; edge: boolean; unreadable: boolean }
-    type Mode = 'on' | 'listing' | 'nodb' | 'ignoring'
+    type Mode = 'on' | 'listing' | 'nodb' | 'nonempty' | 'ignoring'
     type Server = ReturnType<typeof server>
     type Send = (value: unknown) => void
     const noop = () => undefined
@@ -733,6 +733,8 @@ describe('Codex children', () => {
           if (params.parentThreadId && params.ancestorThreadId) return mode === 'listing' ? { result: { data: [], nextCursor: null } } : { error: { code: -32600, message: MUTUAL } }
           if (mode === 'nodb') return { error: { code: -32600, message: 'state DB unavailable for filtered thread listing' } }
           const ancestor = asString(params.ancestorThreadId)
+          // A server that answers the second probe step with a listing for an id no thread has.
+          if (mode === 'nonempty' && ancestor === NIL) return { result: { data: [{ id: 'x', parentThreadId: NIL, status: { type: 'idle' } }], nextCursor: null } }
           // A server that ignores the filter lists every thread it has.
           const ids = [...nodes.keys()].filter((id) => (mode === 'ignoring' && ancestor !== NIL ? true : nodes.get(id)!.edge && reaches(id, ancestor)))
           const from = Number(params.cursor ?? 0)
@@ -856,7 +858,8 @@ describe('Codex children', () => {
 
       it.each([
         ['a listing answered to both filters (an older server)', 'listing' as const, 1],
-        ['"state DB unavailable" answered to the ancestor filter', 'nodb' as const, 2]
+        ['"state DB unavailable" answered to the ancestor filter', 'nodb' as const, 2],
+        ['a listing answered to the ancestor filter alone', 'nonempty' as const, 2]
       ])('%s: the process falls back for good, with one warning and no more thread/list', async (_name, mode, probeRequests) => {
         const { s } = tree({ mode })
         const service = createFast(s)
@@ -932,6 +935,63 @@ describe('Codex children', () => {
         await stopped(second, stop)
         await vi.waitFor(() => expect(interruptsOf(s)).toContain('ghost/'))
         end(w, s, 'ghost', 'interrupted')
+      })
+
+      it.each([
+        ['a helper whose own row is not written yet (an edge without a thread row)', false],
+        ['an archived helper that can no longer be read', true]
+      ])('%s, with a listed child under it, stays in tree mode: the child holds the run until idle', async (_name, unreadable) => {
+        const { w, s } = tree({
+          script: (w, _send, s) => {
+            w.add('mid', PARENT, 'idle', { edge: false, unreadable })
+            begin(w, s, 'leaf', 'mid')
+          }
+        })
+        const service = createFast(s)
+        const running = chat(service, { child: SHARED })
+        expect(await state(running)).toBe('pending')
+        expect(internals(service).app?.tree).toBe('on')
+        expect(warn).not.toHaveBeenCalled()
+        end(w, s, 'leaf')
+        await expect(running).resolves.toBeTruthy()
+        expect(internals(service).app?.tree).toBe('on')
+      })
+
+      it('a listing slower than the sweep deadline does not hold the thread: the next message starts within the deadline', async () => {
+        let hang = false
+        const { s } = tree({
+          open: (index) => index === 0,
+          answer: (message) => (message.method === 'thread/list' && hang && message.params!.ancestorThreadId !== NIL ? ({ silent: true } as Record<string, unknown>) : undefined)
+        })
+        const service = createFast(s, { helperSweepMs: 300 })
+        const stop = new AbortController()
+        const first = chat(service, { child: SHARED, signal: stop.signal })
+        first.catch(noop)
+        await vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(1))
+        hang = true
+        await stopped(first, stop)
+        const stoppedAt = Date.now()
+        const second = chat(service, { child: SHARED })
+        await vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(2), { timeout: 2_000 })
+        expect(Date.now() - stoppedAt).toBeLessThan(1_500)
+        hang = false
+        await expect(second).resolves.toBeTruthy()
+      })
+
+      it('a steer held while a cap sweeps still gets its turn, and the helpers of that turn are swept before the run ends', async () => {
+        const { s } = tree({
+          stubborn: ['h1'],
+          script: [(w, _send, s) => begin(w, s, 'h1', PARENT), (w, _send, s) => begin(w, s, 'h2', PARENT)]
+        })
+        let pending: string | undefined
+        const service = createFast(s, { helperIdleCapMs: 200, helperSweepMs: 600 })
+        const running = chat(service, { child: SHARED, drainSteer: () => { const text = pending; pending = undefined; return text } })
+        await vi.waitFor(() => expect(interruptsOf(s)).toContain('h1/'))
+        pending = 'one more thing'
+        const result = await running
+        expect(result.text).toBe('Some helpers were abandoned after 1 minute without activity')
+        expect(s.requests('turn/start')).toHaveLength(2)
+        expect(interruptsOf(s)).toContain('h2/')
       })
 
       it('a helper the listing and thread/read cannot show is still held by the direct-helper floor, and Stop interrupts it by turn id', async () => {
@@ -1012,6 +1072,89 @@ describe('Codex children', () => {
         expect(result.text).toBe('First.\n\nHelper reported.')
         expect(s.requests('turn/start')).toHaveLength(1)
         expect(interruptsOf(s)).toEqual([])
+      })
+
+      /** A server turn of the parent is adopted while helper h1 keeps the run waiting; steers are refused until `acceptSteers`. */
+      const adoptedScenario = (options: { turnStartAnswers?: string[] } = {}) => {
+        let starts = 0
+        let steers = 0
+        const t = tree({
+          script: [(w, _send, s) => begin(w, s, 'h1', PARENT), undefined],
+          open: (index) => index === 1,
+          answer: (message) => {
+            if (message.method === 'turn/steer') return ++steers < 2 ? { error: { code: -32600, message: 'no active turn to steer' } } : { result: { turnId: 'x' } }
+            if (message.method === 'turn/start' && ++starts === 2 && options.turnStartAnswers?.[0])
+              return { result: { turn: { id: options.turnStartAnswers[0], status: 'inProgress', error: null } } }
+            return undefined
+          }
+        })
+        let steer: string | undefined
+        const serverTurn = async () => {
+          await vi.waitFor(() => expect(t.w.status('h1')).toBe('active'))
+          await vi.waitFor(() => expect(listsOf(t.s).length).toBeGreaterThan(0))
+          t.w.set(PARENT, 'active')
+          t.s.emit(statusNote(PARENT, 'active'))
+          t.s.emit(startedNote(PARENT, 'srv-turn'))
+          await settle(40)
+        }
+        const send = (text: string) => void (steer = text)
+        const drain = () => {
+          const text = steer
+          steer = undefined
+          return text
+        }
+        return { ...t, serverTurn, send, drain }
+      }
+
+      it("Mousse's turn/start that the server steers into an adopted turn makes that turn the run's own: its completion ends the run", async () => {
+        const { w, s, serverTurn, send, drain } = adoptedScenario({ turnStartAnswers: ['srv-turn'] })
+        const running = chat(createFast(s), { child: SHARED, drainSteer: drain })
+        await serverTurn()
+        // The steer into the adopted turn is refused, so it is held and starts a turn; the server steers that into the running one.
+        send('and this')
+        await vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(2))
+        end(w, s, 'h1')
+        w.set(PARENT, 'idle')
+        s.emit(completedNote(PARENT, 'completed', 'srv-turn'))
+        expect(await state(running, 1500)).toBe('settled')
+        await expect(running).resolves.toMatchObject({ turnId: 'srv-turn' })
+      })
+
+      it("a late completion of an adopted turn does not close the turn Mousse started after it: a steer still goes to that turn", async () => {
+        const { w, s, serverTurn, send, drain } = adoptedScenario({ turnStartAnswers: ['mine'] })
+        const running = chat(createFast(s), { child: SHARED, drainSteer: drain })
+        await serverTurn()
+        send('first')
+        await vi.waitFor(() => expect(s.requests('turn/start')).toHaveLength(2))
+        // The adopted turn only now reports its end; Mousse's own turn ('mine') is the one running.
+        w.set(PARENT, 'active')
+        s.emit(completedNote(PARENT, 'completed', 'srv-turn'))
+        await settle(30)
+        send('second')
+        await vi.waitFor(() => expect(s.requests('turn/steer')).toHaveLength(2))
+        expect(s.requests('turn/steer')[1].params).toMatchObject({ expectedTurnId: 'mine' })
+        expect(s.requests('turn/start')).toHaveLength(2)
+        end(w, s, 'h1')
+        w.set(PARENT, 'idle')
+        s.emit(completedNote(PARENT, 'completed', 'mine'))
+        await expect(running).resolves.toMatchObject({ turnId: 'mine' })
+      })
+
+      it.each([
+        ['failed', { message: 'model exploded' }, 'model exploded'],
+        ['interrupted', null, 'Codex interrupted the turn']
+      ])('an adopted turn that ends %s fails the run, and the helpers still running are swept', async (status, error, message) => {
+        const { w, s, serverTurn } = adoptedScenario()
+        const service = createFast(s)
+        const running = chat(service, { child: SHARED })
+        running.catch(noop)
+        await serverTurn()
+        w.set(PARENT, 'idle')
+        s.emit(completedNote(PARENT, status, 'srv-turn', error))
+        await expect(running).rejects.toThrow(message)
+        await vi.waitFor(() => expect(interruptsOf(s)).toContain('h1/'))
+        await vi.waitFor(() => expect(internals(service).turns.size).toBe(0))
+        expect(w.status('h1')).toBe('idle')
       })
 
       it('a server turn that is running when Stop lands is interrupted by its id', async () => {
@@ -1255,6 +1398,8 @@ describe('Codex children', () => {
           await expect(chat(service, { child: SHARED })).resolves.toMatchObject({ codexThreadId: PARENT })
           expect(Date.now() - stoppedAt).toBeGreaterThanOrEqual(250)
           expect(s.requests('turn/start')).toHaveLength(2)
+          // Stop's own interrupt, then one more every round of the sweep.
+          expect(interruptsOf(s).filter((entry) => entry === 'thr-1/turn-1').length).toBeGreaterThanOrEqual(3)
         })
       })
 

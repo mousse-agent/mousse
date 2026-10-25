@@ -57,6 +57,9 @@ export class RpcRefused extends Error {
   }
 }
 
+/** A snapshot that was still running when its sweep gave up; its answers are dropped. */
+class Abandoned extends Error {}
+
 /** The server is not answering like one that filters by ancestor; the tree mode ends for the process. */
 export class TreeOff extends Error {
   constructor(message: string) {
@@ -146,8 +149,11 @@ export class ThreadStatuses {
     return this.open.has(threadId)
   }
 
-  activeIds(): string[] {
-    return [...this.status].filter(([, status]) => status === 'active').map(([threadId]) => threadId)
+  /** Threads that are busy by the server's last word: active, or flagged `systemError` with a turn still open. */
+  busyIds(): string[] {
+    return [...this.status]
+      .filter(([threadId, status]) => status === 'active' || (status === 'systemError' && this.open.has(threadId)))
+      .map(([threadId]) => threadId)
   }
 }
 
@@ -182,8 +188,8 @@ export interface SweepOptions {
   /** `Date.now()`-based moment the sweep gives up (the caller's deadline). */
   deadlineAt: number
   signal?: AbortSignal
-  /** The root's own turn is active: interrupt it (by id when known). */
-  interruptRoot(): void
+  /** The root's own turn is active: interrupt it (by id when known). `round` counts the sweep's rounds from 0. */
+  interruptRoot(round: number): void
   /** Interrupt the direct helpers master tracks. */
   interruptFloor(): void
   /** The process is gone; nothing more can be done. */
@@ -203,6 +209,8 @@ export class HelperTree {
   private wakers: Array<() => void> = []
   private previous: Snapshot | undefined
   private inflight: Promise<Check> | undefined
+  /** Bumped when a sweep gives up on a snapshot in flight; that snapshot then changes nothing. */
+  private epoch = 0
   /** The last snapshot that completed. */
   last: Snapshot | undefined
   /** When the root or a member last reported anything (the idle cap reads this). */
@@ -249,7 +257,7 @@ export class HelperTree {
 
   /** Threads the process reports active that no verdict covers yet go to placement. */
   collectUnknown(): void {
-    for (const id of this.statuses.activeIds()) if (!this.knows(id)) this.unknown.add(id)
+    for (const id of this.statuses.busyIds()) if (!this.knows(id)) this.unknown.add(id)
   }
 
   private poke(): void {
@@ -285,14 +293,24 @@ export class HelperTree {
 
   /** One snapshot, compared with the one before it. Concurrent calls share the snapshot in flight. */
   check(): Promise<Check> {
-    this.inflight ??= this.takeCheck().finally(() => {
-      this.inflight = undefined
-    })
+    if (!this.inflight) {
+      const taken: Promise<Check> = this.takeCheck().finally(() => {
+        if (this.inflight === taken) this.inflight = undefined
+      })
+      this.inflight = taken
+    }
     return this.inflight
   }
 
+  private abandon(): void {
+    this.epoch += 1
+    this.inflight = undefined
+    this.previous = undefined
+  }
+
   private async takeCheck(): Promise<Check> {
-    const snapshot = await this.snapshot()
+    const epoch = this.epoch
+    const snapshot = await this.snapshot(epoch)
     const before = this.previous
     const quiescent =
       before !== undefined &&
@@ -306,23 +324,43 @@ export class HelperTree {
     return { snapshot, quiescent }
   }
 
-  private async snapshot(): Promise<Snapshot> {
+  private async snapshot(epoch: number): Promise<Snapshot> {
+    const live = (): void => {
+      if (epoch !== this.epoch) throw new Abandoned()
+    }
     const startedAt = this.ports.now()
     const startSeq = this.voidSeq
     // Cleared now: a wake-up during the reads asks for another scan.
     this.woke = false
 
     const root = await this.readRoot()
-    const rows = await this.readRows()
+    live()
+    const { rows, parents } = await this.readRows()
+    live()
     this.listed.clear()
     for (const [id, row] of rows) {
       this.listed.set(id, row)
       this.placed.delete(id)
       if (row.status === 'active') this.seenActive.add(id)
     }
-    for (const id of [...this.placed.keys()]) this.placed.set(id, await this.refresh(id))
+    // A row whose parent the listing lacks (a helper whose own row is not written yet, or one archived) is
+    // fine when the parent leads back to the root; only one that provably belongs to another thread is not.
+    for (const parent of new Set(parents.values())) {
+      if (parent === this.rootId || this.listed.has(parent)) continue
+      const walked = await this.walk(parent)
+      live()
+      if (walked.verdict === 'out') throw new TreeOff('a listed thread descends from another thread')
+      if (walked.verdict === 'in') this.rule(walked.chain, 'in')
+    }
+    for (const id of [...this.placed.keys()]) {
+      this.placed.set(id, await this.refresh(id))
+      live()
+    }
     this.collectUnknown()
-    for (const id of [...this.unknown]) await this.place(id)
+    for (const id of [...this.unknown]) {
+      await this.place(id)
+      live()
+    }
 
     const now = this.ports.now()
     const busy: string[] = []
@@ -340,7 +378,10 @@ export class HelperTree {
     for (const [id, status] of this.placed) if (this.busyStatus(id, status)) busy.push(id)
 
     const rootBusy = this.busyStatus(this.rootId, root)
-    const unknownActive = [...this.unknown].some((id) => this.statuses.get(id) === 'active')
+    const unknownActive = [...this.unknown].some((id) => {
+      const status = this.statuses.get(id)
+      return status !== undefined && this.busyStatus(id, status)
+    })
     const floorRunning = this.floor.running().length > 0
     return {
       startedAt,
@@ -383,8 +424,8 @@ export class HelperTree {
     return status
   }
 
-  /** The descendants the server lists, validated: a server that ignores the filter fails here. */
-  private async readRows(): Promise<Map<string, ListedRow>> {
+  /** The descendants the server lists, checked for shape; `snapshot` checks that their parents lead to the root. */
+  private async readRows(): Promise<{ rows: Map<string, ListedRow>; parents: Map<string, string> }> {
     let rows: unknown[]
     try {
       rows = await this.ports.list(this.rootId)
@@ -404,9 +445,7 @@ export class HelperTree {
       parents.set(row.id, row.parentThreadId)
       result.set(row.id, { status: type, ...(typeof row.createdAt === 'number' ? { createdAt: row.createdAt } : {}) })
     }
-    for (const parent of parents.values())
-      if (parent !== this.rootId && !parents.has(parent)) throw new TreeOff('a listed thread has a parent outside the listing')
-    return result
+    return { rows: result, parents }
   }
 
   /** A placed member's status. An error response means the thread is gone from the server: use what it last announced. */
@@ -420,33 +459,44 @@ export class HelperTree {
   }
 
   /**
-   * Follows `parentThreadId` from an unknown thread. Reaching the root or a member puts it and the
-   * threads on the way among the placed members. Reaching a root thread of its own, or a thread
-   * ruled out, rules it out. Anything else (a refused read, a read without a parent, too many
-   * hops) is inconclusive: the thread stays unknown and is tried again. Nothing is ruled out on a failure.
+   * Follows `parentThreadId` from `start`. Reaching the root or a member is `in` (with the threads on the
+   * way); reaching a root thread of its own, or a thread ruled out, is `out`. Anything else (a refused
+   * read, a read without a parent, too many hops) is `inconclusive`: nothing is concluded from a failure.
    */
-  private async place(start: string): Promise<void> {
-    if (this.knows(start)) {
-      this.unknown.delete(start)
-      return
-    }
+  private async walk(start: string): Promise<{ verdict: 'in' | 'out' | 'inconclusive'; chain: Array<{ id: string; status: ThreadStatusType }> }> {
     const chain: Array<{ id: string; status: ThreadStatusType }> = []
+    if (start === this.rootId || this.isMember(start)) return { verdict: 'in', chain }
+    if (this.ruledOut.has(start)) return { verdict: 'out', chain }
     let current = start
     for (let hop = 0; hop < MAX_HOPS; hop += 1) {
       let thread: ReturnType<typeof parseThread>
       try {
         thread = parseThread(await this.ports.read(current))
       } catch (error) {
-        if (error instanceof RpcRefused) return
+        if (error instanceof RpcRefused) return { verdict: 'inconclusive', chain }
         throw error
       }
       chain.push({ id: current, status: thread.status ?? this.statuses.get(current) ?? 'notLoaded' })
-      if (thread.parent === null) return this.rule(chain, 'out')
-      if (typeof thread.parent !== 'string') return
-      if (thread.parent === this.rootId || this.isMember(thread.parent)) return this.rule(chain, 'in')
-      if (this.ruledOut.has(thread.parent)) return this.rule(chain, 'out')
+      if (thread.parent === null) return { verdict: 'out', chain }
+      if (typeof thread.parent !== 'string') return { verdict: 'inconclusive', chain }
+      if (thread.parent === this.rootId || this.isMember(thread.parent)) return { verdict: 'in', chain }
+      if (this.ruledOut.has(thread.parent)) return { verdict: 'out', chain }
       current = thread.parent
     }
+    return { verdict: 'inconclusive', chain }
+  }
+
+  /**
+   * Places an unknown thread. `in`: it and the threads on the way become placed members. `out`: they are
+   * ruled out. Otherwise it stays unknown and is tried again at the next snapshot.
+   */
+  private async place(start: string): Promise<void> {
+    if (this.knows(start)) {
+      this.unknown.delete(start)
+      return
+    }
+    const walked = await this.walk(start)
+    if (walked.verdict !== 'inconclusive') this.rule(walked.chain, walked.verdict)
   }
 
   private rule(chain: Array<{ id: string; status: ThreadStatusType }>, verdict: 'in' | 'out'): void {
@@ -512,29 +562,55 @@ export class HelperTree {
   async sweep(options: SweepOptions): Promise<'quiescent' | 'deadline' | 'closed'> {
     this.previous = undefined
     this.collectUnknown()
-    for (;;) {
+    for (let round = 0; ; round += 1) {
       if (options.dead() || options.signal?.aborted) return 'closed'
       const roundStart = this.ports.now()
       let snapshot = this.last
       let quiescent = false
-      try {
-        const check = await this.check()
-        snapshot = check.snapshot
-        quiescent = check.quiescent
-      } catch (error) {
+      // A snapshot never holds the sweep past its deadline: a read that hangs is given up on, and what it
+      // eventually answers is dropped.
+      const outcome = await this.within(this.check(), options.deadlineAt - roundStart, options.signal)
+      if (outcome.kind === 'done') {
+        snapshot = outcome.value.snapshot
+        quiescent = outcome.value.quiescent
+      } else if (outcome.kind === 'error') {
         // Transport failure: act on the last snapshot that completed and the floor, and try again.
-        if (error instanceof TreeOff) throw error
-      }
-      if (options.dead()) return 'closed'
-      if (snapshot?.rootBusy) options.interruptRoot()
+        if (outcome.error instanceof TreeOff) throw outcome.error
+      } else this.abandon()
+      if (options.dead() || outcome.kind === 'aborted') return 'closed'
+      if (snapshot?.rootBusy) options.interruptRoot(round)
       for (const id of this.targets(snapshot)) this.ports.interrupt(id, '')
       options.interruptFloor()
       if (quiescent) return 'quiescent'
       const now = this.ports.now()
-      if (now >= options.deadlineAt) return 'deadline'
+      if (outcome.kind === 'timeout' || now >= options.deadlineAt) return 'deadline'
       await this.pause(Math.min(this.timing.sweepRoundMs, options.deadlineAt - now), options.signal, true)
       await this.pause(this.timing.pairGapMs - (this.ports.now() - roundStart), options.signal, false)
     }
+  }
+
+  /** `promise`'s outcome, or `timeout` after `ms`, or `aborted` when `signal` aborts first. */
+  private within<T>(
+    promise: Promise<T>,
+    ms: number,
+    signal: AbortSignal | undefined
+  ): Promise<{ kind: 'done'; value: T } | { kind: 'error'; error: unknown } | { kind: 'timeout' } | { kind: 'aborted' }> {
+    return new Promise((resolve) => {
+      const finish = (result: Parameters<typeof resolve>[0]): void => {
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', onAbort)
+        resolve(result)
+      }
+      const onAbort = (): void => finish({ kind: 'aborted' })
+      const timer = setTimeout(() => finish({ kind: 'timeout' }), Math.max(0, ms))
+      timer.unref?.()
+      if (signal?.aborted) return onAbort()
+      signal?.addEventListener('abort', onAbort, { once: true })
+      promise.then(
+        (value) => finish({ kind: 'done', value }),
+        (error: unknown) => finish({ kind: 'error', error })
+      )
+    })
   }
 }
 

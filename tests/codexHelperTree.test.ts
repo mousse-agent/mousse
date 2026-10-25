@@ -418,7 +418,14 @@ describe('validation of the server\'s answers', () => {
     ['a row without a status', (world) => (world.rows = () => [{ id: 'h1', parentThreadId: ROOT }])],
     ['a row with an unknown status', (world) => (world.rows = () => [{ id: 'h1', parentThreadId: ROOT, status: { type: 'weird' } }])],
     ['the root itself in the listing', (world) => (world.rows = () => [{ id: ROOT, parentThreadId: 'x', status: { type: 'idle' } }])],
-    ['a parent outside the listing', (world) => (world.rows = () => [{ id: 'h1', parentThreadId: 'elsewhere', status: { type: 'idle' } }])]
+    // Not a shape problem, but proof that the listing holds a thread of another root.
+    [
+      'a row that descends from another root',
+      (world) => {
+        world.threads.set('elsewhere', { parent: null, status: 'idle' })
+        world.rows = () => [{ id: 'h1', parentThreadId: 'elsewhere', status: { type: 'idle' } }]
+      }
+    ]
   ]
   it.each(badRows)('%s ends tree mode and interrupts nobody', async (_name, corrupt) => {
     const { tree, world } = build()
@@ -453,13 +460,111 @@ describe('validation of the server\'s answers', () => {
     world.add('h1', ROOT, 'active')
     hear(started('h1'))
     await tree.check()
-    world.listFails.push(new Error('timeout'), new Error('timeout'))
+    // Every listing of the sweep fails: only the snapshot taken before it can say who is busy.
+    for (let i = 0; i < 20; i += 1) world.listFails.push(new Error('timeout'))
+    const listsBefore = world.lists.length
     const options = sweepOptions()
     const sweeping = tree.sweep({ ...options, deadlineAt: Date.now() + 1_200 })
     await vi.advanceTimersByTimeAsync(1_500)
     expect(await sweeping).toBe('deadline')
+    expect(world.lists.length - listsBefore).toBeGreaterThanOrEqual(2)
     expect(world.interrupts.filter((entry) => entry === 'h1/').length).toBeGreaterThanOrEqual(2)
     expect(options.interruptFloor.mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
+})
+
+describe('listed rows whose parent the listing lacks', () => {
+  it('a helper whose own row is not written yet (an edge without a thread row) keeps tree mode: it is placed through its own read, and busy while it runs', async () => {
+    const { tree, world, hear } = build()
+    world.add('mid', ROOT, 'idle', { edge: false })
+    world.add('leaf', 'mid', 'active')
+    hear(started('leaf'))
+    const check = await tree.check()
+    expect(check.snapshot.members).toEqual(['leaf', 'mid'])
+    expect(check.snapshot.busy).toEqual(['leaf'])
+  })
+
+  it('an archived intermediate (not readable) keeps tree mode too: its listed child is still a member and busy', async () => {
+    const { tree, world } = build()
+    world.add('mid', ROOT, 'idle', { edge: false, unreadable: true })
+    world.add('leaf', 'mid', 'active')
+    const check = await tree.check()
+    expect(check.snapshot.members).toEqual(['leaf'])
+    expect(check.snapshot.busy).toEqual(['leaf'])
+    // Nothing was ruled out: once the intermediate can be read, it joins.
+    world.threads.get('mid')!.unreadable = false
+    expect((await tree.check()).snapshot.members).toEqual(['leaf', 'mid'])
+  })
+})
+
+describe('sweep deadline', () => {
+  it('a read that hangs near the deadline does not hold the sweep past it; what it answers later is dropped', async () => {
+    const world = new World()
+    world.add('h1', ROOT, 'active')
+    let slow = false
+    const late: Array<() => void> = []
+    const { tree } = build(world, {
+      ports: {
+        read: (id) => {
+          if (!slow) return Promise.resolve(world.read(id))
+          return new Promise((resolve) => late.push(() => resolve(world.read(id))))
+        }
+      }
+    })
+    await tree.check()
+    slow = true
+    const options = sweepOptions({ deadlineAt: Date.now() + 1_000 })
+    let outcome: string | undefined
+    void tree.sweep(options).then((value) => (outcome = value))
+    await vi.advanceTimersByTimeAsync(1_050)
+    expect(outcome).toBe('deadline')
+    // The hanging read is answered long after the run was released: nothing changes and nothing is interrupted.
+    const last = tree.last
+    const interrupts = world.interrupts.length
+    world.set('h1', 'idle')
+    for (const answer of late) answer()
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(tree.last).toBe(last)
+    expect(world.interrupts.length).toBe(interrupts)
+  })
+})
+
+describe('systemError of a thread nobody lists', () => {
+  it('an unlisted helper that was flagged systemError while its turn is open still holds the pair, and is never interrupted', async () => {
+    const { tree, world, hear } = build()
+    // Its placement read is refused (ancestry inconclusive); only the process's own notifications speak.
+    world.add('ghost', ROOT, 'systemError', { edge: false, unreadable: true })
+    hear(started('ghost'))
+    hear(note('thread/status/changed', { threadId: 'ghost', status: { type: 'systemError' } }))
+    const options = sweepOptions({ deadlineAt: Date.now() + 1_000 })
+    let first = await tree.check()
+    expect(first.snapshot.unknownActive).toBe(true)
+    await vi.advanceTimersByTimeAsync(250)
+    expect((await tree.check()).quiescent).toBe(false)
+    // The sweep sees it busy but never interrupts a thread it could not place.
+    let outcome: string | undefined
+    void tree.sweep(options).then((value) => (outcome = value))
+    await vi.advanceTimersByTimeAsync(1_200)
+    expect(outcome).toBe('deadline')
+    expect(world.interrupts).toEqual([])
+    // Its turn ends: now it is settled.
+    hear(completed('ghost'))
+    first = await tree.check()
+    expect(first.snapshot.unknownActive).toBe(false)
+    expect(await checksUntilQuiet(tree)).toBeGreaterThan(0)
+  })
+})
+
+describe('a placed member whose read is refused', () => {
+  it('keeps the status the process last announced for it', async () => {
+    const { tree, world, hear } = build()
+    world.add('ghost', ROOT, 'active', { edge: false })
+    hear(started('ghost'))
+    expect((await tree.check()).snapshot.busy).toEqual(['ghost'])
+    world.threads.get('ghost')!.unreadable = true
+    const check = await tree.check()
+    expect(check.snapshot.members).toEqual(['ghost'])
+    expect(check.snapshot.busy).toEqual(['ghost'])
   })
 })
 
