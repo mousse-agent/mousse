@@ -36,6 +36,7 @@ import {
 import '../chat/components/agent-elements/agent-ui.css'
 import { prepareComposerThread } from '../lib/createComposerThread'
 import { pickerIdFor, pickerProviders, projectScope, useProviderSnapshots } from '../lib/providerSnapshots'
+import { sendErrorLine } from '../lib/errorText'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending } from '../lib/newThread'
 import { ComposerWorkspaceToolbar } from './ComposerWorkspaceToolbar'
@@ -627,7 +628,7 @@ export function OrchestratorChat() {
           ])
         }
         if (result.error) {
-          setSendError(`[${result.error.code}] ${result.error.message}`)
+          setSendError(sendErrorLine(result.error))
           const stillActive = await window.mousse.orchestrator.isTurnActive(targetThreadId ?? undefined).catch(() => false)
           if (stillVisible()) setLoading(stillActive)
           // Admission succeeded: the prompt is already saved in the transcript.
@@ -648,7 +649,7 @@ export function OrchestratorChat() {
         return true
       } catch (error) {
         if (!stillVisible()) return
-        setSendError(error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' ? `${'code' in error ? `[${String(error.code)}] ` : ''}${error.message}` : 'The send failed. Please try again.')
+        setSendError(sendErrorLine(error))
         setInput((current) => current || extractChatReferences(content).text)
         if (optimisticQueueId) {
           setOptimisticQueueItems((current) => current.filter((item) => item.id !== optimisticQueueId))
@@ -805,7 +806,7 @@ export function OrchestratorChat() {
     } catch (error) {
       // Creation and image decoding happen before clearing the draft.
       if (stillVisible()) {
-        setSendError(error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' ? `${'code' in error ? `[${String(error.code)}] ` : ''}${error.message}` : 'The send failed. Please try again.')
+        setSendError(sendErrorLine(error))
         setLoading(false)
       }
     } finally {

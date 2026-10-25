@@ -21,7 +21,7 @@ import {
   type ModelFamily
 } from '../../shared/modelVariants'
 import { ProviderIcon, normalizeProviderId } from '../lib/providerIcons'
-import { instanceBadges } from '../lib/providerSnapshots'
+import { instanceBadges, knownModelLabel } from '../lib/providerSnapshots'
 import { listingKey, listingServes } from '../../shared/providerInstances'
 import { useAppStore } from '../stores/appStore'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
@@ -693,7 +693,15 @@ export function getGroupedModelButtonParts(
   const model =
     provider?.models.find((entry) => entry.id === modelId) ??
     provider?.models.find((entry) => entry.id === baseId)
-  if (!provider || !model) return [modelId || provider?.label || 'Select model']
+  if (!provider || !model) {
+    // A model the picker does not offer (hidden, or its provider is off) keeps its listed name.
+    const known = knownModelLabel({ providerId, instanceId }, modelId)
+    if (known) {
+      const parsed = parseModelVariant({ id: baseId, label: known })
+      return parsed.context ? [parsed.familyLabel, parsed.context] : [parsed.familyLabel]
+    }
+    return [modelId || provider?.label || 'Select model']
+  }
 
   const parsed = parseModelVariant(model)
   const bits = [parsed.familyLabel]

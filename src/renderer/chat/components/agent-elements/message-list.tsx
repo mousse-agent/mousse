@@ -12,6 +12,7 @@ import type { UIMessage, ChatStatus } from "ai";
 import { cn } from "./utils/cn";
 import { ProviderIcon } from "../../../lib/providerIcons";
 import { inferModelBrand } from "../../../../shared/modelVariants";
+import { modelDisplayName, useProviderSnapshotsStore } from "../../../lib/providerSnapshots";
 
 import { UserMessage } from "./user-message";
 import { AppletCard, isAppletPart } from "../../../components/applets/AppletCard";
@@ -1558,6 +1559,27 @@ export const MessageList = memo(function MessageList({
   );
 });
 
+type HandoffSelection = { provider: string; model: string };
+
+/** "Opus 4.5 · High → GPT-5": a model switch in the transcript, by the names the instances list. */
+function ContextHandoffMarker({ handoff }: { handoff: { from: HandoffSelection; to: HandoffSelection } }) {
+  // Names come from the provider snapshots: show them once those arrive.
+  useProviderSnapshotsStore((state) => state.scopes);
+  const iconId = (selection: HandoffSelection) => {
+    const brand = inferModelBrand(selection.model, undefined, selection.provider).brandId;
+    // An unknown model falls back to its provider's id, which ProviderIcon maps to the vendor logo.
+    return brand === 'anthropic' ? 'claude' : brand;
+  };
+  const from = modelDisplayName(handoff.from.provider, handoff.from.model);
+  const to = modelDisplayName(handoff.to.provider, handoff.to.model);
+  return <div role="status" aria-label={`Context handoff: ${from} to ${to}`}
+    className="flex w-full items-center justify-center gap-2 py-1 text-xs text-muted-foreground">
+    <span className="inline-flex items-center gap-1.5" title={handoff.from.model}><ProviderIcon providerId={iconId(handoff.from)} size={14} />{from}</span>
+    <span aria-hidden="true">→</span>
+    <span className="inline-flex items-center gap-1.5" title={handoff.to.model}><ProviderIcon providerId={iconId(handoff.to)} size={14} />{to}</span>
+  </div>;
+}
+
 function AssistantParts({
   msg,
   isLast,
@@ -1703,19 +1725,7 @@ function AssistantParts({
   ]);
 
   const handoff = (msg.metadata as { contextHandoff?: { from: { provider: string; model: string }; to: { provider: string; model: string } } } | undefined)?.contextHandoff;
-  if (handoff) {
-    const iconId = (selection: { provider: string; model: string }) => {
-      const brand = inferModelBrand(selection.model, undefined, selection.provider).brandId;
-      // An unknown model falls back to its provider's id, which ProviderIcon maps to the vendor logo.
-      return brand === 'anthropic' ? 'claude' : brand;
-    };
-    return <div role="status" aria-label={`Context handoff: ${handoff.from.model} to ${handoff.to.model}`}
-      className="flex w-full items-center justify-center gap-2 py-1 text-xs text-muted-foreground">
-      <span className="inline-flex items-center gap-1.5" title={handoff.from.provider}><ProviderIcon providerId={iconId(handoff.from)} size={14} />{handoff.from.model}</span>
-      <span aria-hidden="true">→</span>
-      <span className="inline-flex items-center gap-1.5" title={handoff.to.provider}><ProviderIcon providerId={iconId(handoff.to)} size={14} />{handoff.to.model}</span>
-    </div>;
-  }
+  if (handoff) return <ContextHandoffMarker handoff={handoff} />;
   const compactionMetadata = msg.metadata as { compaction?: boolean; compacting?: boolean } | undefined;
   if (compactionMetadata?.compaction) {
     const text = parts.filter(isTextPart).map((part) => part.text).join('');

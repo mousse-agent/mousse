@@ -8,7 +8,8 @@ import {
   planLegacyFavoritesImport,
   saveModelPrefs
 } from '../src/renderer/lib/modelFavorites'
-import { instanceBadges, pickerIdFor, pickerProviders, showsContextGauge, sortInstances } from '../src/renderer/lib/providerSnapshots'
+import { instanceBadges, modelDisplayName, pickerIdFor, pickerProviders, showsContextGauge, sortInstances, useProviderSnapshotsStore } from '../src/renderer/lib/providerSnapshots'
+import { sendErrorLine } from '../src/renderer/lib/errorText'
 import { getGroupedModelButtonParts, sortPickerEntries } from '../src/renderer/components/ModelFamilyMenu'
 import { profilePreferenceKey } from '../src/renderer/lib/profilePreferences'
 import { model, snapshot } from './providerSnapshotFixture'
@@ -98,6 +99,21 @@ describe('composer picker from snapshots', () => {
     expect(getGroupedModelButtonParts('claude-subscription', 'work-only', listings, false, 'claude:work')).toEqual(['Work Model'])
     expect(getGroupedModelButtonParts('claude-subscription', 'opus', listings, false, 'claude')).toEqual(['Claude Opus'])
     expect(getGroupedModelButtonParts('claude-subscription', 'work-only', listings, false)).toEqual(['work-only'])
+  })
+
+  it('names a hidden model by its listed name on the model button, in a switch marker and in a send error', () => {
+    const haiku = model('haiku', { label: 'Haiku 4.5', hidden: true })
+    useProviderSnapshotsStore.setState({ scopes: { device: { loading: false, snapshots: [snapshot({ models: { entries: [claudeModels[0], haiku], source: 'live' } })] } } })
+    try {
+      const listings = pickerProviders(useProviderSnapshotsStore.getState().scopes.device!.snapshots, [])
+      expect(getGroupedModelButtonParts('claude-subscription', 'haiku:low', listings, false)).toEqual(['Haiku 4.5'])
+      expect(modelDisplayName('claude-subscription', 'haiku:low')).toBe('Haiku 4.5 · Low')
+      expect(modelDisplayName('claude-subscription', 'unknown-model')).toBe('unknown-model')
+    } finally {
+      useProviderSnapshotsStore.setState({ scopes: {} })
+    }
+    expect(sendErrorLine({ code: 'model_hidden', message: 'Haiku 4.5 is hidden.' })).toBe('Haiku 4.5 is hidden.')
+    expect(sendErrorLine({ code: 'internal_error', message: 'Boom' })).toBe('[internal_error] Boom')
   })
 
   it('reads the context gauge from caps, keeping it when unknown', () => {

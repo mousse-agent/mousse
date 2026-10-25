@@ -165,6 +165,8 @@ describe('harness gateway: scope and model prefs', () => {
         expect(codeOf(() => harness.resolve({ instanceId: 'claude', ...selection }, { kind: 'device' }, purpose)), `${purpose} ${JSON.stringify(selection)}`).toBe('model_hidden')
     for (const selection of representations)
       expect(codeOf(() => harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: selection.model }, { purpose: 'turn' }))).toBe('model_hidden')
+    // The refusal names the model as the instance lists it, not its id.
+    expect(() => harness.resolve({ instanceId: 'claude', model: 'opus:low' }, { kind: 'device' }, 'turn')).toThrow(/^Opus is hidden\. /)
     // Another model at an effort still resolves; a colon that is not an effort is part of the id.
     expect(harness.resolve({ instanceId: 'claude', model: 'sonnet:high' }, { kind: 'device' }, 'turn').driver).toBe('claude')
     expect(harness.resolve({ instanceId: 'claude', model: 'opus:thinking' }, { kind: 'device' }, 'turn').driver).toBe('claude')

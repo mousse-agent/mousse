@@ -2,6 +2,7 @@ import { useCallback, useEffect } from 'react'
 import { create } from 'zustand'
 import { describeStatus, type InstanceSnapshot, type ProviderSnapshotsEvent, type StatusDescription } from '../../shared/harness/status'
 import type { HarnessCaps, HarnessDriverKind, ProviderOperationEvent, ProviderScope, SignInPrompt } from '../../shared/harness/types'
+import { formatEffortLabel, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import { legacyProviderForInstance } from '../../shared/providerInstances'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import { useAppStore } from '../stores/appStore'
@@ -256,6 +257,36 @@ export function pickerProviders(snapshots: readonly InstanceSnapshot[] | undefin
     })
   }
   return providers
+}
+
+/**
+ * The name an instance lists a model under, hidden models included, from the snapshots of any
+ * scope on hand. `providerId` is a picker id or provider name; `instanceId`, when known, decides.
+ * The effort an id carries (`haiku:low`) is not part of the name. Undefined when none lists it.
+ */
+export function knownModelLabel(selection: { providerId: string; instanceId?: string }, modelId: string): string | undefined {
+  if (!modelId) return undefined
+  const { baseId } = parseThinkingSuffixFromModelId(modelId)
+  for (const scope of Object.values(useProviderSnapshotsStore.getState().scopes)) {
+    for (const snapshot of scope.snapshots ?? []) {
+      const serves = selection.instanceId
+        ? snapshot.instanceId === selection.instanceId
+        : pickerIdOf(snapshot) === selection.providerId || llmProviderOf(snapshot) === selection.providerId
+      if (!serves) continue
+      const entries = snapshot.models.entries
+      const model = entries.find((entry) => entry.id === modelId) ?? entries.find((entry) => entry.id === baseId)
+      if (model?.label) return model.label
+    }
+  }
+  return undefined
+}
+
+/** A model as a transcript names it: its listed name and the effort its id carries ("Haiku 4.5 · Low"). */
+export function modelDisplayName(providerId: string, modelId: string): string {
+  const label = knownModelLabel({ providerId }, modelId)
+  if (!label) return modelId
+  const { effort } = parseThinkingSuffixFromModelId(modelId)
+  return effort ? `${label} · ${formatEffortLabel(effort)}` : label
 }
 
 /** The picker entry a stored selection names: by instance first, then by its provider name. */

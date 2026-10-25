@@ -19,6 +19,7 @@ import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } 
 import type { ModelOverride } from '../../shared/providerInstances'
 import type { LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
+import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { LoginSession } from '../providers/LoginSession'
 import type { ProviderInstanceService } from '../providers/ProviderInstanceService'
 import type { AdapterHost, TurnControl, TurnInput, TurnResult, TurnSink } from '../run/adapters/ProviderAdapter'
@@ -521,7 +522,7 @@ export class Harness implements HarnessGateway {
       if (options.scope?.kind === 'project' && !this.scopes.enabled(resolved.instanceId, true, options.scope).effective)
         harnessFail('instance_disabled', `Provider instance "${resolved.instanceId}" is turned off for this project. Turn it on or choose another model.`, resolved.instanceId)
       if (selection.model && hidesModel(this.prefs.get(resolved.instanceId), selection.model))
-        harnessFail('model_hidden', `The model "${selection.model}" is hidden. Show it in Settings → Providers or choose another model.`, resolved.instanceId)
+        harnessFail('model_hidden', `${this.modelName(resolved.instanceId, selection.model)} is hidden. Show it in Settings → Providers or choose another model.`, resolved.instanceId)
     }
     const config = driver.decodeConfig(resolved.entry.config)
     const version = this.probes.get(resolved.instanceId)?.lastGood?.binary?.version
@@ -795,6 +796,15 @@ export class Harness implements HarnessGateway {
     }
     if (current) this.retire(current)
     return this.build(instanceId, resolved.entry)
+  }
+
+  /** The name the instance lists a model under (hidden models included), else its id without the effort. */
+  private modelName(instanceId: string, model: string): string {
+    const { baseId } = parseThinkingSuffixFromModelId(model)
+    const listed = this.recordOrUndefined(instanceId)?.runtime.models() ?? []
+    return (listed.find((entry) => entry.id === model) ?? listed.find((entry) => entry.id === baseId))?.label?.trim()
+      || this.prefs.get(instanceId).custom.find((entry) => entry.id === baseId)?.label
+      || baseId
   }
 
   private recordOrUndefined(instanceId: string): InstanceRecord | undefined {
