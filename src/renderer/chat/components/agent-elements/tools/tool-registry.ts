@@ -18,7 +18,7 @@ import {
   isRefusedSubagentResult,
   readSubagentResult,
   type SubagentToolName,
-} from "../../../adapters/subagentTools";
+} from "../../../../../shared/subagentTools";
 
 export type ToolVariant = "simple" | "collapsible";
 

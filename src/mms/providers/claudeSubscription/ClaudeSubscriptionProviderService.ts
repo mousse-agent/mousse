@@ -17,6 +17,7 @@ import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings
 import type { ChatImageAttachment } from '../../../shared/types'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
 import { AppError } from '../../../shared/errors'
+import { recordSubagentCall, toolResultText } from '../../../shared/subagentTools'
 import { CLAUDE_INSTANCE_ID } from '../../../shared/providerInstances'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
@@ -105,6 +106,8 @@ export type ClaudeSubscriptionChatInput = {
     callId: string
     title: string
     toolName?: string
+    /** A Mousse subagent call's bounded record, set when the call completes. */
+    record?: ReturnType<typeof recordSubagentCall>
   }) => void
 }
 type Dependencies = {
@@ -850,6 +853,7 @@ export class ClaudeSubscriptionProviderService {
       success = false,
       sessionId: string | undefined
     const tools = new Map<string, string>()
+    const toolInputs = new Map<string, unknown>()
     const steers: string[] = []
     let steerTimer: ReturnType<typeof setInterval> | undefined
     let interruptRequested = false
@@ -1124,15 +1128,26 @@ export class ClaudeSubscriptionProviderService {
                 })
               }
             }
+            // A tool_use block's arguments are complete only in the assistant message that holds it.
+            if (message.type === 'assistant' && Array.isArray(message.message.content))
+              for (const block of message.message.content)
+                if (block.type === 'tool_use' && tools.has(block.id)) toolInputs.set(block.id, block.input)
             if (message.type === 'user' && Array.isArray(message.message.content))
               for (const block of message.message.content) {
                 if (block.type === 'tool_result' && tools.has(block.tool_use_id)) {
+                  const title = tools.get(block.tool_use_id)!
+                  const record = recordSubagentCall(title, toolInputs.get(block.tool_use_id), {
+                    text: toolResultText(block.content),
+                    isError: block.is_error === true
+                  })
                   input.onTool?.({
                     phase: 'complete',
                     callId: block.tool_use_id,
-                    title: tools.get(block.tool_use_id)!
+                    title,
+                    ...(record ? { record } : {})
                   })
                   tools.delete(block.tool_use_id)
+                  toolInputs.delete(block.tool_use_id)
                 }
               }
             if (message.type === 'result') {

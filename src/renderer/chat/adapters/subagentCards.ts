@@ -1,6 +1,6 @@
 import type { UIMessage } from 'ai'
 import type { SubagentState, SubagentSummary, SubagentTaskSummary, SubagentWaitingOn } from '../../../shared/subagents'
-import { isRefusedSubagentResult, isSubagentStartTool, readSubagentResult, type SubagentStartTool } from './subagentTools'
+import { isRefusedSubagentResult, isSubagentStartTool, readSubagentResult, type SubagentStartTool } from '../../../shared/subagentTools'
 
 /**
  * A subagent card is one task a subagent was given, shown where the parent started it. The row that
@@ -100,6 +100,11 @@ function namesSubagent(call: SubagentCall, entry: TaskEntry): boolean | null {
   return ref === entry.subagent.childThreadId || ref === entry.task.delegationId || normalizedTitle(ref) === normalizedTitle(entry.subagent.title)
 }
 
+/** The call's recorded input says which subagent it is for. */
+function namesAnySubagent(call: SubagentCall): boolean {
+  return normalizedTitle(call.tool === 'delegate_task' ? call.input.title : call.input.subagent) !== null
+}
+
 function taskState(subagent: SubagentSummary, task: SubagentTaskSummary, latest: boolean): SubagentState {
   if (latest) return subagent.state === 'idle' ? 'done' : subagent.state
   switch (task.outcome) {
@@ -161,11 +166,11 @@ export interface JoinOptions {
 /**
  * The card of each start-a-task call that became a task, by tool call id.
  *
- * A call joins the task the daemon recorded for it: by the delegation id in its recorded result when
- * it has one, otherwise by order. Vendor runtimes (Claude, Codex) record neither the call's input nor
- * its result, so for them the Nth call after a given time takes the earliest task that no other call
- * has taken. `delegate_task` starts a subagent's first task and `continue_subagent` a later one; a
- * title in the recorded input narrows the choice when it matches. A call that errored or was refused
+ * A call joins the task the daemon recorded for it, in this order: by the delegation id in its
+ * recorded result; else by the subagent its recorded input names (a title, or the `subagent` a
+ * follow-up addresses); else, only for rows that record neither (written before the daemon kept
+ * them), by order and time, the earliest task no other call has taken. `delegate_task` starts a
+ * subagent's first task and `continue_subagent` a later one. A call that errored or was refused
  * keeps its raw row; so does a finished call no task matches once the list has loaded.
  */
 export function joinSubagentCards(calls: readonly SubagentCall[], subagents: readonly SubagentSummary[], options: JoinOptions): Map<string, SubagentCardModel> {
@@ -176,32 +181,50 @@ export function joinSubagentCards(calls: readonly SubagentCall[], subagents: rea
   const claimed = new Set<string>()
   const assigned = new Map<string, TaskEntry>()
 
-  // A recorded result names its task outright; settle those first so ordering never takes them.
-  for (const call of calls) {
-    if (call.failed) continue
+  const take = (call: SubagentCall, entry: TaskEntry | undefined): boolean => {
+    if (!entry || claimed.has(entry.task.delegationId)) return false
+    claimed.add(entry.task.delegationId)
+    assigned.set(call.toolCallId, entry)
+    return true
+  }
+  const recordedId = (call: SubagentCall): string | null => {
     const id = readSubagentResult(call.output)?.delegationId
-    const entry = typeof id === 'string' ? byDelegation.get(id) : undefined
-    if (entry && !claimed.has(entry.task.delegationId)) {
-      claimed.add(entry.task.delegationId)
-      assigned.set(call.toolCallId, entry)
-    }
+    return typeof id === 'string' && id ? id : null
+  }
+  const live = calls.filter((call) => !call.failed)
+
+  // 1. A recorded result names its task outright.
+  for (const call of live) {
+    const id = recordedId(call)
+    if (id) take(call, byDelegation.get(id))
   }
 
-  for (const call of calls) {
-    if (call.failed || assigned.has(call.toolCallId)) continue
-    const open = entries.filter(
-      (entry) =>
-        !claimed.has(entry.task.delegationId) &&
-        (call.tool === 'delegate_task' ? entry.index === 0 : entry.index >= 1) &&
-        (call.startedAt === null || entry.at >= call.startedAt - START_SLACK_MS)
+  // 2. A recorded input names the subagent: a started subagent by its title, a follow-up by the
+  //    subagent it names, taking that subagent's earliest later task no other call has taken.
+  for (const call of live) {
+    if (assigned.has(call.toolCallId) || recordedId(call)) continue
+    const named = entries.filter((entry) => namesSubagent(call, entry) === true && !claimed.has(entry.task.delegationId))
+    take(
+      call,
+      call.tool === 'delegate_task'
+        ? named.find((entry) => entry.index === 0)
+        : named.find((entry) => entry.index >= 1 && (call.startedAt === null || entry.at >= call.startedAt - START_SLACK_MS))
     )
-    // The title is a preference: a renamed subagent must still join.
-    const named = open.filter((entry) => namesSubagent(call, entry) === true)
-    const pick = (named.length > 0 ? named : open)[0]
-    if (pick) {
-      claimed.add(pick.task.delegationId)
-      assigned.set(call.toolCallId, pick)
-    }
+  }
+
+  // 3. Rows that record neither (written before the daemon kept them) join by order and time. A row
+  //    that names its task or subagent is never matched this way, so it cannot take another call's task.
+  for (const call of live) {
+    if (assigned.has(call.toolCallId) || recordedId(call) || namesAnySubagent(call)) continue
+    take(
+      call,
+      entries.find(
+        (entry) =>
+          !claimed.has(entry.task.delegationId) &&
+          (call.tool === 'delegate_task' ? entry.index === 0 : entry.index >= 1) &&
+          (call.startedAt === null || entry.at >= call.startedAt - START_SLACK_MS)
+      )
+    )
   }
 
   const cards = new Map<string, SubagentCardModel>()

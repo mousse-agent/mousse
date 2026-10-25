@@ -14,7 +14,7 @@ import {
   subagentToolName,
   subagentToolOfRecord,
   type SubagentToolName
-} from '../src/renderer/chat/adapters/subagentTools'
+} from '../src/shared/subagentTools'
 import { previewText } from '../src/renderer/components/QueuedMessages'
 import type { ChatMessage, QueuedMessage } from '../src/shared/types'
 import type { SubagentSummary, SubagentTaskSummary } from '../src/shared/subagents'
@@ -195,10 +195,57 @@ describe('joinSubagentCards', () => {
     expect(cards.get('c1')!.delegationId).toBe('db')
   })
 
-  it('narrows by the title a row recorded, and still joins a renamed subagent', () => {
-    const subagents = [subagent('a', [task('da', 2)], { title: 'Docs' }), subagent('b', [task('db', 2)], { title: 'API reviewer' })]
-    expect(join([call('c1', 'delegate_task', 1, { input: { title: 'API reviewer' } })], subagents).get('c1')!.childThreadId).toBe('b')
-    expect(join([call('c1', 'delegate_task', 1, { input: { title: 'Old name' } })], subagents).get('c1')!.childThreadId).toBe('a')
+  it('joins by the title a row recorded, whatever the order and time', () => {
+    const subagents = [subagent('a', [task('da', 2)], { title: 'Docs' }), subagent('b', [task('db', 3)], { title: 'API reviewer' })]
+    const cards = join(
+      [call('c1', 'delegate_task', 5, { input: { title: 'API reviewer' } }), call('c2', 'delegate_task', 5, { input: { title: 'docs' } })],
+      subagents
+    )
+    expect(cards.get('c1')!.childThreadId).toBe('b')
+    expect(cards.get('c2')!.childThreadId).toBe('a')
+  })
+
+  describe('two calls started in the same instant', () => {
+    // The daemon recorded the second call's task first.
+    const subagents = [subagent('docs', [task('d-docs', 6)]), subagent('api', [task('d-api', 7)])]
+
+    it('join exactly by the delegation id each row recorded', () => {
+      const cards = join(
+        [call('c1', 'delegate_task', 5, { output: { delegationId: 'd-api' } }), call('c2', 'delegate_task', 5, { output: '{"delegationId":"d-docs"}' })],
+        subagents
+      )
+      expect(cards.get('c1')!.delegationId).toBe('d-api')
+      expect(cards.get('c2')!.delegationId).toBe('d-docs')
+    })
+
+    it('join exactly by the subagent a follow-up names', () => {
+      const tasks = [task('d1', 2, { outcome: 'done' }), task('d2', 8, { outcome: 'done' }), task('d3', 9)]
+      const cards = join(
+        [call('c1', 'continue_subagent', 7, { input: { subagent: 'Subagent b' } }), call('c2', 'continue_subagent', 7, { input: { subagent: 'Subagent a' } })],
+        [subagent('a', [task('a1', 1), task('a2', 9)]), subagent('b', tasks)]
+      )
+      expect(cards.get('c1')!.childThreadId).toBe('b')
+      expect(cards.get('c1')!.delegationId).toBe('d2')
+      expect(cards.get('c2')!.delegationId).toBe('a2')
+    })
+
+    it('fall back to order and time only for rows that record neither', () => {
+      const cards = join([call('c1', 'delegate_task', 5), call('c2', 'delegate_task', 5)], subagents)
+      expect(cards.get('c1')!.delegationId).toBe('d-docs')
+      expect(cards.get('c2')!.delegationId).toBe('d-api')
+    })
+  })
+
+  it('never gives a row that names its task, or its subagent, another call`s task by time', () => {
+    const subagents = [subagent('a', [task('da', 3)])]
+    // The recorded task is not in the list (a trashed thread), the recorded title is of a renamed subagent.
+    const cards = join(
+      [call('gone', 'delegate_task', 1, { output: { delegationId: 'd-missing' } }), call('renamed', 'delegate_task', 2, { input: { title: 'Old name' } }), call('plain', 'delegate_task', 2)],
+      subagents
+    )
+    expect(cards.has('gone')).toBe(false)
+    expect(cards.has('renamed')).toBe(false)
+    expect(cards.get('plain')!.delegationId).toBe('da')
   })
 
   it('starts a subagent with delegate_task and later tasks with continue_subagent', () => {

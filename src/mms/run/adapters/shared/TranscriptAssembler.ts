@@ -150,7 +150,7 @@ export class TranscriptAssembler {
         response: event.response,
         status: 'processing',
         ...(parsed.toolName ? { toolName: parsed.toolName } : {}),
-        ...(parsed.input ? { input: parsed.input } : {})
+        ...((event.input ?? parsed.input) ? { input: event.input ?? parsed.input } : {})
       })
       this.state.activeToolCallMessageIds.set(event.callId, message.id)
       this.setToolPhase()
@@ -173,7 +173,7 @@ export class TranscriptAssembler {
               status: 'complete',
               // Preserve start-phase args: complete events carry result text, not args JSON.
               toolName: parsed.toolName ?? existing.toolCall?.toolName,
-              input: existing.toolCall?.input ?? parsed.input
+              input: existing.toolCall?.input ?? event.input ?? parsed.input
             }
           }
           this.hooks.updateMessage(updated)
@@ -198,7 +198,7 @@ export class TranscriptAssembler {
       response: event.response,
       status: 'complete',
       ...(parsed.toolName ? { toolName: parsed.toolName } : {}),
-      ...(parsed.input ? { input: parsed.input } : {})
+      ...((event.input ?? parsed.input) ? { input: event.input ?? parsed.input } : {})
     })
   }
 

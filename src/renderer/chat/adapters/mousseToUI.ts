@@ -7,7 +7,7 @@ import {
   guessMimeTypeFromFilename,
   parseUserMessageContent,
 } from '../../utils/messageAttachments'
-import { subagentToolOfRecord } from './subagentTools'
+import { subagentToolOfRecord } from '../../../shared/subagentTools'
 
 // Provider (ChatMessage.toolCall) -> standardize (UIMessage parts) -> 21st Agent Elements.
 

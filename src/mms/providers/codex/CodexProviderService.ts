@@ -5,6 +5,7 @@ import { delimiter, isAbsolute, join, resolve } from 'node:path'
 import { AppError, redactSecrets } from '../../../shared/errors'
 import { CODEX_INSTANCE_ID } from '../../../shared/providerInstances'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
+import { recordSubagentCall, toolResultText } from '../../../shared/subagentTools'
 import type {
   CliProviderConfig,
   CliProviderConfigPatch,
@@ -142,6 +143,8 @@ export interface CodexToolEvent {
   callId: string
   title: string
   toolName?: string
+  /** A Mousse subagent call's bounded record (`recordSubagentCall`). */
+  record?: ReturnType<typeof recordSubagentCall>
 }
 
 export interface CodexTurnUsage {
@@ -267,8 +270,27 @@ function toolEvent(item: ThreadItem, phase: 'start' | 'complete'): CodexToolEven
       return { phase, callId: item.id, title: paths.length ? `Edit ${paths.join(', ')}` : 'Edit files', toolName: 'apply_patch' }
     }
     case 'mcpToolCall': {
-      const call = item as { server?: string; tool?: string }
-      return { phase, callId: item.id, title: `${call.server}.${call.tool}`, toolName: `mcp__${call.server}__${call.tool}` }
+      const call = item as {
+        server?: string
+        tool?: string
+        status?: string
+        arguments?: unknown
+        result?: { content?: unknown; structuredContent?: unknown } | null
+        error?: unknown
+      }
+      const toolName = `mcp__${call.server}__${call.tool}`
+      // Mousse's subagent tools keep a bounded record of the call, so the app can tell which task a row is.
+      const record = recordSubagentCall(
+        toolName,
+        call.arguments,
+        phase === 'start'
+          ? {}
+          : {
+              text: toolResultText(call.result?.content) ?? (call.result?.structuredContent ? JSON.stringify(call.result.structuredContent) : undefined),
+              isError: call.status === 'failed' || Boolean(call.error)
+            }
+      )
+      return { phase, callId: item.id, title: `${call.server}.${call.tool}`, toolName, ...(record ? { record } : {}) }
     }
     case 'dynamicToolCall':
       return { phase, callId: item.id, title: (item as { tool?: string }).tool ?? 'tool', toolName: (item as { tool?: string }).tool }

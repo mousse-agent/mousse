@@ -198,6 +198,40 @@ describe('CodexAdapter', () => {
     expect(await adapter.forkSession({ provider: 'codex' }, 1)).toBeNull()
   })
 
+  it('records a Mousse subagent call and its result on the tool events, and no other MCP call', async () => {
+    const mcp = (id: string, server: string, tool: string, extra: Record<string, unknown>) => ({ type: 'mcpToolCall', id, server, tool, ...extra })
+    const delegated = mcp('sub-1', 'mousse', 'delegate_task', { arguments: { title: 'API reviewer', prompt: 'SECRET PROMPT', workspace: 'shared' } })
+    const replay = transport([
+      ...handshake(),
+      ...threadStart(3),
+      ...turnStart(4, 'hello'),
+      note('item/started', { threadId: T, turnId: 'turn-1', item: { ...delegated, status: 'inProgress' } }),
+      note('item/completed', {
+        threadId: T,
+        turnId: 'turn-1',
+        item: { ...delegated, status: 'completed', result: { content: [{ type: 'text', text: JSON.stringify({ delegationId: 'd1', childThreadId: 't1', note: 'Started. LONG NOTE' }) }] } }
+      }),
+      note('item/started', { threadId: T, turnId: 'turn-1', item: mcp('other-1', 'tracker', 'delegate_task', { arguments: { title: 'x' }, status: 'inProgress' }) }),
+      note('item/completed', { threadId: T, turnId: 'turn-1', item: mcp('other-1', 'tracker', 'delegate_task', { arguments: { title: 'x' }, status: 'completed' }) }),
+      ...message('msg-1', ['ok']),
+      completed('completed')
+    ])
+    const adapter = new CodexAdapter(() => service(replay))
+    const sink = recordingSink()
+    await adapter.startTurn(input(), sink, control(), host())
+    replay.assertDone()
+    const tools = sink.calls.filter(([name]) => name === 'tool').map(([, event]) => event as Record<string, unknown>)
+    expect(tools[0]).toMatchObject({ phase: 'start', callId: 'sub-1', input: { title: 'API reviewer' } })
+    expect(tools[0]).not.toHaveProperty('response')
+    expect(tools[1]).toMatchObject({ phase: 'complete', callId: 'sub-1', input: { title: 'API reviewer' } })
+    expect(JSON.parse(tools[1]!.response as string)).toEqual({ delegationId: 'd1', childThreadId: 't1' })
+    expect(JSON.stringify(tools)).not.toMatch(/SECRET PROMPT|LONG NOTE/)
+    for (const event of tools.slice(2)) {
+      expect(event).not.toHaveProperty('input')
+      expect(event).not.toHaveProperty('response')
+    }
+  })
+
   it('runs a turn: text, thinking, tools, edits, usage and the thread reference', async () => {
     const replay = transport([
       ...handshake(),

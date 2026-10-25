@@ -109,3 +109,63 @@ export function isRefusedSubagentResult(output: unknown): boolean {
   const result = readSubagentResult(output)
   return result !== null && (result.started === false || result.answered === false)
 }
+
+/** Longest text the app keeps from one field of a subagent tool call. */
+const RECORD_TEXT_CHARS = 200
+
+function clip(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const text = value.replace(/\s+/g, ' ').trim()
+  if (!text) return undefined
+  return text.length > RECORD_TEXT_CHARS ? `${text.slice(0, RECORD_TEXT_CHARS - 1)}…` : text
+}
+
+/** The text of a tool result, whether the runtime gave a string or MCP content blocks. */
+export function toolResultText(content: unknown): string | undefined {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return undefined
+  const text = content
+    .map((block) => (block && typeof block === 'object' && typeof (block as { text?: unknown }).text === 'string' ? (block as { text: string }).text : ''))
+    .join('')
+  return text || undefined
+}
+
+/**
+ * What a transcript row keeps of a Mousse subagent tool call, so the app can tell which task a
+ * card is for without guessing. Only the fields that name the subagent or task go in, each
+ * clipped: the call's title, subagent and delegation id, and the result's delegation id, thread,
+ * title, status and, for a refusal or error, its code and a short message. The prompt, the answers
+ * and the result text never do. Null for any other tool.
+ */
+export function recordSubagentCall(
+  rawName: string | null | undefined,
+  input: unknown,
+  result: { text?: string; isError?: boolean }
+): { input: Record<string, unknown>; response?: string; failed: boolean } | null {
+  if (!subagentToolName(rawName)) return null
+  const args = input && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>) : {}
+  const keptInput: Record<string, unknown> = {}
+  for (const key of ['title', 'subagent', 'delegationId'] as const) {
+    const value = clip(args[key])
+    if (value !== undefined) keptInput[key] = value
+  }
+  const value = readSubagentResult(result.text)
+  const kept: Record<string, unknown> = {}
+  if (value) {
+    for (const key of ['delegationId', 'childThreadId', 'title', 'status', 'code'] as const) {
+      const text = clip(value[key])
+      if (text !== undefined) kept[key] = text
+    }
+    for (const key of ['started', 'answered'] as const) if (typeof value[key] === 'boolean') kept[key] = value[key]
+    const message = clip(value.message)
+    if ((value.started === false || value.answered === false) && message) kept.message = message
+  } else if (result.isError) {
+    const message = clip(result.text)
+    if (message) kept.message = message
+  }
+  return {
+    input: keptInput,
+    ...(Object.keys(kept).length > 0 ? { response: JSON.stringify(kept) } : {}),
+    failed: result.isError === true
+  }
+}
