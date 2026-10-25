@@ -271,6 +271,38 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     expect(claude.text(2)).toContain('Helper A finished.')
   }, 30_000)
 
+  it('a returned steer restores external text and the owned steer whole, never by cutting one out of the other', async () => {
+    const { cli, d, thread } = await threadWithHelper()
+    cli.reply = undefined
+    const session = d.orch.getOrCreateSession(thread.id)
+    let external: string | undefined
+    const turn = (d.orch as any).runTurnOnSession(session, { content: 'two', mode: 'agent' }, false, true, {
+      externalDrainSteer: () => {
+        const text = external
+        external = undefined
+        return text
+      }
+    }) as Promise<unknown>
+    turn.catch(() => undefined)
+    await waitFor(() => cli.last.inputs.length === 2, 'the second turn to start')
+    const claude = cli.last
+    claude.emit(textDelta('working', claude.uuid(1)))
+    let open!: () => void
+    claude.backgroundGate = new Promise<void>((resolve) => { open = resolve })
+    // One drain takes both: the external text "please inspect" and the owned steer "inspect".
+    external = 'please inspect'
+    expect(d.orch.steerThread(thread.id, 'inspect')).toBe(true)
+    await waitFor(() => claude.backgrounded === 1, 'the steer to be drained')
+    claude.emit(resultFrame({ uuids: [claude.uuid(1)], text: 'working' }))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    open()
+    await turn
+    await waitFor(() => claude.inputs.length === 3, 'the returned steer to run as the next turn')
+    // (the message content is JSON text here, so a newline shows as a backslash and an n)
+    expect(claude.text(2)).toContain('inspect\\nplease inspect')
+    expect(claude.text(2)).not.toContain('please \\n')
+  }, 30_000)
+
   it('deleting the thread or switching its provider ends the process and its helpers', async () => {
     const deleted = await threadWithHelper()
     deleted.d.orch.markThreadDeleted(deleted.thread.id)
