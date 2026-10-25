@@ -309,30 +309,117 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     for (const run of s.d.engine.listRuns(s.childThread)) expect(s.d.engine.tools.listForRun(run.runId).map((invocation) => invocation.tool)).not.toContain('list_tasks')
   })
 
-  it('an admitted turn whose own send holds the admission and waits behind a continuation in the lane is passed by it', async () => {
+  it('an admitted turn whose send holds the admission and waits behind a continuation in the lane is passed by it, and keeps its place', async () => {
     const s = await scene()
     const session = s.d.orch.getOrCreateSession(s.childThread)
-    // The lane is held while the situation is set up: a message of the user was admitted (its send holds the
-    // admission) but its effect is made only after the continuation's.
+    // The lane is held while the situation is set up. The user's message is admitted through the real send
+    // path, but its effect is made only after the continuation's.
     await s.d.worker.stop()
-    const sent = await s.d.engine.dispatch({ kind: 'send', threadId: s.childThread, clientRequestId: 'admitted-1', source: 'gui' })
-    if (sent.status !== 'accepted') throw new Error('send refused')
-    session.turnAdmitted = true
-    session.admissionRunId = sent.runId
+    const realEnqueue = (s.d.orch as any).enqueueTurnStart.bind(s.d.orch)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let admitted!: Promise<unknown>
+    vi.spyOn(s.d.orch as any, 'enqueueTurnStart').mockImplementation(((payload: unknown) => {
+      admitted = gate.then(() => realEnqueue(payload))
+      admitted.catch(() => undefined)
+      return admitted
+    }) as never)
+    s.cli.reply = (message, process) => process.answer(String(message.uuid), 'typed answer')
+    await s.d.orch.send('admitted', false, { threadId: s.childThread, clientRequestId: 'admitted-1', source: 'gui', awaitMode: 'ack' })
+    expect(session.turnAdmitted).toBe(true)
+    const owner = session.admissionRunId
+    expect(owner).toBeTruthy()
     s.cli.last.emit(notification('build-1'), textDelta('reading the report'))
     await waitFor(() => s.d.engine.listRuns(s.childThread).some((run) => run.source === 'provider-continuation'), 'the continuation run')
-    s.cli.reply = (message, process) => process.answer(String(message.uuid), 'typed answer')
-    const admitted = (s.d.orch as any).enqueueTurnStart({ runId: sent.runId, threadId: s.childThread, input: { content: 'admitted', mode: 'agent' }, reuseLastUser: false, displayUserMessage: true, source: 'gui', admissionHeld: true }) as Promise<unknown>
-    admitted.catch(() => undefined)
+    release()
     s.cli.last.emit(resultFrame({ text: 'The report is read.', origin: 'task-notification' }))
     s.d.worker.start()
     await admitted
     const continuation = s.d.engine.listRuns(s.childThread).find((run) => run.source === 'provider-continuation')!
-    const typed = s.d.engine.getRun(sent.runId)!
+    const typed = s.d.engine.getRun(owner!)!
     expect([continuation.status, typed.status]).toEqual(['completed', 'completed'])
-    // The continuation went first although it came second in the lane, and the admitted turn kept its admission.
+    // The continuation went first although it came second in the lane.
     expect(continuation.completedAt! <= typed.startedAt!).toBe(true)
   }, 40_000)
+
+  it('a queue drain that holds the admission across the await that makes its run does not deadlock behind a continuation', async () => {
+    const s = await scene()
+    const orch = s.d.orch as any
+    // A deferred continuation looks at the thread again quickly.
+    orch.wakeBusyDeferMs = 50
+    const real = orch.ensureQueueItemRun.bind(orch)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    vi.spyOn(orch, 'ensureQueueItemRun').mockImplementation((async (item: unknown) => {
+      await gate
+      return real(item)
+    }) as never)
+    s.cli.reply = (message, process) => process.answer(String(message.uuid), 'queued answer')
+    const session = s.d.orch.getOrCreateSession(s.childThread)
+    orch.enqueueForThread(s.childThread, { content: 'queued message', mode: 'agent' }, { source: 'gui' })
+    orch.scheduleQueueDrain(session)
+    await waitFor(() => session.turnAdmitted, 'the drain to reserve the admission')
+    // A helper's wake is reported while the drain waits for its run record: its effect enters the lane first.
+    s.cli.last.emit(notification('build-1'), textDelta('reading the report'))
+    await waitFor(() => s.d.engine.listRuns(s.childThread).some((run) => run.source === 'provider-continuation'), 'the continuation run')
+    // Its effect ran once and was deferred (the drain holds the thread); the deferral is over when the drain goes on.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    release()
+    s.cli.last.emit(resultFrame({ text: 'The report is read.', origin: 'task-notification' }))
+    // The worker looks again (in the daemon its poll does) once the deferral has run out.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    s.d.worker.notify()
+    await waitFor(() => {
+      const runs = s.d.engine.listRuns(s.childThread).filter((run) => run.source === 'provider-continuation' || run.source === 'queue' || run.source === 'gui')
+      return runs.length === 2 && runs.every((run) => run.status === 'completed')
+    }, 'both turns to complete', 20_000)
+    const runs = s.d.engine.listRuns(s.childThread)
+    const continuation = runs.find((run) => run.source === 'provider-continuation')!
+    const queued = runs.find((run) => run.source !== 'provider-continuation' && run.source !== 'delegation')!
+    expect(continuation.completedAt! <= queued.startedAt!).toBe(true)
+  }, 40_000)
+
+  it('calls made by the active run are not held by a continuation waiting behind it', async () => {
+    const s = await scene({ mcp: true })
+    ;(s.d.orch as any).continuationCallWaitMs = 100
+    const openSignIn = s.holdSignIn()
+    // A user turn is active in the engine, but its provider has not pushed it yet (the sign-in check is slow).
+    s.cli.reply = undefined
+    const typed = s.d.orch.send('typed', false, { threadId: s.childThread, clientRequestId: 'typed-5', source: 'gui', awaitMode: 'ack' })
+    typed.catch(() => undefined)
+    await waitFor(() => s.d.engine.getActiveRun(s.childThread)?.source === 'gui', 'the user turn to be active')
+    // Claude runs the wake of a finished helper first; its continuation waits behind the user's turn.
+    s.cli.last.emit(notification('build-1'), textDelta('reading the report'))
+    await waitFor(() => (s.d.orch as any).pendingContinuations.size === 1, 'the wake report to reach the host')
+    s.cli.last.emit(resultFrame({ text: 'The report is read.', origin: 'task-notification' }))
+    openSignIn()
+    await waitFor(() => s.cli.last.inputs.length === 2, "the user's message to reach Claude")
+    const uuid = s.cli.last.uuid(1)
+    s.cli.last.emit(textDelta('looking', uuid))
+    // The user turn's own tool call, long after the continuation's wait would have run out.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const response = await s.callMousse('list_tasks')
+    expect(response.error).toBeUndefined()
+    const active = s.d.engine.getActiveRun(s.childThread)!
+    expect(s.d.engine.tools.listForRun(active.runId).map((invocation) => invocation.tool)).toContain('list_tasks')
+    s.cli.last.emit(resultFrame({ uuids: [uuid], text: 'done' }))
+  }, 40_000)
+
+  it('the gate is decided for the turn in flight, not for every continuation waiting on the thread', async () => {
+    const s = await scene()
+    const orch = s.d.orch as any
+    const hold = (runId: string | null) => ({ threadId: s.childThread, reserved: false, done: Promise.resolve({ runId }), settle: () => undefined })
+    orch.pendingContinuations.set('timed-out', hold(null))
+    orch.pendingContinuations.set('active', hold('run-active'))
+    const inFlight = vi.spyOn(s.service, 'inFlightContinuation')
+    inFlight.mockReturnValue('active')
+    await expect(orch.continuationGate(s.childThread)).resolves.toEqual({ runId: 'run-active' })
+    inFlight.mockReturnValue(undefined)
+    expect(orch.continuationGate(s.childThread)).toBeUndefined()
+    inFlight.mockReturnValue('timed-out')
+    await expect(orch.continuationGate(s.childThread)).resolves.toEqual({ runId: null })
+    orch.pendingContinuations.clear()
+  })
 
   it('an admission held by something the engine does not schedule is not passed: the continuation waits', async () => {
     const s = await scene()
@@ -387,6 +474,7 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
       await waitFor(() => s.d.engine.listRuns(s.childThread).some((run) => run.source === 'gui' && run.status === 'completed'), 'the typed message to run after the reservation was released', 20_000)
       expect((s.d.orch as any).pendingContinuations.size).toBe(0)
       expect(session.turnAdmitted).toBe(false)
+      expect(session.admissionRunId).toBeUndefined()
     }, 40_000)
   })
 

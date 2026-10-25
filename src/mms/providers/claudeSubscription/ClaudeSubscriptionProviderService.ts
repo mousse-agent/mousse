@@ -1038,6 +1038,11 @@ export class ClaudeSubscriptionProviderService {
     // unattended, in bypass mode). Its tasks are discharged by the next turn that commits.
     live.discardContinuation(run)
   }
+  /** The turn Claude started on its own that is running now on the thread (see `LiveSession.inFlightContinuationId`). */
+  inFlightContinuation(threadId: string): string | undefined {
+    const live = this.live.get(threadId)
+    return live && !live.dead ? live.inFlightContinuationId() : undefined
+  }
   /** Whether Claude started a turn of its own on the thread that no run has taken yet. */
   hasContinuation(threadId: string, id?: string): boolean {
     const live = this.live.get(threadId)

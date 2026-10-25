@@ -1076,6 +1076,7 @@ export class OrchestratorService extends EventEmitter {
     if (!session) return
     if (session.turnAdmitted && !session.activeTurn) {
       session.turnAdmitted = false
+      session.admissionRunId = undefined
       session.abortRequested = false
     }
     try {
@@ -1087,9 +1088,12 @@ export class OrchestratorService extends EventEmitter {
 
   /** Mousse tool calls of the thread wait for this while a turn the provider started has no active run yet. */
   private continuationGate(threadId: string): Promise<{ runId: string | null }> | undefined {
-    const gates = [...this.pendingContinuations.values()].filter((hold) => hold.threadId === threadId).map((hold) => hold.done)
-    if (gates.length === 0) return undefined
-    return Promise.all(gates).then((states) => (states.some((state) => state.runId === null) ? { runId: null } : states[states.length - 1]))
+    // A call is gated only when it comes from a turn Claude started itself that has no run yet. Provider
+    // frames say which turn is running: while it is a message of ours, its calls act as the active run
+    // at once, whatever continuations wait behind it.
+    const id = this.claudeSubscription?.inFlightContinuation(threadId)
+    const hold = id !== undefined ? this.pendingContinuations.get(id) : undefined
+    return hold && hold.threadId === threadId ? hold.done : undefined
   }
 
   /**
@@ -1098,7 +1102,9 @@ export class OrchestratorService extends EventEmitter {
    * longer holds (it ended folded into a message of ours), ends without running. It holds the thread
    * from the provider's report, so a message queued meanwhile runs after it. If another turn was admitted
    * before the report and its effect waits behind this one in the lane, this one goes first: Claude's
-   * turn already exists and cannot be cancelled, and that effect runs as soon as this one ends.
+   * turn already exists and cannot be cancelled, and that effect runs as soon as this one ends. Only a turn
+   * whose own `turn.start` effect holds the admission is passed (a queue drain's turn gets its effect with
+   * the admission held, so it is passable too); a turn that already runs, or one of a channel, finishes first.
    */
   private async executeContinuationEffect(effect: EffectRecord, payload: ContinuationTurnPayload, signal: AbortSignal): Promise<void> {
     const engine = this.requireRunEngine()
@@ -1116,6 +1122,7 @@ export class OrchestratorService extends EventEmitter {
       return
     }
     let passedThrough = false
+    const passedOwner = session.admissionRunId
     if (!hold?.reserved) {
       const busy = session.isTurnRunning() || engine.getActiveRun(payload.threadId)
       if (busy) {
@@ -1145,8 +1152,11 @@ export class OrchestratorService extends EventEmitter {
     } finally {
       // The run did not become active (it failed before it started): the hold ends here.
       this.endContinuationHold(payload.continuationId, false)
-      // The admitted turn that went second still needs its admission.
-      if (passedThrough) session.turnAdmitted = true
+      // The admitted turn that went second still needs its admission, and its place as the owner of it.
+      if (passedThrough) {
+        session.turnAdmitted = true
+        session.admissionRunId = passedOwner
+      }
     }
   }
 
@@ -1440,8 +1450,10 @@ export class OrchestratorService extends EventEmitter {
       // Let the direct path produce its usual "already running" rejection.
       if (session.turnAdmitted) return direct(false)
       session.turnAdmitted = true
-      session.admissionRunId = runId
     }
+    // The turn.start effect now carries this admission, whoever reserved it (the send, or a queue drain
+    // that held it across the await that made the run): the owner is the run the effect starts.
+    if (session.turnAdmitted && !session.activeTurn) session.admissionRunId = runId
     try {
       return this.enqueueTurnStart({ ...payload, runId, admissionHeld: true })
     } catch (error) {
@@ -1577,6 +1589,7 @@ export class OrchestratorService extends EventEmitter {
     const session = this.boundSession.threadId === payload.threadId ? this.boundSession : this.sessions.get(payload.threadId)
     if (session && entry?.payload.admissionHeld && !session.activeTurn) {
       session.turnAdmitted = false
+      session.admissionRunId = undefined
       session.abortRequested = false
       if (session.drainAfterSettle) {
         session.drainAfterSettle = false
@@ -1603,7 +1616,10 @@ export class OrchestratorService extends EventEmitter {
       console.warn('turn.start effect could not be cancelled', { runId, error: error instanceof Error ? error.message : String(error) })
     }
     const session = this.boundSession.threadId === payload.threadId ? this.boundSession : this.sessions.get(payload.threadId)
-    if (session && !session.activeTurn) session.turnAdmitted = false
+    if (session && !session.activeTurn) {
+      session.turnAdmitted = false
+      session.admissionRunId = undefined
+    }
     if (!payload.queueItemId) {
       this.markRun(runId, (engine, id) => {
         if (engine.getRun(id)?.status === 'queued') engine.markTerminal(id, 'interrupted', { interruptedBy: 'daemon_restart' })

@@ -492,6 +492,16 @@ export class LiveSession<Turn = unknown> {
     return index >= 0 ? this.unclaimed.splice(index, 1)[0] : undefined
   }
 
+  /**
+   * The turn Claude started on its own whose frames are in flight right now, if that is the turn it is
+   * running: a Mousse tool call made now comes from it. When Claude runs a message of ours, nothing is
+   * returned, whatever wakes wait to be run.
+   */
+  inFlightContinuationId(): string | undefined {
+    const run = this.cursor
+    return run && run.kind === 'continuation' && !run.settled && !run.abandoned ? run.id : undefined
+  }
+
   /** A turn Claude started on its own waits for a run (the one `id` names, when given). */
   hasUnclaimedContinuation(id?: string): boolean {
     return id === undefined ? this.unclaimed.length > 0 : this.unclaimed.some((run) => run.id === id)
