@@ -781,8 +781,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
         return runCommandResponse(await ctx.mms.orchestrator.abortRun(runId, clientRequestId, threadId), runId)
       }
-      const ok = ctx.mms.orchestrator.abortActiveTurn(threadId, { clearQueue })
-      return { ok }
+      const aborted = ctx.mms.orchestrator.abortActiveTurn(threadId, { clearQueue })
+      // Stop also reaches the provider's process, so background work it still runs ends.
+      const stopped = await ctx.mms.orchestrator.stopProviderWork(threadId)
+      return { ok: aborted || stopped }
     }
     case 'orchestrator.steer': {
       const p = isObject(params) ? params : {}

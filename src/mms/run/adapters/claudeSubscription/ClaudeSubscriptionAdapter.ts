@@ -23,7 +23,7 @@ import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
 export type ClaudeSubscriptionClient = Pick<
   ClaudeSubscriptionProviderService,
   'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured'
-> & Partial<Pick<ClaudeSubscriptionProviderService, 'commitInterrupted'>>
+> & Partial<Pick<ClaudeSubscriptionProviderService, 'commitInterrupted' | 'stopThread'>>
 
 export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.freeze({
   steer: 'interrupt_restart',
@@ -40,8 +40,11 @@ export const CLAUDE_SUBSCRIPTION_CAPABILITIES: ProviderCapabilities = Object.fre
 /**
  * Claude Code through the official Agent SDK on the user's subscription (SPEC §13.4). Claude runs
  * its own loop and tools (weak containment) and keeps its own session, resumed while the history
- * fingerprint matches; prior turns otherwise go in as a prompt preamble. Steers are drained by the
- * service's poller and delivered by interrupting and resuming the session.
+ * fingerprint matches; prior turns otherwise go in as a prompt preamble. The service keeps one live
+ * Claude process per thread, so the background agents and shells it started outlive a turn (see
+ * `liveSession.ts`). Steers are drained by the service's poller and pushed into the live process as
+ * an immediate message; a thread that has no live process (the cap on processes) interrupts and
+ * resumes the session instead.
  *
  * The service is read through `service()` on every turn: the profile installs it after the
  * orchestrator (and its adapter registry) is built.
@@ -197,11 +200,16 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
   }
 
   /**
-   * Stop reaches Claude through `TurnInput.signal`: the service aborts its SDK query and closes
-   * the session when the orchestrator aborts the turn. There is no separate session to interrupt.
+   * An aborted turn (`TurnInput.signal`) interrupts Claude and leaves its process open, which is what
+   * question preemption and a run timeout want. Stop is `stopThread`.
    */
   async interrupt(_ref: ProviderRef): Promise<'interrupted' | 'not_active'> {
     return 'not_active'
+  }
+
+  /** Stop: interrupts the turn and closes the thread's Claude process, which ends its background agents and shells. */
+  async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
+    return this.service()?.stopThread?.(threadId) ?? 'not_active'
   }
 
   /**

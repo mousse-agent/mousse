@@ -1,0 +1,583 @@
+/**
+ * Issue #142: a Claude thread runs on a live query, so the helpers it started outlive a turn. These
+ * tests drive the provider service against `FakeClaudeCli`, a peer that reads the prompt stream and
+ * writes the frames a real Claude Code process would.
+ */
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
+import {
+  ClaudeSubscriptionProviderService,
+  type ClaudeLiveHost,
+  type ClaudeSubscriptionChatInput
+} from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import { LiveSession, type LiveTimings } from '../src/mms/providers/claudeSubscription/liveSession'
+import { FakeClaudeCli, notification, resultFrame, roster, SESSION, textDelta, toolResult, toolStart } from './run/fakeClaudeCli'
+
+const homes: string[] = []
+afterEach(() => {
+  vi.useRealTimers()
+  for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
+})
+
+function fixture(timings: Partial<LiveTimings> = {}, cli = new FakeClaudeCli()) {
+  const home = mkdtempSync(join(tmpdir(), 'claude-live-test-'))
+  homes.push(home)
+  const binary = join(home, 'claude')
+  writeFileSync(binary, 'fixture')
+  chmodSync(binary, 0o755)
+  mkdirSync(join(home, 'providers', 'claude-subscription'), { recursive: true })
+  writeFileSync(join(home, 'providers', 'claude-subscription', 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
+  const questions = new UserQuestionService()
+  const service = new ClaudeSubscriptionProviderService(home, questions, {
+    query: cli.query,
+    live: timings,
+    runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
+  })
+  const host = { backgroundWork: vi.fn<(threadId: string, active: boolean) => void>(), continuationStarted: vi.fn<NonNullable<ClaudeLiveHost['continuationStarted']>>() }
+  service.setLiveHost(host)
+  const chat = (extra: Partial<ClaudeSubscriptionChatInput> = {}) =>
+    service.chat({ threadId: 'thread', cwd: home, model: 'sonnet', prompt: 'hello', onText: vi.fn(), ...extra })
+  /** One finished turn, committed the way the adapter commits it. */
+  const turn = async (extra: Partial<ClaudeSubscriptionChatInput> = {}, history = '') => {
+    const text = await chat({ history, ...extra })
+    service.commitConversation(extra.threadId ?? 'thread', history)
+    return text
+  }
+  return { home, service, cli, host, questions, chat, turn }
+}
+
+/** A turn whose prompt the process reads but never answers on its own. */
+const silent = (cli: FakeClaudeCli) => {
+  cli.reply = undefined
+}
+const inputs = (cli: FakeClaudeCli, count: number) => vi.waitFor(() => expect(cli.last.inputs.length).toBeGreaterThanOrEqual(count))
+
+describe('a live Claude query', () => {
+  it('serves three turns and a question preemption from one process, never resuming while it is live', async () => {
+    const { cli, chat, turn, service, home } = fixture()
+    for (const n of [1, 2, 3]) expect(await turn({ prompt: `turn ${n}` })).toBe(`reply to ${n}`)
+    expect(cli.processes).toHaveLength(1)
+    const process = cli.last
+    expect(process.options.resume).toBeUndefined()
+    expect(process.inputs.every((message) => message.uuid)).toBe(true)
+    expect(process.inputEnded).toBe(false)
+
+    // Question preemption: the turn is aborted, the process stays.
+    process.onInput = null
+    const preempt = new AbortController()
+    const onText = vi.fn()
+    const fourth = chat({ prompt: 'long', signal: preempt.signal, onText, history: '' })
+    await inputs(cli, 4)
+    process.emit(textDelta('working', process.uuid(3)))
+    await vi.waitFor(() => expect(onText).toHaveBeenCalled())
+    preempt.abort()
+    await expect(fourth).rejects.toThrow()
+    expect(process.interrupts).toBe(1)
+    expect(process.closed).toBe(false)
+    // The adapter fingerprints the stopped turn, so the next turn may reuse the process.
+    service.commitInterrupted('thread', '')
+
+    // The next turn runs on the same process; the result the interrupt produced is not its own.
+    process.onInput = (message, self) => {
+      if (message.priority === 'now') return
+      self.emit(resultFrame({ uuids: [process.uuid(3)], terminalReason: 'aborted_streaming' }))
+      self.answer(String(message.uuid), 'fifth answer')
+    }
+    expect(await chat({ prompt: 'fifth', history: '' })).toBe('fifth answer')
+    expect(cli.processes).toHaveLength(1)
+    expect(process.closed).toBe(false)
+    void home
+  })
+
+  it('closes the process when a turn is aborted before Claude started its prompt, because only closing drops it from the input queue', async () => {
+    const { cli, chat } = fixture()
+    silent(cli)
+    const abort = new AbortController()
+    const turn = chat({ signal: abort.signal })
+    await inputs(cli, 1)
+    abort.abort()
+    await expect(turn).rejects.toThrow()
+    // Claude never started the prompt: only closing the process can drop it from its input queue.
+    expect(cli.last.closed).toBe(true)
+    // Nothing of the stopped request was recorded, so the next turn starts a fresh session.
+    cli.reply = (message, process) => process.answer(String(message.uuid), 'fresh')
+    expect(await chat({ history: '' })).toBe('fresh')
+    expect(cli.processes).toHaveLength(2)
+    expect(cli.last.options.resume).toBeUndefined()
+  })
+
+  it('keeps the Mousse credential on the live query, and a different credential needs a new process', async () => {
+    const { cli, turn } = fixture()
+    const mcp = (token: string) => ({ mcp: { url: 'http://127.0.0.1:9/mcp', token } })
+    await turn(mcp('t1'))
+    await turn(mcp('t1'))
+    expect(cli.processes).toHaveLength(1)
+    expect(JSON.stringify(cli.last.options.mcpServers)).toContain('t1')
+    await turn(mcp('t2'))
+    expect(cli.processes).toHaveLength(2)
+    expect(JSON.stringify(cli.last.options.mcpServers)).toContain('t2')
+  })
+
+  it('applies new integrations when the process restarts: now when it is idle, later when background work keeps it', async () => {
+    const f = fixture()
+    const withServer = (name: string) => ({
+      integrations: { mcpServers: { [name]: { type: 'stdio' as const, command: 'srv' } }, proxiedServers: {}, env: {}, warnings: [], toolRules: {} }
+    })
+    await f.turn(withServer('one'))
+    await f.turn(withServer('two'))
+    expect(f.cli.processes).toHaveLength(2)
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }))
+      process.answer(String(message.uuid), 'started')
+    }
+    await f.turn(withServer('two'))
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'again')
+    // Background work is pending: the integrations change waits for the process to end.
+    expect(await f.turn(withServer('three'))).toBe('again')
+    expect(f.cli.processes).toHaveLength(2)
+  })
+
+  it('moves a steer into the live query as an immediate message and never interrupts, so helpers keep running', async () => {
+    const { cli, service, chat, host } = fixture()
+    silent(cli)
+    const drainSteer = vi.fn<() => string | undefined>().mockReturnValueOnce('also do X').mockReturnValue(undefined)
+    const onSteer = vi.fn()
+    let ended = false
+    const turn = chat({ drainSteer, onSteer }).finally(() => { ended = true })
+    await inputs(cli, 1)
+    const process = cli.last
+    const first = process.uuid(0)
+    process.emit(roster({ id: 'bash-1' }), textDelta('working', first))
+    await inputs(cli, 2)
+    expect(onSteer).toHaveBeenCalledExactlyOnceWith('also do X')
+    expect(process.inputs[1]).toMatchObject({ priority: 'now' })
+    expect(process.text(1)).toContain('also do X')
+    expect(process.backgrounded).toBe(1)
+    expect(process.interrupts).toBe(0)
+    // The interrupt the steer causes ends no run; the run ends at the steer turn's own result.
+    process.emit(resultFrame({ uuids: [first], terminalReason: 'aborted_streaming', queued: 1 }))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(ended).toBe(false)
+    const steerUuid = process.uuid(1)
+    process.emit(textDelta('after steer', steerUuid), resultFrame({ uuids: [steerUuid], text: 'after steer' }))
+    expect(await turn).toBe('working\n\nafter steer')
+    expect(service.hasBackgroundWork('thread')).toBe(true)
+    expect(host.backgroundWork).toHaveBeenCalledExactlyOnceWith('thread', true)
+  })
+
+  it('a steered run whose result already arrived is not steered: the text stays with the orchestrator', async () => {
+    const hooks = { backgroundWork: vi.fn(), continuationStarted: vi.fn(), ended: vi.fn() }
+    const session = new LiveSession('thread', hooks)
+    const process = new FakeClaudeCli()
+    session.attach(process.query({ prompt: session.queue, options: {} as never }))
+    const run = session.beginRun(() => undefined)
+    session.push(run, { type: 'user', message: { role: 'user', content: 'go' }, parent_tool_use_id: null, session_id: '' })
+    await vi.waitFor(() => expect(process.last.inputs).toHaveLength(1))
+    // (the default fake answers and ends the run)
+    await run.done
+    expect(await session.steer(run, 'too late')).toBe(false)
+    expect(process.last.inputs).toHaveLength(1)
+    session.close()
+  })
+
+  it('switches the permission mode for each turn: plan, then bypass on the same process', async () => {
+    const { cli, turn } = fixture()
+    await turn({ mode: 'plan' })
+    const process = cli.last
+    expect(process.options.permissionMode).toBe('plan')
+    // A live query that may switch to bypass later is created with the flag even in plan mode.
+    expect(process.options.allowDangerouslySkipPermissions).toBe(true)
+    const hook = (name: string) => process.options.hooks!.PreToolUse![0].hooks[0](
+      { hook_event_name: 'PreToolUse', tool_use_id: 't', tool_name: name, tool_input: {} } as never, 't', { signal: new AbortController().signal }
+    )
+    expect(await hook('Read')).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } })
+    await turn({ mode: 'default' })
+    expect(cli.processes).toHaveLength(1)
+    expect(process.permissionModes).toEqual(['bypassPermissions'])
+    // The hook reads the turn that is running, not the one that created the query.
+    expect(await hook('Read')).toEqual({})
+  })
+
+  it('keeps the read-only policy of a child on a live query', async () => {
+    const { cli, turn } = fixture()
+    await turn({ child: { readOnly: true } })
+    const process = cli.last
+    expect(process.options.permissionMode).toBe('default')
+    expect(process.options.allowDangerouslySkipPermissions).toBeUndefined()
+    const decision = await process.options.canUseTool!('Bash', { command: 'rm x' }, { signal: new AbortController().signal } as never)
+    expect(decision).toMatchObject({ behavior: 'deny', message: expect.stringContaining('read-only') })
+  })
+})
+
+describe('background work', () => {
+  /** A turn that started a shell and finished; the shell is still running. */
+  const withHelper = async (f: ReturnType<typeof fixture>, id = 'bash-1') => {
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id }))
+      process.answer(String(message.uuid), 'started it')
+    }
+    expect(await f.turn()).toBe('started it')
+    f.cli.reply = undefined
+  }
+
+  it('a helper outlives the turn, and the result reaches the parent through a continuation turn', async () => {
+    const f = fixture()
+    const events: string[] = []
+    f.host.continuationStarted.mockImplementation((threadId, info) => {
+      events.push(`wake ${info.taskIds.join(',')}`)
+      void f.service.chat({ threadId, cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined }).then((text) => {
+        events.push(`continuation ${text}`)
+        f.service.commitConversation(threadId, '')
+      })
+    })
+    await withHelper(f)
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    const process = f.cli.last
+    // The helper finished long after the turn; Claude starts a turn of its own to read the report.
+    process.emit(notification('bash-1'), textDelta('The build passed.'), resultFrame({ text: 'The build passed.', origin: 'task-notification' }))
+    await vi.waitFor(() => expect(events).toContain('continuation The build passed.'))
+    expect(events[0]).toBe('wake bash-1')
+    expect(f.cli.processes).toHaveLength(1)
+    // The notification is consumed and committed with the continuation run.
+    await vi.waitFor(() => expect(f.service.hasBackgroundWork('thread')).toBe(false))
+    expect(f.host.backgroundWork.mock.calls).toEqual([['thread', true], ['thread', false]])
+  })
+
+  it('an empty roster before the notification does not end the obligation', async () => {
+    const f = fixture()
+    await withHelper(f)
+    f.cli.last.emit(roster())
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    expect(f.host.backgroundWork).toHaveBeenCalledTimes(1)
+  })
+
+  it('a helper that finishes during the turn is consumed there and discharged when the turn commits, with no continuation', async () => {
+    const f = fixture()
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'agent-1', type: 'local_agent' }), notification('agent-1'))
+      process.answer(String(message.uuid), 'agent said hi')
+    }
+    const text = await f.chat()
+    expect(text).toBe('agent said hi')
+    // Still owed until the turn commits.
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    f.service.commitConversation('thread', '')
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+    expect(f.host.continuationStarted).not.toHaveBeenCalled()
+    expect(f.host.backgroundWork.mock.calls).toEqual([['thread', true], ['thread', false]])
+  })
+
+  it('a notification for a task the process never listed wakes nothing and keeps nothing busy', async () => {
+    const f = fixture()
+    await f.turn()
+    f.cli.last.emit(notification('mystery'))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(f.host.continuationStarted).not.toHaveBeenCalled()
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+    // Ambient tasks are not activity.
+    f.cli.last.emit(roster({ id: 'watcher', ambient: true }))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+  })
+
+  it('a wake that folds in a pending prompt settles that prompt once and opens no continuation', async () => {
+    const f = fixture()
+    await withHelper(f)
+    const process = f.cli.last
+    const pending = f.chat({ prompt: 'U', history: '' })
+    await inputs(f.cli, 2)
+    const uuid = process.uuid(1)
+    // The task finishes while U waits; Claude folds U into its own turn and echoes it on one result.
+    process.emit(notification('bash-1'), textDelta('folded answer', uuid), resultFrame({ uuids: [uuid], text: 'folded answer', origin: 'task-notification' }))
+    expect(await pending).toBe('folded answer')
+    expect(f.host.continuationStarted).not.toHaveBeenCalled()
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    f.service.commitConversation('thread', '')
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+  })
+
+  it('a prompt pushed while a wake turn is in flight gets its own text; the wake turn is a continuation of its own', async () => {
+    const f = fixture()
+    await withHelper(f)
+    const process = f.cli.last
+    process.emit(notification('bash-1'), textDelta('wake text'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    const mine = f.chat({ prompt: 'mine', history: '' })
+    await inputs(f.cli, 2)
+    // The wake turn ends first (no echo of ours), then Claude answers the pushed prompt.
+    process.emit(resultFrame({ text: 'wake text', origin: 'task-notification' }))
+    process.answer(process.uuid(1), 'my text')
+    expect(await mine).toBe('my text')
+    const continuation = await f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined })
+    expect(continuation).toBe('wake text')
+  })
+
+  it('a wake with no model turn ends its continuation at the empty notification result', async () => {
+    const f = fixture()
+    await withHelper(f)
+    f.cli.last.emit(notification('bash-1'), resultFrame({ text: '', origin: 'task-notification', numTurns: 0 }))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    const onText = vi.fn()
+    // The host's run arrives after the continuation is already over and still gets it.
+    const text = await f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText })
+    expect(text).toBe('')
+    f.service.commitConversation('thread', '')
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+  })
+
+  it('a notification result with no turn of its own ends no Mousse run', async () => {
+    const f = fixture()
+    await withHelper(f)
+    const process = f.cli.last
+    const pending = f.chat({ prompt: 'U', history: '' })
+    await inputs(f.cli, 2)
+    process.emit(notification('bash-1'), resultFrame({ text: '', origin: 'task-notification', numTurns: 0 }))
+    let done = false
+    void pending.then(() => { done = true })
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(done).toBe(false)
+    process.answer(process.uuid(1), 'U answered')
+    expect(await pending).toBe('U answered')
+  })
+
+  it('a wake whose turn never starts ends after the deadline with a note', async () => {
+    vi.useFakeTimers()
+    const f = fixture({ wakeDeadlineMs: 120_000 })
+    await withHelper(f)
+    f.cli.last.emit(notification('bash-1'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    const continuation = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined })
+    await vi.advanceTimersByTimeAsync(120_001)
+    expect(await continuation).toContain('did not respond')
+  })
+
+  it('attributes the tool calls of a continuation to the continuation run and checks them with its policy', async () => {
+    const f = fixture()
+    await withHelper(f)
+    const process = f.cli.last
+    const tools: string[] = []
+    // Frames of the wake turn arrive before its run exists, and more after.
+    process.emit(notification('bash-1'), toolStart('wake-tool', 'Read'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    const continuation = f.service.chat({
+      threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined,
+      integrations: { mcpServers: {}, proxiedServers: {}, env: {}, warnings: [], toolRules: { mcp__srv__: { denied: ['danger'] } } },
+      onTool: (event) => tools.push(`${event.phase}:${event.callId}`)
+    })
+    process.emit(toolResult('wake-tool'), resultFrame({ text: 'read it', origin: 'task-notification' }))
+    expect(await continuation).toBe('read it')
+    expect(tools).toEqual(['start:wake-tool', 'complete:wake-tool'])
+    // The query's hook now follows the continuation's own rules.
+    const denied = await process.options.hooks!.PreToolUse![0].hooks[0](
+      { hook_event_name: 'PreToolUse', tool_use_id: 'x', tool_name: 'mcp__srv__danger', tool_input: {} } as never, 'x', { signal: new AbortController().signal }
+    )
+    expect(denied).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } })
+  })
+
+  it('without a host a wake is read and dropped, and its task is done', async () => {
+    const f = fixture()
+    f.service.setLiveHost(null)
+    await withHelper(f)
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    f.cli.last.emit(notification('bash-1'), textDelta('ignored'), resultFrame({ text: 'ignored', origin: 'task-notification' }))
+    await vi.waitFor(() => expect(f.service.hasBackgroundWork('thread')).toBe(false))
+  })
+})
+
+describe('Stop and process lifetime', () => {
+  it('Stop closes the live query, ends its background work and clears the obligations, even after the turn ended', async () => {
+    const f = fixture()
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }))
+      process.answer(String(message.uuid), 'started')
+    }
+    await f.turn()
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    expect(f.service.stopThread('thread')).toBe('stopped')
+    expect(f.cli.last.closed).toBe(true)
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+    expect(f.host.backgroundWork).toHaveBeenLastCalledWith('thread', false)
+    expect(f.service.stopThread('thread')).toBe('not_active')
+    // The next turn starts a new process.
+    await f.turn()
+    expect(f.cli.processes).toHaveLength(2)
+  })
+
+  it('refuses a model, folder or instruction change while background work exists, and replaces the process when there is none', async () => {
+    const f = fixture()
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }))
+      process.answer(String(message.uuid), 'started')
+    }
+    await f.turn()
+    f.cli.reply = undefined
+    for (const change of [{ model: 'opus' }, { systemPromptAppend: 'new rules' }, { cwd: join(f.home, 'other') }])
+      await expect(f.chat({ history: '', ...change })).rejects.toMatchObject({ code: 'claude_background_work_blocks_change', message: expect.stringContaining('Stop') })
+    expect(f.cli.processes).toHaveLength(1)
+    expect(f.cli.last.closed).toBe(false)
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    // After Stop the same change just starts a new process.
+    f.service.stopThread('thread')
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'on opus')
+    expect(await f.chat({ model: 'opus', history: '' })).toBe('on opus')
+    expect(f.cli.processes).toHaveLength(2)
+  })
+
+  it('a process that dies ends its obligations and the next turn starts a new one that resumes the session', async () => {
+    const f = fixture()
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }))
+      process.answer(String(message.uuid), 'started')
+    }
+    await f.turn()
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    f.cli.last.end()
+    await vi.waitFor(() => expect(f.service.hasBackgroundWork('thread')).toBe(false))
+    expect(f.host.backgroundWork).toHaveBeenLastCalledWith('thread', false)
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'back')
+    expect(await f.chat({ history: '' })).toBe('back')
+    expect(f.cli.processes).toHaveLength(2)
+    expect(f.cli.last.options.resume).toBe(SESSION)
+  })
+
+  it('a turn on a process that dies mid-turn fails with the usual message', async () => {
+    const f = fixture()
+    silent(f.cli)
+    const turn = f.chat()
+    await inputs(f.cli, 1)
+    f.cli.last.end()
+    await expect(turn).rejects.toThrow('Claude Code ended before completing the turn')
+  })
+
+  it('a stopped turn is resumed warm: the same process takes the next turn', async () => {
+    const f = fixture()
+    await f.turn({ history: 'h0' }, 'h0')
+    f.cli.reply = undefined
+    const abort = new AbortController()
+    const stopped = f.chat({ signal: abort.signal, history: 'h0' })
+    await inputs(f.cli, 2)
+    f.cli.last.emit(textDelta('partial', f.cli.last.uuid(1)))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    abort.abort()
+    await expect(stopped).rejects.toThrow()
+    // The adapter fingerprints the stopped turn as the history the next turn will send.
+    f.service.commitInterrupted('thread', 'h1')
+    f.cli.reply = (message, process) => {
+      process.emit(resultFrame({ uuids: [f.cli.last.uuid(1)], terminalReason: 'aborted_streaming' }))
+      process.answer(String(message.uuid), 'next')
+    }
+    expect(await f.chat({ history: 'h1' })).toBe('next')
+    expect(f.cli.processes).toHaveLength(1)
+  })
+})
+
+describe('idle release and the cap on live processes', () => {
+  it('closes an idle thread with no background work after the idle timeout, and the next turn resumes the session', async () => {
+    vi.useFakeTimers()
+    const f = fixture({ idleCloseMs: 1000 })
+    await f.turn({ history: 'h' }, 'h')
+    expect(f.service.liveThreadIds()).toEqual(['thread'])
+    await vi.advanceTimersByTimeAsync(999)
+    expect(f.cli.last.closed).toBe(false)
+    await vi.advanceTimersByTimeAsync(2)
+    expect(f.cli.last.closed).toBe(true)
+    expect(f.service.liveThreadIds()).toEqual([])
+    await f.turn({ history: 'h' }, 'h')
+    expect(f.cli.processes).toHaveLength(2)
+    // Resumed like a one-shot turn: no replayed history in the prompt.
+    expect(f.cli.last.options.resume).toBe(SESSION)
+    expect(f.cli.last.text(0)).not.toContain('Previous conversation')
+  })
+
+  it('a main thread with no background work changes model exactly as before: a fresh process with the history in the prompt', async () => {
+    const f = fixture()
+    await f.turn({ history: 'earlier turns' }, 'earlier turns')
+    await f.turn({ model: 'opus:medium', history: 'earlier turns' }, 'earlier turns')
+    expect(f.cli.processes).toHaveLength(2)
+    expect(f.cli.processes[0].closed).toBe(true)
+    expect(f.cli.last.options).toMatchObject({ model: 'opus', resume: undefined })
+    expect(f.cli.last.text(0)).toContain('Previous conversation')
+    expect(f.cli.last.text(0)).toContain('earlier turns')
+  })
+
+  it('keeps the process while background work is pending, up to the pin cap, and provider activity restarts the cap', async () => {
+    vi.useFakeTimers()
+    const f = fixture({ idleCloseMs: 1000, idleReleaseMs: 5000, maxPinMs: 12_000 })
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }))
+      process.answer(String(message.uuid), 'started')
+    }
+    await f.turn()
+    const process = f.cli.last
+    // The short idle close does not apply while work is pending.
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(process.closed).toBe(false)
+    // Provider activity at 9s starts the budget over.
+    await vi.advanceTimersByTimeAsync(5000)
+    process.emit({ type: 'system', subtype: 'task_progress', session_id: SESSION, task_id: 'bash-1' })
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(process.closed).toBe(false)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(process.closed).toBe(true)
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+    expect(f.host.backgroundWork).toHaveBeenLastCalledWith('thread', false)
+  })
+
+  it('caps live processes: the least recently used idle one is closed, and a turn with none to close runs as a one-shot query', async () => {
+    const f = fixture({ maxSessions: 2 })
+    await f.turn({ threadId: 'a' })
+    await f.turn({ threadId: 'b' })
+    await f.turn({ threadId: 'c' })
+    expect(f.cli.processes[0].closed).toBe(true)
+    expect(f.service.liveThreadIds().sort()).toEqual(['b', 'c'])
+
+    // Both remaining threads are needed: b has background work, c a turn in flight.
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }))
+      process.answer(String(message.uuid), 'started')
+    }
+    await f.turn({ threadId: 'b' })
+    f.cli.reply = undefined
+    const running = f.chat({ threadId: 'c', prompt: 'busy', history: '' })
+    const [, , busy] = f.cli.processes
+    await vi.waitFor(() => expect(busy.inputs).toHaveLength(2))
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'one-shot')
+    const before = f.cli.processes.length
+    expect(await f.turn({ threadId: 'd' })).toBe('one-shot')
+    expect(f.cli.processes).toHaveLength(before + 1)
+    // A one-shot query's prompt ends with its turn, which ends the process.
+    await vi.waitFor(() => expect(f.cli.last.inputEnded).toBe(true))
+    expect(f.service.liveThreadIds().sort()).toEqual(['b', 'c'])
+    busy.answer(busy.uuid(1), 'busy done')
+    expect(await running).toBe('busy done')
+  })
+})
+
+describe('closing the service', () => {
+  it('logout() and stop() close every live process', async () => {
+    const f = fixture()
+    await f.turn({ threadId: 'a' })
+    await f.turn({ threadId: 'b' })
+    await f.service.logout()
+    expect(f.cli.processes.every((process) => process.closed)).toBe(true)
+    expect(f.service.liveThreadIds()).toEqual([])
+    const g = fixture()
+    await g.turn()
+    g.service.stop()
+    expect(g.cli.last.closed).toBe(true)
+  })
+
+  it('declares no per-task stop affordance, so an interrupt stops helpers the way Stop does', async () => {
+    const f = fixture()
+    await f.turn()
+    expect(JSON.stringify(f.cli.last.options)).not.toContain('perTaskStopAffordance')
+  })
+})
+
+beforeEach(() => {
+  vi.useRealTimers()
+})

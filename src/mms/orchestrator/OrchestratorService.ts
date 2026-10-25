@@ -1057,6 +1057,8 @@ export class OrchestratorService extends EventEmitter {
           console.warn('adapter interrupt failed', { runId, error: error instanceof Error ? error.message : String(error) })
         }
       }
+      // Stop ends the provider's process too: its background agents and shells end with it.
+      await this.stopProviderWork(threadId)
     }
     if (live) return
     console.warn('stop settled locally: nothing live for the run', { runId, strategy })
@@ -1065,6 +1067,20 @@ export class OrchestratorService extends EventEmitter {
       if (current && !TERMINAL_RUN_STATUSES.has(current.status))
         runs.markTerminal(id, 'interrupted', { interruptedBy: 'user', stopStrategy: strategy })
     })
+  }
+
+  /**
+   * Stop reaches the provider's process for the thread (`ProviderAdapter.stopThread`): what it still
+   * runs in the background ends, whether or not a turn is live. True when there was a process to end.
+   * Never throws.
+   */
+  async stopProviderWork(threadId: string): Promise<boolean> {
+    try {
+      return (await this.adapterForThread(threadId).adapter.stopThread?.(threadId)) === 'stopped'
+    } catch (error) {
+      console.warn('provider stop failed', { threadId, error: error instanceof Error ? error.message : String(error) })
+      return false
+    }
   }
 
   /** Steer a specific run. Only the thread's active run receives the text; anything else is ignored. */

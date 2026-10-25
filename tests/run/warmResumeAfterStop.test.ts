@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { ClaudeSubscriptionAdapter } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
+import { FakeClaudeCli, resultFrame, textDelta } from './fakeClaudeCli'
 import { CLAUDE, phase6Daemon, waitFor } from './phase6Fixture'
 
 describe('stopping a Claude turn and continuing the thread (issue #142)', () => {
@@ -56,6 +57,7 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
       return Object.assign(events, { close: vi.fn(() => open()), interrupt: vi.fn(async () => {}) }) as unknown as Query
     }
     const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      live: false,
       query,
       runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
     })
@@ -89,5 +91,68 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     expect(inputs).toHaveLength(3)
     expect(inputs[1].options.resume).toBe('vendor-session')
     expect(inputs[2].options.resume).toBeUndefined()
+  }, 30_000)
+
+  /** The same thread on a live query: turn 1 completes, turn 2 hangs after its first frame and is ended with `end`, turn 3 follows. */
+  const liveStoppedThenContinued = async (end: 'stop' | 'preempt') => {
+    home = mkdtempSync(join(tmpdir(), 'mousse-warm-resume-live-'))
+    previousHome = process.env.MOUSSE_HOME
+    process.env.MOUSSE_HOME = home
+    const binary = join(home, 'claude')
+    writeFileSync(binary, 'fixture')
+    chmodSync(binary, 0o755)
+    mkdirSync(join(home, 'providers', 'claude-subscription'), { recursive: true })
+    writeFileSync(join(home, 'providers', 'claude-subscription', 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
+    const cli = new FakeClaudeCli()
+    cli.reply = (message, claude) => {
+      const text = claude.text(claude.inputs.length - 1)
+      if (text.includes('two')) claude.emit(textDelta('partial', String(message.uuid)))
+      else claude.answer(String(message.uuid), `answer ${claude.inputs.length}`)
+    }
+    const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      query: cli.query,
+      runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
+    })
+    stops.push(async () => service.stop())
+    const d = phase6Daemon(home, [new ClaudeSubscriptionAdapter(() => service)])
+    stops.push(d.stop)
+    const thread = d.store.createThread('Subagent')
+    d.orch.setThreadModelOverride(thread.id, CLAUDE)
+
+    await d.orch.send('one', false, { threadId: thread.id, clientRequestId: 'turn-1' })
+    const second = d.orch.send('two', false, { threadId: thread.id, clientRequestId: 'turn-2' })
+    second.catch(() => undefined)
+    await waitFor(() => cli.last.inputs.length === 2, 'the second turn to be read')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const run = d.engine.listRuns(thread.id)[0]
+    if (end === 'stop') await d.orch.abortRun(run.runId, 'stop-2', thread.id)
+    else d.orch.abortActiveTurn(thread.id)
+    await second
+    await waitFor(() => d.engine.getRun(run.runId)?.status === 'interrupted', 'the second run to end')
+    cli.reply = (message, claude) => {
+      // What the interrupted turn leaves behind: its abort result, then the answer to the new prompt.
+      if (end === 'preempt') claude.emit(resultFrame({ uuids: [claude.uuid(1)], terminalReason: 'aborted_streaming' }))
+      claude.answer(String(message.uuid), 'answer to three')
+    }
+    await d.orch.send('three', false, { threadId: thread.id, clientRequestId: 'turn-3' })
+    return { cli, d, thread }
+  }
+
+  it('on a live query, Stop closes the process and the next turn resumes the same native session', async () => {
+    const { cli } = await liveStoppedThenContinued('stop')
+    expect(cli.processes).toHaveLength(2)
+    expect(cli.processes[0].closed).toBe(true)
+    expect(cli.processes[1].options.resume).toBe('vendor-session')
+    // The stopped request reaches Claude once: the resumed session already holds it.
+    expect(cli.processes[1].inputs).toHaveLength(1)
+    expect(cli.processes[1].text(0)).not.toContain('Previous conversation')
+  }, 30_000)
+
+  it('on a live query, a preempted turn leaves the process open and the next turn is pushed into it', async () => {
+    const { cli } = await liveStoppedThenContinued('preempt')
+    expect(cli.processes).toHaveLength(1)
+    expect(cli.processes[0].closed).toBe(false)
+    expect(cli.processes[0].interrupts).toBe(1)
+    expect(cli.processes[0].inputs).toHaveLength(3)
   }, 30_000)
 })
