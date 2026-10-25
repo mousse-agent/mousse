@@ -137,6 +137,18 @@ function runFull(extra = []) {
   return result.status ?? 1
 }
 
+/**
+ * Run the chosen test files and report whether any failed. `createVitest` only builds the instance:
+ * it never calls the reporters' `onInit`, so a reporter that prints (banner, log lines, the run
+ * summary) would read `ctx.logger` / `ctx.state` off an undefined `ctx` and crash. `standalone()` is the
+ * public call that initializes the reporters without starting a run of its own.
+ */
+export async function runSpecifications(vitest, specifications) {
+  await vitest.standalone()
+  const result = await vitest.runTestSpecifications(specifications, false)
+  return result.testModules.some((module) => !module.ok()) || result.unhandledErrors.length > 0
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2))
   const manifest = loadManifest()
@@ -207,8 +219,7 @@ async function main() {
       await vitest.close()
       return 0
     }
-    const result = await vitest.runTestSpecifications(selected.map((entry) => entry.spec), false)
-    const failed = result.testModules.some((module) => !module.ok()) || result.unhandledErrors.length > 0
+    const failed = await runSpecifications(vitest, selected.map((entry) => entry.spec))
     await vitest.close()
     return failed ? 1 : 0
   } catch (error) {
