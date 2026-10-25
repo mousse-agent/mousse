@@ -240,6 +240,8 @@ export type FrameConsumer = (message: SDKMessage) => void
  * itself, after a background task finished; it ends at the next result that echoes none of ours.
  */
 export class LiveRun {
+  /** Names this turn to the host that is asked to run it. */
+  readonly id = randomUUID()
   /** Gates this turn's permission prompts, hooks and cancellation; the query itself never sees it. */
   readonly controller = new AbortController()
   /** Every message id this run pushed; a frame or result that echoes one belongs to the run. */
@@ -309,7 +311,7 @@ export interface LiveSessionHooks {
   /** The thread's set of obligations became non-empty (`true`) or empty. */
   backgroundWork(active: boolean): void
   /** Claude started a turn of its own: `taskIds` finished and nobody was waiting for them. */
-  continuationStarted(run: LiveRun, info: { taskIds: string[]; summaries: string[] }): void
+  continuationStarted(run: LiveRun, info: { id: string; taskIds: string[]; summaries: string[] }): void
   /** Something the thread's user should know about the process (a helper's result that may be lost). */
   notice?(text: string): void
   /** The process ended or was released. */
@@ -431,12 +433,15 @@ export class LiveSession<Turn = unknown> {
    * The oldest turn Claude started on its own that no run has taken yet, whether it is still in flight
    * or already over (its frames and result wait for the run). The run that takes it reads them.
    */
-  claimContinuation(): LiveRun | undefined {
-    return this.unclaimed.shift()
+  claimContinuation(id?: string): LiveRun | undefined {
+    if (id === undefined) return this.unclaimed.shift()
+    const index = this.unclaimed.findIndex((run) => run.id === id)
+    return index >= 0 ? this.unclaimed.splice(index, 1)[0] : undefined
   }
 
-  hasUnclaimedContinuation(): boolean {
-    return this.unclaimed.length > 0
+  /** A turn Claude started on its own waits for a run (the one `id` names, when given). */
+  hasUnclaimedContinuation(id?: string): boolean {
+    return id === undefined ? this.unclaimed.length > 0 : this.unclaimed.some((run) => run.id === id)
   }
 
   /**
@@ -749,7 +754,7 @@ export class LiveSession<Turn = unknown> {
     this.armWake(run)
     // The tasks are the continuation's before the owner hears of it, so it can finish them at once.
     for (const id of taskIds) this.obligations.consume(id, run)
-    this.hooks.continuationStarted(run, { taskIds: [...taskIds], summaries })
+    this.hooks.continuationStarted(run, { id: run.id, taskIds: [...taskIds], summaries })
     return run
   }
 
@@ -823,6 +828,12 @@ export class LiveSession<Turn = unknown> {
   private endContinuation(run: LiveRun, reason: 'deadline' | 'folded'): void {
     if (run.settled) return
     this.remove(run)
+    // A wake that folded a message of ours in has no turn of its own to run: no run may claim it. One that
+    // never started keeps its place, so the run that was opened for it ends with the note.
+    if (reason === 'folded') {
+      const unclaimed = this.unclaimed.indexOf(run)
+      if (unclaimed >= 0) this.unclaimed.splice(unclaimed, 1)
+    }
     run.resolve({ result: null, reason })
     this.afterRunEnded()
   }

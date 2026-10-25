@@ -91,6 +91,8 @@ export interface TurnInput {
    * the transcript. Set for runs with source `provider-continuation`.
    */
   continuation?: boolean
+  /** Which turn the provider started this run is for, when it started several. */
+  continuationId?: string
   /** Text of the admitted user message; prompt-based adapters send it as the turn's prompt. */
   prompt: string
   /** Active pi-ai transcript, ending with the admitted user message. */

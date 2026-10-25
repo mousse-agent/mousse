@@ -105,6 +105,7 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       mode: input.mode === 'plan' ? 'plan' : 'default',
       child: input.child,
       continuation: input.continuation,
+      continuationId: input.continuationId,
       threadId: input.threadId,
       instanceId: input.instanceId,
       cwd,

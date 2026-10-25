@@ -411,8 +411,13 @@ interface ContinuationTurnPayload {
   kind: 'continuation'
   threadId: string
   runId: string
+  /** Names the turn Claude started (`ClaudeLiveHost.continuationStarted`) that this run is for. */
+  continuationId: string
   note: string
 }
+
+/** How long a Mousse tool call waits for the run of a turn the provider started, before it fails as usual. */
+const CONTINUATION_CALL_WAIT_MS = 10_000
 
 function isContinuationTurnPayload(payload: unknown): payload is ContinuationTurnPayload {
   return Boolean(payload) && typeof payload === 'object' && (payload as { kind?: unknown }).kind === 'continuation'
@@ -666,6 +671,12 @@ export class OrchestratorService extends EventEmitter {
    * Claude and Antigravity adapters report nothing, so this stays empty until one does.
    */
   private readonly providerBackground = new Set<string>()
+  /**
+   * Turns a provider started itself whose run is not active yet, by the provider's id for them. Each
+   * holds the admission of its thread from the moment the provider reported it (a message typed meanwhile
+   * queues behind it) and a gate Mousse tool calls of the thread wait on until the run is active.
+   */
+  private readonly pendingContinuations = new Map<string, { threadId: string; reserved: boolean; done: Promise<void>; settle: () => void }>()
   /** Pending retries of a queue item's row release (`releaseQueuedRows`); a shutdown clears them. */
   private readonly releaseRetries = new Set<ReturnType<typeof setTimeout>>()
   /** Last run heartbeat (ms) per run; throttles `RunEngine.heartbeat` writes. */
@@ -1007,54 +1018,121 @@ export class OrchestratorService extends EventEmitter {
    * `turn.start` effect are written in the engine; the effect runs the turn when the thread is free.
    * A host that cannot record the run throws, and the provider reads and drops the turn instead.
    */
-  private startProviderContinuation(threadId: string, info: { taskIds: string[]; summaries: string[] }): void {
+  private startProviderContinuation(threadId: string, info: { id: string; taskIds: string[]; summaries: string[] }): void {
     const engine = this.runEngine
     if (!engine || !this.effectsEnabled()) throw new Error('Continuation turns need the run engine worker')
     const note = info.summaries.length
       ? `A background task finished: ${info.summaries.join('; ').slice(0, 600)}`
       : 'A background task finished.'
-    void engine.dispatch({ kind: 'send', threadId, clientRequestId: `continuation:${uuidv4()}`, source: 'provider-continuation' })
+    // The thread is the continuation's from now on: a message typed before its effect runs sees the
+    // thread busy and queues behind it, instead of taking an admission the continuation then waits for.
+    const session = this.getOrCreateSession(threadId)
+    const reserved = !session.deleted && !session.isTurnRunning()
+    if (reserved) session.turnAdmitted = true
+    let settle!: () => void
+    const done = new Promise<void>((resolve) => { settle = resolve })
+    // Claude keeps working while the run is made. Mousse tool calls it makes wait for the run to be
+    // active, so they act as it, not as a run that just ended or as no one; a run that never comes
+    // frees them after a while.
+    const timer = setTimeout(settle, CONTINUATION_CALL_WAIT_MS)
+    timer.unref?.()
+    this.pendingContinuations.set(info.id, { threadId, reserved, done, settle: () => { clearTimeout(timer); settle() } })
+    void engine.dispatch({ kind: 'send', threadId, clientRequestId: `continuation:${info.id}`, source: 'provider-continuation' })
       .then((result) => {
         if (result.status !== 'accepted') throw new Error(result.reason)
-        const payload: ContinuationTurnPayload = { kind: 'continuation', threadId, runId: result.runId, note }
+        const payload: ContinuationTurnPayload = { kind: 'continuation', threadId, runId: result.runId, continuationId: info.id, note }
         engine.outbox.enqueue({ effectId: `effect:${result.runId}:turn.start:1`, threadId, runId: result.runId, kind: 'turn.start', payload })
       })
       .catch((error: unknown) => {
         console.warn('a provider continuation could not be recorded', { threadId, error: error instanceof Error ? error.message : String(error) })
-        this.claudeSubscription?.discardContinuations(threadId)
+        // Only this turn: another one waiting on the thread belongs to a run of its own.
+        this.claudeSubscription?.discardContinuations(threadId, info.id)
+        this.endContinuationHold(info.id, true)
       })
+  }
+
+  /**
+   * A continuation's hold ends: its run is not going to run (`release`: the admission it reserved goes
+   * back and the queue drains), or it is active now (the run owns the admission from here).
+   */
+  private endContinuationHold(continuationId: string, release: boolean): void {
+    const hold = this.pendingContinuations.get(continuationId)
+    if (!hold) return
+    this.pendingContinuations.delete(continuationId)
+    hold.settle()
+    if (!release || !hold.reserved) return
+    const session = this.sessions.get(hold.threadId)
+    if (!session) return
+    if (session.turnAdmitted && !session.activeTurn) {
+      session.turnAdmitted = false
+      session.abortRequested = false
+    }
+    try {
+      this.scheduleQueueDrain(session)
+    } catch (error) {
+      logDebug('OrchestratorService', 'queue drain after a continuation could not be scheduled', error, { threadId: hold.threadId })
+    }
+  }
+
+  /** Mousse tool calls of the thread wait for this while a turn the provider started has no active run yet. */
+  private continuationGate(threadId: string): Promise<void> | undefined {
+    const gates = [...this.pendingContinuations.values()].filter((hold) => hold.threadId === threadId).map((hold) => hold.done)
+    return gates.length ? Promise.all(gates).then(() => undefined) : undefined
   }
 
   /**
    * A `provider-continuation` run: the turn Claude started itself, run as an ordinary visible turn
    * of the thread. A run that is no longer queued (stopped, thread deleted), or whose turn Claude no
-   * longer holds, ends without running. On a busy thread the effect waits, like a wake: Claude's own
-   * turn is already in its stream, so a message queued meanwhile runs after it.
+   * longer holds (it ended folded into a message of ours), ends without running. It holds the thread
+   * from the provider's report, so a message queued meanwhile runs after it. If another turn was admitted
+   * before the report and its effect waits behind this one in the lane, this one goes first: Claude's
+   * turn already exists and cannot be cancelled, and that effect runs as soon as this one ends.
    */
-  private async executeContinuationEffect(payload: ContinuationTurnPayload, signal: AbortSignal): Promise<void> {
+  private async executeContinuationEffect(effect: EffectRecord, payload: ContinuationTurnPayload, signal: AbortSignal): Promise<void> {
     const engine = this.requireRunEngine()
+    const hold = this.pendingContinuations.get(payload.continuationId)
+    const end = (): void => this.endContinuationHold(payload.continuationId, true)
     if (engine.getRun(payload.runId)?.status !== 'queued') {
-      this.claudeSubscription?.discardContinuations(payload.threadId)
+      this.claudeSubscription?.discardContinuations(payload.threadId, payload.continuationId)
+      end()
       return
     }
     const session = this.getOrCreateSession(payload.threadId)
-    if (session.deleted || !this.claudeSubscription?.hasContinuation(payload.threadId)) {
+    if (session.deleted || !this.claudeSubscription?.hasContinuation(payload.threadId, payload.continuationId)) {
       this.markRun(payload.runId, (runs, id) => runs.markTerminal(id, 'cancelled'))
+      end()
       return
     }
-    if (session.turnAdmitted || session.isTurnRunning() || engine.getActiveRun(payload.threadId))
-      throw new EffectDeferredError(this.wakeBusyDeferMs, 'thread_busy')
+    let passedThrough = false
+    if (!hold?.reserved) {
+      const busy = session.isTurnRunning() || engine.getActiveRun(payload.threadId)
+      if (busy) {
+        const waiting = engine.outbox
+          .listForThread(payload.threadId)
+          .some((other) => other.kind === 'turn.start' && other.effectId !== effect.effectId && (other.status === 'pending' || other.status === 'running'))
+        // Only an admitted turn that has not started and whose effect is queued behind this one may be
+        // passed; a turn that runs, or one the engine does not schedule, finishes first.
+        if (!(waiting && session.turnAdmitted && !session.activeTurn && !engine.getActiveRun(payload.threadId)))
+          throw new EffectDeferredError(this.wakeBusyDeferMs, 'thread_busy')
+        passedThrough = true
+      }
+    }
     try {
       await this.runTurnOnSession(
         session,
         { content: payload.note, mode: getLastUserChatMode(session.messages) ?? 'agent' },
         false,
         true,
-        { source: 'provider-continuation', runId: payload.runId, externalSignal: signal }
+        { source: 'provider-continuation', runId: payload.runId, externalSignal: signal, continuationId: payload.continuationId, admissionHeld: Boolean(hold?.reserved) || passedThrough }
       )
     } catch (error) {
       const run = engine.getRun(payload.runId)
       if (!run || !TERMINAL_RUN_STATUSES.has(run.status)) throw error
+    } finally {
+      // The run did not become active (it failed before it started): the hold ends here.
+      this.endContinuationHold(payload.continuationId, false)
+      // The admitted turn that went second still needs its admission.
+      if (passedThrough) session.turnAdmitted = true
     }
   }
 
@@ -1133,7 +1211,7 @@ export class OrchestratorService extends EventEmitter {
       // it is active or queued: a Stop aimed at an old run must not end the process a newer one is using.
       // The check and the stop run in the same tick, so nothing starts in between.
       const stale = engine.getRun(runId)
-      if (stale?.threadId === target && !engine.listRuns(target).some((run) => !TERMINAL_RUN_STATUSES.has(run.status))) await this.stopProviderWork(target)
+      if (stale?.threadId === target && !engine.listRuns(target).some((run) => !TERMINAL_RUN_STATUSES.has(run.status) && !(run.status === 'queued' && run.source === 'provider-continuation'))) await this.stopProviderWork(target)
     }
     return result
   }
@@ -1306,7 +1384,8 @@ export class OrchestratorService extends EventEmitter {
       listQueue: (threadId) => this.listQueue(threadId),
       enqueue: (threadId, input) => this.enqueueAndDrain(threadId, input, 'mcp'),
       toolLedger: (runId) => this.toolLedgerFor(runId),
-      readOnlyThread: (threadId) => this.isReadOnlyChild(threadId)
+      readOnlyThread: (threadId) => this.isReadOnlyChild(threadId),
+      awaitLiveRun: (threadId) => this.continuationGate(threadId)
     }
   }
 
@@ -1428,7 +1507,7 @@ export class OrchestratorService extends EventEmitter {
   private async executeTurnStartEffect(effect: EffectRecord, signal: AbortSignal): Promise<void> {
     if (isWakeTurnPayload(effect.payload)) return this.executeWakeEffect(effect, effect.payload, signal)
     if (isIntegrationTurnPayload(effect.payload)) return this.executeIntegrationEffect(effect.payload, signal)
-    if (isContinuationTurnPayload(effect.payload)) return this.executeContinuationEffect(effect.payload, signal)
+    if (isContinuationTurnPayload(effect.payload)) return this.executeContinuationEffect(effect, effect.payload, signal)
     const stored = effect.payload as TurnStartPayload
     const entry = this.turnResults.get(stored.runId)
     if (entry?.abandoned) return
@@ -4473,6 +4552,8 @@ export class OrchestratorService extends EventEmitter {
       runId?: string
       /** The subagent results this turn's message delivers (a wake, a queued steer). */
       subagentNotice?: SubagentNoticeItem[]
+      /** The turn the provider started that this run is for (`provider-continuation`). */
+      continuationId?: string
     }
   ): Promise<OrchestratorResponse> {
     // Admission is synchronous, before any await, so a concurrent send always observes it.
@@ -4615,6 +4696,7 @@ export class OrchestratorService extends EventEmitter {
       onUserInputAccepted?: () => void
       runId?: string
       subagentNotice?: SubagentNoticeItem[]
+      continuationId?: string
     }
   ): Promise<OrchestratorResponse> {
     const session = this.session
@@ -4872,6 +4954,8 @@ export class OrchestratorService extends EventEmitter {
     this.setTurnPhase(session.threadId, 'queued', { turnId })
     this.setTurnPhase(session.threadId, 'thinking', { turnId })
     this.markRun(engineRunId, (engine, id) => engine.markRunning(id))
+    // The run is active: Mousse tool calls Claude made while it was being started act as it.
+    if (opts?.continuationId) this.endContinuationHold(opts.continuationId, false)
     const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed'): Promise<void> => {
       if ((!checkpointEnabled || !turnStartSha || !session.projectCwd) && !conversationDirectory || session.threadId === '__unbound__') return
       const threadDir = this.resolveThreadDir(session.threadId)
@@ -5083,7 +5167,7 @@ export class OrchestratorService extends EventEmitter {
         modelPinned: Boolean(modelOverride),
         mode,
         child: this.childTurnPolicy(session),
-        ...(opts?.source === 'provider-continuation' ? { continuation: true } : {}),
+        ...(opts?.source === 'provider-continuation' ? { continuation: true, continuationId: opts.continuationId } : {}),
         prompt: handoffs ? handoffs.prompt(userContent) : userContent,
         messages: handoffs ? handoffs.messages(activeMessages) : activeMessages,
         // A switch handoff stands in for the transcript, including its compaction memory.

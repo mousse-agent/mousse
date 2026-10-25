@@ -85,6 +85,11 @@ type ToolLedger = NonNullable<LlmChatOptions['toolLedger']>
 export interface ToolRegistryOptions {
   /** The thread's active run (`starting|running|finalizing`), or null when it has none. */
   activeRunId(threadId: string): string | null
+  /**
+   * A run is about to become the thread's active one (a turn its provider started itself, not yet
+   * running): a call waits for it, so it acts as that run and not as the one that just ended.
+   */
+  awaitLiveRun?(threadId: string): Promise<void> | undefined
   /** SPEC §12.6 tool ledger of the caller's run; undefined skips it. */
   toolLedger?(runId: string): ToolLedger | undefined
   /** The thread is a read-only (`shared`) delegated child; it may call only `reads` and `readOnlySafe` tools. */
@@ -132,6 +137,7 @@ export class ToolRegistry {
   async call(name: string, args: Record<string, unknown>, request: ToolCallContext): Promise<ToolOutcome> {
     const tool = this.tools.get(name)
     if (!tool) throw new McpToolError('mousse_unknown_tool', `No Mousse tool named ${name}.`)
+    await this.options.awaitLiveRun?.(request.caller.threadId)
     const ctx: ToolCallContext = { ...request, caller: assertLiveCaller(this.options.activeRunId(request.caller.threadId), request.caller) }
     if (tool.access !== 'reads' && !tool.readOnlySafe && this.options.readOnlyThread?.(ctx.caller.threadId))
       throw new McpToolError('mousse_read_only', `${name} can change threads or the workspace; a read-only subagent cannot call it.`)
@@ -190,6 +196,7 @@ export interface MousseToolHost {
   enqueue(threadId: string, input: { content: string; mode: 'agent' | 'plan' }): unknown
   toolLedger?(runId: string): ToolLedger | undefined
   readOnlyThread?(threadId: string): boolean
+  awaitLiveRun?(threadId: string): Promise<void> | undefined
 }
 
 const CLIENT_REQUEST_ID_SCHEMA: JsonSchema = {
@@ -258,6 +265,7 @@ export function createMousseToolRegistry(deps: { engine: RunEngine; host: Mousse
   const { engine, host } = deps
   const registry = new ToolRegistry({
     activeRunId: (threadId) => engine.getActiveRun(threadId)?.runId ?? null,
+    awaitLiveRun: host.awaitLiveRun ? (threadId) => host.awaitLiveRun!(threadId) : undefined,
     toolLedger: host.toolLedger ? (runId) => host.toolLedger!(runId) : undefined,
     readOnlyThread: host.readOnlyThread ? (threadId) => host.readOnlyThread!(threadId) : undefined
   })
