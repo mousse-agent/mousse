@@ -5,10 +5,11 @@
  * re-evaluates it, driven on the real engine, outbox and reconciler over a fake clock. The same rule
  * through a real orchestrator and scripted providers is `subagentHoldIntegration.test.ts`.
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { childBusy, NO_FINAL_MESSAGE, settleWaitingDelegations } from '../../src/mms/run/delegation/hold'
 import { MAX_INBOX_REDELIVERIES } from '../../src/mms/run/delegation/wake'
 import { EFFECT_LEASE_GRACE_MS } from '../../src/mms/run/EffectOutbox'
+import { acknowledgeRows } from '../../src/mms/run/terminal'
 import { EFFECT_KIND_SPEC, type ChildResultPayload } from '../../src/mms/run/types'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -375,6 +376,30 @@ describe('a subagent\'s result waits for its own subagents (issue #142)', () => 
       f!.engine.markTerminal(wakeRunId, 'completed', undefined, { resultText: 'C final' })
       f!.outbox.cancel(wakeEffect(wakeRunId).effectId, f!.now(), 'settled')
       expect(task(pc.delegationId)).toMatchObject({ status: 'result_available', result: { text: 'C final' } })
+    })
+
+    it('markSteerHeld, release and acknowledgeRows each end in a re-evaluation of the row's thread', async () => {
+      const { pc, cg } = await nested()
+      f!.finish(cg.childRunId, 'G result')
+      const [row] = f!.engine.inbox.listByStatus(pc.childThreadId, 'pending')
+      f!.engine.inbox.markDelivered([row.inboxId], 'effect:steer-1')
+      const settled = vi.spyOn(f!.store, 'settleHold')
+      f!.engine.inbox.markSteerHeld([row.inboxId], 'effect:steer-1')
+      expect(settled).toHaveBeenCalledWith(pc.childThreadId)
+      expect(f!.engine.inbox.get(row.inboxId)!.payload).toMatchObject({ steerHeldBy: 'effect:steer-1' })
+      expect(task(pc.delegationId).status).toBe('running')
+      settled.mockClear()
+      f!.engine.inbox.redirectDelivery([row.inboxId], 'queue:item-1', 'effect:steer-1')
+      f!.engine.inbox.release([row.inboxId], 'queue:item-1')
+      expect(settled).toHaveBeenCalledWith(pc.childThreadId)
+      expect(task(pc.delegationId).status).toBe('running')
+      settled.mockClear()
+      f!.engine.inbox.markDelivered([row.inboxId], 'queue:item-2')
+      settled.mockClear()
+      f!.store.db.transaction(() => acknowledgeRows(f!.store, f!.engine.inbox.getMany([row.inboxId])))
+      expect(settled).toHaveBeenCalledWith(pc.childThreadId)
+      // Reading the last row lets the task publish at that moment.
+      expect(task(pc.delegationId)).toMatchObject({ status: 'result_available', result: { text: 'C started G' } })
     })
 
     it('internal steer-followup runs are result runs: the subagent answers a notice through one', async () => {
