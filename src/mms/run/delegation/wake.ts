@@ -1,4 +1,4 @@
-import type { ProviderCapabilities } from '../adapters/ProviderAdapter'
+import type { RunCapabilities as ProviderCapabilities } from '../../../shared/harness/types'
 import { steerStrategy } from '../CommandPolicy'
 import { RunStoreError } from '../db/RunStoreError'
 import { Delegations } from '../Delegations'

@@ -1,4 +1,4 @@
-import type { ProviderCapabilities } from '../adapters/ProviderAdapter'
+import type { RunCapabilities as ProviderCapabilities } from '../../../shared/harness/types'
 
 /**
  * Capability readers for later phases (docs/run-engine/SPEC.md §13.2). Each gate reads one flag

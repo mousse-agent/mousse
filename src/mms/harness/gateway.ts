@@ -22,6 +22,7 @@ import type { ChatMode } from '../../shared/types'
 import type { LoginSession } from '../providers/LoginSession'
 import type { ProviderInstanceService } from '../providers/ProviderInstanceService'
 import type { AdapterHost, TurnControl, TurnInput, TurnResult, TurnSink } from '../run/adapters/ProviderAdapter'
+import type { ChildPreflightContext, SubagentRefusal } from '../run/policy/featureGates'
 import type { ProviderRef } from '../run/types'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
@@ -39,7 +40,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { modelsWithPrefs, ModelPrefsService, visibleProviderOption, type ModelPrefsStore } from './catalog'
-import type { DriverRuntime, HarnessDriver, InstanceConfig } from './driver'
+import type { DriverRuntime, HarnessDriver, InstanceConfig, LiveProcessHost } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, type InstanceEnv } from './env'
 import { addedInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
 import { checkPolicy } from './policy'
@@ -54,6 +55,7 @@ export const PI_DRIVER_ID = 'pi'
 // from the adapters behind it.
 export type {
   AdapterHost,
+  ChildTurnPolicy,
   ProviderMetrics,
   RecoveredContext,
   TurnControl,
@@ -96,10 +98,28 @@ export interface HarnessGateway {
   resolveStored(selection: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>, options: ResolveStoredOptions): ResolvedTurnSelection
   /** The immutable binding of one attempt, from a resolved selection and the current counters. */
   bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string }): ExecutionBinding
+  /**
+   * Issue #142: the instance's look at the user's own setup before a delegated child runs on it
+   * (`ProviderAdapter.childPreflight`); null when nothing stands in the way. Reads, never changes.
+   */
+  childPreflight(instanceId: string, context: ChildPreflightContext): Promise<SubagentRefusal | null>
   /** Stops a native session by its ref (an instance disabled since can still be stopped). */
   interrupt(ref: ProviderRef): Promise<'interrupted' | 'not_active'>
   /** A native fork of `ref` after `atTurnOrdinal`, or null when the instance cannot branch it. */
   forkSession(ref: ProviderRef, atTurnOrdinal: number): Promise<ProviderRef | null>
+  /**
+   * Ends what a thread's process still runs in the background (`ProviderAdapter.stopThread`), on
+   * whichever instance holds it: the thread may have switched instances since. 'stopped' when one did.
+   */
+  stopThread(threadId: string): Promise<'stopped' | 'not_active'>
+  /** Where runtimes with live processes per thread report (every instance's, now and later). */
+  setLiveHost(host: LiveProcessHost | null): void
+  /** The turn a thread's live process started itself and is running now, from whichever instance holds it. */
+  inFlightContinuation(threadId: string): { id: string; discarded: boolean } | undefined
+  /** A thread's live process still holds that turn of its own. */
+  hasContinuation(threadId: string, id?: string): boolean
+  /** Drops the turns of its own a thread's live process holds (only `id`, when given). */
+  discardContinuations(threadId: string, id?: string): void
   /** `llmProvider` names of enabled vendor instances that are signed in (default-model fallback). */
   configuredProviderIds(): string[]
   /** Old provider methods (`providers.listConfigured`, `loginOAuth`, ...) forward here. */
@@ -312,6 +332,7 @@ export class Harness implements HarnessGateway {
   readonly instanceMap: ProviderInstanceService
   private readonly drivers = new Map<HarnessDriverKind, HarnessDriver>()
   private readonly records = new Map<string, InstanceRecord>()
+  private liveHost: LiveProcessHost | null = null
   private readonly retired = new Set<InstanceRecord>()
   private readonly probes = new Map<string, ProbeState>()
   private readonly operations = new Map<string, Operation>()
@@ -534,6 +555,11 @@ export class Harness implements HarnessGateway {
     }
   }
 
+  async childPreflight(instanceId: string, context: ChildPreflightContext): Promise<SubagentRefusal | null> {
+    const record = instanceId === PI_DRIVER_ID ? this.piRecord() : this.record(instanceId, { allowDisabled: true })
+    return (await record.runtime.adapter.childPreflight?.(context)) ?? null
+  }
+
   async interrupt(ref: ProviderRef): Promise<'interrupted' | 'not_active'> {
     const record = this.refRecord(ref)
     return record.runtime.adapter.interrupt(ref)
@@ -542,6 +568,36 @@ export class Harness implements HarnessGateway {
   async forkSession(ref: ProviderRef, atTurnOrdinal: number): Promise<ProviderRef | null> {
     const adapter = this.refRecord(ref).runtime.adapter
     return adapter.forkSession ? adapter.forkSession(ref, atTurnOrdinal) : null
+  }
+
+  async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
+    const results = await Promise.allSettled([...this.records.values()].map((record) => record.runtime.adapter.stopThread?.(threadId)))
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (results.some((result) => result.status === 'fulfilled' && result.value === 'stopped')) return 'stopped'
+    if (failed) throw failed.reason
+    return 'not_active'
+  }
+
+  setLiveHost(host: LiveProcessHost | null): void {
+    this.liveHost = host
+    for (const record of this.records.values()) record.runtime.setLiveHost?.(host)
+  }
+
+  inFlightContinuation(threadId: string): { id: string; discarded: boolean } | undefined {
+    for (const record of this.records.values()) {
+      const flight = record.runtime.inFlightContinuation?.(threadId)
+      if (flight) return flight
+    }
+    return undefined
+  }
+
+  hasContinuation(threadId: string, id?: string): boolean {
+    for (const record of this.records.values()) if (record.runtime.hasContinuation?.(threadId, id)) return true
+    return false
+  }
+
+  discardContinuations(threadId: string, id?: string): void {
+    for (const record of this.records.values()) record.runtime.discardContinuations?.(threadId, id)
   }
 
   /** The runtime of a turn's binding; the bare pi driver serves unselected-default turns. */
@@ -632,6 +688,7 @@ export class Harness implements HarnessGateway {
       findBinary: () => this.findBinary(record),
       changed: () => this.changed(instanceId)
     })
+    record.runtime.setLiveHost?.(this.liveHost)
     this.records.set(instanceId, record)
     return record
   }

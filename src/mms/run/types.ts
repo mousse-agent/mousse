@@ -1,3 +1,4 @@
+import type { ExecutionBinding } from '../../shared/harness/types'
 export type RunStatus =
   | 'queued'
   | 'starting'
@@ -77,6 +78,12 @@ export interface AttemptRecord {
   reason: AttemptReason
   status: AttemptStatus
   providerRef: ProviderRef | null
+  /**
+   * The immutable binding the attempt runs on (instance, account generation, home, config revision,
+   * model, policy), resolved by the harness gateway when the turn starts. Absent until then, and on
+   * attempts made before bindings were recorded.
+   */
+  executionBinding?: ExecutionBinding
   startedAt: string | null
   completedAt: string | null
 }

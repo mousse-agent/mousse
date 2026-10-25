@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { ProviderCapabilities } from '../adapters/ProviderAdapter'
+import type { RunCapabilities as ProviderCapabilities } from '../../../shared/harness/types'
 import { int, json, str, type Row } from '../db/rows'
 import { fail } from '../db/RunStoreError'
 import { stableStringify } from '../json'

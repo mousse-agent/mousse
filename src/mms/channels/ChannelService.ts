@@ -1,3 +1,4 @@
+import type { LlmProviderOption } from '../../shared/settings'
 import { EventEmitter } from 'events'
 import type {
   ChannelActivityEvent,
@@ -29,6 +30,11 @@ export type ChannelAdapterFactory = (
 
 export interface ChannelServiceOptions {
   createAdapter?: ChannelAdapterFactory
+  /**
+   * Models `/model` offers, after the profile's instance scope and model prefs (disabled
+   * instances and hidden models left out). Default: the credentialed pi-ai providers.
+   */
+  listModels?: () => LlmProviderOption[]
 }
 
 function createDefaultAdapter(
@@ -93,7 +99,7 @@ export class ChannelService extends EventEmitter {
       {
         settingsStore: this.settingsStore,
         threadStore: this.threadStore,
-        listModels: () => this.providerAuth.getConfiguredLlmProviders(),
+        listModels: options?.listModels ?? (() => this.providerAuth.getConfiguredLlmProviders()),
         getSubscriptionUsage: (providerId) => this.providerAuth.getSubscriptionUsage(providerId),
         listAgents: this.agentRegistry
           ? () =>

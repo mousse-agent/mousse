@@ -13,8 +13,8 @@ export type HarnessDriverKind = ProviderDriverKind
 /**
  * Capabilities of one instance, computed by the gateway from the driver, the installed version and
  * the execution profile (never a static per-vendor table in callers). Every key has a reader
- * outside the drivers (`tests/run/capabilityReaders.test.ts`). The first eight keep the meaning of
- * `ProviderCapabilities` in `run/adapters/ProviderAdapter.ts`.
+ * outside the drivers (`tests/run/capabilityReaders.test.ts`). All but `planMode` and
+ * `contextUsage` keep the meaning of `ProviderCapabilities` in `run/adapters/ProviderAdapter.ts`.
  */
 export interface HarnessCaps {
   /** How steer text reaches a live turn (`CommandPolicy.steerStrategy`). */
@@ -30,6 +30,11 @@ export interface HarnessCaps {
   historyInjection: 'native' | 'prompt'
   /** The Mousse MCP server can be attached to a turn. */
   mcp: boolean
+  /**
+   * `enforced`: the instance holds a delegated child to its policy (read-only for a `shared`
+   * child). `isolated_only`: it cannot, so it is refused as the target of a `shared` child.
+   */
+  childPolicy: 'enforced' | 'isolated_only'
   /** The composer offers Plan mode for this instance. */
   planMode: boolean
   /**
@@ -42,15 +47,15 @@ export interface HarnessCaps {
 
 /**
  * The capability keys the run engine reads (`CommandPolicy`, `policy/featureGates`, handoffs): the
- * first eight of `HarnessCaps`, the same as an adapter's `ProviderCapabilities`.
+ * keys of `HarnessCaps` an adapter's `ProviderCapabilities` also has.
  */
 export type RunCapabilities = Pick<
   HarnessCaps,
-  'steer' | 'interrupt' | 'rollback' | 'fork' | 'events' | 'containment' | 'historyInjection' | 'mcp'
+  'steer' | 'interrupt' | 'rollback' | 'fork' | 'events' | 'containment' | 'historyInjection' | 'mcp' | 'childPolicy'
 >
 
 export const HARNESS_CAP_KEYS = [
-  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'planMode', 'contextUsage'
+  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage'
 ] as const satisfies ReadonlyArray<keyof HarnessCaps>
 
 /** What a caller picks to run an agent. */

@@ -460,12 +460,6 @@ function harnessGateway(ctx: HandlerContext): HarnessGateway {
   throw harnessAppError({ code: 'not_implemented', message: 'Provider instances are not available in this build yet.' })
 }
 
-/** The vendor driver that owns a CLI provider instance's launch settings. */
-function cliProviderService(ctx: HandlerContext, instanceId: CliProviderInstanceId) {
-  if (instanceId === 'claude') return ctx.mms.claudeSubscription
-  if (instanceId === 'codex') return ctx.mms.codex
-  return ctx.mms.antigravity
-}
 
 async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
   if (isObject(params) && typeof params.threadId === 'string' &&
@@ -728,6 +722,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if ((!instanceId && !llmProvider) || !modelId) throw new Error('Model provider and id are required')
         // Unknown or disabled instances are rejected here, before anything is stored.
         override = ctx.mms.providerInstances.overrideFor({ instanceId, llmProvider, model: modelId })
+        // Hidden models and instances the thread's project turned off are rejected too.
+        const projectId = ctx.mms.threads.getThread(threadId)?.projectId
+        ctx.mms.harness?.resolveStored(override, { purpose: 'composer', scope: projectId ? { kind: 'project', projectId } : { kind: 'device' } })
       }
       const next = ctx.mms.orchestrator.setThreadModelOverride(threadId, override)
       if (override) {
@@ -1611,16 +1608,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.refreshModels': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
-      if (providerId === 'claude-subscription') {
-        await ctx.mms.claudeSubscription.status()
-        await ctx.mms.claudeSubscription.refreshModels(ctx.mms.worktrees.getRepoRoot())
-      }
-      else if (providerId === 'antigravity') await ctx.mms.antigravity.refreshModels(ctx.mms.worktrees.getRepoRoot())
-      else if (providerId === 'codex') {
-        await ctx.mms.codex.status()
-        await ctx.mms.codex.refreshModels()
-      }
-      else await ctx.mms.providerAuth.refreshDynamicModels()
+      // A vendor instance refreshes through its runtime; anything else is a pi-ai provider.
+      if (!(await harnessGateway(ctx).legacy.refreshModels(providerId, ctx.mms.worktrees.getRepoRoot())))
+        await ctx.mms.providerAuth.refreshDynamicModels()
       return { options: ctx.mms.providerInstances.llmProviders() }
     }
     case 'providers.getAmbientInfo': {
@@ -1671,11 +1661,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.logout': {
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
-      if (providerId === 'claude-subscription') await ctx.mms.claudeSubscription.logout()
-      else if (providerId === 'antigravity') await ctx.mms.antigravity.logout()
-      // Disconnects Codex in Mousse only; the terminal `codex login` is never logged out.
-      else if (providerId === 'codex') await ctx.mms.codex.logout()
-      else await ctx.mms.providerAuth.logout(providerId)
+      // Vendor instances disconnect in Mousse only; terminal sign-ins are never logged out.
+      if (!(await harnessGateway(ctx).legacy.logout(providerId))) await ctx.mms.providerAuth.logout(providerId)
       const providers = ctx.mms.providerInstances.configuredProviders()
       ctx.emitEvent?.('providers.changed', { providers })
       return { providers }
@@ -1692,13 +1679,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       session.on('event', forward)
       try {
-        const result = providerId === 'claude-subscription'
-          ? await ctx.mms.claudeSubscription.login(session, ctx.mms.worktrees.getRepoRoot())
-          : providerId === 'antigravity'
-          ? await ctx.mms.antigravity.login(session, ctx.mms.worktrees.getRepoRoot())
-          : providerId === 'codex'
-          ? await ctx.mms.codex.login(session, ctx.mms.worktrees.getRepoRoot())
-          : await ctx.mms.providerAuth.runOAuthLogin(session, providerId)
+        const result = await (harnessGateway(ctx).legacy.login(providerId, session, ctx.mms.worktrees.getRepoRoot())
+          ?? ctx.mms.providerAuth.runOAuthLogin(session, providerId))
         if (result && (result as { success?: boolean }).success !== false) {
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
@@ -1782,12 +1764,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'providers.cliConfig': {
       const p = isObject(params) ? params : {}
-      return { config: await cliProviderService(ctx, asCliProviderInstanceId(p.instanceId)).cliConfig() }
+      return { config: await harnessGateway(ctx).legacy.cliConfig(asCliProviderInstanceId(p.instanceId)) }
     }
     case 'providers.setCliConfig': {
       const p = isObject(params) ? params : {}
-      const service = cliProviderService(ctx, asCliProviderInstanceId(p.instanceId))
-      const config = await service.setCliConfig(parseCliConfigPatch(p.patch))
+      const config = await harnessGateway(ctx).legacy.setCliConfig(asCliProviderInstanceId(p.instanceId), parseCliConfigPatch(p.patch))
       const providers = ctx.mms.providerInstances.configuredProviders()
       ctx.emitEvent?.('providers.changed', { providers })
       return { config, providers }

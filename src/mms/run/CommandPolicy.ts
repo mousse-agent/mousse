@@ -1,4 +1,4 @@
-import type { ProviderCapabilities } from './adapters/ProviderAdapter'
+import type { RunCapabilities as ProviderCapabilities } from '../../shared/harness/types'
 import { TERMINAL_RUN_STATUSES, type RunRecord } from './types'
 
 /**

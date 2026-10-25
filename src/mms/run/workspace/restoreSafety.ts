@@ -4,7 +4,7 @@ import { resolve, sep } from 'node:path'
 import { tryGit } from '../../actions/git'
 import { ThreadWorkspaceManager } from '../../workspace/ThreadWorkspaceManager'
 import type { ThreadWorkspaceMetadata } from '../../../shared/workspace'
-import type { ProviderCapabilities } from '../adapters/ProviderAdapter'
+import type { RunCapabilities as ProviderCapabilities } from '../../../shared/harness/types'
 import { restoreMode, type RestoreMode } from '../policy/featureGates'
 
 /**

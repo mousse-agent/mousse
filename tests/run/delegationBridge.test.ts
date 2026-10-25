@@ -15,7 +15,7 @@ import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
 import type { DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { subagentPreamble } from '../../src/mms/run/delegation/guidance'
-import { AdapterRegistry } from '../../src/mms/run/adapters/AdapterRegistry'
+import { testHarness } from '../../src/mms/run/testkit/harness'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
@@ -87,7 +87,7 @@ function daemon(home: string, script: Script, pid: number) {
     chat: async () => { throw new Error('the scripted adapter replaces the pi loop') }
   }
   const adapter = new ScriptedPiAdapter(script)
-  orch.setAdapterRegistry(new AdapterRegistry().register(adapter))
+  orch.setHarness(testHarness({ adapters: [adapter], profileHome: home }))
   const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })), pid })
   orch.setRunEngine(engine)
   const boot = engine.reconcileOnBoot()

@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import type { ExecutionBinding } from '../../shared/harness/types'
 import { DaemonEpoch } from './DaemonEpoch'
 import { CommandRejection, fail, reject, RunStoreError } from './db/RunStoreError'
 import { isFencedSource, isFollowUpSource } from './delegation/sources'
@@ -446,6 +447,43 @@ export class RunEngine extends EventEmitter {
         providerRef: ref
       })
     })
+  }
+
+  /**
+   * Records the execution binding on the run's active attempt (harness gateway). The first binding
+   * of an attempt stands: a retry, steer restart or fork of it never rereads mutable defaults.
+   * Returns the binding the attempt runs on.
+   */
+  recordExecutionBinding(runId: string, binding: ExecutionBinding): ExecutionBinding {
+    const run = this.store.getRun(runId)
+    if (!run) fail('bad_request', `Unknown run ${runId}.`)
+    if (!run.activeAttemptId) fail('bad_request', `Run ${runId} has no active attempt.`)
+    return this.store.setAttemptBinding(run.activeAttemptId, binding)
+  }
+
+  /**
+   * The binding a run already runs on: its active attempt's, else the latest earlier attempt's
+   * (a retry or recovery attempt keeps the binding of the attempt it replaces).
+   */
+  bindingForRun(runId: string): ExecutionBinding | undefined {
+    const attempts = this.store.listAttempts(runId)
+    for (let index = attempts.length - 1; index >= 0; index -= 1) {
+      const binding = attempts[index].executionBinding
+      if (binding) return binding
+    }
+    return undefined
+  }
+
+  /** The binding of the latest earlier run on the thread that recorded one. */
+  previousBinding(threadId: string, beforeRunId: string): ExecutionBinding | undefined {
+    const runs = this.store.listRuns(threadId)
+    const before = runs.find((run) => run.runId === beforeRunId)?.ordinal ?? Number.POSITIVE_INFINITY
+    for (const run of [...runs].sort((a, b) => b.ordinal - a.ordinal)) {
+      if (run.ordinal >= before) continue
+      const binding = this.bindingForRun(run.runId)
+      if (binding) return binding
+    }
+    return undefined
   }
 
   /**

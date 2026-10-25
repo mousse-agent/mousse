@@ -22,7 +22,13 @@ import { RunEngine } from '../../../src/mms/run/RunEngine'
 import { RunStore } from '../../../src/mms/run/RunStore'
 import { replayAcpProcess } from '../../../src/mms/run/testkit/acpReplay'
 import { replayCodexAppServer } from '../../../src/mms/run/testkit/codexAppServerReplay'
-import { createCodexProviderService } from '../../../src/mms/run/adapters/codex'
+import { createCodexProviderService, type CodexProviderService } from '../../../src/mms/providers/codex/CodexProviderService'
+import { createHarnessGateway } from '../../../src/mms/harness/gateway'
+import { antigravityDriver } from '../../../src/mms/harness/drivers/antigravity'
+import { claudeCodeDriver } from '../../../src/mms/harness/drivers/claudeCode'
+import { codexDriver } from '../../../src/mms/harness/drivers/codex'
+import { piLegacyDriver } from '../../../src/mms/harness/drivers/piLegacy'
+import { ProviderInstanceService } from '../../../src/mms/providers/ProviderInstanceService'
 import { replayPiChat } from '../../../src/mms/run/testkit/piChatReplay'
 import { DEFAULT_VOLATILE_KEYS, dropKeys, readTranscript, ReplayTransport } from '../../../src/mms/run/testkit/ReplayTransport'
 import { Reconciler } from '../../../src/mms/run/Reconciler'
@@ -178,6 +184,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     }
   }
   const questions = new UserQuestionService()
+  const services: { claude?: ClaudeSubscriptionProviderService; antigravity?: AntigravityProviderService; codex?: CodexProviderService } = {}
   // A scenario may drive turns on several adapters (`before`); each replays from the one transcript.
   const involved = new Set([adapterId, ...(scenario.before ?? []).map((turn) => turn.adapter)])
   if (involved.has('pi')) {
@@ -197,7 +204,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })
     })
     stops.push(() => service.stop())
-    orch.setClaudeSubscriptionProvider(service)
+    services.claude = service
   }
   if (involved.has('antigravity')) {
     const service = new AntigravityProviderService(home, home, questions)
@@ -207,7 +214,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       launch: replayAcpProcess(transport)
     })
     stops.push(() => service.stop())
-    orch.setAntigravityProvider(service)
+    services.antigravity = service
   }
   if (involved.has('codex')) {
     const binary = join(home, 'codex')
@@ -219,8 +226,24 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     // Replace the app-server process only; the client, service and adapter run for real.
     const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(transport) })
     stops.push(() => service.stop())
-    orch.setCodexProvider(service)
+    services.codex = service
   }
+  // The real gateway and drivers serve the turns; only each vendor's process boundary is replayed.
+  const harness = createHarnessGateway({
+    profileHome: home,
+    installationHome: home,
+    instanceMap: new ProviderInstanceService(),
+    questions,
+    shellPath: async () => ({ entries: [], source: 'failed' }),
+    drivers: [
+      piLegacyDriver({ client: () => orch.piChatClient() }),
+      claudeCodeDriver({ builtIn: () => services.claude! }),
+      antigravityDriver({ builtIn: () => services.antigravity! }),
+      codexDriver({ builtIn: () => services.codex! })
+    ]
+  })
+  stops.push(() => harness.stop())
+  orch.setHarness(harness)
 
   try {
     let thread

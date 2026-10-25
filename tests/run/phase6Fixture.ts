@@ -11,7 +11,8 @@ import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import type { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
-import { AdapterRegistry } from '../../src/mms/run/adapters/AdapterRegistry'
+import { testHarness } from '../../src/mms/run/testkit/harness'
+import type { HarnessDriver } from '../../src/mms/harness/driver'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type {
@@ -154,7 +155,7 @@ export function createOrchestrator(home: string, store: ThreadDataStore): Orches
 }
 
 /** One daemon over `home`: orchestrator, engine and effect worker with the given adapters. */
-export function phase6Daemon(home: string, adapters: ProviderAdapter[], options: { pid?: number; instances?: ProviderInstanceService } = {}) {
+export function phase6Daemon(home: string, adapters: ProviderAdapter[], options: { pid?: number; instances?: ProviderInstanceService; drivers?: HarnessDriver[] } = {}) {
   const projects = new ProjectManager()
   const store = new ThreadDataStore(projects)
   const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...PI } }
@@ -170,9 +171,7 @@ export function phase6Daemon(home: string, adapters: ProviderAdapter[], options:
     generateTitle: async () => 'Scripted',
     chat: async () => { throw new Error('the scripted adapter replaces the pi loop') }
   }
-  const registry = new AdapterRegistry(options.instances)
-  for (const adapter of adapters) registry.register(adapter)
-  orch.setAdapterRegistry(registry)
+  orch.setHarness(testHarness({ adapters, ...(options.drivers ? { drivers: options.drivers } : {}), ...(options.instances ? { instances: options.instances } : {}), profileHome: home }))
   const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })), pid: options.pid ?? 1 })
   orch.setRunEngine(engine)
   const boot = engine.reconcileOnBoot()

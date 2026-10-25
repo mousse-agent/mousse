@@ -127,6 +127,10 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         signIn: (session, cwd) => service.login(session, cwd),
         signOut: () => service.logout(),
         forgetConversation: (threadId) => service.forgetConversation(threadId),
+        setLiveHost: (host) => service.setLiveHost(host),
+        inFlightContinuation: (threadId) => service.inFlightContinuation(threadId),
+        hasContinuation: (threadId, id) => service.hasContinuation(threadId, id),
+        discardContinuations: (threadId, id) => service.discardContinuations(threadId, id),
         stop: () => {
           if (owned) service.stop()
         }

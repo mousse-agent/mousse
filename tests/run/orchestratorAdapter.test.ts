@@ -11,7 +11,7 @@ import { ProjectManager } from '../../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
-import { AdapterRegistry } from '../../src/mms/run/adapters/AdapterRegistry'
+import { testHarness } from '../../src/mms/run/testkit/harness'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type {
   AdapterHost,
@@ -94,7 +94,7 @@ describe('adapter-based turn.start', () => {
       }
     }
     adapter = new FakePiAdapter()
-    orch.setAdapterRegistry(new AdapterRegistry().register(adapter))
+    orch.setHarness(testHarness({ adapters: [adapter], profileHome: home }))
     engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })) })
     orch.setRunEngine(engine)
     orch.recoverRunEngineOnBoot()

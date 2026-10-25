@@ -56,6 +56,18 @@ export interface DriverContext {
   changed(): void
 }
 
+/**
+ * What a runtime that keeps one live process per thread reports to the host: background work (a
+ * helper agent, a shell) starting or ending, a turn the runtime started on its own when that work
+ * finished, and a line for the thread's user.
+ */
+export interface LiveProcessHost {
+  backgroundWork?(threadId: string, active: boolean): void
+  /** The host runs it as a run of the thread, whose turn names `info.id` as its continuation. */
+  continuationStarted?(threadId: string, info: { id: string; taskIds: string[]; summaries: string[] }): void
+  notice?(threadId: string, text: string): void
+}
+
 export interface DriverRuntime {
   /** The turn runtime of this instance. */
   readonly adapter: ProviderAdapter
@@ -85,6 +97,14 @@ export interface DriverRuntime {
   validateOverride?(path: string): void
   /** Forget the native session of a thread so its next turn hands history over instead. */
   forgetConversation?(threadId: string): void
+  /** A runtime with live processes per thread reports to `host` (null detaches it). */
+  setLiveHost?(host: LiveProcessHost | null): void
+  /** The turn the thread's live process started itself and is running now, if any. */
+  inFlightContinuation?(threadId: string): { id: string; discarded: boolean } | undefined
+  /** The thread's live process still holds that turn of its own (any, without `id`). */
+  hasContinuation?(threadId: string, id?: string): boolean
+  /** Drops the turns of its own the thread's live process holds (only `id`, when given). */
+  discardContinuations?(threadId: string, id?: string): void
   stop(): void
 }
 

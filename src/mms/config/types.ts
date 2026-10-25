@@ -24,6 +24,11 @@ export interface MousseProvidersConfig {
   instances?: Record<string, unknown>
   /** Seed version `instances` was last seeded with (`PROVIDER_INSTANCE_SEED_VERSION`). */
   instancesSeedVersion?: number
+  /**
+   * Model preferences per instance id (hidden, order, favorites, custom models), owned by the
+   * harness gateway and validated when read.
+   */
+  modelPrefs?: Record<string, unknown>
 }
 
 export interface MousseAgentsConfig {
