@@ -1,5 +1,6 @@
 import { parseChatReference, parseMousseFileLink, type ChatReference } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
+import { visibleThreads } from '../../shared/threadLineage'
 
 const UNSAFE_SCHEME = /^(?:javascript|data|vbscript|blob):/i
 
@@ -93,9 +94,11 @@ export async function resolveChatReferences(references: ChatReference[]): Promis
 /** Resolve a referenced project's own draft before opening its workspace. */
 export async function ensureProjectReferenceThread(projectId: string, stillCurrent: () => boolean) {
   const store = useAppStore.getState()
-  let thread = store.threads.find((item) => item.projectId === projectId)
+  // A subagent is not a thread to land on; open the project's own threads.
+  let thread = visibleThreads(store.threads).find((item) => item.projectId === projectId)
   if (!thread) {
-    thread = (await window.mousse.projects.listThreads(projectId))[0]
+    const listed = await window.mousse.projects.listThreads(projectId)
+    thread = visibleThreads(listed, [...store.threads, ...listed])[0]
     if (!stillCurrent()) return null
   }
   if (!thread) {
