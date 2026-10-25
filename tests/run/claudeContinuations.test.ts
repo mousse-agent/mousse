@@ -57,6 +57,12 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     mkdirSync(join(home, 'providers', 'claude-subscription'), { recursive: true })
     writeFileSync(join(home, 'providers', 'claude-subscription', 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
 
+    let signInGate: Promise<void> = Promise.resolve()
+    const holdSignIn = (): (() => void) => {
+      let open!: () => void
+      signInGate = new Promise<void>((resolve) => { open = resolve })
+      return () => { signInGate = Promise.resolve(); open() }
+    }
     const cli = new FakeClaudeCli()
     cli.reply = (message, process) => {
       const text = process.text(process.inputs.length - 1)
@@ -65,7 +71,11 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     }
     const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
       query: cli.query,
-      runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
+      // A test can hold the sign-in check every turn makes before it pushes its prompt.
+      runAuth: vi.fn(async () => {
+        await signInGate
+        return JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })
+      })
     })
     stops.push(() => service.stop())
 
@@ -110,7 +120,7 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
       })
       return await response.json() as { result?: unknown; error?: { message: string; data?: { reason?: string } } }
     }
-    return { d, cli, service, parent, builder, task, reconciler, parentTurns, callMousse, childThread: builder.childThreadId as string }
+    return { d, cli, service, parent, builder, task, reconciler, parentTurns, callMousse, holdSignIn, childThread: builder.childThreadId as string }
   }
 
   it('a helper outlives the turn, and its result reaches the parent through a continuation run', async () => {
@@ -240,24 +250,29 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
   it('a wake that folded a waiting message in has no run of its own: the message gets the answer and no empty turn is written', async () => {
     const s = await scene()
     s.cli.reply = undefined
-    const release = holdContinuationRun(s.d)
+    // The message is sent on the subagent but its prompt is not pushed yet (the sign-in check is slow)...
+    const openSignIn = s.holdSignIn()
     const typed = s.d.orch.send('typed meanwhile', false, { threadId: s.childThread, clientRequestId: 'typed-2', source: 'gui' })
     typed.catch(() => undefined)
+    await waitFor(() => s.d.engine.listRuns(s.childThread).some((run) => run.source === 'gui'), 'the message to be recorded')
+    // ...when the helper's notification arrives: Claude starts a turn of its own for it.
+    s.cli.last.emit(notification('build-1'), textDelta('reading the report'))
+    await waitFor(() => (s.d.orch as any).pendingContinuations.size === 1, 'the wake report to reach the host')
+    openSignIn()
     await waitFor(() => s.cli.last.inputs.length === 2, 'the message to reach Claude')
-    // The notification lands before the message is taken; Claude folds the message into the wake turn.
-    s.cli.last.emit(notification('build-1'), textDelta('report and answer', s.cli.last.uuid(1)), resultFrame({ uuids: [s.cli.last.uuid(1)], text: 'report and answer', origin: 'task-notification' }))
-    await waitFor(() => s.task().status !== 'running', 'the folded answer to settle the task')
-    // The continuation's run is only made now, long after Claude's wake turn was folded away.
-    release()
+    // Claude folds the message into the wake turn and echoes its id on the one result.
+    const uuid = s.cli.last.uuid(1)
+    s.cli.last.emit(textDelta('report and answer', uuid), resultFrame({ uuids: [uuid], text: 'report and answer', origin: 'task-notification' }))
     await typed
-    await new Promise((resolve) => setTimeout(resolve, 200))
     await waitFor(() => s.task().status !== 'running', 'the task to publish')
+    await new Promise((resolve) => setTimeout(resolve, 300))
     const runs = s.d.engine.listRuns(s.childThread)
-    const continuation = runs.find((run) => run.source === 'provider-continuation')
-    if (continuation) expect(continuation.status).toBe('cancelled')
+    // No continuation run executed: the folded wake has no turn of its own.
+    expect(runs.filter((run) => run.source === 'provider-continuation').every((run) => run.status === 'cancelled')).toBe(true)
     expect(s.task().result?.text).toBe('report and answer')
     const messages = s.d.orch.getOrCreateSession(s.childThread).messages
     expect(messages.filter((message) => message.role === 'assistant' && (message.content === 'Done.' || message.content === ''))).toEqual([])
+    expect(messages.some((message) => message.content.includes('A background task finished'))).toBe(false)
   })
 
   it('Stop aimed at a stale run id stops the process when only a queued continuation run is live', async () => {

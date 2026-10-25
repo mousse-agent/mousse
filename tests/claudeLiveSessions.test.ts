@@ -803,7 +803,7 @@ describe('result routing and steering edge cases', () => {
     await expect(second).rejects.toThrow()
     f.service.commitInterrupted('thread', 'h')
     expect(process.interruptOptions).toEqual([undefined, { cancelQueued: true }])
-    await vi.waitFor(() => expect(f.host.notice).toHaveBeenCalledExactlyOnceWith('thread', expect.stringContaining('may not have been delivered')))
+    await vi.waitFor(() => expect(f.host.notice).toHaveBeenCalledExactlyOnceWith('thread', expect.stringMatching(/may not have been delivered.*stays waiting.*Stop releases it now/)))
     f.cli.reply = (message, self) => {
       self.emit(resultFrame({ uuids: [self.uuid(1)], terminalReason: 'aborted_streaming' }))
       self.answer(String(message.uuid), 'third')
