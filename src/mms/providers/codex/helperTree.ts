@@ -14,6 +14,8 @@ import { THREAD_STATUS_TYPES, notificationParams, type CodexNotification, type T
  * already active at the first read is seen only if it is listed or has been active by the second
  * read (its first turn starts from the spawner's message in-process, faster than the spawner's next
  * model round trip). A helper missed that way shows up as a leftover to the next run on the thread.
+ * The ordering argument covers threads whose event listener is attached; before that the server lists a
+ * status from the core agent status instead, and the newborn window (`CODEX_NEWBORN_MS`) covers that gap.
  */
 
 /** A listed helper that has not been seen active yet counts as busy for this long after it was created. */
