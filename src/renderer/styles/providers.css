@@ -1,159 +1,298 @@
-/* Settings → Providers. Built on the settings primitives (settings.css): flat rows split by
-   hairlines, text left and controls right, spacing from the --space-* scale. Only form controls
-   carry borders. Provider logos are the only icons besides textless refresh/remove buttons. */
+/* Settings → Providers, after T3 Code's providers page: a scope line and refresh/add actions,
+   then one surface split into a provider list (17rem) and the selected provider's editor. Below
+   48rem of page width the editor stacks under the list. Built on the settings primitives
+   (settings.css); selection is a background fill only. */
+
+/* The two panes need more than the usual reading column; the page title widens with them. */
+.settings-content:has(> #providers) {
+  --settings-content-w: 1040px;
+}
+
+.prov-page {
+  container: providers / inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding-top: var(--space-8);
+}
+
+/* Toolbar: "Applying settings for [This device]" left; refresh and add right. */
 
 .prov-toolbar {
   display: flex;
   align-items: center;
   gap: var(--space-16);
   min-height: var(--settings-control-h);
-  padding-top: var(--space-8);
 }
 
-.prov-toolbar + .settings-group,
-.prov-toolbar + .prov-error + .settings-group {
-  padding-top: var(--space-16);
+.prov-scope {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-width: 0;
+  font-size: var(--settings-fs-small);
+  color: var(--text-secondary);
 }
 
-.prov-toolbar > .settings-group-action {
+.prov-scope-label {
+  white-space: nowrap;
+}
+
+.prov-scope-note {
+  margin: 0;
+  font-size: var(--settings-fs-small);
+  color: var(--text-secondary);
+}
+
+.prov-toolbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
   margin-left: auto;
 }
 
-.prov-empty {
-  margin: 0;
-  padding: var(--space-16) 0 0;
-}
-
-/* Add view: the search fills the toolbar, "Done" keeps the action slot on the right. */
-.prov-toolbar > .prov-search {
-  flex: 1;
-  min-width: 0;
-}
-
-/* Provider rows share the .settings-item anatomy: they span the group surface, so the
-   hairline, hover and open fill reach its edges, and the details stay on that surface. */
-
-.prov-row {
-  position: relative;
-  margin: 0 calc(-1 * var(--settings-surface-x, 0px));
-  padding: 0 var(--settings-surface-x, 0px);
-  transition: background-color 0.15s;
-}
-
-.prov-row:hover {
-  background: var(--ui-hover);
-}
-
-.prov-row::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: var(--ui-line);
-}
-
-.settings-group-rows > .prov-row:first-child::before,
-.prov-row.is-open::before,
-.prov-row.is-open + .prov-row::before {
-  display: none;
-}
-
-.prov-row.is-open {
-  background: var(--ui-hover);
-}
-
-.prov-row-main {
-  display: flex;
+.prov-ghost-btn {
+  display: inline-flex;
   align-items: center;
-  gap: var(--space-12);
-  min-height: calc(var(--settings-control-h) + 2 * var(--settings-row-y));
-  padding: var(--settings-row-y) 0;
+  gap: var(--space-4);
+  height: var(--settings-control-h);
+  padding: 0 var(--space-8);
+  border: 0;
+  border-radius: var(--ui-control-radius);
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--settings-fs-small);
+  white-space: nowrap;
   cursor: pointer;
 }
 
-.prov-row-main.is-static {
+.prov-ghost-btn:hover:not(:disabled) {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.prov-ghost-btn:disabled {
+  opacity: 0.6;
   cursor: default;
 }
 
-.prov-row-head {
+/* The two panes share one group surface. */
+
+.prov-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: var(--ui-card-radius);
+  background: var(--settings-surface);
+  box-shadow: var(--settings-surface-edge);
+}
+
+.prov-pane-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-bottom: 1px solid var(--ui-line);
+}
+
+.prov-pane-editor {
+  min-width: 0;
+}
+
+.prov-editor {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-16);
+}
+
+@container providers (min-width: 48rem) {
+  .prov-pane {
+    display: grid;
+    grid-template-columns: 17rem minmax(0, 1fr);
+    height: min(44rem, calc(100dvh - 11rem));
+    min-height: 32rem;
+  }
+
+  .prov-pane-list {
+    overflow-y: auto;
+    border-bottom: 0;
+    border-right: 1px solid var(--ui-line);
+  }
+
+  .prov-pane-editor {
+    overflow-y: auto;
+  }
+}
+
+.prov-pane-empty {
+  margin: 0;
+  padding: var(--space-24);
+  font-size: var(--settings-fs-small);
+  color: var(--text-secondary);
+}
+
+/* List rows: logo, name and version, status line; the switch on the right. */
+
+.prov-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  min-height: 64px;
+  padding: var(--space-12) var(--space-12) var(--space-12) var(--space-16);
+  border-bottom: 1px solid var(--ui-line);
+  transition: background-color 0.15s;
+}
+
+.prov-item:hover {
+  background: var(--ui-hover);
+}
+
+.prov-item.is-selected {
+  background: var(--ui-selected);
+}
+
+.prov-item-main {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-12);
+  flex: 1;
+  min-width: 0;
+  transition: opacity 0.15s;
+}
+
+.prov-item.is-off:not(.is-selected) .prov-item-main {
+  opacity: 0.6;
+}
+
+.prov-item.is-off:hover .prov-item-main {
+  opacity: 1;
+}
+
+.prov-item-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ui-control-radius);
+  background: none;
+  cursor: pointer;
+}
+
+.prov-item-hit:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.prov-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.prov-item-title {
   display: flex;
   align-items: center;
   gap: var(--space-8);
-  flex: 1;
   min-width: 0;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: inherit;
-  text-align: left;
-  cursor: inherit;
 }
 
-.prov-row-head:focus-visible {
-  outline: none;
+.prov-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--settings-fs-row);
+  font-weight: 500;
+  color: var(--text-primary);
 }
 
-.prov-row-head:focus-visible .prov-name {
-  text-decoration: underline;
-  text-underline-offset: 3px;
+.prov-item-controls {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-shrink: 0;
 }
 
-/* Logo slot (16px) + gap (8px) = the 24px indent of the detail sub-rows. */
 .prov-logo {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
   flex-shrink: 0;
-}
-
-
-.prov-name {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-8);
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .prov-version {
+  max-width: 7rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
   font-family: var(--font-mono);
   font-size: 11.5px;
   font-weight: 400;
-  color: var(--ui-faint);
+  color: var(--text-secondary);
 }
 
-.prov-row.is-off .prov-logo,
-.prov-row.is-off .settings-item-text,
-.prov-row.is-off .prov-dot {
-  opacity: 0.45;
+.prov-add-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  width: 100%;
+  padding: var(--space-12) var(--space-16);
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--settings-fs-row);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
 }
 
-.prov-switch {
-  display: inline-flex;
-  flex-shrink: 0;
+.prov-add-row:hover,
+.prov-add-row:focus-visible {
+  outline: none;
+  background: var(--ui-hover);
+  color: var(--text-primary);
 }
 
-/* Status dot: colour only; the words are its tooltip and accessible label. */
+/* Status line: "Not authenticated · …"; a dot only when the provider needs attention. */
+
+.prov-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--settings-fs-small);
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.prov-item .prov-status-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
 
 .prov-dot {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
+  margin-top: 0.5em;
   flex-shrink: 0;
   border-radius: 50%;
-  background: var(--ui-faint);
+  background: var(--text-secondary);
 }
 
-.prov-dot.is-ready {
-  background: var(--success);
-}
-
-.prov-dot.is-attention {
+.prov-dot.is-warning {
   background: var(--warning);
 }
 
@@ -161,58 +300,383 @@
   background: var(--danger);
 }
 
-.prov-dot.is-unknown {
-  opacity: 0.5;
-}
-.prov-name .prov-dot {
-  align-self: center;
+/* Project override marker and reset, small icon buttons beside the switch. */
+
+.settings-icon-btn.prov-micro {
+  width: 22px;
+  height: 22px;
 }
 
-/* The per-provider "Advanced" disclosure reads as one more sub-row, not a page heading. */
+.prov-override {
+  position: relative;
+  display: inline-flex;
+}
 
-.prov-row-panel .settings-advanced {
+.prov-override .settings-icon-btn {
+  color: var(--accent);
+}
+
+.prov-override-pop {
+  position: absolute;
+  top: calc(100% + var(--space-4));
+  right: 0;
+  z-index: 20;
+  min-width: 11rem;
+  margin: 0;
+  padding: var(--space-8);
+  list-style: none;
+  border-radius: var(--ui-card-radius);
+  background: var(--ui-raised);
+  box-shadow: var(--ui-dialog-edge), var(--ui-dialog-drop);
+  font-size: var(--settings-fs-small);
+}
+
+.prov-override-pop li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-12);
+  padding: var(--space-4) var(--space-8);
+  border-radius: var(--ui-control-radius);
+  color: var(--text-secondary);
+}
+
+.prov-override-pop li.is-effective {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.prov-override-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.prov-override-pad {
+  width: 13px;
+}
+
+/* Editor sections: heading, then rows on a surface. Inside the pane they sit closer together. */
+
+.prov-editor > .prov-editor-section {
+  padding-top: var(--space-24);
+}
+
+.prov-editor > .prov-editor-section:first-child {
+  padding-top: 0;
+}
+
+.prov-editor .settings-group-title {
+  font-size: var(--settings-fs-row);
+}
+
+.prov-editor > .prov-editor-section:first-child .settings-group-title {
+  font-size: var(--settings-fs-heading);
+}
+
+.prov-editor .settings-group-rows {
+  background: var(--settings-surface);
+}
+
+.prov-editor .settings-item-desc .prov-status {
+  display: flex;
+}
+
+.prov-editor .settings-advanced {
   margin-top: 0;
 }
 
-.prov-row-panel .settings-advanced > summary {
+.prov-editor .settings-advanced > summary {
   display: flex;
+  align-items: center;
   min-height: calc(var(--settings-control-h) + 2 * var(--settings-row-y));
-  padding: var(--settings-row-y) 0 var(--settings-row-y) var(--space-24);
+  padding: var(--settings-row-y) 0;
   border-top: 1px solid var(--ui-line);
   font-size: var(--settings-fs-row);
   font-weight: 450;
 }
 
-.prov-row-panel .settings-advanced-body > :first-child {
+.prov-editor .settings-advanced-body > :first-child {
   border-top: 1px solid var(--ui-line);
 }
 
-/* Details: indented .settings-item sub-rows (SettingsRow indent). */
+/* Models */
 
-.prov-row-panel {
-  padding-bottom: var(--space-4);
+.prov-models-wrap {
+  padding: var(--space-12) 0;
 }
 
-
-.prov-indent {
-  padding-left: var(--space-24);
+.prov-models {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
 }
+
+.prov-models-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.settings-group-rows .settings-input.prov-models-filter {
+  width: 14rem;
+}
+
+.prov-models-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.prov-models-count {
+  font-size: var(--settings-fs-small);
+  color: var(--text-secondary);
+}
+
+.prov-models-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-left: auto;
+}
+
+.prov-models-list {
+  max-height: 20rem;
+  margin: 0 calc(-1 * var(--space-8));
+  overflow-y: auto;
+}
+
+.prov-models-group {
+  padding: var(--space-16) var(--space-8) 6px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.prov-models-group.is-first {
+  padding-top: var(--space-4);
+}
+
+.prov-models-empty {
+  margin: 0;
+  padding: var(--space-8);
+  font-size: var(--settings-fs-small);
+  color: var(--text-secondary);
+}
+
+.prov-model-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-height: 34px;
+  padding: 2px var(--space-8);
+  border-radius: var(--ui-control-radius);
+}
+
+.prov-model-row:hover {
+  background: var(--ui-hover);
+}
+
+.prov-model-row.is-hidden .prov-model-text {
+  opacity: 0.55;
+}
+
+.prov-model-text {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-8);
+  flex: 1;
+  min-width: 0;
+}
+
+.prov-model-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--settings-fs-row);
+  color: var(--text-primary);
+}
+
+.prov-model-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.prov-star.is-on,
+.prov-star.is-on:hover:not(:disabled) {
+  color: var(--warning);
+}
+
+.prov-star.is-on svg {
+  fill: currentColor;
+}
+
+.prov-micro-pad {
+  width: 22px;
+  flex-shrink: 0;
+}
+
+.prov-model-caps {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.prov-model-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+@container providers (max-width: 40rem) {
+  .prov-model-caps {
+    display: none;
+  }
+}
+
+/* Custom model editor: id and name, the efforts it accepts, images and context window. */
+
+.prov-models-add {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--space-12);
+  border-radius: var(--ui-card-radius);
+  background: var(--ui-hover);
+}
+
+.prov-models-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.settings-group-rows .prov-models-add .settings-input {
+  flex: 1;
+  min-width: 10rem;
+}
+
+.settings-group-rows .prov-models-add .settings-input.prov-models-add-window {
+  flex: 0 1 13rem;
+}
+
+.prov-models-add-label {
+  min-width: 4.5rem;
+  font-size: var(--settings-fs-small);
+  color: var(--text-secondary);
+}
+
+.prov-models-add-actions {
+  display: inline-flex;
+  gap: var(--space-8);
+  margin-left: auto;
+}
+
+.prov-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.prov-chip {
+  height: 24px;
+  padding: 0 var(--space-8);
+  border: 0;
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--ui-line-strong);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.prov-chip:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.prov-chip.is-on {
+  background: var(--ui-selected, var(--ui-hover));
+  box-shadow: none;
+  color: var(--text-primary);
+}
+
+/* Runtime: the executable in use, and updates. A one-click update is a button; an update Mousse
+   cannot run itself is a command to copy, in its own box, so the two never look alike. */
+
+.prov-binary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.prov-binary-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.prov-binary-meta {
+  font-size: var(--settings-fs-small);
+  color: var(--text-secondary);
+}
+
+.prov-update.is-one-click .prov-update-btn {
+  color: var(--accent);
+}
+
+.prov-command {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px 2px 2px var(--space-8);
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-hover);
+  box-shadow: inset 0 0 0 1px var(--ui-line);
+}
+
+.prov-command-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.prov-load-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  padding-top: var(--space-16);
+}
+
+/* Errors, links and inputs shared with the add dialog. */
 
 .prov-error {
   margin: 0;
-  padding-bottom: var(--space-8);
   font-size: var(--settings-fs-small);
   line-height: 1.5;
   color: var(--danger);
 }
 
-.prov-toolbar + .prov-error {
-  padding: var(--space-8) 0 0;
-}
-
 .settings-item-desc .prov-error {
   display: block;
-  padding: 0;
 }
 
 .prov-link {
@@ -227,24 +691,8 @@
   cursor: pointer;
 }
 
-/* Controls */
-
-.settings-btn.prov-square {
-  width: var(--settings-control-h);
-  padding: 0;
-  color: var(--text-secondary);
-}
-
-.settings-btn.prov-square:hover:not(:disabled) {
-  color: var(--text-primary);
-}
-
-.settings-btn.prov-confirm {
-  color: var(--danger);
-}
-
 .settings-group-rows .settings-input.prov-wide {
-  width: 320px;
+  width: 300px;
 }
 
 .settings-input.prov-mono {
@@ -267,4 +715,185 @@
 
 .settings-group-rows .prov-env-row .settings-input {
   width: 100%;
+}
+
+.prov-empty {
+  margin: 0;
+  padding: var(--space-16) 0 0;
+}
+
+/* Add provider dialog: description, numbered step bar, then the step's panel. */
+
+.prov-wizard-overlay .modal {
+  width: 720px;
+}
+
+.prov-wizard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  min-height: 22rem;
+}
+
+.prov-wizard-desc {
+  margin: 0;
+  font-size: var(--settings-fs-small, 12.5px);
+  color: var(--text-secondary);
+}
+
+.prov-steps {
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  gap: var(--space-4);
+  margin: 0;
+  padding: var(--space-4);
+  list-style: none;
+  border-radius: var(--ui-card-radius);
+  background: var(--settings-surface, var(--ui-hover));
+}
+
+.prov-step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  width: 100%;
+  min-width: 0;
+  padding: 6px var(--space-8);
+  border: 0;
+  border-radius: var(--ui-control-radius);
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.prov-step:disabled {
+  cursor: default;
+}
+
+.prov-step.is-current {
+  background: var(--ui-selected);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.prov-step.is-done:hover:not(:disabled) {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.prov-step-num {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--ui-hover);
+  font-size: 11.5px;
+}
+
+.prov-step.is-current .prov-step-num,
+.prov-step.is-done .prov-step-num {
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+}
+
+.prov-step-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prov-wizard-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+}
+
+.prov-wizard-panel > .settings-group {
+  padding-top: 0;
+}
+
+.settings-input.prov-wizard-search {
+  width: 100%;
+  height: var(--settings-control-h, 28px);
+  padding: 0 var(--space-8);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  font-size: 12.5px;
+}
+
+.prov-choice-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.prov-choice-heading {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.prov-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-8);
+}
+
+.prov-choice {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  min-width: 0;
+  padding: var(--space-12);
+  border: 0;
+  border-radius: var(--ui-card-radius);
+  background: var(--settings-surface, var(--ui-hover));
+  box-shadow: var(--settings-surface-edge, none);
+  color: var(--text-secondary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.prov-choice:hover {
+  background: var(--ui-hover);
+}
+
+.prov-choice.is-checked {
+  background: var(--ui-selected);
+  color: var(--text-primary);
+}
+
+.prov-choice:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.prov-choice-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.prov-choice-check {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
 }
