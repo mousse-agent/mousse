@@ -880,6 +880,8 @@ describe('result routing and steering edge cases', () => {
     abort.abort()
     await expect(second).rejects.toThrow()
     f.service.commitInterrupted('thread', 'h')
+    // The cancel runs asynchronously: the tasks are lost once it has.
+    await vi.waitFor(() => expect(f.host.notice).toHaveBeenCalled())
     await expect(f.chat({ history: 'h', model: 'opus' })).rejects.toMatchObject({
       message: expect.stringMatching(/may not arrive.*Press Stop to release it now/)
     })
@@ -962,7 +964,7 @@ describe('result routing and steering edge cases', () => {
       const session = (f.service as unknown as { live: Map<string, { owedResults: number }> }).live.get('thread')!
       if (receipts) {
         expect(process.queued).toEqual([])
-        expect(session.owedResults).toBe(0)
+        await vi.waitFor(() => expect(session.owedResults).toBe(0))
       } else {
         expect(session.owedResults).toBe(1)
         // The steer's own result belongs to the cancelled wake, not to the next turn.
@@ -1069,6 +1071,51 @@ describe('result routing and steering edge cases', () => {
     expect(await mine).toBe('report and answer')
     f.service.commitConversation('thread', 'h')
     expect(f.service.hasBackgroundWork('thread')).toBe(false)
+  })
+
+  /** Turn A is cancelled with a steer Claude has not started; its interrupt then never answers. */
+  const cancelThatNeverAnswers = async (f: ReturnType<typeof fixture>) => {
+    await f.turn({ history: 'h' }, 'h')
+    const process = f.cli.last
+    f.cli.reply = undefined
+    const abort = new AbortController()
+    const first = f.chat({
+      history: 'h',
+      signal: abort.signal,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('queued steer').mockReturnValue(undefined)
+    })
+    await inputs(f.cli, 3)
+    process.interruptGate = new Promise(() => undefined)
+    abort.abort()
+    await expect(first).rejects.toThrow()
+    f.service.commitInterrupted('thread', 'h')
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    return process
+  }
+
+  it('an interrupt that never answers fails the waiting push within the bound, closes the process and the next turn starts a fresh one', async () => {
+    const f = fixture({ interruptTimeoutMs: 150 })
+    const process = await cancelThatNeverAnswers(f)
+    const started = Date.now()
+    const second = f.chat({ history: 'h' })
+    await expect(second).rejects.toThrow(/did not answer a cancel in time/)
+    expect(Date.now() - started).toBeLessThan(3000)
+    expect(process.closed).toBe(true)
+    expect(f.service.liveThreadIds()).toEqual([])
+    f.cli.reply = (message, self) => self.answer(String(message.uuid), 'fresh')
+    expect(await f.chat({ history: 'h' })).toBe('fresh')
+    expect(f.cli.processes).toHaveLength(2)
+  })
+
+  it('closing the process while a push waits on a cancel releases the push', async () => {
+    const f = fixture({ interruptTimeoutMs: 600_000 })
+    await cancelThatNeverAnswers(f)
+    const second = f.chat({ history: 'h' })
+    second.catch(() => undefined)
+    await later(100)
+    expect(f.cli.last.inputs).toHaveLength(3)
+    expect(f.service.stopThread('thread')).toBe('stopped')
+    await expect(second).rejects.toThrow()
   })
 
   it('a prompt pushed while a cancel waits for its receipt is not swept up by it', async () => {
