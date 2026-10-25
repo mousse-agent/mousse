@@ -270,7 +270,23 @@ describe('LineageSection rendering', () => {
       expect(html).toContain('Task two')
       expect(html).not.toContain('Elsewhere')
       expect(html).not.toContain('No subagents started yet')
+    })
+  })
+
+  it('offers Stop all in the heading while any subagent runs, and not when none does', () => {
+    const render = () => renderToStaticMarkup(createElement(LineageSection, { threadId: 't1', projectId: null }))
+    withStore({ subagentsByParent: { t1: [subagent('one'), subagent('two', { state: 'done' })] } }, () => {
+      const html = render()
+      expect(html).toContain('class="side-card-section-head"')
+      expect(html).toMatch(/<h3 class="side-card-section-title">Lineage · 1 running<\/h3><button[^>]*class="lineage-stop-all"[^>]*>Stop all<\/button>/)
+      expect(html).toContain('aria-label="Stop all subagents"')
+    })
+    // A waiting subagent still runs; a finished one does not.
+    withStore({ subagentsByParent: { t1: [subagent('one', { state: 'waiting' })] } }, () => expect(render()).toContain('Stop all'))
+    withStore({ subagentsByParent: { t1: [subagent('one', { state: 'done' }), subagent('two', { state: 'stopped' })] } }, () => {
+      const html = render()
       expect(html).not.toContain('Stop all')
+      expect(html).not.toContain('side-card-section-head')
     })
   })
 

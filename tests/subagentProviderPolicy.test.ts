@@ -311,6 +311,32 @@ describe('Codex children', () => {
     asked.mockRestore()
   })
 
+  it('an isolated child\'s approvals are asked through UserQuestionService in the child\'s own thread, where the question router sees them (issue #142)', async () => {
+    const s = server({ approvalRequests: true })
+    const asked: Array<{ requestId: string; threadId: string; prompts: string[] }> = []
+    // What a person (or the parent, through the router and answer_subagent) answers with.
+    const onPending = (event: { requestId: string; threadId: string; questions: Array<{ prompt: string }> }): void => {
+      asked.push({ requestId: event.requestId, threadId: event.threadId, prompts: event.questions.map((question) => question.prompt) })
+      questions.submitAnswers(event.requestId, { permission: 'allow' })
+    }
+    questions.on('pending', onPending)
+    try {
+      await chat(create(s), { child: ISOLATED })
+      const reply = (id: number) => s.messages.find((message) => message.id === id)
+      await vi.waitFor(() => expect(reply(96)).toBeTruthy())
+      // The command and the file edit were asked of the user, keyed by the child's Mousse thread (`chat`'s threadId).
+      expect(asked.map((entry) => entry.threadId)).toEqual(['child', 'child'])
+      expect(asked[0].prompts[0]).toContain('rm -rf build')
+      expect(reply(99)).toMatchObject({ result: { decision: 'accept' } })
+      expect(reply(98)).toMatchObject({ result: { decision: 'accept' } })
+      // Elicitations and extra permissions are still never granted from Mousse.
+      expect(reply(97)).toMatchObject({ result: { action: 'decline' } })
+      expect(reply(96)).toMatchObject({ result: { permissions: {} } })
+    } finally {
+      questions.off('pending', onPending)
+    }
+  })
+
   describe('preflight of the user setup (CodexAdapter.childPreflight)', () => {
     const preflight = (s: ReturnType<typeof server>, workspace: 'shared' | 'isolated') =>
       new CodexAdapter(() => create(s)).childPreflight({ workspace, cwd: home })

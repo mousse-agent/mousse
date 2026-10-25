@@ -354,6 +354,35 @@ describe('remote composer methods', () => {
     expect(time.pending()).toBe(0)
   })
 
+  it('a remote Stop ends the remote turn and also Stops the thread, so the subagents it started end too', async () => {
+    const stopped: string[] = []
+    const backend: RemoteBackendPort = {
+      ...idleBackend,
+      run: (_threadId, _content, control) =>
+        new Promise((resolve) => {
+          control.signal.addEventListener('abort', () => resolve({ text: '', silent: true, aborted: true }), { once: true })
+        }),
+      stop: async (threadId) => {
+        stopped.push(threadId)
+      }
+    }
+    const api = new RemoteApi(backend, clock)
+    resources.push(() => api.close())
+    const runContext = context()
+    const entry = api.methods().find((row) => row.method === 'orchestrator.send')!
+    const pending = Promise.resolve(entry.handle({ threadId: 'thread-2', content: 'work' }, runContext))
+    // Another caller cannot stop it.
+    const stranger = { node: newId('node') as NodeId, user: newId('user') as UserId }
+    await expect(call(api, 'orchestrator.abort', { threadId: 'thread-2', run: runContext.id }, stranger)).rejects.toMatchObject({ code: 'forbidden' })
+    expect(stopped).toEqual([])
+    expect(await call(api, 'orchestrator.abort', { threadId: 'thread-2', run: runContext.id })).toEqual({ ok: true })
+    expect(stopped).toEqual(['thread-2'])
+    await pending
+    // A run that is gone is not a Stop of anything.
+    expect(await call(api, 'orchestrator.abort', { threadId: 'thread-2', run: runContext.id })).toEqual({ ok: false })
+    expect(stopped).toEqual(['thread-2'])
+  })
+
   it('gives staged images back when a send is cancelled before the message is stored', async () => {
     let accept = false
     const backend: RemoteBackendPort = {
