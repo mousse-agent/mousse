@@ -28,6 +28,8 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
     multiInstance: false,
     privateHome: false,
     canInstall: true,
+    // The agent offers the models of the signed-in account only.
+    customModels: false,
     methodLabel: 'Google sign-in',
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     caps: () => ANTIGRAVITY_CAPS,

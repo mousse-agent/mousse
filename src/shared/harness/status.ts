@@ -106,6 +106,8 @@ export interface InstanceSnapshot {
   models: {
     entries: InstanceModel[]
     source: 'live' | 'cached' | 'manifest' | 'none'
+    /** The runtime runs a model by id, so the editor offers adding custom models. */
+    canAddCustom?: boolean
     refreshedAt?: string
     error?: string
   }

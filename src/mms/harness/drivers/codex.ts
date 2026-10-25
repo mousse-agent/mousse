@@ -45,6 +45,7 @@ export function codexDriver(options: { builtIn: () => CodexProviderService }): H
     multiInstance: false,
     privateHome: false,
     canInstall: false,
+    customModels: true,
     methodLabel: 'ChatGPT sign-in',
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     caps: () => CODEX_CAPS,

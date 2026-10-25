@@ -1,3 +1,4 @@
+import type { Api, Model } from '@earendil-works/pi-ai'
 import type { CustomModel, InstanceModel, ModelCapabilities, ModelPrefs, ModelPrefsPatch } from '../../shared/harness/types'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
@@ -101,6 +102,24 @@ export function hidesModel(prefs: ModelPrefs, model: string): boolean {
   if (prefs.hidden.includes(model)) return true
   const { baseId } = parseThinkingSuffixFromModelId(model)
   return baseId !== model && prefs.hidden.includes(baseId)
+}
+
+/**
+ * The definition the pi loop runs for a custom model: the provider's transport (api, base URL,
+ * headers, compatibility) from one of its listed models, with the id and the capabilities the user
+ * declared. Pricing is unknown, so the cost is zero rather than another model's.
+ */
+export function customModelDefinition(template: Model<Api>, custom: CustomModel): Model<Api> {
+  const { thinkingLevelMap: _levels, samplingParams: _sampling, ...transport } = template
+  return {
+    ...transport,
+    id: custom.id,
+    name: custom.label ?? custom.id,
+    reasoning: custom.capabilities.efforts.length > 0,
+    input: custom.capabilities.images ? ['text', 'image'] : ['text'],
+    contextWindow: custom.capabilities.contextWindow ?? template.contextWindow,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  }
 }
 
 /** Capabilities of a listed model: its efforts; images and window are unknown for listed models. */

@@ -32,6 +32,8 @@ export function piLegacyDriver(options: { client: () => PiChatClient; credential
     multiInstance: false,
     privateHome: false,
     canInstall: false,
+    // The loop runs a custom model with its provider's transport (`customModelDefinition`).
+    customModels: true,
     methodLabel: 'API key or sign-in',
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     caps: () => PI_LEGACY_CAPS,

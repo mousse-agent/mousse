@@ -73,6 +73,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     multiInstance: true,
     privateHome: true,
     canInstall: false,
+    customModels: true,
     methodLabel: 'Claude Code sign-in',
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: true }),
     caps: () => CLAUDE_CODE_CAPS,

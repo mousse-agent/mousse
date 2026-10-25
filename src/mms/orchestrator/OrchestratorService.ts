@@ -15,7 +15,9 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { readFileSync } from 'node:fs'
 import { normalizeContextSettings, resolveContextCompactionTokens, resolveModelForMode } from '../../shared/settings'
-import type { ModelOverride } from '../../shared/providerInstances'
+import { piInstanceId, type ModelOverride } from '../../shared/providerInstances'
+import type { Api, Model } from '@earendil-works/pi-ai'
+import { customModelDefinition } from '../harness/catalog'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type { WorkflowChatExecutor } from '../platform/MmsWorkflowChatBridge'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
@@ -575,7 +577,7 @@ export class OrchestratorService extends EventEmitter {
           session.tasks,
           (action) => this.emit('quick-action-created', action),
           (payload, threadId) => this.presentPlanCard(payload, threadId),
-          { questions: this.questions, modeRegistry: this.modeRegistry, browserRuntime }
+          { questions: this.questions, modeRegistry: this.modeRegistry, browserRuntime, customModel: (provider, modelId) => this.customPiModel(provider, modelId) }
         )
         const browser = createDefinitionBrowserBinding({
           request: { ...request, runId },
@@ -627,6 +629,15 @@ export class OrchestratorService extends EventEmitter {
       continuationStarted: (threadId, info) => this.startProviderContinuation(threadId, info),
       notice: (threadId, text) => this.noteProviderNotice(threadId, text)
     })
+  }
+  /**
+   * A custom model added to a pi provider in Settings → Providers, as the pi loop runs it: the
+   * provider's transport (api, base URL, headers) with the capabilities the user declared.
+   */
+  private customPiModel(provider: string, modelId: string): Model<Api> | undefined {
+    const custom = this.harness?.catalog.customModel(piInstanceId(provider), modelId)
+    const template = custom ? this.providerAuth.models.getModels(provider)[0] : undefined
+    return custom && template ? customModelDefinition(template, custom) : undefined
   }
   /** The pi loop's chat client, read per turn by the gateway's pi driver. */
   piChatClient(): Pick<LlmClient, 'chat'> { return this.llm }
@@ -894,7 +905,7 @@ export class OrchestratorService extends EventEmitter {
       this.tasks,
       (action) => this.emit('quick-action-created', action),
       (payload, threadId) => this.presentPlanCard(payload, threadId),
-      { questions: this.questions, modeRegistry: this.modeRegistry }
+      { questions: this.questions, modeRegistry: this.modeRegistry, customModel: (provider, modelId) => this.customPiModel(provider, modelId) }
     )
 
     this.headlessRunner.on('exit', ({ agentId, exitCode }) => {

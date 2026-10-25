@@ -1,6 +1,7 @@
 import type { InstanceSnapshot, ProviderSnapshotsEvent } from '../../shared/harness/status'
 import type {
   AddInstanceInput,
+  CustomModel,
   Enforceability,
   ExecutionBinding,
   HarnessCaps,
@@ -218,6 +219,8 @@ export type HarnessGatewayEvent =
 export interface HarnessCatalog {
   /** Models of an instance with prefs applied, in display order (hidden ones included and flagged). */
   models(instanceId: string, scope: ProviderScope): InstanceModel[]
+  /** A custom model the user added to the instance and has not hidden; runtimes run it by this definition. */
+  customModel(instanceId: string, modelId: string): CustomModel | undefined
 }
 
 /**
@@ -412,7 +415,10 @@ export class Harness implements HarnessGateway {
       },
       refreshModels: (instanceId) => this.refreshModels(instanceId),
       setModelPrefs: async (instanceId, patch) => {
-        this.record(instanceId, { allowDisabled: true })
+        const record = this.record(instanceId, { allowDisabled: true })
+        // A runtime that cannot run a model by id does not offer adding one.
+        if (patch.custom?.length && !record.driver.customModels)
+          harnessFail('unsupported', `${record.driver.label} runs only the models it lists; custom models cannot be added.`, instanceId)
         this.prefs.set(instanceId, patch)
         this.changed(instanceId)
         return this.snapshot(instanceId, { kind: 'device' })
@@ -423,7 +429,11 @@ export class Harness implements HarnessGateway {
       }
     }
     this.catalog = {
-      models: (instanceId) => modelsWithPrefs(this.record(instanceId, { allowDisabled: true }).runtime.models(), this.prefs.get(instanceId))
+      models: (instanceId) => modelsWithPrefs(this.record(instanceId, { allowDisabled: true }).runtime.models(), this.prefs.get(instanceId)),
+      customModel: (instanceId, modelId) => {
+        const prefs = this.prefs.get(instanceId)
+        return hidesModel(prefs, modelId) ? undefined : prefs.custom.find((model) => model.id === modelId)
+      }
     }
     this.legacy = {
       configuredProviders: () => this.instanceMap.configuredProviders(),
@@ -947,6 +957,7 @@ export class Harness implements HarnessGateway {
       models: {
         entries: modelsWithPrefs(listed, prefs),
         source: listed.length ? (models?.live ? 'live' : 'cached') : prefs.custom.length ? 'manifest' : 'none',
+        canAddCustom: driver.customModels,
         ...(models?.refreshedAt ? { refreshedAt: models.refreshedAt } : {}),
         ...(models?.error ? { error: models.error } : {})
       },

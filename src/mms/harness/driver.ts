@@ -126,6 +126,8 @@ export interface HarnessDriver {
   /** Supports a Mousse-owned home (`InstanceConfig.home = private`). */
   readonly privateHome: boolean
   readonly canInstall: boolean
+  /** Runs a model the user adds by id (custom models); otherwise only the models it lists. */
+  readonly customModels: boolean
   /** How the driver's instances sign in, for display. */
   readonly methodLabel?: string
   /** Lenient decoder of an instance's stored `config`: unknown or malformed fields fall back. */

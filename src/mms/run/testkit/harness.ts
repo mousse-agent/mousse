@@ -23,6 +23,7 @@ export function adapterDriver(adapter: ProviderAdapter, extra: Partial<HarnessCa
     multiInstance: false,
     privateHome: false,
     canInstall: false,
+    customModels: true,
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     caps: () => ({ ...adapter.capabilities, planMode: true, contextUsage, ...caps }),
     create: () => ({
