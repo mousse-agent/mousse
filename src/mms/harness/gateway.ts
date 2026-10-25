@@ -2,7 +2,6 @@ import type { InstanceSnapshot, ProviderSnapshotsEvent } from '../../shared/harn
 import type {
   AddInstanceInput,
   CustomModel,
-  Enforceability,
   ExecutionBinding,
   HarnessCaps,
   HarnessDriverKind,
@@ -79,9 +78,10 @@ export interface HarnessGateway {
    * hidden models and disabled instances are rejected for every purpose.
    */
   resolve(selection: ProviderSelection, scope: ProviderScope, purpose: ResolvePurpose): ResolvedSelection
-  /** Fails closed with `policy_unenforceable` when the instance cannot enforce `policy`. */
-  check(selection: ProviderSelection, policy: RunPolicy): Enforceability
-  /** Called only by the RunEngine `turn.start` executor. */
+  /**
+   * Called only by the RunEngine `turn.start` executor. Admission fails closed with
+   * `policy_unenforceable` when the instance cannot enforce the binding's policy.
+   */
   startTurn(spec: TurnSpec): TurnHandle
 
   // -- Run engine -------------------------------------------------------------------------------
@@ -99,9 +99,10 @@ export interface HarnessGateway {
   resolveStored(selection: Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>, options: ResolveStoredOptions): ResolvedTurnSelection
   /**
    * The immutable binding of one attempt, from a resolved selection and the current counters. A
-   * runtime with native sessions has its account checked first (single-flight, bounded), so a
-   * sign-in changed in a terminal since the last check moves the account generation on before the
-   * binding records it.
+   * runtime with native sessions has its account read first (bounded; concurrent reads share one),
+   * so a sign-in changed in a terminal since the last turn moves the account generation on before
+   * the binding records it. That reading serves the `startTurn` of this binding once; any other
+   * dispatch (a stored binding: retry, recovery) reads the account again.
    */
   bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string }): Promise<ExecutionBinding>
   /** The selection a binding runs: a retry or recovery of a run executes its binding, never the current selection. */
@@ -265,8 +266,6 @@ export const PROBE_TTL_MS = 10 * 60_000
 const SHELL_PATH_WAIT_MS = 3_000
 /** How long turn admission waits for the account check; past it the account counts as unknown. */
 export const TURN_ACCOUNT_CHECK_MS = 10_000
-/** An account check this recent serves the next admission (bind, then start, of one turn). */
-const ACCOUNT_CHECK_FRESH_MS = 5_000
 
 export interface HarnessGatewayOptions {
   profileHome: string
@@ -302,8 +301,6 @@ interface InstanceRecord {
   /** Turns running on this runtime; a replaced runtime stops once they end. */
   active: number
   retired?: boolean
-  /** A removed instance: its state directory is deleted once its runtime stops. */
-  removeStateDir?: string
 }
 
 interface ProbeState {
@@ -312,8 +309,15 @@ interface ProbeState {
   checkedAtMs?: number
   probing?: Promise<void>
   models?: { refreshedAt?: string; error?: string; live?: boolean }
-  /** The last turn-admission account check (`accountId` absent = unknown). */
-  account?: { checkedAtMs: number; accountId?: string; checking?: Promise<string | undefined> }
+  /** The account read running for a turn admission (resolves undefined = unknown). */
+  accountCheck?: Promise<string | undefined>
+}
+
+/** A removed instance's state directory, deleted once nothing uses it any more. */
+interface Removal {
+  dir: string
+  /** Checks of the instance still running when it was removed. */
+  pending: number
 }
 
 interface Operation {
@@ -335,6 +339,11 @@ interface Operation {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** The policy mode a chat mode runs under: plan, else the instance's normal permissions. */
+function policyMode(mode: ChatMode): RunPolicy['mode'] {
+  return mode === 'plan' ? 'plan' : 'default'
 }
 
 function harnessFail(code: HarnessErrorCode, message: string, instanceId?: string): never {
@@ -364,6 +373,9 @@ export class Harness implements HarnessGateway {
   private readonly records = new Map<string, InstanceRecord>()
   private liveHost: LiveProcessHost | null = null
   private readonly retired = new Set<InstanceRecord>()
+  private readonly removals = new Map<string, Removal>()
+  /** The account reading `bind` took, for the `startTurn` of that binding (once). */
+  private readonly boundAccounts = new WeakMap<ExecutionBinding, { accountId?: string }>()
   private readonly probes = new Map<string, ProbeState>()
   private readonly operations = new Map<string, Operation>()
   private readonly listeners = new Set<(event: HarnessGatewayEvent) => void>()
@@ -513,15 +525,11 @@ export class Harness implements HarnessGateway {
     return { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, driver: driver.kind, model: selection.model, caps: driver.caps(config, version) }
   }
 
-  check(selection: ProviderSelection, policy: RunPolicy): Enforceability {
-    return checkPolicy(this.resolve(selection, { kind: 'device' }, 'turn').caps, policy, selection.instanceId)
-  }
-
   async bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string }): Promise<ExecutionBinding> {
     const record = resolved.instanceId === PI_DRIVER_ID ? undefined : this.recordOrUndefined(resolved.instanceId)
     const accountId = record ? await this.currentAccount(record) : undefined
     const counters = this.counters.get(resolved.instanceId)
-    return {
+    const binding: ExecutionBinding = {
       instanceId: resolved.instanceId,
       driver: resolved.driver,
       accountGeneration: counters.accountGeneration,
@@ -530,8 +538,10 @@ export class Harness implements HarnessGateway {
       ...(accountId ? { accountId } : {}),
       model: resolved.model,
       ...(input.effort ? { effort: input.effort } : {}),
-      policy: { mode: input.mode === 'plan' ? 'plan' : 'default', approvals: 'ask' }
+      policy: { mode: policyMode(input.mode), approvals: 'ask' }
     }
+    this.boundAccounts.set(binding, accountId ? { accountId } : {})
+    return binding
   }
 
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'> {
@@ -542,16 +552,14 @@ export class Harness implements HarnessGateway {
 
   /**
    * The instance's signed-in account right now, as `accountIdentity` hashes it; undefined when it
-   * cannot be established in time. One check runs at a time per instance, and a check of the last
-   * few seconds serves the next caller. Only runtimes with native sessions are checked: the
-   * account decides whether a session may be resumed.
+   * cannot be established in time. Every call reads it again, except that callers arriving while a
+   * read runs share that read. Only runtimes with native sessions are checked: the account decides
+   * whether a session may be resumed.
    */
   private currentAccount(record: InstanceRecord): Promise<string | undefined> {
     if (!record.runtime.forgetConversation) return Promise.resolve(undefined)
     const state = this.probeState(record.instanceId)
-    const last = state.account
-    if (last?.checking) return last.checking
-    if (last && this.now() - last.checkedAtMs < ACCOUNT_CHECK_FRESH_MS) return Promise.resolve(last.accountId)
+    if (state.accountCheck) return state.accountCheck
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     const deadline = new Promise<undefined>((resolve) => {
@@ -572,10 +580,10 @@ export class Harness implements HarnessGateway {
       })
       .then((accountId) => {
         clearTimeout(timer)
-        state.account = { checkedAtMs: this.now(), ...(accountId ? { accountId } : {}) }
+        if (state.accountCheck === checking) state.accountCheck = undefined
         return accountId
       })
-    state.account = { checkedAtMs: last?.checkedAtMs ?? 0, ...(last?.accountId ? { accountId: last.accountId } : {}), checking }
+    state.accountCheck = checking
     return checking
   }
 
@@ -654,30 +662,38 @@ export class Harness implements HarnessGateway {
   }
 
   /**
-   * Runs a turn on its binding or not at all: the input names the binding's instance and model,
-   * the instance can enforce its policy, and its config, home and account are still the ones the
-   * binding recorded (a retry or recovery after a change fails with `binding_stale`). Then decides
-   * whether the thread's native session may be resumed.
+   * Runs a turn on its binding or not at all: the input names the binding's instance, model and
+   * policy mode, the instance can enforce that policy, and its config, home and account are still
+   * the ones the binding recorded (a retry or recovery after a change fails with `binding_stale`).
+   * Then decides whether the thread's native session may be resumed.
    */
   private async admitTurn(record: InstanceRecord, spec: TurnSpec): Promise<void> {
     const { binding, previous, input } = spec
     if (input.instanceId !== binding.instanceId || input.model !== binding.model)
       harnessFail('protocol', `The turn names ${input.instanceId ?? 'no instance'}/${input.model} but its binding is ${binding.instanceId}/${binding.model}.`, binding.instanceId)
+    // The runtime takes its permissions from the input's mode: it must be the binding's policy.
+    if (policyMode(input.mode) !== binding.policy.mode)
+      harnessFail('protocol', `The turn runs in ${policyMode(input.mode)} mode but its binding is ${binding.policy.mode} mode.`, binding.instanceId)
     const enforceable = checkPolicy(this.recordCaps(record), binding.policy, binding.instanceId)
     if (!enforceable.ok) throw harnessAppError(enforceable.error)
     const stale = (what: string) => harnessFail('binding_stale', `This run started before ${what} of this provider changed, so it cannot continue on it. Send the message again.`, binding.instanceId)
     if (record.env.homeId !== binding.homeId) stale('the home')
     if (this.counters.get(binding.instanceId).configRevision !== binding.configRevision) stale('the settings')
-    const accountId = await this.currentAccount(record)
+    // The reading `bind` took for this binding serves its first dispatch; anything else reads again.
+    const bound = this.boundAccounts.get(binding)
+    this.boundAccounts.delete(binding)
+    const accountId = bound ? bound.accountId : await this.currentAccount(record)
     if (this.counters.get(binding.instanceId).accountGeneration !== binding.accountGeneration ||
         (binding.accountId && accountId && accountId !== binding.accountId)) stale('the signed-in account')
-    // A native session belongs to the home, account and config it was made with. Sessions from
-    // before bindings existed resume only in the user's own home.
+    // A native session belongs to the home, account and config it was made with, and resumes only
+    // when the account read now is the binding's: an account that cannot be read now may be another
+    // one. Sessions from before bindings existed resume only in the user's own home.
+    const verified = binding.accountId === undefined || accountId === binding.accountId
     const resumable = previous !== undefined && previous.instanceId === binding.instanceId &&
       previous.homeId === binding.homeId && previous.configRevision === binding.configRevision &&
       previous.accountGeneration === binding.accountGeneration &&
-      binding.accountId !== undefined && previous.accountId === binding.accountId
-    if (resumable || (!previous && binding.homeId === DEFAULT_HOME_ID)) return
+      binding.accountId !== undefined && previous.accountId === binding.accountId && accountId === binding.accountId
+    if (resumable || (!previous && binding.homeId === DEFAULT_HOME_ID && verified)) return
     try {
       record.runtime.forgetConversation?.(input.threadId)
     } catch (error) {
@@ -856,13 +872,26 @@ export class Harness implements HarnessGateway {
       } catch (error) {
         console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })
       }
-      if (record.removeStateDir) {
-        try {
-          rmSync(record.removeStateDir, { recursive: true, force: true })
-        } catch (error) {
-          // A re-added instance never reuses a directory left behind (`add`).
-          console.warn('[harness] could not delete the files of a removed instance', { instanceId: record.instanceId, error: errorText(error) })
-        }
+    }
+    this.deleteRemoved()
+  }
+
+  /**
+   * Deletes the state directory of a removed instance once nothing uses it: no runtime of the
+   * instance (the last one or one a reconfiguration replaced) runs a turn, and no check or
+   * operation of it is still running.
+   */
+  private deleteRemoved(): void {
+    for (const [instanceId, removal] of this.removals) {
+      if (removal.pending > 0) continue
+      if ([...this.retired].some((record) => record.instanceId === instanceId)) continue
+      if ([...this.operations.values()].some((operation) => operation.started.instanceId === instanceId)) continue
+      this.removals.delete(instanceId)
+      try {
+        rmSync(removal.dir, { recursive: true, force: true })
+      } catch (error) {
+        // A re-added instance never reuses a directory left behind (`add`).
+        console.warn('[harness] could not delete the files of a removed instance', { instanceId, error: errorText(error) })
       }
     }
   }
@@ -1066,6 +1095,7 @@ export class Harness implements HarnessGateway {
   private async remove(instanceId: string): Promise<void> {
     const record = this.record(instanceId, { allowDisabled: true })
     if (record.builtIn) harnessFail('unsupported', 'Built-in providers cannot be removed. Turn them off instead.', instanceId)
+    const state = this.probes.get(instanceId)
     this.records.delete(instanceId)
     this.instanceMap.removeEntry(instanceId)
     this.prefs.remove(instanceId)
@@ -1073,11 +1103,24 @@ export class Harness implements HarnessGateway {
     this.counters.forget(instanceId)
     this.probes.delete(instanceId)
     // The state directory is Mousse's own (its private home, the sign-in in it, saved sessions):
-    // it goes with the instance, once the turns still running on it end.
-    record.removeStateDir = instanceStateDir(this.options.profileHome, instanceId)
+    // it goes with the instance, once every runtime, check and operation still using it ends.
+    const removal: Removal = { dir: instanceStateDir(this.options.profileHome, instanceId), pending: 0 }
+    this.removals.set(instanceId, removal)
+    for (const operation of this.operations.values())
+      if (operation.started.instanceId === instanceId) operation.cancel()
+    const checks = [state?.probing, state?.accountCheck].flatMap((running) => {
+      if (!running) return []
+      removal.pending += 1
+      return [running.catch(() => {}).finally(() => {
+        removal.pending -= 1
+        this.deleteRemoved()
+      })]
+    })
     this.retire(record)
     this.emitSnapshots({ kind: 'device' })
     this.options.onProvidersChanged?.()
+    // Checks end within their deadlines; turns may run on, and the directory waits for them.
+    await Promise.all(checks)
   }
 
   private async configure(instanceId: string, patch: InstanceConfigPatch): Promise<InstanceSnapshot> {
@@ -1190,6 +1233,7 @@ export class Harness implements HarnessGateway {
         })
         .finally(() => {
           this.operations.delete(started.operationId)
+          this.deleteRemoved()
           void this.probe(instanceId, true)
           this.options.onProvidersChanged?.()
         })
@@ -1240,6 +1284,7 @@ export class Harness implements HarnessGateway {
         .catch((error) => this.emit({ type: 'operation', data: { ...started, phase: 'failed', error: { code: 'protocol', message: errorText(error), instanceId } } }))
         .finally(() => {
           this.operations.delete(started.operationId)
+          this.deleteRemoved()
           void this.probe(instanceId, true)
           this.options.onProvidersChanged?.()
         })

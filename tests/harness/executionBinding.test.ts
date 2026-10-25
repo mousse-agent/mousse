@@ -69,8 +69,8 @@ describe('execution bindings', () => {
   let subject: string | undefined
   let authChecks: number
   let clock: number
-  /** Moves the clock past the account check's freshness window. */
-  const later = () => { clock += 60_000 }
+  /** Moves the clock on between two turns. */
+  const later = () => { clock += 1_000 }
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'mousse-binding-'))
@@ -215,6 +215,45 @@ describe('execution bindings', () => {
     expect(forgotten).toEqual([thread.id])
   })
 
+  it('an account switched one second after a turn is read again: one check per turn, shared by its bind and start', async () => {
+    const thread = store.createThread('quick switch')
+    orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
+    let checks = authChecks
+    await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
+    expect(authChecks - checks).toBe(1)
+    subject = 'account-b'
+    later()
+    checks = authChecks
+    await orch.send('two', false, { threadId: thread.id, clientRequestId: 'send-b' })
+    expect(authChecks - checks).toBe(1)
+    const [latest, previous] = engine.listRuns(thread.id)
+    expect(bindingOf(latest.runId)?.accountId).not.toBe(bindingOf(previous.runId)?.accountId)
+    expect(bindingOf(latest.runId)?.accountGeneration).toBe(bindingOf(previous.runId)!.accountGeneration + 1)
+    expect(forgotten).toEqual([thread.id])
+  })
+
+  it('a recovery of a binding made with a known account hands history over when the account cannot be read now', async () => {
+    const thread = store.createThread('unknown recovery')
+    orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
+    await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
+    const [first] = engine.listRuns(thread.id)
+    const stored = bindingOf(first.runId)!
+    expect(stored.accountId).toBeDefined()
+    // The next run recovers on a binding recorded with the known account; the account read now fails.
+    const markStarting = engine.markStarting.bind(engine)
+    engine.markStarting = (runId) => {
+      const run = markStarting(runId)
+      engine.store.setAttemptBinding(run.activeAttemptId!, stored)
+      engine.store.createAttempt({ runId, reason: 'recovery' })
+      return engine.getRun(runId)!
+    }
+    subject = undefined
+    later()
+    await orch.send('two', false, { threadId: thread.id, clientRequestId: 'send-b' })
+    expect(adapter.turns).toHaveLength(2)
+    expect(forgotten).toEqual([thread.id])
+  })
+
   it('an account the instance cannot identify never resumes a native session', async () => {
     const thread = store.createThread('unknown identity')
     orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
@@ -273,8 +312,38 @@ describe('execution bindings', () => {
     await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
     expect(codex.turns).toEqual([])
     expect(adapter.turns).toHaveLength(1)
-    expect(adapter.turns[0]).toMatchObject({ instanceId: 'claude', model: 'bound-model' })
+    expect(adapter.turns[0]).toMatchObject({ instanceId: 'claude', model: 'bound-model', mode: 'agent' })
     expect(engine.store.getAttempt(retryAttempt!)?.executionBinding).toEqual(bound)
+    expect(bound.policy).toEqual({ mode: 'default', approvals: 'ask' })
+  })
+
+  it('a plan-mode binding is never run with an agent-mode input', async () => {
+    const thread = store.createThread('plan retry')
+    orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
+    const bound = await harness.bind(harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'sonnet' }, { purpose: 'turn' }), { mode: 'plan' })
+    expect(bound.policy).toEqual({ mode: 'plan', approvals: 'ask' })
+    const markStarting = engine.markStarting.bind(engine)
+    engine.markStarting = (runId) => {
+      const run = markStarting(runId)
+      engine.store.setAttemptBinding(run.activeAttemptId!, bound)
+      engine.store.createAttempt({ runId, reason: 'retry' })
+      return engine.getRun(runId)!
+    }
+    // The replayed request is in agent mode; the runtime would take bypass permissions from it.
+    await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
+    expect(adapter.turns).toEqual([])
+    const [run] = engine.listRuns(thread.id)
+    expect(run.status).toBe('failed')
+    expect(run.outcome?.error).toMatch(/default mode but its binding is plan mode/)
+  })
+
+  it('a plan-mode send records a plan policy and runs the input in plan mode', async () => {
+    const thread = store.createThread('plan')
+    orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
+    await orch.send({ content: 'one', mode: 'plan' }, false, { threadId: thread.id, clientRequestId: 'send-a' })
+    const [run] = engine.listRuns(thread.id)
+    expect(bindingOf(run.runId)?.policy).toEqual({ mode: 'plan', approvals: 'ask' })
+    expect(adapter.turns.map((turn) => turn.mode)).toEqual(['plan'])
   })
 
   it('a recovery attempt whose binding no longer matches the instance config fails typed instead of running', async () => {

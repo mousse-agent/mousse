@@ -66,7 +66,7 @@ export interface ProviderSelection {
   effort?: string
 }
 
-/** Restrictions a run must honour. `check()` fails closed when an instance cannot enforce them. */
+/** Restrictions a run must honour. Turn admission fails closed when an instance cannot enforce them. */
 export interface RunPolicy {
   mode: 'default' | 'plan'
   /** Exact tool allowlist (and optional denylist); absent = the instance's normal tools. */
@@ -169,7 +169,7 @@ export function harnessAppError(error: HarnessError): AppError {
   })
 }
 
-/** `check()` result: the policy is enforceable, or the typed reason it is not. */
+/** `checkPolicy()` result: the policy is enforceable, or the typed reason it is not. */
 export type Enforceability = { ok: true } | { ok: false; error: HarnessError & { code: 'policy_unenforceable' } }
 
 /** Which settings layer a read or write applies to. Device is a ceiling; projects only narrow. */

@@ -2,7 +2,8 @@ import type { Enforceability, HarnessCaps, RunPolicy } from '../../shared/harnes
 
 /**
  * Capability readers for the two keys the gateway adds to the run engine's eight (SPEC §13.2: every
- * capability key has a reader, and every reader has a caller), and `check()`'s policy rules.
+ * capability key has a reader, and every reader has a caller), and the policy rules turn admission
+ * applies.
  */
 
 /** Whether the composer offers Plan mode, and a plan-mode policy can be enforced. */

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { RunStoreError } from '../../src/mms/run/db/RunStoreError'
 import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
@@ -218,6 +218,44 @@ describe('harness gateway: instances', () => {
     // Files a removal could not delete are never reused: the new instance gets another id.
     mkdirSync(instanceStateDir(profileHome, 'claude:other'), { recursive: true })
     expect((await harness.instances.add({ driver: 'claude', config: { displayName: 'Other' } })).instanceId).toBe('claude:other-2')
+  })
+
+  it('removal waits for a turn still running on a runtime a reconfiguration replaced', async () => {
+    const profileHome = home()
+    let stored: unknown
+    const source = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
+    let release: () => void = () => {}
+    let entered = false
+    const gated: ProviderAdapter = {
+      ...fake('claude'),
+      startTurn: async (input) => {
+        entered = true
+        await new Promise<void>((resolve) => { release = resolve })
+        return { text: 'ok', aborted: false, modelName: input.model, totalResponseTimeMs: 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextSignature: 's', nativeMessages: [] }
+      }
+    }
+    const claude = adapterDriver(gated)
+    const multi = { ...claude, multiInstance: true, privateHome: true, decodeConfig: (raw: Record<string, unknown> | undefined) => decodeInstanceConfig(raw, { privateHome: true }) }
+    const harness = testHarness({ drivers: [adapterDriver(pi()), multi], instances: source, profileHome })
+    const { instanceId } = await harness.instances.add({ driver: 'claude', config: { displayName: 'Work' } })
+    const binding = await harness.bind(harness.resolveStored({ instanceId, llmProvider: '', model: 'm' }, { purpose: 'turn' }), { mode: 'agent' })
+    const noop = () => {}
+    const turn = harness.startTurn({
+      binding,
+      input: { runId: 'r', attemptId: 'a', threadId: 't', cwd: null, instanceId, model: 'm', llmProvider: 'claude-subscription', modelPinned: true, mode: 'agent', prompt: 'hi', messages: [], signal: new AbortController().signal },
+      sink: { text: noop, thinking: noop, tool: noop, nativeMessages: noop, compaction: noop, retry: noop, progress: noop, usage: noop, providerRef: noop, steerAccepted: noop, providerMetrics: noop, lineEdits: noop },
+      control: { drainSteer: () => undefined, heartbeat: noop },
+      host: { tools: {}, context: { recoverOverflow: () => null, prepareNativeContext: () => null, nativeHistoryAfterTurn: () => '' } }
+    })
+    await vi.waitFor(() => expect(entered).toBe(true))
+    const stateDir = instanceStateDir(profileHome, instanceId)
+    // A new revision: the running turn keeps the old runtime, which the next use of the instance retires.
+    await harness.instances.configure(instanceId, { env: { A: '1' } })
+    await harness.instances.remove(instanceId)
+    expect(existsSync(stateDir)).toBe(true)
+    release()
+    await turn.result
+    expect(existsSync(stateDir)).toBe(false)
   })
 
   it('rejects a second instance of a single-instance driver', async () => {
