@@ -722,6 +722,14 @@ describe('remote composer methods on a real profile', () => {
     expect(messages[0].images[0].data).toHaveLength(REMOTE_MESSAGE_IMAGES_MAX_CHARS)
   })
 
+  it('a remote Stop reaches only the threads of this profile', async () => {
+    const { mms } = await profile()
+    const backend = new MmsRemoteBackend(mms)
+    await expect(backend.stop('no-such-thread')).rejects.toMatchObject({ code: 'stream_unknown' })
+    const thread = mms.threads.createThread('Stoppable')
+    await expect(backend.stop(thread.id)).resolves.toMatchObject({ status: 'stopped' })
+  })
+
   it('sets one thread model without changing the computer default', async () => {
     const { mms, api } = await profile()
     const thread = mms.threads.createThread('Model')

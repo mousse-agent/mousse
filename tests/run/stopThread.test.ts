@@ -209,6 +209,17 @@ describe('RunEngine.stopSubtree (issue #142)', () => {
     expect(f!.engine.inbox.listForThread('parent').filter((row) => row.kind === 'child_result')).toEqual([])
   })
 
+  it('rule 4 does not steer a run that is being stopped: the rows wait for the wake after it ends', async () => {
+    f = delegationFixture()
+    const parent = await f.runningRun('parent')
+    await f.engine.dispatch({ kind: 'stop', threadId: 'parent', clientRequestId: 'stop-1', runId: parent.runId })
+    f.engine.inbox.append({ threadId: 'parent', kind: 'reconcile_notice', payload: { text: 'news' } })
+    expect(f.reconciler.runOnce().wakes.steers).toEqual([])
+    expect(f.outbox.listForRun(parent.runId).filter((effect) => effect.kind === 'turn.steer')).toEqual([])
+    f.engine.markTerminal(parent.runId, 'interrupted', { interruptedBy: 'user' })
+    expect(f.reconciler.runOnce().wakes.wakes).toHaveLength(1)
+  })
+
   describe('queued work', () => {
     const send = (threadId: string, source: string, clientRequestId: string, delegation?: { parentRunId: string }) =>
       f!.engine.dispatch({
@@ -788,6 +799,61 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     })
   })
 
+  describe('Stop all and the parent\'s turn', () => {
+    it('wakes nothing for a parent whose turn is over: the person who pressed the button asked', async () => {
+      const s = await scene({ parentBlocks: false, secondChild: true })
+      await waitFor(() => s.terminal(s.parentRunId), 'the parent to end its turn')
+      await s.protocol('subagents.stopAll', { threadId: s.parentId })
+      await waitFor(() => s.terminal(s.delegation.childRunId), 'the subagent to stop')
+      expect(s.d.engine.inbox.listForThread(s.parentId).filter((row) => (row.payload as { kind?: string }).kind === 'delegation_stopped')).toEqual([])
+      expect(s.reconciler.runOnce().wakes.wakes).toEqual([])
+    })
+
+    it('one subagent that cannot be stopped does not stop the others from being stopped', async () => {
+      const s = await scene({ secondChild: true })
+      const second = s.d.engine.delegations.get(s.out.second.delegationId)!
+      const orch = s.d.orch
+      const real = orch.stopThread.bind(orch)
+      vi.spyOn(orch, 'stopThread').mockImplementation((threadId, ...rest) =>
+        threadId === s.childThreadId ? Promise.reject(new Error('boom')) : real(threadId, ...rest))
+      const result = await s.protocol('subagents.stopAll', { threadId: s.parentId })
+      expect(result).toMatchObject({ ok: true })
+      await waitFor(() => s.terminal(second.childRunId), 'the second subagent to stop')
+      expect(s.run(second.childRunId).status).toBe('interrupted')
+    })
+  })
+
+  describe('a steer of a run the Stop ended, with rows that arrived after it', () => {
+    it('gives those rows back, so they are delivered again', async () => {
+      const s = await scene({ parentBlocks: false })
+      await waitFor(() => s.terminal(s.parentRunId), 'the parent to end its turn')
+      await s.d.orch.stopThread(s.parentId, 'user')
+      // Newer work reported to the parent after the Stop; a steer for the old run carried it.
+      const row = s.d.engine.inbox.append({ threadId: s.parentId, kind: 'reconcile_notice', payload: { text: 'newer news' } })
+      const effect = s.d.engine.outbox.enqueue({
+        threadId: s.parentId, runId: s.parentRunId, kind: 'turn.steer', availableAt: new Date(Date.now() + 3_600_000).toISOString(),
+        payload: { runId: s.parentRunId, threadId: s.parentId, text: 'x', inboxIds: [row.inboxId] }
+      })
+      s.d.engine.inbox.markDelivered([row.inboxId], effect.effectId)
+      ;(s.d.orch as any).executeTurnSteerEffect(effect)
+      expect(s.d.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'pending', deliveredBy: null })
+    })
+  })
+
+  describe('a follow-up whose run cannot be created', () => {
+    it('still queues the person\'s steer text, without a run', async () => {
+      const s = await scene({ parentBlocks: false })
+      await waitFor(() => s.terminal(s.parentRunId), 'the parent to end its turn')
+      vi.spyOn(s.d.orch as any, 'scheduleQueueDrain').mockImplementation(() => undefined)
+      vi.spyOn(s.d.engine.store, 'createRun').mockImplementation(() => { throw new Error('run database unavailable') })
+      expect(s.d.orch.steerThread(s.childThreadId, 'please also check the tests')).toBe(true)
+      s.gate.child.resolve()
+      await waitFor(() => s.d.store.loadMessageQueue(s.childThreadId).length > 0, 'the steer text to be queued')
+      expect(s.d.store.loadMessageQueue(s.childThreadId)).toMatchObject([{ content: 'please also check the tests', source: 'steer-followup', internal: true }])
+      expect(s.d.store.loadMessageQueue(s.childThreadId)[0].runId).toBeUndefined()
+    })
+  })
+
   describe('task_cancel repeated', () => {
     it('does not touch newer work the subagent started after the task it names ended', async () => {
       const newer = deferred()
@@ -826,17 +892,21 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
   })
 
   describe('queue entries below the thread a Stop was aimed at', () => {
-    it('removes tasks, stale notices and entries that name no run, and keeps a message a person queued', async () => {
+    it('removes tasks, stale notices and run-less entries that are internal, and keeps a message a person queued, with a run or without', async () => {
       const s = await scene()
       const orch = s.d.orch as any
       // Queued behind the subagent's running task: a person's message (with its run), a steer that missed its turn
-      // (admitted before the Stop) and an entry that names no run.
+      // (admitted before the Stop), an internal entry that names no run, and two a person queued that name no run
+      // (the composer's queue and a steer sent while another process held the thread).
       const typed = await s.d.orch.send('typed to the worker', false, { threadId: s.childThreadId, source: 'gui', clientRequestId: 'typed', awaitMode: 'ack' })
       const late = orch.enqueueForThread(s.childThreadId, { content: 'late notice' }, { source: 'steer-late' })
-      const nameless = orch.enqueueForThread(s.childThreadId, { content: 'no run' }, { source: 'gui' })
-      expect(s.d.orch.listQueue(s.childThreadId).map((item) => item.id).sort()).toEqual([typed.queueItem!.id, late.id, nameless.id].sort())
+      const internal = orch.enqueueForThread(s.childThreadId, { content: 'internal follow-up' }, { source: 'steer-followup', internal: true })
+      const nameless = orch.enqueueForThread(s.childThreadId, { content: 'no run' }, { source: 'remote' })
+      const external = orch.enqueueExternalSteer(s.childThreadId, 'steer text', { source: 'protocol-steer' })
+      const ids = () => s.d.store.loadMessageQueue(s.childThreadId).map((item) => item.id).sort()
+      expect(ids()).toEqual([typed.queueItem!.id, late.id, internal.id, nameless.id, external.id].sort())
       await s.d.orch.stopThread(s.parentId, 'user')
-      expect(s.d.orch.listQueue(s.childThreadId).map((item) => item.id)).toEqual([typed.queueItem!.id])
+      expect(ids()).toEqual([typed.queueItem!.id, nameless.id, external.id].sort())
       expect(s.run(typed.runId!).status).toBe('queued')
       // It runs once the stopped task is over.
       await waitFor(() => s.terminal(s.delegation.childRunId), 'the subagent to stop')
@@ -844,7 +914,7 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
         s.d.orch.recoverAndDrainPendingQueues()
         return s.run(typed.runId!).status === 'completed'
       }, 'the person\'s message to run', 15_000)
-      expect(s.childTurns().at(-1)).toContain('typed to the worker')
+      expect(s.childTurns().some((prompt) => prompt.includes('typed to the worker'))).toBe(true)
     })
   })
 

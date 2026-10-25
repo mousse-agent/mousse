@@ -1239,13 +1239,13 @@ export class OrchestratorService extends EventEmitter {
       const generation = this.runEngine ? currentStopGeneration(this.runEngine.store, id) : 0
       // What a Stop removes: entries of the runs it cancelled, notices that missed their turn, work started on
       // behalf of a parent before the Stop (a stale `stopGeneration`), and, below the thread it was aimed at,
-      // entries that name no run. A message a person queued stays, at any level, unless asked to clear.
+      // run-less entries that are internal or not a person's. A message a person queued stays, at any level, unless asked to clear.
       const removable = (item: QueuedMessage): boolean => {
         if (item.state === 'claimed') return false
         if (item.runId && cancelled.has(item.runId)) return true
         if (item.inboxIds?.length) return true
         if (isFencedSource(item.source) && (item.stopGeneration === undefined || item.stopGeneration < generation)) return true
-        if (!isRoot && !item.runId) return true
+        if (!isRoot && !item.runId && (item.internal || isFencedSource(item.source))) return true
         return clearQueue && !item.internal
       }
       try {
@@ -1711,7 +1711,11 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.requireRunEngine()
     // A steer of a run that a Stop came after belongs to the work that was stopped: it delivers nothing and
     // makes no work (its rows were acknowledged by the Stop).
-    if (engine.isStale(runId)) return
+    if (engine.isStale(runId)) {
+      // Rows that reached it after the Stop (newer work) are not part of what the Stop ended: they go back to be delivered.
+      if (inboxIds?.length) engine.inbox.release(inboxIds, effect.effectId)
+      return
+    }
     let content = text
     let notice: SubagentNoticeItem[] | undefined
     let carried: { inboxIds: string[]; effectId: string } | undefined
@@ -2648,8 +2652,12 @@ export class OrchestratorService extends EventEmitter {
    */
   async stopSubagents(parentThreadId: string, reason = 'user'): Promise<{ ok: boolean; stopped: string[] }> {
     const running = this.subagentView(parentThreadId).filter(isRunningSubagent).map((row) => row.childThreadId)
-    const outcomes = await Promise.all(running.map((childThreadId) => this.stopThread(childThreadId, reason)))
-    return { ok: outcomes.some((outcome) => outcome.ok), stopped: running }
+    // A parent with no turn running is told nothing: the person who pressed the button is the one who asked.
+    const requesterThreadId = this.runEngine?.getActiveRun(parentThreadId) ? undefined : parentThreadId
+    const outcomes = await Promise.allSettled(running.map((childThreadId) => this.stopThread(childThreadId, reason, { requesterThreadId })))
+    for (const outcome of outcomes)
+      if (outcome.status === 'rejected') console.warn('a subagent could not be stopped', { parentThreadId, error: outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason) })
+    return { ok: outcomes.some((outcome) => outcome.status === 'fulfilled' && outcome.value.ok), stopped: running }
   }
 
   /** Cancels one of `parentThreadId`'s delegations and everything below it (host API and tests). */
@@ -4326,6 +4334,10 @@ export class OrchestratorService extends EventEmitter {
           let runId: string | undefined
           try {
             runId = this.runEngine?.store.createRun({ threadId: session.threadId, source: 'steer-followup' }).runId
+          } catch {
+            // Without a run the person's text is still queued; the thread is just not held for it.
+          }
+          try {
             this.enqueueForThread(session.threadId, { content: leftover, mode }, { source: 'steer-followup', internal: true, runId })
           } catch {
             // Best-effort: settlement must not fail if the follow-up cannot queue.

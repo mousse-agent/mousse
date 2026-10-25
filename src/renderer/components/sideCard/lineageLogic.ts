@@ -105,3 +105,20 @@ export function lineageModelLabel(subagent: Pick<SubagentSummary, 'provider' | '
   const label = [subagent.provider, subagent.model].filter(Boolean).join(' · ')
   return label || null
 }
+
+/**
+ * Lineage's Stop all: one call that stops every working subagent (`subagents.stopAll`). A daemon that does
+ * not have it, or a call that fails, falls back to stopping each working subagent on its own, which is the
+ * same Stop; the thread's own turn is never stopped.
+ */
+export async function stopAllSubagents(
+  api: { stopAll(threadId: string): Promise<unknown>; abort(threadId: string): Promise<unknown> },
+  threadId: string,
+  subagents: readonly Pick<SubagentSummary, 'childThreadId' | 'state'>[]
+): Promise<void> {
+  try {
+    await api.stopAll(threadId)
+  } catch {
+    await Promise.allSettled(subagents.filter(isRunningSubagent).map((row) => api.abort(row.childThreadId)))
+  }
+}

@@ -297,6 +297,9 @@ export class MmsRemoteBackend implements RemoteBackendPort {
     )
   }
   async stop(threadId: string): Promise<unknown> {
+    // The same inventory check as `execute`: a remote caller reaches only this profile's threads.
+    if (!this.services.threads.listAllThreads().some((thread) => thread.id === threadId))
+      throw new NetError('stream_unknown', 'Thread is outside this profile inventory.')
     try {
       return await this.services.orchestrator.stopThread(threadId, 'remote')
     } catch (error) {

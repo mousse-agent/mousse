@@ -11,7 +11,8 @@ import {
   lineageSubagentName,
   lineageTitle,
   orderLineageSubagents,
-  sliceLineage
+  sliceLineage,
+  stopAllSubagents
 } from '../src/renderer/components/sideCard/lineageLogic'
 import { selectSubagents } from '../src/renderer/hooks/useSubagents'
 import { useAppStore } from '../src/renderer/stores/appStore'
@@ -236,6 +237,25 @@ describe('LineageList rendering', () => {
     const expanded = render(many, { expanded: true })
     expect(expanded).not.toContain('Show')
     expect(expanded.match(/lineage-name/g)).toHaveLength(7)
+  })
+})
+
+describe('stopAllSubagents', () => {
+  const fakeApi = (stopAll: () => Promise<unknown>) => {
+    const aborted: string[] = []
+    return { aborted, api: { stopAll, abort: async (id: string) => void aborted.push(id) } }
+  }
+
+  it('is one call to the daemon, and aborts nothing when it works', async () => {
+    const { aborted, api } = fakeApi(async () => true)
+    await stopAllSubagents(api, 't1', [subagent('a'), subagent('b', { state: 'done' })])
+    expect(aborted).toEqual([])
+  })
+
+  it('falls back to stopping each working subagent when the daemon cannot (an older daemon, a failed call), never the thread', async () => {
+    const { aborted, api } = fakeApi(async () => { throw new Error('unknown method') })
+    await stopAllSubagents(api, 't1', [subagent('a'), subagent('b', { state: 'done' }), subagent('c', { state: 'waiting' })])
+    expect(aborted.sort()).toEqual(['a', 'c'])
   })
 })
 

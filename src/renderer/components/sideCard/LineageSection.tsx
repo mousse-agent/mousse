@@ -9,7 +9,8 @@ import {
   lineageSubagentName,
   lineageTitle,
   orderLineageSubagents,
-  sliceLineage
+  sliceLineage,
+  stopAllSubagents
 } from './lineageLogic'
 import { SideCardSection, type SideCardSectionContext } from './SideCardSection'
 import './lineage.css'
@@ -119,7 +120,9 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
             type="button"
             className="lineage-stop-all"
             aria-label="Stop all subagents"
-            onClick={() => void window.mousse.subagents.stopAll(threadId)}
+            onClick={() =>
+              void stopAllSubagents({ stopAll: window.mousse.subagents.stopAll, abort: window.mousse.orchestrator.abort }, threadId, subagents)
+            }
           >
             Stop all
           </button>
