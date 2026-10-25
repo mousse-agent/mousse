@@ -5,7 +5,7 @@ import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/sta
 import type { ProviderLoginOption } from '../src/shared/providerAuth'
 import { AgentConnectStep, addChoices } from '../src/renderer/components/providers/AddProviderDialog'
 import { AccountRow, BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
-import { ProviderModelsSection, bulkVisibilityPatch, displayModels, movedOrder } from '../src/renderer/components/providers/ProviderModelsSection'
+import { ProviderModelsSection, bulkVisibilityPatch, displayModels, movedOrder, nextOrder } from '../src/renderer/components/providers/ProviderModelsSection'
 import { AgentEditor, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow } from '../src/renderer/components/providers/parts'
 import { offersRedirectPaste, refusedText } from '../src/renderer/components/providers/SignInDialog'
@@ -280,6 +280,16 @@ describe('models section order', () => {
     expect(movedOrder(display, 'd', -1)).toEqual(['b', 'e', 'd', 'a', 'c'])
     expect(movedOrder(display, 'a', -1)).toBeNull()
     expect(movedOrder(display, 'c', -1)).toBeNull()
+  })
+
+  it('two quick moves both count while the snapshot still has the old order', () => {
+    const plain = [model('a'), model('b'), model('c'), model('d')]
+    const first = nextOrder(plain, null, 'd', -1)
+    expect(first).toEqual(['a', 'b', 'd', 'c'])
+    // The second click comes before the first reply: the snapshot is unchanged.
+    expect(nextOrder(plain, first, 'd', -1)).toEqual(['a', 'd', 'b', 'c'])
+    // A model the sent order does not name keeps its place after it.
+    expect(nextOrder([...plain, model('e')], first, 'e', -1)).toEqual(['a', 'b', 'd', 'e', 'c'])
   })
 })
 

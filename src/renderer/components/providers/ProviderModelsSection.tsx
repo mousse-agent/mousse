@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import type { CustomModel, InstanceModel, ModelCapabilities, ModelPrefsPatch } from '../../../shared/harness/types'
 import { EFFORT_LEVELS, formatEffortLabel } from '../../../shared/modelVariants'
@@ -51,6 +51,24 @@ export function bulkVisibilityPatch(entries: readonly InstanceModel[]): ModelPre
   return builtIn.length > 0 && builtIn.every((model) => model.hidden) ? { unhide: ids } : { hide: ids }
 }
 
+/** The entries in a saved order not yet reported back; models it does not name keep their place after it. */
+export function inOrder(entries: readonly InstanceModel[], order: readonly string[] | null): InstanceModel[] {
+  if (!order) return [...entries]
+  const rank = new Map(order.map((id, index) => [id, index]))
+  return entries
+    .map((model, index) => ({ model, index }))
+    .sort((a, b) => (rank.get(a.model.id) ?? order.length + a.index) - (rank.get(b.model.id) ?? order.length + b.index))
+    .map((entry) => entry.model)
+}
+
+/**
+ * The order after a move, from the latest order sent rather than the last snapshot: two quick
+ * moves both count even when the first reply has not arrived.
+ */
+export function nextOrder(entries: readonly InstanceModel[], pending: readonly string[] | null, id: string, direction: -1 | 1): string[] | null {
+  return movedOrder(displayModels(inOrder(entries, pending)), id, direction)
+}
+
 function customOf(entries: readonly InstanceModel[]): CustomModel[] {
   return entries
     .filter((model) => model.source === 'custom')
@@ -87,8 +105,12 @@ export function ProviderModelsSection({
   const save = useAsyncAction()
   const refresh = useAsyncAction()
 
+  // The latest order sent, shown and moved from until its save settles.
+  const pendingOrder = useRef<string[] | null>(null)
+  const [shownOrder, setShownOrder] = useState<string[] | null>(null)
+
   const entries = snapshot.models.entries
-  const display = displayModels(entries)
+  const display = displayModels(inOrder(entries, shownOrder))
   const hidden = entries.filter((model) => model.hidden && model.source !== 'custom').map((model) => model.id)
   const builtIn = entries.filter((model) => model.source !== 'custom')
   const favoriteCount = entries.filter((model) => model.favorite).length
@@ -103,8 +125,15 @@ export function ProviderModelsSection({
   const setHidden = (id: string, hide: boolean) => write(hide ? { hide: [id] } : { unhide: [id] })
   const toggleFavorite = (model: InstanceModel) => write(model.favorite ? { unstar: [model.id] } : { star: [model.id] })
   const move = (id: string, direction: -1 | 1) => {
-    const order = movedOrder(display, id, direction)
-    if (order) write({ order })
+    const order = nextOrder(entries, pendingOrder.current, id, direction)
+    if (!order) return
+    pendingOrder.current = order
+    setShownOrder(order)
+    void save.run('save', () => onSave({ order })).finally(() => {
+      if (pendingOrder.current !== order) return
+      pendingOrder.current = null
+      setShownOrder(null)
+    })
   }
   const saveCustom = async (next: CustomModel, original?: CustomModel) => {
     const custom = customOf(entries)
