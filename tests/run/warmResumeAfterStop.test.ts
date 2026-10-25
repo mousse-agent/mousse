@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { ClaudeSubscriptionAdapter } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
-import { FakeClaudeCli, resultFrame, textDelta } from './fakeClaudeCli'
+import { FakeClaudeCli, resultFrame, roster, textDelta } from './fakeClaudeCli'
 import { CLAUDE, phase6Daemon, waitFor } from './phase6Fixture'
 
 describe('stopping a Claude turn and continuing the thread (issue #142)', () => {
@@ -137,6 +137,59 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     await d.orch.send('three', false, { threadId: thread.id, clientRequestId: 'turn-3' })
     return { cli, d, thread }
   }
+
+  /** One finished turn that left a background shell running. */
+  const threadWithHelper = async () => {
+    home = mkdtempSync(join(tmpdir(), 'mousse-live-stop-'))
+    previousHome = process.env.MOUSSE_HOME
+    process.env.MOUSSE_HOME = home
+    const binary = join(home, 'claude')
+    writeFileSync(binary, 'fixture')
+    chmodSync(binary, 0o755)
+    mkdirSync(join(home, 'providers', 'claude-subscription'), { recursive: true })
+    writeFileSync(join(home, 'providers', 'claude-subscription', 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
+    const cli = new FakeClaudeCli()
+    cli.reply = (message, claude) => {
+      claude.emit(roster({ id: 'bash-1' }))
+      claude.answer(String(message.uuid), 'started')
+    }
+    const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      query: cli.query,
+      runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
+    })
+    stops.push(async () => service.stop())
+    const d = phase6Daemon(home, [new ClaudeSubscriptionAdapter(() => service)])
+    stops.push(d.stop)
+    const thread = d.store.createThread('Subagent')
+    d.orch.setThreadModelOverride(thread.id, CLAUDE)
+    await d.orch.send('one', false, { threadId: thread.id, clientRequestId: 'turn-1' })
+    expect(service.hasBackgroundWork(thread.id)).toBe(true)
+    return { cli, d, thread, service }
+  }
+
+  it('Stop by run id reaches the process even when that run already ended', async () => {
+    const { cli, d, thread, service } = await threadWithHelper()
+    const run = d.engine.listRuns(thread.id)[0]
+    expect(d.engine.getRun(run.runId)?.status).toBe('completed')
+    const result = await d.orch.abortRun(run.runId, 'stop-after-end', thread.id)
+    expect(result.status).toBe('ignored')
+    expect(cli.last.closed).toBe(true)
+    expect(service.hasBackgroundWork(thread.id)).toBe(false)
+  }, 30_000)
+
+  it('deleting the thread or switching its provider ends the process and its helpers', async () => {
+    const deleted = await threadWithHelper()
+    deleted.d.orch.markThreadDeleted(deleted.thread.id)
+    await waitFor(() => deleted.cli.last.closed, 'the process to close after the thread was deleted')
+    expect(deleted.service.hasBackgroundWork(deleted.thread.id)).toBe(false)
+    await stops.pop()?.()
+    await stops.pop()?.()
+
+    const switched = await threadWithHelper()
+    switched.d.orch.setThreadModelOverride(switched.thread.id, { llmProvider: 'openai', model: 'gpt-replay' })
+    await waitFor(() => switched.cli.last.closed, 'the process to close after the provider was switched')
+    expect(switched.service.hasBackgroundWork(switched.thread.id)).toBe(false)
+  }, 30_000)
 
   it('on a live query, Stop closes the process and the next turn resumes the same native session', async () => {
     const { cli } = await liveStoppedThenContinued('stop')

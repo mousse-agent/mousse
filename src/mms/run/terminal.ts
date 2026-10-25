@@ -3,7 +3,18 @@ import { recordRunResultText } from './delegation/hold'
 import { Inbox } from './Inbox'
 import { stableStringify } from './json'
 import type { RunStore } from './RunStore'
-import type { AttemptStatus, ChildResultPayload, InboxRecord, RunOutcome, RunRecord } from './types'
+import type { AttemptStatus, ChildResultPayload, InboxKind, InboxRecord, RunOutcome, RunRecord } from './types'
+
+/**
+ * An inbox row the run owes its own thread, written in the run's terminal transaction before the
+ * subagent's waiting tasks are judged (an integration run's outcome). The row is what keeps the
+ * thread busy until its model has read the outcome, so the tasks waiting on it cannot publish an
+ * answer that predates it.
+ */
+export interface TerminalNotice {
+  kind: InboxKind
+  payload: unknown
+}
 
 export type RunTerminalStatus = 'completed' | 'interrupted' | 'failed' | 'cancelled' | 'uncertain'
 
@@ -30,7 +41,7 @@ export function writeTerminalRun(
   status: RunTerminalStatus,
   outcome: RunOutcome | undefined,
   completedAt: string,
-  options: { resultText?: string } = {}
+  options: { resultText?: string; notice?: TerminalNotice } = {}
 ): RunRecord {
   return store.db.transaction(() => {
     const merged =
@@ -53,12 +64,47 @@ export function writeTerminalRun(
         completedAt
       })
     recordRunResultText(store, next, options.resultText)
+    // Before anything is acknowledged or judged, so every evaluation below sees the row.
+    const notice = options.notice ?? interruptedIntegrationNotice(store, next)
+    if (notice) new Inbox(store).append({ threadId: next.threadId, runId: next.runId, kind: notice.kind, payload: notice.payload })
     // Rows this run delivered are acknowledged first (inside, the thread is evaluated as they move)...
     acknowledgeDeliveredRows(store, next)
     // ...then, whatever moved or not, once more with the run's own end.
     store.settleHold(next.threadId)
     return next
   })
+}
+
+/**
+ * An integration run that ended without its executor writing the outcome (boot ending active runs and
+ * cancelling queued ones, reconciler rule 2 after a lost lease, rule 3 after a Stop that did not land)
+ * still owes its thread an outcome row, or the subagent whose last live work it was would publish an
+ * answer that predates the integration. The merge may or may not have happened, so the row says
+ * so. `delegationId` comes from the run's `turn.start` payload.
+ *
+ * A run the user stopped is left out on purpose: a user's Stop publishes right away (D2's rule for
+ * every delivery the user stops), and the user already knows the integration did not finish. A run
+ * that completed has its outcome written by the executor, and one that has none owes nothing.
+ */
+function interruptedIntegrationNotice(store: RunStore, run: RunRecord): TerminalNotice | null {
+  if (run.source !== 'integration' || run.status === 'completed' || run.outcome?.interruptedBy === 'user') return null
+  const effect = store.db.statement("SELECT payload FROM effects WHERE run_id = ? AND kind = 'turn.start' ORDER BY rowid LIMIT 1").get(run.runId)
+  let delegationId: string | undefined
+  try {
+    const payload = JSON.parse(String(effect?.payload ?? 'null')) as { kind?: unknown; delegationId?: unknown } | null
+    if (payload?.kind === 'integration' && typeof payload.delegationId === 'string') delegationId = payload.delegationId
+  } catch {
+    /* no payload to read: the row names no task */
+  }
+  const task = delegationId ? `delegated task ${delegationId}` : 'a delegated task'
+  return {
+    kind: 'reconcile_notice',
+    payload: {
+      type: 'integration_failed',
+      ...(delegationId ? { delegationId } : {}),
+      text: `Integration of ${task} was interrupted before its outcome was known; check the workspace.`
+    }
+  }
 }
 
 /**

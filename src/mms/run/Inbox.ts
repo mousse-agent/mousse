@@ -160,6 +160,23 @@ export class Inbox {
   }
 
   /**
+   * A delivery the user stopped: the rows stay `delivered` (as before) but belong to nothing, so
+   * neither the reconciler nor boot gives them back. With `from`, only rows that owner delivers.
+   */
+  detachDelivery(ids: readonly string[], from: string): void {
+    this.db.transaction(() => {
+      for (const id of ids) {
+        const current = this.get(id)
+        if (current?.status !== 'delivered' || current.deliveredBy !== from) continue
+        this.db.statement('UPDATE inbox SET delivered_by = NULL WHERE inbox_id = ? AND status = ?').run(id, 'delivered')
+        this.recorded({ ...current, deliveredBy: null })
+        // Owned by nothing now: it no longer holds the tasks waiting on its thread.
+        this.store.settleHold(current.threadId)
+      }
+    })
+  }
+
+  /**
    * The live turn holds the steer `effectId` carried (it is in the turn's pending steers, not read
    * yet). Only code that holds steers writes this, so rows of a steer delivered before it existed
    * (a native steer of an older version) are never mistaken for an unread one.

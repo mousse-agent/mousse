@@ -285,7 +285,7 @@ describe('subagent status model (plan §3.3)', () => {
     it.each([['pending'], ['delivered']] as const)('a %s inbox row addressed to it keeps it waiting until acknowledged', async (status) => {
       const { child } = await held()
       const row = f!.engine.inbox.append({ threadId: 'child-1', kind: 'reconcile_notice', payload: { text: 'note' } })
-      if (status === 'delivered') f!.engine.inbox.markDelivered([row.inboxId])
+      if (status === 'delivered') f!.engine.inbox.markDelivered([row.inboxId], 'effect:owner')
       expect(rowFor()).toMatchObject({ activity: 'waiting', state: 'waiting', waitingOn: [] })
       expect(rowFor().tasks[0].outcome).toBe('waiting_for_subagents')
       f!.engine.inbox.markAcknowledged([row.inboxId])

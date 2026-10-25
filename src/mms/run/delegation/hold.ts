@@ -58,13 +58,18 @@ export function hasLiveRun(store: RunStore, threadId: string): boolean {
  * Whether an inbox row of a child still has to be consumed before the child's task may publish.
  * `pending` and `delivered` rows count, with two exceptions that would otherwise hold a task for
  * ever: a row whose delivery gave up (`payload.deliveryFailed`, exhausted; the owner has its Retry
- * notice) and a delivered row whose delivery the user stopped (the run that carried it was stopped,
- * so nothing will deliver or acknowledge it).
+ * notice), a delivered row whose delivery the user stopped (the run that carried it was stopped, or
+ * the row was detached from its queue item, so nothing will deliver or acknowledge it), and a
+ * legacy steer row (`isLegacySteerRow`).
  */
 export function isActionableRow(store: RunStore, row: InboxRecord): boolean {
   if (row.status === 'acknowledged') return false
   if (isExhaustedRow(row)) return false
   if (row.status !== 'delivered') return true
+  // A delivered row with no owner belongs to nothing: a delivery the user stopped was detached from
+  // its queue item (`Inbox.detachDelivery`), and rows delivered before owners were recorded have none.
+  // Neither the reconciler nor boot gives such a row back, so nothing will ever consume it.
+  if (row.deliveredBy === null) return false
   return !deliveryStoppedByUser(store, row) && !isLegacySteerRow(store, row)
 }
 
@@ -147,6 +152,10 @@ const RESULT_SOURCES: ReadonlySet<string> = new Set([
   'steer-late',
   'steer-followup',
   ...FOLLOW_UP_SOURCES
+  // Not sources, consistent with `FOLLOW_UP_SOURCES`: `cli-steer` and `protocol-steer` are steers a
+  // client sent to a live turn (they join it and have no run of their own to answer), and
+  // `lease-race`, `queue`, `schedule`, `workflow-observer`, `protocol` and local actions are not a
+  // person asking the subagent something or a notice it answers.
 ])
 
 /**
@@ -213,7 +222,8 @@ function deliveryFailureResult(row: InboxRecord, run: RunRecord | null): Delegat
   const cause = typeof detail?.lastError === 'string' && detail.lastError ? `: ${detail.lastError}` : ''
   return {
     runStatus: 'failed',
-    error: `A subagent result could not be delivered${attempts}${cause}`,
+    // Neutral: the row can be a result, a restart note or a notice of any kind.
+    error: `A notice the subagent was waiting on could not be delivered${attempts}${cause}`,
     ...(run ? { runId: run.runId } : {})
   }
 }

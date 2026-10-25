@@ -4,7 +4,7 @@
  * after the Reader's was read by a run of the Coordinator that committed (the hold rule itself, with
  * every trigger, is `subagentHold.test.ts`).
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
 import { waitFor } from './phase6Fixture'
 import { useSubagentWorld, type Json } from './subagentWorld'
@@ -115,7 +115,25 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
       await waitFor(() => s.task(s.coordinator.delegationId).status !== 'running', 'the task to publish')
       expect(s.task(s.coordinator.delegationId).result?.text).toContain('Coordinator final')
     })
-  })
+ 
+    it('a release that fails is tried again, so the rows do not wait for the next boot', async () => {
+      const { s, row, item } = await queued()
+      vi.useFakeTimers({ toFake: ['setTimeout'] })
+      try {
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+        vi.spyOn(s.d.engine.inbox, 'release').mockImplementationOnce(() => { throw new Error('database busy') })
+        s.d.orch.removeQueuedItem(s.coordinator.childThreadId, item.id)
+        // The item is gone and the first release failed: the rows still hold the task...
+        expect(s.d.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: `queue:${item.id}` })
+        expect(s.task(s.coordinator.delegationId).status).toBe('running')
+        // ...until the retry gives them back.
+        vi.advanceTimersByTime(2_000)
+      } finally {
+        vi.useRealTimers()
+      }
+      expect(s.d.engine.inbox.get(row.inboxId)!.status).toBe('pending')
+    })
+ })
 
   it('boot recovers a row whose queue item is gone: back to pending, the task keeps waiting, and the wake ends it', async () => {
     const s = await scene()
@@ -145,20 +163,163 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
       return { s, row, payload }
     }
 
-    it('a turn that ends cleanly reads the rows, and the task publishes', async () => {
+    /** A run of the Coordinator that carried the rows (a queue item's turn, run without an effect), ended as `end` says. */
+    const ended = (s: Awaited<ReturnType<typeof carried>>['s'], end: (runId: string) => void) => {
+      const run = s.d.engine.store.createRun({ threadId: s.coordinator.childThreadId, source: 'steer-late' })
+      s.d.engine.markStarting(run.runId)
+      s.d.engine.markRunning(run.runId)
+      end(run.runId)
+      return run.runId
+    }
+    const settle = (s: Awaited<ReturnType<typeof carried>>['s'], payload: object, runId: string, turn: Promise<unknown> = Promise.resolve({ message: '', actions: [] })) =>
+      (s.d.orch as any).settleCarriedRows({ ...payload, runId }, turn).catch(() => undefined)
+
+    it('a turn that completed reads the rows, and the task publishes once they are read', async () => {
       const { s, row, payload } = await carried()
-      await (s.d.orch as any).settleCarriedRows(payload, Promise.resolve({ message: 'ok', actions: [] }))
+      const runId = ended(s, (id) => s.d.engine.markTerminal(id, 'completed', undefined, { resultText: 'Coordinator read it.' }))
+      // The run ended, but its rows were still its queue item's: the task keeps waiting until they are settled.
+      expect(s.task(s.coordinator.delegationId).status).toBe('running')
+      await settle(s, payload, runId)
       expect(s.d.engine.inbox.get(row.inboxId)!.status).toBe('acknowledged')
+      expect(s.task(s.coordinator.delegationId)).toMatchObject({ status: 'result_available', result: { text: 'Coordinator read it.' } })
+    })
+
+    it('a turn the user stopped detaches the rows: nothing redelivers them, and the task is not held', async () => {
+      const { s, row, payload } = await carried()
+      const runId = ended(s, (id) => s.d.engine.markTerminal(id, 'interrupted', { interruptedBy: 'user' }))
+      expect(s.task(s.coordinator.delegationId).status).toBe('running')
+      await settle(s, payload, runId)
+      expect(s.d.engine.inbox.get(row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: null })
+      expect(s.reconciler.runOnce().wakes.restored).toEqual([])
       expect(s.task(s.coordinator.delegationId).status).not.toBe('running')
     })
 
-    it('a turn that fails or throws gives the rows back: they keep holding the task and are delivered again', async () => {
-      for (const outcome of [() => Promise.resolve({ message: '', actions: [], error: 'boom' }), () => Promise.reject(new Error('boom'))]) {
+    it('a turn that failed, or whose delivery threw, gives the rows back: they keep holding the task and are delivered again', async () => {
+      for (const turn of [() => Promise.resolve({ message: '', actions: [] }), () => Promise.reject(new Error('boom'))]) {
         const { s, row, payload } = await carried()
-        await (s.d.orch as any).settleCarriedRows(payload, outcome()).catch(() => undefined)
+        const runId = ended(s, (id) => s.d.engine.markTerminal(id, 'failed', { error: 'boom' }))
+        await settle(s, payload, runId, turn())
         expect(s.d.engine.inbox.get(row.inboxId)!.status).toBe('pending')
         expect(s.task(s.coordinator.delegationId).status).toBe('running')
       }
+    })
+  })
+
+  describe('an integration run is the last live work of the Coordinator (issue #142)', () => {
+    /**
+     * The Coordinator is woken for its Reader's result and asks to integrate it; the integration
+     * run ends the Coordinator's work. (The Reader is shared, so the integration fails: nothing to merge.)
+     */
+    const integrating = async (beforeWake?: (w: ReturnType<typeof world>) => void) => {
+      const w = world((input, delegation: DelegationToolHost | undefined) => {
+        if (input.prompt.includes('Review Coordinator')) return w.start(delegation!, 'Reader', {}, 'start:Reader').then((reader) => { w.out.reader = reader; return 'Coordinator started the Reader.' })
+        if (input.prompt.includes('Review Reader')) return 'Reader result.'
+        if (input.prompt.startsWith('Subagent "Reader"')) {
+          const delegationId = /finished task (delegation:[0-9a-f-]+)/.exec(input.prompt)![1]
+          return delegation!.integrateDelegation({ delegationId } as never, { toolCallId: 'integrate-1' }).then(() => 'Coordinator is integrating.')
+        }
+        return 'Coordinator final after the integration notice.'
+      })
+      w.steps.go = async (tools) => { w.out.coordinator = await w.start(tools, 'Coordinator') }
+      await w.say('go')
+      const coordinator = w.out.coordinator
+      await waitFor(() => Boolean(w.out.reader), 'the Reader to start')
+      await w.settled(coordinator.childRunId)
+      await w.settled(w.out.reader.childRunId)
+      const task = () => w.d.engine.delegations.get(coordinator.delegationId)!
+      const coordinatorRuns = () => w.d.engine.listRuns(coordinator.childThreadId)
+      beforeWake?.(w)
+      const wake = w.reconciler.runOnce().wakes.wakes.find((id) => w.d.engine.getRun(id)!.threadId === coordinator.childThreadId)!
+      const integrationRun = async () => {
+        await waitFor(() => coordinatorRuns().some((run) => run.source === 'integration' && ['completed', 'failed'].includes(run.status)), 'the integration run to end')
+        return coordinatorRuns().find((run) => run.source === 'integration')!
+      }
+      return { ...w, coordinator, task, coordinatorRuns, integrationRun, wake }
+    }
+
+    it('the task waits for the integration outcome: it is a row the Coordinator must read, so the answer that predates it is not published', async () => {
+      const s = await integrating()
+      const integration = await s.integrationRun()
+      expect(integration.status).toBe('failed')
+      // The integration run ended the Coordinator's last live work. Its outcome is already an unread row, written with the terminal state.
+      const notices = s.d.engine.inbox.listByStatus(s.coordinator.childThreadId, 'pending').filter((row) => row.kind === 'reconcile_notice')
+      expect(notices).toHaveLength(1)
+      expect(notices[0]).toMatchObject({ runId: integration.runId, payload: { type: 'integration_failed' } })
+      expect(s.task().status).toBe('running')
+      // The Coordinator reads the outcome in a wake of its own, and its answer to it is the result.
+      const wake = s.reconciler.runOnce().wakes.wakes.find((id) => s.d.engine.getRun(id)!.threadId === s.coordinator.childThreadId)!
+      await waitFor(() => s.task().status !== 'running', 'the task to publish')
+      const published = s.task()
+      expect(published.result).toMatchObject({ text: 'Coordinator final after the integration notice.', runId: wake })
+      expect(s.d.engine.getRun(wake)!.ordinal).toBeGreaterThan(integration.ordinal)
+      expect(s.d.engine.inbox.listForThread(s.coordinator.childThreadId).every((row) => row.status === 'acknowledged')).toBe(true)
+    })
+  })
+
+  describe('an integration that merged is reported as merged (issue #142)', () => {
+    it('even when its run was ended while the merge committed and cannot be marked completed', async () => {
+      const merged = { workerHeadSha: 'a'.repeat(40), integrationSha: 'b'.repeat(40), changedPaths: ['x.txt'] }
+      const w = world((input, delegation: DelegationToolHost | undefined) => {
+        if (input.prompt.includes('Review Coordinator')) return w.start(delegation!, 'Reader', {}, 'start:Reader').then(() => 'Coordinator started the Reader.')
+        if (input.prompt.includes('Review Reader')) return 'Reader result.'
+        if (input.prompt.startsWith('Subagent "Reader"')) {
+          const delegationId = /finished task (delegation:[0-9a-f-]+)/.exec(input.prompt)![1]
+          return delegation!.integrateDelegation({ delegationId } as never, { toolCallId: 'integrate-1' }).then(() => 'Coordinator is integrating.')
+        }
+        return 'Coordinator final.'
+      })
+      w.steps.go = async (tools) => { w.out.coordinator = await w.start(tools, 'Coordinator') }
+      await w.say('go')
+      const coordinator = w.out.coordinator
+      await waitFor(() => w.d.engine.delegations.listForParentThread(coordinator.childThreadId).length > 0, 'the Reader to start')
+      const reader = w.d.engine.delegations.listForParentThread(coordinator.childThreadId)[0]
+      await w.settled(coordinator.childRunId)
+      await w.settled(reader.childRunId)
+      // The merge commits; the run cannot be marked completed (something else ended it first).
+      ;(w.d.orch as any).integrateDelegationResult = async () => merged
+      const original = w.d.engine.markTerminal.bind(w.d.engine)
+      vi.spyOn(w.d.engine, 'markTerminal').mockImplementation(((runId: string, status: string, ...rest: unknown[]) => {
+        if (status === 'completed' && w.d.engine.getRun(runId)?.source === 'integration') throw new Error('stale_write: the run ended while it merged')
+        return (original as (...args: unknown[]) => unknown)(runId, status, ...rest)
+      }) as never)
+      w.reconciler.runOnce()
+      await waitFor(() => w.d.engine.inbox.listForThread(coordinator.childThreadId).some((row) => row.kind === 'reconcile_notice'), 'the outcome row')
+      const [row] = w.d.engine.inbox.listForThread(coordinator.childThreadId).filter((entry) => entry.kind === 'reconcile_notice')
+      expect(row.payload).toMatchObject({ type: 'integration_completed' })
+      expect((row.payload as { text: string }).text).toContain('finished: merged aaaaaaaaaaaa as bbbbbbbbbbbb')
+      expect((row.payload as { text: string }).text).not.toContain('failed')
+      const message = w.d.orch.getMessages(coordinator.childThreadId).find((entry) => entry.role === 'system' && entry.content.startsWith('Integration of delegated task'))
+      expect(message?.content).toContain('finished: merged')
+    })
+  })
+
+  describe('the provider background-work input (4) through the orchestrator', () => {
+    it('setRunEngine installs the callback, and ending the work re-evaluates the thread tasks', async () => {
+      const seen: Json = {}
+      const w = world((input) => {
+        // A provider that still has background work for the subagent when its turn ends.
+        if (input.prompt.includes('Review Solo')) {
+          seen.threadId = input.threadId
+          w.d.orch.setProviderBackgroundWork(input.threadId, true)
+        }
+        return 'Solo turn text.'
+      })
+      w.steps.go = async (tools) => { w.out.solo = await w.start(tools, 'Solo') }
+      await w.say('go')
+      await w.settled(w.out.solo.childRunId)
+      const task = () => w.d.engine.delegations.get(w.out.solo.delegationId)!
+      // The host installed its callback on the run store, and the task is held by it.
+      expect(w.d.engine.store.providerBackgroundWork(seen.threadId)).toBe(true)
+      expect(task().status).toBe('running')
+      const settled = vi.spyOn(w.d.engine.store, 'settleHold')
+      w.d.orch.setProviderBackgroundWork(seen.threadId, false)
+      expect(settled).toHaveBeenCalledWith(seen.threadId)
+      expect(w.d.engine.store.providerBackgroundWork(seen.threadId)).toBe(false)
+      expect(task()).toMatchObject({ status: 'result_available', result: { text: 'Solo turn text.' } })
+      // Saying so again changes nothing.
+      settled.mockClear()
+      w.d.orch.setProviderBackgroundWork(seen.threadId, false)
+      expect(settled).not.toHaveBeenCalled()
     })
   })
 })

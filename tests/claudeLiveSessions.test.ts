@@ -92,21 +92,59 @@ describe('a live Claude query', () => {
     void home
   })
 
-  it('closes the process when a turn is aborted before Claude started its prompt, because only closing drops it from the input queue', async () => {
+  it('a turn aborted before Claude started its prompt cancels the queued prompt and keeps the process', async () => {
     const { cli, chat } = fixture()
     silent(cli)
     const abort = new AbortController()
     const turn = chat({ signal: abort.signal })
     await inputs(cli, 1)
+    const process = cli.last
     abort.abort()
     await expect(turn).rejects.toThrow()
-    // Claude never started the prompt: only closing the process can drop it from its input queue.
-    expect(cli.last.closed).toBe(true)
-    // Nothing of the stopped request was recorded, so the next turn starts a fresh session.
+    // The interrupt asks Claude to drop what it has queued; the process is not closed for it.
+    await vi.waitFor(() => expect(process.interruptOptions).toEqual([{ cancelQueued: true }]))
+    expect(process.closed).toBe(false)
+    expect(process.queued).toEqual([])
+    cli.reply = (message, self) => self.answer(String(message.uuid), 'next')
+    expect(await chat({ history: '' })).toBe('next')
+  })
+
+  it.each([true, false])('question preemption during startup keeps a running helper alive (receipts %s)', async (receipts) => {
+    const f = fixture()
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }))
+      process.answer(String(message.uuid), 'started')
+    }
+    await f.turn()
+    const process = f.cli.last
+    process.receipts = receipts
+    f.cli.reply = undefined
+    const abort = new AbortController()
+    const second = f.chat({ signal: abort.signal, history: '' })
+    await inputs(f.cli, 2)
+    // The prompt is queued and Claude has not echoed it yet: this is the startup window.
+    abort.abort()
+    await expect(second).rejects.toThrow()
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(process.closed).toBe(false)
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+  })
+
+  it('closes the process for an aborted, never-started prompt only when Claude cannot cancel it and no helper is running', async () => {
+    const { cli, chat, turn } = fixture()
+    await turn()
+    cli.last.receipts = false
+    silent(cli)
+    const abort = new AbortController()
+    const second = chat({ signal: abort.signal, history: '' })
+    await inputs(cli, 2)
+    abort.abort()
+    await expect(second).rejects.toThrow()
+    await vi.waitFor(() => expect(cli.last.closed).toBe(true))
     cli.reply = (message, process) => process.answer(String(message.uuid), 'fresh')
     expect(await chat({ history: '' })).toBe('fresh')
     expect(cli.processes).toHaveLength(2)
-    expect(cli.last.options.resume).toBeUndefined()
   })
 
   it('keeps the Mousse credential on the live query, and a different credential needs a new process', async () => {
@@ -378,7 +416,7 @@ describe('background work', () => {
     expect(denied).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } })
   })
 
-  it('a wake the host cannot record, or never runs, is read and dropped, and its task is done', async () => {
+  it('a wake the host cannot record, or never runs, is stopped and dropped, and its task is done', async () => {
     const f = fixture()
     f.host.continuationStarted.mockImplementation(() => {
       throw new Error('no worker')
@@ -397,13 +435,23 @@ describe('background work', () => {
     await vi.waitFor(() => expect(g.service.hasBackgroundWork('thread')).toBe(false))
   })
 
-  it('without a host a wake is read and dropped, and its task is done', async () => {
+  it('without a host a wake is stopped the moment it starts, so no hidden turn runs, and its task is done', async () => {
     const f = fixture()
     f.service.setLiveHost(null)
     await withHelper(f)
+    const process = f.cli.last
     expect(f.service.hasBackgroundWork('thread')).toBe(true)
-    f.cli.last.emit(notification('bash-1'), textDelta('ignored'), resultFrame({ text: 'ignored', origin: 'task-notification' }))
+    process.emit(notification('bash-1'))
     await vi.waitFor(() => expect(f.service.hasBackgroundWork('thread')).toBe(false))
+    expect(process.interrupts).toBe(0)
+    // Claude starts its own turn; nobody could read it, so it is interrupted at its first frame.
+    process.emit(textDelta('hidden work'))
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    process.emit(resultFrame({ text: 'hidden work', origin: 'task-notification' }))
+    // The next turn runs on the same process and gets only its own text.
+    f.cli.reply = (message, self) => self.answer(String(message.uuid), 'my turn')
+    expect(await f.chat({ history: '' })).toBe('my turn')
+    expect(f.cli.processes).toHaveLength(1)
   })
 })
 
@@ -573,6 +621,246 @@ describe('idle release and the cap on live processes', () => {
     expect(f.service.liveThreadIds().sort()).toEqual(['b', 'c'])
     busy.answer(busy.uuid(1), 'busy done')
     expect(await running).toBe('busy done')
+  })
+})
+
+describe('result routing and steering edge cases', () => {
+  const helper = (f: ReturnType<typeof fixture>) => {
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }))
+      process.answer(String(message.uuid), 'started')
+    }
+  }
+  const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  it('a result that echoes the id of a finished turn belongs to no one and never ends the turn that is waiting', async () => {
+    const f = fixture()
+    await f.turn({ prompt: 'A' })
+    const process = f.cli.last
+    f.cli.reply = undefined
+    let done = false
+    const b = f.chat({ prompt: 'B', history: '' }).then((text) => {
+      done = true
+      return text
+    })
+    await inputs(f.cli, 2)
+    process.emit(resultFrame({ uuids: [process.uuid(0)], text: 'late result of A' }))
+    await later(30)
+    expect(done).toBe(false)
+    process.answer(process.uuid(1), 'B text')
+    expect(await b).toBe('B text')
+  })
+
+  it('routes the unstamped frames of a turn to it, and drops late ones that no turn is waiting for', async () => {
+    const f = fixture()
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'abc', ['a', 'b', 'c'])
+    expect(await f.turn()).toBe('abc')
+    f.cli.last.emit(textDelta('late'))
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'second')
+    expect(await f.turn({ history: '' })).toBe('second')
+  })
+
+  it('a steered turn ignores an abort result even when Claude echoes no id on it', async () => {
+    const f = fixture()
+    silent(f.cli)
+    const drainSteer = vi.fn<() => string | undefined>().mockReturnValueOnce('steer').mockReturnValue(undefined)
+    let ended = false
+    const turn = f.chat({ drainSteer }).finally(() => { ended = true })
+    await inputs(f.cli, 1)
+    const process = f.cli.last
+    process.emit(textDelta('x', process.uuid(0)))
+    await inputs(f.cli, 2)
+    process.emit(resultFrame({ terminalReason: 'aborted_streaming', queued: 1 }))
+    await later(30)
+    expect(ended).toBe(false)
+    process.emit(textDelta('after'), resultFrame({ uuids: [process.uuid(1)], text: 'after' }))
+    expect(await turn).toBe('x\n\nafter')
+  })
+
+  it('a steer still waiting for foreground work when the turn result arrives is not pushed: it is handed back as the next turn', async () => {
+    const f = fixture()
+    silent(f.cli)
+    let open!: () => void
+    const drainSteer = vi.fn<() => string | undefined>().mockReturnValueOnce('late steer').mockReturnValue(undefined)
+    const onSteer = vi.fn()
+    const returnSteer = vi.fn()
+    const turn = f.chat({ drainSteer, onSteer, returnSteer })
+    await inputs(f.cli, 1)
+    const process = f.cli.last
+    process.backgroundGate = new Promise<void>((resolve) => { open = resolve })
+    process.emit(textDelta('answer', process.uuid(0)))
+    await vi.waitFor(() => expect(process.backgrounded).toBe(1))
+    // The result arrives while the steer waits for the foreground work to move.
+    process.emit(resultFrame({ uuids: [process.uuid(0)], text: 'answer' }))
+    await later(30)
+    open()
+    expect(await turn).toBe('answer')
+    expect(process.inputs).toHaveLength(1)
+    expect(returnSteer).toHaveBeenCalledExactlyOnceWith('late steer')
+    expect(onSteer).not.toHaveBeenCalled()
+  })
+
+  it('a steer collected while the process is still being set up is delivered after the turn is pushed', async () => {
+    const f = fixture()
+    await f.turn({ mode: 'plan', history: 'h' }, 'h')
+    const process = f.cli.last
+    // The turn switches the permission mode before it pushes its prompt; that takes a while.
+    process.permissionGate = later(250)
+    silent(f.cli)
+    const drainSteer = vi.fn<() => string | undefined>().mockReturnValueOnce('early steer').mockReturnValue(undefined)
+    const onSteer = vi.fn()
+    const turn = f.chat({ mode: 'default', history: 'h', drainSteer, onSteer })
+    await later(150)
+    // Nothing was collected, or dropped, while the prompt was not pushed yet.
+    expect(drainSteer).not.toHaveBeenCalled()
+    await inputs(f.cli, 3)
+    expect(process.inputs[2]).toMatchObject({ priority: 'now' })
+    expect(process.text(2)).toContain('early steer')
+    expect(onSteer).toHaveBeenCalledExactlyOnceWith('early steer')
+    process.emit(resultFrame({ uuids: [process.uuid(1), process.uuid(2)], text: 'ok' }))
+    expect(await turn).toBe('ok')
+  })
+
+  it('notifications a cut-off turn had read are done when the next turn on the process commits', async () => {
+    const f = fixture()
+    helper(f)
+    await f.turn()
+    const process = f.cli.last
+    f.cli.reply = undefined
+    const abort = new AbortController()
+    const second = f.chat({ signal: abort.signal, history: '' })
+    await inputs(f.cli, 2)
+    process.emit(textDelta('working', process.uuid(1)), notification('bash-1'))
+    await later(20)
+    abort.abort()
+    await expect(second).rejects.toThrow()
+    f.service.commitInterrupted('thread', '')
+    // Claude read the report in the turn that was cut off; it is not delivered again, and not done yet.
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    f.cli.reply = (message, self) => {
+      self.emit(resultFrame({ uuids: [self.uuid(1)], terminalReason: 'aborted_streaming' }))
+      self.answer(String(message.uuid), 'third')
+    }
+    expect(await f.turn({ history: '' })).toBe('third')
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+  })
+
+  it('after a failed turn the next message continues on the same process, even with background work running', async () => {
+    const f = fixture()
+    helper(f)
+    await f.turn({ history: 'h' }, 'h')
+    f.cli.reply = (message, process) => process.emit(resultFrame({ uuids: [String(message.uuid)], error: 'rate limit' }))
+    await expect(f.chat({ history: 'h' })).rejects.toThrow('rate limit')
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'ok again')
+    expect(await f.chat({ history: 'h' })).toBe('ok again')
+    expect(f.cli.processes).toHaveLength(1)
+    expect(f.cli.last.text(2)).not.toContain('Previous conversation')
+  })
+
+  it('says what changed when it refuses a change, and that the conversation changed when only the history did', async () => {
+    const f = fixture()
+    helper(f)
+    await f.turn({ history: 'h' }, 'h')
+    f.cli.reply = undefined
+    await expect(f.chat({ history: 'h', model: 'opus' })).rejects.toMatchObject({ message: expect.stringContaining('model changed') })
+    await expect(f.chat({ history: 'h', systemPromptAppend: 'new' })).rejects.toMatchObject({ message: expect.stringContaining('instructions changed') })
+    // The history no longer matches what the process holds (an undo or edit).
+    await expect(f.chat({ history: 'something else' })).rejects.toMatchObject({ message: expect.stringContaining('conversation changed') })
+  })
+
+  it('the idle release cannot close the process between acquiring it and pushing the turn', async () => {
+    vi.useFakeTimers()
+    const f = fixture({ idleCloseMs: 1000 })
+    await f.turn({ mode: 'plan', history: 'h' }, 'h')
+    const process = f.cli.last
+    process.permissionGate = new Promise((resolve) => setTimeout(resolve, 5000))
+    f.cli.reply = (message, self) => self.answer(String(message.uuid), 'ok')
+    const turn = f.chat({ mode: 'default', history: 'h' })
+    await vi.advanceTimersByTimeAsync(2500)
+    expect(process.closed).toBe(false)
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(await turn).toBe('ok')
+    expect(f.cli.processes).toHaveLength(1)
+  })
+
+  it('what a helper asks for after a cancelled turn is not refused as "Turn cancelled"', async () => {
+    const f = fixture()
+    await f.turn({ child: { readOnly: true }, history: 'h' }, 'h')
+    const process = f.cli.last
+    silent(f.cli)
+    const abort = new AbortController()
+    const second = f.chat({ child: { readOnly: true }, history: 'h', signal: abort.signal })
+    await inputs(f.cli, 2)
+    process.emit(textDelta('working', process.uuid(1)))
+    await later(20)
+    abort.abort()
+    await expect(second).rejects.toThrow()
+    const decision = await process.options.canUseTool!('Read', {}, { signal: new AbortController().signal } as never)
+    expect(decision).toMatchObject({ behavior: 'allow' })
+  })
+
+  it('a stray root frame that no task announced opens no continuation and does not pin the process', async () => {
+    vi.useFakeTimers()
+    const f = fixture({ idleCloseMs: 1000 })
+    await f.turn()
+    const process = f.cli.last
+    process.emit(textDelta('stray'))
+    await vi.advanceTimersByTimeAsync(10)
+    expect(f.host.continuationStarted).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(process.closed).toBe(true)
+  })
+
+  it.each([true, false])('a steer still queued when its turn is cancelled never ends a later turn (receipts %s)', async (receipts) => {
+    const f = fixture()
+    await f.turn({ history: 'h' }, 'h')
+    const process = f.cli.last
+    process.receipts = receipts
+    silent(f.cli)
+    const abort = new AbortController()
+    const drainSteer = vi.fn<() => string | undefined>().mockReturnValueOnce('queued steer').mockReturnValue(undefined)
+    const second = f.chat({ history: 'h', drainSteer, signal: abort.signal })
+    await inputs(f.cli, 2)
+    process.emit(textDelta('go', process.uuid(1)))
+    await inputs(f.cli, 3)
+    abort.abort()
+    await expect(second).rejects.toThrow()
+    f.service.commitInterrupted('thread', 'h')
+    process.emit(resultFrame({ uuids: [process.uuid(1)], terminalReason: 'aborted_streaming' }))
+    // The next turn runs; the steer's own result, if Claude still produces one, is not the next turn's.
+    let done = false
+    const third = f.chat({ history: 'h' }).then((text) => {
+      done = true
+      return text
+    })
+    await inputs(f.cli, 4)
+    process.emit(resultFrame({ uuids: [process.uuid(2)], text: 'steer result' }))
+    await later(30)
+    expect(done).toBe(false)
+    process.answer(process.uuid(3), 'third')
+    expect(await third).toBe('third')
+  })
+
+  it('never stops individual tasks: aborts, steers and Stop interrupt or close, and the process is created without a per-task stop', async () => {
+    const f = fixture()
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }, { id: 'agent-1', type: 'local_agent' }))
+      process.answer(String(message.uuid), 'started')
+    }
+    await f.turn({ history: 'h' }, 'h')
+    const process = f.cli.last
+    silent(f.cli)
+    const abort = new AbortController()
+    const steered = f.chat({ history: 'h', signal: abort.signal, drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('steer').mockReturnValue(undefined) })
+    await inputs(f.cli, 2)
+    process.emit(textDelta('x', process.uuid(1)))
+    await inputs(f.cli, 3)
+    abort.abort()
+    await expect(steered).rejects.toThrow()
+    expect(f.service.stopThread('thread')).toBe('stopped')
+    expect(process.stoppedTasks).toEqual([])
+    expect(JSON.stringify(process.options)).not.toContain('perTaskStopAffordance')
+    expect(process.closed).toBe(true)
   })
 })
 

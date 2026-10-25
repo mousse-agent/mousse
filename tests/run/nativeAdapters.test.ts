@@ -106,6 +106,21 @@ describe('ClaudeSubscriptionAdapter', () => {
     expect(client.stopThread).toHaveBeenCalledExactlyOnceWith('thread-1')
   })
 
+  it('hands a steer the provider could not take back to the turn control, which queues it as the next turn', async () => {
+    const returned: string[] = []
+    const client = claudeClient(async (chat) => {
+      chat.returnSteer?.('too late')
+      return 'done'
+    })
+    await new ClaudeSubscriptionAdapter(() => client).startTurn(
+      input(),
+      recordingSink(),
+      { ...control(), returnSteer: (text) => returned.push(text) },
+      host()
+    )
+    expect(returned).toEqual(['too late'])
+  })
+
   it('builds the chat input and relays the stream, steer, metrics and commit through the sink', async () => {
     const client = claudeClient(async (chat) => {
       chat.onThinking?.('Considering')

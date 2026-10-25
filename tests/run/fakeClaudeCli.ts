@@ -74,6 +74,19 @@ export class FakeClaudeProcess {
   readonly inputs: SDKUserMessage[] = []
   readonly permissionModes: string[] = []
   interrupts = 0
+  /** The options of each `interrupt()` call. */
+  readonly interruptOptions: Array<{ cancelQueued?: boolean } | undefined> = []
+  stoppedTasks: string[] = []
+  /**
+   * Whether `interrupt()` returns a receipt (a current Claude Code). With `false` it resolves to
+   * undefined, like an older one that cannot say what it cancelled.
+   */
+  receipts = true
+  /** While set, `setPermissionMode` and `backgroundTasks` wait for it. */
+  permissionGate: Promise<unknown> | undefined
+  backgroundGate: Promise<unknown> | undefined
+  private readonly started = new Set<string>()
+  private readonly cancelled = new Set<string>()
   backgrounded = 0
   closed = false
   /** The prompt stream ended (the real process would exit and take its background work with it). */
@@ -121,6 +134,8 @@ export class FakeClaudeProcess {
   emit(...frames: Frame[]): void {
     for (const frame of frames) {
       if (this.ended) return
+      const stamped = frame.user_message_uuids
+      if (Array.isArray(stamped)) for (const id of stamped) this.started.add(String(id))
       if (this.waiting) {
         const resolve = this.waiting
         this.waiting = undefined
@@ -138,8 +153,20 @@ export class FakeClaudeProcess {
   }
 
   /** A model turn that answers `uuid`: its text, then its result. */
-  answer(uuid: string, text: string): void {
-    this.emit(textDelta(text, uuid), resultFrame({ uuids: [uuid], text }))
+  /**
+   * A model turn that answers `uuid`. Like the real process, only the first stream frame of the turn
+   * carries the id of the message it answers (and the result); later frames of the turn carry none.
+   */
+  answer(uuid: string, text: string, chunks: string[] = [text]): void {
+    this.emit(
+      ...chunks.map((chunk, index) => textDelta(chunk, index === 0 ? uuid : undefined)),
+      resultFrame({ uuids: [uuid], text: chunks.join('') })
+    )
+  }
+
+  /** The uuids of messages the process read that no frame has named yet: still in its input queue. */
+  get queued(): string[] {
+    return this.inputs.map((message) => String(message.uuid)).filter((id) => !this.started.has(id) && !this.cancelled.has(id))
   }
 
   asQuery(): Query {
@@ -166,19 +193,30 @@ export class FakeClaudeProcess {
       [Symbol.asyncDispose]: async () => undefined
     } as AsyncGenerator<SDKMessage>
     return Object.assign(iterator, {
-      interrupt: async () => {
+      interrupt: async (options?: { cancelQueued?: boolean }) => {
         this.interrupts++
+        this.interruptOptions.push(options)
         this.onInterrupt?.(this)
+        if (!this.receipts) return undefined
+        const queued = this.queued
+        if (!options?.cancelQueued) return { still_queued: queued }
+        for (const id of queued) this.cancelled.add(id)
+        return { still_queued: [], cancelled: queued }
+      },
+      stopTask: async (taskId: string) => {
+        this.stoppedTasks.push(taskId)
       },
       close: () => {
         this.closed = true
         this.end()
       },
       setPermissionMode: async (mode: string) => {
+        await this.permissionGate
         this.permissionModes.push(mode)
       },
       backgroundTasks: async () => {
         this.backgrounded++
+        await this.backgroundGate
         return true
       },
       supportedModels: async () => []

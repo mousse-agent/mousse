@@ -49,6 +49,8 @@ import { TurnFrames } from './turnFrames'
 import type { ChildTurnPolicy } from '../../run/adapters/ProviderAdapter'
 
 export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
+/** What a live process is started for, in the order of the key `chat` builds; a change needs a new process. */
+const HARD_PARTS = ['instance', 'folder', 'model', 'reasoning effort', 'instructions', 'Mousse credential', 'read-only policy']
 type SavedSession = {
   sessionId: string
   cwd: string
@@ -106,7 +108,10 @@ export type ClaudeSubscriptionChatInput = {
   onMetrics?: (report: ClaudeSubscriptionMetrics) => void
   onLineEdits?: (lines: number) => void
   drainSteer?: () => string | undefined
+  /** A drained steer was pushed to Claude. */
   onSteer?: (text: string) => void
+  /** A drained steer could not be pushed because the turn's result had already arrived: it is the next turn. */
+  returnSteer?: (text: string) => void
   onTool?: (event: {
     phase: 'start' | 'complete'
     callId: string
@@ -863,23 +868,6 @@ export class ClaudeSubscriptionProviderService {
     const live = this.live.get(threadId)
     return Boolean(live && !live.dead && live.obligations.size > 0)
   }
-  /** Whether Claude started a turn of its own on the thread that no run has taken yet. */
-  hasContinuation(threadId: string): boolean {
-    const live = this.live.get(threadId)
-    return Boolean(live && !live.dead && live.hasUnclaimedContinuation())
-  }
-  /**
-   * The host could not run the turn Claude started on its own: it is read and dropped, and the
-   * notifications it consumed are done.
-   */
-  discardContinuations(threadId: string): void {
-    const live = this.live.get(threadId)
-    for (let run = live?.claimContinuation(); live && run; run = live.claimContinuation()) {
-      run.attach(() => undefined)
-      const claimed = run
-      void claimed.done.then(() => live.commit(claimed), () => undefined)
-    }
-  }
   /**
    * Stop reaches Claude's process: the live query is closed, which ends its background agents and
    * shells, and the thread's obligations end with it. Works on a thread whose turn already ended.
@@ -915,14 +903,27 @@ export class ClaudeSubscriptionProviderService {
     return true
   }
   /**
+   * The thread's live process when this turn can use it: it was started for the same instance, folder,
+   * model, effort, instructions, credential and read-only policy, and its conversation is the one this
+   * turn continues. That is so when the saved history fingerprint matches (`resume` is its session),
+   * or when the last turn on the process ended without saving one (a failure): the process holds
+   * exactly what that turn added, nothing was undone.
+   */
+  private reusableLive(threadId: string, hard: readonly unknown[], resume: string | undefined): LiveSession<TurnContext> | undefined {
+    const live = this.live.get(threadId)
+    if (!live || live.dead || live.sessionId === undefined) return undefined
+    if (JSON.stringify(hard) !== JSON.stringify(live.meta.hardParts)) return undefined
+    return resume === live.sessionId || live.meta.pendingKey === true ? live : undefined
+  }
+  /**
    * The thread's live query for this turn: the open one when it is still the right one, a new one
    * otherwise, or undefined when the turn has to run as a one-shot query (live queries are at their
    * cap). A query that has background work is never replaced silently: a change that needs a new
-   * process is refused, because it would end that work.
+   * process is refused, naming the change, because it would end that work.
    */
   private async acquireLive(
     threadId: string,
-    key: { hard: string; soft: string; mode: PermissionMode },
+    key: { hard: readonly unknown[]; soft: string; mode: PermissionMode },
     resume: string | undefined,
     create: (live: LiveSession<TurnContext>) => Options
   ): Promise<LiveSession<TurnContext> | undefined> {
@@ -934,16 +935,23 @@ export class ClaudeSubscriptionProviderService {
       live = undefined
     }
     if (live) {
-      const sameProcess = live.meta.hardKey === key.hard && resume !== undefined && live.sessionId === resume
       const working = live.obligations.size
+      const reusable = this.reusableLive(threadId, key.hard, resume)
       // Launch settings and integrations apply the next time the process starts; pending work keeps this one.
-      if (sameProcess && (live.meta.softKey === key.soft || working > 0)) return live
-      if (working > 0)
+      if (reusable && (live.meta.softKey === key.soft || working > 0)) return live
+      if (working > 0) {
+        const previous = (live.meta.hardParts as readonly unknown[] | undefined) ?? []
+        const changed = HARD_PARTS.filter((_, index) => JSON.stringify(previous[index]) !== JSON.stringify(key.hard[index]))
         throw new AppError({
           code: 'claude_background_work_blocks_change',
-          message: `Claude is still running ${working === 1 ? 'a background task' : `${working} background tasks`} for this thread. Changing the model, folder or instructions needs a new Claude process, which would end that work. Wait for it to finish or press Stop, then send again.`,
+          message: `Claude is still running ${working === 1 ? 'a background task' : `${working} background tasks`} for this thread. ${
+            changed.length
+              ? `The ${changed.join(' and ')} changed, which needs a new Claude process`
+              : 'The conversation changed outside that process (an undo, an edit or a fork), so it cannot continue it'
+          } and would end that work. Wait for it to finish or press Stop, then send again.`,
           errorInfo: { category: 'unavailable', retryable: false }
         })
+      }
       live.close('closed')
       this.live.delete(threadId)
     }
@@ -959,7 +967,7 @@ export class ClaudeSubscriptionProviderService {
       },
       timings
     )
-    created.meta = { hardKey: key.hard, softKey: key.soft, permissionMode: key.mode }
+    created.meta = { hardParts: key.hard, softKey: key.soft, permissionMode: key.mode }
     this.live.set(threadId, created)
     try {
       const query = await this.createQuery(created.queue, create(created))
@@ -996,9 +1004,20 @@ export class ClaudeSubscriptionProviderService {
         console.warn('[claude-subscription] live host callback failed', error instanceof Error ? error.message : String(error))
       }
     }
-    live.claimContinuation()
-    run.attach(() => undefined)
-    void run.done.then(() => live.commit(run), () => undefined)
+    // Nothing can run the turn, so nobody would see it: it is stopped (Claude would otherwise run it
+    // unattended, in bypass mode), and what it read is done.
+    live.discardContinuation(run)
+  }
+  /** Whether Claude started a turn of its own on the thread that no run has taken yet. */
+  hasContinuation(threadId: string): boolean {
+    const live = this.live.get(threadId)
+    return Boolean(live && !live.dead && live.hasUnclaimedContinuation())
+  }
+  /** The host could not run the turn Claude started on its own: it is stopped and dropped. */
+  discardContinuations(threadId: string): void {
+    const live = this.live.get(threadId)
+    if (!live) return
+    for (let run = live.claimContinuation(); run; run = live.claimContinuation()) live.discardContinuation(run)
   }
   /** Mousse's side of one turn's permission decisions; a live query reads the current turn's, not the first's. */
   private permissionCallbacks(turnOf: () => TurnContext): Pick<Options, 'hooks' | 'canUseTool'> {
@@ -1224,7 +1243,7 @@ export class ClaudeSubscriptionProviderService {
     let interruptRequested = false
     const collectSteer = () => {
       if (controller.signal.aborted) return
-      if (liveRun && (liveRun.settled || liveRun.abandoned)) return
+      if (liveRun && (liveRun.settled || liveRun.abandoned || liveRun.resultSeen)) return
       // A turn Claude started itself owns no message of ours to steer; the text stays queued as the next turn.
       if (liveRun?.kind === 'continuation') return
       const steer = input.drainSteer?.()?.trim()
@@ -1232,10 +1251,12 @@ export class ClaudeSubscriptionProviderService {
       if (live && liveRun) {
         // A live turn is steered without interrupting it: the text joins the stream as an immediate
         // message, and background helpers keep running.
-        input.onSteer?.(steer)
         this.questions.autoRejectPendingForThread(input.threadId)
         void live.steer(liveRun, steer).then((pushed) => {
-          if (pushed) frames.breakParagraph()
+          if (pushed) {
+            input.onSteer?.(steer)
+            frames.breakParagraph()
+          } else input.returnSteer?.(steer)
         }, () => cancel())
         return
       }
@@ -1261,8 +1282,26 @@ export class ClaudeSubscriptionProviderService {
       controller.signal.throwIfAborted()
       input.signal?.throwIfAborted()
       controller.signal.throwIfAborted()
+      const selected = parseThinkingSuffixFromModelId(input.model)
+      const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(selected.effort ?? '')
+        ? selected.effort as Options['effort'] : undefined
+      // Agent turns run unattended in the thread workspace, like Mousse's other agents.
+      const permissionMode: PermissionMode = planTurn ? 'plan' : readOnlyChild ? 'default' : 'bypassPermissions'
+      const launchAppend = claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.settings)), input.cwd)
+      const appendTexts = [input.systemPromptAppend ?? '', ...launchAppend]
+      // What a live process is started for (`HARD_PARTS`); a process the turn can reuse already holds the conversation.
+      const hard = [
+        instanceId,
+        resolve(input.cwd),
+        selected.baseId,
+        effort ?? null,
+        appendTexts.filter(Boolean).join('\n\n'),
+        input.mcp ? [input.mcp.url, input.mcp.token] : null,
+        readOnlyChild
+      ]
+      const reuse = !input.continuation && this.reusableLive(input.threadId, hard, resume) !== undefined
       const prompt = (input.appletInstructions ? input.appletInstructions + '\n\nCurrent request:\n' : '') +
-        (!resume && input.history
+        (!resume && !reuse && input.history
           ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
           : '') + input.prompt
       const content: SDKUserMessage['message']['content'] = [
@@ -1288,13 +1327,6 @@ export class ClaudeSubscriptionProviderService {
       const messages = async function* (): AsyncGenerator<SDKUserMessage> {
         yield userMessage(resume ?? '')
       }
-      const selected = parseThinkingSuffixFromModelId(input.model)
-      const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(selected.effort ?? '')
-        ? selected.effort as Options['effort'] : undefined
-      // Agent turns run unattended in the thread workspace, like Mousse's other agents.
-      const permissionMode: PermissionMode = planTurn ? 'plan' : readOnlyChild ? 'default' : 'bypassPermissions'
-      const launchAppend = claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.settings)), input.cwd)
-      const appendTexts = [input.systemPromptAppend ?? '', ...launchAppend]
       const buildOptions = (sdkController: AbortController, turnOf: () => TurnContext, isLive: boolean): Options => ({
         // Mousse's instructions first, then the user's own append text.
         ...this.options(input.cwd, sdkController, env, appendTexts),
@@ -1315,7 +1347,10 @@ export class ClaudeSubscriptionProviderService {
         ...(integrations?.pluginPath ? { plugins: [{ type: 'local' as const, path: integrations.pluginPath }] } : {}),
         ...this.permissionCallbacks(turnOf)
       })
-      if (input.drainSteer)
+      // A steer collected before the live run exists would have nowhere to go, so a live turn starts
+      // polling only once its message is pushed.
+      const startSteering = (): void => {
+        if (!input.drainSteer || steerTimer) return
         steerTimer = setInterval(() => {
           try {
             collectSteer()
@@ -1323,6 +1358,7 @@ export class ClaudeSubscriptionProviderService {
             cancel()
           }
         }, 100)
+      }
       if (input.continuation) {
         // Claude started this turn itself: it joins the one already in flight and pushes no prompt.
         live = this.live.get(input.threadId)
@@ -1333,37 +1369,32 @@ export class ClaudeSubscriptionProviderService {
         metrics.beginQuery(live.sessionId, saved?.usageBaseline)
         liveRun.attach((message) => frames.observe(message))
       } else {
-        const key = {
-          hard: JSON.stringify([
-            instanceId,
-            resolve(input.cwd),
-            selected.baseId,
-            effort ?? null,
-            appendTexts.filter(Boolean).join('\n\n'),
-            input.mcp ? [input.mcp.url, input.mcp.token] : null,
-            readOnlyChild
-          ]),
-          soft: this.launchKey(env, integrations),
-          mode: permissionMode
-        }
+        const key = { hard, soft: this.launchKey(env, integrations), mode: permissionMode }
         live = await this.acquireLive(input.threadId, key, resume, (created) => {
           created.current = turn
           return buildOptions(created.lifetime, () => created.current ?? turn, true)
         })
-        controller.signal.throwIfAborted()
-        if (live) {
-          live.current = turn
-          // The permission mode follows the composer: a live query switches it for this turn.
-          if (live.meta.permissionMode !== permissionMode) {
-            await live.setPermissionMode(permissionMode)
-            live.meta.permissionMode = permissionMode
-            controller.signal.throwIfAborted()
+        // Held until the run exists, so the idle release cannot close the process in between.
+        const hold = live?.reserve()
+        try {
+          controller.signal.throwIfAborted()
+          if (live) {
+            live.current = turn
+            // The permission mode follows the composer: a live query switches it for this turn.
+            if (live.meta.permissionMode !== permissionMode) {
+              await live.setPermissionMode(permissionMode)
+              live.meta.permissionMode = permissionMode
+              controller.signal.throwIfAborted()
+            }
+            liveRun = live.beginRun((message) => frames.observe(message))
+            live.push(liveRun, userMessage(live.sessionId ?? resume ?? ''))
           }
-          liveRun = live.beginRun((message) => frames.observe(message))
-          live.push(liveRun, userMessage(live.sessionId ?? resume ?? ''))
+        } finally {
+          hold?.()
         }
       }
       if (live && liveRun) {
+        startSteering()
         const aborted = new Promise<never>((_, reject) => {
           const fail = () => reject(controller.signal.reason ?? new Error('Turn cancelled'))
           if (controller.signal.aborted) fail()
@@ -1386,8 +1417,10 @@ export class ClaudeSubscriptionProviderService {
         }
         frames.sessionId ??= live.sessionId
         success = true
+        live.meta.pendingKey = false
       } else {
         // A one-shot query: the prompt ends with the turn, which ends the process.
+        startSteering()
         let nextPrompt: AsyncIterable<SDKUserMessage> = messages()
         const options = buildOptions(controller, () => turn, false)
         for (;;) {
@@ -1454,16 +1487,17 @@ export class ClaudeSubscriptionProviderService {
       return frames.text
     } finally {
       // Only this turn's controller: a live query is not the turn's to abort.
-      const cancelled = controller.signal.aborted
       controller.abort()
-      // Background helpers keep calling tools after the turn ended: they are checked by this turn's
-      // policy under a controller of their own, until the next turn replaces it. A cancelled turn's
-      // controller stays aborted, so what its interrupted process still asks for is refused.
-      if (live && !cancelled && live.current === turn) live.current = { ...turn, controller: new AbortController() }
+      // Background helpers keep calling tools after the turn ended, or was cancelled: they are checked by
+      // this turn's policy under a controller of their own, until the next turn replaces it.
+      if (live && live.current === turn) live.current = { ...turn, controller: new AbortController() }
       if (live && liveRun) {
         // A turn that ended without finishing still read what its result carried; a cancelled one did not.
         if (!liveRun.settled) live.abandon(liveRun)
         else if (!success) live.commit(liveRun)
+        // No history fingerprint was saved for a turn that did not finish: the next turn on this process
+        // continues what the process holds (see `reusableLive`).
+        if (!success) live.meta.pendingKey = true
       } else query?.close()
       this.queries.delete(input.threadId)
       this.controllers.delete(controller)
