@@ -2,7 +2,7 @@ import { Delegations } from './Delegations'
 import { Inbox } from './Inbox'
 import { stableStringify } from './json'
 import type { RunStore } from './RunStore'
-import type { AttemptStatus, ChildResultPayload, RunOutcome, RunRecord } from './types'
+import type { AttemptStatus, ChildResultPayload, InboxRecord, RunOutcome, RunRecord } from './types'
 
 export type RunTerminalStatus = 'completed' | 'interrupted' | 'failed' | 'cancelled' | 'uncertain'
 
@@ -66,8 +66,16 @@ export function writeTerminalRun(
 export function acknowledgeDeliveredRows(store: RunStore, run: RunRecord): void {
   if (run.status !== 'completed') return
   const inbox = new Inbox(store)
-  const rows = inbox.listDeliveredByRun(run.runId)
+  acknowledgeRows(store, inbox.listDeliveredByRun(run.runId))
+}
+
+/**
+ * Acknowledges rows a delivery consumed, and the tasks whose notice recorded showing the whole
+ * result. Joins the caller's transaction.
+ */
+export function acknowledgeRows(store: RunStore, rows: readonly InboxRecord[]): void {
   if (rows.length === 0) return
+  const inbox = new Inbox(store)
   inbox.markAcknowledged(rows.map((row) => row.inboxId))
   const delegations = new Delegations(store, inbox)
   for (const row of rows) {
