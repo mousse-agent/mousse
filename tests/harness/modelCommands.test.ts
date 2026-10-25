@@ -155,6 +155,25 @@ describe('/model honours hidden models and disabled instances', () => {
     expect(current.overrides).toEqual([{ instanceId: 'claude:work', llmProvider: 'claude-subscription', model: 'sonnet' }])
     expect(handleInteractiveSlash('/models', current.ctx).reply).toMatch(/\(claude:work\):\n {2}work-only \*/)
     expect(harness.configuredProviderIds()).toEqual(['claude-subscription'])
+
+    // Either account by its instance, from any current selection; a bare shared model asks which.
+    const other = cliContext(listModels)
+    const listed = handleInteractiveSlash('/models', other.ctx).reply
+    expect(listed).toContain('sonnet  (/model claude/sonnet)')
+    expect(listed).toContain('sonnet  (/model claude:work/sonnet)')
+    expect(listed).toMatch(/\n {2}opus\n/)
+    expect(handleInteractiveSlash('/models sonnet', other.ctx).reply).toBe('More than one provider lists `sonnet`. Name the instance:\n  /model claude/sonnet\n  /model claude:work/sonnet')
+    expect(other.overrides).toEqual([])
+    expect(handleInteractiveSlash('/model claude:work/sonnet', other.ctx).reply).toBe('Session model set to claude-subscription/sonnet (claude:work)')
+    expect(handleInteractiveSlash('/model claude sonnet', other.ctx).reply).toBe('Session model set to claude-subscription/sonnet (claude)')
+    expect(handleInteractiveSlash('/model claude:work/opus', other.ctx).reply).toMatch(/Model not found/)
+    // A model only one instance lists needs no instance.
+    expect(handleInteractiveSlash('/model opus', other.ctx).reply).toBe('Session model set to claude-subscription/opus (claude)')
+    expect(other.overrides).toEqual([
+      { instanceId: 'claude:work', llmProvider: 'claude-subscription', model: 'sonnet' },
+      { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' },
+      { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus' }
+    ])
   })
 
   it('resolve() rejects them for the /model purposes too', async () => {
