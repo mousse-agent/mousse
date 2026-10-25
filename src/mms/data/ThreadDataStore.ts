@@ -26,6 +26,7 @@ import type {
   ThreadLineage
 } from '../../shared/types'
 import { isDefaultThreadName } from '../../shared/threadTitle'
+import { visibleThreads } from '../../shared/threadLineage'
 import { parseMousseAgentSessions } from '../agents/MousseAgentService'
 import { normalizeQueuedMessages } from '../queue/ThreadMessageQueue'
 import { withThreadDataMutationLock } from '../queue/ThreadExecutionLease'
@@ -450,6 +451,20 @@ export class ThreadDataStore extends EventEmitter {
     this.listCache = [...standalone, ...projectThreads]
     this.listCacheProjectsKey = projectsKey
     return this.listCache
+  }
+
+  /**
+   * `listThreads(projectId)` without the subagent threads that sit under a parent. For clients that
+   * show threads as a flat list (channels); the parents are looked up in the complete inventory, so
+   * a subagent whose parent is in another project, or gone, is still judged correctly.
+   */
+  listVisibleThreads(projectId?: string): Thread[] {
+    return visibleThreads(this.listThreads(projectId), this.listAllThreads())
+  }
+
+  /** `listAllThreads()` without the subagent threads that sit under a parent. */
+  listAllVisibleThreads(): Thread[] {
+    return visibleThreads(this.listAllThreads())
   }
 
   private isLifecycleVisible(id: string): boolean {
@@ -1367,7 +1382,12 @@ export class ThreadDataStore extends EventEmitter {
     atomicWriteJsonSync(filePath, value)
   }
 
-  searchThreads(query: string, limit = 50): Array<{
+  /**
+   * Matches over every thread by default. `hideSubagents` leaves out the threads a thread list would
+   * fold under their parent (see `visibleThreads`); it applies before `limit`, so hidden threads
+   * never use up result slots.
+   */
+  searchThreads(query: string, limit = 50, options: { hideSubagents?: boolean } = {}): Array<{
     threadId: string
     threadName: string
     projectId?: string
@@ -1392,7 +1412,8 @@ export class ThreadDataStore extends EventEmitter {
 
     const projects = this.projectManager.listProjects()
     const projectNameById = new Map(projects.map((p) => [p.id, p.name]))
-    const threads = this.listAllThreads()
+    const inventory = this.listAllThreads()
+    const threads = options.hideSubagents ? visibleThreads(inventory) : inventory
 
     for (const thread of threads) {
       if (thread.settledAt) continue

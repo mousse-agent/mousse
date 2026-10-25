@@ -1,6 +1,7 @@
 import type { ChatSummary } from '../../../shared/chats'
 import type { Project, Thread, ThreadActivityState, TurnState } from '../../../shared/types'
 import type { MmsProfileServices } from '../../MmsProfileServices'
+import { visibleThreads } from '../../../shared/threadLineage'
 import { mmsJson } from './jsonOutput'
 
 /**
@@ -190,7 +191,8 @@ export class MmsListsSource {
     const s = this.services
     const activity = s.threadRuntimes.getActivitySnapshot()
     const turns = s.orchestrator.getTurnSnapshot()
-    const threads = s.threads.listAllThreads()
+    // Remote devices list threads the way the CLI does: subagents sit under their parent, not beside it.
+    const threads = visibleThreads(s.threads.listAllThreads())
     const status: Record<string, ListsStatus> = {}
     for (const thread of threads) {
       const entry = statusOf(activity[thread.id], turns[thread.id])

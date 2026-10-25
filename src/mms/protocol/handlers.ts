@@ -62,6 +62,7 @@ import {
 } from './validators'
 import { PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
 import { buildSubagentView } from '../run/delegation/subagentView'
+import { connectionSeesSubagents, visibleThreadsFor } from './threadVisibility'
 import { asCliProviderInstanceId, parseCliConfigPatch } from '../providers/cliConfig'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
@@ -562,10 +563,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.list': {
       const p = isObject(params) ? params : {}
       const projectId = asOptionalString(p.projectId)
-      const threads = projectId
-        ? ctx.mms.threads.listThreads(projectId)
-        : ctx.mms.threads.listAllThreads()
-      return { threads }
+      const inventory = ctx.mms.threads.listAllThreads()
+      const threads = projectId ? ctx.mms.threads.listThreads(projectId) : inventory
+      return { threads: visibleThreadsFor(ctx.connection, threads, inventory) }
     }
     case 'threads.get': {
       const p = isObject(params) ? params : {}
@@ -587,7 +587,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (lastUsed) {
         thread = ctx.mms.threads.updateThreadMeta(thread.id, { modelOverride: lastUsed })
       }
-      const threads = ctx.mms.threads.listAllThreads()
+      const threads = visibleThreadsFor(ctx.connection, ctx.mms.threads.listAllThreads())
       return { thread, threads }
     }
     case 'threads.delete': {
@@ -598,7 +598,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const operationResult = ctx.mms.lifecycle.getOperationResult(threadId, operationId)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { threads, lifecycle, operationResult }
+      return { threads: visibleThreadsFor(ctx.connection, threads), lifecycle, operationResult }
     }
     case 'threads.rename': {
       const p = isObject(params) ? params : {}
@@ -607,7 +607,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = ctx.mms.threads.updateThreadMeta(threadId, { name })
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads }
+      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
     }
     case 'threads.pin': {
       const p = isObject(params) ? params : {}
@@ -616,7 +616,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = ctx.mms.threads.setThreadPinned(threadId, pinned)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads }
+      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
     }
     case 'threads.settle': {
       const p = isObject(params) ? params : {}
@@ -625,7 +625,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = ctx.mms.threads.setThreadSettled(threadId, settled)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads }
+      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
     }
     case 'threads.reorder': {
       const p = isObject(params) ? params : {}
@@ -634,7 +634,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threads = ctx.mms.threads.reorderThreads(projectId, threadIds)
       const all = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads: all })
-      return { threads, all }
+      return { threads: visibleThreadsFor(ctx.connection, threads, all), all: visibleThreadsFor(ctx.connection, all) }
     }
     case 'threads.search': {
       const p = isObject(params) ? params : {}
@@ -643,7 +643,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         typeof p.limit === 'number' && Number.isFinite(p.limit) && p.limit > 0
           ? Math.min(Math.floor(p.limit), 200)
           : 50
-      return { results: ctx.mms.threads.searchThreads(query, limit) }
+      return { results: ctx.mms.threads.searchThreads(query, limit, { hideSubagents: !connectionSeesSubagents(ctx.connection) }) }
     }
     case 'thread.snapshot': {
       const p = isObject(params) ? params : {}
@@ -686,7 +686,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = ctx.mms.threads.updateThreadMeta(threadId, { name: title })
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads }
+      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
     }
     case 'threads.setModel': {
       const p = isObject(params) ? params : {}
@@ -716,7 +716,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = ctx.mms.threads.getThread(threadId)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, modelOverride: next, threads }
+      return { thread, modelOverride: next, threads: visibleThreadsFor(ctx.connection, threads) }
     }
     case 'threads.setWorktreeEnabled': {
       const p = isObject(params) ? params : {}
@@ -731,7 +731,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const thread = ctx.mms.threads.setThreadWorktreeEnabled(threadId, enabled)
       const threads = ctx.mms.threads.listAllThreads()
       ctx.emitEvent?.('threads.updated', { threads })
-      return { thread, threads }
+      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
     }
     case 'orchestrator.send': {
       const p = isObject(params) ? params : {}

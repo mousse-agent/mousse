@@ -151,7 +151,7 @@ async function handleUsage(ctx: SlashContext): Promise<string> {
 function handleThreads(ctx: SlashContext): string {
   const session =
     ctx.sessionManager.getSession(ctx.session.sessionKey) ?? ctx.session
-  const threads = ctx.threadStore.listAllThreads().map((t) => ({
+  const threads = ctx.threadStore.listAllVisibleThreads().map((t) => ({
     id: t.id,
     name: t.name
   }))

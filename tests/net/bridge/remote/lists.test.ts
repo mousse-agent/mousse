@@ -124,6 +124,21 @@ describe('phone sidebar lists', () => {
     expect(lists.chats[1]).toEqual({ id: 'c2', kind: 'group', name: 'Team', network: true, agents: [], updatedAt: at })
   })
 
+  it('leaves subagent threads out, but lists one whose parent is gone', () => {
+    const f = fakeServices()
+    const subagentOf = (parentThreadId: string) => ({ lineage: { parentThreadId, rootThreadId: parentThreadId, relationship: 'subagent' as const } })
+    f.threads.list = [
+      thread('parent'),
+      thread('child', subagentOf('parent')),
+      thread('grandchild', subagentOf('child')),
+      thread('orphan', subagentOf('trashed'))
+    ]
+    f.runtimes.activity = { parent: 'idle', child: 'processing', orphan: 'processing' }
+    const lists = new MmsListsSource(f.services).snapshot()
+    expect(lists.threads.map((entry) => entry.id)).toEqual(['parent', 'orphan'])
+    expect(Object.keys(lists.status)).toEqual(['orphan'])
+  })
+
   it('reports a change once per burst, and only when the lists changed', () => {
     const f = fakeServices(),
       timers = manualTimers()

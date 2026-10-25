@@ -394,7 +394,7 @@ export class ChannelRouter extends EventEmitter {
     const sessionKey = buildSessionKey(message.platform, message.chatId, message.threadId)
     const session = this.sessionManager.getSession(sessionKey)
     const projects = this.deps.threadStore.listProjects()
-    const standaloneThreads = this.deps.threadStore.listThreads()
+    const standaloneThreads = this.deps.threadStore.listVisibleThreads()
     if (projects.length === 0 && standaloneThreads.length === 0) {
       return 'No threads or projects are available.'
     }
@@ -441,7 +441,7 @@ export class ChannelRouter extends EventEmitter {
       title: 'Select a project',
       placeholder: 'Choose a project',
       options: projects.map((project) => {
-        const threadCount = this.deps.threadStore.listThreads(project.id).length
+        const threadCount = this.deps.threadStore.listVisibleThreads(project.id).length
         return {
           label: `${project.id === currentProjectId ? '✓ ' : ''}${project.name}`,
           description: `${threadCount} thread${threadCount === 1 ? '' : 's'}`,
@@ -463,7 +463,7 @@ export class ChannelRouter extends EventEmitter {
     message: InboundChannelMessage,
     project: Project
   ): InteractiveMenuDefinition | string {
-    const threads = this.deps.threadStore.listThreads(project.id)
+    const threads = this.deps.threadStore.listVisibleThreads(project.id)
     if (threads.length === 0) {
       return `No threads are available in ${project.name}.`
     }

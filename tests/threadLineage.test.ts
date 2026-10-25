@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isSubagentThread, nearestVisibleAncestor, rollUpActivity, subagentDescendants } from '../src/shared/threadLineage'
+import { isSubagentThread, nearestVisibleAncestor, openSubagentParentRow, rollUpActivities, rollUpActivity, subagentDescendants, visibleThreads } from '../src/shared/threadLineage'
 import type { ThreadActivitySnapshot, ThreadLineage } from '../src/shared/types'
 
 const sub = (id: string, parent: string, root = parent): { id: string; lineage: ThreadLineage } => ({
@@ -72,5 +72,63 @@ describe('rollUpActivity', () => {
 
   it('does not roll a child up into an unrelated thread', () => {
     expect(roll({ child: 'processing' }, 'lone')).toBe('idle')
+  })
+})
+
+describe('visibleThreads', () => {
+  const ids = (threads: readonly { id: string }[]) => threads.map((thread) => thread.id)
+
+  it('hides a subagent under its parent, at every depth', () => {
+    const list = [main('root'), sub('child', 'root'), sub('grandchild', 'child', 'root'), main('other')]
+    expect(ids(visibleThreads(list))).toEqual(['root', 'other'])
+  })
+
+  it('keeps a subagent whose parent is gone, and hides the subagents under it', () => {
+    const list = [sub('orphan', 'trashed'), sub('under-orphan', 'orphan', 'trashed'), main('root')]
+    expect(ids(visibleThreads(list))).toEqual(['orphan', 'root'])
+  })
+
+  it('looks parents up in the inventory when given a slice of it', () => {
+    const inventory = [main('root'), sub('child', 'root'), sub('orphan', 'trashed')]
+    // A slice without the parent does not make the child an orphan.
+    expect(ids(visibleThreads([inventory[1], inventory[2]], inventory))).toEqual(['orphan'])
+    // Without the inventory the slice alone cannot tell, so both stay.
+    expect(ids(visibleThreads([inventory[1], inventory[2]]))).toEqual(['child', 'orphan'])
+  })
+
+  it('returns a new array and leaves the input alone', () => {
+    const list = [main('a'), sub('b', 'a')]
+    const shown = visibleThreads(list)
+    expect(shown).not.toBe(list)
+    expect(list).toHaveLength(2)
+  })
+})
+
+describe('openSubagentParentRow', () => {
+  const list = [main('root'), sub('child', 'root'), sub('grandchild', 'child', 'root'), sub('orphan', 'trashed')]
+
+  it.each([
+    ['a thread with its own row has nothing to highlight in its place', 'root', null],
+    ['a subagent highlights its parent', 'child', 'root'],
+    ['a nested subagent highlights the nearest shown ancestor', 'grandchild', 'root'],
+    ['an orphan has its own row', 'orphan', null],
+    ['an unknown thread highlights nothing', 'missing', null]
+  ])('%s', (_name, id, expected) => {
+    expect(openSubagentParentRow(id, list)).toBe(expected)
+  })
+})
+
+describe('rollUpActivities', () => {
+  const list = [main('parent'), sub('child', 'parent'), sub('grandchild', 'child', 'parent'), main('lone')]
+
+  it('rolls every thread with subagents up in one pass, matching rollUpActivity', () => {
+    const activity: ThreadActivitySnapshot = { grandchild: 'awaiting_input', child: 'processing' }
+    const rows = rollUpActivities(list, activity)
+    expect(rows).toEqual({ parent: 'awaiting_input', child: 'awaiting_input' })
+    for (const id of Object.keys(rows)) expect(rows[id]).toBe(rollUpActivity(id, list, activity))
+  })
+
+  it('leaves out threads without subagents and keeps a quiet parent quiet', () => {
+    expect(rollUpActivities(list, { lone: 'processing', child: 'completed' })).toEqual({ parent: 'idle', child: 'completed' })
   })
 })
