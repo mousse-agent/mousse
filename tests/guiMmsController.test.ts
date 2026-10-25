@@ -154,7 +154,7 @@ describe('GuiMmsController lifecycle', () => {
     vi.spyOn(transport, 'sendRaw').mockImplementation((session, value) => {
       const frame = value as { result?: { methods?: string[] } }
       if (Array.isArray(frame.result?.methods)) {
-        value = { ...frame, result: { ...frame.result, methods: frame.result.methods.filter(method => method !== 'agents.listNamed') } }
+        value = { ...frame, result: { ...frame.result, methods: frame.result.methods.filter(method => method !== 'queue.list') } }
       }
       return send(session, value)
     })
@@ -168,7 +168,7 @@ describe('GuiMmsController lifecycle', () => {
     const clients = (server as unknown as { clients: Set<unknown> }).clients
     const count = clients.size
     try {
-      await expect(gui.prepareWindow(sender)).rejects.toThrow(/Missing APIs: agents.listNamed/)
+      await expect(gui.prepareWindow(sender)).rejects.toThrow(/Missing APIs: queue.list/)
       expect(gui.getWindowBindingForSender(sender.id)).toBeNull()
       await vi.waitFor(() => expect(clients.size).toBe(count))
       expect(sender.listenerCount('destroyed')).toBe(0)
@@ -188,7 +188,7 @@ describe('GuiMmsController lifecycle', () => {
       await vi.waitFor(() => expect(gui.connectionState).toBe('failed'), { timeout: 5_000 })
       expect(gui.connected).toBe(false)
       expect(resnapshot).not.toHaveBeenCalled()
-      expect(errors).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('agents.listNamed') }))
+      expect(errors).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('queue.list') }))
       expect(mms.getOwnerLease()?.owner.token).toBe(ownerToken)
     } finally { await gui.stop() }
   })

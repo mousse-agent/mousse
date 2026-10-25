@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ClaudeSubscriptionProviderService } from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import { ClaudeSubscriptionProviderService, claudeModelOptions } from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 
 const homes: string[] = []
@@ -96,6 +96,20 @@ describe('Claude Subscription native provider', () => {
     expect(service.llmProvider()?.models).toEqual([
       { id: 'sonnet', label: 'Sonnet', efforts: undefined }
     ])
+  })
+  it('names Claude models with their version and drops a duplicate default', () => {
+    const models = [
+      { value: 'default', resolvedModel: 'claude-opus-5-5', displayName: 'Default (recommended)', description: 'Use the default model (currently Opus 5.5) · $4/$20 per Mtok' },
+      { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus', description: 'Opus 5.5 · Best for everyday, complex tasks' },
+      { value: 'haiku', resolvedModel: 'claude-haiku-4-5', displayName: 'Haiku', description: 'Haiku 4.5 · Fastest for quick answers' },
+      { value: 'custom', displayName: 'Custom', description: 'model' }
+    ]
+    expect(claudeModelOptions(models).map((model) => [model.id, model.label])).toEqual([
+      ['opus', 'Opus 5.5'],
+      ['haiku', 'Haiku 4.5'],
+      ['custom', 'Custom']
+    ])
+    expect(claudeModelOptions([{ ...models[0], resolvedModel: 'claude-sonnet-5-5' }])[0].label).toBe('Opus 5.5')
   })
   it('refuses a signed-out terminal without starting a turn', async () => {
     const query = vi.fn(() => fakeQuery([result]))

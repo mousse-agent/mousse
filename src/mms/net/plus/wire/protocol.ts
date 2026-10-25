@@ -7,6 +7,8 @@ export const HOSTED_RELAY_PATH = '/v1/net/relay'
 export const HOSTED_RELAY_AUTH_DOMAIN = 'mousse-plus/net-relay-auth/v1'
 export const AUTH_MAX_BYTES = 16 * 1024
 export const FRAME_MAX_BYTES = 64 * 1024
+/** The most bytes one charge carries: a frame plus whatever earlier retryable failures left uncharged. */
+export const CHARGE_MAX_BYTES = 64 * 1024 * 1024
 /** Configured audience is origin + exact endpoint; never derive it from proxy headers. */
 export function canonicalAudience(address: string): string {
   let url: URL

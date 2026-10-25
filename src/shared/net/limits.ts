@@ -44,11 +44,47 @@ export const META_HEAD_FRESHNESS_MS = 30_000
 export const PREAUTH_MAX_CONNECTIONS = 32
 export const PREAUTH_MAX_PER_ADDRESS = 4
 export const PREAUTH_MAX_BYTES = 16 * 1024
+/**
+ * What a joining node accepts from the authority during enrollment: its hello and the result,
+ * which each carry the whole roster. The authority's TLS key is pinned by the invite, so this
+ * budget is larger than the unauthenticated preauth bound and covers every roster a normal hello
+ * can carry.
+ */
+export const ENROLLMENT_JOINER_MAX_BYTES = 64 * 1024
 export const PREAUTH_DEADLINE_MS = 10_000
+
+/** WebRTC direct path for signed-in phones (docs/net/protocol.md §11). */
+export const WEBRTC_SDP_MAX_BYTES = 16 * 1024
+export const WEBRTC_SDP_MAX_LINES = 100
+export const WEBRTC_MAX_CANDIDATES = 8
+/** How long an offer's ticket may take to reach an authenticated session. */
+export const WEBRTC_TICKET_TTL_MS = 15_000
+/** How long the computer gathers its own candidates before it answers. */
+export const WEBRTC_GATHER_MS = 1_500
+export const WEBRTC_OFFERS_PER_MINUTE = 6
+export const WEBRTC_PENDING_PER_NODE = 2
+export const WEBRTC_PENDING_MAX = 8
+export const WEBRTC_LIVE_PER_NODE = 4
+export const WEBRTC_LIVE_MAX = 16
+/** Raw bytes a phone may send on a new DataChannel before inner TLS completes. */
+export const WEBRTC_PREAUTH_MAX_BYTES = 64 * 1024
+/** Largest DataChannel message either side sends. */
+export const WEBRTC_CHUNK_BYTES = 64 * 1024
+/** Received bytes the computer buffers for a reader that has stopped reading. */
+export const WEBRTC_INBOUND_MAX_BYTES = 8 * 1024 * 1024
+/** UDP ports the computer's WebRTC sockets use. */
+export const WEBRTC_PORT_RANGE = [50_000, 50_999] as const
 export const SESSION_MAX_SUBSCRIPTIONS = 256
 export const SESSION_MAX_INFLIGHT_RPCS = 64
 export const SESSION_MAX_BLOB_TRANSFERS = 8
 export const SESSION_MAX_SPACE_PROOFS = 8
+/**
+ * Live records one session may hold queued for a single stream before it resyncs the subscriber.
+ * A refreshed display snapshot enqueues all its chunks at once, so the caps sit above one largest
+ * snapshot: 32 MiB of source is 1026 records and about 45 MiB encoded.
+ */
+export const SESSION_MAX_LIVE_QUEUE_RECORDS = 1280
+export const SESSION_MAX_LIVE_QUEUE_BYTES = 64 * 1024 * 1024
 export const SPACE_PROOF_DEADLINE_MS = 30_000
 export const SPACE_DISCOVERY_MAX_CONTROLS = 64
 export const SPACE_DISCOVERY_MAX_CONTROL_BYTES = 128 * 1024

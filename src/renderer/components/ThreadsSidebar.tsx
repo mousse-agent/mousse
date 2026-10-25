@@ -2,9 +2,9 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, CircleAlert, CircleCheck, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, ListTree, Loader2, MessagesSquare, MessageSquarePlus, Pin, Search } from '../lib/icons'
+import { Archive, CircleCheck, CircleDotDashed, Edit, Folder, FolderOpen, FolderPlus, FolderKanban, GitBranch, ListTree, Loader2, MessageQuestion, MessagesSquare, MessageSquarePlus, Pin, Search } from '../lib/icons'
 
-import type { Thread, ThreadActivityState } from '../../shared/types'
+import { isThreadActivityActive, type Thread, type ThreadActivityState } from '../../shared/types'
 import { findUnstartedThread, isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { sortSidebarThreads } from '../../shared/threadSidebarSort'
 import { setReferenceDragData } from '../../shared/chatReferences'
@@ -235,7 +235,7 @@ function ThreadCardBody({
   onCancelRename: () => void
 }) {
   const hue = thread.projectId ? (Math.abs(hashText(thread.projectId)) % 6) + 1 : 0
-  const age = threadAge(activity === 'processing' ? startedAt ?? thread.updatedAt : thread.updatedAt)
+  const age = threadAge(isThreadActivityActive(activity) ? startedAt ?? thread.updatedAt : thread.updatedAt)
   return (
     <>
       {projectName ? (
@@ -253,10 +253,15 @@ function ThreadCardBody({
               <Loader2 size={12} strokeWidth={2} className="icon-spin" aria-hidden="true" />
               Working{age && age !== 'now' ? ` ${age}` : ''}
             </span>
-          ) : activity === 'awaiting_input' ? (
+          ) : activity === 'waiting' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-waiting">
-              <CircleAlert size={12} strokeWidth={2} aria-hidden="true" />
-              Waiting
+              <CircleDotDashed size={12} strokeWidth={2} aria-hidden="true" />
+              Waiting{age && age !== 'now' ? ` ${age}` : ''}
+            </span>
+          ) : activity === 'awaiting_input' ? (
+            <span className="threads-sidebar-card-status threads-sidebar-card-status-input">
+              <MessageQuestion size={12} strokeWidth={2} aria-hidden="true" />
+              Input
             </span>
           ) : activity === 'completed' ? (
             <span className="threads-sidebar-card-status threads-sidebar-card-status-done">
@@ -305,8 +310,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const speakingThreadId = useSpeakingThreadId()
-  const centerAgentId = useAppStore((s) => s.centerAgentId)
-  const setCenterAgentId = useAppStore((s) => s.setCenterAgentId)
 
   const threadActivity = useAppStore((s) => s.threadActivity)
   const turnStates = useAppStore((s) => s.turnStates)
@@ -703,11 +706,22 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
     if (state === 'awaiting_input') {
       return (
-        <CircleAlert
+        <MessageQuestion
           size={14}
           strokeWidth={2}
           className="threads-sidebar-status-icon threads-sidebar-status-icon--question"
-          aria-label="Agent has a question"
+          aria-label="Agent needs input"
+        />
+      )
+    }
+
+    if (state === 'waiting') {
+      return (
+        <CircleDotDashed
+          size={14}
+          strokeWidth={2}
+          className="threads-sidebar-status-icon threads-sidebar-status-icon--waiting"
+          aria-label="Agent is waiting"
         />
       )
     }
@@ -995,19 +1009,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           </button>
         ))}
       </div>
-
-      {centerAgentId && (
-        <button
-          type="button"
-          className="threads-sidebar-main-agent"
-          onClick={() => setCenterAgentId(null)}
-        >
-          <span className="threads-sidebar-main-agent-kicker">Main agent</span>
-          <span className="threads-sidebar-main-agent-name">
-            {threads.find((thread) => thread.id === activeThreadId)?.name || 'This chat'}
-          </span>
-        </button>
-      )}
 
       <div className="threads-sidebar-scroll">
 

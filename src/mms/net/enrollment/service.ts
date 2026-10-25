@@ -422,6 +422,8 @@ export class EnrollmentService {
       self = identity.self()
     if (!self?.isAuthority) throw new NetError('forbidden')
     if (!this.protected()) throw new NetError('keystore_locked')
+    // The invite carries the whole roster; rosters written before pruning shrink first.
+    identity.compactRoster()
     const ttl = input.ttlMs ?? 600000,
       granted = input.caps ?? [...DEFAULT_NODE_CAPABILITIES]
     if (!Number.isSafeInteger(ttl) || ttl < 1 || ttl > NODE_DELEGATION_TTL_MS)

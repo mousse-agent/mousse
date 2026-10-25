@@ -350,7 +350,8 @@ describe('P3 real MMS remote Bridge', () => {
       )
       .catch((error) => error)
     await vi.waitFor(() => expect(calls).toHaveLength(1))
-    expect(deltas.length).toBeGreaterThan(0)
+    // Live deltas are batched and published about every 100 ms.
+    await vi.waitFor(() => expect(deltas.length).toBeGreaterThan(0))
     expect(await expired).toMatchObject({ code: 'deadline_exceeded' })
     await vi.waitFor(
       () => {
@@ -581,4 +582,55 @@ describe('P3 real MMS remote Bridge', () => {
       expect.objectContaining({ code: 'bad_request' })
     )
   })
+
+  it('installs a display snapshot larger than the live queue cap used to allow', async () => {
+    const p = await setup(),
+      thread = p.mms.threads.createThread('Huge display')
+    // Like the product wiring, every appended display record is published to the live session.
+    let publish: NetSyncSession['publishRecord'] | undefined
+    const adapter = new ThreadStreamAdapter({
+      db: p.aDb,
+      store: p.aStore,
+      generations: p.aStore,
+      identity: p.aIdentity,
+      keys: p.aKeys,
+      clock: systemClock,
+      source: new MmsThreadSource(p.mms),
+      onRecord: (stream, record) => void publish?.(stream, record).catch(() => undefined),
+      maxRows: 8,
+      maxBytes: 65536
+    })
+    resources.push(() => adapter.close())
+    const descriptor = adapter.activate(thread.id)
+    // 8 MiB of content is about 11 MiB across 260 chunk records, all appended before the first send.
+    const message = {
+      id: 'huge-source-message',
+      role: 'assistant' as const,
+      content: 'z'.repeat(8 * 1024 * 1024),
+      timestamp: new Date().toISOString()
+    }
+    p.mms.threads.mutateThreadData(thread.id, () => ({ messages: [message] }))
+    p.mms.orchestrator.getOrCreateSession(thread.id).messages = [message]
+    // Opening a snapshot refreshes the display, which truncates the stale history.
+    adapter.store.openSnapshot(descriptor.id).close()
+    p.bStore.createStream(descriptor, 1)
+    const live = await p.connect(adapter.store)
+    publish = (stream, record) => live.a.publishRecord(stream, record)
+    await new Promise<void>((resolve, reject) => {
+      const stop = live.b.onClosed((error) => reject(error ?? new Error('Snapshot carrier closed')))
+      live.b.subscribe(descriptor.id, {
+        onRecord() {},
+        onCaughtUp() {},
+        onSnapshotInstalled() {
+          stop()
+          resolve()
+        },
+        onError(code) {
+          stop()
+          reject(new Error(code))
+        }
+      })
+    })
+    expect(p.bStore.cursor(descriptor.id).seq).toBe(adapter.store.head(descriptor.id).seq)
+  }, 60_000)
 })

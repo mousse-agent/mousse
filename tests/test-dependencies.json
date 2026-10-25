@@ -42,6 +42,11 @@
       "run": ["tests/net/plus/enrollment-seal.test.ts", "tests/net/identity/privateStreamKeys.test.ts", "tests/net/protocol/codec.test.ts", "tests/net/spaces/private/service.test.ts", "tests/net/spaces/host/invites.test.ts", "tests/net/spaces/host/meta.test.ts"]
     },
     {
+      "name": "development launchers start processes, so tests cover their helpers",
+      "when": ["scripts/dev.mjs", "scripts/dev-mms.mjs", "scripts/gui-launch.mjs"],
+      "run": ["tests/platformDevelopmentRuntime.test.ts", "tests/mmsDevProbe.test.ts", "tests/linuxGuiLaunch.test.ts"]
+    },
+    {
       "name": "team workflow scripts have their own node:test files",
       "when": ["scripts/team-status.mjs", "scripts/team-cleanup.mjs", "scripts/team-*.test.mjs"],
       "run": ["tests/teamWorkflowScripts.test.ts"]

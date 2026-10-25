@@ -14,19 +14,25 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { ThreadRuntime } from './ThreadRuntime'
 import type { Agent, AgentStatus, Task, ThreadActivityState } from '../../shared/types'
 
-const PROCESSING_AGENT_STATUSES: ReadonlySet<AgentStatus> = new Set([
+const BUSY_AGENT_STATUSES: ReadonlySet<AgentStatus> = new Set([
   'starting',
   'running',
   'merging'
 ])
 
-/** A thread remains processing while any worker it owns is still doing work. */
+/**
+ * A live turn keeps its own state (Working, Waiting on a wait tool, or Input). Once it ends,
+ * thread-owned agents or delegated tasks that are still running hold the thread in Waiting
+ * instead of Done, since they report back to it.
+ */
 export function deriveThreadActivity(
   turnActivity: ThreadActivityState,
-  agents: ReadonlyArray<Pick<Agent, 'status'>>
+  agents: ReadonlyArray<Pick<Agent, 'status'>>,
+  hasPendingDelegations = false
 ): ThreadActivityState {
-  return agents.some((agent) => PROCESSING_AGENT_STATUSES.has(agent.status))
-    ? 'processing'
+  if (turnActivity !== 'idle' && turnActivity !== 'completed') return turnActivity
+  return hasPendingDelegations || agents.some((agent) => BUSY_AGENT_STATUSES.has(agent.status))
+    ? 'waiting'
     : turnActivity
 }
 
@@ -40,6 +46,8 @@ export class ThreadRuntimeManager extends EventEmitter {
   private readonly registryListeners = new Map<string, RuntimeListenerBundle>()
   /** Turn lifecycle state before thread-owned background agent work is folded in. */
   private readonly turnActivity = new Map<string, ThreadActivityState>()
+  /** Threads with delegated tasks still running. */
+  private readonly pendingDelegations = new Set<string>()
   private threadStore: ThreadDataStore | null = null
   private orchestrator: OrchestratorService | null = null
   private ptyManager: PtyManager | null = null
@@ -95,13 +103,13 @@ export class ThreadRuntimeManager extends EventEmitter {
     if (this.registryListeners.has(threadId)) return
     const onAgents = (): void => {
       const agents = rt.agents.list()
-      const hasProcessingAgent = agents.some((agent) =>
-        PROCESSING_AGENT_STATUSES.has(agent.status)
+      const hasBusyAgent = agents.some((agent) =>
+        BUSY_AGENT_STATUSES.has(agent.status)
       )
       // Agent resume/spawn can happen outside a foreground turn. In that case the
       // eventual resting state is completed rather than dropping back to no indicator.
       if (
-        hasProcessingAgent &&
+        hasBusyAgent &&
         (this.turnActivity.get(threadId) ?? 'idle') === 'idle'
       ) {
         this.turnActivity.set(threadId, 'completed')
@@ -190,9 +198,12 @@ export class ThreadRuntimeManager extends EventEmitter {
     this.publishDerivedActivity(threadId, rt, true)
   }
 
-  setTurnStatePhase(threadId: string, phase: import('../../shared/types').TurnPhase): void {
-    const base: ThreadActivityState = phase === 'awaiting_input' ? 'awaiting_input' : (['queued','thinking','streaming','tool_running','finalizing'] as readonly string[]).includes(phase) ? 'processing' : phase === 'completed' ? 'completed' : 'idle'
-    this.setActivity(threadId, base)
+  /** Whether `threadId` has delegated tasks still running; they wake it when they finish. */
+  setPendingDelegations(threadId: string, pending: boolean): void {
+    if (pending === this.pendingDelegations.has(threadId)) return
+    if (pending) this.pendingDelegations.add(threadId)
+    else this.pendingDelegations.delete(threadId)
+    this.publishDerivedActivity(threadId, this.getOrHydrate(threadId))
   }
 
   private publishDerivedActivity(
@@ -202,7 +213,8 @@ export class ThreadRuntimeManager extends EventEmitter {
   ): void {
     const state = deriveThreadActivity(
       this.turnActivity.get(threadId) ?? rt.activity,
-      rt.agents.list()
+      rt.agents.list(),
+      this.pendingDelegations.has(threadId)
     )
     if (!force && state === rt.activity) return
     if (state !== rt.activity) rt.setActivity(state)
@@ -273,6 +285,7 @@ export class ThreadRuntimeManager extends EventEmitter {
     this.questions?.dismissAllForThread(threadId)
     this.runtimes.delete(threadId)
     this.turnActivity.delete(threadId)
+    this.pendingDelegations.delete(threadId)
   }
 
   /**

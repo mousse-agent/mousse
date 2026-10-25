@@ -32,6 +32,7 @@ import {
 import { SettingsStore } from '../../mms/settings/SettingsStore'
 import { FileService } from '../../mms/files/FileService'
 import { GitService } from '../../mms/git/GitService'
+import { listEditors, openInEditor } from '../editors'
 import { BrowserViewManager } from '../browser/BrowserViewManager'
 import type { AttachedBrowserHost } from '../browser/AttachedBrowserHost'
 import { domainObject } from '../../mms/protocol/domainRegistry'
@@ -39,6 +40,7 @@ import { profileBrowserPartition } from '../browser/browserPolicy'
 import { ThreadActivityTracker } from '../data/ThreadActivityTracker'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
 import { LOCAL_TTS_MODELS, type ProviderSpeechRequest, type ProviderSpeechResult } from '../../shared/readAloud'
+import { SPEECH_HOST_METHODS } from '../../shared/speechRelay'
 import {
   LOCAL_STT_MODELS,
   PROVIDER_STT_MAX_BYTES,
@@ -74,7 +76,6 @@ import {
   type WindowDragPoint
 } from '../windowState'
 import { applyWindowMaterial, attachWindowFocusListeners, setWindowProfileSettings } from '../windowMaterial'
-import { closeAgentsTasksWindow, getAgentsTasksWindow, openAgentsTasksWindow } from '../agentsTasksWindow'
 import {
   getThreadNotificationPresentation,
   type ThreadNotificationKind
@@ -84,9 +85,8 @@ import type {
   BrowserBounds,
   ChannelConfig,
   ChannelPlatform,
-  ChatImageAttachment,
-  ContextUsageSnapshot,
   CreateScheduledJobInput,
+  GitCommitOptions,
   MainView,
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
@@ -97,6 +97,7 @@ import type {
   TurnStateSnapshot,
   UserQuestionAnswers
 } from '../../shared/types'
+import { isThreadActivityActive } from '../../shared/types'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import type {
   GitHubCloneRepositoryInput,
@@ -136,6 +137,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...SPACES_LOCAL_METHODS,
   ...BOTS_LOCAL_METHODS,
   ...SPACE_ARCHIVE_METHODS,
+  ...SPEECH_HOST_METHODS,
   ...BROWSER_ACCESS_METHODS,
   ...BROWSER_GUI_METHODS,
   ...BROWSER_SETUP_METHODS,
@@ -202,6 +204,9 @@ function applyWindowAccentBackground(
   )
 }
 
+/** Longest delay a timer accepts (about 24 days): a request that effectively never times out. */
+const NO_REQUEST_TIMEOUT_MS = 2_147_483_647
+
 function normalizeSendContent(request: OrchestratorSendInput): {
   content: string
   requestId?: string
@@ -231,8 +236,8 @@ export function registerGuiIpc(
     repoRoot
   } = services
   activeGuiMms = guiMms
-  registerLinuxWindowResizeIpc(getWindow, getAgentsTasksWindow)
-  registerAppletIpc(registerHandler, guiMms, () => [getWindow(), getAgentsTasksWindow()])
+  registerLinuxWindowResizeIpc(getWindow)
+  registerAppletIpc(registerHandler, guiMms, () => [getWindow()])
 
   const browserHost = (event: Electron.IpcMainInvokeEvent): AttachedBrowserHost => {
     if (event.senderFrame !== event.sender.mainFrame || !services.attachedBrowserHost) throw new Error('In-app browser automation is unavailable')
@@ -490,10 +495,10 @@ export function registerGuiIpc(
         // Any stop of work needs the user: finished, asked a question / paused
         // for approval (awaiting_input), or went idle (interrupted, aborted, or
         // planning pause). Completion belongs to the whole thread, not merely
-        // the parent turn — the daemon keeps this state processing while an
-        // owning subagent is still active. Requiring previous === processing
-        // dings exactly once per work cycle.
-        if (previousState === 'processing') {
+        // the parent turn — the daemon keeps this state waiting while an
+        // owning subagent is still active. Requiring a previous working or
+        // waiting state dings exactly once per work cycle.
+        if (isThreadActivityActive(previousState)) {
           if (state === 'completed') {
             notifyThread(event.threadId, 'completed', currentPresentation().getActiveThreadId())
           } else if (state === 'awaiting_input') {
@@ -508,7 +513,7 @@ export function registerGuiIpc(
       // A question can arrive without (or before) the awaiting_input activity
       // event. If the thread is still tracked as working, flip it and ding;
       // if the activity event already landed, that path already notified.
-      if (activityTrackerFor().getState(event.threadId) === 'processing') {
+      if (isThreadActivityActive(activityTrackerFor().getState(event.threadId))) {
         setThreadActivity(event.threadId, 'awaiting_input')
         notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
       }
@@ -657,7 +662,8 @@ export function registerGuiIpc(
     bridgeProtocolEvent(event, target, presentationForSender(senderId))
     if (event.type === 'activity' && event.threadId) {
       const state = (event.data as { state?: ThreadActivityState } | null)?.state
-      if (!replay && previousActivity === 'processing' && state && state !== 'processing') {
+      // Working → Waiting is still the same work cycle; only its end notifies.
+      if (!replay && isThreadActivityActive(previousActivity) && state && !isThreadActivityActive(state)) {
         const kind: ThreadNotificationKind = state === 'completed'
           ? 'completed'
           : state === 'awaiting_input'
@@ -672,7 +678,7 @@ export function registerGuiIpc(
         )
       }
     }
-    if (event.type === 'questions.pending' && event.threadId && tracker.getState(event.threadId) === 'processing') {
+    if (event.type === 'questions.pending' && event.threadId && isThreadActivityActive(tracker.getState(event.threadId))) {
       tracker.setState(event.threadId, 'awaiting_input')
       target('threads:activity', tracker.getSnapshot())
       if (!replay) notifyThread(
@@ -1264,12 +1270,6 @@ export function registerGuiIpc(
 
   // ── Phase 4: agents / tasks / PTY / Mousse subagents (protocol) ──────────
 
-  registerHandler('agents:listNamed', async (_e, threadId: string) => guiMms.request('agents.listNamed', { threadId }))
-  for (const action of ['createNamed', 'recallNamed', 'integrateNamed', 'reviewNamed'] as const) {
-    registerHandler(`agents:${action}`, async (_e, threadId: string, input: Record<string, unknown>) =>
-      guiMms.request(`agents.${action}`, { ...input, threadId }))
-  }
-
   registerHandler('agents:list', async (_e, threadId?: string) => {
     const id =
       typeof threadId === 'string' && threadId.trim()
@@ -1333,59 +1333,6 @@ export function registerGuiIpc(
       return res.task
     }
   )
-  registerHandler('mousseAgent:getMessages', async (_e, agentId: string) => {
-    const threadId = currentPresentation().getActiveThreadId()
-    if (!threadId) return []
-    const res = await guiMms.request<{ messages: unknown[] }>('mousseAgent.getMessages', {
-      threadId,
-      agentId
-    })
-    return res.messages
-  })
-  registerHandler('mousseAgent:getAssignment', async (_e, agentId: string) => {
-    const res = await guiMms.request<{ assignment?: unknown }>('mousseAgent.getAssignment', {
-      agentId
-    })
-    return res.assignment
-  })
-  registerHandler('mousseAgent:getContextUsage', async (_e, agentId: string, draftInput = '') => {
-    const threadId = currentPresentation().getActiveThreadId()
-    if (!threadId) return undefined
-    const res = await guiMms.request<{ usage?: ContextUsageSnapshot }>('mousseAgent.contextUsage', {
-      threadId,
-      agentId,
-      draftInput
-    })
-    return res.usage
-  })
-  registerHandler('mousseAgent:retryConnection', async (_e, agentId: string) => {
-    const threadId = currentPresentation().getActiveThreadId()
-    if (!threadId) return
-    await guiMms.request('mousseAgent.retry', { threadId, agentId })
-  })
-  registerHandler('mousseAgent:abort', async (_e, agentId: string) => {
-    const res = await guiMms.request<{ aborted: boolean }>('mousseAgent.abort', { agentId })
-    return res.aborted
-  })
-  registerHandler(
-    'mousseAgent:send',
-    async (
-      _e,
-      agentId: string,
-      content: string,
-      images?: ChatImageAttachment[]
-    ) => {
-      const threadId = currentPresentation().getActiveThreadId()
-      if (!threadId) return { accepted: false, reason: 'missing' as const }
-      return guiMms.request<{ accepted: boolean; reason?: string }>('mousseAgent.send', {
-        threadId,
-        agentId,
-        content,
-        images
-      })
-    }
-  )
-
   registerHandler('pty:write', async (_e, ptyId: string, data: string) => {
     await guiMms.request('pty.write', { ptyId, data })
   })
@@ -1807,12 +1754,30 @@ export function registerGuiIpc(
   )
   registerHandler(
     'git:commit',
-    async (_e, message: string, projectId?: string, cwd?: string) => {
-      await gitService.commit(await resolveGitCwd(projectId, cwd), message)
+    async (_e, message: string, projectId?: string, cwd?: string, options?: GitCommitOptions) => {
+      await gitService.commit(await resolveGitCwd(projectId, cwd), message, options)
     }
   )
+  registerHandler('git:init', async (_e, projectId?: string, cwd?: string) => {
+    await gitService.init(await resolveGitCwd(projectId, cwd))
+  })
   registerHandler('git:push', async (_e, projectId?: string, cwd?: string) => {
     await gitService.push(await resolveGitCwd(projectId, cwd))
+  })
+  registerHandler('git:lastCommitMessage', async (_e, projectId?: string, cwd?: string) =>
+    gitService.lastCommitMessage(await resolveGitCwd(projectId, cwd))
+  )
+  registerHandler('git:pullRequest', async (_e, projectId?: string, cwd?: string, branch?: string) =>
+    gitService.github.getPullRequest(await resolveGitCwd(projectId, cwd), typeof branch === 'string' ? branch : undefined)
+  )
+  registerHandler('git:createPullRequest', async (_e, projectId?: string, cwd?: string) => {
+    await gitService.github.createPullRequest(await resolveGitCwd(projectId, cwd))
+  })
+  registerHandler('editors:list', async (_e, options?: { refresh?: boolean }) =>
+    listEditors(options)
+  )
+  registerHandler('editors:open', async (_e, editorId: string, path: string) => {
+    await openInEditor(editorId, path)
   })
 
   registerHandler('github:status', async () => {
@@ -2087,6 +2052,17 @@ export function registerGuiIpc(
     broadcast('providers:changed', res.providers)
     return res.config
   })
+  // Progress reaches the renderer as `providers:install:event` through the protocol event bridge.
+  registerHandler('providers:installAntigravity', async () => {
+    // A slow connection may need hours; the daemon owns the download and cancel is explicit, so this request never times out.
+    // The daemon announces the change to every window of the profile when the install ends.
+    const res = await guiMms.request<{ config: unknown }>('providers.installAntigravity', {}, NO_REQUEST_TIMEOUT_MS)
+    return res.config
+  })
+  registerHandler('providers:cancelAntigravityInstall', async () => {
+    const res = await guiMms.request<{ cancelled: boolean }>('providers.cancelAntigravityInstall', {})
+    return res.cancelled
+  })
   registerHandler('dialog:pickExecutable', async (event, request: unknown) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? getWindow()
     return pickExecutable((options) => (win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)), request)
@@ -2170,22 +2146,11 @@ export function registerGuiIpc(
     broadcast('app:navigateMainView', view)
   })
   registerHandler('window:focusMain', () => {
-    closeAgentsTasksWindow()
     const win = getWindow()
     if (!win || win.isDestroyed()) return
     if (win.isMinimized()) win.restore()
     win.show()
     win.focus()
-  })
-  registerHandler('window:closeAgentsTasks', () => {
-    closeAgentsTasksWindow()
-  })
-  registerHandler('window:openAgentsTasks', (e, anchor?: { x: number; y: number }) => {
-    openAgentsTasksWindow(
-      settings,
-      BrowserWindow.fromWebContents(e.sender) ?? getWindow() ?? undefined,
-      anchor
-    )
   })
   registerHandler('window:minimize', () => {
     getWindow()?.minimize()

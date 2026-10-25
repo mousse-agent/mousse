@@ -12,7 +12,7 @@ it('paints the real shell and retryable skeleton before trusted binding, then pr
   let child: ChildProcess | undefined, exited: Promise<number | null> | undefined
   // I retain the real root, App, profile switcher, browser permission poll and
   // hidden ChannelsPanel; unrelated editors/transcripts are outside this check.
-  const displays = ['OrchestratorChat', 'ChatWorkspace', 'ThreadsSidebar', 'ProjectTerminalPanel', 'FilesPanel', 'GitPanel', 'DocumentPanel', 'AgentsPanel', 'SettingsPage', 'ScheduledPage']
+  const displays = ['OrchestratorChat', 'ChatWorkspace', 'ThreadsSidebar', 'ProjectTerminalPanel', 'FilesPanel', 'GitPanel', 'DocumentPanel', 'SettingsPage', 'ScheduledPage']
   try {
     await build({
       entryPoints: [resolve('tests/fixtures/renderer-startup/entry.tsx')], outfile: join(directory, 'entry.js'), bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic',

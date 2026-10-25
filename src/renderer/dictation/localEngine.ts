@@ -27,15 +27,22 @@ function failAll(error: Error): void {
 }
 
 function createWorker(model: LocalSttModel): Worker {
-  return model.runtime === 'nemo-transducer'
-    ? new Worker(new URL('./parakeetWorker.ts', import.meta.url), { type: 'module' })
-    : new Worker(new URL('./moonshineWorker.ts', import.meta.url), { type: 'module' })
+  switch (model.runtime) {
+    case 'nemo-transducer':
+      return new Worker(new URL('./parakeetWorker.ts', import.meta.url), { type: 'module' })
+    case 'whisper':
+      return new Worker(new URL('./whisperWorker.ts', import.meta.url), { type: 'module' })
+    case 'moonshine':
+      return new Worker(new URL('./moonshineWorker.ts', import.meta.url), { type: 'module' })
+  }
 }
 
 function ensureWorker(model: LocalSttModel): Worker {
   if (worker?.modelId === model.id) return worker.worker
   disposeLocalEngine()
   const created = createWorker(model)
+  const init: LocalSttWorkerRequest = { type: 'init', modelId: model.id }
+  created.postMessage(init)
   serveModelFiles(created, (path) => window.mousse.dictation.readLocalModelFile(model.id, path))
   created.addEventListener('message', (event: MessageEvent<LocalSttWorkerEvent>) => {
     const message = event.data
@@ -89,21 +96,36 @@ function transcribeSegment(model: LocalSttModel, samples: Float32Array): Promise
   })
 }
 
-/** Transcribes a recording with a local model, one segment at a time. */
-export async function transcribeWithLocalModel(modelId: LocalSttModelId, recording: Blob): Promise<string> {
+/**
+ * Transcribes a recording with a local model, one segment at a time. `onPartial` receives the
+ * text of the segments done so far after each one. Aborting `signal` stops before the next
+ * segment goes to the worker and rejects; the segment the worker is already on finishes unseen.
+ */
+export async function transcribeWithLocalModel(
+  modelId: LocalSttModelId,
+  recording: Blob,
+  onPartial?: (text: string) => void,
+  signal?: AbortSignal
+): Promise<string> {
   const model = findLocalSttModel(modelId)
   if (!model) throw new Error(`Unknown local dictation model: ${modelId}`)
   cancelIdleDispose()
   activeTranscriptions++
   try {
+    signal?.throwIfAborted()
     const samples = await decodeRecording(recording, model.sampleRate)
     const minSamples = Math.ceil(MIN_SEGMENT_SECONDS * model.sampleRate)
     const parts: string[] = []
     for (const segment of splitIntoSegments(samples, model.sampleRate, model.maxSegmentSeconds)) {
+      signal?.throwIfAborted()
       if (segment.length < minSamples) continue
       const text = await transcribeSegment(model, segment)
-      if (text) parts.push(text)
+      if (text) {
+        parts.push(text)
+        if (!signal?.aborted) onPartial?.(parts.join(' '))
+      }
     }
+    signal?.throwIfAborted()
     return parts.join(' ')
   } finally {
     activeTranscriptions--

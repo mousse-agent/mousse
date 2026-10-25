@@ -10,6 +10,7 @@ import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdm
 import { BrowserArtifactService } from '../src/mms/browser/BrowserArtifactService'
 import { getExternalResourceClaims } from '../src/mms/lifecycle/LifecycleClaims'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
+import { seedLegacyNamedEpisode } from './fixtures/legacy-named-agent'
 
 const homes: string[] = []
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }) })
@@ -131,5 +132,18 @@ describe('source-derived lifecycle resource inventory', () => {
     expect(ambiguous.blockers.some((item) => item.includes('Unknown record'))).toBe(true)
     expect(ambiguous.resources.find((item) => item.identity === repo)?.ownership).toBe('unknown')
     expect(ambiguous.blockers.some((item) => item.includes('Unverified worktree'))).toBe(true)
+  })
+})
+
+describe('legacy named-agent data left by older builds', () => {
+  it('still holds a recall claim for the identity and a pending-integration claim for an unintegrated isolated result', () => {
+    const { location, inventory } = fixture()
+    const worktreePath = join(tmpdir(), 'legacy-named-agent-worktree'), branch = 'mousse/agent/legacy-writer'
+    seedLegacyNamedEpisode(location, { name: 'Writer', episodeId: 'legacy-writer', workspace: 'isolated', access: 'write', worktreePath, branch, baseSha: 'a'.repeat(40), resultSha: 'b'.repeat(40) })
+    const resources = inventory().resources
+    const claimsOn = (identity: string) => resources.find((item) => item.identity === identity)?.claims.map((claim) => claim.kind)
+    expect(claimsOn(`refs/heads/${branch}`)).toEqual(['pending-integration'])
+    expect(claimsOn('refs/mousse/agents/legacy-writer/result')).toEqual(['pending-integration'])
+    expect(resources.filter((item) => item.kind === 'agent-session').map((item) => item.claims.map((claim) => claim.kind))).toEqual([['recall']])
   })
 })

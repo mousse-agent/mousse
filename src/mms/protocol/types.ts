@@ -13,6 +13,8 @@ export const MMS_PROTOCOL_MAX_FRAME_BYTES = 4 * 1024 * 1024 // 4 MiB
 export const MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS = 60_000
 /** Interactive provider login waits for browser consent or pasted credentials. */
 export const MMS_PROTOCOL_LOGIN_TIMEOUT_MS = 15 * 60_000
+/** The Antigravity agent download is several hundred MB; the request lasts until it is verified. */
+export const MMS_PROTOCOL_INSTALL_TIMEOUT_MS = 60 * 60_000
 /** Agent turns legitimately run longer than the default control-request timeout. */
 export const MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS = 30 * 60_000
 export const MMS_PROTOCOL_REPLAY_RING_SIZE = 512
@@ -239,11 +241,6 @@ export const PROTOCOL_METHODS = [
   'queue.promoteToSteer',
   'agents.list',
   'agents.spawn',
-  'agents.createNamed',
-  'agents.recallNamed',
-  'agents.integrateNamed',
-  'agents.listNamed',
-  'agents.reviewNamed',
   'agents.stop',
   'workspace.getStatus',
   'workspace.restore',
@@ -270,12 +267,6 @@ export const PROTOCOL_METHODS = [
   'tasks.list',
   'tasks.create',
   'tasks.update',
-  'mousseAgent.getMessages',
-  'mousseAgent.getAssignment',
-  'mousseAgent.contextUsage',
-  'mousseAgent.send',
-  'mousseAgent.retry',
-  'mousseAgent.abort',
   'pty.list',
   'pty.create',
   'pty.write',
@@ -343,6 +334,8 @@ export const PROTOCOL_METHODS = [
   'providers.codexStatus',
   'providers.cliConfig',
   'providers.setCliConfig',
+  'providers.installAntigravity',
+  'providers.cancelAntigravityInstall',
   'webTools.getCredentialStatus',
   'webTools.setApiKey',
   'webTools.clearApiKey',
@@ -438,15 +431,9 @@ export type ProtocolEventType =
   | 'agents.updated'
   | 'tasks.updated'
   | 'agent.spawned'
-  | 'agent.activated'
   | 'terminal.activated'
   | 'questions.pending'
   | 'questions.cleared'
-  | 'mousse-agent.message'
-  | 'mousse-agent.message-updated'
-  | 'mousse-agent.messages-sync'
-  | 'mousse-agent.complete'
-  | 'mousse-agent.connection-failed'
   | 'pty.data'
   | 'pty.exit'
   | 'pty.created'
@@ -458,6 +445,7 @@ export type ProtocolEventType =
   | 'settings.changed'
   | 'providers.changed'
   | 'providers.login-event'
+  | 'providers.install-event'
   | 'mcp.changed'
   | 'turn.interrupted'
   | 'turn.aborted'
@@ -468,15 +456,9 @@ export type ProtocolEventType =
   | 'agents.updated'
   | 'tasks.updated'
   | 'agent.spawned'
-  | 'agent.activated'
   | 'terminal.activated'
   | 'questions.pending'
   | 'questions.cleared'
-  | 'mousse-agent.message'
-  | 'mousse-agent.message-updated'
-  | 'mousse-agent.messages-sync'
-  | 'mousse-agent.complete'
-  | 'mousse-agent.connection-failed'
   | 'pty.data'
   | 'pty.exit'
   | 'pty.created'

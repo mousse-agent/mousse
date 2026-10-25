@@ -2,16 +2,15 @@ import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
 import { contextBridge, ipcRenderer } from 'electron'
 import { readStartupAppearanceArgument } from '../shared/startupAppearance'
 import type { BridgeDisplayPart } from '../shared/bridge'
+import type { NetStatus } from '../shared/net/local'
 import type { LocalTtsModelId, LocalTtsModelStatus, ProviderSpeechRequest, ProviderSpeechResult } from '../shared/readAloud'
 import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest, ProviderTranscriptionResult } from '../shared/dictation'
 import type { WindowResizeEdge } from '../shared/windowResize'
 import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../shared/updates'
-import type { AgentEpisode, AgentEpisodeState, NamedAgentIdentity, NamedAgentRequest, NamedAgentRecallRequest, NamedAgentIntegrationRequest, NamedAgentIntegrationReview } from '../shared/agentEpisodes'
 import type {
   Agent,
   BrowserBounds,
   BrowserState,
-  ChatImageAttachment,
   ChatMessage,
   ThreadMessagesSnapshot,
   OrchestratorContextUsageInput,
@@ -19,10 +18,13 @@ import type {
   ContextUsageSnapshot,
   DocumentOpenPayload,
   FileAsset,
+  EditorInfo,
   FileEntry,
   GitBranchInfo,
   GitCommit,
+  GitCommitOptions,
   GitDiffStats,
+  GitPullRequestLookup,
   GitStatusSnapshot,
   MainView,
   OrchestratorResponse,
@@ -61,6 +63,7 @@ import type {
 import type {
   AmbientProviderInfo,
   ClaudeSubscriptionStatus,
+  CliInstallEvent,
   CliProviderConfig,
   CliProviderConfigPatch,
   CliProviderInstanceId,
@@ -308,11 +311,6 @@ const api = {
     }
   },
   agents: {
-    listNamed: (threadId: string): Promise<AgentEpisodeState> => ipcRenderer.invoke('agents:listNamed', threadId),
-    createNamed: (threadId: string, input: NamedAgentRequest & { name: string }): Promise<{ agent: NamedAgentIdentity; episode: AgentEpisode }> => ipcRenderer.invoke('agents:createNamed', threadId, input),
-    recallNamed: (threadId: string, input: NamedAgentRecallRequest): Promise<{ agent: NamedAgentIdentity; episode: AgentEpisode }> => ipcRenderer.invoke('agents:recallNamed', threadId, input),
-    integrateNamed: (threadId: string, input: NamedAgentIntegrationRequest): Promise<unknown> => ipcRenderer.invoke('agents:integrateNamed', threadId, input),
-    reviewNamed: (threadId: string, agent: string, episodeId: string): Promise<NamedAgentIntegrationReview> => ipcRenderer.invoke('agents:reviewNamed', threadId, { agent, episodeId }),
     /** Omit threadId to list agents for the active thread. */
     list: (threadId?: string): Promise<Agent[]> => ipcRenderer.invoke('agents:list', threadId),
     stop: (agentId: string, threadId?: string): Promise<string[]> => ipcRenderer.invoke('agents:stop', agentId, threadId),
@@ -325,72 +323,6 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, agent: Agent) => cb(agent)
       ipcRenderer.on('agent:spawned', handler)
       return () => ipcRenderer.removeListener('agent:spawned', handler)
-    },
-    onActivated: (cb: (payload: { agentId: string }) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, payload: { agentId: string }) => cb(payload)
-      ipcRenderer.on('agent:activated', handler)
-      return () => ipcRenderer.removeListener('agent:activated', handler)
-    }
-  },
-  mousseAgent: {
-    getMessages: (agentId: string): Promise<ChatMessage[]> =>
-      ipcRenderer.invoke('mousseAgent:getMessages', agentId),
-    getAssignment: (agentId: string) => ipcRenderer.invoke('mousseAgent:getAssignment', agentId),
-    getContextUsage: (agentId: string, draftInput = ''): Promise<ContextUsageSnapshot | undefined> =>
-      ipcRenderer.invoke('mousseAgent:getContextUsage', agentId, draftInput),
-    send: (
-      agentId: string,
-      content: string,
-      images?: ChatImageAttachment[]
-    ): Promise<{ accepted: boolean; reason?: string }> =>
-      ipcRenderer.invoke('mousseAgent:send', agentId, content, images),
-    abort: (agentId: string): Promise<boolean> => ipcRenderer.invoke('mousseAgent:abort', agentId),
-    onMessage: (
-      cb: (payload: { agentId: string; message: ChatMessage }) => void
-    ): (() => void) => {
-      const handler = (
-        _: Electron.IpcRendererEvent,
-        payload: { agentId: string; message: ChatMessage }
-      ) => cb(payload)
-      ipcRenderer.on('mousse-agent:message', handler)
-      return () => ipcRenderer.removeListener('mousse-agent:message', handler)
-    },
-    onMessageUpdated: (
-      cb: (payload: { agentId: string; message: ChatMessage }) => void
-    ): (() => void) => {
-      const handler = (
-        _: Electron.IpcRendererEvent,
-        payload: { agentId: string; message: ChatMessage }
-      ) => cb(payload)
-      ipcRenderer.on('mousse-agent:message-updated', handler)
-      return () => ipcRenderer.removeListener('mousse-agent:message-updated', handler)
-    },
-    onMessagesSync: (
-      cb: (payload: { agentId: string; messages: ChatMessage[] }) => void
-    ): (() => void) => {
-      const handler = (
-        _: Electron.IpcRendererEvent,
-        payload: { agentId: string; messages: ChatMessage[] }
-      ) => cb(payload)
-      ipcRenderer.on('mousse-agent:messages-sync', handler)
-      return () => ipcRenderer.removeListener('mousse-agent:messages-sync', handler)
-    },
-    onConnectionFailed: (cb: (payload: { agentId: string }) => void): (() => void) => {
-      const handler = (_: Electron.IpcRendererEvent, payload: { agentId: string }) => cb(payload)
-      ipcRenderer.on('mousse-agent:connection-failed', handler)
-      return () => ipcRenderer.removeListener('mousse-agent:connection-failed', handler)
-    },
-    retryConnection: (agentId: string): Promise<void> =>
-      ipcRenderer.invoke('mousseAgent:retryConnection', agentId),
-    onComplete: (
-      cb: (payload: { agentId: string; summary: string }) => void
-    ): (() => void) => {
-      const handler = (
-        _: Electron.IpcRendererEvent,
-        payload: { agentId: string; summary: string }
-      ) => cb(payload)
-      ipcRenderer.on('mousse-agent:complete', handler)
-      return () => ipcRenderer.removeListener('mousse-agent:complete', handler)
     }
   },
   tasks: {
@@ -480,10 +412,24 @@ const api = {
       ipcRenderer.invoke('git:diffStats', projectId, cwd),
     checkout: (branch: string, projectId?: string, cwd?: string): Promise<void> =>
       ipcRenderer.invoke('git:checkout', branch, projectId, cwd),
-    commit: (message: string, projectId?: string, cwd?: string): Promise<void> =>
-      ipcRenderer.invoke('git:commit', message, projectId, cwd),
+    commit: (message: string, projectId?: string, cwd?: string, options?: GitCommitOptions): Promise<void> =>
+      ipcRenderer.invoke('git:commit', message, projectId, cwd, options),
     push: (projectId?: string, cwd?: string): Promise<void> =>
-      ipcRenderer.invoke('git:push', projectId, cwd)
+      ipcRenderer.invoke('git:push', projectId, cwd),
+    init: (projectId?: string, cwd?: string): Promise<void> =>
+      ipcRenderer.invoke('git:init', projectId, cwd),
+    lastCommitMessage: (projectId?: string, cwd?: string): Promise<string | null> =>
+      ipcRenderer.invoke('git:lastCommitMessage', projectId, cwd),
+    pullRequest: (projectId?: string, cwd?: string, branch?: string): Promise<GitPullRequestLookup> =>
+      ipcRenderer.invoke('git:pullRequest', projectId, cwd, branch),
+    createPullRequest: (projectId?: string, cwd?: string): Promise<void> =>
+      ipcRenderer.invoke('git:createPullRequest', projectId, cwd)
+  },
+  editors: {
+    list: (options?: { refresh?: boolean }): Promise<EditorInfo[]> =>
+      ipcRenderer.invoke('editors:list', options),
+    open: (editorId: string, path: string): Promise<void> =>
+      ipcRenderer.invoke('editors:open', editorId, path)
   },
   inAppBrowser: {
     registerTab: (input) => ipcRenderer.invoke('browser:register-tab', input),
@@ -802,6 +748,18 @@ const api = {
       instanceId: CliProviderInstanceId,
       patch: CliProviderConfigPatch
     ): Promise<CliProviderConfig> => ipcRenderer.invoke('providers:setCliConfig', instanceId, patch),
+    /**
+     * Downloads Google's verified Antigravity agent and resolves with the new config. Progress
+     * arrives through `onInstallEvent`. Never signs in; rejects when cancelled or already running.
+     */
+    installAntigravity: (): Promise<CliProviderConfig> => ipcRenderer.invoke('providers:installAntigravity'),
+    /** Stops a running Antigravity install; resolves false when none is running. */
+    cancelAntigravityInstall: (): Promise<boolean> => ipcRenderer.invoke('providers:cancelAntigravityInstall'),
+    onInstallEvent: (cb: (event: CliInstallEvent) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: CliInstallEvent) => cb(event)
+      ipcRenderer.on('providers:install:event', handler)
+      return () => ipcRenderer.removeListener('providers:install:event', handler)
+    },
     loginOAuth: (providerId: string): Promise<ProviderLoginResult> =>
       ipcRenderer.invoke('providers:loginOAuth', providerId),
     loginApiKey: (providerId: string): Promise<ProviderLoginResult> =>
@@ -885,6 +843,14 @@ const api = {
       return () => ipcRenderer.removeListener('app:navigateMainView', handler)
     }
   },
+  net: {
+    /** Network status pushed by the daemon whenever it changes, including its list of phone requests. */
+    onUpdated: (cb: (status: NetStatus) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, status: NetStatus) => cb(status)
+      ipcRenderer.on('net:updated', handler)
+      return () => ipcRenderer.removeListener('net:updated', handler)
+    }
+  },
   /** In-app updates from GitHub Releases (src/main/updates). */
   updates: {
     getState: (): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.getState),
@@ -950,9 +916,6 @@ const api = {
     close: (): Promise<void> => ipcRenderer.invoke('window:close'),
     isMaximized: (): Promise<boolean> => ipcRenderer.invoke('window:isMaximized'),
     syncBackground: (): Promise<boolean> => ipcRenderer.invoke('window:syncBackground'),
-    openAgentsTasks: (anchor?: { x: number; y: number }): Promise<void> =>
-      ipcRenderer.invoke('window:openAgentsTasks', anchor),
-    closeAgentsTasks: (): Promise<void> => ipcRenderer.invoke('window:closeAgentsTasks'),
     focusMain: (): Promise<void> => ipcRenderer.invoke('window:focusMain'),
     onMaximizedChange: (cb: (maximized: boolean) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, maximized: boolean) => cb(maximized)

@@ -786,3 +786,59 @@ it('rejects cryptographically signed duplicate-key JSON before interpreting its 
     expect.objectContaining({ code: 'bad_request' })
   )
 })
+
+it('treats a repeated revoke as a no-op and reports renaming a revoked node as revoked', async () => {
+  const a = await authority(),
+    peer = newId('node'),
+    keys = new FileKeyStore(profile())
+  await keys.initialize({ asAuthority: false })
+  a.identity.issueNodeDelegation({
+    node: peer,
+    keys: keys.nodeKeys(),
+    name: 'Phone',
+    caps: ['read']
+  })
+  const revoked = a.identity.revoke(peer),
+    version = a.identity.verifySigned<Roster>(revoked, a.keys.rootKey()!).version
+  expect(a.identity.revoke(peer)).toEqual(revoked)
+  expect(a.identity.verifySigned<Roster>(a.identity.roster()!, a.keys.rootKey()!).version).toBe(
+    version
+  )
+  expect(() => a.identity.renameNode(peer, 'Renamed')).toThrow(
+    expect.objectContaining({ code: 'revoked' })
+  )
+  expect(() => a.identity.revoke(newId('node'))).toThrow(
+    expect.objectContaining({ code: 'bad_request' })
+  )
+  expect(() => a.identity.renameNode(newId('node'), 'Unknown')).toThrow(
+    expect.objectContaining({ code: 'bad_request' })
+  )
+})
+
+it('finds the original key epoch of a node from retained rosters after many re-keys', async () => {
+  const a = await authority(),
+    self = a.identity.self()!,
+    peer = newId('node')
+  const issue = async (name: string) => {
+    const keys = new FileKeyStore(profile())
+    await keys.initialize({ asAuthority: false })
+    return a.identity.verifySigned<NodeDelegation>(
+      a.identity.issueNodeDelegation({ node: peer, keys: keys.nodeKeys(), name, caps: ['read'] }),
+      a.keys.rootKey()!
+    )
+  }
+  const first = await issue('Epoch 1'),
+    originalAt = a.timer.clock.now()
+  expect(first.keyEpoch).toBe(1)
+  // The live roster keeps only the newest delegation, so an old epoch exists only in history.
+  a.timer.advance(1)
+  let latest = first
+  for (let index = 0; index < 70; index++) latest = await issue(`Epoch ${index + 2}`)
+  expect(latest.keyEpoch).toBe(71)
+  expect(a.identity.historicalNodeEpoch(self.user, peer, originalAt)).toBe(1)
+  expect(a.identity.historicalNodeEpoch(self.user, peer, a.timer.clock.now())).toBe(71)
+  expect(a.identity.historicalNodeEpoch(self.user, newId('node'), originalAt)).toBeUndefined()
+  a.identity.revoke(peer)
+  expect(a.identity.historicalNodeEpoch(self.user, peer, originalAt)).toBe(1)
+  expect(a.identity.historicalNodeEpoch(self.user, peer, originalAt - 1)).toBeUndefined()
+}, 60_000)

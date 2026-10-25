@@ -35,24 +35,23 @@
   font: inherit;
   font-size: 12px;
   text-align: left;
+}
+
+/* Only "Show more" is a button today; the Lineage rewrite makes agent rows buttons again and uses these rules. */
+button.lineage-row {
   cursor: pointer;
 }
 
-.lineage-row:hover {
+button.lineage-row:hover {
   background: var(--ui-hover);
 }
 
-.lineage-row:focus-visible {
+button.lineage-row:focus-visible {
   outline: none;
   box-shadow: var(--ui-focus-ring);
 }
 
 .lineage-row.is-working {
-  color: var(--text-primary);
-}
-
-.lineage-row.is-current {
-  background: var(--ui-pressed);
   color: var(--text-primary);
 }
 

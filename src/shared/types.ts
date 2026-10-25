@@ -1,5 +1,5 @@
 import type { ModelOverride } from './providerInstances'
-export type MainView = 'agents' | 'browser' | 'terminal' | 'files' | 'git' | 'documents'
+export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'documents'
 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
 
@@ -357,7 +357,6 @@ export function isDelegationSettledStatus(status: AgentStatus): boolean {
 }
 
 export interface Agent {
-  namedIdentityId?: string
   episodeId?: string
   workspacePolicy?: import('./agentEpisodes').AgentWorkspacePolicy
   id: string
@@ -714,7 +713,17 @@ export interface Thread {
   startedAt?: string
 }
 
-export type ThreadActivityState = 'idle' | 'processing' | 'awaiting_input' | 'completed'
+/**
+ * Sidebar status of a thread. `processing` is Working. `waiting` is Waiting: the turn is blocked
+ * only on wait tools, or it ended while thread-owned work that reports back is still running.
+ * `awaiting_input` is Input: the agent asked the user something.
+ */
+export type ThreadActivityState = 'idle' | 'processing' | 'waiting' | 'awaiting_input' | 'completed'
+
+/** Working or Waiting: the thread's work cycle has not finished yet. */
+export function isThreadActivityActive(state: ThreadActivityState | undefined): boolean {
+  return state === 'processing' || state === 'waiting'
+}
 
 export type ThreadActivitySnapshot = Record<string, ThreadActivityState>
 
@@ -737,6 +746,15 @@ export type TurnStateSnapshot = Record<string, TurnState>
 
 export function isTurnActivePhase(phase: TurnPhase): boolean {
   return phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing'
+}
+
+/** Thread activity for a turn phase; `blockedOnWait` marks a tool phase whose calls only wait. */
+export function turnPhaseActivity(phase: TurnPhase, blockedOnWait = false): ThreadActivityState {
+  if (phase === 'awaiting_input') return 'awaiting_input'
+  if (isTurnActivePhase(phase)) return phase === 'tool_running' && blockedOnWait ? 'waiting' : 'processing'
+  // Keep a finished turn completed until its runtime activity changes.
+  if (phase === 'completed') return 'completed'
+  return 'idle'
 }
 
 export interface ThreadData {
@@ -923,6 +941,10 @@ export interface GitStatusSnapshot {
   ahead: number
   behind: number
   changes: GitFileChange[]
+  /** The repository has at least one remote to push to. */
+  hasRemote?: boolean
+  /** The folder itself does not exist, for example a removed worktree. */
+  missing?: boolean
 }
 
 export interface GitCommit {
@@ -933,6 +955,8 @@ export interface GitCommit {
   date: string
   /** True when the commit is already on the remote tracking branch. */
   pushed: boolean
+  /** True when any remote-tracking branch contains the commit, so rewriting it would need a force push. */
+  onRemote: boolean
 }
 
 export interface GitBranchInfo {
@@ -944,6 +968,41 @@ export interface GitDiffStats {
   additions: number
   deletions: number
   filesChanged: number
+}
+
+export interface GitCommitOptions {
+  amend?: boolean
+}
+
+export type PullRequestCheckState = 'passing' | 'failing' | 'pending' | 'none'
+
+export interface GitPullRequestInfo {
+  number: number
+  title: string
+  url: string
+  state: 'open' | 'closed' | 'merged'
+  isDraft: boolean
+  checks: PullRequestCheckState
+  checkCounts: { passed: number; failed: number; pending: number; total: number }
+}
+
+export type GitPullRequestLookup =
+  | { state: 'found'; pullRequest: GitPullRequestInfo }
+  /** isDefaultBranch is null when the repository's default branch could not be read. */
+  | { state: 'none'; isDefaultBranch: boolean | null }
+  | {
+      state: 'unavailable'
+      reason: 'gh-missing' | 'unauthenticated' | 'not-github' | 'no-branch' | 'error'
+      message: string
+    }
+
+export interface EditorInfo {
+  /** Stable id, e.g. 'vscode', 'cursor', 'zed', 'files'. */
+  id: string
+  label: string
+  kind: 'editor' | 'files'
+  /** The app's own icon; omitted when unavailable. */
+  iconDataUrl?: string
 }
 
 export interface BrowserBounds {

@@ -292,7 +292,8 @@ export class GuiMmsController extends EventEmitter {
     this.attachedBrowserHost = host
   }
 
-  async request<T = unknown>(method: string, params?: unknown): Promise<T> {
+  /** `timeoutMs` overrides the client's per-method default for this call. */
+  async request<T = unknown>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
     const sender = this.senderAls.getStore()
     const transition = method === 'profiles.bind' && sender
     if (transition) {
@@ -302,7 +303,7 @@ export class GuiMmsController extends EventEmitter {
     try {
       const client = await this.clientForCurrentSender()
       if (transition) await this.attachedBrowserHost?.releaseWindow(sender)
-      const result = await client.request<T>(method, params)
+      const result = await client.request<T>(method, params, timeoutMs)
       if (transition) {
         const session = this.windowSessions.get(sender.id)
         const bound = result as unknown as {profile?:{id?:string};epoch?:number}

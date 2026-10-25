@@ -56,8 +56,8 @@ The current package manifest specifies Node **>=22.19.0**, React 19, Electron 43
 
 | Area | Current behavior | Required change |
 |---|---|---|
-| Agents | [AgentsPanel.tsx](../src/renderer/components/AgentsPanel.tsx), around lines 28 and 214, displays running agent sessions and terminals. | Add a definition library; retain the runtime panel as run details. Do not reinterpret runtime Agent records as editable definitions. |
-| Navigation | [MainViewTabs.tsx](../src/renderer/components/MainViewTabs.tsx), [MainViewPanel.tsx](../src/renderer/components/MainViewPanel.tsx) route the Agents view. | Introduce AgentsWorkspace with Agents/Workflows subtabs and internal detail routes. |
+| Agents | The runtime Agents panel (`AgentsPanel.tsx`) showed running agent sessions and terminals. It was removed, together with the Agents & Tasks window and named agents. | Add a definition library. Do not reinterpret runtime Agent records as editable definitions. |
+| Navigation | [MainViewTabs.tsx](../src/renderer/components/MainViewTabs.tsx), [MainViewPanel.tsx](../src/renderer/components/MainViewPanel.tsx) route the main area views (Browser, Terminal, Files, Diff, documents). The Agents view no longer exists. | Introduce AgentsWorkspace with Agents/Workflows subtabs and internal detail routes; they live in the Automations workspace. |
 | Markdown editing | [FilesPanel.tsx](../src/renderer/components/FilesPanel.tsx), around lines 164–223, uses Monaco with Edit/Preview. [DocumentPanel.tsx](../src/renderer/components/DocumentPanel.tsx) is read-only. | Extract the existing editing behavior into MarkdownDocumentEditor and use Source/Preview labels. |
 | Model selection | [ModelFamilyMenu.tsx](../src/renderer/components/ModelFamilyMenu.tsx), [ModelFamilySettingsFields.tsx](../src/renderer/components/ModelFamilySettingsFields.tsx) | Reuse search, provider/family grouping, variants, favorites, and capability-aware fields. |
 | Appearance | [useTheme.ts](../src/renderer/hooks/useTheme.ts), [shared/settings.ts](../src/shared/settings.ts) | Existing theme, accent, and acrylic settings support the surrounding surfaces. A liquid glass orb is new work. |
@@ -304,9 +304,9 @@ Rollback before any v2 writes restores the legacy manifest and roots. After v2 w
 
 ### 5.1 Information architecture
 
-The main **Agents** tab opens a workspace with **Agents** and **Workflows** subtabs. The Agents library includes a prominent **New agent** button, search, tags, provider/model filter, favorites, and sort by name/recently edited/last run. Cards show orb thumbnail, name, short purpose, model, enabled state, and any missing dependencies.
+The **Agents** tab of the Automations workspace opens a workspace with **Agents** and **Workflows** subtabs. The Agents library includes a prominent **New agent** button, search, tags, provider/model filter, favorites, and sort by name/recently edited/last run. Cards show orb thumbnail, name, short purpose, model, enabled state, and any missing dependencies.
 
-Selecting a card opens the Agent Editor. Back returns to the same filter and scroll position. Built-in templates can be duplicated into editable definitions. Existing runtime sessions remain accessible from an **Active runs** button/drawer and from thread tool cards, using the current AgentsPanel and AgentsTasksView. A definition's run history links to these runtime views.
+Selecting a card opens the Agent Editor. Back returns to the same filter and scroll position. Built-in templates can be duplicated into editable definitions. Runtime sessions are reached from thread tool cards and the thread's Lineage section; the former AgentsPanel and AgentsTasksView were removed. A definition's run history links to the thread of each run.
 
 The **Workflows** subtab has its own list/card library with **New workflow**, Import, search, tags, profile/project scope, and draft/published/invalid status filters. Listings show name, purpose, slash command, published revision, dependency health, last-run status, and last edited time. Clicking a listing opens its node editor; New workflow offers blank and sample templates. Back restores the library's filters and scroll position. A separate run-history action opens executions without replacing the editable definition.
 

@@ -652,10 +652,6 @@ export class MousseAgentService extends EventEmitter {
         this.emit('failed', event)
       }
 
-      this.emit('messages-sync', {
-        agentId: session.agentId,
-        messages: [...session.messages]
-      })
     }
 
     return events
@@ -705,7 +701,6 @@ export class MousseAgentService extends EventEmitter {
   private pushMessage(session: SessionState, message: ChatMessage): void {
     session.messages.push(message)
     this.touch(session)
-    this.emit('message', { agentId: session.agentId, message })
   }
 
   private updateMessage(session: SessionState, message: ChatMessage): void {
@@ -713,7 +708,6 @@ export class MousseAgentService extends EventEmitter {
     if (index === -1) return
     session.messages[index] = message
     this.touch(session)
-    this.emit('message-updated', { agentId: session.agentId, message })
   }
 
   private checkpointNativeHistory(
@@ -744,10 +738,6 @@ export class MousseAgentService extends EventEmitter {
           })
         } else {
           session.messages = session.messages.filter((entry) => entry.id !== existing.id)
-          this.emit('messages-sync', {
-            agentId: session.agentId,
-            messages: [...session.messages]
-          })
         }
       }
     } else if (content) {
@@ -872,10 +862,6 @@ export class MousseAgentService extends EventEmitter {
           session.messages = session.messages.filter((entry) => entry.id !== placeholder.id)
           session.activeAssistantMessageId = null
           session.assistantStreamBase = ''
-          this.emit('messages-sync', {
-            agentId: session.agentId,
-            messages: [...session.messages]
-          })
         }
       }
 
@@ -1225,7 +1211,6 @@ export class MousseAgentService extends EventEmitter {
           if (!session.managedAccess) await this.callbacks.completeAgent(agentId, action.merge !== false, summary)
           this.setRunState(session, 'completed')
           this.persist(true, session.agentId)
-          this.emit('complete', { agentId, summary })
           return { accepted: true }
         }
       }
@@ -1242,7 +1227,6 @@ export class MousseAgentService extends EventEmitter {
         this.stopStreamingPlaceholders(session)
         this.setRunState(session, 'failed', errorMessage(err))
         this.persist(true, session.agentId)
-        this.emit('connection-failed', { agentId })
         return { accepted: true }
       }
 

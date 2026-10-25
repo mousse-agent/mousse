@@ -25,39 +25,6 @@
   position: relative;
 }
 
-.threads-sidebar-main-agent {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  margin: 0 10px 8px;
-  padding: 8px 10px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.16);
-  border-radius: 8px;
-  background: rgba(var(--surface-soft-rgb), 0.4);
-  color: var(--text-primary);
-  text-align: left;
-  cursor: pointer;
-}
-
-.threads-sidebar-main-agent:hover {
-  background: rgba(var(--surface-elevated-rgb), 0.45);
-}
-
-.threads-sidebar-main-agent-kicker {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-}
-
-.threads-sidebar-main-agent-name {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-}
-
 .threads-sidebar-edge-trigger {
   position: absolute;
   left: var(--navigation-rail-width);
@@ -517,6 +484,7 @@
 }
 
 .threads-sidebar-card-status-working { color: var(--status-running); }
+.threads-sidebar-card-status-input { color: var(--status-input); }
 .threads-sidebar-card-status-waiting { color: var(--status-waiting); }
 .threads-sidebar-card-status-done { color: var(--status-done); }
 
@@ -579,7 +547,11 @@
 }
 
 .threads-sidebar-status-icon--question {
-  color: #facc15;
+  color: var(--status-input);
+}
+
+.threads-sidebar-status-icon--waiting {
+  color: var(--status-waiting);
 }
 
 .threads-sidebar-thread-trailing {

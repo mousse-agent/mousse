@@ -13,6 +13,8 @@ export interface HealthState {
   label: string
   /** Longer wording for the tooltip and the expanded sign-in row. */
   detail?: string
+  /** The next step Mousse itself can do for the provider (Antigravity); other CLIs sign in through their terminal. */
+  action?: 'install' | 'sign-in' | 'sign-out'
 }
 
 /** The message without the channel prefix Electron adds to errors from the main process. */
