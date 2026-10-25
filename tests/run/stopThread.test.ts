@@ -174,6 +174,25 @@ describe('RunEngine.stopSubtree (issue #142)', () => {
     })
   })
 
+  it('a user-stopped integration run, active or queued, owes no outcome row: a user\'s Stop publishes at once (D2)', async () => {
+    f = delegationFixture()
+    const integration = async (clientRequestId: string) => {
+      const sent = await f!.engine.dispatch({ kind: 'send', threadId: 'int', clientRequestId, source: 'integration' })
+      if (sent.status !== 'accepted') throw new Error('send rejected')
+      f!.outbox.enqueue({ threadId: 'int', runId: sent.runId, kind: 'turn.start', payload: { kind: 'integration', delegationId: 'delegation:x' } })
+      return sent.runId
+    }
+    const active = await integration('int-1')
+    f.engine.markStarting(active)
+    f.engine.markRunning(active)
+    const queued = await integration('int-2')
+    const result = f.engine.stopSubtree({ threadId: 'int', reason: 'user' })
+    expect(result.cancelledRuns.map((run) => run.runId)).toEqual([queued])
+    f.engine.markTerminal(active, 'interrupted', { interruptedBy: 'user' })
+    expect(f.engine.getRun(queued)).toMatchObject({ status: 'cancelled', outcome: { interruptedBy: 'user' } })
+    expect(f.engine.inbox.listForThread('int')).toEqual([])
+  })
+
   describe('queued work', () => {
     const send = (threadId: string, source: string, clientRequestId: string, delegation?: { parentRunId: string }) =>
       f!.engine.dispatch({
