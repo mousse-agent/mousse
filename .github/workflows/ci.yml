@@ -70,12 +70,18 @@ jobs:
 
   # PRs are gated on the relevant tests run locally (docs/team-workflow.md,
   # "Testing scope"). This job runs the full suite on a hosted runner, started by hand
-  # or by the nightly and stable release workflows.
+  # or by the nightly and stable release workflows. The suite is split across four
+  # runners so it finishes in about a quarter of the time.
   application:
     name: Full test suite
     if: github.event_name == 'workflow_dispatch' || inputs.full-suite
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      # Let every part finish so one run reports all failing tests.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -106,7 +112,7 @@ jobs:
           # Release builds give a failed test two more tries: timing-sensitive process tests
           # occasionally fail on shared runners. A test that fails every try still blocks.
           RETRY: ${{ inputs.full-suite && '--retry=2' || '' }}
-        run: xvfb-run --auto-servernum --server-args='-screen 0 1280x900x24' dbus-run-session -- npm test -- --maxWorkers=2 $RETRY
+        run: xvfb-run --auto-servernum --server-args='-screen 0 1280x900x24' dbus-run-session -- npm test -- --maxWorkers=2 --shard=${{ matrix.shard }}/4 $RETRY
 
   windows:
     name: Windows focused checks
