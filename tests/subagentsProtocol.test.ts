@@ -91,6 +91,77 @@ it('lists a parent’s subagents and announces the change to clients and the GUI
   off2()
 })
 
+/** A parent with one running run and one delegated child, over a real daemon, with a subscribed client. */
+async function parentWithChild() {
+  f = await lifecycleHarness()
+  const { thread: parent } = await f.rpc.request<{ thread: { id: string } }>('threads.create', { name: 'Parent' })
+  const events: ProtocolEvent[] = []
+  f.rpc.onEvent((event) => events.push(event))
+  await f.rpc.subscribe()
+  const engine = f.services.runEngine
+  const sent = await engine.dispatch({ kind: 'send', threadId: parent.id, clientRequestId: 'parent-run', source: 'gui' })
+  if (sent.status !== 'accepted') throw new Error('send rejected')
+  engine.markStarting(sent.runId)
+  engine.markRunning(sent.runId)
+  const child = await engine.requestDelegation({
+    parentThreadId: parent.id, parentRunId: sent.runId, clientRequestId: `delegation:${sent.runId}:call-1`,
+    prompt: 'Inspect the module', title: 'Reviewer', workspace: 'isolated', wake: 'settled_only'
+  })
+  /** Pushes received so far that name `parentThreadId`. */
+  const count = (parentThreadId: string) =>
+    events.filter((event) => event.type === 'subagents.updated' && (event.data as { parentThreadId: string }).parentThreadId === parentThreadId).length
+  /** A round trip, so every push sent before it has arrived. */
+  const settle = async () => {
+    await f!.rpc.request('subagents.list', { threadId: parent.id })
+  }
+  const listed = async () => (await f!.rpc.request<{ subagents: SubagentSummary[] }>('subagents.list', { threadId: parent.id })).subagents[0]
+  return { parent, child, engine, count, settle, listed }
+}
+
+it('an inbox row appended to or acknowledged on an idle child announces its parent', async () => {
+  const { parent, child, engine, count, settle, listed } = await parentWithChild()
+  engine.markStarting(child.childRunId)
+  engine.markRunning(child.childRunId)
+  engine.markTerminal(child.childRunId, 'completed', undefined, { resultText: 'done' })
+  expect(await listed()).toMatchObject({ activity: 'idle' })
+
+  await settle()
+  let seen = count(parent.id)
+  const row = engine.inbox.append({ threadId: child.childThreadId, kind: 'reconcile_notice', payload: {} })
+  await waitFor(() => count(parent.id) > seen, 'the update for an appended inbox row')
+  expect(await listed()).toMatchObject({ activity: 'waiting' })
+
+  await settle()
+  seen = count(parent.id)
+  engine.inbox.markAcknowledged([row.inboxId])
+  await waitFor(() => count(parent.id) > seen, 'the update for an acknowledged inbox row')
+  expect(await listed()).toMatchObject({ activity: 'idle' })
+})
+
+it('a change on a nested subagent announces every ancestor', async () => {
+  const { parent, child, engine, count, settle } = await parentWithChild()
+  engine.markStarting(child.childRunId)
+  engine.markRunning(child.childRunId)
+  const nested = await engine.requestDelegation({
+    parentThreadId: child.childThreadId, parentRunId: child.childRunId, clientRequestId: `delegation:${child.childRunId}:call-1`,
+    prompt: 'Look deeper', title: 'Grandchild', workspace: 'isolated', wake: 'settled_only'
+  })
+  // The new delegation changes G's row in C's list and C's row in P's list.
+  await settle()
+  let seenParent = count(parent.id)
+  let seenChild = count(child.childThreadId)
+  expect(seenChild).toBeGreaterThan(0)
+  // G's own run moving changes the same two lists.
+  engine.markStarting(nested.childRunId)
+  await waitFor(() => count(parent.id) > seenParent && count(child.childThreadId) > seenChild, 'updates for both ancestors of a run change')
+  await settle()
+  seenParent = count(parent.id)
+  seenChild = count(child.childThreadId)
+  // So does an inbox row on G.
+  engine.inbox.append({ threadId: nested.childThreadId, kind: 'reconcile_notice', payload: {} })
+  await waitFor(() => count(parent.id) > seenParent && count(child.childThreadId) > seenChild, 'updates for both ancestors of an inbox row')
+})
+
 it('boot repair gives older children their lineage, discards a child whose creation never committed, and keeps the rest', async () => {
   f = await lifecycleHarness()
   const { services } = f
