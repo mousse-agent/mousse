@@ -749,6 +749,26 @@ describe('remote composer methods on a real profile', () => {
     expect(backend.isActive(thread.id)).toBe(true)
   })
 
+  it('a thread whose turn is admitted or claimed but not running yet is active too', async () => {
+    const { mms } = await profile()
+    const backend = new MmsRemoteBackend(mms)
+    const admitted = mms.threads.createThread('Admitted')
+    expect(backend.isActive(admitted.id)).toBe(false)
+    // Admission, queue promotion and workspace setup happen before the run is marked starting.
+    mms.orchestrator.getOrCreateSession(admitted.id).turnAdmitted = true
+    expect(backend.isActive(admitted.id)).toBe(true)
+    mms.orchestrator.getOrCreateSession(admitted.id).turnAdmitted = false
+
+    const claimed = mms.threads.createThread('Claimed')
+    const sent = await mms.runEngine.dispatch({ kind: 'send', threadId: claimed.id, clientRequestId: 'send-claimed', source: 'gui' })
+    if (sent.status !== 'accepted') throw new Error('send rejected')
+    mms.runEngine.outbox.enqueue({ threadId: claimed.id, runId: sent.runId, kind: 'turn.start', payload: { threadId: claimed.id, runId: sent.runId } })
+    expect(backend.isActive(claimed.id)).toBe(false)
+    expect(mms.runEngine.outbox.claimNext(mms.runEngine.leaseOwner, new Date().toISOString(), { lanes: ['turn'] })).not.toBeNull()
+    expect(mms.runEngine.getRun(sent.runId)!.status).toBe('queued')
+    expect(backend.isActive(claimed.id)).toBe(true)
+  })
+
   it('a remote Stop reaches only the threads of this profile', async () => {
     const { mms } = await profile()
     const backend = new MmsRemoteBackend(mms)

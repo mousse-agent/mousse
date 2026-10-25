@@ -253,8 +253,8 @@ describe('stopAllSubagents', () => {
   })
 
   it.each([
-    ['a daemon error code', Object.assign(new Error('nope'), { code: 'method_not_found' })],
-    ['a message over IPC', new Error("Error invoking remote method 'subagents:stopAll': Error: unknown method subagents.stopAll")]
+    ['the daemon rejection', Object.assign(new Error('Method not allowed: subagents.stopAll'), { code: 'method_not_allowed' })],
+    ['the same rejection as the renderer sees it over IPC', new Error("Error invoking remote method 'subagents:stopAll': MmsProtocolError: Method not allowed: subagents.stopAll")]
   ])('falls back to stopping each working subagent for an older daemon (%s), never the thread', async (_name, error) => {
     const { aborted, api } = fakeApi(async () => { throw error })
     await stopAllSubagents(api, 't1', [subagent('a'), subagent('b', { state: 'done' }), subagent('c', { state: 'waiting' })])
@@ -265,6 +265,10 @@ describe('stopAllSubagents', () => {
     const warned = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const { aborted, api } = fakeApi(async () => { throw new Error('request timed out') })
     await stopAllSubagents(api, 't1', [subagent('a')])
+    // Another method the daemon refused is not this one.
+    const other = fakeApi(async () => { throw new Error('Method not allowed: orchestrator.abort') })
+    await stopAllSubagents(other.api, 't1', [subagent('a')])
+    expect(other.aborted).toEqual([])
     expect(aborted).toEqual([])
     expect(warned).toHaveBeenCalled()
     warned.mockRestore()

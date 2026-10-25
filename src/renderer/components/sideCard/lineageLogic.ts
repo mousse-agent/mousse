@@ -109,8 +109,9 @@ export function lineageModelLabel(subagent: Pick<SubagentSummary, 'provider' | '
 /** The error of a daemon that does not know the method (the code survives the socket; over IPC only the message does). */
 function isUnknownMethod(error: unknown): boolean {
   const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
-  if (code === 'method_not_found' || code === 'method_not_available' || code === 'unknown_method') return true
-  return /method_not_found|method_not_available|unknown_method|unknown method/i.test(error instanceof Error ? error.message : String(error))
+  if (code === 'method_not_allowed' || code === 'method_not_found' || code === 'method_not_available' || code === 'unknown_method') return true
+  // The daemon's own rejection is `Method not allowed: <method>`; over IPC it arrives inside a longer message.
+  return /(?:method[ _]not[ _](?:allowed|found|available)|unknown[ _]method)\W+subagents\.stopAll\b/i.test(error instanceof Error ? error.message : String(error))
 }
 
 /**
