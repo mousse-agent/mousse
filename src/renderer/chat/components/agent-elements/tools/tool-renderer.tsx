@@ -13,6 +13,7 @@ import { ThinkingTool } from "./thinking-tool";
 import { SearchTool } from "./search-tool";
 import { QuestionTool } from "../question/question-tool";
 import { QuickActionTool } from "./quick-action-tool";
+import { SubagentTool } from "./SubagentCard";
 import type { CustomToolRendererProps } from "../types";
 
 export type ToolRendererProps = {
@@ -60,6 +61,8 @@ export const ToolRenderer = memo(function ToolRenderer({
       return <QuestionTool part={part} chatStatus={chatStatus} />;
     case "tool-QuickAction":
       return <QuickActionTool part={part} chatStatus={chatStatus} />;
+    case "tool-Subagent":
+      return <SubagentTool part={part} chatStatus={chatStatus} />;
     case "tool-Task":
     case "tool-Agent":
       const labelBase = part.type === "tool-Agent" ? "Agent" : "Task";
