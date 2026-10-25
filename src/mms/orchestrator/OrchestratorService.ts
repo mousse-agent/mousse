@@ -1153,7 +1153,14 @@ export class OrchestratorService extends EventEmitter {
     const result = await this.stopThread(target, 'user', { runId, clientRequestId })
     const sequence = engine.maxSeq(target)
     if (result.status === 'rejected') return { status: 'rejected', reason: result.reason ?? 'rejected', sequence, replayed: result.replayed }
-    if (result.status === 'ignored')
+    if (result.status === 'ignored') {
+      // The run is not active (its turn ended), so the Stop does not cascade. It still reaches the provider's
+      // process, which may be running background work for the thread: only for a run of this thread, and only
+      // when no newer run on it is active or queued (a Stop aimed at an old run must not end the process a
+      // newer one is using).
+      const stale = engine.getRun(runId)
+      // A replay of that Stop already did this once; it does not do it again for what has started since.
+      if (!result.replayed && stale?.threadId === target && !engine.listRuns(target).some((run) => !TERMINAL_RUN_STATUSES.has(run.status))) await this.stopProviderWork(target)
       return {
         status: 'ignored',
         reason: result.reason ?? 'run_not_active',
@@ -1162,6 +1169,7 @@ export class OrchestratorService extends EventEmitter {
         sequence,
         ...(result.replayed ? { replayed: true } : {})
       }
+    }
     return { status: 'accepted', runId, sequence, replayed: result.replayed }
   }
 
@@ -1212,9 +1220,24 @@ export class OrchestratorService extends EventEmitter {
       for (const id of result.threads) aborted = this.abortChannelTurn(id) || aborted
       this.removeStoppedQueueEntries(result, opts.clearQueue === true)
     }
-    const worked = await Promise.all(result.threads.map((id) => this.stopProviderWork(id)))
+    // A replayed Stop reaches the provider only for threads that have no work newer than the Stop: a process
+    // that a later run started (and its helpers) is not the one this Stop was for.
+    const providerThreads = result.replayed ? result.threads.filter((id) => !this.hasWorkAfterStop(id, result.generations[id])) : result.threads
+    const worked = await Promise.all(providerThreads.map((id) => this.stopProviderWork(id)))
     const stoppedAnything = aborted || worked.some(Boolean) || result.activeRuns.length + result.cancelledRuns.length + result.delegations.length > 0
     return { ok: stoppedAnything, ...result }
+  }
+
+  /**
+   * Whether the thread has work the replayed Stop did not cover: a run admitted at or after the generation
+   * the Stop raised it to (any status; its process may still hold helpers), or any run that is still not
+   * terminal (the original Stop already ended its provider work once, and the stale-run Stop uses the same
+   * guard). An unknown generation counts as newer work, so nothing is closed on a guess.
+   */
+  private hasWorkAfterStop(threadId: string, generation: number | undefined): boolean {
+    const engine = this.runEngine
+    if (!engine || generation === undefined) return true
+    return engine.listRuns(threadId, { limit: 200 }).some((run) => !TERMINAL_RUN_STATUSES.has(run.status) || runStopGeneration(engine.store, run.runId) >= generation)
   }
 
   /** A replayed Stop's interrupt, now: through the worker when there is one, else directly. True when a live turn was aborted. */
@@ -3266,6 +3289,8 @@ export class OrchestratorService extends EventEmitter {
     const pending = switched ? this.runEngine?.handoffs.pendingForThread(threadId) : null
     if (pending)
       throw new DomainRpcError('handoff_pending', `Thread ${threadId} is still handing its context to ${pending.toRef.provider}; switch providers after that turn.`, { handoffId: pending.handoffId })
+    // The old provider's process is stopped while the thread still resolves to it; its helpers end with it.
+    if (switched) void this.stopProviderWork(threadId)
     session.modelOverride = next ? structuredClone(next) : undefined
     if (this.threadStore) {
       this.threadStore.updateThreadMeta(threadId, { modelOverride: session.modelOverride })
@@ -5105,7 +5130,7 @@ export class OrchestratorService extends EventEmitter {
         nativeContextStartBoundary: turnNativeStartBoundary, nativeContextBoundary: turnNativeStartBoundary
       }, turnStartSha)
     }
-    const turn = {
+    const turn: ActiveTurnControl = {
       abort: new AbortController(),
       pendingSteer: [] as string[],
       promotedSteerIds: [] as string[],
@@ -5397,13 +5422,44 @@ export class OrchestratorService extends EventEmitter {
         providerMetrics: (metrics) => { promptMetrics = metrics },
         lineEdits: (lines) => this.lineEditStats?.record('orchestrator', lines)
       }
+      // Every drain is remembered under its own token until the provider has taken the text, so a drain
+      // the provider hands back restores exactly what that drain took, whatever was drained since.
+      const drained = new Map<string, { external?: string; ownParts: string[]; carried: NonNullable<ActiveTurnControl['carriedSteers']> }>()
+      let drains = 0
+      let returnedAhead = 0
+      const drainEntry = (): { text: string; token: string } | undefined => {
+        turn.lastDrained = undefined
+        const external = opts?.externalDrainSteer?.()?.trim() || undefined
+        const own = this.drainSteerForSession(session, turn)?.trim() || undefined
+        const taken = turn.lastDrained as ActiveTurnControl['lastDrained']
+        turn.lastDrained = undefined
+        const parts = [external, own].filter((part): part is string => Boolean(part))
+        if (parts.length === 0) return undefined
+        const token = `drain-${++drains}`
+        // Each source is kept as it was drained, so a return restores them whole, never by cutting text apart.
+        drained.set(token, { external, ownParts: taken?.parts ?? (own ? [own] : []), carried: taken?.carried ?? [] })
+        returnedAhead = 0
+        return { text: parts.join('\n'), token }
+      }
       const turnControl: TurnControl = {
-        drainSteer: () => {
-          const parts = [
-            opts?.externalDrainSteer?.()?.trim(),
-            this.drainSteerForSession(session, turn)?.trim()
-          ].filter((part): part is string => Boolean(part))
-          return parts.length > 0 ? parts.join('\n') : undefined
+        drainSteer: () => drainEntry()?.text,
+        drainSteerEntry: drainEntry,
+        steerTaken: (token) => { if (token) drained.delete(token) },
+        // Text the provider could not give its turn waits for the turn to end, then runs as the next turn.
+        // Rows a steer carried are held again, unread, and follow it into that turn.
+        returnSteer: (text, token) => {
+          const entry = token ? drained.get(token) : undefined
+          if (token) drained.delete(token)
+          // Returned drains go ahead of anything steered since, oldest first.
+          const put = (...items: string[]): void => {
+            turn.pendingSteer.splice(returnedAhead, 0, ...items)
+            returnedAhead += items.length
+          }
+          if (!entry) return put(text)
+          // In the order they were drained: the external text first, then the thread's own steers.
+          put(...(entry.external ? [entry.external] : []), ...entry.ownParts)
+          for (const carried of entry.carried) this.runEngine?.inbox.unmarkSteerTaken(carried.inboxIds, carried.effectId)
+          turn.carriedSteers = [...entry.carried, ...(turn.carriedSteers ?? [])]
         },
         heartbeat: () => this.heartbeatRun(engineRunId)
       }
@@ -5766,11 +5822,13 @@ export class OrchestratorService extends EventEmitter {
    */
   private drainSteerForSession(
     session: ThreadSession,
-    turn: { pendingSteer: string[]; promotedSteerIds: string[]; carriedSteers?: ActiveTurnControl['carriedSteers'] }
+    turn: { pendingSteer: string[]; promotedSteerIds: string[]; carriedSteers?: ActiveTurnControl['carriedSteers']; lastDrained?: ActiveTurnControl['lastDrained'] }
   ): string | undefined {
     const parts: string[] = []
     if (turn.pendingSteer.length > 0) {
       parts.push(...turn.pendingSteer)
+      // Remembered whole until the provider has taken the text (`returnSteer`).
+      turn.lastDrained = { parts: [...turn.pendingSteer], carried: [...(turn.carriedSteers ?? [])] }
       turn.pendingSteer = []
       // The model reads them now: the rows their steers carried are delivered to this run.
       for (const entry of turn.carriedSteers ?? []) this.runEngine?.inbox.markSteerTaken(entry.inboxIds, entry.effectId)

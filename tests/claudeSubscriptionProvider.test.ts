@@ -32,7 +32,7 @@ function fixture(
   )
   const questions = new UserQuestionService()
   const runAuth = vi.fn(async () => JSON.stringify({ loggedIn, authMethod: loggedIn ? 'claude.ai' : 'none' }))
-  const service = new ClaudeSubscriptionProviderService(home, questions, { query, runAuth })
+  const service = new ClaudeSubscriptionProviderService(home, questions, { query, runAuth, live: false })
   return {
     home,
     service,
@@ -247,6 +247,7 @@ describe('Claude Subscription native provider', () => {
     const key = createHash('sha256').update('history').digest('hex')
     legacy({ sessionId: 'old-session', cwd: home, model: 'sonnet', historyKey: key })
     const reloaded = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      live: false,
       query: (input) => { inputs.push(input); return fakeQuery([result]) },
       runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
     })
@@ -256,6 +257,7 @@ describe('Claude Subscription native provider', () => {
     // A session from an older separate (profile-private) sign-in is never resumed.
     legacy({ sessionId: 'isolated-session', cwd: home, model: 'sonnet', historyKey: key, instanceId: 'claude' }, { loginPolicy: 'isolated' })
     const switched = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      live: false,
       query: (input) => { inputs.push(input); return fakeQuery([result]) },
       runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
     })
@@ -436,6 +438,7 @@ describe('Claude Subscription native provider', () => {
       finish = resolve
     })
     const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      live: false,
       query: () => fakeQuery([result]),
       runAuth: () => pending
     })
@@ -480,6 +483,7 @@ describe('Claude Subscription native provider', () => {
     let finish!: (value: string) => void
     const query = vi.fn(() => fakeQuery([result]))
     const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+      live: false,
       query,
       runAuth: () =>
         new Promise((resolve) => {
@@ -620,6 +624,7 @@ it('reports measured usage once, persists baselines and subtracts them after dae
   expect(first.mock.calls[0][0].usage).toMatchObject({ input: 10, output: 5, cost: { total: 0.1 } })
   expect(settings().sessions.thread.usageBaseline.sessionId).toBe('vendor-session')
   const restarted = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+    live: false,
     runAuth,
     query: () => fakeQuery([measuredResult(14, 7, 0.15, 'next-result')])
   })

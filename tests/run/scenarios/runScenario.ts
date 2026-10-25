@@ -191,6 +191,8 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     mkdirSync(providerDir, { recursive: true })
     writeFileSync(join(providerDir, 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary }))
     const service = new ClaudeSubscriptionProviderService(home, questions, {
+      // A replayed transcript is one query per turn, so the scenarios keep the one-shot path.
+      live: false,
       query: replaySdkQuery(transport),
       runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })
     })

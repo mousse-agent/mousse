@@ -94,9 +94,31 @@ describe('ClaudeSubscriptionAdapter', () => {
     expect(adapter.describe('sonnet')).toEqual({ contextUsage: 'reported' })
     expect(adapter.configured()).toBe(false)
     expect(await adapter.interrupt({ provider: 'claude-subscription' })).toBe('not_active')
+    expect(await adapter.stopThread('thread')).toBe('not_active')
     await expect(adapter.startTurn(input(), recordingSink(), control(), host())).rejects.toThrow(
       'claude-subscription requires a project workspace'
     )
+  })
+
+  it('Stop reaches the thread\'s Claude process through the service', async () => {
+    const client = { ...claudeClient(async () => ''), stopThread: vi.fn(() => 'stopped' as const) }
+    expect(await new ClaudeSubscriptionAdapter(() => client).stopThread('thread-1')).toBe('stopped')
+    expect(client.stopThread).toHaveBeenCalledExactlyOnceWith('thread-1')
+  })
+
+  it('hands a steer the provider could not take back to the turn control, which queues it as the next turn', async () => {
+    const returned: string[] = []
+    const client = claudeClient(async (chat) => {
+      chat.returnSteer?.('too late')
+      return 'done'
+    })
+    await new ClaudeSubscriptionAdapter(() => client).startTurn(
+      input(),
+      recordingSink(),
+      { ...control(), returnSteer: (text) => returned.push(text) },
+      host()
+    )
+    expect(returned).toEqual(['too late'])
   })
 
   it('builds the chat input and relays the stream, steer, metrics and commit through the sink', async () => {
@@ -225,12 +247,13 @@ describe('ClaudeSubscriptionAdapter', () => {
       expect(client.commitConversation).not.toHaveBeenCalled()
     })
 
-    it('does nothing for a turn that failed without being stopped', async () => {
-      const client = { ...claudeClient(async () => { throw new Error('boom') }), commitInterrupted: vi.fn() }
+    it('reports the history boundary of a turn that failed without being stopped, without fingerprinting it', async () => {
+      const client = { ...claudeClient(async () => { throw new Error('boom') }), commitInterrupted: vi.fn(), commitFailed: vi.fn() }
       await expect(
         new ClaudeSubscriptionAdapter(() => client).startTurn(input(), recordingSink(), control(), host({ nativeHistoryNow: () => 'history' }))
       ).rejects.toThrow('boom')
       expect(client.commitInterrupted).not.toHaveBeenCalled()
+      expect(client.commitFailed).toHaveBeenCalledExactlyOnceWith('thread-1', 'history')
     })
 
     it('cannot fingerprint without the host\'s history or the service\'s support, and still rethrows the stop', async () => {

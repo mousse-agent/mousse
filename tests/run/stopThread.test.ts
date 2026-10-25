@@ -515,6 +515,8 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     daemon = d
     const created = d.store.createThread('Parent')
     d.orch.setThreadModelOverride(created.id, PI)
+    // Choosing the model is not a Stop: the provider stop it makes (the old provider's process ends) is setup.
+    adapter.providerStops.length = 0
     parentId = created.id
     const sent = await d.orch.send('Delegate it', false, { threadId: parentId, clientRequestId: 'go', awaitMode: 'ack' })
     await waitFor(() => Boolean(out.delegation?.delegationId) && (!options.queueFollowUp || Boolean(out.queued)) && (!options.secondChild || Boolean(out.second?.delegationId)), 'the parent to start its subagent')

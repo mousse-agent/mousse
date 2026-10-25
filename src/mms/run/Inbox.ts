@@ -218,6 +218,16 @@ export class Inbox {
     })
   }
 
+  /** A steer the model took could not reach it after all (its turn had ended): its rows are held again, unread. */
+  unmarkSteerTaken(ids: readonly string[], effectId: string): void {
+    this.db.transaction(() => {
+      for (const id of ids) {
+        const current = this.get(id)
+        if (current?.status === 'delivered' && current.deliveredBy === effectId) this.patchPayload(id, { steerTakenBy: null })
+      }
+    })
+  }
+
   /** The model read the steer `effectId` carried: its rows count as delivered to that run. */
   markSteerTaken(ids: readonly string[], effectId: string): void {
     this.db.transaction(() => {
