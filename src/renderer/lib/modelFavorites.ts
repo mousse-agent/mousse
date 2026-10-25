@@ -10,7 +10,8 @@ import {
   isCurrentProfileBinding,
   llmProviderOf,
   modelPrefsByInstance,
-  useProviderSnapshots
+  useProviderSnapshots,
+  type ProfileBinding
 } from './providerSnapshots'
 import { profilePreferenceKey } from './profilePreferences'
 
@@ -111,19 +112,32 @@ function catalogsSettled(snapshots: readonly InstanceSnapshot[]): boolean {
 let importing: Promise<void> | null = null
 
 /**
+ * Whether a model prefs save reached the daemon. A save made in a profile binding the window has
+ * since left is skipped, not sent anywhere.
+ */
+export type ModelPrefsSave = 'saved' | 'skipped'
+
+/**
  * Moves this profile's localStorage favorites into the daemon once the device snapshots are
- * settled, then removes the key. A failed write keeps the key so the next load tries again.
+ * settled, then removes the key. The whole import belongs to the profile binding it started in;
+ * if any write fails or is skipped (the window switched profile meanwhile, even a switch that then
+ * failed), the key is kept so the next load tries again. Starring is idempotent, so a retry that
+ * repeats a write already made changes nothing.
  */
 export function importLegacyModelFavorites(
   profileId: string,
   snapshots: readonly InstanceSnapshot[],
-  setModelPrefs: (instanceId: string, patch: ModelPrefsPatch) => Promise<unknown>
+  setModelPrefs: (instanceId: string, patch: ModelPrefsPatch, binding: ProfileBinding) => Promise<ModelPrefsSave>
 ): Promise<void> {
   if (importing || !profileId || !hasLegacyModelFavorites(profileId) || !catalogsSettled(snapshots)) return importing ?? Promise.resolve()
+  const binding = currentProfileBinding()
+  if (binding.profileId !== profileId || !isCurrentProfileBinding(binding)) return Promise.resolve()
   importing = (async () => {
     try {
       const patches = planLegacyFavoritesImport(loadLegacyModelFavorites(profileId), snapshots)
-      for (const [instanceId, patch] of patches) await setModelPrefs(instanceId, patch)
+      for (const [instanceId, patch] of patches) {
+        if ((await setModelPrefs(instanceId, patch, binding)) !== 'saved') return
+      }
       removeLegacyModelFavorites(profileId)
     } catch (error) {
       console.warn('[providers] could not import model favorites; keeping them for the next try', error)
@@ -134,23 +148,28 @@ export function importLegacyModelFavorites(
   return importing
 }
 
-const savingPrefs = new Map<string, Promise<void>>()
+const savingPrefs = new Map<string, Promise<ModelPrefsSave>>()
 
 /**
  * Writes model prefs and shows the result at once (the pushed change follows). Saves of one
  * instance run one after another, so an older reply never replaces a newer one on screen. A save
- * belongs to the profile binding it was made in: once the window switches profile, a save still
- * waiting is dropped rather than sent to the new profile, and a late reply is not shown.
+ * belongs to the profile binding it was made in (or the one given): once the window switches
+ * profile, a save still waiting is skipped rather than sent to the new profile, and a late reply
+ * is not shown. Resolves with whether the save was sent.
  */
-export function saveModelPrefs(instanceId: string, patch: ModelPrefsPatch): Promise<void> {
-  const binding = currentProfileBinding()
+export function saveModelPrefs(
+  instanceId: string,
+  patch: ModelPrefsPatch,
+  binding: ProfileBinding = currentProfileBinding()
+): Promise<ModelPrefsSave> {
   const key = `${binding.profileId}\0${binding.epoch}\0${instanceId}`
-  const previous = savingPrefs.get(key) ?? Promise.resolve()
+  const previous = savingPrefs.get(key) ?? Promise.resolve<ModelPrefsSave>('saved')
   const saving = previous
     .catch(() => undefined)
-    .then(async () => {
-      if (!isCurrentProfileBinding(binding)) return
+    .then(async (): Promise<ModelPrefsSave> => {
+      if (!isCurrentProfileBinding(binding)) return 'skipped'
       applySnapshot(await window.mousse.providers.instances.setModelPrefs(instanceId, patch), binding)
+      return 'saved'
     })
   savingPrefs.set(key, saving)
   const settled = () => {

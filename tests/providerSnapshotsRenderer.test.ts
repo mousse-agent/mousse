@@ -260,14 +260,19 @@ describe('favorites', () => {
         setItem: (name: string, value: string) => void store.set(name, value),
         removeItem: (name: string) => void store.delete(name)
       })
+      useAppStore.setState({ profileId: 'p1' })
     })
-    afterEach(() => vi.unstubAllGlobals())
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      useAppStore.setState({ profileId: 'default' })
+      useProviderSnapshotsStore.setState({ profileId: null, scopes: {} })
+    })
 
     it('writes the favorites to the daemon, then removes the key', async () => {
       store.set(key, JSON.stringify([opusKey]))
-      const setModelPrefs = vi.fn(async () => undefined)
+      const setModelPrefs = vi.fn(async () => 'saved' as const)
       await importLegacyModelFavorites('p1', ready, setModelPrefs)
-      expect(setModelPrefs).toHaveBeenCalledWith('claude', { star: ['claude-opus-4'] })
+      expect(setModelPrefs).toHaveBeenCalledWith('claude', { star: ['claude-opus-4'] }, expect.objectContaining({ profileId: 'p1' }))
       expect(store.has(key)).toBe(false)
     })
 
@@ -282,16 +287,80 @@ describe('favorites', () => {
 
     it('waits until every instance has finished a check', async () => {
       store.set(key, JSON.stringify([opusKey]))
-      const setModelPrefs = vi.fn(async () => undefined)
+      const setModelPrefs = vi.fn(async () => 'saved' as const)
       await importLegacyModelFavorites('p1', [snapshot({ checkedAt: undefined, models: { entries: [], source: 'none' } })], setModelPrefs)
       expect(setModelPrefs).not.toHaveBeenCalled()
       expect(store.has(key)).toBe(true)
     })
 
     it('does nothing without legacy favorites', async () => {
-      const setModelPrefs = vi.fn(async () => undefined)
+      const setModelPrefs = vi.fn(async () => 'saved' as const)
       await importLegacyModelFavorites('p1', ready, setModelPrefs)
       expect(setModelPrefs).not.toHaveBeenCalled()
+    })
+
+    describe('a profile switch during an import of several providers', () => {
+      const openAiModels = [model('gpt-5', { label: 'GPT-5' }), model('gpt-4.1', { label: 'GPT-4.1' })]
+      const both = [
+        snapshot({ models: { entries: claudeModels, source: 'live' } }),
+        snapshot({ instanceId: 'pi:openai', driver: 'pi', displayName: 'OpenAI', models: { entries: openAiModels, source: 'live' } })
+      ]
+      const gptKey = groupModelsByFamily('openai', openAiModels).find((entry) => entry.familyLabel.includes('4.1'))!.familyId
+      const legacy = JSON.stringify([opusKey, gptKey])
+      const setup = () => {
+        const calls: Array<{ profile: string; instanceId: string; patch: unknown }> = []
+        let release: (() => void) | undefined
+        let hold = true
+        const setModelPrefs = async (instanceId: string, patch: unknown) => {
+          calls.push({ profile: useAppStore.getState().profileId, instanceId, patch })
+          if (hold) {
+            hold = false
+            await new Promise<void>((resolve) => (release = resolve))
+          }
+          return snapshot({ instanceId })
+        }
+        vi.stubGlobal('window', { mousse: { providers: { instances: { setModelPrefs } } } })
+        useProviderSnapshotsStore.setState({ profileId: 'p1', scopes: { device: { loading: false, snapshots: both } } })
+        store.set(key, legacy)
+        return { calls, release: () => release!() }
+      }
+
+      it('keeps the key when a failed switch skipped a write, and a later load writes everything', async () => {
+        const { calls, release } = setup()
+        const importing = importLegacyModelFavorites('p1', both, saveModelPrefs)
+        await vi.waitFor(() => expect(calls).toHaveLength(1))
+        const endSwitch = beginProfileSwitch()
+        release()
+        await importing
+        endSwitch(false)
+        // The Claude write went out before the switch; the OpenAI one was skipped, so the key stays.
+        expect(calls).toEqual([{ profile: 'p1', instanceId: 'claude', patch: { star: ['claude-opus-4'] } }])
+        expect(store.get(key)).toBe(legacy)
+
+        // Still profile p1: the next load imports every favorite and only then removes the key.
+        await importLegacyModelFavorites('p1', both, saveModelPrefs)
+        expect(calls.slice(1)).toEqual([
+          { profile: 'p1', instanceId: 'claude', patch: { star: ['claude-opus-4'] } },
+          { profile: 'p1', instanceId: 'pi:openai', patch: { star: ['gpt-4.1'] } }
+        ])
+        expect(store.has(key)).toBe(false)
+      })
+
+      it('sends nothing of the import to the new profile and keeps the key of the profile it started in', async () => {
+        const { calls, release } = setup()
+        const importing = importLegacyModelFavorites('p1', both, saveModelPrefs)
+        await vi.waitFor(() => expect(calls).toHaveLength(1))
+        const endSwitch = beginProfileSwitch()
+        endSwitch(true)
+        useAppStore.setState({ profileId: 'p2' })
+        release()
+        await importing
+        expect(calls).toEqual([{ profile: 'p1', instanceId: 'claude', patch: { star: ['claude-opus-4'] } }])
+        expect(store.get(key)).toBe(legacy)
+        // An import for p1 does not start while the window is bound to p2.
+        await importLegacyModelFavorites('p1', both, saveModelPrefs)
+        expect(calls).toHaveLength(1)
+      })
     })
   })
 })
