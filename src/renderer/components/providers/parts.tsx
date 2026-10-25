@@ -183,7 +183,8 @@ function OverrideInheritance({ projectEnabled, deviceEnabled }: { projectEnabled
 /**
  * A provider in the list pane, in T3 Code's row anatomy: logo, name and version, then the status
  * line; the enable switch on the right. Selection is a background fill only. Switched off, the row
- * is dimmed until hovered or selected. In a project scope an override shows its marker and reset.
+ * is dimmed until hovered or selected. In a project scope an override shows its marker and reset
+ * under the status, so the name keeps the row's width (it wraps rather than truncates).
  */
 export function ProviderListRow({
   iconId,
@@ -225,24 +226,24 @@ export function ProviderListRow({
             {version && <code className="prov-version">{version}</code>}
           </span>
           <StatusLine status={status} />
+          {toggle.overridden && onReset && (
+            <span className="prov-item-override">
+              <OverrideInheritance projectEnabled={toggle.checked} deviceEnabled={toggle.deviceEnabled} />
+              <button
+                type="button"
+                className="settings-icon-btn prov-micro"
+                title="Reset to the device setting"
+                aria-label={`Reset ${name} enablement to the device setting`}
+                disabled={busy}
+                onClick={() => run(onReset)}
+              >
+                <RotateCcw size={12} />
+              </button>
+            </span>
+          )}
         </span>
       </div>
       <span className="prov-item-controls">
-        {toggle.overridden && onReset && (
-          <>
-            <OverrideInheritance projectEnabled={toggle.checked} deviceEnabled={toggle.deviceEnabled} />
-            <button
-              type="button"
-              className="settings-icon-btn prov-micro"
-              title="Reset to the device setting"
-              aria-label={`Reset ${name} enablement to the device setting`}
-              disabled={busy}
-              onClick={() => run(onReset)}
-            >
-              <RotateCcw size={12} />
-            </button>
-          </>
-        )}
         <span title={toggle.locked ? 'Turned off on this device. Turn it on for the device first.' : undefined}>
           <Switch
             checked={toggle.checked}

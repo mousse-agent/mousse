@@ -204,9 +204,7 @@
 .prov-item-name {
   min-width: 0;
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
   font-size: var(--settings-fs-row);
   font-weight: 500;
   color: var(--text-primary);
@@ -302,7 +300,18 @@
   background: var(--danger);
 }
 
-/* Project override marker and reset, small icon buttons beside the switch. */
+/* Project override marker and reset: small icon buttons on their own line under the status,
+   above the row's select target. */
+
+.prov-item-override {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  align-self: flex-start;
+  margin-left: -3px;
+}
 
 .settings-icon-btn.prov-micro {
   width: 22px;
@@ -321,7 +330,7 @@
 .prov-override-pop {
   position: absolute;
   top: calc(100% + var(--space-4));
-  right: 0;
+  left: 0;
   z-index: 20;
   min-width: 11rem;
   margin: 0;
