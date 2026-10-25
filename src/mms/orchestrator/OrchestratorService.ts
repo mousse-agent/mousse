@@ -1025,6 +1025,10 @@ export class OrchestratorService extends EventEmitter {
       this.enqueueControlEffect('turn.interrupt', target, runId, { runId, threadId: target }, () => {
         void this.interruptRun(runId, target)
       })
+    } else if (result.status !== 'accepted') {
+      // The run is not active (its turn ended): Stop still reaches the provider's process, which may
+      // be running background work for the thread.
+      await this.stopProviderWork(target)
     }
     return result
   }
@@ -2858,6 +2862,8 @@ export class OrchestratorService extends EventEmitter {
     const pending = switched ? this.runEngine?.handoffs.pendingForThread(threadId) : null
     if (pending)
       throw new DomainRpcError('handoff_pending', `Thread ${threadId} is still handing its context to ${pending.toRef.provider}; switch providers after that turn.`, { handoffId: pending.handoffId })
+    // The old provider's process is stopped while the thread still resolves to it; its helpers end with it.
+    if (switched) void this.stopProviderWork(threadId)
     session.modelOverride = next ? structuredClone(next) : undefined
     if (this.threadStore) {
       this.threadStore.updateThreadMeta(threadId, { modelOverride: session.modelOverride })
@@ -2925,6 +2931,7 @@ export class OrchestratorService extends EventEmitter {
    */
   markThreadDeleted(threadId: string): void {
     this.revokeMcp(threadId)
+    void this.stopProviderWork(threadId)
     const engine = this.runEngine
     if (engine)
       void engine.cancelThreadWork(threadId).catch((error: unknown) => {
@@ -4966,6 +4973,8 @@ export class OrchestratorService extends EventEmitter {
           ].filter((part): part is string => Boolean(part))
           return parts.length > 0 ? parts.join('\n') : undefined
         },
+        // Text the provider could not give its turn waits for the turn to end, then runs as the next turn.
+        returnSteer: (text) => { turn.pendingSteer.unshift(text) },
         heartbeat: () => this.heartbeatRun(engineRunId)
       }
       const mcp = this.mcpFor(adapter, instance.instanceId, session.threadId, engineRunId, mode)

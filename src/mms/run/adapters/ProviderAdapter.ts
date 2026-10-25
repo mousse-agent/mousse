@@ -168,6 +168,11 @@ export interface ProviderMetrics {
 export interface TurnControl {
   /** Pending steer text for the live turn, or undefined. */
   drainSteer(): string | undefined
+  /**
+   * Hands back text `drainSteer` returned that the turn could not take (its result had already
+   * arrived): it becomes the next turn instead of being lost. Optional for adapters that never refuse a steer.
+   */
+  returnSteer?(text: string): void
   /** Liveness touch; the orchestrator throttles the store write. */
   heartbeat(): void
 }
