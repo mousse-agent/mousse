@@ -8,6 +8,7 @@ import type {
   MousseSettingsUpdate,
   SettingsOptions
 } from '../../shared/settings'
+import { listingServes, selectionFromListing } from '../../shared/providerInstances'
 import { useAppStore } from '../stores/appStore'
 import { ProvidersSettings } from './providers/ProvidersSettings'
 import { SpeechSettings } from '../speech/SpeechSettings'
@@ -224,7 +225,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const ensureValidProviderSelection = useCallback(
     async (nextSettings: MousseSettings, providers = options?.llmProviders ?? []) => {
       const current = nextSettings.provider
-      const selectedProvider = providers.find((p) => p.id === current.llmProvider)
+      // By instance first: two accounts of one provider are two listings.
+      const selectedProvider = providers.find((p) => listingServes(p, current))
       const modelExists = selectedProvider?.models.some((m) => m.id === current.model)
 
       if (selectedProvider && modelExists) return nextSettings
@@ -240,10 +242,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
       return {
         ...nextSettings,
-        provider: {
-          llmProvider: first.id,
-          model: first.models[0]?.id ?? ''
-        }
+        provider: selectionFromListing(first, first.models[0]?.id ?? '')
       }
     },
     [options?.llmProviders]

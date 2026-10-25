@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { ChevronDown } from '../../lib/icons'
 import { ProviderIcon } from '../../lib/providerIcons'
+import { listingServes } from '../../../shared/providerInstances'
 import { ComposerEffortPicker } from '../ComposerEffortPicker'
 import { getGroupedModelButtonParts, ModelFamilyMenu } from '../ModelFamilyMenu'
 import '../../styles/settingsModelPicker.css'
@@ -9,11 +10,13 @@ import '../../styles/settingsModelPicker.css'
 /**
  * One settings control for a model choice: the composer's model menu plus its
  * reasoning/speed menu, joined into a single 28px control. Provider, model,
- * context, effort and speed all land in one `(providerId, modelId)` pair.
+ * context, effort and speed all land in one `(providerId, modelId)` pair, with
+ * the instance serving it when the listing names one.
  */
 export function SettingsModelPicker({
   providers,
   providerId,
+  instanceId,
   modelId,
   onSelect,
   placeholder = 'Select model',
@@ -23,8 +26,10 @@ export function SettingsModelPicker({
 }: {
   providers: LlmProviderOption[]
   providerId: string
+  /** The selection's instance; tells apart two accounts of one provider. */
+  instanceId?: string
   modelId: string
-  onSelect: (providerId: string, modelId: string) => void
+  onSelect: (providerId: string, modelId: string, instanceId?: string) => void
   /** Shown when nothing is selected, e.g. "Automatic". */
   placeholder?: string
   ariaLabel?: string
@@ -35,9 +40,10 @@ export function SettingsModelPicker({
   const buttonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const selected = Boolean(providerId && modelId)
-  const parts = selected ? getGroupedModelButtonParts(providerId, modelId, providers, false) : [placeholder]
+  const parts = selected ? getGroupedModelButtonParts(providerId, modelId, providers, false, instanceId) : [placeholder]
   const label = parts.join(' · ')
-  const models = providers.find((provider) => provider.id === providerId)?.models ?? []
+  const listing = providers.find((provider) => listingServes(provider, { instanceId, llmProvider: providerId }))
+  const models = listing?.models ?? []
 
   useEffect(() => {
     if (!open) return
@@ -83,19 +89,20 @@ export function SettingsModelPicker({
           modelId={modelId}
           models={models}
           readOnly={Boolean(disabled)}
-          onSelect={onSelect}
+          onSelect={(nextProviderId, nextModelId) => onSelect(nextProviderId, nextModelId, listing?.instanceId)}
         />
       )}
       {open && !disabled && (
         <ModelFamilyMenu
           providers={providers}
           selectedProviderId={providerId}
+          selectedInstanceId={instanceId}
           selectedModelId={modelId}
           anchorRef={buttonRef}
           contentRef={menuRef}
-          onSelect={(nextProviderId, nextModelId) => {
+          onSelect={(nextProviderId, nextModelId, nextInstanceId) => {
             setOpen(false)
-            onSelect(nextProviderId, nextModelId)
+            onSelect(nextProviderId, nextModelId, nextInstanceId)
             buttonRef.current?.focus()
           }}
         />

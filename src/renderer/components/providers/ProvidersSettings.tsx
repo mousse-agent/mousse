@@ -115,8 +115,9 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
     const { opts } = await refreshProviderData()
     const current = settingsRef.current
     const next = await ensureValidProviderSelection(current, withoutHiddenModels(opts.llmProviders))
-    if (next.provider.llmProvider === current.provider.llmProvider && next.provider.model === current.provider.model) return
-    await updateSettings({ provider: { llmProvider: next.provider.llmProvider, model: next.provider.model } })
+    const { instanceId, llmProvider, model } = next.provider
+    if (instanceId === current.provider.instanceId && llmProvider === current.provider.llmProvider && model === current.provider.model) return
+    await updateSettings({ provider: { ...(instanceId ? { instanceId } : {}), llmProvider, model } })
   }
 
   const guard = async (action: () => Promise<void>) => {

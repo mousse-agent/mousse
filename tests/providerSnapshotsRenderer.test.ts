@@ -8,7 +8,7 @@ import {
   planLegacyFavoritesImport
 } from '../src/renderer/lib/modelFavorites'
 import { instanceBadges, pickerIdFor, pickerProviders, showsContextGauge, sortInstances } from '../src/renderer/lib/providerSnapshots'
-import { sortPickerEntries } from '../src/renderer/components/ModelFamilyMenu'
+import { getGroupedModelButtonParts, sortPickerEntries } from '../src/renderer/components/ModelFamilyMenu'
 import { profilePreferenceKey } from '../src/renderer/lib/profilePreferences'
 import { model, snapshot } from './providerSnapshotFixture'
 
@@ -87,6 +87,16 @@ describe('composer picker from snapshots', () => {
       { key: 'claude:team', iconKey: 'claude', label: 'Team Max' }
     ])
     expect(Object.fromEntries(badges)).toEqual({ 'claude:work': '2', 'claude:team': 'TM' })
+  })
+
+  it('names a settings selection by its instance when two accounts share a provider (S7)', () => {
+    const listings: LlmProviderOption[] = [
+      { id: 'claude-subscription', instanceId: 'claude', label: 'Claude Code', models: [{ id: 'opus', label: 'Claude Opus' }] },
+      { id: 'claude-subscription', instanceId: 'claude:work', label: 'Claude Code 2', models: [{ id: 'work-only', label: 'Work Model' }] }
+    ]
+    expect(getGroupedModelButtonParts('claude-subscription', 'work-only', listings, false, 'claude:work')).toEqual(['Work Model'])
+    expect(getGroupedModelButtonParts('claude-subscription', 'opus', listings, false, 'claude')).toEqual(['Claude Opus'])
+    expect(getGroupedModelButtonParts('claude-subscription', 'work-only', listings, false)).toEqual(['work-only'])
   })
 
   it('reads the context gauge from caps, keeping it when unknown', () => {

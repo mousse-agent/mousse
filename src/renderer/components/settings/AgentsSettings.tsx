@@ -21,11 +21,6 @@ export function AgentsSettings({
 }) {
   const providers = options.llmProviders
   const hasProviders = providers.length > 0
-  /** The provider instance serving a listed provider, as the composer sends it. */
-  const instanceSelection = (providerId: string): { instanceId?: string } => {
-    const instanceId = providers.find((provider) => provider.id === providerId)?.instanceId
-    return instanceId ? { instanceId } : {}
-  }
 
   // Blank title keys mean "Automatic" (resolveTitleModel picks a connected
   // model at send time). Show the saved mode, not the resolved fallback.
@@ -50,11 +45,11 @@ export function AgentsSettings({
               ariaLabel="Default model"
               providers={providers}
               providerId={settings.provider.llmProvider}
+              instanceId={settings.provider.instanceId}
               modelId={settings.provider.model}
-              onSelect={(llmProvider, model) =>
-                void updateSettings({
-                  provider: { ...instanceSelection(llmProvider), llmProvider, model }
-                })
+              onSelect={(llmProvider, model, instanceId) =>
+                // Always the whole selection: a write without the instance clears it.
+                void updateSettings({ provider: { ...(instanceId ? { instanceId } : {}), llmProvider, model } })
               }
             />
           }
