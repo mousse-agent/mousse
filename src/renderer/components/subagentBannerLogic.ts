@@ -44,8 +44,8 @@ export function collectNeedingInput(
 /**
  * Why a thread whose turn has ended is still Waiting: on its subagents when any are going,
  * otherwise on work its provider reports running in the background. Null when it is not Waiting.
- * This reads the thread's activity, so background work shows as soon as a provider reports it
- * (`OrchestratorService.setProviderBackgroundWork`) and the daemon counts it as Waiting.
+ * This reads the thread's activity, the hook point for provider background work: nothing reports
+ * it yet, and it shows here as soon as the daemon marks a thread with background work Waiting.
  */
 export function waitingBannerLabel(activity: ThreadActivityState | undefined, subagents: readonly Pick<SubagentSummary, 'state'>[]): string | null {
   if (activity !== 'waiting') return null
