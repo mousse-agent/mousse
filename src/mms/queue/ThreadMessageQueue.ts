@@ -20,6 +20,8 @@ export interface EnqueueMessageInput {
   source?: string
   internal?: boolean
   runId?: string
+  inboxIds?: string[]
+  subagentNotice?: QueuedMessage['subagentNotice']
 }
 
 export interface ClaimOwnerInput {
@@ -107,7 +109,9 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       claim,
       source: typeof item.source === 'string' ? item.source : undefined,
       internal: item.internal === true ? true : undefined,
-      ...(typeof item.runId === 'string' && item.runId ? { runId: item.runId } : {})
+      ...(typeof item.runId === 'string' && item.runId ? { runId: item.runId } : {}),
+      ...(Array.isArray(item.inboxIds) && item.inboxIds.length && item.inboxIds.every((id) => typeof id === 'string') ? { inboxIds: item.inboxIds } : {}),
+      ...(Array.isArray(item.subagentNotice) && item.subagentNotice.length ? { subagentNotice: item.subagentNotice } : {})
     })
   }
   return sortQueue(out)
@@ -164,7 +168,9 @@ export function enqueueMessage(
     state: 'pending',
     source: input.source,
     internal: input.internal === true ? true : undefined,
-    ...(input.runId ? { runId: input.runId } : {})
+    ...(input.runId ? { runId: input.runId } : {}),
+    ...(input.inboxIds?.length ? { inboxIds: input.inboxIds } : {}),
+    ...(input.subagentNotice?.length ? { subagentNotice: input.subagentNotice } : {})
   }
 
   return { items: sortQueue([...items, item]), item }

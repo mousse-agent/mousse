@@ -112,6 +112,59 @@ export class Inbox {
       .map(toInbox)
   }
 
+  /** Delivered rows whose delivering effect belongs to `runId` (the wake run, or the run a steer joined), oldest first. */
+  listDeliveredByRun(runId: string): InboxRecord[] {
+    return this.db
+      .statement(
+        `SELECT i.* FROM inbox i JOIN effects e ON e.effect_id = i.delivered_by
+         WHERE i.status = 'delivered' AND e.run_id = ? ORDER BY i.created_at, i.rowid`
+      )
+      .all(runId)
+      .map(toInbox)
+  }
+
+  /** Delivered rows of a thread whose delivery gave up (`payload.deliveryFailed`), oldest first. */
+  listUndeliverable(threadId: string): InboxRecord[] {
+    return this.listByStatus(threadId, 'delivered').filter((row) => (row.payload as { deliveryFailed?: unknown } | null)?.deliveryFailed === true)
+  }
+
+  /**
+   * A delivered row changes hands: its notice now rides another effect (a steer that missed its turn
+   * became a queued turn). The row stays `delivered`.
+   */
+  redirectDelivery(ids: readonly string[], deliveredBy: string): InboxRecord[] {
+    return this.db.transaction(() => {
+      const moved: InboxRecord[] = []
+      for (const id of ids) {
+        const current = this.get(id)
+        if (!current || current.status !== 'delivered' || current.deliveredBy === deliveredBy) continue
+        this.db.statement('UPDATE inbox SET delivered_by = ? WHERE inbox_id = ? AND status = ?').run(deliveredBy, id, 'delivered')
+        const next = { ...current, deliveredBy }
+        this.recorded(next)
+        moved.push(next)
+      }
+      return moved
+    })
+  }
+
+  /** Merges `patch` into the row's payload object (a `null` value removes the key). */
+  patchPayload(inboxId: string, patch: Record<string, unknown>): InboxRecord {
+    return this.db.transaction(() => {
+      const current = this.get(inboxId)
+      if (!current) fail('bad_request', `Unknown inbox row ${inboxId}.`)
+      const merged: Record<string, unknown> = { ...((current.payload as Record<string, unknown> | null) ?? {}) }
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === null) delete merged[key]
+        else merged[key] = value
+      }
+      const payload = JSON.parse(stableStringify(merged)) as unknown
+      this.db.statement('UPDATE inbox SET payload = ? WHERE inbox_id = ?').run(stableStringify(payload), inboxId)
+      const next = { ...current, payload }
+      this.recorded(next)
+      return next
+    })
+  }
+
   /**
    * pending -> delivered by `deliveredBy` (the wake `turn.start` or `turn.steer` effect carrying the
    * rows), so a failed or cut-off delivery can return them to pending. Rows already past `pending`

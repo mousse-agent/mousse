@@ -433,6 +433,11 @@ export interface ChatMessage {
   error?: import('./errors').AppErrorShape
   workflowRun?: import('./workflowChat').WorkflowChatRun
   workflowInvocationId?: string
+  /**
+   * Set on a message that delivered subagent results to this thread (a wake turn, a steer, a queued
+   * steer): the tasks it reports, so the app never parses the text.
+   */
+  subagentNotice?: import('./subagents').SubagentNoticeItem[]
   /** Durable model-context input that is intentionally omitted from the user-facing transcript. */
   hidden?: boolean
   /** Original presentation visibility while a conversation-undo is active. */
@@ -619,6 +624,10 @@ export interface QueuedMessage {
   internal?: boolean
   /** Run Engine run this item executes when drained. */
   runId?: string
+  /** Inbox rows whose notice this item delivers (a steer that missed its turn); rebuilt when it runs. */
+  inboxIds?: string[]
+  /** The subagent results the item's message reports. */
+  subagentNotice?: import('./subagents').SubagentNoticeItem[]
 }
 
 export interface ContextUsageCategory {

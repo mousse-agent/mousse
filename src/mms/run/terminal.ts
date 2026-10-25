@@ -1,7 +1,9 @@
 import { Delegations } from './Delegations'
+import { fullyShownDelegations } from './delegation/notice'
+import { Inbox } from './Inbox'
 import { stableStringify } from './json'
 import type { RunStore } from './RunStore'
-import type { AttemptStatus, RunOutcome, RunRecord } from './types'
+import type { AttemptStatus, ChildResultPayload, RunOutcome, RunRecord } from './types'
 
 export type RunTerminalStatus = 'completed' | 'interrupted' | 'failed' | 'cancelled' | 'uncertain'
 
@@ -49,6 +51,32 @@ export function writeTerminalRun(
         completedAt
       })
     new Delegations(store).publishResult(next, options.resultText)
+    acknowledgeDeliveredRows(store, next)
     return next
   })
+}
+
+/**
+ * Acknowledge on delivery (issue #142): the notices a run delivered (a wake run's, a steer's, a
+ * queued steer's) were read when that run completed, so their inbox rows are acknowledged in the
+ * run's terminal transaction. A task whose result the notice showed whole is read too; one that was
+ * cut stays unread until the model reads the rest with `task_status`. A run that did not complete
+ * leaves its rows `delivered`: the reconciler returns them to `pending` (`restoreUndeliveredRows`),
+ * except for a run the user stopped, which keeps them as before.
+ */
+function acknowledgeDeliveredRows(store: RunStore, run: RunRecord): void {
+  if (run.status !== 'completed') return
+  const inbox = new Inbox(store)
+  const rows = inbox.listDeliveredByRun(run.runId)
+  if (rows.length === 0) return
+  inbox.markAcknowledged(rows.map((row) => row.inboxId))
+  const shown = fullyShownDelegations(rows)
+  const delegations = new Delegations(store, inbox)
+  for (const row of rows) {
+    if (row.kind !== 'child_result') continue
+    const { delegationId } = row.payload as ChildResultPayload
+    const delegation = delegations.get(delegationId)
+    if (shown.has(delegationId) && delegation && (delegation.status === 'result_available' || delegation.status === 'failed'))
+      delegations.setStatus({ delegationId, from: delegation.status, to: 'acknowledged' })
+  }
 }
