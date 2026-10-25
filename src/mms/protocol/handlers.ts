@@ -1622,6 +1622,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const apiKey = asString(p.apiKey, 'apiKey', 8192)
       await ctx.mms.providerAuth.setApiKey(providerId, apiKey)
       await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
+      await ctx.mms.harness?.legacy.credentialsChanged(providerId)
       const providers = ctx.mms.providerInstances.configuredProviders()
       ctx.emitEvent?.('providers.changed', { providers })
       return { providers }
@@ -1652,6 +1653,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
       const result = await ctx.mms.providerAuth.verifyAmbientProvider(providerId)
+      await ctx.mms.harness?.legacy.credentialsChanged(providerId)
       const providers = ctx.mms.providerInstances.configuredProviders()
       if (result?.success) ctx.emitEvent?.('providers.changed', { providers })
       return { result, providers }
@@ -1660,7 +1662,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const providerId = asString(p.providerId, 'providerId', 128)
       // Vendor instances disconnect in Mousse only; terminal sign-ins are never logged out.
-      if (!(await harnessGateway(ctx).legacy.logout(providerId))) await ctx.mms.providerAuth.logout(providerId)
+      if (!(await harnessGateway(ctx).legacy.logout(providerId))) {
+        await ctx.mms.providerAuth.logout(providerId)
+        await harnessGateway(ctx).legacy.credentialsChanged(providerId)
+      }
       const providers = ctx.mms.providerInstances.configuredProviders()
       ctx.emitEvent?.('providers.changed', { providers })
       return { providers }
@@ -1682,6 +1687,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (result && (result as { success?: boolean }).success !== false) {
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
+        await ctx.mms.harness?.legacy.credentialsChanged(providerId)
         const providers = ctx.mms.providerInstances.configuredProviders()
         if (result && (result as { success?: boolean }).success !== false) {
           ctx.emitEvent?.('providers.changed', { providers })
@@ -1712,6 +1718,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         if (result && (result as { success?: boolean }).success !== false) {
           await ctx.mms.providerAuth.refreshDynamicModels().catch(() => undefined)
         }
+        await ctx.mms.harness?.legacy.credentialsChanged(providerId)
         const providers = ctx.mms.providerInstances.configuredProviders()
         if (result && (result as { success?: boolean }).success !== false) {
           ctx.emitEvent?.('providers.changed', { providers })

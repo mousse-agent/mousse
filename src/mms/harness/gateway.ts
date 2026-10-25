@@ -162,6 +162,11 @@ export interface LegacyProviders {
   logout(providerId: string): Promise<boolean>
   /** Undefined when `providerId` is not a vendor instance. */
   login(providerId: string, session: LoginSession, cwd: string): Promise<ProviderLoginResult> | undefined
+  /**
+   * A pi provider's credentials changed through the old methods (API key, OAuth, logout): its
+   * instance is checked again now and its snapshot published, whatever the probe cache held.
+   */
+  credentialsChanged(providerId: string): Promise<void>
 }
 
 /** Who is resolving; recorded for diagnostics, and the same rules apply to all. */
@@ -463,6 +468,18 @@ export class Harness implements HarnessGateway {
         const record = this.legacyRecord(providerId)
         if (!record?.runtime.signIn) return undefined
         return record.runtime.signIn(session, cwd).finally(() => void this.probe(record.instanceId, true))
+      },
+      credentialsChanged: async (providerId) => {
+        let instanceId: string
+        try {
+          instanceId = this.instanceMap.instanceIdForLegacyProvider(providerId)
+        } catch {
+          return
+        }
+        if (this.instanceMap.get(instanceId)?.driver !== 'pi') return
+        // A check already running read the old credentials: wait for it, then check again.
+        await this.probes.get(instanceId)?.probing
+        await this.probe(instanceId, true)
       }
     }
   }
@@ -910,6 +927,18 @@ export class Harness implements HarnessGateway {
       .catch((error) => {
         console.warn('[harness] provider check failed', { instanceId, error: errorText(error) })
         state.checkedAtMs = this.now()
+        // Recorded like a check that did not finish: the last good values stay (stale), or the
+        // page says what failed and offers Check again, never "Checking" until the TTL ends.
+        const message = `The check failed: ${errorText(error)}`
+        const last = state.lastGood
+        state.result = {
+          checkedAt: new Date(this.now()).toISOString(),
+          install: last?.install ?? 'unknown',
+          runs: { state: 'unknown', message },
+          auth: { state: 'unknown', message },
+          compatibility: last?.compatibility ?? { state: 'unknown' },
+          timedOut: Boolean(last)
+        }
       })
       .finally(() => {
         state.probing = undefined
