@@ -298,6 +298,116 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     expect(s.service.hasContinuation(s.childThread, second.id)).toBe(true)
   })
 
+  it('a tool call waiting for a continuation run that never becomes active is refused, and nothing is recorded under another run', async () => {
+    const s = await scene({ mcp: true })
+    ;(s.d.orch as any).continuationCallWaitMs = 80
+    holdContinuationRun(s.d)
+    s.cli.last.emit(notification('build-1'), textDelta('checking'))
+    await waitFor(() => (s.d.orch as any).pendingContinuations.size === 1, 'the wake report to reach the host')
+    const response = await s.callMousse('list_tasks')
+    expect(response.error?.message).toContain('did not become active')
+    for (const run of s.d.engine.listRuns(s.childThread)) expect(s.d.engine.tools.listForRun(run.runId).map((invocation) => invocation.tool)).not.toContain('list_tasks')
+  })
+
+  it('an admitted turn whose own send holds the admission and waits behind a continuation in the lane is passed by it', async () => {
+    const s = await scene()
+    const session = s.d.orch.getOrCreateSession(s.childThread)
+    // The lane is held while the situation is set up: a message of the user was admitted (its send holds the
+    // admission) but its effect is made only after the continuation's.
+    await s.d.worker.stop()
+    const sent = await s.d.engine.dispatch({ kind: 'send', threadId: s.childThread, clientRequestId: 'admitted-1', source: 'gui' })
+    if (sent.status !== 'accepted') throw new Error('send refused')
+    session.turnAdmitted = true
+    session.admissionRunId = sent.runId
+    s.cli.last.emit(notification('build-1'), textDelta('reading the report'))
+    await waitFor(() => s.d.engine.listRuns(s.childThread).some((run) => run.source === 'provider-continuation'), 'the continuation run')
+    s.cli.reply = (message, process) => process.answer(String(message.uuid), 'typed answer')
+    const admitted = (s.d.orch as any).enqueueTurnStart({ runId: sent.runId, threadId: s.childThread, input: { content: 'admitted', mode: 'agent' }, reuseLastUser: false, displayUserMessage: true, source: 'gui', admissionHeld: true }) as Promise<unknown>
+    admitted.catch(() => undefined)
+    s.cli.last.emit(resultFrame({ text: 'The report is read.', origin: 'task-notification' }))
+    s.d.worker.start()
+    await admitted
+    const continuation = s.d.engine.listRuns(s.childThread).find((run) => run.source === 'provider-continuation')!
+    const typed = s.d.engine.getRun(sent.runId)!
+    expect([continuation.status, typed.status]).toEqual(['completed', 'completed'])
+    // The continuation went first although it came second in the lane, and the admitted turn kept its admission.
+    expect(continuation.completedAt! <= typed.startedAt!).toBe(true)
+  }, 40_000)
+
+  it('an admission held by something the engine does not schedule is not passed: the continuation waits', async () => {
+    const s = await scene()
+    const session = s.d.orch.getOrCreateSession(s.childThread)
+    ;(s.d.orch as any).wakeBusyDeferMs = 50
+    // A queue drain or a channel turn holds the admission; no run of the engine owns it.
+    session.turnAdmitted = true
+    session.admissionRunId = undefined
+    s.cli.last.emit(notification('build-1'), textDelta('reading the report'))
+    await waitFor(() => s.d.engine.listRuns(s.childThread).some((run) => run.source === 'provider-continuation'), 'the continuation run')
+    // Some other turn.start is pending on the thread (that alone must not make the admission passable).
+    const other = await s.d.engine.dispatch({ kind: 'send', threadId: s.childThread, clientRequestId: 'unrelated-1', source: 'gui' })
+    if (other.status !== 'accepted') throw new Error('send refused')
+    s.d.engine.outbox.enqueue({ threadId: s.childThread, runId: other.runId, kind: 'turn.start', availableAt: new Date(Date.now() + 3_600_000).toISOString(), payload: { runId: other.runId, threadId: s.childThread, input: { content: 'x', mode: 'agent' } } })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(s.d.engine.listRuns(s.childThread).find((run) => run.source === 'provider-continuation')?.status).toBe('queued')
+    // Cleanup: the run the unrelated effect belongs to is cancelled, and the admission is freed.
+    s.d.engine.markTerminal(other.runId, 'cancelled')
+    session.turnAdmitted = false
+  }, 40_000)
+
+  type Dispatch = (command: never) => Promise<{ status: string; runId?: string; reason?: string }>
+  describe.each([
+    ['the run cannot be recorded', (real: Dispatch): Dispatch => async (command: { kind: string; source?: string }) => {
+      if (command.kind === 'send' && command.source === 'provider-continuation') {
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        throw new Error('the engine is unavailable')
+      }
+      return real(command as never)
+    }],
+    ['the run is cancelled before it starts', (real: Dispatch, cancel: (runId: string) => void): Dispatch => async (command: { kind: string; source?: string }) => {
+      if (command.kind === 'send' && command.source === 'provider-continuation') await new Promise((resolve) => setTimeout(resolve, 150))
+      const result = await real(command as never)
+      if (command.kind === 'send' && command.source === 'provider-continuation' && result.status === 'accepted') {
+        // Cancelled in the same tick the run is made, before its effect can start it.
+        cancel(result.runId!)
+      }
+      return result
+    }]
+  ] as const)('when %s', (_label, wrap) => {
+    it('the reservation is released, and a message typed meanwhile runs', async () => {
+      const s = await scene()
+      const real = s.d.engine.dispatch.bind(s.d.engine) as unknown as Dispatch
+      vi.spyOn(s.d.engine, 'dispatch').mockImplementation(wrap(real, (runId) => s.d.engine.markTerminal(runId, 'cancelled')) as never)
+      s.cli.last.emit(notification('build-1'), textDelta('reading the report'))
+      await waitFor(() => (s.d.orch as any).pendingContinuations.size === 1, 'the wake report to reach the host')
+      const session = s.d.orch.getOrCreateSession(s.childThread)
+      expect(session.turnAdmitted).toBe(true)
+      s.cli.reply = (message, process) => process.answer(String(message.uuid), 'typed answer')
+      const typed = await s.d.orch.send('typed meanwhile', false, { threadId: s.childThread, clientRequestId: 'typed-3', source: 'gui' })
+      expect(typed.queued).toBe(true)
+      await waitFor(() => s.d.engine.listRuns(s.childThread).some((run) => run.source === 'gui' && run.status === 'completed'), 'the typed message to run after the reservation was released', 20_000)
+      expect((s.d.orch as any).pendingContinuations.size).toBe(0)
+      expect(session.turnAdmitted).toBe(false)
+    }, 40_000)
+  })
+
+  it('the thread note about a possibly lost result comes from a real cancel, once', async () => {
+    const s = await scene()
+    s.cli.reply = undefined
+    const typed = s.d.orch.send('typed', false, { threadId: s.childThread, clientRequestId: 'typed-4', source: 'gui', awaitMode: 'ack' })
+    typed.catch(() => undefined)
+    await waitFor(() => s.cli.last.inputs.length === 2, 'the message to reach Claude')
+    const claude = s.cli.last
+    claude.emit(textDelta('working', claude.uuid(1)), notification('build-1'))
+    expect(s.d.orch.steerThread(s.childThread, 'queued steer')).toBe(true)
+    await waitFor(() => claude.inputs.length === 3, 'the steer to reach Claude')
+    s.d.orch.abortActiveTurn(s.childThread)
+    const notes = () => s.d.orch.getOrCreateSession(s.childThread).messages.filter((message) => message.content.includes('may not have been delivered'))
+    await waitFor(() => notes().length === 1, 'the note', 15_000)
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    expect(notes()).toHaveLength(1)
+    expect(notes()[0].content).toMatch(/Stop releases it now/)
+  }, 40_000)
+
   it('boot cancels a continuation run whose effect died with the daemon', async () => {
     const s = await scene()
     const run = s.d.engine.store.createRun({ threadId: s.childThread, source: 'provider-continuation', clientRequestId: 'continuation:orphan' })

@@ -1101,6 +1101,27 @@ describe('result routing and steering edge cases', () => {
     expect(process.interruptOptions).toEqual([undefined, { cancelQueued: true }])
   })
 
+  it('a continuation a run already claimed that Claude then folded a message into ends without a result of its own', async () => {
+    const f = fixture()
+    await withHelperTurn(f)
+    const process = f.cli.last
+    process.emit(notification('bash-1'), textDelta('reading the report'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    const id = f.host.continuationStarted.mock.calls[0][1].id
+    const claimed = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, continuationId: id, onText: () => undefined })
+    claimed.catch(() => undefined)
+    // A message of ours is pushed straight into the live session (a race the host cannot normally lose).
+    const live = (f.service as unknown as { live: Map<string, { beginRun(consumer: () => void): { done: Promise<unknown> }; push(run: unknown, message: unknown): string }> }).live.get('thread')!
+    const run = live.beginRun(() => undefined)
+    live.push(run, { type: 'user', message: { role: 'user', content: 'mine' }, parent_tool_use_id: null, session_id: '' })
+    await inputs(f.cli, 2)
+    const uuid = process.uuid(1)
+    process.emit(textDelta('report and answer', uuid), resultFrame({ uuids: [uuid], text: 'report and answer', origin: 'task-notification' }))
+    await run.done
+    // The claimed wake has no turn of its own: it fails as folded, with no text to publish as "Done.".
+    await expect(claimed).rejects.toMatchObject({ code: 'claude_continuation_folded' })
+  })
+
   it('a steered continuation ignores an abort result that echoes no id and ends at its own result', async () => {
     const f = fixture()
     await withHelperTurn(f)

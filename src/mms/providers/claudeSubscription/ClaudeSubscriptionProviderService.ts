@@ -1471,6 +1471,13 @@ export class ClaudeSubscriptionProviderService {
             frames.text += result.result
             input.onText(frames.text)
           }
+        } else if (outcome.reason === 'folded') {
+          // A wake Claude folded a message of ours into has no turn of its own; the message got the answer.
+          throw new AppError({
+            code: 'claude_continuation_folded',
+            message: 'Claude answered this wake together with a message of yours; it has no turn of its own.',
+            errorInfo: { category: 'cancelled', retryable: false }
+          })
         } else if (outcome.reason === 'deadline') {
           frames.text = 'A background task finished, but Claude did not respond to it.'
           input.onText(frames.text)
