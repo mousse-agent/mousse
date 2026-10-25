@@ -36,6 +36,7 @@ const card = (patch: Partial<SubagentCardModel> = {}): SubagentCardModel => ({
   continued: false,
   latest: true,
   waitingOn: [],
+  exact: true,
   createdAt: Date.parse('2026-10-25T12:08:00.000Z'),
   completedAt: null,
   ...patch
@@ -212,6 +213,14 @@ describe('a subagent tool row', () => {
     const html = withCards([], createElement(SubagentTool, { part: subagentTool('c3', { state: 'output-error' }) }))
     expect(html).not.toContain('subagent-card')
     expect(html).toContain("Couldn&#x27;t start subagent")
+  })
+
+  it('says a call cut off before it returned did not finish, and a running one is starting', () => {
+    const part = subagentTool('c5', { state: 'input-available', input: { recordVersion: 1 } })
+    expect(withCards([], createElement(SubagentTool, { part }))).toContain("Subagent call didn&#x27;t finish")
+    const live = withCards([], createElement(SubagentTool, { part, chatStatus: 'streaming' }))
+    expect(live).toContain('Starting subagent')
+    expect(live).not.toContain('didn')
   })
 
   it('shows the other subagent tools as plain rows, never as cards', () => {

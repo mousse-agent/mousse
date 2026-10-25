@@ -167,6 +167,7 @@ const call = (toolCallId: string, tool: SubagentCall['tool'], startedSeconds: nu
   tool,
   startedAt: Date.parse(at(startedSeconds)),
   pending: false,
+  inLastTurn: true,
   recorded: false,
   failed: false,
   input: {},
@@ -174,8 +175,8 @@ const call = (toolCallId: string, tool: SubagentCall['tool'], startedSeconds: nu
   ...patch
 })
 
-const join = (calls: SubagentCall[], subagents: SubagentSummary[], options: { loaded?: boolean; previous?: ReadonlyMap<string, SubagentCardModel> } = {}) =>
-  joinSubagentCards(calls, subagents, { loaded: options.loaded ?? true, previous: options.previous })
+const join = (calls: SubagentCall[], subagents: SubagentSummary[], options: { loaded?: boolean; previous?: ReadonlyMap<string, SubagentCardModel>; turnActive?: boolean } = {}) =>
+  joinSubagentCards(calls, subagents, { loaded: options.loaded ?? true, previous: options.previous, turnActive: options.turnActive })
 
 describe('joinSubagentCards', () => {
   it('gives each start-a-task call the task the daemon recorded after it, by order', () => {
@@ -335,6 +336,85 @@ describe('joinSubagentCards', () => {
       )
       expect(answered.get('c1')!.delegationId).toBe('d3')
       expect(answered.get('c2')!.delegationId).toBe('d2')
+    })
+
+    describe('when its task shows up across list updates', () => {
+      const input = { recordVersion: 1, subagent: 'Subagent a' }
+      const first = task('d1', 1, { outcome: 'done', continued: true })
+      const list = (...later: SubagentTaskSummary[]) => [subagent('a', [first, ...later])]
+      const pendingCalls = () => [recorded('c1', 'continue_subagent', { input }), recorded('c2', 'continue_subagent', { input })]
+      const answered = (id: string, delegationId: string) =>
+        recorded(id, 'continue_subagent', { input, pending: false, output: { delegationId } })
+      const ids = (cards: ReadonlyMap<string, SubagentCardModel>) => [cards.get('c1')?.delegationId ?? null, cards.get('c2')?.delegationId ?? null]
+
+      it('never gives two follow-ups to one subagent a task from the list, and lets their results decide', () => {
+        // The list holds one later task, d2, before the second follow-up's task, d3, exists.
+        const waiting = join(pendingCalls(), list(task('d2', 6)))
+        expect(ids(waiting)).toEqual([null, null])
+        expect([waiting.get('c1')!.pending, waiting.get('c2')!.pending]).toEqual([true, true])
+        // Results arrive: c1 started d3, c2 started d2.
+        const settled = join([answered('c1', 'd3'), answered('c2', 'd2')], list(task('d2', 6), task('d3', 7)), { previous: waiting })
+        expect(ids(settled)).toEqual(['d3', 'd2'])
+        expect([settled.get('c1')!.exact, settled.get('c2')!.exact]).toEqual([true, true])
+      })
+
+      it('gives each its task when the results arrive in the opposite order', () => {
+        const waiting = join(pendingCalls(), list(task('d2', 6)))
+        // c2's result comes first, and the list has d2 only.
+        const second = join([recorded('c1', 'continue_subagent', { input }), answered('c2', 'd2')], list(task('d2', 6)), { previous: waiting })
+        expect(ids(second)).toEqual([null, 'd2'])
+        // Then d3 is listed and c1's result names it.
+        const third = join([answered('c1', 'd3'), answered('c2', 'd2')], list(task('d2', 6), task('d3', 7)), { previous: second })
+        expect(ids(third)).toEqual(['d3', 'd2'])
+      })
+
+      it('lets an exact id replace a provisional match and frees that task for its own call', () => {
+        // One follow-up so far: the only candidate is provisionally its task.
+        const alone = join([recorded('c1', 'continue_subagent', { input })], list(task('d2', 6)))
+        expect(alone.get('c1')).toMatchObject({ delegationId: 'd2', exact: false })
+        // A second follow-up appears and the results say the opposite.
+        const settled = join([answered('c1', 'd3'), answered('c2', 'd2')], list(task('d2', 6), task('d3', 7)), { previous: alone })
+        expect(ids(settled)).toEqual(['d3', 'd2'])
+      })
+
+      it('does not keep a provisional match when its task leaves the list', () => {
+        const alone = join([recorded('c1', 'continue_subagent', { input })], list(task('d2', 6)))
+        const after = join([recorded('c1', 'continue_subagent', { input })], [], { previous: alone })
+        expect(after.get('c1')).toMatchObject({ pending: true, delegationId: null })
+      })
+
+      it('keeps an exact match when its task leaves the list', () => {
+        const exact = join([answered('c1', 'd2')], list(task('d2', 6)))
+        expect(join([answered('c1', 'd2')], [], { previous: exact }).get('c1')).toBe(exact.get('c1'))
+      })
+    })
+
+    describe('a call that never returned', () => {
+      const stale = () => recorded('c1', 'delegate_task')
+
+      it('is a starting card only while its turn is running', () => {
+        expect(join([stale()], subagents, { turnActive: true }).get('c1')).toMatchObject({ pending: true })
+        expect(join([stale()], subagents, { turnActive: false }).has('c1')).toBe(false)
+        // A turn is running, but this row belongs to an earlier one.
+        expect(join([{ ...stale(), inLastTurn: false }], subagents, { turnActive: true }).has('c1')).toBe(false)
+      })
+
+      it('is not a card once the turn ended, even with its input and an unrelated list', () => {
+        const named = recorded('c1', 'delegate_task', { input: { recordVersion: 1, title: 'Nobody' } })
+        expect(join([named], subagents, { turnActive: false }).has('c1')).toBe(false)
+      })
+
+      it('still joins a task it names after the turn ended', () => {
+        const named = recorded('c1', 'delegate_task', { input: { recordVersion: 1, title: 'Subagent docs' } })
+        expect(join([named], subagents, { turnActive: false }).get('c1')!.delegationId).toBe('d-docs')
+      })
+
+      it('is found by the transcript as in the last turn only after the last user message', () => {
+        const message = (id: string, role: 'user' | 'assistant', parts: unknown[] = []) => ({ id, role, parts, createdAt: at(1) }) as unknown as UIMessage
+        const part = (toolCallId: string) => ({ type: 'tool-Subagent', toolCallId, subagentTool: 'delegate_task', state: 'input-available', input: { recordVersion: 1 } })
+        const calls = collectSubagentCalls([message('a1', 'assistant', [part('old')]), message('u2', 'user'), message('a2', 'assistant', [part('new')])])
+        expect(calls.map((entry) => [entry.toolCallId, entry.inLastTurn])).toEqual([['old', false], ['new', true]])
+      })
     })
 
     it('keeps its raw row when it finished without naming a task', () => {

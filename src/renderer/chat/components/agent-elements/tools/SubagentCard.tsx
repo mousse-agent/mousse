@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import type { ReactNode, RefObject } from "react";
 import type { SubagentCardModel } from "../../../adapters/subagentCards";
 import { IconChevronRight } from "../../../../lib/icons";
+import { isSubagentStartTool } from "../../../../../shared/subagentTools";
 import { openThread } from "../../../../lib/openThread";
 import { getToolStatus } from "../utils/format-tool";
 import { GenericTool } from "./generic-tool";
@@ -149,10 +150,12 @@ function LiveSubagentCard({ card }: { card: SubagentCardModel }) {
 function RawSubagentRow({ part, chatStatus }: { part: any; chatStatus?: string }) {
   const meta = toolRegistry["tool-Subagent"]!;
   const { isPending } = getToolStatus(part, chatStatus);
+  // A call that never returned and is not running now was cut off: the turn stopped or the app closed.
+  const unfinished = isSubagentStartTool(part.subagentTool) && part.state !== "output-available" && part.state !== "output-error" && !isPending;
   return (
     <GenericTool
       icon={meta.icon}
-      title={meta.title(part)}
+      title={unfinished ? "Subagent call didn't finish" : meta.title(part)}
       subtitle={meta.subtitle?.(part)}
       isPending={isPending}
     />

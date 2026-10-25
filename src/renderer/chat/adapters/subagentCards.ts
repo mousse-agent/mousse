@@ -16,6 +16,8 @@ export interface SubagentCall {
   startedAt: number | null
   /** The call has not returned yet. */
   pending: boolean
+  /** The row belongs to the conversation's last turn, the only one that can still be running. */
+  inLastTurn: boolean
   /** The row carries the daemon's record of the call (even if empty so far), so it joins only by what the record names. */
   recorded: boolean
   /** The call errored or was refused, so no task came of it and its raw row stays. */
@@ -40,6 +42,11 @@ export interface SubagentCardModel {
   /** This is the subagent's latest task, so its state is the subagent's current one. */
   latest: boolean
   waitingOn: SubagentWaitingOn[]
+  /**
+   * The task is certain: the call's own result named it, its title named a subagent's first task, or an
+   * old row was joined by order. A provisional match (a lone follow-up taking the only candidate) is not.
+   */
+  exact: boolean
   createdAt: number | null
   completedAt: number | null
   error?: string
@@ -56,7 +63,8 @@ function timeOf(value: unknown): number | null {
 /** The start-a-task calls in `messages`, in transcript order. */
 export function collectSubagentCalls(messages: readonly UIMessage[]): SubagentCall[] {
   const calls: SubagentCall[] = []
-  for (const message of messages) {
+  const lastUser = messages.reduce((found, message, index) => (message.role === 'user' ? index : found), -1)
+  for (const [messageIndex, message] of messages.entries()) {
     for (const raw of message.parts ?? []) {
       const part = raw as Part
       if (part.type !== 'tool-Subagent' || !isSubagentStartTool(part.subagentTool)) continue
@@ -68,6 +76,7 @@ export function collectSubagentCalls(messages: readonly UIMessage[]): SubagentCa
         tool: part.subagentTool,
         startedAt: timeOf((message as { createdAt?: unknown }).createdAt),
         pending: state !== 'output-available' && state !== 'output-error',
+        inLastTurn: messageIndex > lastUser,
         recorded: typeof input.recordVersion === 'number',
         failed: state === 'output-error' || isRefusedSubagentResult(part.output),
         input,
@@ -120,7 +129,7 @@ function taskState(subagent: SubagentSummary, task: SubagentTaskSummary, latest:
   }
 }
 
-function modelOf(call: SubagentCall, entry: TaskEntry): SubagentCardModel {
+function modelOf(call: SubagentCall, entry: TaskEntry, exact: boolean): SubagentCardModel {
   const { subagent, task } = entry
   const latest = entry.index === subagent.tasks.length - 1
   return {
@@ -135,6 +144,7 @@ function modelOf(call: SubagentCall, entry: TaskEntry): SubagentCardModel {
     continued: task.continued,
     latest,
     waitingOn: latest ? subagent.waitingOn : [],
+    exact,
     createdAt: timeOf(task.createdAt),
     completedAt: timeOf(task.completedAt),
     ...(task.error ? { error: task.error } : {})
@@ -154,6 +164,7 @@ function pendingModel(call: SubagentCall): SubagentCardModel {
     continued: false,
     latest: true,
     waitingOn: [],
+    exact: false,
     createdAt: call.startedAt,
     completedAt: null
   }
@@ -164,6 +175,12 @@ export interface JoinOptions {
   loaded: boolean
   /** Cards joined last time: one whose subagent has dropped out of the list (a trashed thread) stays. */
   previous?: ReadonlyMap<string, SubagentCardModel>
+  /**
+   * The thread's turn is running. A call that never returned is starting only while its turn is live;
+   * a row left unfinished by a crash or a stop is not a pending card and keeps its plain row.
+   * Defaults to running.
+   */
+  turnActive?: boolean
 }
 
 /**
@@ -182,12 +199,12 @@ export function joinSubagentCards(calls: readonly SubagentCall[], subagents: rea
     .sort((a, b) => a.at - b.at)
   const byDelegation = new Map(entries.map((entry) => [entry.task.delegationId, entry]))
   const claimed = new Set<string>()
-  const assigned = new Map<string, TaskEntry>()
+  const assigned = new Map<string, { entry: TaskEntry; exact: boolean }>()
 
-  const take = (call: SubagentCall, entry: TaskEntry | undefined): boolean => {
+  const take = (call: SubagentCall, entry: TaskEntry | undefined, exact: boolean): boolean => {
     if (!entry || claimed.has(entry.task.delegationId)) return false
     claimed.add(entry.task.delegationId)
-    assigned.set(call.toolCallId, entry)
+    assigned.set(call.toolCallId, { entry, exact })
     return true
   }
   const recordedId = (call: SubagentCall): string | null => {
@@ -196,39 +213,52 @@ export function joinSubagentCards(calls: readonly SubagentCall[], subagents: rea
   }
   const live = calls.filter((call) => !call.failed)
 
-  // 0. A call that already has a card keeps its task, listed or not, before any other call is
-  //    matched: a task that dropped out of the list must not be handed to a neighbour.
-  const reserved = new Set<string>()
-  for (const call of live) {
-    const before = options.previous?.get(call.toolCallId)
-    if (!before || before.pending || !before.delegationId) continue
-    reserved.add(call.toolCallId)
-    take(call, byDelegation.get(before.delegationId))
-  }
-
-  // 1. A recorded result names its task outright.
+  // 1. A recorded result names its task outright, and always wins over any other match.
   for (const call of live) {
     const id = recordedId(call)
-    if (id && !reserved.has(call.toolCallId)) take(call, byDelegation.get(id))
+    if (id) take(call, byDelegation.get(id), true)
   }
 
-  // 2. A recorded input names the subagent: a started subagent by its title, a follow-up by the
-  //    subagent it names, taking that subagent's earliest later task no other call has taken. A
-  //    recorded follow-up with several candidate tasks waits for its result rather than guess.
+  // 2. A call that already has a card for a certain task keeps it, listed or not, before any other
+  //    call is matched: a task that dropped out of the list must not be handed to a neighbour. A
+  //    provisional match is not kept; it is worked out again from what is known now.
+  const reserved = new Set<string>()
   for (const call of live) {
-    if (assigned.has(call.toolCallId) || reserved.has(call.toolCallId) || recordedId(call)) continue
+    if (assigned.has(call.toolCallId)) continue
+    const before = options.previous?.get(call.toolCallId)
+    if (!before || before.pending || !before.exact || !before.delegationId) continue
+    reserved.add(call.toolCallId)
+    take(call, byDelegation.get(before.delegationId), true)
+  }
+
+  // 3. A recorded input names the subagent. A started subagent is found by its title, which is
+  //    unique. A follow-up takes that subagent's later task only when no other unresolved follow-up
+  //    names the same subagent and exactly one task is a candidate; otherwise it stays pending until
+  //    its own result arrives, never given a task from list order.
+  const unresolved = live.filter((call) => !assigned.has(call.toolCallId) && !reserved.has(call.toolCallId) && !recordedId(call))
+  const subagentsNamed = (call: SubagentCall): Set<string> =>
+    new Set(entries.filter((entry) => namesSubagent(call, entry) === true).map((entry) => entry.subagent.childThreadId))
+  for (const call of unresolved) {
     const named = entries.filter((entry) => namesSubagent(call, entry) === true && !claimed.has(entry.task.delegationId))
     if (call.tool === 'delegate_task') {
-      take(call, named.find((entry) => entry.index === 0))
+      take(call, named.find((entry) => entry.index === 0), true)
       continue
     }
     const later = named.filter((entry) => entry.index >= 1 && (call.startedAt === null || entry.at >= call.startedAt - START_SLACK_MS))
-    if (later.length === 1 || (later.length > 1 && !call.recorded)) take(call, later[0])
+    if (!call.recorded) {
+      take(call, later[0], false)
+      continue
+    }
+    const mine = subagentsNamed(call)
+    const rivals = unresolved.some(
+      (other) => other !== call && other.recorded && other.tool === 'continue_subagent' && !assigned.has(other.toolCallId) && [...subagentsNamed(other)].some((id) => mine.has(id))
+    )
+    if (!rivals && later.length === 1) take(call, later[0], false)
   }
 
-  // 3. Rows written before the daemon kept a record join by order and time. A recorded row never
-  //    does, whatever it has named so far: until its result or title arrives it stays pending, so two
-  //    calls started together cannot swap children. A row that names its task or subagent is
+  // 4. Rows written before the daemon kept a record join by order and time. A recorded row never
+  //    does, whatever it has named so far: until its result or title arrives it stays pending, so
+  //    two calls started together cannot swap children. A row that names its task or subagent is
   //    not matched this way either, so it cannot take another call's task.
   for (const call of live) {
     if (assigned.has(call.toolCallId) || reserved.has(call.toolCallId) || call.recorded || recordedId(call) || namesAnySubagent(call)) continue
@@ -239,21 +269,24 @@ export function joinSubagentCards(calls: readonly SubagentCall[], subagents: rea
           !claimed.has(entry.task.delegationId) &&
           (call.tool === 'delegate_task' ? entry.index === 0 : entry.index >= 1) &&
           (call.startedAt === null || entry.at >= call.startedAt - START_SLACK_MS)
-      )
+      ),
+      true
     )
   }
 
+  const turnActive = options.turnActive ?? true
+  const starting = (call: SubagentCall): boolean => turnActive && call.inLastTurn
   const cards = new Map<string, SubagentCardModel>()
   for (const call of calls) {
-    const entry = assigned.get(call.toolCallId)
-    if (entry) {
-      cards.set(call.toolCallId, modelOf(call, entry))
+    const match = assigned.get(call.toolCallId)
+    if (match) {
+      cards.set(call.toolCallId, modelOf(call, match.entry, match.exact))
       continue
     }
     if (call.failed) continue
     const kept = options.previous?.get(call.toolCallId)
-    if (kept && !kept.pending) cards.set(call.toolCallId, kept)
-    else if (call.pending || !options.loaded) cards.set(call.toolCallId, pendingModel(call))
+    if (kept && !kept.pending && kept.exact) cards.set(call.toolCallId, kept)
+    else if (call.pending ? starting(call) : !options.loaded) cards.set(call.toolCallId, pendingModel(call))
   }
   return cards
 }
