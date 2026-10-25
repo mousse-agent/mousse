@@ -358,7 +358,11 @@ export class RunEngine extends EventEmitter {
     return leaseOwner(this.daemonEpoch, this.pid)
   }
 
-  dispatch(command: RunCommand, opts?: { expectedSequence?: number }): Promise<CommandResult> {
+  /**
+   * `admit` runs only for a command the engine has no receipt of, before anything is written; a
+   * throw refuses it and leaves no run, event or receipt. A replay never runs it.
+   */
+  dispatch(command: RunCommand, opts?: { expectedSequence?: number; admit?: () => void }): Promise<CommandResult> {
     return this.mutex.withLock(command.threadId, () => this.decide(command, opts ?? {}))
   }
 
@@ -1329,7 +1333,7 @@ export class RunEngine extends EventEmitter {
     return this.store.maxSeq(threadId)
   }
 
-  private decide(command: RunCommand, opts: { expectedSequence?: number }): CommandResult {
+  private decide(command: RunCommand, opts: { expectedSequence?: number; admit?: () => void }): CommandResult {
     const { store } = this
     const { threadId, clientRequestId } = command
     const receipt = store.getReceipt(clientRequestId)
@@ -1345,6 +1349,7 @@ export class RunEngine extends EventEmitter {
     const seqBefore = store.maxSeq(threadId)
     if (opts.expectedSequence !== undefined && opts.expectedSequence !== seqBefore)
       return { status: 'rejected', reason: 'stale_sequence', sequence: seqBefore }
+    opts.admit?.()
     let result: CommandResult
     try {
       result = command.kind === 'send' ? this.commitSend(command, this.trackedFollowUp(command)) : this.commitControl(command)

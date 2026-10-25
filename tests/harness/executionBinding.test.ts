@@ -169,6 +169,27 @@ describe('execution bindings', () => {
     expect(adapter.turns).toEqual([])
   })
 
+  it('a retried send that was accepted returns its run even after its model is hidden', async () => {
+    const thread = store.createThread('replay hidden')
+    orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
+    const first = await orch.send('one', false, { threadId: thread.id, clientRequestId: 'replay-hidden' })
+    await harness.instances.setModelPrefs('claude', { hide: ['sonnet'] })
+    await expect(orch.send('one', false, { threadId: thread.id, clientRequestId: 'replay-hidden' })).resolves.toMatchObject({ runId: first.runId, replayed: true })
+    // A new message is still refused.
+    await expect(orch.send('two', false, { threadId: thread.id, clientRequestId: 'new-hidden' })).rejects.toMatchObject({ code: 'model_hidden' })
+    expect(engine.listRuns(thread.id)).toHaveLength(1)
+  })
+
+  it('a retried send that was accepted returns its run even after its provider is turned off', async () => {
+    const thread = store.createThread('replay off')
+    orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
+    const first = await orch.send('one', false, { threadId: thread.id, clientRequestId: 'replay-off' })
+    await harness.instances.setEnabled('claude', { kind: 'device' }, false)
+    await expect(orch.send('one', false, { threadId: thread.id, clientRequestId: 'replay-off' })).resolves.toMatchObject({ runId: first.runId, replayed: true })
+    await expect(orch.send('two', false, { threadId: thread.id, clientRequestId: 'new-off' })).rejects.toMatchObject({ code: 'provider_instance_disabled' })
+    expect(engine.listRuns(thread.id)).toHaveLength(1)
+  })
+
   it('a config change during an active turn applies to the next attempt only', async () => {
     const thread = store.createThread('config change')
     orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })

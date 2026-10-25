@@ -4898,8 +4898,10 @@ export class OrchestratorService extends EventEmitter {
 
     // SPEC §16.2: a send that would queue behind a pending merge-back is refused before it is a run.
     if (opts?.forceQueue || session.isTurnRunning()) this.assertQueueOpen(threadId)
-    if (!reuseLastUser && !opts?.continuationOfRunId && opts?.source !== 'wake')
-      this.assertSendableSelection(session, input)
+    // Only a new message is checked: a replay of an accepted request returns its run as it was.
+    const admit = !reuseLastUser && !opts?.continuationOfRunId && opts?.source !== 'wake'
+      ? () => this.assertSendableSelection(session, input)
+      : undefined
 
     // The run is durable before any queue/run decision or provider I/O (SPEC §2.1).
     let run: { runId: string; sequence: number } | undefined
@@ -4912,7 +4914,7 @@ export class OrchestratorService extends EventEmitter {
         prompt: normalizeSendRequest(input).content,
         ...(opts?.delegation ? { delegation: opts.delegation } : {}),
         ...(opts?.continuationOfRunId ? { continuationOfRunId: opts.continuationOfRunId, acknowledgeUncertain: opts.acknowledgeUncertain === true } : {})
-      })
+      }, { admit })
       if (result.status === 'rejected' && CONTINUATION_REFUSALS.has(result.reason))
         throw new DomainRpcError(result.reason, `Cannot continue run ${opts?.continuationOfRunId}: ${result.reason}.`)
       // Every refusal surfaces with its reason as the error code (S3), e.g. client_request_id_conflict.
@@ -4928,6 +4930,8 @@ export class OrchestratorService extends EventEmitter {
         return { message: '', actions: [], ...replayed }
       }
       run = { runId: result.runId, sequence: result.sequence }
+    } else {
+      admit?.()
     }
 
     // A follow-up from a parent (`continue_subagent`) never answers the subagent's question for it.
