@@ -213,7 +213,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
     // Hiding a model may hide the default one; move the default to a model that is still offered.
     const onSaveModelPrefs = async (patch: Parameters<typeof saveModelPrefs>[1]) => {
       await saveModelPrefs(snapshot.instanceId, patch)
-      if (patch.hidden) await reconcileSelection()
+      if (patch.hidden || patch.hide?.length) await reconcileSelection()
     }
     if (isApiInstance(snapshot)) {
       const providerId = piProviderIdOf(snapshot.instanceId) ?? snapshot.instanceId
