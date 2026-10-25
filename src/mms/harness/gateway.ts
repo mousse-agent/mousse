@@ -386,7 +386,7 @@ export class Harness implements HarnessGateway {
       cancelInstall: async (operationId) => this.operations.get(operationId)?.cancel() ?? false,
       update: (instanceId) => this.update(instanceId),
       uninstall: async (instanceId) => {
-        this.record(instanceId)
+        this.record(instanceId, { allowDisabled: true })
         return harnessFail('unsupported', 'Mousse does not uninstall CLIs it did not install. Remove it with the tool that installed it.', instanceId)
       },
       signIn: (instanceId, method) => this.signIn(instanceId, method),
@@ -398,7 +398,7 @@ export class Harness implements HarnessGateway {
       },
       refreshModels: (instanceId) => this.refreshModels(instanceId),
       setModelPrefs: async (instanceId, patch) => {
-        this.record(instanceId)
+        this.record(instanceId, { allowDisabled: true })
         this.prefs.set(instanceId, patch)
         this.changed(instanceId)
         return this.snapshot(instanceId, { kind: 'device' })
@@ -409,7 +409,7 @@ export class Harness implements HarnessGateway {
       }
     }
     this.catalog = {
-      models: (instanceId) => modelsWithPrefs(this.record(instanceId).runtime.models(), this.prefs.get(instanceId))
+      models: (instanceId) => modelsWithPrefs(this.record(instanceId, { allowDisabled: true }).runtime.models(), this.prefs.get(instanceId))
     }
     this.legacy = {
       configuredProviders: () => this.instanceMap.configuredProviders(),
