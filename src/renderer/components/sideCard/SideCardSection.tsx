@@ -11,14 +11,23 @@ export interface SideCardSectionContext {
 interface SideCardSectionProps {
   title: string
   threadId: string | null
+  /** A control at the end of the heading row (Lineage's Stop all). */
+  action?: ReactNode
   children: ReactNode
 }
 
 /** Shared spacing and heading for one block of the thread side card. */
-export function SideCardSection({ title, threadId, children }: SideCardSectionProps) {
+export function SideCardSection({ title, threadId, action, children }: SideCardSectionProps) {
   return (
     <section className="side-card-section" data-thread-id={threadId ?? undefined}>
-      <h3 className="side-card-section-title">{title}</h3>
+      {action ? (
+        <div className="side-card-section-head">
+          <h3 className="side-card-section-title">{title}</h3>
+          {action}
+        </div>
+      ) : (
+        <h3 className="side-card-section-title">{title}</h3>
+      )}
       {children}
     </section>
   )

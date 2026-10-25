@@ -15,6 +15,8 @@ import { createNativeContext, isNativeLastTurnUsage, normalizeNativeContext } fr
 
 export interface ActiveTurnControl {
   abort: AbortController
+  /** The Run Engine run this turn executes, so a Stop aimed at one run cannot abort a later turn of the thread. */
+  runId?: string
   pendingSteer: string[]
   promotedSteerIds: string[]
   /** Notices (subagent results) the steers in `pendingSteer` carry, until the model reads them or the turn ends. */

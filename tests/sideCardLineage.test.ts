@@ -1,6 +1,6 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { LineageList, LineageSection } from '../src/renderer/components/sideCard/LineageSection'
 import {
   LINEAGE_COLLAPSED_COUNT,
@@ -11,7 +11,8 @@ import {
   lineageSubagentName,
   lineageTitle,
   orderLineageSubagents,
-  sliceLineage
+  sliceLineage,
+  stopAllSubagents
 } from '../src/renderer/components/sideCard/lineageLogic'
 import { selectSubagents } from '../src/renderer/hooks/useSubagents'
 import { useAppStore } from '../src/renderer/stores/appStore'
@@ -239,6 +240,41 @@ describe('LineageList rendering', () => {
   })
 })
 
+describe('stopAllSubagents', () => {
+  const fakeApi = (stopAll: () => Promise<unknown>) => {
+    const aborted: string[] = []
+    return { aborted, api: { stopAll, abort: async (id: string) => void aborted.push(id) } }
+  }
+
+  it('is one call to the daemon, and aborts nothing when it works', async () => {
+    const { aborted, api } = fakeApi(async () => true)
+    await stopAllSubagents(api, 't1', [subagent('a'), subagent('b', { state: 'done' })])
+    expect(aborted).toEqual([])
+  })
+
+  it.each([
+    ['the daemon rejection', Object.assign(new Error('Method not allowed: subagents.stopAll'), { code: 'method_not_allowed' })],
+    ['the same rejection as the renderer sees it over IPC', new Error("Error invoking remote method 'subagents:stopAll': MmsProtocolError: Method not allowed: subagents.stopAll")]
+  ])('falls back to stopping each working subagent for an older daemon (%s), never the thread', async (_name, error) => {
+    const { aborted, api } = fakeApi(async () => { throw error })
+    await stopAllSubagents(api, 't1', [subagent('a'), subagent('b', { state: 'done' }), subagent('c', { state: 'waiting' })])
+    expect(aborted.sort()).toEqual(['a', 'c'])
+  })
+
+  it('does not retry from its own list after any other failure: the call may already have run on the daemon', async () => {
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { aborted, api } = fakeApi(async () => { throw new Error('request timed out') })
+    await stopAllSubagents(api, 't1', [subagent('a')])
+    // Another method the daemon refused is not this one.
+    const other = fakeApi(async () => { throw new Error('Method not allowed: orchestrator.abort') })
+    await stopAllSubagents(other.api, 't1', [subagent('a')])
+    expect(other.aborted).toEqual([])
+    expect(aborted).toEqual([])
+    expect(warned).toHaveBeenCalled()
+    warned.mockRestore()
+  })
+})
+
 describe('LineageSection rendering', () => {
   const withStore = (patch: Parameters<typeof useAppStore.setState>[0], run: () => void) => {
     const initial = useAppStore.getInitialState()
@@ -270,7 +306,23 @@ describe('LineageSection rendering', () => {
       expect(html).toContain('Task two')
       expect(html).not.toContain('Elsewhere')
       expect(html).not.toContain('No subagents started yet')
+    })
+  })
+
+  it('offers Stop all in the heading while any subagent runs, and not when none does', () => {
+    const render = () => renderToStaticMarkup(createElement(LineageSection, { threadId: 't1', projectId: null }))
+    withStore({ subagentsByParent: { t1: [subagent('one'), subagent('two', { state: 'done' })] } }, () => {
+      const html = render()
+      expect(html).toContain('class="side-card-section-head"')
+      expect(html).toMatch(/<h3 class="side-card-section-title">Lineage · 1 running<\/h3><button[^>]*class="lineage-stop-all"[^>]*>Stop all<\/button>/)
+      expect(html).toContain('aria-label="Stop all subagents"')
+    })
+    // A waiting subagent still runs; a finished one does not.
+    withStore({ subagentsByParent: { t1: [subagent('one', { state: 'waiting' })] } }, () => expect(render()).toContain('Stop all'))
+    withStore({ subagentsByParent: { t1: [subagent('one', { state: 'done' }), subagent('two', { state: 'stopped' })] } }, () => {
+      const html = render()
       expect(html).not.toContain('Stop all')
+      expect(html).not.toContain('side-card-section-head')
     })
   })
 

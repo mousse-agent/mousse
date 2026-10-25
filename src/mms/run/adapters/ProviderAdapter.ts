@@ -293,6 +293,12 @@ export interface ProviderAdapter {
    */
   startTurn(input: TurnInput, sink: TurnSink, ctl: TurnControl, host: AdapterHost): Promise<TurnResult>
   interrupt(ref: ProviderRef): Promise<'interrupted' | 'not_active'>
+  /**
+   * Stop reaches the provider's process for `threadId` and ends everything it still runs for the
+   * thread (background agents and shells), even when no turn is live. Only adapters whose process
+   * outlives a turn have it. Resolves `stopped` when there was a process to end.
+   */
+  stopThread?(threadId: string): Promise<'stopped' | 'not_active'>
   steer?(ref: ProviderRef, text: string): Promise<'delivered' | 'not_active'>
   /**
    * SPEC §16.2 native fork: a new provider session branched from `ref` after `atTurnOrdinal`, or

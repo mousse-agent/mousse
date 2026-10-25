@@ -84,6 +84,7 @@ export class ChannelService extends EventEmitter {
         runChannelTurn: (threadId, text, opts) =>
           orchestrator.runChannelTurn(threadId, text, threadStore, opts),
         abortChannelTurn: (threadId) => orchestrator.abortChannelTurn(threadId),
+        stopThread: (threadId) => orchestrator.stopThread(threadId, 'channel'),
         steerChannelTurn: (threadId, text) => orchestrator.steerChannelTurn(threadId, text),
         isChannelTurnActive: (threadId) => orchestrator.isChannelTurnActive(threadId)
       },

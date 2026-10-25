@@ -113,6 +113,34 @@ export class Inbox {
   }
 
   /**
+   * The rows a thread's parent holds about the subagent `childThreadId`, oldest first: its results
+   * (`child_result`) and its questions (`child_question`, a `reconcile_notice`). `kind` narrows to one.
+   */
+  listForChildThread(childThreadId: string, kind?: 'child_result' | 'child_question'): InboxRecord[] {
+    const results = `kind = 'child_result'`
+    const questions = `(kind = 'reconcile_notice' AND json_extract(payload, '$.kind') = 'child_question')`
+    const filter = kind === 'child_result' ? results : kind === 'child_question' ? questions : `(${results} OR ${questions})`
+    return this.db
+      .statement(
+        `SELECT * FROM inbox WHERE json_extract(payload, '$.childThreadId') = ? AND ${filter}
+         ORDER BY created_at, rowid`
+      )
+      .all(childThreadId)
+      .map(toInbox)
+  }
+
+  /** Every `child_question` row that is not acknowledged yet, oldest first (boot: their requests died with the process). */
+  listOpenChildQuestions(): InboxRecord[] {
+    return this.db
+      .statement(
+        `SELECT * FROM inbox WHERE kind = 'reconcile_notice' AND json_extract(payload, '$.kind') = 'child_question'
+           AND status <> 'acknowledged' ORDER BY created_at, rowid`
+      )
+      .all()
+      .map(toInbox)
+  }
+
+  /**
    * Delivered rows whose delivery reached the run `runId`, oldest first: those of its wake `turn.start`
    * (or of a queued steer's), and those of a `turn.steer` that the model read (`markSteerTaken`). A
    * steer that has not run yet, or that the turn took but never read, has delivered nothing: the run

@@ -120,6 +120,29 @@ button.lineage-row:focus-visible {
   background: var(--ui-pressed);
 }
 
+/* Stop all sits in the heading row, always visible while something runs. */
+.lineage-stop-all {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.lineage-stop-all:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.lineage-stop-all:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
 .lineage-stop:focus-visible {
   outline: none;
   box-shadow: var(--ui-focus-ring);

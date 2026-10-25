@@ -7,7 +7,6 @@ import { describe, expect, it, vi } from 'vitest'
 import { DELEGATION_PROMPT } from '../../src/mms/orchestrator/systemPrompt'
 import { delegationToolDefinitions, dispatchDelegationTool, LISTED_DELEGATION_TOOL_NAMES, type DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
 import {
-  ADVERTISE_NESTING,
   delegationGuidanceLines,
   mcpDelegationInstructions,
   piDelegationPrompt,
@@ -57,17 +56,22 @@ describe('subagent guidance', () => {
   })
 
   it('what a subagent is told in its first prompt', () => {
-    expect(subagentPreamble('API reviewer')).toBe('You are a subagent of "API reviewer". Your final message is your result: keep it self-contained and bounded. ask_user questions reach your parent and the user.')
-    expect(subagentGuidanceLines('Parent')).toHaveLength(2)
+    expect(subagentPreamble('API reviewer')).toBe(
+      'You are a subagent of "API reviewer". Your final message is your result: keep it self-contained and bounded. ask_user questions reach your parent and the user. You may start your own subagents unless your instructions say not to.'
+    )
+    expect(subagentGuidanceLines('Parent')).toHaveLength(3)
     // A parent with no title reads naturally, not as a subagent of "its parent".
-    expect(subagentPreamble()).toBe('You are a subagent. Your final message is your result: keep it self-contained and bounded. ask_user questions reach your parent and the user.')
+    expect(subagentPreamble()).toBe(
+      'You are a subagent. Your final message is your result: keep it self-contained and bounded. ask_user questions reach your parent and the user. You may start your own subagents unless your instructions say not to.'
+    )
     expect(subagentPreamble('')).toBe(subagentPreamble())
   })
 
-  it('does not tell models about nested subagents yet', () => {
-    expect(ADVERTISE_NESTING).toBe(false)
-    const everything = [piDelegationPrompt(), mousseOrchestrationInstructions(), subagentPreamble('Parent'), ...delegationGuidanceLines(), ...mcpDelegationInstructions()].join('\n')
-    expect(everything).not.toMatch(/own subagents|nest/i)
+  it('tells a subagent that it may start subagents of its own, and tells no one else', () => {
+    expect(subagentPreamble('Parent')).toContain('You may start your own subagents unless your instructions say not to.')
+    // The main thread's guidance is about its own subagents; nesting is the subagent's preamble alone.
+    const mainThread = [piDelegationPrompt(), mousseOrchestrationInstructions(), ...delegationGuidanceLines(), ...mcpDelegationInstructions()].join('\n')
+    expect(mainThread).not.toMatch(/own subagents|nest/i)
   })
 
   it('every listed tool is named by the guidance the models read', () => {

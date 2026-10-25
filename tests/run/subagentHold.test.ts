@@ -502,12 +502,13 @@ describe('a subagent\'s result waits for its own subagents (issue #142)', () => 
       expect(task(pc.delegationId).status).toBe('cancelled')
     })
 
-    it('a deleted thread acknowledges its rows, which releases the tasks waiting on it', async () => {
+    it('a stopped or deleted thread acknowledges its rows and ends the tasks waiting on it', async () => {
       const { pc, cg } = await nested()
       f!.finish(cg.childRunId, 'G result')
       expect(task(pc.delegationId).status).toBe('running')
-      await f!.engine.cancelThreadWork(pc.childThreadId)
-      expect(task(pc.delegationId).status).not.toBe('running')
+      f!.engine.stopSubtree({ threadId: pc.childThreadId, reason: 'thread_deleted', clearQueue: true })
+      expect(task(pc.delegationId).status).toBe('cancelled')
+      expect(f!.engine.inbox.listForThread(pc.childThreadId).map((row) => row.status)).toEqual(['acknowledged'])
     })
   })
 

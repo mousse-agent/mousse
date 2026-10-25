@@ -22,6 +22,7 @@ export interface EnqueueMessageInput {
   runId?: string
   inboxIds?: string[]
   subagentNotice?: QueuedMessage['subagentNotice']
+  stopGeneration?: number
 }
 
 export interface ClaimOwnerInput {
@@ -111,7 +112,8 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       internal: item.internal === true ? true : undefined,
       ...(typeof item.runId === 'string' && item.runId ? { runId: item.runId } : {}),
       ...(Array.isArray(item.inboxIds) && item.inboxIds.length && item.inboxIds.every((id) => typeof id === 'string') ? { inboxIds: item.inboxIds } : {}),
-      ...(Array.isArray(item.subagentNotice) && item.subagentNotice.length ? { subagentNotice: item.subagentNotice } : {})
+      ...(Array.isArray(item.subagentNotice) && item.subagentNotice.length ? { subagentNotice: item.subagentNotice } : {}),
+      ...(typeof item.stopGeneration === 'number' && Number.isSafeInteger(item.stopGeneration) && item.stopGeneration >= 0 ? { stopGeneration: item.stopGeneration } : {})
     })
   }
   return sortQueue(out)
@@ -170,7 +172,8 @@ export function enqueueMessage(
     internal: input.internal === true ? true : undefined,
     ...(input.runId ? { runId: input.runId } : {}),
     ...(input.inboxIds?.length ? { inboxIds: input.inboxIds } : {}),
-    ...(input.subagentNotice?.length ? { subagentNotice: input.subagentNotice } : {})
+    ...(input.subagentNotice?.length ? { subagentNotice: input.subagentNotice } : {}),
+    ...(input.stopGeneration !== undefined ? { stopGeneration: input.stopGeneration } : {})
   }
 
   return { items: sortQueue([...items, item]), item }

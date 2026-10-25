@@ -16,3 +16,18 @@ export const FOLLOW_UP_SOURCES: ReadonlySet<string> = new Set(['gui', 'cli', 'ch
 export function isFollowUpSource(source: string): boolean {
   return FOLLOW_UP_SOURCES.has(source)
 }
+
+/**
+ * Sources of work that starts on behalf of a parent or of the engine, not of a person: a delegated
+ * task or follow-up (`delegation`), the wake and the queued steer that deliver a subagent's result
+ * (`wake`, `steer-late`), a provider's own continuation turn, and an integration. The Stop fence
+ * (`stopGeneration.ts`) refuses such work at execution once a Stop came after it was admitted. Every
+ * other source (a person's send from the app, the CLI, a channel or the protocol, a plain steer left
+ * for a follow-up turn, a schedule) is new intent and is never fenced.
+ */
+export const FENCED_SOURCES: ReadonlySet<string> = new Set(['delegation', 'wake', 'steer-late', 'provider-continuation', 'integration'])
+
+/** Whether work with this `source` is subject to the Stop fence. */
+export function isFencedSource(source: string | null | undefined): boolean {
+  return source !== null && source !== undefined && FENCED_SOURCES.has(source)
+}
