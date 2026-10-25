@@ -18,7 +18,12 @@ import type { MacroEngine } from '../../src/mms/macros/MacroEngine'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import { createCodexProviderService } from '../../src/mms/run/adapters/codex'
+import { createCodexProviderService } from '../../src/mms/providers/codex/CodexProviderService'
+import { createHarnessGateway } from '../../src/mms/harness/gateway'
+import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
+import { codexDriver } from '../../src/mms/harness/drivers/codex'
+import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
+import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectWorker } from '../../src/mms/run/EffectWorker'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
@@ -85,8 +90,17 @@ describe.skipIf(!live)('live: Claude and Codex delegate to each other over the M
     // Claude Code uses the terminal sign-in.
     const claude = new ClaudeSubscriptionProviderService(home, questions)
     const codex = createCodexProviderService(home, questions)
-    orch.setClaudeSubscriptionProvider(claude)
-    orch.setCodexProvider(codex)
+    orch.setHarness(createHarnessGateway({
+      profileHome: home,
+      installationHome: home,
+      instanceMap: new ProviderInstanceService(),
+      questions,
+      drivers: [
+        piLegacyDriver({ client: () => orch.piChatClient() }),
+        claudeCodeDriver({ builtIn: () => claude }),
+        codexDriver({ builtIn: () => codex })
+      ]
+    }))
     const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })), pid: process.pid })
     orch.setRunEngine(engine)
     engine.reconcileOnBoot()

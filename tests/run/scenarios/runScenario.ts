@@ -33,7 +33,7 @@ import { replayPiChat } from '../../../src/mms/run/testkit/piChatReplay'
 import { DEFAULT_VOLATILE_KEYS, dropKeys, readTranscript, ReplayTransport } from '../../../src/mms/run/testkit/ReplayTransport'
 import { Reconciler } from '../../../src/mms/run/Reconciler'
 import { replaySdkQuery } from '../../../src/mms/run/testkit/sdkQueryReplay'
-import type { DelegationRecord, EffectKind, EffectRecord, HandoffRecord, RunRecord, TransferRecord } from '../../../src/mms/run/types'
+import type { AttemptRecord, DelegationRecord, EffectKind, EffectRecord, HandoffRecord, RunRecord, TransferRecord } from '../../../src/mms/run/types'
 import { TaskQueue } from '../../../src/mms/tasks/TaskQueue'
 import { HeadlessAgentRunner } from '../../../src/mms/terminals/HeadlessAgentRunner'
 import { PtyManager } from '../../../src/mms/terminals/PtyManager'
@@ -69,6 +69,8 @@ export interface ScenarioResult {
   handoffs: HandoffRecord[]
   /** Transfers into or out of the scenario thread (SPEC §16.2), oldest first. */
   transfers: TransferRecord[]
+  /** Attempts of each run of the scenario thread (with their execution bindings), by run id. */
+  attempts: Record<string, AttemptRecord[]>
 }
 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g
@@ -293,7 +295,8 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       delegations: engine.delegations.listForParentThread(threadId),
       runs: engine.listRuns(threadId).reverse(),
       handoffs: engine.handoffs.listForThread(threadId),
-      transfers: engine.transfers.listForThread(threadId)
+      transfers: engine.transfers.listForThread(threadId),
+      attempts: Object.fromEntries(engine.listRuns(threadId).map((entry) => [entry.runId, engine.store.listAttempts(entry.runId)]))
     }
   } finally {
     await worker.stop()

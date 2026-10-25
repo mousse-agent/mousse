@@ -1,0 +1,22 @@
+/**
+ * Harness conformance: the real gateway and drivers, against the four replay transports
+ * (`sdkQueryReplay`, `codexAppServerReplay`, `acpReplay`, `piChatReplay`) through the replay
+ * scenario runner. The scenario suite checks each scenario's own outcome; this checks what every
+ * driver owes the gateway.
+ */
+import { describe, it } from 'vitest'
+import { fixtureAdapters, runScenario } from '../run/scenarios/runScenario'
+import { assertHarnessConformance } from './conformance'
+
+const CASES: Array<{ scenario: string; stopped?: boolean }> = [
+  { scenario: 'plain-turn' },
+  { scenario: 'provider-error' },
+  { scenario: 'steer-mid-turn' },
+  { scenario: 'stop-mid-stream', stopped: true }
+]
+
+describe.each(CASES)('$scenario', ({ scenario, stopped }) => {
+  it.each(fixtureAdapters(scenario))('conforms through %s', async (adapterId) => {
+    assertHarnessConformance(await runScenario(scenario, adapterId), { stopped })
+  })
+})

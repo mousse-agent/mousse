@@ -1,0 +1,123 @@
+/**
+ * `/model` in channels and the interactive CLI lists the profile's models through the gateway's
+ * view: hidden models and disabled instances are not offered, so they cannot be picked.
+ */
+import { describe, expect, it } from 'vitest'
+import { handleInteractiveSlash, type InteractiveCommandContext } from '../../src/cli/interactive/sessionCommands'
+import { dispatchSlashCommand, type SlashContext } from '../../src/mms/channels/slash/handlers'
+import { parseSlashCommand } from '../../src/mms/channels/slash/parse'
+import { piInstanceId, piProviderIdOf } from '../../src/shared/providerInstances'
+import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
+import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
+import type { LlmProviderOption } from '../../src/shared/settings'
+
+const pi = new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
+const claude: ProviderAdapter = { driver: 'claude', capabilities: pi.capabilities, configured: () => true, startTurn: async () => { throw new Error('unused') }, interrupt: async () => 'not_active' }
+
+/** A profile with OpenAI (one hidden model), a disabled Anthropic pi instance and Claude Code. */
+async function profile() {
+  const piProviders: LlmProviderOption[] = [
+    { id: 'openai', label: 'OpenAI', models: [{ id: 'gpt-a', label: 'GPT A' }, { id: 'gpt-hidden', label: 'GPT Hidden' }] },
+    { id: 'anthropic', label: 'Anthropic', models: [{ id: 'claude-x', label: 'Claude X' }] }
+  ]
+  let stored: unknown = { 'pi:anthropic': { driver: 'pi', enabled: false } }
+  const instances = new ProviderInstanceService({
+    store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } },
+    providerAuth: { getConfiguredLlmProviders: () => piProviders, credentials: { listProviderIds: () => ['openai', 'anthropic'] } }
+  })
+  const harness = testHarness({
+    drivers: [
+      adapterDriver(pi),
+      adapterDriver(claude, { runtime: { llmProvider: () => ({ id: 'claude-subscription', label: 'Claude Code', models: [{ id: 'opus', label: 'Opus' }, { id: 'sonnet', label: 'Sonnet' }] }) } })
+    ],
+    instances
+  })
+  await harness.instances.setModelPrefs(piInstanceId('openai'), { hidden: ['gpt-hidden'] })
+  await harness.instances.setModelPrefs('claude', { hidden: ['opus'] })
+  return { harness, instances }
+}
+
+function channelContext(listModels: () => LlmProviderOption[], text: string) {
+  const parsed = parseSlashCommand(text)!
+  const overrides: Array<unknown> = []
+  const session = { sessionKey: 's', platform: 'telegram', chatId: 'c' }
+  const ctx = {
+    message: { platform: 'telegram', chatId: 'c', text },
+    session,
+    args: parsed.args,
+    parsed,
+    sessionManager: { getSession: () => session, setModelOverride: (_key: string, value: unknown) => overrides.push(value) },
+    settings: { get: () => ({ provider: { llmProvider: 'openai', model: 'gpt-a' } }), set: () => {} },
+    listModels,
+    bumpGeneration: () => 1,
+    getGeneration: () => 1
+  } as unknown as SlashContext
+  return { ctx, overrides }
+}
+
+function cliContext(listModels: () => LlmProviderOption[]) {
+  const overrides: unknown[] = []
+  const ctx: InteractiveCommandContext = {
+    state: { threadId: null },
+    listThreads: () => [],
+    listModels,
+    getGlobalModel: () => ({ llmProvider: 'openai', model: 'gpt-a' }),
+    setGlobalModel: () => {},
+    getContextUsage: () => null,
+    isTurnActive: () => false,
+    abortTurn: () => false,
+    steerTurn: () => false,
+    bindThread: () => {},
+    setModelOverride: (value) => overrides.push(value)
+  }
+  return { ctx, overrides }
+}
+
+describe('/model honours hidden models and disabled instances', () => {
+  it('the picker listing leaves them out and adds nothing hidden', async () => {
+    const { instances } = await profile()
+    const listing = instances.llmProviders()
+    expect(listing.map((option) => [option.instanceId, option.models.map((model) => model.id)])).toEqual([
+      ['pi:openai', ['gpt-a']],
+      ['claude', ['sonnet']]
+    ])
+  })
+
+  it('channel /model cannot select a hidden model or a disabled instance', async () => {
+    const { instances } = await profile()
+    // The profile's channel listing (MmsProfileServices): pi-ai providers through the instance view.
+    const listModels = () => instances.llmProviders().filter((option) => option.instanceId && piProviderIdOf(option.instanceId))
+    for (const name of ['gpt-hidden', 'claude-x']) {
+      const { ctx, overrides } = channelContext(listModels, `/model ${name}`)
+      const result = await dispatchSlashCommand(ctx)
+      expect(result.reply, name).toMatch(/Model not found/)
+      expect(overrides).toEqual([])
+    }
+    const { ctx, overrides } = channelContext(listModels, '/model gpt-a')
+    expect((await dispatchSlashCommand(ctx)).reply).toMatch(/Session model set to openai\/gpt-a/)
+    expect(overrides).toEqual([{ llmProvider: 'openai', model: 'gpt-a' }])
+    expect(JSON.stringify(listModels())).not.toMatch(/gpt-hidden|claude-x/)
+  })
+
+  it('CLI /models cannot select a hidden model or a disabled instance', async () => {
+    const { instances } = await profile()
+    // `settings.getOptions().llmProviders` is `providerInstances.llmProviders()`.
+    const listModels = () => instances.llmProviders()
+    for (const name of ['gpt-hidden', 'claude-x', 'opus']) {
+      const { ctx, overrides } = cliContext(listModels)
+      expect(handleInteractiveSlash(`/models ${name}`, ctx).reply, name).toMatch(/Model not found/)
+      expect(overrides).toEqual([])
+    }
+    const { ctx, overrides } = cliContext(listModels)
+    expect(handleInteractiveSlash('/models sonnet', ctx).reply).toMatch(/claude-subscription\/sonnet/)
+    expect(overrides).toEqual([{ llmProvider: 'claude-subscription', model: 'sonnet' }])
+  })
+
+  it('resolve() rejects them for the /model purposes too', async () => {
+    const { harness } = await profile()
+    expect(() => harness.resolve({ instanceId: 'pi:openai', model: 'gpt-hidden' }, { kind: 'device' }, 'channel_model')).toThrow(/hidden/)
+    expect(() => harness.resolve({ instanceId: 'pi:anthropic', model: 'claude-x' }, { kind: 'device' }, 'cli_model')).toThrow(/disabled/)
+  })
+})
