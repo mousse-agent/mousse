@@ -91,6 +91,22 @@ describe('Claude account subject', () => {
     expect(subject({ CLAUDE_CODE_USE_BEDROCK: '1' }, workHome(stored))).toBeUndefined()
   })
 
+  it('on Bedrock, a named profile wins over key variables, as in the AWS SDK default chain', () => {
+    const stored = claudeJson('user-a')
+    const files = (key: string) => workHome(stored, { [join('/users/me', '.aws', 'credentials')]: `[work]
+aws_access_key_id = ${key}
+aws_secret_access_key = secret
+` })
+    const mixed = { CLAUDE_CODE_USE_BEDROCK: '1', AWS_PROFILE: 'work', AWS_ACCESS_KEY_ID: 'AKIAENV', AWS_SECRET_ACCESS_KEY: 'env-secret' }
+    const one = subject(mixed, files('AKIAONE'))
+    expect(one).toMatch(/^bedrock:key:/)
+    // The profile's key changes between turns, the variables do not: another account.
+    expect(subject(mixed, files('AKIATWO'))).not.toBe(one)
+    expect(one).toBe(subject({ CLAUDE_CODE_USE_BEDROCK: '1', AWS_PROFILE: 'work' }, files('AKIAONE')))
+    // A named profile without static keys is unknown, even with key variables set.
+    expect(subject({ ...mixed, AWS_PROFILE: 'sso' }, files('AKIAONE'))).toBeUndefined()
+  })
+
   it('on Vertex, reads the principal of the Google credentials file, not its path', () => {
     const vertex = { CLAUDE_CODE_USE_VERTEX: '1', GOOGLE_APPLICATION_CREDENTIALS: '/keys/sa.json', ANTHROPIC_VERTEX_PROJECT_ID: 'p1' }
     const key = (email: string) => workHome(claudeJson('user-a'), { '/keys/sa.json': JSON.stringify({ type: 'service_account', client_email: email, private_key: 'k' }) })

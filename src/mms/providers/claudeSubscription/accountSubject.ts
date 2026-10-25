@@ -34,7 +34,8 @@ const on = (value: string | undefined) => Boolean(value && /^(1|true|yes|on)$/i.
  * Every credential Claude Code may use is part of the id, so a change to any of them reads as
  * another account (forgetting a session too often is safe; resuming another account's is not):
  * - a token or key variable, by a hash of its value;
- * - on Bedrock, the AWS access key id (from the variables or the profile's static keys); on Vertex,
+ * - on Bedrock, the AWS access key id (the named profile's static keys, else the variables, else the
+ *   default profile's, as the AWS SDK default chain picks them); on Vertex,
  *   the service account or user grant of the Google credentials file, with the project;
  * - the claude.ai sign-in stored in the home's `.claude.json` (account and organization).
  * A credential Mousse cannot see makes the account unknown even when a stored sign-in is there:
@@ -92,8 +93,11 @@ function bedrockPrincipal(value: (name: string) => string | undefined, readText:
   const token = value('AWS_BEARER_TOKEN_BEDROCK')
   if (token) return `bedrock:token:${sha(token)}`
   const region = value('AWS_REGION') ?? value('AWS_DEFAULT_REGION') ?? ''
+  // The AWS SDK default chain Claude Code uses skips the key variables when a profile is named:
+  // the profile wins, so its keys are the ones the calls are signed with.
+  const named = value('AWS_PROFILE')
   const keyId = value('AWS_ACCESS_KEY_ID')
-  if (keyId) return `bedrock:key:${sha(keyId)}:${region}`
+  if (keyId && !named) return `bedrock:key:${sha(keyId)}:${region}`
   // The shared credentials file of the profile; a profile without static keys (SSO, a role, a
   // credential process) or the remaining default chain (instance roles, ...) is unknown.
   let text: string
@@ -102,7 +106,7 @@ function bedrockPrincipal(value: (name: string) => string | undefined, readText:
   } catch {
     return undefined
   }
-  const profile = value('AWS_PROFILE') ?? 'default'
+  const profile = named ?? 'default'
   let section: string | undefined
   for (const line of text.split(/\r?\n/)) {
     const header = /^\s*\[([^\]]+)\]\s*$/.exec(line)
