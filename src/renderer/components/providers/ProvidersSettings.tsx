@@ -307,7 +307,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
         </span>
       </div>
       {scopeId && (
-        <p className="prov-scope-note">Switches here apply to this project only. A provider turned off for the device stays off in every project.</p>
+        <p className="prov-scope-note">Switches here apply to this project only. A provider turned off for the device stays off in every project. Setup, runtime, environment and models apply to this device.</p>
       )}
       {(pageError ?? refreshing.error) && <p className="prov-error">{pageError ?? refreshing.error}</p>}
 

@@ -6,7 +6,7 @@ import type { ProviderLoginOption } from '../src/shared/providerAuth'
 import { AgentConnectStep, addChoices } from '../src/renderer/components/providers/AddProviderDialog'
 import { AccountRow, BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
 import { displayModels, movedOrder } from '../src/renderer/components/providers/ProviderModelsSection'
-import { allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
+import { AgentEditor, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow } from '../src/renderer/components/providers/parts'
 import { offersRedirectPaste, refusedText } from '../src/renderer/components/providers/SignInDialog'
 import { switchStateOf } from '../src/renderer/components/providers/providerView'
@@ -281,5 +281,18 @@ describe('Sign-in dialog', () => {
   it('says why a refused answer did nothing', () => {
     expect(refusedText({ promptId: 'p1', kind: 'redirect_url', value: 'http://localhost/x' })).toContain('paste it here')
     expect(refusedText({ promptId: 'p2', kind: 'input', value: 'x' })).toContain('Try again')
+  })
+})
+
+describe('Agent editor scope', () => {
+  const editor = (scope: InstanceSnapshot['scope']) => {
+    const entry = snapshot({ scope })
+    return renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
+  }
+
+  it('in a project scope, says runtime, environment and models apply to the whole device', () => {
+    const notes = (html: string) => html.split('Applies to this device, in every project.').length - 1
+    expect(notes(editor({ kind: 'project', projectId: 'p1' }))).toBe(3)
+    expect(notes(editor({ kind: 'device' }))).toBe(0)
   })
 })

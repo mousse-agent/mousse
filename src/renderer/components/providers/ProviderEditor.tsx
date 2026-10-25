@@ -79,6 +79,16 @@ export function EditorHeader({
 }
 
 /**
+ * Provider setup is per machine, as in T3 Code: only the on/off switch has a project override. In
+ * a project scope the device-wide sections say so.
+ */
+const DEVICE_WIDE = 'Applies to this device, in every project.'
+
+function deviceWideNote(snapshot: InstanceSnapshot): string | undefined {
+  return snapshot.scope.kind === 'project' ? DEVICE_WIDE : undefined
+}
+
+/**
  * The editor of one agent instance: Setup (status, next step, account), Runtime (the executable
  * Mousse resolved, updates, path and arguments, home), Environment and Models.
  */
@@ -113,14 +123,14 @@ export function AgentEditor({
         <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} />
         <AccountRow snapshot={snapshot} actions={actions} />
       </EditorSection>
-      <EditorSection title="Runtime">
+      <EditorSection title="Runtime" description={deviceWideNote(snapshot)}>
         <BinaryRow snapshot={snapshot} />
         <UpdateRow snapshot={snapshot} operation={operation} actions={actions} />
         <ExecutableRow snapshot={snapshot} label={info.label} onSave={(binaryPath) => actions.configure({ binaryPath })} />
         <ArgsRow snapshot={snapshot} onSave={(args) => actions.configure({ args })} />
         <HomeRow snapshot={snapshot} />
       </EditorSection>
-      <EditorSection title="Environment">
+      <EditorSection title="Environment" description={deviceWideNote(snapshot)}>
         <EnvRow snapshot={snapshot} onSave={(env) => actions.configure({ env })} />
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} />
@@ -143,7 +153,10 @@ export function ModelsEditorSection({
   onRefresh: () => Promise<void>
 }) {
   return (
-    <EditorSection title="Models" description="Favorites show first in the model picker. Hidden models are not offered anywhere in Mousse.">
+    <EditorSection
+      title="Models"
+      description={`Favorites show first in the model picker. Hidden models are not offered anywhere in Mousse.${snapshot.scope.kind === 'project' ? ` ${DEVICE_WIDE}` : ''}`}
+    >
       <div className="prov-models-wrap">
         <ProviderModelsSection
           snapshot={snapshot}
