@@ -5,7 +5,7 @@ import type { AgentWorkspacePolicy } from '../../shared/agentEpisodes'
 const READ_TOOLS = new Set(['read', 'read_file', 'ls', 'list_dir', 'find', 'grep'])
 // A read-only agent may start subagents; `delegateTask` lets it start only read-only (shared) ones, and
 // `integrate_delegation` (which merges into the workspace) stays out.
-const DELEGATION_TOOLS = new Set(['delegate_task', 'task_status', 'task_cancel', 'list_delegations', 'create_subagent', 'create_subagents', 'list_subagents', 'recall_subagent'])
+const DELEGATION_TOOLS = new Set(['delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_delegations', 'create_subagent', 'create_subagents', 'list_subagents', 'recall_subagent'])
 export function resolveAgentWorkspacePolicy(
   requested: Partial<AgentWorkspacePolicy> | undefined,
   options: { legacy?: boolean; inherited?: AgentWorkspacePolicy; adapter: string }

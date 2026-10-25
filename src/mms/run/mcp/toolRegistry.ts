@@ -292,6 +292,10 @@ export function createMousseToolRegistry(deps: { engine: RunEngine; host: Mousse
         if (caller.modeCeiling === 'plan')
           throw new McpToolError('mousse_ceiling_exceeded', 'Integration writes the workspace; a plan ceiling cannot integrate.')
       }))
+    } else if (tool.name === 'continue_subagent' || tool.name === 'answer_subagent') {
+      // Both act on the caller's own subagent, which the host's handler checks; they stay `actsAsCaller`
+      // like `delegate_task` rather than loosening the thread-writing scope check for other tools.
+      registry.register(delegationTool(tool, { clientRequestId: CLIENT_REQUEST_ID_SCHEMA }))
     } else {
       registry.register(delegationTool(tool, {}))
     }

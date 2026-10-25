@@ -5,6 +5,7 @@ import { appendProjectAgentInstructions } from './projectInstructions'
 import type { SkillDescriptor } from '../../shared/integrations'
 import type { ChatMode } from '../../shared/types'
 import { getSkillIdFromMode, normalizeChatMode } from '../../shared/chatMode'
+import { piDelegationPrompt } from '../run/delegation/guidance'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 
 export interface BuildSystemPromptOptions {
@@ -82,13 +83,8 @@ Agents created by earlier Mousse versions may still be listed for this task. Whe
 \`\`\`
 Target only exact ids of ready agents; never starting or running agents. A failed merge preserves the agent branch and keeps it eligible: resolve conflicts in the main working tree, stage them with \`git add\` and emit the same action again. Never claim integration succeeded until its result says the branch was merged.`
 
-/** Appended to the prompt whenever the turn has the delegation tools (SPEC §14.2). */
-export const DELEGATION_PROMPT = `## Delegation
-Use delegate_task to hand a bounded task to a child thread. It returns immediately with a delegationId; do not wait or poll. When the child finishes, Mousse wakes you with a notice ("Delegated task … finished"); then call task_status for the full result (reading it acknowledges it). task_cancel stops a child and everything it delegated. list_delegations lists this thread's tasks.
-- workspace "isolated" gives the child its own worktree; use it for any edits, builds or tests. "shared" is only for read-only roles (role "research" or "review") that inspect your workspace.
-- Include the plan/spec body or a readable path, the acceptance criteria and the focused validation to run. provider and model default to yours; set them only when the user explicitly requests an override, using known connected identifiers. Never copy example or guessed model identifiers.
-- Isolated results do not affect this task until you call integrate_delegation after the child finished; it runs as its own integration run after your turn and you are notified of the outcome. Never claim integration from completion alone.
-- create_subagent(s), recall_subagent, integrate_subagent and list_subagents are named wrappers over the same tools: the name titles the child thread, and recall sends a follow-up to that thread.`
+/** Appended to the prompt whenever the turn has the delegation tools (SPEC §14.2); the text lives in the guidance module. */
+export const DELEGATION_PROMPT = piDelegationPrompt()
 
 const CURSOR_AGENT_PROMPT = `${MOUSSE_PREAMBLE}
 

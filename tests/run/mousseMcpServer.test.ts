@@ -74,7 +74,7 @@ describe('MousseMcpServer (SPEC §15.1)', () => {
 
     const list = await rpc(server.url, attachment.token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} })
     const names = list.body.result.tools.map((tool: { name: string }) => tool.name).sort()
-    expect(names).toEqual(['ask_user', 'create_task', 'delegate_task', 'integrate_delegation', 'list_delegations', 'list_tasks',
+    expect(names).toEqual(['answer_subagent', 'ask_user', 'continue_subagent', 'create_task', 'delegate_task', 'integrate_delegation', 'list_subagents', 'list_tasks',
       'present_plan', 'queue_enqueue', 'queue_list', 'task_cancel', 'task_status', 'thread_fork',
       'thread_merge_back', 'thread_read', 'update_task'])
 

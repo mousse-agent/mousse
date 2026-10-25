@@ -20,16 +20,18 @@ function fakeHost() {
   }
   const host: DelegationToolHost = {
     delegateTask: record('delegateTask'),
+    continueSubagent: record('continueSubagent'),
+    answerSubagent: record('answerSubagent'),
     taskStatus: record('taskStatus'),
     taskCancel: record('taskCancel'),
     listDelegations: () => ({ tool: 'listDelegations' }),
+    listSubagents: () => ({ tool: 'listSubagents' }),
     integrateDelegation: record('integrateDelegation'),
     named: {
       create: record('named.create'),
       createBatch: record('named.createBatch'),
       recall: record('named.recall'),
-      integrate: record('named.integrate'),
-      list: () => ({ tool: 'named.list' })
+      integrate: record('named.integrate')
     }
   }
   return { host, calls }
@@ -41,8 +43,8 @@ const call = (name: string, args: Record<string, unknown>, id = 'tool-call-1') =
 describe('agent spawning', () => {
   it('routes delegate_task with the model tool call id so a retried call is the same request', async () => {
     const { host, calls } = fakeHost()
-    await dispatchDelegationTool(host, call('delegate_task', { prompt: 'Fix the parser', workspace: 'isolated', role: 'implement' }, 'call-42'))
-    expect(calls).toEqual([{ tool: 'delegateTask', toolCallId: 'call-42', input: { prompt: 'Fix the parser', workspace: 'isolated', role: 'implement', wake: undefined, provider: undefined, model: undefined } }])
+    await dispatchDelegationTool(host, call('delegate_task', { prompt: 'Fix the parser', title: ' Parser fixer ', workspace: 'isolated', role: 'implement' }, 'call-42'))
+    expect(calls).toEqual([{ tool: 'delegateTask', toolCallId: 'call-42', input: { prompt: 'Fix the parser', title: 'Parser fixer', workspace: 'isolated', role: 'implement', wake: undefined, provider: undefined, model: undefined } }])
   })
 
   it('rejects delegate_task without a prompt or a valid workspace before reaching the host', async () => {
@@ -52,12 +54,14 @@ describe('agent spawning', () => {
     await expect(dispatchDelegationTool(host, call('delegate_task', { prompt: 'x', workspace: 'shared', wake: 'never' }))).rejects.toThrow('wake')
     await expect(dispatchDelegationTool(host, call('delegate_task', { prompt: 'x', workspace: 'isolated', provider: '' }))).rejects.toThrow('provider must be a non-empty string')
     await expect(dispatchDelegationTool(host, call('delegate_task', { prompt: 'x', workspace: 'isolated', model: 7 }))).rejects.toThrow('model must be a non-empty string')
+    await expect(dispatchDelegationTool(host, call('delegate_task', { prompt: 'x', workspace: 'isolated' }))).rejects.toThrow('requires a title')
+    await expect(dispatchDelegationTool(host, call('delegate_task', { prompt: 'x', title: '  ', workspace: 'isolated' }))).rejects.toThrow('requires a title')
     expect(calls).toEqual([])
   })
 
   it('passes provider and model overrides through to the host', async () => {
     const { host, calls } = fakeHost()
-    await dispatchDelegationTool(host, call('delegate_task', { prompt: 'Implement the login form component', workspace: 'isolated', provider: 'openai', model: 'gpt-x' }))
+    await dispatchDelegationTool(host, call('delegate_task', { prompt: 'Implement the login form component', title: 'Login form', workspace: 'isolated', provider: 'openai', model: 'gpt-x' }))
     expect(calls[0].input).toMatchObject({ provider: 'openai', model: 'gpt-x', workspace: 'isolated' })
   })
 
@@ -73,9 +77,48 @@ describe('agent spawning', () => {
     await dispatchDelegationTool(host, call('create_subagent', { name: 'Reviewer', task: 'Review', access: 'read-only' }))
     await dispatchDelegationTool(host, call('recall_subagent', { agent: 'Reviewer', task: 'Again' }))
     await dispatchDelegationTool(host, call('integrate_subagent', { agent: 'Reviewer' }))
-    expect(await dispatchDelegationTool(host, call('list_subagents', {}))).toEqual({ tool: 'named.list' })
+    expect(await dispatchDelegationTool(host, call('list_subagents', {}))).toEqual({ tool: 'listSubagents' })
+    expect(await dispatchDelegationTool(host, call('list_delegations', {}))).toEqual({ tool: 'listDelegations' })
     expect(calls.map((entry) => entry.tool)).toEqual(['named.create', 'named.recall', 'named.integrate'])
     await expect(dispatchDelegationTool(host, call('create_subagents', { agents: [{ name: 'x' }] }))).rejects.toThrow('names and tasks')
+  })
+
+  it('routes continue_subagent and answer_subagent with the model tool call id', async () => {
+    const { host, calls } = fakeHost()
+    await dispatchDelegationTool(host, call('continue_subagent', { subagent: 'API reviewer', prompt: 'Now check the tests' }, 'call-7'))
+    await dispatchDelegationTool(host, call('answer_subagent', { subagent: 'API reviewer', requestId: 'req-1', answers: { q1: 'a', q2: ['x', 'y'] } }, 'call-8'))
+    expect(calls).toEqual([
+      { tool: 'continueSubagent', toolCallId: 'call-7', input: { subagent: 'API reviewer', prompt: 'Now check the tests' } },
+      { tool: 'answerSubagent', toolCallId: 'call-8', input: { subagent: 'API reviewer', requestId: 'req-1', answers: { q1: 'a', q2: ['x', 'y'] } } }
+    ])
+  })
+
+  it.each([
+    ['continue_subagent', { prompt: 'x' }, 'subagent'],
+    ['continue_subagent', { subagent: 'A' }, 'prompt'],
+    ['answer_subagent', { subagent: 'A', requestId: 'r' }, 'answers'],
+    ['answer_subagent', { subagent: 'A', requestId: 'r', answers: { q: 3 } }, 'answers'],
+    ['answer_subagent', { subagent: 'A', answers: {} }, 'requestId']
+  ])('rejects %s with bad arguments (%j) before reaching the host', async (name, args, mention) => {
+    const { host, calls } = fakeHost()
+    await expect(dispatchDelegationTool(host, call(name, args))).rejects.toThrow(mention)
+    expect(calls).toEqual([])
+  })
+
+  it('addresses task_status, task_cancel and integrate_delegation by delegationId or by subagent title', async () => {
+    const { host, calls } = fakeHost()
+    await dispatchDelegationTool(host, call('task_status', { delegationId: 'delegation:1' }))
+    await dispatchDelegationTool(host, call('task_status', { subagent: 'API reviewer' }))
+    await dispatchDelegationTool(host, call('task_cancel', { subagent: 'API reviewer' }))
+    await dispatchDelegationTool(host, call('integrate_delegation', { subagent: 'API reviewer' }))
+    expect(calls.map((entry) => [entry.tool, entry.input])).toEqual([
+      ['taskStatus', { delegationId: 'delegation:1' }],
+      ['taskStatus', { subagent: 'API reviewer' }],
+      ['taskCancel', { subagent: 'API reviewer' }],
+      ['integrateDelegation', { subagent: 'API reviewer' }]
+    ])
+    for (const name of ['task_status', 'task_cancel', 'integrate_delegation'])
+      await expect(dispatchDelegationTool(host, call(name, {}))).rejects.toThrow('delegationId or a subagent title')
   })
 
   it('uses the reserved spawn id in the agent registry', () => {
