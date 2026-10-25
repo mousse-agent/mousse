@@ -3,6 +3,7 @@ import { MOUSSE_BUILTIN_TOOL_IDS } from './integrations'
 import type { ChatMode } from './types'
 import { getSkillIdFromMode } from './chatMode'
 import { generateRandomUsername } from './randomUsername'
+import { listingServes } from './providerInstances'
 
 /** Color themes only — acrylic is a separate appearance toggle. */
 export type ThemeId =
@@ -98,6 +99,8 @@ export interface MousseSettings {
   title: {
     llmProvider: LlmProviderId
     model: string
+    /** Provider instance of the title model; absent on records from before instances (legacy mapping). */
+    instanceId?: string
   }
   agents: {
     enabled: Record<AgentTypeId, boolean>
@@ -513,14 +516,17 @@ function preferredTitleModel(provider: LlmProviderOption): string {
 export function resolveTitleModel(
   settings: MousseSettings,
   providers: LlmProviderOption[]
-): { llmProvider: string; model: string } {
-  const explicitProvider = providers.find((provider) => provider.id === settings.title?.llmProvider)
+): { instanceId?: string; llmProvider: string; model: string } {
+  const explicitProvider = settings.title?.llmProvider
+    ? providers.find((provider) => listingServes(provider, settings.title))
+    : undefined
   if (explicitProvider) {
+    const instance = explicitProvider.instanceId ? { instanceId: explicitProvider.instanceId } : {}
     const { baseId } = parseTitleModelId(settings.title.model)
     if (explicitProvider.models.some((model) => model.id === baseId)) {
-      return settings.title
+      return { ...instance, llmProvider: explicitProvider.id, model: settings.title.model }
     }
-    return { llmProvider: explicitProvider.id, model: preferredTitleModel(explicitProvider) }
+    return { ...instance, llmProvider: explicitProvider.id, model: preferredTitleModel(explicitProvider) }
   }
 
   const openAi = providers.find((provider) => {
@@ -544,7 +550,10 @@ export function resolveSkillModelSettings(
 ): SkillModelSettings | undefined {
   const skillModel = settings.integrations.skills.model[skillId]
   if (!skillModel?.llmProvider || !skillModel.model) return undefined
-  return skillModel
+  // The skill's own instance, so a second account of one provider runs the skill (legacy records
+  // name only `llmProvider` and map to its built-in instance when the turn resolves).
+  const instanceId = skillModel.instanceId?.trim()
+  return { ...(instanceId ? { instanceId } : {}), llmProvider: skillModel.llmProvider, model: skillModel.model }
 }
 
 /** Last composer/chat model. Used as the default for newly created threads. */

@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { LlmProviderOption } from '../../../shared/settings'
-import { getGroupedModelButtonLabel, ModelFamilyMenu } from '../ModelFamilyMenu'
+import { listingServes } from '../../../shared/providerInstances'
+import { getGroupedModelButtonParts, ModelFamilyMenu } from '../ModelFamilyMenu'
 
-export interface SkillModelChoice { llmProvider: string; model: string }
+/** `instanceId` tells apart two accounts of one provider; absent on older records. */
+export interface SkillModelChoice { instanceId?: string; llmProvider: string; model: string }
 
 /** Settings-side default model per skill (`integrations.skills.model[skillId]`). */
 export interface SkillModelBinding {
@@ -20,9 +22,9 @@ export function SkillModelPicker({ skillId, binding, disabled }: { skillId: stri
   const menuRef = useRef<HTMLDivElement>(null)
   const value = binding.get(skillId)
   const providers = binding.providers
-  const provider = value ? providers.find((entry) => entry.id === value.llmProvider) : undefined
+  const provider = value ? providers.find((entry) => listingServes(entry, value)) : undefined
   const label = value
-    ? `${provider?.label ?? value.llmProvider} · ${getGroupedModelButtonLabel(value.llmProvider, value.model, providers)}`
+    ? `${provider?.label ?? value.llmProvider} · ${getGroupedModelButtonParts(value.llmProvider, value.model, providers, true, value.instanceId).join(' · ')}`
     : 'Default model'
 
   useEffect(() => {
@@ -68,10 +70,11 @@ export function SkillModelPicker({ skillId, binding, disabled }: { skillId: stri
     {open && !disabled ? <ModelFamilyMenu
       providers={providers}
       selectedProviderId={value?.llmProvider ?? ''}
+      selectedInstanceId={value?.instanceId}
       selectedModelId={value?.model ?? ''}
       anchorRef={buttonRef}
       contentRef={menuRef}
-      onSelect={(llmProvider, model) => { setOpen(false); save({ llmProvider, model }) }}
+      onSelect={(llmProvider, model, instanceId) => { setOpen(false); save({ ...(instanceId ? { instanceId } : {}), llmProvider, model }) }}
     /> : null}
     {error ? <p className="integration-error" role="alert">{error}</p> : null}
   </div>

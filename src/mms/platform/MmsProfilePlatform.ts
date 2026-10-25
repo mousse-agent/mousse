@@ -68,7 +68,7 @@ export class MmsProfilePlatform {
       new SkillLifecycleService(services.skillsRegistry, services.integrationContext),
       new McpLifecycleService(services.mcpRegistry, services.mcpManager, services.integrationContext)
     )
-    this.models = new SharedAgentModelLookup(services.providerAuth)
+    this.models = new SharedAgentModelLookup(services.providerAuth, () => services.harness)
     this.chats = new AgentChatService({ services, registry: this.agentDefinitions,
       resolverFor: async (runtimeKind, projectPath) => new AgentResolver({ registry: this.agentDefinitions, modelLookup: this.models,
         integrationLookup: await this.integrationLookup(runtimeKind, projectPath) }) })

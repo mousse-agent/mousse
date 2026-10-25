@@ -1494,10 +1494,20 @@ export class LlmClient {
 
 
 
-  async generateTitle(userRequest: string, firstResponse?: string, threadId?: string): Promise<string> {
+  /**
+   * `selection` is the title model as the harness gateway resolved it (its instance's provider);
+   * absent, the stored title setting is read as is.
+   */
+  async generateTitle(
+    userRequest: string,
+    firstResponse?: string,
+    threadId?: string,
+    selection?: { instanceId?: string; llmProvider: string; model: string }
+  ): Promise<string> {
     const configuredProviders = this.providerAuth.getConfiguredLlmProviders()
+    const settings = this.settingsStore.get()
     const { llmProvider, model: selectedModelId } = resolveTitleModel(
-      this.settingsStore.get(),
+      selection ? { ...settings, title: selection } : settings,
       configuredProviders
     )
     if (!llmProvider || !selectedModelId) {

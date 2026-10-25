@@ -25,7 +25,8 @@ function formatModelRef(ref: AgentModelRef): string {
   const effort = ref.effort ? ` effort=${ref.effort}` : ''
   const speed = ref.speed ? ` speed=${ref.speed}` : ''
   const context = ref.context ? ` context=${ref.context}` : ''
-  return `${ref.providerId}/${ref.modelId}${effort}${speed}${context}`
+  const instance = ref.instanceId ? ` (${ref.instanceId})` : ''
+  return `${ref.providerId}/${ref.modelId}${instance}${effort}${speed}${context}`
 }
 
 function validateCapability(
@@ -35,12 +36,15 @@ function validateCapability(
 ): AgentDefinitionIssue[] {
   const issues: AgentDefinitionIssue[] = []
   if (!profile.available) {
+    // A refusal by the provider gateway (disabled instance, hidden model) keeps its message and code.
     issues.push({
       code: 'MODEL_CAPABILITY_MISSING',
-      message: `Model ${formatModelRef(ref)} is not available in the shared catalog.`,
+      message: profile.unavailableCode
+        ? `Model ${formatModelRef(ref)} is not available: ${profile.unavailableReasons.join(' ')}`
+        : `Model ${formatModelRef(ref)} is not available in the shared catalog.`,
       pointer,
       retryable: false,
-      details: { ref, reasons: profile.unavailableReasons }
+      details: { ref, reasons: profile.unavailableReasons, ...(profile.unavailableCode ? { errorCode: profile.unavailableCode } : {}) }
     })
     return issues
   }

@@ -379,7 +379,7 @@ export class MmsWorkflowAgents {
     const lookup = await this.lookupFor(published.runtimeKind, projectPath, 'user')
     const resolver = new AgentResolver({
       registry: this.services.platform.agentDefinitions,
-      modelLookup: new SharedAgentModelLookup(this.services.providerAuth),
+      modelLookup: new SharedAgentModelLookup(this.services.providerAuth, () => this.services.harness),
       integrationLookup: lookup
     })
     const resolved = resolver.resolve({ definitionId, revision })
@@ -403,7 +403,8 @@ export class MmsWorkflowAgents {
   private async resolveMain(projectPath?: string): Promise<ResolvedAgentDefinition> {
     const settings = defaultAgentSettings({ name: 'Main', slug: 'main' })
     const provider = this.services.settings.get().provider
-    settings.primaryModel.ref = { providerId: provider.llmProvider, modelId: provider.model }
+    const instanceId = provider.instanceId?.trim()
+    settings.primaryModel.ref = { providerId: provider.llmProvider, modelId: provider.model, ...(instanceId ? { instanceId } : {}) }
     settings.context = {
       includeCurrentThread: false,
       selectedFiles: [],
@@ -431,7 +432,7 @@ export class MmsWorkflowAgents {
     }))
     const resolver = new AgentResolver({
       registry: this.services.platform.agentDefinitions,
-      modelLookup: new SharedAgentModelLookup(this.services.providerAuth),
+      modelLookup: new SharedAgentModelLookup(this.services.providerAuth, () => this.services.harness),
       integrationLookup: await this.lookupFor('mousse', projectPath, 'main')
     })
     return resolver.resolveOwned({

@@ -76,8 +76,12 @@ export function AgentsSettings({
               placeholder="Automatic"
               providers={providers}
               providerId={titleIsAutomatic ? '' : titleProvider}
+              instanceId={titleIsAutomatic ? undefined : settings.title?.instanceId}
               modelId={titleIsAutomatic ? '' : titleModel}
-              onSelect={(llmProvider, model) => void updateSettings({ title: { llmProvider, model } })}
+              onSelect={(llmProvider, model, instanceId) =>
+                // Always the whole selection: a write without the instance clears it.
+                void updateSettings({ title: { ...(instanceId ? { instanceId } : {}), llmProvider, model } })
+              }
             />
           }
         />

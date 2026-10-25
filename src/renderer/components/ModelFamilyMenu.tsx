@@ -679,14 +679,6 @@ export function sortPickerEntries<T extends { providerRank: number; familyRank: 
     .map(({ entry }) => entry)
 }
 
-export function getGroupedModelButtonLabel(
-  providerId: string,
-  modelId: string,
-  providers: LlmProviderOption[]
-): string {
-  return getGroupedModelButtonParts(providerId, modelId, providers).join(' · ')
-}
-
 export function getGroupedModelButtonParts(
   providerId: string,
   modelId: string,

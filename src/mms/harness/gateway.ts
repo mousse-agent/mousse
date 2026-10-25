@@ -179,6 +179,7 @@ export type ResolvePurpose =
   | 'workflow'
   | 'channel_model'
   | 'cli_model'
+  | 'title'
 
 export interface ResolvedSelection {
   selection: ProviderSelection

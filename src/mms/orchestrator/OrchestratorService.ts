@@ -3956,10 +3956,21 @@ export class OrchestratorService extends EventEmitter {
       return heuristic
     }
     try {
-      return await this.llm.generateTitle(firstUser.content, firstAssistant?.content, threadId)
+      return await this.generateTitleText(firstUser.content, firstAssistant?.content, threadId)
     } catch {
       return heuristic
     }
+  }
+
+  /**
+   * Names a chat with the title model. The selection is resolved through the gateway like any
+   * other: the instance the picker chose (a legacy record maps to its built-in instance), with a
+   * disabled instance or hidden model refused by its typed error.
+   */
+  private async generateTitleText(userRequest: string, firstResponse: string | undefined, threadId: string | undefined): Promise<string> {
+    const title = this.settingsStore.get().title
+    const resolved = this.harness.resolveStored(title, { purpose: 'title', ...(threadId ? { scope: this.threadScope(threadId) } : {}) })
+    return this.llm.generateTitle(userRequest, firstResponse, threadId, { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model: title.model })
   }
 
   /**
@@ -4026,7 +4037,7 @@ export class OrchestratorService extends EventEmitter {
     }
     let title: string | null = null
     try {
-      title = await this.llm.generateTitle(userContent, undefined, threadId)
+      title = await this.generateTitleText(userContent, undefined, threadId)
     } catch (error) {
       this.emit('thread-title-generation-failed', {
         threadId,

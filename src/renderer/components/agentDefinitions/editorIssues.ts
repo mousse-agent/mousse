@@ -2,6 +2,7 @@ import { defaultAgentSettings } from '../../../shared/agents/defaults'
 import type { AgentDefinitionIssue } from '../../../shared/agents/errors'
 import type { AgentDefinitionSettings, AgentRuntimeKind } from '../../../shared/agents/types'
 import type { AgentEditorCatalogs } from './client'
+import { listingServes } from '../../../shared/providerInstances'
 
 export interface EditorFieldIssue {
   pointer: string
@@ -67,9 +68,11 @@ export function collectUnsupportedCliSettingPointers(
 export function findModelInCatalog(
   catalogs: AgentEditorCatalogs,
   providerId: string,
-  modelId: string
+  modelId: string,
+  /** The selection's instance: picks the right listing when one provider has several. */
+  instanceId?: string
 ): { providerLabel: string; modelLabel: string } | null {
-  const provider = catalogs.providers.find((entry) => entry.id === providerId)
+  const provider = catalogs.providers.find((entry) => listingServes(entry, { instanceId, llmProvider: providerId }))
   const model = provider?.models.find((entry) => entry.id === modelId)
   if (!provider || !model) return null
   return { providerLabel: provider.label, modelLabel: model.label }
@@ -90,7 +93,7 @@ export function collectEditorIssues(input: {
       message: 'Choose a model before publishing or running.',
       blocking: true
     })
-  } else if (!findModelInCatalog(input.catalogs, ref.providerId, ref.modelId)) {
+  } else if (!findModelInCatalog(input.catalogs, ref.providerId, ref.modelId, ref.instanceId)) {
     issues.push({
       pointer: '/settings/primaryModel/ref',
       fieldId: fieldIdForPointer('/settings/primaryModel'),
