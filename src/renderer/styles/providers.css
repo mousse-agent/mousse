@@ -845,6 +845,13 @@
   padding-top: 0;
 }
 
+/* A value the dialog shows but does not let you change (the Label of an existing provider). */
+.prov-wizard-panel .settings-input:disabled {
+  border-style: dashed;
+  color: var(--text-secondary);
+  cursor: default;
+}
+
 .settings-input.prov-wizard-search {
   width: 100%;
   height: var(--settings-control-h, 28px);

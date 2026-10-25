@@ -9,6 +9,16 @@ import { EditorSection, RemoveButton, useAsyncAction } from './parts'
 import { DRIVER_INFO, formatVersion, iconIdOf } from './providerView'
 
 /**
+ * Provider setup is per machine, as in T3 Code: only the on/off switch has a project override. In
+ * a project scope the device-wide sections say so.
+ */
+const DEVICE_WIDE = 'Applies to this device, in every project.'
+
+function deviceWideNote(snapshot: InstanceSnapshot): string | undefined {
+  return snapshot.scope.kind === 'project' ? DEVICE_WIDE : undefined
+}
+
+/**
  * The editor's first section, as in T3 Code: the provider's logo and name as the heading, its
  * version and delete on the right, then the Display name row. The status lives in Setup → Status.
  */
@@ -57,7 +67,9 @@ export function EditorHeader({
     >
       <SettingsRow
         title="Display name"
-        description={(removal.error ?? rename.error) && <span className="prov-error">{removal.error ?? rename.error}</span>}
+        description={
+          removal.error || rename.error ? <span className="prov-error">{removal.error ?? rename.error}</span> : deviceWideNote(snapshot)
+        }
         control={
           <input
             className="settings-input"
@@ -76,16 +88,6 @@ export function EditorHeader({
       />
     </EditorSection>
   )
-}
-
-/**
- * Provider setup is per machine, as in T3 Code: only the on/off switch has a project override. In
- * a project scope the device-wide sections say so.
- */
-const DEVICE_WIDE = 'Applies to this device, in every project.'
-
-function deviceWideNote(snapshot: InstanceSnapshot): string | undefined {
-  return snapshot.scope.kind === 'project' ? DEVICE_WIDE : undefined
 }
 
 /**

@@ -337,9 +337,9 @@ describe('Agent editor scope', () => {
     return renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
   }
 
-  it('in a project scope, says runtime, environment and models apply to the whole device', () => {
+  it('in a project scope, says display name, runtime, environment and models apply to the whole device', () => {
     const notes = (html: string) => html.split('Applies to this device, in every project.').length - 1
-    expect(notes(editor({ kind: 'project', projectId: 'p1' }))).toBe(3)
+    expect(notes(editor({ kind: 'project', projectId: 'p1' }))).toBe(4)
     expect(notes(editor({ kind: 'device' }))).toBe(0)
   })
 })
