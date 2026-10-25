@@ -321,6 +321,27 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     expect(cli.last.text(1)).not.toContain('Previous conversation')
   }, 30_000)
 
+  it('replaying an old Stop does not close the process, and the helper, that a newer run started', async () => {
+    const { cli, d, thread, service } = await threadWithHelper()
+    // Stop A: the thread's first process (with its helper) ends.
+    const first = await d.orch.stopThread(thread.id, 'user', { clientRequestId: 'stop-a' })
+    expect(first.ok).toBe(true)
+    expect(cli.processes[0].closed).toBe(true)
+    // Run B starts a new process with a helper of its own.
+    await d.orch.send('b', false, { threadId: thread.id, clientRequestId: 'turn-b' })
+    expect(cli.processes).toHaveLength(2)
+    expect(service.hasBackgroundWork(thread.id)).toBe(true)
+    // A's Stop is retried (same clientRequestId): the result is the first one, and B's process is left alone.
+    const replay = await d.orch.stopThread(thread.id, 'user', { clientRequestId: 'stop-a' })
+    expect(replay.replayed).toBe(true)
+    expect(replay.threads).toEqual(first.threads)
+    expect(cli.processes[1].closed).toBe(false)
+    expect(service.hasBackgroundWork(thread.id)).toBe(true)
+    // A Stop that is new does end it.
+    await d.orch.stopThread(thread.id, 'user', { clientRequestId: 'stop-b' })
+    expect(cli.processes[1].closed).toBe(true)
+  }, 30_000)
+
   it('deleting the thread or switching its provider ends the process and its helpers', async () => {
     const deleted = await threadWithHelper()
     deleted.d.orch.markThreadDeleted(deleted.thread.id)

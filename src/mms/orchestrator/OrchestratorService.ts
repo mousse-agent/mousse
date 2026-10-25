@@ -1219,9 +1219,22 @@ export class OrchestratorService extends EventEmitter {
       for (const id of result.threads) aborted = this.abortChannelTurn(id) || aborted
       this.removeStoppedQueueEntries(result, opts.clearQueue === true)
     }
-    const worked = await Promise.all(result.threads.map((id) => this.stopProviderWork(id)))
+    // A replayed Stop reaches the provider only for threads that have no work newer than the Stop: a process
+    // that a later run started (and its helpers) is not the one this Stop was for.
+    const providerThreads = result.replayed ? result.threads.filter((id) => !this.hasWorkAfterStop(id, result.generations[id])) : result.threads
+    const worked = await Promise.all(providerThreads.map((id) => this.stopProviderWork(id)))
     const stoppedAnything = aborted || worked.some(Boolean) || result.activeRuns.length + result.cancelledRuns.length + result.delegations.length > 0
     return { ok: stoppedAnything, ...result }
+  }
+
+  /**
+   * Whether the thread has a run admitted at or after the generation its Stop raised it to (any status):
+   * work the Stop did not cover. An unknown generation counts as newer work, so nothing is closed on a guess.
+   */
+  private hasWorkAfterStop(threadId: string, generation: number | undefined): boolean {
+    const engine = this.runEngine
+    if (!engine || generation === undefined) return true
+    return engine.listRuns(threadId, { limit: 200 }).some((run) => runStopGeneration(engine.store, run.runId) >= generation)
   }
 
   /** A replayed Stop's interrupt, now: through the worker when there is one, else directly. True when a live turn was aborted. */
