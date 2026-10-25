@@ -6,6 +6,7 @@ import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
 import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
 import { createHarnessGateway, type TurnSpec } from '../../src/mms/harness/gateway'
 import { instanceStateDir } from '../../src/mms/harness/instances'
+import { instanceEnv } from '../../src/mms/harness/env'
 import { observeHarnessSpawns, type HarnessSpawn } from '../../src/mms/harness/spawn'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
@@ -135,6 +136,18 @@ describe('two Claude Code instances', () => {
     expect(claudeLoadsSkill({ source: 'claude-global' }, workEnv!())).toBe(false)
     expect(claudeLoadsSkill({ source: 'claude-global' }, ownEnv!())).toBe(!process.env.CLAUDE_CONFIG_DIR)
   }, 30_000)
+})
+
+describe('instance environments', () => {
+  it('a private home does not inherit the user credential variables; the default home keeps everything', () => {
+    const base = { PATH: '/bin', CLAUDE_CODE_OAUTH_TOKEN: 'user-token', ANTHROPIC_API_KEY: 'user-key', KEEP: '1' }
+    const own = instanceEnv({ instanceId: 'claude', driver: 'claude', configRevision: 0, searchPath: [], base })
+    expect(own.env).toEqual(base)
+    expect(own.homeId).toBe('default')
+    const work = instanceEnv({ instanceId: 'claude:work', driver: 'claude', configRevision: 2, home: '/profiles/p/harness/claude_work/home', searchPath: [], base })
+    expect(work.env).toEqual({ PATH: '/bin', KEEP: '1', CLAUDE_CONFIG_DIR: '/profiles/p/harness/claude_work/home' })
+    expect(work).toMatchObject({ homeId: 'private:claude:work', configRevision: 2 })
+  })
 })
 
 function turnSpec(instanceId: string, binding: TurnSpec['binding'], cwd: string): TurnSpec {

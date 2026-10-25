@@ -40,6 +40,16 @@ export const HOME_VARIABLES: Partial<Record<HarnessDriverKind, string>> = {
   codex: 'CODEX_HOME'
 }
 
+/**
+ * Credentials a driver reads from the environment ahead of its home. An instance with its own home
+ * does not inherit them from Mousse's environment, or it would sign in as the user's own account
+ * whatever its home holds. Variables set on the instance itself still apply.
+ */
+export const INHERITED_CREDENTIALS: Partial<Record<HarnessDriverKind, readonly string[]>> = {
+  claude: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'],
+  codex: ['CODEX_API_KEY', 'OPENAI_API_KEY']
+}
+
 export function instanceEnv(input: {
   instanceId: string
   driver: HarnessDriverKind
@@ -52,6 +62,10 @@ export function instanceEnv(input: {
   const base = input.base ?? process.env
   const variable = HOME_VARIABLES[input.driver]
   const env = input.home && variable ? withUserEnv(base, { [variable]: input.home }) : { ...base }
+  if (input.home) {
+    const drop = new Set((INHERITED_CREDENTIALS[input.driver] ?? []).map((name) => name.toUpperCase()))
+    for (const key of Object.keys(env)) if (drop.has(key.toUpperCase())) delete env[key]
+  }
   return {
     instanceId: input.instanceId,
     driver: input.driver,

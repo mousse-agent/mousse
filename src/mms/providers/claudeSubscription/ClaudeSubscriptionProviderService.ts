@@ -188,6 +188,13 @@ type Dependencies = {
   /** The terminal command that signs this instance in; default `claude auth login`. */
   signInCommand?: string
 }
+/** How `claude auth status` names its sign-in methods, for display. */
+const CLAUDE_AUTH_METHOD_LABELS: Record<string, string> = {
+  'claude.ai': 'Claude account',
+  oauth_token: 'OAuth token',
+  api_key: 'API key',
+  console: 'Anthropic Console'
+}
 /** The signed-in account as `claude auth status` reports it: an id (never the email) and a label. */
 export type ClaudeAccount = { id: string; label?: string }
 type AuthProbe =
@@ -552,7 +559,7 @@ export class ClaudeSubscriptionProviderService {
       if (typeof stdout !== 'string' || !stdout.trim()) return unreadable
       output = stdout
     }
-    let status: { loggedIn?: unknown; orgId?: unknown; authMethod?: unknown; subscriptionType?: unknown; apiProvider?: unknown }
+    let status: { loggedIn?: unknown; orgId?: unknown; authMethod?: unknown; subscriptionType?: unknown }
     try {
       status = JSON.parse(output) as typeof status
     } catch {
@@ -565,8 +572,10 @@ export class ClaudeSubscriptionProviderService {
         message: `Claude Code isn't signed in. Run \`${this.signInCommand()}\` in a terminal, then check again.`
       }
     const text = (value: unknown) => (typeof value === 'string' && value.trim() ? value.trim() : undefined)
-    const id = text(status.orgId) ?? text(status.apiProvider) ?? text(status.authMethod)
-    const label = text(status.subscriptionType) ?? text(status.authMethod)
+    const method = text(status.authMethod)
+    const id = text(status.orgId) ?? method
+    const plan = text(status.subscriptionType)
+    const label = plan ? `Claude ${plan[0].toUpperCase()}${plan.slice(1)}` : method && (CLAUDE_AUTH_METHOD_LABELS[method] ?? method)
     return { kind: 'signed_in', ...(id ? { account: { id, ...(label ? { label } : {}) } } : {}) }
   }
   /** The account of the last live sign-in check, when it was signed in and named one. */
