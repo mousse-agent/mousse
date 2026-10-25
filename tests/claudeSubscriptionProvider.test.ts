@@ -117,6 +117,57 @@ describe('Claude Subscription native provider', () => {
     await expect(service.chat(chatInput(home))).rejects.toThrow(/claude auth login/)
     expect(query).not.toHaveBeenCalled()
   })
+  it('records the call and the result of a Mousse subagent tool, and nothing of other tools', async () => {
+    const start = (id: string, name: string) => ({ type: 'stream_event', session_id: 'vendor-session', event: { type: 'content_block_start', content_block: { type: 'tool_use', id, name } } })
+    const events = [
+      start('sub1', 'mcp__mousse__delegate_task'),
+      start('sub2', 'mcp__mousse__delegate_task'),
+      start('read1', 'Read'),
+      {
+        type: 'assistant',
+        session_id: 'vendor-session',
+        message: {
+          content: [
+            { type: 'tool_use', id: 'sub1', name: 'mcp__mousse__delegate_task', input: { title: 'API reviewer', prompt: 'SECRET PROMPT TEXT', workspace: 'shared' } },
+            { type: 'tool_use', id: 'sub2', name: 'mcp__mousse__delegate_task', input: { title: 'Docs', prompt: 'x', workspace: 'shared' } },
+            { type: 'tool_use', id: 'read1', name: 'Read', input: { file_path: 'a.ts' } }
+          ]
+        }
+      },
+      {
+        type: 'user',
+        session_id: 'vendor-session',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 'sub2', content: [{ type: 'text', text: JSON.stringify({ delegationId: 'd2', childThreadId: 't2', childRunId: 'r2', title: 'Docs', note: 'Started. LONG NOTE' }) }] },
+            { type: 'tool_result', tool_use_id: 'sub1', content: JSON.stringify({ started: false, code: 'title_taken', message: 'You already have a subagent titled "API reviewer".', existing: [{ childThreadId: 'x' }] }) },
+            { type: 'tool_result', tool_use_id: 'read1', content: 'file contents' }
+          ]
+        }
+      },
+      result
+    ]
+    const { service, home } = fixture(() => fakeQuery(events))
+    const onTool = vi.fn()
+    await service.chat({ ...chatInput(home), onTool })
+    const complete = (callId: string) => onTool.mock.calls.map(([event]) => event).find((event) => event.phase === 'complete' && event.callId === callId)
+    // Every subagent row is marked as recorded from the first start, and repeats its start once the arguments are known.
+    const starts = (callId: string) => onTool.mock.calls.map(([event]) => event).filter((event) => event.phase === 'start' && event.callId === callId)
+    expect(starts('sub1').map((event) => event.record?.input)).toEqual([{ recordVersion: 1 }, { recordVersion: 1, title: 'API reviewer' }])
+    expect(starts('sub2').map((event) => event.record?.input)).toEqual([{ recordVersion: 1 }, { recordVersion: 1, title: 'Docs' }])
+    expect(starts('read1')).toEqual([{ phase: 'start', callId: 'read1', title: 'Read', toolName: 'Read' }])
+    expect(complete('sub2').record).toEqual({
+      input: { recordVersion: 1, title: 'Docs' },
+      response: JSON.stringify({ delegationId: 'd2', childThreadId: 't2', title: 'Docs' }),
+      failed: false
+    })
+    const refused = complete('sub1').record
+    expect(refused.input).toEqual({ recordVersion: 1, title: 'API reviewer' })
+    expect(JSON.parse(refused.response)).toEqual({ started: false, code: 'title_taken', message: 'You already have a subagent titled "API reviewer".' })
+    expect(JSON.stringify(onTool.mock.calls)).not.toContain('SECRET PROMPT TEXT')
+    expect(complete('read1')).toEqual({ phase: 'complete', callId: 'read1', title: 'Read' })
+  })
+
   it('streams text/thinking/tools and only resumes committed matching history', async () => {
     const inputs: Array<{ options: Options; prompt: unknown }> = []
     const events = [

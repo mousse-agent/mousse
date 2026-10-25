@@ -27,6 +27,7 @@ import { filesToImagePayloads, imagePayloadToDataUrl, imagePayloadToFile } from 
 import { stripComposerTransportMarkers } from './QueuedMessages'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { SubagentParentBar } from './SubagentParentBar'
+import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { mousseToUIMessages, chatStatusFromPhase } from '../chat/adapters/mousseToUI'
 import {
   findQuickActionCardForApproval,
@@ -1010,7 +1011,7 @@ export function OrchestratorChat() {
               placeholder={workspaceReady ? undefined : 'Loading workspace...'}
               onSend={(skillMode) => void handleSend(skillMode)}
               onStop={() => void handleStop()}
-
+              banner={<SubagentComposerBanner threadId={activeThreadId} />}
 
 
             />

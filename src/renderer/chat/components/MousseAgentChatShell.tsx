@@ -4,7 +4,9 @@ import type { UIMessage, ChatStatus } from 'ai'
 import { useAppStore } from '../../stores/appStore'
 import { X } from '../../lib/icons'
 import { PromptUndoProvider } from '../../components/PromptUndoControls'
+import { useSubagentCardModels } from '../../hooks/useSubagentCards'
 import { AgentChat } from './agent-elements/agent-chat'
+import { SubagentCardsContext } from './agent-elements/tools/subagent-cards-context'
 import type { CustomToolRendererProps } from './agent-elements/types'
 import {
   QuickActionApprovalContext,
@@ -83,10 +85,12 @@ export function MousseAgentChatShell({
     () => ({ InputBar: MousseInputBarSlot as never }),
     []
   )
+  const subagentCards = useSubagentCardModels(threadId, messages)
   return (
     <MousseComposerContext.Provider value={composer}>
       <PromptUndoProvider key={`${profileId}:${threadId ?? ""}`} threadId={threadId} busy={busy} revision={messages}>
       <QuickActionApprovalContext.Provider value={quickActionApproval ?? null}>
+      <SubagentCardsContext.Provider value={subagentCards}>
         <AgentChat
           className="mousse-chat-shell"
           messages={messages}
@@ -105,6 +109,7 @@ export function MousseAgentChatShell({
           showCopyToolbar
           enableImagePreview
         />
+      </SubagentCardsContext.Provider>
       </QuickActionApprovalContext.Provider>
       </PromptUndoProvider>
     </MousseComposerContext.Provider>

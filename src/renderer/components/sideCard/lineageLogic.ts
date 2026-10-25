@@ -78,7 +78,7 @@ const FINISHED_LABELS: Record<string, string> = {
 }
 
 /** What a subagent waits on: its own subagents when they are known, else just "subagents". */
-function waitingLabel(subagent: Pick<SubagentSummary, 'waitingOn'>): string {
+export function waitingLabel(subagent: Pick<SubagentSummary, 'waitingOn'>): string {
   const count = subagent.waitingOn.length
   return count > 0 ? `Waiting on ${count} ${count === 1 ? 'subagent' : 'subagents'}` : 'Waiting on subagents'
 }

@@ -55,18 +55,36 @@ export type AssistantMessageAnalysis = {
    */
   toolsOnly: boolean;
   toolItems: AssistantToolItem[];
+  /**
+   * True when the message renders only subagent cards. Cards never join an
+   * activity group: a running one must stay in view when the turn ends, and a
+   * finished one stays as the record of what the subagent did.
+   */
+  cardsOnly: boolean;
+  cardParts: ToolPartBase[];
 };
+
+const NO_CARD_IDS: ReadonlySet<string> = new Set();
 
 /**
  * Pure per-message analysis mirroring AssistantParts rendering rules:
  * text/error/question rows disqualify grouping; thoughts and file edits join it.
  * TaskOutput,
  * nested, and suppressed-question parts are invisible and ignored.
+ * `cardIds` are the tool calls drawn as subagent cards; a message that holds
+ * one is groupable as neither tools nor cards unless it holds only cards.
  */
 export function analyzeAssistantMessage(
   rawParts: unknown[],
   suppressQuestionTool: boolean,
+  cardIds: ReadonlySet<string> = NO_CARD_IDS,
 ): AssistantMessageAnalysis {
+  const notGroupable: AssistantMessageAnalysis = {
+    toolsOnly: false,
+    toolItems: [],
+    cardsOnly: false,
+    cardParts: [],
+  };
   const parts = normalizeAssistantToolParts(rawParts) as unknown[];
 
   const taskPartIds = new Set(
@@ -95,19 +113,24 @@ export function analyzeAssistantMessage(
   }
 
   const toolItems: AssistantToolItem[] = [];
+  const cardParts: ToolPartBase[] = [];
   for (const part of parts) {
     if (isTextPart(part)) {
-      if (part.text) return { toolsOnly: false, toolItems: [] };
+      if (part.text) return notGroupable;
       continue;
     }
-    if (isRecord(part) && (part.type === "data-applet" || part.type === "data-applet-pending")) return { toolsOnly: false, toolItems: [] };
-    if (isErrorPart(part)) return { toolsOnly: false, toolItems: [] };
+    if (isRecord(part) && (part.type === "data-applet" || part.type === "data-applet-pending")) return notGroupable;
+    if (isErrorPart(part)) return notGroupable;
     if (!isV5ToolPart(part)) continue;
     if (part.type === "tool-TaskOutput") continue;
     if (suppressQuestionTool && part.type === "tool-Question") continue;
     if (part.toolCallId && nestedToolIds.has(part.toolCallId)) continue;
     if (STANDALONE_TOOL_TYPES.has(part.type)) {
-      return { toolsOnly: false, toolItems: [] };
+      return notGroupable;
+    }
+    if (part.toolCallId && cardIds.has(part.toolCallId)) {
+      cardParts.push(part);
+      continue;
     }
     const toolCallId = part.toolCallId;
     const nestedTools =
@@ -118,13 +141,20 @@ export function analyzeAssistantMessage(
     toolItems.push({ part, nestedTools });
   }
 
-  if (toolItems.length === 0) return { toolsOnly: false, toolItems: [] };
-  return { toolsOnly: true, toolItems };
+  if (cardParts.length > 0) {
+    // Cards and other rows in one message render as the message itself.
+    return toolItems.length === 0
+      ? { toolsOnly: false, toolItems: [], cardsOnly: true, cardParts }
+      : notGroupable;
+  }
+  if (toolItems.length === 0) return notGroupable;
+  return { toolsOnly: true, toolItems, cardsOnly: false, cardParts: [] };
 }
 
 export type TurnSegment =
   | { kind: "message"; msgIndex: number }
-  | { kind: "tools"; msgIndices: number[] };
+  | { kind: "tools"; msgIndices: number[] }
+  | { kind: "cards"; msgIndices: number[] };
 
 /** First non-empty line of a thinking part, or "" when it has no message. */
 export function thoughtMessageFromPart(part: ToolPartBase): string {
@@ -155,13 +185,16 @@ export function activityGroupLabel(items: AssistantToolItem[]): string {
 /**
  * Partition a turn's assistant messages into render segments: runs of
  * consecutive activity messages (tools and thoughts, length >= 2) collapse
- * into one group; everything else renders message by message.
+ * into one group; consecutive subagent-card messages form one card list,
+ * outside any group; everything else renders message by message.
  */
 export function partitionTurnSegments(
   toolsOnlyFlags: boolean[],
+  cardsOnlyFlags: boolean[] = [],
 ): TurnSegment[] {
   const segments: TurnSegment[] = [];
   let run: number[] = [];
+  let cards: number[] = [];
   const flush = () => {
     if (run.length >= 2) {
       segments.push({ kind: "tools", msgIndices: run });
@@ -170,7 +203,17 @@ export function partitionTurnSegments(
     }
     run = [];
   };
+  const flushCards = () => {
+    if (cards.length > 0) segments.push({ kind: "cards", msgIndices: cards });
+    cards = [];
+  };
   toolsOnlyFlags.forEach((flag, msgIndex) => {
+    if (cardsOnlyFlags[msgIndex]) {
+      flush();
+      cards.push(msgIndex);
+      return;
+    }
+    flushCards();
     if (flag) {
       run.push(msgIndex);
     } else {
@@ -179,5 +222,6 @@ export function partitionTurnSegments(
     }
   });
   flush();
+  flushCards();
   return segments;
 }

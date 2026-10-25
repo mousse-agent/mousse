@@ -3596,7 +3596,8 @@ export class OrchestratorService extends EventEmitter {
     responseMetadata?: ChatMessage['responseMetadata'],
     queueItemId?: string,
     mode?: ChatMode,
-    subagentNotice?: SubagentNoticeItem[]
+    subagentNotice?: SubagentNoticeItem[],
+    steered?: boolean
   ): ChatMessage {
     const msg: ChatMessage = {
       id: uuidv4(),
@@ -3607,7 +3608,8 @@ export class OrchestratorService extends EventEmitter {
       responseMetadata,
       queueItemId: role === 'user' && queueItemId ? queueItemId : undefined,
       ...(role === 'user' && mode !== undefined ? { mode: normalizeChatMode(mode) } : {}),
-      ...(role === 'user' && subagentNotice?.length ? { subagentNotice } : {})
+      ...(role === 'user' && subagentNotice?.length ? { subagentNotice } : {}),
+      ...(role === 'user' && steered ? { steered: true } : {})
     }
     this.messages.push(msg)
     this.emitMessageAdded(msg)
@@ -4052,7 +4054,7 @@ export class OrchestratorService extends EventEmitter {
         // Mid-turn steers share the turn's mode — preserve tracking so the next
         // real turn does not mistake this UI echo for a legacy agent turn.
         const currentMode = getLastUserChatMode(this.messages)
-        this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice)
+        this.addMessage('user', trimmed, undefined, undefined, undefined, currentMode, subagentNotice, true)
       }
       if (this.sessionAls.getStore()?.threadId === threadId) {
         run()
