@@ -37,6 +37,7 @@ import {
   type StoredCliConfig
 } from '../cliConfig'
 import { resolveWindowsShim } from '../resolveWindowsShim'
+import { claudeAccountSubject } from './accountSubject'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -200,49 +201,6 @@ const CLAUDE_AUTH_METHOD_LABELS: Record<string, string> = {
  * the account or credential (`claudeAccountSubject`), never shown.
  */
 export type ClaudeAccount = { label?: string; subject?: string }
-
-/** Variables that carry the credential Claude Code runs with, ahead of a stored sign-in. */
-const CLAUDE_CREDENTIAL_VARIABLES = [
-  'ANTHROPIC_API_KEY',
-  'ANTHROPIC_AUTH_TOKEN',
-  'CLAUDE_CODE_OAUTH_TOKEN',
-  'AWS_PROFILE',
-  'AWS_ACCESS_KEY_ID',
-  'ANTHROPIC_VERTEX_PROJECT_ID',
-  'GOOGLE_APPLICATION_CREDENTIALS'
-]
-/** Variables that route the credential elsewhere (a proxy, a cloud provider). */
-const CLAUDE_ROUTING_VARIABLES = ['ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX']
-
-/**
- * A stable id of the account Claude Code runs as, read from what it reads, without starting it
- * (never shown or stored; the gateway hashes it). A credential variable wins over a stored sign-in,
- * as in Claude Code: a hash of the credential and routing variables. Otherwise the claude.ai sign-in
- * stored in the home's `.claude.json`: its account and organization uuid. Undefined when neither is
- * there (the caller then treats the account as unknown).
- */
-export function claudeAccountSubject(
-  env: NodeJS.ProcessEnv,
-  readText: (path: string) => string = (path) => readFileSync(path, 'utf8')
-): string | undefined {
-  const value = (name: string) => env[name]?.trim()
-  const credentials = CLAUDE_CREDENTIAL_VARIABLES.filter((name) => value(name))
-  if (credentials.length) {
-    const lines = [...credentials, ...CLAUDE_ROUTING_VARIABLES.filter((name) => value(name))].map((name) => `${name}=${value(name)}`)
-    return `env:${createHash('sha256').update(lines.join('\n')).digest('hex')}`
-  }
-  const configDir = value('CLAUDE_CONFIG_DIR')
-  try {
-    const config = JSON.parse(readText(configDir ? join(configDir, '.claude.json') : join(homedir(), '.claude.json'))) as { oauthAccount?: { accountUuid?: unknown; organizationUuid?: unknown } }
-    const account = config.oauthAccount?.accountUuid
-    if (typeof account !== 'string' || !account) return undefined
-    const organization = config.oauthAccount?.organizationUuid
-    const routing = CLAUDE_ROUTING_VARIABLES.filter((name) => value(name)).map((name) => `${name}=${value(name)}`).join('\n')
-    return `claude.ai:${account}:${typeof organization === 'string' ? organization : ''}${routing ? `:${createHash('sha256').update(routing).digest('hex')}` : ''}`
-  } catch {
-    return undefined
-  }
-}
 type AuthProbe =
   | { kind: 'signed_in'; account?: ClaudeAccount }
   | { kind: 'signed_out'; message: string }

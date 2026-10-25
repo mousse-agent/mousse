@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { InstanceCounterStore } from '../../src/mms/harness/instances'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
-import { claudeAccountSubject } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
+import { claudeAccountSubject } from '../../src/mms/providers/claudeSubscription/accountSubject'
 import { CodexProviderService } from '../../src/mms/providers/codex/CodexProviderService'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
@@ -29,38 +29,85 @@ const claudeJson = (accountUuid: string, organizationUuid = 'org-1') =>
   JSON.stringify({ oauthAccount: { accountUuid, organizationUuid, emailAddress: `${accountUuid}@example.com`, organizationName: 'Acme' } })
 
 describe('Claude account subject', () => {
+  /** Files Claude Code would read, by path; anything else does not exist. */
   const read = (files: Record<string, string>) => (path: string) => {
     const text = files[path]
     if (text === undefined) throw new Error('ENOENT')
     return text
   }
-  const home = (text: string) => read({ [join('/homes/work', '.claude.json')]: text })
+  const workHome = (text: string, more: Record<string, string> = {}) => read({ [join('/homes/work', '.claude.json')]: text, ...more })
+  const subject = (env: NodeJS.ProcessEnv, readText: (path: string) => string) =>
+    claudeAccountSubject({ CLAUDE_CONFIG_DIR: '/homes/work', ...env }, { readText, home: '/users/me', platform: 'linux' })
 
   it('tells two claude.ai users of one organization apart, from the home Claude Code reads', () => {
-    const env = { CLAUDE_CONFIG_DIR: '/homes/work' }
-    const a = claudeAccountSubject(env, home(claudeJson('user-a')))
-    const b = claudeAccountSubject(env, home(claudeJson('user-b')))
+    const a = subject({}, workHome(claudeJson('user-a')))
+    const b = subject({}, workHome(claudeJson('user-b')))
     expect(a).toBeDefined()
     expect(b).toBeDefined()
     expect(a).not.toBe(b)
     // No account recorded in the home: unknown, never a shared placeholder.
-    expect(claudeAccountSubject(env, read({}))).toBeUndefined()
-    expect(claudeAccountSubject(env, home('{}'))).toBeUndefined()
+    expect(subject({}, read({}))).toBeUndefined()
+    expect(subject({}, workHome('{}'))).toBeUndefined()
   })
 
-  it('keys a token or key sign-in by its credential, ahead of a stored sign-in, without exposing it', () => {
-    const stored = home(claudeJson('user-a'))
-    const one = claudeAccountSubject({ CLAUDE_CONFIG_DIR: '/homes/work', CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat-one' }, stored)
-    const two = claudeAccountSubject({ CLAUDE_CONFIG_DIR: '/homes/work', CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat-two' }, stored)
+  it('keys a token or key sign-in by its credential, with the stored sign-in, without exposing it', () => {
+    const stored = workHome(claudeJson('user-a'))
+    const one = subject({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat-one' }, stored)
+    const two = subject({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat-two' }, stored)
     expect(one).not.toBe(two)
     expect(one).not.toContain('sk-ant')
-    expect(one).not.toBe(claudeAccountSubject({ CLAUDE_CONFIG_DIR: '/homes/work' }, stored))
+    expect(one).not.toBe(subject({}, stored))
+    // Claude Code may still use the stored sign-in (a key it was told to refuse): it is part of the id.
+    expect(subject({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat-one' }, workHome(claudeJson('user-b')))).not.toBe(one)
     // A proxy alone is not a credential: the stored account still decides, and the route is part of it.
-    const proxied = claudeAccountSubject({ CLAUDE_CONFIG_DIR: '/homes/work', ANTHROPIC_BASE_URL: 'https://proxy.example' }, stored)
+    const proxied = subject({ ANTHROPIC_BASE_URL: 'https://proxy.example' }, stored)
     expect(proxied).toMatch(/^claude\.ai:user-a:/)
-    expect(proxied).not.toBe(claudeAccountSubject({ CLAUDE_CONFIG_DIR: '/homes/work' }, stored))
+    expect(proxied).not.toBe(subject({}, stored))
     // Nothing Mousse can see: unknown.
-    expect(claudeAccountSubject({ CLAUDE_CONFIG_DIR: '/homes/work' }, read({}))).toBeUndefined()
+    expect(subject({}, read({}))).toBeUndefined()
+  })
+
+  it('ignores cloud variables while their route is off: a claude.ai switch still reads as another account', () => {
+    const cloud = { AWS_PROFILE: 'default', AWS_ACCESS_KEY_ID: 'AKIAONE', GOOGLE_APPLICATION_CREDENTIALS: '/keys/sa.json', ANTHROPIC_VERTEX_PROJECT_ID: 'p1' }
+    const a = subject(cloud, workHome(claudeJson('user-a')))
+    const b = subject(cloud, workHome(claudeJson('user-b')))
+    expect(a).toMatch(/^claude\.ai:user-a:/)
+    expect(a).not.toBe(b)
+  })
+
+  it('on Bedrock, reads the AWS access key the calls are signed with; a profile without static keys is unknown', () => {
+    const stored = claudeJson('user-a')
+    const credentials = (key: string) => `[default]\naws_access_key_id = AKIADEFAULT\n\n[work]\naws_access_key_id = ${key}\naws_secret_access_key = secret\n`
+    const files = (key: string) => workHome(stored, { [join('/users/me', '.aws', 'credentials')]: credentials(key) })
+    const bedrock = { CLAUDE_CODE_USE_BEDROCK: '1', AWS_PROFILE: 'work' }
+    const one = subject(bedrock, files('AKIAONE'))
+    expect(one).toMatch(/^bedrock:key:/)
+    expect(one).not.toContain('AKIAONE')
+    // The same profile name over another key is another account.
+    expect(subject(bedrock, files('AKIATWO'))).not.toBe(one)
+    expect(subject({ CLAUDE_CODE_USE_BEDROCK: '1', AWS_ACCESS_KEY_ID: 'AKIAENV' }, workHome(stored))).toMatch(/^bedrock:key:/)
+    // SSO, roles, the default chain: Mousse cannot tell, so unknown (never the stored claude.ai account).
+    expect(subject({ CLAUDE_CODE_USE_BEDROCK: '1', AWS_PROFILE: 'sso' }, files('AKIAONE'))).toBeUndefined()
+    expect(subject({ CLAUDE_CODE_USE_BEDROCK: '1' }, workHome(stored))).toBeUndefined()
+  })
+
+  it('on Vertex, reads the principal of the Google credentials file, not its path', () => {
+    const vertex = { CLAUDE_CODE_USE_VERTEX: '1', GOOGLE_APPLICATION_CREDENTIALS: '/keys/sa.json', ANTHROPIC_VERTEX_PROJECT_ID: 'p1' }
+    const key = (email: string) => workHome(claudeJson('user-a'), { '/keys/sa.json': JSON.stringify({ type: 'service_account', client_email: email, private_key: 'k' }) })
+    const one = subject(vertex, key('one@p1.iam.gserviceaccount.com'))
+    expect(one).toMatch(/^vertex:sa:one@/)
+    // Another service account at the same path is another account.
+    expect(subject(vertex, key('two@p1.iam.gserviceaccount.com'))).not.toBe(one)
+    // A credential of another kind, or none (the metadata server): unknown.
+    expect(subject(vertex, workHome(claudeJson('user-a'), { '/keys/sa.json': JSON.stringify({ type: 'external_account' }) }))).toBeUndefined()
+    expect(subject({ CLAUDE_CODE_USE_VERTEX: '1' }, workHome(claudeJson('user-a')))).toBeUndefined()
+  })
+
+  it('an apiKeyHelper or route in Claude Code\'s settings is honoured: the stored sign-in is not taken for the account', () => {
+    const settings = (value: unknown) => workHome(claudeJson('user-a'), { [join('/homes/work', 'settings.json')]: JSON.stringify(value) })
+    expect(subject({}, settings({ apiKeyHelper: '~/bin/get-key.sh' }))).toBeUndefined()
+    expect(subject({}, settings({ env: { CLAUDE_CODE_USE_BEDROCK: '1' } }))).toBeUndefined()
+    expect(subject({}, settings({ env: { ANTHROPIC_API_KEY: 'sk-ant-api-one' } }))).toMatch(/env:/)
   })
 })
 
