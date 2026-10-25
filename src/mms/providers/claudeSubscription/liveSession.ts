@@ -30,6 +30,8 @@ export const LIVE_MAX_PIN_MS = 4 * 60 * 60_000
 export const LIVE_MAX_SESSIONS = 4
 /** A task finished and Claude never started its own turn: the wake ends after this long. */
 export const WAKE_TURN_START_DEADLINE_MS = 2 * 60_000
+/** How long a task the next turn cleared on a guess (its wake never came) is remembered, in case the wake still comes. */
+export const UNSURE_MEMORY_MS = 10 * 60_000
 /** A steer waits at most this long for foreground subagents to move to the background. */
 export const STEER_BACKGROUND_MOVE_MS = 5_000
 
@@ -138,6 +140,14 @@ export class BackgroundObligations {
    * continuation) but, like `DISCARDED` ones, the next turn that begins afterwards and commits clears them.
    */
   private readonly unsure = new Set<string>()
+  /** What the notifications of tasks in `unsure` said, kept for the wake that opens for them. */
+  private readonly summaries = new Map<string, string>()
+  /**
+   * `unsure` tasks the next committed turn cleared, with the time their memory ends. Claude's wake for one
+   * may still come after that clear (it was only a guess that it would not), and it opens a continuation
+   * rather than being dropped.
+   */
+  private readonly recent = new Map<string, number>()
 
   get size(): number {
     return this.tasks.size
@@ -176,10 +186,34 @@ export class BackgroundObligations {
    * The task finished while a wake that was cut off still owed its result: Claude starts its own turn for it
    * later, so it is `CARRIED`, and `unsure` since that turn may never come.
    */
-  carry(taskId: string): void {
+  carry(taskId: string, summary = ''): void {
     if (!this.tasks.has(taskId)) return
     this.consumers.set(taskId, CARRIED)
     this.unsure.add(taskId)
+    if (summary) this.summaries.set(taskId, summary)
+  }
+
+  /** What the notifications of `ids` said, for the wake that opens for them; each is handed out once. */
+  takeSummaries(ids: readonly string[]): string[] {
+    const found: string[] = []
+    for (const id of ids) {
+      const summary = this.summaries.get(id)
+      if (summary === undefined) continue
+      this.summaries.delete(id)
+      found.push(summary)
+    }
+    return found
+  }
+
+  /** Tasks an `unsure` clear took, still remembered: the wake Claude owed for one of them may yet come. */
+  recentlyCleared(): string[] {
+    const now = Date.now()
+    for (const [id, until] of this.recent) if (until <= now) this.recent.delete(id)
+    return [...this.recent.keys()]
+  }
+
+  forget(ids: readonly string[]): void {
+    for (const id of ids) this.recent.delete(id)
   }
 
   consumed(taskId: string): boolean {
@@ -266,6 +300,7 @@ export class BackgroundObligations {
     let changed = false
     for (const id of ids)
       if (this.clearable(id, this.consumers.get(id))) {
+        if (this.consumers.get(id) === CARRIED) this.recent.set(id, Date.now() + UNSURE_MEMORY_MS)
         this.consumers.delete(id)
         this.unsure.delete(id)
         changed = this.tasks.delete(id) || changed
@@ -300,6 +335,8 @@ export class BackgroundObligations {
     this.tasks.clear()
     this.consumers.clear()
     this.unsure.clear()
+    this.summaries.clear()
+    this.recent.clear()
     return had
   }
 }
@@ -710,7 +747,8 @@ export class LiveSession<Turn = unknown> {
       // A wake that began stays the cursor and the continuation until its own result arrives (like a
       // cut-off prompt it owes that result): the frames it already wrote are dropped, and the wake Claude
       // may owe for a task it had not read opens only after this one is over (`routeResult`).
-      if (run.kind === 'continuation' && run.started && run === this.continuation) this.clearWake()
+      // One whose result already arrived (held back for a steer) has nothing left to wait for.
+      if (run.kind === 'continuation' && run.started && !run.resultSeen && run === this.continuation) this.clearWake()
       else this.finishCancelled(run)
     } else if (run === this.continuation) {
       this.continuation = undefined
@@ -925,7 +963,16 @@ export class LiveSession<Turn = unknown> {
     // A stray frame with nothing carried opens nothing: no task announced it, and nothing would end it.
     const carried = this.obligations.carriedIds()
     const root = (message as { parent_tool_use_id?: unknown }).parent_tool_use_id == null && message.type !== 'user'
-    if (carried.length > 0 && root) return (this.cursor = this.startContinuation(carried))
+    if (carried.length > 0 && root) return (this.cursor = this.startContinuation(carried, this.obligations.takeSummaries(carried)))
+    // The wake for a task the last committed turn cleared on a guess may still come: with no turn of ours
+    // in flight, no wake and no cut-off turn owing a result, a root frame is that wake.
+    if (root && this.runs.length === 0) {
+      const recent = this.obligations.recentlyCleared()
+      if (recent.length > 0) {
+        this.obligations.forget(recent)
+        return (this.cursor = this.startContinuation(recent))
+      }
+    }
     return this.runs.find((run) => !run.abandoned && !run.settled)
   }
 
@@ -986,7 +1033,7 @@ export class LiveSession<Turn = unknown> {
     // opened now: the task is owed, and Claude's next turn for it opens the continuation once the old one is over.
     const old = this.continuation
     if (old && old.abandoned && !old.settled) {
-      this.obligations.carry(taskId)
+      this.obligations.carry(taskId, summary)
       return
     }
     this.startContinuation([taskId], summary ? [summary] : [])

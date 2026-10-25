@@ -1666,10 +1666,87 @@ describe('background helpers as the real Claude Code reports them', () => {
     // Claude's turn for the second shell opens its own continuation, which only that turn's text and result settle.
     process.emit(textDelta('B text'))
     await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(2))
+    // The note for the wake still says what the task reported.
+    expect(f.host.continuationStarted).toHaveBeenLastCalledWith('thread', expect.objectContaining({ taskIds: ['bash-2'], summaries: ['task bash-2 completed'] }))
+    const wakeB = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined })
+    process.emit(resultFrame({ text: 'B text', origin: 'task-notification' }))
+    expect(await wakeB).toBe('B text')
+  })
+
+  it('a cut-off wake whose result was already held back for a steer ends at once, so the next wake is not dropped', async () => {
+    const f = fixture()
+    startedWith(f, { id: 'bash-1', type: 'local_bash' }, { id: 'bash-2', type: 'local_bash' })
+    await f.turn()
+    const process = f.cli.last
+    f.cli.reply = undefined
+    process.emit(notification('bash-1'), textDelta('reading the first report'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    let open!: () => void
+    process.backgroundGate = new Promise<void>((resolve) => { open = resolve })
+    const abort = new AbortController()
+    const wakeA = f.service.chat({
+      threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined, signal: abort.signal,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('a steer').mockReturnValue(undefined)
+    })
+    wakeA.catch(() => undefined)
+    // The steer waits for foreground work to move, and the wake's result arrives meanwhile: it is held back.
+    await vi.waitFor(() => expect(process.backgrounded).toBe(1))
+    process.emit(resultFrame({ text: 'A done', origin: 'task-notification' }))
+    await later(30)
+    abort.abort()
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    open()
+    await later(30)
+    // The second shell's wake runs: nothing is waiting for a result that already came.
+    process.emit(notification('bash-2'))
+    process.emit(textDelta('B text'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(2))
+    const wakeB = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined })
+    process.emit(resultFrame({ text: 'B text', origin: 'task-notification' }))
+    expect(await wakeB).toBe('B text')
+  })
+
+  it('a wake that comes after the next turn cleared its task on a guess still opens a continuation and gets its text', async () => {
+    const f = fixture()
+    startedWith(f, { id: 'bash-1', type: 'local_bash' }, { id: 'bash-2', type: 'local_bash' })
+    await f.turn()
+    const process = f.cli.last
+    f.cli.reply = undefined
+    process.emit(notification('bash-1'), textDelta('reading the first report'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    process.emit(notification('bash-2'))
+    await later(20)
+    const abort = new AbortController()
+    const wakeA = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined, signal: abort.signal })
+    await later(20)
+    abort.abort()
+    await expect(wakeA).rejects.toThrow()
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    process.emit(resultFrame({ terminalReason: 'aborted_streaming', origin: 'task-notification' }))
+    await later(30)
+    // The next turn commits and clears bash-2, guessing that its wake will not come.
+    f.service.commitInterrupted('thread', '')
+    f.cli.reply = (message, self) => self.answer(String(message.uuid), 'next')
+    expect(await f.turn({ history: '' })).toBe('next')
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+    // It does come after all.
+    process.emit(textDelta('B text'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(2))
     expect(f.host.continuationStarted).toHaveBeenLastCalledWith('thread', expect.objectContaining({ taskIds: ['bash-2'] }))
     const wakeB = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined })
     process.emit(resultFrame({ text: 'B text', origin: 'task-notification' }))
     expect(await wakeB).toBe('B text')
+  })
+
+  it('Stop forgets the tasks a guess cleared, so a closed process owes nothing and a new one starts clean', () => {
+    const session = new LiveSession('thread', { backgroundWork: vi.fn(), continuationStarted: vi.fn(), ended: vi.fn() })
+    session.obligations.observeRoster([{ task_id: 'bash-2' }])
+    session.obligations.carry('bash-2')
+    const [id] = session.obligations.discardedIds()
+    expect(session.obligations.clearDiscarded([id])).toBe(true)
+    expect(session.obligations.recentlyCleared()).toEqual(['bash-2'])
+    session.close()
+    expect(session.obligations.recentlyCleared()).toEqual([])
   })
 
   it('the same for a wake nobody could run: a later task\'s wake opens after the discarded one is over', async () => {
