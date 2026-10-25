@@ -40,6 +40,8 @@ export interface LiveTimings {
   maxSessions: number
   wakeDeadlineMs: number
   backgroundMoveMs: number
+  /** How long one step of a cancel (an interrupt and its receipt) may take before the process is given up. */
+  interruptTimeoutMs: number
   /** How long a "result may not have arrived" note waits, so a Stop that follows the cancel can drop it. */
   noticeDelayMs: number
 }
@@ -51,7 +53,8 @@ export const DEFAULT_LIVE_TIMINGS: LiveTimings = {
   maxSessions: LIVE_MAX_SESSIONS,
   wakeDeadlineMs: WAKE_TURN_START_DEADLINE_MS,
   backgroundMoveMs: STEER_BACKGROUND_MOVE_MS,
-  noticeDelayMs: 1_000
+  noticeDelayMs: 1_000,
+  interruptTimeoutMs: 10_000
 }
 
 /** The input stream of a live query. It ends only when closed. */
@@ -269,6 +272,13 @@ export type FrameConsumer = (message: SDKMessage) => void
  * and its steers) and ends at the result that echoes them. A continuation is a turn Claude started
  * itself, after a background task finished; it ends at the next result that echoes none of ours.
  */
+/** A step of a cancel did not answer within its bound. */
+class CancelTimedOut extends Error {
+  constructor() {
+    super('The cancel did not answer in time')
+  }
+}
+
 /** A push met a cancel in progress; the caller waits for `afterCancel()` and pushes again. */
 export class CancelInProgress extends Error {
   constructor() {
@@ -406,7 +416,7 @@ export class LiveSession<Turn = unknown> {
   private reserved = 0
   /** Cancel sequences under way (`interruptFor`); pushes wait for them. */
   private cancelling = 0
-  private cancelWaiters: Array<() => void> = []
+  private cancelWaiters: Array<{ resolve: () => void; reject: (error: Error) => void }> = []
   private readonly noticeTimers = new Set<ReturnType<typeof setTimeout>>()
   private idleTimer: ReturnType<typeof setTimeout> | undefined
   private wakeTimer: ReturnType<typeof setTimeout> | undefined
@@ -520,15 +530,15 @@ export class LiveSession<Turn = unknown> {
   /** Resolves once no cancel sequence is under way; pushes (and steers) wait here instead of racing the cancel. */
   afterCancel(): Promise<void> {
     if (this.cancelling === 0) return Promise.resolve()
-    return new Promise((resolve) => this.cancelWaiters.push(resolve))
+    return new Promise((resolve, reject) => this.cancelWaiters.push({ resolve, reject }))
   }
 
   private cancelFinished(): void {
-    this.cancelling--
+    this.cancelling = Math.max(0, this.cancelling - 1)
     if (this.cancelling > 0) return
     const waiters = this.cancelWaiters
     this.cancelWaiters = []
-    for (const resolve of waiters) resolve()
+    for (const waiter of waiters) waiter.resolve()
   }
 
   /** Pushes a message a run owns. Returns the id it will be echoed under. */
@@ -655,8 +665,9 @@ export class LiveSession<Turn = unknown> {
     const target = query as { interrupt(options?: { cancelQueued?: boolean }): Promise<Receipt> }
     let receipt: Receipt
     try {
-      receipt = (await target.interrupt()) ?? undefined
-    } catch {
+      receipt = (await this.bounded(target.interrupt())) ?? undefined
+    } catch (error) {
+      if (error instanceof CancelTimedOut) this.giveUpCancel()
       return
     }
     if (this.dead) return
@@ -668,8 +679,9 @@ export class LiveSession<Turn = unknown> {
     if (queued.length === 0) return
     let cancelled: Receipt
     try {
-      cancelled = (await target.interrupt({ cancelQueued: true })) ?? undefined
-    } catch {
+      cancelled = (await this.bounded(target.interrupt({ cancelQueued: true }))) ?? undefined
+    } catch (error) {
+      if (error instanceof CancelTimedOut) this.giveUpCancel()
       return
     }
     if (this.dead) return
@@ -678,6 +690,27 @@ export class LiveSession<Turn = unknown> {
     // Every cancelled id is reconciled against the run that owns it: the cancel swept the whole queue.
     for (const id of cancelled?.cancelled ?? []) this.cancelId(id)
     if (run.owned.size === 0 && !run.settled) this.finishCancelled(run)
+  }
+
+  /** One step of a cancel, held to `interruptTimeoutMs`: the SDK's control requests have no deadline of their own. */
+  private bounded<T>(step: Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new CancelTimedOut()), this.timings.interruptTimeoutMs)
+      timer.unref?.()
+    })
+    return Promise.race([step, deadline]).finally(() => {
+      if (timer) clearTimeout(timer)
+    })
+  }
+
+  /**
+   * Claude did not answer the cancel in time, so what is queued in it is unknown: the process is not
+   * reused. It is closed, which ends its helpers, and every run and push that waited on the cancel fails
+   * with a message that says so; the next turn starts a fresh process.
+   */
+  private giveUpCancel(): void {
+    this.close('closed', new Error('Claude Code did not answer a cancel in time, so its process was closed (its background helpers ended with it). Send the message again.'))
   }
 
   /**
@@ -692,7 +725,9 @@ export class LiveSession<Turn = unknown> {
       if (owner.owned.size === 0) this.finishCancelled(owner)
       return
     }
-    if (owner.owned.size === 0 && owner.steerInFlight === 0 && !owner.settled)
+    // A wake owns only the steers it received: a sweep that took them does not end the wake, which Claude
+    // is still running and which ends at its own result.
+    if (owner.kind === 'prompt' && owner.owned.size === 0 && owner.steerInFlight === 0 && !owner.settled)
       this.failCancelled(owner, new Error('Claude Code cancelled the message before it started; send it again'))
   }
 
@@ -733,9 +768,9 @@ export class LiveSession<Turn = unknown> {
   }
 
   /** The process is released or closed on purpose (Stop, idle, replacement): everything it owed ends with it. */
-  close(reason: 'closed' | 'idle' | 'idle-cap' = 'closed'): void {
+  close(reason: 'closed' | 'idle' | 'idle-cap' = 'closed', error?: Error): void {
     if (this.dead) return
-    this.shutdown(new Error('Claude Code session closed'), reason)
+    this.shutdown(error ?? new Error('Claude Code session closed'), reason)
   }
 
   setPermissionMode(mode: Parameters<Query['setPermissionMode']>[0]): Promise<void> {
@@ -1054,6 +1089,11 @@ export class LiveSession<Turn = unknown> {
     this.capTimer = undefined
     for (const timer of this.noticeTimers) clearTimeout(timer)
     this.noticeTimers.clear()
+    // Pushes waiting on a cancel are released with the error: nothing will answer it now.
+    const waiters = this.cancelWaiters
+    this.cancelWaiters = []
+    this.cancelling = 0
+    for (const waiter of waiters) waiter.reject(error)
     this.queue.close()
     this.lifetime.abort()
     try {

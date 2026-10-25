@@ -5282,7 +5282,8 @@ export class OrchestratorService extends EventEmitter {
             returnedAhead += items.length
           }
           if (!entry) return put(text)
-          put(...entry.ownParts, ...(entry.external ? [entry.external] : []))
+          // In the order they were drained: the external text first, then the thread's own steers.
+          put(...(entry.external ? [entry.external] : []), ...entry.ownParts)
           for (const carried of entry.carried) this.runEngine?.inbox.unmarkSteerTaken(carried.inboxIds, carried.effectId)
           turn.carriedSteers = [...entry.carried, ...(turn.carriedSteers ?? [])]
         },

@@ -1418,9 +1418,16 @@ export class ClaudeSubscriptionProviderService {
           })
         } catch (error) {
           // A refused change started nothing: the conversation is as it was, so the next request can resume it.
-          if (error instanceof AppError && error.code === 'claude_background_work_blocks_change' && stored && savedHistoryKey) {
-            stored.historyKey = savedHistoryKey
-            this.save()
+          // Mousse keeps the refused message in the transcript, so the history the next request carries has
+          // it; the adapter reports that boundary (`commitFailed`), and the process, which never saw the
+          // message, continues from there without replaying it.
+          if (error instanceof AppError && error.code === 'claude_background_work_blocks_change') {
+            if (stored && savedHistoryKey) {
+              stored.historyKey = savedHistoryKey
+              this.save()
+            }
+            const refusing = this.live.get(input.threadId)
+            if (refusing && !refusing.dead) refusing.meta.pushedFailed = true
           }
           throw error
         }
@@ -1444,7 +1451,14 @@ export class ClaudeSubscriptionProviderService {
                 break
               } catch (error) {
                 if (!(error instanceof CancelInProgress)) throw error
-                await live.afterCancel()
+                // The wait ends with this turn's own cancellation too, not only with the cancel it waits for.
+                await Promise.race([
+                  live.afterCancel(),
+                  new Promise<never>((_, reject) => {
+                    if (controller.signal.aborted) reject(controller.signal.reason ?? new Error('Turn cancelled'))
+                    else controller.signal.addEventListener('abort', () => reject(controller.signal.reason ?? new Error('Turn cancelled')), { once: true })
+                  })
+                ])
                 controller.signal.throwIfAborted()
               }
             }
