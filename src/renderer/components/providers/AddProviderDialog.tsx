@@ -21,15 +21,24 @@ function connectKind(option: ProviderLoginOption): ConnectKind {
 
 /**
  * A choice in the Provider step. An agent whose seeded instance is switched off is turned back on;
- * otherwise, where a second account makes sense, the dialog adds a new instance.
+ * otherwise, where a second account makes sense, the dialog adds a new instance. A model API is one
+ * choice with each of its sign-in methods (`options`), picked in the Identity step.
  */
 export type AddChoice =
   | { kind: 'enable'; key: string; label: string; iconId: string; group: string; snapshot: InstanceSnapshot }
   | { kind: 'new'; key: string; label: string; iconId: string; group: string; driver: HarnessDriverKind; existing?: InstanceSnapshot }
-  | { kind: 'api'; key: string; label: string; iconId: string; group: string; option: ProviderLoginOption }
+  | { kind: 'api'; key: string; label: string; iconId: string; group: string; options: ProviderLoginOption[] }
 
 const GROUP_ORDER = ['Agents', 'Subscriptions', 'API keys', 'Cloud credentials']
 const API_GROUP: Record<ConnectKind, string> = { subscription: 'Subscriptions', api_key: 'API keys', cloud: 'Cloud credentials' }
+/** Methods in the order they are offered; the first decides the provider's group. */
+const KIND_ORDER: ConnectKind[] = ['subscription', 'api_key', 'cloud']
+const METHOD_LABEL: Record<ConnectKind, string> = { subscription: 'Sign in', api_key: 'API key', cloud: 'Cloud credentials' }
+
+/** A sign-in method's key, unique within its provider. */
+export function methodKey(option: ProviderLoginOption): string {
+  return `${option.authType}${option.ambient ? ':ambient' : ''}`
+}
 
 /** What the dialog offers, from the device snapshots and the model APIs not connected yet. */
 export function addChoices(snapshots: readonly InstanceSnapshot[], loginOptions: readonly ProviderLoginOption[]): AddChoice[] {
@@ -53,16 +62,17 @@ export function addChoices(snapshots: readonly InstanceSnapshot[], loginOptions:
   }
   // Agents sign in through their own instance; their login options are not model APIs.
   const agentProviders = new Set(snapshots.filter((snapshot) => !isApiInstance(snapshot)).map(llmProviderOf))
+  const methods = new Map<string, ProviderLoginOption[]>()
   for (const option of loginOptions) {
     if (option.configured || agentProviders.has(option.id)) continue
-    choices.push({
-      kind: 'api',
-      key: `api:${option.id}:${option.authType}`,
-      label: option.label,
-      iconId: option.id,
-      group: API_GROUP[connectKind(option)],
-      option
-    })
+    const listed = methods.get(option.id)
+    if (!listed) methods.set(option.id, [option])
+    else if (!listed.some((entry) => methodKey(entry) === methodKey(option))) listed.push(option)
+  }
+  // One entry per provider (T3 Code), under the group of its first method.
+  for (const [id, options] of methods) {
+    options.sort((a, b) => KIND_ORDER.indexOf(connectKind(a)) - KIND_ORDER.indexOf(connectKind(b)))
+    choices.push({ kind: 'api', key: `api:${id}`, label: options[0]!.label, iconId: id, group: API_GROUP[connectKind(options[0]!)], options })
   }
   return choices
 }
@@ -146,6 +156,7 @@ export function AddProviderDialog({
   const [step, setStep] = useState(0)
   const [label, setLabel] = useState('')
   const [home, setHome] = useState<'default' | 'private'>('private')
+  const [method, setMethod] = useState('')
   const { busy, error, setError, run } = useAsyncAction()
   const searchRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
@@ -166,10 +177,13 @@ export function AddProviderDialog({
     items: shown.filter((choice) => choice.group === group).sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }))
   })).filter((group) => group.items.length > 0)
   const selected = choices.find((choice) => choice.key === selectedKey) ?? null
+  /** The sign-in method of a model API: the one chosen in Identity, else its first. */
+  const apiOption = selected?.kind === 'api' ? (selected.options.find((option) => methodKey(option) === method) ?? selected.options[0]!) : undefined
 
   const choose = (choice: AddChoice) => {
     setSelectedKey(choice.key)
     setError(null)
+    setMethod(choice.kind === 'api' ? methodKey(choice.options[0]!) : '')
     if (choice.kind === 'new') {
       const base = DRIVER_INFO[choice.driver].label
       setLabel(choice.existing ? nextInstanceLabel(base, snapshots) : base)
@@ -178,7 +192,7 @@ export function AddProviderDialog({
     }
   }
 
-  const signInStep = selected?.kind === 'api' && connectKind(selected.option) === 'subscription'
+  const signInStep = apiOption !== undefined && connectKind(apiOption) === 'subscription'
   const steps = ['Provider', 'Identity', signInStep ? 'Sign in' : 'Config'] as const
   const summaries = [selected?.label ?? null, selected?.kind === 'new' ? label.trim() || null : (selected?.label ?? null), null]
 
@@ -249,7 +263,7 @@ export function AddProviderDialog({
                         role="radio"
                         aria-checked={checked}
                         className={`prov-choice${checked ? ' is-checked' : ''}`}
-                        title={choice.kind === 'api' ? choice.option.description : choice.kind === 'new' ? DRIVER_INFO[choice.driver].description : undefined}
+                        title={choice.kind === 'api' ? choice.options.map((option) => option.description).filter(Boolean).join(' · ') || undefined : choice.kind === 'new' ? DRIVER_INFO[choice.driver].description : undefined}
                         onClick={() => choose(choice)}
                         onDoubleClick={() => {
                           choose(choice)
@@ -316,15 +330,31 @@ export function AddProviderDialog({
                   )}
                 </>
               ) : (
-                <SettingsRow
-                  title="Label"
-                  description={
-                    selected.kind === 'enable'
-                      ? 'This provider is set up already and switched off. Adding turns it back on.'
-                      : 'Shown in the provider list.'
-                  }
-                  control={<input className="settings-input" value={selected.label} readOnly disabled aria-label="Label" />}
-                />
+                <>
+                  <SettingsRow
+                    title="Label"
+                    description={
+                      selected.kind === 'enable'
+                        ? 'This provider is set up already and switched off. Adding turns it back on.'
+                        : 'Shown in the provider list.'
+                    }
+                    control={<input className="settings-input" value={selected.label} readOnly disabled aria-label="Label" />}
+                  />
+                  {selected.kind === 'api' && selected.options.length > 1 && apiOption && (
+                    <SettingsRow
+                      title="Sign-in method"
+                      description={apiOption.description && apiOption.description !== apiOption.label ? apiOption.description : undefined}
+                      control={
+                        <Segmented
+                          ariaLabel="Sign-in method"
+                          value={methodKey(apiOption)}
+                          onChange={setMethod}
+                          options={selected.options.map((option) => ({ value: methodKey(option), label: METHOD_LABEL[connectKind(option)] }))}
+                        />
+                      }
+                    />
+                  )}
+                </>
               )}
             </SettingsGroup>
           </div>
@@ -364,19 +394,20 @@ export function AddProviderDialog({
           </div>
         )}
 
-        {step === 2 && selected?.kind === 'api' && (
+        {step === 2 && selected?.kind === 'api' && apiOption && (
           <div className="prov-wizard-panel">
             <SettingsGroup>
               <ConnectStep
-                option={selected.option}
+                key={methodKey(apiOption)}
+                option={apiOption}
                 busy={busy === selected.key}
                 disabled={busy !== null}
                 error={error}
                 onConnect={(connect) =>
                   void run(selected.key, async () => {
                     await connect()
-                    await handlers.onApiConnected(selected.option.id)
-                    finish(piInstanceId(selected.option.id))
+                    await handlers.onApiConnected(apiOption.id)
+                    finish(piInstanceId(apiOption.id))
                   })
                 }
                 runLogin={handlers.runLogin}

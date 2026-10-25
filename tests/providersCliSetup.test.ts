@@ -221,6 +221,21 @@ describe('Add provider choices', () => {
     expect(choices.filter((choice) => choice.kind === 'api').map((choice) => choice.label)).toEqual(['openai'])
   })
 
+  it('shows a provider with several sign-in methods once, with its methods to choose from', () => {
+    const choices = addChoices([claude, codex], [
+      loginOption('github-copilot', { label: 'GitHub Copilot' }),
+      loginOption('github-copilot', { label: 'GitHub Copilot', authType: 'oauth' }),
+      loginOption('openai', { label: 'OpenAI' })
+    ])
+    const api = choices.filter((choice) => choice.kind === 'api')
+    expect(api.map((choice) => [choice.label, choice.group])).toEqual([
+      ['GitHub Copilot', 'Subscriptions'],
+      ['OpenAI', 'API keys']
+    ])
+    const copilot = api[0] as Extract<(typeof api)[number], { kind: 'api' }>
+    expect(copilot.options.map((option) => option.authType)).toEqual(['oauth', 'api_key'])
+  })
+
   it('offers Install for a switched-off agent Mousse installs itself', () => {
     const missing = snapshot({
       instanceId: 'antigravity', driver: 'antigravity', displayName: 'Antigravity',
