@@ -125,7 +125,7 @@ export function restoreUndeliveredRows(store: RunStore, outbox: EffectOutbox, no
   for (const row of inbox.listDeliveredWithEffect()) {
     const effect = outbox.get(row.deliveredBy!)
     if (!effect) continue
-    const failure = deliveryFailure(store, effect)
+    const failure = deliveryFailure(store, effect, row)
     if (!failure) continue
     const flagged = (row.payload as { deliveryFailed?: unknown } | null)?.deliveryFailed === true
     if (flagged) continue
@@ -148,10 +148,18 @@ export function restoreUndeliveredRows(store: RunStore, outbox: EffectOutbox, no
 }
 
 /** Why and when the delivery an effect carried did not happen, or null when it did (or may still). */
-function deliveryFailure(store: RunStore, effect: EffectRecord): { at: string; error: string } | null {
+function deliveryFailure(store: RunStore, effect: EffectRecord, row: InboxRecord): { at: string; error: string } | null {
   const run = store.getRun(effect.runId ?? '')
   if (effect.status === 'failed' || effect.status === 'cancelled')
     return { at: effect.completedAt ?? effect.updatedAt, error: effect.lastError ?? `delivery ${effect.status}` }
+  // A steer the turn took but never read, on a run that ended: the follow-up turn that should have
+  // carried the rows was never queued (a crash between the run's end and the turn's settlement, a
+  // failed enqueue). Nothing else will deliver them, so they are delivered again.
+  if (
+    effect.kind === 'turn.steer' && effect.status === 'succeeded' && run?.status === 'completed' &&
+    (row.payload as { steerTakenBy?: unknown } | null)?.steerTakenBy !== effect.effectId
+  )
+    return { at: run.completedAt ?? effect.updatedAt, error: 'the steer was never read' }
   // Only an effect that carries a turn can have its run end without the notice being read.
   if (effect.kind !== 'turn.start' && effect.kind !== 'turn.steer') return null
   if (!run || !TERMINAL_RUN_STATUSES.has(run.status) || run.status === 'completed') return null

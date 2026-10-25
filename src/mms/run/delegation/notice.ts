@@ -71,4 +71,3 @@ export function formatInboxNotice(row: InboxRecord, context: NoticeContext = {})
 export function formatWakeNotice(rows: readonly InboxRecord[], context: NoticeContext = {}): string {
   return planWakeNotice(rows, context).text
 }
-
