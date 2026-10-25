@@ -20,7 +20,11 @@ describe('sanitizeSavedWorkspace', () => {
   })
 
   it('keeps unrelated saved fields', () => {
-    expect(sanitizeSavedWorkspace({ ...legacy('agents', ['agents']), sidebarWidth: 41, chatMode: 'plan' })).toMatchObject({ sidebarWidth: 41, chatMode: 'plan' })
+    expect(sanitizeSavedWorkspace({ ...legacy('agents', ['agents']), sidebarWidth: 41 })).toMatchObject({ sidebarWidth: 41 })
+  })
+
+  it.each(['plan', 'build'] as const)('resets a saved %s mode to agent', (chatMode) => {
+    expect(sanitizeSavedWorkspace({ ...legacy('git', ['git']), chatMode })).toMatchObject({ chatMode: 'agent' })
   })
 })
 

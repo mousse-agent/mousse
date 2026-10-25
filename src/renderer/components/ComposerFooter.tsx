@@ -1,35 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import {
-  ArrowUp,
-  ChevronDown,
-  Hammer,
-  Infinity,
-  Mic,
-  Paperclip,
-  Square,
-  Sparkles,
-  ClipboardList
-} from '../lib/icons'
+import { useCallback, useEffect, useRef } from 'react'
+import { ArrowUp, ChevronDown, Mic, Paperclip, Square } from '../lib/icons'
 import type { LlmProviderOption } from '../../shared/settings'
-import type { ChatMode } from '../../shared/types'
-import type { SkillDescriptor } from '../../shared/integrations'
 import type { ContextUsageSnapshot } from '../../shared/types'
-import { chatModeEquals, getChatModeLabel } from '../../shared/chatMode'
-import { DEFAULT_CHAT_MODE } from '../../shared/types'
-import { ComposerEffortPicker, MenuCheck } from './ComposerEffortPicker'
+import { ComposerEffortPicker } from './ComposerEffortPicker'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { getGroupedModelButtonParts, ModelFamilyMenu } from './ModelFamilyMenu'
 import { ProviderIcon } from '../lib/providerIcons'
 import { ContextUsagePopover, ContextUsageRing } from './ContextUsagePopover'
-
-const BUILTIN_CHAT_MODES = ['plan', 'agent', 'build'] as const
-
-function getModeIcon(mode: ChatMode) {
-  if (mode === 'plan') return ClipboardList
-  if (mode === 'build') return Hammer
-  if (mode === 'agent') return Infinity
-  return Sparkles
-}
 
 function useMenuScrollFade() {
   const scrollFadeTimerRef = useRef<number | null>(null)
@@ -58,9 +35,6 @@ function useMenuScrollFade() {
 }
 
 export interface ComposerFooterProps {
-  chatMode: ChatMode
-  onChatModeChange: (mode: ChatMode) => void
-  enabledSkills: SkillDescriptor[]
   providers: LlmProviderOption[]
   selectedProviderId: string
   selectedModelId: string
@@ -87,16 +61,11 @@ export interface ComposerFooterProps {
   primaryAction?: 'send' | 'implement-plan'
   onImplementPlan?: () => void
   implementPlanDisabled?: boolean
-  /** Hide mode picker (e.g. Mousse subagent always implements work). */
-  hideModePicker?: boolean
   /** When true, file attach stays enabled during an active turn (queued sends). */
   allowAttachWhileLoading?: boolean
 }
 
 export function ComposerFooter({
-  chatMode,
-  onChatModeChange,
-  enabledSkills,
   providers,
   selectedProviderId,
   selectedModelId,
@@ -122,37 +91,17 @@ export function ComposerFooter({
   primaryAction = 'send',
   onImplementPlan,
   implementPlanDisabled = false,
-  hideModePicker = false,
   allowAttachWhileLoading = false
 }: ComposerFooterProps) {
-  const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const modelPickerRef = useRef<HTMLDivElement>(null)
   const modelButtonRef = useRef<HTMLButtonElement>(null)
   const modelMenuContentRef = useRef<HTMLDivElement>(null)
-  const modePickerRef = useRef<HTMLDivElement>(null)
-  const modeButtonRef = useRef<HTMLButtonElement>(null)
-  const modeMenuContentRef = useRef<HTMLDivElement>(null)
   const contextBtnRef = useRef<HTMLButtonElement>(null)
   const handleMenuScroll = useMenuScrollFade()
   const modelButtonParts = getGroupedModelButtonParts(selectedProviderId, selectedModelId, providers, false)
   const modelButtonLabel = modelButtonParts.join(' · ')
   const selectedProvider = providers.find((entry) => entry.id === selectedProviderId)
   const providerModels = selectedProvider?.models ?? []
-  const ModeIcon = getModeIcon(chatMode)
-  const activeSkill = typeof chatMode === 'object'
-    ? enabledSkills.find((skill) => skill.id === chatMode.skillId)
-    : undefined
-  const modeLabel = getChatModeLabel(chatMode, activeSkill?.name)
-  const accessibleModeLabel = `${modeLabel} mode`
-
-  const modeMenuStyle = useFloatingPosition({
-    open: modeMenuOpen,
-    anchorRef: modeButtonRef,
-    contentRef: modeMenuContentRef,
-    placement: 'above-start',
-    deps: [modeLabel]
-  })
-
   const emptyModelMenuStyle = useFloatingPosition({
     open: modelMenuOpen && providers.length === 0,
     anchorRef: modelButtonRef,
@@ -183,36 +132,7 @@ export function ComposerFooter({
     }
   }, [modelMenuOpen, onModelMenuOpenChange])
 
-  useEffect(() => {
-    if (!modeMenuOpen) return
-    const handlePointerDown = (event: MouseEvent) => {
-      const target = event.target as Node
-      if (
-        modePickerRef.current?.contains(target) ||
-        modeMenuContentRef.current?.contains(target)
-      ) {
-        return
-      }
-      setModeMenuOpen(false)
-    }
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setModeMenuOpen(false)
-    }
-    document.addEventListener('mousedown', handlePointerDown)
-    document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown)
-      document.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [modeMenuOpen])
-
-  const handleModeSelect = (mode: ChatMode) => {
-    onChatModeChange(mode)
-    setModeMenuOpen(false)
-  }
-
   const handleModelMenuToggle = () => {
-    setModeMenuOpen(false)
     onModelMenuOpenChange(!modelMenuOpen)
   }
 
@@ -238,66 +158,6 @@ export function ComposerFooter({
   return (
     <div className="composer-footer">
       <div className="composer-footer-left">
-        {!hideModePicker && <div className="composer-mode-picker" ref={modePickerRef}>
-          {modeMenuOpen && (
-            <FloatingPortal>
-              <div
-                ref={modeMenuContentRef}
-                className="composer-mode-menu composer-mode-menu-floating scrollbar-ultra-thin"
-                role="listbox"
-                aria-label="Select chat mode"
-                style={modeMenuStyle}
-                onScroll={handleMenuScroll}
-              >
-                <div
-                  className="composer-mode-menu-section"
-                  role="group"
-                  aria-label="Agent"
-                >
-                  <div className="composer-mode-menu-heading">Agent</div>
-                  {BUILTIN_CHAT_MODES.filter((mode) => selectedProviderId !== 'antigravity' || mode !== 'plan').map((mode) => {
-                    const selected = chatModeEquals(chatMode, mode)
-                    const isDefault = mode === DEFAULT_CHAT_MODE
-                    return (
-                      <button
-                        key={mode}
-                        type="button"
-                        role="option"
-                        aria-selected={selected}
-                        className={`composer-mode-menu-item${selected ? ' selected' : ''}`}
-                        onClick={() => handleModeSelect(mode)}
-                      >
-                        <MenuCheck on={selected} />
-                        <span>{getChatModeLabel(mode)}</span>
-                        {isDefault ? (
-                          <span className="composer-mode-menu-item-meta">Default</span>
-                        ) : null}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-            </FloatingPortal>
-          )}
-          <button
-            ref={modeButtonRef}
-            type="button"
-            className={`composer-pill-btn${modeMenuOpen ? ' open' : ''}`}
-            aria-expanded={modeMenuOpen}
-            aria-haspopup="listbox"
-            aria-label={accessibleModeLabel}
-            title={accessibleModeLabel}
-            onClick={() => {
-              onModelMenuOpenChange(false)
-              setModeMenuOpen((open) => !open)
-            }}
-          >
-            <ModeIcon size={14} strokeWidth={2} />
-            <span className="composer-pill-btn-label">{modeLabel}</span>
-            <ChevronDown size={12} strokeWidth={2} />
-          </button>
-        </div>}
-
         <div className="composer-model-picker" ref={modelPickerRef}>
           {!modelReadOnly && modelMenuOpen && (
             <>

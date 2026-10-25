@@ -68,8 +68,8 @@ function defaultPreview(plan: Plan, markdown: string): void {
 }
 
 /**
- * Approve the plan and start implementation: switch to build mode and send
- * the approved plan back through the orchestrator as a build request.
+ * Approve the plan and start implementation: send the approved plan back
+ * through the orchestrator as a build request. The chat mode stays as it is.
  */
 async function defaultApprove(plan: Plan, markdown: string): Promise<void> {
   const store = useAppStore.getState();
@@ -78,7 +78,6 @@ async function defaultApprove(plan: Plan, markdown: string): Promise<void> {
     ? `The implementation plan is approved. Implement it now, following the plan:\n\n${markdown}`
     : "The implementation plan is approved. Implement it now.";
   const request = { content, mode: "build" as const };
-  store.setChatMode("build");
   store.setLoading(true);
   try {
     const activeThreadId = store.activeThreadId;

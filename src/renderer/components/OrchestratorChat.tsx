@@ -76,7 +76,6 @@ export function OrchestratorChat() {
   const setLoading = useAppStore((s) => s.setLoading)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const chatMode = useAppStore((s) => s.chatMode)
-  const setChatMode = useAppStore((s) => s.setChatMode)
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const profileId = useAppStore((s) => s.profileId)
   const profileReady = useAppStore((s) => s.profileReady)
@@ -996,8 +995,6 @@ export function OrchestratorChat() {
               onAddReference={addResolvedReference}
               onRemoveReference={(id) => removeComposerReference(activeThreadId, id)}
               onReferenceError={setSendError}
-              chatMode={chatMode}
-              onChatModeChange={setChatMode}
               enabledSkills={enabledSkills}
               providers={providers}
               selectedProviderId={selectedProviderId}
