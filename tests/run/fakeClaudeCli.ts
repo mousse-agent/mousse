@@ -77,6 +77,8 @@ export class FakeClaudeProcess {
   /** The options of each `interrupt()` call. */
   readonly interruptOptions: Array<{ cancelQueued?: boolean } | undefined> = []
   stoppedTasks: string[] = []
+  /** The roster's tasks that have not ended: `local_agent` or `local_bash` by id. */
+  private readonly liveTasks = new Map<string, string>()
   /**
    * Whether `interrupt()` returns a receipt (a current Claude Code). With `false` it resolves to
    * undefined, like an older one that cannot say what it cancelled.
@@ -136,6 +138,7 @@ export class FakeClaudeProcess {
   emit(...frames: Frame[]): void {
     for (const frame of frames) {
       if (this.ended) return
+      this.trackTasks(frame)
       const stamped = frame.user_message_uuids
       if (Array.isArray(stamped)) for (const id of stamped) this.started.add(String(id))
       if (this.waiting) {
@@ -144,6 +147,22 @@ export class FakeClaudeProcess {
         resolve({ value: frame as unknown as SDKMessage, done: false })
       } else this.frames.push(frame)
     }
+  }
+
+  /** The tasks the roster lists that have not ended, by id, with their type. */
+  private trackTasks(frame: Frame): void {
+    if (frame.subtype === 'background_tasks_changed' && Array.isArray(frame.tasks)) {
+      for (const task of frame.tasks as Array<{ task_id: string; task_type?: string; ambient?: boolean }>)
+        if (!task.ambient) this.liveTasks.set(task.task_id, task.task_type ?? 'local_bash')
+    } else if (frame.subtype === 'task_notification') this.liveTasks.delete(String(frame.task_id))
+  }
+
+  /**
+   * A finished task: the process reports it and, as the real one does, starts a turn of its own for it
+   * only when the test emits that turn's frames. Only shells and agents still running can finish.
+   */
+  finishTask(id: string, status = 'completed'): void {
+    if (this.liveTasks.has(id)) this.emit(notification(id, status))
   }
 
   /** The process exits: the iterator ends. */
@@ -164,6 +183,14 @@ export class FakeClaudeProcess {
       ...chunks.map((chunk, index) => textDelta(chunk, index === 0 ? uuid : undefined)),
       resultFrame({ uuids: [uuid], text: chunks.join('') })
     )
+  }
+
+  /**
+   * Messages Claude read together and answered in one turn: the first stream frame and the result both
+   * name every one of them, in the order they were pushed.
+   */
+  answerBatch(uuids: string[], text: string): void {
+    this.emit(textDelta(text, uuids[uuids.length - 1], { user_message_uuids: uuids }), resultFrame({ uuids, text }))
   }
 
   /** The process took this message into the turn it is running (folded in) without a frame naming it. */
@@ -205,6 +232,9 @@ export class FakeClaudeProcess {
         this.interruptOptions.push(options)
         this.onInterrupt?.(this)
         await this.interruptGate
+        // Like the real process: an interrupt stops the background agents (each reports `stopped`, and
+        // no turn follows) and leaves shells running.
+        for (const [id, type] of [...this.liveTasks]) if (type === 'local_agent') this.emit(notification(id, 'stopped'))
         if (!this.receipts) return undefined
         const queued = this.queued
         if (!options?.cancelQueued) return { still_queued: queued }

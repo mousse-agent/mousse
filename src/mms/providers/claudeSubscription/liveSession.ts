@@ -395,7 +395,9 @@ function isAbortResult(message: SDKResultMessage): boolean {
  * - A frame or result that echoes the id of a message a run pushed belongs to that run.
  * - Otherwise it belongs to the run whose frames are in flight (the cursor), then to the oldest run
  *   still waiting, then to a continuation, which opens when Claude starts a turn nobody asked for.
- * - A run ends at the result that echoes its ids, never at a result of someone else's turn.
+ * - A run ends at the result that echoes its ids, never at a result of someone else's turn. When one
+ *   result names the ids of several runs (Claude read their messages together), the newest live run
+ *   takes it and the cancelled ones are finished.
  */
 export class LiveSession<Turn = unknown> {
   readonly obligations = new BackgroundObligations()
@@ -629,6 +631,9 @@ export class LiveSession<Turn = unknown> {
   /**
    * The turn was cancelled but the query stays open: the turn is interrupted, and the run keeps
    * owning its ids as a tombstone so the result the interrupt produces is not given to anyone else.
+   * What the interrupt ends depends on the task: Claude stops background agents (each reports `stopped`,
+   * see `routeNotification`), but shells keep running and stay owed; only closing the process (Stop, the
+   * idle caps) ends them.
    */
   abandon(run: LiveRun): void {
     if (run.settled || run.abandoned) return
@@ -637,9 +642,10 @@ export class LiveSession<Turn = unknown> {
     run.consumer = undefined
     const unclaimed = this.unclaimed.indexOf(run)
     if (unclaimed >= 0) this.unclaimed.splice(unclaimed, 1)
-    // What the run had read stays queued in Claude, which starts a wake turn for it (CARRIED), unless the
-    // cancel below also drops it (LOST).
-    this.obligations.release(run, 'carried')
+    // What a turn had read stays queued in Claude, which starts a wake turn for it (CARRIED), unless the
+    // cancel below also drops it (LOST). A wake that had started already read its notification: no
+    // second wake follows, so what it held is cleared by the next turn that commits (DISCARDED).
+    this.obligations.release(run, run.kind === 'continuation' && run.started ? 'discarded' : 'carried')
     const query = this.query
     // A turn that pushed nothing has nothing in flight; one that did, or a wake, is interrupted. An
     // interrupt of an idle query is harmless, and one that fails leaves the next turn to find out.
@@ -859,9 +865,20 @@ export class LiveSession<Turn = unknown> {
     return this.runs.find((run) => !run.abandoned && !run.settled)
   }
 
+  /** Every run that pushed one of `ids`, oldest first. */
+  private ownersOf(ids: readonly string[]): LiveRun[] {
+    const candidates = this.continuation && !this.runs.includes(this.continuation) ? [...this.runs, this.continuation] : this.runs
+    return candidates.filter((run) => ids.some((id) => run.ids.has(id)))
+  }
+
+  /**
+   * The run a frame or result that echoes `ids` belongs to. Claude may read several queued messages
+   * together and name all of them: the newest live run then is the one that waits for the answer, and a
+   * cancelled run that owned an older one only owes it.
+   */
   private ownerOf(ids: readonly string[]): LiveRun | undefined {
-    const candidates = this.continuation ? [...this.runs, this.continuation] : this.runs
-    return candidates.find((run) => ids.some((id) => run.ids.has(id)))
+    const owners = this.ownersOf(ids)
+    return [...owners].reverse().find((run) => !run.abandoned && !run.settled) ?? owners[owners.length - 1]
   }
 
   private routeSystem(message: SDKMessage & { type: 'system' }): void {
@@ -876,16 +893,25 @@ export class LiveSession<Turn = unknown> {
       if (this.obligations.observeRoster(tasks)) this.backgroundChanged()
       return
     }
-    if (frame.subtype === 'task_notification' && typeof frame.task_id === 'string') this.routeNotification(frame.task_id, typeof frame.summary === 'string' ? frame.summary : '')
+    if (frame.subtype === 'task_notification' && typeof frame.task_id === 'string')
+      this.routeNotification(frame.task_id, typeof frame.summary === 'string' ? frame.summary : '', typeof frame.status === 'string' ? frame.status : '')
   }
 
   /**
    * A task finished. One this process never listed (an opaque task, T3's rule) wakes nothing and
-   * keeps nothing busy. Otherwise a turn that is already in flight consumes it; if none is, Claude is
-   * about to start its own turn for it, which opens as a continuation at this report.
+   * keeps nothing busy. A task that was stopped (an interrupt stops background agents) is reported
+   * without a turn following: it is not owed any more, and no continuation opens for it. Otherwise a
+   * turn that is already in flight consumes it; if none is, Claude is about to start its own turn for
+   * it, which opens as a continuation at this report.
    */
-  private routeNotification(taskId: string, summary: string): void {
-    if (!this.obligations.has(taskId) || this.obligations.consumed(taskId)) return
+  private routeNotification(taskId: string, summary: string, status: string): void {
+    if (!this.obligations.has(taskId)) return
+    if (status === 'stopped') {
+      this.obligations.discard(taskId)
+      this.backgroundChanged()
+      return
+    }
+    if (this.obligations.consumed(taskId)) return
     const owner = this.notificationOwner()
     if (owner) {
       this.obligations.consume(taskId, owner)
@@ -929,7 +955,15 @@ export class LiveSession<Turn = unknown> {
     if (echoed.length) {
       target = this.ownerOf(echoed)
       if (!target) return
-      for (const id of echoed) target.owned.delete(id)
+      // One result may answer messages of several runs (read together): each has had its result, and the
+      // runs that are not the target forget the ids, so a later frame that names them reaches no one.
+      for (const owner of this.ownersOf(echoed)) {
+        for (const id of echoed) {
+          owner.owned.delete(id)
+          if (owner !== target) owner.ids.delete(id)
+        }
+        if (owner !== target && owner.abandoned && owner.owned.size === 0) this.finishCancelled(owner)
+      }
     } else if (isTaskOrigin(message)) {
       // A wake with no model turn ends here too (num_turns is 0). With no continuation open and a run
       // live, the result is dropped: that run consumed the notification.

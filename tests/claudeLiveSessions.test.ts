@@ -1450,6 +1450,152 @@ describe('result routing and steering edge cases', () => {
   })
 })
 
+/**
+ * What a check against Claude Code 2.1.308 (SDK 0.3.291) showed: an interrupt stops background agents
+ * (each reports `stopped` and no turn follows) and leaves shells running; a wake turn that was cut off has
+ * already read its notification; and messages Claude reads together are answered by one result that names
+ * all of them.
+ */
+describe('background helpers as the real Claude Code reports them', () => {
+  const startedWith = (f: ReturnType<typeof fixture>, ...tasks: Array<{ id: string; type: string }>) => {
+    f.cli.reply = (message, process) => {
+      process.emit(roster(...tasks))
+      process.answer(String(message.uuid), 'started')
+    }
+  }
+  /** Lets a moment pass, whether the clock is real or faked. */
+  const moment = (ms: number) => (vi.isFakeTimers() ? vi.advanceTimersByTimeAsync(ms) : later(ms))
+  const agent = (f: ReturnType<typeof fixture>) => startedWith(f, { id: 'agent-1', type: 'local_agent' })
+  const shell = (f: ReturnType<typeof fixture>) => startedWith(f, { id: 'bash-1', type: 'local_bash' })
+  /** Turn two is cut off while it streams; the interrupt is the plain one. */
+  const cutOff = async (f: ReturnType<typeof fixture>) => {
+    await f.turn({ history: 'h' }, 'h')
+    const process = f.cli.last
+    f.cli.reply = undefined
+    const abort = new AbortController()
+    const second = f.chat({ signal: abort.signal, history: 'h' })
+    await inputs(f.cli, 2)
+    process.emit(textDelta('working', process.uuid(1)))
+    await moment(20)
+    abort.abort()
+    await expect(second).rejects.toThrow()
+    f.service.commitInterrupted('thread', 'h')
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    await moment(30)
+    return process
+  }
+
+  it('a stopped task is not owed any more and wakes nothing', async () => {
+    const f = fixture()
+    agent(f)
+    await f.turn()
+    const process = f.cli.last
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    process.emit(notification('agent-1', 'stopped'))
+    await later(30)
+    expect(f.host.continuationStarted).not.toHaveBeenCalled()
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+    expect(f.host.backgroundWork).toHaveBeenLastCalledWith('thread', false)
+  })
+
+  it('a turn cut off while an agent runs: the interrupt stops the agent, which leaves nothing owed and starts no wake', async () => {
+    const f = fixture()
+    agent(f)
+    const process = await cutOff(f)
+    expect(f.host.continuationStarted).not.toHaveBeenCalled()
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+    expect(process.closed).toBe(false)
+  })
+
+  it('a turn cut off while a shell runs: the shell survives, stays owed, and its end wakes the thread', async () => {
+    const f = fixture()
+    shell(f)
+    const process = await cutOff(f)
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    expect(process.closed).toBe(false)
+    expect(f.host.continuationStarted).not.toHaveBeenCalled()
+    process.finishTask('bash-1')
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    process.emit(textDelta('The shell finished.'), resultFrame({ text: 'The shell finished.', origin: 'task-notification' }))
+    await f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined })
+    f.service.commitConversation('thread', '')
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+  })
+
+  it('a shell that survived a cut-off turn is released by the four-hour cap, and Stop releases it at once', async () => {
+    vi.useFakeTimers()
+    const f = fixture({ idleCloseMs: 1000, idleReleaseMs: 5000, maxPinMs: 12_000 })
+    shell(f)
+    const first = await cutOff(f)
+    // Provider activity does not move the cap, which counts from when the shell first became owed.
+    await vi.advanceTimersByTimeAsync(9000)
+    expect(first.closed).toBe(false)
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(first.closed).toBe(true)
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+  })
+
+  it('Stop releases a shell that survived a cut-off turn at once', async () => {
+    const f = fixture()
+    shell(f)
+    const process = await cutOff(f)
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    expect(f.service.stopThread('thread')).toBe('stopped')
+    expect(process.closed).toBe(true)
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+    expect(f.host.backgroundWork).toHaveBeenLastCalledWith('thread', false)
+  })
+
+  it('a wake that was cut off after it started has read its notification: nothing is left for a second wake, and the next turn that commits clears it', async () => {
+    const f = fixture()
+    shell(f)
+    await f.turn()
+    const process = f.cli.last
+    f.cli.reply = undefined
+    process.emit(notification('bash-1'), textDelta('reading the report'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    const abort = new AbortController()
+    const wake = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined, signal: abort.signal })
+    await later(20)
+    abort.abort()
+    await expect(wake).rejects.toThrow()
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    process.emit(resultFrame({ terminalReason: 'aborted_streaming', origin: 'task-notification' }))
+    await later(30)
+    f.service.commitInterrupted('thread', '')
+    f.cli.reply = (message, self) => self.answer(String(message.uuid), 'next')
+    expect(await f.turn({ history: '' })).toBe('next')
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+    expect(f.host.continuationStarted).toHaveBeenCalledTimes(1)
+  })
+
+  it('messages Claude read together are answered by one result: the newest live turn gets it and the cancelled one is finished', async () => {
+    const f = fixture()
+    shell(f)
+    await f.turn()
+    const process = f.cli.last
+    // Claude cannot cancel what it has queued, so the cancelled turn still owns its message.
+    process.receipts = false
+    f.cli.reply = undefined
+    const abort = new AbortController()
+    const cancelled = f.chat({ prompt: 'cancelled', signal: abort.signal, history: '' })
+    await inputs(f.cli, 2)
+    abort.abort()
+    await expect(cancelled).rejects.toThrow()
+    f.service.commitInterrupted('thread', '')
+    const second = f.chat({ prompt: 'second', history: '' })
+    await inputs(f.cli, 3)
+    process.answerBatch([process.uuid(1), process.uuid(2)], 'both answered')
+    expect(await second).toBe('both answered')
+    const session = (f.service as unknown as { live: Map<string, { owedResults: number }> }).live.get('thread')!
+    expect(session.owedResults).toBe(0)
+    // The next turn is not confused by what the batch named.
+    f.service.commitConversation('thread', '')
+    f.cli.reply = (message, self) => self.answer(String(message.uuid), 'third')
+    expect(await f.turn({ history: '' })).toBe('third')
+  })
+})
+
 describe('closing the service', () => {
   it('logout() and stop() close every live process', async () => {
     const f = fixture()
@@ -1464,7 +1610,7 @@ describe('closing the service', () => {
     expect(g.cli.last.closed).toBe(true)
   })
 
-  it('declares no per-task stop affordance, so an interrupt stops helpers the way Stop does', async () => {
+  it('declares no per-task stop affordance: Claude decides what an interrupt stops (agents), Stop closes the process (shells too)', async () => {
     const f = fixture()
     await f.turn()
     expect(JSON.stringify(f.cli.last.options)).not.toContain('perTaskStopAffordance')
