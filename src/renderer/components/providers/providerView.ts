@@ -141,15 +141,6 @@ export function binaryOverrideOf(snapshot: InstanceSnapshot): string | undefined
   return snapshot.binary?.source === 'override' ? snapshot.binary.path : undefined
 }
 
-/**
- * Sign-out is offered only where Mousse owns the sign-in (a private home, or an agent Mousse
- * installed). Signing out of a CLI the user set up would sign their own terminal out too.
- */
-export function canSignOut(snapshot: InstanceSnapshot): boolean {
-  if (snapshot.auth.state !== 'signed_in' && snapshot.auth.state !== 'expired') return false
-  return instanceConfigOf(snapshot)?.home === 'private' || snapshot.binary?.source === 'managed'
-}
-
 /** The switch, in T3 Code's layering: device is a ceiling, a project only narrows it. */
 export interface SwitchState {
   checked: boolean

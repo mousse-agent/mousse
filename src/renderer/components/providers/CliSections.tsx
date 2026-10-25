@@ -8,7 +8,6 @@ import {
   DRIVER_INFO,
   binaryOverrideOf,
   binarySourceLabel,
-  canSignOut,
   formatArgs,
   formatVersion,
   instanceConfigOf,
@@ -138,7 +137,7 @@ export function SetupRow({
   )
 }
 
-/** The signed-in account, keyed by id; sign-out only where Mousse owns the sign-in. */
+/** The signed-in account, keyed by id; sign-out only where the daemon says Mousse owns the sign-in. */
 export function AccountRow({ snapshot, actions }: { snapshot: InstanceSnapshot; actions: InstanceActions }) {
   const { busy, error, run } = useAsyncAction()
   const { auth } = snapshot
@@ -150,7 +149,7 @@ export function AccountRow({ snapshot, actions }: { snapshot: InstanceSnapshot; 
       title="Account"
       description={withError(description, error)}
       control={
-        canSignOut(snapshot) ? (
+        auth.canSignOut ? (
           <button type="button" className="settings-btn" disabled={busy !== null} onClick={() => void run('signout', actions.signOut)}>
             Sign out
           </button>

@@ -4,10 +4,10 @@ import { describe, expect, it } from 'vitest'
 import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/status'
 import type { ProviderLoginOption } from '../src/shared/providerAuth'
 import { AgentConnectStep, addChoices } from '../src/renderer/components/providers/AddProviderDialog'
-import { BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
+import { AccountRow, BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
 import { displayModels, movedOrder } from '../src/renderer/components/providers/ProviderModelsSection'
 import { ProviderListRow } from '../src/renderer/components/providers/parts'
-import { canSignOut, switchStateOf } from '../src/renderer/components/providers/providerView'
+import { switchStateOf } from '../src/renderer/components/providers/providerView'
 import { model, snapshot, type SnapshotOverrides } from './providerSnapshotFixture'
 
 const noop = async () => undefined
@@ -163,12 +163,14 @@ describe('Scope: device ceiling and project overrides', () => {
 })
 
 describe('Sign-out', () => {
-  it('is offered only where Mousse owns the sign-in', () => {
-    expect(canSignOut(snapshot())).toBe(false)
-    expect(canSignOut(snapshot({ binary: { source: 'managed', path: '/m/agy' } }))).toBe(true)
-    const privateHome = { ...snapshot(), config: { home: 'private', args: [], env: {} } } as InstanceSnapshot
-    expect(canSignOut(privateHome)).toBe(true)
-    expect(canSignOut(snapshot({ binary: { source: 'managed' }, auth: { state: 'signed_out', account: undefined } }))).toBe(false)
+  const accountRow = (overrides: SnapshotOverrides) =>
+    renderToStaticMarkup(createElement(AccountRow, { snapshot: snapshot(overrides), actions }))
+
+  it('follows the daemon: offered only when the snapshot says Mousse owns the sign-in', () => {
+    expect(buttons(accountRow({}))).toEqual([])
+    expect(buttons(accountRow({ auth: { canSignOut: false } }))).toEqual([])
+    expect(buttons(accountRow({ auth: { canSignOut: true } }))).toEqual(['Sign out'])
+    expect(accountRow({ auth: { state: 'signed_out', account: undefined, canSignOut: true } })).toBe('')
   })
 })
 
