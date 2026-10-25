@@ -56,11 +56,18 @@ export function decodeModelPrefs(raw: unknown): ModelPrefs {
   return { hidden: ids(value.hidden), order: ids(value.order), favorites: ids(value.favorites), custom: customModels(value.custom) }
 }
 
+/** Adds and removes ids on a list, against the stored list rather than the caller's copy. */
+function edited(list: string[], add: string[] | undefined, remove: string[] | undefined): string[] {
+  if (!add?.length && !remove?.length) return list
+  const removed = new Set(remove)
+  return ids([...list.filter((id) => !removed.has(id)), ...(add ?? []).filter((id) => !removed.has(id))])
+}
+
 export function applyPrefsPatch(prefs: ModelPrefs, patch: ModelPrefsPatch): ModelPrefs {
   return {
-    hidden: patch.hidden !== undefined ? ids(patch.hidden) : prefs.hidden,
+    hidden: edited(patch.hidden !== undefined ? ids(patch.hidden) : prefs.hidden, patch.hide, patch.unhide),
     order: patch.order !== undefined ? ids(patch.order) : prefs.order,
-    favorites: patch.favorites !== undefined ? ids(patch.favorites) : prefs.favorites,
+    favorites: edited(patch.favorites !== undefined ? ids(patch.favorites) : prefs.favorites, patch.star, patch.unstar),
     custom: patch.custom !== undefined ? customModels(patch.custom) : prefs.custom
   }
 }

@@ -214,8 +214,17 @@ export interface ModelPrefs {
   custom: CustomModel[]
 }
 
-/** Each present field replaces the stored one. */
-export type ModelPrefsPatch = Partial<ModelPrefs>
+/**
+ * Each present list field replaces the stored one. `star`/`unstar` and `hide`/`unhide` add or
+ * remove ids against the stored lists instead, so overlapping saves (a reorder and a star, two
+ * stars) never write back a stale copy of another field or of each other.
+ */
+export interface ModelPrefsPatch extends Partial<ModelPrefs> {
+  star?: string[]
+  unstar?: string[]
+  hide?: string[]
+  unhide?: string[]
+}
 
 /** One model of an instance as the page and picker show it, with the prefs applied. */
 export interface InstanceModel {

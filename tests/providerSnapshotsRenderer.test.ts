@@ -5,7 +5,8 @@ import {
   familyFavoritesPatch,
   importLegacyModelFavorites,
   isFamilyFavorite,
-  planLegacyFavoritesImport
+  planLegacyFavoritesImport,
+  saveModelPrefs
 } from '../src/renderer/lib/modelFavorites'
 import { instanceBadges, pickerIdFor, pickerProviders, showsContextGauge, sortInstances } from '../src/renderer/lib/providerSnapshots'
 import { getGroupedModelButtonParts, sortPickerEntries } from '../src/renderer/components/ModelFamilyMenu'
@@ -110,10 +111,33 @@ describe('composer picker from snapshots', () => {
 describe('favorites', () => {
   const family = groupModelsByFamily('claude-subscription', claudeModels)[0]
 
-  it('stars and unstars a whole family', () => {
-    const starred = familyFavoritesPatch(family, new Set(['other']), true).favorites ?? []
-    expect(isFamilyFavorite(family, new Set(starred))).toBe(true)
-    expect(familyFavoritesPatch(family, new Set(starred), false).favorites).toEqual(['other'])
+  it('stars and unstars a whole family as an edit of the stored favorites', () => {
+    const ids = family.variants.map((variant) => variant.id)
+    expect(familyFavoritesPatch(family, true)).toEqual({ star: ids })
+    expect(familyFavoritesPatch(family, false)).toEqual({ unstar: ids })
+    expect(isFamilyFavorite(family, new Set(['other', ids[0]!]))).toBe(true)
+  })
+
+  it('saves the prefs of one instance one after another, so an older reply never lands last', async () => {
+    const replies: Array<() => void> = []
+    const setModelPrefs = vi.fn(() => new Promise<never>((_resolve, reject) => replies.push(() => reject(new Error('offline')))))
+    vi.stubGlobal('window', { mousse: { providers: { instances: { setModelPrefs } } } })
+    try {
+      const first = saveModelPrefs('claude', { order: ['b', 'a'] })
+      const second = saveModelPrefs('claude', { star: ['a'] })
+      await vi.waitFor(() => expect(setModelPrefs).toHaveBeenCalledTimes(1))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(setModelPrefs).toHaveBeenCalledTimes(1)
+      replies.shift()!()
+      await expect(first).rejects.toThrow('offline')
+      // A failed save does not stop the next one.
+      await vi.waitFor(() => expect(setModelPrefs).toHaveBeenCalledTimes(2))
+      expect(setModelPrefs).toHaveBeenLastCalledWith('claude', { star: ['a'] })
+      replies.shift()!()
+      await expect(second).rejects.toThrow('offline')
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('plans the import of legacy keys onto the instance serving each provider', () => {
@@ -122,8 +146,8 @@ describe('favorites', () => {
     const opus = groupModelsByFamily('claude-subscription', claudeModels).find((entry) => entry.familyLabel.includes('Opus'))!
     const gpt41 = groupModelsByFamily('openai', pi.models.entries).find((entry) => entry.familyLabel.includes('4.1'))!
     const patches = planLegacyFavoritesImport(new Set([opus.familyId, gpt41.familyId, 'gone:Old model']), [claude, pi])
-    expect(patches.get('claude')).toEqual({ favorites: ['claude-opus-4'] })
-    expect(patches.get('pi:openai')).toEqual({ favorites: ['gpt-5', 'gpt-4.1'] })
+    expect(patches.get('claude')).toEqual({ star: ['claude-opus-4'] })
+    expect(patches.get('pi:openai')).toEqual({ star: ['gpt-4.1'] })
   })
 
   describe('one-time import from localStorage', () => {
@@ -146,7 +170,7 @@ describe('favorites', () => {
       store.set(key, JSON.stringify([opusKey]))
       const setModelPrefs = vi.fn(async () => undefined)
       await importLegacyModelFavorites('p1', ready, setModelPrefs)
-      expect(setModelPrefs).toHaveBeenCalledWith('claude', { favorites: ['claude-opus-4'] })
+      expect(setModelPrefs).toHaveBeenCalledWith('claude', { star: ['claude-opus-4'] })
       expect(store.has(key)).toBe(false)
     })
 

@@ -84,11 +84,9 @@ export function ProviderModelsSection({
   const allHidden = builtIn.length > 0 && builtIn.every((model) => model.hidden)
 
   const write = (patch: ModelPrefsPatch) => void save.run('save', () => onSave(patch))
-  const setHidden = (id: string, hide: boolean) => write({ hidden: hide ? [...hidden, id] : hidden.filter((entry) => entry !== id) })
-  const toggleFavorite = (model: InstanceModel) => {
-    const favorites = entries.filter((entry) => entry.favorite).map((entry) => entry.id)
-    write({ favorites: model.favorite ? favorites.filter((id) => id !== model.id) : [...favorites, model.id] })
-  }
+  // Stars and hides are edits of the stored lists, so a save in flight is never undone by this one.
+  const setHidden = (id: string, hide: boolean) => write(hide ? { hide: [id] } : { unhide: [id] })
+  const toggleFavorite = (model: InstanceModel) => write(model.favorite ? { unstar: [model.id] } : { star: [model.id] })
   const move = (id: string, direction: -1 | 1) => {
     const order = movedOrder(display, id, direction)
     if (order) write({ order })

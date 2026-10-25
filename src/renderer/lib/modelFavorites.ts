@@ -63,14 +63,10 @@ export function isFamilyFavorite(family: ModelFamily, favorites: ReadonlySet<str
   return Boolean(favorites) && family.variants.some((variant) => favorites!.has(variant.id))
 }
 
-/** The instance's favorites with the whole family starred, or unstarred. */
-export function familyFavoritesPatch(family: ModelFamily, favorites: ReadonlySet<string>, favorite: boolean): ModelPrefsPatch {
-  const next = new Set(favorites)
-  for (const variant of family.variants) {
-    if (favorite) next.add(variant.id)
-    else next.delete(variant.id)
-  }
-  return { favorites: [...next] }
+/** Stars or unstars the whole family (an edit of the stored favorites, not a copy of them). */
+export function familyFavoritesPatch(family: ModelFamily, favorite: boolean): ModelPrefsPatch {
+  const ids = family.variants.map((variant) => variant.id)
+  return favorite ? { star: ids } : { unstar: ids }
 }
 
 /**
@@ -89,12 +85,12 @@ export function planLegacyFavoritesImport(
     const providerId = llmProviderOf(snapshot)
     const models = snapshot.models.entries.map((model) => ({ id: model.id, label: model.label }))
     const current = new Set(snapshot.models.entries.filter((model) => model.favorite).map((model) => model.id))
-    const next = new Set(current)
+    const added = new Set<string>()
     for (const family of groupModelsByFamily(providerId, models)) {
       if (!legacy.has(favoriteKey(providerId, family.familyId))) continue
-      for (const variant of family.variants) next.add(variant.id)
+      for (const variant of family.variants) if (!current.has(variant.id)) added.add(variant.id)
     }
-    if (next.size > current.size) patches.set(snapshot.instanceId, { favorites: [...next] })
+    if (added.size) patches.set(snapshot.instanceId, { star: [...added] })
   }
   return patches
 }
@@ -130,9 +126,23 @@ export function importLegacyModelFavorites(
   return importing
 }
 
-/** Writes model prefs and shows the result at once (the pushed change follows). */
-export async function saveModelPrefs(instanceId: string, patch: ModelPrefsPatch): Promise<void> {
-  applySnapshot(await window.mousse.providers.instances.setModelPrefs(instanceId, patch))
+const savingPrefs = new Map<string, Promise<void>>()
+
+/**
+ * Writes model prefs and shows the result at once (the pushed change follows). Saves of one
+ * instance run one after another, so an older reply never replaces a newer one on screen.
+ */
+export function saveModelPrefs(instanceId: string, patch: ModelPrefsPatch): Promise<void> {
+  const previous = savingPrefs.get(instanceId) ?? Promise.resolve()
+  const saving = previous
+    .catch(() => undefined)
+    .then(async () => applySnapshot(await window.mousse.providers.instances.setModelPrefs(instanceId, patch)))
+  savingPrefs.set(instanceId, saving)
+  const settled = () => {
+    if (savingPrefs.get(instanceId) === saving) savingPrefs.delete(instanceId)
+  }
+  saving.then(settled, settled)
+  return saving
 }
 
 /** Runs the one-time favorites import once the device snapshots are in. */
@@ -176,7 +186,7 @@ export function useModelFavorites(): ModelFavorites {
     (provider: { id: string; instanceId?: string }, family: ModelFamily) => {
       const instance = provider.instanceId ? prefs?.get(provider.instanceId) : undefined
       if (instance && provider.instanceId) {
-        const patch = familyFavoritesPatch(family, instance.favorites, !isFamilyFavorite(family, instance.favorites))
+        const patch = familyFavoritesPatch(family, !isFamilyFavorite(family, instance.favorites))
         void saveModelPrefs(provider.instanceId, patch).catch((error) => console.warn('[providers] could not save the favorite', error))
         return
       }

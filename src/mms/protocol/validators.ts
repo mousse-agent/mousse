@@ -589,7 +589,7 @@ function asCustomModels(v: unknown, name: string): CustomModel[] {
 
 export function asModelPrefsPatch(v: unknown, name = 'patch'): ModelPrefsPatch {
   const o = asPlainObject(v, name)
-  assertKnownKeys(o, name, ['hidden', 'order', 'favorites', 'custom'])
+  assertKnownKeys(o, name, ['hidden', 'order', 'favorites', 'custom', 'star', 'unstar', 'hide', 'unhide'])
   const list = (value: unknown, key: string): string[] =>
     asStringArray(value, `${name}.${key}`, { unique: true, maxItems: MAX_MODEL_PREF_ITEMS, maxItemLen: MAX_MODEL_ID })
   const patch: ModelPrefsPatch = {}
@@ -597,6 +597,7 @@ export function asModelPrefsPatch(v: unknown, name = 'patch'): ModelPrefsPatch {
   if (o.order !== undefined) patch.order = list(o.order, 'order')
   if (o.favorites !== undefined) patch.favorites = list(o.favorites, 'favorites')
   if (o.custom !== undefined) patch.custom = asCustomModels(o.custom, `${name}.custom`)
+  for (const key of ['star', 'unstar', 'hide', 'unhide'] as const) if (o[key] !== undefined) patch[key] = list(o[key], key)
   return patch
 }
 

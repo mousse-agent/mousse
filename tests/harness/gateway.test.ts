@@ -178,6 +178,26 @@ describe('harness gateway: scope and model prefs', () => {
       ['opus-x', false, false, 'custom']
     ])
   })
+
+  it('overlapping prefs saves keep each other: a reorder and stars edit the stored lists', async () => {
+    const { harness } = full(instances(undefined, []), { models: { claude: [{ id: 'opus', label: 'Opus' }, { id: 'sonnet', label: 'Sonnet' }, { id: 'haiku', label: 'Haiku' }] } })
+    await harness.instances.setModelPrefs('claude', { star: ['opus'] })
+    // Sent together from one view of the page: a reorder, then two stars and a hide.
+    await Promise.all([
+      harness.instances.setModelPrefs('claude', { order: ['haiku', 'sonnet', 'opus'] }),
+      harness.instances.setModelPrefs('claude', { star: ['sonnet'] }),
+      harness.instances.setModelPrefs('claude', { star: ['haiku'], unstar: ['opus'] }),
+      harness.instances.setModelPrefs('claude', { hide: ['opus'] })
+    ])
+    const models = harness.catalog.models('claude', { kind: 'device' })
+    expect(models.map((model) => [model.id, model.favorite, model.hidden])).toEqual([
+      ['haiku', true, false],
+      ['sonnet', true, false],
+      ['opus', false, true]
+    ])
+    await harness.instances.setModelPrefs('claude', { unhide: ['opus'], unstar: ['haiku', 'sonnet'] })
+    expect(harness.catalog.models('claude', { kind: 'device' }).filter((model) => model.favorite || model.hidden)).toEqual([])
+  })
 })
 
 describe('harness gateway: instances', () => {
