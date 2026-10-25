@@ -1030,9 +1030,12 @@ export class OrchestratorService extends EventEmitter {
         void this.interruptRun(runId, target)
       })
     } else if (result.status !== 'accepted') {
-      // The run is not active (its turn ended): Stop still reaches the provider's process, which may
-      // be running background work for the thread.
-      await this.stopProviderWork(target)
+      // The run is not active (its turn ended): Stop still reaches the provider's process, which may be
+      // running background work for the thread. Only a run of this thread, and only when no newer run on
+      // it is active or queued: a Stop aimed at an old run must not end the process a newer one is using.
+      // The check and the stop run in the same tick, so nothing starts in between.
+      const stale = engine.getRun(runId)
+      if (stale?.threadId === target && !engine.listRuns(target).some((run) => !TERMINAL_RUN_STATUSES.has(run.status))) await this.stopProviderWork(target)
     }
     return result
   }
@@ -4714,7 +4717,7 @@ export class OrchestratorService extends EventEmitter {
         nativeContextStartBoundary: turnNativeStartBoundary, nativeContextBoundary: turnNativeStartBoundary
       }, turnStartSha)
     }
-    const turn = {
+    const turn: ActiveTurnControl = {
       abort: new AbortController(),
       pendingSteer: [] as string[],
       promotedSteerIds: [] as string[]
@@ -5014,7 +5017,17 @@ export class OrchestratorService extends EventEmitter {
           return parts.length > 0 ? parts.join('\n') : undefined
         },
         // Text the provider could not give its turn waits for the turn to end, then runs as the next turn.
-        returnSteer: (text) => { turn.pendingSteer.unshift(text) },
+        // Rows a steer carried are held again, unread, and follow it into that turn.
+        returnSteer: (text) => {
+          const last = turn.lastDrained
+          turn.lastDrained = undefined
+          if (!last) return void turn.pendingSteer.unshift(text)
+          const rest = text.replace(last.parts.join('\n'), '').trim()
+          if (rest) turn.pendingSteer.unshift(rest)
+          turn.pendingSteer.unshift(...last.parts)
+          for (const entry of last.carried) this.runEngine?.inbox.unmarkSteerTaken(entry.inboxIds, entry.effectId)
+          turn.carriedSteers = [...last.carried, ...(turn.carriedSteers ?? [])]
+        },
         heartbeat: () => this.heartbeatRun(engineRunId)
       }
       const mcp = this.mcpFor(adapter, instance.instanceId, session.threadId, engineRunId, mode)
@@ -5376,11 +5389,13 @@ export class OrchestratorService extends EventEmitter {
    */
   private drainSteerForSession(
     session: ThreadSession,
-    turn: { pendingSteer: string[]; promotedSteerIds: string[]; carriedSteers?: ActiveTurnControl['carriedSteers'] }
+    turn: { pendingSteer: string[]; promotedSteerIds: string[]; carriedSteers?: ActiveTurnControl['carriedSteers']; lastDrained?: ActiveTurnControl['lastDrained'] }
   ): string | undefined {
     const parts: string[] = []
     if (turn.pendingSteer.length > 0) {
       parts.push(...turn.pendingSteer)
+      // Remembered whole until the provider has taken the text (`returnSteer`).
+      turn.lastDrained = { parts: [...turn.pendingSteer], carried: [...(turn.carriedSteers ?? [])] }
       turn.pendingSteer = []
       // The model reads them now: the rows their steers carried are delivered to this run.
       for (const entry of turn.carriedSteers ?? []) this.runEngine?.inbox.markSteerTaken(entry.inboxIds, entry.effectId)

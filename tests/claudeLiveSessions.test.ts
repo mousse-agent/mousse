@@ -36,7 +36,7 @@ function fixture(timings: Partial<LiveTimings> = {}, cli = new FakeClaudeCli()) 
     live: timings,
     runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
   })
-  const host = { backgroundWork: vi.fn<(threadId: string, active: boolean) => void>(), continuationStarted: vi.fn<NonNullable<ClaudeLiveHost['continuationStarted']>>() }
+  const host = { backgroundWork: vi.fn<(threadId: string, active: boolean) => void>(), continuationStarted: vi.fn<NonNullable<ClaudeLiveHost['continuationStarted']>>(), notice: vi.fn<NonNullable<ClaudeLiveHost['notice']>>() }
   service.setLiveHost(host)
   const chat = (extra: Partial<ClaudeSubscriptionChatInput> = {}) =>
     service.chat({ threadId: 'thread', cwd: home, model: 'sonnet', prompt: 'hello', onText: vi.fn(), ...extra })
@@ -613,6 +613,12 @@ describe('result routing and steering edge cases', () => {
     }
   }
   const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+  /** One finished turn that left a shell running; the process then answers nothing on its own. */
+  const withHelperTurn = async (f: ReturnType<typeof fixture>) => {
+    helper(f)
+    await f.turn()
+    f.cli.reply = undefined
+  }
 
   it('a result that echoes the id of a finished turn belongs to no one and never ends the turn that is waiting', async () => {
     const f = fixture()
@@ -702,28 +708,144 @@ describe('result routing and steering edge cases', () => {
     expect(await turn).toBe('ok')
   })
 
-  it('notifications a cut-off turn had read are done when the next turn on the process commits', async () => {
-    const f = fixture()
+  /** Turn two reads the helper's notification and is cut off by a plain interrupt (nothing of it is unechoed). */
+  const cutOffAfterNotification = async (f: ReturnType<typeof fixture>) => {
     helper(f)
-    await f.turn()
+    await f.turn({ history: 'h' }, 'h')
     const process = f.cli.last
     f.cli.reply = undefined
     const abort = new AbortController()
-    const second = f.chat({ signal: abort.signal, history: '' })
+    const second = f.chat({ signal: abort.signal, history: 'h' })
     await inputs(f.cli, 2)
     process.emit(textDelta('working', process.uuid(1)), notification('bash-1'))
     await later(20)
     abort.abort()
     await expect(second).rejects.toThrow()
-    f.service.commitInterrupted('thread', '')
-    // Claude read the report in the turn that was cut off; it is not delivered again, and not done yet.
+    f.service.commitInterrupted('thread', 'h')
+    return process
+  }
+
+  it('after a plain interrupt the wake for a notification the cut-off turn read opens a continuation, which commits it', async () => {
+    const f = fixture()
+    const process = await cutOffAfterNotification(f)
+    expect(process.interruptOptions).toEqual([undefined])
+    // Still owed: no turn saw the report.
     expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    expect(f.host.continuationStarted).not.toHaveBeenCalled()
+    // Claude had the notification queued, so it starts a wake turn: it must not run unseen.
+    process.emit(resultFrame({ uuids: [process.uuid(1)], terminalReason: 'aborted_streaming' }))
+    process.emit(textDelta('The helper finished.'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    process.emit(resultFrame({ text: 'The helper finished.', origin: 'task-notification' }))
+    const text = await f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined })
+    expect(text).toBe('The helper finished.')
+    f.service.commitConversation('thread', '')
+    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+  })
+
+  it('a turn that did not see a helper\'s notification never commits it', async () => {
+    const f = fixture()
+    const process = await cutOffAfterNotification(f)
     f.cli.reply = (message, self) => {
       self.emit(resultFrame({ uuids: [self.uuid(1)], terminalReason: 'aborted_streaming' }))
       self.answer(String(message.uuid), 'third')
     }
-    expect(await f.turn({ history: '' })).toBe('third')
-    expect(f.service.hasBackgroundWork('thread')).toBe(false)
+    expect(await f.turn({ history: 'h' }, 'h')).toBe('third')
+    // The next turn committed, but it never saw the report: the task is still owed.
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    expect(process.closed).toBe(false)
+  })
+
+  it('a cancel that also drops queued messages may have dropped the notification: the task stays owed, is not committed, and the thread is told', async () => {
+    const f = fixture()
+    helper(f)
+    await f.turn({ history: 'h' }, 'h')
+    const process = f.cli.last
+    f.cli.reply = undefined
+    const abort = new AbortController()
+    const second = f.chat({
+      history: 'h',
+      signal: abort.signal,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('queued steer').mockReturnValue(undefined)
+    })
+    await inputs(f.cli, 2)
+    process.emit(textDelta('working', process.uuid(1)), notification('bash-1'))
+    // The steer reaches Claude's queue but Claude has not started it.
+    await inputs(f.cli, 3)
+    abort.abort()
+    await expect(second).rejects.toThrow()
+    f.service.commitInterrupted('thread', 'h')
+    expect(process.interruptOptions).toEqual([{ cancelQueued: true }])
+    expect(f.host.notice).toHaveBeenCalledExactlyOnceWith('thread', expect.stringContaining('may not have been delivered'))
+    f.cli.reply = (message, self) => {
+      self.emit(resultFrame({ uuids: [self.uuid(1)], terminalReason: 'aborted_streaming' }))
+      self.answer(String(message.uuid), 'third')
+    }
+    await f.turn({ history: 'h' }, 'h')
+    expect(f.service.hasBackgroundWork('thread')).toBe(true)
+    expect(f.host.continuationStarted).not.toHaveBeenCalled()
+  })
+
+  it('a steered continuation ignores an abort result that echoes no id and ends at its own result', async () => {
+    const f = fixture()
+    await withHelperTurn(f)
+    const process = f.cli.last
+    process.emit(notification('bash-1'), textDelta('reading the report'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    let ended = false
+    const continuation = f.service.chat({
+      threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined,
+      drainSteer: vi.fn<() => string | undefined>().mockReturnValueOnce('please also check X').mockReturnValue(undefined)
+    }).finally(() => { ended = true })
+    await inputs(f.cli, 2)
+    expect(process.inputs[1]).toMatchObject({ priority: 'now' })
+    process.emit(resultFrame({ terminalReason: 'aborted_streaming', origin: 'task-notification', queued: 1 }))
+    await later(30)
+    expect(ended).toBe(false)
+    process.emit(textDelta('checked X', process.uuid(1)), resultFrame({ uuids: [process.uuid(1)], text: 'checked X', origin: 'task-notification' }))
+    expect(await continuation).toContain('checked X')
+  })
+
+  it('with no host, a message folded into the wake turn is not interrupted with it, and the abandoned wake ends', async () => {
+    const f = fixture()
+    f.service.setLiveHost(null)
+    await withHelperTurn(f)
+    const process = f.cli.last
+    process.emit(notification('bash-1'))
+    await vi.waitFor(() => expect(f.service.hasBackgroundWork('thread')).toBe(false))
+    f.cli.reply = undefined
+    const mine = f.chat({ prompt: 'mine', history: '' })
+    await inputs(f.cli, 2)
+    // The wake turn begins before Claude takes the message; it may carry it.
+    process.emit(textDelta('wake text'))
+    await later(30)
+    expect(process.interrupts).toBe(0)
+    process.emit(textDelta('answer to mine', process.uuid(1)), resultFrame({ uuids: [process.uuid(1)], text: 'answer to mine', origin: 'task-notification' }))
+    expect(await mine).toBe('answer to mine')
+    expect(process.interrupts).toBe(0)
+    // The abandoned wake is over: the next turn's unstamped frames are its own.
+    f.cli.reply = (message, self) => self.answer(String(message.uuid), 'next', ['n', 'ext'])
+    expect(await f.turn({ history: '' })).toBe('next')
+  })
+
+  it('after a failed turn a plain resend continues on the process, an undone conversation does not', async () => {
+    const f = fixture()
+    helper(f)
+    await f.turn({ history: 'h' }, 'h')
+    const failing = (message: { uuid?: string }, process: { emit(...frames: Record<string, unknown>[]): void }) =>
+      process.emit(resultFrame({ uuids: [String(message.uuid)], error: 'rate limit' }))
+    f.cli.reply = failing as never
+    await expect(f.chat({ history: 'h' })).rejects.toThrow('rate limit')
+    // The adapter reports what the failed turn left: the history with its request in it.
+    f.service.commitFailed('thread', 'h + failed request')
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'again')
+    // The conversation was undone back to before the failed request: the process still holds it.
+    await expect(f.chat({ history: 'h' })).rejects.toMatchObject({ message: expect.stringContaining('conversation changed') })
+    expect(f.cli.processes).toHaveLength(1)
+    // A plain resend carries the boundary the failed turn left.
+    expect(await f.chat({ history: 'h + failed request' })).toBe('again')
+    expect(f.cli.processes).toHaveLength(1)
+    expect(f.cli.last.text(2)).not.toContain('Previous conversation')
   })
 
   it('after a failed turn the next message continues on the same process, even with background work running', async () => {
@@ -732,8 +854,9 @@ describe('result routing and steering edge cases', () => {
     await f.turn({ history: 'h' }, 'h')
     f.cli.reply = (message, process) => process.emit(resultFrame({ uuids: [String(message.uuid)], error: 'rate limit' }))
     await expect(f.chat({ history: 'h' })).rejects.toThrow('rate limit')
+    f.service.commitFailed('thread', 'h + the failed request')
     f.cli.reply = (message, process) => process.answer(String(message.uuid), 'ok again')
-    expect(await f.chat({ history: 'h' })).toBe('ok again')
+    expect(await f.chat({ history: 'h + the failed request' })).toBe('ok again')
     expect(f.cli.processes).toHaveLength(1)
     expect(f.cli.last.text(2)).not.toContain('Previous conversation')
   })
