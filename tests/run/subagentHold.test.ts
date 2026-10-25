@@ -6,6 +6,7 @@
  * through a real orchestrator and scripted providers is `subagentHoldIntegration.test.ts`.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Delegations } from '../../src/mms/run/Delegations'
 import { childBusy, NO_FINAL_MESSAGE, settleWaitingDelegations } from '../../src/mms/run/delegation/hold'
 import { MAX_INBOX_REDELIVERIES } from '../../src/mms/run/delegation/wake'
 import { EFFECT_LEASE_GRACE_MS } from '../../src/mms/run/EffectOutbox'
@@ -473,7 +474,7 @@ describe('a subagent\'s result waits for its own subagents (issue #142)', () => 
       const [row] = f!.engine.inbox.listByStatus(pc.childThreadId, 'pending')
       f!.engine.inbox.markDelivered([row.inboxId], 'effect:nowhere')
       f!.engine.inbox.patchPayload(row.inboxId, { deliveryFailed: true, attempts: 4, lastError: 'provider unavailable' })
-      expect(task(pc.delegationId)).toMatchObject({ status: 'failed', result: { runStatus: 'failed', error: 'A subagent result could not be delivered after 4 attempts: provider unavailable' } })
+      expect(task(pc.delegationId)).toMatchObject({ status: 'failed', result: { runStatus: 'failed', error: 'A notice the subagent was waiting on could not be delivered after 4 attempts: provider unavailable' } })
     })
 
     it('retrying a delivery that gave up makes the row count again', async () => {
@@ -539,6 +540,25 @@ describe('a subagent\'s result waits for its own subagents (issue #142)', () => 
       f.engine.reconcileOnBoot()
       expect(task(pc.delegationId)).toMatchObject({ status: 'result_available', result: { text: 'turn text' } })
     })
+  })
+
+  it('a settlement that throws outside a transaction keeps the other queued threads for the next call', async () => {
+    f = delegationFixture()
+    f.store.setProviderBackgroundWork(() => true)
+    const parentRun = await f.runningRun('parent')
+    const a = await f.delegate(parentRun.runId, 'a')
+    const b = await f.delegate(parentRun.runId, 'b')
+    f.finish(a.childRunId, 'a answer')
+    f.finish(b.childRunId, 'b answer')
+    f.store.setProviderBackgroundWork(() => false)
+    const publish = vi.spyOn(Delegations.prototype, 'publish').mockImplementationOnce(() => { throw new Error('boom') })
+    // B's thread is queued first and its settlement throws; A's was still waiting its turn.
+    ;(f.store as unknown as { settleQueue: Set<string> }).settleQueue.add(b.childThreadId)
+    expect(() => f!.store.settleHold(a.childThreadId)).toThrow('boom')
+    publish.mockRestore()
+    expect([task(a.delegationId).status, task(b.delegationId).status]).toEqual(['running', 'running'])
+    f.store.settleHold(b.childThreadId)
+    expect([task(a.delegationId).status, task(b.delegationId).status]).toEqual(['result_available', 'result_available'])
   })
 
   it('settleWaitingDelegations returns what it published, and nothing for a thread that has no waiting task', async () => {

@@ -3,7 +3,18 @@ import { recordRunResultText } from './delegation/hold'
 import { Inbox } from './Inbox'
 import { stableStringify } from './json'
 import type { RunStore } from './RunStore'
-import type { AttemptStatus, ChildResultPayload, InboxRecord, RunOutcome, RunRecord } from './types'
+import type { AttemptStatus, ChildResultPayload, InboxKind, InboxRecord, RunOutcome, RunRecord } from './types'
+
+/**
+ * An inbox row the run owes its own thread, written in the run's terminal transaction before the
+ * subagent's waiting tasks are judged (an integration run's outcome). The row is what keeps the
+ * thread busy until its model has read the outcome, so the tasks waiting on it cannot publish an
+ * answer that predates it.
+ */
+export interface TerminalNotice {
+  kind: InboxKind
+  payload: unknown
+}
 
 export type RunTerminalStatus = 'completed' | 'interrupted' | 'failed' | 'cancelled' | 'uncertain'
 
@@ -30,7 +41,7 @@ export function writeTerminalRun(
   status: RunTerminalStatus,
   outcome: RunOutcome | undefined,
   completedAt: string,
-  options: { resultText?: string } = {}
+  options: { resultText?: string; notice?: TerminalNotice } = {}
 ): RunRecord {
   return store.db.transaction(() => {
     const merged =
@@ -53,6 +64,8 @@ export function writeTerminalRun(
         completedAt
       })
     recordRunResultText(store, next, options.resultText)
+    // Before anything is acknowledged or judged, so every evaluation below sees the row.
+    if (options.notice) new Inbox(store).append({ threadId: next.threadId, runId: next.runId, kind: options.notice.kind, payload: options.notice.payload })
     // Rows this run delivered are acknowledged first (inside, the thread is evaluated as they move)...
     acknowledgeDeliveredRows(store, next)
     // ...then, whatever moved or not, once more with the run's own end.

@@ -4,7 +4,7 @@
  * after the Reader's was read by a run of the Coordinator that committed (the hold rule itself, with
  * every trigger, is `subagentHold.test.ts`).
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
 import { waitFor } from './phase6Fixture'
 import { useSubagentWorld, type Json } from './subagentWorld'
@@ -159,6 +159,86 @@ describe('P -> Coordinator -> Reader through the orchestrator (issue #142)', () 
         expect(s.d.engine.inbox.get(row.inboxId)!.status).toBe('pending')
         expect(s.task(s.coordinator.delegationId).status).toBe('running')
       }
+    })
+  })
+
+  describe('an integration run is the last live work of the Coordinator (issue #142)', () => {
+    /**
+     * The Coordinator is woken for its Reader's result and asks to integrate it; the integration
+     * run ends the Coordinator's work. (The Reader is shared, so the integration fails: nothing to merge.)
+     */
+    const integrating = async () => {
+      const w = world((input, delegation: DelegationToolHost | undefined) => {
+        if (input.prompt.includes('Review Coordinator')) return w.start(delegation!, 'Reader', {}, 'start:Reader').then((reader) => { w.out.reader = reader; return 'Coordinator started the Reader.' })
+        if (input.prompt.includes('Review Reader')) return 'Reader result.'
+        if (input.prompt.startsWith('Subagent "Reader"')) {
+          const delegationId = /finished task (delegation:[0-9a-f-]+)/.exec(input.prompt)![1]
+          return delegation!.integrateDelegation({ delegationId } as never, { toolCallId: 'integrate-1' }).then(() => 'Coordinator is integrating.')
+        }
+        return 'Coordinator final after the integration notice.'
+      })
+      w.steps.go = async (tools) => { w.out.coordinator = await w.start(tools, 'Coordinator') }
+      await w.say('go')
+      const coordinator = w.out.coordinator
+      await waitFor(() => Boolean(w.out.reader), 'the Reader to start')
+      await w.settled(coordinator.childRunId)
+      await w.settled(w.out.reader.childRunId)
+      const task = () => w.d.engine.delegations.get(coordinator.delegationId)!
+      const coordinatorRuns = () => w.d.engine.listRuns(coordinator.childThreadId)
+      const wake = w.reconciler.runOnce().wakes.wakes.find((id) => w.d.engine.getRun(id)!.threadId === coordinator.childThreadId)!
+      const integrationRun = async () => {
+        await waitFor(() => coordinatorRuns().some((run) => run.source === 'integration' && ['completed', 'failed'].includes(run.status)), 'the integration run to end')
+        return coordinatorRuns().find((run) => run.source === 'integration')!
+      }
+      return { ...w, coordinator, task, coordinatorRuns, integrationRun, wake }
+    }
+
+    it('the task waits for the integration outcome: it is a row the Coordinator must read, so the answer that predates it is not published', async () => {
+      const s = await integrating()
+      const integration = await s.integrationRun()
+      expect(integration.status).toBe('failed')
+      // The integration run ended the Coordinator's last live work. Its outcome is already an unread row, written with the terminal state.
+      const notices = s.d.engine.inbox.listByStatus(s.coordinator.childThreadId, 'pending').filter((row) => row.kind === 'reconcile_notice')
+      expect(notices).toHaveLength(1)
+      expect(notices[0]).toMatchObject({ runId: integration.runId, payload: { type: 'integration_failed' } })
+      expect(s.task().status).toBe('running')
+      // The Coordinator reads the outcome in a wake of its own, and its answer to it is the result.
+      const wake = s.reconciler.runOnce().wakes.wakes.find((id) => s.d.engine.getRun(id)!.threadId === s.coordinator.childThreadId)!
+      await waitFor(() => s.task().status !== 'running', 'the task to publish')
+      const published = s.task()
+      expect(published.result).toMatchObject({ text: 'Coordinator final after the integration notice.', runId: wake })
+      expect(s.d.engine.getRun(wake)!.ordinal).toBeGreaterThan(integration.ordinal)
+      expect(s.d.engine.inbox.listForThread(s.coordinator.childThreadId).every((row) => row.status === 'acknowledged')).toBe(true)
+    })
+  })
+
+  describe('the provider background-work input (4) through the orchestrator', () => {
+    it('setRunEngine installs the callback, and ending the work re-evaluates the thread tasks', async () => {
+      const seen: Json = {}
+      const w = world((input) => {
+        // A provider that still has background work for the subagent when its turn ends.
+        if (input.prompt.includes('Review Solo')) {
+          seen.threadId = input.threadId
+          w.d.orch.setProviderBackgroundWork(input.threadId, true)
+        }
+        return 'Solo turn text.'
+      })
+      w.steps.go = async (tools) => { w.out.solo = await w.start(tools, 'Solo') }
+      await w.say('go')
+      await w.settled(w.out.solo.childRunId)
+      const task = () => w.d.engine.delegations.get(w.out.solo.delegationId)!
+      // The host installed its callback on the run store, and the task is held by it.
+      expect(w.d.engine.store.providerBackgroundWork(seen.threadId)).toBe(true)
+      expect(task().status).toBe('running')
+      const settled = vi.spyOn(w.d.engine.store, 'settleHold')
+      w.d.orch.setProviderBackgroundWork(seen.threadId, false)
+      expect(settled).toHaveBeenCalledWith(seen.threadId)
+      expect(w.d.engine.store.providerBackgroundWork(seen.threadId)).toBe(false)
+      expect(task()).toMatchObject({ status: 'result_available', result: { text: 'Solo turn text.' } })
+      // Saying so again changes nothing.
+      settled.mockClear()
+      w.d.orch.setProviderBackgroundWork(seen.threadId, false)
+      expect(settled).not.toHaveBeenCalled()
     })
   })
 })

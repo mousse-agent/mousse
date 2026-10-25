@@ -476,8 +476,10 @@ export class EffectOutbox {
     if (Number(result.changes) !== 1)
       fail('stale_write', `Effect ${current.effectId} changed while it was being settled.`)
     this.recorded(next)
-    // The one place an effect changes status (succeed, fail, cancel, defer, lease reclaim, boot): a
-    // wake or steer for the thread that is no longer in flight stops holding its tasks.
+    // Every status write except a claim goes through here (succeed, fail, cancel, defer, lease reclaim,
+    // boot): a wake or steer for the thread that is no longer in flight stops holding its tasks. A
+    // claim (`claimNext`, its own SQL) moves pending to running, which is still in flight, so the
+    // hold has nothing to re-evaluate there.
     this.store.settleHold(next.threadId)
     return next
   }

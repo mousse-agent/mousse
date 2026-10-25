@@ -2365,20 +2365,27 @@ export class OrchestratorService extends EventEmitter {
     if (engine.getRun(payload.runId)?.status !== 'queued') return
     let notice: string
     let failed = false
+    // The outcome is a row for this thread, written with the run's terminal state: the thread stays
+    // busy until its model reads it, so a task waiting on this thread (it may be a subagent that
+    // integrates its own subagent's work) never publishes an answer that predates the outcome.
+    const outcomeRow = (text: string, type: 'integration_completed' | 'integration_failed') => ({
+      kind: 'reconcile_notice' as const,
+      payload: { type, delegationId: payload.delegationId, text }
+    })
     try {
       engine.markStarting(payload.runId)
       engine.markRunning(payload.runId)
       const record = await this.lifecycle.run('delegation-integration', () =>
         this.integrateDelegationResult(payload.threadId, payload.delegationId, payload.runId, AbortSignal.any([signal, this.lifecycle.signal])))
       notice = `Integration of delegated task ${payload.delegationId} finished: merged ${record.workerHeadSha.slice(0, 12)} as ${record.integrationSha.slice(0, 12)} (${record.changedPaths.length} path(s)).`
-      engine.markTerminal(payload.runId, 'completed', undefined, { resultText: notice })
+      engine.markTerminal(payload.runId, 'completed', undefined, { resultText: notice, notice: outcomeRow(notice, 'integration_completed') })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       failed = true
       notice = `Integration of delegated task ${payload.delegationId} failed: ${message}`
       this.markRun(payload.runId, (runs, id) => {
         const run = runs.getRun(id)
-        if (run && !TERMINAL_RUN_STATUSES.has(run.status)) runs.markTerminal(id, 'failed', { error: message })
+        if (run && !TERMINAL_RUN_STATUSES.has(run.status)) runs.markTerminal(id, 'failed', { error: message }, { notice: outcomeRow(notice, 'integration_failed') })
       })
     }
     try {
@@ -2387,14 +2394,14 @@ export class OrchestratorService extends EventEmitter {
     } catch (error) {
       console.warn('integration notice could not reach the transcript', { runId: payload.runId, error: error instanceof Error ? error.message : String(error) })
     }
-    engine.inbox.append({
-      threadId: payload.threadId,
-      runId: payload.runId,
-      kind: 'reconcile_notice',
-      payload: failed
-        ? { type: 'integration_failed', delegationId: payload.delegationId, text: notice }
-        : { type: 'integration_completed', delegationId: payload.delegationId, text: notice }
-    })
+    // Normally written with the terminal state above; a run something else had already ended (the
+    // reconciler, a stop) still owes the thread its outcome.
+    const written = engine.inbox.listForThread(payload.threadId).some((row) =>
+      row.runId === payload.runId && row.kind === 'reconcile_notice' && String((row.payload as { type?: unknown } | null)?.type).startsWith('integration_'))
+    if (!written) {
+      const row = outcomeRow(notice, failed ? 'integration_failed' : 'integration_completed')
+      engine.inbox.append({ threadId: payload.threadId, runId: payload.runId, kind: row.kind, payload: row.payload })
+    }
   }
 
   private async integrateDelegationResult(parentThreadId: string, delegationId: string, runId: string, signal: AbortSignal) {
@@ -2412,7 +2419,9 @@ export class OrchestratorService extends EventEmitter {
       const target = await new WorkspaceResolver(parentDirectory, parentThreadId, project).resolve('agent', 'main', signal, lease)
       if (!target.capability.checkpointable) throw new Error('Integration requires an owned Git workspace')
       // The task's own checkpoint, not the worktree as it is now: the subagent may have worked on since.
-      const pinned = taskCheckpoint(new ThreadActionService(childDirectory).list(), delegation.childRunId)
+      // The run whose text the task published (it can be a later run than the task's own, once the
+      // subagent had waited on its own subagents), and the task's own run for a result that predates `runId`.
+      const pinned = taskCheckpoint(new ThreadActionService(childDirectory).list(), delegation.result?.runId ?? delegation.childRunId)
       if (!pinned) throw new Error('The delegated task left no code checkpoint to integrate.')
       return await new ChildAgentIntegrationService(parentDirectory).integrate({
         agentId: delegation.childThreadId,

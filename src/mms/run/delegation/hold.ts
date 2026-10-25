@@ -147,6 +147,10 @@ const RESULT_SOURCES: ReadonlySet<string> = new Set([
   'steer-late',
   'steer-followup',
   ...FOLLOW_UP_SOURCES
+  // Not sources, consistent with `FOLLOW_UP_SOURCES`: `cli-steer` and `protocol-steer` are steers a
+  // client sent to a live turn (they join it and have no run of their own to answer), and
+  // `lease-race`, `queue`, `schedule`, `workflow-observer`, `protocol` and local actions are not a
+  // person asking the subagent something or a notice it answers.
 ])
 
 /**
@@ -213,7 +217,8 @@ function deliveryFailureResult(row: InboxRecord, run: RunRecord | null): Delegat
   const cause = typeof detail?.lastError === 'string' && detail.lastError ? `: ${detail.lastError}` : ''
   return {
     runStatus: 'failed',
-    error: `A subagent result could not be delivered${attempts}${cause}`,
+    // Neutral: the row can be a result, a restart note or a notice of any kind.
+    error: `A notice the subagent was waiting on could not be delivered${attempts}${cause}`,
     ...(run ? { runId: run.runId } : {})
   }
 }
