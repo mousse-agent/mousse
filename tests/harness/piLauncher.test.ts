@@ -111,10 +111,21 @@ describe('Pi launcher: environment', () => {
     expect(env.AWS_PROFILE).toBe('work')
   })
 
-  it('applies the instance\'s own variables after the drops, but never a subscription token or a Pi setting', () => {
-    const env = launch({ extraEnv: { MOUSSE_PI_BRIDGE: 'b', CLOUDFLARE_ACCOUNT_ID: 'acct', CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat-x', PI_OFFLINE: '0' } }).env
-    expect(env).toMatchObject({ MOUSSE_PI_BRIDGE: 'b', CLOUDFLARE_ACCOUNT_ID: 'acct', PI_OFFLINE: '1' })
-    expect(env).not.toHaveProperty('CLAUDE_CODE_OAUTH_TOKEN')
+  it('filters the instance\'s own variables like the inherited ones, and takes only MOUSSE_PI_* from the engine', () => {
+    const env = launch({
+      extraEnv: {
+        CLOUDFLARE_ACCOUNT_ID: 'acct', AWS_REGION: 'us-east-1',
+        NODE_OPTIONS: '--require evil.js', ELECTRON_RUN_AS_NODE: '1', ELECTRON_NO_ASAR: '1', MOUSSE_PROFILE: 'x', MOUSSE_PI_BRIDGE: 'forged', PI_OFFLINE: '0',
+        CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat-x', OPENAI_API_KEY: 'k', openrouter_api_key: 'configured', AWS_MAX_ATTEMPTS: '3'
+      },
+      engineEnv: { MOUSSE_PI_BRIDGE: 'bridge', MOUSSE_PI_SECRETS: 'secrets' }
+    }).env
+    expect(env).toMatchObject({ CLOUDFLARE_ACCOUNT_ID: 'acct', AWS_REGION: 'us-east-1', MOUSSE_PI_BRIDGE: 'bridge', MOUSSE_PI_SECRETS: 'secrets', PI_OFFLINE: '1', AWS_MAX_ATTEMPTS: '1' })
+    for (const key of ['NODE_OPTIONS', 'ELECTRON_RUN_AS_NODE', 'ELECTRON_NO_ASAR', 'MOUSSE_PROFILE', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'openrouter_api_key', 'OPENROUTER_API_KEY'])
+      expect(env, key).not.toHaveProperty(key)
+    // A variable outside MOUSSE_PI_* passed as an engine variable is ignored at run time too.
+    const forged = launch({ engineEnv: { NODE_OPTIONS: '--require evil.js' } as unknown as Record<`MOUSSE_PI_${string}`, string> }).env
+    expect(forged).not.toHaveProperty('NODE_OPTIONS')
   })
 })
 

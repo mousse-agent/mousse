@@ -158,6 +158,23 @@ describe('Pi RPC client: exit', () => {
     expect(exits).toEqual([{ code: null, signal: null, error: 'spawn node ENOENT' }])
   })
 
+  it('stays open when a running process emits an error (a failed kill); its real exit still ends it', async () => {
+    const { child, exit } = fakeChild()
+    Object.assign(child, { pid: 4321 })
+    const exits: PiRpcExit[] = []
+    const client = new PiRpcClient(child, { exit: (info) => exits.push(info) })
+    const pending = client.send({ type: 'get_state' })
+    let settled = false
+    void pending.catch(() => {}).finally(() => { settled = true })
+    child.emit('error', new Error('kill EPERM'))
+    await flush()
+    expect(settled).toBe(false)
+    expect(client.closed).toBe(false)
+    exit(0)
+    await expect(pending).rejects.toMatchObject({ code: 'exited' })
+    expect(exits).toEqual([{ code: 0, signal: null }])
+  })
+
   it('rejects commands after its input has ended', async () => {
     const { child, sent } = fakeChild()
     const client = new PiRpcClient(child)

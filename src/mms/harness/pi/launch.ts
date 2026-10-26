@@ -49,11 +49,13 @@ export interface PiLaunchInput {
   /** Resume this session (`--session`). */
   sessionId?: string
   /**
-   * Variables the instance adds (its configured `env`, the engine's bridge variables). Applied after
-   * the drops, so they may set `MOUSSE_*`, but never an Anthropic subscription token, Pi's own
-   * settings or the AWS retry pins.
+   * Variables configured on the instance (e.g. an account id). They pass the same filter as the
+   * inherited environment: no Electron, Node, Mousse or Pi setting, no credential variable, and
+   * never the AWS retry pins.
    */
   extraEnv?: Readonly<Record<string, string>>
+  /** Mousse's own variables for its extension (`MOUSSE_PI_*`), set by the engine after the drops. */
+  engineEnv?: Readonly<Record<`MOUSSE_PI_${string}`, string>>
   /** Where the instance's own provider key is read from: Mousse's environment unless a test passes one. */
   ambient?: NodeJS.ProcessEnv
   /** The host process (test seam): its executable and versions. */
@@ -114,9 +116,11 @@ export function piLaunch(input: PiLaunchInput): PiLaunch {
     if (value) put(env, name, value)
   }
 
-  const subscription = new Set(ANTHROPIC_OAUTH_ENV_KEYS.map((name) => name.toUpperCase()))
+  const refused = new Set([...credentials, ...ANTHROPIC_OAUTH_ENV_KEYS, ...Object.keys(PI_AWS_RETRY_ENV)].map((name) => name.toUpperCase()))
   for (const [name, value] of Object.entries(input.extraEnv ?? {}))
-    if (!subscription.has(name.toUpperCase()) && !/^PI_/i.test(name)) put(env, name, value)
+    if (!refused.has(name.toUpperCase()) && !DROPPED.some((pattern) => pattern.test(name))) put(env, name, value)
+  for (const [name, value] of Object.entries(input.engineEnv ?? {}))
+    if (/^MOUSSE_PI_/i.test(name)) put(env, name, value)
 
   put(env, 'PI_PACKAGE_DIR', input.runtime.root)
   put(env, 'PI_OFFLINE', '1')

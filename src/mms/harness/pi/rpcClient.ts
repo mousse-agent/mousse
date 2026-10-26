@@ -48,6 +48,8 @@ export class PiRpcError extends Error {
 
 /** The child as the client needs it: `ChildProcess` satisfies it, and so does a test double. */
 export interface PiRpcChild extends EventEmitter {
+  /** Undefined until the process started (and forever when it could not start). */
+  readonly pid?: number | undefined
   stdin: Writable | null
   stdout: Readable | null
 }
@@ -67,8 +69,9 @@ interface Pending {
 }
 
 /**
- * Splits a byte stream into records on LF only. JSON strings may hold U+2028 and U+2029, which
- * readline treats as line ends, so it is not used. A CR before the LF is dropped.
+ * Splits a byte stream into records on LF only, as Pi frames them (its `modes/rpc/jsonl.js`): a
+ * record is one `JSON.stringify` line, so a raw LF never occurs inside one. A CR before the LF is
+ * dropped. The decoder keeps a multi-byte character that a chunk boundary splits.
  */
 export function readJsonLines(stream: Readable, onLine: (line: string) => void): void {
   const decoder = new StringDecoder('utf8')
@@ -91,7 +94,10 @@ export function readJsonLines(stream: Readable, onLine: (line: string) => void):
 }
 
 export class PiRpcClient {
-  /** Settles once, with the same value `handlers.exit` receives. */
+  /**
+   * Settles once, with the same value `handlers.exit` receives, at the child's `close`: after its
+   * stdout ended, so a grandchild that inherited the pipe delays it until the tree is killed.
+   */
   readonly exited: Promise<PiRpcExit>
   private readonly pending = new Map<string, Pending>()
   private sequence = 0
@@ -117,7 +123,11 @@ export class PiRpcClient {
     // `close` follows `exit` once stdout has ended, so every response already written is read first.
     child.once('close', (code: number | null, signal: NodeJS.Signals | null) =>
       this.finish({ code: this.exitCode ?? code, signal: this.exitSignal ?? signal }))
-    child.on('error', (error: Error) => this.finish({ code: null, signal: null, error: error.message }))
+    // `error` ends the client only when the process never started (no pid). A live process can
+    // also emit it, e.g. when a kill fails; its real exit still comes as `close`.
+    child.on('error', (error: Error) => {
+      if (child.pid === undefined) this.finish({ code: null, signal: null, error: error.message })
+    })
   }
 
   /** Whether the process has exited (every later command rejects as `exited`). */
