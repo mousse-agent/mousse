@@ -13,6 +13,8 @@ import { ProviderInstanceService } from './providers/ProviderInstanceService'
 import { createHarnessGateway, type Harness, type HarnessGateway } from './harness/gateway'
 import { antigravityDriver } from './harness/drivers/antigravity'
 import { acpDriver } from './harness/drivers/acp'
+import { AgentInstalls } from './harness/agents/install'
+import { AcpRegistry } from './harness/agents/registry'
 import { claudeCodeDriver } from './harness/drivers/claudeCode'
 import { codexDriver } from './harness/drivers/codex'
 import { cursorDriver } from './harness/drivers/cursor'
@@ -214,6 +216,8 @@ export class MmsProfileServices {
       allowLegacyProjectData?: boolean
       inheritChannelEnvironment?: boolean
       includeExternalCliConfigs?: boolean
+      /** The installation's profiles: an agent install another profile uses counts only while it is listed. */
+      listProfiles?: () => Array<{ id: string; displayName?: string }>
       /**
        * Effect worker fibres per lane class (SPEC §12.3). `turn` caps this profile's concurrent
        * turns (default 8); control fibres keep Stop and steer responsive while turns run.
@@ -354,6 +358,15 @@ export class MmsProfileServices {
       registry: this.orchestrator.mcpToolRegistry()
     })
     this.orchestrator.setAppletStore(this.applets)
+    // Registry agents install once per installation; each profile records which versions it uses.
+    const agentRegistry = new AcpRegistry({ cachePath: join(shared.installationHome, 'agents', 'registry.json') })
+    const agentInstalls = new AgentInstalls({
+      installationHome: shared.installationHome,
+      profileId: this.profileId,
+      registry: agentRegistry,
+      liveInstances: () => Object.keys(this.providerInstances.list()),
+      ...(shared.listProfiles ? { listProfiles: shared.listProfiles } : {})
+    })
     // The harness gateway over this profile's instances: one runtime per instance, built by its
     // driver. Built-in instances share the profile's vendor services (usage, Settings) above.
     this.harnessImpl = createHarnessGateway({
@@ -377,9 +390,10 @@ export class MmsProfileServices {
         }),
         codexDriver({ builtIn: () => this.codex }),
         antigravityDriver({ builtIn: () => this.antigravity }),
-        acpDriver(),
+        acpDriver({ agents: agentInstalls }),
         cursorDriver()
       ],
+      registry: { search: (query) => agentRegistry.search(query) },
       questions: this.questions,
       prefs: {
         read: () => config.getProvidersSection().modelPrefs,

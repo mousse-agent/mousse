@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { foldedInto } from '../../../shared/harness/move'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
-import type { HarnessDriverKind, InstanceConfigPatch } from '../../../shared/harness/types'
+import type { HarnessDriverKind, InstanceConfigPatch, RegistryAgentView } from '../../../shared/harness/types'
 import type { ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
 import { piInstanceId } from '../../../shared/providerInstances'
 import { Check } from '../../lib/icons'
@@ -10,7 +10,8 @@ import { llmProviderOf } from '../../lib/providerSnapshots'
 import { Modal } from '../ui/Modal'
 import { Segmented, SettingsGroup, SettingsRow } from '../settings/SettingsRow'
 import { BrowseButton, useAsyncAction } from './parts'
-import { commandLabel, DRIVER_INFO, isApiInstance, nextInstanceLabel, parseArgs, parseEnvLines } from './providerView'
+import { commandLabel, DRIVER_INFO, isApiInstance, nextInstanceLabel, parseArgs, parseEnvLines, registrySourceOf } from './providerView'
+import { RegistryAgentList, RegistryConfirmStep } from './RegistryAgents'
 
 type ConnectKind = 'subscription' | 'api_key' | 'cloud'
 
@@ -28,6 +29,8 @@ function connectKind(option: ProviderLoginOption): ConnectKind {
 export type AddChoice =
   | { kind: 'new'; key: string; label: string; iconId: string; group: string; driver: HarnessDriverKind; existing?: InstanceSnapshot }
   | { kind: 'api'; key: string; label: string; iconId: string; group: string; options: ProviderLoginOption[] }
+  /** An agent picked from the ACP registry, installed by Mousse as an entry of `driver`. */
+  | { kind: 'registry'; key: string; label: string; iconId: string; group: string; driver: HarnessDriverKind }
 
 const GROUP_ORDER = ['Agents', 'Subscriptions', 'API keys', 'Cloud credentials']
 const API_GROUP: Record<ConnectKind, string> = { subscription: 'Subscriptions', api_key: 'API keys', cloud: 'Cloud credentials' }
@@ -58,6 +61,10 @@ export function addChoices(snapshots: readonly InstanceSnapshot[], loginOptions:
         existing
       })
     }
+    // A registry agent is always a new entry, so this choice stays whatever is already added.
+    if (info.registry) {
+      choices.push({ kind: 'registry', key: `registry:${driver}`, label: info.registry.addLabel, iconId: info.iconId, group: 'Agents', driver })
+    }
   }
   // Agents sign in through their own instance; their login options are not model APIs. A model API
   // that now runs as an agent (`FOLDED_INTO_AGENT`) is added as that agent only.
@@ -75,6 +82,13 @@ export function addChoices(snapshots: readonly InstanceSnapshot[], loginOptions:
     choices.push({ kind: 'api', key: `api:${id}`, label: options[0]!.label, iconId: id, group: API_GROUP[connectKind(options[0]!)], options })
   }
   return choices
+}
+
+/** The choice's tooltip: a model API's sign-in methods, an agent's one-line description. */
+function choiceHint(choice: AddChoice): string | undefined {
+  if (choice.kind === 'api') return choice.options.map((option) => option.description).filter(Boolean).join(' · ') || undefined
+  if (choice.kind === 'registry') return DRIVER_INFO[choice.driver].registry?.description
+  return DRIVER_INFO[choice.driver].description
 }
 
 function matches(query: string, ...fields: Array<string | undefined>): boolean {
@@ -152,6 +166,10 @@ export function AddProviderDialog({
   const [step, setStep] = useState(0)
   const [label, setLabel] = useState('')
   const [method, setMethod] = useState('')
+  /** The registry step: its search, the agent picked for the confirm panel, and an entry already added. */
+  const [registryQuery, setRegistryQuery] = useState('')
+  const [registryAgent, setRegistryAgent] = useState<RegistryAgentView | null>(null)
+  const registryAdded = useRef<{ agentId: string; version: string; instanceId: string } | null>(null)
   const { busy, error, setError, run } = useAsyncAction()
   const searchRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
@@ -163,6 +181,9 @@ export function AddProviderDialog({
     setSelectedKey(null)
     setStep(0)
     setError(null)
+    setRegistryQuery('')
+    setRegistryAgent(null)
+    registryAdded.current = null
   }, [open, setError])
 
   const choices = useMemo(() => addChoices(snapshots, loginOptions), [snapshots, loginOptions])
@@ -178,6 +199,7 @@ export function AddProviderDialog({
   const choose = (choice: AddChoice) => {
     setSelectedKey(choice.key)
     setError(null)
+    setRegistryAgent(null)
     setMethod(choice.kind === 'api' ? methodKey(choice.options[0]!) : '')
     if (choice.kind === 'new') {
       const base = DRIVER_INFO[choice.driver].label
@@ -188,7 +210,7 @@ export function AddProviderDialog({
   const signInStep = apiOption !== undefined && connectKind(apiOption) === 'subscription'
   /** A middle step only when there is a real choice to make: the sign-in method of a model API. */
   const methodStep = selected?.kind === 'api' && selected.options.length > 1
-  const lastStep = signInStep ? 'Sign in' : selected?.kind === 'api' ? 'Connect' : 'Add'
+  const lastStep = signInStep ? 'Sign in' : selected?.kind === 'api' ? 'Connect' : selected?.kind === 'registry' ? 'Agent' : 'Add'
   const steps = methodStep ? ['Provider', 'Sign-in method', lastStep] : ['Provider', lastStep]
   const last = steps.length - 1
   const summaries = [selected?.label ?? null, ...(methodStep && apiOption ? [METHOD_LABEL[connectKind(apiOption)]] : []), null]
@@ -207,11 +229,38 @@ export function AddProviderDialog({
     onClose()
   }
 
+  /** Back from the registry's confirm panel returns to its list, not to the Provider step. */
+  const inRegistryConfirm = step === last && selected?.kind === 'registry' && registryAgent !== null
+  const back = () => {
+    if (step === 0) return onClose()
+    if (inRegistryConfirm) {
+      setError(null)
+      setRegistryAgent(null)
+      return
+    }
+    goTo(step - 1)
+  }
+
+  /** Adds the registry agent (once, even when the install is retried), then starts its install. */
+  const addRegistryAgent = (choice: Extract<AddChoice, { kind: 'registry' }>, agent: RegistryAgentView) =>
+    void run(choice.key, async () => {
+      const source = registrySourceOf(agent)
+      if (!source) throw new Error(agent.unsupported ?? `Mousse cannot install ${agent.name} on this computer.`)
+      const added = registryAdded.current
+      const instanceId =
+        added && added.agentId === agent.id && added.version === agent.version
+          ? added.instanceId
+          : await handlers.add(choice.driver, { displayName: agent.name, source })
+      registryAdded.current = { agentId: agent.id, version: agent.version, instanceId }
+      await window.mousse.providers.instances.install(instanceId)
+      finish(instanceId)
+    })
+
   if (!open) return null
 
   const footer = (
     <>
-      <button type="button" className="btn" disabled={busy !== null} onClick={() => (step === 0 ? onClose() : goTo(step - 1))}>
+      <button type="button" className="btn" disabled={busy !== null} onClick={back}>
         {step === 0 ? 'Cancel' : 'Back'}
       </button>
       {step < last && (
@@ -256,7 +305,7 @@ export function AddProviderDialog({
                         role="radio"
                         aria-checked={checked}
                         className={`prov-choice${checked ? ' is-checked' : ''}`}
-                        title={choice.kind === 'api' ? choice.options.map((option) => option.description).filter(Boolean).join(' · ') || undefined : choice.kind === 'new' ? DRIVER_INFO[choice.driver].description : undefined}
+                        title={choiceHint(choice)}
                         onClick={() => choose(choice)}
                         onDoubleClick={() => {
                           choose(choice)
@@ -315,7 +364,36 @@ export function AddProviderDialog({
           </div>
         )}
 
-        {step === last && selected && selected.kind !== 'api' && !DRIVER_INFO[selected.driver].customCommand && (
+        {step === last && selected?.kind === 'registry' && (
+          <div className="prov-wizard-panel">
+            {registryAgent ? (
+              <SettingsGroup>
+                <RegistryConfirmStep
+                  key={`${registryAgent.id}@${registryAgent.version}`}
+                  agent={registryAgent}
+                  busy={busy === selected.key}
+                  disabled={busy !== null}
+                  error={error}
+                  onConfirm={() => addRegistryAgent(selected, registryAgent)}
+                />
+              </SettingsGroup>
+            ) : (
+              <RegistryAgentList
+                iconId={selected.iconId}
+                query={registryQuery}
+                onQuery={setRegistryQuery}
+                selectedId={null}
+                disabled={busy !== null}
+                onSelect={(agent) => {
+                  setError(null)
+                  setRegistryAgent(agent)
+                }}
+              />
+            )}
+          </div>
+        )}
+
+        {step === last && selected?.kind === 'new' && !DRIVER_INFO[selected.driver].customCommand && (
           <div className="prov-wizard-panel">
             <SettingsGroup>
               {selected.kind === 'new' && selected.existing && (

@@ -15,6 +15,7 @@ import type {
   ModelCapabilities,
   ModelPrefsPatch,
   ProviderScope,
+  RegistrySourcePatch,
   SignInResponse
 } from '../../shared/harness/types'
 import { parseCliConfigPatch } from '../providers/cliConfig'
@@ -532,7 +533,7 @@ function asNullableTrimmed(v: unknown, name: string, maxLen: number): string | n
 export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfigPatch {
   if (v === undefined || v === null) return {}
   const o = asPlainObject(v, name)
-  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod'])
+  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod', 'source'])
   // binaryPath, args and env share the CLI launch-settings limits.
   const patch: InstanceConfigPatch = { ...parseCliConfigPatch({ binaryPath: o.binaryPath, args: o.args, env: o.env }) }
   if (o.displayName !== undefined) patch.displayName = asNullableTrimmed(o.displayName, `${name}.displayName`, 80)
@@ -541,7 +542,30 @@ export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfi
     if (o.home !== 'default' && o.home !== 'private') throw invalidParams(`${name}.home must be default|private`)
     patch.home = o.home
   }
+  if (o.source !== undefined) patch.source = asRegistrySource(o.source, `${name}.source`)
   return patch
+}
+
+const REGISTRY_AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
+const REGISTRY_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/
+
+/** An ACP registry agent to install: ids and versions that can be path segments only. */
+function asRegistrySource(v: unknown, name: string): RegistrySourcePatch {
+  const o = asPlainObject(v, name)
+  assertKnownKeys(o, name, ['kind', 'agentId', 'version', 'distribution', 'consent'])
+  if (o.kind !== 'registry') throw invalidParams(`${name}.kind must be registry`)
+  const agentId = asString(o.agentId, `${name}.agentId`, 64)
+  if (!REGISTRY_AGENT_ID.test(agentId)) throw invalidParams(`${name}.agentId is not a registry agent id`)
+  const version = asString(o.version, `${name}.version`, 64)
+  if (!REGISTRY_VERSION.test(version)) throw invalidParams(`${name}.version is not a registry version`)
+  if (o.distribution !== 'binary' && o.distribution !== 'npx') throw invalidParams(`${name}.distribution must be binary|npx`)
+  const source: RegistrySourcePatch = { kind: 'registry', agentId, version, distribution: o.distribution }
+  if (o.consent !== undefined) {
+    const consent = asPlainObject(o.consent, `${name}.consent`)
+    assertKnownKeys(consent, `${name}.consent`, ['version', 'artifactUrl'])
+    source.consent = { version: asString(consent.version, `${name}.consent.version`, 64), artifactUrl: asString(consent.artifactUrl, `${name}.consent.artifactUrl`, 2_048) }
+  }
+  return source
 }
 
 export function asAddInstanceInput(v: unknown): AddInstanceInput {

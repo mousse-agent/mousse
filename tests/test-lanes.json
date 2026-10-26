@@ -18,6 +18,7 @@
     "tests/gitServiceConfiguredUpstream.test.ts",
     "tests/gitServiceWrites.test.ts",
     "tests/guiMmsController.test.ts",
+    "tests/harness/agentLock.test.ts",
     "tests/harness/chatgpt/crossProcess.test.ts",
     "tests/harness/chatgpt/storeProcesses.test.ts",
     "tests/harness/cursorHost.test.ts",

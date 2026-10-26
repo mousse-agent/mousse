@@ -14,7 +14,7 @@ import { AcpSessions, type AcpChatInput, type SavedAcpSession } from '../../harn
 import type { LoginSession } from '../LoginSession'
 import { applyCliConfigPatch, requireExecutable, sharedCliVersions, storedCliArgs, storedCliEnv, withUserEnv, type CliVersionCache, type StoredCliConfig } from '../cliConfig'
 import { directLaunch } from '../resolveWindowsShim'
-import { ANTIGRAVITY_RELEASE, antigravityInstallState, cancelAntigravityInstall, installAntigravity, installedAntigravityBinary, onAntigravityInstallEvent, validateManualAntigravityBinary } from './installation'
+import { ANTIGRAVITY_RELEASE, antigravityInstallState, cancelAntigravityInstall, installAntigravity, installedAntigravityBinary, onAntigravityInstallEvent, validateManualAntigravityBinary, type AntigravityInstallProgress } from './installation'
 
 export const ANTIGRAVITY_PROVIDER_ID = 'antigravity'
 type ProfileSettings = {
@@ -326,7 +326,7 @@ export class AntigravityProviderService {
    * Downloads Google's pinned agent into the installation. Install and sign-in are separate:
    * this never starts a sign-in. A manual executable path is dropped so the verified install is used.
    */
-  async install(onProgress?: (message: string, fraction?: number) => void): Promise<CliProviderConfig> {
+  async install(onProgress?: AntigravityInstallProgress): Promise<CliProviderConfig> {
     if (this.stopped) throw new Error('Antigravity provider is stopped')
     if (this.installing) throw new Error('Antigravity is already being installed')
     const abort = new AbortController()

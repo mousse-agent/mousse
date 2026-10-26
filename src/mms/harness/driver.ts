@@ -1,5 +1,5 @@
 import type { AuthState, InstallOwner } from '../../shared/harness/status'
-import type { HarnessCaps, HarnessDriverKind, RuntimeFacts } from '../../shared/harness/types'
+import type { HarnessCaps, HarnessDriverKind, RemoveInstallResult, RuntimeFacts } from '../../shared/harness/types'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
@@ -36,6 +36,31 @@ export interface InstanceConfig {
   source?: AcpSource
   /** The entry this one moved to (`instances.move`): turned off, and its threads continue there. */
   movedTo?: string
+}
+
+/** Progress of an install: a line to show, and bytes when a download knows them. */
+export interface InstallProgress {
+  message: string
+  fraction?: number
+  receivedBytes?: number
+  totalBytes?: number
+}
+
+export interface InstallResult {
+  config?: Record<string, unknown>
+}
+
+export interface ManagedInstall {
+  path: string
+  version?: string
+  /** What the download takes on disk. */
+  bytes?: number
+  /** Whether the registry gave a checksum for the download. */
+  checksum?: 'registry' | 'none'
+  /** Why the installed files may not run (they changed since install). */
+  broken?: string
+  /** Something to tell the user about the install. */
+  advisory?: string
 }
 
 /** Runtime facts as a runtime reports them; the gateway stamps the instance and its counters. */
@@ -118,11 +143,24 @@ export interface DriverRuntime {
   exportApiKey?(): Promise<string | undefined>
   /** Saves `apiKey` as this entry's own credential (a move that copies the old entry's key). */
   adoptApiKey?(apiKey: string): Promise<void>
-  install?(onProgress: (message: string, fraction?: number) => void): Promise<void>
+  /**
+   * Installs (or updates) the runtime. A result's `config` is merged into the instance's stored
+   * config, which moves its revision on (a registry agent records the install it was made with).
+   */
+  install?(onProgress: (progress: InstallProgress) => void): Promise<void | InstallResult>
   cancelInstall?(): boolean
   installState?(): { installing: boolean; progress?: string }
   /** A Mousse-managed install and its known version. */
-  managed?(): { path: string; version?: string } | undefined
+  managed?(): ManagedInstall | undefined
+  /**
+   * Checks every installed file against its install record (Recheck, Add, after install); a
+   * mismatch shows through `managed().broken`.
+   */
+  verifyInstall?(signal: AbortSignal): Promise<void>
+  /** Deletes the instance's downloaded files; other entries using them block it unless `force`. */
+  removeInstall?(options: { force: boolean }): Promise<RemoveInstallResult>
+  /** The instance is being removed: it lets go of shared installs (its files stay unless deleted). */
+  release?(): Promise<void>
   /** Validates an override path beyond "exists and runs" (throws when invalid). */
   validateOverride?(path: string): void
   /** Forget the native session of a thread so its next turn hands history over instead. */

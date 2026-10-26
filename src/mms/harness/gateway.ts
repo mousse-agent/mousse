@@ -13,6 +13,8 @@ import type {
   ProviderOperationStarted,
   ProviderScope,
   ProviderSelection,
+  RegistryAgentView,
+  RemoveInstallResult,
   RunPolicy,
   RuntimeFacts,
   SignInResponse,
@@ -47,7 +49,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelPrefsService, visibleProviderOption, type ModelPrefsStore } from './catalog'
-import type { AuthReading, DriverRuntime, HarnessDriver, InstanceConfig, LiveProcessHost } from './driver'
+import type { AuthReading, DriverRuntime, HarnessDriver, InstallProgress, InstanceConfig, LiveProcessHost } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, type InstanceEnv } from './env'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
 import { LatestVersionCache } from './latest'
@@ -84,6 +86,8 @@ export type {
 export interface HarnessGateway {
   readonly instances: HarnessInstances
   readonly catalog: HarnessCatalog
+  /** The ACP agent registry ("More ACP agents"). */
+  readonly registry: HarnessRegistry
   /**
    * The selection a caller may run, after scope (device ceiling, project narrowing) and model
    * prefs. Throws `instance_unknown`, `instance_disabled`, `model_hidden` or `model_unavailable`;
@@ -222,6 +226,11 @@ export interface HarnessInstances {
   /** `null` clears a project override; the device scope takes a boolean only. */
   setEnabled(instanceId: string, scope: ProviderScope, enabled: boolean | null): Promise<InstanceSnapshot>
   install(instanceId: string): Promise<ProviderOperationStarted>
+  /**
+   * Deletes the files Mousse downloaded for the instance. Other entries using them (in this or
+   * another profile) block it with the list of who uses them, unless `force`.
+   */
+  removeInstall(instanceId: string, options: { force: boolean }): Promise<RemoveInstallResult>
   /** Cancels a running install or update; false when it is not running. */
   cancelInstall(operationId: string): Promise<boolean>
   update(instanceId: string): Promise<ProviderOperationStarted>
@@ -243,6 +252,11 @@ export interface HarnessInstances {
   move(fromInstanceId: string, toInstanceId: string, options?: { copyKey?: boolean }): Promise<MoveResult>
   /** Snapshot changes (`snapshots$`) and operation progress; returns the unsubscribe. */
   subscribe(listener: (event: HarnessGatewayEvent) => void): () => void
+}
+
+export interface HarnessRegistry {
+  /** Agents of the ACP registry that fit this computer, best match first. */
+  search(query: string): Promise<RegistryAgentView[]>
 }
 
 export type HarnessGatewayEvent =
@@ -343,6 +357,8 @@ export interface HarnessGatewayOptions {
   defaults?: { rewrite(from: string, to: { instanceId: string; llmProvider: string; model(model: string): string }): string[] }
   /** Test seam: the agent a model API moves to (`FOLDED_INTO_AGENT`). */
   foldedInto?: (providerId: string | undefined) => HarnessDriverKind | undefined
+  /** The ACP agent registry; without it the search finds nothing. */
+  registry?: HarnessRegistry
 }
 
 interface InstanceRecord {
@@ -418,7 +434,7 @@ interface Operation {
   manualCode?: string
   urlPrompts: string[]
   prompts: number
-  progress?: { message: string; fraction?: number }
+  progress?: InstallProgress
   cancel(): boolean
 }
 
@@ -486,6 +502,7 @@ function memoryPrefs(): ModelPrefsStore {
 export class Harness implements HarnessGateway {
   readonly instances: HarnessInstances
   readonly catalog: HarnessCatalog
+  readonly registry: HarnessRegistry
   readonly legacy: LegacyProviders
   readonly instanceMap: ProviderInstanceService
   private readonly drivers = new Map<HarnessDriverKind, HarnessDriver>()
@@ -561,6 +578,7 @@ export class Harness implements HarnessGateway {
       configure: (instanceId, patch) => this.configure(instanceId, patch),
       setEnabled: (instanceId, scope, enabled) => this.setEnabled(instanceId, scope, enabled),
       install: (instanceId) => this.install(instanceId, 'install'),
+      removeInstall: (instanceId, options) => this.removeInstall(instanceId, options),
       cancelInstall: async (operationId) => this.operations.get(operationId)?.cancel() ?? false,
       update: (instanceId) => this.update(instanceId),
       signIn: (instanceId, method) => this.signIn(instanceId, method),
@@ -587,6 +605,7 @@ export class Harness implements HarnessGateway {
         return () => this.listeners.delete(listener)
       }
     }
+    this.registry = { search: (query) => options.registry?.search(query) ?? Promise.resolve([]) }
     this.catalog = {
       models: (instanceId) => modelsWithPrefs(this.record(instanceId, { allowDisabled: true }).runtime.models(), this.prefs.get(instanceId)),
       customModel: (instanceId, modelId) => {
@@ -1512,6 +1531,7 @@ export class Harness implements HarnessGateway {
     const operation = [...this.operations.values()].find((entry) => entry.started.instanceId === instanceId && entry.started.kind !== 'sign_in')
     const installing = Boolean(operation) || runtime.installState?.().installing === true
     const installProgress = operation?.progress ?? (runtime.installState?.().progress ? { message: runtime.installState!().progress! } : undefined)
+    const managed = runtime.managed?.()
     const auth = shown?.auth ?? { state: 'unknown' as const }
     const update = this.updateFor(record)
     const prefs = this.prefs.get(instanceId)
@@ -1531,7 +1551,10 @@ export class Harness implements HarnessGateway {
         state: installing ? 'installing' : shown?.install ?? 'unknown',
         ...(operation ? { operationId: operation.started.operationId } : {}),
         ...(installing && installProgress ? { progress: installProgress } : {}),
-        canInstall: driver.canInstall && Boolean(runtime.install)
+        canInstall: driver.canInstall && Boolean(runtime.install),
+        ...(managed?.bytes !== undefined && runtime.removeInstall ? { downloaded: { bytes: managed.bytes } } : {}),
+        ...(managed?.checksum ? { checksum: managed.checksum } : {}),
+        ...(managed?.advisory ? { advisory: managed.advisory } : {})
       },
       runs: shown?.runs ?? { state: 'unknown' },
       auth: {
@@ -1614,7 +1637,10 @@ export class Harness implements HarnessGateway {
       args: [...(source.args ?? [])],
       env: { ...(source.env ?? {}) },
       ...(record.config.loginMethod ? { loginMethod: record.config.loginMethod } : {}),
-      ...(record.config.movedTo ? { movedTo: record.config.movedTo } : {})
+      ...(record.config.movedTo ? { movedTo: record.config.movedTo } : {}),
+      ...(record.config.source?.kind === 'registry'
+        ? { source: { kind: 'registry' as const, agentId: record.config.source.agentId, version: record.config.source.version, distribution: record.config.source.distribution } }
+        : {})
     }
   }
 
@@ -1666,6 +1692,12 @@ export class Harness implements HarnessGateway {
     // sign-in are never touched, and Add provider adds it back.
     const record = this.record(instanceId, { allowDisabled: true })
     const state = this.probes.get(instanceId)
+    // Shared installs stop counting this entry as a user; their files stay unless deleted.
+    try {
+      await record.runtime.release?.()
+    } catch (error) {
+      console.warn('[harness] could not release an install', { instanceId, error: errorText(error) })
+    }
     this.records.delete(instanceId)
     this.instanceMap.removeEntry(instanceId)
     this.prefs.remove(instanceId)
@@ -1700,6 +1732,9 @@ export class Harness implements HarnessGateway {
 
   private async configure(instanceId: string, patch: InstanceConfigPatch): Promise<InstanceSnapshot> {
     const record = this.record(instanceId, { allowDisabled: true })
+    // An install in progress binds the entry to the source it installs when it ends.
+    if (patch.source !== undefined && [...this.operations.values()].some((entry) => entry.started.instanceId === instanceId && entry.started.kind !== 'sign_in'))
+      harnessFail('operation_busy', `${this.displayName(record)} is being installed. Wait for it to finish, then change its version.`, instanceId)
     if (record.builtIn && patch.home === 'private')
       harnessFail('unsupported', `The built-in ${record.driver.label} runs as you set it up. Add another instance for a separate home.`, instanceId)
     if (patch.home === 'private' && !record.driver.privateHome)
@@ -1746,6 +1781,13 @@ export class Harness implements HarnessGateway {
     if (patch.args !== undefined) setOrDelete(config, 'args', patch.args.length ? [...patch.args] : undefined)
     if (patch.env !== undefined) setOrDelete(config, 'env', Object.keys(patch.env).length ? { ...patch.env } : undefined)
     if (patch.loginMethod !== undefined) setOrDelete(config, 'loginMethod', patch.loginMethod || undefined)
+    if (patch.source !== undefined) {
+      // Only a driver that reads registry sources takes one (it validates every value itself).
+      if (driver.decodeConfig({ source: patch.source }).source?.kind !== 'registry')
+        harnessFail('unsupported', `${driver.label} cannot install agents from the ACP registry.`)
+      config.source = { ...patch.source }
+      delete config.binaryPath
+    }
     return config
   }
 
@@ -1832,12 +1874,21 @@ export class Harness implements HarnessGateway {
     const operation: Operation = { started, prompts: 0, urlPrompts: [], cancel: () => runtime.cancelInstall?.() ?? false }
     this.operations.set(started.operationId, operation)
     queueMicrotask(() => {
-      void runtime.install!((message, fraction) => {
-        operation.progress = { message, ...(fraction !== undefined ? { fraction } : {}) }
-        this.emit({ type: 'operation', data: { ...started, phase: 'progress', message, ...(fraction !== undefined ? { fraction } : {}) } })
+      void runtime.install!((progress) => {
+        const fraction = progress.fraction ?? (progress.receivedBytes !== undefined && progress.totalBytes ? Math.min(1, progress.receivedBytes / progress.totalBytes) : undefined)
+        operation.progress = { ...progress, ...(fraction !== undefined ? { fraction } : {}) }
+        this.emit({ type: 'operation', data: { ...started, phase: 'progress', ...operation.progress } })
         this.emitSnapshots({ kind: 'device' })
       })
-        .then(() => this.emit({ type: 'operation', data: { ...started, phase: 'completed' } }))
+        .then((result) => {
+          // The install binds the entry (a registry agent's install record): a new revision.
+          if (result?.config && Object.prototype.hasOwnProperty.call(this.instanceMap.list(), instanceId)) {
+            const entry = this.instanceMap.list()[instanceId]!
+            this.instanceMap.setEntry(instanceId, { ...entry, config: { ...(entry.config ?? {}), ...result.config } })
+            this.counters.bumpConfig(instanceId)
+          }
+          this.emit({ type: 'operation', data: { ...started, phase: 'completed' } })
+        })
         .catch((error) => {
           const cancelled = /cancel/i.test(errorText(error))
           this.emit({ type: 'operation', data: cancelled ? { ...started, phase: 'cancelled' } : { ...started, phase: 'failed', error: { code: 'protocol', message: errorText(error), instanceId } } })
@@ -1851,6 +1902,22 @@ export class Harness implements HarnessGateway {
     })
     this.emitSnapshots({ kind: 'device' })
     return started
+  }
+
+  private async removeInstall(instanceId: string, options: { force: boolean }): Promise<RemoveInstallResult> {
+    const record = this.record(instanceId, { allowDisabled: true })
+    if (!record.runtime.removeInstall) return harnessFail('unsupported', `${this.displayName(record)} has no files Mousse downloaded.`, instanceId)
+    if ([...this.operations.values()].some((entry) => entry.started.instanceId === instanceId && entry.started.kind !== 'sign_in'))
+      return harnessFail('operation_busy', `${this.displayName(record)} is being installed.`, instanceId)
+    let result: RemoveInstallResult
+    try {
+      result = await record.runtime.removeInstall(options)
+    } catch (error) {
+      return harnessFail('operation_busy', errorText(error), instanceId)
+    }
+    if (result.removed) await this.probe(instanceId, true)
+    this.changed(instanceId)
+    return result
   }
 
   private async update(instanceId: string): Promise<ProviderOperationStarted> {

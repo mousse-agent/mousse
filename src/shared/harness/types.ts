@@ -313,7 +313,53 @@ export interface InstanceConfigPatch {
   /** Full replacement. */
   env?: Record<string, string>
   loginMethod?: string | null
+  /** An ACP agent from the registry (`acp` instances): a new version or agent replaces the old one. */
+  source?: RegistrySourcePatch
 }
+
+/**
+ * An agent the ACP registry lists, installed by Mousse. `consent` records that the user accepted
+ * an artifact without a registry checksum; it covers that version and download only.
+ */
+export interface RegistrySourcePatch {
+  kind: 'registry'
+  agentId: string
+  version: string
+  distribution: 'binary' | 'npx'
+  consent?: { version: string; artifactUrl: string }
+}
+
+/** How a registry agent is fetched: a checked download, an unchecked one, or an npm package. */
+export type RegistryChecksum = 'registry' | 'none'
+
+/** One agent of the ACP registry as the "More ACP agents" step shows it, for this computer. */
+export interface RegistryAgentView {
+  id: string
+  name: string
+  version: string
+  description: string
+  authors: string[]
+  license?: string
+  website?: string
+  repository?: string
+  /** What Mousse would install here; `uvx` and unsupported archives are listed but cannot be added. */
+  distribution: 'binary' | 'npx' | 'uvx'
+  checksum: RegistryChecksum
+  /** The download, for binary agents (shown in the confirm step and recorded with consent). */
+  artifactUrl?: string
+  /** The npm package, for npx agents (`name@version`). */
+  package?: string
+  /** What the agent starts with, after Mousse drops variables it never passes on. */
+  args: string[]
+  env: Record<string, string>
+  /** Why it cannot be added here; absent when it can. */
+  unsupported?: string
+}
+
+/** `instances.removeInstall`: deleted, or still used by other entries (`force` deletes anyway). */
+export type RemoveInstallResult =
+  | { removed: true; bytes: number }
+  | { removed: false; usedBy: Array<{ profileId: string; profileName?: string; entries: number }> }
 
 export interface AddInstanceInput {
   driver: HarnessDriverKind
@@ -345,7 +391,7 @@ export interface SignInResponse {
 
 /** Progress and completion of one provider operation (`providers.operation`). */
 export type ProviderOperationEvent = ProviderOperationStarted & (
-  | { phase: 'progress'; message: string; /** 0..1 when known. */ fraction?: number }
+  | { phase: 'progress'; message: string; /** 0..1 when known. */ fraction?: number; receivedBytes?: number; totalBytes?: number }
   | { phase: 'prompt'; prompt: SignInPrompt }
   | { phase: 'completed' }
   | { phase: 'failed'; error: HarnessError }

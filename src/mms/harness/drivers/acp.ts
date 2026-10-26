@@ -13,11 +13,13 @@ import { AcpAdapter } from '../../run/adapters/acp/AcpAdapter'
 import { decodeAuthMethods, type AcpAuthMethod } from '../acp/auth'
 import { connectAcpProcess, type AcpConnection, type AcpConnectionFactory, type AcpLaunchRequest } from '../acp/connection'
 import { AGENT_DEFAULT_MODEL } from '../acp/models'
-import type { AcpPreset, AcpSource } from '../acp/preset'
+import type { AcpLaunch, AcpPreset, AcpSource } from '../acp/preset'
 import { GENERIC_ACP_PRESET } from '../acp/presets/generic'
 import { AcpSessions, type AcpObservations, type SavedAcpSession } from '../acp/session'
-import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig, type LiveProcessHost, type RuntimeFactsReport } from '../driver'
-import { withUserEnv } from '../../providers/cliConfig'
+import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig, type LiveProcessHost, type ManagedInstall, type RuntimeFactsReport } from '../driver'
+import { withUserEnv, type CliLaunch } from '../../providers/cliConfig'
+import type { AgentInstalls, InstalledAgent, RegistrySource } from '../agents/install'
+import { DIST_DIR } from '../agents/receipt'
 import { resolveCommand } from '../env'
 import { ptyAvailable, runInPty, signInPrompts, type PtySpawn } from '../pty'
 import { killTree, spawnHarness } from '../spawn'
@@ -26,8 +28,10 @@ import { fingerprintOf } from '../status'
 /**
  * Any agent that speaks the Agent Client Protocol, run from a command the user chose
  * (`config.source = { kind: 'local', command, args, env }`): no shell, `.cmd` shims resolved to
- * the program they run, and a command that cannot run reports `runs: no`. Sign-in follows the
- * methods the agent advertises (ACP `agent` and `terminal`), and counts only once a later
+ * the program they run, and a command that cannot run reports `runs: no`. Or an agent from the ACP
+ * registry that Mousse installs (`{ kind: 'registry', agentId, version, distribution }`): it runs
+ * from its install record only, and only while every installed file matches it. Sign-in follows
+ * the methods the agent advertises (ACP `agent` and `terminal`), and counts only once a later
  * `session/new` succeeds.
  */
 
@@ -45,6 +49,8 @@ interface AcpState {
   auth?: { bindingHash: string; methodId: string; authenticated: boolean }
   /** The agent asked for a sign-in during a turn. */
   signedOut?: boolean
+  /** The installed files (of the install record `hash`) no longer match it. */
+  filesChanged?: { hash: string; message: string }
 }
 
 export interface AcpDriverOptions {
@@ -53,22 +59,57 @@ export interface AcpDriverOptions {
   connect?: (context: DriverContext, request: AcpLaunchRequest) => AcpConnection
   /** Test seam: the pseudo-terminal for `terminal` sign-in methods. */
   pty?: { available: () => boolean; spawn?: PtySpawn }
+  /** Managed installs of registry agents; without it a registry entry cannot be installed. */
+  agents?: AgentInstalls
 }
+
+/**
+ * A launch right after a full file check of the same install record does not hash again (a
+ * Recheck checks the files, then starts the agent for its handshake).
+ */
+export const INSTALL_CHECK_REUSE_MS = 5_000
+
+const REGISTRY_AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
+const REGISTRY_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
-/** The local command of an instance: `config.source`, else its executable, arguments and variables. */
+/** Where an instance's agent comes from: `config.source`, else its executable, arguments and variables. */
 export function acpSourceOf(config: InstanceConfig): AcpSource | undefined {
   if (config.source) return config.source
   return config.binaryPath ? { kind: 'local', command: config.binaryPath, args: [...(config.args ?? [])], env: { ...(config.env ?? {}) } } : undefined
 }
 
+/** A stored registry source, or undefined when any of its values could not be a path segment. */
+export function decodeRegistrySource(source: Record<string, unknown>): RegistrySource | undefined {
+  const { agentId, version, distribution, receiptHash, consent } = source
+  if (typeof agentId !== 'string' || !REGISTRY_AGENT_ID.test(agentId)) return undefined
+  if (typeof version !== 'string' || !REGISTRY_VERSION.test(version)) return undefined
+  if (distribution !== 'binary' && distribution !== 'npx') return undefined
+  const accepted = isRecord(consent) && typeof consent.version === 'string' && typeof consent.artifactUrl === 'string'
+    ? { version: consent.version, artifactUrl: consent.artifactUrl }
+    : undefined
+  return {
+    kind: 'registry',
+    agentId,
+    version,
+    distribution,
+    ...(typeof receiptHash === 'string' && /^[a-f0-9]{64}$/.test(receiptHash) ? { receiptHash } : {}),
+    ...(accepted ? { consent: accepted } : {})
+  }
+}
+
 function decodeAcpConfig(raw: Record<string, unknown> | undefined): InstanceConfig {
   const config = decodeInstanceConfig(raw, { privateHome: false })
   const source = raw?.source
-  if (isRecord(source) && source.kind === 'local' && typeof source.command === 'string' && source.command.trim()) {
+  const registry = isRecord(source) && source.kind === 'registry' ? decodeRegistrySource(source) : undefined
+  if (registry) {
+    config.source = registry
+    // A registry agent runs from its install only, never from an executable path.
+    delete config.binaryPath
+  } else if (isRecord(source) && source.kind === 'local' && typeof source.command === 'string' && source.command.trim()) {
     config.source = {
       kind: 'local',
       command: source.command.trim(),
@@ -98,7 +139,8 @@ export function acpDriver(options: AcpDriverOptions = {}): HarnessDriver {
     ...(preset.testedVersions ? { testedVersions: preset.testedVersions } : {}),
     multiInstance: true,
     privateHome: false,
-    canInstall: false,
+    // Registry agents only; a local command's runtime offers no install.
+    canInstall: true,
     customModels: false,
     methodLabel: 'The agent’s own sign-in',
     // ACP updates do not name the MCP server: the bearer is kept only after a turn whose tool calls all completed.
@@ -129,7 +171,11 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     atomicWriteJsonSync(statePath, state, { mode: 0o600 })
   }
   const source = acpSourceOf(context.config)
+  const registrySource = source?.kind === 'registry' ? source : undefined
+  const agents = options.agents
   const label = context.config.displayName ?? preset.label
+  /** The install a registry entry's launch was last checked against, and when. */
+  let verified: { hash: string; atMs: number } | undefined
   let liveHost: LiveProcessHost | null = null
   let signInGeneration = 0
   let observedInfo: AcpObservations['info']
@@ -137,26 +183,74 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
 
   /**
    * The binding a verified sign-in belongs to: the command, its arguments, its variables and the
-   * method. Changing any of them makes the sign-in unknown again.
+   * method (a registry agent: its id, version, distribution and install). Changing any of them
+   * makes the sign-in unknown again.
    */
+  const sortedEnv = (env: Record<string, string> | undefined) => Object.entries(env ?? {}).sort(([a], [b]) => a.localeCompare(b))
   const bindingHash = (methodId: string) => createHash('sha256')
-    .update(JSON.stringify([source?.command, source?.args, Object.entries(source?.env ?? {}).sort(([a], [b]) => a.localeCompare(b)), methodId]))
+    .update(JSON.stringify(source?.kind === 'registry'
+      ? [source.agentId, source.version, source.distribution, source.receiptHash, context.config.args, sortedEnv(context.config.env), methodId]
+      : [source?.command, source?.args, sortedEnv(source?.env), methodId]))
     .digest('hex')
 
   /** The instance's variables over its environment (on Windows a user `PATH` replaces `Path`). */
   const launchEnv = (variables: Record<string, string>, extra: Record<string, string> = {}) =>
     withUserEnv(withUserEnv(context.env.env, variables), extra)
 
-  const launchOf = (purpose: AcpLaunchRequest['purpose']) => {
+  /** The registry entry's published install, when there is one. */
+  const installedNow = (): InstalledAgent | undefined => (registrySource && agents ? agents.installed(registrySource) : undefined)
+
+  const launchOf = (purpose: AcpLaunchRequest['purpose']): { resolved: CliLaunch; launch: AcpLaunch; root?: string } => {
     if (!source) throw new Error(`${label} has no command. Set one in its settings.`)
+    if (source.kind === 'registry') {
+      const installed = installedNow()
+      if (!agents || !installed) throw new Error(`${label} is not installed. Install it in Settings → Providers.`)
+      // The receipt says how it starts; the entry's own arguments and variables go on top.
+      const agent = agents.launch(installed, context.env)
+      return {
+        resolved: { path: agent.path, command: agent.command, args: agent.args },
+        launch: { command: agent.command, args: [...(context.config.args ?? [])], env: { ...agent.env, ...(context.config.env ?? {}) } },
+        root: installed.root
+      }
+    }
     const launch = preset.launch({ config: context.config, source, purpose })
     const resolved = resolveCommand(launch.command, context.env)
     if (!resolved) throw new Error(`Mousse cannot run ${launch.command}.`)
     return { resolved, launch }
   }
 
+  /**
+   * Before a registry agent starts: its install record is the one the entry was installed with,
+   * and every file still matches it. A mismatch is kept (the card offers Reinstall) and stops the launch.
+   */
+  const checkInstall = async (signal?: AbortSignal, options: { reuse?: boolean } = {}): Promise<void> => {
+    if (!registrySource) return
+    const installed = installedNow()
+    if (!agents || !installed) throw new Error(`${label} is not installed. Install it in Settings → Providers.`)
+    // Only a launch reuses a check made moments ago; Recheck always hashes every file.
+    if (options.reuse && verified?.hash === installed.hash && Date.now() - verified.atMs < INSTALL_CHECK_REUSE_MS && !state.filesChanged) return
+    const changed = await agents.changed(installed, registrySource.receiptHash, signal)
+    if (changed) {
+      if (state.filesChanged?.hash !== installed.hash || state.filesChanged.message !== changed) {
+        state.filesChanged = { hash: installed.hash, message: changed }
+        save()
+        context.changed()
+      }
+      throw new Error(`Installed files changed since install (${changed}). Reinstall ${label} in Settings → Providers.`)
+    }
+    if (state.filesChanged) {
+      delete state.filesChanged
+      save()
+    }
+    verified = { hash: installed.hash, atMs: Date.now() }
+  }
+
   const spawnAgent = (request: AcpLaunchRequest): AcpConnection => {
-    const { resolved, launch } = launchOf(request.purpose)
+    const { resolved, launch, root } = launchOf(request.purpose)
+    // Every registry launch follows a file check (`beforeLaunch`); none starts without one.
+    if (root && (!verified || verified.hash !== installedNow()?.hash || Date.now() - verified.atMs > 60_000))
+      throw new Error(`Mousse did not check the files of ${label} before starting it.`)
+    const untrack = root && agents ? agents.track(root) : undefined
     // Checks and sign-in verification run in a folder of their own, removed when the process ends.
     const scratch = request.purpose === 'turn' ? undefined : mkdtempSync(join(tmpdir(), 'mousse-acp-'))
     const child = spawnHarness({ ...context.env, env: launchEnv(launch.env) }, `acp-${request.purpose}`, resolved.command, [...resolved.args, ...launch.args], {
@@ -172,6 +266,7 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
         }
       } : {}),
       onExit: () => {
+        untrack?.()
         request.onExit?.()
         if (scratch) rmSync(scratch, { recursive: true, force: true })
       }
@@ -204,6 +299,7 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     // links as URL elicitations only to clients that accept them.
     clientCapabilities: () => ({ auth: { terminal: ptyRuns() }, elicitation: { url: {} } }),
     closeSessions: true,
+    beforeLaunch: () => checkInstall(undefined, { reuse: true }),
     store: {
       saved: (threadId) => state.sessions?.[threadId],
       setSaved: (threadId, saved) => {
@@ -333,6 +429,7 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
         if (!method) throw new Error('Choose a sign-in method.')
       }
       if (method.type === 'terminal') {
+        await checkInstall(session.abort.signal)
         const { resolved, launch } = launchOf('sign_in')
         const shown = new Set<string>()
         const run = runInPty(resolved.command, [...resolved.args, ...launch.args, ...method.args], {
@@ -357,6 +454,7 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
         return succeed(method.id, session)
       }
       // `agent`: the agent signs in after `authenticate`, sending its link as an elicitation or printing it.
+      await checkInstall(session.abort.signal)
       const active = sessions.launch('sign_in', (url) => {
         session.emitEvent({ sessionId: session.sessionId, type: 'auth_url', url, usesCallbackServer: false })
       })
@@ -391,10 +489,57 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     interrupt: (sessionId: string | undefined) => sessions.interrupt(sessionId)
   }
 
+  /** What the card shows about a registry entry's install. */
+  const managed = (): ManagedInstall | undefined => {
+    const installed = installedNow()
+    if (!installed || !agents) return undefined
+    const replaced = registrySource?.receiptHash && installed.hash !== registrySource.receiptHash ? 'the install was replaced' : undefined
+    const broken = replaced ?? (state.filesChanged?.hash === installed.hash ? state.filesChanged.message : undefined)
+    const advisory = agents.advisory(installed)
+    return {
+      path: join(installed.root, DIST_DIR, ...installed.receipt.launch.cmd.split('/')),
+      version: installed.receipt.version,
+      bytes: installed.receipt.bytes,
+      checksum: installed.receipt.checksum,
+      ...(broken ? { broken } : {}),
+      ...(advisory ? { advisory } : {})
+    }
+  }
+
+  const registryRuntime: Partial<DriverRuntime> = registrySource && agents ? {
+    install: async (onProgress) => {
+      const installed = await agents.install({ instanceId: context.instanceId, source: registrySource, env: context.env, label, onProgress })
+      if (state.filesChanged) {
+        delete state.filesChanged
+        save()
+      }
+      // The entry is bound to this install record: a different one later reads as changed files.
+      return { config: { source: { ...registrySource, receiptHash: installed.hash } } }
+    },
+    cancelInstall: () => agents.cancel(context.instanceId),
+    installState: () => ({ installing: agents.installing(context.instanceId) }),
+    managed,
+    verifyInstall: async (signal) => {
+      try {
+        await checkInstall(signal)
+      } catch {
+        // Recorded in the state; the probe reads it through `managed().broken`.
+      }
+    },
+    removeInstall: async ({ force }) => {
+      const result = await agents.removeInstall({ instanceId: context.instanceId, source: registrySource, force })
+      if (result.removed) sessions.closeAll()
+      return result
+    },
+    release: () => agents.release(context.instanceId, registrySource)
+  } : {}
+
   const runtime: DriverRuntime = {
     adapter,
+    ...registryRuntime,
     configured: () => {
       if (!source || state.signedOut) return false
+      if (registrySource && (!installedNow() || managed()?.broken)) return false
       try {
         launchOf('turn')
         return true
@@ -428,6 +573,7 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
       sessions.closeAll()
       if (state.auth?.methodId && authMethods().some((method) => method.id === state.auth?.methodId && method.type === 'agent')) {
         try {
+          await checkInstall()
           const active = sessions.launch('sign_out')
           try {
             await sessions.initialize(active)

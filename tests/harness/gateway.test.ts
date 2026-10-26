@@ -397,8 +397,8 @@ describe('harness gateway: instances', () => {
     const driver = adapterDriver(antigravity, {
       runtime: {
         install: (onProgress) => new Promise<void>((resolve, reject) => {
-          onProgress('Downloading')
-          onProgress('Downloading 57 MB of 136 MB', 0.42)
+          onProgress({ message: 'Downloading' })
+          onProgress({ message: 'Downloading 57 MB of 136 MB', receivedBytes: 57_000_000, totalBytes: 136_000_000 })
           release = () => (cancelled ? reject(new Error('Install cancelled')) : resolve())
         }),
         cancelInstall: () => {
@@ -416,9 +416,10 @@ describe('harness gateway: instances', () => {
     expect(started).toMatchObject({ instanceId: 'antigravity', kind: 'install' })
     await expect(harness.instances.install('antigravity')).rejects.toMatchObject({ code: 'operation_busy' })
     await waitFor(() => events.some((event) => event.type === 'operation' && event.data.phase === 'progress' && event.data.fraction !== undefined))
-    // Byte progress keeps its fraction for the downloads indicator; a plain step has none.
+    // Byte progress reaches the downloads indicator with its bytes and their fraction; a plain step has neither.
     const progress = events.flatMap((event) => (event.type === 'operation' && event.data.phase === 'progress' ? [event.data] : []))
-    expect(progress.map((data) => [data.message, data.fraction])).toEqual([['Downloading', undefined], ['Downloading 57 MB of 136 MB', 0.42]])
+    expect(progress.map((data) => [data.message, data.fraction, data.receivedBytes, data.totalBytes]))
+      .toEqual([['Downloading', undefined, undefined, undefined], ['Downloading 57 MB of 136 MB', 57 / 136, 57_000_000, 136_000_000]])
     expect(await harness.instances.cancelInstall(started.operationId)).toBe(true)
     await waitFor(() => events.some((event) => event.type === 'operation' && event.data.phase === 'cancelled'))
     expect(await harness.instances.cancelInstall(started.operationId)).toBe(false)

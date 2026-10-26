@@ -138,7 +138,27 @@ export async function probeInstance(input: {
     return { checkedAt, install: 'installed', runs: { state: 'yes' }, auth, compatibility: { state: 'tested' }, binary: { source: 'bundled' }, timedOut }
   }
 
+  // Recheck, Add and after install: every installed file against its install record. Hashing a
+  // large install is local work with no deadline; the start-up check that follows reuses it.
+  if (input.force && runtime.verifyInstall) {
+    try {
+      await runtime.verifyInstall(new AbortController().signal)
+    } catch (error) {
+      console.warn('[harness] install check failed', { driver: driver.kind, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
   const managed = runtime.managed?.()
+  if (managed?.broken) {
+    return {
+      checkedAt,
+      install: 'broken',
+      runs: { state: 'no', failure: 'files_changed', message: `Installed files changed since install (${managed.broken}). Reinstall to run it.` },
+      auth: notChecked,
+      compatibility: compatibilityOf(driver, managed.version),
+      binary: { path: managed.path, source: 'managed', owner: 'managed', ...(managed.version ? { version: managed.version } : {}) },
+      timedOut: false
+    }
+  }
   const resolved = resolveBinary({
     override: input.override,
     validateOverride: runtime.validateOverride,

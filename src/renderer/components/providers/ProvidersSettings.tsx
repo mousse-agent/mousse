@@ -27,7 +27,7 @@ import type { InstanceActions } from './CliSections'
 import { MoveNotice } from './MoveProviderDialog'
 import { AgentEditor, ApiEditor } from './ProviderEditor'
 import { ProviderListRow, errorText, useAsyncAction, useRelativeTime } from './parts'
-import { formatVersion, iconIdOf, isApiInstance, lastCheckedAt, switchStateOf } from './providerView'
+import { formatVersion, iconIdOf, isApiInstance, lastCheckedAt, switchStateOf, usedByLabel } from './providerView'
 import { SignInDialog } from './SignInDialog'
 import '../../styles/providers.css'
 
@@ -84,6 +84,8 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
   const [loginActive, setLoginActive] = useState(false)
   const [signIn, setSignIn] = useState<{ operationId: string; name: string } | null>(null)
   const [pageError, setPageError] = useState<string | null>(null)
+  /** Something a finished action wants the user to know (files kept after a remove). */
+  const [pageNotice, setPageNotice] = useState<string | null>(null)
   const refreshing = useAsyncAction()
 
   // Model APIs still connect through the provider login methods; their options say what is connected.
@@ -123,6 +125,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
 
   const guard = async (action: () => Promise<void>) => {
     setPageError(null)
+    setPageNotice(null)
     try {
       await action()
     } catch (error) {
@@ -165,7 +168,8 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
       },
       signOut: async () => applySnapshot(await instances.signOut(id)),
       recheck: async () => applySnapshot(await instances.recheck(id)),
-      configure: async (patch) => applySnapshot(await instances.configure(id, patch))
+      configure: async (patch) => applySnapshot(await instances.configure(id, patch)),
+      removeInstall: (force) => instances.removeInstall(id, force)
     }
   }
 
@@ -260,10 +264,18 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
         status={status}
         operation={operation}
         actions={actionsFor(snapshot)}
-        onRemove={async () => {
-          await window.mousse.providers.instances.remove(snapshot.instanceId)
+        onRemove={async ({ deleteFiles }) => {
+          const { instances } = window.mousse.providers
+          setPageNotice(null)
+          // Deleting the files comes first: if it fails, nothing is removed. Files other entries
+          // use stay; the entry is removed anyway and the page says why the files are still there.
+          const files = deleteFiles ? await instances.removeInstall(snapshot.instanceId) : undefined
+          await instances.remove(snapshot.instanceId)
           removeSnapshot(snapshot.instanceId)
           setSelectedId(null)
+          if (files && !files.removed) {
+            setPageNotice(`The downloaded files of ${snapshot.displayName} stay because other entries use them: ${files.usedBy.map(usedByLabel).join(', ')}.`)
+          }
           await reconcileSelection()
         }}
         onSaveModelPrefs={onSaveModelPrefs}
@@ -277,6 +289,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
 
   const openAdd = () => {
     setPageError(null)
+    setPageNotice(null)
     setAddOpen(true)
     void loadLoginOptions().catch(() => {})
   }
@@ -310,6 +323,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
         <p className="prov-scope-note">Switches here apply to this project only. A provider turned off for the device stays off in every project. Setup, runtime, environment and models apply to this device.</p>
       )}
       {(pageError ?? refreshing.error) && <p className="prov-error">{pageError ?? refreshing.error}</p>}
+      {pageNotice && <p className="prov-notice">{pageNotice}</p>}
 
       {!snapshots ? (
         loadError && !loading ? (

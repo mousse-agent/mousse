@@ -7,6 +7,7 @@ import { SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
 import { AccountRow, ArgsRow, BinaryRow, EnvRow, ExecutableRow, HomeRow, SetupRow, UpdateRow, type InstanceActions } from './CliSections'
 import { ProviderModelsSection, modelsSummary } from './ProviderModelsSection'
 import { EditorSection, RemoveButton, useAsyncAction } from './parts'
+import { DownloadedFilesRow, RegistrySourceRow, RemoveWithFilesButton, type RemoveOptions } from './RegistryAgents'
 import { DRIVER_INFO, formatVersion, iconIdOf } from './providerView'
 
 /**
@@ -32,10 +33,12 @@ export function EditorHeader({
   snapshot: InstanceSnapshot
   removeLabel?: string
   removeHint?: string
-  onRemove?: () => Promise<void>
+  onRemove?: (options: RemoveOptions) => Promise<void>
 }) {
   const removal = useAsyncAction()
   const version = formatVersion(snapshot.binary?.version)
+  // An entry with downloaded files asks whether to delete them too; others confirm in place.
+  const downloaded = snapshot.install.downloaded
   return (
     <section className="settings-group prov-editor-section">
       <div className="settings-group-head">
@@ -50,7 +53,11 @@ export function EditorHeader({
           {version && <code className="prov-version">{version}</code>}
           {onRemove && removeLabel && (
             <span title={removeHint}>
-              <RemoveButton label={removeLabel} disabled={removal.busy !== null} onRemove={() => void removal.run('remove', onRemove)} />
+              {downloaded ? (
+                <RemoveWithFilesButton snapshot={snapshot} bytes={downloaded.bytes} label={removeLabel} onRemove={onRemove} />
+              ) : (
+                <RemoveButton label={removeLabel} disabled={removal.busy !== null} onRemove={() => void removal.run('remove', () => onRemove({ deleteFiles: false }))} />
+              )}
             </span>
           )}
         </div>
@@ -109,11 +116,13 @@ export function AgentEditor({
   status: StatusDescription
   operation?: ProviderOperationEvent
   actions: InstanceActions
-  onRemove?: () => Promise<void>
+  onRemove?: (options: RemoveOptions) => Promise<void>
   onSaveModelPrefs: (patch: ModelPrefsPatch) => Promise<void>
   onRefreshModels: () => Promise<void>
 }) {
   const info = DRIVER_INFO[snapshot.driver]
+  const source = snapshot.config?.source?.kind === 'registry' ? snapshot.config.source : undefined
+  const downloaded = snapshot.install.downloaded
   return (
     <>
       <EditorHeader
@@ -126,6 +135,8 @@ export function AgentEditor({
               ? `Deletes this provider from Mousse. The sign-in Mousse kept for it stays${snapshot.config.homePath ? ` at ${snapshot.config.homePath}` : ''}; sign out first if you want it removed.`
               : info.bundled
                 ? 'Deletes this provider and the sign-in Mousse kept for it. Add it again any time.'
+                : source
+                  ? 'Deletes this provider from Mousse. Add it again any time.'
                 : 'Deletes this provider from Mousse. Your CLI and its sign-in stay; add it again any time.'
         }
         onRemove={onRemove}
@@ -133,6 +144,7 @@ export function AgentEditor({
       <EditorSection title="Setup">
         <DisplayNameRow snapshot={snapshot} onRename={(displayName) => actions.configure({ displayName })} />
         <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} />
+        {source && <RegistrySourceRow snapshot={snapshot} source={source} actions={actions} />}
         <AccountRow snapshot={snapshot} actions={actions} />
       </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} />
@@ -143,6 +155,7 @@ export function AgentEditor({
           {!info.bundled && (
             <>
               <UpdateRow snapshot={snapshot} operation={operation} actions={actions} />
+              {downloaded && <DownloadedFilesRow snapshot={snapshot} bytes={downloaded.bytes} onRemoveInstall={actions.removeInstall} />}
               <ExecutableRow snapshot={snapshot} label={info.label} onSave={(binaryPath) => actions.configure({ binaryPath })} />
               <ArgsRow snapshot={snapshot} onSave={(args) => actions.configure({ args })} />
               <HomeRow snapshot={snapshot} />

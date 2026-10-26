@@ -1,5 +1,12 @@
 import type { BinarySource, InstallOwner, InstanceSnapshot } from '../../../shared/harness/status'
-import type { HarnessDriverKind, ProviderScope } from '../../../shared/harness/types'
+import type {
+  HarnessDriverKind,
+  ProviderScope,
+  RegistryAgentView,
+  RegistryChecksum,
+  RegistrySourcePatch,
+  RemoveInstallResult
+} from '../../../shared/harness/types'
 
 /**
  * What the providers page shows for a snapshot, as plain functions (no React), so the wording and
@@ -32,6 +39,8 @@ export interface DriverInfo {
    * arguments or variables to set. Its sign-in is a key Mousse keeps.
    */
   bundled?: boolean
+  /** Also added from the ACP registry: the Add dialog offers it as its own choice ("More ACP agents…"). */
+  registry?: { addLabel: string; description: string }
 }
 
 export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
@@ -78,7 +87,8 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     multiInstance: true,
     customModels: false,
     customCommand: true,
-    addLabel: 'Custom command'
+    addLabel: 'Custom command',
+    registry: { addLabel: 'More ACP agents…', description: 'Agents listed in the ACP registry. Mousse downloads and installs them.' }
   },
   pi: {
     label: 'Model API',
@@ -250,4 +260,81 @@ export function parseArgs(text: string): string[] {
     args.push(match[1] ?? match[2] ?? match[3] ?? '')
   }
   return args
+}
+
+/* ACP registry agents ("More ACP agents…"). */
+
+export const CHECKSUM_LABELS: Record<RegistryChecksum, string> = {
+  registry: 'Registry checksum checked',
+  none: 'No registry checksum'
+}
+
+export function checksumLabel(checksum: RegistryChecksum): string {
+  return CHECKSUM_LABELS[checksum]
+}
+
+/** Said wherever Mousse installs a download the registry gives no checksum for. */
+export const UNVERIFIED_NOTE = "Mousse cannot verify this download. It records the files' fingerprints and refuses to run them if they change."
+
+const DISTRIBUTION_LABELS: Record<RegistryAgentView['distribution'], string> = {
+  binary: 'Binary download',
+  npx: 'npm package',
+  uvx: 'Python (uvx)'
+}
+
+export function distributionLabel(distribution: RegistryAgentView['distribution']): string {
+  return DISTRIBUTION_LABELS[distribution]
+}
+
+/** Whether installing this agent needs the user's explicit yes (a download without a checksum). */
+export function needsConsent(agent: Pick<RegistryAgentView, 'distribution' | 'checksum'>): boolean {
+  return agent.distribution === 'binary' && agent.checksum === 'none'
+}
+
+/**
+ * The `source` that adds or updates an entry to this registry agent; undefined when Mousse cannot
+ * install it here. An unverified download carries the consent for exactly this version and URL.
+ */
+export function registrySourceOf(agent: RegistryAgentView): RegistrySourcePatch | undefined {
+  if (agent.unsupported || agent.distribution === 'uvx') return undefined
+  return {
+    kind: 'registry',
+    agentId: agent.id,
+    version: agent.version,
+    distribution: agent.distribution,
+    ...(needsConsent(agent) && agent.artifactUrl ? { consent: { version: agent.version, artifactUrl: agent.artifactUrl } } : {})
+  }
+}
+
+/** The row's second line: licence, how it is fetched, and the checksum label. */
+export function registryAgentMeta(agent: RegistryAgentView): string {
+  return [agent.license, distributionLabel(agent.distribution), checksumLabel(agent.checksum)].filter(Boolean).join(' · ')
+}
+
+/** "ACP registry · gemini v1.2.0": where a registry entry comes from. */
+export function registrySourceLabel(source: { agentId: string; version: string }): string {
+  return `ACP registry · ${source.agentId} ${formatVersion(source.version) ?? source.version}`
+}
+
+/**
+ * The registry's listing of an installed agent when it offers another version Mousse can install;
+ * undefined when it is the same, missing or cannot be installed here. Matches the id exactly.
+ */
+export function registryUpdateOf(
+  installed: { agentId: string; version: string },
+  agents: readonly RegistryAgentView[]
+): RegistryAgentView | undefined {
+  const listed = agents.find((agent) => agent.id === installed.agentId)
+  if (!listed || listed.version === installed.version || !registrySourceOf(listed)) return undefined
+  return listed
+}
+
+/** Megabytes as the downloads indicator shows them: no decimals, at least 1. */
+export function formatMegabytes(bytes: number): string {
+  return `${Math.max(1, Math.round(bytes / 1_000_000))} MB`
+}
+
+/** "Work (2 entries)": a profile whose entries still use the downloaded files. */
+export function usedByLabel(entry: Extract<RemoveInstallResult, { removed: false }>['usedBy'][number]): string {
+  return `${entry.profileName ?? entry.profileId} (${entry.entries} ${entry.entries === 1 ? 'entry' : 'entries'})`
 }

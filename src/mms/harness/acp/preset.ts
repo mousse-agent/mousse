@@ -1,4 +1,4 @@
-import type { HarnessCaps, RuntimeFacts } from '../../../shared/harness/types'
+import type { HarnessCaps, RegistrySourcePatch, RuntimeFacts } from '../../../shared/harness/types'
 import type { InstanceConfig } from '../driver'
 import type { AcpPurpose } from './connection'
 import type { ClassifyOption } from './permissions'
@@ -10,12 +10,18 @@ import type { AcpQuirks } from './quirks'
  * read, and its quirks. Presets never fork the core.
  */
 
-/** Where a generic agent comes from. PR B adds registry installs. */
-export type AcpSource = { kind: 'local'; command: string; args: string[]; env: Record<string, string> }
+/** A command the user chose: a program (path or name on PATH), its arguments and variables. */
+export type AcpLocalSource = { kind: 'local'; command: string; args: string[]; env: Record<string, string> }
+
+/**
+ * Where a generic agent comes from: a command the user chose, or an agent Mousse installs from the
+ * ACP registry (`receiptHash` binds the entry to the install it was made with).
+ */
+export type AcpSource = AcpLocalSource | (RegistrySourcePatch & { receiptHash?: string })
 
 export interface AcpLaunchContext {
   config: InstanceConfig
-  source: AcpSource
+  source: AcpLocalSource
   purpose: AcpPurpose
 }
 
