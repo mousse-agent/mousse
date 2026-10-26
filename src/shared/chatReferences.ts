@@ -1,7 +1,7 @@
 export const MOUSSE_REFERENCE_MIME = 'application/x-mousse-reference'
 export const MOUSSE_FILE_SCHEME = 'mousse-file:'
 
-export type ChatReferenceKind = 'file' | 'project' | 'thread' | 'terminal' | 'browser' | 'agent'
+export type ChatReferenceKind = 'file' | 'project' | 'thread' | 'terminal' | 'browser' | 'agent' | 'review-comment'
 
 export interface ChatReference {
   id: string
@@ -9,7 +9,17 @@ export interface ChatReference {
   title: string
   path?: string
   line?: number
+  /** Last line of a `review-comment` range; absent for a single line. */
+  endLine?: number
   column?: number
+  /** `review-comment` text the user wrote. */
+  comment?: string
+  /** `review-comment` selected lines of the modified side, capped (see `capReviewExcerpt`). */
+  excerpt?: string
+  /** Version a `review-comment` was made on: `turn:<turnId>`, `thread`, `worktree:staged` or `worktree:unstaged`. */
+  reviewScope?: string
+  /** Human label of `reviewScope` for the agent and the pill: "Turn 3" or "Working tree". */
+  scopeLabel?: string
   threadId?: string
   projectId?: string
   tabId?: string
@@ -20,13 +30,73 @@ export interface ChatReference {
   cwd?: string
 }
 
-const KINDS = new Set<ChatReferenceKind>(['file', 'project', 'thread', 'terminal', 'browser', 'agent'])
+const KINDS = new Set<ChatReferenceKind>(['file', 'project', 'thread', 'terminal', 'browser', 'agent', 'review-comment'])
 const MAX_FIELD = 16_384
+export const REVIEW_COMMENT_MAX_CHARS = 4_096
+const REVIEW_EXCERPT_MAX_INPUT = 8_192
+export const REVIEW_EXCERPT_MAX_LINES = 40
+export const REVIEW_EXCERPT_MAX_CHARS = 4_096
+const EXCERPT_MARKER = '…'
+/** Turn ids are Run Engine run ids (`run:thread:<encoded>:ordinal:<n>`), so they contain colons and percent escapes. */
+const REVIEW_SCOPE_RE = /^(turn:[^\s\]]{1,256}|thread|worktree:(staged|unstaged))$/
 
 function cleanString(value: unknown, max = MAX_FIELD): string | undefined {
   if (typeof value !== 'string') return undefined
   const clean = value.replace(/[\u0000-\u001f\u007f]/g, '').trim()
   return clean && clean.length <= max ? clean : undefined
+}
+
+/**
+ * Strips control characters other than `\n` and `\t`, and rewrites any line that starts like a block
+ * marker so the text cannot end the `[Mousse references]` block early. Idempotent. The rewrite adds a
+ * character per line, so lengths must be checked on the result, not the input.
+ */
+export function neutralizeBlockMarkers(text: string): string {
+  return text
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
+    .split('\n')
+    .map((line) => line.replace(/^\[(\/?Mousse references)/, '[ $1'))
+    .join('\n')
+}
+
+/**
+ * Multi-line text for `comment` and `excerpt`: see `neutralizeBlockMarkers`. Does not trim; callers
+ * decide what whitespace is meaningful. Rejects input longer than `maxInput`. The result can be
+ * longer than the input (the marker rewrite adds characters), so callers cut it to their own limit.
+ */
+function cleanText(value: unknown, maxInput: number): string | undefined {
+  if (typeof value !== 'string' || value.length > maxInput) return undefined
+  return neutralizeBlockMarkers(value)
+}
+
+/** Cuts an excerpt to `REVIEW_EXCERPT_MAX_LINES` lines and `REVIEW_EXCERPT_MAX_CHARS` characters, ending with a `…` marker line when cut. Idempotent. */
+export function capReviewExcerpt(excerpt: string): string {
+  let text = excerpt
+  let cut = false
+  if (text === EXCERPT_MARKER || text.endsWith(`\n${EXCERPT_MARKER}`)) {
+    text = text.slice(0, text.length - EXCERPT_MARKER.length).replace(/\n$/, '')
+    cut = true
+  }
+  let lines = text.split('\n')
+  if (lines.length > REVIEW_EXCERPT_MAX_LINES) {
+    lines = lines.slice(0, REVIEW_EXCERPT_MAX_LINES)
+    cut = true
+  }
+  text = lines.join('\n')
+  if (text.length > REVIEW_EXCERPT_MAX_CHARS) {
+    text = text.slice(0, REVIEW_EXCERPT_MAX_CHARS)
+    // Drop the partial last line so the cut falls on a line boundary when there is one.
+    const lastBreak = text.lastIndexOf('\n')
+    if (lastBreak > 0) text = text.slice(0, lastBreak)
+    cut = true
+  }
+  return cut ? `${text}\n${EXCERPT_MARKER}` : text
+}
+
+/** The turn id inside a `turn:<turnId>` review scope, or undefined for other scopes. */
+export function turnIdOfScope(reviewScope: string | undefined): string | undefined {
+  if (!reviewScope?.startsWith('turn:')) return undefined
+  return reviewScope.slice('turn:'.length) || undefined
 }
 
 function positiveInteger(value: unknown): number | undefined {
@@ -52,6 +122,22 @@ export function parseChatReference(value: unknown): ChatReference | null {
   }
   reference.line = positiveInteger(raw.line)
   reference.column = positiveInteger(raw.column)
+  if (kind === 'review-comment') {
+    const endLine = positiveInteger(raw.endLine)
+    if (endLine !== undefined && reference.line !== undefined && endLine >= reference.line) reference.endLine = endLine
+    // Cut after the marker rewrite so the stored comment stays within the limit and parses again unchanged.
+    const comment = cleanText(raw.comment, REVIEW_COMMENT_MAX_CHARS)?.slice(0, REVIEW_COMMENT_MAX_CHARS).trim()
+    if (comment) reference.comment = comment
+    // An over-long excerpt is cut by `capReviewExcerpt`, not dropped: only its first characters are read.
+    const rawExcerpt = typeof raw.excerpt === 'string' ? raw.excerpt.slice(0, REVIEW_EXCERPT_MAX_INPUT) : undefined
+    const excerpt = cleanText(rawExcerpt, Infinity)?.replace(/^(?:[ \t]*\n)+/, '').trimEnd()
+    if (excerpt) reference.excerpt = capReviewExcerpt(excerpt)
+    // Tested on the raw value: cleaning would turn "turn:a\nb" into a different, valid-looking scope.
+    if (typeof raw.reviewScope === 'string' && REVIEW_SCOPE_RE.test(raw.reviewScope)) reference.reviewScope = raw.reviewScope
+    const scopeLabel = cleanString(raw.scopeLabel, 128)
+    if (scopeLabel) reference.scopeLabel = scopeLabel
+    if (!reference.path || !reference.line || !reference.comment || !reference.reviewScope) return null
+  }
   if (kind === 'file' && !reference.path) return null
   if (kind === 'project' && !reference.projectId) return null
   if (kind === 'thread' && !reference.threadId) return null
@@ -84,12 +170,42 @@ function contextPath(reference: ChatReference): string | undefined {
   return reference.metadataPath ?? reference.path ?? reference.cwd
 }
 
-/** Durable model-facing context. The encoded header lets the UI reconstruct rich pills. */
+function fenceFor(text: string): string {
+  const longestRun = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length))
+  return '`'.repeat(Math.max(3, longestRun + 1))
+}
+
+function reviewCommentLines(reference: ChatReference): string[] {
+  const { line = 0, endLine, path, comment = '', excerpt } = reference
+  const [first = '', ...rest] = comment.split('\n')
+  const lines = [
+    `- review-comment: ${JSON.stringify(reference.title)}`,
+    path ? `  Path: ${path}` : '',
+    endLine && endLine > line ? `  Lines: ${line}–${endLine}` : `  Line: ${line}`,
+    reference.scopeLabel || reference.reviewScope ? `  Scope: ${reference.scopeLabel ?? reference.reviewScope}` : '',
+    `  Comment: ${first}`,
+    ...rest.map((text) => `    ${text}`)
+  ]
+  if (excerpt) {
+    const fence = fenceFor(excerpt)
+    const extension = path?.match(/\.([A-Za-z0-9+#_-]{1,16})$/)?.[1]?.toLowerCase() ?? ''
+    lines.push(`  Selected code:`, `${fence}${extension}`, excerpt, fence)
+  }
+  return lines.filter(Boolean)
+}
+
+/**
+ * Durable model-facing context. The encoded header lets the UI reconstruct rich pills.
+ * It carries every field of every reference, so a review comment's text and excerpt appear twice
+ * in the message: once readable in the body, once encoded in the header. The header copy is what
+ * rebuilds the pill, so do not drop fields from it to save space.
+ */
 export function formatChatReferences(references: ChatReference[]): string {
   const valid = references.map(parseChatReference).filter((item): item is ChatReference => Boolean(item))
   if (!valid.length) return ''
   const data = encodeURIComponent(JSON.stringify(valid))
   const lines = valid.flatMap((reference) => {
+    if (reference.kind === 'review-comment') return reviewCommentLines(reference)
     const details = [
       `- ${reference.kind}: ${JSON.stringify(reference.title)}`,
       contextPath(reference) ? `  Path: ${contextPath(reference)}` : '',
@@ -143,4 +259,53 @@ export function parseMousseFileLink(href: string): { path: string; line?: number
       column: positiveInteger(Number(url.searchParams.get('column')))
     }
   } catch { return null }
+}
+
+function joinReviewPath(root: string, path: string): string {
+  // The shared module has no `process`: the separator follows the shape of the daemon's root string.
+  const windows = root.includes('\\') || /^[A-Za-z]:/.test(root)
+  const separator = windows ? '\\' : '/'
+  const base = root.replace(/[\\/]+$/, '').replace(/[\\/]/g, separator)
+  const relative = path.replace(/^[\\/]+/, '').replace(/[\\/]/g, separator)
+  return `${base}${separator}${relative}`
+}
+
+/** A review comment on lines of a changed file; `path` is relative to `root`, and the reference carries the absolute path. */
+export function createReviewComment(input: {
+  root: string
+  path: string
+  line: number
+  endLine?: number
+  comment: string
+  excerpt?: string
+  reviewScope: string
+  scopeLabel?: string
+}): ChatReference {
+  const { root, path, line, endLine, reviewScope, scopeLabel } = input
+  // The composer drops a reference that fails to parse without a trace, so a bad scope fails here instead.
+  if (!REVIEW_SCOPE_RE.test(reviewScope)) throw new Error(`Invalid review scope: ${JSON.stringify(reviewScope)}`)
+  const name = path.split(/[\\/]/).pop() || path
+  const hasRange = endLine !== undefined && endLine > line
+  return {
+    id: `review-comment:${crypto.randomUUID()}`,
+    kind: 'review-comment',
+    title: `${name}:${line}${hasRange ? `-${endLine}` : ''}`,
+    path: joinReviewPath(root, path),
+    line,
+    ...(hasRange ? { endLine } : {}),
+    // Neutralise before cutting: the marker rewrite adds characters, and the parser checks the cleaned length.
+    comment: neutralizeBlockMarkers(input.comment).slice(0, REVIEW_COMMENT_MAX_CHARS).trim(),
+    ...(input.excerpt ? { excerpt: capReviewExcerpt(input.excerpt) } : {}),
+    reviewScope,
+    ...(scopeLabel ? { scopeLabel } : {})
+  }
+}
+
+/** Whether two paths name the same file. `platform` is `appInfo.platform`; Windows paths compare case-insensitively. */
+export function sameReviewFile(a: string, b: string, platform: string): boolean {
+  const normalize = (value: string) => {
+    const slashed = value.replace(/\\/g, '/')
+    return platform === 'win32' ? slashed.toLowerCase() : slashed
+  }
+  return normalize(a) === normalize(b)
 }

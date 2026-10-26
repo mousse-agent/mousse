@@ -10,7 +10,16 @@ const ICONS = {
   thread: MessageSquare,
   terminal: TerminalSquare,
   browser: Globe,
-  agent: Bot
+  agent: Bot,
+  'review-comment': MessageSquare
+}
+
+/** Pill tooltip: a review comment shows its scope and text, other kinds show where they point. */
+export function referenceTitle(reference: ChatReference): string {
+  if (reference.kind === 'review-comment') {
+    return [reference.scopeLabel, reference.comment].filter(Boolean).join(': ') || reference.title
+  }
+  return reference.path ?? reference.metadataPath ?? reference.url ?? reference.title
 }
 
 /** Opens what a reference points at: file, project, thread, terminal, browser tab, or the thread an old agent reference belongs to. */
@@ -46,7 +55,9 @@ export function openChatReference(reference: ChatReference): void {
     }
     return
   }
-  if (reference.kind === 'file' && reference.path) {
+  // The Review surface does not exist yet, so a review comment opens the file at its first line.
+  // The review store's reveal (scope, file, line) replaces this when the surface lands.
+  if ((reference.kind === 'file' || reference.kind === 'review-comment') && reference.path) {
     routeLink(formatMousseFileLink(reference.path, reference.line, reference.column), reference)
   }
 }
@@ -58,7 +69,7 @@ export function ChatReferencePill({ reference: candidate, onRemove }: { referenc
   const open = () => openChatReference(reference)
   return (
     <span className="composer-attachment-pill composer-reference-pill">
-      <button type="button" className="composer-reference-link" onClick={open} title={reference.path ?? reference.metadataPath ?? reference.url ?? reference.title}>
+      <button type="button" className="composer-reference-link" onClick={open} title={referenceTitle(reference)}>
         <Icon size={12} strokeWidth={2} />
         <span>{reference.title}</span>
       </button>
