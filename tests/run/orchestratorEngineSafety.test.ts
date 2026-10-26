@@ -229,6 +229,33 @@ describe('orchestrator and engine safety (review round 2)', () => {
     expect(d.engine.getRun(live.runId)!.status).toBe('interrupted')
   }, 30_000)
 
+  it('a channel turn that ends while a later one waits on the same thread leaves the later turn registered, so a Stop still reaches it', async () => {
+    const gateA = deferred()
+    const gateB = deferred()
+    releases.push(gateA.resolve, gateB.resolve)
+    const adapter = new HostAdapter(async (input) => {
+      await until(input.prompt === 'A' ? gateA.promise : gateB.promise, input.signal)
+      return `reply to ${input.prompt}`
+    })
+    const d = start(adapter)
+    const threadId = thread(d, 'Overlap')
+    const turns = (d.orch as unknown as { channelTurns: Map<string, unknown> }).channelTurns
+    const first = d.orch.runChannelTurn(threadId, 'A', d.store)
+    await waitFor(() => adapter.turns.length === 1, 'turn A')
+    const entryA = turns.get(threadId)
+    // A second channel message arrives while A runs: it registers itself and waits for the thread's lease.
+    const second = d.orch.runChannelTurn(threadId, 'B', d.store)
+    await waitFor(() => turns.get(threadId) !== entryA, 'turn B to register')
+    gateA.resolve()
+    expect(await first).toMatchObject({ text: 'reply to A' })
+    // A's end must not unregister B's turn.
+    expect(turns.has(threadId)).toBe(true)
+    await waitFor(() => adapter.turns.length === 2, 'turn B')
+    expect(d.orch.abortChannelTurn(threadId)).toBe(true)
+    expect(await second).toMatchObject({ aborted: true })
+    expect(turns.has(threadId)).toBe(false)
+  }, 30_000)
+
   it('C4: a wake on a thread busy with a turn the engine does not schedule stays queued (one wake run) and runs once after', async () => {
     const gate = deferred()
     releases.push(gate.resolve)

@@ -972,14 +972,22 @@ export class ClaudeSubscriptionProviderService {
           ? `The ${changed.join(' and ')} changed, which needs a new Claude process`
           : 'The conversation changed outside that process (an undo, an edit or a fork), so it cannot continue it'
         const tasks = working === 1 ? 'a background task' : `${working} background tasks`
+        // Tasks Claude read whose reply was cut off (or could not be shown) are not running: the next message
+        // clears them. They are told apart from the ones still running, which a change would end.
         const unshown = live.obligations.unshownCount()
+        const unshownTasks = unshown === 1 ? 'a background task' : `${unshown} background tasks`
+        const running = working - unshown
+        const runningTasks = running === 1 ? 'a background task' : `${running} background tasks`
+        const message = live.obligations.hasLost()
+          ? `Claude is still holding ${tasks} for this thread whose result may not arrive. ${cause} and would end that work. Press Stop to release it now, then send again.`
+          : unshown > 0 && running === 0
+            ? `Claude read the result of ${unshownTasks} for this thread, but ${unshown === 1 ? 'its reply was' : 'their replies were'} cut off or could not be shown. ${cause}. Send a message without the change to clear ${unshown === 1 ? 'it' : 'them'}, or press Stop, then send again.`
+            : unshown > 0
+              ? `Claude is still running ${runningTasks} for this thread, and read the result of ${unshown === 1 ? 'another background task' : `${unshown} other background tasks`}, whose ${unshown === 1 ? 'reply was' : 'replies were'} cut off or could not be shown. ${cause} and would end the running work (Stop ends it too). Wait for it to finish or press Stop, then send again.`
+              : `Claude is still running ${tasks} for this thread. ${cause} and would end that work. Wait for it to finish or press Stop, then send again.`
         throw new AppError({
           code: 'claude_background_work_blocks_change',
-          message: live.obligations.hasLost()
-            ? `Claude is still holding ${tasks} for this thread whose result may not arrive. ${cause} and would end that work. Press Stop to release it now, then send again.`
-            : unshown > 0
-              ? `Claude already read the result of ${unshown === 1 ? 'a background task' : `${unshown} background tasks`} for this thread, but its answer was cut off or could not be shown. ${cause} and would end that work. Press Stop to release it now, then send again.`
-              : `Claude is still running ${tasks} for this thread. ${cause} and would end that work. Wait for it to finish or press Stop, then send again.`,
+          message,
           errorInfo: { category: 'unavailable', retryable: false }
         })
       }

@@ -1436,8 +1436,9 @@ export class OrchestratorService extends EventEmitter {
    * Whether the thread has work the replayed Stop did not cover: a run admitted at or after the generation
    * the Stop raised it to (any status; its process may still hold helpers), or any run that is still not
    * terminal (the original Stop already ended its provider work once, and the stale-run Stop uses the same
-   * guard). A turn in this process that is not an engine run (a channel turn) is newer work too. An unknown
-   * generation counts as newer work, so nothing is closed on a guess.
+   * guard). Any turn still in this process counts, whether or not it is an engine run: a channel turn, and
+   * also one the first Stop aborted that is still unwinding. That last case is safe, since the first Stop
+   * already reached the provider. An unknown generation counts as newer work, so nothing is closed on a guess.
    */
   private hasWorkAfterStop(threadId: string, generation: number | undefined): boolean {
     const engine = this.runEngine
@@ -7222,7 +7223,9 @@ export class OrchestratorService extends EventEmitter {
       if (isAbort) return { text: '', silent: true, aborted: true }
       return { text: '', silent: false, error: err instanceof Error ? err.message : String(err) }
     } finally {
-      if (channelTurn) this.channelTurns.delete(threadId)
+      // A later channel turn on this thread may have registered itself while this one ran (it waits for the
+      // lease): only this turn's own entry is removed.
+      if (channelTurn && this.channelTurns.get(threadId) === channelTurn) this.channelTurns.delete(threadId)
       if (lease) releaseExecutionLeaseHandle(lease)
       if (admittedSession) {
         this.releaseSessionExecutionLease(admittedSession)
