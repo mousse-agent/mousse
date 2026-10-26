@@ -1,10 +1,11 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import type { InstanceSnapshot, StatusDescription } from '../../../shared/harness/status'
 import type { ModelPrefsPatch, ProviderOperationEvent } from '../../../shared/harness/types'
+import { ChevronRight } from '../../lib/icons'
 import { ProviderIcon } from '../../lib/providerIcons'
 import { SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
 import { AccountRow, ArgsRow, BinaryRow, EnvRow, ExecutableRow, HomeRow, SetupRow, UpdateRow, type InstanceActions } from './CliSections'
-import { ProviderModelsSection } from './ProviderModelsSection'
+import { ProviderModelsSection, modelsSummary } from './ProviderModelsSection'
 import { EditorSection, RemoveButton, useAsyncAction } from './parts'
 import { DRIVER_INFO, formatVersion, iconIdOf } from './providerView'
 
@@ -163,20 +164,33 @@ export function ModelsEditorSection({
   onSave: (patch: ModelPrefsPatch) => Promise<void>
   onRefresh: () => Promise<void>
 }) {
+  // Collapsed by default, like Advanced; the summary keeps the counts in view while it is closed.
   return (
-    <EditorSection
-      title="Models"
-      description={`Favorites show first in the model picker. Hidden models are not offered anywhere in Mousse.${snapshot.scope.kind === 'project' ? ` ${DEVICE_WIDE}` : ''}`}
-    >
-      <div className="prov-models-wrap">
-        <ProviderModelsSection
-          snapshot={snapshot}
-          allowCustom={allowsCustomModels(snapshot)}
-          onSave={onSave}
-          onRefresh={onRefresh}
-        />
+    <details className="settings-advanced prov-models-section">
+      <summary>
+        <ChevronRight size={14} aria-hidden="true" className="settings-advanced-chevron" />
+        Models
+        <span className="prov-models-summary">{modelsSummary(snapshot.models.entries)}</span>
+      </summary>
+      <div className="settings-advanced-body">
+        <section className="settings-group prov-editor-section">
+          <p className="settings-group-desc">
+            Favorites show first in the model picker. Hidden models are not offered anywhere in Mousse.
+            {snapshot.scope.kind === 'project' ? ` ${DEVICE_WIDE}` : ''}
+          </p>
+          <div className="settings-group-rows">
+            <div className="prov-models-wrap">
+              <ProviderModelsSection
+                snapshot={snapshot}
+                allowCustom={allowsCustomModels(snapshot)}
+                onSave={onSave}
+                onRefresh={onRefresh}
+              />
+            </div>
+          </div>
+        </section>
       </div>
-    </EditorSection>
+    </details>
   )
 }
 

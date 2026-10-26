@@ -133,6 +133,7 @@ import UserCircleIcon from '@hugeicons/core-free-icons/UserCircleIcon'
 import UserGroupIcon from '@hugeicons/core-free-icons/UserGroupIcon'
 import UserIcon from '@hugeicons/core-free-icons/UserIcon'
 import ViewIcon from '@hugeicons/core-free-icons/ViewIcon'
+import ViewOffSlashIcon from '@hugeicons/core-free-icons/ViewOffSlashIcon'
 import VolumeHighIcon from '@hugeicons/core-free-icons/VolumeHighIcon'
 import WebhookIcon from '@hugeicons/core-free-icons/WebhookIcon'
 import WorkflowSquare01Icon from '@hugeicons/core-free-icons/WorkflowSquare01Icon'
@@ -203,6 +204,7 @@ export const Download = /* @__PURE__ */ createIcon('Download', Download04Icon)
 export const Edit = /* @__PURE__ */ createIcon('Edit', Edit02Icon)
 export const ExternalLink = /* @__PURE__ */ createIcon('ExternalLink', LinkSquare02Icon)
 export const Eye = /* @__PURE__ */ createIcon('Eye', ViewIcon)
+export const EyeOff = /* @__PURE__ */ createIcon('EyeOff', ViewOffSlashIcon)
 export const File = /* @__PURE__ */ createIcon('File', File01Icon)
 export const FileOutput = /* @__PURE__ */ createIcon('FileOutput', FileExportIcon)
 export const FileText = /* @__PURE__ */ createIcon('FileText', File02Icon)

@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import type { CustomModel, InstanceModel, ModelCapabilities, ModelPrefsPatch } from '../../../shared/harness/types'
 import { EFFORT_LEVELS, formatEffortLabel } from '../../../shared/modelVariants'
-import { ArrowDown, ArrowUp, Pencil, Plus, Star, X } from '../../lib/icons'
+import { ArrowDown, ArrowUp, ChevronRight, Eye, EyeOff, Pencil, Plus, Star, X } from '../../lib/icons'
 import { Switch } from '../settings/SettingsRow'
 import { RefreshButton, useAsyncAction } from './parts'
 
@@ -84,10 +84,48 @@ export function describeCapabilities(capabilities: ModelCapabilities): string {
   return parts.join(' · ')
 }
 
+type CapabilityChip = { text: string; title: string }
+
+/** Short chips for a row: the effort range, images, the context window; each says more on hover. */
+export function capabilityChips(capabilities: ModelCapabilities): CapabilityChip[] {
+  const chips: CapabilityChip[] = []
+  const efforts = capabilities.efforts
+  if (efforts.length > 0) {
+    const levels: readonly string[] = EFFORT_LEVELS
+    const ranks = efforts.map((level) => levels.indexOf(level))
+    const contiguous = efforts.length > 2 && ranks.every((rank, index) => rank >= 0 && (index === 0 || rank === ranks[index - 1]! + 1))
+    const all = efforts.map(formatEffortLabel).join(', ')
+    chips.push({
+      text: contiguous ? `${formatEffortLabel(efforts[0]!)}–${formatEffortLabel(efforts[efforts.length - 1]!)}` : all,
+      title: `Reasoning: ${all}`
+    })
+  }
+  if (capabilities.images) chips.push({ text: 'Images', title: 'Accepts images' })
+  if (capabilities.contextWindow) {
+    const tokens = capabilities.contextWindow
+    const text = tokens >= 1_000_000 ? `${Number((tokens / 1_000_000).toFixed(1))}M` : `${Math.round(tokens / 1000)}k`
+    chips.push({ text, title: `${text} token context window` })
+  }
+  return chips
+}
+
+/** "24 models · 3 favorites · 2 hidden": the section's one-line summary. */
+export function modelsSummary(entries: readonly InstanceModel[]): string {
+  if (entries.length === 0) return 'No models yet'
+  const favorites = entries.filter((model) => model.favorite).length
+  const hidden = entries.filter(isHiddenInPicker).length
+  return [
+    `${entries.length} model${entries.length === 1 ? '' : 's'}`,
+    ...(favorites > 0 ? [`${favorites} favorite${favorites === 1 ? '' : 's'}`] : []),
+    ...(hidden > 0 ? [`${hidden} hidden`] : [])
+  ].join(' · ')
+}
+
 /**
- * T3 Code's provider Models section on the instance's snapshot: counter, filter past eight models,
- * favorites first, a show-in-picker switch and move up/down per model, bulk hide/show, and
- * custom models with their capabilities stated. Every change is saved to the daemon's model prefs.
+ * T3 Code's provider Models section on the instance's snapshot: filter past eight models, favorites
+ * first, models hidden from the picker folded into one group at the end, a show-in-picker eye and
+ * move up/down (on hover or focus) per model, bulk hide/show, and custom models with their
+ * capabilities stated. Every change is saved to the daemon's model prefs.
  */
 export function ProviderModelsSection({
   snapshot,
@@ -109,9 +147,10 @@ export function ProviderModelsSection({
   const pendingOrder = useRef<string[] | null>(null)
   const [shownOrder, setShownOrder] = useState<string[] | null>(null)
 
+  const [hiddenOpen, setHiddenOpen] = useState(false)
+
   const entries = snapshot.models.entries
   const display = displayModels(inOrder(entries, shownOrder))
-  const hidden = entries.filter((model) => model.hidden && model.source !== 'custom').map((model) => model.id)
   const builtIn = entries.filter((model) => model.source !== 'custom')
   const favoriteCount = entries.filter((model) => model.favorite).length
   const showFilter = entries.length > FILTER_THRESHOLD
@@ -119,6 +158,11 @@ export function ProviderModelsSection({
   const filtering = showFilter && query.length > 0
   const visible = filtering ? display.filter((model) => model.label.toLowerCase().includes(query) || model.id.toLowerCase().includes(query)) : display
   const allHidden = builtIn.length > 0 && builtIn.every((model) => model.hidden)
+  const favorites = visible.filter((model) => modelGroupOf(model) === 'favorite')
+  const rest = visible.filter((model) => modelGroupOf(model) === 'visible')
+  const hiddenGroup = visible.filter((model) => modelGroupOf(model) === 'hidden')
+  // A filter searches the hidden models too, so it opens their group.
+  const showHidden = hiddenOpen || filtering
 
   const write = (patch: ModelPrefsPatch) => void save.run('save', () => onSave(patch))
   // Stars and hides are edits of the stored lists, so a save in flight is never undone by this one.
@@ -144,6 +188,101 @@ export function ProviderModelsSection({
 
   const groupLabel = (text: string, first: boolean) => <div className={`prov-models-group${first ? ' is-first' : ''}`}>{text}</div>
 
+  // One line per model: star, name, capability chips, then move and custom-model actions that
+  // appear on hover or focus, and the show-in-picker eye. Moves stay within the model's group.
+  const row = (model: InstanceModel, group: readonly InstanceModel[], index: number) => {
+    const custom = model.source === 'custom'
+    // A hidden favorite stays in Favorites, so its own flag says whether it is hidden.
+    const isHidden = isHiddenInPicker(model)
+    const movable = modelGroupOf(model) !== 'hidden' && !filtering
+    const slug = model.label !== model.id ? model.id : undefined
+    return (
+      <div key={`${model.source}:${model.id}`} className={`prov-model-row${isHidden ? ' is-hidden' : ''}`}>
+        <button
+          type="button"
+          className={`settings-icon-btn prov-micro prov-star${model.favorite ? ' is-on' : ''}`}
+          title={model.favorite ? 'Remove from favorites' : 'Add to favorites'}
+          aria-label={`${model.favorite ? 'Remove' : 'Add'} ${model.label} ${model.favorite ? 'from' : 'to'} favorites`}
+          aria-pressed={model.favorite}
+          onClick={() => toggleFavorite(model)}
+        >
+          <Star size={13} />
+        </button>
+        <span className="prov-model-text" title={slug}>
+          <span className="prov-model-name">{model.label}</span>
+          {custom && <span className="prov-model-chip">Custom</span>}
+        </span>
+        <span className="prov-model-caps" title={describeCapabilities(model.capabilities) || undefined}>
+          {capabilityChips(model.capabilities).map((chip) => (
+            <span key={chip.title} className="prov-model-chip" title={chip.title}>
+              {chip.text}
+            </span>
+          ))}
+        </span>
+        <span className="prov-model-actions">
+          {movable && (
+            <>
+              <button
+                type="button"
+                className="settings-icon-btn prov-micro"
+                title="Move up"
+                aria-label={`Move ${model.label} up`}
+                disabled={index === 0}
+                onClick={() => move(model.id, -1)}
+              >
+                <ArrowUp size={12} />
+              </button>
+              <button
+                type="button"
+                className="settings-icon-btn prov-micro"
+                title="Move down"
+                aria-label={`Move ${model.label} down`}
+                disabled={index === group.length - 1}
+                onClick={() => move(model.id, 1)}
+              >
+                <ArrowDown size={12} />
+              </button>
+            </>
+          )}
+          {custom && allowCustom && (
+            <>
+              <button
+                type="button"
+                className="settings-icon-btn prov-micro"
+                title="Edit name and options"
+                aria-label={`Edit ${model.id}`}
+                onClick={() => setEditing({ original: customOf([model])[0] })}
+              >
+                <Pencil size={12} />
+              </button>
+              <button
+                type="button"
+                className="settings-icon-btn prov-micro danger"
+                title="Remove custom model"
+                aria-label={`Remove ${model.id}`}
+                onClick={() => removeCustom(model.id)}
+              >
+                <X size={12} />
+              </button>
+            </>
+          )}
+        </span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={!isHidden}
+          aria-label={`Show ${model.label} in the model picker`}
+          className={`settings-icon-btn prov-micro prov-eye${isHidden ? ' is-off' : ''}`}
+          title={custom ? 'Custom models are always shown in the picker' : isHidden ? 'Hidden from picker: click to show' : 'Shown in picker: click to hide'}
+          disabled={custom}
+          onClick={() => setHidden(model.id, !isHidden)}
+        >
+          {isHidden ? <EyeOff size={13} /> : <Eye size={13} />}
+        </button>
+      </div>
+    )
+  }
+
   return (
     <div className="prov-models">
       <div className="prov-models-bar">
@@ -157,19 +296,12 @@ export function ProviderModelsSection({
             onChange={(event) => setFilter(event.target.value)}
           />
         )}
-        <span className="prov-models-meta">
+        <span className="prov-models-actions">
           {builtIn.length > 0 && (
-            <button type="button" className="prov-ghost-btn" onClick={() => write(bulkVisibilityPatch(entries))}>
+            <button type="button" className="prov-text-btn" onClick={() => write(bulkVisibilityPatch(entries))}>
               {allHidden ? 'Show all' : 'Hide all'}
             </button>
           )}
-          <span className="prov-models-count">
-            {entries.length} model{entries.length === 1 ? '' : 's'}
-            {favoriteCount > 0 ? ` · ${favoriteCount} favorite${favoriteCount === 1 ? '' : 's'}` : ''}
-            {hidden.length > 0 ? ` · ${hidden.length} hidden` : ''}
-          </span>
-        </span>
-        <span className="prov-models-actions">
           {allowCustom && !editing && (
             <button type="button" className="prov-ghost-btn" onClick={() => setEditing({})}>
               <Plus size={12} />
@@ -183,99 +315,25 @@ export function ProviderModelsSection({
 
       <div className="prov-models-list">
         {visible.length === 0 && <p className="prov-models-empty">{filtering ? 'No models match.' : 'No models reported for this provider yet.'}</p>}
-        {visible.map((model, index) => {
-          const group = modelGroupOf(model)
-          const previous = visible[index - 1]
-          const next = visible[index + 1]
-          const startsGroup = previous === undefined || modelGroupOf(previous) !== group
-          const custom = model.source === 'custom'
-          // A hidden favorite stays in Favorites, so its own flag says whether it is hidden.
-          const isHidden = isHiddenInPicker(model)
-          const capabilities = describeCapabilities(model.capabilities)
-          return (
-            <div key={`${model.source}:${model.id}`}>
-              {startsGroup && favoriteCount > 0 && group === 'favorite' && groupLabel('Favorites', index === 0)}
-              {startsGroup && favoriteCount > 0 && group === 'visible' && groupLabel('All', index === 0)}
-              {startsGroup && group === 'hidden' && groupLabel('Hidden from picker', index === 0)}
-              <div className={`prov-model-row${isHidden ? ' is-hidden' : ''}`}>
-                <button
-                  type="button"
-                  className={`settings-icon-btn prov-micro prov-star${model.favorite ? ' is-on' : ''}`}
-                  title={model.favorite ? 'Remove from favorites' : 'Add to favorites'}
-                  aria-label={`${model.favorite ? 'Remove' : 'Add'} ${model.label} ${model.favorite ? 'from' : 'to'} favorites`}
-                  aria-pressed={model.favorite}
-                  onClick={() => toggleFavorite(model)}
-                >
-                  <Star size={13} />
-                </button>
-                <span className="prov-model-main">
-                  <span className="prov-model-text">
-                    <span className="prov-model-name">{model.label}</span>
-                    {model.label !== model.id && <code className="prov-model-detail">{model.id}</code>}
-                    {custom && <span className="prov-model-detail">custom</span>}
-                  </span>
-                  <span className="prov-model-caps">{capabilities}</span>
-                </span>
-                <span className="prov-model-actions">
-                  {group !== 'hidden' && !filtering && (
-                    <>
-                      <button
-                        type="button"
-                        className="settings-icon-btn prov-micro"
-                        title="Move up"
-                        aria-label={`Move ${model.label} up`}
-                        disabled={previous === undefined || modelGroupOf(previous) !== group}
-                        onClick={() => move(model.id, -1)}
-                      >
-                        <ArrowUp size={12} />
-                      </button>
-                      <button
-                        type="button"
-                        className="settings-icon-btn prov-micro"
-                        title="Move down"
-                        aria-label={`Move ${model.label} down`}
-                        disabled={next === undefined || modelGroupOf(next) !== group}
-                        onClick={() => move(model.id, 1)}
-                      >
-                        <ArrowDown size={12} />
-                      </button>
-                    </>
-                  )}
-                  {custom && allowCustom && (
-                    <>
-                      <button
-                        type="button"
-                        className="settings-icon-btn prov-micro"
-                        title="Edit name and options"
-                        aria-label={`Edit ${model.id}`}
-                        onClick={() => setEditing({ original: customOf([model])[0] })}
-                      >
-                        <Pencil size={12} />
-                      </button>
-                      <button
-                        type="button"
-                        className="settings-icon-btn prov-micro danger"
-                        title="Remove custom model"
-                        aria-label={`Remove ${model.id}`}
-                        onClick={() => removeCustom(model.id)}
-                      >
-                        <X size={12} />
-                      </button>
-                    </>
-                  )}
-                </span>
-                <span title={custom ? 'Custom models are always shown in the picker' : isHidden ? 'Hidden from picker' : 'Shown in picker'}>
-                  <Switch
-                    checked={!isHidden}
-                    disabled={custom}
-                    label={`Show ${model.label} in the model picker`}
-                    onChange={(show) => setHidden(model.id, !show)}
-                  />
-                </span>
-              </div>
-            </div>
-          )
-        })}
+        {favorites.length > 0 && groupLabel('Favorites', true)}
+        {favorites.map((model, index) => row(model, favorites, index))}
+        {favoriteCount > 0 && rest.length > 0 && groupLabel('All', favorites.length === 0)}
+        {rest.map((model, index) => row(model, rest, index))}
+        {hiddenGroup.length > 0 && (
+          <>
+            <button
+              type="button"
+              className={`prov-models-group prov-models-hidden-toggle${favorites.length + rest.length === 0 ? ' is-first' : ''}`}
+              aria-expanded={showHidden}
+              disabled={filtering}
+              onClick={() => setHiddenOpen((open) => !open)}
+            >
+              <ChevronRight size={12} aria-hidden="true" className="prov-models-hidden-chevron" />
+              {hiddenGroup.length} hidden from picker
+            </button>
+            <div hidden={!showHidden}>{hiddenGroup.map((model, index) => row(model, hiddenGroup, index))}</div>
+          </>
+        )}
       </div>
 
       {allowCustom && editing && (

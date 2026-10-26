@@ -483,17 +483,6 @@
   width: 14rem;
 }
 
-.prov-models-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-8);
-}
-
-.prov-models-count {
-  font-size: var(--settings-fs-small);
-  color: var(--text-secondary);
-}
-
 .prov-models-actions {
   display: inline-flex;
   align-items: center;
@@ -517,6 +506,73 @@
   padding-top: var(--space-4);
 }
 
+/* The hidden models fold into one group at the end. */
+.prov-models-hidden-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  width: 100%;
+  margin-top: var(--space-8);
+  padding-top: 6px;
+  padding-bottom: 6px;
+  border: 0;
+  border-radius: var(--ui-control-radius);
+  background: none;
+  font: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.prov-models-hidden-toggle.is-first {
+  margin-top: 0;
+}
+
+.prov-models-hidden-toggle:hover:not(:disabled) {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+.prov-models-hidden-toggle:disabled {
+  cursor: default;
+}
+
+.prov-models-hidden-toggle:focus-visible {
+  outline: 1px solid var(--ui-line-strong);
+  outline-offset: 0;
+}
+
+.prov-models-hidden-chevron {
+  transition: transform 0.15s;
+}
+
+.prov-models-hidden-toggle[aria-expanded='true'] .prov-models-hidden-chevron {
+  transform: rotate(90deg);
+}
+
+/* "Hide all" / "Show all": a quiet text action. */
+.prov-text-btn {
+  height: var(--settings-control-h);
+  padding: 0 var(--space-4);
+  border: 0;
+  border-radius: var(--ui-control-radius);
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--settings-fs-small);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.prov-text-btn:hover {
+  color: var(--text-primary);
+}
+
+.prov-text-btn:focus-visible {
+  outline: 1px solid var(--ui-line-strong);
+  outline-offset: 0;
+}
+
 .prov-models-empty {
   margin: 0;
   padding: var(--space-8);
@@ -528,8 +584,8 @@
   display: flex;
   align-items: center;
   gap: var(--space-8);
-  min-height: 34px;
-  padding: 2px var(--space-8);
+  min-height: 30px;
+  padding: 1px var(--space-8);
   border-radius: var(--ui-control-radius);
 }
 
@@ -537,23 +593,14 @@
   background: var(--ui-hover);
 }
 
-.prov-model-row.is-hidden .prov-model-text {
+.prov-model-row.is-hidden :is(.prov-model-text, .prov-model-caps) {
   opacity: 0.55;
 }
 
-/* Name and id, then the efforts; the efforts move under the name when the row is narrow. */
-.prov-model-main {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  column-gap: var(--space-12);
-  flex: 1;
-  min-width: 0;
-}
-
+/* One line: name (the id on hover), capability chips, then the hover actions and the eye. */
 .prov-model-text {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--space-8);
   flex: 1 1 auto;
   min-width: 0;
@@ -567,11 +614,14 @@
   color: var(--text-primary);
 }
 
-.prov-model-detail {
-  overflow: hidden;
-  text-overflow: ellipsis;
+.prov-model-chip {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-hover);
+  font-size: 11px;
+  line-height: 16px;
   white-space: nowrap;
-  font-size: 11.5px;
   color: var(--text-secondary);
 }
 
@@ -590,16 +640,41 @@
 }
 
 .prov-model-caps {
-  margin-left: auto;
-  font-size: 11.5px;
-  color: var(--text-secondary);
+  display: inline-flex;
+  gap: var(--space-4);
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
 }
 
+/* Move, edit and remove appear on hover or keyboard focus; they keep their space so nothing shifts. */
 .prov-model-actions {
   display: inline-flex;
   align-items: center;
   gap: 2px;
   flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.prov-model-row:hover .prov-model-actions,
+.prov-model-row:focus-within .prov-model-actions {
+  opacity: 1;
+}
+
+.prov-eye {
+  opacity: 0.6;
+}
+
+.prov-model-row:hover .prov-eye,
+.prov-eye:focus-visible,
+.prov-eye.is-off {
+  opacity: 1;
+}
+
+.prov-eye:disabled,
+.prov-model-row:hover .prov-eye:disabled {
+  opacity: 0.35;
 }
 
 /* Custom model editor: id and name, the efforts it accepts, images and context window. */
