@@ -16,7 +16,7 @@ const TRANSITIONS: Record<InboxStatus, ReadonlySet<InboxStatus>> = {
  * Stored notifications for a thread (docs/run-engine/SPEC.md §14.1). A child's result is one
  * `child_result` row written in the child's terminal transaction; the reconciler (rule 4) wakes
  * the thread for its pending rows. Every write joins the caller's transaction or opens one and
- * appends an `inbox.status` thread event carrying the full row.
+ * appends an `inbox.status` thread event carrying the full row and a `change` tag.
  */
 export class Inbox {
   constructor(private readonly store: RunStore) {}
@@ -364,7 +364,10 @@ export class Inbox {
     })
   }
 
-  /** `change`: `status` for a row that was written or moved, `payload` for a write that leaves its status as it was. */
+  /**
+   * `change`: `status` for a row that was written or moved to another status; `payload` for any write
+   * that leaves the status as it was, a payload patch or an owner change (`deliveredBy`) alike.
+   */
   private recorded(record: InboxRecord, change: 'status' | 'payload'): void {
     this.store.appendEvent({
       threadId: record.threadId,

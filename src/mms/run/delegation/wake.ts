@@ -114,11 +114,12 @@ export function redeliveryDelayMs(attempts: number): number {
  * it (`deliveredBy`) ended `failed` or `cancelled`, or when the run that effect belongs to (a wake
  * run, the run a steer joined, a queued steer's run) ended other than `completed` — except a run
  * the user stopped (they saw it start and chose to stop it). With `now`, later redeliveries back off
- * (`redeliveryDelayMs`); attempts are the row's moves to `pending` (`Inbox.pendingCount`), so a payload
- * patch or an owner change on a pending row spends none. A row returns at most `MAX_INBOX_REDELIVERIES` times; after that it stays
- * `delivered` with `payload.deliveryFailed` set (attempts and the last error), and a
- * `reconcile.delivery_failed` event tells the owner, so a delivery that keeps failing cannot loop and
- * is never silently stuck. Joins the caller's transaction.
+ * (`redeliveryDelayMs`); attempts are the row's moves to `pending` (`Inbox.pendingCount`), so a
+ * payload patch or an owner change on a pending row spends none. A row returns at most
+ * `MAX_INBOX_REDELIVERIES` times; after that it stays `delivered` with `payload.deliveryFailed` set
+ * (attempts and the last error), and a `reconcile.delivery_failed` event tells the owner, so a
+ * delivery that keeps failing cannot loop and is never silently stuck. Joins the caller's
+ * transaction.
  */
 export function restoreUndeliveredRows(store: RunStore, outbox: EffectOutbox, now?: string): string[] {
   const inbox = new Inbox(store)
