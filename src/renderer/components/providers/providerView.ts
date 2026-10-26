@@ -19,7 +19,7 @@ export interface DriverInfo {
   multiInstance: boolean
   /** Models can be added by id (Antigravity serves a fixed list). */
   customModels: boolean
-  /** The vendor home a default instance shares with the user's terminal, for the Identity step. */
+  /** The vendor home a default instance shares with the user's terminal. */
   homeHint?: string
 }
 

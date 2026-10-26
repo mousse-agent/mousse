@@ -132,8 +132,8 @@ export interface AddProviderHandlers {
 
 /**
  * T3 Code's Add provider dialog: Provider → Identity → Config (or Sign in). Identity names a new
- * instance and picks its home: a second Claude Code account gets a private home and signs in
- * there, apart from the user's terminal.
+ * instance; a second Claude Code instance is always another account, with a private home it
+ * signs in to apart from the user's terminal.
  */
 export function AddProviderDialog({
   open,
@@ -155,7 +155,6 @@ export function AddProviderDialog({
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [step, setStep] = useState(0)
   const [label, setLabel] = useState('')
-  const [home, setHome] = useState<'default' | 'private'>('private')
   const [method, setMethod] = useState('')
   const { busy, error, setError, run } = useAsyncAction()
   const searchRef = useRef<HTMLInputElement>(null)
@@ -187,14 +186,16 @@ export function AddProviderDialog({
     if (choice.kind === 'new') {
       const base = DRIVER_INFO[choice.driver].label
       setLabel(choice.existing ? nextInstanceLabel(base, snapshots) : base)
-      // The seeded instance already uses the shared home; a second one only helps with its own.
-      setHome(choice.existing ? 'private' : 'default')
     }
   }
 
   const signInStep = apiOption !== undefined && connectKind(apiOption) === 'subscription'
-  const steps = ['Provider', 'Identity', signInStep ? 'Sign in' : 'Config'] as const
-  const summaries = [selected?.label ?? null, selected?.kind === 'new' ? label.trim() || null : (selected?.label ?? null), null]
+  /** A middle step only when there is a real choice to make: the sign-in method of a model API. */
+  const methodStep = selected?.kind === 'api' && selected.options.length > 1
+  const lastStep = signInStep ? 'Sign in' : selected?.kind === 'api' ? 'Connect' : 'Add'
+  const steps = methodStep ? ['Provider', 'Sign-in method', lastStep] : ['Provider', lastStep]
+  const last = steps.length - 1
+  const summaries = [selected?.label ?? null, ...(methodStep && apiOption ? [METHOD_LABEL[connectKind(apiOption)]] : []), null]
 
   const goTo = (next: number) => {
     setError(null)
@@ -202,11 +203,7 @@ export function AddProviderDialog({
       setError('Choose a provider.')
       return
     }
-    if (next > 1 && selected?.kind === 'new' && !label.trim()) {
-      setError('Enter a label.')
-      return
-    }
-    setStep(Math.max(0, Math.min(steps.length - 1, next)))
+    setStep(Math.max(0, Math.min(last, next)))
   }
 
   const finish = (instanceId: string) => {
@@ -221,7 +218,7 @@ export function AddProviderDialog({
       <button type="button" className="btn" disabled={busy !== null} onClick={() => (step === 0 ? onClose() : goTo(step - 1))}>
         {step === 0 ? 'Cancel' : 'Back'}
       </button>
-      {step < 2 && (
+      {step < last && (
         <button type="button" className="btn btn-primary" disabled={!selected} onClick={() => goTo(step + 1)}>
           Next
         </button>
@@ -234,7 +231,7 @@ export function AddProviderDialog({
       <div className="prov-wizard">
         <p className="prov-wizard-desc">Add an account or configure a provider on this device.</p>
         <WizardSteps steps={steps} current={step} summaries={summaries} disabled={busy !== null} onStep={goTo} />
-        {error && step < 2 && <p className="prov-error">{error}</p>}
+        {error && step < last && <p className="prov-error">{error}</p>}
 
         {step === 0 && (
           <div className="prov-wizard-panel">
@@ -286,83 +283,35 @@ export function AddProviderDialog({
           </div>
         )}
 
-        {step === 1 && selected && (
+        {step === 1 && methodStep && selected?.kind === 'api' && apiOption && (
           <div className="prov-wizard-panel">
             <SettingsGroup>
-              {selected.kind === 'new' ? (
-                <>
-                  <SettingsRow
-                    title="Label"
-                    description="Shown in the provider list and the model picker."
-                    control={
-                      <input
-                        className="settings-input"
-                        value={label}
-                        autoFocus
-                        aria-label="Label"
-                        onChange={(event) => setLabel(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter') goTo(2)
-                        }}
-                      />
-                    }
+              <SettingsRow
+                title="Sign-in method"
+                description={apiOption.description && apiOption.description !== apiOption.label ? apiOption.description : undefined}
+                control={
+                  <Segmented
+                    ariaLabel="Sign-in method"
+                    value={methodKey(apiOption)}
+                    onChange={setMethod}
+                    options={selected.options.map((option) => ({ value: methodKey(option), label: METHOD_LABEL[connectKind(option)] }))}
                   />
-                  {DRIVER_INFO[selected.driver].multiInstance && (
-                    <SettingsRow
-                      title="Account"
-                      description={
-                        home === 'private'
-                          ? 'Mousse keeps a private home for this instance. Sign in to another account there; your terminal is not touched.'
-                          : `Uses your own setup${DRIVER_INFO[selected.driver].homeHint ? ` (${DRIVER_INFO[selected.driver].homeHint})` : ''}, signed in the way your terminal is.`
-                      }
-                      control={
-                        <Segmented
-                          ariaLabel="Account home"
-                          value={home}
-                          onChange={setHome}
-                          options={[
-                            { value: 'private', label: 'Separate account' },
-                            { value: 'default', label: 'Your own' }
-                          ]}
-                        />
-                      }
-                    />
-                  )}
-                </>
-              ) : (
-                <>
-                  <SettingsRow
-                    title="Label"
-                    description={
-                      selected.kind === 'enable'
-                        ? 'This provider is set up already and switched off. Adding turns it back on.'
-                        : 'Shown in the provider list.'
-                    }
-                    control={<input className="settings-input" value={selected.label} readOnly disabled aria-label="Label" />}
-                  />
-                  {selected.kind === 'api' && selected.options.length > 1 && apiOption && (
-                    <SettingsRow
-                      title="Sign-in method"
-                      description={apiOption.description && apiOption.description !== apiOption.label ? apiOption.description : undefined}
-                      control={
-                        <Segmented
-                          ariaLabel="Sign-in method"
-                          value={methodKey(apiOption)}
-                          onChange={setMethod}
-                          options={selected.options.map((option) => ({ value: methodKey(option), label: METHOD_LABEL[connectKind(option)] }))}
-                        />
-                      }
-                    />
-                  )}
-                </>
-              )}
+                }
+              />
             </SettingsGroup>
           </div>
         )}
 
-        {step === 2 && selected && selected.kind !== 'api' && (
+        {step === last && selected && selected.kind !== 'api' && (
           <div className="prov-wizard-panel">
             <SettingsGroup>
+              {selected.kind === 'new' && selected.existing && (
+                <SettingsRow
+                  title="Name"
+                  description="A separate account, with its own sign-in. Shown in the provider list and the model picker."
+                  control={<input className="settings-input" value={label} aria-label="Name" onChange={(event) => setLabel(event.target.value)} />}
+                />
+              )}
               <AgentConnectStep
                 choice={selected}
                 busy={busy === selected.key}
@@ -374,8 +323,12 @@ export function AddProviderDialog({
                       await handlers.enable(selected.snapshot, binaryPath)
                       finish(selected.snapshot.instanceId)
                     } else {
-                      const config: InstanceConfigPatch = { displayName: label.trim(), ...(binaryPath ? { binaryPath } : {}) }
-                      if (DRIVER_INFO[selected.driver].multiInstance) config.home = home
+                      const config: InstanceConfigPatch = {
+                        displayName: label.trim() || DRIVER_INFO[selected.driver].label,
+                        ...(binaryPath ? { binaryPath } : {})
+                      }
+                      // A second instance of an agent is another account, so it gets its own home.
+                      if (DRIVER_INFO[selected.driver].multiInstance) config.home = selected.existing ? 'private' : 'default'
                       finish(await handlers.add(selected.driver, config))
                     }
                   })
@@ -394,7 +347,7 @@ export function AddProviderDialog({
           </div>
         )}
 
-        {step === 2 && selected?.kind === 'api' && apiOption && (
+        {step === last && selected?.kind === 'api' && apiOption && (
           <div className="prov-wizard-panel">
             <SettingsGroup>
               <ConnectStep
@@ -447,7 +400,9 @@ export function AgentConnectStep({
   const checked = Boolean(known && (known.checkedAt || known.stale))
   const missing = checked && known?.install.state === 'not_installed'
   const offerInstall = Boolean(onInstall) && choice.kind === 'enable' && missing && choice.snapshot.install.canInstall
-  const showPath = !offerInstall || manual
+  // Most people never need the executable field: it shows only when nothing was found or on request.
+  const showPath = offerInstall ? manual : missing || manual
+  const version = known?.binary?.version
   const entered = path.trim()
   const canAdd = !disabled && (entered !== '' || !missing)
   const label = choice.kind === 'enable' ? choice.label : DRIVER_INFO[choice.driver].label
@@ -482,6 +437,30 @@ export function AgentConnectStep({
           }
         />
       )}
+      {!offerInstall && !showPath && (
+        <SettingsRow
+          title="Ready to add"
+          description={
+            error ? (
+              <span className="prov-error">{error}</span>
+            ) : detected ? (
+              `Mousse found ${label}${version ? ` ${version}` : ''} on this computer.`
+            ) : (
+              `Mousse uses the ${label} it finds on this computer.`
+            )
+          }
+          control={
+            <>
+              <button type="button" className="prov-link" disabled={disabled} onClick={() => setManual(true)}>
+                Use a different executable
+              </button>
+              <button type="button" className="settings-btn" autoFocus disabled={!canAdd} onClick={() => add()}>
+                {busy ? 'Adding…' : 'Add'}
+              </button>
+            </>
+          }
+        />
+      )}
       {showPath && (
         <SettingsRow
           title="Executable"
@@ -498,6 +477,19 @@ export function AgentConnectStep({
           }
           control={
             <>
+              {!offerInstall && !missing && (
+                <button
+                  type="button"
+                  className="prov-link"
+                  disabled={disabled}
+                  onClick={() => {
+                    setManual(false)
+                    setPath('')
+                  }}
+                >
+                  Use the one Mousse found
+                </button>
+              )}
               <input
                 className="settings-input prov-mono prov-wide"
                 value={path}
