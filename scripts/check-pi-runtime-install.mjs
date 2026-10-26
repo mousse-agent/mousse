@@ -4,19 +4,20 @@
 //   node scripts/check-pi-runtime-install.mjs --app <resources/app.asar> --exec <Mousse executable>
 //                                                                   packaged (electron-builder --dir): the unpacked copy, run by Electron as Node
 //
-// It starts Pi in RPC mode the way the launcher does (argv flags, private agent dir, offline), with a
-// clean environment and a temporary user home, after checking that every package the bundle
-// imports is inside the runtime. It round-trips get_state and get_available_models, loads photon-node,
-// then has Pi's `bash` start a long-lived grandchild and kills the tree (taskkill /T on Windows, the
-// process group elsewhere), and checks that the grandchild is gone. A receipt goes to
-// .mousse-dev/logs/pi-runtime-check.json.
+// It first checks that every package Pi would load is inside the runtime. Then it starts Pi in RPC
+// mode the way the launcher does (argv flags, private agent dir, offline), with a clean environment
+// and an empty user home; round-trips get_state and get_available_models; loads photon-node; checks
+// that Mousse's extension loaded; has Pi's `bash` start a long-lived grandchild; kills the tree with
+// the app's own tree kill (`processTree.mjs`); and checks that the grandchild is gone. Anything it
+// started is killed at the end whatever happened. A receipt goes to .mousse-dev/logs/pi-runtime-check.json.
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { fileURLToPath } from 'node:url'
-import { buildPiRuntime, bundleImports, OPTIONAL_IMPORTS, packageName } from './build-pi-runtime.mjs'
+import { killProcessTree } from '../src/mms/harness/processTree.mjs'
+import { buildPiRuntime, runtimeProblems } from './build-pi-runtime.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const STEP_MS = 30_000
@@ -39,10 +40,9 @@ const extension = join(runtime, 'mousse-extension.mjs')
 for (const path of [entry, extension, join(packageRoot, 'package.json'), join(packageRoot, 'node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm')])
   if (!existsSync(path)) throw new Error(`Pi runtime file missing: ${path}`)
 // Node resolves a missing package from any node_modules above the runtime (the repository's, the
-// user's home), so a start alone cannot prove the runtime is complete: every import must be inside it.
-const unshipped = bundleImports(join(packageRoot, 'dist', 'bundle')).map(packageName)
-  .filter((name) => !OPTIONAL_IMPORTS.includes(name) && !existsSync(join(packageRoot, 'node_modules', name, 'package.json')))
-if (unshipped.length) throw new Error(`The Pi runtime does not ship: ${[...new Set(unshipped)].join(', ')}`)
+// user's home), so a start alone cannot prove the runtime is complete.
+const problems = runtimeProblems(packageRoot)
+if (problems.length) throw new Error(`The Pi runtime would load packages it does not ship: ${problems.join('; ')}`)
 
 const scratch = mkdtempSync(join(tmpdir(), 'mousse-pi-check-'))
 const home = join(scratch, 'home')
@@ -108,11 +108,6 @@ function within(promise, what, ms = STEP_MS) {
     .finally(() => clearTimeout(timer))
 }
 
-function killTree(pid) {
-  if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, timeout: 10_000 })
-  else process.kill(-pid, 'SIGKILL')
-}
-
 function alive(pid) {
   try {
     process.kill(pid, 0)
@@ -131,6 +126,8 @@ async function until(test, what) {
 }
 
 const receipt = { exec, runtime, platform: process.platform, asNode }
+/** Processes the check started through Pi, killed in `finally` whatever happened. */
+const fixtures = new Set()
 try {
   // Image resizing loads photon-node (and its wasm) lazily, resolved from the bundle's chunks.
   const photon = spawnSync(exec, ['-e', `const m = require('node:module').createRequire(${JSON.stringify(join(packageRoot, 'dist/bundle/chunks/x.js'))})('@silvia-odwyer/photon-node'); if (typeof m.PhotonImage !== 'function') process.exit(2)`],
@@ -146,6 +143,12 @@ try {
   if (!models.success || !Array.isArray(models.data?.models)) throw new Error(`get_available_models failed: ${models.error}`)
   receipt.models = models.data.models.length
   if (receipt.models !== 0) throw new Error(`Pi listed ${receipt.models} models with no credentials`)
+  // A failed extension load is only a startup warning, so ask Pi for the command the extension registers.
+  const commands = await send({ type: 'get_commands' })
+  const marker = commands.data?.commands?.find((command) => command.name === 'mousse-extension' && command.source === 'extension')
+  if (!marker) throw new Error(`Mousse's extension did not load:
+${stderr}`)
+  receipt.extension = marker.sourceInfo?.path ?? true
 
   // A grandchild through Pi's own shell, so the kill has a real tree to take down.
   const pidFile = join(scratch, 'grandchild.pid').replace(/\\/g, '/')
@@ -154,8 +157,10 @@ try {
   const shell = send({ type: 'bash', command }).catch((error) => error)
   await until(() => existsSync(pidFile) || child.exitCode !== null, 'the grandchild to start')
   const grandchild = Number(readFileSync(pidFile, 'utf8'))
+  fixtures.add(grandchild)
   if (!alive(grandchild)) throw new Error('The grandchild was not running')
-  killTree(child.pid)
+  // The app's own tree kill: on POSIX Pi's shell runs in its own process group.
+  killProcessTree(child.pid)
   const exit = await within(exited, 'Pi to exit after the tree kill')
   await until(() => !alive(grandchild), 'the grandchild to die')
   await shell
@@ -164,8 +169,15 @@ try {
 } catch (error) {
   receipt.ok = false
   receipt.error = error instanceof Error ? error.message : String(error)
-  if (child.exitCode === null) killTree(child.pid)
+  if (child.exitCode === null && child.signalCode === null) killProcessTree(child.pid)
 } finally {
+  for (const pid of fixtures) {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      /* already gone */
+    }
+  }
   rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
 }
 

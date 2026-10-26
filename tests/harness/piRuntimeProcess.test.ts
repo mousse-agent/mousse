@@ -1,7 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { build } from 'esbuild'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { getPiExtensionBuildOptions } from '../../scripts/build-pi-runtime.mjs'
 import { instanceEnv } from '../../src/mms/harness/env'
 import { piLaunch, startPiProcess, type PiProcess, type PiRuntimePaths } from '../../src/mms/harness/pi/launch'
 import type { PiRpcExit } from '../../src/mms/harness/pi/rpcClient'
@@ -14,9 +16,27 @@ const repoRoot = resolve(__dirname, '..', '..')
 const piPackage = join(repoRoot, 'node_modules/@earendil-works/pi-coding-agent')
 const scratch: string[] = []
 const running: PiProcess[] = []
+/** Processes a test started through Pi: killed after it whatever happened. */
+const fixtures: number[] = []
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
 
 afterEach(() => {
-  for (const started of running.splice(0)) if (started.child.exitCode === null) killTree(started.child)
+  for (const started of running.splice(0)) killTree(started.child)
+  for (const pid of fixtures.splice(0)) {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      /* already gone */
+    }
+  }
   for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 })
 
@@ -85,10 +105,11 @@ describe('Pi runtime process', () => {
     expect(exits).toHaveLength(1)
   })
 
-  it('runs the pinned Pi in RPC mode: get_state and get_available_models round-trip, and the tree kill ends it once', async () => {
+  /** The pinned Pi with Mousse's extension built from source, started through the launcher. */
+  async function startPi() {
     const { dir, stateDir, base, env } = setup()
     const extension = join(dir, 'mousse-extension.mjs')
-    writeFileSync(extension, 'export default function () {}\n')
+    await build({ ...getPiExtensionBuildOptions(repoRoot), outfile: extension, logLevel: 'silent' })
     const runtime: PiRuntimePaths = { root: piPackage, entry: join(piPackage, 'dist/bundle/rpc-entry.js'), extension }
     const launched = piLaunch({
       env, runtime, stateDir, provider: 'openrouter', model: 'anthropic/claude-sonnet-4.5', thinking: 'off',
@@ -98,18 +119,51 @@ describe('Pi runtime process', () => {
     const exits: PiRpcExit[] = []
     const started = startPiProcess(env, launched, { cwd: dir, handlers: { exit: (exit) => exits.push(exit) } })
     running.push(started)
+    return { dir, stateDir, extension, started, exits }
+  }
 
+  it('runs the pinned Pi in RPC mode with only Mousse\'s extension, and the tree kill ends it once', async () => {
+    const { stateDir, extension, started, exits } = await startPi()
     const state = await started.client.send({ type: 'get_state' }).catch((error) => { throw new Error(`${error.message}\n${started.stderr()}`) })
     expect(state.model).toMatchObject({ provider: 'openrouter', id: 'anthropic/claude-sonnet-4.5' })
     expect(state.sessionFile?.startsWith(join(stateDir, 'sessions'))).toBe(true)
     const { models } = await started.client.send({ type: 'get_available_models' })
     expect(models.length).toBeGreaterThan(0)
     expect(new Set(models.map((model) => model.provider))).toEqual(new Set(['openrouter']))
+    // A failed extension load is only a startup warning; the marker command proves it loaded.
+    const { commands } = await started.client.send({ type: 'get_commands' })
+    // Besides it, Pi 0.85.1 always loads its hidden built-in llama.cpp extension (a `llama` provider
+    // and command), even with --no-extensions. Pinned so a new built-in fails here; the RPC engine
+    // must guard its provider too. No skill or prompt template loads.
+    expect(commands.map((command) => ({ name: command.name, source: command.source, path: command.sourceInfo.path })))
+      .toEqual([{ name: 'mousse-extension', source: 'extension', path: extension }, { name: 'llama', source: 'extension', path: '<inline:llama.cpp>' }])
 
     killTree(started.child)
     const exit = await started.client.exited
     expect(exit.code === 0 && exit.signal === null).toBe(false)
     await expect(started.client.send({ type: 'get_state' })).rejects.toMatchObject({ code: 'exited' })
     expect(exits).toEqual([exit])
+    // Killing a tree that is already gone is not an error.
+    expect(() => killTree(started.child)).not.toThrow()
+  })
+
+  // Pi's shell runs detached, in its own process group on POSIX, so killing Pi's group alone would
+  // leave it running. Windows runs it too: taskkill /T follows parent links regardless of groups.
+  it('kills the shell Pi started and its child along with Pi', async () => {
+    const { dir, started } = await startPi()
+    await started.client.send({ type: 'get_state' })
+    const pidFile = join(dir, 'grandchild.pid').replace(/\\/g, '/')
+    const program = `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`
+    const shell = started.client.send({ type: 'bash', command: `${JSON.stringify(process.execPath.replace(/\\/g, '/'))} -e ${JSON.stringify(program)}` })
+    void shell.catch(() => {})
+    await vi.waitFor(() => expect(existsSync(pidFile)).toBe(true), { timeout: 15_000, interval: 50 })
+    const grandchild = Number(readFileSync(pidFile, 'utf8'))
+    fixtures.push(grandchild)
+    expect(alive(grandchild)).toBe(true)
+
+    killTree(started.child)
+    await started.client.exited
+    await expect(shell).rejects.toMatchObject({ code: 'exited' })
+    await vi.waitFor(() => expect(alive(grandchild)).toBe(false), { timeout: 10_000, interval: 50 })
   })
 })
