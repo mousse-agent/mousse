@@ -3,9 +3,20 @@ import type { SecretCodec } from './secretCodec'
 /** The JSON key of an encrypted secret file: `{ "__mousse_encrypted_v1": "<base64>" }`. */
 export const SECRET_ENVELOPE_KEY = '__mousse_encrypted_v1'
 
-/** Why a secret file cannot be read or written. The message never carries secret material. */
+/**
+ * Why a secret file cannot be read or written. The message never carries secret material.
+ * - `corrupt`: the file is not valid JSON or not a valid envelope.
+ * - `unavailable`: the envelope is fine but this host cannot decrypt it (no vault, another OS
+ *   account, a locked keyring). The file may be intact; never discard it.
+ * - `encryption`: the data must be encrypted and the vault cannot do it now.
+ */
 export class SecretFileError extends Error {
-  constructor(readonly reason: string) {
+  constructor(
+    readonly reason: string,
+    readonly kind: 'corrupt' | 'unavailable' | 'encryption' = 'corrupt',
+    /** Whether the file was an encrypted envelope, so a replacement must be encrypted too. */
+    readonly wasEncrypted = false
+  ) {
     super(reason)
     this.name = 'SecretFileError'
   }
@@ -26,12 +37,18 @@ export function openSecretFile(raw: string, codec: SecretCodec): { value: unknow
   if (!isRecord(parsed) || !Object.hasOwn(parsed, SECRET_ENVELOPE_KEY)) return { value: parsed, encrypted: false }
   const payload = parsed[SECRET_ENVELOPE_KEY]
   if (typeof payload !== 'string' || !payload || Buffer.from(payload, 'base64').toString('base64') !== payload) {
-    throw new SecretFileError('the encrypted envelope is invalid')
+    throw new SecretFileError('the encrypted envelope is invalid', 'corrupt', true)
   }
   let decrypted: string | null
   try { decrypted = codec.decrypt(Buffer.from(payload, 'base64')) } catch { decrypted = null }
-  if (decrypted === null) throw new SecretFileError('decryption is unavailable or failed; use the Electron host that saved these credentials')
-  return { value: parse(decrypted), encrypted: true }
+  if (decrypted === null) throw new SecretFileError('decryption is unavailable or failed; use the Electron host that saved these credentials', 'unavailable', true)
+  let value: unknown
+  try {
+    value = parse(decrypted)
+  } catch {
+    throw new SecretFileError('the stored data is invalid JSON', 'corrupt', true)
+  }
+  return { value, encrypted: true }
 }
 
 /**
@@ -46,7 +63,7 @@ export function sealSecretFile(serialized: string, codec: SecretCodec, wasEncryp
       if (!encrypted) throw new Error('encryption unavailable')
     }
   } catch {
-    throw new SecretFileError('encryption is unavailable or failed; credentials cannot be saved safely')
+    throw new SecretFileError('encryption is unavailable or failed; credentials cannot be saved safely', 'encryption')
   }
   return encrypted
     ? { stored: `${JSON.stringify({ [SECRET_ENVELOPE_KEY]: encrypted.toString('base64') }, null, 2)}\n`, encrypted: true }
