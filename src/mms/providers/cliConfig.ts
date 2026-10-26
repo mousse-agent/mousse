@@ -1,11 +1,7 @@
 import { execFile } from 'node:child_process'
 import { accessSync, constants, statSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
-import {
-  CLI_PROVIDER_INSTANCE_IDS,
-  type CliProviderConfigPatch,
-  type CliProviderInstanceId
-} from '../../shared/providerAuth'
+import type { CliProviderConfigPatch } from '../../shared/providerAuth'
 import { isWindowsScriptShim, resolveWindowsShim, type CliLaunch } from './resolveWindowsShim'
 
 export type { CliLaunch } from './resolveWindowsShim'
@@ -24,12 +20,6 @@ const MAX_ARG = 8192
 const MAX_ENV = 256
 const MAX_ENV_VALUE = 32_768
 export const CLI_VERSION_TIMEOUT_MS = 3_000
-
-export function asCliProviderInstanceId(value: unknown): CliProviderInstanceId {
-  if (typeof value !== 'string' || !(CLI_PROVIDER_INSTANCE_IDS as readonly string[]).includes(value))
-    throw new Error(`instanceId must be one of ${CLI_PROVIDER_INSTANCE_IDS.join(', ')}`)
-  return value as CliProviderInstanceId
-}
 
 function noNul(value: string, label: string): string {
   if (value.includes('\0')) throw new Error(`${label} must not contain NUL characters`)

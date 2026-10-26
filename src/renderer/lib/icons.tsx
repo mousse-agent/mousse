@@ -19,6 +19,7 @@ import ArrowUp01Icon from '@hugeicons/core-free-icons/ArrowUp01Icon'
 import ArrowUp02Icon from '@hugeicons/core-free-icons/ArrowUp02Icon'
 import ArrowUpDoubleIcon from '@hugeicons/core-free-icons/ArrowUpDoubleIcon'
 import ArrowUpRight01Icon from '@hugeicons/core-free-icons/ArrowUpRight01Icon'
+import CircleArrowUp02Icon from '@hugeicons/core-free-icons/CircleArrowUp02Icon'
 import AtIcon from '@hugeicons/core-free-icons/AtIcon'
 import Attachment01Icon from '@hugeicons/core-free-icons/Attachment01Icon'
 import BookOpen01Icon from '@hugeicons/core-free-icons/BookOpen01Icon'
@@ -132,6 +133,7 @@ import UserCircleIcon from '@hugeicons/core-free-icons/UserCircleIcon'
 import UserGroupIcon from '@hugeicons/core-free-icons/UserGroupIcon'
 import UserIcon from '@hugeicons/core-free-icons/UserIcon'
 import ViewIcon from '@hugeicons/core-free-icons/ViewIcon'
+import ViewOffSlashIcon from '@hugeicons/core-free-icons/ViewOffSlashIcon'
 import VolumeHighIcon from '@hugeicons/core-free-icons/VolumeHighIcon'
 import WebhookIcon from '@hugeicons/core-free-icons/WebhookIcon'
 import WorkflowSquare01Icon from '@hugeicons/core-free-icons/WorkflowSquare01Icon'
@@ -174,6 +176,7 @@ export const ArrowLeft = /* @__PURE__ */ createIcon('ArrowLeft', ArrowLeft02Icon
 export const ArrowRight = /* @__PURE__ */ createIcon('ArrowRight', ArrowRight02Icon)
 export const ArrowUp = /* @__PURE__ */ createIcon('ArrowUp', ArrowUp02Icon)
 export const ArrowUpRight = /* @__PURE__ */ createIcon('ArrowUpRight', ArrowUpRight01Icon)
+export const CircleArrowUp = /* @__PURE__ */ createIcon('CircleArrowUp', CircleArrowUp02Icon)
 export const AtSign = /* @__PURE__ */ createIcon('AtSign', AtIcon)
 export const Bell = /* @__PURE__ */ createIcon('Bell', Notification02Icon)
 export const BookOpen = /* @__PURE__ */ createIcon('BookOpen', BookOpen01Icon)
@@ -201,6 +204,7 @@ export const Download = /* @__PURE__ */ createIcon('Download', Download04Icon)
 export const Edit = /* @__PURE__ */ createIcon('Edit', Edit02Icon)
 export const ExternalLink = /* @__PURE__ */ createIcon('ExternalLink', LinkSquare02Icon)
 export const Eye = /* @__PURE__ */ createIcon('Eye', ViewIcon)
+export const EyeOff = /* @__PURE__ */ createIcon('EyeOff', ViewOffSlashIcon)
 export const File = /* @__PURE__ */ createIcon('File', File01Icon)
 export const FileOutput = /* @__PURE__ */ createIcon('FileOutput', FileExportIcon)
 export const FileText = /* @__PURE__ */ createIcon('FileText', File02Icon)

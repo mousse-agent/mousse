@@ -1,4 +1,5 @@
 import type { SQLInputValue } from 'node:sqlite'
+import type { ExecutionBinding } from '../../shared/harness/types'
 import type { ProfileDatabase } from './db/ProfileDatabase'
 import { RUN_MIGRATIONS } from './db/migrations'
 import { json, str, type Row } from './db/rows'
@@ -235,6 +236,20 @@ export class RunStore {
         stableStringify({ ...(current.outcome ?? {}), ...input.outcomePatch })
       ) as RunOutcome
       return this.writeCas({ ...current, epoch: current.epoch + 1, outcome }, input.expectedEpoch)
+    })
+  }
+
+  /**
+   * Records the attempt's execution binding once; a later call never replaces it (retries,
+   * steering and forks of the attempt reuse the first binding). Returns the stored binding.
+   */
+  setAttemptBinding(attemptId: string, binding: ExecutionBinding): ExecutionBinding {
+    return this.db.transaction(() => {
+      const current = this.getAttempt(attemptId)
+      if (!current) fail('bad_request', `Unknown attempt ${attemptId}.`)
+      if (current.executionBinding) return current.executionBinding
+      this.db.statement('UPDATE run_attempts SET execution_binding = ? WHERE attempt_id = ?').run(stableStringify(binding), attemptId)
+      return binding
     })
   }
 
@@ -563,6 +578,7 @@ function toRun(row: Row): RunRecord {
 }
 
 function toAttempt(row: Row): AttemptRecord {
+  const binding = json<ExecutionBinding>(row.execution_binding)
   return {
     attemptId: String(row.attempt_id),
     runId: String(row.run_id),
@@ -571,7 +587,8 @@ function toAttempt(row: Row): AttemptRecord {
     status: row.status as AttemptStatus,
     providerRef: json<ProviderRef>(row.provider_ref),
     startedAt: str(row.started_at),
-    completedAt: str(row.completed_at)
+    completedAt: str(row.completed_at),
+    ...(binding ? { executionBinding: binding } : {})
   }
 }
 

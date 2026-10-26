@@ -6,6 +6,18 @@ import { knownAppError, parseErrorInfo } from '../../shared/errors'
 
 import type { ChatImageAttachment, ChatMode } from '../../shared/types'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
+import { PROVIDER_DRIVER_KINDS } from '../../shared/providerInstances'
+import type {
+  AddInstanceInput,
+  CustomModel,
+  HarnessDriverKind,
+  InstanceConfigPatch,
+  ModelCapabilities,
+  ModelPrefsPatch,
+  ProviderScope,
+  SignInResponse
+} from '../../shared/harness/types'
+import { parseCliConfigPatch } from '../providers/cliConfig'
 import {
   parseClientCommandResponse,
   parseServerCommandCancel,
@@ -470,6 +482,141 @@ export function asProviderLoginResponse(v: unknown): ProviderLoginResponse {
   }
   const value = asOptionalString(response.value, MMS_PROTOCOL_MAX_TEXT_LENGTH)
   return value === undefined ? { sessionId, kind } : { sessionId, kind, value }
+}
+
+// ── Harness gateway (`providers.snapshots`, `providers.instances.*`) ────────
+
+const MAX_INSTANCE_ID = 128
+const MAX_MODEL_ID = 256
+const MAX_MODEL_PREF_ITEMS = 1000
+const MAX_CUSTOM_MODELS = 200
+
+function assertKnownKeys(o: Record<string, unknown>, name: string, allowed: readonly string[]): void {
+  for (const key of Object.keys(o)) {
+    if (!allowed.includes(key)) throw invalidParams(`${name} contains unknown field: ${key}`)
+  }
+}
+
+export function asInstanceId(v: unknown, name = 'instanceId'): string {
+  return asString(v, name, MAX_INSTANCE_ID)
+}
+
+export function asProviderScope(v: unknown, name = 'scope'): ProviderScope {
+  const o = asPlainObject(v, name)
+  if (o.kind === 'device') {
+    assertKnownKeys(o, name, ['kind'])
+    return { kind: 'device' }
+  }
+  if (o.kind === 'project') {
+    assertKnownKeys(o, name, ['kind', 'projectId'])
+    return { kind: 'project', projectId: asString(o.projectId, `${name}.projectId`, 256) }
+  }
+  throw invalidParams(`${name}.kind must be device|project`)
+}
+
+export function asHarnessDriverKind(v: unknown, name = 'driver'): HarnessDriverKind {
+  if (typeof v !== 'string' || !(PROVIDER_DRIVER_KINDS as readonly string[]).includes(v)) {
+    throw invalidParams(`${name} must be one of ${PROVIDER_DRIVER_KINDS.join('|')}`)
+  }
+  return v as HarnessDriverKind
+}
+
+function asNullableTrimmed(v: unknown, name: string, maxLen: number): string | null {
+  if (v === null) return null
+  if (typeof v !== 'string') throw invalidParams(`${name} must be a string or null`)
+  const trimmed = v.trim()
+  if (trimmed.length > maxLen) throw invalidParams(`${name} exceeds max length ${maxLen}`)
+  return trimmed || null
+}
+
+export function asInstanceConfigPatch(v: unknown, name = 'patch'): InstanceConfigPatch {
+  if (v === undefined || v === null) return {}
+  const o = asPlainObject(v, name)
+  assertKnownKeys(o, name, ['displayName', 'home', 'binaryPath', 'args', 'env', 'loginMethod'])
+  // binaryPath, args and env share the CLI launch-settings limits.
+  const patch: InstanceConfigPatch = { ...parseCliConfigPatch({ binaryPath: o.binaryPath, args: o.args, env: o.env }) }
+  if (o.displayName !== undefined) patch.displayName = asNullableTrimmed(o.displayName, `${name}.displayName`, 80)
+  if (o.loginMethod !== undefined) patch.loginMethod = asNullableTrimmed(o.loginMethod, `${name}.loginMethod`, 64)
+  if (o.home !== undefined) {
+    if (o.home !== 'default' && o.home !== 'private') throw invalidParams(`${name}.home must be default|private`)
+    patch.home = o.home
+  }
+  return patch
+}
+
+export function asAddInstanceInput(v: unknown): AddInstanceInput {
+  const o = asPlainObject(v, 'params')
+  const driver = asHarnessDriverKind(o.driver)
+  const config = asInstanceConfigPatch(o.config, 'config')
+  return Object.keys(config).length > 0 ? { driver, config } : { driver }
+}
+
+/** Device scope takes a boolean; a project may also clear its override with null. */
+export function asEnabledForScope(v: unknown, scope: ProviderScope): boolean | null {
+  if (v === null && scope.kind === 'project') return null
+  if (typeof v !== 'boolean') {
+    throw invalidParams(scope.kind === 'project' ? 'enabled must be a boolean or null' : 'enabled must be a boolean')
+  }
+  return v
+}
+
+function asModelCapabilities(v: unknown, name: string): ModelCapabilities {
+  const o = asPlainObject(v, name)
+  assertKnownKeys(o, name, ['efforts', 'images', 'contextWindow'])
+  const contextWindow = asOptionalBoundedInt(o.contextWindow, `${name}.contextWindow`, { min: 1, max: 100_000_000 })
+  return {
+    efforts: asStringArray(o.efforts ?? [], `${name}.efforts`, { unique: true, maxItems: 16, maxItemLen: 32 }),
+    images: asBoolean(o.images, `${name}.images`),
+    ...(contextWindow !== undefined ? { contextWindow } : {})
+  }
+}
+
+function asCustomModels(v: unknown, name: string): CustomModel[] {
+  if (!Array.isArray(v)) throw invalidParams(`${name} must be an array`)
+  if (v.length > MAX_CUSTOM_MODELS) throw invalidParams(`${name} exceeds max items ${MAX_CUSTOM_MODELS}`)
+  const seen = new Set<string>()
+  return v.map((entry, index) => {
+    const path = `${name}[${index}]`
+    const o = asPlainObject(entry, path)
+    assertKnownKeys(o, path, ['id', 'label', 'capabilities'])
+    const id = asString(o.id, `${path}.id`, MAX_MODEL_ID).trim()
+    if (seen.has(id)) throw invalidParams(`${name} must not contain duplicate ids`)
+    seen.add(id)
+    const label = asOptionalString(o.label, 200)?.trim()
+    return { id, ...(label ? { label } : {}), capabilities: asModelCapabilities(o.capabilities, `${path}.capabilities`) }
+  })
+}
+
+export function asModelPrefsPatch(v: unknown, name = 'patch'): ModelPrefsPatch {
+  const o = asPlainObject(v, name)
+  assertKnownKeys(o, name, ['hidden', 'order', 'favorites', 'custom', 'star', 'unstar', 'hide', 'unhide'])
+  const list = (value: unknown, key: string): string[] =>
+    asStringArray(value, `${name}.${key}`, { unique: true, maxItems: MAX_MODEL_PREF_ITEMS, maxItemLen: MAX_MODEL_ID })
+  const patch: ModelPrefsPatch = {}
+  if (o.hidden !== undefined) patch.hidden = list(o.hidden, 'hidden')
+  if (o.order !== undefined) patch.order = list(o.order, 'order')
+  if (o.favorites !== undefined) patch.favorites = list(o.favorites, 'favorites')
+  if (o.custom !== undefined) patch.custom = asCustomModels(o.custom, `${name}.custom`)
+  for (const key of ['star', 'unstar', 'hide', 'unhide'] as const) if (o[key] !== undefined) patch[key] = list(o[key], key)
+  return patch
+}
+
+export function asSignInResponse(v: unknown): SignInResponse {
+  const o = asPlainObject(v, 'response')
+  assertKnownKeys(o, 'response', ['promptId', 'kind', 'value'])
+  const kind = o.kind
+  if (kind !== 'input' && kind !== 'select' && kind !== 'redirect_url' && kind !== 'cancel') {
+    throw invalidParams('response.kind must be input|select|redirect_url|cancel')
+  }
+  const promptId = asOptionalString(o.promptId, 256)
+  if (kind !== 'cancel' && !promptId) throw invalidParams('response.promptId is required')
+  const value = asOptionalString(o.value, 64 * 1024)
+  if ((kind === 'select' || kind === 'redirect_url') && !value) throw invalidParams(`response.value is required for ${kind}`)
+  return {
+    kind,
+    ...(promptId ? { promptId } : {}),
+    ...(value !== undefined ? { value } : {})
+  }
 }
 
 export function asTaskStatus(

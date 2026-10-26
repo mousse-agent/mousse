@@ -44,6 +44,23 @@ describe('Antigravity release install', () => {
     expect(antigravityInstallState(home)).toEqual({ installing: false })
   })
 
+  it('reports byte progress with its fraction, at most once per whole percent', async () => {
+    const home = newHome()
+    const abort = new AbortController()
+    // Four chunks: 25, 50, 75 and 100 percent, the second split in two within the same percent.
+    const quarter = payload.length / 4
+    const chunks = [payload.subarray(0, quarter), payload.subarray(quarter, quarter + 1), payload.subarray(quarter + 1, 2 * quarter), payload.subarray(2 * quarter, 3 * quarter), payload.subarray(3 * quarter)]
+    const chunked: typeof fetch = async () => new Response(new ReadableStream({ start(controller) { for (const chunk of chunks) controller.enqueue(new Uint8Array(chunk)); controller.close() } }))
+    const reported: Array<[string, number | undefined]> = []
+    await expect(installAntigravity(home, abort.signal, (message, fraction) => {
+      reported.push([message, fraction])
+      if (message.startsWith('Verifying')) abort.abort()
+    }, { release, fetch: chunked })).rejects.toMatchObject({ name: 'AbortError' })
+    const bytes = reported.filter(([, fraction]) => fraction !== undefined)
+    expect(bytes.map(([, fraction]) => fraction)).toEqual([0.25, 0.5, 0.75, 1])
+    expect(bytes[0]![0]).toBe('Downloading 0 MB of 0 MB')
+  })
+
   it('stops a download in flight when cancelled through the installation', async () => {
     const home = newHome()
     const running = installAntigravity(home, undefined, undefined, { release, fetch: stalledDownload() })

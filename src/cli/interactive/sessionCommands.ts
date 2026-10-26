@@ -4,6 +4,7 @@
  */
 
 import { formatThreadList, resolveThreadSelection } from '../../shared/threadSelection'
+import { listingKey, listingServes, selectionFromListing } from '../../shared/providerInstances'
 import type { LlmProviderOption } from '../../shared/settings'
 import type { ContextUsageSnapshot } from '../../shared/types'
 
@@ -13,6 +14,8 @@ export interface SessionThread {
 }
 
 export interface SessionModel {
+  /** The provider instance (two Claude instances share `llmProvider`); absent on older selections. */
+  instanceId?: string
   llmProvider: string
   model: string
 }
@@ -74,6 +77,7 @@ export function handleInteractiveSlash(
           '  /thread …                 Alias of /threads',
           '  /models [name]            List or switch models',
           '  /model [name]             Same as /models',
+          '  /model <instance>/<name>  A model of one instance (claude:work/sonnet)',
           '  /usage                    Show context usage for this thread',
           '  /steer <prompt>           Mid-turn guidance (active turn only)',
           '  /stop                     Abort the in-flight turn',
@@ -195,19 +199,27 @@ function handleModelCommand(raw: string, ctx: InteractiveCommandContext): string
   const modelName = nameParts.join(' ').trim()
   if (!modelName) return formatModelList(ctx)
 
-  const match = findModel(ctx.listModels(), modelName, ctx)
-  if (!match) {
+  const providers = ctx.listModels()
+  const found = findModel(providers, modelName, ctx)
+  if (!found) {
     return `Model not found: \`${modelName}\`. Use /models to list available models.`
   }
+  if ('choices' in found) {
+    return [`More than one provider lists \`${modelName}\`. Name the instance:`, ...found.choices.map((choice) => `  /model ${choice}`)].join('\n')
+  }
+  const match = found.match
+  // Two instances of one provider (two Claude accounts) read apart by their instance.
+  const shared = match.instanceId && providers.filter((provider) => provider.id === match.llmProvider).length > 1
+  const name = `${match.llmProvider}/${match.model}${shared ? ` (${match.instanceId})` : ''}`
 
   if (global && !sessionMode) {
     ctx.setGlobalModel(match)
     ctx.setModelOverride(undefined)
-    return `Global model set to ${match.llmProvider}/${match.model}`
+    return `Global model set to ${name}`
   }
 
   ctx.setModelOverride(match)
-  return `Session model set to ${match.llmProvider}/${match.model}`
+  return `Session model set to ${name}`
 }
 
 function formatModelList(ctx: InteractiveCommandContext): string {
@@ -228,54 +240,82 @@ function formatModelList(ctx: InteractiveCommandContext): string {
   const maxModels = 30
   let shown = 0
   let total = 0
-  for (const provider of providers) total += provider.models.length
+  const listedBy = new Map<string, number>()
+  for (const provider of providers) {
+    total += provider.models.length
+    for (const model of provider.models) listedBy.set(model.id, (listedBy.get(model.id) ?? 0) + 1)
+  }
 
   outer: for (const provider of providers) {
-    lines.push(`${provider.label} (${provider.id}):`)
+    lines.push(`${provider.label} (${listingKey(provider)}):`)
     for (const model of provider.models) {
       if (shown >= maxModels) break outer
       const marker =
-        model.id === current.model && provider.id === current.llmProvider ? ' *' : ''
-      lines.push(`  ${model.id}${marker}`)
+        model.id === current.model && listingServes(provider, current) ? ' *' : ''
+      // A model more than one instance lists is picked by its qualified name.
+      const qualified = (listedBy.get(model.id) ?? 0) > 1 ? `  (/model ${qualifiedName(provider, model.id)})` : ''
+      lines.push(`  ${model.id}${marker}${qualified}`)
       shown++
     }
   }
 
   if (total > shown) lines.push(`… and ${total - shown} more`)
   lines.push('')
-  lines.push('Usage: /models <name> [--session|--thread|--global]')
+  lines.push('Usage: /models <name> [--session|--thread|--global]; /models <instance>/<name> picks one instance')
   return lines.join('\n')
 }
 
+/** `<instance>/<model>`: how a model of one instance is named when another lists it too. */
+function qualifiedName(provider: LlmProviderOption, model: string): string {
+  return `${listingKey(provider)}/${model}`
+}
+
+/**
+ * The selection `query` names. `<instance>/<model>` (or `<instance> <model>`) looks in that
+ * instance only. A bare model goes to the one listing that has it, else to the current instance's;
+ * when other instances list it too, the caller is asked to name one (`choices`).
+ */
 function findModel(
   providers: LlmProviderOption[],
   query: string,
   ctx: InteractiveCommandContext
-): SessionModel | undefined {
+): { match: SessionModel } | { choices: string[] } | undefined {
   const q = query.trim()
   if (!q) return undefined
-  const currentProvider =
-    ctx.state.modelOverride?.llmProvider ?? ctx.getGlobalModel().llmProvider
+  const current = ctx.state.modelOverride ?? ctx.getGlobalModel()
 
-  type Hit = SessionModel & { score: number }
-  const hits: Hit[] = []
-  for (const provider of providers) {
-    for (const model of provider.models) {
-      if (model.id === q) {
-        hits.push({ llmProvider: provider.id, model: model.id, score: 0 })
-      } else if (model.id.toLowerCase() === q.toLowerCase()) {
-        hits.push({ llmProvider: provider.id, model: model.id, score: 1 })
-      } else if (model.label.toLowerCase() === q.toLowerCase()) {
-        hits.push({ llmProvider: provider.id, model: model.id, score: 2 })
+  // Each hit keeps the instance that lists it; only the best kind of match counts.
+  type Hit = { provider: LlmProviderOption; model: string; score: number }
+  const hitsIn = (listings: LlmProviderOption[], name: string): Hit[] => {
+    const hits: Hit[] = []
+    for (const provider of listings) {
+      for (const model of provider.models) {
+        if (model.id === name) {
+          hits.push({ provider, model: model.id, score: 0 })
+        } else if (model.id.toLowerCase() === name.toLowerCase()) {
+          hits.push({ provider, model: model.id, score: 1 })
+        } else if (model.label.toLowerCase() === name.toLowerCase()) {
+          hits.push({ provider, model: model.id, score: 2 })
+        }
       }
     }
+    const best = Math.min(...hits.map((hit) => hit.score))
+    return hits.filter((hit) => hit.score === best)
   }
+
+  // Qualified by an instance: the longest instance key followed by `/` or a space.
+  const qualified = providers
+    .map((provider) => ({ provider, key: listingKey(provider) }))
+    .filter(({ key }) => q.length > key.length + 1 && q.slice(0, key.length).toLowerCase() === key.toLowerCase() && /[/\s]/.test(q[key.length]!))
+    .sort((a, b) => b.key.length - a.key.length)[0]
+  if (qualified) {
+    const [hit] = hitsIn([qualified.provider], q.slice(qualified.key.length + 1).trim())
+    if (hit) return { match: selectionFromListing(hit.provider, hit.model) }
+  }
+
+  const hits = hitsIn(providers, q)
   if (hits.length === 0) return undefined
-  hits.sort((a, b) => {
-    if (a.score !== b.score) return a.score - b.score
-    if (a.llmProvider === currentProvider && b.llmProvider !== currentProvider) return -1
-    if (b.llmProvider === currentProvider && a.llmProvider !== currentProvider) return 1
-    return 0
-  })
-  return { llmProvider: hits[0]!.llmProvider, model: hits[0]!.model }
+  const chosen = hits.length === 1 ? hits[0] : hits.find((hit) => listingServes(hit.provider, current))
+  if (chosen) return { match: selectionFromListing(chosen.provider, chosen.model) }
+  return { choices: hits.map((hit) => qualifiedName(hit.provider, hit.model)) }
 }

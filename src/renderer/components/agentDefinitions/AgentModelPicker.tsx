@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import type { LlmProviderOption } from '../../../shared/settings'
 import type { AgentModelRef } from '../../../shared/agents/types'
+import { listingServes } from '../../../shared/providerInstances'
 import { ModelFamilyMenu } from '../ModelFamilyMenu'
 import { ModelFamilySettingsFields } from '../ModelFamilySettingsFields'
 import { findModelInCatalog, fieldIdForPointer } from './editorIssues'
@@ -23,9 +24,9 @@ export function AgentModelPicker({
 }) {
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
-  const available = findModelInCatalog(catalogs, value.providerId, value.modelId)
+  const available = findModelInCatalog(catalogs, value.providerId, value.modelId, value.instanceId)
   const missing = Boolean(value.providerId && value.modelId && !available)
-  const provider = catalogs.providers.find((entry) => entry.id === value.providerId)
+  const provider = catalogs.providers.find((entry) => listingServes(entry, { instanceId: value.instanceId, llmProvider: value.providerId }))
   const buttonLabel = available
     ? `${available.providerLabel} · ${available.modelLabel}`
     : value.modelId
@@ -56,10 +57,14 @@ export function AgentModelPicker({
           <ModelFamilyMenu
             providers={catalogs.providers}
             selectedProviderId={value.providerId}
+            selectedInstanceId={value.instanceId}
             selectedModelId={value.modelId}
             anchorRef={buttonRef}
-            onSelect={(providerId, modelId) => {
-              onChange({ ...value, providerId, modelId })
+            onSelect={(providerId, modelId, instanceId) => {
+              // The whole selection: a listing without an instance drops the earlier one.
+              const next: AgentModelRef = { ...value, providerId, modelId, instanceId }
+              if (!instanceId) delete next.instanceId
+              onChange(next)
               setOpen(false)
             }}
           />

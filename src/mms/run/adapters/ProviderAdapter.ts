@@ -66,7 +66,7 @@ export interface TurnInput {
   threadId: string
   /** Project working directory; null for a thread without a project. */
   cwd: string | null
-  /** Provider instance the turn runs on (SPEC §13.8); `AdapterRegistry` routed the turn by it. */
+  /** Provider instance the turn runs on (SPEC §13.8); the harness gateway routed the turn by it. */
   instanceId: string
   /** Resolved model of the selection. */
   model: string
@@ -292,7 +292,7 @@ export interface ModelInfo {
 }
 
 export interface ProviderAdapter {
-  /** The driver kind this adapter implements; `AdapterRegistry` maps each instance to it. */
+  /** The driver kind this adapter implements; the harness gateway maps each instance to it. */
   readonly driver: ProviderDriverKind
   readonly capabilities: ProviderCapabilities
   /** Facts about `model`; adapters whose context Mousse measures itself (the pi loop) omit it. */

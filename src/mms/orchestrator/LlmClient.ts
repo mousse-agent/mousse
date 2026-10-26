@@ -10,7 +10,9 @@ import {
   type ProviderResponse,
   type AssistantMessageEvent,
   type AssistantMessageEventStream,
+  type Api,
   type Message,
+  type Model,
   type ThinkingLevel,
   type Tool,
   type ToolCall,
@@ -754,6 +756,8 @@ export class LlmClient {
 
   private browserBinding?: BrowserExecutionBinding
 
+  private readonly customModel?: (provider: string, modelId: string) => Model<Api> | undefined
+
   constructor(
 
     private settingsStore: SettingsStore,
@@ -780,9 +784,16 @@ export class LlmClient {
 
     private onPresentPlan?: (payload: { title: string; markdown: string }, threadId?: string) => void,
 
-    runtime?: { questions?: UserQuestionService; modeRegistry?: ModeRegistry; browserRuntime?: BrowserRuntimePort }
+    runtime?: {
+      questions?: UserQuestionService
+      modeRegistry?: ModeRegistry
+      browserRuntime?: BrowserRuntimePort
+      /** A model the user added to a provider (Settings → Providers) that its catalog does not list. */
+      customModel?: (provider: string, modelId: string) => Model<Api> | undefined
+    }
 
   ) {
+    this.customModel = runtime?.customModel
     this.questions = runtime?.questions ?? defaultUserQuestionService
     this.modeRegistry = runtime?.modeRegistry ?? defaultModeRegistry
     this.browserRuntime = runtime?.browserRuntime
@@ -803,6 +814,11 @@ export class LlmClient {
     this.devGuiTools = new DevGuiTools()
     this.webTools = new WebTools(this.providerAuth.credentials)
 
+  }
+
+  /** The provider's catalog model, else a custom model the user added to that provider. */
+  private catalogModel(provider: string, modelId: string): Model<Api> | undefined {
+    return this.providerAuth.models.getModel(provider, modelId) ?? this.customModel?.(provider, modelId)
   }
 
   /** Host-injected dispatcher. Never accept a model-supplied port. */
@@ -942,8 +958,8 @@ export class LlmClient {
     const reasoningLevel = requestedEffort ?? modelEffort
 
     const model =
-      this.providerAuth.models.getModel(llmProvider, catalogModelId) ??
-      this.providerAuth.models.getModel(llmProvider, modelId)
+      this.catalogModel(llmProvider, catalogModelId) ??
+      this.catalogModel(llmProvider, modelId)
 
     if (!model) {
 
@@ -1478,18 +1494,24 @@ export class LlmClient {
 
 
 
-  async generateTitle(userRequest: string, firstResponse?: string, threadId?: string): Promise<string> {
-    const configuredProviders = this.providerAuth.getConfiguredLlmProviders()
-    const { llmProvider, model: selectedModelId } = resolveTitleModel(
-      this.settingsStore.get(),
-      configuredProviders
-    )
+  /**
+   * `selection` is the title model the harness gateway resolved and admitted (an API provider's
+   * model); it runs as is. Absent, the stored title setting is resolved against the configured
+   * providers.
+   */
+  async generateTitle(
+    userRequest: string,
+    firstResponse?: string,
+    threadId?: string,
+    selection?: { instanceId?: string; llmProvider: string; model: string }
+  ): Promise<string> {
+    const { llmProvider, model: selectedModelId } = selection ?? resolveTitleModel(this.settingsStore.get(), this.providerAuth.getConfiguredLlmProviders())
     if (!llmProvider || !selectedModelId) {
       throw new Error('Connect a provider with a title model before generating a chat title.')
     }
 
     const { baseId, effort } = parseThinkingSuffixFromModelId(selectedModelId)
-    const model = this.providerAuth.models.getModel(llmProvider, baseId)
+    const model = this.catalogModel(llmProvider, baseId)
     if (!model) throw new Error(`Unknown title model "${selectedModelId}" for provider "${llmProvider}"`)
     if (!(await this.providerAuth.models.getAuth(model))) {
       throw new Error(`Title provider "${llmProvider}" is not configured.`)
@@ -1559,8 +1581,8 @@ export class LlmClient {
     const { baseId: catalogModelId } = parseThinkingSuffixFromModelId(modelId)
 
     const model =
-      this.providerAuth.models.getModel(llmProvider, catalogModelId) ??
-      this.providerAuth.models.getModel(llmProvider, modelId)
+      this.catalogModel(llmProvider, catalogModelId) ??
+      this.catalogModel(llmProvider, modelId)
 
     if (!model) {
 
@@ -1602,8 +1624,8 @@ export class LlmClient {
     const normalizedMode = normalizeChatMode(mode)
     const { llmProvider, model: modelId } = this.resolveProviderModel(normalizedMode, options)
     const { baseId, effort } = parseThinkingSuffixFromModelId(modelId)
-    const model = this.providerAuth.models.getModel(llmProvider, baseId) ??
-      this.providerAuth.models.getModel(llmProvider, modelId)
+    const model = this.catalogModel(llmProvider, baseId) ??
+      this.catalogModel(llmProvider, modelId)
     if (!model) throw new Error(`Unknown model "${modelId}" for provider "${llmProvider}"`)
     const projectPath = options.projectPath ?? this.getProjectPath?.()
     const prepared = await this.prepareRequestContext(
@@ -1660,8 +1682,8 @@ export class LlmClient {
     }
 
     const model =
-      this.providerAuth.models.getModel(llmProvider, baseId) ??
-      this.providerAuth.models.getModel(llmProvider, modelId)
+      this.catalogModel(llmProvider, baseId) ??
+      this.catalogModel(llmProvider, modelId)
     if (!model) throw new Error(`Unknown model "${modelId}" for provider "${llmProvider}"`)
 
     if (options.effort && options.effort !== 'off') {

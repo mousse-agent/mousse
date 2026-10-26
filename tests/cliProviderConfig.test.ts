@@ -11,7 +11,6 @@ import { ClaudeSubscriptionProviderService } from '../src/mms/providers/claudeSu
 import type { CodexLaunch, CodexProcess } from '../src/mms/providers/codex/CodexAppServerClient'
 import { CodexProviderService } from '../src/mms/providers/codex/CodexProviderService'
 import {
-  asCliProviderInstanceId,
   claudeExtraArgs,
   CliVersionCache,
   parseCliConfigPatch,
@@ -44,14 +43,6 @@ const versions = (output = 'tool 1.2.3 (CLI)') => {
 }
 
 describe('CLI provider config validation', () => {
-  it('accepts only the three CLI provider instances', () => {
-    expect(asCliProviderInstanceId('claude')).toBe('claude')
-    expect(asCliProviderInstanceId('codex')).toBe('codex')
-    expect(asCliProviderInstanceId('antigravity')).toBe('antigravity')
-    expect(() => asCliProviderInstanceId('openai')).toThrow(/instanceId/)
-    expect(() => asCliProviderInstanceId(undefined)).toThrow(/instanceId/)
-  })
-
   it('validates the path, args and env of a patch', () => {
     expect(parseCliConfigPatch(undefined)).toEqual({})
     expect(parseCliConfigPatch({ binaryPath: null })).toEqual({ binaryPath: null })

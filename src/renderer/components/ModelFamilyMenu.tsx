@@ -11,7 +11,6 @@ import { ChevronRight, LayoutGrid, Star } from '../lib/icons'
 import { SettingsSearch } from './settings/SettingsSearch'
 import type { LlmProviderOption } from '../../shared/settings'
 import {
-  compareModelsNewestFirst,
   formatEffortLabel,
   getCurrentEffort,
   getEffortsForModel,
@@ -21,21 +20,23 @@ import {
   resolveModelVariant,
   type ModelFamily
 } from '../../shared/modelVariants'
-import { ProviderIcon } from '../lib/providerIcons'
+import { ProviderIcon, normalizeProviderId } from '../lib/providerIcons'
+import { instanceBadges, knownModelLabel } from '../lib/providerSnapshots'
+import { listingKey, listingServes } from '../../shared/providerInstances'
 import { useAppStore } from '../stores/appStore'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
-import {
-  favoriteKey,
-  loadModelFavorites,
-  toggleModelFavorite,
-  type ModelFavoriteKey
-} from '../lib/modelFavorites'
+import { favoriteKey, useModelFavorites, type ModelFavoriteKey } from '../lib/modelFavorites'
+import type { StatusDescription } from '../../shared/harness/status'
 
 interface ModelFamilyMenuProps {
-  providers: LlmProviderOption[]
+  /** `status` (from the instance snapshot) is shown on the rows of a provider that is not ready. */
+  providers: Array<LlmProviderOption & { status?: StatusDescription }>
   selectedProviderId: string
+  /** The selected instance, when the selection names one; listings of one provider are told apart by it. */
+  selectedInstanceId?: string
   selectedModelId: string
-  onSelect: (providerId: string, modelId: string) => void
+  /** `instanceId` is the chosen listing's instance, for a selection that names it. */
+  onSelect: (providerId: string, modelId: string, instanceId?: string) => void
   onMenuScroll?: (event: React.UIEvent<HTMLElement>) => void
   emptyState?: React.ReactNode
   /** Anchor for fixed/portal positioning (avoids overflow clipping). */
@@ -46,7 +47,18 @@ interface ModelFamilyMenuProps {
 
 interface FlatModelEntry {
   providerId: string
+  instanceId?: string
+  /** The listing this entry belongs to (`listingKey`): its instance, else its provider. */
+  listing: string
+  /** The instance's name ("Claude Code 2"), with the model's maker for a multi-brand API. */
   providerLabel: string
+  /** Initials telling apart instances that share a logo (T3 Code's instance badge). */
+  badge?: string
+  /** Position of the provider, then of the family in the saved model order. */
+  providerRank: number
+  familyRank: number
+  /** Shown under the model while the provider needs a step (e.g. "Not signed in"). */
+  providerStatus?: string
   family: ModelFamily
   brandId: string
   brandLabel: string
@@ -150,74 +162,111 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 export function ModelFamilyMenu(props: ModelFamilyMenuProps) {
   const profileId = useAppStore((state) => state.profileId)
-  return <ProfileModelFamilyMenu key={profileId} {...props} profileId={profileId} />
+  return <ProfileModelFamilyMenu key={profileId} {...props} />
 }
 
 function ProfileModelFamilyMenu({
-  profileId,
   providers,
   selectedProviderId,
+  selectedInstanceId,
   selectedModelId,
   onSelect,
   onMenuScroll,
   emptyState,
   anchorRef,
   contentRef
-}: ModelFamilyMenuProps & { profileId: string }) {
+}: ModelFamilyMenuProps) {
+  const favorites = useModelFavorites()
+  const { hiddenOf } = favorites
   const groupedProviders = useMemo(
     () => {
       // The daemon only returns configured providers, but keep this boundary
       // defensive: duplicate catalog rows must not become duplicate rail tabs.
       // An empty catalog is not an enabled provider for this picker.
-      const uniqueProviders = new Map<string, LlmProviderOption>()
-      for (const provider of providers) {
+      const uniqueProviders = new Map<string, ModelFamilyMenuProps['providers'][number]>()
+      for (const listed of providers) {
+        // Models hidden in Settings > Providers never reach a picker.
+        const hidden = hiddenOf(listed.instanceId)
+        const provider = hidden?.size ? { ...listed, models: listed.models.filter((model) => !hidden.has(model.id)) } : listed
         if (provider.models.length === 0) continue
-        const existing = uniqueProviders.get(provider.id)
+        // Two accounts of one provider are two listings, told apart by their instance.
+        const key = listingKey(provider)
+        const existing = uniqueProviders.get(key)
         if (!existing) {
-          uniqueProviders.set(provider.id, provider)
+          uniqueProviders.set(key, provider)
           continue
         }
         const models = new Map(existing.models.map((model) => [model.id, model]))
         for (const model of provider.models) models.set(model.id, model)
-        uniqueProviders.set(provider.id, { ...existing, models: [...models.values()] })
+        uniqueProviders.set(key, { ...existing, models: [...models.values()] })
       }
-      return [...uniqueProviders.values()].map((provider) =>
-        groupProviderModels(provider.id, provider.label, provider.models)
-      )
+      const listed = [...uniqueProviders.values()]
+      const badges = instanceBadges(listed.map((provider) => ({ key: listingKey(provider), iconKey: normalizeProviderId(provider.id), label: provider.label })))
+      return listed.map((provider) => {
+        const grouped = groupProviderModels(provider.id, provider.label, provider.models)
+        // Families follow the saved model order (Settings > Providers), not a newest-first guess.
+        const modelRank = new Map(provider.models.map((model, index) => [model.id, index]))
+        const rankOf = (family: ModelFamily) =>
+          Math.min(
+            ...family.variants.map(
+              (variant) => modelRank.get(variant.id) ?? modelRank.get(parseThinkingSuffixFromModelId(variant.id).baseId) ?? Number.MAX_SAFE_INTEGER
+            )
+          )
+        return {
+          ...grouped,
+          familyRanks: new Map(grouped.families.map((family) => [family.familyId, rankOf(family)])),
+          multiBrand: new Set(grouped.families.map((family) => family.brandId)).size > 1,
+          instanceId: provider.instanceId,
+          listing: listingKey(provider),
+          badge: badges.get(listingKey(provider)),
+          status: provider.status && provider.status.tone !== 'ready' ? provider.status.headline : undefined
+        }
+      })
     },
-    [providers]
+    [providers, hiddenOf]
   )
 
   const allEntries = useMemo((): FlatModelEntry[] => {
     const entries: FlatModelEntry[] = []
-    for (const provider of groupedProviders) {
+    groupedProviders.forEach((provider, providerRank) => {
       for (const family of provider.families) {
         entries.push({
           providerId: provider.providerId,
-          providerLabel: provider.label,
+          instanceId: provider.instanceId,
+          listing: provider.listing,
+          providerLabel: provider.multiBrand ? `${provider.label} · ${family.brandLabel}` : provider.label,
+          badge: provider.badge,
+          providerRank,
+          familyRank: provider.familyRanks.get(family.familyId) ?? Number.MAX_SAFE_INTEGER,
+          providerStatus: provider.status,
           family,
           brandId: family.brandId,
           brandLabel: family.brandLabel,
-          key: favoriteKey(provider.providerId, family.familyId)
+          key: favoriteKey(provider.instanceId ?? provider.providerId, family.familyId)
         })
       }
-    }
+    })
     return entries
   }, [groupedProviders])
+
+  const { isFavorite: isProviderFavorite } = favorites
+  const isEntryFavorite = useCallback(
+    (entry: FlatModelEntry) => isProviderFavorite({ id: entry.providerId, instanceId: entry.instanceId }, entry.family),
+    [isProviderFavorite]
+  )
 
   const railItems = useMemo(() => {
     // The rail is a provider filter, never a model-brand/family filter. The
     // catalog above has already removed empty and duplicate provider entries.
-    return groupedProviders.map((provider) => ({ id: provider.providerId, label: provider.label }))
+    return groupedProviders.map((provider) => ({ key: provider.listing, iconId: provider.providerId, label: provider.label, badge: provider.badge }))
   }, [groupedProviders])
 
-  const [favorites, setFavorites] = useState<Set<ModelFavoriteKey>>(() => loadModelFavorites(profileId))
   const [searchQuery, setSearchQuery] = useState('')
   const [favoritesOnly, setFavoritesOnly] = useState(false)
   const [railFilter, setRailFilter] = useState<string | null>(null)
   const [highlightIndex, setHighlightIndex] = useState(0)
   const [activeFamily, setActiveFamily] = useState<{
-    providerId: string
+    entry: FlatModelEntry
     family: ModelFamily
   } | null>(null)
   const [panelTop, setPanelTop] = useState(0)
@@ -252,13 +301,20 @@ function ProfileModelFamilyMenu({
     deps: [providers.length, activeFamily?.family.familyId, panelSide, searchQuery, railFilter]
   })
 
+  const isEntrySelected = useCallback(
+    (entry: FlatModelEntry) =>
+      listingServes({ id: entry.providerId, instanceId: entry.instanceId }, { instanceId: selectedInstanceId, llmProvider: selectedProviderId }) &&
+      isFamilySelected(entry.family, selectedModelId),
+    [selectedInstanceId, selectedProviderId, selectedModelId]
+  )
+
   const filteredEntries = useMemo(() => {
     const query = searchQuery.trim().toLowerCase()
 
     const list = allEntries.filter((entry) => {
-      if (favoritesOnly && !favorites.has(entry.key)) return false
+      if (favoritesOnly && !isEntryFavorite(entry)) return false
       if (railFilter) {
-        if (entry.providerId !== railFilter) return false
+        if (entry.listing !== railFilter) return false
       }
       if (!query) return true
       const haystack = [
@@ -273,21 +329,16 @@ function ProfileModelFamilyMenu({
       return haystack.includes(query)
     })
 
-    // Newest versions first (e.g. GPT 5.6 above GPT 5.5 / older catalog order).
-    return [...list].sort((a, b) => {
-      const aKey = `${a.family.familyLabel} ${a.family.variants[0]?.id ?? ''}`
-      const bKey = `${b.family.familyLabel} ${b.family.variants[0]?.id ?? ''}`
-      return compareModelsNewestFirst(aKey, bKey)
-    })
-  }, [allEntries, favorites, favoritesOnly, groupedProviders, railFilter, searchQuery])
+    // As in Settings > Providers: favorites first, then providers in their order, then each
+    // provider's models in the saved order.
+    return sortPickerEntries(list, isEntryFavorite)
+  }, [allEntries, isEntryFavorite, favoritesOnly, railFilter, searchQuery])
 
   useLayoutEffect(() => {
-    const selectedIndex = filteredEntries.findIndex((entry) =>
-      entry.providerId === selectedProviderId && isFamilySelected(entry.family, selectedModelId)
-    )
+    const selectedIndex = filteredEntries.findIndex((entry) => isEntrySelected(entry))
     scrollHighlightRef.current = true
     setHighlightIndex(Math.max(0, selectedIndex))
-  }, [filteredEntries, selectedProviderId, selectedModelId])
+  }, [filteredEntries, isEntrySelected])
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -349,15 +400,15 @@ function ProfileModelFamilyMenu({
         entry.family,
         getInitialVariantOptions(entry.family, selectedModelId, preferredEffort)
       )
-      if (resolved) onSelect(entry.providerId, resolved.id)
+      if (resolved) onSelect(entry.providerId, resolved.id, entry.instanceId)
     },
     [onSelect, preferredEffort, selectedModelId]
   )
 
-  const handleToggleFavorite = (key: ModelFavoriteKey, event: React.MouseEvent) => {
+  const handleToggleFavorite = (entry: FlatModelEntry, event: React.MouseEvent) => {
     event.preventDefault()
     event.stopPropagation()
-    setFavorites((current) => toggleModelFavorite(current, key, profileId))
+    favorites.toggle({ id: entry.providerId, instanceId: entry.instanceId }, entry.family)
   }
 
   useEffect(() => {
@@ -436,13 +487,12 @@ function ProfileModelFamilyMenu({
   }
 
   const renderEntry = (entry: FlatModelEntry, index: number) => {
-    const selected =
-      entry.providerId === selectedProviderId && isFamilySelected(entry.family, selectedModelId)
-    const isFavorite = favorites.has(entry.key)
+    const selected = isEntrySelected(entry)
+    const isFavorite = isEntryFavorite(entry)
     const shortcut = index < 5 ? `Ctrl+${index + 1}` : null
     const isHighlighted = index === highlightIndex
     const isActive =
-      activeFamily?.providerId === entry.providerId &&
+      activeFamily?.entry.listing === entry.listing &&
       activeFamily.family.familyId === entry.family.familyId
 
     const openVariantPanel = (element: HTMLElement) => {
@@ -454,7 +504,7 @@ function ProfileModelFamilyMenu({
       }
       clearHideTimer()
       activeRowRef.current = element
-      setActiveFamily({ providerId: entry.providerId, family: entry.family })
+      setActiveFamily({ entry, family: entry.family })
     }
 
     return (
@@ -475,6 +525,7 @@ function ProfileModelFamilyMenu({
           role="option"
           aria-selected={selected}
           className="model-picker-row-main"
+          title={[entry.family.familyLabel, entry.providerLabel, entry.providerStatus].filter(Boolean).join(' · ')}
           onFocus={(event) => {
             setHighlightIndex(index)
             openVariantPanel(event.currentTarget.parentElement!)
@@ -483,11 +534,13 @@ function ProfileModelFamilyMenu({
         >
           <span className="model-picker-row-icon">
             <ProviderIcon providerId={entry.brandId === 'anthropic' ? 'claude' : entry.brandId} size={16} />
+            {entry.badge ? <span className="model-picker-instance-badge" aria-hidden="true">{entry.badge}</span> : null}
           </span>
           <span className="model-picker-row-text">
             <span className="model-picker-row-title">{entry.family.familyLabel}</span>
             <span className="model-picker-row-subtitle">
-              <span>{entry.brandLabel}</span>
+              <span className="model-picker-row-provider">{entry.providerLabel}</span>
+              {entry.providerStatus ? <span className="model-picker-row-status">{entry.providerStatus}</span> : null}
             </span>
           </span>
           {(entry.family.contexts.length > 1) ? (
@@ -500,7 +553,7 @@ function ProfileModelFamilyMenu({
           className={`model-picker-star${isFavorite ? ' active' : ''}`}
           aria-label={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
           title={isFavorite ? 'Unfavorite' : 'Favorite'}
-          onClick={(event) => handleToggleFavorite(entry.key, event)}
+          onClick={(event) => handleToggleFavorite(entry, event)}
         >
           <Star size={14} strokeWidth={2} fill={isFavorite ? 'currentColor' : 'none'} />
         </button>
@@ -558,15 +611,17 @@ function ProfileModelFamilyMenu({
               </button>
               {railItems.map((item) => (
                 <button
-                  key={item.id}
+                  key={item.key}
                   type="button"
                   role="tab"
-                  aria-selected={railFilter === item.id}
-                  className={`model-picker-rail-item${railFilter === item.id ? ' selected' : ''}`}
+                  aria-selected={railFilter === item.key}
+                  className={`model-picker-rail-item${railFilter === item.key ? ' selected' : ''}`}
                   title={item.label}
-                  onClick={() => setRailFilter((current) => (current === item.id ? null : item.id))}
+                  aria-label={item.label}
+                  onClick={() => setRailFilter((current) => (current === item.key ? null : item.key))}
                 >
-                  <ProviderIcon providerId={item.id} size={16} />
+                  <ProviderIcon providerId={item.iconId} size={16} />
+                  {item.badge ? <span className="model-picker-instance-badge" aria-hidden="true">{item.badge}</span> : null}
                 </button>
               ))}
             </div>
@@ -602,7 +657,7 @@ function ProfileModelFamilyMenu({
             family={activeFamily.family}
             selectedModelId={selectedModelId}
             preferredEffort={preferredEffort}
-            onSelect={(modelId) => onSelect(activeFamily.providerId, modelId)}
+            onSelect={(modelId) => onSelect(activeFamily.entry.providerId, modelId, activeFamily.entry.instanceId)}
           />
         </aside>
       )}
@@ -616,27 +671,37 @@ function ProfileModelFamilyMenu({
   return shell
 }
 
-export function getGroupedModelButtonLabel(
-  providerId: string,
-  modelId: string,
-  providers: LlmProviderOption[]
-): string {
-  return getGroupedModelButtonParts(providerId, modelId, providers).join(' · ')
+/** Favorites first, then by provider, then by the provider's saved model order. */
+export function sortPickerEntries<T extends { providerRank: number; familyRank: number }>(entries: readonly T[], isFavorite: (entry: T) => boolean): T[] {
+  return entries
+    .map((entry, index) => ({ entry, index, favorite: isFavorite(entry) }))
+    .sort((a, b) => Number(b.favorite) - Number(a.favorite) || a.entry.providerRank - b.entry.providerRank || a.entry.familyRank - b.entry.familyRank || a.index - b.index)
+    .map(({ entry }) => entry)
 }
 
 export function getGroupedModelButtonParts(
   providerId: string,
   modelId: string,
   providers: LlmProviderOption[],
-  includeEffort = true
+  includeEffort = true,
+  /** The selection's instance: picks the right listing when one provider has several. */
+  instanceId?: string
 ): string[] {
   if (!providerId) return ['Select model']
-  const provider = providers.find((entry) => entry.id === providerId)
+  const provider = providers.find((entry) => listingServes(entry, { instanceId, llmProvider: providerId }))
   const { baseId } = parseThinkingSuffixFromModelId(modelId)
   const model =
     provider?.models.find((entry) => entry.id === modelId) ??
     provider?.models.find((entry) => entry.id === baseId)
-  if (!provider || !model) return [modelId || provider?.label || 'Select model']
+  if (!provider || !model) {
+    // A model the picker does not offer (hidden, or its provider is off) keeps its listed name.
+    const known = knownModelLabel({ providerId, instanceId }, modelId)
+    if (known) {
+      const parsed = parseModelVariant({ id: baseId, label: known })
+      return parsed.context ? [parsed.familyLabel, parsed.context] : [parsed.familyLabel]
+    }
+    return [modelId || provider?.label || 'Select model']
+  }
 
   const parsed = parseModelVariant(model)
   const bits = [parsed.familyLabel]

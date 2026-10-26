@@ -8,7 +8,7 @@ import type {
   MousseSettingsUpdate,
   SettingsOptions
 } from '../../shared/settings'
-import type { ConfiguredProvider } from '../../shared/providerAuth'
+import { listingServes, selectionFromListing } from '../../shared/providerInstances'
 import { useAppStore } from '../stores/appStore'
 import { ProvidersSettings } from './providers/ProvidersSettings'
 import { SpeechSettings } from '../speech/SpeechSettings'
@@ -89,7 +89,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
   const [settings, setSettings] = useState<MousseSettings | null>(null)
   const [options, setOptions] = useState<SettingsOptions | null>(null)
-  const [configuredProviders, setConfiguredProviders] = useState<ConfiguredProvider[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const [restartRequired, setRestartRequired] = useState(false)
@@ -126,13 +125,9 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   }, [activeSection, settings])
 
   const refreshProviderData = useCallback(async () => {
-    const [configured, opts] = await Promise.all([
-      window.mousse.providers.listConfigured(),
-      window.mousse.settings.getOptions()
-    ])
-    setConfiguredProviders(configured)
+    const opts = await window.mousse.settings.getOptions()
     setOptions(opts)
-    return { configured, opts }
+    return { opts }
   }, [])
 
   // Only settings and provider data gate the page; Skills & MCP loads its own data.
@@ -157,8 +152,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
   useEffect(() => {
     if (!settingsOpen) return
-    const unsub = window.mousse.providers.onChanged((providers) => {
-      setConfiguredProviders(providers)
+    const unsub = window.mousse.providers.onChanged(() => {
       void refreshProviderData()
     })
     return unsub
@@ -231,7 +225,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const ensureValidProviderSelection = useCallback(
     async (nextSettings: MousseSettings, providers = options?.llmProviders ?? []) => {
       const current = nextSettings.provider
-      const selectedProvider = providers.find((p) => p.id === current.llmProvider)
+      // By instance first: two accounts of one provider are two listings.
+      const selectedProvider = providers.find((p) => listingServes(p, current))
       const modelExists = selectedProvider?.models.some((m) => m.id === current.model)
 
       if (selectedProvider && modelExists) return nextSettings
@@ -247,10 +242,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
       return {
         ...nextSettings,
-        provider: {
-          llmProvider: first.id,
-          model: first.models[0]?.id ?? ''
-        }
+        provider: selectionFromListing(first, first.models[0]?.id ?? '')
       }
     },
     [options?.llmProviders]
@@ -399,8 +391,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
             <section id="providers" className="settings-section">
               <ProvidersSettings
                 settings={settings}
-                options={options}
-                configuredProviders={configuredProviders}
                 refreshProviderData={refreshProviderData}
                 updateSettings={updateSettings}
                 ensureValidProviderSelection={ensureValidProviderSelection}

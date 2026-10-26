@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { ArrowUp, ChevronDown, Mic, Paperclip, Square } from '../lib/icons'
-import type { LlmProviderOption } from '../../shared/settings'
+import { showsContextGauge, type ProviderWithStatus } from '../lib/providerSnapshots'
 import type { ContextUsageSnapshot } from '../../shared/types'
 import { ComposerEffortPicker } from './ComposerEffortPicker'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
@@ -35,7 +35,8 @@ function useMenuScrollFade() {
 }
 
 export interface ComposerFooterProps {
-  providers: LlmProviderOption[]
+  /** Picker entries; `caps` and `status` come from the instance snapshots. */
+  providers: ProviderWithStatus[]
   selectedProviderId: string
   selectedModelId: string
   modelMenuOpen: boolean
@@ -102,6 +103,9 @@ export function ComposerFooter({
   const modelButtonLabel = modelButtonParts.join(' · ')
   const selectedProvider = providers.find((entry) => entry.id === selectedProviderId)
   const providerModels = selectedProvider?.models ?? []
+  // A selected instance that needs a step (signed out, not found) says so on the model button.
+  const providerAttention = selectedProvider?.status && selectedProvider.status.tone !== 'ready' ? selectedProvider.status : null
+  const modelButtonTitle = providerAttention ? `${modelButtonLabel} · ${selectedProvider?.label}: ${providerAttention.headline}` : modelButtonLabel
   const emptyModelMenuStyle = useFloatingPosition({
     open: modelMenuOpen && providers.length === 0,
     anchorRef: modelButtonRef,
@@ -207,7 +211,7 @@ export function ComposerFooter({
             aria-expanded={modelReadOnly ? undefined : modelMenuOpen}
             aria-haspopup={modelReadOnly ? undefined : 'listbox'}
             aria-label={`${modelReadOnly ? 'Assigned model' : 'Model'}: ${modelButtonLabel}`}
-            title={modelReadOnly ? `Assigned model: ${modelButtonLabel}` : modelButtonLabel}
+            title={modelReadOnly ? `Assigned model: ${modelButtonTitle}` : modelButtonTitle}
             disabled={modelReadOnly}
             onClick={modelReadOnly ? undefined : handleModelMenuToggle}
           >
@@ -218,6 +222,9 @@ export function ComposerFooter({
               <span className="composer-model-btn-name">{modelButtonParts[0]}</span>
               {modelButtonParts.length > 1 ? ` · ${modelButtonParts.slice(1).join(' · ')}` : null}
             </span>
+            {providerAttention && (providerAttention.tone === 'warning' || providerAttention.tone === 'error') ? (
+              <span className={`composer-model-btn-dot is-${providerAttention.tone}`} aria-label={providerAttention.headline} />
+            ) : null}
             {!modelReadOnly && <ChevronDown size={12} strokeWidth={2} />}
           </button>
         </div>
@@ -225,7 +232,7 @@ export function ComposerFooter({
       </div>
 
       <div className="composer-footer-right">
-        {selectedProviderId !== 'antigravity' && <div className="composer-context-anchor">
+        {showsContextGauge(selectedProvider) && <div className="composer-context-anchor">
           <ContextUsageRing
             percent={contextUsage.percent}
             capacityKnown={contextUsage.limit > 0}

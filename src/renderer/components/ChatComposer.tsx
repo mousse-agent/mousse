@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import type { ReactNode } from 'react'
 import { Loader2, Mic, X } from '../lib/icons'
 import { SpeechWave } from '../speech/SpeechWave'
-import type { LlmProviderOption } from '../../shared/settings'
+import type { ProviderWithStatus } from '../lib/providerSnapshots'
 import type {
   BrowserElementAttachment,
   ChatMode,
@@ -56,7 +56,7 @@ export interface ChatComposerProps {
   onRemoveReference?: (id: string) => void
   onReferenceError?: (message: string) => void
   enabledSkills: SkillDescriptor[]
-  providers: LlmProviderOption[]
+  providers: ProviderWithStatus[]
   selectedProviderId: string
   selectedModelId: string
   modelMenuOpen: boolean

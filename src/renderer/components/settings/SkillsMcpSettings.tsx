@@ -21,7 +21,7 @@ const WEB_SERVICES: Array<{ id: WebService; label: string }> = [{ id: 'exa', lab
 type IntegrationsPatch = {
   tools?: { enabled?: boolean; enabledTools?: string[] }
   mcp?: { enableForMainAgent?: boolean; enableForAgents?: Partial<Record<AgentTypeId, boolean>> }
-  skills?: { enableForMainAgent?: boolean; enableForAgents?: Partial<Record<AgentTypeId, boolean>>; model?: Record<string, { llmProvider: string; model: string }> }
+  skills?: { enableForMainAgent?: boolean; enableForAgents?: Partial<Record<AgentTypeId, boolean>>; model?: Record<string, { instanceId?: string; llmProvider: string; model: string }> }
 }
 const patch = (integrations: IntegrationsPatch) => ({ integrations }) as unknown as MousseSettingsUpdate
 

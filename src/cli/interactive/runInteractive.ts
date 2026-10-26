@@ -132,9 +132,10 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
     modelCache = await listModels()
     try {
       const s = await client.request<{
-        settings: { provider: { llmProvider: string; model: string } }
+        settings: { provider: { instanceId?: string; llmProvider: string; model: string } }
       }>('settings.get')
       globalModel = {
+        ...(s.settings.provider.instanceId ? { instanceId: s.settings.provider.instanceId } : {}),
         llmProvider: s.settings.provider.llmProvider,
         model: s.settings.provider.model
       }
@@ -162,7 +163,7 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
     setGlobalModel: (model: SessionModel) => {
       globalModel = model
       void client.request('settings.set', {
-        partial: { provider: { llmProvider: model.llmProvider, model: model.model } }
+        partial: { provider: { instanceId: model.instanceId, llmProvider: model.llmProvider, model: model.model } }
       })
     },
     isTurnActive: () => turnActive,
@@ -190,7 +191,7 @@ export async function runInteractiveChat(opts: InteractiveChatOptions): Promise<
       if (override) {
         void client.request('settings.set', {
           partial: {
-            provider: { llmProvider: override.llmProvider, model: override.model }
+            provider: { instanceId: override.instanceId, llmProvider: override.llmProvider, model: override.model }
           }
         })
       }

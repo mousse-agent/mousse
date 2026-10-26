@@ -1593,6 +1593,19 @@ html.platform-darwin .titlebar-left {
   font-weight: 600;
 }
 
+/* The selected instance needs attention (not found, sign-in expired): a dot, as in Settings. */
+.composer-model-btn-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--warning);
+}
+
+.composer-model-btn-dot.is-error {
+  background: var(--danger);
+}
+
 .composer-model-btn-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1792,6 +1805,7 @@ html.platform-darwin .titlebar-left {
 }
 
 .model-picker-rail-item {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1891,6 +1905,7 @@ html[data-theme='high-contrast'] .model-picker-row.selected {
 }
 
 .model-picker-row-icon {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1925,14 +1940,55 @@ html[data-theme='high-contrast'] .model-picker-row.selected {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  min-width: 0;
   font-size: 12px;
   color: var(--text-secondary);
   line-height: 1.3;
 }
 
+/* The instance name stays whole; its status gives way first. */
+.model-picker-row-provider {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* T3 Code's instance badge: where two providers share a logo ("Claude Code" and "Claude Code 2"),
+   the later one carries what sets its name apart, on the logo's corner. */
+.model-picker-instance-badge {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 12px;
+  height: 12px;
+  padding: 0 2px;
+  border-radius: 6px;
+  background: var(--ui-raised);
+  box-shadow: 0 0 0 1px var(--ui-line-strong);
+  color: var(--text-primary);
+  font-size: 8.5px;
+  font-weight: 600;
+  line-height: 1;
+  pointer-events: none;
+}
+
 .model-picker-row-chevron {
   flex-shrink: 0;
   color: var(--ui-faint);
+}
+
+/* The instance needs a step first ("Claude Code 2 · Not signed in"), from its snapshot. */
+.model-picker-row-status {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-picker-row-status::before {
+  content: '·';
+  margin-right: 5px;
 }
 
 /* Shortcut hints and stars are quiet chrome: faint, no fill, no colour. */

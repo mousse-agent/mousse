@@ -1,16 +1,19 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
-import type { ProviderCapabilities } from '../../src/mms/run/adapters/ProviderAdapter'
+import { CLAUDE_CODE_CAPS } from '../../src/mms/harness/drivers/claudeCode'
+import { PI_LEGACY_CAPS } from '../../src/mms/harness/drivers/piLegacy'
+import { HARNESS_CAP_KEYS, type HarnessCaps } from '../../src/shared/harness/types'
 
-// SPEC §13.2: every capability flag has a reader outside the adapters, and that reader is called
-// somewhere. A flag nobody reads, or a reader nobody calls, is a promise nothing keeps.
+// SPEC §13.2: every capability key has a reader outside the drivers, and that reader is called
+// somewhere. A key nobody reads, or a reader nobody calls, is a promise nothing keeps. Readers live
+// in the run engine and the harness gateway; drivers (and the adapters they wrap) only declare.
 const repoRoot = resolve(__dirname, '..', '..')
-const runRoot = join(repoRoot, 'src', 'mms', 'run')
+const readerRoots = [join(repoRoot, 'src', 'mms', 'run'), join(repoRoot, 'src', 'mms', 'harness')]
 const srcRoot = join(repoRoot, 'src')
+const DECLARATION_DIRS = ['src/mms/run/adapters/', 'src/mms/harness/drivers/']
 
-/** Each key of `ProviderCapabilities` and the reader functions that read it; `satisfies` keeps it exact. */
+/** Each key of `HarnessCaps` and the reader functions that read it; `satisfies` keeps it exact. */
 const READERS = {
   steer: ['steerStrategy'],
   interrupt: ['stopStrategy'],
@@ -20,15 +23,17 @@ const READERS = {
   containment: ['restoreMode'],
   historyInjection: ['handoffDelivery'],
   mcp: ['mcpAttachable'],
-  childPolicy: ['subagentTargetRefusal']
-} satisfies Record<keyof ProviderCapabilities, string[]>
-const CAPABILITY_KEYS = Object.keys(READERS) as Array<keyof ProviderCapabilities>
+  childPolicy: ['subagentTargetRefusal'],
+  planMode: ['planModeAvailable'],
+  contextUsage: ['contextGauge']
+} satisfies Record<keyof HarnessCaps, string[]>
+const CAPABILITY_KEYS = Object.keys(READERS) as Array<keyof HarnessCaps>
 
 function sources(root: string): Array<{ path: string; source: string }> {
   return readdirSync(root, { recursive: true, withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts'))
     .map((entry) => relative(repoRoot, join(entry.parentPath, entry.name)).split(sep).join('/'))
-    .filter((path) => !path.startsWith('src/mms/run/adapters/'))
+    .filter((path) => !DECLARATION_DIRS.some((dir) => path.startsWith(dir)))
     .map((path) => ({ path, source: readFileSync(join(repoRoot, path), 'utf8') }))
 }
 
@@ -41,19 +46,22 @@ function codeLines(source: string): string[] {
 }
 
 describe('capability readers', () => {
-  const runSources = sources(runRoot)
+  const runSources = readerRoots.flatMap(sources)
   const allSources = sources(srcRoot)
 
-  it('scans the run engine sources outside the adapters', () => {
+  it('scans the run engine and gateway sources outside the drivers', () => {
     expect(runSources.some(({ path }) => path === 'src/mms/run/CommandPolicy.ts')).toBe(true)
-    expect(allSources.some(({ path }) => path.startsWith('src/mms/run/adapters/'))).toBe(false)
+    expect(runSources.some(({ path }) => path === 'src/mms/harness/policy.ts')).toBe(true)
+    expect(allSources.some(({ path }) => DECLARATION_DIRS.some((dir) => path.startsWith(dir)))).toBe(false)
   })
 
-  it('covers every key the pi adapter declares', () => {
-    expect([...CAPABILITY_KEYS].sort()).toEqual(Object.keys(PI_LOOP_CAPABILITIES).sort())
+  it('covers every key the default drivers declare', () => {
+    expect([...CAPABILITY_KEYS].sort()).toEqual([...HARNESS_CAP_KEYS].sort())
+    expect([...CAPABILITY_KEYS].sort()).toEqual(Object.keys(CLAUDE_CODE_CAPS).sort())
+    expect([...CAPABILITY_KEYS].sort()).toEqual(Object.keys(PI_LEGACY_CAPS).sort())
   })
 
-  it.each(CAPABILITY_KEYS)('%s is read by its reader function outside src/mms/run/adapters/', (key) => {
+  it.each(CAPABILITY_KEYS)('%s is read by its reader function outside the drivers', (key) => {
     for (const name of READERS[key]) {
       const definition = new RegExp(`export function ${name}\\(([^)]*)\\)[^{]*\\{([\\s\\S]*?)\\n\\}`)
       const defined = runSources.map(({ source }) => definition.exec(source)).find(Boolean)

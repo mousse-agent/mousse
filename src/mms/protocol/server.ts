@@ -351,6 +351,13 @@ export class MmsProtocolServer {
     onEmitter(services.events, 'providers:install', (event: import('../../shared/providerAuth').CliInstallEvent) => {
       emitToSubscribers(this.ring.push('providers.install-event', { event }))
     })
+    // Harness snapshot changes and operation progress, whichever request or background check caused them.
+    if (services.harness) {
+      disposers.push(services.harness.instances.subscribe((event) => {
+        if (event.type === 'snapshots') emitToSubscribers(this.ring.push('providers.snapshots', event.data))
+        else emitToSubscribers(this.ring.push('providers.operation', { event: event.data }))
+      }))
+    }
     // Some daemon-owned producers (Telegram/Discord/webhooks and scheduled jobs)
     // create threads directly rather than through a protocol request. Fan those
     // creations out through the same sequenced event consumed by the GUI.

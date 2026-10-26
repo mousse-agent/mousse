@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import { ClaudeSubscriptionAdapter } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
+import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import { createMousseToolRegistry } from '../../src/mms/run/mcp/toolRegistry'
@@ -92,9 +92,9 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
         )
       return 'Parent done.'
     })
-    const d = phase6Daemon(home, [parentAdapter, new ClaudeSubscriptionAdapter(() => service)])
+    // The `claude` instance runs on this service through the real driver, live host included.
+    const d = phase6Daemon(home, [parentAdapter], { drivers: [claudeCodeDriver({ builtIn: () => service })] })
     stops.push(d.stop)
-    d.orch.setClaudeSubscriptionProvider(service)
     if (options.mcp) {
       const credentials = new McpCredentials(d.engine.store)
       const server = new MousseMcpServer({ credentials, registry: createMousseToolRegistry({ engine: d.engine, host: d.orch.mcpToolHost() }) })

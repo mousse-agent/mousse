@@ -33,9 +33,11 @@ import {
   storedCliEnv,
   withUserEnv,
   type CliLaunch,
-  type CliVersionCache
+  type CliVersionCache,
+  type StoredCliConfig
 } from '../cliConfig'
 import { resolveWindowsShim } from '../resolveWindowsShim'
+import { claudeAccountSubject } from './accountSubject'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -167,9 +169,40 @@ type Dependencies = {
   ) => Promise<string>
   /** `claude --version` lookups (tests). */
   versions?: CliVersionCache
+  /**
+   * Where this instance keeps its settings, saved sessions and standalone workspaces. Default:
+   * `<profileHome>/providers/claude-subscription` (the `claude` instance).
+   */
+  stateDir?: string
+  /** Finds `claude` when no executable is set; default: PATH and `~/.local/bin`. */
+  findBinary?: () => string | undefined
+  /**
+   * The environment Claude Code starts from, before the user's variables; default `process.env`.
+   * An instance with its own Claude home sets `CLAUDE_CONFIG_DIR` here.
+   */
+  baseEnv?: () => NodeJS.ProcessEnv
+  /**
+   * The executable, launch args and variables of an instance whose launch settings live in its
+   * instance config rather than in `settings.json`.
+   */
+  launchConfig?: () => StoredCliConfig
+  /** The terminal command that signs this instance in; default `claude auth login`. */
+  signInCommand?: string
 }
+/** How `claude auth status` names its sign-in methods, for display. */
+const CLAUDE_AUTH_METHOD_LABELS: Record<string, string> = {
+  'claude.ai': 'Claude account',
+  oauth_token: 'OAuth token',
+  api_key: 'API key',
+  console: 'Anthropic Console'
+}
+/**
+ * The signed-in account: a display label (plan or sign-in method) and `subject`, a stable id of
+ * the account or credential (`claudeAccountSubject`), never shown.
+ */
+export type ClaudeAccount = { label?: string; subject?: string }
 type AuthProbe =
-  | { kind: 'signed_in' }
+  | { kind: 'signed_in'; account?: ClaudeAccount }
   | { kind: 'signed_out'; message: string }
   | { kind: 'error'; message: string }
 
@@ -324,6 +357,7 @@ function sessionBoundTo(saved: SavedSession, instanceId: string): boolean {
 }
 
 export class ClaudeSubscriptionProviderService {
+  private readonly dir: string
   private readonly settingsPath: string
   private settings: Settings = {}
   /** Set when settings.json exists but cannot be read; blocks migration and every write. */
@@ -350,16 +384,12 @@ export class ClaudeSubscriptionProviderService {
   private policyStored = false
 
   constructor(
-    private readonly profileHome: string,
+    profileHome: string,
     private readonly questions: UserQuestionService,
     private readonly dependencies: Dependencies = {}
   ) {
-    this.settingsPath = join(
-      profileHome,
-      'providers',
-      CLAUDE_SUBSCRIPTION_PROVIDER_ID,
-      'settings.json'
-    )
+    this.dir = dependencies.stateDir ?? join(profileHome, 'providers', CLAUDE_SUBSCRIPTION_PROVIDER_ID)
+    this.settingsPath = join(this.dir, 'settings.json')
     this.liveConfig = dependencies.live === false ? null : { ...DEFAULT_LIVE_TIMINGS, ...dependencies.live }
     this.loadSettings()
   }
@@ -391,7 +421,7 @@ export class ClaudeSubscriptionProviderService {
     delete this.settings.signedIn
   }
   standaloneWorkspace(threadId: string): string {
-    const directory = join(this.profileHome, 'providers', CLAUDE_SUBSCRIPTION_PROVIDER_ID, 'workspaces', historyKey(threadId))
+    const directory = join(this.dir, 'workspaces', historyKey(threadId))
     mkdirSync(directory, { recursive: true, mode: 0o700 })
     return directory
   }
@@ -404,7 +434,7 @@ export class ClaudeSubscriptionProviderService {
   }
   /** How to start Claude Code: the chosen or detected executable, with an npm shim resolved. */
   private launchTarget(): CliLaunch | undefined {
-    return cliLaunch(this.settings.binaryPath || binaryOnPath())
+    return cliLaunch(this.launchSettings().binaryPath || (this.dependencies.findBinary?.() ?? binaryOnPath()))
   }
   /** The program that runs (reported as `resolvedBinaryPath`). */
   private binary(): string | undefined {
@@ -417,18 +447,41 @@ export class ClaudeSubscriptionProviderService {
     return (this.dependencies.runAuth ?? runAuth)(launch.command, [...launch.args, ...args], env, signal)
   }
   private environment(): NodeJS.ProcessEnv {
-    return withUserEnv(claudeSubscriptionEnvironment(), storedCliEnv(this.settings))
+    return withUserEnv(claudeSubscriptionEnvironment(this.dependencies.baseEnv?.()), storedCliEnv(this.launchSettings()))
+  }
+  /** The stored executable, args and variables: the instance config's, else `settings.json`. */
+  private launchSettings(): StoredCliConfig {
+    return this.dependencies.launchConfig?.() ?? this.settings
+  }
+  /** The terminal command that signs this instance in. */
+  private signInCommand(): string {
+    return this.dependencies.signInCommand ?? 'claude auth login'
+  }
+  /**
+   * Drops the saved session of `threadId`, so its next turn starts a new Claude session with the
+   * history in the prompt (the account or home it was saved under changed).
+   */
+  forgetConversation(threadId: string): void {
+    if (!this.settings.sessions?.[threadId]) return
+    const { [threadId]: _dropped, ...rest } = this.settings.sessions
+    this.settings.sessions = rest
+    this.save()
+  }
+  /** The stored executable, launch args and variables, as saved (no lookup, no version check). */
+  storedLaunch(): StoredCliConfig {
+    const stored = this.launchSettings()
+    return { ...(stored.binaryPath ? { binaryPath: stored.binaryPath } : {}), args: storedCliArgs(stored), env: storedCliEnv(stored) }
   }
   /** The executable path, launch args and environment set in Settings → Providers. */
   async cliConfig(): Promise<CliProviderConfig> {
     const launch = this.launchTarget()
     return {
       instanceId: CLAUDE_INSTANCE_ID,
-      ...(this.settings.binaryPath ? { binaryPath: this.settings.binaryPath } : {}),
+      ...(this.launchSettings().binaryPath ? { binaryPath: this.launchSettings().binaryPath } : {}),
       ...(launch ? { resolvedBinaryPath: launch.path } : {}),
       version: await (this.dependencies.versions ?? sharedCliVersions).version(launch, this.environment()),
-      args: storedCliArgs(this.settings),
-      env: storedCliEnv(this.settings)
+      args: storedCliArgs(this.launchSettings()),
+      env: storedCliEnv(this.launchSettings())
     }
   }
   /**
@@ -479,6 +532,10 @@ export class ClaudeSubscriptionProviderService {
       description: 'Official Claude Code · personal account'
     }
   }
+  /** The discovered models, or the CLI aliases until discovery runs. */
+  models(): LlmModelOption[] {
+    return this.settings.models?.length ? this.settings.models : FALLBACK_MODELS
+  }
   llmProvider(): LlmProviderOption | undefined {
     if (!this.configured()) return undefined
     // Offer the CLI aliases until model discovery runs.
@@ -506,7 +563,7 @@ export class ClaudeSubscriptionProviderService {
       if (typeof stdout !== 'string' || !stdout.trim()) return unreadable
       output = stdout
     }
-    let status: { loggedIn?: unknown }
+    let status: { loggedIn?: unknown; authMethod?: unknown; subscriptionType?: unknown }
     try {
       status = JSON.parse(output) as typeof status
     } catch {
@@ -516,9 +573,23 @@ export class ClaudeSubscriptionProviderService {
     if (!status.loggedIn)
       return {
         kind: 'signed_out',
-        message: "Claude Code isn't signed in. Run `claude auth login` in a terminal, then check again."
+        message: `Claude Code isn't signed in. Run \`${this.signInCommand()}\` in a terminal, then check again.`
       }
-    return { kind: 'signed_in' }
+    const text = (value: unknown) => (typeof value === 'string' && value.trim() ? value.trim() : undefined)
+    const method = text(status.authMethod)
+    const plan = text(status.subscriptionType)
+    const label = plan ? `Claude ${plan[0].toUpperCase()}${plan.slice(1)}` : method && (CLAUDE_AUTH_METHOD_LABELS[method] ?? method)
+    const subject = claudeAccountSubject(env)
+    return { kind: 'signed_in', account: { ...(label ? { label } : {}), ...(subject ? { subject } : {}) } }
+  }
+  /** The account of the last live sign-in check, when it was signed in and named one. */
+  account(): ClaudeAccount | undefined {
+    const result = this.cliProbe?.result
+    return result?.kind === 'signed_in' ? result.account : undefined
+  }
+  /** The account this instance runs as (`claudeAccountSubject`), read without starting Claude Code. */
+  accountSubject(): string | undefined {
+    return claudeAccountSubject(this.environment())
   }
   /** Checks the sign-in with the environment the caller captured for its turn. */
   private async authenticated(signal?: AbortSignal, env = this.environment()): Promise<boolean> {
@@ -541,7 +612,7 @@ export class ClaudeSubscriptionProviderService {
     this.cliProbe = { at: Date.now(), result }
     if (result.kind === 'signed_in' && !this.settings.models?.length && !this.modelDiscoveryStarted) {
       this.modelDiscoveryStarted = true
-      void this.refreshModels(join(this.profileHome, 'providers', CLAUDE_SUBSCRIPTION_PROVIDER_ID)).catch(
+      void this.refreshModels(this.dir).catch(
         () => {
           /* the CLI aliases stay available */
         }
@@ -627,7 +698,7 @@ export class ClaudeSubscriptionProviderService {
         const answer = await interaction.prompt({
           type: 'select',
           message:
-            "Claude Code isn't signed in. Run `claude auth login` in a terminal, then check again. Mousse uses the same sign-in as your terminal.",
+            `Claude Code isn't signed in. Run \`${this.signInCommand()}\` in a terminal, then check again. Mousse uses the same sign-in as your terminal.`,
           options: [
             { id: 'check', label: 'Check sign-in' },
             { id: 'cancel', label: 'Cancel' }
@@ -688,7 +759,7 @@ export class ClaudeSubscriptionProviderService {
   ): Options {
     const launch = this.launchTarget()
     // The append flags travel in `systemPrompt.append` (see claudeLaunchAppendSystemPrompt).
-    const extraArgs = claudeExtraArgs(storedCliArgs(this.settings))
+    const extraArgs = claudeExtraArgs(storedCliArgs(this.launchSettings()))
     for (const name of APPEND_SYSTEM_PROMPT_ARGS) delete extraArgs[name]
     const appendText = append.filter(Boolean).join('\n\n')
     return {
@@ -824,7 +895,7 @@ export class ClaudeSubscriptionProviderService {
     if (this.settingsError) return 'Connect Claude Subscription in Settings → Providers first.'
     if (this.settings.cliDisconnected)
       return 'Claude Subscription is disconnected. Reconnect it in Settings → Providers.'
-    return "Claude Code isn't signed in. Run `claude auth login` in a terminal, then try again."
+    return `Claude Code isn't signed in. Run \`${this.signInCommand()}\` in a terminal, then try again.`
   }
   private abortInFlight(): void {
     for (const controller of this.controllers) controller.abort()
@@ -1345,7 +1416,7 @@ export class ClaudeSubscriptionProviderService {
         ? selected.effort as Options['effort'] : undefined
       // Agent turns run unattended in the thread workspace, like Mousse's other agents.
       const permissionMode: PermissionMode = planTurn ? 'plan' : readOnlyChild ? 'default' : 'bypassPermissions'
-      const launchAppend = claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.settings)), input.cwd)
+      const launchAppend = claudeLaunchAppendSystemPrompt(claudeExtraArgs(storedCliArgs(this.launchSettings())), input.cwd)
       const appendTexts = [input.systemPromptAppend ?? '', ...launchAppend]
       // What a live process is started for (`HARD_PARTS`); a process the turn can reuse already holds the conversation.
       const hard = [
@@ -1650,7 +1721,7 @@ export class ClaudeSubscriptionProviderService {
           launch?.path,
           launch?.command,
           launch?.args,
-          claudeExtraArgs(storedCliArgs(this.settings)),
+          claudeExtraArgs(storedCliArgs(this.launchSettings())),
           Object.entries(env).sort(([a], [b]) => (a < b ? -1 : 1)),
           integrations?.mcpServers,
           Object.entries(integrations?.proxiedServers ?? {}).map(([name, proxied]) => [name, proxied.tools]),

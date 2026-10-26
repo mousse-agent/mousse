@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { dispatchMethod, type HandlerContext } from '../src/mms/protocol/handlers'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { AntigravityProviderService } from '../src/mms/providers/antigravity/AntigravityProviderService'
 import { installAntigravity } from '../src/mms/providers/antigravity/installation'
@@ -135,21 +134,6 @@ describe('Antigravity install', () => {
     await vi.waitFor(() => expect(installMock).toHaveBeenCalledTimes(1))
     service.stop()
     await rejected
-  })
-})
-
-describe('Antigravity install requests', () => {
-  it('returns the new config and the provider list', async () => {
-    const { service } = setup()
-    installMock.mockResolvedValue('agy')
-    const providers = [{ id: 'antigravity' }]
-    const context = {
-      mms: { antigravity: service, providerInstances: { configuredProviders: () => providers } },
-      globalSequence: () => 0
-    } as unknown as HandlerContext
-    const result = await dispatchMethod(context, 'providers.installAntigravity', {}) as { config: { instanceId: string }; providers: unknown[] }
-    expect(result).toMatchObject({ config: { instanceId: 'antigravity' }, providers })
-    expect(await dispatchMethod(context, 'providers.cancelAntigravityInstall', {})).toEqual({ cancelled: false })
   })
 })
 

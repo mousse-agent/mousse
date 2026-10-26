@@ -77,7 +77,8 @@ describe('delegate_task by provider instance', () => {
       }
     })
     const claude = new ScriptedAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, async () => 'Reviewed by Claude.')
-    const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
+    let seedVersion: number | undefined
+    const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion }), write: (next) => { stored = next.instances; seedVersion = next.seedVersion } } })
     const { orch, engine, store, stop } = phase6Daemon(home, [parent, claude], { instances })
     stops.push(stop)
     return { orch, engine, store, parent, claude, outcome }

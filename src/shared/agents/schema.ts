@@ -107,6 +107,10 @@ export function parseModelRef(value: unknown, pointer: string): AgentModelRef {
     providerId: requireString(value.providerId, `${pointer}/providerId`).trim(),
     modelId: requireString(value.modelId, `${pointer}/modelId`).trim()
   }
+  if (value.instanceId !== undefined) {
+    const instanceId = requireString(value.instanceId, `${pointer}/instanceId`).trim()
+    if (instanceId) ref.instanceId = instanceId
+  }
   if (typeof value.familyId === 'string' && value.familyId.trim()) ref.familyId = value.familyId.trim()
   if (typeof value.variantId === 'string' && value.variantId.trim()) ref.variantId = value.variantId.trim()
   if (typeof value.effort === 'string' && value.effort.trim()) ref.effort = value.effort.trim()

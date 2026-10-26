@@ -62,6 +62,11 @@ export interface AgentInstructionsSettings {
 export interface AgentModelRef {
   providerId: string
   modelId: string
+  /**
+   * Provider instance serving the model (two accounts of one provider share `providerId`). Absent on
+   * definitions saved before instances; `providerId` then maps to its built-in instance.
+   */
+  instanceId?: string
   familyId?: string
   variantId?: string
   effort?: string
@@ -313,6 +318,8 @@ export interface AgentModelCapabilityProfile {
   contexts: string[]
   capabilities: AgentCapabilityKind[]
   unavailableReasons: string[]
+  /** Error code of the refusal when the provider gateway refused the model (e.g. `model_hidden`). */
+  unavailableCode?: string
 }
 
 export interface EffectiveAgentGrantEntry {

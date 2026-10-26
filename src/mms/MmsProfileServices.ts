@@ -10,7 +10,15 @@ import { ClaudeSubscriptionProviderService } from './providers/claudeSubscriptio
 import { ClaudeIntegrationResolver } from './providers/claudeSubscription/integrations'
 import { AntigravityProviderService } from './providers/antigravity/AntigravityProviderService'
 import { ProviderInstanceService } from './providers/ProviderInstanceService'
-import { createCodexProviderService, type CodexProviderService } from './run/adapters/codex'
+import { createHarnessGateway, type Harness, type HarnessGateway } from './harness/gateway'
+import { antigravityDriver } from './harness/drivers/antigravity'
+import { claudeCodeDriver } from './harness/drivers/claudeCode'
+import { codexDriver } from './harness/drivers/codex'
+import { piLegacyDriver } from './harness/drivers/piLegacy'
+import { harnessAuthRunner, recordHarnessSpawn } from './harness/spawn'
+import { spawnCodexAppServer } from './providers/codex/CodexAppServerClient'
+import { createCodexProviderService, findCodexBinary, type CodexProviderService } from './providers/codex/CodexProviderService'
+import { CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, piProviderIdOf } from '../shared/providerInstances'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { backfillSubagentLineage } from './data/subagentLineage'
@@ -102,6 +110,9 @@ export class MmsProfileServices {
   readonly codex: CodexProviderService
   /** Provider instances of this profile: the agents callers pick by `{ instanceId, model }`. */
   readonly providerInstances: ProviderInstanceService
+  /** The harness gateway: the only way app code reaches agents and providers. */
+  harness?: HarnessGateway
+  private harnessImpl?: Harness
   readonly projects: ProjectManager
   readonly applets: AppletStore
   readonly threads: ThreadDataStore
@@ -232,9 +243,19 @@ export class MmsProfileServices {
     this.antigravity.hooks.changed = () => this.events.emit({ channel: 'providers:changed', data: undefined })
     this.antigravity.hooks.installProgress = (message) =>
       this.events.emit({ channel: 'providers:install', data: { instanceId: 'antigravity', type: 'progress', message } })
-    // Every profile uses the terminal Claude sign-in, like Codex.
-    this.claudeSubscription = new ClaudeSubscriptionProviderService(homeDir, this.questions)
-    this.codex = createCodexProviderService(homeDir, this.questions)
+    // Every profile uses the terminal Claude sign-in, like Codex. Both find their CLI through the
+    // gateway (the inherited PATH first, then the login shell's) and start through its spawn path.
+    this.claudeSubscription = new ClaudeSubscriptionProviderService(homeDir, this.questions, {
+      findBinary: () => this.harnessImpl?.findBinaryFor(CLAUDE_INSTANCE_ID),
+      runAuth: harnessAuthRunner(CLAUDE_INSTANCE_ID)
+    })
+    this.codex = createCodexProviderService(homeDir, this.questions, {
+      findBinary: () => this.harnessImpl?.findBinaryFor(CODEX_INSTANCE_ID) ?? findCodexBinary(),
+      launch: (launch) => {
+        recordHarnessSpawn({ instanceId: CODEX_INSTANCE_ID, purpose: 'app-server', command: launch.binary, args: launch.args, env: launch.env })
+        return spawnCodexAppServer(launch)
+      }
+    })
     // Seeded on load; a stored instance is never rewritten.
     this.providerInstances = new ProviderInstanceService({
       providerAuth: this.providerAuth,
@@ -332,17 +353,41 @@ export class MmsProfileServices {
       registry: createMousseToolRegistry({ engine: this.runEngine, host: this.orchestrator.mcpToolHost() })
     })
     this.orchestrator.setAppletStore(this.applets)
-    this.orchestrator.setAntigravityProvider(this.antigravity)
-    this.orchestrator.setClaudeSubscriptionProvider(this.claudeSubscription, new ClaudeIntegrationResolver({
-      mcpRegistry: this.mcpRegistry,
-      mcpManager: this.mcpManager,
-      skillsRegistry: this.skillsRegistry,
-      settings: this.settings,
-      secrets: this.integrationContext.secrets,
-      pluginRoot: join(homeDir, 'providers', 'claude-subscription', 'skill-plugins')
-    }))
-    this.orchestrator.setCodexProvider(this.codex)
-    this.orchestrator.setProviderInstances(this.providerInstances)
+    // The harness gateway over this profile's instances: one runtime per instance, built by its
+    // driver. Built-in instances share the profile's vendor services (usage, Settings) above.
+    this.harnessImpl = createHarnessGateway({
+      profileHome: homeDir,
+      installationHome: shared.installationHome,
+      instanceMap: this.providerInstances,
+      drivers: [
+        piLegacyDriver({ client: () => this.orchestrator.piChatClient(), credentials: () => this.providerAuth }),
+        claudeCodeDriver({
+          builtIn: () => this.claudeSubscription,
+          // Skill resolution follows the instance's environment (its own CLAUDE_CONFIG_DIR, if any).
+          integrations: (env) => new ClaudeIntegrationResolver({
+            mcpRegistry: this.mcpRegistry,
+            mcpManager: this.mcpManager,
+            skillsRegistry: this.skillsRegistry,
+            settings: this.settings,
+            secrets: this.integrationContext.secrets,
+            pluginRoot: join(homeDir, 'providers', 'claude-subscription', 'skill-plugins'),
+            env
+          })
+        }),
+        codexDriver({ builtIn: () => this.codex }),
+        antigravityDriver({ builtIn: () => this.antigravity })
+      ],
+      questions: this.questions,
+      prefs: {
+        read: () => config.getProvidersSection().modelPrefs,
+        write: (modelPrefs) => config.updateProvidersSection({ modelPrefs })
+      },
+      cwd: () => this.worktrees.getRepoRoot(),
+      piDisplayName: (providerId) => this.providerAuth.getProviderDisplayName(providerId),
+      onProvidersChanged: () => this.events.emit({ channel: 'providers:changed', data: undefined })
+    })
+    this.harness = this.harnessImpl
+    this.orchestrator.setHarness(this.harnessImpl)
     this.orchestrator.setWorkflowChatExecutor(this.platform.workflowChat)
     this.orchestrator.setFeatureFlags(this.config.get().features)
     this.threadRuntimes = new ThreadRuntimeManager()
@@ -387,7 +432,11 @@ export class MmsProfileServices {
       this.channelStore,
       this.settings,
       this.providerAuth,
-      this.agents
+      this.agents,
+      {
+        // Channel turns pick pi-ai providers by name; disabled instances and hidden models leave.
+        listModels: () => this.providerInstances.llmProviders().filter((option) => option.instanceId && piProviderIdOf(option.instanceId))
+      }
     )
 
     this.net = new NetService({
@@ -1005,6 +1054,7 @@ export class MmsProfileServices {
       () => this.stopRunEngine(),
       () => this.net.shutdown(),
       () => this.requests.waitForIdle(),
+      () => this.harnessImpl?.stop(),
       () => this.antigravity.stop(),
       () => this.claudeSubscription.stop(),
       () => this.codex.stop(),

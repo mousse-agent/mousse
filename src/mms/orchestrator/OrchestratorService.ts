@@ -12,9 +12,12 @@ import { createAgentToolAccess } from '../agents/WorkspaceAccessPolicy'
 import type { AgentWorkspacePolicy } from '../../shared/agentEpisodes'
 import { AsyncLocalStorage } from 'async_hooks'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { readFileSync } from 'node:fs'
 import { normalizeContextSettings, resolveContextCompactionTokens, resolveModelForMode } from '../../shared/settings'
-import type { ModelOverride } from '../../shared/providerInstances'
+import { piInstanceId, PROVIDER_INSTANCE_ERROR_CODES, type ModelOverride } from '../../shared/providerInstances'
+import type { Api, Model } from '@earendil-works/pi-ai'
+import { customModelDefinition } from '../harness/catalog'
 import { OwnedWorkBarrier } from '../execution/OwnedWorkBarrier'
 import type { WorkflowChatExecutor } from '../platform/MmsWorkflowChatBridge'
 import type { WorkflowChatRun } from '../../shared/workflowChat'
@@ -33,9 +36,6 @@ import { createNativeAgentRuntime } from '../agentDefinitions/nativeRuntime'
 import type { AgentExecutionRequest, AgentExecutionResult } from '../../shared/agents/execution'
 import { EventEmitter } from 'events'
 import { nativeAgentAssistantMessage, nativeAgentHistory } from '../providers/nativeAgentHistory'
-import type { ClaudeSubscriptionProviderService } from '../providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import type { ClaudeIntegrationSource } from '../providers/claudeSubscription/integrations'
-import type { AntigravityProviderService } from '../providers/antigravity/AntigravityProviderService'
 import { v4 as uuidv4 } from 'uuid'
 import { TitleTakenRejection, type CommandResult, type RunEngine, type SendDelegation, type StopResult } from '../run/RunEngine'
 import { isFencedSource } from '../run/delegation/sources'
@@ -49,12 +49,10 @@ import { stopStrategy } from '../run/CommandPolicy'
 import { McpToolError } from '../run/mcp/toolRegistry'
 import { stableStringify } from '../run/json'
 import { formatRestartNote } from '../run/restartNote'
-import { AdapterRegistry } from '../run/adapters/AdapterRegistry'
-import { PiLoopAdapter } from '../run/adapters/pi/PiLoopAdapter'
-import { ClaudeSubscriptionAdapter } from '../run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
-import { AntigravityAdapter } from '../run/adapters/antigravity/AntigravityAdapter'
-import { CodexAdapter, type CodexClient } from '../run/adapters/codex'
-import type { AdapterHost, ChildTurnPolicy, ProviderAdapter, ProviderCapabilities, ProviderMetrics, RecoveredContext, TurnControl, TurnInput, TurnSink } from '../run/adapters/ProviderAdapter'
+import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
+import { piLegacyDriver } from '../harness/drivers/piLegacy'
+import { contextGauge } from '../harness/policy'
+import type { ExecutionBinding, HarnessCaps, ProviderScope } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { McpCaller, MousseToolHost } from '../run/mcp/toolRegistry'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
@@ -491,24 +489,6 @@ function toolArgsDigest(args: unknown): string {
 export class OrchestratorService extends EventEmitter {
   private appletStore?: AppletStore
   setAppletStore(store: AppletStore): void { this.appletStore = store }
-  private claudeSubscription?: ClaudeSubscriptionProviderService
-  private claudeIntegrations?: ClaudeIntegrationSource
-  setClaudeSubscriptionProvider(provider: ClaudeSubscriptionProviderService, integrations?: ClaudeIntegrationSource): void {
-    this.claudeSubscription?.setLiveHost(null)
-    this.claudeSubscription = provider
-    this.claudeIntegrations = integrations
-    // Claude's live processes report their background work and the turns they start themselves here.
-    provider.setLiveHost({
-      backgroundWork: (threadId, active) => this.setProviderBackgroundWork(threadId, active),
-      continuationStarted: (threadId, info) => this.startProviderContinuation(threadId, info),
-      notice: (threadId, text) => this.noteProviderNotice(threadId, text)
-    })
-  }
-  private codex?: CodexClient
-  /** The profile's Codex service (`codex` driver); read by the Codex adapter on every turn. */
-  setCodexProvider(provider: CodexClient | null): void { this.codex = provider ?? undefined }
-  private antigravity?: AntigravityProviderService
-  setAntigravityProvider(provider: AntigravityProviderService): void { this.antigravity = provider }
   private readonly lifecycle = new OwnedWorkBarrier()
 
   getOwnedActivity(): Record<string, number> {
@@ -597,7 +577,7 @@ export class OrchestratorService extends EventEmitter {
           session.tasks,
           (action) => this.emit('quick-action-created', action),
           (payload, threadId) => this.presentPlanCard(payload, threadId),
-          { questions: this.questions, modeRegistry: this.modeRegistry, browserRuntime }
+          { questions: this.questions, modeRegistry: this.modeRegistry, browserRuntime, customModel: (provider, modelId) => this.customPiModel(provider, modelId) }
         )
         const browser = createDefinitionBrowserBinding({
           request: { ...request, runId },
@@ -631,25 +611,42 @@ export class OrchestratorService extends EventEmitter {
   }
   private llm: LlmClient
   /**
-   * Provider adapters for `executeTurn` (SPEC §13), one per driver kind, resolved by provider
-   * instance id (§13.8). The pi loop reads `this.llm` per turn. The constructor gives the registry
-   * an in-memory instance map; the profile installs its stored one with `setProviderInstances`.
+   * The harness gateway (SPEC §13): instance id → driver → turn runtime, capabilities, scope and
+   * model prefs. Until the profile installs its own (`setHarness`), an in-memory instance map with
+   * the pi loop serves turns; the pi loop reads `this.llm` per turn.
    */
-  private adapters = new AdapterRegistry()
-    .register(new PiLoopAdapter(() => this.llm))
-    .register(new ClaudeSubscriptionAdapter(() => this.claudeSubscription ?? null, () => this.claudeIntegrations ?? null))
-    .register(new AntigravityAdapter(() => this.antigravity ?? null))
-    .register(new CodexAdapter(() => this.codex ?? null))
-  /** Test seam: replaces the provider adapters (and with them the instance map they resolve against). */
-  setAdapterRegistry(registry: AdapterRegistry): void { this.adapters = registry }
-  /** The profile's provider instances (stored map, seeds, legacy mapping). */
-  setProviderInstances(instances: ProviderInstanceService): void { this.adapters.setInstances(instances) }
+  private harness: HarnessGateway
+  /** The profile's harness gateway; also the test seam for fake drivers. */
+  setHarness(harness: HarnessGateway): void {
+    this.harness.setLiveHost(null)
+    this.harness = harness
+    this.attachLiveHost()
+  }
+  /** Runtimes that keep a live process per thread report their background work and the turns they start themselves here. */
+  private attachLiveHost(): void {
+    this.harness.setLiveHost({
+      backgroundWork: (threadId, active) => this.setProviderBackgroundWork(threadId, active),
+      continuationStarted: (threadId, info) => this.startProviderContinuation(threadId, info),
+      notice: (threadId, text) => this.noteProviderNotice(threadId, text)
+    })
+  }
+  /**
+   * A custom model added to a pi provider in Settings → Providers, as the pi loop runs it: the
+   * provider's transport (api, base URL, headers) with the capabilities the user declared.
+   */
+  private customPiModel(provider: string, modelId: string): Model<Api> | undefined {
+    const custom = this.harness?.catalog.customModel(piInstanceId(provider), modelId)
+    const template = custom ? this.providerAuth.models.getModels(provider)[0] : undefined
+    return custom && template ? customModelDefinition(template, custom) : undefined
+  }
+  /** The pi loop's chat client, read per turn by the gateway's pi driver. */
+  piChatClient(): Pick<LlmClient, 'chat'> { return this.llm }
   /**
    * Migrate-on-read for a stored model selection: adds the instance id an older `llmProvider`
    * maps to. Never throws; an unmappable selection fails when a turn resolves it.
    */
   migrateModelOverride<T extends ModelOverride>(override: T | undefined): T | undefined {
-    return this.adapters.instances.migrate(override)
+    return this.harness.instanceMap.migrate(override)
   }
   private readonly questions: UserQuestionService
   private readonly modeRegistry: ModeRegistry
@@ -881,7 +878,17 @@ export class OrchestratorService extends EventEmitter {
     runtime?: { questions?: UserQuestionService; modeRegistry?: ModeRegistry }
   ) {
     super()
-    this.adapters.setInstances(new ProviderInstanceService({ providerAuth }))
+    // Until `setHarness` binds the profile's gateway: the pi loop only, over a per-process scratch
+    // home (nothing is written there unless a caller changes instance state).
+    const unboundHome = join(tmpdir(), `mousse-unbound-harness-${process.pid}`)
+    this.harness = createHarnessGateway({
+      profileHome: unboundHome,
+      installationHome: unboundHome,
+      instanceMap: new ProviderInstanceService({ providerAuth }),
+      drivers: [piLegacyDriver({ client: () => this.llm, credentials: () => this.providerAuth })],
+      questions: runtime?.questions ?? defaultUserQuestionService,
+      shellPath: async () => ({ entries: [], source: 'failed' })
+    })
     this.questions = runtime?.questions ?? defaultUserQuestionService
     this.modeRegistry = runtime?.modeRegistry ?? defaultModeRegistry
     // Seed unbound session registries (tests / legacy inject shared instances).
@@ -901,7 +908,7 @@ export class OrchestratorService extends EventEmitter {
       this.tasks,
       (action) => this.emit('quick-action-created', action),
       (payload, threadId) => this.presentPlanCard(payload, threadId),
-      { questions: this.questions, modeRegistry: this.modeRegistry }
+      { questions: this.questions, modeRegistry: this.modeRegistry, customModel: (provider, modelId) => this.customPiModel(provider, modelId) }
     )
 
     this.headlessRunner.on('exit', ({ agentId, exitCode }) => {
@@ -1072,7 +1079,7 @@ export class OrchestratorService extends EventEmitter {
       .catch((error: unknown) => {
         console.warn('a provider continuation could not be recorded', { threadId, error: error instanceof Error ? error.message : String(error) })
         // Only this turn: another one waiting on the thread belongs to a run of its own.
-        this.claudeSubscription?.discardContinuations(threadId, info.id)
+        this.harness.discardContinuations(threadId, info.id)
         this.endContinuationHold(info.id, true)
       })
   }
@@ -1117,7 +1124,7 @@ export class OrchestratorService extends EventEmitter {
     // A call is gated only when it comes from a turn Claude started itself that has no run yet. Provider
     // frames say which turn is running: while it is a message of ours, its calls act as the active run
     // at once, whatever continuations wait behind it.
-    const flight = this.claudeSubscription?.inFlightContinuation(threadId)
+    const flight = this.harness.inFlightContinuation(threadId)
     if (!flight) return undefined
     // A wake nobody could run (discarded) has no run and never will: its calls are refused.
     if (flight.discarded) return Promise.resolve({ runId: null })
@@ -1140,12 +1147,12 @@ export class OrchestratorService extends EventEmitter {
     const hold = this.pendingContinuations.get(payload.continuationId)
     const end = (): void => this.endContinuationHold(payload.continuationId, true)
     if (engine.getRun(payload.runId)?.status !== 'queued') {
-      this.claudeSubscription?.discardContinuations(payload.threadId, payload.continuationId)
+      this.harness.discardContinuations(payload.threadId, payload.continuationId)
       end()
       return
     }
     const session = this.getOrCreateSession(payload.threadId)
-    if (session.deleted || !this.claudeSubscription?.hasContinuation(payload.threadId, payload.continuationId)) {
+    if (session.deleted || !this.harness.hasContinuation(payload.threadId, payload.continuationId)) {
       this.markRun(payload.runId, (runs, id) => runs.markTerminal(id, 'cancelled'))
       end()
       return
@@ -1559,13 +1566,15 @@ export class OrchestratorService extends EventEmitter {
     // A turn of this process (live, admitted or unwinding) writes the run's terminal state itself.
     let live = abortedLocally || this.hasLocalTurn(threadId)
     if (strategy === 'interrupt') {
-      const ref = run.activeAttemptId ? engine.store.getAttempt(run.activeAttemptId)?.providerRef ?? null : null
+      const attempt = run.activeAttemptId ? engine.store.getAttempt(run.activeAttemptId) : null
+      const stored = attempt?.providerRef ?? null
+      // The attempt's binding names the instance that owns the session.
+      const ref = stored && attempt?.executionBinding ? { ...stored, instanceId: attempt.executionBinding.instanceId } : stored
       if (ref) {
         try {
           // A session already running on an instance can still be stopped after it was disabled.
           // A ref of a turn that ran on the unselected default names the bare pi driver.
-          const { adapter } = this.adapters.resolveSelection({ instanceId: ref.instanceId, llmProvider: ref.provider }, { allowDisabled: true, unselectedDefault: true })
-          if ((await adapter.interrupt(ref)) === 'interrupted') live = true
+          if ((await this.harness.interrupt(ref)) === 'interrupted') live = true
         } catch (error) {
           console.warn('adapter interrupt failed', { runId, error: error instanceof Error ? error.message : String(error) })
         }
@@ -1581,13 +1590,13 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Stop reaches the provider's process for the thread (`ProviderAdapter.stopThread`): what it still
+   * Stop reaches the provider's process for the thread (`HarnessGateway.stopThread`): what it still
    * runs in the background ends, whether or not a turn is live. True when there was a process to end.
    * Never throws.
    */
   async stopProviderWork(threadId: string): Promise<boolean> {
     try {
-      return (await this.adapterForThread(threadId).adapter.stopThread?.(threadId)) === 'stopped'
+      return (await this.harness.stopThread(threadId)) === 'stopped'
     } catch (error) {
       console.warn('provider stop failed', { threadId, error: error instanceof Error ? error.message : String(error) })
       return false
@@ -1658,8 +1667,8 @@ export class OrchestratorService extends EventEmitter {
    * The thread's MCP credential for the adapter (reused, re-pointed at this run and ceiling) when
    * the adapter can attach the server; null otherwise.
    */
-  private mcpFor(adapter: ProviderAdapter, instanceId: string, threadId: string, runId: string | undefined, mode: ChatMode): AdapterHost['mcp'] {
-    if (!runId || !this.mcpAttachment || !this.runEngine || !mcpAttachable(adapter.capabilities)) return null
+  private mcpFor(caps: HarnessCaps, instanceId: string, threadId: string, runId: string | undefined, mode: ChatMode): AdapterHost['mcp'] {
+    if (!runId || !this.mcpAttachment || !this.runEngine || !mcpAttachable(caps)) return null
     try {
       // One credential per thread and provider instance (SPEC §15.1).
       return this.mcpAttachment.attach({ threadId, runId, provider: instanceId, modeCeiling: this.modeCeilingFor(threadId, mode) })
@@ -2078,26 +2087,51 @@ export class OrchestratorService extends EventEmitter {
   // row, a child's completion is an inbox row written with its terminal run, and reconciler rule 4
   // wakes the parent. Every caller goes through `delegate_task`.
 
-  /** Capabilities of the adapter serving the thread's selected model (reconciler rule 4). */
-  capabilitiesForThread(threadId: string): ProviderCapabilities | null {
+  /** Capabilities of the instance serving the thread's selected model (reconciler rule 4). */
+  capabilitiesForThread(threadId: string): HarnessCaps | null {
     try {
-      return this.adapterForThread(threadId).adapter.capabilities
+      return this.resolvedForThread(threadId).caps
     } catch {
       return null
     }
   }
 
-  private adapterForThread(threadId: string) {
+  /** The instance serving the thread's selected model, disabled ones included (work already running). */
+  private resolvedForThread(threadId: string): ResolvedTurnSelection {
     const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
     const explicit = session?.modelOverride ?? this.threadStore?.getThread(threadId)?.modelOverride
-    return this.adapters.resolveSelection(explicit ?? this.defaultAgentModel(), { allowDisabled: true, unselectedDefault: !explicit })
+    return this.harness.resolveStored(explicit ?? this.defaultAgentModel(), { purpose: 'turn', allowDisabled: true, unselectedDefault: !explicit })
   }
 
   private defaultAgentModel(): ModelOverride {
-    return this.adapters.instances.migrate(resolveModelForMode(this.settingsStore.get(), 'agent', [
+    return this.harness.instanceMap.migrate(resolveModelForMode(this.settingsStore.get(), 'agent', [
       ...(this.providerAuth.credentials?.listProviderIds() ?? []),
-      ...this.adapters.configuredProviderIds()
+      ...this.harness.configuredProviderIds()
     ]))
+  }
+
+  /** The scope a thread's selection resolves in: its project's overrides, else the device. */
+  private threadScope(threadId: string): ProviderScope {
+    const projectId = this.threadStore?.getThread(threadId)?.projectId
+    return projectId ? { kind: 'project', projectId } : { kind: 'device' }
+  }
+
+  /**
+   * The execution binding of a turn: the one its run already recorded (a retry or restart of the
+   * run; `resolved` was built from it), else a new one from the resolved selection. Either way it
+   * is recorded on the active attempt, so a replacement attempt keeps its run's binding.
+   */
+  private async bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: ResolvedTurnSelection, mode: ChatMode): Promise<ExecutionBinding> {
+    const engine = this.runEngine
+    const binding = existing ?? await this.harness.bind(resolved, { mode })
+    if (runId && engine) {
+      try {
+        return engine.recordExecutionBinding(runId, binding)
+      } catch (error) {
+        console.warn('execution binding could not be recorded', { runId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return binding
   }
 
   /** The parent's workspace path a `shared` child observes, or null when the parent has none. */
@@ -2117,12 +2151,12 @@ export class OrchestratorService extends EventEmitter {
     if (!parentThread) throw new Error(`Thread not found: ${request.parentThreadId}`)
     const parent = this.getOrCreateSession(request.parentThreadId)
     const title = request.title?.trim() || `Delegated: ${request.prompt.trim().split('\n')[0].slice(0, 60)}`
-    const inherited = this.adapters.instances.migrate(parent.modelOverride ?? undefined)
+    const inherited = this.harness.instanceMap.migrate(parent.modelOverride ?? undefined)
     const base = (): ModelOverride => inherited ?? this.defaultAgentModel()
     // The requested instance (already resolved by `delegateTask`) or the parent's. Resolved before the
     // thread exists, so an unknown instance fails loudly without leaving an orphaned thread.
     const override = request.instanceId || request.model
-      ? this.adapters.instances.overrideFor({
+      ? this.harness.instanceMap.overrideFor({
           ...(request.instanceId ? { instanceId: request.instanceId } : { instanceId: base().instanceId, llmProvider: base().llmProvider }),
           model: request.model ?? base().model
         })
@@ -2177,9 +2211,11 @@ export class OrchestratorService extends EventEmitter {
    * `instanceId` is the requested instance; without one the child runs on the parent's selection.
    */
   private async delegationRefusal(parentThreadId: string, instanceId: string | undefined, workspace: 'shared' | 'isolated') {
-    let target: ReturnType<OrchestratorService['adapterForThread']>
+    let target: ResolvedTurnSelection
     try {
-      target = instanceId ? this.adapters.resolve(instanceId) : this.adapterForThread(parentThreadId)
+      target = instanceId
+        ? this.harness.resolveStored({ instanceId, llmProvider: '', model: '' }, { purpose: 'delegate_task' })
+        : this.resolvedForThread(parentThreadId)
     } catch {
       // An unresolvable target fails loudly when the child is created, as before.
       return null
@@ -2188,14 +2224,10 @@ export class OrchestratorService extends EventEmitter {
     return refusal ? { started: false as const, ...refusal } : null
   }
 
-  /** The static check of the adapter's capabilities, then the adapter's look at the user's setup. */
-  private async targetRefusal(
-    target: ReturnType<OrchestratorService['adapterForThread']>,
-    workspace: 'shared' | 'isolated',
-    cwd: string | null
-  ): Promise<SubagentRefusal | null> {
-    return subagentTargetRefusal(target.adapter.capabilities, target.entry.driver, workspace)
-      ?? await target.adapter.childPreflight?.({ workspace, cwd }) ?? null
+  /** The static check of the instance's capabilities, then the instance's look at the user's setup. */
+  private async targetRefusal(target: ResolvedTurnSelection, workspace: 'shared' | 'isolated', cwd: string | null): Promise<SubagentRefusal | null> {
+    return subagentTargetRefusal(target.caps, target.driver, workspace)
+      ?? await this.harness.childPreflight(target.instanceId, { workspace, cwd })
   }
 
   /**
@@ -2239,7 +2271,7 @@ export class OrchestratorService extends EventEmitter {
     const title = creation.title?.trim() || `Fork of ${sourceThread.name}`.slice(0, 120)
     const fork = this.threadStore.createThread(title, sourceThread.projectId, undefined,
       sourceThread.worktreeEnabled === undefined ? undefined : { worktreeEnabled: sourceThread.worktreeEnabled })
-    const override = this.adapters.instances.migrate(source.modelOverride ?? sourceThread.modelOverride)
+    const override = this.harness.instanceMap.migrate(source.modelOverride ?? sourceThread.modelOverride)
     if (override) this.threadStore.updateThreadMeta(fork.id, { modelOverride: structuredClone(override) })
     const session = this.getOrCreateSession(fork.id)
     session.modelOverride = override ? structuredClone(override) : undefined
@@ -2296,7 +2328,7 @@ export class OrchestratorService extends EventEmitter {
   private async planTurnHandoffs(input: {
     session: ThreadSession
     runId: string | undefined
-    adapter: ProviderAdapter
+    resolved: ResolvedTurnSelection
     selection: { llmProvider: string; model: string }
     previousModel: { provider: string; model: string } | undefined
     promptRuntime: boolean
@@ -2310,7 +2342,7 @@ export class OrchestratorService extends EventEmitter {
     if (!engine || !runId) return null
     const threadId = input.session.threadId
     const to: ProviderRef = { provider: input.selection.llmProvider, model: input.selection.model }
-    const caps = input.adapter.capabilities
+    const caps = input.resolved.caps
     const current = { text: input.content, ...(input.images?.length ? { attachments: { images: input.images.length } } : {}) }
     const planned: PlannedHandoff[] = []
     try {
@@ -2327,9 +2359,9 @@ export class OrchestratorService extends EventEmitter {
         const sourceRun = engine.getRun(String(fork.payload.sourceRunId ?? ''))
         const sourceRef = sourceRun?.activeAttemptId ? engine.store.getAttempt(sourceRun.activeAttemptId)?.providerRef ?? null : null
         let branched: ProviderRef | null = null
-        if (forkStrategy(caps) === 'native' && sourceRef?.sessionId && sourceRef.provider === to.provider && input.adapter.forkSession) {
+        if (forkStrategy(caps) === 'native' && sourceRef?.sessionId && sourceRef.provider === to.provider) {
           try {
-            branched = await input.adapter.forkSession(sourceRef, fork.sourceRunOrdinal)
+            branched = await this.harness.forkSession(sourceRef, fork.sourceRunOrdinal)
           } catch (error) {
             console.warn('native fork failed; using a portable handoff', { runId, error: error instanceof Error ? error.message : String(error) })
           }
@@ -2597,7 +2629,10 @@ export class OrchestratorService extends EventEmitter {
     // or disabled instance fails the tool call here, before any thread is created.
     const requested = input.instanceId?.trim() || input.provider?.trim()
     const instanceId = requested
-      ? this.adapters.resolve(input.instanceId?.trim() || this.adapters.instances.instanceIdForLegacyProvider(requested)).instanceId
+      ? this.harness.resolveStored(
+          { instanceId: input.instanceId?.trim() || this.harness.instanceMap.instanceIdForLegacyProvider(requested), llmProvider: '', model: input.model?.trim() ?? '' },
+          { purpose: 'delegate_task', scope: this.threadScope(parentThreadId) }
+        ).instanceId
       : undefined
     // A read-only subagent may start subagents, but only read-only ones: authority only narrows down the tree.
     if (input.workspace !== 'shared' && this.isReadOnlyChild(parentThreadId))
@@ -3474,7 +3509,7 @@ export class OrchestratorService extends EventEmitter {
         data.messageQueue,
         data.agents,
         data.tasks,
-        this.adapters.instances.migrate(this.threadStore.getThread(threadId)?.modelOverride)
+        this.harness.instanceMap.migrate(this.threadStore.getThread(threadId)?.modelOverride)
       )
       if (this.projectManager) {
         const projectPath = resolveThreadProjectPath(this.projectManager, this.threadStore, threadId)
@@ -3504,9 +3539,9 @@ export class OrchestratorService extends EventEmitter {
   ): ThreadSession['modelOverride'] {
     const session = this.getOrCreateSession(threadId)
     // Stored in the instance shape (SPEC §13.8); callers that still pass an `llmProvider` are mapped.
-    const next = this.adapters.instances.migrate(override)
+    const next = this.harness.instanceMap.migrate(override)
     const instanceKey = (selection: ModelOverride | undefined) => {
-      const migrated = this.adapters.instances.migrate(selection)
+      const migrated = this.harness.instanceMap.migrate(selection)
       return migrated?.instanceId ?? migrated?.llmProvider
     }
     const switched = instanceKey(session.modelOverride) !== instanceKey(next)
@@ -3553,7 +3588,7 @@ export class OrchestratorService extends EventEmitter {
         queue ?? (this.threadStore ? this.threadStore.loadMessageQueue(threadId) : []),
         undefined,
         undefined,
-        this.adapters.instances.migrate(this.threadStore?.getThread(threadId)?.modelOverride)
+        this.harness.instanceMap.migrate(this.threadStore?.getThread(threadId)?.modelOverride)
       )
     }
 
@@ -3921,10 +3956,23 @@ export class OrchestratorService extends EventEmitter {
       return heuristic
     }
     try {
-      return await this.llm.generateTitle(firstUser.content, firstAssistant?.content, threadId)
+      return await this.generateTitleText(firstUser.content, firstAssistant?.content, threadId)
     } catch {
       return heuristic
     }
+  }
+
+  /**
+   * Names a chat with the chosen title model (Automatic never reaches here: it names the chat from
+   * its first line). The selection is resolved through the gateway like any other: the instance the
+   * picker chose (a legacy record maps to its built-in instance), and exactly that selection runs.
+   * A disabled instance, a hidden model or an agent runtime (titles run on API providers) is
+   * refused by its typed error, never swapped for another provider.
+   */
+  private async generateTitleText(userRequest: string, firstResponse: string | undefined, threadId: string | undefined): Promise<string> {
+    const title = this.settingsStore.get().title
+    const resolved = this.harness.resolveStored(title, { purpose: 'title', ...(threadId ? { scope: this.threadScope(threadId) } : {}) })
+    return this.llm.generateTitle(userRequest, firstResponse, threadId, { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, model: title.model })
   }
 
   /**
@@ -3991,7 +4039,7 @@ export class OrchestratorService extends EventEmitter {
     }
     let title: string | null = null
     try {
-      title = await this.llm.generateTitle(userContent, undefined, threadId)
+      title = await this.generateTitleText(userContent, undefined, threadId)
     } catch (error) {
       this.emit('thread-title-generation-failed', {
         threadId,
@@ -4058,19 +4106,22 @@ export class OrchestratorService extends EventEmitter {
       const modelOverride = this.session.modelOverride
       const selectedModel = modelOverride ?? resolveModelForMode(this.settingsStore.get(), request.mode, [
         ...(this.providerAuth.credentials?.listProviderIds() ?? []),
-        ...this.adapters.configuredProviderIds()
+        ...this.harness.configuredProviderIds()
       ])
+      // Nothing to measure against before a model is chosen (a fresh profile): an empty gauge.
+      if (!selectedModel.model?.trim() || !(selectedModel.instanceId?.trim() || selectedModel.llmProvider?.trim()))
+        return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model ?? '', source: 'estimated', categories: [] }
       // The gauge never fails: a selection that cannot be resolved is measured like the pi loop's.
-      let adapter: ProviderAdapter | undefined
+      let caps: HarnessCaps | undefined
       try {
-        adapter = this.adapters.resolveSelection(selectedModel, { allowDisabled: true, unselectedDefault: !modelOverride }).adapter
+        caps = this.harness.resolveStored(selectedModel, { purpose: 'composer', allowDisabled: true, unselectedDefault: !modelOverride }).caps
       } catch {
-        adapter = undefined
+        caps = undefined
       }
-      if (adapter && handoffDelivery(adapter.capabilities) === 'prompt_preamble') {
+      if (caps && handoffDelivery(caps) === 'prompt_preamble') {
         // Prompt-injected runtimes own their context. Without a reported window, do not display
         // a fabricated Mousse context measurement.
-        if (adapter.describe?.(selectedModel.model).contextUsage !== 'reported') {
+        if (contextGauge(caps) !== 'reported') {
           return { percent: 0, used: 0, limit: 0, modelName: selectedModel.model, source: 'estimated', categories: [] }
         }
         const key = `${selectedModel.llmProvider}:${selectedModel.model}`
@@ -4795,6 +4846,36 @@ export class OrchestratorService extends EventEmitter {
     return this.lifecycle.run('send', () => this.sendOwned(input, reuseLastUser, opts))
   }
 
+  /** The model a new turn of the session runs: the given or thread override, else the mode's default. */
+  private turnSelection(session: ThreadSession, mode: ChatMode, override?: ModelOverride): ModelOverride {
+    return this.harness.instanceMap.migrate(override ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
+      ...(this.providerAuth.credentials?.listProviderIds() ?? []),
+      ...this.harness.configuredProviderIds()
+    ]))
+  }
+
+  /**
+   * Refuses a new message whose turn could not start because the user hid its model or turned its
+   * provider off for the project. Refused before it is a run or a transcript entry, the sender
+   * keeps the message and says why, instead of the transcript holding a prompt with no reply.
+   * Other resolution failures still fail the turn as before.
+   */
+  private assertSendableSelection(session: ThreadSession, input: OrchestratorSendInput): void {
+    const request = normalizeSendRequest(input)
+    if (request.workflowInvocationId) return
+    const explicit = session.modelOverride
+    try {
+      this.harness.resolveStored(this.turnSelection(session, request.mode), {
+        purpose: 'turn',
+        scope: this.threadScope(session.threadId),
+        unselectedDefault: !explicit
+      })
+    } catch (error) {
+      const code = (error as { code?: unknown } | undefined)?.code
+      if (code === 'model_hidden' || code === 'instance_disabled' || code === PROVIDER_INSTANCE_ERROR_CODES.disabled) throw error
+    }
+  }
+
   private async sendOwned(
     input: OrchestratorSendInput,
     reuseLastUser = false,
@@ -4817,6 +4898,10 @@ export class OrchestratorService extends EventEmitter {
 
     // SPEC §16.2: a send that would queue behind a pending merge-back is refused before it is a run.
     if (opts?.forceQueue || session.isTurnRunning()) this.assertQueueOpen(threadId)
+    // Only a new message is checked: a replay of an accepted request returns its run as it was.
+    const admit = !reuseLastUser && !opts?.continuationOfRunId && opts?.source !== 'wake'
+      ? () => this.assertSendableSelection(session, input)
+      : undefined
 
     // The run is durable before any queue/run decision or provider I/O (SPEC §2.1).
     let run: { runId: string; sequence: number } | undefined
@@ -4829,7 +4914,7 @@ export class OrchestratorService extends EventEmitter {
         prompt: normalizeSendRequest(input).content,
         ...(opts?.delegation ? { delegation: opts.delegation } : {}),
         ...(opts?.continuationOfRunId ? { continuationOfRunId: opts.continuationOfRunId, acknowledgeUncertain: opts.acknowledgeUncertain === true } : {})
-      })
+      }, { admit })
       if (result.status === 'rejected' && CONTINUATION_REFUSALS.has(result.reason))
         throw new DomainRpcError(result.reason, `Cannot continue run ${opts?.continuationOfRunId}: ${result.reason}.`)
       // Every refusal surfaces with its reason as the error code (S3), e.g. client_request_id_conflict.
@@ -4845,6 +4930,8 @@ export class OrchestratorService extends EventEmitter {
         return { message: '', actions: [], ...replayed }
       }
       run = { runId: result.runId, sequence: result.sequence }
+    } else {
+      admit?.()
     }
 
     // A follow-up from a parent (`continue_subagent`) never answers the subagent's question for it.
@@ -5437,11 +5524,11 @@ export class OrchestratorService extends EventEmitter {
     let failureDiagnostic: Record<string, unknown> | undefined
     let compactionNote: ChatMessage | undefined
     let switchMarker: ChatMessage | undefined
-    // Migrated to the instance shape (SPEC §13.8): `llmProvider` is re-derived from a known instance.
-    const selectedModel = this.adapters.instances.migrate(opts?.modelOverride ?? session.modelOverride ?? resolveModelForMode(this.settingsStore.get(), mode, [
-      ...(this.providerAuth.credentials?.listProviderIds() ?? []),
-      ...this.adapters.configuredProviderIds()
-    ]))
+    // A retry or recovery of a run executes the binding its run recorded, never the current
+    // selection. Otherwise migrated to the instance shape (SPEC §13.8): `llmProvider` is
+    // re-derived from a known instance.
+    const runBinding = engineRunId ? this.runEngine?.bindingForRun(engineRunId) : undefined
+    const selectedModel = runBinding ? this.harness.selectionOf(runBinding) : this.turnSelection(session, mode, opts?.modelOverride)
     if (displayUserMessage && !reuseLastUser) {
       const selection = { provider: selectedModel.llmProvider, model: selectedModel.model }
       const admittedUser = session.messages.slice(turnPresentationStart).find(message => message.role === 'user' && !message.hidden)
@@ -5524,8 +5611,11 @@ export class OrchestratorService extends EventEmitter {
     try {
       // Instance id → driver → adapter; an unknown or disabled instance, or a blank explicit
       // override, fails the turn here.
-      const instance = this.adapters.resolveSelection(selectedModel, { unselectedDefault: !(opts?.modelOverride ?? session.modelOverride) })
-      const adapter = instance.adapter
+      const instance = this.harness.resolveStored(selectedModel, {
+        purpose: 'turn',
+        scope: this.threadScope(session.threadId),
+        unselectedDefault: runBinding ? runBinding.instanceId === PI_DRIVER_ID : !(opts?.modelOverride ?? session.modelOverride)
+      })
       // Issue #142: a read-only child is checked on every turn, not only when it was created. Its
       // provider may have been switched, or the user's setup changed, since then.
       if (session.sharedWorkspace) {
@@ -5533,10 +5623,12 @@ export class OrchestratorService extends EventEmitter {
         // A known error keeps its message; an unknown one would reach the thread as a generic failure.
         if (refusal) throw new AppError({ code: refusal.code, message: refusal.message, errorInfo: { category: 'unavailable', retryable: false } })
       }
+      // The attempt's immutable binding; a retry of the same run keeps the one it already has.
+      const binding = await this.bindTurn(engineRunId, runBinding, instance, mode)
       // A transcript-native runtime (the pi loop) is sent Mousse's transcript and tools, so Mousse
       // keeps that transcript within the window before the turn. A prompt-injected runtime owns its
       // loop, context and tools and receives prior turns as a prompt preamble.
-      promptRuntime = handoffDelivery(adapter.capabilities) === 'prompt_preamble'
+      promptRuntime = handoffDelivery(instance.caps) === 'prompt_preamble'
       const modelOverride = opts?.modelOverride ?? session.modelOverride
       const contextSettings = normalizeContextSettings(this.settingsStore.get().context)
       const browserExecution = promptRuntime
@@ -5576,7 +5668,7 @@ export class OrchestratorService extends EventEmitter {
         }
       }
       handoffs = await this.planTurnHandoffs({
-        session, runId: engineRunId, adapter, selection: selectedModel, previousModel, promptRuntime,
+        session, runId: engineRunId, resolved: instance, selection: selectedModel, previousModel, promptRuntime,
         content: userContent, images, mode, modelOverride
       })
       if (handoffs) this.recordHandoffMarkers(session, handoffs, switchMarker, turnId, selectedModel)
@@ -5697,7 +5789,7 @@ export class OrchestratorService extends EventEmitter {
         },
         heartbeat: () => this.heartbeatRun(engineRunId)
       }
-      const mcp = this.mcpFor(adapter, instance.instanceId, session.threadId, engineRunId, mode)
+      const mcp = this.mcpFor(instance.caps, instance.instanceId, session.threadId, engineRunId, mode)
       const adapterHost: AdapterHost = {
         mcp,
         tools: {
@@ -5751,8 +5843,15 @@ export class OrchestratorService extends EventEmitter {
           nativeHistoryNow: () => nativeAgentHistory(this.nativeContext)
         }
       }
-      const result = await adapter.startTurn(turnInput, turnSink, turnControl, adapterHost)
-        .finally(() => { if (mcp) this.endMcpTurn(session.threadId) })
+      const previous = engineRunId ? this.runEngine?.previousBinding(session.threadId, engineRunId, binding.instanceId) : undefined
+      const result = await this.harness.startTurn({
+        binding,
+        ...(previous ? { previous } : {}),
+        input: turnInput,
+        sink: turnSink,
+        control: turnControl,
+        host: adapterHost
+      }).result.finally(() => { if (mcp) this.endMcpTurn(session.threadId) })
       handoffs?.settle(result.aborted || turn.abort.signal.aborted ? 'aborted' : 'completed')
       assistantText = result.text
       aborted = Boolean(result.aborted)

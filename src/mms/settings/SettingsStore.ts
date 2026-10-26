@@ -29,6 +29,19 @@ function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<
   return result
 }
 
+/** A stored selection with its instance id kept only when it names one. */
+function withInstance<T extends { instanceId?: unknown }>(selection: T): T {
+  if (!selection || typeof selection !== 'object') return selection
+  const { instanceId, ...rest } = selection
+  const id = typeof instanceId === 'string' ? instanceId.trim() : ''
+  return (id ? { ...rest, instanceId: id } : rest) as T
+}
+
+/** An update that picks a model by provider name alone (no instance). */
+function namesProviderOnly(selection: { llmProvider?: unknown; instanceId?: unknown } | undefined): boolean {
+  return Boolean(selection) && selection!.llmProvider !== undefined && selection!.instanceId === undefined
+}
+
 function normalizeSettings(settings: MousseSettings): MousseSettings {
   const defaults = getDefaultSettings()
   const integrations = settings.integrations as MousseSettings['integrations'] & {
@@ -50,12 +63,20 @@ function normalizeSettings(settings: MousseSettings): MousseSettings {
     : [...MOUSSE_BUILTIN_TOOL_IDS]
   const enabledSet = new Set([...storedTools, ...newlyAvailable])
   const enabledTools = MOUSSE_BUILTIN_TOOL_IDS.filter((id) => enabledSet.has(id))
+  const skills = settings.integrations?.skills
   return {
     ...settings,
     appearance: normalizeAppearance(settings.appearance),
     context: normalizeContextSettings(settings.context),
+    ...(settings.title ? { title: withInstance(settings.title) } : {}),
     integrations: {
       ...settings.integrations,
+      ...(skills?.model ? {
+        skills: {
+          ...skills,
+          model: Object.fromEntries(Object.entries(skills.model).map(([skillId, value]) => [skillId, withInstance(value)]))
+        }
+      } : {}),
       tools: {
         enabled: typeof rawTools?.enabled === 'boolean' ? rawTools.enabled : defaults.integrations.tools.enabled,
         enabledTools,
@@ -112,6 +133,15 @@ export class SettingsStore {
     if (partial.provider?.llmProvider !== undefined && partial.provider.instanceId === undefined)
       merged.provider = { ...merged.provider, instanceId: undefined }
     const normalized = normalizeSettings(merged)
+    // The same for the title model and each skill's model. Their section is merged deeply on
+    // disk, so the instance is cleared by writing it blank; reading drops a blank instance.
+    if (namesProviderOnly(partial.title)) normalized.title = { ...normalized.title, instanceId: '' }
+    const skillModels = Object.entries(partial.integrations?.skills?.model ?? {}).filter(([, value]) => namesProviderOnly(value))
+    if (skillModels.length) {
+      const model = { ...normalized.integrations.skills.model }
+      for (const [skillId] of skillModels) model[skillId] = { ...model[skillId]!, instanceId: '' }
+      normalized.integrations = { ...normalized.integrations, skills: { ...normalized.integrations.skills, model } }
+    }
     this.config.applySettingsPatch(normalized)
     return this.get()
   }

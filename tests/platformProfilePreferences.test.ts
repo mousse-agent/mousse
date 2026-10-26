@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { loadModelFavorites, saveModelFavorites, toggleModelFavorite } from '../src/renderer/lib/modelFavorites'
+import { loadLegacyModelFavorites as loadModelFavorites } from '../src/renderer/lib/modelFavorites'
 import { createQuickAction, loadQuickActions, saveQuickActions } from '../src/renderer/lib/quickActions'
-import { migrateLegacyProfilePreferences } from '../src/renderer/lib/profilePreferences'
+import { migrateLegacyProfilePreferences, profilePreferenceKey } from '../src/renderer/lib/profilePreferences'
+
+/** Favorites as older builds saved them; they now wait in localStorage only until the daemon import. */
+const saveModelFavorites = (favorites: Set<string>, profileId: string) =>
+  localStorage.setItem(profilePreferenceKey(profileId, 'modelFavorites'), JSON.stringify([...favorites]))
 
 const values = new Map<string, string>()
 beforeEach(() => {
@@ -20,7 +24,7 @@ describe('profile-owned personal renderer preferences', () => {
     saveQuickActions([aliceAction], 'alice')
     expect([...loadModelFavorites('bob')]).toEqual([])
     expect(loadQuickActions('bob').some((action) => action.payload === aliceAction.payload)).toBe(false)
-    toggleModelFavorite(loadModelFavorites('bob'), 'provider:bob-model', 'bob')
+    saveModelFavorites(new Set([...loadModelFavorites('bob'), 'provider:bob-model']), 'bob')
     saveQuickActions([], 'bob')
     expect([...loadModelFavorites('alice')]).toEqual(['provider:alice-model'])
     expect(loadQuickActions('alice')).toEqual([aliceAction])

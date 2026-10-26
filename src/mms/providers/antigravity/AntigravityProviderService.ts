@@ -15,7 +15,7 @@ import { mousseVersion } from '../../appVersion'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { acpMcpServers } from '../../run/mcp/attachment'
 import type { LoginSession } from '../LoginSession'
-import { applyCliConfigPatch, requireExecutable, sharedCliVersions, storedCliArgs, storedCliEnv, withUserEnv, type CliVersionCache } from '../cliConfig'
+import { applyCliConfigPatch, requireExecutable, sharedCliVersions, storedCliArgs, storedCliEnv, withUserEnv, type CliVersionCache, type StoredCliConfig } from '../cliConfig'
 import { directLaunch } from '../resolveWindowsShim'
 import { ANTIGRAVITY_RELEASE, antigravityInstallState, cancelAntigravityInstall, installAntigravity, installedAntigravityBinary, onAntigravityInstallEvent, validateManualAntigravityBinary } from './installation'
 
@@ -607,6 +607,34 @@ export class AntigravityProviderService {
     } finally { this.close(active) }
   }
 
+  /** Drops the saved ACP session of `threadId`; its next turn starts a new one with the history in the prompt. */
+  forgetConversation(threadId: string): void {
+    if (!this.settings.sessions?.[threadId]) return
+    const { [threadId]: _dropped, ...rest } = this.settings.sessions
+    this.settings.sessions = rest
+    this.save()
+  }
+
+  /** The agent's launch state for status: installing, and the executable it would run. */
+  installState(): { installing: boolean; progress?: string } {
+    return antigravityInstallState(this.installationHome)
+  }
+
+  /** The verified install this installation holds, when present. */
+  managedBinary(): string | undefined {
+    return installedAntigravityBinary(this.installationHome)
+  }
+
+  /** Whether the profile completed a sign-in that the agent has not since refused. */
+  signedIn(): boolean {
+    return Boolean(this.settings.signedIn)
+  }
+
+  /** Models of the last sign-in or refresh. */
+  models(): LlmModelOption[] {
+    return this.settings.models ?? []
+  }
+
   async logout(): Promise<void> {
     for (const session of this.loginSessions) session.abort.abort()
     this.closeAll()
@@ -627,6 +655,10 @@ export class AntigravityProviderService {
       this.save()
       this.notifyChanged()
     }
+  }
+  /** The stored executable, launch args and variables, as saved (no lookup, no version check). */
+  storedLaunch(): StoredCliConfig {
+    return { ...(this.settings.binaryPath ? { binaryPath: this.settings.binaryPath } : {}), args: storedCliArgs(this.settings), env: storedCliEnv(this.settings) }
   }
   /** The executable path, launch args and environment set in Settings → Providers. */
   async cliConfig(): Promise<CliProviderConfig> {
@@ -699,7 +731,7 @@ export class AntigravityProviderService {
    * Downloads Google's pinned agent into the installation. Install and sign-in are separate:
    * this never starts a sign-in. A manual executable path is dropped so the verified install is used.
    */
-  async install(onProgress?: (message: string) => void): Promise<CliProviderConfig> {
+  async install(onProgress?: (message: string, fraction?: number) => void): Promise<CliProviderConfig> {
     if (this.stopped) throw new Error('Antigravity provider is stopped')
     if (this.installing) throw new Error('Antigravity is already being installed')
     const abort = new AbortController()

@@ -6,7 +6,9 @@ import type { Migration } from './ProfileDatabase'
  * is the Phase 4 delegation model (§14.1): thread lineage, delegations and the inbox; version 4 is
  * the Phase 5 Mousse MCP server (§15.1): bearer credentials and the delegation mode ceiling;
  * version 5 is Phase 6 (§16): context handoffs and fork/merge-back transfers; version 6 stores a
- * delegation's workspace policy and role so a shared read-only child keeps them across restarts.
+ * delegation's workspace policy and role so a shared read-only child keeps them across restarts;
+ * version 7 records which effect delivered an inbox row; version 8 is the Stop fence (thread stop
+ * generations); version 9 stores each attempt's execution binding (harness gateway).
  */
 export const RUN_MIGRATIONS: readonly Migration[] = [
   {
@@ -257,6 +259,14 @@ CREATE TABLE thread_stop_generations(
 
 -- The generation of the run's own thread when the run was created; 0 for runs from before version 8.
 ALTER TABLE runs ADD COLUMN stop_generation INTEGER NOT NULL DEFAULT 0;
+`
+  },
+  {
+    version: 9,
+    sql: `
+-- The immutable execution binding of an attempt (instance, driver, account generation, home,
+-- config revision, model, effort, policy), JSON. NULL for attempts made before version 9.
+ALTER TABLE run_attempts ADD COLUMN execution_binding TEXT;
 `
   }
 ]

@@ -195,8 +195,8 @@ export function DownloadsList({ entries, notesOpen, onToggleNotes, onInstall, on
   )
 }
 
-const KIND_ICON: Record<DownloadKind, LucideIcon> = { update: ArrowUp, 'dictation-model': Mic, 'voice-model': VolumeHigh }
-const KIND_LABEL: Record<DownloadKind, string> = { update: 'App update', 'dictation-model': 'Dictation model', 'voice-model': 'Read-aloud voice' }
+const KIND_ICON: Record<DownloadKind, LucideIcon> = { update: ArrowUp, 'dictation-model': Mic, 'voice-model': VolumeHigh, agent: Download }
+const KIND_LABEL: Record<DownloadKind, string> = { update: 'App update', 'dictation-model': 'Dictation model', 'voice-model': 'Read-aloud voice', agent: 'Coding agent' }
 
 /** "57 of 136 MB", in KB below a megabyte. */
 export function formatDownloadBytes(received: number, total: number): string {

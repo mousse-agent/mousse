@@ -1,134 +1,132 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type {
-  LlmProviderOption,
-  MousseSettings,
-  MousseSettingsUpdate,
-  SettingsOptions
-} from '../../../shared/settings'
-import type {
-  ClaudeSubscriptionStatus,
-  CliProviderConfig,
-  CliProviderConfigPatch,
-  CliProviderInstanceId,
-  CodexStatus,
-  ConfiguredProvider,
-  ProviderLoginOption,
-  ProviderLoginResult
-} from '../../../shared/providerAuth'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { LlmProviderOption, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
+import type { ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
+import { describeStatus, type InstanceSnapshot } from '../../../shared/harness/status'
+import type { HarnessDriverKind, InstanceConfigPatch, ProviderScope } from '../../../shared/harness/types'
+import { piProviderIdOf } from '../../../shared/providerInstances'
+import { Plus, RefreshCw } from '../../lib/icons'
+import { saveModelPrefs, useLegacyFavoritesImport } from '../../lib/modelFavorites'
 import {
-  piInstanceId,
-  piProviderIdOf,
-  readProviderInstances,
-  type ProviderDriverKind
-} from '../../../shared/providerInstances'
-import { Plus } from '../../lib/icons'
+  DEVICE_SCOPE,
+  applySnapshot,
+  loadProviderSnapshots,
+  modelPrefsByInstance,
+  projectScope,
+  removeSnapshot,
+  sortInstances,
+  useProviderSnapshots,
+  useProviderSnapshotsStore,
+  useRunningOperation
+} from '../../lib/providerSnapshots'
+import { useAppStore } from '../../stores/appStore'
 import { ProviderLoginModal } from '../ProviderLoginModal'
-import { SettingsGroup } from '../settings/SettingsRow'
-import { AddProviderView } from './AddProviderView'
-import { ApiProviderRow, type ApiProviderEntry } from './ApiProviderRow'
-import { CliProviderRow } from './CliProviderRow'
-import { CLI_LOGIN_IDS, CLI_PROVIDERS, cliHealth, type CliProviderDefinition } from './cliProviders'
-import { errorText } from './parts'
-import { useCliInstall } from './useCliInstall'
+import { Select } from '../ui/Select'
+import { AddProviderDialog, type AddProviderHandlers } from './AddProviderDialog'
+import { ApiSetupRow } from './ApiSections'
+import type { InstanceActions } from './CliSections'
+import { AgentEditor, ApiEditor } from './ProviderEditor'
+import { ProviderListRow, errorText, useAsyncAction, useRelativeTime } from './parts'
+import { formatVersion, iconIdOf, isApiInstance, lastCheckedAt, switchStateOf } from './providerView'
+import { SignInDialog } from './SignInDialog'
 import '../../styles/providers.css'
 
 export interface ProvidersSettingsProps {
   settings: MousseSettings
-  options: SettingsOptions
-  configuredProviders: ConfiguredProvider[]
-  refreshProviderData: () => Promise<{ configured: ConfiguredProvider[]; opts: SettingsOptions }>
+  refreshProviderData: () => Promise<{ opts: SettingsOptions }>
   updateSettings: (partial: MousseSettingsUpdate) => Promise<void>
   ensureValidProviderSelection: (next: MousseSettings, providers?: LlmProviderOption[]) => Promise<MousseSettings>
+}
+
+/** The scope last chosen on this page, kept while the app runs. */
+let lastScopeId = ''
+
+/** The catalog less the models hidden in Settings, as the pickers offer it. */
+function withoutHiddenModels(providers: LlmProviderOption[]): LlmProviderOption[] {
+  const prefs = modelPrefsByInstance(useProviderSnapshotsStore.getState().scopes.device?.snapshots)
+  return providers
+    .map((provider) => {
+      const hidden = provider.instanceId ? prefs.get(provider.instanceId)?.hidden : undefined
+      return hidden?.size ? { ...provider, models: provider.models.filter((model) => !hidden.has(model.id)) } : provider
+    })
+    .filter((provider) => provider.models.length > 0)
 }
 
 function ensureSignedIn(result: ProviderLoginResult, fallback: string): void {
   if (!result.success) throw new Error(result.error ?? fallback)
 }
 
-/** Settings → Providers: the agent CLIs and model APIs this device uses. */
-export function ProvidersSettings({
-  settings,
-  options,
-  configuredProviders,
-  refreshProviderData,
-  updateSettings,
-  ensureValidProviderSelection
-}: ProvidersSettingsProps) {
+/**
+ * Settings → Providers, after T3 Code's providers page: a provider list beside the selected
+ * instance's editor. Everything shown comes from the daemon's instance snapshots for the chosen
+ * scope (this device, or a project's overrides); every change goes through `providers.instances`.
+ */
+export function ProvidersSettings({ settings, refreshProviderData, updateSettings, ensureValidProviderSelection }: ProvidersSettingsProps) {
   const settingsRef = useRef(settings)
   settingsRef.current = settings
+  const projects = useAppStore((state) => state.projects)
 
-  const [mode, setMode] = useState<'list' | 'add'>('list')
-  const [openRow, setOpenRow] = useState<string | null>(null)
-  /** CLIs switched off during this visit stay listed (dimmed) so the switch can turn them back on. */
-  const [keptCli, setKeptCli] = useState<ReadonlySet<string>>(() => new Set())
+  /** '' is this device; otherwise a project id. A removed project falls back to the device. */
+  const [chosenScopeId, setChosenScopeId] = useState(lastScopeId)
+  const scopeId = chosenScopeId && projects.some((project) => project.id === chosenScopeId) ? chosenScopeId : ''
+  const setScopeId = (next: string) => {
+    lastScopeId = next
+    setChosenScopeId(next)
+  }
+  const scope: ProviderScope = projectScope(scopeId || null)
+  const { snapshots, error: loadError, loading, reload } = useProviderSnapshots(scope)
+  const { snapshots: deviceSnapshots } = useProviderSnapshots(DEVICE_SCOPE)
+  useLegacyFavoritesImport()
+
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [addOpen, setAddOpen] = useState(false)
   const [loginOptions, setLoginOptions] = useState<ProviderLoginOption[]>([])
-  const [claudeStatus, setClaudeStatus] = useState<ClaudeSubscriptionStatus | null>(null)
-  const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null)
-  const [cliConfigs, setCliConfigs] = useState<Partial<Record<CliProviderInstanceId, CliProviderConfig>>>({})
   const [loginActive, setLoginActive] = useState(false)
+  const [signIn, setSignIn] = useState<{ operationId: string; name: string } | null>(null)
   const [pageError, setPageError] = useState<string | null>(null)
+  const refreshing = useAsyncAction()
 
+  // Model APIs still connect through the provider login methods; their options say what is connected.
   const loadLoginOptions = useCallback(async () => {
     setLoginOptions(await window.mousse.providers.getLoginOptions())
   }, [])
-  const loadStatuses = useCallback(() => {
-    void window.mousse.providers.claudeStatus().then(setClaudeStatus).catch(() => {})
-    void window.mousse.providers.codexStatus().then(setCodexStatus).catch(() => {})
-  }, [])
-  const loadCliConfigs = useCallback(async () => {
-    const loaded = await Promise.all(
-      CLI_PROVIDERS.map(async (cli) => [cli.id, await window.mousse.providers.cliConfig(cli.id).catch(() => undefined)] as const)
-    )
-    setCliConfigs(Object.fromEntries(loaded.filter(([, config]) => config)))
-  }, [])
-
-  /** Sign-in and download state live in the daemon and change without this page (a revoked session, a download). */
-  const loadAntigravityConfig = useCallback(async () => {
-    const config = await window.mousse.providers.cliConfig('antigravity').catch(() => undefined)
-    if (config) setCliConfigs((current) => ({ ...current, antigravity: config }))
-  }, [])
-
   useEffect(() => {
     void loadLoginOptions().catch(() => {})
-    loadStatuses()
-    void loadCliConfigs()
-    return window.mousse.providers.onChanged(() => {
-      void loadLoginOptions().catch(() => {})
-      loadStatuses()
-      void loadAntigravityConfig()
-    })
-  }, [loadLoginOptions, loadStatuses, loadCliConfigs, loadAntigravityConfig])
+    return window.mousse.providers.onChanged(() => void loadLoginOptions().catch(() => {}))
+  }, [loadLoginOptions])
 
-  /** Antigravity's agent download; shared by the row and the add step. */
-  const install = useCliInstall(cliConfigs.antigravity, () => void loadAntigravityConfig())
-
-  const instances = useMemo(() => readProviderInstances(settings.provider.instances), [settings.provider.instances])
-  const cliEnabled = (id: string) => instances[id]?.enabled ?? true
-
-  const modelsFor = (instanceId: string, providerId: string) =>
-    options.llmProviders.find((provider) => provider.instanceId === instanceId)?.models ??
-    options.llmProviders.find((provider) => provider.id === providerId)?.models ??
+  // A failed install or update reports here; a failed sign-in stays in its dialog.
+  useEffect(
+    () =>
+      useProviderSnapshotsStore.subscribe((state, previous) => {
+        for (const event of Object.values(state.operations)) {
+          if (event.phase !== 'failed' || event.kind === 'sign_in' || previous.operations[event.operationId] === event) continue
+          setPageError(event.error.message)
+        }
+      }),
     []
+  )
 
-  /** Keep the default model on a provider that is still listed. */
-  const reconcileSelection = async (providers: LlmProviderOption[]) => {
-    const current = settingsRef.current
-    const next = await ensureValidProviderSelection(current, providers)
-    if (next.provider.llmProvider === current.provider.llmProvider && next.provider.model === current.provider.model) return
-    await updateSettings({ provider: { llmProvider: next.provider.llmProvider, model: next.provider.model } })
-  }
+  const sorted = sortInstances(snapshots ?? [])
+  const selected = sorted.find((snapshot) => snapshot.instanceId === selectedId) ?? sorted[0] ?? null
+  const operation = useRunningOperation(selected?.instanceId ?? '')
 
-  const refreshAll = async () => {
+  /** Keep the default model on an instance that is still on, and on a model it still offers. */
+  const reconcileSelection = async () => {
     const { opts } = await refreshProviderData()
-    await reconcileSelection(opts.llmProviders)
-    loadStatuses()
-    await loadLoginOptions().catch(() => {})
+    const current = settingsRef.current
+    const next = await ensureValidProviderSelection(current, withoutHiddenModels(opts.llmProviders))
+    const { instanceId, llmProvider, model } = next.provider
+    if (instanceId === current.provider.instanceId && llmProvider === current.provider.llmProvider && model === current.provider.model) return
+    await updateSettings({ provider: { ...(instanceId ? { instanceId } : {}), llmProvider, model } })
   }
 
-  const setInstanceEnabled = async (instanceId: string, driver: ProviderDriverKind, enabled: boolean) => {
-    const existing = readProviderInstances(settingsRef.current.provider.instances)[instanceId]
-    await updateSettings({ provider: { instances: { [instanceId]: { ...(existing ?? { driver }), enabled } } } })
-    await refreshAll()
+  const guard = async (action: () => Promise<void>) => {
+    setPageError(null)
+    try {
+      await action()
+    } catch (error) {
+      setPageError(errorText(error))
+    }
   }
 
   const runLogin = async (login: () => Promise<ProviderLoginResult>) => {
@@ -140,242 +138,232 @@ export function ProvidersSettings({
     }
   }
 
-  const guard = (action: () => Promise<void>) => async () => {
-    setPageError(null)
-    try {
-      await action()
-    } catch (error) {
-      setPageError(errorText(error))
+  const setEnabled = async (snapshot: InstanceSnapshot, target: ProviderScope, enabled: boolean | null) => {
+    applySnapshot(await window.mousse.providers.instances.setEnabled(snapshot.instanceId, target, enabled))
+    if (target.kind === 'device') await reconcileSelection()
+  }
+
+  const actionsFor = (snapshot: InstanceSnapshot): InstanceActions => {
+    const { instances } = window.mousse.providers
+    const id = snapshot.instanceId
+    return {
+      // Off on the device is a ceiling: turning on starts there, a project override only narrows.
+      enable: () => setEnabled(snapshot, snapshot.enabled.device ? scope : DEVICE_SCOPE, true),
+      install: async () => {
+        await instances.install(id)
+      },
+      cancelInstall: async (operationId) => {
+        await instances.cancelInstall(operationId)
+      },
+      update: async () => {
+        await instances.update(id)
+      },
+      signIn: async () => {
+        const started = await instances.signIn(id)
+        setSignIn({ operationId: started.operationId, name: snapshot.displayName })
+      },
+      signOut: async () => applySnapshot(await instances.signOut(id)),
+      recheck: async () => applySnapshot(await instances.recheck(id)),
+      configure: async (patch) => applySnapshot(await instances.configure(id, patch))
     }
   }
 
-  // Rows that throw keep their own error line; switches report here.
-  const toggleCli = (cli: CliProviderDefinition) => (enabled: boolean) =>
-    guard(async () => {
-      await setInstanceEnabled(cli.id, cli.id, enabled)
-      setKeptCli((current) => new Set(current).add(cli.id))
-    })()
+  const refreshModels = (snapshot: InstanceSnapshot) => async () =>
+    applySnapshot(await window.mousse.providers.instances.refreshModels(snapshot.instanceId))
 
-  const removeCli = (cli: CliProviderDefinition) => async () => {
-    await setInstanceEnabled(cli.id, cli.id, false)
-    setKeptCli((current) => {
-      const next = new Set(current)
-      next.delete(cli.id)
-      return next
+  /** The header's refresh: check every instance again, as T3 Code's "Refresh provider status". */
+  const refreshStatus = () =>
+    void refreshing.run('refresh', async () => {
+      if (!snapshots) return reload()
+      const results = await Promise.allSettled(sorted.map((snapshot) => window.mousse.providers.instances.recheck(snapshot.instanceId)))
+      for (const result of results) if (result.status === 'fulfilled') applySnapshot(result.value)
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+      if (failed) throw failed.reason
     })
-    setOpenRow(null)
+
+  const addHandlers: AddProviderHandlers = {
+    add: async (driver: HarnessDriverKind, config: InstanceConfigPatch) => {
+      const snapshot = await window.mousse.providers.instances.add({ driver, config })
+      applySnapshot(snapshot)
+      void loadProviderSnapshots(DEVICE_SCOPE)
+      if (scope.kind === 'project') void reload()
+      return snapshot.instanceId
+    },
+    onApiConnected: async (providerId) => {
+      await loadLoginOptions().catch(() => {})
+      await loadProviderSnapshots(DEVICE_SCOPE)
+      if (scope.kind === 'project') void reload()
+      const instance = useProviderSnapshotsStore.getState().scopes.device?.snapshots?.find((entry) => piProviderIdOf(entry.instanceId) === providerId)
+      if (instance && !instance.enabled.device) await setEnabled(instance, DEVICE_SCOPE, true)
+      else await reconcileSelection()
+    },
+    runLogin
   }
 
-  const saveCliConfig = (cli: CliProviderDefinition) => async (patch: CliProviderConfigPatch) => {
-    const config = await window.mousse.providers.setCliConfig(cli.id, patch)
-    setCliConfigs((current) => ({ ...current, [cli.id]: config }))
-    if ('binaryPath' in patch) {
-      loadStatuses()
-      void refreshProviderData()
+  const renderEditor = (snapshot: InstanceSnapshot) => {
+    const status = describeStatus(snapshot)
+    // Hiding a model may hide the default one; move the default to a model that is still offered.
+    const onSaveModelPrefs = async (patch: Parameters<typeof saveModelPrefs>[1]) => {
+      await saveModelPrefs(snapshot.instanceId, patch)
+      if (patch.hidden || patch.hide?.length) await reconcileSelection()
     }
-  }
-
-  const refreshModels = (providerId: string) => async () => {
-    await window.mousse.providers.refreshModels(providerId)
-    await refreshProviderData()
-  }
-
-  const signInCli = (cli: CliProviderDefinition) => async () => {
-    ensureSignedIn(await runLogin(() => window.mousse.providers.loginOAuth(cli.providerId)), 'Sign-in failed.')
-    await refreshAll()
-  }
-
-  /** Signing out forgets only the Google sign-in; the downloaded agent stays. */
-  const signOutCli = (cli: CliProviderDefinition) => async () => {
-    await window.mousse.providers.logout(cli.providerId)
-    await refreshAll()
-  }
-
-  /** Downloads the agent without signing in; true once it is installed. Failures show through `install.error`. */
-  const installCli = async (cli: CliProviderDefinition) => {
-    const config = await install.start()
-    if (!config) return false
-    setCliConfigs((current) => ({ ...current, [cli.id]: config }))
-    return true
-  }
-
-  const recheckCli = (cli: CliProviderDefinition) => async () => {
-    if (cli.id === 'claude') setClaudeStatus(await window.mousse.providers.claudeStatus(true))
-    else if (cli.id === 'codex') setCodexStatus(await window.mousse.providers.codexStatus(true))
-    await refreshProviderData()
-  }
-
-  /** A rejected path throws before the CLI is turned on, so the add step can show why. */
-  const addCli = async (cli: CliProviderDefinition, binaryPath?: string) => {
-    if (binaryPath) {
-      const config = await window.mousse.providers.setCliConfig(cli.id, { binaryPath })
-      setCliConfigs((current) => ({ ...current, [cli.id]: config }))
+    if (isApiInstance(snapshot)) {
+      const providerId = piProviderIdOf(snapshot.instanceId) ?? snapshot.instanceId
+      const option =
+        loginOptions.find((entry) => entry.id === providerId && entry.configured) ?? loginOptions.find((entry) => entry.id === providerId)
+      return (
+        <ApiEditor
+          snapshot={snapshot}
+          removeHint={option?.ambient ? undefined : option?.authType === 'oauth' ? 'Signs out' : 'Deletes the saved key'}
+          onRemove={async () => {
+            await window.mousse.providers.logout(providerId)
+            await reload()
+            await reconcileSelection()
+          }}
+          setup={
+            <ApiSetupRow
+              providerId={providerId}
+              label={snapshot.displayName}
+              option={option}
+              status={status}
+              onReplaceKey={async (apiKey) => {
+                if (apiKey) await window.mousse.providers.setApiKey(providerId, apiKey)
+                else ensureSignedIn(await runLogin(() => window.mousse.providers.loginApiKey(providerId)), 'API key setup failed.')
+                await reload()
+              }}
+              onSignIn={async () => {
+                ensureSignedIn(await runLogin(() => window.mousse.providers.loginOAuth(providerId)), 'Sign-in failed.')
+                await reload()
+              }}
+            />
+          }
+          onSaveModelPrefs={onSaveModelPrefs}
+          onRefreshModels={refreshModels(snapshot)}
+        />
+      )
     }
-    await setInstanceEnabled(cli.id, cli.id, true)
-    setMode('list')
-    setOpenRow(`cli:${cli.id}`)
+    return (
+      <AgentEditor
+        snapshot={snapshot}
+        status={status}
+        operation={operation}
+        actions={actionsFor(snapshot)}
+        onRemove={async () => {
+          await window.mousse.providers.instances.remove(snapshot.instanceId)
+          removeSnapshot(snapshot.instanceId)
+          setSelectedId(null)
+          await reconcileSelection()
+        }}
+        onSaveModelPrefs={onSaveModelPrefs}
+        onRefreshModels={refreshModels(snapshot)}
+      />
+    )
   }
 
-  const apiConnected = async (providerId: string) => {
-    const instanceId = piInstanceId(providerId)
-    if (readProviderInstances(settingsRef.current.provider.instances)[instanceId]?.enabled === false) {
-      await setInstanceEnabled(instanceId, 'pi', true)
-    } else {
-      await refreshAll()
-    }
-    setMode('list')
-    setOpenRow(`api:${providerId}`)
+  const checkedLabel = useRelativeTime(snapshots ? lastCheckedAt(snapshots) : null)
+  const scopeOptions = [{ value: '', label: 'This device' }, ...projects.map((project) => ({ value: project.id, label: project.name }))]
+
+  const openAdd = () => {
+    setPageError(null)
+    setAddOpen(true)
+    void loadLoginOptions().catch(() => {})
   }
-
-  const removeApi = (entry: ApiProviderEntry) => async () => {
-    await window.mousse.providers.logout(entry.providerId)
-    await refreshAll()
-    setOpenRow(null)
-  }
-
-  const replaceApiKey = (entry: ApiProviderEntry) => async (apiKey: string) => {
-    if (apiKey) await window.mousse.providers.setApiKey(entry.providerId, apiKey)
-    else ensureSignedIn(await runLogin(() => window.mousse.providers.loginApiKey(entry.providerId)), 'API key setup failed.')
-    await refreshAll()
-  }
-
-  const signInApi = (entry: ApiProviderEntry) => async () => {
-    ensureSignedIn(await runLogin(() => window.mousse.providers.loginOAuth(entry.providerId)), 'Sign-in failed.')
-    await refreshAll()
-  }
-
-  const cliRows = CLI_PROVIDERS.filter((cli) => cliEnabled(cli.id) || keptCli.has(cli.id))
-
-  const apiRows = useMemo(() => {
-    const rows = new Map<string, ApiProviderEntry>()
-    for (const provider of configuredProviders) {
-      if (CLI_LOGIN_IDS.has(provider.id)) continue
-      rows.set(provider.id, {
-        providerId: provider.id,
-        instanceId: provider.instanceId ?? piInstanceId(provider.id),
-        label: provider.label,
-        authType: provider.authType,
-        source: provider.source,
-        enabled: true
-      })
-    }
-    // Switched-off APIs drop out of `listConfigured` but keep their credential; list them dimmed.
-    for (const [instanceId, entry] of Object.entries(instances)) {
-      const providerId = piProviderIdOf(instanceId)
-      if (entry.driver !== 'pi' || entry.enabled || !providerId || rows.has(providerId)) continue
-      const option = loginOptions.find((item) => item.id === providerId && item.configured)
-      if (!option) continue
-      rows.set(providerId, { providerId, instanceId, label: option.label, authType: option.authType, enabled: false })
-    }
-    return [...rows.values()]
-  }, [configuredProviders, instances, loginOptions])
-
-  const addableClis = CLI_PROVIDERS.filter((cli) => !cliEnabled(cli.id))
-  const addableApis = loginOptions.filter((option) => !option.configured && !CLI_LOGIN_IDS.has(option.id))
-
-  const toggleOpen = (key: string) => (open: boolean) => setOpenRow(open ? key : null)
 
   return (
-    <>
+    <div className="prov-page">
       <ProviderLoginModal active={loginActive} onClose={() => setLoginActive(false)} />
-      {mode === 'list' && (
-        <div className="prov-toolbar">
-          {/* Same slot and sizing as the group actions on other pages ("Add skill", "Add device"). */}
-          <div className="settings-group-action">
-            <button
-              type="button"
-              className="settings-btn"
-              onClick={() => {
-                setPageError(null)
-                setMode('add')
-                void loadLoginOptions().catch(() => {})
-                // Catch a CLI installed since the page opened.
-                void loadCliConfigs()
-              }}
-            >
-              <Plus size={14} />Add provider
+      <SignInDialog operationId={signIn?.operationId ?? null} name={signIn?.name ?? ''} onClose={() => setSignIn(null)} />
+
+      <div className="prov-toolbar">
+        <span className="prov-scope">
+          <span className="prov-scope-label">Applying settings for</span>
+          <Select ariaLabel="Settings scope" size="small" value={scopeId} onChange={setScopeId} options={scopeOptions} />
+        </span>
+        <span className="prov-toolbar-actions">
+          <button
+            type="button"
+            className="prov-ghost-btn"
+            title="Refresh provider status"
+            aria-busy={refreshing.busy !== null}
+            disabled={refreshing.busy !== null}
+            onClick={refreshStatus}
+          >
+            <RefreshCw size={13} className={refreshing.busy ? 'icon-spin' : undefined} />
+            <span className="sr-only">Refresh provider status</span>
+            <span>{refreshing.busy ? 'Refreshing providers' : checkedLabel ? `Checked ${checkedLabel}` : 'Checking'}</span>
+          </button>
+        </span>
+      </div>
+      {scopeId && (
+        <p className="prov-scope-note">Switches here apply to this project only. A provider turned off for the device stays off in every project. Setup, runtime, environment and models apply to this device.</p>
+      )}
+      {(pageError ?? refreshing.error) && <p className="prov-error">{pageError ?? refreshing.error}</p>}
+
+      {!snapshots ? (
+        loadError && !loading ? (
+          <div className="prov-load-error">
+            <p className="prov-error">Provider status isn&apos;t available: {loadError}</p>
+            <button type="button" className="settings-btn" onClick={() => void reload()}>
+              Try again
             </button>
+          </div>
+        ) : (
+          <p className="settings-muted prov-empty">Checking providers…</p>
+        )
+      ) : (
+        <div className="prov-pane">
+          <div className="prov-pane-list">
+            {sorted.map((snapshot) => (
+              <ProviderListRow
+                key={snapshot.instanceId}
+                iconId={iconIdOf(snapshot)}
+                name={snapshot.displayName}
+                version={formatVersion(snapshot.binary?.version)}
+                update={
+                  snapshot.update
+                    ? {
+                        label: `Update ${snapshot.displayName}${snapshot.update.latestVersion ? ` to ${formatVersion(snapshot.update.latestVersion)}` : ''}`,
+                        // One click where Mousse knows who installed it; otherwise the editor shows the command.
+                        onClick:
+                          snapshot.update.kind === 'one_click'
+                            ? () => guard(() => actionsFor(snapshot).update())
+                            : () => setSelectedId(snapshot.instanceId)
+                      }
+                    : undefined
+                }
+                status={describeStatus(snapshot)}
+                toggle={switchStateOf(snapshot, scope)}
+                selected={selected?.instanceId === snapshot.instanceId}
+                onSelect={() => setSelectedId(snapshot.instanceId)}
+                onToggle={(next) => guard(() => setEnabled(snapshot, scope, next))}
+                onReset={scope.kind === 'project' ? () => guard(() => setEnabled(snapshot, scope, null)) : undefined}
+              />
+            ))}
+            <button type="button" className="prov-add-row" onClick={openAdd}>
+              <Plus size={16} />
+              Add provider
+            </button>
+          </div>
+          <div className="prov-pane-editor">
+            {selected ? (
+              <div key={selected.instanceId} className="prov-editor">
+                {renderEditor(selected)}
+              </div>
+            ) : (
+              <p className="prov-pane-empty">No providers configured.</p>
+            )}
           </div>
         </div>
       )}
-      {pageError && <p className="prov-error">{pageError}</p>}
 
-      {mode === 'add' ? (
-        <AddProviderView
-          clis={addableClis}
-          cliConfigs={cliConfigs}
-          apis={addableApis}
-          onAddCli={addCli}
-          install={install}
-          onInstallCli={async (cli) => {
-            if (await installCli(cli)) await addCli(cli)
-          }}
-          onApiConnected={apiConnected}
-          runLogin={runLogin}
-          onDone={() => setMode('list')}
-        />
-      ) : (
-        <>
-          {cliRows.length > 0 && (
-            <SettingsGroup title="Agent CLIs">
-              {cliRows.map((cli) => {
-                const enabled = cliEnabled(cli.id)
-                const config = cliConfigs[cli.id]
-                return (
-                  <CliProviderRow
-                    key={cli.id}
-                    cli={cli}
-                    enabled={enabled}
-                    open={openRow === `cli:${cli.id}`}
-                    onOpenChange={toggleOpen(`cli:${cli.id}`)}
-                    state={cliHealth(cli, {
-                      claude: claudeStatus,
-                      codex: codexStatus,
-                      config,
-                      configured: configuredProviders.some((provider) => provider.instanceId === cli.id || provider.id === cli.providerId)
-                    })}
-                    config={config}
-                    models={modelsFor(cli.id, cli.providerId)}
-                    onToggle={toggleCli(cli)}
-                    onRemove={removeCli(cli)}
-                    onSaveConfig={saveCliConfig(cli)}
-                    onRefreshModels={refreshModels(cli.providerId)}
-                    onSignIn={signInCli(cli)}
-                    onRecheck={recheckCli(cli)}
-                    install={cli.id === 'antigravity' ? install : undefined}
-                    onInstall={cli.id === 'antigravity' ? async () => { if (await installCli(cli)) await refreshAll() } : undefined}
-                    onSignOut={cli.id === 'antigravity' ? signOutCli(cli) : undefined}
-                  />
-                )
-              })}
-            </SettingsGroup>
-          )}
-
-          {apiRows.length > 0 && (
-            <SettingsGroup title="Model APIs">
-              {apiRows.map((entry) => (
-                <ApiProviderRow
-                  key={entry.providerId}
-                  entry={entry}
-                  option={loginOptions.find((option) => option.id === entry.providerId && option.authType === entry.authType)}
-                  models={modelsFor(entry.instanceId, entry.providerId)}
-                  open={openRow === `api:${entry.providerId}`}
-                  onOpenChange={toggleOpen(`api:${entry.providerId}`)}
-                  onToggle={(enabled) => guard(() => setInstanceEnabled(entry.instanceId, 'pi', enabled))()}
-                  onRemove={removeApi(entry)}
-                  onReplaceKey={replaceApiKey(entry)}
-                  onSignIn={signInApi(entry)}
-                  onRefreshModels={refreshModels(entry.providerId)}
-                />
-              ))}
-            </SettingsGroup>
-          )}
-
-          {cliRows.length === 0 && apiRows.length === 0 && (
-            <p className="settings-muted prov-empty">No providers yet</p>
-          )}
-        </>
-      )}
-    </>
+      <AddProviderDialog
+        open={addOpen}
+        snapshots={deviceSnapshots ?? []}
+        loginOptions={loginOptions}
+        handlers={addHandlers}
+        onClose={() => setAddOpen(false)}
+        onFinished={setSelectedId}
+      />
+    </div>
   )
 }

@@ -1,20 +1,14 @@
-import { useCallback, useId, useState, type ReactNode } from 'react'
-import type { LlmModelOption } from '../../../shared/settings'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import type { StatusDescription } from '../../../shared/harness/status'
 import { ProviderIcon } from '../../lib/providerIcons'
-import { Folder, RefreshCw } from '../../lib/icons'
-import { SettingsRow, Switch } from '../settings/SettingsRow'
+import { Check, CircleArrowUp, Copy, Folder, Layers, RefreshCw, RotateCcw } from '../../lib/icons'
+import { Switch } from '../settings/SettingsRow'
 import { ipcErrorMessage } from '../../utils/voiceErrors'
+import type { SwitchState } from './providerView'
 
-/** Row health, shown only as the status dot colour; the words live in its tooltip and label. */
-export type Health = 'ready' | 'attention' | 'error' | 'unknown'
-
-export interface HealthState {
-  health: Health
-  label: string
-  /** Longer wording for the tooltip and the expanded sign-in row. */
-  detail?: string
-  /** The next step Mousse itself can do for the provider (Antigravity); other CLIs sign in through their terminal. */
-  action?: 'install' | 'sign-in' | 'sign-out'
+/** Only warning and error show a dot, as in T3 Code. */
+export function needsAttention(status: StatusDescription): boolean {
+  return status.tone === 'warning' || status.tone === 'error'
 }
 
 /** The message without the channel prefix Electron adds to errors from the main process. */
@@ -40,10 +34,40 @@ export function useAsyncAction() {
   return { busy, error, setError, run }
 }
 
-export function StatusDot({ state, enabled }: { state: HealthState; enabled: boolean }) {
-  const label = enabled ? state.label : `Off · ${state.label}`
-  const title = state.detail && state.detail !== state.label ? `${label}. ${state.detail}` : label
-  return <span className={`prov-dot is-${state.health}`} role="img" aria-label={title} title={title} />
+/**
+ * The status said once: the headline, and the detail unless it only repeats the command shown
+ * below the row (a terminal sign-in's message names the command it asks for).
+ */
+export function statusText(status: StatusDescription): string {
+  const headline = status.headline
+  const command = status.nextStep?.command
+  const detail = status.detail && status.detail !== status.headline && !(command && status.detail.includes(command)) ? status.detail : null
+  return detail ? `${headline} · ${detail}` : headline
+}
+
+/** The headline alone, for the provider list: "Signed in", "Not found", "Checking". */
+export function shortStatus(status: StatusDescription): string {
+  const head = status.headline.split(' · ')[0] ?? status.headline
+  return head === 'Checking provider status' ? 'Checking' : head
+}
+
+/** The list's status: a few words, and a dot when the provider needs attention; the editor says the rest. */
+export function CompactStatus({ status }: { status: StatusDescription }) {
+  return (
+    <span className="prov-status is-compact" title={statusText(status)} aria-live="polite">
+      {needsAttention(status) && <span className={`prov-dot is-${status.tone}`} aria-hidden="true" />}
+      <span className="prov-status-text">{shortStatus(status)}</span>
+    </span>
+  )
+}
+
+/** "Not signed in · Run claude to sign in", in the tone's colour (the editor's Setup → Status). */
+export function StatusLine({ status }: { status: StatusDescription }) {
+  return (
+    <span className={`prov-status-text is-${status.tone}`} aria-live="polite">
+      {statusText(status)}
+    </span>
+  )
 }
 
 /** Icon-only refresh; the glyph spins while busy. */
@@ -95,111 +119,209 @@ export function BrowseButton({
   )
 }
 
-const MODEL_PREVIEW = 10
-
-export function ModelsSubRow({ models, onRefresh }: { models: LlmModelOption[]; onRefresh: () => Promise<void> }) {
-  const [showAll, setShowAll] = useState(false)
-  const { busy, error, run } = useAsyncAction()
-  const shown = showAll ? models : models.slice(0, MODEL_PREVIEW)
-  const hidden = models.length - shown.length
+/** A command to run in a terminal, with a copy button: the advisory update, a terminal sign-in. */
+export function CommandBox({ command, label = 'Copy command' }: { command: string; label?: string }) {
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), 1600)
+    return () => clearTimeout(timer)
+  }, [copied])
   return (
-    <SettingsRow
-      indent
-      title="Models"
-      description={
-        <>
-          {models.length === 0 ? 'None yet' : shown.map((model) => model.label || model.id).join(' · ')}
-          {hidden > 0 && (
-            <>
-              {' '}
-              <button type="button" className="prov-link" onClick={() => setShowAll(true)}>
-                and {hidden} more
-              </button>
-            </>
-          )}
-          {error && <span className="prov-error">{error}</span>}
-        </>
-      }
-      control={<RefreshButton label="Refresh models" busy={busy === 'refresh'} onClick={() => void run('refresh', onRefresh)} />}
-    />
+    <span className="prov-command">
+      <code className="prov-command-text" title={command}>
+        {command}
+      </code>
+      <button
+        type="button"
+        className="settings-icon-btn prov-micro"
+        title={copied ? 'Copied' : label}
+        aria-label={label}
+        onClick={() => void navigator.clipboard.writeText(command).then(() => setCopied(true))}
+      >
+        {copied ? <Check size={12} /> : <Copy size={12} />}
+      </button>
+    </span>
   )
 }
 
-export function modelCount(models: LlmModelOption[]): string | undefined {
-  if (models.length === 0) return undefined
-  return `${models.length} model${models.length === 1 ? '' : 's'}`
-}
-
-export function formatVersion(version: string | undefined): string | undefined {
-  const trimmed = version?.trim()
-  if (!trimmed) return undefined
-  return /^\d/.test(trimmed) ? `v${trimmed}` : trimmed
+/** The "Overridden for this project" marker; opens where the value comes from. */
+function OverrideInheritance({ projectEnabled, deviceEnabled }: { projectEnabled: boolean; deviceEnabled: boolean }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLSpanElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const close = (event: MouseEvent) => {
+      if (!ref.current?.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [open])
+  const layers = [
+    { key: 'project', label: 'Project', enabled: projectEnabled, effective: true },
+    { key: 'device', label: 'Device', enabled: deviceEnabled, effective: false }
+  ]
+  return (
+    <span className="prov-override" ref={ref}>
+      <button
+        type="button"
+        className="settings-icon-btn prov-micro"
+        title="Overridden for this project"
+        aria-label="Overridden for this project. Show where this value comes from"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Layers size={12} />
+      </button>
+      {open && (
+        <ol className="prov-override-pop" role="list">
+          {layers.map((layer) => (
+            <li key={layer.key} className={layer.effective ? 'is-effective' : undefined}>
+              <span>{layer.label}</span>
+              <span className="prov-override-value">
+                {layer.enabled ? 'On' : 'Off'}
+                {layer.effective ? <Check size={13} aria-hidden="true" /> : <span className="prov-override-pad" aria-hidden="true" />}
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </span>
+  )
 }
 
 /**
- * A provider row in the shared row anatomy: logo, name and status dot on the left; the enable
- * switch on the right. Clicking the row opens its details as indented sub-rows below.
+ * A provider in the list pane, in T3 Code's row anatomy: logo, name and version, then the status
+ * line; the enable switch on the right. Selection is a background fill only. Switched off, the row
+ * is dimmed until hovered or selected. In a project scope an override shows its marker and reset
+ * under the status, so the name keeps the row's width (it wraps rather than truncates).
  */
-export function ProviderRow({
+export function ProviderListRow({
   iconId,
   name,
   version,
-  meta,
-  state,
-  enabled,
-  toggleLabel,
-  open,
-  onOpenChange,
+  update,
+  status,
+  toggle,
+  selected,
+  onSelect,
   onToggle,
-  children
+  onReset
 }: {
   iconId: string
   name: string
   version?: string
-  meta?: string
-  state: HealthState
-  enabled: boolean
-  toggleLabel: string
-  open: boolean
-  onOpenChange: (open: boolean) => void
+  /** An update is available: a small button takes the version's place. */
+  update?: { label: string; onClick: () => void }
+  status: StatusDescription
+  toggle: SwitchState
+  selected: boolean
+  onSelect: () => void
   onToggle: (enabled: boolean) => Promise<void>
-  children: ReactNode
+  /** Clears the project override; only passed in a project scope. */
+  onReset?: () => Promise<void>
 }) {
-  const panelId = useId()
-  const [toggling, setToggling] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const run = (action: () => Promise<void>) => {
+    setBusy(true)
+    void action().finally(() => setBusy(false))
+  }
   return (
-    <div className={`prov-row${open ? ' is-open' : ''}${enabled ? '' : ' is-off'}`}>
-      <div className="prov-row-main" onClick={() => onOpenChange(!open)}>
-        <button type="button" className="prov-row-head" aria-expanded={open} aria-controls={open ? panelId : undefined}>
-          <span className="prov-logo">
-            <ProviderIcon providerId={iconId} size={16} />
+    <div className={`prov-item${selected ? ' is-selected' : ''}${toggle.checked ? '' : ' is-off'}`}>
+      <div className="prov-item-main">
+        <button type="button" className="prov-item-hit" onClick={onSelect} aria-label={`Select ${name}`} aria-pressed={selected} />
+        <span className="prov-logo">
+          <ProviderIcon providerId={iconId} size={16} />
+        </span>
+        <span className="prov-item-text">
+          <span className="prov-item-title">
+            <span className="prov-item-name">{name}</span>
+            {/* An update takes the version's place, so the name keeps its room. */}
+            {update ? (
+              <button
+                type="button"
+                className="settings-icon-btn prov-micro prov-item-update"
+                title={version ? `${update.label} (now ${version})` : update.label}
+                aria-label={update.label}
+                onClick={update.onClick}
+              >
+                <CircleArrowUp size={14} />
+              </button>
+            ) : (
+              version && <code className="prov-version">{version}</code>
+            )}
           </span>
-          <span className="settings-item-text">
-            <span className="settings-item-title prov-name">
-              {name}
-              {version && <span className="prov-version">{version}</span>}
-              <StatusDot state={state} enabled={enabled} />
+          <CompactStatus status={status} />
+          {toggle.overridden && onReset && (
+            <span className="prov-item-override">
+              <OverrideInheritance projectEnabled={toggle.checked} deviceEnabled={toggle.deviceEnabled} />
+              <button
+                type="button"
+                className="settings-icon-btn prov-micro"
+                title="Reset to the device setting"
+                aria-label={`Reset ${name} enablement to the device setting`}
+                disabled={busy}
+                onClick={() => run(onReset)}
+              >
+                <RotateCcw size={12} />
+              </button>
             </span>
-            {meta && <span className="settings-item-desc">{meta}</span>}
-          </span>
-        </button>
-        <span className="prov-switch" onClick={(event) => event.stopPropagation()}>
-          <Switch
-            checked={enabled}
-            label={toggleLabel}
-            disabled={toggling}
-            onChange={(next) => {
-              setToggling(true)
-              void onToggle(next).finally(() => setToggling(false))
-            }}
-          />
+          )}
         </span>
       </div>
-      {open && (
-        <div className="prov-row-panel" id={panelId}>
-          {children}
-        </div>
-      )}
+      <span className="prov-item-controls">
+        <span title={toggle.locked ? 'Turned off on this device. Turn it on for the device first.' : undefined}>
+          <Switch
+            checked={toggle.checked}
+            label={`Enable ${name}`}
+            disabled={busy || toggle.locked}
+            onChange={(next) => run(() => onToggle(next))}
+          />
+        </span>
+      </span>
     </div>
   )
+}
+
+/** An editor section: heading on the page, rows on one surface (Mousse's SettingsGroup), with an optional custom title. */
+export function EditorSection({
+  title,
+  action,
+  description,
+  children
+}: {
+  title: ReactNode
+  action?: ReactNode
+  description?: ReactNode
+  children: ReactNode
+}) {
+  return (
+    <section className="settings-group prov-editor-section">
+      <div className="settings-group-head">
+        <div className="settings-group-head-text">
+          <h3 className="settings-group-title">{title}</h3>
+          {description && <p className="settings-group-desc">{description}</p>}
+        </div>
+        {action && <div className="settings-group-action">{action}</div>}
+      </div>
+      <div className="settings-group-rows">{children}</div>
+    </section>
+  )
+}
+
+/** "Checked 2 min ago", ticking. */
+export function useRelativeTime(at: number | null): string | null {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 15_000)
+    return () => clearInterval(timer)
+  }, [])
+  if (at === null) return null
+  const seconds = Math.max(0, Math.round((now - at) / 1000))
+  if (seconds < 45) return 'just now'
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes} min ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours} h ago`
+  return `${Math.round(hours / 24)} d ago`
 }

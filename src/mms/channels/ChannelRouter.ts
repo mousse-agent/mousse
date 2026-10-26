@@ -7,7 +7,7 @@ import type {
   ChannelPlatform,
   Project
 } from '../../shared/types'
-import type { ModelOverride } from '../../shared/providerInstances'
+import { listingKey, listingServes, selectionFromListing, type ModelOverride } from '../../shared/providerInstances'
 import type { LlmProviderOption } from '../../shared/settings'
 import { applyEffortToModelId, formatEffortLabel } from '../../shared/modelVariants'
 import type { SettingsStore } from '../settings/SettingsStore'
@@ -509,12 +509,12 @@ export class ChannelRouter extends EventEmitter {
       title: 'Select a model provider',
       placeholder: 'Choose a provider',
       options: providers.map((provider) => ({
-        label: `${provider.id === current.llmProvider ? '✓ ' : ''}${provider.label}`,
+        label: `${listingServes(provider, current) ? '✓ ' : ''}${provider.label}`,
         description: `${provider.models.length} model${provider.models.length === 1 ? '' : 's'}`,
-        value: provider.id
+        value: listingKey(provider)
       })),
-      onSelect: (providerId) => {
-        const provider = this.deps.listModels().find((entry) => entry.id === providerId)
+      onSelect: (key) => {
+        const provider = this.deps.listModels().find((entry) => listingKey(entry) === key)
         if (!provider) return { text: 'That provider is no longer available. Run /models again.' }
         return { next: this.buildModelMenu(message, provider) }
       }
@@ -534,12 +534,12 @@ export class ChannelRouter extends EventEmitter {
       title: `Select a model from ${provider.label}`,
       placeholder: 'Choose a model',
       options: provider.models.map((model) => ({
-        label: `${provider.id === current.llmProvider && model.id === current.model ? '✓ ' : ''}${model.label}`,
+        label: `${listingServes(provider, current) && model.id === current.model ? '✓ ' : ''}${model.label}`,
         description: model.id,
         value: model.id
       })),
       onSelect: (modelId) => {
-        const liveProvider = this.deps.listModels().find((entry) => entry.id === provider.id)
+        const liveProvider = this.deps.listModels().find((entry) => listingKey(entry) === listingKey(provider))
         const model = liveProvider?.models.find((entry) => entry.id === modelId)
         if (!model) return { text: 'That model is no longer available. Run /models again.' }
         if (model.efforts?.length) {
@@ -553,7 +553,7 @@ export class ChannelRouter extends EventEmitter {
             )
           }
         }
-        return { text: this.selectSessionModel(sessionKey, provider.id, model.id) }
+        return { text: this.selectSessionModel(sessionKey, provider, model.id) }
       }
     }
   }
@@ -578,20 +578,21 @@ export class ChannelRouter extends EventEmitter {
           return { text: 'That reasoning effort is no longer available. Run /models again.' }
         }
         const selectedModel = applyEffortToModelId(modelId, effort)
-        return { text: this.selectSessionModel(sessionKey, provider.id, selectedModel, effort) }
+        return { text: this.selectSessionModel(sessionKey, provider, selectedModel, effort) }
       }
     }
   }
 
   private selectSessionModel(
     sessionKey: string,
-    llmProvider: string,
+    provider: LlmProviderOption,
     model: string,
     effort?: string
   ): string {
-    const updated = this.sessionManager.setModelOverride(sessionKey, { llmProvider, model })
+    // The listing's instance: a model of the second Claude instance runs there, not on the first.
+    const updated = this.sessionManager.setModelOverride(sessionKey, selectionFromListing(provider, model))
     if (!updated) return 'Could not update this channel session.'
-    return `Session model set to ${llmProvider}/${model}${effort ? ` (reasoning effort: ${effort})` : ''}`
+    return `Session model set to ${provider.id}/${model}${effort ? ` (reasoning effort: ${effort})` : ''}`
   }
 
   private registerMenu(

@@ -30,7 +30,8 @@ import {
   storedCliEnv,
   withUserEnv,
   type CliLaunch,
-  type CliVersionCache
+  type CliVersionCache,
+  type StoredCliConfig
 } from '../cliConfig'
 import { resolveWindowsShim } from '../resolveWindowsShim'
 import {
@@ -793,6 +794,11 @@ export class CodexProviderService {
     }
   }
 
+  /** The listed models, or the Codex default until a listing runs. */
+  models(): LlmModelOption[] {
+    return this.settings.models?.length ? this.settings.models : CODEX_FALLBACK_MODELS
+  }
+
   llmProvider(): LlmProviderOption | undefined {
     if (!this.configured()) return undefined
     return {
@@ -802,9 +808,9 @@ export class CodexProviderService {
     }
   }
 
-  private checkDue(): boolean {
+  private checkDue(force = false): boolean {
     if (this.stopped || this.settingsError || this.settings.disconnected) return false
-    return !this.probeResult || Date.now() - this.probeResult.at >= CODEX_ACCOUNT_TTL_MS
+    return force || !this.probeResult || Date.now() - this.probeResult.at >= CODEX_ACCOUNT_TTL_MS
   }
 
   private async probe(): Promise<AccountProbe> {
@@ -844,14 +850,13 @@ export class CodexProviderService {
 
   /**
    * Checks the terminal sign-in with a live `account/read` when the cached result is missing,
-   * older than five minutes, or `force` (Recheck) is set.
+   * older than five minutes, or `force` (Recheck, a turn's account check) is set. The last result
+   * stays the synchronous view (`configured()`, listings) until the new one arrives.
    */
   async status(options: { force?: boolean } = {}): Promise<CodexStatus> {
-    if (options.force) {
-      await this.probing
-      this.probeResult = undefined
-    }
-    if (this.binary() && this.checkDue()) {
+    // A check already running may have read the sign-in before it changed: wait, then check again.
+    if (options.force) await this.probing
+    if (this.binary() && this.checkDue(options.force)) {
       this.probing ??= (async () => {
         const result = await this.probe()
         if (this.stopped) return
@@ -981,6 +986,31 @@ export class CodexProviderService {
     }
   }
 
+  /**
+   * Drops the saved Codex thread of `threadId`, so its next turn starts a new Codex thread with the
+   * history in the prompt (the account it was saved under changed).
+   */
+  forgetConversation(threadId: string): void {
+    if (!this.settings.threads?.[threadId]) return
+    const { [threadId]: _dropped, ...rest } = this.settings.threads
+    this.settings.threads = rest
+    this.save()
+  }
+
+  /**
+   * The account of the last live sign-in check, when it was a ChatGPT sign-in: the plan for display
+   * and `subject`, the account's email as Codex reports it, which the gateway only hashes (never
+   * shown or stored). No subject when Codex reports no email.
+   */
+  account(): { label?: string; subject?: string } | undefined {
+    const result = this.probeResult?.result
+    if (result?.kind !== 'signed_in') return undefined
+    const email = result.email?.trim().toLowerCase()
+    // Codex reports the plan in lower case (`plus`, `pro`); the page names it as ChatGPT does.
+    const plan = result.planType ? `${result.planType[0]!.toUpperCase()}${result.planType.slice(1)}` : ''
+    return { label: plan ? `ChatGPT ${plan}` : 'ChatGPT', ...(email ? { subject: `chatgpt:${email}` } : {}) }
+  }
+
   /** Disconnects this profile in Mousse only; the terminal sign-in is never logged out. */
   async logout(): Promise<void> {
     this.scope += 1
@@ -990,6 +1020,11 @@ export class CodexProviderService {
     this.save()
     this.abortInFlight()
     this.app?.conn.close()
+  }
+
+  /** The stored executable, launch args and variables, as saved (no lookup, no version check). */
+  storedLaunch(): StoredCliConfig {
+    return { ...(this.settings.binaryPath ? { binaryPath: this.settings.binaryPath } : {}), args: storedCliArgs(this.settings), env: storedCliEnv(this.settings) }
   }
 
   /** The executable path, launch args and environment set in Settings → Providers. */

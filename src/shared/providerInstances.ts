@@ -130,6 +130,25 @@ export function legacyProviderForInstance(instanceId: string, entry: Pick<Provid
   return entry.driver === 'pi' ? piProviderIdOf(instanceId) : LEGACY_PROVIDER_BY_DRIVER[entry.driver]
 }
 
+/**
+ * Whether a picker listing (`llmProviders` entry) serves a selection: by instance when both name
+ * one (two Claude instances share `llmProvider`), else by the legacy provider name.
+ */
+export function listingServes(listing: { id: string; instanceId?: string }, selection: { instanceId?: string; llmProvider?: string }): boolean {
+  const instanceId = selection.instanceId?.trim()
+  return instanceId && listing.instanceId ? listing.instanceId === instanceId : listing.id === selection.llmProvider
+}
+
+/** The selection one model of a picker listing makes: its instance, provider name and model. */
+export function selectionFromListing(listing: { id: string; instanceId?: string }, model: string): ModelOverride {
+  return { ...(listing.instanceId ? { instanceId: listing.instanceId } : {}), llmProvider: listing.id, model }
+}
+
+/** Stable key of a picker listing: its instance id, else its provider name. */
+export function listingKey(listing: { id: string; instanceId?: string }): string {
+  return listing.instanceId ?? listing.id
+}
+
 export function isProviderInstanceConfig(value: unknown): value is ProviderInstanceConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const entry = value as Record<string, unknown>
@@ -180,8 +199,8 @@ function sameEntry(value: unknown, seed: ProviderInstanceConfig): boolean {
 }
 
 /**
- * Extends `stored` with every seed it lacks: the vendor instances and `pi:<provider>` for each
- * credentialed pi-ai provider. A stored id is never overwritten, even when its entry is malformed,
+ * Extends `stored` with every seed it lacks: the vendor instances (only on a profile never seeded
+ * before) and `pi:<provider>` for each credentialed pi-ai provider. A stored id is never overwritten, even when its entry is malformed,
  * with one exception: an entry is only upgraded when the profile's recorded seed version proves it
  * is the seed (a marker of at least 1, below the change, and an entry equal to the old seed).
  * Returns the raw map and the version to persist. `changes` and `current` are for tests.
@@ -209,7 +228,9 @@ export function seedProviderInstances(
       instances[change.id] = { ...change.next }
       upgraded.push(change.id)
     }
-  for (const [id, entry] of VENDOR_SEEDS) seed(id, { ...entry })
+  // Agents are added once, for a profile that was never seeded; after that they are entries like any
+  // other, so a provider the user deleted stays deleted.
+  if (version < 1) for (const [id, entry] of VENDOR_SEEDS) seed(id, { ...entry })
   for (const providerId of credentialedPiProviders) if (providerId) seed(piInstanceId(providerId), { driver: 'pi', enabled: true })
   return { instances, added, upgraded, seedVersion: Math.max(version, current) }
 }

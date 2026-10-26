@@ -63,18 +63,23 @@ import type {
 } from '../shared/integrations'
 import type {
   AmbientProviderInfo,
-  ClaudeSubscriptionStatus,
   CliInstallEvent,
-  CliProviderConfig,
-  CliProviderConfigPatch,
-  CliProviderInstanceId,
-  CodexStatus,
   ConfiguredProvider,
   ProviderLoginEvent,
   ProviderLoginOption,
   ProviderLoginResponse,
   ProviderLoginResult
 } from '../shared/providerAuth'
+import type { InstanceSnapshot, ProviderSnapshotsEvent } from '../shared/harness/status'
+import type {
+  AddInstanceInput,
+  InstanceConfigPatch,
+  ModelPrefsPatch,
+  ProviderOperationEvent,
+  ProviderOperationStarted,
+  ProviderScope,
+  SignInResponse
+} from '../shared/harness/types'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
 import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
@@ -744,27 +749,6 @@ const api = {
       ipcRenderer.invoke('providers:verifyAmbient', providerId),
     logout: (providerId: string): Promise<void> =>
       ipcRenderer.invoke('providers:logout', providerId),
-    /** Claude Subscription sign-in state; `recheck` skips the cached `claude auth status`. */
-    claudeStatus: (recheck?: boolean): Promise<ClaudeSubscriptionStatus> =>
-      ipcRenderer.invoke('providers:claudeStatus', recheck),
-    /** Codex sign-in state; `recheck` skips the cached `account/read`. */
-    codexStatus: (recheck?: boolean): Promise<CodexStatus> =>
-      ipcRenderer.invoke('providers:codexStatus', recheck),
-    /** Executable path, launch args, environment and installed version of a CLI provider. */
-    cliConfig: (instanceId: CliProviderInstanceId): Promise<CliProviderConfig> =>
-      ipcRenderer.invoke('providers:cliConfig', instanceId),
-    /** Saves CLI launch settings; new sessions use them. Rejects invalid input. */
-    setCliConfig: (
-      instanceId: CliProviderInstanceId,
-      patch: CliProviderConfigPatch
-    ): Promise<CliProviderConfig> => ipcRenderer.invoke('providers:setCliConfig', instanceId, patch),
-    /**
-     * Downloads Google's verified Antigravity agent and resolves with the new config. Progress
-     * arrives through `onInstallEvent`. Never signs in; rejects when cancelled or already running.
-     */
-    installAntigravity: (): Promise<CliProviderConfig> => ipcRenderer.invoke('providers:installAntigravity'),
-    /** Stops a running Antigravity install; resolves false when none is running. */
-    cancelAntigravityInstall: (): Promise<boolean> => ipcRenderer.invoke('providers:cancelAntigravityInstall'),
     onInstallEvent: (cb: (event: CliInstallEvent) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, event: CliInstallEvent) => cb(event)
       ipcRenderer.on('providers:install:event', handler)
@@ -790,6 +774,58 @@ const api = {
         cb(providers)
       ipcRenderer.on('providers:changed', handler)
       return () => ipcRenderer.removeListener('providers:changed', handler)
+    },
+    /** Status of every provider instance in `scope` (device, or a project's overrides on top). */
+    snapshots: (scope: ProviderScope): Promise<InstanceSnapshot[]> =>
+      ipcRenderer.invoke('providers:snapshots', scope),
+    /** Pushed on every change; a page showing another scope refetches with `snapshots`. */
+    onSnapshots: (cb: (event: ProviderSnapshotsEvent) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: ProviderSnapshotsEvent) => cb(event)
+      ipcRenderer.on('providers:snapshots', handler)
+      return () => ipcRenderer.removeListener('providers:snapshots', handler)
+    },
+    /** Progress, sign-in prompts and the outcome of install, update and sign-in operations. */
+    onOperation: (cb: (event: ProviderOperationEvent) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, event: ProviderOperationEvent) => cb(event)
+      ipcRenderer.on('providers:operation', handler)
+      return () => ipcRenderer.removeListener('providers:operation', handler)
+    },
+    /**
+     * Provider instance commands. Mutations resolve with the instance's snapshot; install, update
+     * and sign-in resolve at once with an operation id and report through `onOperation`.
+     */
+    instances: {
+      add: (input: AddInstanceInput): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:add', input),
+      /** Deletes the instance; the user's own CLI and its sign-in are not touched. */
+      remove: (instanceId: string): Promise<void> => ipcRenderer.invoke('providers:instances:remove', instanceId),
+      configure: (instanceId: string, patch: InstanceConfigPatch): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:configure', instanceId, patch),
+      /** `null` clears a project override; the device scope takes a boolean. */
+      setEnabled: (instanceId: string, scope: ProviderScope, enabled: boolean | null): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:setEnabled', instanceId, scope, enabled),
+      install: (instanceId: string): Promise<ProviderOperationStarted> =>
+        ipcRenderer.invoke('providers:instances:install', instanceId),
+      /** Cancels a running install or update; false when it is not running. */
+      cancelInstall: (operationId: string): Promise<boolean> =>
+        ipcRenderer.invoke('providers:instances:cancelInstall', operationId),
+      update: (instanceId: string): Promise<ProviderOperationStarted> =>
+        ipcRenderer.invoke('providers:instances:update', instanceId),
+      signIn: (instanceId: string, method?: string): Promise<ProviderOperationStarted> =>
+        ipcRenderer.invoke('providers:instances:signIn', instanceId, method),
+      /** Answers a sign-in prompt, or cancels the sign-in with `{ kind: 'cancel' }`. */
+      respondSignIn: (operationId: string, response: SignInResponse): Promise<boolean> =>
+        ipcRenderer.invoke('providers:instances:respondSignIn', operationId, response),
+      signOut: (instanceId: string): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:signOut', instanceId),
+      /** Checks again, bypassing the cached status. */
+      recheck: (instanceId: string): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:recheck', instanceId),
+      refreshModels: (instanceId: string): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:refreshModels', instanceId),
+      /** Each present field replaces the stored one. */
+      setModelPrefs: (instanceId: string, patch: ModelPrefsPatch): Promise<InstanceSnapshot> =>
+        ipcRenderer.invoke('providers:instances:setModelPrefs', instanceId, patch)
     }
   },
   readAloud: {

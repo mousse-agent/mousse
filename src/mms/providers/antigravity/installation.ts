@@ -100,7 +100,7 @@ export interface AntigravityInstallOptions { release?: Release; fetch?: typeof f
  * Download only Google's pinned archive and publish a verified immutable release. One install runs per
  * installation; a second caller is rejected. Cancelling stops it before anything is published.
  */
-export async function installAntigravity(installationHome: string, signal?: AbortSignal, progress?: (message: string) => void, options: AntigravityInstallOptions = {}): Promise<string> {
+export async function installAntigravity(installationHome: string, signal?: AbortSignal, progress?: (message: string, fraction?: number) => void, options: AntigravityInstallOptions = {}): Promise<string> {
   const pin = options.release ?? RELEASES[`${process.platform}-${process.arch}`]
   if (!pin) throw new Error('This platform is not available in the pinned Antigravity release.')
   const existing = installedAntigravityBinary(installationHome)
@@ -114,9 +114,9 @@ export async function installAntigravity(installationHome: string, signal?: Abor
   if (signal?.aborted) forward()
   else signal?.addEventListener('abort', forward, { once: true })
   try {
-    return await download(installationHome, pin, active.abort.signal, (message) => {
+    return await download(installationHome, pin, active.abort.signal, (message, fraction) => {
       active.progress = message
-      progress?.(message)
+      progress?.(message, fraction)
       announce(key, { type: 'progress', message })
     }, options.fetch ?? fetch)
   } finally {
@@ -126,7 +126,7 @@ export async function installAntigravity(installationHome: string, signal?: Abor
   }
 }
 
-async function download(installationHome: string, pin: Release, signal: AbortSignal, progress: (message: string) => void, fetchFile: typeof fetch): Promise<string> {
+async function download(installationHome: string, pin: Release, signal: AbortSignal, progress: (message: string, fraction?: number) => void, fetchFile: typeof fetch): Promise<string> {
   const dir = releaseDirectory(installationHome)
   const root = dirname(dir)
   mkdirSync(root, { recursive: true })
@@ -142,6 +142,9 @@ async function download(installationHome: string, pin: Release, signal: AbortSig
     const hash = createHash('sha256')
     let size = 0
     const reader = response.body.getReader()
+    // Byte progress for the downloads indicator, at most once per whole percent.
+    const mb = (bytes: number) => `${Math.round(bytes / 1_048_576)} MB`
+    let reported = -1
     try {
       for (;;) {
         signal.throwIfAborted()
@@ -150,6 +153,11 @@ async function download(installationHome: string, pin: Release, signal: AbortSig
         size += value.byteLength
         if (size > pin.archiveSize) throw new Error('Antigravity archive exceeds pinned size')
         hash.update(value)
+        const percent = Math.floor((size / pin.archiveSize) * 100)
+        if (percent > reported) {
+          reported = percent
+          progress(`Downloading ${mb(size)} of ${mb(pin.archiveSize)}`, size / pin.archiveSize)
+        }
         if (!writer.write(value)) await new Promise<void>((resolveDrain) => writer.once('drain', resolveDrain))
       }
     } finally { writer.end() }

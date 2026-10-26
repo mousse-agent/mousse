@@ -241,6 +241,8 @@ export interface AgentIntegrationPolicy {
 export interface SkillModelSettings {
   llmProvider: LlmProviderId
   model: string
+  /** Provider instance of the skill's model; absent on records from before instances (legacy mapping). */
+  instanceId?: string
 }
 
 export interface MousseToolsSettings {

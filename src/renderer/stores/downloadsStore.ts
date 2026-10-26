@@ -3,16 +3,21 @@ import { LOCAL_STT_MODELS } from '../../shared/dictation'
 import type { LocalModelManifest, LocalModelStatus } from '../../shared/localModels'
 import { LOCAL_TTS_MODELS } from '../../shared/readAloud'
 import type { UpdateState } from '../../shared/updates'
+import type { ProviderOperationEvent } from '../../shared/harness/types'
+import { useProviderSnapshotsStore } from '../lib/providerSnapshots'
 import { subscribeToUpdates, updateActions, useUpdateStore } from './updateStore'
 
 /**
  * Every download Mousse runs, in one list for the downloads indicator (navigation rail and the
- * Settings nav): the app update and the local speech models. Each source keeps its own state in
+ * Settings nav): the app update, the local speech models and the agents Mousse installs or updates. Each source keeps its own state in
  * the main process; this store mirrors their broadcasts, so progress keeps flowing whichever
  * dialog started a download and whether or not it is still open.
  */
 
-export type DownloadKind = 'update' | 'dictation-model' | 'voice-model'
+export type DownloadKind = 'update' | 'dictation-model' | 'voice-model' | 'agent'
+
+/** The local speech model kinds, each with its own IPC group. */
+type LocalModelKind = 'dictation-model' | 'voice-model'
 
 export type DownloadPhase =
   /** An update is offered but not downloaded yet. */
@@ -28,10 +33,10 @@ export type DownloadPhase =
   | 'cancelled'
 
 export interface DownloadEntry {
-  /** `update`, or `<kind>:<model id>`. */
+  /** `update`, `<kind>:<model id>`, or `agent:<instance id>`. */
   id: string
   kind: DownloadKind
-  /** The model id, or the update's version. */
+  /** The model id, the update's version, or an agent operation's id. */
   sourceId: string
   label: string
   phase: DownloadPhase
@@ -69,7 +74,7 @@ const without = (entries: readonly DownloadEntry[], id: string): DownloadEntry[]
 /** Folds one local model status event into the list. Only downloads seen starting get an entry. */
 export function applyLocalModelStatus(
   entries: readonly DownloadEntry[],
-  kind: Exclude<DownloadKind, 'update'>,
+  kind: LocalModelKind,
   label: string,
   status: LocalModelStatus,
   now: number
@@ -97,6 +102,26 @@ export function applyLocalModelStatus(
       // A running download that stops without finishing was cancelled; otherwise the model was deleted.
       if (current && isActiveDownload(current)) return replace(entries, { ...current, phase: 'cancelled', settledAt: now })
       return current ? without(entries, id) : entries.slice()
+  }
+}
+
+/** Folds one agent install or update into the list; sign-ins are not downloads. */
+export function applyProviderOperation(entries: readonly DownloadEntry[], event: ProviderOperationEvent, label: string, now: number): DownloadEntry[] {
+  if (event.kind === 'sign_in' || event.phase === 'prompt') return entries.slice()
+  const id = `agent:${event.instanceId}`
+  const current = entries.find((entry) => entry.id === id)
+  const base = { id, kind: 'agent' as const, sourceId: event.operationId, label }
+  switch (event.phase) {
+    case 'progress': {
+      const percent = event.fraction !== undefined ? Math.min(100, Math.floor(event.fraction * 100)) : current?.percent
+      return replace(entries, { ...base, phase: 'downloading', ...(percent !== undefined ? { percent } : {}) })
+    }
+    case 'completed':
+      return replace(entries, { ...base, phase: 'done', percent: 100, settledAt: now })
+    case 'failed':
+      return replace(entries, { ...base, phase: 'failed', error: event.error.message })
+    case 'cancelled':
+      return current ? replace(entries, { ...current, phase: 'cancelled', settledAt: now }) : entries.slice()
   }
 }
 
@@ -203,17 +228,25 @@ interface LocalModelIpc {
   onLocalModelStatus: (listener: (status: LocalModelStatus) => void) => () => void
 }
 
-const MODEL_SOURCES: Record<Exclude<DownloadKind, 'update'>, { models: readonly LocalModelManifest[]; ipc: () => LocalModelIpc | undefined }> = {
+const MODEL_SOURCES: Record<LocalModelKind, { models: readonly LocalModelManifest[]; ipc: () => LocalModelIpc | undefined }> = {
   'dictation-model': { models: LOCAL_STT_MODELS, ipc: () => window.mousse?.dictation as unknown as LocalModelIpc | undefined },
   'voice-model': { models: LOCAL_TTS_MODELS, ipc: () => window.mousse?.readAloud as unknown as LocalModelIpc | undefined }
 }
 
-const modelLabel = (kind: Exclude<DownloadKind, 'update'>, modelId: string): string =>
+const modelLabel = (kind: LocalModelKind, modelId: string): string =>
   MODEL_SOURCES[kind].models.find((model) => model.id === modelId)?.label ?? modelId
 
 /** Feeds a local model status event into the store (also used by tests). */
-export function receiveLocalModelStatus(kind: Exclude<DownloadKind, 'update'>, status: LocalModelStatus): void {
+export function receiveLocalModelStatus(kind: LocalModelKind, status: LocalModelStatus): void {
   setEntries((entries) => applyLocalModelStatus(entries, kind, modelLabel(kind, status.modelId), status, Date.now()))
+}
+
+const agentLabel = (instanceId: string): string =>
+  useProviderSnapshotsStore.getState().scopes.device?.snapshots?.find((entry) => entry.instanceId === instanceId)?.displayName ?? instanceId
+
+/** Feeds a provider operation event into the store (also used by tests). */
+export function receiveProviderOperation(event: ProviderOperationEvent): void {
+  setEntries((entries) => applyProviderOperation(entries, event, agentLabel(event.instanceId), Date.now()))
 }
 
 export function receiveUpdateState(state: UpdateState): void {
@@ -229,7 +262,8 @@ export function subscribeToDownloads(): void {
   subscribeToUpdates()
   receiveUpdateState(useUpdateStore.getState())
   useUpdateStore.subscribe((state) => receiveUpdateState(state))
-  for (const kind of Object.keys(MODEL_SOURCES) as Array<Exclude<DownloadKind, 'update'>>) {
+  window.mousse.providers?.onOperation?.((event) => receiveProviderOperation(event))
+  for (const kind of Object.keys(MODEL_SOURCES) as LocalModelKind[]) {
     const ipc = MODEL_SOURCES[kind].ipc()
     if (!ipc) continue
     ipc.onLocalModelStatus((status) => receiveLocalModelStatus(kind, status))
@@ -241,16 +275,28 @@ export function subscribeToDownloads(): void {
 }
 
 const modelIpc = (entry: DownloadEntry): LocalModelIpc | undefined =>
-  entry.kind === 'update' ? undefined : MODEL_SOURCES[entry.kind].ipc()
+  entry.kind === 'update' || entry.kind === 'agent' ? undefined : MODEL_SOURCES[entry.kind].ipc()
+
+const agentInstanceId = (entry: DownloadEntry): string => entry.id.slice('agent:'.length)
 
 export const downloadsActions = {
   cancel(entry: DownloadEntry): void {
+    if (entry.kind === 'agent') {
+      void window.mousse.providers.instances.cancelInstall(entry.sourceId).catch(() => undefined)
+      return
+    }
     void modelIpc(entry)?.cancelLocalModelDownload(entry.sourceId).catch(() => undefined)
   },
   /** Starts the download again; results arrive through the source's status events. */
   retry(entry: DownloadEntry): void {
     if (entry.kind === 'update') {
       void updateActions.download()
+      return
+    }
+    if (entry.kind === 'agent') {
+      void window.mousse.providers.instances.install(agentInstanceId(entry)).catch((cause: unknown) => {
+        setEntries((entries) => replace(entries, { ...entry, phase: 'failed', error: cause instanceof Error ? cause.message : String(cause) }))
+      })
       return
     }
     const kind = entry.kind
