@@ -378,6 +378,8 @@ export const PROTOCOL_METHODS = [
   'files.stat',
   'git.status',
   'git.diff',
+  'review.files',
+  'review.file',
   'git.log',
   'git.branches',
   'git.checkout',

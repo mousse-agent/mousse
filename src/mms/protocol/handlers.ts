@@ -98,6 +98,9 @@ import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
 import { isInstallationMethod } from '../profiles/admission'
 import { ChatReferenceMetadataResolver } from '../data/resolveChatReferenceMetadata'
 import { parseChatReference } from '../../shared/chatReferences'
+import type { ReviewFilesResult, ReviewRange, ReviewScope } from '../../shared/review'
+import { isGitRepository, listChangedFiles, readFileVersions, worktreeRange } from '../git/reviewDiff'
+import { resolveReviewScope } from '../actions/reviewRange'
 
 /** Profiles (keyed by their Claude service) whose last sign-in statuses both had a usable answer. */
 const vendorSignInsAnswered = new WeakSet<object>()
@@ -415,6 +418,40 @@ function containedPath(root: string, value: unknown): string {
 
 function requiredContainedPath(root: string, value: unknown): string {
   return containedPath(root, asString(value, 'path', 4096))
+}
+
+function asReviewScope(value: unknown): ReviewScope {
+  if (!isObject(value)) throw new DomainRpcError('invalid_params', 'scope is required')
+  const kind = asString(value.kind, 'scope.kind', 16)
+  if (kind === 'turn') return { kind, turnId: asString(value.turnId, 'scope.turnId', 256) }
+  if (kind === 'thread') return { kind }
+  if (kind === 'worktree') return asOptionalBoolean(value.staged, 'scope.staged') === true ? { kind, staged: true } : { kind }
+  throw new DomainRpcError('invalid_params', 'Unknown review scope')
+}
+
+interface ReviewTarget {
+  scope: ReviewScope
+  root: string
+  range: ReviewRange
+  unavailable?: string
+}
+
+/** Resolves a review scope to the root it reads from and the Git range it compares. */
+async function reviewTarget(ctx: HandlerContext, p: Record<string, unknown>): Promise<ReviewTarget> {
+  const scope = asReviewScope(p.scope)
+  if (scope.kind === 'worktree') {
+    const root = projectRootContext(ctx, p)
+    if (!await isGitRepository(root)) return { scope, root, range: { from: null, to: { kind: 'worktree' } }, unavailable: 'Not a Git repository.' }
+    return { scope, root, range: await worktreeRange(root, scope.staged === true) }
+  }
+  // Turns and the thread's base belong to a thread's own worktree; a project id has neither.
+  if (p.projectId !== undefined) throw new DomainRpcError('invalid_params', 'Turn and thread scopes need a threadId, not a projectId')
+  const lookup = threadLookupContext(ctx, p)
+  const resolved = resolveReviewScope(lookup.threadDirectory, scope)
+  if (!resolved) {
+    return { scope, root: lookup.projectPath ?? '', range: { from: null, to: { kind: 'worktree' } }, unavailable: 'This thread has no worktree of its own, so its changes cannot be reviewed.' }
+  }
+  return { scope, root: resolved.cwd, range: resolved.range, unavailable: resolved.unavailable }
 }
 
 function buildSendInput(
@@ -1921,6 +1958,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const action = new ThreadActionService(operation.threadDirectory).get(actionId)
       if (!action) throw new Error(`Action not found: ${actionId}`)
       return { files: action.changedPaths, externalEffects: action.externalEffects }
+    }
+    case 'review.files': {
+      const p = isObject(params) ? params : {}
+      const target = await reviewTarget(ctx, p)
+      const result: ReviewFilesResult = { root: target.root, scope: target.scope, range: target.range, files: [], truncated: false, mergeCommits: 0 }
+      if (target.unavailable) return { ...result, unavailable: target.unavailable }
+      return { ...result, ...await listChangedFiles(target.root, target.range) }
+    }
+    case 'review.file': {
+      const p = isObject(params) ? params : {}
+      const target = await reviewTarget(ctx, p)
+      if (target.unavailable) throw new DomainRpcError('review_unavailable', target.unavailable)
+      const path = requiredContainedPath(target.root, p.path)
+      const oldPath = p.oldPath === undefined ? undefined : requiredContainedPath(target.root, p.oldPath)
+      return await readFileVersions(target.root, target.range, path, oldPath)
     }
     case 'actions.undoLatest': {
       const p = isObject(params) ? params : {}
