@@ -1,4 +1,4 @@
-import type { AssistantMessage } from '@earendil-works/pi-ai'
+import type { AssistantMessage } from '../../../shared/transcript'
 import { nativeAgentAssistantMessage } from '../nativeAgentHistory'
 export { nativeAgentHistory as antigravityHistory } from '../nativeAgentHistory'
 

@@ -4,7 +4,7 @@ import type {
   MousseAgentSessionSnapshot,
   NativeLlmContext
 } from '../../shared/types'
-import type { Message } from '@earendil-works/pi-ai'
+import type { Message } from '../../shared/transcript'
 import { getActiveMessages, normalizeNativeContext } from '../orchestrator/nativeContext'
 
 /**

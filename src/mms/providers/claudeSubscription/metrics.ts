@@ -1,4 +1,4 @@
-import type { AssistantMessage } from '@earendil-works/pi-ai'
+import type { AssistantMessage } from '../../../shared/transcript'
 import type { ModelUsage, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { open } from 'node:fs/promises'
 import { constants } from 'node:fs'

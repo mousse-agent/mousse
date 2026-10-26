@@ -1,4 +1,4 @@
-import type { AssistantMessage, Message, UserMessage } from '@earendil-works/pi-ai'
+import type { AssistantMessage, Message, UserMessage } from '../../../shared/transcript'
 import type { HandoffPlan } from './HandoffService'
 
 /**
