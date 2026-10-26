@@ -5,6 +5,7 @@ import type { BinarySource } from '../../shared/harness/status'
 import type { HarnessDriverKind } from '../../shared/harness/types'
 import { cliLaunch, withUserEnv, type CliLaunch } from '../providers/cliConfig'
 import { resolveWindowsShim } from '../providers/resolveWindowsShim'
+import { PI_ENV_KEYS } from './pi/envKeys'
 
 /**
  * The environment of one instance at one config revision: where its binary is, which home it
@@ -37,7 +38,9 @@ export function privateHomeId(instanceId: string): string {
 /** The variable that points a driver at another home, when it has one. */
 export const HOME_VARIABLES: Partial<Record<HarnessDriverKind, string>> = {
   claude: 'CLAUDE_CONFIG_DIR',
-  codex: 'CODEX_HOME'
+  codex: 'CODEX_HOME',
+  /** Pi's agent dir (auth, settings, models); a Pi process always runs with a Mousse-owned one. */
+  pi: 'PI_CODING_AGENT_DIR'
 }
 
 /**
@@ -47,7 +50,8 @@ export const HOME_VARIABLES: Partial<Record<HarnessDriverKind, string>> = {
  */
 export const INHERITED_CREDENTIALS: Partial<Record<HarnessDriverKind, readonly string[]>> = {
   claude: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'],
-  codex: ['CODEX_API_KEY', 'OPENAI_API_KEY']
+  codex: ['CODEX_API_KEY', 'OPENAI_API_KEY'],
+  pi: PI_ENV_KEYS
 }
 
 export function instanceEnv(input: {

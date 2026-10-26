@@ -159,6 +159,11 @@ export interface HarnessDriver {
   readonly multiInstance: boolean
   /** Supports a Mousse-owned home (`InstanceConfig.home = private`). */
   readonly privateHome: boolean
+  /**
+   * Every instance, built-in ones included, runs with a Mousse-owned home under its state dir,
+   * whatever its config says (a runtime Mousse hosts itself and never points at the user's home).
+   */
+  readonly alwaysPrivateHome?: boolean
   readonly canInstall: boolean
   /** Runs a model the user adds by id (custom models); otherwise only the models it lists. */
   readonly customModels: boolean
