@@ -897,7 +897,7 @@ describe('result routing and steering edge cases', () => {
     await later(30)
     expect(f.service.hasBackgroundWork('thread')).toBe(true)
     // The model may not be changed meanwhile, and the error says what to do.
-    await expect(f.chat({ history: '', model: 'opus' })).rejects.toMatchObject({ message: expect.stringContaining('Press Stop') })
+    await expect(f.chat({ history: '', model: 'opus' })).rejects.toMatchObject({ message: expect.stringMatching(/already read the result.*could not be shown.*Press Stop/) })
     f.cli.reply = (message, self) => self.answer(String(message.uuid), 'next')
     expect(await f.chat({ history: '' })).toBe('next')
     // Not committed yet: the turn has to commit.
@@ -1607,6 +1607,29 @@ describe('background helpers as the real Claude Code reports them', () => {
     expect(await second).toBe('The second shell finished.')
   })
 
+  it('a task a cut-off wake had read is not described as one whose result may not arrive', async () => {
+    const f = fixture()
+    shell(f)
+    await f.turn()
+    const process = f.cli.last
+    f.cli.reply = undefined
+    process.emit(notification('bash-1'), textDelta('reading the report'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    const abort = new AbortController()
+    const wake = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined, signal: abort.signal })
+    await later(20)
+    abort.abort()
+    await expect(wake).rejects.toThrow()
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    process.emit(resultFrame({ terminalReason: 'aborted_streaming', origin: 'task-notification' }))
+    await later(30)
+    f.service.commitInterrupted('thread', '')
+    // Claude read the report; only the answer was cut off.
+    const error = await f.chat({ history: '', model: 'opus' }).then(() => undefined, (caught: Error) => caught)
+    expect(error?.message).toMatch(/already read the result of a background task.*cut off.*Press Stop/)
+    expect(error?.message).not.toMatch(/may not arrive/)
+  })
+
   it.each([
     ['after the wake began', true],
     ['before the wake began', false]
@@ -1729,7 +1752,7 @@ describe('background helpers as the real Claude Code reports them', () => {
     expect(await wake).toBe('B text')
   })
 
-  it('a cut-off wake whose result was already held back for a steer ends at once, so the next wake is not dropped', async () => {
+  it('a cut-off wake whose result was already held back for a steer ends at once and sends no interrupt, so the next wake is not dropped or hit', async () => {
     const f = fixture()
     startedWith(f, { id: 'bash-1', type: 'local_bash' }, { id: 'bash-2', type: 'local_bash' })
     await f.turn()
@@ -1750,7 +1773,9 @@ describe('background helpers as the real Claude Code reports them', () => {
     process.emit(resultFrame({ text: 'A done', origin: 'task-notification' }))
     await later(30)
     abort.abort()
-    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    // The wake's turn is over: an interrupt now could hit the next wake, so none is sent.
+    await later(50)
+    expect(process.interrupts).toBe(0)
     open()
     await later(30)
     // The second shell's wake runs: nothing is waiting for a result that already came.

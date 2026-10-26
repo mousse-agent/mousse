@@ -972,11 +972,14 @@ export class ClaudeSubscriptionProviderService {
           ? `The ${changed.join(' and ')} changed, which needs a new Claude process`
           : 'The conversation changed outside that process (an undo, an edit or a fork), so it cannot continue it'
         const tasks = working === 1 ? 'a background task' : `${working} background tasks`
+        const unshown = live.obligations.unshownCount()
         throw new AppError({
           code: 'claude_background_work_blocks_change',
           message: live.obligations.hasLost()
             ? `Claude is still holding ${tasks} for this thread whose result may not arrive. ${cause} and would end that work. Press Stop to release it now, then send again.`
-            : `Claude is still running ${tasks} for this thread. ${cause} and would end that work. Wait for it to finish or press Stop, then send again.`,
+            : unshown > 0
+              ? `Claude already read the result of ${unshown === 1 ? 'a background task' : `${unshown} background tasks`} for this thread, but its answer was cut off or could not be shown. ${cause} and would end that work. Press Stop to release it now, then send again.`
+              : `Claude is still running ${tasks} for this thread. ${cause} and would end that work. Wait for it to finish or press Stop, then send again.`,
           errorInfo: { category: 'unavailable', retryable: false }
         })
       }

@@ -679,6 +679,23 @@ describe('OrchestratorService.stopThread through a real orchestrator (issue #142
     expect(s.generation(s.childThreadId)).toBe(1)
   })
 
+  it('a replayed Stop does not close the provider process under a channel turn that has no run of its own', async () => {
+    const s = await scene()
+    await s.d.orch.stopThread(s.parentId, 'user', { clientRequestId: 'once' })
+    await waitFor(() => s.terminal(s.parentRunId) && s.terminal(s.delegation.childRunId), 'both runs to end')
+    // A channel turn starts on the parent after the Stop; it is not an engine run.
+    const channelTurns = (s.d.orch as unknown as { channelTurns: Map<string, unknown> }).channelTurns
+    channelTurns.set(s.parentId, { abort: new AbortController(), pendingSteer: [], promotedSteerIds: [] })
+    try {
+      s.adapter.providerStops.length = 0
+      await s.d.orch.stopThread(s.parentId, 'user', { clientRequestId: 'once' })
+      // The subagent has nothing newer, so its process is still ended; the parent's channel turn is newer work.
+      expect(s.adapter.providerStops).toEqual([s.childThreadId])
+    } finally {
+      channelTurns.delete(s.parentId)
+    }
+  })
+
   describe('what a Stop aims at, and what it leaves', () => {
     it('aborts only the turn of the run it names: a turn of a later run is not its to abort', async () => {
       const s = await scene()

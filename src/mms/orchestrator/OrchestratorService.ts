@@ -1436,11 +1436,13 @@ export class OrchestratorService extends EventEmitter {
    * Whether the thread has work the replayed Stop did not cover: a run admitted at or after the generation
    * the Stop raised it to (any status; its process may still hold helpers), or any run that is still not
    * terminal (the original Stop already ended its provider work once, and the stale-run Stop uses the same
-   * guard). An unknown generation counts as newer work, so nothing is closed on a guess.
+   * guard). A turn in this process that is not an engine run (a channel turn) is newer work too. An unknown
+   * generation counts as newer work, so nothing is closed on a guess.
    */
   private hasWorkAfterStop(threadId: string, generation: number | undefined): boolean {
     const engine = this.runEngine
     if (!engine || generation === undefined) return true
+    if (this.hasLocalTurn(threadId)) return true
     return engine.listRuns(threadId, { limit: 200 }).some((run) => !TERMINAL_RUN_STATUSES.has(run.status) || runStopGeneration(engine.store, run.runId) >= generation)
   }
 

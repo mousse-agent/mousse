@@ -308,10 +308,17 @@ export class BackgroundObligations {
     return changed
   }
 
-  /** Some task's result may never arrive. */
+  /** Some task's result may never arrive (a cancel may have dropped its notification). */
   hasLost(): boolean {
-    for (const consumer of this.consumers.values()) if (consumer === LOST || consumer === DISCARDED) return true
+    for (const consumer of this.consumers.values()) if (consumer === LOST) return true
     return false
+  }
+
+  /** How many tasks Claude read but no turn showed (a wake that was cut off or could not be run): see `DISCARDED`. */
+  unshownCount(): number {
+    let count = 0
+    for (const consumer of this.consumers.values()) if (consumer === DISCARDED) count++
+    return count
   }
 
   /** A turn whose result came from the wake that folded its message in saw the notifications a cut-off turn left: they are its to commit. */
@@ -736,7 +743,10 @@ export class LiveSession<Turn = unknown> {
     const query = this.query
     // A turn that pushed nothing has nothing in flight; one that did, or a wake, is interrupted. An
     // interrupt of an idle query is harmless, and one that fails leaves the next turn to find out.
-    if (query && !this.dead && (run.ids.size > 0 || run.kind === 'continuation')) {
+    // A turn whose result already arrived (held back for a steer) is over: an interrupt now would hit whatever
+    // Claude runs next, such as the wake for a task that just finished.
+    const over = run.resultSeen && run.owned.size === 0
+    if (query && !this.dead && !over && (run.ids.size > 0 || run.kind === 'continuation')) {
       // The interrupt is sent: a frame of the wake that arrives later must not send another.
       if (run.kind === 'continuation') run.interruptSent = true
       void this.interruptFor(run, query)
