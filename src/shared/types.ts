@@ -1,5 +1,5 @@
 import type { ModelOverride } from './providerInstances'
-export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'documents'
+export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'review' | 'documents'
 
 export type ScheduledJobState = 'scheduled' | 'running' | 'paused' | 'completed' | 'error'
 

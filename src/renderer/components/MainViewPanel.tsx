@@ -2,6 +2,7 @@ import { ProjectTerminalPanel } from './ProjectTerminalPanel'
 import { BrowserPanel } from './BrowserPanel'
 import { FilesPanel } from './FilesPanel'
 import { GitPanel } from './GitPanel'
+import { ReviewPanel } from './review/ReviewPanel'
 import { DocumentPanel } from './DocumentPanel'
 import { KeepMounted, KeepMountedStack } from './KeepMounted'
 import { useAppStore } from '../stores/appStore'
@@ -36,6 +37,7 @@ export function MainViewPanel() {
   const transientPanel = (() => {
     switch (mainView) {
       case 'git': return <GitPanel />
+      case 'review': return <ReviewPanel />
       case 'documents': return <DocumentPanel />
       default: return null
     }

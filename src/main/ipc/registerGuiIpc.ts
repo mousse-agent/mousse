@@ -1759,11 +1759,6 @@ export function registerGuiIpc(
   registerHandler('git:status', async (_e, projectId?: string, cwd?: string) =>
     gitService.getStatus(await resolveGitCwd(projectId, cwd))
   )
-  registerHandler(
-    'git:diff',
-    async (_e, filePath: string, staged: boolean, projectId?: string, cwd?: string) =>
-      gitService.getDiff(await resolveGitCwd(projectId, cwd), filePath, staged)
-  )
   registerHandler('git:log', async (_e, limit?: number, projectId?: string, cwd?: string) =>
     gitService.getLog(await resolveGitCwd(projectId, cwd), limit)
   )

@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { Bot, FileText, FolderOpen, GitBranch, Globe, Terminal } from '../lib/icons'
+import { Bot, Eye, FileText, FolderOpen, GitBranch, Globe, Terminal } from '../lib/icons'
 import { SURFACE_CHOICES, openSurface, type SurfaceChoice } from '../lib/surfaces'
 import { useAppStore } from '../stores/appStore'
 
@@ -8,6 +8,7 @@ const ICONS = {
   terminal: Terminal,
   files: FolderOpen,
   git: GitBranch,
+  review: Eye,
   agents: Bot,
   documents: FileText
 } as const
