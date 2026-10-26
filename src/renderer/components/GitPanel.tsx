@@ -1,16 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { DiffEditor, type BeforeMount, type DiffOnMount } from '@monaco-editor/react'
-import type { Monaco } from '@monaco-editor/react'
 import { Cloud, Download, FolderOpen, GitBranch, Milestone, RefreshCw } from '../lib/icons'
 import type { GitCommit, GitFileChange } from '../../shared/types'
 import type { GitHubAvailability, GitHubRepositoryVisibility } from '../../shared/github'
 import { useActiveProjectLocation } from '../hooks/useActiveProjectPath'
 import { useAppStore } from '../stores/appStore'
 import { useGitStatus } from '../stores/gitStatusStore'
-import { CODE_FONT } from '../lib/typography'
-import { applyEditorTheme, MOUSSE_EDITOR_THEME } from '../utils/monacoTheme'
-import { languageForPath } from '../utils/fileEditor'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
+import { ReviewDiffPane, WhitespaceToggle } from './review/ReviewDiffPane'
 
 const STATUS_LABELS: Record<GitFileChange['status'], string> = {
   modified: 'M',
@@ -27,28 +23,6 @@ const MIN_SECTION_RATIO = 0.15
 const MAX_SECTION_RATIO = 0.85
 
 type GitSectionId = 'staged' | 'changes' | 'untracked' | 'commits'
-
-function parseUnifiedDiff(diff: string): { original: string; modified: string } {
-  const original: string[] = []
-  const modified: string[] = []
-  let inHunk = false
-
-  for (const line of diff.split('\n')) {
-    if (line.startsWith('@@')) {
-      inHunk = true
-      continue
-    }
-    if (!inHunk || line.startsWith('\\ No newline')) continue
-    if (line.startsWith('+')) modified.push(line.slice(1))
-    else if (line.startsWith('-')) original.push(line.slice(1))
-    else if (line.startsWith(' ')) {
-      original.push(line.slice(1))
-      modified.push(line.slice(1))
-    }
-  }
-
-  return { original: original.join('\n'), modified: modified.join('\n') }
-}
 
 function groupChanges(changes: GitFileChange[]) {
   const staged = changes.filter((c) => c.staged && c.status !== 'untracked')
@@ -148,9 +122,21 @@ export function GitPanel() {
     [projectId, projectPath, projects]
   )
   const { status, commits, loading, refresh } = useGitStatus(projectPath)
+  const reviewIgnoreWhitespace = useAppStore((state) => state.reviewIgnoreWhitespace)
+  // The daemon resolves the folder the status came from: a thread's worktree through the thread,
+  // any other project folder through the project.
+  const threadInProject = useAppStore((state) => {
+    const thread = state.threads.find((item) => item.id === state.activeThreadId)
+    return thread && thread.projectId && thread.projectId === projectId ? thread.id : null
+  })
+  const reviewTarget = useMemo(
+    () => (threadInProject ? { threadId: threadInProject } : projectId ? { projectId } : null),
+    [threadInProject, projectId]
+  )
+  // Reload the open diff in place whenever the status refreshes.
+  const [diffVersion, setDiffVersion] = useState(0)
+  useEffect(() => setDiffVersion((value) => value + 1), [status])
   const [selected, setSelected] = useState<{ path: string; staged: boolean } | null>(null)
-  const [diff, setDiff] = useState('')
-  const [diffLoading, setDiffLoading] = useState(false)
   const [githubStatus, setGithubStatus] = useState<GitHubAvailability | null>(null)
   const [githubBusy, setGithubBusy] = useState(false)
   const [githubError, setGithubError] = useState('')
@@ -165,13 +151,11 @@ export function GitPanel() {
     untracked: 1,
     commits: 1
   })
-  const monacoRef = useRef<Monaco | null>(null)
   const sectionElsRef = useRef<Partial<Record<GitSectionId, HTMLDivElement | null>>>({})
   const draggingDivider = useRef<{ upper: GitSectionId; lower: GitSectionId } | null>(null)
 
   useEffect(() => {
     setSelected(null)
-    setDiff('')
     setGithubError('')
     setGithubNotice('')
   }, [projectPath])
@@ -243,31 +227,10 @@ export function GitPanel() {
     }
   }, [cloneDestination, cloneRepository, refreshGitHubStatus])
 
-  const loadDiff = useCallback(
-    async (path: string, staged: boolean) => {
-      if (!projectPath) return
-      setSelected({ path, staged })
-      setDiff('')
-      setDiffLoading(true)
-      try {
-        const text = await window.mousse.git.diff(path, staged, undefined, projectPath)
-        setDiff(text || '(No diff)')
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        setDiff(`Could not load diff: ${message}`)
-      } finally {
-        setDiffLoading(false)
-      }
-    },
-    [projectPath]
-  )
-
   const groups = useMemo(
     () => (status?.changes ? groupChanges(status.changes) : null),
     [status?.changes]
   )
-
-  const diffDocuments = useMemo(() => parseUnifiedDiff(diff), [diff])
 
   const onDividerMouseDown = useCallback((upper: GitSectionId, lower: GitSectionId) => {
     draggingDivider.current = { upper, lower }
@@ -315,24 +278,6 @@ export function GitPanel() {
       window.removeEventListener('mouseup', onMouseUp)
     }
   }, [])
-
-  useEffect(() => {
-    const updateTheme = () => monacoRef.current && applyEditorTheme(monacoRef.current)
-    const observer = new MutationObserver(updateTheme)
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'style'] })
-    const media = window.matchMedia('(prefers-color-scheme: light)')
-    media.addEventListener('change', updateTheme)
-    return () => {
-      observer.disconnect()
-      media.removeEventListener('change', updateTheme)
-    }
-  }, [])
-
-  const beforeMount: BeforeMount = (monaco) => applyEditorTheme(monaco)
-  const onMount: DiffOnMount = (_editor, monaco) => {
-    monacoRef.current = monaco
-    applyEditorTheme(monaco)
-  }
 
   const bindSectionRef = (id: GitSectionId) => (el: HTMLDivElement | null) => {
     sectionElsRef.current[id] = el
@@ -412,7 +357,7 @@ export function GitPanel() {
           title="Staged"
           items={groups.staged}
           selected={selected}
-          onSelect={(path, staged) => void loadDiff(path, staged)}
+          onSelect={(path, staged) => setSelected({ path, staged })}
           flex={sectionFlex.staged}
           sectionRef={bindSectionRef('staged')}
         />
@@ -429,7 +374,7 @@ export function GitPanel() {
           title="Changes"
           items={groups.unstaged}
           selected={selected}
-          onSelect={(path, staged) => void loadDiff(path, staged)}
+          onSelect={(path, staged) => setSelected({ path, staged })}
           flex={sectionFlex.changes}
           sectionRef={bindSectionRef('changes')}
         />
@@ -446,7 +391,7 @@ export function GitPanel() {
           title="Untracked"
           items={groups.untracked}
           selected={selected}
-          onSelect={(path, staged) => void loadDiff(path, staged)}
+          onSelect={(path, staged) => setSelected({ path, staged })}
           flex={sectionFlex.untracked}
           sectionRef={bindSectionRef('untracked')}
         />
@@ -498,36 +443,17 @@ export function GitPanel() {
           <span className="panel-toolbar-path">
             {selected ? `${selected.staged ? 'Staged' : 'Unstaged'}: ${selected.path}` : 'Diff'}
           </span>
+          <WhitespaceToggle />
         </div>
-        {diffLoading ? (
-          <div className="git-diff-empty">Loading diff…</div>
-        ) : selected ? (
-          <div className="git-diff-content">
-            <DiffEditor
-              key={`${selected.staged ? 'staged' : 'unstaged'}:${selected.path}`}
-              original={diffDocuments.original}
-              modified={diffDocuments.modified}
-              language={languageForPath(selected.path)}
-              theme={MOUSSE_EDITOR_THEME}
-              beforeMount={beforeMount}
-              onMount={onMount}
-              options={{
-                automaticLayout: true,
-                readOnly: true,
-                originalEditable: false,
-                minimap: { enabled: false },
-                lineNumbers: 'on',
-                scrollBeyondLastLine: false,
-                folding: true,
-                renderWhitespace: 'selection',
-                wordWrap: 'off',
-                fontFamily: CODE_FONT,
-                fontSize: 12
-              }}
-            />
-          </div>
+        {selected && !reviewTarget ? (
+          <div className="git-diff-empty">This folder does not belong to a project, so its diff is not available.</div>
         ) : (
-          <div className="git-diff-empty">Select a changed file to view its diff</div>
+          <ReviewDiffPane
+            target={{ ...reviewTarget, scope: { kind: 'worktree', staged: selected?.staged } }}
+            path={selected?.path ?? null}
+            version={diffVersion}
+            ignoreWhitespace={reviewIgnoreWhitespace}
+          />
         )}
       </div>
     </div>

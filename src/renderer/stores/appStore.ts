@@ -117,6 +117,9 @@ interface AppState {
   /** @deprecated use turnStates[threadId]?.phase instead â€” kept for compat */
   loading: boolean
   appInfo: { platform: string; repoRoot: string; llmProvider: string; deviceName?: string } | null
+  /** Review and Git diffs ignore leading/trailing whitespace when highlighting. View only: counts stay total. */
+  reviewIgnoreWhitespace: boolean
+  setReviewIgnoreWhitespace: (ignore: boolean) => void
   threadsSidebarView: 'projects' | 'threads' | 'chats'
   setThreadsSidebarView: (view: 'projects' | 'threads' | 'chats') => void
   sidebarMode: 'projects' | 'chats'
@@ -303,7 +306,8 @@ const personalWorkspaceKeys = [
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
   'sidebarMode', 'sidebarWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
   'openedSurfaceKinds',
-  'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView'
+  'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView',
+  'reviewIgnoreWhitespace'
 ] as const
 let profileActivated = false
 
@@ -385,6 +389,8 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   browserTabs: [],
   browserActiveTabByThread: {},
   browserElementAttachmentsByThread: {},
+  reviewIgnoreWhitespace: true,
+  setReviewIgnoreWhitespace: (reviewIgnoreWhitespace) => set({ reviewIgnoreWhitespace }),
   threadsSidebarView: 'projects',
   setThreadsSidebarView: (threadsSidebarView) => set({ threadsSidebarView }),
   composerWorkspaceDrafts: {},
@@ -585,6 +591,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       composerWorkspaceDrafts: {},
       composerDrafts: {},
       composerReferences: {},
+      reviewIgnoreWhitespace: true,
       sidebarMode: 'projects' as 'projects' | 'chats',
       mainView: DEFAULT_MAIN_VIEW as MainView,
       openedSurfaceKinds: [] as MainView[],

@@ -1475,7 +1475,7 @@ export const MessageList = memo(function MessageList({
                           })()}
                         </div>
                         {!isTurnStreaming && (
-                          <TurnEditSummary messages={turn.assistantMsgs} />
+                          <TurnEditSummary messages={turn.assistantMsgs} turnId={(turn.userMsg as { turnId?: string } | undefined)?.turnId} />
                         )}
                         {showToolbar ? (
                           <MessageToolbar

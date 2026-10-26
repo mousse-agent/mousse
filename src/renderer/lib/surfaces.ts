@@ -12,7 +12,8 @@ export const SURFACE_CHOICES: SurfaceChoice[] = [
   { id: 'browser', label: 'Browser', shortcut: 'B' },
   { id: 'terminal', label: 'Terminal', shortcut: 'T' },
   { id: 'files', label: 'Files', shortcut: 'F' },
-  { id: 'git', label: 'Diff', shortcut: 'D' }
+  { id: 'git', label: 'Diff', shortcut: 'D' },
+  { id: 'review', label: 'Review', shortcut: 'R' }
 ]
 
 export interface SurfaceTabItem {
@@ -56,6 +57,8 @@ export function surfaceTabItems(input: {
       items.push({ key: 'files', view: 'files', label: 'Files', closable: true })
     } else if (kind === 'git') {
       items.push({ key: 'git', view: 'git', label: 'Diff', closable: true })
+    } else if (kind === 'review') {
+      items.push({ key: 'review', view: 'review', label: 'Review', closable: true })
     }
   }
   input.documents.forEach((tab) => {

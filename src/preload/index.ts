@@ -419,8 +419,6 @@ const api = {
   git: {
     status: (projectId?: string, cwd?: string): Promise<GitStatusSnapshot> =>
       ipcRenderer.invoke('git:status', projectId, cwd),
-    diff: (filePath: string, staged: boolean, projectId?: string, cwd?: string): Promise<string> =>
-      ipcRenderer.invoke('git:diff', filePath, staged, projectId, cwd),
     log: (limit?: number, projectId?: string, cwd?: string): Promise<GitCommit[]> =>
       ipcRenderer.invoke('git:log', limit, projectId, cwd),
     branches: (projectId?: string, cwd?: string): Promise<GitBranchInfo> =>

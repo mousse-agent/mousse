@@ -2,7 +2,8 @@ import { useMemo, useState } from "react";
 import type { UIMessage } from "ai";
 import { ChevronRight, FileText, Folder } from "../../../lib/icons";
 import { useActiveProjectPath } from "../../../hooks/useActiveProjectPath";
-import { openSurface } from "../../../lib/surfaces";
+import { useAppStore } from "../../../stores/appStore";
+import { openTurnInReview } from "../../../components/review/openReview";
 import { extractFilePathArg } from "./utils/tool-adapters";
 import { isRecord, isV5ToolPart } from "./utils/assistant-blocks";
 
@@ -166,7 +167,7 @@ function Stat({ added, removed }: { added: number; removed: number }) {
   );
 }
 
-export function TurnEditSummary({ messages }: { messages: UIMessage[] }) {
+export function TurnEditSummary({ messages, turnId }: { messages: UIMessage[]; turnId?: string }) {
   const root = useActiveProjectPath();
   const summary = useMemo(() => collectEdits(messages, root), [messages, root]);
   const [open, setOpen] = useState(true);
@@ -189,10 +190,10 @@ export function TurnEditSummary({ messages }: { messages: UIMessage[] }) {
         <button
           type="button"
           className="turn-edits-open"
-          onClick={() => openSurface("git")}
+          onClick={() => void openTurnInReview(useAppStore.getState().activeThreadId, turnId)}
         >
           <FileText size={14} strokeWidth={1.8} />
-          Open diff
+          Review changes
         </button>
       </div>
       {open && (

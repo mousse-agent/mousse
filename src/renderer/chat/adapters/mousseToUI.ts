@@ -170,6 +170,8 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
       // ai SDK UIMessage expects createdAt? agent-elements uses Date|string, so ISO is fine
       // @ts-ignore - allow string for compat with ai 5
       createdAt: msg.timestamp,
+      // The turn a user message started, for the row that opens that turn in Review.
+      ...(msg.turnId ? { turnId: msg.turnId } : {}),
       metadata: msg.responseMetadata ? { ...msg.responseMetadata } : undefined,
     } as unknown as UIMessage
 

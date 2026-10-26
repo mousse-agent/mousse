@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { FileText, FolderOpen, GitBranch, Globe, Plus, Terminal, X } from '../lib/icons'
+import { Eye, FileText, FolderOpen, GitBranch, Globe, Plus, Terminal, X } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { surfaceTabItems, type SurfaceTabItem } from '../lib/surfaces'
@@ -11,6 +11,7 @@ const TAB_ICONS = {
   terminal: Terminal,
   files: FolderOpen,
   git: GitBranch,
+  review: Eye,
   documents: FileText
 } as const
 
