@@ -181,7 +181,8 @@ export interface HarnessDriver {
   readonly userMcp?: 'native' | 'proxy'
   /**
    * The runtime hands a Mousse MCP tool result's images to its model, and the models it lists read
-   * images (a browser screenshot reaches the model). A custom model's own capabilities win.
+   * images (a browser screenshot reaches the model). A custom model's own capabilities win. An ACP
+   * agent without it reads images when its `initialize` says so (`promptCapabilities.image`).
    */
   readonly mcpImageResults?: boolean
   /** Lenient decoder of an instance's stored `config`: unknown or malformed fields fall back. */

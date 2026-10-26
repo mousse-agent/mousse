@@ -225,6 +225,10 @@ describe('browser tools of a vendor turn', () => {
     await d.send('Look again')
     expect(seen[1].turn).toMatchObject({ browser: { vision: false } })
     expect(seen[1].result).toMatchObject({ isError: true, text: expect.stringMatching(/does not support image input/) })
+    // The turn preamble offers a screenshot only when it can reach the model.
+    expect(vendor.bridges[0].turnPreamble).toMatch(/Usable now: .*browser_screenshot/)
+    expect(vendor.bridges[1].turnPreamble).toMatch(/Usable now: .*browser_observe/)
+    expect(vendor.bridges[1].turnPreamble).not.toMatch(/browser_screenshot/)
     expect(browser.dispatched.map((call) => call.name)).toEqual(['browser_screenshot'])
   }, 30_000)
 

@@ -254,7 +254,8 @@ export interface HarnessCatalog {
   customModel(instanceId: string, modelId: string): CustomModel | undefined
   /**
    * Images in a Mousse tool's result reach the model a runtime with its own loop runs (the browser's
-   * vision): a custom model's stated capability, else the driver's `mcpImageResults`.
+   * vision): a custom model's stated capability, else the driver's `mcpImageResults`, else an ACP
+   * agent's own word in `initialize` (`promptCapabilities.image`). Unknown is no.
    */
   toolImages(instanceId: string, modelId: string): boolean
 }
@@ -524,7 +525,10 @@ export class Harness implements HarnessGateway {
         if (!record) return false
         const baseId = parseThinkingSuffixFromModelId(modelId).baseId
         const custom = this.prefs.get(instanceId).custom.find((model) => model.id === modelId || model.id === baseId)
-        return custom ? custom.capabilities.images : record.driver.mcpImageResults === true
+        if (custom) return custom.capabilities.images
+        if (record.driver.mcpImageResults === true) return true
+        const prompt = this.currentFacts(instanceId)?.agentCapabilities?.promptCapabilities
+        return typeof prompt === 'object' && prompt !== null && (prompt as { image?: unknown }).image === true
       }
     }
     this.legacy = {

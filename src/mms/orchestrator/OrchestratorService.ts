@@ -1769,6 +1769,8 @@ export class OrchestratorService extends EventEmitter {
       // A Plan turn cannot start threads; everything else listed is usable when available now.
       .filter((tool) => !(turn.modeCeiling === 'plan' && tool.access === 'startsThreads'))
       .filter((tool) => (tool.available?.(turn) ?? true) === true)
+      // A screenshot is refused when it cannot reach the model; the preamble does not offer it.
+      .filter((tool) => !(tool.name === 'browser_screenshot' && turn.browser && !turn.browser.vision))
       .map((tool) => tool.name)
   }
 
