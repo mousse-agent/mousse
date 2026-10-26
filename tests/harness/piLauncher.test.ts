@@ -102,6 +102,15 @@ describe('Pi launcher: environment', () => {
     expect(env).toMatchObject({ AWS_PROFILE: 'work', AWS_REGION: 'eu-west-1', GOOGLE_CLOUD_PROJECT: 'p' })
   })
 
+  it('keeps the Windows variables Pi needs to find Git Bash and run its shell', () => {
+    const windows = {
+      ProgramFiles: 'C:\\Program Files', 'ProgramFiles(x86)': 'C:\\Program Files (x86)', ProgramW6432: 'C:\\Program Files',
+      SystemRoot: 'C:\\Windows', SystemDrive: 'C:', ComSpec: 'C:\\Windows\\system32\\cmd.exe', PATHEXT: '.COM;.EXE',
+      LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local', Path: 'C:\\Windows\\System32'
+    }
+    expect(launch({ base: windows }).env).toMatchObject(windows)
+  })
+
   it('pins the AWS SDK to one attempt in standard mode, after anything inherited or configured', () => {
     const env = launch({
       base: { AWS_MAX_ATTEMPTS: '5', AWS_RETRY_MODE: 'adaptive', aws_retry_mode: 'legacy', AWS_PROFILE: 'work' },

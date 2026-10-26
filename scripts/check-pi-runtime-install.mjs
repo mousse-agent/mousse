@@ -50,8 +50,11 @@ const userHome = join(scratch, 'user')
 mkdirSync(home)
 mkdirSync(userHome)
 
-// Only what a process needs to start; no credentials, and a user home with nothing in it.
-const keep = ['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'windir', 'WINDIR', 'ComSpec', 'COMSPEC', 'TEMP', 'TMP', 'TMPDIR', 'LANG']
+// Only what a process needs to start, and on Windows where programs are installed (Pi looks for
+// Git Bash under %ProgramFiles% before PATH, where `bash.exe` may be WSL's); no credentials, and a
+// user home with nothing in it.
+const keep = ['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'SystemDrive', 'windir', 'WINDIR', 'ComSpec', 'COMSPEC',
+  'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'TEMP', 'TMP', 'TMPDIR', 'LANG']
 const env = Object.fromEntries(keep.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]))
 Object.assign(env, {
   HOME: userHome,
@@ -154,8 +157,11 @@ ${stderr}`)
   const pidFile = join(scratch, 'grandchild.pid').replace(/\\/g, '/')
   const program = `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`
   const command = `${JSON.stringify(exec.replace(/\\/g, '/'))} -e ${JSON.stringify(program).replace(/\$/g, '\\$')}`
-  const shell = send({ type: 'bash', command }).catch((error) => error)
-  await until(() => existsSync(pidFile) || child.exitCode !== null, 'the grandchild to start')
+  let shellEnded
+  const shell = send({ type: 'bash', command }).then((response) => (shellEnded = response), (error) => (shellEnded = error))
+  await until(() => existsSync(pidFile) || shellEnded !== undefined || child.exitCode !== null, 'the grandchild to start')
+  if (!existsSync(pidFile))
+    throw new Error(`Pi's shell ended without starting the grandchild: ${JSON.stringify(shellEnded?.data ?? shellEnded?.error ?? shellEnded?.message ?? null)}`)
   const grandchild = Number(readFileSync(pidFile, 'utf8'))
   fixtures.add(grandchild)
   if (!alive(grandchild)) throw new Error('The grandchild was not running')

@@ -40,6 +40,12 @@ afterEach(() => {
   for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 })
 
+/**
+ * What a process needs to start, and on Windows where programs are installed: Pi looks for Git
+ * Bash under %ProgramFiles% before PATH, where `bash.exe` may be WSL's.
+ */
+const SYSTEM_VARIABLES = ['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'SystemDrive', 'windir', 'ComSpec', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'TEMP', 'TMP', 'TMPDIR']
+
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), 'mousse-pi-process-'))
   scratch.push(dir)
@@ -49,7 +55,7 @@ function setup() {
   mkdirSync(userHome)
   // A clean environment with an empty user home, so nothing of the developer's reaches the child.
   const base: NodeJS.ProcessEnv = {
-    ...Object.fromEntries(['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'windir', 'ComSpec', 'TEMP', 'TMP', 'TMPDIR'].filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]])),
+    ...Object.fromEntries(SYSTEM_VARIABLES.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]])),
     HOME: userHome,
     USERPROFILE: userHome,
     OPENAI_API_KEY: 'fake-openai-key',
@@ -155,8 +161,13 @@ describe('Pi runtime process', () => {
     const pidFile = join(dir, 'grandchild.pid').replace(/\\/g, '/')
     const program = `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000)`
     const shell = started.client.send({ type: 'bash', command: `${JSON.stringify(process.execPath.replace(/\\/g, '/'))} -e ${JSON.stringify(program)}` })
-    void shell.catch(() => {})
-    await vi.waitFor(() => expect(existsSync(pidFile)).toBe(true), { timeout: 15_000, interval: 50 })
+    let shellEnded: string | undefined
+    void shell.then((result) => { shellEnded = JSON.stringify(result) }, () => {})
+    await vi.waitFor(() => {
+      // A shell that ends before the grandchild starts is a setup failure: show what it said.
+      if (shellEnded) throw new Error(`Pi's shell ended without starting the grandchild: ${shellEnded}`)
+      expect(existsSync(pidFile)).toBe(true)
+    }, { timeout: 15_000, interval: 50 })
     const grandchild = Number(readFileSync(pidFile, 'utf8'))
     fixtures.push(grandchild)
     expect(alive(grandchild)).toBe(true)
