@@ -13,7 +13,7 @@ import {
   type ClaudeLiveHost,
   type ClaudeSubscriptionChatInput
 } from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import { LiveSession, type LiveTimings } from '../src/mms/providers/claudeSubscription/liveSession'
+import { BackgroundObligations, LiveSession, UNSURE_MEMORY_MS, type LiveTimings } from '../src/mms/providers/claudeSubscription/liveSession'
 import { FakeClaudeCli, notification, resultFrame, roster, SESSION, textDelta, toolResult, toolStart } from './run/fakeClaudeCli'
 
 const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -1779,6 +1779,57 @@ describe('background helpers as the real Claude Code reports them', () => {
     expect(await wake).toBe('B text')
   })
 
+  it('a cut-off turn whose aborted result never names it stops owing once the next turn\'s own frame arrives: a task that finishes afterwards opens its wake', async () => {
+    const f = fixture()
+    shell(f)
+    const process = await cutOff(f)
+    // The aborted result never comes. The next turn starts and Claude answers it.
+    f.cli.reply = (message, self) => self.answer(String(message.uuid), 'next')
+    expect(await f.turn({ history: 'h' }, 'h')).toBe('next')
+    process.finishTask('bash-1')
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    expect(f.host.continuationStarted).toHaveBeenLastCalledWith('thread', expect.objectContaining({ taskIds: ['bash-1'] }))
+  })
+
+  it('the same when the later turn\'s first named event is its result', async () => {
+    const f = fixture()
+    shell(f)
+    const process = await cutOff(f)
+    f.cli.reply = (message, self) => self.emit(resultFrame({ uuids: [String(message.uuid)], text: 'next' }))
+    expect(await f.turn({ history: 'h' }, 'h')).toBe('next')
+    process.finishTask('bash-1')
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+  })
+
+  it('a late frame naming an older cut-off turn does not pass a newer cut-off turn over', async () => {
+    const hooks = { backgroundWork: vi.fn(), continuationStarted: vi.fn(), ended: vi.fn() }
+    const session = new LiveSession('thread', hooks)
+    const cli = new FakeClaudeCli()
+    cli.reply = undefined
+    session.attach(cli.query({ prompt: session.queue, options: {} as never }))
+    const process = cli.last
+    const message = { type: 'user', message: { role: 'user', content: 'go' }, parent_tool_use_id: null, session_id: '' } as never
+    const older = session.beginRun(() => undefined)
+    const olderId = session.push(older, message)
+    const newer = session.beginRun(() => undefined)
+    const newerId = session.push(newer, message)
+    // Both started (named by frames) while live, then both were cut off before any result.
+    process.emit(textDelta('a', olderId), textDelta('b', newerId))
+    await later(20)
+    session.abandon(older)
+    session.abandon(newer)
+    expect(session.owedResults).toBe(2)
+    // A frame naming the older turn passes nothing over: the newer turn still owes its result.
+    process.emit(textDelta('late a', olderId))
+    await later(20)
+    expect(session.owedResults).toBe(2)
+    // A frame naming the newer turn shows Claude moved past the older one.
+    process.emit(textDelta('late b', newerId))
+    await later(20)
+    expect(session.owedResults).toBe(1)
+    session.close()
+  })
+
   it('a cut-off wake whose result was already held back for a steer ends at once and sends no interrupt, so the next wake is not dropped or hit', async () => {
     const f = fixture()
     startedWith(f, { id: 'bash-1', type: 'local_bash' }, { id: 'bash-2', type: 'local_bash' })
@@ -1840,10 +1891,145 @@ describe('background helpers as the real Claude Code reports them', () => {
     // It does come after all.
     process.emit(textDelta('B text'))
     await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(2))
-    expect(f.host.continuationStarted).toHaveBeenLastCalledWith('thread', expect.objectContaining({ taskIds: ['bash-2'] }))
+    // bash-2 was read by the open wake, not carried, and its note still says what the task reported.
+    expect(f.host.continuationStarted).toHaveBeenLastCalledWith('thread', expect.objectContaining({ taskIds: ['bash-2'], summaries: ['task bash-2 completed'] }))
     const wakeB = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined })
     process.emit(resultFrame({ text: 'B text', origin: 'task-notification' }))
     expect(await wakeB).toBe('B text')
+  })
+
+  /** A session with tasks `bash-1`..`bash-n` listed, each carried and then cleared on a guess (so remembered in `recent`). */
+  const rememberedTasks = async (...ids: string[]) => {
+    const hooks = { backgroundWork: vi.fn(), continuationStarted: vi.fn(), ended: vi.fn() }
+    const session = new LiveSession('thread', hooks)
+    const cli = new FakeClaudeCli()
+    cli.reply = undefined
+    session.attach(cli.query({ prompt: session.queue, options: {} as never }))
+    const process = cli.last
+    process.emit(roster(...ids.map((id) => ({ id }))))
+    await vi.waitFor(() => expect(session.obligations.size).toBe(ids.length))
+    for (const id of ids) session.obligations.carry(id, `task ${id} completed`)
+    expect(session.obligations.clearDiscarded(session.obligations.discardedIds())).toBe(true)
+    expect(session.obligations.recentlyCleared()).toEqual(ids)
+    return { hooks, session, process }
+  }
+
+  it('two tasks cleared on a guess get one late wake each, oldest first', async () => {
+    const { hooks, session, process } = await rememberedTasks('bash-1', 'bash-2')
+    process.emit(textDelta('first wake'))
+    await vi.waitFor(() => expect(hooks.continuationStarted).toHaveBeenCalledTimes(1))
+    expect(hooks.continuationStarted).toHaveBeenLastCalledWith(expect.anything(), { id: expect.any(String), taskIds: ['bash-1'], summaries: ['task bash-1 completed'] })
+    process.emit(resultFrame({ text: 'first wake', origin: 'task-notification' }))
+    await later(20)
+    process.emit(textDelta('second wake'))
+    await vi.waitFor(() => expect(hooks.continuationStarted).toHaveBeenCalledTimes(2))
+    expect(hooks.continuationStarted).toHaveBeenLastCalledWith(expect.anything(), { id: expect.any(String), taskIds: ['bash-2'], summaries: ['task bash-2 completed'] })
+    session.close()
+  })
+
+  it('an unlisted task\'s notification labels the next late wake with that task, and the remembered task\'s wake still opens afterwards', async () => {
+    const { hooks, session, process } = await rememberedTasks('bash-2')
+    process.emit(notification('opaque'))
+    await later(20)
+    process.emit(textDelta('a wake'))
+    await vi.waitFor(() => expect(hooks.continuationStarted).toHaveBeenCalledTimes(1))
+    expect(hooks.continuationStarted).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ taskIds: ['opaque'], summaries: ['task opaque completed'] }))
+    expect(session.obligations.recentlyCleared()).toEqual(['bash-2'])
+    process.emit(resultFrame({ text: 'a wake', origin: 'task-notification' }))
+    await later(20)
+    process.emit(textDelta('another wake'))
+    await vi.waitFor(() => expect(hooks.continuationStarted).toHaveBeenCalledTimes(2))
+    expect(hooks.continuationStarted).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ taskIds: ['bash-2'], summaries: ['task bash-2 completed'] }))
+    session.close()
+  })
+
+  it('a stopped notification for an unlisted task changes no label', async () => {
+    const { hooks, session, process } = await rememberedTasks('bash-2')
+    process.emit(notification('opaque', 'stopped'))
+    await later(20)
+    process.emit(textDelta('a wake'))
+    await vi.waitFor(() => expect(hooks.continuationStarted).toHaveBeenCalledTimes(1))
+    expect(hooks.continuationStarted).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ taskIds: ['bash-2'] }))
+    session.close()
+  })
+
+  it('a stray label survives the aborted result of a cut-off turn', async () => {
+    const hooks = { backgroundWork: vi.fn(), continuationStarted: vi.fn(), ended: vi.fn() }
+    const session = new LiveSession('thread', hooks)
+    const cli = new FakeClaudeCli()
+    cli.reply = undefined
+    session.attach(cli.query({ prompt: session.queue, options: {} as never }))
+    const process = cli.last
+    const run = session.beginRun(() => undefined)
+    const id = session.push(run, { type: 'user', message: { role: 'user', content: 'go' }, parent_tool_use_id: null, session_id: '' } as never)
+    process.emit(textDelta('working', id))
+    await later(20)
+    session.abandon(run)
+    // The cut-off turn still owes its result, so no live turn folds the notification in.
+    process.emit(notification('opaque'))
+    await later(20)
+    process.emit(resultFrame({ uuids: [id], terminalReason: 'aborted_streaming' }))
+    await later(20)
+    expect(session.owedResults).toBe(0)
+    process.emit(textDelta('a wake'))
+    await vi.waitFor(() => expect(hooks.continuationStarted).toHaveBeenCalledTimes(1))
+    expect(hooks.continuationStarted).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ taskIds: ['opaque'] }))
+    session.close()
+  })
+
+  describe('the summaries of tasks', () => {
+    const listed = (...ids: string[]) => {
+      const obligations = new BackgroundObligations()
+      obligations.observeRoster(ids.map((id) => ({ task_id: id })))
+      return obligations
+    }
+
+    it('end with the task: a commit, a discard and a task that was never listed leave none behind', () => {
+      const obligations = listed('a', 'b')
+      const owner = {}
+      obligations.consume('a', owner, 'sa')
+      obligations.consume('b', owner, 'sb')
+      obligations.consume('never-listed', owner, 'sn')
+      expect(obligations.takeSummary('never-listed')).toBeUndefined()
+      obligations.discard('b')
+      expect(obligations.takeSummary('b')).toBeUndefined()
+      obligations.commit(owner)
+      expect(obligations.takeSummary('a')).toBeUndefined()
+    })
+
+    it('outlive a hand-over to a new owner that is cut off in turn, and are handed out once', () => {
+      const obligations = listed('a', 'b')
+      const first = {}
+      const second = {}
+      obligations.consume('a', first, 'sa')
+      obligations.reassign(first, second)
+      obligations.release(second, 'carried')
+      expect(obligations.takeSummary('a')).toBe('sa')
+      expect(obligations.takeSummary('a')).toBeUndefined()
+      const cutOff = {}
+      const adopter = {}
+      obligations.consume('b', cutOff, 'sb')
+      obligations.release(cutOff, 'carried')
+      expect(obligations.adoptCarried(adopter).sort()).toEqual(['a', 'b'])
+      obligations.release(adopter, 'carried')
+      expect(obligations.takeSummary('b')).toBe('sb')
+    })
+
+    it('stay for a task a guess cleared until its memory ends, and not for one that was read', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+      const obligations = listed('a', 'b')
+      const owner = {}
+      obligations.carry('a', 'sa')
+      obligations.consume('b', owner, 'sb')
+      obligations.release(owner, 'discarded')
+      expect(obligations.clearDiscarded(obligations.discardedIds())).toBe(true)
+      expect(obligations.takeSummary('b')).toBeUndefined()
+      expect(obligations.recentlyCleared()).toEqual(['a'])
+      vi.setSystemTime(Date.now() + UNSURE_MEMORY_MS + 1)
+      expect(obligations.recentlyCleared()).toEqual([])
+      expect(obligations.takeSummary('a')).toBeUndefined()
+    })
   })
 
   it('Stop forgets the tasks a guess cleared, so a closed process owes nothing and a new one starts clean', () => {
@@ -1857,7 +2043,10 @@ describe('background helpers as the real Claude Code reports them', () => {
     expect(session.obligations.recentlyCleared()).toEqual([])
   })
 
-  it('the same for a wake nobody could run: a later task\'s wake opens after the discarded one is over', async () => {
+  it.each([
+    ['carried for it', false],
+    ['cleared on a guess by a turn that committed meanwhile', true]
+  ])('the same for a wake nobody could run: a later task\'s wake, %s, opens after the discarded one is over', async (_how, clearedOnAGuess) => {
     const f = fixture()
     f.service.setLiveHost(null)
     startedWith(f, { id: 'bash-1', type: 'local_bash' }, { id: 'bash-2', type: 'local_bash' })
@@ -1873,6 +2062,12 @@ describe('background helpers as the real Claude Code reports them', () => {
     await later(30)
     process.emit(resultFrame({ terminalReason: 'aborted_streaming', origin: 'task-notification' }))
     await later(30)
+    if (clearedOnAGuess) {
+      // The next turn commits and clears the second shell, guessing that its wake will not come.
+      f.cli.reply = (message, self) => self.answer(String(message.uuid), 'next')
+      expect(await f.turn({ history: '' })).toBe('next')
+      expect(f.service.hasBackgroundWork('thread')).toBe(false)
+    }
     // Claude's turn for the second shell is a wake of its own, and it is stopped at its first frame like the first.
     process.emit(textDelta('hidden work of B'))
     await vi.waitFor(() => expect(process.interrupts).toBe(2))
