@@ -4,7 +4,7 @@ import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import type { ChatMode } from '../../../../shared/types'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import type { BrowserExecutionBinding } from '../../../orchestrator/browser'
-import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../orchestrator/LlmClient'
+import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
 import type { ModeCeiling } from '../../types'
 import type { DelegationToolHost } from './delegation'
 

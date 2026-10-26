@@ -1,6 +1,6 @@
 import { Type, type Tool, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai'
 import { recordSubagentCall } from '../../../../shared/subagentTools'
-import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../orchestrator/LlmClient'
+import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
 import {
   CLIENT_REQUEST_ID_SCHEMA,
   McpToolError,

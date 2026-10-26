@@ -1,4 +1,4 @@
-import type { LlmToolEvent } from '../../../orchestrator/LlmClient'
+import type { LlmToolEvent } from '../../../harness/turnEvents'
 import { PlanModeTools } from '../../../orchestrator/PlanModeTools'
 import type { AppToolHost } from './host'
 import {

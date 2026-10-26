@@ -1,5 +1,5 @@
 import type { ActivityPatch, ProviderToolEvent } from '../../../../shared/agentActivity'
-import type { StreamingLlmToolEvent } from '../../../orchestrator/LlmClient'
+import type { StreamingLlmToolEvent } from '../../../harness/turnEvents'
 import type { TurnSink } from '../ProviderAdapter'
 
 /**

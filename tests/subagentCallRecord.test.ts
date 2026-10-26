@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { executeDelegationTool, type DelegationToolHost, type LlmToolEvent, type StreamingLlmToolEvent } from '../src/mms/orchestrator/LlmClient'
+import type { LlmToolEvent, StreamingLlmToolEvent } from '../src/mms/harness/turnEvents'
+import { executeDelegationTool, type DelegationToolHost } from '../src/mms/run/mcp/appTools/delegation'
 import { runtimeToolEvent } from '../src/mms/run/adapters/shared/promptRuntime'
 import { TranscriptAssembler, type TranscriptHooks, type TranscriptStreamState } from '../src/mms/run/adapters/shared/TranscriptAssembler'
 import { mousseToUIMessages } from '../src/renderer/chat/adapters/mousseToUI'

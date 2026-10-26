@@ -118,7 +118,8 @@ import { WorktreeManager } from '../worktree/WorktreeManager'
 import { PtyManager } from '../terminals/PtyManager'
 import { HeadlessAgentRunner } from '../terminals/HeadlessAgentRunner'
 import { MacroEngine } from '../macros/MacroEngine'
-import { LlmClient, parseActions, stripActionBlocks, type StreamingLlmThinkingEvent, type StreamingLlmToolEvent, type LlmChatOptions, filterActionsForChatMode, rejectOrchestrationAction, type DelegateTaskInput, type DelegationToolCall, type DelegationToolHost, type NamedAgentToolRequest, type SubagentRef } from './LlmClient'
+import { LlmClient, parseActions, stripActionBlocks, type LlmChatOptions, filterActionsForChatMode, rejectOrchestrationAction, type DelegateTaskInput, type DelegationToolCall, type DelegationToolHost, type NamedAgentToolRequest, type SubagentRef } from './LlmClient'
+import type { StreamingLlmTextEvent, StreamingLlmThinkingEvent, StreamingLlmToolEvent } from '../harness/turnEvents'
 import type { BrowserRuntimePort } from '../../shared/browser/runtime'
 import {
   type BrowserExecutionBinding,
@@ -4624,7 +4625,7 @@ export class OrchestratorService extends EventEmitter {
     this.persist(true)
   }
 
-  private handleStreamingTextEvent(event: import('./LlmClient').StreamingLlmTextEvent): void {
+  private handleStreamingTextEvent(event: StreamingLlmTextEvent): void {
     this.transcript.text(event)
   }
 

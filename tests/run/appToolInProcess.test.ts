@@ -5,7 +5,8 @@
  */
 import type { AssistantMessage, Message, Tool, ToolResultMessage } from '@earendil-works/pi-ai'
 import { describe, expect, it, vi } from 'vitest'
-import { LlmClient, type LlmChatOptions, type StreamingLlmToolEvent, type TrustedAgentExecutionOptions } from '../../src/mms/orchestrator/LlmClient'
+import { LlmClient, type LlmChatOptions, type TrustedAgentExecutionOptions } from '../../src/mms/orchestrator/LlmClient'
+import type { StreamingLlmToolEvent } from '../../src/mms/harness/turnEvents'
 import { userMessage } from '../../src/mms/orchestrator/nativeContext'
 import { createAppToolRegistry, type AppToolTurn } from '../../src/mms/run/mcp/appTools'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'

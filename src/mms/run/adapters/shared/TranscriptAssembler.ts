@@ -19,7 +19,7 @@ import type {
   StreamingLlmTextEvent,
   StreamingLlmThinkingEvent,
   StreamingLlmToolEvent
-} from '../../../orchestrator/LlmClient'
+} from '../../../harness/turnEvents'
 
 /**
  * Where an assembler keeps its open-message bookkeeping. The orchestrator's `ThreadSession`
