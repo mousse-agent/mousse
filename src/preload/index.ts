@@ -827,9 +827,12 @@ const api = {
       /** Checks again, bypassing the cached status. */
       recheck: (instanceId: string): Promise<InstanceSnapshot> =>
         ipcRenderer.invoke('providers:instances:recheck', instanceId),
-      /** Moves a model API entry to the agent that now serves it; lists the defaults rewritten. */
-      move: (instanceId: string, toInstanceId: string): Promise<MoveResult> =>
-        ipcRenderer.invoke('providers:instances:move', instanceId, toInstanceId),
+      /**
+       * Moves a model API entry to the agent that now serves it; lists the defaults rewritten.
+       * `copyKey` gives the agent the entry's saved API key.
+       */
+      move: (instanceId: string, toInstanceId: string, options?: { copyKey?: boolean }): Promise<MoveResult> =>
+        ipcRenderer.invoke('providers:instances:move', instanceId, toInstanceId, options),
       refreshModels: (instanceId: string): Promise<InstanceSnapshot> =>
         ipcRenderer.invoke('providers:instances:refreshModels', instanceId),
       /** Each present field replaces the stored one. */

@@ -122,7 +122,7 @@ export function AgentEditor({
         removeHint={
           !onRemove
             ? undefined
-            : snapshot.config?.home === 'private'
+            : snapshot.config?.home === 'private' || info.bundled
               ? 'Deletes this provider and the sign-in Mousse kept for it. Add it again any time.'
               : 'Deletes this provider from Mousse. Your CLI and its sign-in stay; add it again any time.'
         }
@@ -137,14 +137,21 @@ export function AgentEditor({
       <SettingsAdvanced>
         <EditorSection title="Runtime" description={deviceWideNote(snapshot)}>
           <BinaryRow snapshot={snapshot} />
-          <UpdateRow snapshot={snapshot} operation={operation} actions={actions} />
-          <ExecutableRow snapshot={snapshot} label={info.label} onSave={(binaryPath) => actions.configure({ binaryPath })} />
-          <ArgsRow snapshot={snapshot} onSave={(args) => actions.configure({ args })} />
-          <HomeRow snapshot={snapshot} />
+          {/* A runtime that ships with Mousse has no executable, arguments, home or variables to set. */}
+          {!info.bundled && (
+            <>
+              <UpdateRow snapshot={snapshot} operation={operation} actions={actions} />
+              <ExecutableRow snapshot={snapshot} label={info.label} onSave={(binaryPath) => actions.configure({ binaryPath })} />
+              <ArgsRow snapshot={snapshot} onSave={(args) => actions.configure({ args })} />
+              <HomeRow snapshot={snapshot} />
+            </>
+          )}
         </EditorSection>
-        <EditorSection title="Environment" description={deviceWideNote(snapshot)}>
-          <EnvRow snapshot={snapshot} onSave={(env) => actions.configure({ env })} />
-        </EditorSection>
+        {!info.bundled && (
+          <EditorSection title="Environment" description={deviceWideNote(snapshot)}>
+            <EnvRow snapshot={snapshot} onSave={(env) => actions.configure({ env })} />
+          </EditorSection>
+        )}
       </SettingsAdvanced>
     </>
   )

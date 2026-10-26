@@ -27,6 +27,11 @@ export interface DriverInfo {
    */
   customCommand?: boolean
   addLabel?: string
+  /**
+   * Runs on what ships with Mousse (Cursor's SDK): there is no executable to find, and no
+   * arguments or variables to set. Its sign-in is a key Mousse keeps.
+   */
+  bundled?: boolean
 }
 
 export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
@@ -55,6 +60,15 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     description: "Google's official Antigravity agent, with its own Google sign-in.",
     multiInstance: false,
     customModels: false
+  },
+  cursor: {
+    label: 'Cursor',
+    iconId: 'cursor',
+    family: 'agent',
+    description: "Cursor's agent, signed in with your Cursor account or an API key. Cursor approves its tools itself.",
+    multiInstance: true,
+    customModels: false,
+    bundled: true
   },
   acp: {
     label: 'ACP agent',

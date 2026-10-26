@@ -240,6 +240,12 @@ export class ProviderAuthService {
     return this.credentials.has(providerId)
   }
 
+  /** The API key saved for `providerId` (never an environment fallback), for a move that copies it. */
+  storedApiKey(providerId: string): string | undefined {
+    const credential = this.credentials.get(providerId)
+    return credential?.type === 'api_key' && credential.key ? credential.key : undefined
+  }
+
   getProviderDisplayName(providerId: string): string {
     const provider = this.models.getProvider(providerId) ?? builtinProviders().find((p) => p.id === providerId)
     return getProductProviderDisplayName(providerId, provider?.name)

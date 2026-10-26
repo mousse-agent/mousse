@@ -22,6 +22,27 @@ Axes:
 | macOS arm64, Linux x64, Linux arm64 | Custom command | any | untested: no machine in this PR's runs |
 | any | managed | any | not available yet (PR B adds managed installs) |
 
+## Cursor
+
+Cursor runs through `@cursor/sdk`, bundled with Mousse and hosted in a process of its own per
+Cursor entry. There is nothing to install or find on PATH.
+
+| OS | Sign-in | State |
+|---|---|---|
+| Windows x64 | Cursor account (browser link shown in Mousse) | tested with a fake SDK and host replays; manual smoke pending (needs a Cursor account) |
+| Windows x64 | API key | tested with a fake SDK and host replays; manual smoke pending |
+| Windows x64 | packaged build (`app.asar.unpacked` helpers) | `scripts/check-packaged-helpers.mjs`; see the PR for the run |
+| Windows arm64 | any | untested: the SDK publishes no `win32-arm64` platform package, so `rg` and the sandbox helper are missing |
+| macOS arm64, Linux x64, Linux arm64 | any | untested: no machine in this PR's runs |
+
+- Each Cursor entry keeps its own key in Mousse's vault and its agents in its own store. Mousse
+  never reads `~/.cursor/sdk/auth.json` or an ambient `CURSOR_API_KEY`.
+- Cursor approves its tools itself (Auto-review on), so it runs only chats a person drives.
+- Signing out forgets the key in Mousse. A key minted by an account sign-in stays valid on Cursor's
+  side until it expires (90 days) unless revoked at cursor.com/dashboard.
+- A model API entry `pi:cursor` keeps working on the Mousse agent until the user moves it to a
+  Cursor entry (Move…, optionally with the same API key).
+
 ## Notes
 
 - A Custom command runs without a shell. A name without a path is looked up on PATH; a `.cmd`

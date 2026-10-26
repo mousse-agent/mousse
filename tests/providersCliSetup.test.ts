@@ -247,7 +247,7 @@ describe('Add provider choices', () => {
 
   it('offers a second Claude Code account and skips single-instance agents already in the list, on or off', () => {
     const choices = addChoices([claude, codex, antigravity], [])
-    expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([['new', 'Claude Code · another account'], ['new', 'Custom command']])
+    expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([['new', 'Claude Code · another account'], ['new', 'Cursor'], ['new', 'Custom command']])
   })
 
   it('always offers a Custom command, never as another account', () => {
@@ -261,6 +261,7 @@ describe('Add provider choices', () => {
     expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([
       ['new', 'Claude Code'],
       ['new', 'Antigravity'],
+      ['new', 'Cursor'],
       ['new', 'Custom command']
     ])
     expect(choices.every((choice) => choice.kind === 'new' && choice.existing === undefined)).toBe(true)
@@ -271,9 +272,12 @@ describe('Add provider choices', () => {
       loginOption('claude-subscription', { authType: 'oauth' }),
       loginOption('codex', { authType: 'oauth' }),
       loginOption('openai'),
-      loginOption('anthropic', { configured: true })
+      loginOption('anthropic', { configured: true }),
+      // A model API that now runs as an agent is added as that agent.
+      loginOption('cursor')
     ])
     expect(choices.filter((choice) => choice.kind === 'api').map((choice) => choice.label)).toEqual(['openai'])
+    expect(choices.find((choice) => choice.key === 'new:cursor')).toMatchObject({ label: 'Cursor', group: 'Agents' })
   })
 
   it('shows a provider with several sign-in methods once, with its methods to choose from', () => {
@@ -303,6 +307,13 @@ describe('Add provider choices', () => {
     expect(html).toContain('Mousse found Claude Code')
     expect(html).not.toContain('aria-label="Claude Code executable path"')
     expect(buttons(html)).toEqual(['Use a different executable', 'Add'])
+  })
+
+  it('adds Cursor without an executable to find: it ships with Mousse', () => {
+    const choice = addChoices([claude, codex, antigravity], []).find((entry) => entry.key === 'new:cursor')
+    const html = connect(choice)
+    expect(html).toContain('Cursor ships with Mousse. Sign in after adding.')
+    expect(buttons(html)).toEqual(['Add'])
   })
 
   it('asks for the executable when the CLI was not found', () => {
@@ -408,6 +419,17 @@ describe('Sign-in dialog', () => {
   it('says why a refused answer did nothing', () => {
     expect(refusedText({ promptId: 'p1', kind: 'redirect_url', value: 'http://localhost/x' })).toContain('paste it here')
     expect(refusedText({ promptId: 'p2', kind: 'input', value: 'x' })).toContain('Try again')
+  })
+})
+
+describe('Cursor in the agent editor', () => {
+  it('shows the bundled runtime, with no executable, arguments, home or variables to set', () => {
+    const entry = { ...snapshot({ instanceId: 'cursor:work', driver: 'cursor', displayName: 'Work', builtIn: false }), binary: { source: 'bundled' as const } }
+    const html = renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
+    expect(html).toContain('Bundled with Mousse')
+    expect(html).not.toContain('Not found')
+    expect(html).not.toContain('Environment')
+    expect(html).not.toContain('executable path')
   })
 })
 

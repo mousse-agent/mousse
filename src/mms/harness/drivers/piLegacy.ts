@@ -19,7 +19,7 @@ export const PI_LEGACY_CAPS: HarnessCaps = Object.freeze({
 })
 
 export type PiCredentials = Partial<Pick<ProviderAuthService,
-  'getConfiguredProviders' | 'getConfiguredLlmProviders' | 'has' | 'logout' | 'runOAuthLogin' | 'runApiKeyLogin' | 'refreshDynamicModels' | 'getProviderDisplayName'
+  'getConfiguredProviders' | 'getConfiguredLlmProviders' | 'has' | 'logout' | 'runOAuthLogin' | 'runApiKeyLogin' | 'refreshDynamicModels' | 'getProviderDisplayName' | 'storedApiKey'
 >>
 
 /**
@@ -77,6 +77,7 @@ export function piLegacyDriver(options: { client: () => PiChatClient; credential
           return method === 'api_key' ? auth.runApiKeyLogin(session, providerId) : auth.runOAuthLogin(session, providerId)
         },
         signOut: async () => void (await credentials()?.logout?.(providerId)),
+        exportApiKey: async () => credentials()?.storedApiKey?.(providerId),
         stop: () => {}
       }
     }

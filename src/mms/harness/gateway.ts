@@ -238,8 +238,9 @@ export interface HarnessInstances {
    * Moves a model API entry to the agent that now serves it (`FOLDED_INTO_AGENT`): the old entry is
    * turned off (never deleted) and records `movedTo`, the defaults that named it are rewritten and
    * listed, and threads pinned to it continue on the agent with their history handed over.
+   * `copyKey` saves the old entry's API key as the agent's own first (only when the user ticks it).
    */
-  move(fromInstanceId: string, toInstanceId: string): Promise<MoveResult>
+  move(fromInstanceId: string, toInstanceId: string, options?: { copyKey?: boolean }): Promise<MoveResult>
   /** Snapshot changes (`snapshots$`) and operation progress; returns the unsubscribe. */
   subscribe(listener: (event: HarnessGatewayEvent) => void): () => void
 }
@@ -505,7 +506,7 @@ export class Harness implements HarnessGateway {
         return this.snapshot(instanceId, { kind: 'device' })
       },
       refreshModels: (instanceId) => this.refreshModels(instanceId),
-      move: (fromInstanceId, toInstanceId) => this.move(fromInstanceId, toInstanceId),
+      move: (fromInstanceId, toInstanceId, options) => this.move(fromInstanceId, toInstanceId, options),
       setModelPrefs: async (instanceId, patch) => {
         const record = this.record(instanceId, { allowDisabled: true })
         // A runtime that cannot run a model by id does not offer adding one.
@@ -1536,13 +1537,22 @@ export class Harness implements HarnessGateway {
     return config
   }
 
-  private async move(fromId: string, toId: string): Promise<MoveResult> {
+  private async move(fromId: string, toId: string, options: { copyKey?: boolean } = {}): Promise<MoveResult> {
     const from = this.record(fromId, { allowDisabled: true })
     const to = this.record(toId, { allowDisabled: true })
     const agent = (this.options.foldedInto ?? foldedInto)(piProviderIdOf(fromId))
     if (fromId === toId || !agent || to.driver.kind !== agent)
       harnessFail('unsupported', `${this.displayName(from)} cannot move to ${this.displayName(to)}.`, fromId)
     if (from.config.movedTo) harnessFail('unsupported', `${this.displayName(from)} has already moved.`, fromId)
+    // The key goes over first: when it cannot, nothing has moved yet.
+    if (options.copyKey) {
+      const key = await from.runtime.exportApiKey?.()
+      if (!key) harnessFail('unsupported', `${this.displayName(from)} has no saved API key to copy.`, fromId)
+      if (!to.runtime.adoptApiKey) harnessFail('unsupported', `${this.displayName(to)} cannot take an API key.`, toId)
+      await to.runtime.adoptApiKey(key)
+      this.counters.bumpAccount(toId)
+      void this.probe(toId, true)
+    }
     // Turned off, never deleted: an older build can still turn it back on.
     this.instanceMap.setEntry(fromId, { ...from.entry, enabled: false, config: { ...(from.entry.config ?? {}), movedTo: toId } })
     const llmProvider = legacyProviderForInstance(toId, to.entry) ?? ''

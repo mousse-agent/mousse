@@ -46,6 +46,23 @@ export function getCliBuildOptions(projectRoot = root) {
 }
 
 /**
+ * The Cursor host entry beside the CLI bundle (`out/cli/cursorHost.js`): the daemon starts it as a
+ * child process, and it loads `@cursor/sdk` from node_modules.
+ */
+export function getCursorHostBuildOptions(projectRoot = root) {
+  return {
+    entryPoints: [resolve(projectRoot, 'src/mms/harness/hosts/cursorHost.ts')],
+    outfile: resolve(projectRoot, 'out/cli/cursorHost.js'),
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    target: 'node20',
+    sourcemap: true,
+    packages: 'external'
+  }
+}
+
+/**
  * One-shot CLI build, or watch mode for development.
  * @param {{ watch?: boolean, onRebuild?: (error: Error | null) => void, log?: boolean, reuse?: boolean }} [opts]
  */
@@ -60,6 +77,7 @@ export async function buildCli(opts = {}) {
   if (!watch) {
     const worker = await buildBrowserWorker(root, { reuse })
     const cli = await cachedBuild(options, { projectRoot: root, name: 'cli', reuse })
+    await cachedBuild(getCursorHostBuildOptions(root), { projectRoot: root, name: 'cursor-host', reuse })
     if (log) console.log(`${cli.reused ? 'Reused' : 'Built'} ${outfile}`)
     return { cliReused: cli.reused, workerReused: worker.reused }
   }
@@ -85,6 +103,8 @@ export async function buildCli(opts = {}) {
     ]
   })
   await ctx.watch()
+  // The host rarely changes; it is built once when watching starts.
+  await cachedBuild(getCursorHostBuildOptions(root), { projectRoot: root, name: 'cursor-host' })
   const browserOptions = getBrowserWorkerBuildOptions(root)
   let browserContext
   try {

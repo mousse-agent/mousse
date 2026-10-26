@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { claudeCodeDriver, claudeSignInCommand } from '../../src/mms/harness/drivers/claudeCode'
+import { spawnCursorHost } from '../../src/mms/harness/cursor/hostClient'
+import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
 import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
 import { createHarnessGateway, type TurnSpec } from '../../src/mms/harness/gateway'
 import { instanceStateDir } from '../../src/mms/harness/instances'
@@ -12,6 +14,7 @@ import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionServ
 import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { claudeLoadsSkill } from '../../src/mms/providers/claudeSubscription/integrations'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
+import { FakeCursorHost } from './fakeCursorHost'
 
 const dirs: string[] = []
 afterEach(() => {
@@ -218,6 +221,99 @@ describe('instance environments', () => {
     const work = instanceEnv({ instanceId: 'claude:work', driver: 'claude', configRevision: 2, home: '/profiles/p/harness/claude_work/home', searchPath: [], base })
     expect(work.env).toEqual({ PATH: '/bin', KEEP: '1', CLAUDE_CONFIG_DIR: '/profiles/p/harness/claude_work/home' })
     expect(work).toMatchObject({ homeId: 'private:claude:work', configRevision: 2 })
+  })
+})
+
+describe('two Cursor instances', () => {
+  it('each host starts without an ambient key; each instance runs with its own key, store and account', async () => {
+    const profileHome = tempDir('mousse-two-cursor-')
+    // The host process: its environment never carries the user's CURSOR_API_KEY.
+    const script = join(profileHome, 'host.mjs')
+    writeFileSync(script, 'process.exit(0)\n')
+    const spawned: HarnessSpawn[] = []
+    const unobserve = observeHarnessSpawns((entry) => spawned.push(entry))
+    try {
+      for (const instanceId of ['cursor:a', 'cursor:b']) {
+        const env = instanceEnv({ instanceId, driver: 'cursor', configRevision: 0, searchPath: [], base: { PATH: process.env.PATH ?? '', CURSOR_API_KEY: 'user-key' } })
+        spawnCursorHost(env, script).kill()
+      }
+    } finally {
+      unobserve()
+    }
+    expect(spawned.map((entry) => [entry.instanceId, entry.purpose, entry.env.CURSOR_API_KEY, entry.env.ELECTRON_RUN_AS_NODE])).toEqual([
+      ['cursor:a', 'cursor-host', undefined, '1'],
+      ['cursor:b', 'cursor-host', undefined, '1']
+    ])
+
+    const hosts = new Map<string, FakeCursorHost>()
+    const hostFor = (instanceId: string) => {
+      const host = new FakeCursorHost({
+        me: (params) => ({ userId: Number(String(params.apiKey).slice(-1)) }),
+        models: () => ({ models: [] }),
+        create: () => ({ agentId: `agent-${instanceId}-${hosts.get(instanceId)!.calls('create').length}` }),
+        send: (_params, fake) => {
+          const runId = `run-${fake.calls('send').length}`
+          setTimeout(() => fake.emit({ event: 'run_end', runId, status: 'finished' }), 1)
+          return { runId }
+        },
+        close: () => ({})
+      })
+      hosts.set(instanceId, host)
+      return host
+    }
+    let stored: unknown = {
+      'cursor:a': { driver: 'cursor', enabled: true, config: { displayName: 'A' } },
+      'cursor:b': { driver: 'cursor', enabled: true, config: { displayName: 'B' } }
+    }
+    const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
+    const harness = createHarnessGateway({
+      profileHome,
+      installationHome: profileHome,
+      instanceMap: instances,
+      questions: new UserQuestionService(),
+      shellPath: async () => ({ entries: [], source: 'failed' }),
+      drivers: [cursorDriver({ connect: (context) => (hosts.get(context.instanceId) ?? hostFor(context.instanceId)).connect() })]
+    })
+    try {
+      const signIn = async (instanceId: string, key: string) => {
+        const done = new Promise<void>((resolve, reject) => {
+          const unsubscribe = harness.instances.subscribe((event) => {
+            if (event.type !== 'operation' || event.data.instanceId !== instanceId) return
+            const data = event.data
+            if (data.phase === 'prompt') void harness.instances.respondSignIn(data.operationId, { promptId: data.prompt.promptId, kind: 'input', value: key })
+            if (data.phase === 'completed') { unsubscribe(); resolve() }
+            if (data.phase === 'failed') { unsubscribe(); reject(new Error(data.error.message)) }
+          })
+        })
+        await harness.instances.signIn(instanceId, 'api_key')
+        await done
+      }
+      await signIn('cursor:a', 'key-1')
+      await signIn('cursor:b', 'key-2')
+      const turn = async (instanceId: string, previous?: TurnSpec['binding']) => {
+        const binding = await harness.bind(harness.resolveStored({ instanceId, llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent' })
+        const spec = turnSpec(instanceId, binding, profileHome)
+        await harness.startTurn({ ...spec, ...(previous ? { previous } : {}), input: { ...spec.input, model: 'default', llmProvider: '' } }).result
+        return binding
+      }
+      const firstA = await turn('cursor:a')
+      await turn('cursor:b')
+      expect(hosts.get('cursor:a')!.calls('create').map((call) => call.apiKey)).toEqual(['key-1'])
+      expect(hosts.get('cursor:b')!.calls('create').map((call) => call.apiKey)).toEqual(['key-2'])
+      // Each instance keeps its agents in its own store.
+      expect(hosts.get('cursor:a')!.calls('create')[0]!.storeDir).not.toBe(hosts.get('cursor:b')!.calls('create')[0]!.storeDir)
+      expect(firstA.accountId).toBeDefined()
+
+      // Another key on A between two turns: the account moves on and the thread's agent is not reused.
+      await signIn('cursor:a', 'key-3')
+      const secondA = await turn('cursor:a', firstA)
+      expect(secondA.accountGeneration).toBeGreaterThan(firstA.accountGeneration)
+      expect(secondA.accountId).not.toBe(firstA.accountId)
+      expect(hosts.get('cursor:a')!.calls('create').map((call) => call.apiKey)).toEqual(['key-1', 'key-3'])
+      expect(hosts.get('cursor:a')!.calls('resume')).toEqual([])
+    } finally {
+      harness.stop()
+    }
   })
 })
 

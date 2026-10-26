@@ -8,6 +8,9 @@ Ported in logic (not copied verbatim) from T3 Code at commit `d53873b6a4`:
 
 - `src/mms/harness/acp/loadGate.ts`: the `session/load` replay gate.
 - `src/mms/harness/acp/permissions.ts`: the mapping of ACP permission options.
+- `src/mms/harness/hosts/cursorHost.ts`: the Cursor SDK's unhandled-rejection guard (`CursorSdk.ts`),
+  transport-failure detection (`transportFailure.ts`) and the run lifecycle around `agent.send`,
+  including active-run recovery (`CursorAgentSdk.ts`).
 
 Rules ported in logic from T3 Code's `apps/server/src/provider/CodexChatGptAuth.ts`:
 
@@ -128,3 +131,9 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
 TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
+
+## Cursor SDK
+
+`@cursor/sdk` and its platform packages (`@cursor/sdk-<platform>-<arch>`, which carry `rg` and the
+Cursor sandbox helper) ship with Mousse unmodified. They are proprietary and used under Cursor's
+terms (`node_modules/@cursor/sdk/LICENSE.md`). Mousse loads them only in its Cursor host process.

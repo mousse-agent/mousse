@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { foldedInto } from '../../../shared/harness/move'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import type { HarnessDriverKind, InstanceConfigPatch } from '../../../shared/harness/types'
 import type { ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
@@ -58,11 +59,12 @@ export function addChoices(snapshots: readonly InstanceSnapshot[], loginOptions:
       })
     }
   }
-  // Agents sign in through their own instance; their login options are not model APIs.
+  // Agents sign in through their own instance; their login options are not model APIs. A model API
+  // that now runs as an agent (`FOLDED_INTO_AGENT`) is added as that agent only.
   const agentProviders = new Set(snapshots.filter((snapshot) => !isApiInstance(snapshot)).map(llmProviderOf))
   const methods = new Map<string, ProviderLoginOption[]>()
   for (const option of loginOptions) {
-    if (option.configured || agentProviders.has(option.id)) continue
+    if (option.configured || agentProviders.has(option.id) || foldedInto(option.id)) continue
     const listed = methods.get(option.id)
     if (!listed) methods.set(option.id, [option])
     else if (!listed.some((entry) => methodKey(entry) === methodKey(option))) listed.push(option)
@@ -400,6 +402,7 @@ export function AgentConnectStep({
   const entered = path.trim()
   const canAdd = !disabled && (entered !== '' || !missing)
   const label = DRIVER_INFO[choice.driver].label
+  const bundled = DRIVER_INFO[choice.driver].bundled === true
   const add = () => {
     if (canAdd) onAdd(entered || undefined)
   }
@@ -413,6 +416,8 @@ export function AgentConnectStep({
           description={
             error ? (
               <span className="prov-error">{error}</span>
+            ) : bundled ? (
+              `${label} ships with Mousse. Sign in after adding.`
             ) : detected ? (
               `Mousse found ${label}${version ? ` ${version}` : ''} on this computer.`
             ) : (
@@ -421,9 +426,11 @@ export function AgentConnectStep({
           }
           control={
             <>
-              <button type="button" className="prov-link" disabled={disabled} onClick={() => setManual(true)}>
-                Use a different executable
-              </button>
+              {!bundled && (
+                <button type="button" className="prov-link" disabled={disabled} onClick={() => setManual(true)}>
+                  Use a different executable
+                </button>
+              )}
               <button type="button" className="settings-btn" autoFocus disabled={!canAdd} onClick={() => add()}>
                 {busy ? 'Adding…' : 'Add'}
               </button>

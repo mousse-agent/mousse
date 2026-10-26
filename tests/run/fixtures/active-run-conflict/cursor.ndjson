@@ -1,0 +1,13 @@
+{"kind":"transcript","adapter":"cursor","scenario":"active-run-conflict","boundary":"Cursor host NDJSON on the host process: requests out; replies, run updates and exits in","recordedAt":"hand-authored","version":1}
+{"dir":"out","frame":{"kind":"request","method":"resume","params":{"apiKey":"replay-key","model":{"id":"default"},"mode":"agent","settingSources":["project","user","team","mdm","plugins"],"autoReview":true,"agentId":"agent-1"}}}
+{"dir":"in","frame":{"kind":"reply","method":"resume","result":{"agentId":"agent-1"}}}
+{"dir":"out","frame":{"kind":"request","method":"send","params":{"agentId":"agent-1","text":"Continue","model":{"id":"default"},"mode":"agent"}}}
+{"dir":"in","frame":{"kind":"error","method":"send","error":{"message":"Agent agent-1 already has active run run-0","name":"AgentBusyError","activeRun":true}}}
+{"dir":"out","frame":{"kind":"request","method":"listRuns","params":{"agentId":"agent-1","limit":5}}}
+{"dir":"in","frame":{"kind":"reply","method":"listRuns","result":{"runs":[{"id":"run-0","status":"running"}]}}}
+{"dir":"out","frame":{"kind":"request","method":"cancelRun","params":{"runId":"run-0"}}}
+{"dir":"in","frame":{"kind":"reply","method":"cancelRun","result":{}}}
+{"dir":"out","frame":{"kind":"request","method":"send","params":{"agentId":"agent-1","text":"Continue","model":{"id":"default"},"mode":"agent"}}}
+{"dir":"in","frame":{"kind":"reply","method":"send","result":{"runId":"run-1"}}}
+{"dir":"in","frame":{"kind":"delta","runId":"run-1","update":{"type":"text-delta","text":"Continuing"}}}
+{"dir":"in","frame":{"kind":"run_end","runId":"run-1","status":"finished"}}

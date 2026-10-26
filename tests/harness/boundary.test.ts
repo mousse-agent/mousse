@@ -91,14 +91,36 @@ describe('harness import boundary', () => {
   it('every listed exception still exists', () => {
     for (const path of Object.keys(IMPORT_EXCEPTIONS)) expect(sources.some((entry) => entry.path === path), path).toBe(true)
   })
+
+  it('only the Cursor host loads the Cursor SDK', () => {
+    const violations: string[] = []
+    for (const { path, source } of sources) {
+      if (CURSOR_SDK_IMPORTERS.some((rule) => rule.test(path)) || CURSOR_SDK_TRANSITIONAL[path]) continue
+      for (const specifier of specifiers(source)) if (CURSOR_SDK.test(specifier)) violations.push(`${path} → ${specifier}`)
+    }
+    expect(violations).toEqual([])
+    for (const path of Object.keys(CURSOR_SDK_TRANSITIONAL)) expect(sources.some((entry) => entry.path === path), path).toBe(true)
+  })
 })
+
+/**
+ * The Cursor SDK keeps process-wide state and leaves rejections nobody awaits: it runs only in
+ * the host process (agent CLIs plan §2 "Boundary"). Type-only imports count too.
+ */
+const CURSOR_SDK = /^(@cursor\/sdk|pi-cursor-sdk)(\/|$)/
+const CURSOR_SDK_IMPORTERS = [/^src\/mms\/harness\/hosts\//]
+/** The legacy `pi:cursor` model API, removed with the pi loop. */
+const CURSOR_SDK_TRANSITIONAL: Record<string, string> = {
+  'src/mms/providers/cursorPiProvider.ts': 'PR 4',
+  'src/mms/providers/ProviderAuthService.ts': 'PR 4'
+}
 
 // -- Rule 2: driver-name literals at branch sites --------------------------------------------------
 
 /** Where application branches live. Declarations and data tables are out of scope (plan v3). */
 const BRANCH_SCOPES = ['src/renderer/', 'src/mms/orchestrator/', 'src/mms/protocol/', 'src/mms/channels/', 'src/cli/']
 
-const DRIVER_NAMES = ['antigravity', 'claude-subscription', 'codex', 'pi', 'claude', 'acp']
+const DRIVER_NAMES = ['antigravity', 'claude-subscription', 'codex', 'pi', 'claude', 'acp', 'cursor']
 const NAME = `['"\`](${DRIVER_NAMES.join('|')})['"\`]`
 const BRANCH_SITES = [
   new RegExp(`(===|!==|==|!=)\\s*${NAME}`),
@@ -113,7 +135,9 @@ const BRANCH_SITES = [
  */
 const LITERAL_ALLOWLIST: Record<string, string> = {
   'src/renderer/lib/providerIcons.tsx': 'icons',
-  'src/cli/commands/agents.ts': 'PR 4 (headless CLI agents)'
+  'src/cli/commands/agents.ts': 'PR 4 (headless CLI agents)',
+  // The pi loop's prompt for the legacy `pi:cursor` model API (`providerId` is a pi-ai provider).
+  'src/mms/orchestrator/systemPrompt.ts': 'PR 4 (goes with the pi loop)'
 }
 
 /**

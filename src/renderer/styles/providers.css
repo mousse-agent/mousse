@@ -968,6 +968,14 @@
   padding-top: 0;
 }
 
+/* A choice the user ticks in a dialog (the Move dialog's "Use the same API key"). */
+.prov-check-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  cursor: pointer;
+}
+
 /* A value the dialog shows but does not let you change (the Label of an existing provider). */
 .prov-wizard-panel .settings-input:disabled {
   border-style: dashed;
