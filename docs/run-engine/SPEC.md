@@ -360,7 +360,7 @@ Pure functions from `(capabilities, runState)` to a decision; the engine and exe
 |---|---|---|
 | `PiLoopAdapter` | `LlmClient.chat` tool loop | native / yes / rich / strong (we run the tools) |
 | `ClaudeSubscriptionAdapter` | `ClaudeSubscriptionProviderService.chat` | interrupt_restart (drainSteer, interrupt then resume) / yes (signal) / rich / weak |
-| `AntigravityAdapter` | `AntigravityProviderService.chat` | interrupt_restart (cancel then re-prompt) / yes / sparse / weak |
+| `AcpAdapter` (Antigravity preset) | `AcpSessions.chat` (`harness/acp`) | interrupt_restart (cancel then re-prompt) / yes / sparse / weak |
 | `CodexAdapter` | `CodexProviderService.chat` over `codex app-server` | native (`turn/steer` joins the running turn) / yes (`turn/interrupt`) / rich / weak |
 
 There is no `terminalQuality` flag: every adapter's `startTurn` settles when its stream closes, and that settlement is the turn's terminal signal, so no code path would read a "stream closed without a terminal event" policy. A hung stream is caught by rule 2's heartbeat window (§12.4).
@@ -503,7 +503,7 @@ Native-agent providers (Claude subscription, Antigravity) receive `mcpServers: {
 |---|---|
 | `PiLoopAdapter` | in-process `ToolHost`, no MCP needed |
 | `ClaudeSubscriptionAdapter` | SDK `mcpServers: { mousse: { type:'http', url, headers:{ Authorization } } }` |
-| `AntigravityAdapter` | ACP `session/new` `mcpServers: [{ name:'mousse', type:'http', url, headers }]`; fall back to the stdio bridge when the agent rejects http |
+| `AcpAdapter` | ACP `session/new` `mcpServers: [{ name:'mousse', type:'http', url, headers }]`; fall back to the stdio bridge when the agent rejects http |
 | CLI children (claude-code, codex, opencode, cursor) | `AgentConfigManager` materialises a `mousse` entry next to the user's servers, with the token in env |
 
 `caps.mcp === false` adapters show the orchestration tools as unavailable; nothing is emulated.

@@ -18,7 +18,8 @@ import {
   ClaudeSubscriptionProviderService,
   type ClaudeSubscriptionChatInput
 } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import { AntigravityAdapter, type AntigravityClient } from '../../src/mms/run/adapters/antigravity/AntigravityAdapter'
+import { antigravityAdapter } from '../../src/mms/harness/drivers/antigravity'
+import type { AcpTurnClient as AntigravityClient } from '../../src/mms/run/adapters/acp/AcpAdapter'
 import { ClaudeSubscriptionAdapter, type ClaudeSubscriptionClient } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import type { AdapterHost, TurnInput, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { acpMcpServers, claudeMcpServers, MOUSSE_MCP_TOKEN_ENV } from '../../src/mms/run/mcp/attachment'
@@ -186,14 +187,13 @@ describe('Claude subscription attachment', () => {
 type Sent = { method: string; params: Record<string, unknown> }
 
 /**
- * A fake ACP agent process; `http` is what its initialize advertises. It replaces the service's
- * private `launch`, so like the real one it records the launch-settings generation it started under.
+ * A fake ACP agent process; `http` is what its initialize advertises. It is the service's
+ * `AcpConnectionFactory`: the core records the launch-settings generation itself.
  */
 function fakeAcp(http: boolean, sent: Sent[]) {
-  return function (this: { launchGeneration: number }) {
+  return function () {
     const abort = new AbortController()
     return {
-      generation: this.launchGeneration,
       child: { exitCode: 0, signalCode: null, kill: () => true },
       connection: {
         signal: abort.signal,
@@ -218,7 +218,7 @@ describe('Antigravity attachment', () => {
   it('the Antigravity adapter passes the server and the guidance only when host.mcp is set', async () => {
     const seen: Array<Parameters<AntigravityClient['chat']>[0]> = []
     const client: AntigravityClient = { chat: vi.fn(async (chat) => { seen.push(chat); return 'ok' }), commitConversation: vi.fn(), configured: () => true }
-    const adapter = new AntigravityAdapter(() => client)
+    const adapter = antigravityAdapter(() => client)
     await adapter.startTurn(input({ llmProvider: 'antigravity' }), sink(), control, host(MCP))
     await adapter.startTurn(input({ llmProvider: 'antigravity' }), sink(), control, host(null))
     expect(seen[0]).toMatchObject({ mcp: MCP, orchestrationInstructions: mousseOrchestrationInstructions() })
@@ -226,12 +226,12 @@ describe('Antigravity attachment', () => {
     expect(seen[1].orchestrationInstructions).toBeUndefined()
   })
 
-  const service = (http: boolean, sent: Sent[]) => {
+  const service = (http: boolean, sent: Sent[], connect: () => unknown = fakeAcp(http, sent)) => {
     const home = tempHome('mousse-mcp-acp-')
     const workspace = join(home, 'workspace')
     mkdirSync(workspace)
-    const antigravity = new AntigravityProviderService(home, home, new UserQuestionService())
-    Object.assign(antigravity as unknown as Record<string, unknown>, { configured: () => true, launch: fakeAcp(http, sent) })
+    const antigravity = new AntigravityProviderService(home, home, new UserQuestionService(), undefined, { connect: connect as never })
+    Object.assign(antigravity as unknown as Record<string, unknown>, { configured: () => true })
     return { antigravity, workspace }
   }
   const prompts = (sent: Sent[]) => sent.filter((frame) => frame.method === 'session/prompt')
@@ -259,9 +259,8 @@ describe('Antigravity attachment', () => {
 
   it('reuses the live agent process and ACP session across turns while the thread token is stable', async () => {
     const sent: Sent[] = []
-    const { antigravity, workspace } = service(true, sent)
     const launch = vi.fn(fakeAcp(true, sent))
-    Object.assign(antigravity as unknown as Record<string, unknown>, { launch })
+    const { antigravity, workspace } = service(true, sent, launch)
     const chat = { threadId: 't', cwd: workspace, model: 'm1', onText: vi.fn(), mcp: MCP, orchestrationInstructions: 'GUIDE' }
     await antigravity.chat({ ...chat, prompt: 'first' })
     antigravity.commitConversation('t', 'history-1')

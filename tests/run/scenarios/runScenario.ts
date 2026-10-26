@@ -209,12 +209,9 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     services.claude = service
   }
   if (involved.has('antigravity')) {
-    const service = new AntigravityProviderService(home, home, questions)
     // Replace the agent process boundary only; the service's session lifecycle runs for real.
-    Object.assign(service as unknown as Record<string, unknown>, {
-      configured: () => true,
-      launch: replayAcpProcess(transport)
-    })
+    const service = new AntigravityProviderService(home, home, questions, undefined, { connect: replayAcpProcess(transport) })
+    Object.assign(service as unknown as Record<string, unknown>, { configured: () => true })
     stops.push(() => service.stop())
     services.antigravity = service
   }

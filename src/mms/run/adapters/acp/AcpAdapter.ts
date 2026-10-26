@@ -1,4 +1,5 @@
-import type { AntigravityProviderService } from '../../../providers/antigravity/AntigravityProviderService'
+import type { AcpChatInput } from '../../../harness/acp/session'
+import type { ProviderDriverKind } from '../../../../shared/providerInstances'
 import { mousseOrchestrationInstructions } from '../../mcp/instructions'
 import type { ProviderRef } from '../../types'
 import type {
@@ -13,40 +14,37 @@ import type {
 } from '../ProviderAdapter'
 import { promptStreams, runtimeToolEvent, withAppletGuidance } from '../shared/promptRuntime'
 
-/** The slice of the provider service a turn drives. */
-export type AntigravityClient = Pick<AntigravityProviderService, 'chat' | 'commitConversation' | 'configured'>
+/** The slice of an ACP agent's runtime a turn drives. */
+export interface AcpTurnClient {
+  chat(input: AcpChatInput): Promise<string>
+  commitConversation(threadId: string, history: string): void
+  configured(): boolean
+}
+
+export interface AcpAdapterOptions {
+  driver: ProviderDriverKind
+  /** The agent's name in errors. */
+  label: string
+  capabilities: ProviderCapabilities
+}
 
 /**
- * `childPolicy: 'isolated_only'`: the ACP agent rejects plan mode, so a `shared` (read-only) child
- * cannot be held to read-only. An `isolated` child runs; any native `start_subagent` it makes is only
- * observed (the provider service reports it), not controlled.
- */
-export const ANTIGRAVITY_CAPABILITIES: ProviderCapabilities = Object.freeze({
-  steer: 'interrupt_restart',
-  interrupt: true,
-  rollback: 'none',
-  fork: 'portable',
-  events: 'sparse',
-  containment: 'weak',
-  historyInjection: 'prompt',
-  mcp: true,
-  childPolicy: 'isolated_only'
-})
-
-/**
- * Google Antigravity over the Agent Client Protocol (SPEC §13.4). The agent runs its own loop and
- * tools inside the project workspace (weak containment), reports text and tool calls only (sparse
+ * An agent over the Agent Client Protocol (SPEC §13.4). The agent runs its own loop and tools
+ * inside the project workspace (weak containment), reports text and tool calls only (sparse
  * events: no thinking, no usage), and keeps its own ACP session, resumed while the history
  * fingerprint matches. Steers cancel the active prompt and are sent as the next one.
  *
- * The service is read through `service()` on every turn: the profile installs it after the
+ * The runtime is read through `client()` on every turn: a profile installs its services after the
  * orchestrator (and its adapter registry) is built.
  */
-export class AntigravityAdapter implements ProviderAdapter {
-  readonly driver = 'antigravity' as const
-  readonly capabilities = ANTIGRAVITY_CAPABILITIES
+export class AcpAdapter implements ProviderAdapter {
+  readonly driver: ProviderDriverKind
+  readonly capabilities: ProviderCapabilities
 
-  constructor(private readonly service: () => AntigravityClient | null) {}
+  constructor(private readonly client: () => AcpTurnClient | null, private readonly options: AcpAdapterOptions) {
+    this.driver = options.driver
+    this.capabilities = options.capabilities
+  }
 
   /** The agent publishes no context window or usage. */
   describe(_model: string): ModelInfo {
@@ -54,7 +52,7 @@ export class AntigravityAdapter implements ProviderAdapter {
   }
 
   configured(): boolean {
-    return this.service()?.configured() ?? false
+    return this.client()?.configured() ?? false
   }
 
   async startTurn(
@@ -63,11 +61,11 @@ export class AntigravityAdapter implements ProviderAdapter {
     ctl: TurnControl,
     host: AdapterHost
   ): Promise<TurnResult> {
-    if (input.mode === 'plan') throw new Error('Use Antigravity’s /plan command in a chat turn')
-    const service = this.service()
-    if (!service || !input.cwd) throw new Error(`${input.llmProvider} requires a project workspace`)
+    if (input.mode === 'plan') throw new Error(`Use ${this.options.label}’s /plan command in a chat turn`)
+    const client = this.client()
+    if (!client || !input.cwd) throw new Error(`${input.llmProvider} requires a project workspace`)
     const startedAt = Date.now()
-    // The ACP session id stays inside the service's saved sessions; the ref names the runtime.
+    // The ACP session id stays inside the runtime's saved sessions; the ref names the runtime.
     const providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
     sink.providerRef(providerRef)
     const streams = promptStreams(sink)
@@ -75,7 +73,7 @@ export class AntigravityAdapter implements ProviderAdapter {
       sink.progress()
       ctl.heartbeat()
     }
-    const text = await service.chat({
+    const text = await client.chat({
       threadId: input.threadId,
       instanceId: input.instanceId,
       cwd: input.cwd,
@@ -103,7 +101,7 @@ export class AntigravityAdapter implements ProviderAdapter {
         sink.tool(runtimeToolEvent(event))
       }
     })
-    service.commitConversation(input.threadId, host.context.nativeHistoryAfterTurn(text))
+    client.commitConversation(input.threadId, host.context.nativeHistoryAfterTurn(text))
     streams.text.complete(text)
     const contextKey = `${input.llmProvider}:${input.model}`
     return {
@@ -120,7 +118,7 @@ export class AntigravityAdapter implements ProviderAdapter {
   }
 
   /**
-   * Stop reaches the agent through `TurnInput.signal`: the service rejects pending permission
+   * Stop reaches the agent through `TurnInput.signal`: the runtime rejects pending permission
    * prompts and closes the ACP process when the orchestrator aborts the turn.
    */
   async interrupt(_ref: ProviderRef): Promise<'interrupted' | 'not_active'> {
@@ -128,9 +126,8 @@ export class AntigravityAdapter implements ProviderAdapter {
   }
 
   /**
-   * No native fork yet: ACP has no session fork.
-   * Null makes a fork use the portable `full_summary` handoff (SPEC §16.2); a native fork lands
-   * here once the runtime exposes session branching.
+   * No native fork yet. Null makes a fork use the portable `full_summary` handoff (SPEC §16.2); a
+   * native fork lands here once the agent advertises `session/fork`.
    */
   async forkSession(_ref: ProviderRef, _atTurnOrdinal: number): Promise<ProviderRef | null> {
     return null
