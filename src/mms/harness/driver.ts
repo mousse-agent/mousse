@@ -9,6 +9,7 @@ import type { LoginSession } from '../providers/LoginSession'
 import type { ProviderAdapter } from '../run/adapters/ProviderAdapter'
 import type { ProviderRef } from '../run/types'
 import type { InstanceEnv } from './env'
+import type { LatestVersionSource } from './latest'
 
 /**
  * A driver is a kind of runtime (Claude Code, Codex, Antigravity, the pi loop). The gateway asks
@@ -155,6 +156,8 @@ export interface HarnessDriver {
   readonly binaryNames: readonly string[]
   /** Versions Mousse was tested with; a newer one is reported, never blocked. */
   readonly testedVersions?: { min: string; max: string }
+  /** Where the newest published version is known from; none for an agent whose releases Mousse cannot see. */
+  readonly latestVersion?: LatestVersionSource
   /** The driver can run several instances (Add dialog); others have only their built-in one. */
   readonly multiInstance: boolean
   /** Supports a Mousse-owned home (`InstanceConfig.home = private`). */

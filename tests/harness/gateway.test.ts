@@ -8,8 +8,11 @@ import { PiLoopAdapter } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { ProviderAdapter } from '../../src/mms/run/adapters/ProviderAdapter'
 import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import type { HarnessGatewayEvent } from '../../src/mms/harness/gateway'
-import { decodeInstanceConfig } from '../../src/mms/harness/driver'
+import { decodeInstanceConfig, type HarnessDriver } from '../../src/mms/harness/driver'
 import { instanceStateDir } from '../../src/mms/harness/instances'
+import { LatestVersionCache } from '../../src/mms/harness/latest'
+import { observeHarnessSpawns } from '../../src/mms/harness/spawn'
+import { describeStatus } from '../../src/shared/harness/status'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 
 const pi = (): PiLoopAdapter => new PiLoopAdapter(() => ({ chat: async () => { throw new Error('unused') } }))
@@ -418,6 +421,95 @@ describe('harness gateway: instances', () => {
     await waitFor(() => events.some((event) => event.type === 'operation' && event.data.phase === 'cancelled'))
     expect(await harness.instances.cancelInstall(started.operationId)).toBe(false)
     await expect(harness.instances.install('claude')).rejects.toMatchObject({ code: 'unsupported' })
+  })
+})
+
+describe('harness gateway: update available', () => {
+  const device = { kind: 'device' } as const
+  const response = (version: string) => new Response(JSON.stringify({ version }), { status: 200 })
+
+  it('shows a newer published version without checking the CLI again, and never fetches during the check', async () => {
+    let authChecks = 0
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const fetchImpl = vi.fn(async () => {
+      await gate
+      return response('2.2.0')
+    }) as unknown as typeof fetch
+    const dir = home()
+    const base = adapterDriver(fake('claude'), {
+      runtime: {
+        managed: () => ({ path: process.execPath, version: '2.1.0' }),
+        auth: async () => {
+          authChecks += 1
+          return { state: 'signed_in' }
+        }
+      }
+    })
+    const driver: HarnessDriver = {
+      ...base,
+      latestVersion: { kind: 'npm', package: '@anthropic-ai/claude-code' },
+      updateCommand: (owner) => (owner === 'managed' ? 'fakecli update' : undefined)
+    }
+    const harness = testHarness({ drivers: [adapterDriver(pi()), driver, adapterDriver(fake('codex')), adapterDriver(fake('antigravity'))], instances: instances(), profileHome: dir, latest: new LatestVersionCache(dir, { fetchImpl }) })
+    const events: HarnessGatewayEvent[] = []
+    harness.instances.subscribe((event) => events.push(event))
+    const spawned: string[] = []
+    const stops = observeHarnessSpawns((entry) => spawned.push(entry.command))
+
+    const before = (await harness.instances.snapshots(device)).find((snapshot) => snapshot.instanceId === 'claude')
+    expect(before?.update).toBeUndefined()
+    expect(authChecks).toBe(1)
+    release?.()
+    await waitFor(() => events.some((event) => event.type === 'snapshots' && event.data.snapshots.some((snapshot) => snapshot.instanceId === 'claude' && snapshot.update)))
+
+    const after = (await harness.instances.snapshots(device)).find((snapshot) => snapshot.instanceId === 'claude')
+    expect(after?.update).toEqual({ kind: 'advisory', command: 'fakecli update', latestVersion: '2.2.0' })
+    expect(describeStatus(after!).detail).toBe('Update available: 2.2.0.')
+    // The lookup ran once; the newer version needed no second check of the CLI.
+    expect(authChecks).toBe(1)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(spawned).toEqual([])
+    stops()
+    harness.stop()
+  })
+
+  it('a managed install older than the published version updates in one click, and that starts the install', async () => {
+    let installs = 0
+    const base = adapterDriver(fake('antigravity'), {
+      runtime: {
+        managed: () => ({ path: process.execPath, version: '1.0.0' }),
+        auth: async () => ({ state: 'signed_in' }),
+        install: async () => {
+          installs += 1
+        }
+      }
+    })
+    const driver: HarnessDriver = { ...base, canInstall: true, latestVersion: { kind: 'pinned', version: '1.1.0' } }
+    const harness = testHarness({ drivers: [adapterDriver(pi()), adapterDriver(fake('claude')), adapterDriver(fake('codex')), driver], instances: instances(), profileHome: home() })
+    const snapshot = (await harness.instances.snapshots(device)).find((entry) => entry.instanceId === 'antigravity')
+    expect(snapshot?.update).toEqual({ kind: 'one_click', owner: 'managed', latestVersion: '1.1.0' })
+    expect(await harness.instances.update('antigravity')).toMatchObject({ instanceId: 'antigravity', kind: 'update' })
+    await waitFor(() => installs === 1)
+    harness.stop()
+  })
+
+  it('a current install and a driver without a source show no update, and nothing is fetched for them', async () => {
+    const fetchImpl = vi.fn(async () => response('9.9.9')) as unknown as typeof fetch
+    const dir = home()
+    const current = adapterDriver(fake('antigravity'), { runtime: { managed: () => ({ path: process.execPath, version: '1.1.0' }), auth: async () => ({ state: 'signed_in' }) } })
+    const driver: HarnessDriver = { ...current, canInstall: true, latestVersion: { kind: 'pinned', version: '1.1.0' } }
+    const harness = testHarness({
+      drivers: [adapterDriver(pi()), adapterDriver(fake('claude')), adapterDriver(fake('codex')), driver],
+      instances: instances(),
+      profileHome: dir,
+      latest: new LatestVersionCache(dir, { fetchImpl })
+    })
+    const snapshots = await harness.instances.snapshots(device)
+    expect(snapshots.filter((entry) => entry.update)).toEqual([])
+    await expect(harness.instances.update('antigravity')).rejects.toMatchObject({ code: 'unsupported' })
+    expect(fetchImpl).not.toHaveBeenCalled()
+    harness.stop()
   })
 })
 

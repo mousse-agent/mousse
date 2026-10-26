@@ -23,7 +23,6 @@ export interface ProbeResult {
   runs: { state: RunsState; failure?: RunsFailure; message?: string }
   auth: AuthReading
   compatibility: { state: CompatibilityState; testedRange?: string }
-  update?: UpdateAffordance
   binary?: InstanceBinary
   /** The executable's size and modification time when checked: runtime facts recorded for another one are dropped. */
   fingerprint?: BinaryFingerprint
@@ -51,14 +50,25 @@ export function compatibilityOf(driver: HarnessDriver, version: string | undefin
 
 /**
  * One-click update only when Mousse owns the install; otherwise the owner's command to copy.
- * Offered when the version is older than tested (Mousse has no other proof that an update exists).
+ * Offered when the version is older than tested, or when `latest` (the newest published version
+ * known, from `LatestVersionCache`) is newer than the installed one. An owner Mousse cannot prove
+ * has no command, so nothing is offered.
  */
-export function updateAffordance(driver: HarnessDriver, binary: InstanceBinary | undefined, compatibility: ProbeResult['compatibility']): UpdateAffordance | undefined {
-  if (!binary || (compatibility.state !== 'too_old' && compatibility.state !== 'known_broken')) return undefined
+export function updateAffordance(
+  driver: HarnessDriver,
+  binary: InstanceBinary | undefined,
+  compatibility: ProbeResult['compatibility'],
+  latest?: string
+): UpdateAffordance | undefined {
+  if (!binary) return undefined
+  const outdated = compatibility.state === 'too_old' || compatibility.state === 'known_broken'
+  const newer = Boolean(latest && binary.version && compareVersions(latest, binary.version) > 0)
+  if (!outdated && !newer) return undefined
+  const latestVersion = newer && latest ? { latestVersion: latest } : {}
   const owner = binary.owner ?? 'unknown'
-  if (owner === 'managed' && driver.canInstall) return { kind: 'one_click', owner }
+  if (owner === 'managed' && driver.canInstall) return { kind: 'one_click', owner, ...latestVersion }
   const command = driver.updateCommand?.(owner)
-  return command ? { kind: 'advisory', command } : undefined
+  return command ? { kind: 'advisory', command, ...latestVersion } : undefined
 }
 
 function withDeadline<T>(work: Promise<T>, ms: number): Promise<{ value: T } | { timedOut: true }> {
@@ -219,6 +229,5 @@ export async function probeInstance(input: {
     }
   }
   const compatibility = compatibilityOf(driver, binary.version)
-  const update = updateAffordance(driver, binary, compatibility)
-  return { checkedAt, install, runs, auth, compatibility, ...(update ? { update } : {}), binary, ...(fingerprint ? { fingerprint } : {}), timedOut, ...(handshakeRan ? { handshakeRan } : {}) }
+  return { checkedAt, install, runs, auth, compatibility, binary, ...(fingerprint ? { fingerprint } : {}), timedOut, ...(handshakeRan ? { handshakeRan } : {}) }
 }
