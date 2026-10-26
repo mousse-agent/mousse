@@ -209,9 +209,13 @@ describe('withAsyncFileLock', () => {
   it('the next acquire clears what a crashed removal set aside, and only that', async () => {
     const lock = lockPath()
     mkdirSync(dirname(lock), { recursive: true })
-    const crashed = `test.lock.${deadPid()}.aaaa.removed`
-    const inFlight = `test.lock.${process.ppid}.bbbb.removed`
+    const dead = deadPid()
+    const crashed = `test.lock.${dead}.aaaaaaaaaaaa.removed`
+    // A crashed removal of one of the lock's reclaim markers leaves the same kind of litter.
+    const crashedMarker = `test.lock.reclaim-0123456789abcdef.${dead}.cccccccccccc.removed`
+    const inFlight = `test.lock.${process.ppid}.bbbbbbbbbbbb.removed`
     writeFileSync(join(dirname(lock), crashed), owner('x'))
+    writeFileSync(join(dirname(lock), crashedMarker), owner('z'))
     writeFileSync(join(dirname(lock), inFlight), owner('y'))
     await withAsyncFileLock(lock, async () => undefined, { waitMs: 0 })
     expect(readdirSync(dirname(lock))).toEqual([inFlight])

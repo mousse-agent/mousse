@@ -303,6 +303,7 @@ export function releaseForTests(lockPath: string, token: string): void {
 }
 
 const REMOVED_SUFFIX = '.removed'
+const REMOVED_NAME = /\.(\d+)\.[0-9a-f]{12}\.removed$/
 
 /**
  * Deletes files a conditional removal set aside and never cleaned up because its process died in
@@ -311,7 +312,7 @@ const REMOVED_SUFFIX = '.removed'
  */
 function sweepRemoved(lockPath: string): void {
   const directory = dirname(lockPath)
-  const prefix = `${basename(lockPath)}.`
+  const prefix = basename(lockPath)
   let names: string[]
   try {
     names = readdirSync(directory)
@@ -319,8 +320,10 @@ function sweepRemoved(lockPath: string): void {
     return
   }
   for (const name of names) {
-    if (!name.startsWith(prefix) || !name.endsWith(REMOVED_SUFFIX)) continue
-    const pid = Number(name.slice(prefix.length).split('.')[0])
+    // `<lock>.<pid>.<hex>.removed`, and the same for its reclaim markers `<lock>.reclaim-<id>.…`.
+    const match = REMOVED_NAME.exec(name)
+    if (!name.startsWith(prefix) || !match) continue
+    const pid = Number(match[1])
     if (!Number.isInteger(pid) || (pid !== process.pid && isProcessAlive(pid))) continue
     try { unlinkSync(join(directory, name)) } catch { /* gone already */ }
   }
