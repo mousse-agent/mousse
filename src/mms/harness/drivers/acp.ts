@@ -4,14 +4,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { methods } from '@agentclientprotocol/sdk'
-import type { HarnessCaps, RuntimeFacts } from '../../../shared/harness/types'
+import type { HarnessCaps, HarnessDriverKind, RuntimeFacts } from '../../../shared/harness/types'
 import type { ProviderLoginResult } from '../../../shared/providerAuth'
 import type { LlmModelOption } from '../../../shared/settings'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { LoginSession } from '../../providers/LoginSession'
 import { AcpAdapter } from '../../run/adapters/acp/AcpAdapter'
 import { decodeAuthMethods, type AcpAuthMethod } from '../acp/auth'
-import { connectAcpProcess, type AcpConnection, type AcpConnectionFactory, type AcpLaunchRequest } from '../acp/connection'
+import { connectAcpProcess, type AcpConnection, type AcpConnectionFactory, type AcpLaunchRequest, type AcpPurpose } from '../acp/connection'
 import { AGENT_DEFAULT_MODEL } from '../acp/models'
 import type { AcpLaunch, AcpPreset, AcpSource } from '../acp/preset'
 import { GENERIC_ACP_PRESET } from '../acp/presets/generic'
@@ -61,6 +61,24 @@ export interface AcpDriverOptions {
   pty?: { available: () => boolean; spawn?: PtySpawn }
   /** Managed installs of registry agents; without it a registry entry cannot be installed. */
   agents?: AgentInstalls
+}
+
+/**
+ * What a driver built on this runtime (a preset with an executable of its own, like Grok) adds to
+ * it: where its program is, the last word on its variables, and its own check before a launch.
+ */
+export interface AcpRuntimeHooks {
+  /** The driver kind its turns report (default `acp`). */
+  driver?: HarnessDriverKind
+  /**
+   * The program the preset runs when the entry has no command of its own (an override, a managed
+   * copy or the one on PATH); `track` marks a process running from a managed copy.
+   */
+  program?(purpose: AcpPurpose): { resolved: CliLaunch; track?: () => () => void } | undefined
+  /** The variables of a process, last (the instance's secrets win). */
+  env?(env: NodeJS.ProcessEnv, purpose: AcpPurpose): NodeJS.ProcessEnv
+  /** Runs before every new process (a managed copy checks its files); a throw stops the launch. */
+  beforeLaunch?(): Promise<void>
 }
 
 /**
@@ -157,7 +175,7 @@ export function acpDriver(options: AcpDriverOptions = {}): HarnessDriver {
   }
 }
 
-function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: AcpDriverOptions, ptyRuns: () => boolean): DriverRuntime {
+export function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: AcpDriverOptions, ptyRuns: () => boolean, hooks: AcpRuntimeHooks = {}): DriverRuntime {
   const statePath = join(context.stateDir, 'acp.json')
   let state: AcpState = {}
   try {
@@ -194,13 +212,21 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     .digest('hex')
 
   /** The instance's variables over its environment (on Windows a user `PATH` replaces `Path`). */
-  const launchEnv = (variables: Record<string, string>, extra: Record<string, string> = {}) =>
-    withUserEnv(withUserEnv(context.env.env, variables), extra)
+  const launchEnv = (purpose: AcpPurpose, variables: Record<string, string>, extra: Record<string, string> = {}) => {
+    const env = withUserEnv(withUserEnv(context.env.env, variables), extra)
+    return hooks.env ? hooks.env(env, purpose) : env
+  }
 
   /** The registry entry's published install, when there is one. */
   const installedNow = (): InstalledAgent | undefined => (registrySource && agents ? agents.installed(registrySource) : undefined)
 
-  const launchOf = (purpose: AcpLaunchRequest['purpose']): { resolved: CliLaunch; launch: AcpLaunch; root?: string } => {
+  const launchOf = (purpose: AcpLaunchRequest['purpose']): { resolved: CliLaunch; launch: AcpLaunch; root?: string; track?: () => () => void } => {
+    if (!source && hooks.program) {
+      const program = hooks.program(purpose)
+      if (!program) throw new Error(`${label} is not installed. Install it, or set its executable in Settings → Providers.`)
+      const launch = preset.launch({ config: context.config, source: { kind: 'local', command: program.resolved.path, args: [], env: {} }, purpose })
+      return { resolved: program.resolved, launch, ...(program.track ? { track: program.track } : {}) }
+    }
     if (!source) throw new Error(`${label} has no command. Set one in its settings.`)
     if (source.kind === 'registry') {
       const installed = installedNow()
@@ -246,14 +272,14 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
   }
 
   const spawnAgent = (request: AcpLaunchRequest): AcpConnection => {
-    const { resolved, launch, root } = launchOf(request.purpose)
+    const { resolved, launch, root, track } = launchOf(request.purpose)
     // Every registry launch follows a file check (`beforeLaunch`); none starts without one.
     if (root && (!verified || verified.hash !== installedNow()?.hash || Date.now() - verified.atMs > 60_000))
       throw new Error(`Mousse did not check the files of ${label} before starting it.`)
-    const untrack = root && agents ? agents.track(root) : undefined
+    const untrack = root && agents ? agents.track(root) : track?.()
     // Checks and sign-in verification run in a folder of their own, removed when the process ends.
     const scratch = request.purpose === 'turn' ? undefined : mkdtempSync(join(tmpdir(), 'mousse-acp-'))
-    const child = spawnHarness({ ...context.env, env: launchEnv(launch.env) }, `acp-${request.purpose}`, resolved.command, [...resolved.args, ...launch.args], {
+    const child = spawnHarness({ ...context.env, env: launchEnv(request.purpose, launch.env) }, `acp-${request.purpose}`, resolved.command, [...resolved.args, ...launch.args], {
       stdio: ['pipe', 'pipe', 'pipe'],
       ...(scratch ? { cwd: scratch } : {})
     }) as ChildProcessWithoutNullStreams
@@ -299,7 +325,10 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     // links as URL elicitations only to clients that accept them.
     clientCapabilities: () => ({ auth: { terminal: ptyRuns() }, elicitation: { url: {} } }),
     closeSessions: true,
-    beforeLaunch: () => checkInstall(undefined, { reuse: true }),
+    beforeLaunch: async () => {
+      await checkInstall(undefined, { reuse: true })
+      await hooks.beforeLaunch?.()
+    },
     store: {
       saved: (threadId) => state.sessions?.[threadId],
       setSaved: (threadId, saved) => {
@@ -433,7 +462,7 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
         const { resolved, launch } = launchOf('sign_in')
         const shown = new Set<string>()
         const run = runInPty(resolved.command, [...resolved.args, ...launch.args, ...method.args], {
-          env: launchEnv(launch.env, method.env),
+          env: launchEnv('sign_in', launch.env, method.env),
           ...(options.pty?.spawn ? { spawn: options.pty.spawn } : {}),
           onOutput: (transcript) => {
             const found = signInPrompts(transcript)
@@ -477,7 +506,7 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
   }
 
   const adapter = new AcpAdapter(() => client, {
-    driver: 'acp',
+    driver: hooks.driver ?? 'acp',
     label,
     capabilities: preset.staticCaps,
     planMode: () => Boolean(state.facts?.modes?.some((mode) => /^(plan|architect)$/i.test(mode.id) || /^(plan|architect)$/i.test(mode.name)))

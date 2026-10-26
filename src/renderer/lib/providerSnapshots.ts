@@ -258,8 +258,9 @@ const DRIVER_ORDER: Record<HarnessDriverKind, { rank: number; byName: boolean }>
   codex: { rank: 1, byName: false },
   antigravity: { rank: 2, byName: false },
   cursor: { rank: 3, byName: true },
-  acp: { rank: 4, byName: true },
-  pi: { rank: 5, byName: true }
+  grok: { rank: 4, byName: true },
+  acp: { rank: 5, byName: true },
+  pi: { rank: 6, byName: true }
 }
 
 /**

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { methods, type NewSessionResponse } from '@agentclientprotocol/sdk'
 import type { LlmModelOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
@@ -21,6 +21,7 @@ import {
   type PermissionPrompter
 } from './permissions'
 import type { AcpQuirks } from './quirks'
+import { xaiHandlers } from './xai'
 
 /**
  * The ACP session lifecycle shared by every ACP agent: one agent process per thread, kept between
@@ -59,7 +60,13 @@ export interface AcpProcess extends AcpConnection {
   generation: number
   /** Sign-in generation at launch; a process from before the latest sign-in cannot sign the profile out. */
   signInGeneration: number
+  /** Prompts the agent reported complete (`xaiExtensions`), and who waits for the next one. */
+  completedPrompts?: Set<string>
+  onPromptComplete?: (promptId: string) => void
 }
+
+/** How long a steer waits for a cancelled prompt's own completion before sending the next one. */
+export const PROMPT_COMPLETE_WAIT_MS = 5_000
 
 /** `instanceId` is absent on sessions saved before provider instances existed (the default instance). */
 export interface SavedAcpSession {
@@ -209,7 +216,17 @@ export class AcpSessions {
           if (!onAuthUrl || typeof url !== 'string' || !/^https:\/\//i.test(url)) return { action: 'decline' }
           onAuthUrl(url)
           return { action: 'accept' }
-        } } : {})
+        } } : {}),
+        ...(quirks.xaiExtensions ? xaiHandlers({
+          questions,
+          scope,
+          promptComplete: (promptId) => {
+            if (!active) return
+            active.completedPrompts ??= new Set()
+            active.completedPrompts.add(promptId)
+            active.onPromptComplete?.(promptId)
+          }
+        }) : {})
       },
       onAuthUrl: onAuthUrl ?? (() => {
         // The agent wants a sign-in outside a sign-in: the saved sign-in is gone or was never valid.
@@ -361,7 +378,24 @@ export class AcpSessions {
     if (active.threadId) this.options.questions.autoRejectPendingForThread(active.threadId)
     await active.connection.agent.notify(methods.agent.session.cancel, { sessionId: active.sessionId! })
     await active.prompting
+    // The agent may still count its task as running after the cancel's reply: its process ends,
+    // and the thread's next turn reopens the saved session on a new one.
+    if (this.options.quirks.xaiExtensions) closeAcpConnection(active)
     return 'interrupted'
+  }
+
+  /** Settles when the agent reports `promptId` complete (`xaiExtensions`); never rejects. */
+  private promptCompleted(active: AcpProcess, promptId: string): Promise<void> {
+    if (active.completedPrompts?.has(promptId)) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      const previous = active.onPromptComplete
+      active.onPromptComplete = (id) => {
+        previous?.(id)
+        if (id !== promptId) return
+        active.onPromptComplete = previous
+        resolve()
+      }
+    })
   }
 
   /** Kills the process of `sessionId`; the thread's next turn starts a new one with the history handed over. */
@@ -671,8 +705,12 @@ export class AcpSessions {
           const { historyKey: _stale, ...rest } = accepted
           store.setSaved(input.threadId, rest)
         }
-        const request = active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId,
-          prompt: [{ type: 'text', text: prompt }, ...attachments] })
+        // xAI: the prompt is tagged, and ends at its reply or its `prompt_complete`, whichever is first.
+        const promptId = quirks.xaiExtensions ? randomUUID() : undefined
+        const reply = active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId,
+          prompt: [{ type: 'text', text: prompt }, ...attachments], ...(promptId ? { _meta: { promptId } } : {}) })
+        const request = promptId ? Promise.race([reply.then(() => undefined), this.promptCompleted(active, promptId)]) : reply
+        if (promptId) reply.catch(() => undefined)
         active.prompting = request.then(() => undefined, () => undefined)
         try {
           await request
@@ -680,6 +718,8 @@ export class AcpSessions {
           active.prompting = undefined
         }
         prompting = false
+        // A steer's cancel: the next prompt waits (briefly) for the cancelled task to report its end.
+        if (promptId && cancelSent) await Promise.race([this.promptCompleted(active, promptId), new Promise<void>((resolve) => setTimeout(resolve, PROMPT_COMPLETE_WAIT_MS).unref?.())])
         input.signal?.throwIfAborted()
         collectSteer()
         if (steerFailure) throw steerFailure

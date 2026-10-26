@@ -18,6 +18,14 @@ export interface AcpQuirks {
   modelConfigId?: string
   /** Its npm package needs its install scripts (Mousse installs npm agents with `--ignore-scripts`). */
   allowInstallScripts?: boolean
+  /**
+   * xAI's extensions (Grok), under both the `_x.ai/` and `x.ai/` prefixes: `ask_user_question`
+   * goes to the thread's questions; `exit_plan_mode` is answered `abandoned` so it never blocks a
+   * turn; a prompt is tagged `_meta.promptId` and ends at its `session/prompt_complete` or its
+   * reply, whichever comes first; and a stopped prompt's process is ended (the agent may still
+   * report its task running), so the next turn reopens the session on a new one.
+   */
+  xaiExtensions?: boolean
 }
 
 export const NO_QUIRKS: Readonly<AcpQuirks> = Object.freeze({})
