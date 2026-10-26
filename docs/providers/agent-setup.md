@@ -42,13 +42,21 @@ now, into the installation (shared by every profile), and runs it from its insta
   install against its receipt (binary agents: the unpacked download; npm agents: everything npm
   installed under the prefix) and checks that the receipt is the one the entry was installed with.
   Any added, changed or missing file refuses the launch; the card shows "Installed files changed
-  since install" and offers Reinstall.
+  since install" and offers Reinstall. A link in the install counts only when it is relative and
+  resolves inside it (its target is then checked like any other file). A launch within a few seconds
+  of a full check reuses it; Recheck always checks every file.
+- **Agents that write into their own install folder** (a cache, a module built on first run) fail
+  this check on their next start, by design. Reinstall clears it; such an agent is better added as
+  a Custom command.
 - **Downloads** are checked against the registry's SHA-256 when it has one, capped at 1 GiB, and may
   redirect only on their own host or from github.com to GitHub's asset hosts. A download without a
   registry checksum needs an explicit yes for that version and URL; an update asks again.
-- **npm agents** need Node.js and npm on your PATH. Mousse runs `npm install --global --prefix …
-  --ignore-scripts` without your npm or provider credentials in its environment, then runs the
-  package's command with Node.
+- **npm agents** need Node.js and npm on your PATH. Mousse downloads the package from
+  registry.npmjs.org itself and checks it against the sha512 the npm registry publishes for that
+  version (recorded in the receipt). npm then installs that file with `--ignore-scripts`, its
+  dependencies from the same registry only, and none of your npm setup: empty user and global
+  config, its own cache and home, no `npm_config_*` variables and no credentials. The package's
+  command runs with Node.
 - **Shared files.** Each profile records which versions its entries use. "Delete downloaded files"
   lists the other profiles still using them and offers "Delete anyway". After an update the old
   version is deleted once nothing runs from it; one Windows still locks is retried at the next start.
