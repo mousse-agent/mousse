@@ -11,6 +11,7 @@ import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoordinator'
+import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
 import { changedPaths, git, introducedCommits, MOUSSE_COMMIT_ENV, requireClean, tryGit } from './git'
 
 export interface RunThreadActionOptions {
@@ -33,7 +34,7 @@ export interface RunThreadActionOptions {
   signal?: AbortSignal
 }
 
-export const IN_PROGRESS_GIT_MARKERS = ['MERGE_HEAD', 'REVERT_HEAD', 'CHERRY_PICK_HEAD', 'REBASE_HEAD', 'rebase-merge', 'rebase-apply'] as const
+export { IN_PROGRESS_GIT_MARKERS }
 
 /** Refuse to snapshot a workspace that is mid-merge/revert/cherry-pick/rebase or has unmerged paths; `git add -A` would commit conflict markers. */
 function assertNoInProgressGitOperation(workspacePath: string): void {

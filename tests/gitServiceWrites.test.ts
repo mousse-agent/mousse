@@ -25,10 +25,10 @@ const write = (cwd: string, name: string, text = `${name}\n`) => {
   mkdirSync(dirname(join(cwd, name)), { recursive: true }); writeFileSync(join(cwd, name), text)
 }
 /** Points the repository's hooks at a directory holding a `pre-commit` that runs a node script from the repository folder. */
-function withHook(cwd: string, script: string): string {
+function withHook(cwd: string, script: string, name = 'pre-commit'): string {
   const dir = join(dirname(cwd), `${basename(cwd)}-hooks`); roots.push(dir); mkdirSync(dir, { recursive: true })
-  const body = join(dir, 'pre-commit.cjs'); writeFileSync(body, script)
-  writeFileSync(join(dir, 'pre-commit'), `#!/bin/sh\nexec node "${body.replace(/\\/g, '/')}"\n`, { mode: 0o755 })
+  const body = join(dir, `${name}.cjs`); writeFileSync(body, script)
+  writeFileSync(join(dir, name), `#!/bin/sh\nexec node "${body.replace(/\\/g, '/')}"\n`, { mode: 0o755 })
   git(cwd, 'config', 'core.hooksPath', dir)
   return dir
 }
@@ -480,5 +480,120 @@ describe('GitService branches', () => {
     await expect(service.deleteBranch(cwd, 'main')).rejects.toMatchObject({ code: 'git_branch_current' })
     await expect(service.deleteBranch(cwd, 'mousse/agent/x', { force: true })).rejects.toMatchObject({ code: 'git_branch_protected' })
     await expect(service.deleteBranch(cwd, 'elsewhere', { force: true })).rejects.toMatchObject({ code: 'git_branch_in_worktree' })
+  })
+})
+
+describe('GitService in a project folder inside the repository', () => {
+  /** Paths from status are relative to the repository, whatever folder the project is. A root README and pkg/README.md share a name on purpose. */
+  function nested() {
+    const top = repo(), cwd = join(top, 'pkg')
+    write(top, 'pkg/README.md', 'pkg readme\n'); write(top, 'other/keep.txt'); git(top, 'add', '-A'); git(top, 'commit', '-m', 'pkg')
+    return { top, cwd }
+  }
+
+  it('reports repository-relative paths, and stage and unstage act on them', async () => {
+    const { top, cwd } = nested(), service = new GitService()
+    write(top, 'pkg/README.md', 'edited\n'); write(top, 'other/keep.txt', 'edited\n'); write(top, 'README.md')
+    expect((await changes(cwd)).map((change) => change.path).sort()).toEqual(['README.md', 'other/keep.txt', 'pkg/README.md'])
+    await service.stage(cwd, ['pkg/README.md', 'other/keep.txt', 'README.md'])
+    expect(porcelain(top)).toEqual(['A  README.md', 'M  other/keep.txt', 'M  pkg/README.md'])
+    await service.unstage(cwd, ['pkg/README.md', 'other/keep.txt'])
+    expect(porcelain(top)).toEqual([' M other/keep.txt', ' M pkg/README.md', 'A  README.md'])
+    await service.unstageAll(cwd)
+    expect(porcelain(top)).toEqual([' M other/keep.txt', ' M pkg/README.md', '?? README.md'])
+    await service.stageAll(cwd)
+    expect(porcelain(top)).toEqual(['A  README.md', 'M  other/keep.txt', 'M  pkg/README.md'])
+  })
+
+  it('discards the file the path names, not a same-named file under the project folder', async () => {
+    const { top, cwd } = nested()
+    write(top, 'pkg/README.md', 'precious edit\n'); write(top, 'README.md', 'untracked root file\n'); write(top, 'other/keep.txt', 'edited\n')
+    await new GitService().discard(cwd, ['README.md', 'other/keep.txt'])
+    expect(existsSync(join(top, 'README.md'))).toBe(false)
+    expect(readFileSync(join(top, 'pkg/README.md'), 'utf8')).toBe('precious edit\n')
+    expect(readFileSync(join(top, 'other/keep.txt'), 'utf8')).toBe('other/keep.txt\n')
+    expect(porcelain(top)).toEqual([' M pkg/README.md'])
+  })
+
+  it('commits everything in the repository with all, not only the project folder', async () => {
+    const { top, cwd } = nested()
+    write(top, 'pkg/new.txt'); write(top, 'other/new.txt'); write(top, '.mousse/state.json'); git(top, 'add', 'pkg/new.txt')
+    await new GitService().commit(cwd, 'everything', { all: true })
+    expect(git(top, 'show', '--name-only', '--format=', 'HEAD').split('\n').sort()).toEqual(['other/new.txt', 'pkg/new.txt'])
+    expect(porcelain(top)).toEqual(['?? .mousse/state.json'])
+  })
+})
+
+describe('GitService discard of a nested repository', () => {
+  it('leaves an untracked nested repository and its history alone, also through a parent folder', async () => {
+    const cwd = repo()
+    const inner = join(cwd, 'vendor/lib'); mkdirSync(inner, { recursive: true })
+    git(inner, 'init', '-b', 'main'); git(inner, 'config', 'user.name', 'x'); git(inner, 'config', 'user.email', 'x@example.invalid'); git(inner, 'config', 'commit.gpgsign', 'false')
+    write(inner, 'inner.txt'); git(inner, 'add', '-A'); git(inner, 'commit', '-m', 'inner history')
+    write(cwd, 'vendor/loose.txt')
+    await new GitService().discard(cwd, ['vendor'])
+    expect(existsSync(join(cwd, 'vendor/loose.txt'))).toBe(false)
+    expect(git(inner, 'log', '-1', '--format=%s')).toBe('inner history')
+    await new GitService().discard(cwd, ['vendor/lib'])
+    expect(existsSync(join(inner, '.git'))).toBe(true)
+  })
+})
+
+describe('GitService unstage before the first commit', () => {
+  it('unstages a file that was edited again after it was added, and keeps the file', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'mousse-git-unborn-')); roots.push(cwd)
+    git(cwd, 'init', '-b', 'main')
+    const service = new GitService()
+    write(cwd, 'a.txt', 'first\n'); write(cwd, 'b.txt', 'first\n'); git(cwd, 'add', '-A'); write(cwd, 'a.txt', 'edited again\n'); write(cwd, 'b.txt', 'edited again\n')
+    expect(porcelain(cwd)).toEqual(['AM a.txt', 'AM b.txt'])
+    await service.unstage(cwd, ['a.txt'])
+    expect(porcelain(cwd)).toEqual(['?? a.txt', 'AM b.txt'])
+    await service.unstageAll(cwd)
+    expect(porcelain(cwd)).toEqual(['?? a.txt', '?? b.txt'])
+    expect(readFileSync(join(cwd, 'a.txt'), 'utf8')).toBe('edited again\n')
+  })
+})
+
+describe('GitService commit that stalls or lands late', () => {
+  it('keeps the commit and the index when only a slow post-commit hook is stopped', async () => {
+    const cwd = repo()
+    withHook(cwd, 'setTimeout(() => {}, 60000)', 'post-commit')
+    write(cwd, 'a.txt'); write(cwd, 'base.txt', 'changed\n')
+    const before = Number(git(cwd, 'rev-list', '--count', 'HEAD'))
+    await new GitService({ commitSilenceMs: 4000 }).commit(cwd, 'lands')
+    expect(Number(git(cwd, 'rev-list', '--count', 'HEAD'))).toBe(before + 1)
+    expect(porcelain(cwd)).toEqual([])
+  }, 60_000)
+
+  it('stops a silent pre-commit hook and everything it started, then puts the index back', async () => {
+    const cwd = repo(), pidFile = join(dirname(cwd), `${basename(cwd)}.pid`); roots.push(pidFile)
+    withHook(cwd, `const { spawn } = require('node:child_process'); const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' }); require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(child.pid)); setTimeout(() => {}, 60000)`)
+    write(cwd, 'a.txt'); write(cwd, 'b.txt'); git(cwd, 'add', 'a.txt')
+    const head = git(cwd, 'rev-parse', 'HEAD'), state = porcelain(cwd)
+    await expect(new GitService({ commitSilenceMs: 4000 }).commit(cwd, 'stuck', { all: true })).rejects.toMatchObject({ code: 'git_silence_timeout' })
+    expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head)
+    expect(porcelain(cwd)).toEqual(state)
+    expect(existsSync(join(cwd, '.git', 'index.lock'))).toBe(false)
+    const pid = Number(readFileSync(pidFile, 'utf8'))
+    expect(() => process.kill(pid, 0)).toThrow()
+  }, 60_000)
+})
+
+describe('GitService stash and switch keeps the staged part', () => {
+  it('a failed switch puts a staged-then-edited file back as it was', async () => {
+    const cwd = repo()
+    write(cwd, 'base.txt', 'staged\n'); git(cwd, 'add', 'base.txt'); write(cwd, 'base.txt', 'edited again\n')
+    await expect(new GitService().checkout(cwd, 'missing', { dirty: 'stash' })).rejects.toMatchObject({ code: 'git_checkout_failed' })
+    expect(porcelain(cwd)).toEqual(['MM base.txt'])
+    expect(git(cwd, 'show', ':base.txt')).toBe('staged')
+    expect(readFileSync(join(cwd, 'base.txt'), 'utf8')).toBe('edited again\n')
+    expect(git(cwd, 'stash', 'list')).toBe('')
+  })
+
+  it('a successful switch brings the staged part along too', async () => {
+    const cwd = repo(); git(cwd, 'branch', 'feature')
+    write(cwd, 'base.txt', 'staged\n'); git(cwd, 'add', 'base.txt'); write(cwd, 'base.txt', 'edited again\n')
+    await new GitService().checkout(cwd, 'feature', { dirty: 'stash' })
+    expect(porcelain(cwd)).toEqual(['MM base.txt'])
   })
 })

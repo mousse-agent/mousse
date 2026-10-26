@@ -222,6 +222,14 @@ describe('GitService fetch and pull', () => {
     }
   })
 
+  it('pull while a merge already waits is an error, not a new conflict', async () => {
+    const { cwd, remoteCommit, localCommit } = synced(), service = new GitService()
+    remoteCommit('shared.txt', 'remote edit\n', 'remote'); localCommit('shared.txt', 'local edit\n', 'local')
+    await expect(service.pull(cwd, { strategy: 'merge' })).resolves.toEqual({ result: 'conflicted' })
+    await expect(service.pull(cwd, { strategy: 'merge' })).rejects.toMatchObject({ code: 'git_pull_failed' })
+    expect((await service.getStatus(cwd)).inProgress).toBe('merge')
+  })
+
   it('pull on a branch without an upstream says so', async () => {
     const { cwd } = synced()
     git(cwd, 'checkout', '-b', 'local-only')

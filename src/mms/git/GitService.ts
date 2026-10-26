@@ -7,8 +7,8 @@ import { dirname, join, resolve, sep } from 'node:path'
 import simpleGit, { type SimpleGit, type StatusResult } from 'simple-git'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
-import { IN_PROGRESS_GIT_MARKERS } from '../actions/ThreadActionService'
 import { explicitActionGitEnv } from './gitEnv'
+import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
 import { GitHubService } from './GitHubService'
 import { resolveRepositoryIdentity } from './RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
@@ -56,6 +56,8 @@ const gitErrors = createErrorProvider({
   git_checkout_dirty: { category: 'conflict', retryable: false, message: 'Uncommitted changes would be overwritten by the switch.' },
   git_checkout_untracked_collision: { category: 'conflict', retryable: false, message: 'Untracked files in the way would be overwritten by the switch.' },
   git_checkout_failed: { category: 'invalid', retryable: false, message: 'Git could not switch branches.' },
+  git_stash_kept: { category: 'conflict', retryable: false, message: 'Git could not put your changes back. They are kept in the stash named "mousse: switch to ...".' },
+  git_index_restore_failed: { category: 'internal', retryable: false, message: 'The commit failed and Git could not put the staged files back as they were. Everything is staged; unstage what you do not want to commit.' },
   git_stash_failed: { category: 'invalid', retryable: false, message: 'Git could not stash the changes.' },
   git_branch_invalid: { category: 'invalid', retryable: false, message: 'That is not a valid branch name.' },
   git_ref_not_found: { category: 'invalid', retryable: false, message: 'That branch or commit does not exist.' },
@@ -81,7 +83,9 @@ const PUSH_SILENCE_MS = 2 * 60_000
 const FETCH_SILENCE_MS = 2 * 60_000
 /** Hooks may run tests without printing; this only stops one that waits on a prompt forever. */
 const COMMIT_SILENCE_MS = 10 * 60_000
-/** After a stalled process is killed, how long to wait for its output pipes to close. */
+/** After a stalled process is asked to stop, how long it has before its whole process group is killed. */
+const KILL_GRACE_MS = 2_000
+/** After a stalled process is stopped, how long to wait for its output pipes to close. */
 const KILL_SETTLE_MS = 5_000
 
 export interface PushRemoteInputs {
@@ -116,6 +120,15 @@ const CONFLICTED_PAIRS = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'])
 /** Conflict pairs whose path has no version in HEAD ("us"). */
 const ABSENT_FROM_HEAD_PAIRS = new Set(['DD', 'DU', 'UA'])
 
+/**
+ * Git's own messages in English, so failures can be classified. Only the message
+ * locale is forced: hooks and credential helpers keep the user's locale, except where
+ * the user set `LC_ALL`, which would otherwise win over `LC_MESSAGES`.
+ */
+function englishMessagesEnv(): Record<string, string> {
+  return { LC_MESSAGES: 'C', LANGUAGE: 'C', ...(process.env.LC_ALL ? { LC_ALL: 'C' } : {}) }
+}
+
 const IN_PROGRESS_KIND: Record<(typeof IN_PROGRESS_GIT_MARKERS)[number], GitInProgress> = {
   MERGE_HEAD: 'merge',
   REVERT_HEAD: 'revert',
@@ -143,8 +156,9 @@ const statusMap: Record<string, GitFileChange['status']> = {
   C: 'copied'
 }
 
+/** Git prints `/` everywhere; only on Windows can a caller's path use a backslash, elsewhere it is part of a file name. */
 function normalizePath(value: string): string {
-  return value.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '').replace(/\/+$/, '')
+  return (process.platform === 'win32' ? value.replace(/\\/g, '/') : value).replace(/^(?:\.\/)+/, '').replace(/\/+$/, '')
 }
 
 function rawEntries(status: StatusResult): RawEntry[] {
@@ -210,15 +224,18 @@ interface GitRunOptions {
 /**
  * Runs Git and reports its exit status. Unlike simple-git, a non-zero exit with an
  * empty stderr (a hook that exits 1 quietly, a merge that stops on conflicts) is a
- * failure here. Messages are forced to English so failures can be classified.
+ * failure here. A process that goes silent is stopped together with everything it started
+ * (hooks, credential helpers, ssh) before the result is returned.
  */
 function runGitProcess(cwd: string, args: readonly string[], options: GitRunOptions = {}): Promise<GitRun> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn('git', args, {
       cwd,
-      env: { ...process.env, LC_ALL: 'C', LANGUAGE: 'C', ...options.env },
+      env: { ...process.env, ...englishMessagesEnv(), ...options.env },
       stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true
+      windowsHide: true,
+      // Leads its own process group on POSIX, so a stop reaches hooks and helpers too.
+      detached: process.platform !== 'win32'
     })
     const stdout: Buffer[] = []
     const stderr: Buffer[] = []
@@ -226,11 +243,23 @@ function runGitProcess(cwd: string, args: readonly string[], options: GitRunOpti
     let settled = false
     let silence: NodeJS.Timeout | undefined
     let fallback: NodeJS.Timeout | undefined
+    let escalate: NodeJS.Timeout | undefined
+    const killGroup = (signal: NodeJS.Signals): void => {
+      if (!child.pid) return
+      try {
+        process.kill(-child.pid, signal)
+      } catch {
+        /* the group is already gone */
+      }
+    }
     const finish = (code: number | null): void => {
       if (settled) return
       settled = true
       if (silence) clearTimeout(silence)
       if (fallback) clearTimeout(fallback)
+      if (escalate) clearTimeout(escalate)
+      // Nothing a stopped process started may outlive the result: the caller restores state and releases the lease next.
+      if (stalled && process.platform !== 'win32') killGroup('SIGKILL')
       const out = Buffer.concat(stdout).toString('utf8')
       const err = Buffer.concat(stderr).toString('utf8')
       resolvePromise({ ok: code === 0 && !stalled, stalled, stdout: out, output: [out, err].filter(Boolean).join('\n') })
@@ -238,7 +267,11 @@ function runGitProcess(cwd: string, args: readonly string[], options: GitRunOpti
     const stop = (): void => {
       stalled = true
       if (process.platform === 'win32' && child.pid) spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => undefined)
-      else child.kill('SIGKILL')
+      else {
+        // Let Git remove its lock files, then end the whole group.
+        killGroup('SIGTERM')
+        escalate = setTimeout(() => killGroup('SIGKILL'), KILL_GRACE_MS)
+      }
       // A grandchild holding the pipes must not hold the repository lease.
       fallback = setTimeout(() => finish(null), KILL_SETTLE_MS)
     }
@@ -254,6 +287,7 @@ function runGitProcess(cwd: string, args: readonly string[], options: GitRunOpti
       settled = true
       if (silence) clearTimeout(silence)
       if (fallback) clearTimeout(fallback)
+      if (escalate) clearTimeout(escalate)
       reject(error)
     })
     child.on('close', (code) => finish(code))
@@ -280,6 +314,8 @@ export class GitService {
   /** Profile-scoped GitHub CLI integration alongside the existing Git operations. */
   readonly github = new GitHubService()
   private readonly mutations = new Map<string, Promise<void>>()
+
+  constructor(private readonly options: { /** Overrides how long a commit may stay silent; for tests. */ commitSilenceMs?: number } = {}) {}
 
   private gitFor(cwd: string): SimpleGit {
     return simpleGit(cwd)
@@ -508,6 +544,14 @@ export class GitService {
     })
   }
 
+  /**
+   * The top of the repository. Status paths are relative to it, not to the project folder,
+   * which can be a subfolder, so every action that takes such paths runs from here.
+   */
+  private async toplevel(cwd: string): Promise<string> {
+    return resolve(await this.read(cwd, ['rev-parse', '--show-toplevel']) ?? cwd)
+  }
+
   private async statusEntries(cwd: string): Promise<RawEntry[]> {
     return rawEntries(await this.gitFor(cwd).status())
   }
@@ -537,14 +581,15 @@ export class GitService {
   /** Stages the working tree state of these paths, including deletions and new files. Paths with nothing to stage are skipped. */
   async stage(cwd: string, paths: readonly string[]): Promise<void> {
     await this.serialized(cwd, async () => {
-      const targets = selectEntries(await this.statusEntries(cwd), paths).filter((entry) => entry.workdir !== '')
-      await this.withPathspecFile(cwd, ['add'], targets.map((entry) => entry.path))
+      const top = await this.toplevel(cwd)
+      const targets = selectEntries(await this.statusEntries(top), paths).filter((entry) => entry.workdir !== '')
+      await this.withPathspecFile(top, ['add'], targets.map((entry) => entry.path))
     })
   }
 
   async stageAll(cwd: string): Promise<void> {
     await this.serialized(cwd, async () => {
-      const run = await this.runGit(cwd, ['add', '-A'])
+      const run = await this.runGit(await this.toplevel(cwd), ['add', '-A'])
       if (!run.ok) throw failure('git_failed', run)
     })
   }
@@ -552,21 +597,24 @@ export class GitService {
   /** Takes these paths out of the index and leaves the working tree alone. A staged rename is unstaged on both names. */
   async unstage(cwd: string, paths: readonly string[]): Promise<void> {
     await this.serialized(cwd, async () => {
-      const targets = selectEntries(await this.statusEntries(cwd), paths).filter((entry) => entry.index !== '' && entry.index !== '?' && !isConflicted(entry))
+      const top = await this.toplevel(cwd)
+      const targets = selectEntries(await this.statusEntries(top), paths).filter((entry) => entry.index !== '' && entry.index !== '?' && !isConflicted(entry))
       const names = new Set<string>()
       for (const entry of targets) {
         names.add(entry.path)
         if (entry.index === 'R' && entry.from) names.add(entry.from)
       }
-      const unborn = !await this.hasHead(cwd)
-      await this.withPathspecFile(cwd, unborn ? ['rm', '--cached', '-r', '--ignore-unmatch'] : ['restore', '--staged'], [...names])
+      const unborn = !await this.hasHead(top)
+      // `-f` lets `rm --cached` drop an index entry whose content differs from the file; the file itself is kept.
+      await this.withPathspecFile(top, unborn ? ['rm', '--cached', '-r', '-f', '--ignore-unmatch'] : ['restore', '--staged'], [...names])
     })
   }
 
   async unstageAll(cwd: string): Promise<void> {
     await this.serialized(cwd, async () => {
-      const unborn = !await this.hasHead(cwd)
-      const run = await this.runGit(cwd, unborn ? ['rm', '--cached', '-r', '--ignore-unmatch', '-q', '--', '.'] : ['restore', '--staged', '--', '.'])
+      const top = await this.toplevel(cwd)
+      const unborn = !await this.hasHead(top)
+      const run = await this.runGit(top, unborn ? ['rm', '--cached', '-r', '-f', '--ignore-unmatch', '-q', '--', '.'] : ['restore', '--staged', '--', '.'])
       if (!run.ok) throw failure('git_failed', run)
     })
   }
@@ -578,8 +626,9 @@ export class GitService {
    */
   async discard(cwd: string, paths: readonly string[]): Promise<void> {
     await this.serialized(cwd, async () => {
-      const selected = selectEntries(await this.statusEntries(cwd), paths)
-      const unborn = !await this.hasHead(cwd)
+      const top = await this.toplevel(cwd)
+      const selected = selectEntries(await this.statusEntries(top), paths)
+      const unborn = !await this.hasHead(top)
       const restore = new Set<string>()
       const remove = new Set<string>()
       const untracked: string[] = []
@@ -595,18 +644,23 @@ export class GitService {
         else restore.add(entry.path)
         if (!unborn && entry.index === 'R' && entry.from) restore.add(entry.from)
       }
-      await this.withPathspecFile(cwd, ['restore', '--source=HEAD', '--staged', '--worktree'], [...restore])
-      await this.withPathspecFile(cwd, ['rm', '-f', '-r', '--ignore-unmatch', '-q'], [...remove])
-      await this.removeUntracked(cwd, untracked)
+      await this.withPathspecFile(top, ['restore', '--source=HEAD', '--staged', '--worktree'], [...restore])
+      await this.withPathspecFile(top, ['rm', '-f', '-r', '--ignore-unmatch', '-q'], [...remove])
+      await this.removeUntracked(top, untracked)
     })
   }
 
-  /** `git clean` takes no pathspec file, so untracked paths are removed directly, each confined to the folder. */
-  private async removeUntracked(cwd: string, paths: readonly string[]): Promise<void> {
-    const root = resolve(cwd)
+  /**
+   * `git clean` takes no pathspec file, so untracked paths are removed directly, each confined
+   * to the repository. Like `git clean -d`, a nested Git repository is left alone: it shows up
+   * as one untracked directory, and removing it would delete its history.
+   */
+  private async removeUntracked(top: string, paths: readonly string[]): Promise<void> {
+    const root = resolve(top)
     for (const path of paths) {
       const target = resolve(root, path)
       if (target === root || !target.startsWith(root + sep)) throw gitErrors.create('git_path_outside')
+      if (existsSync(join(target, '.git'))) continue
       await rm(target, { recursive: true, force: true })
       // Like `git clean -d`, leave no empty directory behind.
       for (let dir = dirname(target); dir !== root && dir.startsWith(root + sep); dir = dirname(dir)) {
@@ -649,11 +703,13 @@ export class GitService {
       if (!await this.currentBranch(cwd)) throw gitErrors.create('git_detached_head')
       if (!await this.upstream(git)) throw gitErrors.create('git_no_upstream')
       const before = await this.read(cwd, ['rev-parse', 'HEAD'])
+      // A merge or rebase already waiting makes Git refuse the pull; that is an error, not a new conflict.
+      const waiting = await this.inProgress(cwd)
       const flags = strategy === 'ff-only' ? ['--ff-only'] : strategy === 'merge' ? ['--no-rebase', '--no-edit'] : ['--rebase']
       // Never on a timer: a merge or rebase killed halfway leaves the tree in a worse state than a slow one.
       const run = await this.runGit(cwd, ['pull', ...flags], { env: explicitActionGitEnv() })
       if (!run.ok) {
-        if (await this.inProgress(cwd)) return { result: 'conflicted' }
+        if (!waiting && await this.inProgress(cwd)) return { result: 'conflicted' }
         const text = run.output
         if (/Not possible to fast-forward|Need to specify how to reconcile/i.test(text)) throw classified('git_pull_diverged', run)
         if (/would be overwritten|commit your changes or stash|You have unstaged changes|cannot pull with rebase/i.test(text)) throw classified('git_pull_dirty', run)
@@ -765,19 +821,34 @@ export class GitService {
       const stashRef = () => this.read(cwd, ['rev-parse', '-q', '--verify', 'refs/stash'])
       const before = await stashRef()
       const push = await this.runGit(cwd, ['stash', 'push', '-u', '-m', `mousse: switch to ${branch}`])
-      if (!push.ok) throw failure('git_stash_failed', push)
       // With nothing to stash Git exits 0 and says so; popping then would apply an older, unrelated stash.
       const stashed = await stashRef() !== before
+      if (!push.ok) {
+        // A stash can exist even though Git reported a failure, for example when it could not remove an untracked file.
+        if (stashed && !await this.popStash(cwd)) throw gitErrors.create('git_stash_kept', push.output)
+        throw failure('git_stash_failed', push)
+      }
       try {
         await this.switchTo(cwd, branch)
       } catch (error) {
-        if (stashed) await this.runGit(cwd, ['stash', 'pop'])
+        if (stashed && !await this.popStash(cwd)) throw gitErrors.create('git_stash_kept', error)
         throw error
       }
       if (!stashed) return {}
-      const pop = await this.runGit(cwd, ['stash', 'pop'])
-      return pop.ok ? {} : { stashKept: true }
+      return await this.popStash(cwd) ? {} : { stashKept: true }
     })
+  }
+
+  /**
+   * Puts the newest stash back, with its staged part, so a file that was staged and edited
+   * again comes back the same. If the staged part cannot be re-applied Git refuses before
+   * touching anything, and the plain pop still brings the edits back. False means the stash is kept.
+   */
+  private async popStash(cwd: string): Promise<boolean> {
+    const indexed = await this.runGit(cwd, ['stash', 'pop', '--index'])
+    if (indexed.ok) return true
+    if (/Conflicts in index|Try without --index/i.test(indexed.output)) return (await this.runGit(cwd, ['stash', 'pop'])).ok
+    return false
   }
 
   private async hasStagedChanges(cwd: string): Promise<boolean> {
@@ -808,24 +879,31 @@ export class GitService {
         const tree = await this.runGit(cwd, ['write-tree'])
         if (!tree.ok) throw failure('git_commit_failed', tree)
         snapshot = tree.stdout.trim()
-        const add = await this.runGit(cwd, ['add', '-A', ...(options.all ? ['--', '.', ':(exclude).mousse/**'] : [])])
+        // From the top of the repository: the project can be a subfolder, and the checkpoint that follows sweeps the whole tree.
+        const add = await this.runGit(await this.toplevel(cwd), ['add', '-A', ...(options.all ? ['--', '.', ':(exclude).mousse/**'] : [])])
         if (!add.ok) {
-          await this.restoreIndex(cwd, snapshot)
+          await this.restoreIndex(cwd, snapshot, add)
           throw failure('git_commit_failed', add)
         }
         // Nothing to commit is not an error, except that finishing a merge needs a commit even when the tree is unchanged.
         if (!options.amend && !await this.hasStagedChanges(cwd) && await this.inProgress(cwd) !== 'merge') return
       }
 
-      const run = await this.runGit(cwd, ['commit', ...(options.amend ? ['--amend'] : []), '-m', message], { env: explicitActionGitEnv(), silenceMs: COMMIT_SILENCE_MS })
+      const headBefore = await this.read(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD'])
+      const run = await this.runGit(cwd, ['commit', ...(options.amend ? ['--amend'] : []), '-m', message], { env: explicitActionGitEnv(), silenceMs: this.options.commitSilenceMs ?? COMMIT_SILENCE_MS })
       if (run.ok) return
-      if (snapshot !== null) await this.restoreIndex(cwd, snapshot)
+      // The commit was recorded and only something after it failed or was stopped (a slow post-commit hook). Putting the old index back now would stage the commit's reversal.
+      if (await this.read(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD']) !== headBefore) return
+      if (snapshot !== null) await this.restoreIndex(cwd, snapshot, run)
       throw run.stalled ? gitErrors.create('git_silence_timeout') : failure('git_commit_failed', run)
     })
   }
 
-  private async restoreIndex(cwd: string, tree: string): Promise<void> {
-    await this.runGit(cwd, ['read-tree', tree])
+  /** Puts the index back as it was before `add -A`. If that fails the caller is told, because everything is staged now. */
+  private async restoreIndex(cwd: string, tree: string, cause: GitRun): Promise<void> {
+    const run = await this.runGit(cwd, ['read-tree', tree])
+    if (!run.ok) throw gitErrors.create('git_index_restore_failed', redactGitText(`${cause.output}
+${run.output}`))
   }
 
   async lastCommitMessage(cwd: string): Promise<string | null> {

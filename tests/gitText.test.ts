@@ -11,6 +11,14 @@ describe('redactGitText', () => {
     expect(redactGitText('fetching admin:hunter2@git.example.com:org/repo.git')).toBe('fetching [redacted]@git.example.com:org/repo.git')
   })
 
+  it('redacts credentials whatever the host looks like', () => {
+    expect(redactGitText('fatal: user:secret-password@gitserver:repo.git')).toBe('fatal: [redacted]@gitserver:repo.git')
+    expect(redactGitText('fatal: user:secret-password@10.0.0.5:repo.git')).toBe('fatal: [redacted]@10.0.0.5:repo.git')
+    expect(redactGitText('fatal: user:secret-password@[::1]:repo.git')).toBe('fatal: [redacted]@[::1]:repo.git')
+    expect(redactGitText('unable to access https://5up3rs3cr3t7oken@dev.azure.com/org/_git/repo/')).toBe('unable to access https://[redacted]@dev.azure.com/org/_git/repo/')
+    expect(redactGitText('remote: ssh://git@host.example/repo.git')).toBe('remote: ssh://git@host.example/repo.git')
+  })
+
   it('keeps ordinary Git text and scp-style addresses without a password', () => {
     for (const line of ['git@github.com:org/repo.git', 'To github.com:org/repo.git', ' ! [rejected]        main -> main (fetch first)', 'remote: Resolving deltas: 100% (3/3), done.']) {
       expect(redactGitText(line)).toBe(line)
