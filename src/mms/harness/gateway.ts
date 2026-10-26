@@ -49,7 +49,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelPrefsService, visibleProviderOption, type ModelPrefsStore } from './catalog'
-import type { AuthReading, DriverRuntime, HarnessDriver, InstallProgress, InstanceConfig, LiveProcessHost } from './driver'
+import { privateHomeRule, type AuthReading, type DriverRuntime, type HarnessDriver, type InstallProgress, type InstanceConfig, type LiveProcessHost } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, type InstanceEnv } from './env'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
 import { LatestVersionCache } from './latest'
@@ -792,6 +792,14 @@ export class Harness implements HarnessGateway {
     // The attempt runs on the caps of this moment, whatever the runtime reports meanwhile.
     const caps = record ? this.recordCaps(record) : resolved.caps
     const binary = record ? this.probes.get(record.instanceId)?.lastGood?.fingerprint : undefined
+    // The model is fixed here: a runtime that resolves `default` itself runs the bound model on
+    // dispatch, retry and recovery, whatever its listing says by then.
+    let model = resolved.model
+    if (record?.runtime.concreteModel) {
+      const concrete = record.runtime.concreteModel(model)
+      if (!concrete) harnessFail('model_unavailable', `${this.displayName(record)} has no models listed. Refresh models, then try again.`, record.instanceId)
+      model = concrete
+    }
     const binding: ExecutionBinding = {
       instanceId: resolved.instanceId,
       driver: resolved.driver,
@@ -799,7 +807,7 @@ export class Harness implements HarnessGateway {
       homeId: record?.env.homeId ?? DEFAULT_HOME_ID,
       configRevision: counters.configRevision,
       ...(accountId ? { accountId } : {}),
-      model: resolved.model,
+      model,
       ...(input.effort ? { effort: input.effort } : {}),
       policy: { mode: policyMode(input.mode), approvals: 'ask', origin: input.origin ?? 'interactive' },
       caps: { ...caps },
@@ -1381,6 +1389,7 @@ export class Harness implements HarnessGateway {
 
   /** The CLI an instance would find on PATH (inherited, `~/.local/bin`, then the login shell's). */
   private findBinary(record: InstanceRecord): string | undefined {
+    if (record.runtime?.pinned) return record.runtime.managed?.()?.path
     if (!record.driver.binaryNames.length) return undefined
     return findOnPath(record.driver.binaryNames, { env: record.env.env, searchPath: this.searchPath })
   }
@@ -1592,7 +1601,8 @@ export class Harness implements HarnessGateway {
   private updateFor(record: InstanceRecord): UpdateAffordance | undefined {
     const good = this.probes.get(record.instanceId)?.lastGood
     if (!good) return undefined
-    return updateAffordance(record.driver, good.binary, good.compatibility, this.latest.get(record.driver.latestVersion))
+    const latest = record.runtime.pinned ? record.runtime.pinned().version : this.latest.get(record.driver.latestVersion)
+    return updateAffordance(record.driver, good.binary, good.compatibility, latest)
   }
 
   /**
@@ -1638,6 +1648,7 @@ export class Harness implements HarnessGateway {
       env: { ...(source.env ?? {}) },
       ...(record.config.loginMethod ? { loginMethod: record.config.loginMethod } : {}),
       ...(record.config.movedTo ? { movedTo: record.config.movedTo } : {}),
+      ...(record.config.setup ? { setup: record.config.setup } : {}),
       ...(record.config.source?.kind === 'registry'
         ? { source: { kind: 'registry' as const, agentId: record.config.source.agentId, version: record.config.source.version, distribution: record.config.source.distribution } }
         : {})
@@ -1666,7 +1677,14 @@ export class Harness implements HarnessGateway {
     // The first instance of an agent runs on the user's own setup (their CLI and its sign-in), under
     // the driver's usual id; further ones are other accounts with private homes.
     const ownSetup = defaultInstanceId(driver.kind)
-    const useOwnSetup = ownSetup !== undefined && !hasOne && !Object.prototype.hasOwnProperty.call(entries, ownSetup)
+    // An entry that must have a home of its own (a managed Codex) is never the user's own setup,
+    // and does not count as one.
+    const rule = privateHomeRule(driver, driver.decodeConfig(patch as Record<string, unknown>))
+    const hasOwnSetup = Object.values(entries).some((entry) => entry.driver === driver.kind && privateHomeRule(driver, driver.decodeConfig(entry.config)) !== 'required')
+    // A driver whose home depends on the setup has one entry on the user's own setup at most.
+    if (driver.privateHomeFor && rule === 'forbidden' && hasOwnSetup)
+      return harnessFail('unsupported', `${driver.label} on your own setup is already added. Add one Mousse manages for another account.`)
+    const useOwnSetup = rule !== 'required' && ownSetup !== undefined && !hasOwnSetup && !Object.prototype.hasOwnProperty.call(entries, ownSetup)
     let instanceId = useOwnSetup ? ownSetup : ''
     if (!useOwnSetup) {
       // An id whose state directory is still on disk (a removal that could not delete it) is taken.
@@ -1678,8 +1696,8 @@ export class Harness implements HarnessGateway {
       }
     }
     const config = useOwnSetup
-      ? this.applyConfigPatch({}, { ...(patch.displayName ? { displayName: patch.displayName } : {}) }, driver)
-      : this.applyConfigPatch({ home: driver.privateHome ? 'private' : 'default' }, patch, driver)
+      ? this.applyConfigPatch({}, { ...(patch.displayName ? { displayName: patch.displayName } : {}), ...(patch.setup ? { setup: patch.setup } : {}) }, driver)
+      : this.applyConfigPatch({ home: driver.privateHome && rule !== 'forbidden' ? 'private' : 'default' }, patch, driver)
     this.instanceMap.setEntry(instanceId, { driver: driver.kind, enabled: true, config })
     mkdirSync(instanceStateDir(this.options.profileHome, instanceId), { recursive: true, mode: 0o700 })
     this.changed(instanceId)
@@ -1692,6 +1710,16 @@ export class Harness implements HarnessGateway {
     // sign-in are never touched, and Add provider adds it back.
     const record = this.record(instanceId, { allowDisabled: true })
     const state = this.probes.get(instanceId)
+    // Sign-ins Mousse keeps in the instance's folder go first, with what used them stopped and
+    // their tokens revoked; the folder is deleted only after that. When it fails the entry stays,
+    // so removing it again retries.
+    if (record.runtime.deleteCredentials) {
+      try {
+        await record.runtime.deleteCredentials()
+      } catch (error) {
+        harnessFail('operation_busy', `${this.displayName(record)} could not be removed: ${errorText(error)} Try removing it again.`, instanceId)
+      }
+    }
     // Shared installs stop counting this entry as a user; their files stay unless deleted.
     try {
       await record.runtime.release?.()
@@ -1737,8 +1765,13 @@ export class Harness implements HarnessGateway {
       harnessFail('operation_busy', `${this.displayName(record)} is being installed. Wait for it to finish, then change its version.`, instanceId)
     if (record.builtIn && patch.home === 'private')
       harnessFail('unsupported', `The built-in ${record.driver.label} runs as you set it up. Add another instance for a separate home.`, instanceId)
-    if (patch.home === 'private' && !record.driver.privateHome)
-      harnessFail('unsupported', `${record.driver.label} cannot use a separate home.`, instanceId)
+    if (patch.setup !== undefined && patch.setup !== (record.config.setup ?? patch.setup))
+      harnessFail('unsupported', `${this.displayName(record)} keeps the setup it was added with. Add another entry for the other one.`, instanceId)
+    const homeRule = privateHomeRule(record.driver, record.config)
+    if (patch.home === 'private' && homeRule === 'forbidden')
+      harnessFail('unsupported', `${this.displayName(record)} cannot use a separate home.`, instanceId)
+    if (patch.home === 'default' && homeRule === 'required')
+      harnessFail('unsupported', `${this.displayName(record)} always runs in a home of its own.`, instanceId)
     const stored = record.entry.config ?? {}
     if (record.builtIn) {
       // Built-in vendor instances keep their launch settings in their own settings.json.
@@ -1776,7 +1809,8 @@ export class Harness implements HarnessGateway {
   private applyConfigPatch(stored: Record<string, unknown>, patch: InstanceConfigPatch, driver: HarnessDriver): Record<string, unknown> {
     const config: Record<string, unknown> = { ...stored }
     if (patch.displayName !== undefined) setOrDelete(config, 'displayName', patch.displayName?.trim() || undefined)
-    if (patch.home !== undefined) config.home = driver.privateHome ? patch.home : 'default'
+    if (patch.home !== undefined) config.home = patch.home
+    if (patch.setup !== undefined) config.setup = patch.setup
     if (patch.binaryPath !== undefined) setOrDelete(config, 'binaryPath', patch.binaryPath?.trim() || undefined)
     if (patch.args !== undefined) setOrDelete(config, 'args', patch.args.length ? [...patch.args] : undefined)
     if (patch.env !== undefined) setOrDelete(config, 'env', Object.keys(patch.env).length ? { ...patch.env } : undefined)
@@ -1788,6 +1822,10 @@ export class Harness implements HarnessGateway {
       config.source = { ...patch.source }
       delete config.binaryPath
     }
+    // The home follows the driver's rule for the patched config: required, allowed or forbidden.
+    const rule = privateHomeRule(driver, driver.decodeConfig({ ...config, home: undefined }))
+    if (rule === 'required') config.home = 'private'
+    else if (rule === 'forbidden' && config.home !== undefined) config.home = 'default'
     return config
   }
 
@@ -1959,7 +1997,7 @@ export class Harness implements HarnessGateway {
             this.counters.bumpAccount(instanceId)
             // Its verification (a `session/new`) may have listed the account's models and modes.
             this.captureFacts(record)
-            this.emit({ type: 'operation', data: { ...started, phase: 'completed' } })
+            this.emit({ type: 'operation', data: { ...started, phase: 'completed', ...(result.warning ? { warning: result.warning } : {}) } })
           }
           else this.emit({ type: 'operation', data: { ...started, phase: 'failed', error: { code: 'signed_out', message: result.error ?? 'Sign-in failed.', instanceId } } })
         })

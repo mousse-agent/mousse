@@ -95,6 +95,8 @@ export interface ProviderLoginResult {
   success: boolean
   error?: string
   sessionId?: string
+  /** A sign-in that succeeded with something the user should know. */
+  warning?: string
 }
 
 export interface AmbientProviderInfo {

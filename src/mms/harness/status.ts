@@ -163,7 +163,8 @@ export async function probeInstance(input: {
     override: input.override,
     validateOverride: runtime.validateOverride,
     managed: managed?.path,
-    names: driver.binaryNames,
+    // A runtime pinned to Mousse's own install never runs a binary found on PATH.
+    names: runtime.pinned ? [] : driver.binaryNames,
     env
   })
   const installing = runtime.installState?.().installing === true

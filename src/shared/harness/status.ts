@@ -73,6 +73,8 @@ export interface InstanceConfigView {
   movedTo?: string
   /** An ACP agent Mousse installs from the registry. */
   source?: { kind: 'registry'; agentId: string; version: string; distribution: 'binary' | 'npx' }
+  /** Codex: Mousse's own download and sign-in, or the user's Codex CLI. */
+  setup?: 'managed' | 'existing'
 }
 
 export interface InstanceSnapshot {
