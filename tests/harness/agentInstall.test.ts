@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { InstanceEnv } from '../../src/mms/harness/env'
-import { AgentInstalls, ConsentRequiredError, downloadArtifact, isolatedNpmEnv, resetAgentInstallState, resolveNpm, sha512Of, withoutCredentials, type InstallProgress, type NpmRunner, type RegistrySource } from '../../src/mms/harness/agents/install'
+import { AgentInstalls, ConsentRequiredError, downloadArtifact, isolatedNpmEnv, packageBin, resetAgentInstallState, resolveNpm, sha512Of, withoutCredentials, type InstallProgress, type NpmRunner, type RegistrySource } from '../../src/mms/harness/agents/install'
 import { LockBusyError, withLock } from '../../src/mms/harness/agents/lock'
 import type { RegistryAgent } from '../../src/mms/harness/agents/registry'
 import { tarGzOf } from './archiveFixtures'
@@ -535,6 +535,14 @@ describe('npm agent installs', () => {
     writeFileSync(join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), '')
     const npm = resolveNpm({ env: { PATH: dir }, searchPath: [] }, 'win32')
     expect(npm).toEqual({ path: join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), command: join(dir, 'node.exe'), args: [join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js')] })
+  })
+
+  it('runs the package command named after the agent, else after the package, else its only one', () => {
+    expect(packageBin({ bin: 'cli.js' }, 'demo', 'demo')).toBe('cli.js')
+    expect(packageBin({ bin: { other: 'a.js' } }, 'demo', 'demo')).toBe('a.js')
+    expect(packageBin({ bin: { helper: 'h.js', 'demo-agent': 'a.js', demo: 'p.js' } }, 'demo-agent', '@scope/demo')).toBe('a.js')
+    expect(packageBin({ bin: { helper: 'h.js', demo: 'p.js' } }, 'demo-agent', '@scope/demo')).toBe('p.js')
+    expect(packageBin({ bin: { helper: 'h.js', tool: 't.js' } }, 'demo-agent', '@scope/demo')).toBeUndefined()
   })
 
   it('keeps credentials and every npm setting of the user out of the npm environment', () => {

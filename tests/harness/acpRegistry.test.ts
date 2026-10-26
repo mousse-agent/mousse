@@ -15,6 +15,7 @@ import {
   commandSegments,
   decodeAgent,
   decodeRegistry,
+  pinnedPackage,
   platformKeys,
   REGISTRY_MAX_BYTES,
   resolveDistribution,
@@ -71,6 +72,14 @@ describe('the ACP registry', () => {
     ]) expect(decodeAgent(bad), JSON.stringify(bad)).toBeUndefined()
     // One bad entry costs only itself.
     expect(decodeRegistry({ agents: [binaryAgent({ id: 'x/..' }), binaryAgent()] }).map((agent) => agent.id)).toEqual(['demo-agent'])
+  })
+
+  it('accepts runner packages pinned to one release only, scoped npm names included', () => {
+    for (const spec of ['demo@1.2.3', '@scope/demo-acp@0.2.1', 'demo@v1.0.0-beta.1+7']) expect(pinnedPackage(spec, 'npx'), spec).toBe(true)
+    for (const spec of ['demo', 'demo@latest', 'demo@^1.2.3', '@scope@1.0.0', '@scope/demo', 'demo@1.2', '../x@1.0.0']) expect(pinnedPackage(spec, 'npx'), spec).toBe(false)
+    expect(pinnedPackage('fast-agent==0.3.1', 'uvx')).toBe(true)
+    expect(pinnedPackage('fast-agent@0.3.1', 'uvx')).toBe(true)
+    expect(pinnedPackage('@scope/x==1.0.0', 'uvx')).toBe(false)
   })
 
   it('never lets registry variables set the launch path, loaders, homes or credentials', () => {

@@ -3,9 +3,6 @@
  * outside it or that is not a plain file or folder: symlinks, hardlinks, devices, FIFOs, and
  * absolute, drive, UNC or `..` names (read with `\` as `/`). Entry count and expanded size are
  * counted while streaming, never taken from the archive's own headers.
- *
- * Adapted from T3 Code (MIT, © 2026 T3 Tools Inc., commit d53873b6a4): the archive and traversal
- * checks of `AcpRegistrySupport.ts`, ported in logic.
  */
 import { randomBytes } from 'node:crypto'
 import { accessSync, chmodSync, constants, createReadStream, createWriteStream, lstatSync, mkdirSync, realpathSync, rmSync } from 'node:fs'

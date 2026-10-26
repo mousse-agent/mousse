@@ -247,19 +247,17 @@ function npmPackageDir(prefix: string, name: string, platform: NodeJS.Platform =
   return join(base, ...name.split('/'))
 }
 
-/** The entry script of a package's command: its only `bin`, else the one named like the agent or package. */
+/**
+ * The script a package's command runs. A package with one command (`"bin": "cli.js"`, or a single
+ * entry) runs that; with several, the one named after the registry agent, else after the package.
+ */
 export function packageBin(manifest: Record<string, unknown>, agentId: string, name: string): string | undefined {
   const bin = manifest.bin
   if (typeof bin === 'string') return bin
   if (!isRecord(bin)) return undefined
-  const entries = Object.entries(bin).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
-  if (entries.length === 1) return entries[0]![1]
-  const unscoped = name.split('/').pop() ?? name
-  for (const candidate of [agentId, unscoped, unscoped.replace(/-acp$/, '')]) {
-    const found = entries.find(([command]) => command === candidate)
-    if (found) return found[1]
-  }
-  return undefined
+  const commands = new Map(Object.entries(bin).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+  if (commands.size === 1) return [...commands.values()][0]
+  return commands.get(agentId) ?? commands.get(name.slice(name.lastIndexOf('/') + 1))
 }
 
 export class AgentInstalls {

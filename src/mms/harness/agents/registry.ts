@@ -2,10 +2,6 @@
  * The ACP agent registry (https://agentclientprotocol.com/registry): fetched with hard caps,
  * cached in the installation, and decoded leniently, so one bad entry drops only itself. Every
  * value that later becomes a path, a download or a launch is validated here first.
- *
- * Adapted from T3 Code (MIT, © 2026 T3 Tools Inc., commit d53873b6a4,
- * `packages/provider-acp-registry/src/server/AcpRegistrySupport.ts`): the entry shape, platform
- * keys, pin rules and search ranking, ported in logic.
  */
 import { mkdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
@@ -20,10 +16,26 @@ export const REGISTRY_MAX_AGENTS = 512
 
 const AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
 const VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/
-const EXACT_VERSION = 'v?[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?'
-const NPX_PACKAGE = new RegExp(`^(?:@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)@${EXACT_VERSION}$`, 'i')
-const UVX_PACKAGE = new RegExp(`^[a-z0-9][a-z0-9._-]*(?:@|==)${EXACT_VERSION}$`, 'i')
+/** One release: three numbers, then any pre-release or build parts (`1.2.3`, `v0.4.0-beta.1+7`). */
+const RELEASE = /^v?\d+\.\d+\.\d+([-+][0-9A-Za-z][0-9A-Za-z.-]*)*$/
+/** An npm package name, with or without a scope. */
+const NPM_NAME = /^(@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*$/i
+/** A Python package name. */
+const PYPI_NAME = /^[a-z0-9][\w.-]*$/i
 const SHA256 = /^[a-f0-9]{64}$/i
+
+/**
+ * Whether a package runner spec names one release of one package: `name@1.2.3` for npm (scoped
+ * names too), `name==1.2.3` or `name@1.2.3` for Python. A tag (`latest`) or a range never passes.
+ */
+export function pinnedPackage(spec: string, runner: 'npx' | 'uvx'): boolean {
+  const separator = runner === 'uvx' && spec.includes('==') ? '==' : '@'
+  const split = spec.lastIndexOf(separator)
+  if (split <= 0) return false
+  const name = spec.slice(0, split)
+  const version = spec.slice(split + separator.length)
+  return (runner === 'npx' ? NPM_NAME : PYPI_NAME).test(name) && RELEASE.test(version)
+}
 
 /** Registry platform keys. */
 export type RegistryPlatform = 'darwin-aarch64' | 'darwin-x86_64' | 'linux-aarch64' | 'linux-x86_64' | 'windows-aarch64' | 'windows-x86_64'
@@ -100,11 +112,16 @@ function httpsUrl(value: unknown): string | undefined {
 
 /** A registry `cmd` as path segments: relative, `\` read as `/`, no `.`/`..`, drive or UNC form. */
 export function commandSegments(command: string): string[] | undefined {
-  const normalized = command.trim().replace(/\\/g, '/')
-  if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized)) return undefined
-  const segments = normalized.replace(/^(\.\/)+/, '').split('/').filter((segment) => segment.length > 0)
-  if (!segments.length || segments.some((segment) => segment === '.' || segment === '..' || unsafeSegment(segment))) return undefined
-  return segments
+  const parts = command.trim().split(/[\\/]/)
+  // A leading separator (`/x`, `\\server`) or a drive (`C:`) names a place outside the install.
+  if (parts[0] === '' || /^[A-Za-z]:/.test(parts[0]!)) return undefined
+  const segments: string[] = []
+  for (const part of parts) {
+    if (part === '' || part === '.') continue
+    if (part === '..' || unsafeSegment(part)) return undefined
+    segments.push(part)
+  }
+  return segments.length ? segments : undefined
 }
 
 const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)(\..*)?$/i
@@ -157,11 +174,11 @@ function decodeBinaryTarget(value: unknown): RegistryBinaryTarget | undefined {
   return { archive, cmd, ...(typeof value.sha256 === 'string' ? { sha256: value.sha256.toLowerCase() } : {}), args, env: cleanEnv(value.env) }
 }
 
-function decodePackage(value: unknown, pattern: RegExp): RegistryPackage | undefined {
+function decodePackage(value: unknown, runner: 'npx' | 'uvx'): RegistryPackage | undefined {
   if (!isRecord(value)) return undefined
   const spec = boundedString(value.package, 256)
   const args = cleanArgs(value.args)
-  if (!spec || !pattern.test(spec) || !args) return undefined
+  if (!spec || !pinnedPackage(spec, runner) || !args) return undefined
   return { package: spec, args, env: cleanEnv(value.env) }
 }
 
@@ -181,8 +198,8 @@ export function decodeAgent(value: unknown): RegistryAgent | undefined {
       const target = decodeBinaryTarget(distribution.binary[platform])
       if (target) binary[platform] = target
     }
-  const npx = distribution.npx === undefined ? undefined : decodePackage(distribution.npx, NPX_PACKAGE)
-  const uvx = distribution.uvx === undefined ? undefined : decodePackage(distribution.uvx, UVX_PACKAGE)
+  const npx = distribution.npx === undefined ? undefined : decodePackage(distribution.npx, 'npx')
+  const uvx = distribution.uvx === undefined ? undefined : decodePackage(distribution.uvx, 'uvx')
   if (!Object.keys(binary).length && !npx && !uvx) return undefined
   const authors = Array.isArray(value.authors) ? value.authors.filter((author): author is string => typeof author === 'string' && author.length <= 256).slice(0, 16) : []
   const license = boundedString(value.license, 128)
@@ -220,12 +237,17 @@ export function decodeRegistry(value: unknown): RegistryAgent[] {
 }
 
 /** This computer's registry platform keys, best first: Windows on Arm also runs x64 builds. */
+const REGISTRY_OS: Partial<Record<NodeJS.Platform, string>> = { darwin: 'darwin', linux: 'linux', win32: 'windows' }
+const REGISTRY_CPU: Readonly<Record<string, string>> = { arm64: 'aarch64', x64: 'x86_64' }
+
 export function platformKeys(platform: NodeJS.Platform = process.platform, arch: string = process.arch): RegistryPlatform[] {
-  const os = platform === 'darwin' ? 'darwin' : platform === 'linux' ? 'linux' : platform === 'win32' ? 'windows' : undefined
-  const cpu = arch === 'arm64' ? 'aarch64' : arch === 'x64' ? 'x86_64' : undefined
+  const os = REGISTRY_OS[platform]
+  const cpu = REGISTRY_CPU[arch]
   if (!os || !cpu) return []
-  const key = `${os}-${cpu}` as RegistryPlatform
-  return key === 'windows-aarch64' ? [key, 'windows-x86_64'] : [key]
+  const keys = [`${os}-${cpu}` as RegistryPlatform]
+  // Windows on Arm emulates x64 programs, so an x64 build serves when there is no Arm one.
+  if (os === 'windows' && cpu === 'aarch64') keys.push('windows-x86_64')
+  return keys
 }
 
 export function archiveFormat(url: string): ArchiveFormat | undefined {
@@ -285,21 +307,28 @@ export function agentView(agent: RegistryAgent, keys: readonly RegistryPlatform[
   }
 }
 
-function searchRank(agent: RegistryAgent, query: string): number | undefined {
-  const normalized = query.trim().toLowerCase()
-  if (!normalized) return 100
-  const id = agent.id.toLowerCase()
-  const name = agent.name.toLowerCase()
-  const authors = agent.authors.join(' ').toLowerCase()
-  const terms = normalized.split(/\s+/)
-  if (id === normalized || name === normalized) return 0
-  if (id.startsWith(normalized) || name.startsWith(normalized)) return 10
-  const tokens = `${id} ${name}`.split(/[^a-z0-9]+/).filter(Boolean)
-  if (terms.every((term) => tokens.some((token) => token.startsWith(term)))) return 20
-  if (terms.every((term) => id.includes(term) || name.includes(term))) return 30
-  if (terms.every((term) => authors.includes(term))) return 40
-  if (terms.every((term) => `${id} ${name} ${authors} ${agent.description.toLowerCase()}`.includes(term))) return 50
-  return undefined
+/**
+ * How well an agent matches a search, higher is better, or undefined when a word of the query is
+ * found nowhere. Each word scores by where it is found: a whole word of the id or name, the start
+ * of one, anywhere in them, or in the authors and description. The whole query naming the agent
+ * exactly comes first.
+ */
+function matchScore(agent: RegistryAgent, query: string): number | undefined {
+  const wanted = query.trim().toLowerCase()
+  const words = wanted.split(/\s+/).filter(Boolean)
+  if (!words.length) return 0
+  const title = `${agent.id} ${agent.name}`.toLowerCase()
+  const titleWords = title.split(/[^a-z0-9]+/).filter(Boolean)
+  const other = `${agent.authors.join(' ')} ${agent.description}`.toLowerCase()
+  let score = wanted === agent.id.toLowerCase() || wanted === agent.name.toLowerCase() ? 100 : 0
+  for (const word of words) {
+    if (titleWords.includes(word)) score += 4
+    else if (titleWords.some((titleWord) => titleWord.startsWith(word))) score += 3
+    else if (title.includes(word)) score += 2
+    else if (other.includes(word)) score += 1
+    else return undefined
+  }
+  return score
 }
 
 /** Matching agents for this computer, best first; agents with their own Mousse entry are left out. */
@@ -307,11 +336,11 @@ export function searchAgents(agents: readonly RegistryAgent[], query: string, ke
   return agents
     .filter((agent) => !Object.prototype.hasOwnProperty.call(COVERED_AGENT_IDS, agent.id))
     .flatMap((agent) => {
-      const rank = searchRank(agent, query)
-      const view = rank === undefined ? undefined : agentView(agent, keys)
-      return view && rank !== undefined ? [{ rank, view }] : []
+      const score = matchScore(agent, query)
+      const view = score === undefined ? undefined : agentView(agent, keys)
+      return view && score !== undefined ? [{ score, view }] : []
     })
-    .sort((a, b) => a.rank - b.rank || a.view.name.localeCompare(b.view.name))
+    .sort((a, b) => b.score - a.score || a.view.name.localeCompare(b.view.name))
     .map((entry) => entry.view)
 }
 
