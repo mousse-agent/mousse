@@ -1,5 +1,6 @@
-import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import type { InstanceEnv } from './env'
+import { killProcessTree } from './processTree.mjs'
 
 /**
  * The one way the gateway starts a harness process (probes, version checks, sign-in checks, model
@@ -57,13 +58,15 @@ export function spawnHarness(
   })
 }
 
-/** Kills `child` and everything it started. */
+/**
+ * Kills `child` and everything it started, including helpers it put in other process groups
+ * (`processTree.mjs`). A process that is already gone is not an error.
+ */
 export function killTree(child: ChildProcess): void {
   const pid = child.pid
   if (!pid) return
   try {
-    if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, timeout: 5_000 })
-    else process.kill(-pid, 'SIGKILL')
+    killProcessTree(pid)
   } catch {
     try {
       child.kill('SIGKILL')
