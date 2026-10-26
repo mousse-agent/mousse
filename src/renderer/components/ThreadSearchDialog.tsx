@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Search, X } from '../lib/icons'
 import type { ThreadSearchResult } from '../../shared/types'
+import { useCommandOverlay } from '../commands/commandRegistry'
 import '../styles/thread-search.css'
 
 interface ThreadSearchDialogProps {
@@ -26,6 +27,7 @@ export function ThreadSearchDialog({ open, onClose, onSelect }: ThreadSearchDial
   const [loading, setLoading] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
+  useCommandOverlay('thread-search', open)
 
   useEffect(() => {
     if (!open) {

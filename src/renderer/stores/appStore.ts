@@ -21,6 +21,7 @@ import type { SubagentSummary } from '../../shared/subagents'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
 import { workspacePendingKey } from '../lib/newThread'
+import type { ShortcutOverrides } from '../../shared/commands'
 
 /** In-memory transcript cache so re-visiting a thread paints instantly (not in Zustand). */
 // Each entry is a fully hydrated transcript. Keeping sixteen live-sized threads
@@ -120,6 +121,12 @@ interface AppState {
   /** Review and Git diffs ignore leading/trailing whitespace when highlighting. View only: counts stay total. */
   reviewIgnoreWhitespace: boolean
   setReviewIgnoreWhitespace: (ignore: boolean) => void
+  /** The bound profile's shortcut overrides (`settings.shortcuts`). Not persisted here; the daemon owns them. */
+  shortcuts: ShortcutOverrides
+  setShortcuts: (shortcuts: ShortcutOverrides) => void
+  /** The Search threads dialog, opened from the rail's menu, the threads sidebar and its shortcut. */
+  threadSearchOpen: boolean
+  setThreadSearchOpen: (open: boolean) => void
   threadsSidebarView: 'projects' | 'threads' | 'chats'
   setThreadsSidebarView: (view: 'projects' | 'threads' | 'chats') => void
   sidebarMode: 'projects' | 'chats'
@@ -351,6 +358,11 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   channelsOpen: false,
   loading: false,
   appInfo: null,
+  shortcuts: {},
+  // Settings events repeat the same map; keep the old object so nothing re-resolves for no change.
+  setShortcuts: (shortcuts) => set((s) => (JSON.stringify(s.shortcuts) === JSON.stringify(shortcuts) ? s : { shortcuts })),
+  threadSearchOpen: false,
+  setThreadSearchOpen: (threadSearchOpen) => set({ threadSearchOpen }),
   threadsSidebarOpen: true,
   mainAreaOpen: false,
   sideCardOn: true,
@@ -615,6 +627,9 @@ export const useAppStore = create<AppState>()(persist((set) => ({
       usageOpen: false,
       profileReady: true,
       workspaceReady: false,
+      // Another profile's shortcuts must not stay bound until its own settings arrive.
+      shortcuts: {},
+      threadSearchOpen: false,
       ...next,
       messages: [],
       agents: [],

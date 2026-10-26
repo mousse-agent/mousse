@@ -4,6 +4,7 @@ import type { ChatMode } from './types'
 import { getSkillIdFromMode } from './chatMode'
 import { generateRandomUsername } from './randomUsername'
 import { listingServes } from './providerInstances'
+import type { ShortcutOverrides } from './commands'
 
 /** Color themes only — acrylic is a separate appearance toggle. */
 export type ThemeId =
@@ -85,6 +86,8 @@ export interface MousseSettings {
   }
   appearance: AppearanceSettings
   notifications: NotificationSettings
+  /** Keyboard shortcut overrides by command id; only changes are stored, `null` unbinds. */
+  shortcuts: ShortcutOverrides
   context: ContextSettings
   provider: {
     llmProvider: LlmProviderId
@@ -380,6 +383,7 @@ export function getDefaultSettings(): MousseSettings {
     notifications: {
       threadCompletionSound: true
     },
+    shortcuts: {},
     context: normalizeContextSettings(),
     provider: {
       llmProvider: '',

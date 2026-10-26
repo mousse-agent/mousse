@@ -14,6 +14,7 @@ import { removeInlineSkillToken } from '../../shared/channelCommands'
 import type { SkillDescriptor } from '../../shared/integrations'
 import { isTurnActivePhase } from '../../shared/types'
 import { useAppStore } from '../stores/appStore'
+import { useCommand } from '../commands/commandRegistry'
 import {
   ChatComposer,
   type AttachedFile,
@@ -672,6 +673,8 @@ export function OrchestratorChat() {
     await window.mousse.orchestrator.abort(activeThreadId ?? undefined)
     await refreshTurnActive()
   }, [activeThreadId, refreshTurnActive])
+  // Stop run is bound to a key; the command's own rule limits it to a thread with a run going.
+  useCommand('run.stop', () => void handleStop())
 
   const handleSend = async (skillMode?: SkillChatMode) => {
     if (!useAppStore.getState().workspaceReady) return

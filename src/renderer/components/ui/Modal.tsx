@@ -119,6 +119,9 @@ export const inheritedOpener = (dialog: HTMLElement): HTMLElement | undefined =>
 
 const topDialog = (): HTMLElement | undefined => openDialogs[openDialogs.length - 1]
 
+/** Whether any dialog is open. A dialog owns the keyboard, so shortcuts outside it must stand down. */
+export const hasOpenDialog = (): boolean => openDialogs.length > 0
+
 /** Only the top dialog answers Tab and Escape, so one stacked above another does not fight it for focus. */
 export const isTopDialog = (dialog: HTMLElement): boolean => topDialog() === dialog
 

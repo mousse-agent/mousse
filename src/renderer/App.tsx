@@ -24,6 +24,8 @@ import { SubscriptionUsagePage } from './components/SubscriptionUsagePage'
 
 import { openSurface } from './lib/surfaces'
 import { useAppStore } from './stores/appStore'
+import { useAppCommands } from './commands/useAppCommands'
+import { useCommandShortcuts } from './commands/useCommandShortcuts'
 
 import './styles/app.css'
 
@@ -44,6 +46,9 @@ const THREAD_LIST_RECONCILE_MS = 2_000
 
 export default function App() {
 
+  useCommandShortcuts()
+  useAppCommands()
+  const setShortcuts = useAppStore((s) => s.setShortcuts)
   const usageOpen = useAppStore((s) => s.usageOpen)
   const setUsageOpen = useAppStore((s) => s.setUsageOpen)
   useEffect(() => {
@@ -259,6 +264,8 @@ export default function App() {
 
 
 
+    // The bound profile's shortcut overrides; later changes arrive through settings.onChanged below.
+    window.mousse.settings.get().then(applyIfCurrent((settings) => setShortcuts(settings.shortcuts ?? {}))).catch(() => {})
     window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
     window.mousse.turn.getSnapshot().then(applyIfCurrent(setTurnSnapshot)).catch(() => {})
 
@@ -323,6 +330,7 @@ export default function App() {
         const info = useAppStore.getState().appInfo
         const llmProvider = settings?.provider?.llmProvider ?? ''
         if (info && info.llmProvider !== llmProvider) setAppInfo({ ...info, llmProvider })
+        setShortcuts(settings?.shortcuts ?? {})
       })),
       window.mousse.turn.onTurnState(applyIfCurrent(setTurnState)),
       window.mousse.turn.onTurnSnapshot(applyIfCurrent(setTurnSnapshot)),
@@ -368,6 +376,7 @@ export default function App() {
     setTasks,
     applyThreadView,
     setAppInfo,
+    setShortcuts,
     addMessage,
     updateMessage,
     setProjects,

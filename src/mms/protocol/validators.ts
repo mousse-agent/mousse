@@ -893,6 +893,7 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
     'profile',
     'appearance',
     'notifications',
+    'shortcuts',
     'context',
     'provider',
     'title',

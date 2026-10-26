@@ -31,6 +31,7 @@ export const SETTINGS_CLASSIFICATION: readonly SettingsClassificationEntry[] = [
   },
   { path: 'settings.appearance', scope: 'profile', notes: 'Theme, accent, and acrylic follow the selected profile.' },
   { path: 'settings.notifications', scope: 'profile', notes: 'Notification preferences are personal.' },
+  { path: 'settings.shortcuts', scope: 'profile', notes: 'Keyboard shortcut overrides are personal.' },
   { path: 'settings.integrations', scope: 'profile', notes: 'Skill/MCP enablement is profile-owned.' },
   { path: 'settings.title', scope: 'profile', notes: 'Title-model selection points at the shared catalog.' },
   {

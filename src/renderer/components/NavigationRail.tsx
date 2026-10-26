@@ -31,7 +31,8 @@ export function NavigationRail({ onMouseEnter, onMouseLeave }: NavigationRailPro
   const switchToThread = useAppStore((s) => s.switchToThread)
   const projectPath = useActiveProjectPath()
   const [moreOpen, setMoreOpen] = useState(false)
-  const [searchOpen, setSearchOpen] = useState(false)
+  const searchOpen = useAppStore((s) => s.threadSearchOpen)
+  const setSearchOpen = useAppStore((s) => s.setThreadSearchOpen)
   const moreRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const menuStyle = useFloatingPosition({
