@@ -106,4 +106,49 @@ describe('reopening a saved session', () => {
       sessions.stop()
     }
   })
+
+  it.each([
+    ['replays its model selector', true],
+    ['replays nothing of its setup', false]
+  ])('keeps the session’s model control and modes when a load never replies and %s', async (_name, replaysOptions) => {
+    const calls: Array<[string, unknown]> = []
+    const agent = inProcessAgent((app) => {
+      app
+        .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: { loadSession: true }, authMethods: [] }))
+        .onRequest(methods.agent.session.load, async (c) => {
+          const sessionId = c.params.sessionId
+          if (replaysOptions) await c.client.notify(methods.client.session.update, { sessionId, update: { sessionUpdate: 'config_option_update', configOptions: [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'fast', options: [{ value: 'fast', name: 'Fast' }, { value: 'deep', name: 'Deep' }] }] } as never })
+          await c.client.notify(methods.client.session.update, { sessionId, update: { sessionUpdate: 'current_mode_update', currentModeId: 'code' } as never })
+          await c.client.notify(methods.client.session.update, { sessionId, update: message('replayed answer') as never })
+          // Never answers: the replay going quiet opens the gate.
+          return new Promise(() => {})
+        })
+        .onRequest(methods.agent.session.setConfigOption, (c) => { calls.push(['set_config_option', c.params]); return { configOptions: [] } })
+        .onRequest(methods.agent.session.setMode, (c) => { calls.push(['set_mode', c.params]); return {} })
+        .onRequest(methods.agent.session.prompt, async (c) => {
+          calls.push(['prompt', c.params.sessionId])
+          return { stopReason: 'end_turn' }
+        })
+    })
+    const setup = { modelControl: { kind: 'config' as const, configId: 'model' }, modes: [{ id: 'code', name: 'Code' }, { id: 'plan', name: 'Plan' }], defaultModeId: 'code' }
+    const saved = new Map<string, SavedAcpSession>([['t', { sessionId: 'old-session', cwd: process.cwd(), historyKey: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', instanceId: 'acp:fake', setup }]])
+    const models = [{ id: 'fast', label: 'Fast' }, { id: 'deep', label: 'Deep' }]
+    const sessions = new AcpSessions({
+      label: 'Fake agent', defaultInstanceId: 'acp:fake', questions: new UserQuestionService(), connect: agent.connect, quirks: NO_QUIRKS, loadIdleMs: 20,
+      store: { saved: (id) => saved.get(id), setSaved: (id, value) => (value ? saved.set(id, value) : saved.delete(id)), models: () => models, setModels: () => {} },
+      launchGeneration: () => 0, signInGeneration: () => 0, markSignedOut: () => {}, signInRequiredMessage: 'Sign in'
+    })
+    try {
+      await sessions.chat({ threadId: 't', instanceId: 'acp:fake', cwd: process.cwd(), model: 'deep', mode: 'plan', prompt: 'next', onText: () => {} })
+      expect(calls).toEqual([
+        ['set_config_option', { sessionId: 'old-session', configId: 'model', value: 'deep' }],
+        ['set_mode', { sessionId: 'old-session', modeId: 'plan' }],
+        ['prompt', 'old-session']
+      ])
+      // What the session said when it opened is kept for the next reopen.
+      expect(saved.get('t')?.setup).toEqual(setup)
+    } finally {
+      sessions.stop()
+    }
+  })
 })

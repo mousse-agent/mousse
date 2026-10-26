@@ -63,6 +63,17 @@ export interface SavedAcpSession {
   cwd: string
   historyKey?: string
   instanceId?: string
+  /**
+   * How the session chooses its model and which modes it has, as it said when it opened. A load
+   * whose reply is missing or partial (the replay opened the gate) keeps them.
+   */
+  setup?: SessionSetup
+}
+
+export interface SessionSetup {
+  modelControl?: ModelControl
+  modes?: Array<{ id: string; name: string }>
+  defaultModeId?: string
 }
 
 /** Where saved sessions and the last listed models persist. */
@@ -117,6 +128,8 @@ export interface AcpSessionsOptions {
   prompter?: PermissionPrompter
   /** `_meta` sent with `initialize`. */
   initializeMeta?: Record<string, unknown>
+  /** Test seam: how long a load replay may pause before the gate opens (`LOAD_REPLAY_IDLE_MS`). */
+  loadIdleMs?: number
   /** Client capabilities added to `initialize` (ACP `auth`, `elicitation`). */
   clientCapabilities?: () => Record<string, unknown>
   /** Sign-in links may arrive as URL elicitations (else only through the preset's own channel). */
@@ -276,14 +289,18 @@ export class AcpSessions {
     }
   }
 
-  /** Records a session's models and modes; returns them. */
-  private observeSession(active: AcpProcess, session: unknown): { models: LlmModelOption[]; modes: Array<{ id: string; name: string }> } {
+  /**
+   * Records a session's models and modes; returns them. `known` is what a reopened session said
+   * when it opened: it stands in for what a load's missing reply would have said, and `currentModeId`
+   * is the mode the replay left it in.
+   */
+  private observeSession(active: AcpProcess, session: unknown, known?: SessionSetup & { currentModeId?: string }): { models: LlmModelOption[]; modes: Array<{ id: string; name: string }> } {
     const { models, control } = agentModels(session, active.info?.meta)
     const modes = agentModes(session)
-    active.modelControl = control
-    active.modes = modes.modes
-    active.defaultModeId = modes.current
-    active.currentModeId = modes.current
+    active.modelControl = control.kind === 'none' && known?.modelControl ? known.modelControl : control
+    active.modes = modes.modes.length ? modes.modes : known?.modes ?? []
+    active.defaultModeId = known?.defaultModeId ?? modes.current
+    active.currentModeId = modes.current ?? known?.currentModeId ?? active.defaultModeId
     if (models.length) this.options.store.setModels(models)
     const configOptions = (session as { configOptions?: unknown[] } | null)?.configOptions
     this.options.observed?.({ session: { ...(Array.isArray(configOptions) ? { configOptions } : {}), modes: modes.modes, models } })
@@ -343,18 +360,27 @@ export class AcpSessions {
    * agent can load, else `session/resume` when advertised. Null when it cannot be reopened; a load
    * that misses the gateway's deadline kills the process and forgets the session.
    */
-  private async reopen(active: AcpProcess, saved: SavedAcpSession, input: AcpChatInput, mcpServers: ReturnType<typeof sessionMcpServers>): Promise<unknown | null> {
+  private async reopen(active: AcpProcess, saved: SavedAcpSession, input: AcpChatInput, mcpServers: ReturnType<typeof sessionMcpServers>): Promise<{ response: unknown; currentModeId?: string } | null> {
     if (active.info?.agentCapabilities.loadSession === true) {
-      const gate = new LoadGate(saved.sessionId)
+      const gate = new LoadGate(saved.sessionId, this.options.loadIdleMs)
       const deliver = active.onUpdate
+      // Setup the replay states (its model selector, the mode it is in) when the reply says nothing.
+      let replayOptions: unknown[] | undefined
+      let currentModeId: string | undefined
       active.onUpdate = (update, sessionId) => {
         const verdict = gate.update(sessionId, update)
-        if (verdict !== 'discard') deliver?.(update, sessionId)
+        if (verdict === 'discard') return
+        if (verdict === 'keep') {
+          const event = update as { sessionUpdate?: string; configOptions?: unknown; currentModeId?: unknown }
+          if (event.sessionUpdate === 'config_option_update' && Array.isArray(event.configOptions)) replayOptions = event.configOptions
+          if (event.sessionUpdate === 'current_mode_update' && typeof event.currentModeId === 'string') currentModeId = event.currentModeId
+        }
+        deliver?.(update, sessionId)
       }
-      let response: unknown = {}
+      let response: Record<string, unknown> = {}
       const load = active.connection.agent.request(methods.agent.session.load, { sessionId: saved.sessionId, cwd: input.cwd, mcpServers })
         .then((value) => {
-          if (gate.state !== 'ready') response = value ?? {}
+          if (gate.state !== 'ready' && value && typeof value === 'object') response = value as Record<string, unknown>
           gate.reply()
         })
       // A failed load ends the wait at once; a late answer after the gate opened changes nothing.
@@ -364,14 +390,14 @@ export class AcpSessions {
           closeAcpConnection(active)
           this.forgetConversation(input.threadId)
         })
-        return response
+        return { response: response.configOptions === undefined && replayOptions ? { ...response, configOptions: replayOptions } : response, ...(currentModeId ? { currentModeId } : {}) }
       } finally {
         gate.dispose()
         active.onUpdate = deliver
         load.catch(() => undefined)
       }
     }
-    if (sessionCapability(active.info, 'resume')) return active.connection.agent.request(methods.agent.session.resume, { sessionId: saved.sessionId, cwd: input.cwd, mcpServers })
+    if (sessionCapability(active.info, 'resume')) return { response: await active.connection.agent.request(methods.agent.session.resume, { sessionId: saved.sessionId, cwd: input.cwd, mcpServers }) }
     return null
   }
 
@@ -477,6 +503,7 @@ export class AcpSessions {
       input.signal?.throwIfAborted()
       if (freshProcess) {
         let session: unknown
+        let known: (SessionSetup & { currentModeId?: string }) | undefined
         for (;;) {
           await this.initialize(current, quirks.clientFs === true)
           input.signal?.throwIfAborted()
@@ -491,8 +518,12 @@ export class AcpSessions {
               else {
                 // Setup metadata of a load replay applies; replayed conversation is dropped.
                 current.onUpdate = onUpdate
-                session = await this.reopen(current, saved, input, mcpServers)
-                reopened = session !== null
+                const loaded = await this.reopen(current, saved, input, mcpServers)
+                reopened = loaded !== null
+                if (loaded) {
+                  session = loaded.response
+                  known = { ...saved.setup, ...(loaded.currentModeId ? { currentModeId: loaded.currentModeId } : {}) }
+                }
               }
               if (reopened) {
                 current.sessionId = reopenedId
@@ -527,7 +558,13 @@ export class AcpSessions {
         if (quirks.modelConfigId) {
           const models = modelOptions((session ?? {}) as Pick<NewSessionResponse, 'configOptions'>)
           if (models.length) store.setModels(models)
-        } else this.observeSession(current, session ?? {})
+        } else {
+          this.observeSession(current, session ?? {}, known)
+          store.setSaved(input.threadId, {
+            sessionId: current.sessionId!, cwd: input.cwd, instanceId,
+            setup: { ...(current.modelControl ? { modelControl: current.modelControl } : {}), modes: current.modes ?? [], ...(current.defaultModeId ? { defaultModeId: current.defaultModeId } : {}) }
+          })
+        }
         this.sessions.set(input.threadId, current)
       }
       active = current
