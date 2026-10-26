@@ -4,7 +4,7 @@
  * calls the delegation tools through the same host the pi loop and the Mousse MCP server use.
  */
 import { describe, expect, it, vi } from 'vitest'
-import type { DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
+import type { DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
 import { subagentPreamble } from '../../src/mms/run/delegation/guidance'
 import { waitFor } from './phase6Fixture'
 import { useSubagentWorld, type Json } from './subagentWorld'

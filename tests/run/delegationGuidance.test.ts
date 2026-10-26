@@ -5,7 +5,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { DELEGATION_PROMPT } from '../../src/mms/orchestrator/systemPrompt'
-import { delegationToolDefinitions, dispatchDelegationTool, LISTED_DELEGATION_TOOL_NAMES, type DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
+import { delegationToolDefinitions, dispatchDelegationTool, LISTED_DELEGATION_TOOL_NAMES, type DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
 import {
   delegationGuidanceLines,
   mcpDelegationInstructions,

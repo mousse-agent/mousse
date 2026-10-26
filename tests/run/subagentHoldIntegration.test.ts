@@ -5,7 +5,7 @@
  * every trigger, is `subagentHold.test.ts`).
  */
 import { describe, expect, it, vi } from 'vitest'
-import type { DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
+import type { DelegationToolHost } from '../../src/mms/run/mcp/appTools/delegation'
 import { childBusy } from '../../src/mms/run/delegation/hold'
 import { waitFor } from './phase6Fixture'
 import { useSubagentWorld, type Json } from './subagentWorld'

@@ -137,21 +137,6 @@ export interface LlmMessage {
 
 
 
-// The delegation tools live with the other app tools (`run/mcp/appTools`); re-exported for callers
-// that name them through the loop.
-export {
-  delegationToolDefinitions,
-  dispatchDelegationTool,
-  executeDelegationTool,
-  LISTED_DELEGATION_TOOL_NAMES,
-  type DelegateTaskInput,
-  type DelegationToolCall,
-  type DelegationToolHost,
-  type NamedAgentRecallRequest,
-  type NamedAgentToolRequest,
-  type SubagentRef
-} from '../run/mcp/appTools/delegation'
-
 export interface LlmChatOptions {
   appletInstructions?: string
   onPublishApplet?: (source: unknown) => unknown
