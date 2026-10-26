@@ -1436,11 +1436,14 @@ export class OrchestratorService extends EventEmitter {
    * Whether the thread has work the replayed Stop did not cover: a run admitted at or after the generation
    * the Stop raised it to (any status; its process may still hold helpers), or any run that is still not
    * terminal (the original Stop already ended its provider work once, and the stale-run Stop uses the same
-   * guard). An unknown generation counts as newer work, so nothing is closed on a guess.
+   * guard). Any turn still in this process counts, whether or not it is an engine run: a channel turn, and
+   * also one the first Stop aborted that is still unwinding. That last case is safe, since the first Stop
+   * already reached the provider. An unknown generation counts as newer work, so nothing is closed on a guess.
    */
   private hasWorkAfterStop(threadId: string, generation: number | undefined): boolean {
     const engine = this.runEngine
     if (!engine || generation === undefined) return true
+    if (this.hasLocalTurn(threadId)) return true
     return engine.listRuns(threadId, { limit: 200 }).some((run) => !TERMINAL_RUN_STATUSES.has(run.status) || runStopGeneration(engine.store, run.runId) >= generation)
   }
 
@@ -7088,6 +7091,8 @@ export class OrchestratorService extends EventEmitter {
       onUserInputAccepted?: () => void
     }
   ): Promise<BackgroundWorkflowTurnResult> {
+    // The turn registers itself only when the caller passes no signal. Production callers (ChannelRouter and the
+    // remote MmsBackend) always pass one, so this path runs only for callers without one (today, tests).
     const ownedTurn = !opts?.signal
     const channelTurn: { abort: AbortController; pendingSteer: string[]; promotedSteerIds: string[]; runId?: string } | null = ownedTurn
       ? { abort: new AbortController(), pendingSteer: [], promotedSteerIds: [] }
@@ -7220,7 +7225,9 @@ export class OrchestratorService extends EventEmitter {
       if (isAbort) return { text: '', silent: true, aborted: true }
       return { text: '', silent: false, error: err instanceof Error ? err.message : String(err) }
     } finally {
-      if (channelTurn) this.channelTurns.delete(threadId)
+      // A later channel turn on this thread may have registered itself while this one ran (it waits for the
+      // lease): only this turn's own entry is removed.
+      if (channelTurn && this.channelTurns.get(threadId) === channelTurn) this.channelTurns.delete(threadId)
       if (lease) releaseExecutionLeaseHandle(lease)
       if (admittedSession) {
         this.releaseSessionExecutionLease(admittedSession)

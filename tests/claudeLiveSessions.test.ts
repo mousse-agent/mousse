@@ -897,7 +897,7 @@ describe('result routing and steering edge cases', () => {
     await later(30)
     expect(f.service.hasBackgroundWork('thread')).toBe(true)
     // The model may not be changed meanwhile, and the error says what to do.
-    await expect(f.chat({ history: '', model: 'opus' })).rejects.toMatchObject({ message: expect.stringContaining('Press Stop') })
+    await expect(f.chat({ history: '', model: 'opus' })).rejects.toMatchObject({ message: expect.stringMatching(/read the result of a background task.*could not be shown.*press Stop/) })
     f.cli.reply = (message, self) => self.answer(String(message.uuid), 'next')
     expect(await f.chat({ history: '' })).toBe('next')
     // Not committed yet: the turn has to commit.
@@ -1607,6 +1607,56 @@ describe('background helpers as the real Claude Code reports them', () => {
     expect(await second).toBe('The second shell finished.')
   })
 
+  /** The wake for `bash-1` is cut off after it began; `bash-2` (when listed) keeps running. */
+  const cutOffWake = async (f: ReturnType<typeof fixture>, listed: Array<{ id: string; type: string }>) => {
+    startedWith(f, ...listed)
+    await f.turn()
+    const process = f.cli.last
+    f.cli.reply = undefined
+    process.emit(notification('bash-1'), textDelta('reading the report'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    const abort = new AbortController()
+    const wake = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined, signal: abort.signal })
+    await later(20)
+    abort.abort()
+    await expect(wake).rejects.toThrow()
+    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    process.emit(resultFrame({ terminalReason: 'aborted_streaming', origin: 'task-notification' }))
+    await later(30)
+    f.service.commitInterrupted('thread', '')
+    return f.chat({ history: '', model: 'opus' }).then(() => undefined, (caught: Error) => caught)
+  }
+
+  it('a task a cut-off wake had read is not described as one whose result may not arrive, or as work a change would end', async () => {
+    const f = fixture()
+    // Claude read the report; only the reply was cut off. Sending a message clears it.
+    const error = await cutOffWake(f, [{ id: 'bash-1', type: 'local_bash' }])
+    expect(error?.message).toMatch(/read the result of a background task for this thread, but its reply was cut off.*Send a message without the change to clear it, or press Stop/)
+    expect(error?.message).not.toMatch(/may not arrive|would end that work/)
+  })
+
+  it('when a task is still running as well, the refusal says the running one would end, and mentions the one that was read', async () => {
+    const f = fixture()
+    const error = await cutOffWake(f, [{ id: 'bash-1', type: 'local_bash' }, { id: 'bash-2', type: 'local_bash' }])
+    expect(error?.message).toMatch(/still running a background task for this thread, and read the result of another background task, whose reply was cut off.*would end the running work.*Wait for it to finish or press Stop/)
+    expect(error?.message).not.toMatch(/may not arrive/)
+  })
+
+  it('when a lost task and a read one coexist, only the lost one is counted and the other is mentioned', async () => {
+    const f = fixture()
+    startedWith(f, { id: 'bash-1', type: 'local_bash' }, { id: 'bash-2', type: 'local_bash' })
+    await f.turn()
+    const { obligations } = (f.service as unknown as { live: Map<string, { obligations: import('../src/mms/providers/claudeSubscription/liveSession').BackgroundObligations }> }).live.get('thread')!
+    const lost = {}
+    const read = {}
+    obligations.consume('bash-1', lost)
+    obligations.release(lost, 'lost')
+    obligations.consume('bash-2', read)
+    obligations.release(read, 'discarded')
+    const error = await f.chat({ history: '', model: 'opus' }).then(() => undefined, (caught: Error) => caught)
+    expect(error?.message).toMatch(/holding a background task for this thread whose result may not arrive, along with another background task\..*Press Stop/)
+  })
+
   it.each([
     ['after the wake began', true],
     ['before the wake began', false]
@@ -1729,7 +1779,7 @@ describe('background helpers as the real Claude Code reports them', () => {
     expect(await wake).toBe('B text')
   })
 
-  it('a cut-off wake whose result was already held back for a steer ends at once, so the next wake is not dropped', async () => {
+  it('a cut-off wake whose result was already held back for a steer ends at once and sends no interrupt, so the next wake is not dropped or hit', async () => {
     const f = fixture()
     startedWith(f, { id: 'bash-1', type: 'local_bash' }, { id: 'bash-2', type: 'local_bash' })
     await f.turn()
@@ -1750,7 +1800,9 @@ describe('background helpers as the real Claude Code reports them', () => {
     process.emit(resultFrame({ text: 'A done', origin: 'task-notification' }))
     await later(30)
     abort.abort()
-    await vi.waitFor(() => expect(process.interrupts).toBe(1))
+    // The wake's turn is over: an interrupt now could hit the next wake, so none is sent.
+    await later(50)
+    expect(process.interrupts).toBe(0)
     open()
     await later(30)
     // The second shell's wake runs: nothing is waiting for a result that already came.
