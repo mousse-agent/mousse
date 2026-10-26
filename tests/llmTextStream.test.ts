@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { handleTextStreamEvent, type StreamingLlmTextEvent } from '../src/mms/orchestrator/LlmClient'
+import type { StreamingLlmTextEvent } from '../src/mms/harness/turnEvents'
+import { handleTextStreamEvent } from '../src/mms/harness/drivers/pi/stream'
 
 describe('handleTextStreamEvent', () => {
   it('retains independent text blocks from a provider response', () => {

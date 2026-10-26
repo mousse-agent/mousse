@@ -10,7 +10,7 @@ import {
   DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS,
   ProviderStreamStallError,
   resolveStreamInactivityTimeout
-} from '../src/mms/orchestrator/LlmClient'
+} from '../src/mms/harness/drivers/pi/stream'
 import {
   isConnectionFailure,
   retryConnectionFailures
