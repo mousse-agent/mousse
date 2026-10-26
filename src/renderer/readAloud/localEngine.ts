@@ -25,6 +25,8 @@ const IDLE_DISPOSE_MS = 5 * 60_000
 let pool: { modelId: LocalTtsModelId; workers: Worker[] } | null = null
 let lastRequestId = 0
 let activeSessions = 0
+/** Ends each running read or phone job with an error; its workers are about to be terminated. */
+const sessionStops = new Set<(error: Error) => void>()
 let idleTimer: ReturnType<typeof setTimeout> | null = null
 
 function send(target: Worker, message: LocalTtsWorkerRequest): void {
@@ -52,10 +54,14 @@ function createWorker(model: LocalTtsModel): Worker {
   return created
 }
 
-/** Starts workers for `model` up to `size`; a one-segment message needs only one. */
-function ensurePool(model: LocalTtsModel, size: number): Worker[] {
-  if (pool && pool.modelId !== model.id) disposeLocalEngine()
+/**
+ * Starts workers for `model` for `segments` segments: one for a one-segment message, and never
+ * more than the model allows. Another model's workers are replaced, ending the jobs using them.
+ */
+function ensurePool(model: LocalTtsModel, segments: number): Worker[] {
+  if (pool && pool.modelId !== model.id) disposeLocalEngine('Reading stopped because another voice model started')
   pool ??= { modelId: model.id, workers: [] }
+  const size = Math.min(model.maxWorkers ?? POOL_SIZE, segments)
   while (pool.workers.length < size) pool.workers.push(createWorker(model))
   return pool.workers.slice(0, size)
 }
@@ -73,11 +79,15 @@ function scheduleIdleDispose(): void {
   }, IDLE_DISPOSE_MS)
 }
 
-/** Drops the loaded model, e.g. after its files were deleted or when it has been idle. */
-export function disposeLocalEngine(): void {
+/**
+ * Drops the loaded model, e.g. after its files were deleted or when it has been idle. Jobs still
+ * using it fail with `reason` instead of waiting for workers that no longer answer.
+ */
+export function disposeLocalEngine(reason = 'The voice model was unloaded while reading'): void {
   cancelIdleDispose()
   for (const worker of pool?.workers ?? []) worker.terminate()
   pool = null
+  for (const stop of [...sessionStops]) stop(new Error(reason))
 }
 
 interface SegmentState extends SegmentTiming {
@@ -100,7 +110,7 @@ export function speakWithLocalModel(
     if (segments.length === 0) return resolve()
     cancelIdleDispose()
     activeSessions++
-    const workers = ensurePool(model, Math.min(model.maxWorkers ?? POOL_SIZE, segments.length))
+    const workers = ensurePool(model, segments.length)
     const context = new AudioContext()
     if (pause.paused) void context.suspend().catch(() => undefined)
     else void context.resume().catch(() => undefined)
@@ -126,6 +136,7 @@ export function speakWithLocalModel(
     const settle = (error?: Error): void => {
       if (settled) return
       settled = true
+      sessionStops.delete(settle)
       activeSessions--
       if (activeSessions === 0) scheduleIdleDispose()
       if (startTimer) clearTimeout(startTimer)
@@ -236,8 +247,9 @@ export function speakWithLocalModel(
       drain()
     }
     const onWorkerError = (event: ErrorEvent): void => {
-      disposeLocalEngine()
-      settle(new Error(event.message || 'The local voice engine stopped unexpectedly'))
+      const message = event.message || 'The local voice engine stopped unexpectedly'
+      settle(new Error(message))
+      disposeLocalEngine(message)
     }
     const onAbort = (): void => settle()
 
@@ -246,6 +258,7 @@ export function speakWithLocalModel(
       worker.addEventListener('error', onWorkerError)
     }
     signal.addEventListener('abort', onAbort)
+    sessionStops.add(settle)
     dispatch()
   })
 }
@@ -283,7 +296,7 @@ export function synthesizeWithLocalModel(
     if (segments.length === 0) return resolve()
     cancelIdleDispose()
     activeSessions++
-    const workers = ensurePool(model, Math.min(POOL_SIZE, segments.length))
+    const workers = ensurePool(model, segments.length)
     const results: Array<{ samples: Float32Array; sampleRate: number } | undefined> = []
     const inFlight = new Map<number, { index: number; worker: Worker }>()
     const busy = new Set<Worker>()
@@ -295,6 +308,7 @@ export function synthesizeWithLocalModel(
     const settle = (error?: Error): void => {
       if (settled) return
       settled = true
+      sessionStops.delete(settle)
       activeSessions--
       if (activeSessions === 0) scheduleIdleDispose()
       for (const worker of workers) {
@@ -356,8 +370,9 @@ export function synthesizeWithLocalModel(
       }
     }
     const onWorkerError = (event: ErrorEvent): void => {
-      disposeLocalEngine()
-      settle(new Error(event.message || 'The local voice engine stopped unexpectedly'))
+      const message = event.message || 'The local voice engine stopped unexpectedly'
+      settle(new Error(message))
+      disposeLocalEngine(message)
     }
     const onAbort = (): void => settle()
 
@@ -366,6 +381,7 @@ export function synthesizeWithLocalModel(
       worker.addEventListener('error', onWorkerError)
     }
     signal.addEventListener('abort', onAbort)
+    sessionStops.add(settle)
     dispatch()
   })
 }

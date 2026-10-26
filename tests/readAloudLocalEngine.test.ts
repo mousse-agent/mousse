@@ -380,4 +380,35 @@ describe('local read aloud with more than one model', () => {
     await expect(startRead(SHORT, new AbortController(), 'gone' as LocalTtsModelId).done).rejects.toThrow('not available')
     expect(FakeWorker.all).toHaveLength(0)
   })
+
+  it('ends a read when a phone starts another model, instead of leaving it waiting on stopped workers', async () => {
+    const read = startRead(LONG)
+    const outcome = expect(read.done).rejects.toThrow('another voice model')
+    const kokoro = [...FakeWorker.all]
+    const phone = engine.synthesizeWithLocalModel('pocket-tts-fr', SHORT, { signal: new AbortController().signal, voice: undefined, speed: 1, onClip: () => undefined })
+
+    await outcome
+    expect(kokoro.map((worker) => worker.terminated)).toEqual([1, 1])
+    while (FakeWorker.all.some((worker) => worker.answerPending())) {
+      // answer the phone job
+    }
+    await phone
+
+    // Neither job is left counted as running, so the Pocket worker is still dropped when idle.
+    await vi.advanceTimersByTimeAsync(IDLE_MS)
+    expect(FakeWorker.all.at(-1)?.terminated).toBe(1)
+  })
+
+  it('runs Supertonic on one worker for a phone too', async () => {
+    expect(splitSpeechSegments(LONG)).toHaveLength(2)
+    const onClip = vi.fn()
+    const done = engine.synthesizeWithLocalModel('supertonic-3', LONG, { signal: new AbortController().signal, voice: undefined, speed: 1, onClip })
+    expect(FakeWorker.all).toHaveLength(1)
+    while (FakeWorker.all.some((worker) => worker.answerPending())) {
+      await vi.advanceTimersByTimeAsync(0)
+    }
+    await done
+    expect(onClip).toHaveBeenCalledTimes(2)
+    expect(FakeWorker.all).toHaveLength(1)
+  })
 })
