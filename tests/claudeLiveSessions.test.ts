@@ -1943,6 +1943,22 @@ describe('background helpers as the real Claude Code reports them', () => {
     session.close()
   })
 
+  it('a repeat notification for a remembered task opens one wake for it, not two', async () => {
+    const { hooks, session, process } = await rememberedTasks('bash-2')
+    process.emit(notification('bash-2'))
+    await later(20)
+    process.emit(textDelta('a wake'))
+    await vi.waitFor(() => expect(hooks.continuationStarted).toHaveBeenCalledTimes(1))
+    expect(hooks.continuationStarted).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ taskIds: ['bash-2'], summaries: ['task bash-2 completed'] }))
+    expect(session.obligations.recentlyCleared()).toEqual([])
+    process.emit(resultFrame({ text: 'a wake', origin: 'task-notification' }))
+    await later(20)
+    process.emit(textDelta('a stray frame'))
+    await later(20)
+    expect(hooks.continuationStarted).toHaveBeenCalledTimes(1)
+    session.close()
+  })
+
   it('a stopped notification for an unlisted task changes no label', async () => {
     const { hooks, session, process } = await rememberedTasks('bash-2')
     process.emit(notification('opaque', 'stopped'))

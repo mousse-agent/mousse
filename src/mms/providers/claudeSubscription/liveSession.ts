@@ -1012,6 +1012,9 @@ export class LiveSession<Turn = unknown> {
       const stray = this.stray
       if (stray && Date.now() < stray.until) {
         this.stray = undefined
+        // A repeat notification for a remembered task is that task's wake: forget it, so it opens one wake.
+        this.obligations.forget([stray.id])
+        this.obligations.takeSummary(stray.id)
         return (this.cursor = this.startContinuation([{ id: stray.id, summary: stray.summary }]))
       }
       // One remembered task per late wake, the oldest first (an assumption: Claude starts one wake per
@@ -1106,7 +1109,9 @@ export class LiveSession<Turn = unknown> {
 
   /**
    * A task finished. One this process never listed (an opaque task, T3's rule) keeps nothing busy and
-   * opens no continuation now; when no live turn folds it in, it only labels the next late wake (`stray`). A task that was stopped (an interrupt stops background agents) is reported
+   * opens no continuation now. When no live turn folds it in, Claude may start a wake for it: the next
+   * late root frame within `wakeDeadlineMs` opens a visible continuation labelled with it (`stray`), also
+   * when nothing is remembered. A task that was stopped (an interrupt stops background agents) is reported
    * without a turn following: it is not owed any more, and no continuation opens for it. Otherwise a
    * turn that is already in flight consumes it; if none is, Claude is about to start its own turn for
    * it, which opens as a continuation at this report.
@@ -1146,6 +1151,11 @@ export class LiveSession<Turn = unknown> {
     return this.runs.find((run) => !run.abandoned && !run.settled)
   }
 
+  /**
+   * Opens the continuation for `entries`. Callers take the summaries first and rely on no continuation being
+   * open (`frameTarget` returns earlier for an unsettled one, and `routeNotification` gets here only when
+   * `notificationOwner()` found none): an open one is returned as is and consumes nothing.
+   */
   private startContinuation(entries: ReadonlyArray<{ id: string; summary?: string }>): LiveRun {
     const open = this.openContinuation()
     if (open) return open
