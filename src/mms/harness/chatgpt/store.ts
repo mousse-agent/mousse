@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { createSecretCodec, type SecretCodec } from '../../providers/secretCodec'
 import { openSecretFile, sealSecretFile, SecretFileError } from '../../providers/secretFile'
 import { instanceStateDir } from '../instances'
@@ -157,8 +158,11 @@ function isNewer(value: unknown): boolean {
   return isRecord(value) && typeof value.version === 'number' && value.version > 1
 }
 
-/** The database layout. A database with a higher `user_version` was made by a newer Mousse. */
-const SCHEMA_VERSION = 1
+/**
+ * The database layout. A database with a higher `user_version` was made by a newer Mousse.
+ * 2 added `meta` (the incarnation); a version-1 database gains it on open.
+ */
+const SCHEMA_VERSION = 2
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS store (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -201,6 +205,23 @@ interface Row {
 }
 
 const corrupt = () => new ChatGptAuthError('protocol', 'storage', MESSAGES.storageUnreadable)
+
+/** A replacement database is built as `chatgpt.db.new-<uuid>` before it takes the name. */
+const TEMPORARY_INFIX = '.new-'
+/** A replacement older than this was left by a swap that never saved its intent. */
+const ORPHAN_TEMPORARY_MS = 60_000
+
+/** Saved before a damaged database is swapped out, so a crash mid-swap can be finished. */
+interface SwapIntent {
+  temporary: string
+  aside: string
+}
+
+/** Tests only: runs between the two halves of a swap; a throw there acts like a crash. */
+let swapHook: (() => void) | null = null
+export function setSwapHookForTests(hook: (() => void) | null): void {
+  swapHook = hook
+}
 
 /** Whether a damaged database file still shows encrypted payloads, so its replacement stays encrypted. */
 function wasEncryptedFile(path: string): boolean {
@@ -249,6 +270,7 @@ export class ChatGptStore {
           throw error
         }
       }
+      this.settleEncryptionMarker(database)
       return work(database)
     } catch (error) {
       if (error instanceof ChatGptAuthError || error instanceof CorruptDatabase) throw error
@@ -266,7 +288,13 @@ export class ChatGptStore {
   }
 
   private incarnation(database: DatabaseSync): string {
-    const found = database.prepare("SELECT value FROM meta WHERE key = 'incarnation'").get() as { value: string } | undefined
+    const select = () => database.prepare("SELECT value FROM meta WHERE key = 'incarnation'").get() as { value: string } | undefined
+    let found = select()
+    if (!found) {
+      // A lost incarnation is given a new one: data read before cannot match it, which is safe.
+      database.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('incarnation', ?)").run(randomUUID())
+      found = select()
+    }
     if (!found) throw corrupt()
     return found.value
   }
@@ -293,8 +321,13 @@ export class ChatGptStore {
    * fails typed and is never touched. A corrupt payload or database fails typed (`storage`).
    */
   read(): ChatGptStoreData {
-    // A store never written reads as empty without creating anything.
-    if (!existsSync(this.path)) return emptyStore()
+    this.finishSwap()
+    if (!existsSync(this.path)) {
+      // A database set aside earlier and now missing must be recovered, not read as never written.
+      if (this.wasSetAside()) throw corrupt()
+      // A store never written reads as empty without creating anything.
+      return emptyStore()
+    }
     try {
       return this.withDatabase((database) => this.decode(this.row(database), this.incarnation(database)))
     } catch (error) {
@@ -314,8 +347,11 @@ export class ChatGptStore {
    * Anything else (a locked vault, a newer Mousse, a readable store) is returned or thrown as `read`.
    */
   recover(): ChatGptStoreData {
+    this.finishSwap()
+    if (!existsSync(this.path)) return this.replaceDamagedFile()
+    let promote = false
     try {
-      return this.withDatabase((database) => {
+      const recovered = this.withDatabase((database) => {
         database.exec('BEGIN IMMEDIATE')
         try {
           const row = this.row(database)
@@ -328,7 +364,8 @@ export class ChatGptStore {
             database.prepare('INSERT INTO set_aside (at, revision, encrypted, payload) VALUES (?, ?, ?, ?)').run(Date.now(), row.revision, row.encrypted, row.payload)
             const fresh = { ...emptyStore(), signInFence: row.fence + 1, incarnation }
             const sealed = this.seal(fresh, row.encrypted === 1)
-            if (sealed.encrypted) this.markEncrypted()
+            if (sealed.encrypted) this.beginEncrypted()
+            promote = sealed.encrypted
             database.prepare('UPDATE store SET revision = revision + 1, fence = ?, encrypted = ?, payload = ? WHERE id = 1').run(fresh.signInFence, sealed.encrypted ? 1 : 0, sealed.stored)
             data = { ...fresh, revision: row.revision + 1 }
           }
@@ -339,26 +376,50 @@ export class ChatGptStore {
           throw error
         }
       })
+      if (promote) this.promoteEncrypted()
+      return recovered
     } catch (error) {
-      if (!(error instanceof CorruptDatabase)) throw error
+      if (!(error instanceof CorruptDatabase)) {
+        if (promote) this.settleAfterFailure()
+        throw error
+      }
       return this.replaceDamagedFile()
     }
   }
 
+  /** After a failed commit, settles a pending marker from what is actually committed. */
+  private settleAfterFailure(): void {
+    try {
+      this.withDatabase(() => undefined)
+    } catch {
+      // Unreadable now: the pending marker stays and keeps encryption required until settled.
+    }
+  }
+
   /**
-   * Replaces a damaged database file. The complete replacement is built first, under a temporary
-   * name, sealed as the old store required (a seal that fails leaves everything untouched). The old
-   * journal files move aside before the old database, so the new database never meets an old WAL;
-   * if any of them cannot move, the moved ones go back and nothing is treated as recovered. Only
-   * then does the replacement take the name. It has a new incarnation, so data read from the old
-   * file can never commit to it, and a clock-based fence above any the old one handed out.
+   * Replaces a damaged (or missing, after a damaged one was set aside) database file.
+   *
+   * The complete replacement is built first, under a temporary name, sealed as the old store
+   * required; a seal that fails leaves everything untouched. A swap intent naming both files is
+   * saved next, so a crash at any later point is finished or rolled back by the next open
+   * (`finishSwap`), and a missing database is never mistaken for a store never written. The old
+   * journal files move aside before the old database, so the new database never meets an old
+   * WAL. Any failure puts back what moved and removes the replacement; only a completed swap
+   * counts as recovered. The replacement has a new incarnation, so data read from the old file can
+   * never commit to it, and a clock-based fence above any the old one handed out.
    */
   private replaceDamagedFile(): ChatGptStoreData {
-    const encrypt = this.codec.encryptionRequired === true || wasEncryptedFile(this.path)
+    const encrypt = this.codec.encryptionRequired === true || (existsSync(this.path) && wasEncryptedFile(this.path))
     const fresh: ChatGptStoreData = { ...emptyStore(), signInFence: Date.now(), incarnation: randomUUID() }
     const sealed = this.seal(fresh, encrypt)
-    if (sealed.encrypted) this.markEncrypted()
-    const temporary = `${this.path}.new-${randomUUID()}`
+    const pending = sealed.encrypted && this.beginEncrypted()
+    const temporary = `${this.path}${TEMPORARY_INFIX}${randomUUID()}`
+    const giveUp = (error: ChatGptAuthError): never => {
+      rmSync(temporary, { force: true })
+      rmSync(this.swapIntentPath(), { force: true })
+      if (pending) rmSync(this.pendingMarker(), { force: true })
+      throw error
+    }
     try {
       const database = new DatabaseSync(temporary)
       try {
@@ -370,54 +431,152 @@ export class ChatGptStore {
         database.close()
       }
     } catch {
-      rmSync(temporary, { force: true })
-      throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageWrite)
+      giveUp(new ChatGptAuthError('protocol', 'storage', MESSAGES.storageWrite))
     }
     const aside = `${this.path}.corrupt-${new Date().toISOString().replace(/:/g, '-')}`
-    const moved: string[] = []
     try {
-      for (const suffix of ['-wal', '-shm']) {
+      atomicWriteJsonSync(this.swapIntentPath(), { temporary, aside } satisfies SwapIntent, { mode: 0o600 })
+    } catch {
+      giveUp(new ChatGptAuthError('protocol', 'storage', MESSAGES.storageWrite))
+    }
+    const moved: string[] = []
+    const putBack = () => {
+      for (const suffix of moved) {
+        try { renameSync(`${aside}${suffix}`, `${this.path}${suffix}`) } catch { /* left beside the copy */ }
+      }
+    }
+    try {
+      for (const suffix of ['-wal', '-shm', '']) {
         if (!existsSync(`${this.path}${suffix}`)) continue
         renameSync(`${this.path}${suffix}`, `${aside}${suffix}`)
         moved.push(suffix)
       }
-      renameSync(this.path, aside)
     } catch {
-      for (const suffix of moved) {
-        try { renameSync(`${aside}${suffix}`, `${this.path}${suffix}`) } catch { /* left beside the copy */ }
-      }
-      rmSync(temporary, { force: true })
-      throw new ChatGptAuthError('operation_busy', 'storage', MESSAGES.storageSetAside)
+      putBack()
+      giveUp(new ChatGptAuthError('operation_busy', 'storage', MESSAGES.storageSetAside))
     }
+    // Tests only: a crash between the two halves of the swap (no clean-up runs).
+    swapHook?.()
     try {
       renameSync(temporary, this.path)
     } catch {
-      rmSync(temporary, { force: true })
-      throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageWrite)
+      putBack()
+      giveUp(new ChatGptAuthError('protocol', 'storage', MESSAGES.storageWrite))
     }
+    rmSync(this.swapIntentPath(), { force: true })
+    if (pending) this.promoteEncrypted()
     return { ...fresh, revision: 1 }
+  }
+
+  private swapIntentPath(): string {
+    return `${this.path}.swap`
+  }
+
+  /**
+   * Finishes a swap a crash interrupted: if the replacement is complete but not in place, it takes
+   * the name; if it is gone, the original comes back. Then clears replacements left by a swap that
+   * never saved its intent (older than a minute, so one in flight elsewhere is left alone). Fails
+   * typed while an intent remains and the database is missing.
+   */
+  private finishSwap(): void {
+    const intentPath = this.swapIntentPath()
+    if (existsSync(intentPath)) {
+      let intent: SwapIntent | null = null
+      try {
+        const parsed = JSON.parse(readFileSync(intentPath, 'utf8')) as Partial<SwapIntent>
+        if (typeof parsed.temporary === 'string' && typeof parsed.aside === 'string') intent = { temporary: parsed.temporary, aside: parsed.aside }
+      } catch {
+        // Saved atomically, so unreadable means damaged; nothing can be finished from it.
+      }
+      if (intent && !existsSync(this.path)) {
+        try {
+          if (existsSync(intent.temporary)) {
+            renameSync(intent.temporary, this.path)
+          } else if (existsSync(intent.aside)) {
+            for (const suffix of ['-wal', '-shm']) {
+              if (existsSync(`${intent.aside}${suffix}`)) renameSync(`${intent.aside}${suffix}`, `${this.path}${suffix}`)
+            }
+            renameSync(intent.aside, this.path)
+          }
+        } catch {
+          throw corrupt()
+        }
+      }
+      if (!existsSync(this.path)) throw corrupt()
+      if (intent) rmSync(intent.temporary, { force: true })
+      rmSync(intentPath, { force: true })
+    }
+    const directory = dirname(this.path)
+    const prefix = `${basename(this.path)}${TEMPORARY_INFIX}`
+    let names: string[] = []
+    try { names = readdirSync(directory) } catch { /* no directory yet */ }
+    for (const name of names) {
+      if (!name.startsWith(prefix)) continue
+      const file = join(directory, name)
+      try {
+        if (Date.now() - statSync(file).mtimeMs > ORPHAN_TEMPORARY_MS) rmSync(file, { force: true })
+      } catch { /* gone already */ }
+    }
+  }
+
+  /** Whether a damaged database was set aside here, so a missing one is not a store never written. */
+  private wasSetAside(): boolean {
+    const prefix = `${basename(this.path)}.corrupt-`
+    try {
+      return readdirSync(dirname(this.path)).some((name) => name.startsWith(prefix) && !name.endsWith('-wal') && !name.endsWith('-shm'))
+    } catch {
+      return false
+    }
   }
 
   /**
    * The store has held encrypted data: from then on it only accepts encrypted payloads, even when
-   * its database is replaced. Kept as a file beside the database.
+   * its database is replaced. Kept as a file beside the database. It is written only once an
+   * encrypted row is committed: before the commit a pending marker is written, and the next open
+   * promotes or removes it from the committed row, so a rejected write never changes the policy
+   * and a crash between commit and promotion loses nothing.
    */
   private encryptionMarker(): string {
     return join(dirname(this.path), 'chatgpt.encrypted')
   }
 
-  private markEncrypted(): void {
+  private pendingMarker(): string {
+    return `${this.encryptionMarker()}.pending`
+  }
+
+  /** Writes the pending marker when the final one is missing. True when this call wrote it. */
+  private beginEncrypted(): boolean {
+    if (existsSync(this.encryptionMarker())) return false
+    try {
+      writeFileSync(this.pendingMarker(), '', { flag: 'wx', mode: 0o600 })
+      return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+      throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageWrite)
+    }
+  }
+
+  private promoteEncrypted(): void {
     try {
       writeFileSync(this.encryptionMarker(), '', { flag: 'wx', mode: 0o600 })
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageWrite)
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return
     }
+    rmSync(this.pendingMarker(), { force: true })
+  }
+
+  /** Settles a pending marker from the committed row (run on every open). */
+  private settleEncryptionMarker(database: DatabaseSync): void {
+    if (!existsSync(this.pendingMarker())) return
+    if (this.row(database)?.encrypted === 1) this.promoteEncrypted()
+    else rmSync(this.pendingMarker(), { force: true })
   }
 
   private seal(data: ChatGptStoreData, wasEncrypted: boolean): { stored: string; encrypted: boolean } {
     const { revision: _revision, signInFence: _fence, incarnation: _incarnation, ...payload } = data
+    const required = wasEncrypted || existsSync(this.encryptionMarker()) || existsSync(this.pendingMarker())
     try {
-      return sealSecretFile(`${JSON.stringify(payload)}\n`, this.codec, wasEncrypted || existsSync(this.encryptionMarker()))
+      return sealSecretFile(`${JSON.stringify(payload)}\n`, this.codec, required)
     } catch {
       throw new ChatGptAuthError('unsupported', 'storage', MESSAGES.storageEncryption)
     }
@@ -428,6 +587,7 @@ export class ChatGptStore {
    * or a store that once held encrypted data under a host that cannot encrypt).
    */
   assertWritable(): void {
+    this.finishSwap()
     if (!existsSync(this.path)) {
       this.seal(emptyStore(), false)
       return
@@ -457,6 +617,9 @@ export class ChatGptStore {
   write(data: ChatGptStoreData): void {
     const changed = () => new ChatGptAuthError('operation_busy', 'busy', MESSAGES.storeChanged)
     let incarnation = ''
+    let encrypted = false
+    this.finishSwap()
+    if (!existsSync(this.path) && this.wasSetAside()) throw corrupt()
     try {
       this.withDatabase((database) => {
         database.exec('BEGIN IMMEDIATE')
@@ -464,7 +627,8 @@ export class ChatGptStore {
           const row = this.row(database)
           incarnation = this.incarnation(database)
           const sealed = this.seal(data, row ? row.encrypted === 1 : false)
-          if (sealed.encrypted) this.markEncrypted()
+          encrypted = sealed.encrypted
+          if (encrypted) this.beginEncrypted()
           if (!row) {
             // Only data read before anything was saved, or from this same database, may create the row.
             if (data.revision !== 0 || (data.incarnation !== '' && data.incarnation !== incarnation)) throw changed()
@@ -484,9 +648,12 @@ export class ChatGptStore {
         }
       })
     } catch (error) {
+      // A rejected write must not change the encryption policy: settle from the committed row.
+      if (encrypted) this.settleAfterFailure()
       if (error instanceof CorruptDatabase) throw corrupt()
       throw error
     }
+    if (encrypted) this.promoteEncrypted()
     data.revision += 1
     data.incarnation = incarnation
   }

@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { chatgptHostIdPath, ensureChatGptHostId } from '../../../src/mms/harness/chatgpt/hostId'
 import { ChatGptLifecycle } from '../../../src/mms/harness/chatgpt/lifecycle'
 import type { SecretCodec } from '../../../src/mms/providers/secretCodec'
-import { ChatGptStore, chatgptStorePath, emptyStore, profileKeyOf, type ChatGptStoreData } from '../../../src/mms/harness/chatgpt/store'
+import { ChatGptStore, chatgptStorePath, emptyStore, profileKeyOf, setSwapHookForTests, type ChatGptStoreData } from '../../../src/mms/harness/chatgpt/store'
 import { FakeIssuer, fakeVault, guardNetwork, plainCodec, tempHomes } from './fakeIssuer'
 import { chatgptAuth, signIn, startSignIn } from './signInFlow'
 
@@ -151,12 +151,12 @@ describe('ChatGPT store', () => {
     const home = homes()
     const path = chatgptStorePath(home.profileHome, 'codex:managed')
     new ChatGptStore(path, plainCodec).write(SAMPLE())
-    userVersion(path, 2)
+    userVersion(path, 3)
     const auth = chatgptAuth(issuer, home)
     const flow = startSignIn(auth)
     expect(await flow.result).toMatchObject({ success: false, failure: 'storage_newer' })
-    expect(userVersion(path)).toBe(2)
-    userVersion(path, 1)
+    expect(userVersion(path)).toBe(3)
+    userVersion(path, 2)
     setPayload(path, JSON.stringify({ version: 2, whatever: true }), 0)
     const before = row(path)
     expect((await startSignIn(auth).result)).toMatchObject({ success: false, failure: 'storage_newer' })
@@ -326,6 +326,139 @@ describe('ChatGPT store', () => {
     const names = readdirSync(dirname(path))
     expect(names.some((name) => /^chatgpt\.db\.corrupt-.*-wal$/.test(name))).toBe(true)
     expect(auth.status().state).toBe('signed_in')
+  })
+
+  it('a rejected write never makes a plain store require encryption', () => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'i')
+    const plain = new ChatGptStore(path, plainCodec)
+    plain.write(SAMPLE())
+    const stale = plain.read()
+    plain.write({ ...plain.read(), credentialEpoch: 7 })
+    // A host with a working vault would seal this write; it loses the race.
+    const vaulted = new ChatGptStore(path, { ...fakeVault(), encryptionRequired: false })
+    expect(() => vaulted.write({ ...stale, active: null })).toThrow(expect.objectContaining({ code: 'operation_busy' }))
+    expect(readdirSync(dirname(path)).filter((name) => name.startsWith('chatgpt.encrypted'))).toEqual([])
+    expect(row(path)).toMatchObject({ encrypted: 0 })
+    plain.write({ ...plain.read(), credentialEpoch: 8 })
+    expect(row(path)).toMatchObject({ encrypted: 0, revision: 3 })
+  })
+
+  it('a pending encryption marker is settled from the committed row on the next open', () => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'i')
+    const directory = dirname(path)
+    // Crash after an encrypted commit, before the marker was promoted: it is promoted.
+    new ChatGptStore(path, fakeVault()).write(SAMPLE())
+    rmSync(join(directory, 'chatgpt.encrypted'))
+    writeFileSync(join(directory, 'chatgpt.encrypted.pending'), '')
+    new ChatGptStore(path, fakeVault()).read()
+    expect(readdirSync(directory).filter((name) => name.startsWith('chatgpt.encrypted'))).toEqual(['chatgpt.encrypted'])
+    // Crash before a commit that never happened: the pending marker goes away.
+    const other = chatgptStorePath(profileHome, 'j')
+    new ChatGptStore(other, plainCodec).write(SAMPLE())
+    writeFileSync(join(dirname(other), 'chatgpt.encrypted.pending'), '')
+    new ChatGptStore(other, plainCodec).read()
+    expect(readdirSync(dirname(other)).filter((name) => name.startsWith('chatgpt.encrypted'))).toEqual([])
+  })
+
+  it('a replacement that cannot take the name puts the original back, and it still reads as damaged', () => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'codex:managed')
+    new ChatGptStore(path, plainCodec).write(SAMPLE())
+    damageHeader(path)
+    const before = readFileSync(path)
+    fsControl.failRename = (from) => from.includes('.new-')
+    expect(() => new ChatGptStore(path, plainCodec).recover()).toThrow(expect.objectContaining({ failure: 'storage' }))
+    fsControl.failRename = null
+    expect(readFileSync(path).equals(before)).toBe(true)
+    expect(readdirSync(dirname(path)).filter((name) => name.startsWith('chatgpt.db'))).toEqual(['chatgpt.db'])
+    expect(() => new ChatGptStore(path, plainCodec).read()).toThrow(expect.objectContaining({ failure: 'storage' }))
+  })
+
+  it('a swap interrupted by a crash is finished on the next open, never read as a store never written', () => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'codex:managed')
+    new ChatGptStore(path, plainCodec).write(SAMPLE())
+    damageHeader(path)
+    setSwapHookForTests(() => {
+      throw new Error('crash')
+    })
+    try {
+      expect(() => new ChatGptStore(path, plainCodec).recover()).toThrow('crash')
+    } finally {
+      setSwapHookForTests(null)
+    }
+    expect(existsSync(path)).toBe(false)
+    const after = new ChatGptStore(path, plainCodec).read()
+    // The complete replacement took the name: revision 1 of a new database with a clock fence.
+    expect(after).toMatchObject({ revision: 1, active: null, incarnation: expect.stringMatching(/^[0-9a-f-]{36}$/) })
+    expect(after.signInFence).toBeGreaterThan(1_000_000_000_000)
+    expect(readdirSync(dirname(path)).some((name) => name.endsWith('.swap') || name.includes('.new-'))).toBe(false)
+  })
+
+  it('a swap interrupted after its replacement was lost is rolled back to the damaged original', () => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'codex:managed')
+    new ChatGptStore(path, plainCodec).write(SAMPLE())
+    damageHeader(path)
+    const before = readFileSync(path)
+    setSwapHookForTests(() => {
+      for (const name of readdirSync(dirname(path))) if (name.includes('.new-')) rmSync(join(dirname(path), name))
+      throw new Error('crash')
+    })
+    try {
+      expect(() => new ChatGptStore(path, plainCodec).recover()).toThrow('crash')
+    } finally {
+      setSwapHookForTests(null)
+    }
+    expect(() => new ChatGptStore(path, plainCodec).read()).toThrow(expect.objectContaining({ failure: 'storage' }))
+    expect(readFileSync(path).equals(before)).toBe(true)
+  })
+
+  it('a missing database after one was set aside is recovered, not read as never written', async () => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'codex:managed')
+    new ChatGptStore(path, plainCodec).write(SAMPLE())
+    damageHeader(path)
+    new ChatGptStore(path, plainCodec).recover()
+    rmSync(path)
+    expect(() => new ChatGptStore(path, plainCodec).read()).toThrow(expect.objectContaining({ failure: 'storage' }))
+    expect(() => new ChatGptStore(path, plainCodec).write(SAMPLE())).toThrow(expect.objectContaining({ failure: 'storage' }))
+    const start = await lifecycle(profileHome, plainCodec).prepareSignIn()
+    expect(start.fence).toBeGreaterThan(1_000_000_000_000)
+  })
+
+  it('a database from the previous layout gains its incarnation and keeps its data', () => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'i')
+    new ChatGptStore(path, plainCodec).write(SAMPLE())
+    const database = new DatabaseSync(path)
+    try {
+      database.exec('DROP TABLE meta; PRAGMA user_version=1;')
+    } finally {
+      database.close()
+    }
+    const data = new ChatGptStore(path, plainCodec).read()
+    expect(data).toMatchObject({ revision: 1, active: 'oaiapp_a', incarnation: expect.stringMatching(/^[0-9a-f-]{36}$/) })
+    expect(userVersion(path)).toBe(2)
+    new ChatGptStore(path, plainCodec).write({ ...data, credentialEpoch: 6 })
+  })
+
+  it('clears replacements an interrupted swap left before saving its intent', () => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'i')
+    new ChatGptStore(path, plainCodec).write(SAMPLE())
+    const old = `${path}.new-11111111-1111-4111-8111-111111111111`
+    const recent = `${path}.new-22222222-2222-4222-8222-222222222222`
+    writeFileSync(old, 'x')
+    writeFileSync(recent, 'y')
+    const longAgo = new Date(Date.now() - 10 * 60_000)
+    utimesSync(old, longAgo, longAgo)
+    new ChatGptStore(path, plainCodec).read()
+    expect(existsSync(old)).toBe(false)
+    // One in flight in another process is left alone.
+    expect(existsSync(recent)).toBe(true)
   })
 
   it('the profile key covers client, subject, ID token and epoch', () => {
