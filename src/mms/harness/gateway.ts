@@ -31,7 +31,7 @@ import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { TurnSettlement } from '../run/mcp/McpCredentials'
 import type { ModeCeiling, ProviderRef } from '../run/types'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstanceConfigView, NextStep, UpdateAffordance } from '../../shared/harness/status'
 import { foldedInto, type MoveResult } from '../../shared/harness/move'
@@ -358,6 +358,32 @@ interface InstanceRecord {
   /** Turns running on this runtime; a replaced runtime stops once they end. */
   active: number
   retired?: boolean
+  /** The turns running or being admitted on this runtime, one per attempt, so a removal or disable can stop them. */
+  turns: Map<string, TurnEntry>
+  /** Set when the instance was removed or turned off on the device: no turn is admitted or dispatched until lifted. */
+  stopped?: { reason: StopReason }
+}
+
+type StopReason = 'removed' | 'disabled'
+
+/** One attempt on a runtime. */
+interface TurnEntry {
+  threadId: string
+  /** The provider session, once the adapter published it. */
+  ref?: ProviderRef
+  /** Aborted (with the typed instance error) when the instance is removed or turned off. */
+  cancel: AbortController
+  /** Why this attempt was stopped, when it was. */
+  stoppedFor?: StopReason
+  /** The attempt's thread was told it was stopped. */
+  noticed?: boolean
+  /** The attempt ended with a complete result in spite of the stop: nothing is left to tell its thread. */
+  completed?: boolean
+  /** A native interrupt for the session already went out. */
+  interrupted?: boolean
+  /** Settles when the attempt's result has settled. */
+  done: Promise<void>
+  finish(): void
 }
 
 interface ProbeState {
@@ -405,6 +431,40 @@ function policyMode(mode: ChatMode): RunPolicy['mode'] {
   return mode === 'plan' ? 'plan' : 'default'
 }
 
+/**
+ * Deletes a removed instance's state directory except its private home: sign-in files are never
+ * deleted by Mousse, only by signing out. Only a home that is missing or listed as empty goes with
+ * the rest; a home that cannot be inspected is kept like any other (fail closed). Throws the first
+ * failure after trying every other entry, so the caller reports what was left behind.
+ */
+function removeStateDir(dir: string): void {
+  const home = join(dir, 'home')
+  let keepHome = false
+  let failure: unknown
+  try {
+    keepHome = readdirSync(home).length > 0
+  } catch (error) {
+    // Only "no such directory" proves there is no home; any other error leaves the home alone.
+    if ((error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT') {
+      keepHome = true
+      failure = error
+    }
+  }
+  if (!keepHome) {
+    rmSync(dir, { recursive: true, force: true })
+    return
+  }
+  for (const name of readdirSync(dir)) {
+    if (name === 'home') continue
+    try {
+      rmSync(join(dir, name), { recursive: true, force: true })
+    } catch (error) {
+      failure ??= error
+    }
+  }
+  if (failure) throw failure
+}
+
 function harnessFail(code: HarnessErrorCode, message: string, instanceId?: string): never {
   throw harnessAppError({ code, message, ...(instanceId ? { instanceId } : {}) })
 }
@@ -433,6 +493,12 @@ export class Harness implements HarnessGateway {
   private liveHost: LiveProcessHost | null = null
   private mcp: McpAttachmentProvider | null = null
   private readonly retired = new Set<InstanceRecord>()
+  /**
+   * The stops of a removal or disable still running, per instance (each settles, never rejects). They
+   * belong to the instance, not to a runtime, so a reconfiguration or a runtime that finished its
+   * turns cannot drop them: a turn admitted later waits for every one.
+   */
+  private readonly stopBarriers = new Map<string, Set<Promise<void>>>()
   private readonly removals = new Map<string, Removal>()
   /** The account reading `bind` took, for the `startTurn` of that binding (once). */
   private readonly boundAccounts = new WeakMap<ExecutionBinding, { accountId?: string }>()
@@ -820,23 +886,61 @@ export class Harness implements HarnessGateway {
     const record = this.turnRecord(spec.binding)
     let ref: ProviderRef | undefined
     let ended = false
-    const sink: TurnSink = { ...spec.sink, providerRef: (next) => { ref = next; spec.sink.providerRef(next) } }
+    // One entry per attempt (the attempt id is unique; a duplicate never replaces a live entry).
+    let key = spec.input.attemptId
+    while (record.turns.has(key)) key = `${key}#${randomUUID()}`
+    let finish: () => void = () => {}
+    const entry: TurnEntry = {
+      threadId: spec.input.threadId,
+      cancel: new AbortController(),
+      done: new Promise<void>((resolve) => { finish = resolve }),
+      finish: () => finish()
+    }
+    record.turns.set(key, entry)
+    const sink: TurnSink = {
+      ...spec.sink,
+      providerRef: (next) => {
+        ref = next
+        entry.ref = next
+        spec.sink.providerRef(next)
+        // A session that appears after the attempt was stopped is interrupted as soon as it is known.
+        if (entry.cancel.signal.aborted && !entry.interrupted) {
+          entry.interrupted = true
+          void this.interruptOn(record, next, entry.threadId).catch((error) => this.warnStop(record, error))
+        }
+      }
+    }
     record.active += 1
     const result = (async () => {
+      let outcome: 'ok' | 'aborted' | 'failed' = 'failed'
       let minted: ReturnType<Harness['mintBridge']>
+      let signal = spec.input.signal
       try {
-        await this.admitTurn(record, spec)
+        await this.admitTurn(record, spec, entry)
+        // Admission awaits; the fence is checked again right before the runtime is reached.
+        this.refuseStopped(record, entry)
+        signal = AbortSignal.any([spec.input.signal, entry.cancel.signal])
+        const input: TurnInput = { ...spec.input, signal }
         minted = this.mintBridge(record, spec)
         const host: AdapterHost = minted ? { ...spec.host, bridge: minted.bridge } : spec.host
-        const output = await record.runtime.adapter.startTurn(spec.input, sink, spec.control, host)
-        minted?.settle({ status: output.aborted || spec.input.signal.aborted ? 'aborted' : 'completed', ...(output.drain ? { drain: output.drain } : {}) })
-        return output
+        const turn = await record.runtime.adapter.startTurn(input, sink, spec.control, host)
+        minted?.settle({ status: turn.aborted || signal.aborted ? 'aborted' : 'completed', ...(turn.drain ? { drain: turn.drain } : {}) })
+        minted = undefined
+        // The adapter ended because the instance was removed or turned off: the thread sees why.
+        if (turn.aborted && this.cancelledByStop(spec, entry)) throw entry.cancel.signal.reason
+        outcome = turn.aborted ? 'aborted' : 'ok'
+        return turn
       } catch (error) {
-        minted?.settle({ status: spec.input.signal.aborted ? 'aborted' : 'failed' })
+        minted?.settle({ status: signal.aborted ? 'aborted' : 'failed' })
+        if (this.cancelledByStop(spec, entry)) throw entry.cancel.signal.reason
         throw error
       } finally {
         ended = true
+        record.turns.delete(key)
         record.active -= 1
+        entry.completed = outcome === 'ok'
+        this.stopNotice(record, entry)
+        entry.finish()
         // A turn's `session/new` may have taught the runtime something; the next admission sees it.
         if (!record.retired) this.captureFacts(record)
         this.releaseRetired()
@@ -860,8 +964,15 @@ export class Harness implements HarnessGateway {
    * the ones the binding recorded (a retry or recovery after a change fails with `binding_stale`).
    * Then decides whether the thread's native session may be resumed.
    */
-  private async admitTurn(record: InstanceRecord, spec: TurnSpec): Promise<void> {
+  private async admitTurn(record: InstanceRecord, spec: TurnSpec, entry: TurnEntry): Promise<void> {
     const { binding, previous, input } = spec
+    // An attempt stopped before it got here never runs, and a turn admitted after the instance was
+    // turned on again waits until the stops of the turn off before it (on any runtime of the
+    // instance, replaced or not) have drained, so they cannot reach it.
+    this.refuseStopped(record, entry)
+    const draining = this.stopBarriers.get(record.instanceId)
+    if (draining?.size) await Promise.all([...draining])
+    this.refuseStopped(record, entry)
     if (input.instanceId !== binding.instanceId || input.model !== binding.model)
       harnessFail('protocol', `The turn names ${input.instanceId ?? 'no instance'}/${input.model} but its binding is ${binding.instanceId}/${binding.model}.`, binding.instanceId)
     // The runtime takes its permissions from the input's mode: it must be the binding's policy.
@@ -942,6 +1053,98 @@ export class Harness implements HarnessGateway {
       ...(runtime.terminate ? { terminate: (target: ProviderRef) => runtime.terminate!(target) } : {}),
       ...(runtime.forgetConversation ? { forgetConversation: (id: string) => runtime.forgetConversation!(id) } : {})
     }, ref, { ...(threadId ? { threadId } : {}) })
+  }
+
+  /** The typed error a thread sees when its instance was removed or turned off. */
+  private stopError(record: InstanceRecord, reason: StopReason): unknown {
+    return reason === 'removed'
+      ? harnessAppError({ code: 'instance_unknown', message: `${this.displayName(record)} was removed from Mousse.`, instanceId: record.instanceId })
+      : harnessAppError({ code: 'instance_disabled', message: `${this.displayName(record)} was turned off on this device.`, instanceId: record.instanceId })
+  }
+
+  /** Throws when the attempt was stopped, or when the instance is removed or off and nothing has lifted that. */
+  private refuseStopped(record: InstanceRecord, entry: TurnEntry): void {
+    if (entry.cancel.signal.aborted) throw entry.cancel.signal.reason
+    if (record.stopped) throw this.stopError(record, record.stopped.reason)
+  }
+
+  /** The attempt ended because the instance was stopped, not because its own caller stopped it. */
+  private cancelledByStop(spec: TurnSpec, entry: TurnEntry): boolean {
+    return entry.cancel.signal.aborted && !spec.input.signal.aborted
+  }
+
+  private warnStop(record: InstanceRecord, error: unknown): void {
+    console.warn('[harness] could not stop a turn', { instanceId: record.instanceId, error: errorText(error) })
+  }
+
+  /** Tells the attempt's thread why it stopped, once. */
+  private stopNotice(record: InstanceRecord, entry: TurnEntry): void {
+    if (entry.noticed || entry.completed || !entry.stoppedFor) return
+    entry.noticed = true
+    const name = this.displayName(record)
+    const text = entry.stoppedFor === 'removed'
+      ? `${name} was removed from Mousse; this chat was stopped. Choose another model to continue.`
+      : `${name} was turned off on this device; this chat was stopped. Choose another model to continue.`
+    try {
+      this.liveHost?.notice?.(entry.threadId, text)
+    } catch (error) {
+      console.warn('[harness] notice failed', errorText(error))
+    }
+  }
+
+  /**
+   * Stops what runs on an instance that was removed or turned off, on its current runtime and on
+   * every older one still finishing turns. Phase 1 is synchronous: the fence goes up and every
+   * attempt is cancelled before anything is awaited, so no attempt can pass admission or reach the
+   * runtime however long the stops take, nor be revived by turning the instance on again. Phase 2
+   * awaits the runtime's own stops; `stopBarriers` holds them per instance, and a turn admitted later
+   * waits for them whatever became of the runtime that was stopped.
+   */
+  private stopTurns(instanceId: string, current: InstanceRecord | undefined, reason: StopReason): Promise<void> {
+    const records = [...new Set([...(current ? [current] : []), ...[...this.retired].filter((record) => record.instanceId === instanceId)])]
+    const stops: Array<{ record: InstanceRecord; entry: TurnEntry }> = []
+    for (const record of records) {
+      record.stopped = { reason }
+      for (const entry of record.turns.values()) {
+        // An attempt a disable already stopped is being drained by that disable.
+        if (entry.cancel.signal.aborted) continue
+        entry.stoppedFor = reason
+        entry.cancel.abort(this.stopError(record, reason))
+        stops.push({ record, entry })
+      }
+    }
+    const drain = (async () => {
+      await Promise.all(stops.map(async ({ record, entry }) => {
+        let stopped = false
+        let interrupted = false
+        try {
+          stopped = (await record.runtime.adapter.stopThread?.(entry.threadId)) === 'stopped'
+        } catch (error) {
+          this.warnStop(record, error)
+        }
+        const ref = entry.ref
+        if (ref && !entry.interrupted) {
+          entry.interrupted = true
+          try {
+            interrupted = (await this.interruptOn(record, ref, entry.threadId)) === 'interrupted'
+          } catch (error) {
+            this.warnStop(record, error)
+          }
+        }
+        // The notice follows the result, and only when the runtime really stopped or the attempt ended with the stop.
+        if (stopped || interrupted) void entry.done.then(() => this.stopNotice(record, entry))
+      }))
+    })()
+    // Registered in the same turn of the event loop as phase 1, before any attempt can be admitted.
+    let barriers = this.stopBarriers.get(instanceId)
+    if (!barriers) this.stopBarriers.set(instanceId, (barriers = new Set()))
+    const held = barriers
+    held.add(drain)
+    void drain.finally(() => {
+      held.delete(drain)
+      if (!held.size && this.stopBarriers.get(instanceId) === held) this.stopBarriers.delete(instanceId)
+    })
+    return drain
   }
 
   async childPreflight(instanceId: string, context: ChildPreflightContext): Promise<SubagentRefusal | null> {
@@ -1085,7 +1288,10 @@ export class Harness implements HarnessGateway {
       return current
     }
     if (current) this.retire(current)
-    return this.build(instanceId, resolved.entry)
+    const next = this.build(instanceId, resolved.entry)
+    // A new runtime of an instance that is turned off stays fenced until it is turned on.
+    if (current?.stopped) next.stopped = current.stopped
+    return next
   }
 
   /** The name the instance lists a model under (hidden models included), else its id without the effort. */
@@ -1128,6 +1334,7 @@ export class Harness implements HarnessGateway {
       key: `${driver.kind}|${revision}|${config.home}`,
       env,
       active: 0,
+      turns: new Map(),
       runtime: undefined as unknown as DriverRuntime
     }
     record.runtime = driver.create({
@@ -1180,9 +1387,9 @@ export class Harness implements HarnessGateway {
   }
 
   /**
-   * Deletes the state directory of a removed instance once nothing uses it: no runtime of the
+   * Deletes Mousse's own state of a removed instance once nothing uses it: no runtime of the
    * instance (the last one or one a reconfiguration replaced) runs a turn, and no check or
-   * operation of it is still running.
+   * operation of it is still running. A private home, and the sign-in in it, is kept (`removeStateDir`).
    */
   private deleteRemoved(): void {
     for (const [instanceId, removal] of this.removals) {
@@ -1191,7 +1398,7 @@ export class Harness implements HarnessGateway {
       if ([...this.operations.values()].some((operation) => operation.started.instanceId === instanceId)) continue
       this.removals.delete(instanceId)
       try {
-        rmSync(removal.dir, { recursive: true, force: true })
+        removeStateDir(removal.dir)
       } catch (error) {
         // A re-added instance never reuses a directory left behind (`add`).
         console.warn('[harness] could not delete the files of a removed instance', { instanceId, error: errorText(error) })
@@ -1402,6 +1609,7 @@ export class Harness implements HarnessGateway {
     return {
       ...(record.config.displayName ? { displayName: record.config.displayName } : {}),
       home: record.env.home ? 'private' : 'default',
+      ...(record.env.home ? { homePath: record.env.home } : {}),
       ...(source.binaryPath ? { binaryPath: source.binaryPath } : {}),
       args: [...(source.args ?? [])],
       env: { ...(source.env ?? {}) },
@@ -1465,8 +1673,9 @@ export class Harness implements HarnessGateway {
     this.counters.forget(instanceId)
     this.facts.forget(instanceId)
     this.probes.delete(instanceId)
-    // The state directory is Mousse's own (its private home, the sign-in in it, saved sessions):
-    // it goes with the instance, once every runtime, check and operation still using it ends.
+    // The state directory is Mousse's own (its settings and saved sessions) and goes with the
+    // instance, once every runtime, check and operation still using it ends. A private home and
+    // the sign-in in it stay (`removeStateDir`): signing out is what removes them.
     const removal: Removal = { dir: instanceStateDir(this.options.profileHome, instanceId), pending: 0 }
     this.removals.set(instanceId, removal)
     for (const operation of this.operations.values())
@@ -1479,10 +1688,13 @@ export class Harness implements HarnessGateway {
         this.deleteRemoved()
       })]
     })
+    // Chats running on it stop (on this runtime and on any older one still finishing turns); the
+    // directory waits for them to end.
+    void this.stopTurns(instanceId, record, 'removed').catch((error) => this.warnStop(record, error))
     this.retire(record)
     this.emitSnapshots({ kind: 'device' })
     this.options.onProvidersChanged?.()
-    // Checks end within their deadlines; turns may run on, and the directory waits for them.
+    // Checks end within their deadlines; stopped turns end as their runtime stops.
     await Promise.all(checks)
   }
 
@@ -1573,7 +1785,11 @@ export class Harness implements HarnessGateway {
     if (scope.kind === 'device') {
       if (enabled === null) harnessFail('unsupported', 'The device setting takes on or off.', instanceId)
       this.instanceMap.setEntry(instanceId, { ...record.entry, enabled })
-      if (enabled) void this.probe(instanceId, false)
+      if (enabled) {
+        // Attempts a turn off cancelled stay cancelled; new ones wait for its stops to drain (`admitTurn`).
+        delete record.stopped
+        void this.probe(instanceId, false)
+      } else void this.stopTurns(instanceId, record, 'disabled').catch((error) => this.warnStop(record, error))
     } else this.scopes.setEnabled(scope.projectId, instanceId, enabled)
     this.changed(instanceId, { scope })
     return this.snapshot(instanceId, scope)

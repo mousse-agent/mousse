@@ -133,6 +133,23 @@ describe('TurnBridge (PR 2 §2)', () => {
     expect(s.mcp.ends.at(-1)).toMatchObject({ runId: 'run-3', settlement: { status: 'aborted' } })
   })
 
+  it.each([
+    ['returns an aborted result', async () => ({ aborted: true })],
+    ['throws', async () => { throw new Error('killed') }]
+  ] as const)('a turn stopped because its instance was turned off settles its bearer once as aborted and fails with the typed error when the adapter %s', async (_name, ending) => {
+    const s = setup()
+    s.codex.endWith(async (input) => {
+      await new Promise<void>((resolve) => input.signal.addEventListener('abort', () => resolve(), { once: true }))
+      return ending()
+    })
+    const result = s.turn('codex', { runId: 'run-stop' })
+    const failed = result.then(() => undefined, (error: { code?: string }) => error.code)
+    await vi.waitFor(() => expect(s.codex.hosts).toHaveLength(1))
+    await s.harness.instances.setEnabled('codex', { kind: 'device' }, false)
+    expect(await failed).toBe('instance_disabled')
+    expect(s.mcp.ends.filter((end) => end.runId === 'run-stop')).toEqual([expect.objectContaining({ settlement: { status: 'aborted' } })])
+  })
+
   it('attaches nothing to an instance that cannot attach the server, or a turn that may not, but still gives the texts', async () => {
     const s = setup()
     await s.turn('claude', { app: s.app({ mcpEligible: false }) })
