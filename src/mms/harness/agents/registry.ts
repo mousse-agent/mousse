@@ -103,8 +103,19 @@ export function commandSegments(command: string): string[] | undefined {
   const normalized = command.trim().replace(/\\/g, '/')
   if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized)) return undefined
   const segments = normalized.replace(/^(\.\/)+/, '').split('/').filter((segment) => segment.length > 0)
-  if (!segments.length || segments.some((segment) => segment === '.' || segment === '..')) return undefined
+  if (!segments.length || segments.some((segment) => segment === '.' || segment === '..' || unsafeSegment(segment))) return undefined
   return segments
+}
+
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)(\..*)?$/i
+
+/**
+ * A path segment Windows would read as something else, on every platform: `:` (an NTFS alternate
+ * stream the receipt cannot see), `<>"|?*`, control characters, a trailing dot or space (dropped
+ * by Windows, so two names meet), and reserved device names (`CON`, `NUL`, `COM1`…).
+ */
+export function unsafeSegment(segment: string): boolean {
+  return /[<>:"|?*\x00-\x1f]/.test(segment) || /[. ]$/.test(segment) || WINDOWS_RESERVED.test(segment)
 }
 
 /** Names the registry may never set for an agent: the launch path, loaders, homes and credentials. */

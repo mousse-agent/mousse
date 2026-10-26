@@ -13,7 +13,7 @@ import { join, relative, resolve, sep } from 'node:path'
 import { Transform, type Readable } from 'node:stream'
 import { Parser, type ReadEntry } from 'tar'
 import { open as openZip, type Entry, type ZipFile } from 'yauzl'
-import type { ArchiveFormat } from './registry'
+import { unsafeSegment, type ArchiveFormat } from './registry'
 
 export const MAX_ARCHIVE_ENTRIES = 20_000
 export const MAX_EXPANDED_BYTES = 4 * 1024 ** 3
@@ -51,6 +51,7 @@ export function entrySegments(name: string, stripPrefix?: string): string[] | nu
   }
   const segments = normalized.split('/').filter((segment) => segment !== '' && segment !== '.')
   if (segments.some((segment) => segment === '..')) throw new ArchiveError(`The archive has an entry outside its folder: ${name}`)
+  if (segments.some(unsafeSegment)) throw new ArchiveError(`The archive has a name Windows cannot hold safely: ${name}`)
   return segments.length ? segments : null
 }
 

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { createReadStream, lstatSync, readdirSync, readFileSync, readlinkSync } from 'node:fs'
-import { join } from 'node:path'
+import { createReadStream, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs'
+import { isAbsolute, join, relative } from 'node:path'
 import type { RegistryChecksum } from '../../../shared/harness/types'
 
 /**
@@ -16,7 +16,7 @@ export interface AgentReceipt {
   distribution: 'binary' | 'npx'
   /** The download (binary) or the package (`name@version`, npx). */
   artifactUrl: string
-  /** Where the download came from after redirects. */
+  /** Where the download came from after redirects (npx: the package tarball). */
   finalUrl?: string
   /** The digest the registry published, with its algorithm. */
   expected?: { algorithm: 'sha256' | 'sha512'; digest: string }
@@ -41,10 +41,10 @@ export function sha256Hex(data: string | Buffer): string {
   return createHash('sha256').update(data).digest('hex')
 }
 
-/** SHA-256 of a file, streamed. */
-export function hashFile(path: string, signal?: AbortSignal): Promise<string> {
+/** A file's digest (SHA-256 unless asked otherwise, hex unless asked otherwise), streamed. */
+export function hashFile(path: string, signal?: AbortSignal, algorithm: 'sha256' | 'sha512' = 'sha256', encoding: 'hex' | 'base64' = 'hex'): Promise<string> {
   return new Promise((resolve, reject) => {
-    const hash = createHash('sha256')
+    const hash = createHash(algorithm)
     const stream = createReadStream(path)
     const abort = () => stream.destroy(signal?.reason instanceof Error ? signal.reason : new Error('cancelled'))
     signal?.addEventListener('abort', abort, { once: true })
@@ -55,7 +55,7 @@ export function hashFile(path: string, signal?: AbortSignal): Promise<string> {
     })
     stream.once('end', () => {
       signal?.removeEventListener('abort', abort)
-      resolve(hash.digest('hex'))
+      resolve(hash.digest(encoding))
     })
   })
 }
@@ -64,25 +64,45 @@ interface TreeEntry {
   rel: string
   path: string
   link?: string
+  /** Why a link cannot be part of an install: it points outside it, or nowhere. */
+  escapes?: 'outside' | 'dangling'
   size: number
 }
 
-/** Every file and symlink under `root`, sorted; folders are walked, never recorded. */
+/**
+ * Every file and link under `root`, sorted; folders are walked, never recorded, and links are
+ * never followed. A link (a symlink, or a Windows junction) counts only when it resolves inside
+ * `root`: whatever it points at is then a file or folder of the tree itself, hashed on its own.
+ */
 function walk(root: string): TreeEntry[] {
+  const realRoot = realpathSync(root)
   const entries: TreeEntry[] = []
   const visit = (dir: string, prefix: string) => {
     for (const name of readdirSync(dir).sort()) {
       const path = join(dir, name)
       const rel = prefix ? `${prefix}/${name}` : name
       const stat = lstatSync(path)
-      if (stat.isSymbolicLink()) entries.push({ rel, path, link: readlinkSync(path), size: 0 })
-      else if (stat.isDirectory()) visit(path, rel)
+      if (stat.isSymbolicLink()) {
+        let escapes: TreeEntry['escapes']
+        try {
+          const target = realpathSync(path)
+          const inside = relative(realRoot, target)
+          if (!inside || inside.startsWith('..') || isAbsolute(inside)) escapes = 'outside'
+        } catch {
+          escapes = 'dangling'
+        }
+        entries.push({ rel, path, link: readlinkSync(path), size: 0, ...(escapes ? { escapes } : {}) })
+      } else if (stat.isDirectory()) visit(path, rel)
       else if (stat.isFile()) entries.push({ rel, path, size: stat.size })
       else entries.push({ rel, path, link: '\0special', size: 0 })
     }
   }
   visit(root, '')
   return entries
+}
+
+function escapeText(entry: TreeEntry): string {
+  return entry.escapes === 'dangling' ? `${entry.rel} links to nothing` : `${entry.rel} links outside the install`
 }
 
 /** Digests of every file under `root` (`link:<target>` for symlinks), and their total size. */
@@ -93,6 +113,9 @@ export async function hashTree(root: string, signal?: AbortSignal): Promise<{ fi
     signal?.throwIfAborted()
     if (entry.link !== undefined) {
       if (entry.link === '\0special') throw new Error(`${entry.rel} is not a regular file.`)
+      if (entry.escapes) throw new Error(`${escapeText(entry)}, so Mousse cannot check what it runs.`)
+      // An absolute link (a Windows junction) would point into the staging folder once published.
+      if (isAbsolute(entry.link)) throw new Error(`${entry.rel} is an absolute link, which Mousse does not install.`)
       files[entry.rel] = `link:${entry.link}`
       continue
     }
@@ -117,6 +140,7 @@ export async function changedFile(root: string, receipt: Pick<AgentReceipt, 'fil
     if (digest === undefined) return `${entry.rel} was added`
     expected.delete(entry.rel)
     if (entry.link !== undefined) {
+      if (entry.escapes) return escapeText(entry)
       if (digest !== `link:${entry.link}`) return `${entry.rel} changed`
       continue
     }

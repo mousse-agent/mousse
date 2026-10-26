@@ -50,6 +50,20 @@ function stale(path: string, graceMs: number): boolean {
   }
 }
 
+/**
+ * Removes a stale lock file, only while it is still the one found stale: another waiter may have
+ * taken the lock over in between, and its fresh file must stay.
+ */
+export function removeStale(path: string, seen: string | undefined): boolean {
+  if (readHolder(path)?.token !== seen) return false
+  try {
+    unlinkSync(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function tryAcquire(path: string, graceMs: number): string | undefined {
   const token = randomUUID()
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -60,15 +74,12 @@ function tryAcquire(path: string, graceMs: number): string | undefined {
       } finally {
         closeSync(fd)
       }
-      return token
+      // Held only while the file still names this holder (a racing takeover may have replaced it).
+      return readHolder(path)?.token === token ? token : undefined
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
       if (attempt > 0 || !stale(path, graceMs)) return undefined
-      try {
-        unlinkSync(path)
-      } catch {
-        return undefined
-      }
+      if (!removeStale(path, readHolder(path)?.token)) return undefined
     }
   }
   return undefined
@@ -104,6 +115,7 @@ export async function withLock<T>(path: string, work: () => Promise<T> | T, opti
     token = tryAcquire(path, 5_000)
   }
   try {
+    if (readHolder(path)?.token !== token) throw new LockBusyError('Another Mousse profile took over this agent’s files. Try again in a moment.')
     return await work()
   } finally {
     release(path, token)

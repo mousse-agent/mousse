@@ -36,10 +36,12 @@ afterEach(async () => {
 
 const archive = tarGzOf([{ name: 'bin/demo', data: '#!/bin/sh\necho demo\n', mode: 0o755 }, { name: 'lib/helper.txt', data: 'helper' }])
 
-async function fixture() {
+async function fixture(options: { gate?: Promise<void> } = {}) {
   const server = createServer((_request, response) => {
-    response.writeHead(200, { 'content-length': String(archive.length) })
-    response.end(archive)
+    void (options.gate ?? Promise.resolve()).then(() => {
+      response.writeHead(200, { 'content-length': String(archive.length) })
+      response.end(archive)
+    })
   })
   servers.push(server)
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -131,6 +133,32 @@ describe('a registry agent through the gateway', () => {
     expect(existsSync(join(agentDir, 'refs', 'p1.json'))).toBe(false)
     // The files stay for whoever adds the agent again.
     expect(existsSync(join(agentDir, '1.0.0', KEY, 'receipt.json'))).toBe(true)
+  })
+
+  it('hashes the install once per Recheck: the start-up check reuses the file check', async () => {
+    const { harness, agents, events } = await fixture()
+    const { instanceId: id } = await harness.instances.add({ driver: 'acp', config: { displayName: 'Demo', source: { kind: 'registry', agentId: 'demo-agent', version: '1.0.0', distribution: 'binary' } } })
+    await harness.instances.install(id)
+    await vi.waitFor(() => expect(events.some((event) => event.phase === 'completed')).toBe(true))
+    await vi.waitFor(async () => expect((await harness.instances.snapshots({ kind: 'device' }))[0]!.runs.state).toBe('yes'))
+    const changed = vi.spyOn(agents, 'changed')
+    const snapshot = await harness.instances.recheck(id)
+    expect(snapshot.runs.state).toBe('yes')
+    // The file check, not again for the handshake process right after it.
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a version change while the entry is being installed', async () => {
+    let open: () => void = () => {}
+    const gate = new Promise<void>((resolve) => { open = resolve })
+    const { harness, events } = await fixture({ gate })
+    const { instanceId: id } = await harness.instances.add({ driver: 'acp', config: { displayName: 'Demo', source: { kind: 'registry', agentId: 'demo-agent', version: '1.0.0', distribution: 'binary' } } })
+    await harness.instances.install(id)
+    await expect(harness.instances.configure(id, { source: { kind: 'registry', agentId: 'demo-agent', version: '2.0.0', distribution: 'binary' } })).rejects.toMatchObject({ code: 'operation_busy' })
+    // A rename still goes through.
+    await harness.instances.configure(id, { displayName: 'Demo agent' })
+    open()
+    await vi.waitFor(() => expect(events.some((event) => event.phase === 'completed')).toBe(true))
   })
 
   it('takes a registry source only for drivers that read one, and never with an executable path', async () => {

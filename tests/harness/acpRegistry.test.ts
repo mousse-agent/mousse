@@ -61,6 +61,8 @@ describe('the ACP registry', () => {
       binaryAgent({}, { cmd: 'C:\\demo.exe' }),
       binaryAgent({}, { cmd: '\\\\server\\share\\demo.exe' }),
       binaryAgent({}, { cmd: './bin/../../demo' }),
+      binaryAgent({}, { cmd: './demo.exe:stream' }),
+      binaryAgent({}, { cmd: './bin/NUL' }),
       binaryAgent({}, { archive: 'http://example.com/demo.tar.gz' }),
       binaryAgent({}, { archive: 'https://user:pass@example.com/demo.tar.gz' }),
       binaryAgent({}, { sha256: 'not-a-digest' }),

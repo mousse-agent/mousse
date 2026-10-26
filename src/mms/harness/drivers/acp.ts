@@ -63,6 +63,12 @@ export interface AcpDriverOptions {
   agents?: AgentInstalls
 }
 
+/**
+ * A launch right after a full file check of the same install record does not hash again (a
+ * Recheck checks the files, then starts the agent for its handshake).
+ */
+export const INSTALL_CHECK_REUSE_MS = 5_000
+
 const REGISTRY_AGENT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
 const REGISTRY_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/
 
@@ -217,10 +223,12 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
    * Before a registry agent starts: its install record is the one the entry was installed with,
    * and every file still matches it. A mismatch is kept (the card offers Reinstall) and stops the launch.
    */
-  const checkInstall = async (signal?: AbortSignal): Promise<void> => {
+  const checkInstall = async (signal?: AbortSignal, options: { reuse?: boolean } = {}): Promise<void> => {
     if (!registrySource) return
     const installed = installedNow()
     if (!agents || !installed) throw new Error(`${label} is not installed. Install it in Settings → Providers.`)
+    // Only a launch reuses a check made moments ago; Recheck always hashes every file.
+    if (options.reuse && verified?.hash === installed.hash && Date.now() - verified.atMs < INSTALL_CHECK_REUSE_MS && !state.filesChanged) return
     const changed = await agents.changed(installed, registrySource.receiptHash, signal)
     if (changed) {
       if (state.filesChanged?.hash !== installed.hash || state.filesChanged.message !== changed) {
@@ -291,7 +299,7 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     // links as URL elicitations only to clients that accept them.
     clientCapabilities: () => ({ auth: { terminal: ptyRuns() }, elicitation: { url: {} } }),
     closeSessions: true,
-    beforeLaunch: () => checkInstall(),
+    beforeLaunch: () => checkInstall(undefined, { reuse: true }),
     store: {
       saved: (threadId) => state.sessions?.[threadId],
       setSaved: (threadId, saved) => {

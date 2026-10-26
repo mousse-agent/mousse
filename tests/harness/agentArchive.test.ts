@@ -65,6 +65,10 @@ describe('agent archive extraction', () => {
       await expect(extractArchive(zip, dest, { format: 'zip' }), name).rejects.toThrow()
       onlyOut(dir, 'a.zip')
     }
+    // Names Windows reads as something else: an alternate data stream, a device, a dropped trailing dot.
+    for (const name of ['bin/agent.exe:hidden', 'CON', 'lib/aux.js', 'nul', 'COM1.txt', 'dir./file', 'file ', 'a|b', 'a?b'])
+      expect(() => entrySegments(name), name).toThrow(/Windows cannot hold safely/)
+    expect(entrySegments('lib/console.js')).toEqual(['lib', 'console.js'])
     // Entries outside the stripped prefix are refused too.
     expect(() => entrySegments('other/file', 'package/')).toThrow(ArchiveError)
     expect(entrySegments('package/', 'package/')).toBeNull()

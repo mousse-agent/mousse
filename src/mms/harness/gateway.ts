@@ -1732,6 +1732,9 @@ export class Harness implements HarnessGateway {
 
   private async configure(instanceId: string, patch: InstanceConfigPatch): Promise<InstanceSnapshot> {
     const record = this.record(instanceId, { allowDisabled: true })
+    // An install in progress binds the entry to the source it installs when it ends.
+    if (patch.source !== undefined && [...this.operations.values()].some((entry) => entry.started.instanceId === instanceId && entry.started.kind !== 'sign_in'))
+      harnessFail('operation_busy', `${this.displayName(record)} is being installed. Wait for it to finish, then change its version.`, instanceId)
     if (record.builtIn && patch.home === 'private')
       harnessFail('unsupported', `The built-in ${record.driver.label} runs as you set it up. Add another instance for a separate home.`, instanceId)
     if (patch.home === 'private' && !record.driver.privateHome)

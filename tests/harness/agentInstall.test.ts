@@ -6,14 +6,14 @@
  * version goes once no process uses it.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { InstanceEnv } from '../../src/mms/harness/env'
-import { AgentInstalls, ConsentRequiredError, downloadArtifact, resetAgentInstallState, resolveNpm, withoutCredentials, type InstallProgress, type NpmRunner, type RegistrySource } from '../../src/mms/harness/agents/install'
-import { LockBusyError, withLock } from '../../src/mms/harness/agents/lock'
+import { AgentInstalls, ConsentRequiredError, downloadArtifact, isolatedNpmEnv, resetAgentInstallState, resolveNpm, sha512Of, withoutCredentials, type InstallProgress, type NpmRunner, type RegistrySource } from '../../src/mms/harness/agents/install'
+import { LockBusyError, removeStale, withLock } from '../../src/mms/harness/agents/lock'
 import type { RegistryAgent } from '../../src/mms/harness/agents/registry'
 import { tarGzOf } from './archiveFixtures'
 
@@ -73,7 +73,7 @@ function agent(version: string, url: string, options: { sha256?: string | null; 
   }
 }
 
-function setup(options: { profiles?: Array<{ id: string; displayName?: string }>; npm?: NpmRunner; maxDownloadBytes?: number; liveInstances?: () => string[] } = {}) {
+function setup(options: { profiles?: Array<{ id: string; displayName?: string }>; npm?: NpmRunner; maxDownloadBytes?: number; liveInstances?: () => string[]; fetch?: typeof fetch; npmRegistry?: string } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-agent-install-'))
   dirs.push(home)
   const registry = { current: undefined as RegistryAgent | undefined }
@@ -89,6 +89,8 @@ function setup(options: { profiles?: Array<{ id: string; displayName?: string }>
     exitGraceMs: 50,
     ...(options.liveInstances ? { liveInstances: options.liveInstances } : {}),
     ...(options.npm ? { npm: options.npm } : {}),
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(options.npmRegistry ? { npmRegistry: options.npmRegistry } : {}),
     ...(options.maxDownloadBytes ? { maxDownloadBytes: options.maxDownloadBytes } : {})
   })
   const env: InstanceEnv = { instanceId: 'acp:demo', driver: 'acp', configRevision: 0, homeId: 'default', env: { ...process.env }, searchPath: [] }
@@ -286,6 +288,64 @@ describe('managed agent installs', () => {
     expect(existsSync(join(agentDir, '1.1.0', KEY, 'receipt.json'))).toBe(true)
   })
 
+  it('keeps an old version another profile reuses while it waited to be deleted', async () => {
+    const server = await downloads({ 'demo.tar.gz': archive, 'demo-2.tar.gz': archive })
+    const { registry, installs, env } = setup()
+    registry.current = agent('1.0.0', `${server.base}/archive/demo.tar.gz`)
+    const p1 = installs('p1')
+    const v1 = await p1.install({ instanceId: 'acp:demo', source: binarySource(), env, label: 'Demo', onProgress: () => {} })
+    const running = p1.track(v1.root)
+    registry.current = agent('1.1.0', `${server.base}/archive/demo-2.tar.gz`)
+    await p1.install({ instanceId: 'acp:demo', source: binarySource('1.1.0'), env, label: 'Demo', onProgress: () => {} })
+    expect(existsSync(v1.root)).toBe(true)
+    // p2 adds the old version while p1's process still runs from it: it reuses the published copy.
+    const reused = await installs('p2').install({ instanceId: 'acp:old', source: binarySource('1.0.0'), env, label: 'Demo', onProgress: () => {} })
+    expect(reused.root).toBe(v1.root)
+    running()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(existsSync(join(v1.root, 'receipt.json'))).toBe(true)
+  })
+
+  it('rejects a download whose file fails, and leaves nothing open', async () => {
+    const body = Buffer.alloc(128 * 1024, 7)
+    const fetchFile = (async () => new Response(body, { headers: { 'content-length': String(body.length) } })) as unknown as typeof fetch
+    const { home } = setup()
+    await expect(downloadArtifact('https://example.com/a.zip', join(home, 'missing', 'folder', 'a.zip'), { fetch: fetchFile, label: 'Demo' })).rejects.toThrow(/ENOENT/)
+    // A cancel while the file is being written rejects too, and the file is closed afterwards.
+    const controller = new AbortController()
+    const slow = (async () => new Response(new ReadableStream({
+      pull(stream) {
+        stream.enqueue(new Uint8Array(64 * 1024))
+        controller.abort(new Error('Install cancelled'))
+      }
+    }))) as unknown as typeof fetch
+    const target = join(home, 'b.zip')
+    await expect(downloadArtifact('https://example.com/b.zip', target, { fetch: slow, label: 'Demo', signal: controller.signal })).rejects.toThrow(/cancelled/)
+    rmSync(target, { force: true })
+    expect(existsSync(target)).toBe(false)
+  })
+
+  it('takes over a stale lock only while it is still the stale one', () => {
+    const { home } = setup()
+    const lock = join(home, 'lock')
+    writeFileSync(lock, JSON.stringify({ pid: 2_147_483_646, startedAt: 0, token: 'stale' }))
+    // Another waiter replaced it first: its fresh lock stays.
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: 0, token: 'fresh' }))
+    expect(removeStale(lock, 'stale')).toBe(false)
+    expect(JSON.parse(readFileSync(lock, 'utf8')).token).toBe('fresh')
+    expect(removeStale(lock, 'fresh')).toBe(true)
+  })
+
+  it('applies the registry rules to the receipt launch again when an agent starts', async () => {
+    const server = await downloads({ 'demo.tar.gz': archive })
+    const { registry, installs, env } = setup()
+    registry.current = agent('1.0.0', `${server.base}/archive/demo.tar.gz`)
+    const manager = installs('p1')
+    const installed = await manager.install({ instanceId: 'acp:demo', source: binarySource(), env, label: 'Demo', onProgress: () => {} })
+    const edited = { ...installed, receipt: { ...installed.receipt, launch: { ...installed.receipt.launch, args: ['--acp', 5 as unknown as string], env: { PATH: '/evil', NODE_OPTIONS: '--require x', DEMO_MODE: 'acp' } } } }
+    expect(manager.launch(edited, env)).toMatchObject({ args: ['--acp'], env: { DEMO_MODE: 'acp' } })
+  })
+
   it('removes staging folders of installs whose process is gone at the next start', async () => {
     const { installs, agentDir } = setup()
     mkdirSync(join(agentDir, '.staging-dead'), { recursive: true })
@@ -300,66 +360,178 @@ describe('npm agent installs', () => {
   const packageDir = (prefix: string) => (process.platform === 'win32' ? join(prefix, 'node_modules', 'demo-npm') : join(prefix, 'lib', 'node_modules', 'demo-npm'))
   const npmAgent: RegistryAgent = { id: 'demo-npm', name: 'Demo npm', version: '2.0.0', description: '', authors: [], distribution: { npx: { package: 'demo-npm@2.0.0', args: ['--acp'], env: {} } } }
   const npxSource: RegistrySource = { kind: 'registry', agentId: 'demo-npm', version: '2.0.0', distribution: 'npx' }
+  const REGISTRY = 'https://npm.test/'
+  const tarball = tarGzOf([{ name: 'package/package.json', data: '{"name":"demo-npm","version":"2.0.0"}' }])
+  const sha512 = createHash('sha512').update(tarball).digest('base64')
 
-  it('installs with --ignore-scripts and no credentials, and runs the package bin with Node', async () => {
-    const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = []
-    const npm: NpmRunner = async (args, options) => {
-      calls.push({ args, env: options.env.env })
+  /** The npm registry: this version's metadata and its tarball. */
+  function npmRegistry(options: { integrity?: string; tarballUrl?: string } = {}) {
+    const requests: string[] = []
+    const fetchFile = (async (url: string) => {
+      requests.push(url)
+      if (url === `${REGISTRY}demo-npm/2.0.0`)
+        return Response.json({ name: 'demo-npm', version: '2.0.0', dist: { integrity: options.integrity ?? `sha512-${sha512} sha1-abc`, tarball: options.tarballUrl ?? `${REGISTRY}demo-npm/-/demo-npm-2.0.0.tgz` } })
+      if (url === `${REGISTRY}demo-npm/-/demo-npm-2.0.0.tgz`) return new Response(tarball, { headers: { 'content-length': String(tarball.length) } })
+      return new Response(null, { status: 404 })
+    }) as unknown as typeof fetch
+    return { fetch: fetchFile, requests }
+  }
+
+  /** npm as a fake: writes the package (and whatever `extra` adds) under the prefix. */
+  function fakeNpm(calls: Array<{ args: string[]; env: NodeJS.ProcessEnv; cwd: string }>, extra?: (pkg: string) => void, version = '2.0.0'): NpmRunner {
+    return async (args, options) => {
+      calls.push({ args, env: options.env.env, cwd: options.cwd })
       const prefix = args[args.indexOf('--prefix') + 1]!
       mkdirSync(join(packageDir(prefix), 'bin'), { recursive: true })
-      writeFileSync(join(packageDir(prefix), 'package.json'), JSON.stringify({ name: 'demo-npm', version: '2.0.0', bin: { 'demo-npm': 'bin/cli.js' } }))
+      writeFileSync(join(packageDir(prefix), 'package.json'), JSON.stringify({ name: 'demo-npm', version, bin: { 'demo-npm': 'bin/cli.js' } }))
       writeFileSync(join(packageDir(prefix), 'bin', 'cli.js'), 'console.log(1)\n')
+      extra?.(packageDir(prefix))
       return { code: 0, stdout: '', stderr: '', timedOut: false }
     }
-    const { registry, installs, env } = setup({ npm })
-    registry.current = npmAgent
+  }
+
+  function npmSetup(npm: NpmRunner, registryOptions: Parameters<typeof npmRegistry>[0] = {}) {
+    const served = npmRegistry(registryOptions)
+    const base = setup({ npm, fetch: served.fetch, npmRegistry: REGISTRY })
+    base.registry.current = npmAgent
+    return { ...base, served }
+  }
+
+  it('checks the package against the npm registry sha512, then installs it with npm isolated from the user setup', async () => {
+    const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv; cwd: string }> = []
+    const { installs, env, served } = npmSetup(fakeNpm(calls))
+    // The user's own npm setup: a saved token in their .npmrc and registry overrides.
+    const userHome = mkdtempSync(join(tmpdir(), 'mousse-user-home-'))
+    dirs.push(userHome)
+    writeFileSync(join(userHome, '.npmrc'), '//registry.npmjs.org/:_authToken=npm_SAVEDSECRET\n@demo:registry=https://evil.example/\n')
     const installed = await installs('p1').install({
       instanceId: 'acp:npm', source: npxSource, label: 'Demo npm', onProgress: () => {},
-      env: { ...env, env: { ...env.env, NPM_TOKEN: 'secret', ANTHROPIC_API_KEY: 'k', npm_config__authToken: 't' } }
+      env: {
+        ...env,
+        env: {
+          ...env.env, HOME: userHome, USERPROFILE: userHome, NPM_TOKEN: 'secret', ANTHROPIC_API_KEY: 'k',
+          npm_config_registry: 'https://evil.example/', 'npm_config_@demo:registry': 'https://evil.example/',
+          NPM_CONFIG_USERCONFIG: join(userHome, '.npmrc'), NPM_CONFIG_GLOBALCONFIG: join(userHome, '.npmrc'), npm_config__authToken: 't'
+        }
+      }
     })
+    expect(served.requests).toEqual([`${REGISTRY}demo-npm/2.0.0`, `${REGISTRY}demo-npm/-/demo-npm-2.0.0.tgz`])
     expect(calls).toHaveLength(1)
-    const { args, env: npmEnv } = calls[0]!
-    expect(args).toEqual(expect.arrayContaining(['install', '--global', '--prefix', '--ignore-scripts', '--no-audit', '--no-fund']))
-    expect(args.at(-1)).toBe('demo-npm@2.0.0')
+    const { args, env: npmEnv, cwd } = calls[0]!
+    expect(args).toEqual(expect.arrayContaining(['install', '--global', '--prefix', '--ignore-scripts', '--no-audit', '--no-fund', `--registry=${REGISTRY}`]))
+    // npm installs the tarball Mousse checked, not a name it would look up itself.
+    expect(args.at(-1)).toMatch(/package\.tgz$/)
+    const flag = (name: string) => args.find((arg) => arg.startsWith(`--${name}=`))!.slice(name.length + 3)
+    expect(npmEnv.NPM_CONFIG_USERCONFIG).toBe(flag('userconfig'))
+    expect(npmEnv.NPM_CONFIG_GLOBALCONFIG).toBe(flag('globalconfig'))
+    expect(npmEnv.NPM_CONFIG_CACHE).toBe(flag('cache'))
+    for (const name of Object.keys(npmEnv)) if (/^npm_config_/i.test(name)) expect(['NPM_CONFIG_USERCONFIG', 'NPM_CONFIG_GLOBALCONFIG', 'NPM_CONFIG_CACHE', 'NPM_CONFIG_UPDATE_NOTIFIER'], name).toContain(name)
+    expect(npmEnv.HOME).not.toBe(userHome)
+    expect(npmEnv.USERPROFILE).toBe(npmEnv.HOME)
+    expect(cwd.startsWith(userHome)).toBe(false)
     expect(npmEnv.NPM_TOKEN).toBeUndefined()
     expect(npmEnv.ANTHROPIC_API_KEY).toBeUndefined()
-    expect(npmEnv.npm_config__authToken).toBeUndefined()
-    expect(installed.receipt).toMatchObject({ distribution: 'npx', platform: 'node', checksum: 'registry', artifactUrl: 'demo-npm@2.0.0', launch: { runner: 'node', args: ['--acp'] } })
+    expect(installed.receipt).toMatchObject({
+      distribution: 'npx', platform: 'node', checksum: 'registry', artifactUrl: 'demo-npm@2.0.0',
+      finalUrl: `${REGISTRY}demo-npm/-/demo-npm-2.0.0.tgz`, expected: { algorithm: 'sha512', digest: sha512 },
+      launch: { runner: 'node', args: ['--acp'] }
+    })
     expect(installed.receipt.launch.cmd).toMatch(/node_modules\/demo-npm\/bin\/cli\.js$/)
-    expect(Object.keys(installed.receipt.files)).toEqual(expect.arrayContaining([expect.stringMatching(/demo-npm\/package\.json$/)]))
+    // Nothing of the npm setup Mousse made, nor the tarball, is part of the install.
+    expect(Object.keys(installed.receipt.files).every((file) => file.includes('demo-npm'))).toBe(true)
     const launch = installs('p1').launch(installed, { env: process.env, searchPath: [] })
     expect(launch.args[launch.args.length - 2]).toBe(launch.path)
     expect(launch.path).toMatch(/cli\.js$/)
   })
 
-  it('refuses a package npm installed at another version, and reports npm failures', async () => {
-    const wrong: NpmRunner = async (args) => {
-      const prefix = args[args.indexOf('--prefix') + 1]!
-      mkdirSync(packageDir(prefix), { recursive: true })
-      writeFileSync(join(packageDir(prefix), 'package.json'), JSON.stringify({ name: 'demo-npm', version: '9.9.9', bin: 'cli.js' }))
-      return { code: 0, stdout: '', stderr: '', timedOut: false }
+  it('refuses a package that misses the npm registry sha512, comes from another host, or has no sha512', async () => {
+    for (const [registryOptions, message] of [
+      [{ integrity: `sha512-${createHash('sha512').update('other').digest('base64')}` }, /does not match the npm registry checksum/],
+      [{ tarballUrl: 'https://evil.example/demo-npm-2.0.0.tgz' }, /served from evil\.example/],
+      [{ integrity: 'sha1-abc' }, /publishes no sha512/]
+    ] as const) {
+      const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv; cwd: string }> = []
+      const { installs, env, agentDir } = npmSetup(fakeNpm(calls), registryOptions)
+      await expect(installs('p1').install({ instanceId: 'acp:npm', source: npxSource, env, label: 'Demo npm', onProgress: () => {} })).rejects.toThrow(message)
+      expect(calls).toEqual([])
+      expect(stagingLeft(agentDir)).toEqual([])
     }
-    const one = setup({ npm: wrong })
-    one.registry.current = npmAgent
+  })
+
+  it('refuses a package npm installed at another version, and reports npm failures', async () => {
+    const one = npmSetup(fakeNpm([], undefined, '9.9.9'))
     await expect(one.installs('p1').install({ instanceId: 'acp:npm', source: npxSource, env: one.env, label: 'Demo npm', onProgress: () => {} })).rejects.toThrow(/9\.9\.9, not 2\.0\.0/)
-    const failing = setup({ npm: async () => ({ code: 1, stdout: '', stderr: 'npm ERR! 404 Not Found', timedOut: false }) })
-    failing.registry.current = npmAgent
+    const failing = npmSetup(async () => ({ code: 1, stdout: '', stderr: 'npm ERR! 404 Not Found', timedOut: false }))
     await expect(failing.installs('p1').install({ instanceId: 'acp:npm', source: npxSource, env: failing.env, label: 'Demo npm', onProgress: () => {} })).rejects.toThrow(/npm failed: npm ERR! 404/)
     expect(stagingLeft(failing.agentDir)).toEqual([])
   })
 
-  it('runs npm on Windows as Node with the npm-cli.js beside it, never the extensionless shell script', () => {
+  it('refuses a dependency linked from outside the install, at install and at launch, and checks linked files inside it', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'mousse-outside-dep-'))
+    dirs.push(outside)
+    writeFileSync(join(outside, 'index.js'), 'module.exports = 1\n')
+    // A `file:` dependency npm links to its source folder (a junction on Windows).
+    const linked = npmSetup(fakeNpm([], (pkg) => {
+      mkdirSync(join(pkg, 'node_modules'), { recursive: true })
+      symlinkSync(outside, join(pkg, 'node_modules', 'dep'), 'junction')
+    }))
+    await expect(linked.installs('p1').install({ instanceId: 'acp:npm', source: npxSource, env: linked.env, label: 'Demo npm', onProgress: () => {} })).rejects.toThrow(/node_modules\/dep links outside the install/)
+    expect(stagingLeft(linked.agentDir)).toEqual([])
+
+    // An absolute link inside the staging folder would dangle once published: refused.
+    const absolute = npmSetup(fakeNpm([], (pkg) => {
+      mkdirSync(join(pkg, 'lib'), { recursive: true })
+      mkdirSync(join(pkg, 'node_modules'), { recursive: true })
+      symlinkSync(join(pkg, 'lib'), join(pkg, 'node_modules', 'alias'), 'junction')
+    }))
+    await expect(absolute.installs('p1').install({ instanceId: 'acp:npm', source: npxSource, env: absolute.env, label: 'Demo npm', onProgress: () => {} })).rejects.toThrow(/node_modules\/alias is an absolute link/)
+
+    // A relative link inside the install is kept; the files it points at are hashed where they are.
+    // (Windows without the symlink privilege cannot make one; npm makes these on POSIX only.)
+    try {
+      symlinkSync('index.js', join(outside, 'probe-link'))
+    } catch {
+      return
+    }
+    const internal = npmSetup(fakeNpm([], (pkg) => {
+      mkdirSync(join(pkg, 'lib'), { recursive: true })
+      writeFileSync(join(pkg, 'lib', 'impl.js'), 'module.exports = 2\n')
+      mkdirSync(join(pkg, 'node_modules'), { recursive: true })
+      symlinkSync(join('..', 'lib'), join(pkg, 'node_modules', 'alias'), 'dir')
+    }))
+    const manager = internal.installs('p1')
+    const installed = await manager.install({ instanceId: 'acp:npm', source: npxSource, env: internal.env, label: 'Demo npm', onProgress: () => {} })
+    const pkg = packageDir(join(installed.root, 'dist'))
+    expect(await manager.changed(installed, installed.hash)).toBeUndefined()
+    writeFileSync(join(pkg, 'lib', 'impl.js'), 'module.exports = 3\n')
+    expect(await manager.changed(installed, installed.hash)).toMatch(/lib\/impl\.js changed/)
+    writeFileSync(join(pkg, 'lib', 'impl.js'), 'module.exports = 2\n')
+    // The internal link swapped for one to outside: the next launch refuses it.
+    rmSync(join(pkg, 'node_modules', 'alias'), { recursive: false, force: true })
+    symlinkSync(outside, join(pkg, 'node_modules', 'alias'), 'junction')
+    expect(await manager.changed(installed, installed.hash)).toMatch(/node_modules\/alias links outside the install/)
+  })
+
+  it('runs npm on Windows as Node with the npm-cli.js beside it, else an npm.exe launcher, never the shell script', () => {
     const dir = mkdtempSync(join(tmpdir(), 'mousse-npm-'))
     dirs.push(dir)
     writeFileSync(join(dir, 'node.exe'), 'MZ', { mode: 0o755 })
     writeFileSync(join(dir, 'npm'), '#!/bin/sh', { mode: 0o755 })
+    const volta = resolveNpm({ env: { PATH: dir }, searchPath: [] }, 'win32')
+    expect(volta).toBeUndefined()
+    writeFileSync(join(dir, 'npm.exe'), 'MZ', { mode: 0o755 })
+    expect(resolveNpm({ env: { PATH: dir }, searchPath: [] }, 'win32')).toMatchObject({ command: join(dir, 'npm.exe') })
     mkdirSync(join(dir, 'node_modules', 'npm', 'bin'), { recursive: true })
     writeFileSync(join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), '')
     const npm = resolveNpm({ env: { PATH: dir }, searchPath: [] }, 'win32')
     expect(npm).toEqual({ path: join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), command: join(dir, 'node.exe'), args: [join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js')] })
   })
 
-  it('keeps credentials out of the npm environment', () => {
+  it('keeps credentials and every npm setting of the user out of the npm environment', () => {
     expect(withoutCredentials({ PATH: '/bin', NPM_TOKEN: 'x', GITHUB_TOKEN: 'x', OPENAI_API_KEY: 'x', MY_SECRET: 'x', NODE_AUTH_TOKEN: 'x', HOME: '/h' })).toEqual({ PATH: '/bin', HOME: '/h' })
+    expect(isolatedNpmEnv({ PATH: '/bin', HOME: '/h', USERPROFILE: '/h', npm_config_registry: 'x', NPM_CONFIG_PREFIX: 'x', 'npm_config_@s:registry': 'x' }, { home: '/m', userconfig: '/m/u', globalconfig: '/m/g', cache: '/m/c' }))
+      .toEqual({ PATH: '/bin', HOME: '/m', USERPROFILE: '/m', NPM_CONFIG_USERCONFIG: '/m/u', NPM_CONFIG_GLOBALCONFIG: '/m/g', NPM_CONFIG_CACHE: '/m/c', NPM_CONFIG_UPDATE_NOTIFIER: 'false' })
+    expect(sha512Of('sha1-abc sha512-XYZ==')).toBe('XYZ==')
+    expect(sha512Of('sha1-abc')).toBeUndefined()
   })
 })

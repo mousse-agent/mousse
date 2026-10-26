@@ -12,7 +12,7 @@
  * refuses files that differ from its receipt.
  */
 import { createHash } from 'node:crypto'
-import { chmodSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
+import { chmodSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative } from 'node:path'
 import type { RegistrySourcePatch, RemoveInstallResult } from '../../../shared/harness/types'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
@@ -22,8 +22,8 @@ import { INHERITED_CREDENTIALS, resolveCommand, type InstanceEnv } from '../env'
 import { runHarness, type HarnessRunResult } from '../spawn'
 import { containedFile, createStaging, extractArchive } from './archive'
 import { withLock } from './lock'
-import { changedFile, DIST_DIR, hashTree, readReceipt, RECEIPT_FILE, type AgentReceipt } from './receipt'
-import { commandSegments, platformKeys, resolveDistribution, type AcpRegistry, type RegistryAgent, type RegistryPlatform } from './registry'
+import { changedFile, DIST_DIR, hashFile, hashTree, readReceipt, RECEIPT_FILE, type AgentReceipt } from './receipt'
+import { cleanEnv, commandSegments, platformKeys, resolveDistribution, type AcpRegistry, type RegistryAgent, type RegistryPlatform } from './registry'
 
 export const MAX_DOWNLOAD_BYTES = 1024 ** 3
 export const DOWNLOAD_TIMEOUT_MS = 20 * 60_000
@@ -63,7 +63,10 @@ export interface AgentLaunch {
   path: string
 }
 
-export type NpmRunner = (args: string[], options: { env: InstanceEnv; signal: AbortSignal; timeoutMs: number }) => Promise<HarnessRunResult>
+export type NpmRunner = (args: string[], options: { env: InstanceEnv; signal: AbortSignal; timeoutMs: number; cwd: string }) => Promise<HarnessRunResult>
+
+/** The npm registry npm agents install from: the registry the ACP registry's `npx` entries mean. */
+export const NPM_REGISTRY = 'https://registry.npmjs.org/'
 
 export interface AgentInstallsOptions {
   installationHome: string
@@ -81,6 +84,8 @@ export interface AgentInstallsOptions {
   downloadTimeoutMs?: number
   /** How long a deletion waits for processes that are exiting (default 5 s). */
   exitGraceMs?: number
+  /** Test seam: the npm registry (default `NPM_REGISTRY`). */
+  npmRegistry?: string
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -99,8 +104,11 @@ type Ref = { version: string; platform: string }
 
 /** Processes running from an install root in this process, so its files are not deleted under them. */
 const running = new Map<string, number>()
-/** Roots to delete once their last process here ends. */
-const deleteWhenIdle = new Set<string>()
+/**
+ * Roots waiting for their last process here to end, with the deletion to run then: it takes the
+ * agent's lock and checks the references again, since another entry may use the version by then.
+ */
+const deleteWhenIdle = new Map<string, () => void>()
 /** Installation homes swept in this process. */
 const swept = new Set<string>()
 
@@ -124,6 +132,35 @@ export function withoutCredentials(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     result[key] = value
   }
   return result
+}
+
+/**
+ * The environment npm installs an agent with: no credentials, none of the user's npm settings
+ * (every `npm_config_*` is dropped; user and global config are empty files of Mousse's own), a
+ * private cache, and a home of its own, so no `.npmrc` of the user's is read.
+ */
+export function isolatedNpmEnv(env: NodeJS.ProcessEnv, paths: { home: string; userconfig: string; globalconfig: string; cache: string }): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(withoutCredentials(env))) {
+    const upper = key.toUpperCase()
+    if (upper.startsWith('NPM_CONFIG_') || upper === 'HOME' || upper === 'USERPROFILE' || upper === 'XDG_CONFIG_HOME') continue
+    result[key] = value
+  }
+  return {
+    ...result,
+    HOME: paths.home,
+    USERPROFILE: paths.home,
+    NPM_CONFIG_USERCONFIG: paths.userconfig,
+    NPM_CONFIG_GLOBALCONFIG: paths.globalconfig,
+    NPM_CONFIG_CACHE: paths.cache,
+    NPM_CONFIG_UPDATE_NOTIFIER: 'false'
+  }
+}
+
+/** The sha512 of an npm `dist.integrity` (it may list several algorithms). */
+export function sha512Of(integrity: unknown): string | undefined {
+  if (typeof integrity !== 'string') return undefined
+  return integrity.split(/\s+/).find((entry) => entry.startsWith('sha512-'))?.slice('sha512-'.length)
 }
 
 /**
@@ -163,13 +200,23 @@ export async function downloadArtifact(
   }
   const hash = createHash('sha256')
   const writer = createWriteStream(target, { flags: 'wx', mode: 0o600 })
+  // A failing file (no folder, no permission, a full disk) rejects the download; it never goes
+  // unhandled. The file is closed before the caller deletes the staging folder.
+  const closed = new Promise<void>((resolve) => writer.once('close', resolve))
+  const failed = new Promise<never>((_resolve, reject) => writer.once('error', reject))
+  failed.catch(() => undefined)
+  const aborted = new Promise<never>((_resolve, reject) => {
+    if (signal.aborted) reject(signal.reason)
+    else signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+  })
+  aborted.catch(() => undefined)
   const reader = response.body.getReader()
   let received = 0
   let reported = -1
   try {
     for (;;) {
       signal.throwIfAborted()
-      const { done, value } = await reader.read()
+      const { done, value } = await Promise.race([reader.read(), failed])
       if (done) break
       received += value.byteLength
       if (received > max) throw new Error(`The ${options.label} download is larger than ${mb(max)}.`)
@@ -179,18 +226,17 @@ export async function downloadArtifact(
         reported = step
         options.onProgress?.({ message: total ? `Downloading ${mb(received)} of ${mb(total)}` : `Downloading ${mb(received)}`, receivedBytes: received, ...(total ? { totalBytes: total } : {}) })
       }
-      if (!writer.write(value)) await new Promise<void>((resolve) => writer.once('drain', resolve))
+      if (!writer.write(value)) await Promise.race([new Promise<void>((resolve) => writer.once('drain', resolve)), failed, aborted])
     }
+    writer.end()
+    await Promise.race([new Promise<void>((resolve) => writer.once('finish', resolve)), failed])
   } catch (error) {
     await reader.cancel().catch(() => undefined)
+    writer.destroy()
+    await closed
     throw timeout.aborted && !options.signal?.aborted ? new Error(`The ${options.label} download did not finish in time.`) : error
-  } finally {
-    writer.end()
-    await new Promise<void>((resolve) => {
-      writer.once('close', resolve)
-      writer.once('error', () => resolve())
-    })
   }
+  await closed
   return { sha256: hash.digest('hex'), finalUrl: current.href, bytes: received }
 }
 
@@ -283,7 +329,9 @@ export class AgentInstalls {
 
   /** How `installed` starts: its receipt's launch, resolved inside the install folder. */
   launch(installed: InstalledAgent, env: Pick<InstanceEnv, 'env' | 'searchPath'>): AgentLaunch {
-    const { receipt, root } = installed
+    const { root } = installed
+    // The receipt's arguments and variables pass the registry's rules again (a receipt can be edited).
+    const receipt = { ...installed.receipt, launch: { ...installed.receipt.launch, args: installed.receipt.launch.args.filter((arg): arg is string => typeof arg === 'string'), env: cleanEnv(installed.receipt.launch.env) } }
     const segments = commandSegments(receipt.launch.cmd)
     if (!segments) throw new Error('The receipt names an invalid command.')
     const dist = join(root, DIST_DIR)
@@ -316,7 +364,9 @@ export class AgentInstalls {
       if (left > 0) running.set(root, left)
       else {
         running.delete(root)
-        if (deleteWhenIdle.has(root) && tryDelete(root)) deleteWhenIdle.delete(root)
+        const retry = deleteWhenIdle.get(root)
+        deleteWhenIdle.delete(root)
+        retry?.()
       }
     }
   }
@@ -472,11 +522,35 @@ export class AgentInstalls {
     if (!resolved || resolved.kind !== 'npx') throw new Error(`${input.label} has no npm package.`)
     const dist = join(staging, DIST_DIR)
     mkdirSync(dist, { recursive: true })
+    // The package itself comes from the npm registry, checked against the sha512 it publishes for
+    // this exact version; npm then installs that file, and its dependencies from the same registry.
+    const registry = this.options.npmRegistry ?? NPM_REGISTRY
+    input.onProgress({ message: `Checking ${resolved.spec.package} on the npm registry…` })
+    const meta = await this.packageMetadata(registry, resolved.name, resolved.packageVersion, signal)
+    const tarball = join(staging, 'package.tgz')
+    input.onProgress({ message: `Downloading ${resolved.spec.package}…` })
+    const download = await downloadArtifact(meta.tarball, tarball, {
+      signal,
+      ...(this.options.fetch ? { fetch: this.options.fetch } : {}),
+      onProgress: input.onProgress,
+      label: input.label
+    })
+    if ((await hashFile(tarball, signal, 'sha512', 'base64')) !== meta.sha512) throw new Error(`The ${resolved.spec.package} download does not match the npm registry checksum.`)
+    // npm reads none of the user's settings or credentials: empty config files and a home of its own.
+    const npmDir = join(staging, 'npm')
+    const paths = { home: join(npmDir, 'home'), userconfig: join(npmDir, 'userconfig'), globalconfig: join(npmDir, 'globalconfig'), cache: join(npmDir, 'cache') }
+    mkdirSync(paths.home, { recursive: true })
+    mkdirSync(paths.cache, { recursive: true })
+    writeFileSync(paths.userconfig, '')
+    writeFileSync(paths.globalconfig, '')
     input.onProgress({ message: `Installing ${resolved.spec.package} with npm…` })
     const scripts = quirksFor(agent.id).allowInstallScripts ? [] : ['--ignore-scripts']
-    const args = ['install', '--global', '--prefix', dist, ...scripts, '--no-audit', '--no-fund', '--loglevel=error', resolved.spec.package]
-    const env: InstanceEnv = { ...input.env, env: withoutCredentials(input.env.env) }
-    const result = await (this.options.npm ?? runUserNpm)(args, { env, signal, timeoutMs: NPM_TIMEOUT_MS })
+    const args = [
+      'install', '--global', '--prefix', dist, `--registry=${registry}`, `--userconfig=${paths.userconfig}`, `--globalconfig=${paths.globalconfig}`,
+      `--cache=${paths.cache}`, ...scripts, '--no-audit', '--no-fund', '--no-update-notifier', '--loglevel=error', tarball
+    ]
+    const env: InstanceEnv = { ...input.env, env: isolatedNpmEnv(input.env.env, paths) }
+    const result = await (this.options.npm ?? runUserNpm)(args, { env, signal, timeoutMs: NPM_TIMEOUT_MS, cwd: npmDir })
     signal.throwIfAborted()
     if (result.spawnError) throw new Error(result.spawnError === 'npm_not_found' ? 'npm is not on your PATH. Install Node.js, then try again.' : `npm could not start (${result.spawnError}).`)
     if (result.timedOut) throw new Error('npm did not finish in time.')
@@ -503,13 +577,40 @@ export class AgentInstalls {
       platform: 'node',
       distribution: 'npx',
       artifactUrl: resolved.spec.package,
+      finalUrl: download.finalUrl,
+      expected: { algorithm: 'sha512', digest: meta.sha512 },
+      archiveSha256: download.sha256,
       files: tree.files,
       bytes: tree.bytes,
       launch: { cmd, args: [...resolved.spec.args], env: { ...resolved.spec.env }, runner: 'node' },
-      // npm checks the package against the npm registry's integrity hash.
+      // Mousse checked the package against the npm registry's sha512; npm checked its dependencies.
       checksum: 'registry',
       installedAt: new Date().toISOString()
     }
+  }
+
+  /** The tarball and sha512 the npm registry publishes for `name@version`. */
+  private async packageMetadata(registry: string, name: string, version: string, signal: AbortSignal): Promise<{ tarball: string; sha512: string }> {
+    const base = new URL(registry)
+    const url = new URL(`${name.replace('/', '%2f')}/${encodeURIComponent(version)}`, base)
+    const response = await (this.options.fetch ?? fetch)(url.href, { signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]), redirect: 'error', headers: { accept: 'application/json' } })
+    if (!response.ok) throw new Error(`The npm registry has no ${name}@${version} (${response.status}).`)
+    const text = await response.text()
+    if (text.length > 4 * 1024 * 1024) throw new Error(`The npm registry answer for ${name} is too large.`)
+    let meta: unknown
+    try {
+      meta = JSON.parse(text)
+    } catch {
+      throw new Error(`The npm registry answer for ${name} is not JSON.`)
+    }
+    const dist = isRecord(meta) && isRecord(meta.dist) ? meta.dist : undefined
+    const sha512 = sha512Of(dist?.integrity)
+    if (!dist || !sha512 || typeof dist.tarball !== 'string') throw new Error(`The npm registry publishes no sha512 for ${name}@${version}.`)
+    if (!isRecord(meta) || meta.version !== version) throw new Error(`The npm registry answered for another version of ${name}.`)
+    // The tarball comes from that registry's host, like everything npm installs here.
+    const tarball = new URL(dist.tarball)
+    if (tarball.protocol !== base.protocol || tarball.host !== base.host) throw new Error(`The ${name} package is served from ${tarball.host}, not ${base.host}.`)
+    return { tarball: tarball.href, sha512 }
   }
 
   // -- References ---------------------------------------------------------------------------------
@@ -536,8 +637,17 @@ export class AgentInstalls {
   /** Call with the agent's lock held. `installed` undefined drops the entry's reference. */
   private writeRef(agentId: string, instanceId: string, installed: InstalledAgent | undefined): void {
     const refs = this.readRefs(agentId, this.options.profileId)
-    if (installed) refs.instances[instanceId] = { version: installed.receipt.version, platform: installed.receipt.platform }
-    else delete refs.instances[instanceId]
+    if (installed) {
+      refs.instances[instanceId] = { version: installed.receipt.version, platform: installed.receipt.platform }
+      // A version in use again is no longer waiting to be deleted.
+      deleteWhenIdle.delete(installed.root)
+      const pending = this.readPending(agentId)
+      const left = pending.filter((entry) => entry.version !== installed.receipt.version || entry.platform !== installed.receipt.platform)
+      if (left.length !== pending.length) {
+        if (left.length) atomicWriteJsonSync(this.pendingPath(agentId), left)
+        else rmSync(this.pendingPath(agentId), { force: true })
+      }
+    } else delete refs.instances[instanceId]
     const path = this.refPath(agentId, this.options.profileId)
     if (!Object.keys(refs.instances).length) {
       rmSync(path, { force: true })
@@ -651,11 +761,16 @@ export class AgentInstalls {
   private deletePending(agentId: string): void {
     const used = new Set(this.liveRefs(agentId).map((ref) => `${ref.version}/${ref.platform}`))
     const left = this.readPending(agentId).filter((entry) => {
-      if (used.has(`${entry.version}/${entry.platform}`) || !VERSION.test(entry.version) || !/^[a-z0-9_-]+$/.test(entry.platform)) return false
+      if (used.has(`${entry.version}/${entry.platform}`) || !VERSION.test(entry.version) || !/^[a-z0-9_-]+$/.test(entry.platform)) {
+        deleteWhenIdle.delete(join(this.agentDir(agentId), entry.version, entry.platform))
+        return false
+      }
       const versionDir = join(this.agentDir(agentId), entry.version)
       const root = join(versionDir, entry.platform)
       if (!tryDelete(root)) {
-        deleteWhenIdle.add(root)
+        // Still running here: tried again, under the lock and with fresh references, once it ends.
+        deleteWhenIdle.set(root, () => void withLock(this.lockPath(agentId), () => this.deletePending(agentId)).catch((error) =>
+          console.warn('[agents] could not delete an old version', { agentId, error: errorText(error) })))
         return true
       }
       try {
@@ -743,11 +858,12 @@ export function resolveNpm(env: Pick<InstanceEnv, 'env' | 'searchPath'>, platfor
     const cli = join(dirname(node.path), 'node_modules', 'npm', 'bin', 'npm-cli.js')
     if (existsSync(cli)) return { path: cli, command: node.command, args: [...node.args, cli] }
   }
-  return resolveCommand('npm.cmd', env, platform)
+  // Volta and similar managers ship an `npm.exe` launcher instead.
+  return resolveCommand('npm.exe', env, platform) ?? resolveCommand('npm.cmd', env, platform)
 }
 
 const runUserNpm: NpmRunner = async (args, options) => {
   const npm = resolveNpm(options.env)
   if (!npm) return { code: null, stdout: '', stderr: '', timedOut: false, spawnError: 'npm_not_found' }
-  return runHarness(options.env, 'install', npm.command, [...npm.args, ...args], { timeoutMs: options.timeoutMs, signal: options.signal, maxBytes: 64 * 1024 })
+  return runHarness(options.env, 'install', npm.command, [...npm.args, ...args], { timeoutMs: options.timeoutMs, signal: options.signal, maxBytes: 64 * 1024, cwd: options.cwd })
 }
