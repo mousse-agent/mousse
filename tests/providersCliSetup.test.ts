@@ -136,6 +136,16 @@ describe('Runtime rows', () => {
     expect(labels(html)).toContain('Copy update command')
   })
 
+  it('shows a newer version with no command and no button when the owner is not proven', () => {
+    const html = renderToStaticMarkup(createElement(UpdateRow, {
+      snapshot: snapshot({ update: { kind: 'notice', latestVersion: '2.2.0' } }), actions
+    }))
+    expect(html).toContain('is-notice')
+    expect(html).toContain('v2.2.0 is available')
+    expect(buttons(html)).toEqual([])
+    expect(labels(html)).toEqual([])
+  })
+
   it('renders nothing without an update', () => {
     expect(renderToStaticMarkup(createElement(UpdateRow, { snapshot: snapshot(), actions }))).toBe('')
   })

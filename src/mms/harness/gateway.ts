@@ -1268,10 +1268,13 @@ export class Harness implements HarnessGateway {
   private refreshLatest(instanceIds: readonly string[]): void {
     if (this.stopped) return
     const entries = this.instanceMap.list()
+    // Instances of one driver share a package: one lookup, one publish.
+    const packages = new Set<string>()
     for (const instanceId of instanceIds) {
       const entry = entries[instanceId]
       const source = entry?.enabled ? this.drivers.get(entry.driver)?.latestVersion : undefined
-      if (source?.kind !== 'npm') continue
+      if (source?.kind !== 'npm' || packages.has(source.package)) continue
+      packages.add(source.package)
       void this.latest.refresh(source).then((changed) => {
         if (changed && !this.stopped) this.changed(instanceId, { legacy: false })
       })
@@ -1524,6 +1527,8 @@ export class Harness implements HarnessGateway {
   private async update(instanceId: string): Promise<ProviderOperationStarted> {
     const update = this.updateFor(this.record(instanceId, { allowDisabled: true }))
     if (update?.kind === 'one_click') return this.install(instanceId, 'update')
+    if (update?.kind === 'notice')
+      return harnessFail('unsupported', `Mousse cannot tell how this CLI was installed, so it cannot update it. Version ${update.latestVersion} is available.`, instanceId)
     if (update?.kind === 'advisory')
       return harnessFail('unsupported', `Mousse cannot prove who installed this CLI. Update it with: ${update.command}`, instanceId)
     return harnessFail('unsupported', 'No update is available.', instanceId)

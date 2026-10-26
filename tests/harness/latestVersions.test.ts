@@ -64,6 +64,22 @@ describe('latest published versions', () => {
     expect(cache.get(codex)).toBe('0.164.0')
   })
 
+  it('treats a check dated in the future as expired', async () => {
+    const dir = home()
+    mkdirSync(join(dir, 'harness'))
+    const now = Date.parse('2026-10-26T00:00:00Z')
+    writeFileSync(join(dir, 'harness', 'latest-versions.json'), JSON.stringify({
+      version: 1,
+      entries: { '@openai/codex': { version: '0.150.0', checkedAt: new Date(now + 3 * LATEST_TTL_MS).toISOString() } }
+    }))
+    const { fetchImpl, calls } = registry({ '@openai/codex': { version: '0.163.0' } })
+    const cache = new LatestVersionCache(dir, { fetchImpl, now: () => now })
+    expect(cache.get(codex)).toBe('0.150.0')
+    expect(await cache.refresh(codex)).toBe(true)
+    expect(calls).toHaveBeenCalledTimes(1)
+    expect(cache.get(codex)).toBe('0.163.0')
+  })
+
   it('keeps the last good version when a lookup fails and waits before trying again', async () => {
     let now = Date.parse('2026-10-26T00:00:00Z')
     let fail = false

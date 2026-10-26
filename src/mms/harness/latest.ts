@@ -73,7 +73,9 @@ export class LatestVersionCache {
     if (running) return running
     const entry = this.read().entries[name]
     const checkedAtMs = entry ? Date.parse(entry.checkedAt) : Number.NaN
-    if (Number.isFinite(checkedAtMs) && this.now() - checkedAtMs < LATEST_TTL_MS) return Promise.resolve(false)
+    // A check dated in the future (clock set back, file from another machine) counts as expired.
+    const age = this.now() - checkedAtMs
+    if (Number.isFinite(age) && age >= 0 && age < LATEST_TTL_MS) return Promise.resolve(false)
     if (this.now() < (this.retryAt.get(name) ?? 0)) return Promise.resolve(false)
     const lookup = this.lookup(name, signal).finally(() => this.inFlight.delete(name))
     this.inFlight.set(name, lookup)
@@ -87,7 +89,10 @@ export class LatestVersionCache {
         headers: { Accept: 'application/json' },
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout
       })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      if (!response.ok) {
+        void response.body?.cancel().catch(() => {})
+        throw new Error(`HTTP ${response.status}`)
+      }
       const body: unknown = await response.json()
       const version = body && typeof body === 'object' ? (body as { version?: unknown }).version : undefined
       if (typeof version !== 'string' || !VERSION.test(version)) throw new Error('The registry answered without a version.')

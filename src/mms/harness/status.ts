@@ -52,7 +52,7 @@ export function compatibilityOf(driver: HarnessDriver, version: string | undefin
  * One-click update only when Mousse owns the install; otherwise the owner's command to copy.
  * Offered when the version is older than tested, or when `latest` (the newest published version
  * known, from `LatestVersionCache`) is newer than the installed one. An owner Mousse cannot prove
- * has no command, so nothing is offered.
+ * has no command: a newer version is then reported as a notice only, with nothing to run or click.
  */
 export function updateAffordance(
   driver: HarnessDriver,
@@ -68,7 +68,9 @@ export function updateAffordance(
   const owner = binary.owner ?? 'unknown'
   if (owner === 'managed' && driver.canInstall) return { kind: 'one_click', owner, ...latestVersion }
   const command = driver.updateCommand?.(owner)
-  return command ? { kind: 'advisory', command, ...latestVersion } : undefined
+  if (command) return { kind: 'advisory', command, ...latestVersion }
+  // The version is worth showing; without a proven owner there is nothing to run or click.
+  return newer && latest ? { kind: 'notice', latestVersion: latest } : undefined
 }
 
 function withDeadline<T>(work: Promise<T>, ms: number): Promise<{ value: T } | { timedOut: true }> {

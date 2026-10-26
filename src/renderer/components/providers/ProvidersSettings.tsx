@@ -332,7 +332,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
                 name={snapshot.displayName}
                 version={formatVersion(snapshot.binary?.version)}
                 update={
-                  snapshot.update
+                  snapshot.update && snapshot.update.kind !== 'notice'
                     ? {
                         label: `Update ${snapshot.displayName}${snapshot.update.latestVersion ? ` to ${formatVersion(snapshot.update.latestVersion)}` : ''}`,
                         // One click where Mousse knows who installed it; otherwise the editor shows the command.

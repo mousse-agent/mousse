@@ -474,6 +474,48 @@ describe('harness gateway: update available', () => {
     harness.stop()
   })
 
+  it('an install whose owner is not proven shows the newer version, and Update says why it cannot act', async () => {
+    const fetchImpl = vi.fn(async () => response('2.2.0')) as unknown as typeof fetch
+    const dir = home()
+    const latest = new LatestVersionCache(dir, { fetchImpl })
+    await latest.refresh({ kind: 'npm', package: '@anthropic-ai/claude-code' })
+    const base = adapterDriver(fake('claude'), { runtime: { managed: () => ({ path: process.execPath, version: '2.1.0' }), auth: async () => ({ state: 'signed_in' }) } })
+    // No update command for the managed owner and no install: nothing to run or click.
+    const driver: HarnessDriver = { ...base, latestVersion: { kind: 'npm', package: '@anthropic-ai/claude-code' } }
+    const harness = testHarness({ drivers: [adapterDriver(pi()), driver, adapterDriver(fake('codex')), adapterDriver(fake('antigravity'))], instances: instances(), profileHome: dir, latest })
+    const snapshot = (await harness.instances.snapshots(device)).find((entry) => entry.instanceId === 'claude')
+    expect(snapshot?.update).toEqual({ kind: 'notice', latestVersion: '2.2.0' })
+    const status = describeStatus(snapshot!)
+    expect(status.detail).toBe('Update available: 2.2.0.')
+    expect(status.nextStep).toBeNull()
+    await expect(harness.instances.update('claude')).rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('2.2.0') })
+    harness.stop()
+  })
+
+  it('two instances of one driver share one lookup and one publish', async () => {
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const fetchImpl = vi.fn(async () => {
+      await gate
+      return response('2.2.0')
+    }) as unknown as typeof fetch
+    const dir = home()
+    const base = adapterDriver(fake('claude'), { runtime: { managed: () => ({ path: process.execPath, version: '2.1.0' }), auth: async () => ({ state: 'signed_in' }) } })
+    const driver: HarnessDriver = { ...base, multiInstance: true, privateHome: true, latestVersion: { kind: 'npm', package: '@anthropic-ai/claude-code' } }
+    const harness = testHarness({ drivers: [adapterDriver(pi()), driver, adapterDriver(fake('codex')), adapterDriver(fake('antigravity'))], instances: instances(), profileHome: dir, latest: new LatestVersionCache(dir, { fetchImpl }) })
+    await harness.instances.add({ driver: 'claude', config: { displayName: 'Work', home: 'private' } })
+    await harness.instances.snapshots(device)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const events: HarnessGatewayEvent[] = []
+    harness.instances.subscribe((event) => events.push(event))
+    release?.()
+    await waitFor(() => events.length > 0)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(events.filter((event) => event.type === 'snapshots')).toHaveLength(1)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    harness.stop()
+  })
+
   it('a managed install older than the published version updates in one click, and that starts the install', async () => {
     let installs = 0
     const base = adapterDriver(fake('antigravity'), {
