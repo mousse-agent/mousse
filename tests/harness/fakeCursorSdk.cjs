@@ -47,8 +47,10 @@ function described(options) {
 
 let agents = 0
 let runs = 0
+let handles = 0
 
 function makeAgent(agentId) {
+  const handle = ++handles
   return {
     agentId,
     model: undefined,
@@ -108,7 +110,7 @@ function makeAgent(agentId) {
       }
     },
     close() {
-      log({ call: 'close', agentId })
+      log({ call: 'close', agentId, handle })
     }
   }
 }

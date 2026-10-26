@@ -8,6 +8,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { CursorHostClient, spawnCursorHost } from '../../src/mms/harness/cursor/hostClient'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
 import type { DriverContext, DriverRuntime } from '../../src/mms/harness/driver'
 import { instanceEnv } from '../../src/mms/harness/env'
@@ -133,6 +134,19 @@ describe('the Cursor host process', () => {
       { call: 'store.runs.delete', storeDir, filter: { agentIds: ['agent-1'] } },
       { call: 'store.agents.delete', storeDir, filter: { agentIds: ['agent-1'] } }
     ])
+  })
+
+  it('closes the handle a second reopen of the same agent replaces', async () => {
+    const { calls, stateDir } = setup()
+    const client = new CursorHostClient(() => spawnCursorHost(instanceEnv({ instanceId: 'cursor:work', driver: 'cursor', configRevision: 0, searchPath: [], base: process.env }), hostScript, { MOUSSE_CURSOR_SDK_MODULE: FAKE_SDK, MOUSSE_FAKE_CURSOR_LOG: join(stateDir, 'sdk-calls.ndjson') }))
+    try {
+      const reopen = { apiKey: 'user-key', agentId: 'agent-1', cwd: stateDir, storeDir: join(stateDir, 'cursor-store'), settingSources: [], autoReview: true }
+      await client.request('resume', reopen)
+      await client.request('resume', reopen)
+      expect(calls().filter((call) => call.call === 'close')).toEqual([{ call: 'close', agentId: 'agent-1', handle: 1 }])
+    } finally {
+      client.stop()
+    }
   })
 
   it('fails a turn whose reply is only a transport error', async () => {

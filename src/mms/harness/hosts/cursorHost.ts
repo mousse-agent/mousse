@@ -241,7 +241,10 @@ function main(): void {
     },
     resume: async (params) => {
       const agent = await sdk.Agent.resume(params.agentId, agentOptions(params))
+      // A second reopen of the same agent replaces the first handle: that one is closed, not leaked.
+      const replaced = agents.get(agent.agentId)
       agents.set(agent.agentId, agent)
+      if (replaced && replaced !== agent) replaced.close()
       return { agentId: agent.agentId }
     },
     send: async (params) => {
