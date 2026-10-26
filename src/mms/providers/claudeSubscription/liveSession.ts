@@ -310,8 +310,14 @@ export class BackgroundObligations {
 
   /** Some task's result may never arrive (a cancel may have dropped its notification). */
   hasLost(): boolean {
-    for (const consumer of this.consumers.values()) if (consumer === LOST) return true
-    return false
+    return this.lostCount() > 0
+  }
+
+  /** How many tasks' results may never arrive. */
+  lostCount(): number {
+    let count = 0
+    for (const consumer of this.consumers.values()) if (consumer === LOST) count++
+    return count
   }
 
   /** How many tasks Claude read but no turn showed (a wake that was cut off or could not be run): see `DISCARDED`. */

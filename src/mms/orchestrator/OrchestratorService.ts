@@ -210,6 +210,11 @@ interface ChannelTurnEntry {
   pendingSteer: string[]
   promotedSteerIds: string[]
   runId?: string
+  /**
+   * This turn acquired the thread's execution lease, so it is the one that runs. Registration order does not
+   * say so: the lease is polled for, so a turn that registered later can take it before an earlier one.
+   */
+  leaseHeld?: boolean
 }
 
 interface NormalizedOrchestratorSendRequest {
@@ -1956,10 +1961,21 @@ export class OrchestratorService extends EventEmitter {
     return Boolean(session?.activeTurn || session?.turnAdmitted || this.channelTurns.get(threadId)?.size)
   }
 
-  /** The channel turn that runs now: the oldest one that has not been aborted (later ones wait for its lease). */
+  /**
+   * The channel turn that runs: the one that holds the lease, aborted or not (its steers are still its own).
+   * While none holds it yet (the first turn is still acquiring it), the oldest one registered.
+   */
+  private runningChannelTurn(threadId: string): ChannelTurnEntry | undefined {
+    const turns = this.channelTurns.get(threadId)
+    if (!turns) return undefined
+    for (const turn of turns) if (turn.leaseHeld) return turn
+    return turns.values().next().value
+  }
+
+  /** The channel turn that runs now, if it has not been aborted: what a steer reaches. A turn waiting for the lease is not one. */
   private activeChannelTurn(threadId: string): ChannelTurnEntry | undefined {
-    for (const turn of this.channelTurns.get(threadId) ?? []) if (!turn.abort.signal.aborted) return turn
-    return undefined
+    const turn = this.runningChannelTurn(threadId)
+    return turn && !turn.abort.signal.aborted ? turn : undefined
   }
 
   /**
@@ -4736,17 +4752,17 @@ export class OrchestratorService extends EventEmitter {
    * a channel turn that is an engine run also gets its `stop` recorded against that run.
    */
   abortChannelTurn(threadId: string): boolean {
-    // Every channel turn of the thread: the one that runs and any that wait for its lease.
-    let aborted = false
-    for (const turn of [...(this.channelTurns.get(threadId) ?? [])]) {
-      if (turn.abort.signal.aborted) continue
-      turn.pendingSteer = []
-      turn.promotedSteerIds = []
-      turn.abort.abort()
-      this.recordChannelControl('stop', threadId, turn.runId)
-      aborted = true
-    }
-    return aborted
+    // Stop ends the turn that runs (the one holding the lease). A channel message still waiting for the lease
+    // is like a queued message: it survives the Stop and runs afterwards. A lone turn that has not acquired
+    // the lease yet is the one the Stop was for.
+    const turns = this.channelTurns.get(threadId)
+    const turn = this.runningChannelTurn(threadId)
+    if (!turn || turn.abort.signal.aborted || (!turn.leaseHeld && turns!.size > 1)) return false
+    turn.pendingSteer = []
+    turn.promotedSteerIds = []
+    turn.abort.abort()
+    this.recordChannelControl('stop', threadId, turn.runId)
+    return true
   }
 
   /**
@@ -6088,8 +6104,7 @@ export class OrchestratorService extends EventEmitter {
     }
 
     const localPromoted = new Set<string>(turn.promotedSteerIds ?? [])
-    // The turn that runs is the oldest one registered (aborted or not: its steers are still its own).
-    const channelTurn = this.channelTurns.get(session.threadId)?.values().next().value as ChannelTurnEntry | undefined
+    const channelTurn = this.runningChannelTurn(session.threadId)
     if (channelTurn) {
       for (const id of channelTurn.promotedSteerIds ?? []) localPromoted.add(id)
     }
@@ -7135,6 +7150,8 @@ export class OrchestratorService extends EventEmitter {
           maxAttempts: 240,
           retryDelayMs: 50
         })
+        // This turn runs now, whatever order the turns on the thread registered in.
+        if (channelTurn) channelTurn.leaseHeld = true
       } catch (err) {
         if (signal.aborted || (err instanceof Error && /abort/i.test(err.message))) {
           return { text: '', silent: true, aborted: true }
@@ -7247,6 +7264,7 @@ export class OrchestratorService extends EventEmitter {
       // A later channel turn on this thread may have registered itself while this one ran (it waits for the
       // lease): only this turn's own entry is removed.
       if (channelTurn) {
+        channelTurn.leaseHeld = false
         const turns = this.channelTurns.get(threadId)
         turns?.delete(channelTurn)
         if (turns?.size === 0) this.channelTurns.delete(threadId)
