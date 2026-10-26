@@ -9,6 +9,7 @@ import { ChatGptTokenBroker } from '../../src/mms/harness/codex/broker'
 import type { CodexInstallation } from '../../src/mms/harness/codex/installation'
 import { createManagedCodexRuntime, MANAGED_MODEL_PROVIDER } from '../../src/mms/harness/codex/managedRuntime'
 import type { DriverContext } from '../../src/mms/harness/driver'
+import { decodeCodexConfig } from '../../src/mms/harness/drivers/codex'
 import { instanceEnv } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import type { CodexLaunch, CodexProcess } from '../../src/mms/providers/codex/CodexAppServerClient'
@@ -303,3 +304,18 @@ describe('managed Codex: models and readings', () => {
   })
 })
 
+
+describe('codex driver config', () => {
+  it('a managed entry always has a private home; the own setup never keeps one', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(decodeCodexConfig({ setup: 'managed', home: 'default' })).toMatchObject({ setup: 'managed', home: 'private' })
+      expect(decodeCodexConfig({ home: 'private' })).toMatchObject({ home: 'default' })
+      expect(decodeCodexConfig({ setup: 'existing', home: 'private' })).toMatchObject({ setup: 'existing', home: 'default' })
+      expect(warn).toHaveBeenCalledTimes(2)
+      expect(decodeCodexConfig(undefined)).toEqual({ home: 'default' })
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})

@@ -65,6 +65,8 @@ describe('execution bindings', () => {
   let forgotten: string[]
   let codexForgotten: string[]
   let codex: GatedClaude
+  /** The models the codex runtime lists, first = what `default` runs. */
+  let codexListing: string[]
   /** The account the instances report; `undefined` = signed in, identity unknown. */
   let subject: string | undefined
   let authChecks: number
@@ -91,6 +93,7 @@ describe('execution bindings', () => {
     codex = new GatedClaude('codex')
     forgotten = []
     codexForgotten = []
+    codexListing = []
     subject = 'account-a'
     authChecks = 0
     clock = Date.now()
@@ -101,7 +104,14 @@ describe('execution bindings', () => {
       return { state: 'signed_in' as const, ...(subject ? { subject } : {}) }
     }
     const claude = adapterDriver(adapter, { runtime: { auth, forgetConversation: (threadId) => forgotten.push(threadId), signOut: async () => {}, setLaunch: async () => {} } })
-    const codexDriver = adapterDriver(codex, { runtime: { auth, forgetConversation: (threadId) => codexForgotten.push(threadId) } })
+    const codexDriver = adapterDriver(codex, {
+      runtime: {
+        auth,
+        forgetConversation: (threadId) => codexForgotten.push(threadId),
+        // As a managed Codex: `default` runs the first listed model, fixed at bind.
+        concreteModel: (model) => (model === 'default' ? codexListing[0] : model)
+      }
+    })
     harness = testHarness({
       drivers: [{ ...claude, decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }) }, codexDriver],
       instances,
@@ -351,6 +361,38 @@ describe('execution bindings', () => {
     expect(adapter.turns[0]).toMatchObject({ instanceId: 'claude', model: 'bound-model', mode: 'agent' })
     expect(engine.store.getAttempt(retryAttempt!)?.executionBinding).toEqual(bound)
     expect(bound.policy).toEqual({ mode: 'default', approvals: 'ask', origin: 'interactive' })
+  })
+
+  it('a turn on a runtime that resolves `default` runs and records the bound model, and recovery keeps it', async () => {
+    const thread = store.createThread('bound default')
+    orch.setThreadModelOverride(thread.id, { instanceId: 'codex', llmProvider: 'codex', model: 'default' })
+    codexListing = ['gpt-a', 'gpt-b']
+    await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
+    const [first] = engine.listRuns(thread.id)
+    const stored = bindingOf(first.runId)!
+    // The dispatched input and the persisted binding carry the same concrete model.
+    expect(stored.model).toBe('gpt-a')
+    expect(codex.turns.map((turn) => turn.model)).toEqual(['gpt-a'])
+    // The catalog reorders; a recovery of that binding still runs the bound model.
+    codexListing = ['gpt-b', 'gpt-a']
+    const markStarting = engine.markStarting.bind(engine)
+    engine.markStarting = (runId) => {
+      const run = markStarting(runId)
+      engine.store.setAttemptBinding(run.activeAttemptId!, stored)
+      engine.store.createAttempt({ runId, reason: 'recovery' })
+      return engine.getRun(runId)!
+    }
+    later()
+    await orch.send('two', false, { threadId: thread.id, clientRequestId: 'send-b' })
+    expect(codex.turns.map((turn) => turn.model)).toEqual(['gpt-a', 'gpt-a'])
+  })
+
+  it('a turn on `default` with no listed model fails before it runs', async () => {
+    const thread = store.createThread('no models')
+    orch.setThreadModelOverride(thread.id, { instanceId: 'codex', llmProvider: 'codex', model: 'default' })
+    await orch.send('one', false, { threadId: thread.id, clientRequestId: 'send-a' })
+    expect(codex.turns).toEqual([])
+    expect(engine.listRuns(thread.id).map((run) => [run.status, run.outcome?.error])).toEqual([['failed', expect.stringMatching(/model_unavailable.*Refresh models/)]])
   })
 
   it('a plan-mode binding is never run with an agent-mode input', async () => {
