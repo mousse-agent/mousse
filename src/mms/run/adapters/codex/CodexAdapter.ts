@@ -31,37 +31,8 @@ export type CodexClient = Pick<
   'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'steer' | 'userSetup'
 > & Partial<Pick<CodexProviderService, 'commitInterrupted'>>
 
-/** Upstream codes read from a failure's details, each an exact token (never matched inside free text). */
-const NOT_ELIGIBLE_CODES: ReadonlySet<string> = new Set([
-  'subscription_sharing_not_eligible',
-  'subscription_sharing_client_not_enabled',
-  'subscription_sharing_plan_not_eligible',
-  'chatpass_not_eligible'
-])
-const UNSUPPORTED_CODES: ReadonlySet<string> = new Set([
-  'subscription_sharing_unsupported_capability',
-  'subscription_sharing_route_not_supported'
-])
-const SIGNED_OUT_CODES: ReadonlySet<string> = new Set(['subscription_sharing_invalid_user'])
-const PARAM = /^[\w.[\]-]{1,64}$/
-
-/** `error.code` and `error.param` of a details text that is exactly a JSON error body; nothing else. */
-function upstreamError(details: string | null): { code?: string; param?: string } {
-  if (!details) return {}
-  let body: unknown
-  try {
-    body = JSON.parse(details)
-  } catch {
-    return {}
-  }
-  const error = body && typeof body === 'object' ? (body as { error?: unknown }).error : undefined
-  if (!error || typeof error !== 'object') return {}
-  const { code, param } = error as { code?: unknown; param?: unknown }
-  return {
-    ...(typeof code === 'string' && (NOT_ELIGIBLE_CODES.has(code) || UNSUPPORTED_CODES.has(code) || SIGNED_OUT_CODES.has(code)) ? { code } : {}),
-    ...(typeof param === 'string' && PARAM.test(param) ? { param } : {})
-  }
-}
+/** How Codex 0.162.1 begins the message of a turn its `auth.command` failed (wire test). */
+const TOKEN_COMMAND_FAILED = 'provider auth command '
 
 /**
  * The harness error of a turn a managed Codex (Sign in with ChatGPT) ended as failed. The adapter
@@ -73,22 +44,26 @@ export function codexHarnessError(error: unknown, instanceId?: string): unknown 
   if (!(error instanceof CodexTurnFailure)) return error
   const kind = codexErrorKind(error.codexErrorInfo)
   if (kind === 'contextWindowExceeded') return error
+  // Codex 0.162.1 reports an HTTP failure as its status alone (`httpConnectionFailed`); the
+  // upstream `error.code` (`subscription_sharing_*`) is not passed on in any field (wire test), so
+  // the mapping reads the kind and the status only.
   const status = error.httpStatus
-  const upstream = upstreamError(error.additionalDetails)
   const fail = (code: HarnessError['code'], message: string): unknown =>
     harnessAppError({ code, message, ...(instanceId ? { instanceId } : {}) })
-  if (upstream.code && NOT_ELIGIBLE_CODES.has(upstream.code))
-    return fail('not_eligible', "This ChatGPT account can't use its plan in Mousse. Check the plan, or sign in with another account.")
-  if (upstream.code && UNSUPPORTED_CODES.has(upstream.code))
-    return fail('unsupported', `Your ChatGPT plan doesn't support this request${upstream.param ? ` (${upstream.param})` : ''}.`)
-  if ((upstream.code && SIGNED_OUT_CODES.has(upstream.code)) || kind === 'unauthorized' || status === 401)
+  // The token helper failed (signed out, the account changed, Mousse not running): Codex says so
+  // in its own words, with no kind or status, and retries without a bearer until it gives up.
+  if (kind === 'other' && status === undefined && error.message.startsWith(TOKEN_COMMAND_FAILED))
+    return fail('auth_expired', 'Mousse could not give Codex a ChatGPT token. Sign in again in Settings → Providers.')
+  if (kind === 'unauthorized' || status === 401)
     return fail('auth_expired', 'ChatGPT did not accept this sign-in. Sign in again in Settings → Providers.')
   if (kind === 'usageLimitExceeded' || status === 429)
     return fail('rate_limited', 'Usage limit reached for your ChatGPT plan. It resets later; see Manage usage on chatgpt.com.')
+  if (status === 403)
+    return fail('not_eligible', "ChatGPT refused this request for this account or plan. Check the plan, or sign in with another account.")
   if (kind === 'serverOverloaded' || status === 503)
     return fail('service_unavailable', 'ChatGPT is unavailable or busy right now. Try again in a moment.')
-  if (kind === 'badRequest')
-    return fail('unsupported', `ChatGPT did not accept this request${upstream.param ? ` (${upstream.param})` : ''}.`)
+  if (kind === 'badRequest' || status === 400)
+    return fail('unsupported', 'ChatGPT did not accept this request.')
   return fail('protocol', `Codex ended the turn with an error: ${error.message}`)
 }
 

@@ -33,9 +33,29 @@ function toml(value: unknown): string {
 }
 
 /**
+ * Codex features that reach chatgpt.com or GitHub on their own (ChatGPT apps and connectors,
+ * plugins and their marketplace, update checks, tool and skill suggestions, analytics). A managed
+ * entry uses none of them, and ChatGPT plan use must not call ChatGPT's backend: the wire test
+ * (`codexManagedWire.test.ts`) saw chatgpt.com, github.com and api.github.com contacted without
+ * these, and nothing with them.
+ */
+export const MANAGED_OFFLINE_OVERRIDES = [
+  'features.apps=false',
+  'features.plugins=false',
+  'features.remote_plugin=false',
+  'features.plugin_sharing=false',
+  'features.in_app_updates=false',
+  'features.tool_suggest=false',
+  'features.skill_search=false',
+  'check_for_update_on_startup=false',
+  'analytics.enabled=false'
+] as const
+
+/**
  * The `-c` overrides one managed app-server starts with. `requires_openai_auth` and `env_key` are
  * left out: the provider authenticates through `auth` alone. Codex's own multi-agent tools stay
- * off, as ChatGPT plan use asks.
+ * off, as ChatGPT plan use asks. No `model_catalog_url`: Codex 0.162.1 lists `<base_url>/models`
+ * through the same `auth` command on its own (wire test), and Mousse always sends the model.
  */
 export function managedCodexConfigArgs(helper: Pick<CliCommand, 'command' | 'args'>, options: { baseUrl?: string } = {}): string[] {
   const provider = {
@@ -49,7 +69,8 @@ export function managedCodexConfigArgs(helper: Pick<CliCommand, 'command' | 'arg
     '-c', `model_provider=${toml(MANAGED_MODEL_PROVIDER)}`,
     '-c', `model_providers.${MANAGED_MODEL_PROVIDER}=${toml(provider)}`,
     '-c', 'features.multi_agent=false',
-    '-c', 'features.multi_agent_v2=false'
+    '-c', 'features.multi_agent_v2=false',
+    ...MANAGED_OFFLINE_OVERRIDES.flatMap((override) => ['-c', override])
   ]
 }
 
