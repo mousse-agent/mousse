@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream, type Context, type Model } from '@earendil-works/pi-ai'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ONE_SHOT_INACTIVITY_MS, type Harness, type OneShotRequest } from '../../src/mms/harness/gateway'
-import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
+import { piDriver } from '../../src/mms/harness/drivers/pi'
 import { runPiOneShot } from '../../src/mms/harness/drivers/pi/oneShot'
 import { streamSimple as bedrockStreamSimple } from '@earendil-works/pi-ai/api/bedrock-converse-stream'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
@@ -82,7 +82,7 @@ function setup() {
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
   const harness = testHarness({
     adapters: [agent],
-    drivers: [piLegacyDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }), credentials: () => credentials as never })],
+    drivers: [piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }), credentials: () => credentials as never })],
     instances,
     profileHome: home
   })

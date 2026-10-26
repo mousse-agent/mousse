@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
+import { piDriver } from '../../src/mms/harness/drivers/pi'
 import type { HarnessGatewayEvent } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
@@ -48,7 +48,7 @@ describe('credential changes through the old provider methods', () => {
     const instances = new ProviderInstanceService({ providerAuth: auth as never })
     const now = Date.now()
     const harness = testHarness({
-      drivers: [piLegacyDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }), credentials: () => auth as never })],
+      drivers: [piDriver({ client: () => ({ chat: async () => { throw new Error('unused') } }), credentials: () => auth as never })],
       instances,
       profileHome: home(),
       now: () => now

@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join, relative, resolve, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { CLAUDE_CODE_CAPS } from '../../src/mms/harness/drivers/claudeCode'
-import { PI_LEGACY_CAPS } from '../../src/mms/harness/drivers/piLegacy'
+import { PI_LEGACY_CAPS } from '../../src/mms/harness/drivers/pi'
 import { HARNESS_CAP_KEYS, type HarnessCaps } from '../../src/shared/harness/types'
 
 // SPEC §13.2: every capability key has a reader outside the drivers, and that reader is called
