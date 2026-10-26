@@ -101,6 +101,9 @@ export function acpDriver(options: AcpDriverOptions = {}): HarnessDriver {
     canInstall: false,
     customModels: false,
     methodLabel: 'The agent’s own sign-in',
+    // ACP updates do not name the MCP server: the bearer is kept only after a turn whose tool calls all completed.
+    mcpTurnBinding: 'drained_turn',
+    userMcp: 'native',
     decodeConfig: decodeAcpConfig,
     versionArgs: (config) => preset.versionArgs?.(config) ?? null,
     caps: (_config, _version, facts?: RuntimeFacts): HarnessCaps => {

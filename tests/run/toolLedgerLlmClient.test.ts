@@ -6,6 +6,7 @@ import type { AssistantMessage, ToolCall } from '@earendil-works/pi-ai'
 import { describe, expect, it } from 'vitest'
 import { LlmClient } from '../../src/mms/orchestrator/LlmClient'
 import { userMessage } from '../../src/mms/orchestrator/nativeContext'
+import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
 import { getDefaultSettings } from '../../src/shared/settings'
 
 const emptyCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
@@ -119,5 +120,78 @@ describe('LlmClient tool ledger', () => {
       timestamp: Date.now()
     }))
     expect(calls).toEqual(['start:bash:{"command":"ls"}', 'execute:bash', 'failed:inv-1'])
+  })
+
+  it('writes one start and one commit per app tool call, and start + failed for an app tool error result', async () => {
+    const settings = getDefaultSettings()
+    settings.provider = { llmProvider: 'anthropic', model: 'claude-test' }
+    const outputs = [
+      response(
+        [
+          { type: 'toolCall', id: 'call-1', name: 'create_task', arguments: { description: 'one' } },
+          { type: 'toolCall', id: 'call-2', name: 'create_task', arguments: { description: 'two' } },
+          { type: 'toolCall', id: 'call-3', name: 'update_task', arguments: { id: '' } }
+        ],
+        'toolUse'
+      ),
+      response([{ type: 'text', text: 'done' }], 'stop')
+    ]
+    const models = {
+      getModel: (provider: string, id: string) => ({
+        id,
+        name: id,
+        api: 'anthropic-messages',
+        provider,
+        baseUrl: '',
+        reasoning: false,
+        input: ['text'],
+        cost: emptyCost,
+        contextWindow: 128_000,
+        maxTokens: 8_000
+      }),
+      getAuth: async () => ({ apiKey: 'test' }),
+      streamSimple: () => {
+        const message = outputs.shift()!
+        return { async *[Symbol.asyncIterator]() {}, result: async () => message }
+      }
+    }
+    const tasks = new TaskQueue()
+    const client = new LlmClient(
+      { get: () => settings } as never,
+      { has: () => true, credentials: { listProviderIds: () => ['anthropic'] }, models } as never,
+      { getEnabledTools: async () => [] } as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      tasks
+    )
+    const calls: string[] = []
+    let next = 0
+    const result = await client.chat([userMessage('track tasks')], undefined, {
+      mode: 'agent',
+      threadId: 'thread-1',
+      toolLedger: {
+        start: (call) => {
+          next += 1
+          calls.push(`start:${call.name}:${call.id}`)
+          return `inv-${next}`
+        },
+        commit: (id) => calls.push(`commit:${id}`),
+        failed: (id) => calls.push(`failed:${id}`)
+      }
+    })
+    expect(result.text).toBe('done')
+    expect(tasks.list().map((task) => task.description)).toEqual(['one', 'two'])
+    expect(calls).toEqual([
+      'start:create_task:call-1',
+      'commit:inv-1',
+      'start:create_task:call-2',
+      'commit:inv-2',
+      'start:update_task:call-3',
+      'failed:inv-3'
+    ])
   })
 })

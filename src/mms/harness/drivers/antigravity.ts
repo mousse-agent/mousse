@@ -41,6 +41,9 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
     // The agent offers the models of the signed-in account only.
     customModels: false,
     methodLabel: 'Google sign-in',
+    // ACP updates do not name the MCP server: the bearer is kept only after a turn whose tool calls all completed.
+    mcpTurnBinding: 'drained_turn',
+    userMcp: 'native',
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     caps: () => ANTIGRAVITY_CAPS,
     updateCommand: () => undefined,

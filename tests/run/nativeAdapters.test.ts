@@ -8,7 +8,6 @@ import {
   type ClaudeSubscriptionClient
 } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
-import { APPLET_GENERATION_GUIDANCE } from '../../src/shared/appletGuidance'
 
 const user = (text: string): Message => ({ role: 'user', content: text, timestamp: 0 })
 
@@ -61,6 +60,7 @@ function host(context: Partial<AdapterHost['context']> = {}): AdapterHost & { co
   return {
     committed,
     tools: {},
+    bridge: { mcp: null, turnToken: 'turn-1', sessionInstructions: 'SESSION', turnPreamble: 'PREAMBLE', userMcp: 'native' },
     context: {
       recoverOverflow: () => null,
       prepareNativeContext: () => null,
@@ -154,8 +154,12 @@ describe('ClaudeSubscriptionAdapter', () => {
       model: 'sonnet',
       prompt: 'hello',
       history: 'compacted history',
-      appletInstructions: APPLET_GENERATION_GUIDANCE + '\ncatalogue'
+      // The bridge's preamble and session text, never the pi loop's applet catalogue.
+      turnPreamble: 'PREAMBLE',
+      systemPromptAppend: 'SESSION',
+      mcp: null
     })
+    expect(chat).not.toHaveProperty('appletInstructions')
     const names = sink.calls.map(([name]) => name).filter((name) => name !== 'progress')
     expect(names).toEqual([
       'providerRef',
@@ -309,7 +313,8 @@ describe('AntigravityAdapter', () => {
     expect(service.chat.mock.calls[0][0]).toMatchObject({
       cwd: '/work',
       history: 'prior turns',
-      appletInstructions: APPLET_GENERATION_GUIDANCE + '\ncatalogue'
+      turnPreamble: 'PREAMBLE',
+      orchestrationInstructions: 'SESSION'
     })
     expect(sink.calls.some(([name]) => name === 'thinking' || name === 'providerMetrics')).toBe(false)
     expect(sink.calls.filter(([name]) => name === 'text').map(([, event]) => (event as { phase: string }).phase)).toEqual([
@@ -323,5 +328,7 @@ describe('AntigravityAdapter', () => {
     expect(sink.calls.find(([name]) => name === 'providerRef')?.[1]).toEqual({ provider: 'antigravity', instanceId: 'antigravity', model: 'm' })
     expect(result.totalTokensUsed).toBeUndefined()
     expect(typeof result.totalResponseTimeMs).toBe('number')
+    // The subagent tool call never reached a completed update: the turn cannot be proven drained.
+    expect(result.drain).toEqual({ toolCalls: 1, toolsSettled: false })
   })
 })

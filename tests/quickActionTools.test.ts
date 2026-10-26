@@ -53,7 +53,8 @@ describe('QuickActionTools', () => {
     expect(result.text).toContain('Commit and push')
     expect(requestApproval).toHaveBeenCalledWith(
       { label: 'Commit and push', kind: 'send-current', payload: VALID_ARGS.payload },
-      'thread-1'
+      'thread-1',
+      undefined
     )
     expect(published).toHaveLength(1)
     expect(published[0].id).toBeTruthy()

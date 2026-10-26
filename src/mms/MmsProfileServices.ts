@@ -27,7 +27,6 @@ import { OrchestratorService } from './orchestrator/OrchestratorService'
 import { ProfileDatabase } from './run/db/ProfileDatabase'
 import { McpCredentials } from './run/mcp/McpCredentials'
 import { MousseMcpServer } from './run/mcp/MousseMcpServer'
-import { createMousseToolRegistry } from './run/mcp/toolRegistry'
 import { EffectWorker, type EffectWorkerFibres } from './run/EffectWorker'
 import type { ThreadEvent } from './run/types'
 import { Reconciler } from './run/Reconciler'
@@ -351,7 +350,7 @@ export class MmsProfileServices {
     this.mcpCredentials = new McpCredentials(this.runEngine.store)
     this.mcpServer = new MousseMcpServer({
       credentials: this.mcpCredentials,
-      registry: createMousseToolRegistry({ engine: this.runEngine, host: this.orchestrator.mcpToolHost() })
+      registry: this.orchestrator.mcpToolRegistry()
     })
     this.orchestrator.setAppletStore(this.applets)
     // The harness gateway over this profile's instances: one runtime per instance, built by its

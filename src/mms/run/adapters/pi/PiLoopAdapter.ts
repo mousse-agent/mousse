@@ -67,6 +67,7 @@ export class PiLoopAdapter implements ProviderAdapter {
           model: input.modelPinned ? input.model : undefined,
           projectPath: input.cwd ?? undefined,
           threadId: input.threadId,
+          runId: input.runId,
           browser: host.tools.browser,
           delegation: host.tools.delegation,
           toolAccess: host.tools.toolAccess,
@@ -87,6 +88,7 @@ export class PiLoopAdapter implements ProviderAdapter {
             ctl.heartbeat()
           },
           toolLedger: host.tools.toolLedger,
+          runActive: host.tools.runActive,
           onCompaction: (phase) => {
             sink.compaction(phase)
             ctl.heartbeat()

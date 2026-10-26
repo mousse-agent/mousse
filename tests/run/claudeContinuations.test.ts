@@ -14,7 +14,6 @@ import { ClaudeSubscriptionProviderService } from '../../src/mms/providers/claud
 import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
-import { createMousseToolRegistry } from '../../src/mms/run/mcp/toolRegistry'
 import { Reconciler } from '../../src/mms/run/Reconciler'
 import { ThreadRuntimeManager } from '../../src/mms/runtime/ThreadRuntimeManager'
 import { FakeClaudeCli, notification, resultFrame, roster, textDelta } from './fakeClaudeCli'
@@ -97,7 +96,7 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     stops.push(d.stop)
     if (options.mcp) {
       const credentials = new McpCredentials(d.engine.store)
-      const server = new MousseMcpServer({ credentials, registry: createMousseToolRegistry({ engine: d.engine, host: d.orch.mcpToolHost() }) })
+      const server = new MousseMcpServer({ credentials, registry: d.orch.mcpToolRegistry() })
       await server.start()
       d.orch.setMcpAttachment(server)
       stops.push(() => server.stop())
@@ -112,11 +111,19 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     await waitFor(() => d.engine.getRun(builder.childRunId)?.status === 'completed', 'the Builder\'s first turn')
     const task = () => d.engine.delegations.get(builder.delegationId)!
     const callMousse = async (name: string, args: Record<string, unknown> = {}) => {
-      const server = (cli.last.options.mcpServers as Record<string, { url: string; headers: { Authorization: string } }>).mousse
+      const options = cli.last.options
+      const server = (options.mcpServers as Record<string, { url: string; headers: { Authorization: string } }>).mousse
+      // Claude runs Mousse's PreToolUse hook before each call; the input the hook returns (stamped
+      // with the turn's token) is what reaches the server.
+      const hooked = await options.hooks!.PreToolUse![0].hooks[0](
+        { hook_event_name: 'PreToolUse', tool_name: `mcp__mousse__${name}`, tool_input: args, tool_use_id: `use-${name}` } as never,
+        `use-${name}`,
+        { signal: new AbortController().signal }
+      ) as { hookSpecificOutput?: { updatedInput?: Record<string, unknown> } }
       const response = await fetch(server.url, {
         method: 'POST',
         headers: { Authorization: server.headers.Authorization, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } })
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: hooked.hookSpecificOutput?.updatedInput ?? args } })
       })
       return await response.json() as { result?: unknown; error?: { message: string; data?: { reason?: string } } }
     }

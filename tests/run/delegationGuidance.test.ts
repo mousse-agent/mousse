@@ -14,7 +14,7 @@ import {
   subagentPreamble
 } from '../../src/mms/run/delegation/guidance'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
-import { createMousseToolRegistry, type MousseToolHost } from '../../src/mms/run/mcp/toolRegistry'
+import { createAppToolRegistry, type AppToolHost } from '../../src/mms/run/mcp/appTools'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
 import { delegationFixture } from './delegationFixture'
 
@@ -51,6 +51,10 @@ describe('subagent guidance', () => {
       - clientRequestId: pass a fresh clientRequestId for every new action that changes state (delegate_task, continue_subagent, answer_subagent, integrate_delegation). Reuse the same value only when retrying the same call after an error or timeout; Mousse then returns the first result instead of acting twice.
       - A delegated task can never exceed your own mode ceiling: a planning turn may only start planning children and cannot integrate.
       - Use ask_user for clarifying questions and present_plan for a plan the user should approve; use thread_read to read your thread's run events (and those of your parent or children).
+      - Browser: when the browser_* tools are usable in a turn, Mousse binds them to the browser the user chose; open or observe a page before acting on it, and act on the refs an observation returns.
+      - Applets: publish an offline HTML/CSS/JS applet with publish_applet rather than a mousse-applet fence when the tool is usable.
+      - Skills: list_skills shows the Skills the user enabled and load_skill loads one; a skill the user invoked explicitly (/name) is already in the turn's instructions.
+      - What a turn may use depends on its mode, the browser binding and Settings; a Mousse tool that is not usable now returns why instead of running.
       - Never ask for passwords, API keys, tokens or other secrets in chat, and never repeat a secret you were given."
     `)
   })
@@ -179,10 +183,10 @@ describe('the delegation tools models are offered', () => {
         listDelegations: vi.fn(), listSubagents: vi.fn(), integrateDelegation: vi.fn(),
         named: { create: vi.fn(), createBatch: vi.fn(), recall: vi.fn(), integrate: vi.fn() }
       }
-      const host: MousseToolHost = {
+      const host: AppToolHost = {
         delegation: () => delegation, askUser: vi.fn(), presentPlan: vi.fn(), tasks: () => new TaskQueue(), listQueue: () => [], enqueue: vi.fn()
       }
-      const registry = createMousseToolRegistry({ engine: f.engine, host })
+      const { registry } = createAppToolRegistry({ engine: f.engine, host })
       const mcp = registry.list().filter((tool) => (LISTED_DELEGATION_TOOL_NAMES as readonly string[]).includes(tool.name))
       const pi = delegationToolDefinitions()
       expect(mcp.map((tool) => tool.name).sort()).toEqual(pi.map((tool) => tool.name).sort())
@@ -197,9 +201,11 @@ describe('the delegation tools models are offered', () => {
         )
         expect(piProperties.every((name) => mcpProperties.includes(name))).toBe(true)
       }
-      // The older names are not offered by either.
+      // The older names are not offered by either (they stay dispatchable in process only).
+      const listed = registry.listFor({ readOnly: false, modeCeiling: 'default' }).map((tool) => tool.name)
       for (const hidden of ['create_subagent', 'create_subagents', 'recall_subagent', 'integrate_subagent', 'list_delegations']) {
-        expect(registry.get(hidden)).toBeUndefined()
+        expect(listed).not.toContain(hidden)
+        expect(registry.get(hidden)?.hidden).toBe(true)
         expect(pi.map((tool) => tool.name)).not.toContain(hidden)
       }
     } finally {

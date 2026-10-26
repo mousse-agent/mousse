@@ -256,7 +256,7 @@ describe('RunEngine boot (SPEC §12.5)', () => {
     const first = daemon(10)
     const run = await running(first.engine, 't1', 'req-mcp')
     const credentials = new McpCredentials(first.store)
-    const minted = credentials.mintOrReuse({ threadId: 't1', runId: run.runId, provider: 'claude-subscription', modeCeiling: 'default' })
+    const minted = credentials.bearerForTurn({ threadId: 't1', runId: run.runId, instanceId: 'claude', modeCeiling: 'default', binding: 'per_call', generation: 'g' })
     expect(credentials.listForThread('t1')).toMatchObject([{ revokedAt: null }])
     first.engine.shutdown()
     const second = daemon(20)

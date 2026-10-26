@@ -91,6 +91,11 @@ function isUnsafeHostname(hostname: string): boolean {
     (a === 198 && (b === 18 || b === 19))
 }
 
+/** The request's own deadline, and the caller's abort when it has one. */
+function withAbort(deadline: AbortSignal, abort: AbortSignal | undefined): AbortSignal {
+  return abort ? AbortSignal.any([deadline, abort]) : deadline
+}
+
 export class WebTools {
   constructor(private readonly credentials: CredentialStore, private readonly fetchImpl: typeof fetch = fetch) {}
 
@@ -122,10 +127,11 @@ export class WebTools {
 
   isWebTool(name: string): boolean { return name === 'web_search' || name === 'web_fetch' }
 
-  async execute(name: string, args: Record<string, unknown>): Promise<WebToolResult> {
+  /** `signal` (the caller's turn or request) aborts the request on top of its own timeout. */
+  async execute(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<WebToolResult> {
     try {
-      if (name === 'web_fetch') return await this.webFetch(args)
-      if (name === 'web_search') return await this.webSearch(args)
+      if (name === 'web_fetch') return await this.webFetch(args, signal)
+      if (name === 'web_search') return await this.webSearch(args, signal)
       return { text: `Unknown web tool: ${name}`, isError: true }
     } catch (error) {
       return { text: error instanceof Error ? error.message : String(error), isError: true }
@@ -143,7 +149,7 @@ export class WebTools {
     return { provider: 'exa', key: await this.key('exa') }
   }
 
-  private async webSearch(args: Record<string, unknown>): Promise<WebToolResult> {
+  private async webSearch(args: Record<string, unknown>, abort?: AbortSignal): Promise<WebToolResult> {
     const query = String(args.query ?? '').trim()
     if (!query) return { text: 'query is required', isError: true }
     const { provider, key } = await this.resolveProvider(args.provider)
@@ -159,14 +165,14 @@ export class WebTools {
     const response = await this.fetchImpl(endpoint, {
       method: 'POST', headers,
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: tool, arguments: parameters } }),
-      signal: AbortSignal.timeout(25_000)
+      signal: withAbort(AbortSignal.timeout(25_000), abort)
     })
     const body = await this.readBounded(response)
     if (!response.ok) return { text: `${provider} search failed (${response.status}): ${body}`, isError: true }
     return mcpResult(body) ?? { text: 'No search results found. Please try a different query.' }
   }
 
-  private async webFetch(args: Record<string, unknown>): Promise<WebToolResult> {
+  private async webFetch(args: Record<string, unknown>, abort?: AbortSignal): Promise<WebToolResult> {
     let url: URL
     try { url = new URL(String(args.url ?? '')) } catch { return { text: 'A valid URL is required.', isError: true } }
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || isUnsafeHostname(url.hostname)) {
@@ -175,7 +181,7 @@ export class WebTools {
     const format = args.format === 'text' || args.format === 'html' ? args.format : 'markdown'
     const timeout = Math.min(120, Math.max(1, Number(args.timeout) || 30)) * 1000
     const accept = format === 'html' ? 'text/html,application/xhtml+xml,text/plain;q=0.8' : format === 'text' ? 'text/plain,text/markdown;q=0.9,text/html;q=0.8' : 'text/markdown,text/plain;q=0.9,text/html;q=0.8'
-    const signal = AbortSignal.timeout(timeout)
+    const signal = withAbort(AbortSignal.timeout(timeout), abort)
     let response: Response | undefined
     for (let redirects = 0; redirects <= 5; redirects += 1) {
       if (isUnsafeHostname(url.hostname)) return { text: 'Redirected to a non-public address.', isError: true }

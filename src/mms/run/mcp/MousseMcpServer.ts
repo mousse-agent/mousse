@@ -5,25 +5,24 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { mousseVersion } from '../../appVersion'
-import type { ModeCeiling } from '../types'
+import { McpToolError, type McpCredentialAuthority, type McpToolErrorCode, type ToolOutcome, type ToolRegistry } from './appTools'
 import { mousseOrchestrationInstructions } from './instructions'
-import type { McpCredentials } from './McpCredentials'
-import { McpToolError, type McpCaller, type McpToolErrorCode, type ToolRegistry } from './toolRegistry'
+import type { BearerTurn, CredentialRecord, McpCredentials, TurnSettlement } from './McpCredentials'
 
-/** Where a provider runtime reaches the server, and the bearer token of one thread's provider. */
+/** Where a provider runtime reaches the server, and the bearer token of one thread's turn. */
 export interface McpAttachment {
   url: string
   token: string
 }
 
 /**
- * What the thread owner needs: the `turn.start` executor attaches (one stable credential per
- * thread and provider, re-pointed at each turn's run) and ends the turn (in-flight calls abort; the
- * credential stays); deleting a thread or switching its provider revokes.
+ * What the harness gateway needs to give a turn its bridge (PR 2 §2 `TurnBridge`): a bearer for the
+ * turn under the driver's turn binding, the turn's end (the drained-turn check, then in-flight calls
+ * abort), and revocation when a thread is deleted or switches instance.
  */
 export interface McpAttachmentProvider {
-  attach(input: { threadId: string; runId: string; provider: string; modeCeiling: ModeCeiling }): McpAttachment | null
-  turnEnded(threadId: string): void
+  bearerForTurn(input: BearerTurn): (McpAttachment & { tokenHash: string }) | null
+  turnEnded(input: { threadId: string; runId: string; tokenHash?: string; settlement: TurnSettlement }): 'kept' | 'rotated' | undefined
   revokeThread(threadId: string): void
 }
 
@@ -45,7 +44,7 @@ const MAX_BODY_BYTES = 4 * 1024 * 1024
  * `127.0.0.1` with a random port, through the SDK's `Server` and stateless
  * `StreamableHTTPServerTransport` (one pair per POST; responses are JSON, the SSE GET stream is
  * not offered). Every request carries `Authorization: Bearer <token>`; the token resolves to the
- * run it acts as (`McpCredentials`), and the tools come from the `ToolRegistry`.
+ * credential it acts under (`McpCredentials`), and the tools come from the app-tool registry.
  */
 export class MousseMcpServer implements McpAttachmentProvider {
   private http: HttpServer | null = null
@@ -110,19 +109,22 @@ export class MousseMcpServer implements McpAttachmentProvider {
     await closed
   }
 
-  /**
-   * The thread's credential for `provider` (reused across turns, re-pointed at `runId` and
-   * `modeCeiling`), or a fresh one; null when the server is not running.
-   */
-  attach(input: { threadId: string; runId: string; provider: string; modeCeiling: ModeCeiling }): McpAttachment | null {
+  /** The turn's bearer (`McpCredentials.bearerForTurn`); null when the server is not running. */
+  bearerForTurn(input: BearerTurn): (McpAttachment & { tokenHash: string }) | null {
     if (!this.http) return null
-    const { token } = this.options.credentials.mintOrReuse(input)
-    return { url: this.url, token }
+    const { token, tokenHash } = this.options.credentials.bearerForTurn(input)
+    return { url: this.url, token, tokenHash }
   }
 
-  /** The thread's turn ended: its in-flight tool calls abort (a blocked `ask_user`); the credential stays. */
-  turnEnded(threadId: string): void {
-    this.abortThread(threadId, new Error(`The turn of thread ${threadId} ended`))
+  /**
+   * The thread's turn ended: whether its bearer is kept for the next turn is settled first (a call
+   * still running counts against a drained turn), then its in-flight tool calls abort (a blocked
+   * `ask_user`).
+   */
+  turnEnded(input: { threadId: string; runId: string; tokenHash?: string; settlement: TurnSettlement }): 'kept' | 'rotated' | undefined {
+    const settled = input.tokenHash ? this.options.credentials.settleTurn(input.tokenHash, input.runId, input.settlement) : undefined
+    this.abortThread(input.threadId, new Error(`The turn of thread ${input.threadId} ended`))
+    return settled
   }
 
   /** Revokes the thread's credentials (thread deleted, provider switched) and aborts its calls. */
@@ -162,19 +164,13 @@ export class MousseMcpServer implements McpAttachmentProvider {
       jsonRpcError(res, 400, -32700, `Parse error: ${error instanceof Error ? error.message : String(error)}`)
       return
     }
-    const caller: McpCaller = {
-      threadId: credential.threadId,
-      runId: credential.runId,
-      provider: credential.provider,
-      modeCeiling: credential.modeCeiling
-    }
     const request = new AbortController()
-    this.track(caller.threadId, request)
-    const server = this.mcpServer(caller, request.signal)
+    this.track(credential.threadId, request)
+    const server = this.mcpServer(credential, request.signal)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
     res.once('close', () => {
       request.abort(new Error('The MCP request closed'))
-      this.untrack(caller.threadId, request)
+      this.untrack(credential.threadId, request)
       void transport.close().catch(() => undefined)
       void server.close().catch(() => undefined)
     })
@@ -182,15 +178,16 @@ export class MousseMcpServer implements McpAttachmentProvider {
     await transport.handleRequest(req, res, body)
   }
 
-  /** One SDK server per request, bound to the caller the request's token resolved to. */
-  private mcpServer(caller: McpCaller, requestSignal: AbortSignal): Server {
+  /** One SDK server per request, bound to the credential the request's token resolved to. */
+  private mcpServer(resolved: CredentialRecord, requestSignal: AbortSignal): Server {
     const server = new Server(
       { name: 'mousse', version: mousseVersion() },
       { capabilities: { tools: {} }, instructions: mousseOrchestrationInstructions() }
     )
-    const registry = this.options.registry
+    const { registry, credentials } = this.options
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: registry.list().map((tool) => ({
+      // Stable for the thread (its ceiling, not the turn's mode), so a list a runtime cached stays valid.
+      tools: registry.listForThread(resolved.threadId).map((tool) => ({
         name: tool.name,
         description: tool.description,
         inputSchema: tool.inputSchema as { type: 'object'; properties?: Record<string, object> }
@@ -201,17 +198,31 @@ export class MousseMcpServer implements McpAttachmentProvider {
       const toolCallId = typeof clientRequestId === 'string' && clientRequestId.trim()
         ? `mcp:${clientRequestId.trim()}`
         : `mcp:${randomUUID()}`
+      // The credential as it stands for this call: the run it is bound to now, and its ceiling.
+      const record = credentials.current(resolved.tokenHash) ?? resolved
+      credentials.callReceived(record.tokenHash, record.runId)
+      credentials.callRunning(record.tokenHash, record.runId, 1)
+      const authority: McpCredentialAuthority = {
+        threadId: record.threadId,
+        runId: record.runId,
+        provider: record.provider,
+        modeCeiling: record.modeCeiling,
+        binding: record.binding,
+        current: () => credentials.isCurrent(record)
+      }
       try {
         const outcome = await registry.call(request.params.name, args, {
-          caller,
+          credential: authority,
           toolCallId,
           signal: AbortSignal.any([requestSignal, extra.signal])
         })
-        return { content: [{ type: 'text' as const, text: outcome.text }], ...(outcome.isError ? { isError: true } : {}) }
+        return toolContent(outcome)
       } catch (error) {
         if (error instanceof McpToolError)
           throw Object.assign(new Error(error.message), { code: MCP_ERROR_CODES[error.code], data: { reason: error.code } })
         throw error
+      } finally {
+        credentials.callRunning(record.tokenHash, record.runId, -1)
       }
     })
     return server
@@ -228,6 +239,17 @@ export class MousseMcpServer implements McpAttachmentProvider {
     if (!set) return
     set.delete(controller)
     if (set.size === 0) this.inFlight.delete(threadId)
+  }
+}
+
+/** A tool outcome as MCP content: its text, then its images. */
+function toolContent(outcome: ToolOutcome) {
+  return {
+    content: [
+      { type: 'text' as const, text: outcome.text },
+      ...(outcome.images ?? []).map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }))
+    ],
+    ...(outcome.isError ? { isError: true } : {})
   }
 }
 

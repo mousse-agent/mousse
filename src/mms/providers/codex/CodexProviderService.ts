@@ -184,7 +184,8 @@ export type CodexChatInput = {
   cwd: string
   model: string
   prompt: string
-  appletInstructions?: string
+  /** Prefixed to the prompt: the turn's skills, mode, applet catalogue and usable Mousse tools. */
+  turnPreamble?: string
   /** Canonical prior turns; injected as a preamble when no matching Codex thread is resumed. */
   history?: string
   images?: ChatImageAttachment[]
@@ -194,11 +195,20 @@ export type CodexChatInput = {
   child?: ChildTurnPolicy
   /** The Mousse MCP server for this run (SPEC §15.2); null attaches none. */
   mcp?: { url: string; token: string } | null
-  /** Codex developer instructions for a new or resumed thread (SPEC §15.3). */
+  /**
+   * Codex developer instructions for a new, resumed or forked thread (SPEC §15.3). A loaded thread
+   * that continues with other instructions gets the new text in that turn's prompt.
+   */
   developerInstructions?: string
   onText: (text: string) => void
   onThinking?: (text: string) => void
   onTool?: (event: CodexToolEvent) => void
+  /**
+   * Every `item/started` and `item/completed` notification of a tool item, as the server sent it
+   * (never the completions `closeTools` adds for rows left open): the drained-turn proof of the
+   * turn's Mousse MCP calls.
+   */
+  onToolNotification?: (event: { phase: 'start' | 'complete'; callId: string; toolName?: string }) => void
   onLineEdits?: (lines: number) => void
   /** The server retries a failed model call itself (`error` with `willRetry`). */
   onRetry?: (attempt: number) => void
@@ -624,6 +634,7 @@ class TurnRun {
       const event = toolEvent(item, 'start')
       if (event) {
         this.openTools.set(item.id, event)
+        this.input.onToolNotification?.({ phase: 'start', callId: event.callId, toolName: event.toolName })
         this.input.onTool?.(event)
       }
       return
@@ -641,6 +652,8 @@ class TurnRun {
           this.input.onText(this.text)
         }
       }
+      const settled = toolEvent(item, 'complete')
+      if (settled) this.input.onToolNotification?.({ phase: 'complete', callId: settled.callId, toolName: settled.toolName })
       const open = this.openTools.get(item.id)
       if (open) {
         this.openTools.delete(item.id)
@@ -718,7 +731,7 @@ export class CodexProviderService {
   private readonly pendingSweeps = new Map<string, Promise<void>>()
   /** Helpers of finished chats that were told to stop before their turn id was known. */
   private readonly orphans = new Set<NativeHelpers>()
-  private readonly loaded = new Map<string, { mcpToken: string | null; cwd: string; childKey: string }>()
+  private readonly loaded = new Map<string, { mcpToken: string | null; cwd: string; childKey: string; instructionsHash?: string }>()
   private readonly activeThreads = new Set<string>()
   private readonly controllers = new Set<AbortController>()
   private readonly readyToCommit = new Set<string>()
@@ -1566,8 +1579,9 @@ export class CodexProviderService {
     conn: CodexConnection,
     input: CodexChatInput,
     signal: AbortSignal
-  ): Promise<{ codexThreadId: string; model: string | undefined; continued: boolean }> {
+  ): Promise<{ codexThreadId: string; model: string | undefined; continued: boolean; instructionsStale?: boolean }> {
     const cwd = resolve(input.cwd)
+    const instructionsHash = input.developerInstructions ? historyKey(input.developerInstructions).slice(0, 32) : undefined
     const saved = this.settings.threads?.[input.threadId]
     const mcpToken = input.mcp?.token ?? null
     const overrides = codexMcpConfigOverrides(input.mcp) as ThreadConfig
@@ -1596,34 +1610,38 @@ export class CodexProviderService {
         if (this.turns.has(saved.codexThreadId)) throw new Error('The previous Codex turn on this thread is still running')
       }
       const loaded = this.loaded.get(saved.codexThreadId)
-      if (loaded && loaded.mcpToken === mcpToken && loaded.cwd === cwd && loaded.childKey === childKey)
-        return { codexThreadId: saved.codexThreadId, model: undefined, continued: true }
+      if (loaded && loaded.mcpToken === mcpToken && loaded.cwd === cwd && loaded.childKey === childKey) {
+        // A loaded thread keeps the developer instructions it was opened with: changed ones go into the prompt.
+        const instructionsStale = instructionsHash !== undefined && loaded.instructionsHash !== instructionsHash
+        loaded.instructionsHash = instructionsHash
+        return { codexThreadId: saved.codexThreadId, model: undefined, continued: true, instructionsStale }
+      }
       if (loaded) {
         // The attachment, cwd or child policy changed while the thread is loaded. A resume would
         // keep the old config, so fork it: Codex loads the history into a new thread with the new
         // config, and the old thread is released.
         const forked = chatgptProvider(await conn.request('thread/fork', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
         this.loaded.delete(saved.codexThreadId)
-        this.loaded.set(forked.thread.id, { mcpToken, cwd, childKey })
+        this.loaded.set(forked.thread.id, { mcpToken, cwd, childKey, instructionsHash })
         await conn.request('thread/unsubscribe', { threadId: saved.codexThreadId }, { signal, timeoutMs: 5_000 }).catch(() => undefined)
         signal.throwIfAborted()
         return { codexThreadId: forked.thread.id, model: forked.model, continued: true }
       }
       try {
         const resumed = chatgptProvider(await conn.request('thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
-        this.loaded.set(resumed.thread.id, { mcpToken, cwd, childKey })
+        this.loaded.set(resumed.thread.id, { mcpToken, cwd, childKey, instructionsHash })
         return { codexThreadId: resumed.thread.id, model: resumed.model, continued: true }
       } catch (error) {
         signal.throwIfAborted()
         conn.signal.throwIfAborted()
         if (!(error instanceof CodexRpcError)) throw error
         const fresh = chatgptProvider(await conn.request('thread/start', params, { signal }))
-        this.loaded.set(fresh.thread.id, { mcpToken, cwd, childKey })
+        this.loaded.set(fresh.thread.id, { mcpToken, cwd, childKey, instructionsHash })
         return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false }
       }
     }
     const fresh = chatgptProvider(await conn.request('thread/start', params, { signal }))
-    this.loaded.set(fresh.thread.id, { mcpToken, cwd, childKey })
+    this.loaded.set(fresh.thread.id, { mcpToken, cwd, childKey, instructionsHash })
     return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false }
   }
 
@@ -1736,7 +1754,10 @@ export class CodexProviderService {
       aborted.catch(() => undefined)
 
       const preamble =
-        (input.appletInstructions ? input.appletInstructions + '\n\nCurrent request:\n' : '') +
+        (thread.instructionsStale && input.developerInstructions
+          ? `<mousse_session_instructions>\n${input.developerInstructions}\n</mousse_session_instructions>\n\n`
+          : '') +
+        (input.turnPreamble ? input.turnPreamble + '\n\nCurrent request:\n' : '') +
         (!thread.continued && input.history
           ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
           : '')

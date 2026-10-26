@@ -1,19 +1,11 @@
-import { APPLET_GENERATION_GUIDANCE } from '../../../../shared/appletGuidance'
 import type { StreamingLlmToolEvent } from '../../../orchestrator/LlmClient'
 import type { TurnSink } from '../ProviderAdapter'
 
 /**
  * Shared pieces of the prompt-injected vendor runtimes (SPEC §13.4): they run their own loop and
- * system prompt, report cumulative text, and take prior turns as a prompt preamble.
+ * system prompt, report cumulative text, and take prior turns as a prompt preamble. Their applet
+ * guidance is part of the turn bridge's session instructions, the catalogue part of its preamble.
  */
-
-/**
- * Applet instructions for a runtime with its own system prompt: the guidance the pi loop's system
- * prompt carries, followed by the conversation's applet catalogue. Undefined when applets are off.
- */
-export function withAppletGuidance(catalogue: string | undefined): string | undefined {
-  return catalogue === undefined ? undefined : APPLET_GENERATION_GUIDANCE + catalogue
-}
 
 /**
  * Relays a runtime's cumulative text (each callback carries everything so far) as the

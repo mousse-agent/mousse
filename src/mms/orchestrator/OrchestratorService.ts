@@ -46,15 +46,21 @@ import { delegationRequestKey, followUpRequestKey, narrowCeiling } from '../run/
 import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { stopStrategy } from '../run/CommandPolicy'
-import { McpToolError } from '../run/mcp/toolRegistry'
+import { AppToolTurns, createAppToolRegistry, McpToolError, type AppToolHost, type AppToolTurn, type McpCaller, type ToolRegistry } from '../run/mcp/appTools'
+import { modeFactsFor, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
+import { questionApproval } from '../run/mcp/appTools/quickActions'
+import { APPLET_GENERATION_GUIDANCE } from '../../shared/appletGuidance'
+import { defaultIntegrationActor } from '../../shared/integrations/actor'
+import { DevGuiTools } from '../devgui/DevGuiTools'
+import { QuickActionTools } from './QuickActionTools'
+import { WebTools } from './WebTools'
 import { stableStringify } from '../run/json'
 import { formatRestartNote } from '../run/restartNote'
-import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
+import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piLegacyDriver } from '../harness/drivers/piLegacy'
 import { contextGauge } from '../harness/policy'
 import type { ExecutionBinding, HarnessCaps, ProviderScope, TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
-import type { McpCaller, MousseToolHost } from '../run/mcp/toolRegistry'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
 import { taskCheckpoint } from '../run/delegation/checkpoint'
@@ -117,7 +123,8 @@ import type { BrowserRuntimePort } from '../../shared/browser/runtime'
 import {
   type BrowserExecutionBinding,
   createDefinitionBrowserBinding,
-  readHostBrowserRuntime
+  readHostBrowserRuntime,
+  snapshotBrowserExecutionBinding
 } from './browser'
 import { computeContextUsage } from './contextUsage'
 import { getToolCallDisplay } from '../../shared/toolCallDisplay'
@@ -619,8 +626,10 @@ export class OrchestratorService extends EventEmitter {
   /** The profile's harness gateway; also the test seam for fake drivers. */
   setHarness(harness: HarnessGateway): void {
     this.harness.setLiveHost(null)
+    this.harness.setMcpAttachment(null)
     this.harness = harness
     this.attachLiveHost()
+    this.harness.setMcpAttachment(this.mcpAttachment)
   }
   /** Runtimes that keep a live process per thread report their background work and the turns they start themselves here. */
   private attachLiveHost(): void {
@@ -676,6 +685,9 @@ export class OrchestratorService extends EventEmitter {
   private effectWorker: EffectWorker | null = null
   /** Phase 5: mints a Mousse MCP credential per MCP-capable turn. Null attaches nothing. */
   private mcpAttachment: McpAttachmentProvider | null = null
+  private mcpRegistry?: ToolRegistry
+  /** The app-tool context of each running turn (PR 2 §2), for the Mousse MCP server's calls. */
+  readonly appToolTurns = new AppToolTurns()
   /** Pending results of `turn.start` effects, keyed by runId (SPEC §12.7). */
   private readonly turnResults = new Map<string, TurnResult>()
   /**
@@ -1639,13 +1651,13 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Phase 5 (SPEC §15.2): the profile's Mousse MCP server. Each turn of an MCP-capable adapter gets
-   * its thread's credential for that provider (`AdapterHost.mcp`), stable across turns so the
-   * runtime's session and MCP configuration stay the same; deleting the thread or switching its
-   * provider revokes it.
+   * Phase 5 (SPEC §15.2): the profile's Mousse MCP server. The harness gateway gives each turn of an
+   * MCP-capable instance a bearer under the driver's turn binding (PR 2 §2 `TurnBridge`); deleting
+   * the thread or switching its instance revokes it.
    */
   setMcpAttachment(provider: McpAttachmentProvider | null): void {
     this.mcpAttachment = provider
+    this.harness.setMcpAttachment(provider)
   }
 
   /**
@@ -1663,33 +1675,6 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  /**
-   * The thread's MCP credential for the adapter (reused, re-pointed at this run and ceiling) when
-   * the adapter can attach the server; null otherwise.
-   */
-  private mcpFor(caps: HarnessCaps, instanceId: string, threadId: string, runId: string | undefined, mode: ChatMode): AdapterHost['mcp'] {
-    if (!runId || !this.mcpAttachment || !this.runEngine || !mcpAttachable(caps)) return null
-    try {
-      // One credential per thread and provider instance (SPEC §15.1).
-      return this.mcpAttachment.attach({ threadId, runId, provider: instanceId, modeCeiling: this.modeCeilingFor(threadId, mode) })
-    } catch (error) {
-      console.warn('Mousse MCP credential could not be minted; the turn runs without Mousse tools', {
-        runId,
-        error: error instanceof Error ? error.message : String(error)
-      })
-      return null
-    }
-  }
-
-  /** The thread's turn ended: its in-flight Mousse tool calls abort; the credential stays. */
-  private endMcpTurn(threadId: string): void {
-    try {
-      this.mcpAttachment?.turnEnded(threadId)
-    } catch (error) {
-      console.warn('Mousse MCP turn end failed', { threadId, error: error instanceof Error ? error.message : String(error) })
-    }
-  }
-
   /** Revokes the thread's Mousse MCP credentials (thread deleted, provider switched). */
   private revokeMcp(threadId: string): void {
     try {
@@ -1700,23 +1685,131 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * Registers a run's app-tool context (PR 2 §2 "Turn context"). A turn the runtime started itself
+   * keeps the token of the turn it continues: calls made across that hand-over were stamped with it.
+   */
+  private registerAppTurn(session: ThreadSession, runId: string, mode: ChatMode, continuation: boolean): { turn: AppToolTurn; drop(): void } {
+    const projectPath = session.projectCwd ?? undefined
+    return this.appToolTurns.register({
+      threadId: session.threadId,
+      runId,
+      mode,
+      modeFacts: modeFactsFor(this.modeRegistry, mode, projectPath),
+      modeCeiling: this.modeCeilingFor(session.threadId, mode),
+      subagent: false,
+      discovery: false,
+      projectPath,
+      actor: defaultIntegrationActor(false),
+      enabledSkills: [],
+      loadedSkills: [],
+      ...(session.sharedWorkspace ? { toolAccess: createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path) } : {}),
+      settingsEnabled: (name) => settingsToolEnabled(this.settingsStore.get().integrations?.tools, name)
+    }, { continuation })
+  }
+
+  /**
+   * Completes a registered turn (its browser binding, applet staging and, for a runtime with its own
+   * loop, the skills it loads) and returns what the gateway mints its bridge from: the session text
+   * and the turn preamble, with the Mousse tools usable now when the server is attached.
+   */
+  private async completeAppTurn(
+    registered: AppToolTurn,
+    input: { promptRuntime: boolean; browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string }
+  ): Promise<TurnAppContext> {
+    let skills: Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'> = { enabledSkills: [], loadedSkills: [] }
+    if (input.promptRuntime) {
+      try {
+        skills = await prepareSkills({
+          registry: this.skillsRegistry,
+          settings: () => this.settingsStore.get().integrations.skills,
+          projectPath: registered.projectPath,
+          mode: registered.mode,
+          userContent: input.userContent,
+          actor: registered.actor
+        })
+      } catch (error) {
+        // Skills are optional for a runtime with its own loop: a broken registry cannot block the turn.
+        console.warn('skills unavailable for the turn', { threadId: registered.threadId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    // A runtime with its own loop runs the selected model natively: its vision decides whether a browser
+    // screenshot can reach the model (the pi loop's `LlmClient` sets it from its own model).
+    const browser = input.browser && input.promptRuntime
+      ? snapshotBrowserExecutionBinding({ ...input.browser, vision: this.harness.catalog.toolImages(input.instanceId, input.model) })
+      : input.browser
+    const turn = this.appToolTurns.update(registered.runId, {
+      ...(browser ? { browser } : {}),
+      ...(input.onPublishApplet ? { onPublishApplet: input.onPublishApplet } : {}),
+      ...skills
+    }) ?? registered
+    const descriptor = typeof turn.mode === 'string' ? this.modeRegistry.getModeSync(turn.mode, { projectPath: turn.projectPath }) : undefined
+    // Agent and Plan run natively in the runtime; another mode's own instructions go into the preamble.
+    const modePrompt = descriptor && !['agent', 'plan', 'build'].includes(descriptor.id) ? descriptor.prompt : undefined
+    const appletCatalogue = this.appletStore ? this.appletCatalogue() : undefined
+    return {
+      turnToken: turn.turnToken,
+      modeCeiling: turn.modeCeiling,
+      mcpEligible: Boolean(this.runEngine),
+      instructions: (mcpAttached) => ({
+        sessionInstructions: sessionInstructions({ mcp: mcpAttached, appletGuidance: this.appletStore ? APPLET_GENERATION_GUIDANCE : undefined }),
+        turnPreamble: turnPreamble({
+          loadedSkills: turn.loadedSkills,
+          modePrompt,
+          appletCatalogue,
+          usableTools: mcpAttached ? this.usableAppTools(this.appToolTurns.get(turn.runId) ?? turn) : undefined
+        })
+      })
+    }
+  }
+
+  /** The Mousse tools a thread's credential lists that the turn may use now. */
+  private usableAppTools(turn: AppToolTurn): string[] {
+    return this.mcpToolRegistry()
+      .listForThread(turn.threadId)
+      // A Plan turn cannot start threads; everything else listed is usable when available now.
+      .filter((tool) => !(turn.modeCeiling === 'plan' && tool.access === 'startsThreads'))
+      .filter((tool) => (tool.available?.(turn) ?? true) === true)
+      // A screenshot is refused when it cannot reach the model; the preamble does not offer it.
+      .filter((tool) => !(tool.name === 'browser_screenshot' && turn.browser && !turn.browser.vision))
+      .map((tool) => tool.name)
+  }
+
+  /**
+   * The app-tool registry the Mousse MCP server serves (PR 2 §2): the same modules the pi loop runs,
+   * over this thread owner, with the run engine's thread tools and the turns registered here.
+   */
+  mcpToolRegistry(): ToolRegistry {
+    this.mcpRegistry ??= createAppToolRegistry({ host: this.mcpToolHost(), engine: this.requireRunEngine(), turns: this.appToolTurns }).registry
+    return this.mcpRegistry
+  }
+
+  /**
    * What the Mousse MCP server's tools need from the thread owner (SPEC §15.1). Every call acts as
    * the credential's caller: its thread's session, run and mode ceiling.
    */
-  mcpToolHost(): MousseToolHost {
+  mcpToolHost(): AppToolHost {
     return {
       delegation: (caller: McpCaller) =>
         this.delegationTools(this.getOrCreateSession(caller.threadId), caller.runId, caller.modeCeiling),
       askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
+      dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
       presentPlan: (threadId, payload) => {
+        if (!threadId) return
         const session = this.getOrCreateSession(threadId)
         this.sessionAls.run(session, () => this.presentPlanCard(payload, threadId))
       },
-      tasks: (threadId) => this.getTasksForThread(threadId),
+      tasks: (threadId) => (threadId ? this.getTasksForThread(threadId) : null),
       listQueue: (threadId) => this.listQueue(threadId),
       enqueue: (threadId, input) => this.enqueueAndDrain(threadId, input, 'mcp'),
+      browserRuntime: () => this.browserRuntime,
+      skills: () => this.skillsRegistry,
+      quickActions: new QuickActionTools(questionApproval(this.questions), (action) => this.emit('quick-action-created', action)),
+      web: new WebTools(this.providerAuth.credentials),
+      devGui: new DevGuiTools(),
       toolLedger: (runId) => this.toolLedgerFor(runId),
       readOnlyThread: (threadId) => this.isReadOnlyChild(threadId),
+      // The ceiling the thread's delegations gave it: a Plan turn narrows only its own calls.
+      threadCeiling: (threadId) => this.modeCeilingFor(threadId, 'agent'),
       awaitLiveRun: (threadId) => this.continuationGate(threadId)
     }
   }
@@ -3631,6 +3724,7 @@ export class OrchestratorService extends EventEmitter {
    */
   markThreadDeleted(threadId: string): void {
     this.revokeMcp(threadId)
+    this.appToolTurns.forgetThread(threadId)
     this.dropContinuationsOf(threadId)
     if (this.runEngine)
       void this.stopThread(threadId, 'thread_deleted', { clearQueue: true }).catch((error: unknown) => {
@@ -5205,7 +5299,17 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  private async executeTurn(
+  /** One turn; whatever way it ends, nothing of its app-tool context stays registered. */
+  private async executeTurn(...args: Parameters<OrchestratorService['executeTurnBody']>): Promise<OrchestratorResponse> {
+    const runId = args[3]?.runId
+    try {
+      return await this.executeTurnBody(...args)
+    } finally {
+      if (runId) this.appToolTurns.dropRun(runId)
+    }
+  }
+
+  private async executeTurnBody(
     input: OrchestratorSendInput,
     reuseLastUser = false,
     displayUserMessage = true,
@@ -5479,6 +5583,9 @@ export class OrchestratorService extends EventEmitter {
     }
     this.setTurnPhase(session.threadId, 'queued', { turnId })
     this.setTurnPhase(session.threadId, 'thinking', { turnId })
+    // The turn's app-tool context (PR 2 §2), registered before the run is active so a call a runtime made
+    // while the run was started finds it; the executor completes it before the gateway starts the turn.
+    const appTurn = engineRunId ? this.registerAppTurn(session, engineRunId, mode, opts?.source === 'provider-continuation') : undefined
     this.markRun(engineRunId, (engine, id) => engine.markRunning(id))
     // The run is active: Mousse tool calls Claude made while it was being started act as it.
     if (opts?.continuationId) this.endContinuationHold(opts.continuationId, false, engineRunId ?? null)
@@ -5645,7 +5752,8 @@ export class OrchestratorService extends EventEmitter {
       promptRuntime = handoffDelivery(instance.caps) === 'prompt_preamble'
       const modelOverride = opts?.modelOverride ?? session.modelOverride
       const contextSettings = normalizeContextSettings(this.settingsStore.get().context)
-      const browserExecution = promptRuntime
+      // Runtimes with their own loop get the browser through Mousse's MCP server.
+      const browserExecution = promptRuntime && !mcpAttachable(instance.caps)
         ? undefined
         : this.mainBrowserFactory
           ? this.mainBrowserFactory({ threadId: session.threadId, turnId, source: opts?.source, mode })
@@ -5804,21 +5912,23 @@ export class OrchestratorService extends EventEmitter {
         },
         heartbeat: () => this.heartbeatRun(engineRunId)
       }
-      const mcp = this.mcpFor(instance.caps, instance.instanceId, session.threadId, engineRunId, mode)
+      const onPublishApplet = this.appletStore ? (value: unknown) => {
+        if (stagedApplets.length >= 3) throw new Error('Only three applets may be published per response.')
+        stagedApplets.push(validateAppletSubmission(value))
+        return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
+      } : undefined
+      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { promptRuntime, browser: browserExecution, onPublishApplet, userContent, instanceId: instance.instanceId, model: selectedModel.model }) : undefined
       const adapterHost: AdapterHost = {
-        mcp,
         tools: {
-          onPublishApplet: this.appletStore ? (value) => {
-            if (stagedApplets.length >= 3) throw new Error('Only three applets may be published per response.')
-            stagedApplets.push(validateAppletSubmission(value))
-            return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
-          } : undefined,
+          onPublishApplet,
           browser: browserExecution,
           delegation: engineRunId && this.effectsEnabled() ? this.delegationTools(session, engineRunId, this.modeCeilingFor(session.threadId, mode)) : undefined,
           toolAccess: session.sharedWorkspace
             ? createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path)
             : turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
-          toolLedger: this.toolLedgerFor(engineRunId)
+          toolLedger: this.toolLedgerFor(engineRunId),
+          // The loop's app tools act only while this run is the thread's active one.
+          ...(engineRunId && this.runEngine ? { runActive: () => this.runEngine?.getActiveRun(session.threadId)?.runId === engineRunId } : {})
         },
         context: {
           // In-loop compaction checkpoints index the sent transcript; a switch handoff is not canonical.
@@ -5865,8 +5975,9 @@ export class OrchestratorService extends EventEmitter {
         input: turnInput,
         sink: turnSink,
         control: turnControl,
-        host: adapterHost
-      }).result.finally(() => { if (mcp) this.endMcpTurn(session.threadId) })
+        host: adapterHost,
+        ...(app ? { app } : {})
+      }).result
       handoffs?.settle(result.aborted || turn.abort.signal.aborted ? 'aborted' : 'completed')
       assistantText = result.text
       aborted = Boolean(result.aborted)
@@ -5914,6 +6025,7 @@ export class OrchestratorService extends EventEmitter {
         assistantText = `[${providerError.code}] ${providerError.message}`
       }
     } finally {
+      appTurn?.drop()
       if (compactionNote) onCompaction('unchanged')
       if (turn.abort.signal.aborted) aborted = true
       opts?.externalSignal?.removeEventListener('abort', mirrorExternalAbort)

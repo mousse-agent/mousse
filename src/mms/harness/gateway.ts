@@ -25,9 +25,11 @@ import type { ChatMode } from '../../shared/types'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import type { LoginSession } from '../providers/LoginSession'
 import type { ProviderInstanceService } from '../providers/ProviderInstanceService'
-import type { AdapterHost, TurnControl, TurnInput, TurnResult, TurnSink } from '../run/adapters/ProviderAdapter'
-import type { ChildPreflightContext, SubagentRefusal } from '../run/policy/featureGates'
-import type { ProviderRef } from '../run/types'
+import type { AdapterHost, TurnBridge, TurnControl, TurnInput, TurnResult, TurnSink } from '../run/adapters/ProviderAdapter'
+import { mcpAttachable, type ChildPreflightContext, type SubagentRefusal } from '../run/policy/featureGates'
+import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
+import type { TurnSettlement } from '../run/mcp/McpCredentials'
+import type { ModeCeiling, ProviderRef } from '../run/types'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -49,6 +51,7 @@ import type { AuthReading, DriverRuntime, HarnessDriver, InstanceConfig, LivePro
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, type InstanceEnv } from './env'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
 import { RuntimeFactsStore } from './facts'
+import { questionsPrompter } from './acp/permissions'
 import { checkPolicy, purposeAllowed, toolControlLevel } from './policy'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
@@ -65,6 +68,7 @@ export type {
   ChildTurnPolicy,
   ProviderMetrics,
   RecoveredContext,
+  TurnBridge,
   TurnControl,
   TurnInput,
   TurnResult,
@@ -130,6 +134,8 @@ export interface HarnessGateway {
   stopThread(threadId: string): Promise<'stopped' | 'not_active'>
   /** Where runtimes with live processes per thread report (every instance's, now and later). */
   setLiveHost(host: LiveProcessHost | null): void
+  /** The profile's Mousse MCP server, which turn bridges attach (null: none). */
+  setMcpAttachment(provider: McpAttachmentProvider | null): void
   /** The turn a thread's live process started itself and is running now, from whichever instance holds it. */
   inFlightContinuation(threadId: string): { id: string; discarded: boolean } | undefined
   /** A thread's live process still holds that turn of its own. */
@@ -246,6 +252,12 @@ export interface HarnessCatalog {
   models(instanceId: string, scope: ProviderScope): InstanceModel[]
   /** A custom model the user added to the instance and has not hidden; runtimes run it by this definition. */
   customModel(instanceId: string, modelId: string): CustomModel | undefined
+  /**
+   * Images in a Mousse tool's result reach the model a runtime with its own loop runs (the browser's
+   * vision): a custom model's stated capability, else the driver's `mcpImageResults`, else an ACP
+   * agent's own word in `initialize` (`promptCapabilities.image`). Unknown is no.
+   */
+  toolImages(instanceId: string, modelId: string): boolean
 }
 
 /**
@@ -264,7 +276,22 @@ export interface TurnSpec {
   input: TurnInput
   sink: TurnSink
   control: TurnControl
+  /** The adapter host; the gateway adds the turn's `bridge` from `app`. */
   host: AdapterHost
+  /** The turn's app-tool context, from which the gateway mints its `TurnBridge`. */
+  app?: TurnAppContext
+}
+
+/** What the `turn.start` executor knows of a turn's app tools, for its bridge (PR 2 §2). */
+export interface TurnAppContext {
+  /** The token of the turn's registered app-tool context (`AppToolTurns`). */
+  turnToken: string
+  /** The credential ceiling of the run. */
+  modeCeiling: ModeCeiling
+  /** The turn may attach the Mousse MCP server (a run engine run). */
+  mcpEligible: boolean
+  /** The session text and turn preamble, given whether the server was attached. */
+  instructions(mcpAttached: boolean): { sessionInstructions: string; turnPreamble: string }
 }
 
 export interface TurnHandle {
@@ -400,6 +427,7 @@ export class Harness implements HarnessGateway {
   private readonly drivers = new Map<HarnessDriverKind, HarnessDriver>()
   private readonly records = new Map<string, InstanceRecord>()
   private liveHost: LiveProcessHost | null = null
+  private mcp: McpAttachmentProvider | null = null
   private readonly retired = new Set<InstanceRecord>()
   private readonly removals = new Map<string, Removal>()
   /** The account reading `bind` took, for the `startTurn` of that binding (once). */
@@ -491,6 +519,16 @@ export class Harness implements HarnessGateway {
       customModel: (instanceId, modelId) => {
         const prefs = this.prefs.get(instanceId)
         return hidesModel(prefs, modelId) ? undefined : prefs.custom.find((model) => model.id === modelId)
+      },
+      toolImages: (instanceId, modelId) => {
+        const record = this.recordOrUndefined(instanceId)
+        if (!record) return false
+        const baseId = parseThinkingSuffixFromModelId(modelId).baseId
+        const custom = this.prefs.get(instanceId).custom.find((model) => model.id === modelId || model.id === baseId)
+        if (custom) return custom.capabilities.images
+        if (record.driver.mcpImageResults === true) return true
+        const prompt = this.currentFacts(instanceId)?.agentCapabilities?.promptCapabilities
+        return typeof prompt === 'object' && prompt !== null && (prompt as { image?: unknown }).image === true
       }
     }
     this.legacy = {
@@ -778,9 +816,17 @@ export class Harness implements HarnessGateway {
     const sink: TurnSink = { ...spec.sink, providerRef: (next) => { ref = next; spec.sink.providerRef(next) } }
     record.active += 1
     const result = (async () => {
+      let minted: ReturnType<Harness['mintBridge']>
       try {
         await this.admitTurn(record, spec)
-        return await record.runtime.adapter.startTurn(spec.input, sink, spec.control, spec.host)
+        minted = this.mintBridge(record, spec)
+        const host: AdapterHost = minted ? { ...spec.host, bridge: minted.bridge } : spec.host
+        const output = await record.runtime.adapter.startTurn(spec.input, sink, spec.control, host)
+        minted?.settle({ status: output.aborted || spec.input.signal.aborted ? 'aborted' : 'completed', ...(output.drain ? { drain: output.drain } : {}) })
+        return output
+      } catch (error) {
+        minted?.settle({ status: spec.input.signal.aborted ? 'aborted' : 'failed' })
+        throw error
       } finally {
         ended = true
         record.active -= 1
@@ -916,6 +962,63 @@ export class Harness implements HarnessGateway {
   setLiveHost(host: LiveProcessHost | null): void {
     this.liveHost = host
     for (const record of this.records.values()) record.runtime.setLiveHost?.(host)
+  }
+
+  setMcpAttachment(provider: McpAttachmentProvider | null): void {
+    this.mcp = provider
+  }
+
+  /**
+   * The turn's bridge (PR 2 §2 `TurnBridge`, the orchestrator's former `mcpFor`): a bearer under the
+   * driver's turn binding when the instance can attach the Mousse MCP server, the instruction texts,
+   * and the settle that ends the turn for the bearer (the drained-turn check, then in-flight calls
+   * abort). A bearer that cannot be minted leaves the turn without Mousse tools, never failed.
+   */
+  private mintBridge(record: InstanceRecord, spec: TurnSpec): { bridge: TurnBridge; settle(settlement: TurnSettlement): void } | undefined {
+    const app = spec.app
+    if (!app) return undefined
+    const { binding, input } = spec
+    const caps = this.recordCaps(record)
+    let attachment: { url: string; token: string; tokenHash: string } | null = null
+    if (app.mcpEligible && this.mcp && mcpAttachable(caps)) {
+      try {
+        attachment = this.mcp.bearerForTurn({
+          threadId: input.threadId,
+          instanceId: binding.instanceId,
+          runId: input.runId,
+          modeCeiling: app.modeCeiling,
+          binding: record.driver.mcpTurnBinding ?? 'rotate',
+          // A new runtime, a new epoch: driver, home, signed-in account and settings.
+          generation: [binding.driver, binding.homeId, binding.accountGeneration, binding.configRevision].join('|')
+        })
+      } catch (error) {
+        console.warn('Mousse MCP credential could not be minted; the turn runs without Mousse tools', {
+          runId: input.runId,
+          error: errorText(error)
+        })
+      }
+    }
+    const mcp = this.mcp
+    const texts = app.instructions(attachment !== null)
+    return {
+      bridge: {
+        mcp: attachment ? { url: attachment.url, token: attachment.token } : null,
+        turnToken: app.turnToken,
+        sessionInstructions: texts.sessionInstructions,
+        turnPreamble: texts.turnPreamble,
+        ...(binding.policy.tools ? { toolPolicy: binding.policy.tools } : {}),
+        userMcp: record.driver.userMcp ?? 'native',
+        permission: questionsPrompter(this.options.questions)
+      },
+      settle: (settlement) => {
+        if (!attachment || !mcp) return
+        try {
+          mcp.turnEnded({ threadId: input.threadId, runId: input.runId, tokenHash: attachment.tokenHash, settlement })
+        } catch (error) {
+          console.warn('Mousse MCP turn end failed', { threadId: input.threadId, error: errorText(error) })
+        }
+      }
+    }
   }
 
   inFlightContinuation(threadId: string): { id: string; discarded: boolean } | undefined {

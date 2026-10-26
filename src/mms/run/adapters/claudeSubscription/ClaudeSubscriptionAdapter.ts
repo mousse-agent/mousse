@@ -4,7 +4,6 @@ import {
 } from '../../../providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import type { ClaudeIntegrationSource, ClaudeTurnIntegrations } from '../../../providers/claudeSubscription/integrations'
 import type { ClaudeSubscriptionMetrics } from '../../../providers/claudeSubscription/metrics'
-import { mousseOrchestrationInstructions } from '../../mcp/instructions'
 import type { ProviderRef } from '../../types'
 import type {
   AdapterHost,
@@ -16,7 +15,7 @@ import type {
   TurnResult,
   TurnSink
 } from '../ProviderAdapter'
-import { promptStreams, runtimeToolEvent, withAppletGuidance } from '../shared/promptRuntime'
+import { promptStreams, runtimeToolEvent } from '../shared/promptRuntime'
 import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
 
 /** The slice of the provider service a turn drives. */
@@ -113,14 +112,15 @@ export class ClaudeSubscriptionAdapter implements ProviderAdapter {
       prompt: input.prompt,
       images: input.images,
       signal: input.signal,
-      appletInstructions: withAppletGuidance(input.appletInstructions),
+      turnPreamble: host.bridge?.turnPreamble || undefined,
       history,
-      // SPEC §15.2: the Mousse MCP server over HTTP with this run's bearer token, and the shared
-      // orchestration guidance appended to the system prompt.
-      mcp: host.mcp ?? null,
+      // SPEC §15.2: the Mousse MCP server over HTTP with this turn's bearer; Mousse's hook stamps each
+      // Mousse call with the turn's token (`per_call` turn binding).
+      mcp: host.bridge?.mcp ?? null,
+      mcpTurnToken: host.bridge?.mcp ? host.bridge.turnToken : undefined,
       // Claude Code loads the project's instruction files itself, as in a terminal (CLAUDE.md, and
-      // AGENTS.md as its own settings decide), so Mousse appends only its own guidance.
-      systemPromptAppend: host.mcp ? mousseOrchestrationInstructions() : undefined,
+      // AGENTS.md as its own settings decide), so Mousse appends only its own session instructions.
+      systemPromptAppend: host.bridge?.sessionInstructions || undefined,
       integrations,
       drainSteer: () => ctl.drainSteer(),
       drainSteerEntry: ctl.drainSteerEntry ? () => ctl.drainSteerEntry!() : undefined,

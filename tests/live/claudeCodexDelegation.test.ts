@@ -28,7 +28,6 @@ import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { EffectWorker } from '../../src/mms/run/EffectWorker'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
-import { createMousseToolRegistry } from '../../src/mms/run/mcp/toolRegistry'
 import { RunEngine } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
@@ -107,7 +106,7 @@ describe.skipIf(!live)('live: Claude and Codex delegate to each other over the M
     const worker = new EffectWorker({ outbox: engine.outbox, executors: orch.effectExecutors(), owner: engine.leaseOwner })
     worker.start()
     orch.attachEffectWorker(worker)
-    const server = new MousseMcpServer({ credentials: new McpCredentials(engine.store), registry: createMousseToolRegistry({ engine, host: orch.mcpToolHost() }) })
+    const server = new MousseMcpServer({ credentials: new McpCredentials(engine.store), registry: orch.mcpToolRegistry() })
     await server.start()
     orch.setMcpAttachment(server)
     try {

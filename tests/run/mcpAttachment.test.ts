@@ -38,8 +38,9 @@ const tempHome = (prefix: string): string => {
 }
 
 const sink = (): TurnSink => new Proxy({} as TurnSink, { get: () => () => undefined })
-const host = (mcp: AdapterHost['mcp']): AdapterHost => ({
-  mcp,
+/** A host whose bridge attaches `mcp` (with the session text a turn would get), or none. */
+const host = (mcp: { url: string; token: string } | null): AdapterHost => ({
+  bridge: { mcp, turnToken: 'turn-1', sessionInstructions: mcp ? mousseOrchestrationInstructions() : '', turnPreamble: '', userMcp: 'native' },
   tools: {},
   context: { recoverOverflow: () => null, prepareNativeContext: () => null, nativeHistoryAfterTurn: (text) => text }
 })
@@ -50,7 +51,7 @@ const input = (overrides: Partial<TurnInput> = {}): TurnInput => ({
 const control = { drainSteer: () => undefined, heartbeat: () => undefined }
 
 describe('Claude subscription attachment', () => {
-  it('the Claude adapter passes the server and its guidance only when host.mcp is set, and leaves AGENTS.md to Claude Code', async () => {
+  it('the Claude adapter passes the server, its turn token and the session text only when the bridge attaches one, and leaves AGENTS.md to Claude Code', async () => {
     const seen: ClaudeSubscriptionChatInput[] = []
     const standalone = tempHome('mousse-claude-standalone-')
     writeFileSync(join(standalone, 'AGENTS.md'), 'STANDALONE RULES')
@@ -67,10 +68,14 @@ describe('Claude subscription attachment', () => {
     writeFileSync(join(project, 'AGENTS.md'), 'UPDATED RULES')
     await adapter.startTurn(input({ cwd: project }), sink(), control, host(null))
     await adapter.startTurn(input({ cwd: tempHome('mousse-claude-bare-') }), sink(), control, host(null))
-    await adapter.startTurn(input({ cwd: null }), sink(), control, { ...host(null), mcp: undefined })
-    // The server is passed through only when host.mcp is set.
+    await adapter.startTurn(input({ cwd: null }), sink(), control, { ...host(null), bridge: undefined })
+    // The server and the turn token are passed through only when the bridge attaches the server.
     expect(seen[0].mcp).toEqual(MCP)
-    for (const chat of seen.slice(1)) expect(chat.mcp).toBeNull()
+    expect(seen[0].mcpTurnToken).toBe('turn-1')
+    for (const chat of seen.slice(1)) {
+      expect(chat.mcp).toBeNull()
+      expect(chat.mcpTurnToken).toBeUndefined()
+    }
     // Claude Code loads the project's instruction files itself; Mousse adds only its own guidance.
     expect(seen[0].systemPromptAppend).toBe(mousseOrchestrationInstructions())
     for (const chat of seen.slice(1)) expect(chat.systemPromptAppend).toBeUndefined()
@@ -182,6 +187,30 @@ describe('Claude subscription attachment', () => {
     expect(options[1].plugins).toBeUndefined()
     expect(options[1].env).not.toHaveProperty('MOUSSE_MCP_VALUE_0')
   })
+
+  it('Mousse\'s PreToolUse hook stamps each Mousse call with the turn token (per_call), and nothing else', async () => {
+    const options: Options[] = []
+    const { home, questions, service: claude } = service(({ options: o }) => { options.push(o); return finished(o) })
+    questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }))
+    await claude.chat({ threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: MCP, mcpTurnToken: 'turn-7' })
+    await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: MCP, mcpTurnToken: 'turn-8', mode: 'plan' })
+    await claude.chat({ threadId: 't3', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn() })
+    const hook = (index: number, tool_name: string) => options[index].hooks!.PreToolUse![0].hooks[0](
+      { hook_event_name: 'PreToolUse', tool_name, tool_input: { limit: 5 }, tool_use_id: 'u' } as never, 'u', { signal: new AbortController().signal }
+    )
+    // The spike (`claudeUpdatedInputSpike.test.ts`) shows Claude Code forwards `updatedInput` to the server.
+    expect(await hook(0, 'mcp__mousse__thread_read')).toEqual({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput: { limit: 5, _mousse_turn: 'turn-7' } }
+    })
+    expect(await hook(0, 'Read')).toEqual({})
+    // A plan turn routes every call through canUseTool (`ask`), stamped all the same.
+    expect(await hook(1, 'mcp__mousse__thread_read')).toEqual({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask', updatedInput: { limit: 5, _mousse_turn: 'turn-8' } }
+    })
+    expect(await hook(1, 'Read')).toEqual({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' } })
+    // Without the server, the same name is not Mousse's and is left as it is.
+    expect(await hook(2, 'mcp__mousse__thread_read')).toEqual({})
+  })
 })
 
 type Sent = { method: string; params: Record<string, unknown> }
@@ -215,7 +244,7 @@ function fakeAcp(http: boolean, sent: Sent[]) {
 }
 
 describe('Antigravity attachment', () => {
-  it('the Antigravity adapter passes the server and the guidance only when host.mcp is set', async () => {
+  it('the Antigravity adapter passes the server and the session text only when the bridge attaches one', async () => {
     const seen: Array<Parameters<AntigravityClient['chat']>[0]> = []
     const client: AntigravityClient = { chat: vi.fn(async (chat) => { seen.push(chat); return 'ok' }), commitConversation: vi.fn(), configured: () => true }
     const adapter = antigravityAdapter(() => client)
@@ -269,6 +298,51 @@ describe('Antigravity attachment', () => {
     expect(sent.filter((frame) => frame.method === 'initialize')).toHaveLength(1)
     expect(sent.filter((frame) => frame.method === 'session/new' || frame.method === 'session/resume')).toHaveLength(1)
     expect(prompts(sent)).toEqual(['<mousse_orchestration_instructions>\nGUIDE\n</mousse_orchestration_instructions>\n\nfirst', 'second'])
+    await antigravity.stop()
+  })
+
+  it('a turn\'s permission requests are answered by its bridge\'s prompter', async () => {
+    const sent: Sent[] = []
+    const asked: string[] = []
+    let handlers: { requestPermission(request: unknown): Promise<unknown> } | undefined
+    const connect = (request: { handlers: typeof handlers }) => {
+      handlers = request.handlers
+      const process = fakeAcp(true, sent)() as { connection: { agent: { request: (method: string, params: Record<string, unknown>) => Promise<unknown> } } }
+      const base = process.connection.agent.request
+      process.connection.agent.request = async (method, params) => {
+        if (method === 'session/prompt') answers.push(await handlers!.requestPermission({
+          sessionId: 'acp-session',
+          toolCall: { toolCallId: 'c1', title: 'Edit file' },
+          options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }, { optionId: 'no', name: 'Reject', kind: 'reject_once' }]
+        }))
+        return base(method, params)
+      }
+      return process
+    }
+    const answers: unknown[] = []
+    const { antigravity, workspace } = service(true, sent, connect as never)
+    const prompter = { choose: async ({ title }: { title: string }) => { asked.push(title); return 'yes' } }
+    await antigravity.chat({ threadId: 't', cwd: workspace, model: 'm1', prompt: 'go', onText: vi.fn(), prompter })
+    expect(asked).toHaveLength(1)
+    expect(answers).toEqual([{ outcome: { outcome: 'selected', optionId: 'yes' } }])
+    await antigravity.stop()
+  })
+
+  it('a resumed session made with other instructions gets the new text in its next prompt, once', async () => {
+    const sent: Sent[] = []
+    const { antigravity, workspace } = service(true, sent)
+    const chat = { threadId: 't', cwd: workspace, model: 'm1', onText: vi.fn(), mcp: MCP }
+    await antigravity.chat({ ...chat, prompt: 'first', orchestrationInstructions: 'GUIDE' })
+    antigravity.commitConversation('t', 'history-1')
+    sent.length = 0
+    // A new token reopens (resumes) the session; the instructions changed since it was made.
+    await antigravity.chat({ ...chat, prompt: 'second', history: 'history-1', mcp: { ...MCP, token: 'tok-2' }, orchestrationInstructions: 'GUIDE 2' })
+    expect(sent.some((frame) => frame.method === 'session/resume')).toBe(true)
+    expect(prompts(sent)).toEqual(['<mousse_orchestration_instructions>\nGUIDE 2\n</mousse_orchestration_instructions>\n\nsecond'])
+    antigravity.commitConversation('t', 'history-2')
+    sent.length = 0
+    await antigravity.chat({ ...chat, prompt: 'third', history: 'history-2', mcp: { ...MCP, token: 'tok-2' }, orchestrationInstructions: 'GUIDE 2' })
+    expect(prompts(sent)).toEqual(['third'])
     await antigravity.stop()
   })
 

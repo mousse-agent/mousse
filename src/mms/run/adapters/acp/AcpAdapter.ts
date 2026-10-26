@@ -1,6 +1,5 @@
 import type { AcpChatInput } from '../../../harness/acp/session'
 import type { ProviderDriverKind } from '../../../../shared/providerInstances'
-import { mousseOrchestrationInstructions } from '../../mcp/instructions'
 import type { ProviderRef } from '../../types'
 import type {
   AdapterHost,
@@ -12,7 +11,7 @@ import type {
   TurnResult,
   TurnSink
 } from '../ProviderAdapter'
-import { promptStreams, runtimeToolEvent, withAppletGuidance } from '../shared/promptRuntime'
+import { promptStreams, runtimeToolEvent } from '../shared/promptRuntime'
 
 /** The slice of an ACP agent's runtime a turn drives. */
 export interface AcpTurnClient {
@@ -78,6 +77,9 @@ export class AcpAdapter implements ProviderAdapter {
       sink.progress()
       ctl.heartbeat()
     }
+    // The drained-turn proof for the bearer: ACP updates do not name the MCP server, so every tool call
+    // the agent started must reach a completed update (none failed, none left open).
+    const toolCalls = new Map<string, 'running' | 'completed' | 'failed'>()
     const text = await client.chat({
       threadId: input.threadId,
       instanceId: input.instanceId,
@@ -87,12 +89,13 @@ export class AcpAdapter implements ProviderAdapter {
       prompt: input.prompt,
       images: input.images,
       signal: input.signal,
-      appletInstructions: withAppletGuidance(input.appletInstructions),
+      turnPreamble: host.bridge?.turnPreamble || undefined,
       history: input.nativeHistory,
       // SPEC §15.2: the Mousse MCP server in the ACP session (HTTP, or the stdio bridge when the
-      // agent does not advertise HTTP) and the shared guidance in the session's first prompt.
-      mcp: host.mcp ?? null,
-      orchestrationInstructions: host.mcp ? mousseOrchestrationInstructions() : undefined,
+      // agent does not advertise HTTP) and the session instructions in the session's first prompt.
+      mcp: host.bridge?.mcp ?? null,
+      orchestrationInstructions: host.bridge?.sessionInstructions || undefined,
+      ...(host.bridge?.permission ? { prompter: host.bridge.permission } : {}),
       drainSteer: () => ctl.drainSteer(),
       onSteer: (steer) => {
         progress()
@@ -104,6 +107,8 @@ export class AcpAdapter implements ProviderAdapter {
       },
       onTool: (event) => {
         progress()
+        if (event.phase === 'start') toolCalls.set(event.callId, 'running')
+        else toolCalls.set(event.callId, event.status === 'completed' ? 'completed' : 'failed')
         sink.tool(runtimeToolEvent(event))
       },
       // The ref names the agent's session once there is one, so stop and terminate find it.
@@ -121,7 +126,8 @@ export class AcpAdapter implements ProviderAdapter {
       contextSignature: contextKey,
       contextModelKey: contextKey,
       nativeMessages: [],
-      providerRef
+      providerRef,
+      drain: { toolCalls: toolCalls.size, toolsSettled: [...toolCalls.values()].every((status) => status === 'completed') }
     }
   }
 

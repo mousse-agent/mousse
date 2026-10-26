@@ -17,23 +17,13 @@ import {
   type Tool,
   type ToolCall,
   type ToolResultMessage,
-  type TSchema,
   type Usage,
   type UserMessage
 } from '@earendil-works/pi-ai'
 
-import type {
-  McpToolDescriptor,
-  MousseIntegrationsSettings,
-  SkillDescriptor,
-  SkillsRegistrySnapshot
-} from '../../shared/integrations'
+import type { McpToolDescriptor } from '../../shared/integrations'
 import type { IntegrationActor } from '../../shared/integrations/actor'
 import { defaultIntegrationActor } from '../../shared/integrations/actor'
-import type { McpToolCallResult } from '../../shared/integrations/results'
-import {
-  resolveEffectiveSkills
-} from '../integrations/catalog/EffectiveIntegrationResolver'
 import type {
   AgentExecutionBudget,
   AgentExecutionLimit,
@@ -42,7 +32,6 @@ import type {
   AgentRuntimeToolApprovalCallback
 } from '../../shared/agents/execution'
 import type { EffectiveAgentGrants } from '../../shared/agents/types'
-import { sha256Hex } from '../../shared/agents/hashes'
 import {
   authorizeTrustedToolDispatch,
   canonicalizeBuiltinToolName,
@@ -52,14 +41,13 @@ import {
 
 import type { ChatMode, OrchestratorAction } from '../../shared/types'
 
-import { allowsOrchestrationActions, filterActionsForMode, getSkillIdFromMode, normalizeChatMode } from '../../shared/chatMode'
+import { allowsOrchestrationActions, filterActionsForMode, normalizeChatMode } from '../../shared/chatMode'
 import { isToolAllowedForMode } from '../../shared/modes'
 import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes/ModeRegistry'
 
 import { resolveModelForMode, resolveTitleModel, normalizeContextSettings, resolveContextCompactionTokens } from '../../shared/settings'
 
 import { EFFORT_SUFFIXES, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
-import { recordSubagentCall } from '../../shared/subagentTools'
 
 import { getModelEffortLevels } from '../../shared/modelEfforts'
 
@@ -77,31 +65,31 @@ import type { GitService } from '../git/GitService'
 
 import { BuildModeTools } from './BuildModeTools'
 import { PiCodingTools, piToolSetForMode } from './PiCodingTools'
-import { PlanModeTools } from './PlanModeTools'
-import { DevGuiTools, isDevGuiToolsEnabled } from '../devgui/DevGuiTools'
-import {
-  QuickActionTools,
-  describeQuickActionKind,
-  type CreatedQuickAction,
-  type StagedQuickAction
-} from './QuickActionTools'
+import { DevGuiTools } from '../devgui/DevGuiTools'
+import { QuickActionTools, type CreatedQuickAction } from './QuickActionTools'
 import { userQuestionService as defaultUserQuestionService, UserQuestionService } from './UserQuestionService'
 import type { DocumentOpenPayload } from '../../shared/types'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { TaskQueue } from '../tasks/TaskQueue'
-import { TaskControlTools } from '../tasks/TaskControlTools'
 import { WebTools } from './WebTools'
 
 import { buildOrchestratorSystemPrompt, DELEGATION_PROMPT } from './systemPrompt'
-import type { BrowserRuntimePort } from '../../shared/browser/runtime'
 import {
-  type BrowserExecutionBinding,
-  dispatchBrowserTool,
-  getBrowserToolDefinitions,
-  resolveTrustedBrowserTarget,
-  isBrowserAutomationTool,
-  snapshotBrowserExecutionBinding
-} from './browser'
+  createAppToolRegistry,
+  type AppToolFamily,
+  type AppToolTurn,
+  type InProcessAuthority,
+  type ToolOutcome,
+  type ToolRegistry,
+  type ToolTimeline
+} from '../run/mcp/appTools'
+import { DELEGATION_TOOL_NAMES, delegationToolDefinitions, type DelegationToolHost } from '../run/mcp/appTools/delegation'
+import { PUBLISH_APPLET_TOOL } from '../run/mcp/appTools/applets'
+import { modeFactsFor, offeredDefinitions, prepareSkills, settingsToolEnabled } from '../run/mcp/appTools/assemble'
+import { callUserMcpTool, userMcpTool } from '../run/mcp/appTools/userMcp'
+import { questionApproval } from '../run/mcp/appTools/quickActions'
+import type { BrowserRuntimePort } from '../../shared/browser/runtime'
+import { type BrowserExecutionBinding, snapshotBrowserExecutionBinding } from './browser'
 import {
   estimateActiveContextTokens,
   shouldCompactNativeContext,
@@ -142,73 +130,20 @@ export interface LlmMessage {
 
 
 
-/** Named-agent wrapper input (`create_subagent`); `name` becomes the child thread title. */
-export interface NamedAgentToolRequest {
-  name: string
-  task: string
-  workspace?: 'shared' | 'isolated'
-  access?: 'read-only' | 'write'
-}
-/** Named-agent wrapper input (`recall_subagent`): a follow-up on the named child thread. */
-export interface NamedAgentRecallRequest extends Omit<NamedAgentToolRequest, 'name'> { agent: string; expectedAgentGeneration?: number; contextMode?: 'continue' | 'fresh'; resumeResult?: boolean }
-
-/** `delegate_task` arguments (docs/run-engine/SPEC.md §14.2). */
-export interface DelegateTaskInput {
-  prompt: string
-  /** Provider instance the child runs on (`claude`, `pi:openai`, ...); defaults to the caller's. */
-  instanceId?: string
-  /** @deprecated Older `llmProvider` name; mapped to an instance id. `instanceId` wins when both are set. */
-  provider?: string
-  model?: string
-  role?: string
-  workspace: 'isolated' | 'shared'
-  wake?: 'always' | 'settled_only'
-  /**
-   * The subagent's title: its address among the caller's subagents. The `delegate_task` tool
-   * requires it; a host call without one derives a title from the prompt.
-   */
-  title?: string
-  /**
-   * The most the child may do (SPEC §15.1). Only the Mousse MCP server offers it; the host
-   * defaults it to the caller's ceiling and refuses a broader one.
-   */
-  modeCeiling?: 'plan' | 'default'
-}
-
-/** The model's tool call that invoked a delegation tool; its id derives the clientRequestId. */
-export interface DelegationToolCall {
-  toolCallId: string
-}
-
-/**
- * Delegation tools (SPEC §14.2, `ToolHost`). Host-minted per turn; never accepted from protocol
- * input. The named-agent tools are thin wrappers the host builds on `delegateTask`.
- */
-export interface DelegationToolHost {
-  delegateTask(input: DelegateTaskInput, call: DelegationToolCall): Promise<unknown>
-  continueSubagent(input: { subagent: string; prompt: string }, call: DelegationToolCall): Promise<unknown>
-  answerSubagent(input: { subagent: string; requestId: string; answers: Record<string, string | string[]> }, call: DelegationToolCall): Promise<unknown> | unknown
-  taskStatus(input: SubagentRef): Promise<unknown> | unknown
-  taskCancel(input: SubagentRef): Promise<unknown>
-  listDelegations(): unknown
-  listSubagents(): unknown
-  integrateDelegation(input: SubagentRef, call: DelegationToolCall): Promise<unknown>
-  named: {
-    create(input: NamedAgentToolRequest, call: DelegationToolCall): Promise<unknown>
-    createBatch(input: NamedAgentToolRequest[], call: DelegationToolCall): Promise<unknown>
-    recall(input: NamedAgentRecallRequest, call: DelegationToolCall): Promise<unknown>
-    integrate(input: { agent: string }, call: DelegationToolCall): Promise<unknown>
-  }
-}
-
-/**
- * The task a delegation tool names: a `delegationId`, or `subagent` (a title, a childThreadId or a
- * delegationId) for the subagent's latest task. At least one is set.
- */
-export interface SubagentRef {
-  delegationId?: string
-  subagent?: string
-}
+// The delegation tools live with the other app tools (`run/mcp/appTools`); re-exported for callers
+// that name them through the loop.
+export {
+  delegationToolDefinitions,
+  dispatchDelegationTool,
+  executeDelegationTool,
+  LISTED_DELEGATION_TOOL_NAMES,
+  type DelegateTaskInput,
+  type DelegationToolCall,
+  type DelegationToolHost,
+  type NamedAgentRecallRequest,
+  type NamedAgentToolRequest,
+  type SubagentRef
+} from '../run/mcp/appTools/delegation'
 
 export interface LlmChatOptions {
   appletInstructions?: string
@@ -262,6 +197,11 @@ export interface LlmChatOptions {
 
   /** Explicit thread for pending questions / daemon ownership (Phase 4). */
   threadId?: string
+
+  /** The run engine run this loop turn belongs to; its app tools act for it (`InProcessAuthority`). */
+  runId?: string
+  /** Whether `runId` is still its thread's active run; an app tool call after that is refused. Host-supplied. */
+  runActive?: () => boolean
 
   /** Abort in-flight stream and tool loop. */
   signal?: AbortSignal
@@ -742,15 +682,8 @@ export class LlmClient {
 
   private piCodingTools: PiCodingTools
 
-  private planTools: PlanModeTools
-
-  private taskTools: TaskControlTools | null
-
-  private quickActionTools: QuickActionTools
-
-  private devGuiTools: DevGuiTools
-
-  private webTools: WebTools
+  /** The app tools (plans, tasks, skills, browser, quick actions, web, dev GUI, applets, delegation) over this client's dependencies. */
+  private readonly appTools: { registry: ToolRegistry; families: Record<AppToolFamily, string[]> }
 
   private browserRuntime?: BrowserRuntimePort
 
@@ -801,18 +734,27 @@ export class LlmClient {
     this.buildTools = new BuildModeTools(fileService!, gitService!, lineEditStats)
     this.piCodingTools = new PiCodingTools(lineEditStats)
 
-    this.planTools = new PlanModeTools(
-      (questions, threadId) => this.questions.requestAnswers(questions, threadId),
-      (payload) => this.onOpenDocument?.(payload),
-      (payload, threadId) => this.onPresentPlan?.(payload, threadId)
-    )
-    this.taskTools = tasks ? new TaskControlTools(tasks) : null
-    this.quickActionTools = new QuickActionTools(
-      (staged, threadId) => this.requestQuickActionApproval(staged, threadId),
-      (action) => this.onQuickActionCreated?.(action)
-    )
-    this.devGuiTools = new DevGuiTools()
-    this.webTools = new WebTools(this.providerAuth.credentials)
+    // The same modules the Mousse MCP server serves, over this client's own dependencies.
+    this.appTools = createAppToolRegistry({
+      host: {
+        delegation: () => {
+          throw new Error('Delegation tools run with the turn that has them.')
+        },
+        askUser: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
+        dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
+        presentPlan: (threadId, payload) => this.onPresentPlan?.(payload, threadId),
+        openDocument: (payload) => this.onOpenDocument?.(payload),
+        tasks: () => tasks ?? null,
+        browserRuntime: () => this.browserRuntime,
+        skills: () => this.skillsRegistry,
+        quickActions: new QuickActionTools(
+          questionApproval(this.questions),
+          (action) => this.onQuickActionCreated?.(action)
+        ),
+        web: new WebTools(this.providerAuth.credentials),
+        devGui: new DevGuiTools()
+      }
+    })
 
   }
 
@@ -833,37 +775,6 @@ export class LlmClient {
   bindBrowserExecution(binding: BrowserExecutionBinding | undefined): void {
     this.browserBinding = binding ? snapshotBrowserExecutionBinding(binding) : undefined
   }
-
-  /**
-   * Approval gate for agent-created quick actions. Blocks the tool loop on the
-   * same user-question flow as ask_user, so approval renders in the existing
-   * question UI (modal + inline agent-elements question card).
-   */
-  private async requestQuickActionApproval(
-    staged: StagedQuickAction,
-    threadId: string
-  ): Promise<boolean> {
-    const preview =
-      staged.kind === 'bash' ? `$ ${staged.payload}` : staged.payload
-    const answers = await this.questions.requestAnswers(
-      [
-        {
-          id: 'approval',
-          prompt:
-            `Create quick action "${staged.label}" (${describeQuickActionKind(staged.kind)})? ` +
-            `Content: ${preview.slice(0, 300)}`,
-          options: [
-            { id: 'approve', label: 'Approve and create' },
-            { id: 'reject', label: 'Reject' }
-          ]
-        }
-      ],
-      threadId
-    )
-    const decision = answers['approval']
-    return decision === 'approve' || (Array.isArray(decision) && decision.includes('approve'))
-  }
-
 
 
   async chat(
@@ -1010,7 +921,8 @@ export class LlmClient {
         otherToolsText: serializeToolDefinitions(runtimeContext.tools),
         signature: '',
         modelKey: ''
-      }
+      },
+      appTurn: undefined
     } : await this.prepareRequestContext(
       mode,
       userContent,
@@ -1020,11 +932,20 @@ export class LlmClient {
       discovery,
       actor,
       trustedAgent,
-      browserBinding
+      browserBinding,
+      options.threadId
     )
     let { enabledSkills, loadedSkills, mcpTools, tools, systemPrompt, contextInputs } = requestContext
+    // The turn the app tools act in: this request's selection, plus what the host minted for it.
+    const appTurn: AppToolTurn | undefined = requestContext.appTurn && {
+      ...requestContext.appTurn,
+      runId: options.runId ?? '',
+      ...(options.onPublishApplet && !subagent ? { onPublishApplet: options.onPublishApplet } : {}),
+      ...(options.delegation ? { delegation: options.delegation } : {}),
+      ...(options.toolAccess ? { toolAccess: options.toolAccess } : {})
+    }
     if (options.onPublishApplet && !runtimeContext && !subagent) {
-      tools = [...tools, { name: 'publish_applet', description: 'Publish a complete offline HTML/CSS/JS illustration or interactive dashboard in this thread. This stages presentation until the response completes; never performs workspace or network actions.', parameters: Type.Object({schemaVersion: Type.Literal(1), title: Type.String({maxLength:120}), description: Type.String({maxLength:1000}), html: Type.String(), css: Type.String(), js: Type.String(), data: Type.Optional(Type.Unknown()), stateVersion: Type.Optional(Type.Integer({minimum:1})), appletId: Type.Optional(Type.String()), expectedRevision: Type.Optional(Type.String())}) }]
+      tools = [...tools, PUBLISH_APPLET_TOOL]
       systemPrompt += options.appletInstructions ?? ''
       contextInputs = {...contextInputs, systemPromptText: systemPrompt, otherToolsText: serializeToolDefinitions(tools.filter(tool => !mcpTools.some(mcp => mcp.providerName === tool.name)))}
     }
@@ -1052,7 +973,7 @@ export class LlmClient {
       systemPrompt = [trustedAgent.systemPrompt, grantedSkillText].filter(Boolean).join('\n\n')
       contextInputs = {
         systemPromptText: systemPrompt,
-        mcpToolsText: serializeToolDefinitions(mcpTools.map(toPiTool)),
+        mcpToolsText: serializeToolDefinitions(mcpTools.map(userMcpTool)),
         otherToolsText: serializeToolDefinitions(tools.filter((tool) => !mcpTools.some((mcp) => mcp.providerName === tool.name))),
         signature: '',
         modelKey: ''
@@ -1068,7 +989,7 @@ export class LlmClient {
     if (options.toolAccess) {
       tools = tools.filter((tool) => options.toolAccess!.allows(tool.name))
       mcpTools = mcpTools.filter((tool) => options.toolAccess!.allows(tool.providerName))
-      contextInputs = { ...contextInputs, mcpToolsText: serializeToolDefinitions(mcpTools.map(toPiTool)),
+      contextInputs = { ...contextInputs, mcpToolsText: serializeToolDefinitions(mcpTools.map(userMcpTool)),
         otherToolsText: serializeToolDefinitions(tools.filter((tool) => !mcpTools.some((mcp) => mcp.providerName === tool.name))) }
     }
     const systemPromptWithoutMemory = systemPrompt
@@ -1362,33 +1283,33 @@ export class LlmClient {
         toolCallsUsed += 1
         recordAttempt()
 
+        // The caller writes the ledger row of every call, app tools included (the registry writes none in process).
+        const ledgerId = options.toolLedger?.start(toolCall)
+        const authority: InProcessAuthority = trustedAgent || !options.runId
+          ? { kind: 'trusted', ledgerEntryId: ledgerId }
+          : { kind: 'run', runId: options.runId, ledgerEntryId: ledgerId, ...(options.runActive ? { active: options.runActive } : {}) }
         const dispatch = async (): Promise<ToolResultMessage> => {
           if (runtimeContext) return runtimeContext.executeTool(toolCall, requestSignal)
-          if (toolCall.name === 'publish_applet' && options.onPublishApplet) {
-            try { return toolResult(toolCall, JSON.stringify(options.onPublishApplet(toolCall.arguments)), false) }
-            catch (error) { return toolResult(toolCall, error instanceof Error ? error.message : 'Invalid applet.', true) }
-          }
-          if (options.delegation && DELEGATION_TOOL_NAMES.has(toolCall.name)) {
-            return executeDelegationTool(options.delegation, toolCall, toolEvents, onToolEvent)
+          if (appTurn && ((toolCall.name === 'publish_applet' && options.onPublishApplet) ||
+              (options.delegation && DELEGATION_TOOL_NAMES.has(toolCall.name)))) {
+            return this.callAppTool(toolCall, appTurn, authority, toolEvents, onToolEvent, requestSignal)
           }
           return this.executeToolCall(
           toolCall,
           mcpTools,
-          enabledSkills,
           projectPath,
           mode,
           toolEvents,
           onToolEvent,
           requestSignal,
-          options.threadId,
+          appTurn,
+          authority,
           discovery,
           actor,
-          trustedAgent,
-          browserBinding
+          trustedAgent
         )
         }
         let result: ToolResultMessage
-        const ledgerId = options.toolLedger?.start(toolCall)
         try {
           result = options.toolAccess
             ? await options.toolAccess.execute(toolCall.name, (toolCall.arguments ?? {}) as Record<string, unknown>, dispatch)
@@ -1725,14 +1646,21 @@ export class LlmClient {
     discovery?: LlmChatOptions['subagentDiscovery'],
     actor: IntegrationActor = defaultIntegrationActor(false),
     trustedAgent?: TrustedAgentExecutionOptions,
-    browserBinding?: BrowserExecutionBinding
+    browserBinding?: BrowserExecutionBinding,
+    threadId?: string
   ) {
-    const descriptor = typeof mode === 'string' ? this.modeRegistry.getModeSync(mode, { projectPath }) : undefined
-    const isReadOnlyMode = descriptor ? (descriptor.permission?.['edit'] === 'deny' || descriptor.permission?.['bash'] === 'deny') : mode === 'plan'
-    const isBuildMode = descriptor ? descriptor.id === 'build' : mode === 'build'
+    const modeFacts = modeFactsFor(this.modeRegistry, mode, projectPath)
     const [{ enabledSkills, loadedSkills }, mcpTools] = await Promise.all([
-      this.prepareSkillsContext(projectPath, mode, userContent, actor, trustedAgent),
-      isBuildMode && !subagent
+      prepareSkills({
+        registry: this.skillsRegistry,
+        settings: () => this.settingsStore.get().integrations.skills,
+        projectPath,
+        mode,
+        userContent,
+        actor,
+        grants: trustedAgent?.grants
+      }),
+      modeFacts.build && !subagent
         ? Promise.resolve([] as McpToolDescriptor[])
         : this.getMcpTools(projectPath, actor),
       llmProvider === CURSOR_PROVIDER_ID && projectPath
@@ -1740,74 +1668,52 @@ export class LlmClient {
         : Promise.resolve()
     ]).then(([skillsContext, tools]) => [skillsContext, tools] as const)
 
-    const toolEnabled = (name: string): boolean => trustedAgent ? true : this.isMousseToolEnabled(name)
-    const mcpToolDefs = mcpTools.map(toPiTool)
-    const unfilteredInternalTools = isReadOnlyMode ? [] : this.getInternalSkillTools(enabledSkills, mode)
-    const internalTools = unfilteredInternalTools.filter((tool) =>
-      toolEnabled(tool.name)
-    )
+    const toolEnabled = (name: string): boolean => trustedAgent ? true : settingsToolEnabled(this.settingsStore.get().integrations.tools, name)
+    // The turn the app tools are selected for and act in (the request adds what its host minted).
+    const appTurn: AppToolTurn = {
+      threadId: threadId ?? '',
+      runId: '',
+      turnToken: '',
+      mode,
+      modeFacts,
+      modeCeiling: mode === 'plan' ? 'plan' : 'default',
+      subagent,
+      discovery: Boolean(discovery),
+      projectPath,
+      actor,
+      browser: browserBinding,
+      enabledSkills,
+      loadedSkills,
+      settingsEnabled: toolEnabled,
+      trusted: Boolean(trustedAgent)
+    }
+    const app = offeredDefinitions(this.appTools.registry, this.appTools.families, appTurn)
+    const mcpToolDefs = mcpTools.map(userMcpTool)
     const piToolSet = projectPath ? piToolSetForMode(mode, projectPath, this.modeRegistry) : null
     const unfilteredPiToolDefs =
       projectPath && piToolSet
         ? await this.piCodingTools.getToolDefinitions(projectPath, piToolSet)
         : []
     const unfilteredGitToolDefs =
-      isBuildMode && projectPath ? this.buildTools.getGitToolDefinitions() : []
+      modeFacts.build && projectPath ? this.buildTools.getGitToolDefinitions() : []
     const piCodingToolDefs = unfilteredPiToolDefs.filter((tool) =>
       toolEnabled(tool.name)
     )
     const buildGitToolDefs = unfilteredGitToolDefs.filter((tool) =>
       toolEnabled(tool.name)
     )
-    const isAgentMode = descriptor ? descriptor.id === 'agent' : mode === 'agent'
-    // Plan tools are available in Plan mode and in Agent mode alike — the
-    // Agent-mode model decides whether presenting a plan, asking, editing,
-    // or delegating fits the turn. Subagents and Build/Skill modes stay
-    // plan-free so workers implement instead of re-planning.
-    const unfilteredPlanToolDefs = !discovery
-      ? isReadOnlyMode || (!subagent && isAgentMode)
-        ? this.planTools.getToolDefinitions()
-        : []
-      : []
-    const planToolDefs = unfilteredPlanToolDefs.filter((tool) =>
-      toolEnabled(tool.name)
-    )
-    // Task tools for the main orchestrator in every chat mode (not subagents).
-    const unfilteredTaskToolDefs =
-      !subagent && this.taskTools ? this.taskTools.getToolDefinitions() : []
-    const taskToolDefs = unfilteredTaskToolDefs.filter((tool) =>
-      toolEnabled(tool.name)
-    )
-    // Agent-created quick actions: main orchestrator only — approval needs a user.
-    const unfilteredQuickActionToolDefs =
-      !subagent ? this.quickActionTools.getToolDefinitions() : []
-    const quickActionToolDefs = unfilteredQuickActionToolDefs.filter((tool) =>
-      toolEnabled(tool.name)
-    )
-    // Dev GUI self-inspection tools: main orchestrator only, dev sessions only,
-    // gated by Settings → Skills & MCP like every other Mousse tool.
-    const unfilteredDevGuiToolDefs =
-      !subagent && isDevGuiToolsEnabled() ? this.devGuiTools.getToolDefinitions() : []
-    const devGuiToolDefs = unfilteredDevGuiToolDefs.filter((tool) =>
-      toolEnabled(tool.name)
-    )
-    const unfilteredBrowserToolDefs =
-      this.browserRuntime && browserBinding && browserBinding.mode === 'structured'
-        ? getBrowserToolDefinitions({ vision: browserBinding.vision === true, backend: resolveTrustedBrowserTarget(this.browserRuntime, browserBinding.execution).target?.backend ?? 'electron-attached', screenshots: this.browserRuntime.capabilities?.(browserBinding.execution)?.screenshots })
-        : []
-    const browserToolDefs = unfilteredBrowserToolDefs.filter((tool) =>
-      toolEnabled(tool.name) && browserBinding!.policy.allowedTools.includes(tool.name)
-    )
+    // The pi loop's order: skills, coding and git tools, then plan, task, quick-action, dev GUI, web
+    // and browser tools (app tools come from the registry's selection for this turn).
     const otherToolDefs: Tool[] = [
-      ...internalTools,
+      ...app.skills,
       ...piCodingToolDefs,
       ...buildGitToolDefs,
-      ...planToolDefs,
-      ...taskToolDefs,
-      ...quickActionToolDefs,
-      ...devGuiToolDefs,
-      ...this.webTools.getToolDefinitions().filter((tool) => toolEnabled(tool.name)),
-      ...browserToolDefs
+      ...app.plans,
+      ...app.tasks,
+      ...app.quickActions,
+      ...app.devGui,
+      ...app.web,
+      ...app.browser
     ]
     if (discovery) {
       otherToolDefs.push({
@@ -1840,66 +1746,7 @@ export class LlmClient {
       modelKey: ''
     }
 
-    return { enabledSkills, loadedSkills, mcpTools, tools, systemPrompt, contextInputs }
-  }
-
-
-
-  private async prepareSkillsContext(
-    projectPath: string | undefined,
-    mode: ChatMode,
-    userContent: string,
-    actor: IntegrationActor = defaultIntegrationActor(false),
-    trustedAgent?: TrustedAgentExecutionOptions
-  ): Promise<{
-    enabledSkills: SkillDescriptor[]
-    loadedSkills: Array<{ name: string; content: string; revision?: string }>
-  }> {
-    if (!this.skillsRegistry) {
-      return { enabledSkills: [], loadedSkills: [] }
-    }
-
-    const settings = this.settingsStore.get().integrations.skills
-    const snapshot = await this.skillsRegistry.discover({ projectPath })
-    const enabledSkills = this.filterEnabledSkills(snapshot, mode, settings, actor)
-    const modeSkills = trustedAgent ? [] : await this.loadSkillForMode(mode, projectPath, snapshot)
-    const explicitSkills = await this.loadExplicitSkills(userContent, enabledSkills, projectPath, snapshot)
-    const grantedSkills = trustedAgent
-      ? await Promise.all(enabledSkills.map(async (skill) => {
-          const grant = trustedAgent.grants.skills.find(
-            (entry) => entry.id === skill.id || entry.id === skill.installationId
-          )!
-          const result = await this.skillsRegistry!.readSkill(skill.installationId ?? skill.id, { projectPath }, snapshot)
-          if (grant.hash && sha256Hex(result.content) !== grant.hash) {
-            throw new Error(`Granted skill changed after agent resolution: ${grant.id}.`)
-          }
-          if (!grant.hash && grant.revision && result.skill.revision !== grant.revision && result.skill.contentHash !== grant.revision) {
-            throw new Error(`Granted skill revision is unavailable: ${grant.id}@${grant.revision}.`)
-          }
-          return { name: result.skill.name, content: truncateForModel(result.content) }
-        }))
-      : []
-    const loadedSkills = trustedAgent ? grantedSkills : [
-      ...modeSkills,
-      ...explicitSkills.filter(
-        (skill) => !modeSkills.some((loaded) => loaded.name === skill.name)
-      )
-    ]
-
-    return { enabledSkills, loadedSkills }
-  }
-
-  private filterEnabledSkills(
-    snapshot: SkillsRegistrySnapshot,
-    mode: ChatMode | undefined,
-    settings: MousseIntegrationsSettings['skills'],
-    actor: IntegrationActor
-  ): SkillDescriptor[] {
-    const skillId = getSkillIdFromMode(normalizeChatMode(mode))
-    if (skillId) {
-      return snapshot.skills.filter((skill) => skill.id === skillId || skill.installationId === skillId)
-    }
-    return resolveEffectiveSkills({ snapshot, settings, actor })
+    return { enabledSkills, loadedSkills, mcpTools, tools, systemPrompt, contextInputs, appTurn: appTurn as AppToolTurn | undefined }
   }
 
   private async getMcpTools(
@@ -1914,140 +1761,61 @@ export class LlmClient {
 
   }
 
-  private isMousseToolEnabled(toolName: string): boolean {
-    const tools = this.settingsStore.get().integrations.tools
-    if (!tools || tools.enabled === false) {
-      // Missing settings (pre-migration configs) default to all enabled.
-      if (!tools) return true
-      return false
-    }
-    const enabled = tools.enabledTools
-    if (!Array.isArray(enabled)) return true
-    // Empty explicit list means nothing selected; default list means all.
-    if (enabled.length === 0) return false
-    const canonical = canonicalizeBuiltinToolName(toolName)
-    if (enabled.includes(toolName) || enabled.includes(canonical)) return true
-    return false
-  }
-
-
-
-  private async loadSkillForMode(
-    mode: ChatMode,
-    projectPath?: string,
-    snapshot?: SkillsRegistrySnapshot
-  ): Promise<Array<{ name: string; content: string }>> {
-    const skillId = getSkillIdFromMode(mode)
-    if (!skillId || !this.skillsRegistry) return []
-
-    const result = await this.skillsRegistry.readSkill(skillId, { projectPath }, snapshot)
-    return [{ name: result.skill.name, content: truncateForModel(result.content) }]
-  }
-
-  private async loadExplicitSkills(
-    userContent: string,
-    availableSkills: SkillDescriptor[],
-    projectPath?: string,
-    snapshot?: SkillsRegistrySnapshot
-  ): Promise<Array<{ name: string; content: string }>> {
-
-    if (!this.skillsRegistry) return []
-
-    const requestedNames = Array.from(userContent.matchAll(/(?:^|\s)\/([A-Za-z0-9_-]+)/g)).map(
-
-      (match) => match[1].toLowerCase()
-
-    )
-
-    if (requestedNames.length === 0) return []
-
-
-
-    const loaded: Array<{ name: string; content: string }> = []
-
-    for (const name of requestedNames) {
-
-      const skill = availableSkills.find((candidate) => normalizeSkillName(candidate.name) === name)
-
-      if (!skill) continue
-
-      const result = await this.skillsRegistry.readSkill(skill.id, { projectPath }, snapshot)
-
-      loaded.push({ name: result.skill.name, content: truncateForModel(result.content) })
-
-    }
-
-    return loaded
-
-  }
-
-
-
-  private getInternalSkillTools(availableSkills: SkillDescriptor[], mode: ChatMode): Tool[] {
-
-    if (!this.skillsRegistry || availableSkills.length === 0 || mode === 'build') return []
-
-    return [
-
-      {
-
-        name: 'list_skills',
-
-        description: 'List available Mousse Agent Skills with descriptions and scopes.',
-
-        parameters: Type.Object({})
-
+  /**
+   * One app tool through the registry (`callInProcess`), written to this turn's timeline as the
+   * pi loop always has. The caller already wrote the ledger row and applied a read-only child's
+   * workspace capability and a definition's grants.
+   */
+  private async callAppTool(
+    toolCall: ToolCall,
+    turn: AppToolTurn,
+    authority: InProcessAuthority,
+    toolEvents: LlmToolEvent[],
+    onToolEvent: LlmToolEventHandler | undefined,
+    signal: AbortSignal | undefined,
+    trustedAgent?: TrustedAgentExecutionOptions
+  ): Promise<ToolResultMessage> {
+    const timeline: ToolTimeline = {
+      record: (event, phase, extra) => {
+        toolEvents.push(event)
+        onToolEvent?.({ ...event, phase, callId: toolCall.id, ...extra })
       },
-
+      emit: (event, phase) => onToolEvent?.({ ...event, phase, callId: toolCall.id })
+    }
+    const outcome = await this.appTools.registry.callInProcess(
+      toolCall.name,
+      (toolCall.arguments ?? {}) as Record<string, unknown>,
+      authority,
       {
-
-        name: 'load_skill',
-
-        description: 'Load the full SKILL.md instructions for one available Skill by name or id.',
-
-        parameters: Type.Object({
-
-          skill: Type.String({ description: 'Skill name or id to load.' })
-
-        })
-
+        turn,
+        toolCallId: toolCall.id,
+        signal: signal ?? new AbortController().signal,
+        timeline,
+        markEffect: () => {
+          if (trustedAgent?.effects) trustedAgent.effects.dispatched = true
+        }
       }
-
-    ]
-
+    )
+    return appToolResult(toolCall, outcome)
   }
-
-
 
   private async executeToolCall(
-
     toolCall: ToolCall,
-
     mcpTools: McpToolDescriptor[],
-
-    availableSkills: SkillDescriptor[],
-
     projectPath: string | undefined,
-
     mode: ChatMode,
-
     toolEvents: LlmToolEvent[],
-
-    onToolEvent?: LlmToolEventHandler,
-
-    signal?: AbortSignal,
-
-    threadId?: string,
-
+    onToolEvent: LlmToolEventHandler | undefined,
+    signal: AbortSignal | undefined,
+    appTurn: AppToolTurn | undefined,
+    authority: InProcessAuthority,
     discovery?: LlmChatOptions['subagentDiscovery'],
     actor: IntegrationActor = defaultIntegrationActor(false),
-    trustedAgent?: TrustedAgentExecutionOptions,
-    browserBinding?: BrowserExecutionBinding
-
+    trustedAgent?: TrustedAgentExecutionOptions
   ): Promise<ToolResultMessage> {
 
     try {
-      const settingsEnabled = (name: string): boolean => Boolean(trustedAgent) || this.isMousseToolEnabled(name)
+      const settingsEnabled = (name: string): boolean => Boolean(trustedAgent) || settingsToolEnabled(this.settingsStore.get().integrations.tools, name)
       const markTrustedEffect = (): void => {
         if (trustedAgent?.effects) trustedAgent.effects.dispatched = true
       }
@@ -2082,64 +1850,11 @@ export class LlmClient {
         }
       }
 
-      if (this.webTools.isWebTool(toolCall.name)) {
-        if (!settingsEnabled(toolCall.name)) {
-          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Skills & MCP.`, true)
-        }
-        const event: LlmToolEvent = {
-          kind: 'build_tool_call', title: `Web tool ${toolCall.name}`,
-          summary: `Running ${toolCall.name}.`, details: [`Tool: ${toolCall.name}`]
-        }
-        onToolEvent?.({ ...event, phase: 'start', callId: toolCall.id })
-        const result = await this.webTools.execute(toolCall.name, toolCall.arguments as Record<string, unknown>)
-        onToolEvent?.({ ...event, phase: 'complete', callId: toolCall.id, summary: result.isError ? result.text : `Completed ${toolCall.name}.` })
-        return toolResult(toolCall, result.text, result.isError)
-      }
-
-      if (isBrowserAutomationTool(toolCall.name)) {
-        if (!this.browserRuntime || !browserBinding || browserBinding.mode === 'disabled') {
-          return toolResult(
-            toolCall,
-            this.browserRuntime
-              ? 'Browser tools are not bound for this turn. Root must supply a trusted execution context.'
-              : 'Browser runtime is not bound. Call setBrowserRuntime before dispatching browser tools.',
-            true
-          )
-        }
-        if (!trustedAgent && !settingsEnabled(toolCall.name)) {
-          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Skills & MCP.`, true)
-        }
-        const callEvent: LlmToolEvent = {
-          kind: 'build_tool_call',
-          title: `Browser tool ${toolCall.name}`,
-          summary: 'The assistant called a host-bound browser tool.',
-          details: [`Tool: ${toolCall.name}`],
-          response: JSON.stringify(toolCall.arguments, null, 2)
-        }
-        toolEvents.push(callEvent)
-        onToolEvent?.({ ...callEvent, phase: 'start', callId: toolCall.id })
-        const result = await dispatchBrowserTool({
-          port: this.browserRuntime,
-          binding: browserBinding,
-          name: toolCall.name,
-          args: toolCall.arguments,
-          signal
-        })
-        if (result.dispatched) markTrustedEffect()
-        const resultEvent: LlmToolEvent = {
-          kind: 'build_tool_result',
-          title: `Browser tool ${toolCall.name}`,
-          summary: result.isError ? 'The browser tool returned an error.' : 'The browser tool returned successfully.',
-          details: [`Tool: ${toolCall.name}`],
-          response: result.text
-        }
-        toolEvents.push(resultEvent)
-        onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id })
-        const message = toolResult(toolCall, result.text, result.isError)
-        if (result.image && browserBinding.vision) {
-          message.content.push({ type: 'image', data: result.image.data, mimeType: result.image.mimeType })
-        }
-        return message
+      // App tools run through the registry; delegation and applets only where the request has them
+      // (see `dispatch`), as before.
+      const appTool = this.appTools.registry.get(toolCall.name)
+      if (appTool && appTurn && appTool.class !== 'delegation' && toolCall.name !== PUBLISH_APPLET_TOOL.name) {
+        return this.callAppTool(toolCall, appTurn, authority, toolEvents, onToolEvent, signal, trustedAgent)
       }
 
       if (toolCall.name === 'declare_files' && discovery) {
@@ -2161,258 +1876,6 @@ export class LlmClient {
         toolEvents.push(event)
         onToolEvent?.({ ...event, phase: 'complete', callId: toolCall.id })
         return toolResult(toolCall, `Declaration accepted for ${files.length} tracked file(s).`)
-      }
-
-      if (toolCall.name === 'list_skills') {
-
-        if (!settingsEnabled('list_skills')) {
-          return toolResult(toolCall, 'Tool "list_skills" is disabled in Settings → Skills & MCP.', true)
-        }
-        return toolResult(toolCall, JSON.stringify(availableSkills.map(toSkillSummary), null, 2))
-
-      }
-
-
-
-      if (toolCall.name === 'load_skill') {
-
-        if (!settingsEnabled('load_skill')) {
-          return toolResult(toolCall, 'Tool "load_skill" is disabled in Settings → Skills & MCP.', true)
-        }
-        const requested = String(toolCall.arguments.skill ?? '')
-
-        const skill = availableSkills.find(
-
-          (candidate) =>
-
-            candidate.id === requested ||
-
-            candidate.name === requested ||
-
-            normalizeSkillName(candidate.name) === normalizeSkillName(requested)
-
-        )
-
-        if (!skill) return toolResult(toolCall, `Skill not found: ${requested}`, true)
-
-        if (skill['disable-model-invocation']) {
-
-          return toolResult(toolCall, `Skill ${skill.name} can only be loaded by explicit user invocation.`, true)
-
-        }
-
-        markTrustedEffect()
-        const result = await this.skillsRegistry!.readSkill(skill.installationId ?? skill.id, { projectPath })
-
-        const skillEvent: LlmToolEvent = {
-
-          kind: 'skill_loaded',
-
-          title: `Loaded skill ${result.skill.name}`,
-
-          summary: 'Loaded Skill instructions through the orchestrator tool loop.',
-
-          details: [`Skill: ${result.skill.name}`, `Characters: ${result.content.length}`]
-
-        }
-
-        toolEvents.push(skillEvent)
-
-        onToolEvent?.({ ...skillEvent, phase: 'complete', callId: toolCall.id })
-
-        return toolResult(toolCall, truncateForModel(result.content))
-
-      }
-
-
-
-      if (this.planTools.isPlanTool(toolCall.name)) {
-
-        if (!settingsEnabled(toolCall.name)) {
-          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Skills & MCP.`, true)
-        }
-        const callEvent: LlmToolEvent = {
-
-          kind: 'build_tool_call',
-
-          title: `Plan tool ${toolCall.name}`,
-
-          summary: 'The assistant called a plan tool.',
-
-          details: [`Tool: ${toolCall.name}`],
-
-          response: JSON.stringify(toolCall.arguments, null, 2)
-
-        }
-
-        toolEvents.push(callEvent)
-
-        onToolEvent?.({ ...callEvent, phase: 'start', callId: toolCall.id })
-
-
-
-        markTrustedEffect()
-        const planExecution = this.planTools.execute(
-          toolCall.name,
-          toolCall.arguments as Record<string, unknown>,
-          threadId
-        )
-        const result = signal
-          ? await Promise.race([
-              planExecution,
-              new Promise<never>((_resolve, reject) => {
-                const abort = (): void => {
-                  if (threadId) this.questions.dismissAllForThread(threadId)
-                  reject(signal.reason instanceof Error ? signal.reason : new DOMException('Aborted', 'AbortError'))
-                }
-                if (signal.aborted) abort()
-                else signal.addEventListener('abort', abort, { once: true })
-                void planExecution.finally(() => signal.removeEventListener('abort', abort)).catch(() => {})
-              })
-            ])
-          : await planExecution
-
-        const resultEvent: LlmToolEvent = {
-
-          kind: 'build_tool_result',
-
-          title: `Plan tool ${toolCall.name}`,
-
-          summary: result.isError ? 'The plan tool returned an error.' : 'The plan tool returned successfully.',
-
-          details: [`Tool: ${toolCall.name}`],
-
-          response: truncateForDisplay(result.text)
-
-        }
-
-        toolEvents.push(resultEvent)
-
-        onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id })
-
-        return toolResult(toolCall, result.text, result.isError)
-
-      }
-
-      if (this.taskTools?.isTaskTool(toolCall.name)) {
-        if (!settingsEnabled(toolCall.name)) {
-          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Skills & MCP.`, true)
-        }
-        const callEvent: LlmToolEvent = {
-          kind: 'build_tool_call',
-          title: `Task tool ${toolCall.name}`,
-          summary: 'The orchestrator updated the thread task queue.',
-          details: [`Tool: ${toolCall.name}`],
-          response: JSON.stringify(toolCall.arguments, null, 2)
-        }
-        toolEvents.push(callEvent)
-        onToolEvent?.({ ...callEvent, phase: 'start', callId: toolCall.id })
-
-        markTrustedEffect()
-        const result = await this.taskTools.execute(
-          toolCall.name,
-          toolCall.arguments as Record<string, unknown>
-        )
-
-        const resultEvent: LlmToolEvent = {
-          kind: 'build_tool_result',
-          title: `Task tool ${toolCall.name}`,
-          summary: result.isError ? 'The task tool returned an error.' : 'The task tool returned successfully.',
-          details: [`Tool: ${toolCall.name}`],
-          response: truncateForDisplay(result.text)
-        }
-        toolEvents.push(resultEvent)
-
-        onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id })
-        return toolResult(toolCall, result.text, result.isError)
-      }
-
-
-
-      if (this.quickActionTools.isQuickActionTool(toolCall.name)) {
-        if (!settingsEnabled(toolCall.name)) {
-          return toolResult(toolCall, `Tool "${toolCall.name}" is disabled in Settings → Skills & MCP.`, true)
-        }
-        const callEvent: LlmToolEvent = {
-          kind: 'build_tool_call',
-          title: `Quick action ${toolCall.name}`,
-          summary: 'The orchestrator is creating a quick action.',
-          details: [`Tool: ${toolCall.name}`],
-          response: JSON.stringify(toolCall.arguments, null, 2)
-        }
-        toolEvents.push(callEvent)
-        onToolEvent?.({ ...callEvent, phase: 'start', callId: toolCall.id })
-
-        markTrustedEffect()
-        const result = await this.quickActionTools.execute(
-          toolCall.name,
-          toolCall.arguments as Record<string, unknown>,
-          threadId
-        )
-
-        const resultEvent: LlmToolEvent = {
-          kind: 'build_tool_result',
-          title: `Quick action ${toolCall.name}`,
-          summary: result.isError ? 'The quick-action tool returned an error.' : 'The quick-action tool returned successfully.',
-          details: [`Tool: ${toolCall.name}`],
-          response: truncateForDisplay(result.text)
-        }
-        toolEvents.push(resultEvent)
-        onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id })
-        return toolResult(toolCall, result.text, result.isError)
-      }
-
-
-      if (this.devGuiTools.isDevGuiTool(toolCall.name)) {
-        if (!isDevGuiToolsEnabled()) {
-          return toolResult(
-            toolCall,
-            'Dev GUI tools are only available in development (`npm run dev`).',
-            true
-          )
-        }
-        const callEvent: LlmToolEvent = {
-          kind: 'build_tool_call',
-          title: `Dev GUI ${toolCall.name}`,
-          summary: 'The orchestrator is inspecting the dev Electron window.',
-          details: [`Tool: ${toolCall.name}`],
-          response: JSON.stringify(toolCall.arguments, null, 2)
-        }
-        toolEvents.push(callEvent)
-        onToolEvent?.({ ...callEvent, phase: 'start', callId: toolCall.id })
-
-        markTrustedEffect()
-        const result = await this.devGuiTools.execute(
-          toolCall.name,
-          toolCall.arguments as Record<string, unknown>
-        )
-
-        const resultEvent: LlmToolEvent = {
-          kind: 'build_tool_result',
-          title: `Dev GUI ${toolCall.name}`,
-          summary: result.isError
-            ? 'The dev GUI tool returned an error.'
-            : 'The dev GUI tool returned successfully.',
-          details: [`Tool: ${toolCall.name}`],
-          response: truncateForDisplay(result.text)
-        }
-        toolEvents.push(resultEvent)
-        onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id })
-
-        // Screenshot carries a vision image block; all other tools are text-only.
-        return {
-          role: 'toolResult',
-          toolCallId: toolCall.id,
-          toolName: toolCall.name,
-          content: [
-            { type: 'text', text: result.text },
-            ...(result.image
-              ? [{ type: 'image', data: result.image.data, mimeType: result.image.mimeType } as const]
-              : [])
-          ],
-          isError: result.isError,
-          timestamp: Date.now()
-        }
       }
 
       if (this.piCodingTools.isPiTool(toolCall.name) || this.buildTools.isGitTool(toolCall.name) || this.buildTools.isBuildTool(toolCall.name)) {
@@ -2504,6 +1967,7 @@ export class LlmClient {
 
 
 
+      // The user's own MCP servers, proxied (`appTools/userMcp`).
       const mcpTool = mcpTools.find((tool) => tool.providerName === toolCall.name)
 
       if (!mcpTool || !this.mcpManager) {
@@ -2512,71 +1976,24 @@ export class LlmClient {
 
       }
 
-      if (typeof this.mcpManager.isToolCallAllowed === 'function') {
-        const allowed = await this.mcpManager.isToolCallAllowed(mcpTool.providerName, projectPath, actor)
-        if (!allowed.allowed) {
-          return toolResult(
-            toolCall,
-            allowed.reason ?? 'MCP tool is not enabled for this actor.',
-            true
-          )
-        }
-      }
-
-
-
-      const callEvent: LlmToolEvent = {
-
-        kind: 'mcp_tool_call',
-
-        title: `Called ${mcpTool.serverName}.${mcpTool.toolName}`,
-
-        summary: 'The orchestrator called an MCP tool.',
-
-        details: [`Server: ${mcpTool.serverName}`, `Tool: ${mcpTool.toolName}`],
-
-        response: JSON.stringify(toolCall.arguments, null, 2)
-
-      }
-
-      toolEvents.push(callEvent)
-
-      onToolEvent?.({ ...callEvent, phase: 'start', callId: toolCall.id })
-
-
-
-      markTrustedEffect()
-      const result = await this.mcpManager.callTool(
-        toolCall.name,
-        toolCall.arguments,
+      const outcome = await callUserMcpTool({
+        manager: this.mcpManager,
+        tool: mcpTool,
+        call: toolCall,
         projectPath,
+        actor,
         signal,
-        actor
-      )
-
-      const resultEvent: LlmToolEvent = {
-
-        kind: 'mcp_tool_result',
-
-        title: `Called ${mcpTool.serverName}.${mcpTool.toolName}`,
-
-        summary: result.isError ? 'The MCP tool returned an error.' : 'The MCP tool returned successfully.',
-
-        details: [
-          `Server: ${mcpTool.serverName}`,
-          `Tool: ${mcpTool.toolName}`,
-          `Installation: ${result.provenance?.installationId ?? mcpTool.installationId ?? mcpTool.serverId}`
-        ],
-
-        response: truncateForDisplay(result.text)
-
-      }
-
-      toolEvents.push(resultEvent)
-
-      onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id })
-
-      return toolResult(toolCall, mcpResultToToolContent(result), result.isError)
+        timeline: {
+          record: (event, phase) => {
+            toolEvents.push(event)
+            onToolEvent?.({ ...event, phase, callId: toolCall.id })
+          },
+          emit: (event, phase) => onToolEvent?.({ ...event, phase, callId: toolCall.id })
+        },
+        markEffect: markTrustedEffect
+      })
+      if (outcome.kind === 'refused') return toolResult(toolCall, outcome.text, true)
+      return toolResult(toolCall, outcome.content, outcome.isError)
 
     } catch (err) {
 
@@ -2607,20 +2024,6 @@ function withGeneratedMemory(systemPrompt: string, summary: string): string {
   return `${systemPrompt}\n\nThe following is generated context from older archived events. It is not a new user message. Preserve verbatim user directives quoted within it, but verify assistant progress and tool observations before relying on them.\n\n${summary.trim()}`
 }
 
-function toPiTool(tool: McpToolDescriptor): Tool {
-
-  return {
-
-    name: tool.providerName,
-
-    description: tool.description || `Call ${tool.toolName} on MCP server ${tool.serverName}.`,
-
-    parameters: toTypeboxSchema(tool.inputSchema)
-
-  }
-
-}
-
 function isTrustedToolAllowed(
   toolName: string,
   mcpTools: McpToolDescriptor[],
@@ -2641,23 +2044,9 @@ function isTrustedToolAllowed(
 
 
 
-function toTypeboxSchema(schema: Record<string, unknown> | undefined): TSchema {
-
-  if (schema && schema.type === 'object') {
-
-    return schema as unknown as TSchema
-
-  }
-
-  return Type.Object({}, { additionalProperties: true })
-
-}
-
-
-
 function toolResult(
   toolCall: ToolCall,
-  text: string | ReturnType<typeof mcpResultToToolContent>,
+  text: string | Array<Record<string, unknown>>,
   isError = false
 ): ToolResultMessage {
   const content = typeof text === 'string' ? [{ type: 'text' as const, text }] : text
@@ -2671,44 +2060,11 @@ function toolResult(
   }
 }
 
-function mcpResultToToolContent(result: McpToolCallResult): Array<Record<string, unknown>> {
-  const blocks: Array<Record<string, unknown>> = []
-  for (const block of result.content ?? []) {
-    if (block.type === 'text') {
-      blocks.push({ type: 'text', text: block.text })
-      continue
-    }
-    if (block.type === 'image' && block.data) {
-      blocks.push({ type: 'image', data: block.data, mimeType: block.mimeType })
-      continue
-    }
-    if (block.type === 'image') {
-      blocks.push({
-        type: 'text',
-        text: `[image ${block.mimeType}${block.bytes ? `, ${block.bytes} bytes` : ''}${block.artifactId ? `; artifact=${block.artifactId}` : ''}]`
-      })
-      continue
-    }
-    if (block.type === 'resource_link') {
-      blocks.push({ type: 'text', text: `[resource ${block.uri}]` })
-      continue
-    }
-    if (block.type === 'resource') {
-      blocks.push({ type: 'text', text: block.text ?? `[resource ${block.uri ?? 'untyped'}]` })
-      continue
-    }
-    blocks.push({ type: 'text', text: `[${block.rawType}]` })
-  }
-  if (result.structuredContent !== undefined) {
-    blocks.push({
-      type: 'text',
-      text: `structuredContent: ${JSON.stringify(result.structuredContent)}`
-    })
-  }
-  if (blocks.length === 0) {
-    blocks.push({ type: 'text', text: result.text || (result.isError ? 'MCP tool returned an error.' : '') })
-  }
-  return blocks
+/** An app tool outcome as the tool result the loop appends: its text, then its images. */
+function appToolResult(toolCall: ToolCall, outcome: ToolOutcome): ToolResultMessage {
+  const message = toolResult(toolCall, outcome.text, outcome.isError ?? false)
+  for (const image of outcome.images ?? []) message.content.push({ type: 'image', data: image.data, mimeType: image.mimeType })
+  return message
 }
 
 function calculateTokensPerSecond(outputTokens: number, streamDurationMs: number): number | undefined {
@@ -2732,46 +2088,6 @@ function emptyUsage(): Usage {
     totalTokens: 0,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
   }
-}
-
-
-
-function toSkillSummary(skill: SkillDescriptor): Record<string, unknown> {
-
-  return {
-
-    id: skill.id,
-
-    name: skill.name,
-
-    description: skill.description,
-
-    scope: skill.scope,
-
-    source: skill.source,
-
-    paths: skill.paths,
-
-    modelInvocationDisabled: skill['disable-model-invocation'] === true
-
-  }
-
-}
-
-
-
-function normalizeSkillName(value: string): string {
-
-  return value.toLowerCase().replace(/[^a-z0-9_-]/g, '-')
-
-}
-
-
-
-function truncateForModel(value: string): string {
-
-  return value.length > 16_000 ? `${value.slice(0, 16_000)}\n...[truncated]` : value
-
 }
 
 
@@ -3012,168 +2328,4 @@ function isValidAction(a: unknown): a is OrchestratorAction {
 
   return false
 
-}
-
-/** Delegation tool schemas (SPEC §14.2) plus the named-agent compatibility wrappers. */
-const DELEGATION_TOOLS: Tool[] = [
-  { name: 'delegate_task', description: 'Start a new subagent on its own thread and return at once with its delegationId. Mousse sends you a notice with the result when it finishes. title is a short role-like name ("API reviewer"), unique among your subagents: it is how you address the subagent later (continue_subagent, task_status, task_cancel); when it is taken the call returns title_taken and starts nothing. workspace isolated gives the subagent its own worktree; shared is only for read-only roles (research, review). instanceId (the agent to run, such as "claude" or "pi:openai") and model default to yours; provider is the older name form of instanceId.',
-    parameters: Type.Object({ prompt: Type.String(), title: Type.String(), instanceId: Type.Optional(Type.String()), provider: Type.Optional(Type.String()), model: Type.Optional(Type.String()), role: Type.Optional(Type.String()),
-      workspace: Type.Union([Type.Literal('isolated'), Type.Literal('shared')]),
-      wake: Type.Optional(Type.Union([Type.Literal('always'), Type.Literal('settled_only')])) }) },
-  { name: 'continue_subagent', description: 'Send a follow-up to a subagent you already started, by title (or childThreadId, or delegationId). It continues on the same thread with the context it has, so use it when the next step builds on what it read or did. Starts a new task, returns at once with its delegationId, and Mousse sends you a notice with the result. A subagent that is busy runs the follow-up after its current task (status queued). A subagent waiting for an answer returns needs_answer with its question; answer it with answer_subagent. It cannot change workspace, provider or model; start a new subagent for that.',
-    parameters: Type.Object({ subagent: Type.String(), prompt: Type.String() }) },
-  { name: 'answer_subagent', description: 'Answer a question one of your subagents asked (ask_user), using the requestId from continue_subagent (needs_answer) or from the question notice. answers maps each question id to the chosen option id (an array when several are allowed) or free text.',
-    parameters: Type.Object({ subagent: Type.String(), requestId: Type.String(), answers: Type.Record(Type.String(), Type.Union([Type.String(), Type.Array(Type.String())])) }) },
-  { name: 'task_status', description: 'Status of a subagent task, with its result once finished (bounded). Pass the delegationId, or the subagent title for its latest task. Reading a result acknowledges it.', parameters: Type.Object({ delegationId: Type.Optional(Type.String()), subagent: Type.Optional(Type.String()) }) },
-  { name: 'task_cancel', description: 'Cancel a subagent task and everything that subagent delegated, deepest first. Pass the delegationId, or the subagent title to cancel all of its open tasks.', parameters: Type.Object({ delegationId: Type.Optional(Type.String()), subagent: Type.Optional(Type.String()) }) },
-  { name: 'list_delegations', description: 'List the tasks this thread delegated, with their status.', parameters: Type.Object({}) },
-  { name: 'integrate_delegation', description: 'Merge a finished isolated subagent task into this thread workspace. Pass the delegationId, or the subagent title for its latest finished task. Merges exactly what that task finished with, even if the subagent has worked since. Runs as its own integration run after this turn; you are notified of the outcome.', parameters: Type.Object({ delegationId: Type.Optional(Type.String()), subagent: Type.Optional(Type.String()) }) },
-  { name: 'create_subagent', description: 'Named wrapper over delegate_task: starts a child thread titled with the name and returns at once. Defaults to shared read-only research; access write runs in an isolated worktree.',
-    parameters: Type.Object({ name: Type.String(), task: Type.String(),
-      workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])),
-      access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])) }) },
-  { name: 'create_subagents', description: 'Start up to eight named delegated tasks at once (see create_subagent).', parameters: Type.Object({ agents: Type.Array(Type.Object({ name: Type.String(), task: Type.String(), workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])), access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])) }), { minItems: 1, maxItems: 8 }) }) },
-  { name: 'integrate_subagent', description: 'Named wrapper over integrate_delegation for the latest finished task of the named child.', parameters: Type.Object({ agent: Type.String(), episodeId: Type.Optional(Type.String()), expectedResultSha: Type.Optional(Type.String()), expectedDestinationSha: Type.Optional(Type.String()) }) },
-  { name: 'recall_subagent', description: 'Send a follow-up task to an existing named child thread; returns at once and wakes you when it finishes.',
-    parameters: Type.Object({ agent: Type.String(), task: Type.String(), expectedAgentGeneration: Type.Optional(Type.Integer({ minimum: 0 })),
-      workspace: Type.Optional(Type.Union([Type.Literal('shared'), Type.Literal('isolated')])),
-      access: Type.Optional(Type.Union([Type.Literal('read-only'), Type.Literal('write')])),
-      contextMode: Type.Optional(Type.Union([Type.Literal('continue'), Type.Literal('fresh')])), resumeResult: Type.Optional(Type.Boolean()) }) },
-  { name: 'list_subagents', description: 'List your subagents, one row per subagent: title, childThreadId, state, latest delegationId, whether a result is unread, workspace, provider and model.', parameters: Type.Object({}) }
-]
-
-/** Every name `dispatchDelegationTool` runs, the hidden compatibility aliases included. */
-const DELEGATION_TOOL_NAMES: ReadonlySet<string> = new Set(DELEGATION_TOOLS.map((tool) => tool.name))
-
-/**
- * The tools both the pi loop and the Mousse MCP server offer, in one list. The older names
- * (`create_subagent(s)`, `recall_subagent`, `integrate_subagent`, `list_delegations`) stay
- * dispatchable for replayed transcripts but are not listed.
- */
-export const LISTED_DELEGATION_TOOL_NAMES = ['delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'integrate_delegation'] as const
-
-/**
- * Runs one delegation tool and writes it to the timeline as a Mousse MCP call, the shape Claude
- * and Codex rows have, with the bounded record the app needs to tell which task it started
- * (`recordSubagentCall`): never the prompt or the result text.
- */
-export async function executeDelegationTool(
-  host: DelegationToolHost,
-  toolCall: ToolCall,
-  toolEvents: LlmToolEvent[],
-  onToolEvent?: LlmToolEventHandler
-): Promise<ToolResultMessage> {
-  const callEvent: LlmToolEvent = {
-    kind: 'mcp_tool_call',
-    title: `Called mousse.${toolCall.name}`,
-    summary: 'The orchestrator called a Mousse tool.',
-    details: ['Server: mousse', `Tool: ${toolCall.name}`]
-  }
-  const started = recordSubagentCall(toolCall.name, toolCall.arguments, {})
-  toolEvents.push(callEvent)
-  onToolEvent?.({ ...callEvent, phase: 'start', callId: toolCall.id, ...(started ? { input: started.input } : {}) })
-  const finish = (text: string, isError: boolean): void => {
-    const record = recordSubagentCall(toolCall.name, toolCall.arguments, { text, isError })
-    const resultEvent: LlmToolEvent = {
-      kind: 'mcp_tool_result',
-      title: callEvent.title,
-      summary: isError ? 'The MCP tool returned an error.' : 'The MCP tool returned successfully.',
-      details: callEvent.details,
-      ...(record?.response ? { response: record.response } : {})
-    }
-    toolEvents.push(resultEvent)
-    onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id, ...(record ? { input: record.input } : {}) })
-  }
-  let text: string
-  try {
-    text = JSON.stringify(await dispatchDelegationTool(host, toolCall))
-  } catch (error) {
-    // The caller turns a throw into the tool's error result; the row says so too.
-    finish(error instanceof Error ? error.message : String(error), true)
-    throw error
-  }
-  finish(text, false)
-  return toolResult(toolCall, text, false)
-}
-
-/** Definitions shared by the pi loop and the Mousse MCP server, so both offer identical schemas. */
-export function delegationToolDefinitions(names: readonly string[] = LISTED_DELEGATION_TOOL_NAMES): Tool[] {
-  return DELEGATION_TOOLS.filter((tool) => names.includes(tool.name))
-}
-
-function requireString(input: Record<string, unknown>, key: string, message: string): string {
-  const value = input[key]
-  if (typeof value !== 'string' || !value.trim()) throw new Error(message)
-  return value
-}
-
-/** The task a call names: a `delegationId`, or a `subagent` (its title, childThreadId or delegationId). */
-function subagentRef(args: Record<string, unknown>, tool: string): SubagentRef {
-  const delegationId = typeof args.delegationId === 'string' && args.delegationId.trim() ? args.delegationId : undefined
-  const subagent = typeof args.subagent === 'string' && args.subagent.trim() ? args.subagent : undefined
-  if (!delegationId && !subagent) throw new Error(`${tool} requires a delegationId or a subagent title`)
-  return { ...(delegationId ? { delegationId } : {}), ...(subagent ? { subagent } : {}) }
-}
-
-/** Runs one delegation tool call against the turn's host (also used by the pi replay kit). */
-export async function dispatchDelegationTool(host: DelegationToolHost, toolCall: ToolCall): Promise<unknown> {
-  const args = (toolCall.arguments ?? {}) as Record<string, unknown>
-  const call: DelegationToolCall = { toolCallId: toolCall.id }
-  switch (toolCall.name) {
-    case 'delegate_task': {
-      const prompt = requireString(args, 'prompt', 'delegate_task requires a prompt')
-      if (args.workspace !== 'isolated' && args.workspace !== 'shared') throw new Error('delegate_task requires workspace isolated or shared')
-      if (args.wake !== undefined && args.wake !== 'always' && args.wake !== 'settled_only') throw new Error('wake must be always or settled_only')
-      for (const key of ['instanceId', 'provider', 'model', 'role'] as const)
-        if (args[key] !== undefined && (typeof args[key] !== 'string' || !String(args[key]).trim())) throw new Error(`${key} must be a non-empty string`)
-      if (args.modeCeiling !== undefined && args.modeCeiling !== 'plan' && args.modeCeiling !== 'default') throw new Error('modeCeiling must be plan or default')
-      const title = requireString(args, 'title', 'delegate_task requires a title: a short role-like name for the subagent, such as "API reviewer"').trim()
-      return host.delegateTask({ prompt, title, workspace: args.workspace, wake: args.wake as DelegateTaskInput['wake'],
-        instanceId: args.instanceId as string | undefined, provider: args.provider as string | undefined, model: args.model as string | undefined, role: args.role as string | undefined,
-        ...(args.modeCeiling !== undefined ? { modeCeiling: args.modeCeiling as DelegateTaskInput['modeCeiling'] } : {}) }, call)
-    }
-    case 'continue_subagent':
-      return host.continueSubagent({
-        subagent: requireString(args, 'subagent', 'continue_subagent requires a subagent: its title, childThreadId or delegationId'),
-        prompt: requireString(args, 'prompt', 'continue_subagent requires a prompt')
-      }, call)
-    case 'answer_subagent': {
-      const answers = args.answers
-      if (!answers || typeof answers !== 'object' || Array.isArray(answers) ||
-        Object.values(answers).some((value) => typeof value !== 'string' && !(Array.isArray(value) && value.every((item) => typeof item === 'string'))))
-        throw new Error('answer_subagent requires answers: an object mapping each question id to an option id, an array of option ids, or text')
-      return host.answerSubagent({
-        subagent: requireString(args, 'subagent', 'answer_subagent requires a subagent: its title, childThreadId or delegationId'),
-        requestId: requireString(args, 'requestId', 'answer_subagent requires the requestId of the question'),
-        answers: answers as Record<string, string | string[]>
-      }, call)
-    }
-    case 'task_status':
-      return host.taskStatus(subagentRef(args, 'task_status'))
-    case 'task_cancel':
-      return host.taskCancel(subagentRef(args, 'task_cancel'))
-    case 'list_delegations':
-      return host.listDelegations()
-    case 'integrate_delegation':
-      return host.integrateDelegation(subagentRef(args, 'integrate_delegation'), call)
-    case 'create_subagent': {
-      if (typeof args.name !== 'string' || typeof args.task !== 'string') throw new Error('Named subagent requires name and task')
-      return host.named.create(args as unknown as NamedAgentToolRequest, call)
-    }
-    case 'create_subagents': {
-      const agents = args.agents as NamedAgentToolRequest[] | undefined
-      if (!Array.isArray(agents) || agents.some((agent) => typeof agent?.name !== 'string' || typeof agent?.task !== 'string')) throw new Error('Parallel named assignments require names and tasks')
-      return host.named.createBatch(agents, call)
-    }
-    case 'integrate_subagent':
-      return host.named.integrate({ agent: requireString(args, 'agent', 'Integration requires the agent name') }, call)
-    case 'recall_subagent': {
-      if (typeof args.agent !== 'string' || typeof args.task !== 'string' || args.contextMode !== undefined && !['continue', 'fresh'].includes(String(args.contextMode))) throw new Error('Recall requires agent and task')
-      return host.named.recall(args as unknown as NamedAgentRecallRequest, call)
-    }
-    case 'list_subagents':
-      return host.listSubagents()
-    default:
-      throw new Error(`Unknown delegation tool ${toolCall.name}`)
-  }
 }

@@ -40,6 +40,8 @@ export function piLegacyDriver(options: { client: () => PiChatClient; credential
     // The loop runs a custom model with its provider's transport (`customModelDefinition`).
     customModels: true,
     methodLabel: 'API key or sign-in',
+    // The pi loop calls the app tools in process and proxies the user's MCP servers.
+    userMcp: 'proxy',
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     caps: () => PI_LEGACY_CAPS,
     create(context: DriverContext): DriverRuntime {

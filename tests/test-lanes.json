@@ -68,6 +68,7 @@
     "tests/resourceLifecycleStoreInventory.test.ts",
     "tests/resourcePurgeQualification.test.ts",
     "tests/resourcePurgeWindows.test.ts",
+    "tests/run/mcpTurnBindingClaude.test.ts",
     "tests/run/providerBranchRatchet.test.ts",
     "tests/run/restoreSafety.test.ts",
     "tests/run/threadFork.test.ts",

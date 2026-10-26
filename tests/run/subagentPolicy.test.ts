@@ -14,7 +14,8 @@ import { CODEX_CAPABILITIES } from '../../src/mms/run/adapters/codex/CodexAdapte
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { READ_ONLY_MOUSSE_TOOLS } from '../../src/mms/run/mcp/attachment'
-import { createMousseToolRegistry, ToolRegistry } from '../../src/mms/run/mcp/toolRegistry'
+import { AppToolTurns, ToolRegistry } from '../../src/mms/run/mcp/appTools'
+import { appTurn } from './appToolsFixture'
 import { subagentTargetRefusal, type ChildPreflightContext, type SubagentRefusal } from '../../src/mms/run/policy/featureGates'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { phase6Daemon, waitFor } from './phase6Fixture'
@@ -147,8 +148,8 @@ describe('delegated child policy', () => {
 
   it('the read-only Mousse tool list runtimes use matches what the registry lets a read-only child call', () => {
     const { d } = daemon(async () => undefined)
-    const registry = createMousseToolRegistry({ engine: d.engine, host: d.orch.mcpToolHost() })
-    const callable = registry.list().filter((tool) => tool.access === 'reads' || tool.readOnlySafe).map((tool) => tool.name)
+    const registry = d.orch.mcpToolRegistry()
+    const callable = registry.list().filter((tool) => !tool.hidden && (tool.access === 'reads' || tool.readOnlySafe)).map((tool) => tool.name)
     expect(new Set(callable)).toEqual(READ_ONLY_MOUSSE_TOOLS)
   })
 
@@ -345,7 +346,7 @@ describe('delegated child policy', () => {
       if (!name || probed.has(name)) return 'Looked.'
       probed.add(name)
       const tools = await registry
-      const caller = { threadId: input.threadId, runId: input.runId, provider: 'claude', modeCeiling: 'default' as const }
+      const credential = { threadId: input.threadId, runId: input.runId, provider: 'codex', modeCeiling: 'default' as const, binding: 'drained_turn' as const, current: () => true }
       for (const [tool, args] of [
         ['thread_read', {}],
         ['queue_list', {}],
@@ -356,11 +357,11 @@ describe('delegated child policy', () => {
         ['integrate_delegation', { delegationId: 'delegation:any' }],
         ['create_task', { title: 't' }]
       ] as const) {
-        results[name][tool] = await tools.call(tool, { ...args }, { caller, toolCallId: `${name}-${tool}`, signal: new AbortController().signal })
+        results[name][tool] = await tools.call(tool, { ...args }, { credential, toolCallId: `${name}-${tool}`, signal: new AbortController().signal })
           .then((outcome) => tool === 'delegate_task' ? (JSON.parse(outcome.text).code ?? 'started') : 'allowed', (error: { code?: string }) => error.code ?? 'error')
       }
       // A read-only child may start a read-only subagent through the MCP server.
-      const nestedShared = await tools.call('delegate_task', { prompt: 'sub', title: 'Looker', workspace: 'shared', role: 'research', instanceId: 'claude' }, { caller, toolCallId: `${name}-nested`, signal: new AbortController().signal })
+      const nestedShared = await tools.call('delegate_task', { prompt: 'sub', title: 'Looker', workspace: 'shared', role: 'research', instanceId: 'claude' }, { credential, toolCallId: `${name}-nested`, signal: new AbortController().signal })
       results[name].delegate_shared = JSON.parse(nestedShared.text).code ?? 'started'
       return 'Probed.'
     }
@@ -369,7 +370,7 @@ describe('delegated child policy', () => {
       started.isolated = await delegate(delegation, { workspace: 'isolated', role: 'implement' }, 'isolated') as never
     }, async (input) => probe(input))
     engine = d.engine
-    registryReady!(createMousseToolRegistry({ engine: d.engine, host: d.orch.mcpToolHost() }))
+    registryReady!(d.orch.mcpToolRegistry())
     await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
     for (const child of Object.values(started)) await waitFor(() => d.engine.getRun(child.childRunId)?.status === 'completed', 'a child run')
 
@@ -393,16 +394,22 @@ describe('delegated child policy', () => {
 
 describe('ToolRegistry read-only gate', () => {
   const tool = (name: string, access: 'reads' | 'actsAsCaller' | 'writesThreads' | 'startsThreads', readOnlySafe = false) => ({
-    name, description: name, inputSchema: {}, access, ...(readOnlySafe ? { readOnlySafe } : {}), handler: () => ({ text: 'ok' })
+    name, description: name, inputSchema: {}, access, class: 'read' as const, ...(readOnlySafe ? { readOnlySafe } : {}), handler: () => ({ text: 'ok' })
   })
-  const registry = new ToolRegistry({ activeRunId: () => 'run-1', readOnlyThread: (threadId) => threadId === 'child' })
+  const turns = new AppToolTurns()
+  for (const threadId of ['child', 'parent']) turns.register(appTurn({ threadId, runId: `run-${threadId}` }))
+  const registry = new ToolRegistry({ activeRunId: (threadId) => `run-${threadId}`, readOnlyThread: (threadId) => threadId === 'child', turns })
     .register(tool('reads', 'reads'))
     .register(tool('safe', 'actsAsCaller', true))
     .register(tool('acts', 'actsAsCaller'))
     .register(tool('writes', 'writesThreads'))
     .register(tool('starts', 'startsThreads'))
   const call = (name: string, threadId: string) =>
-    registry.call(name, {}, { caller: { threadId, runId: 'run-1', provider: 'claude', modeCeiling: 'default' }, toolCallId: 'c', signal: new AbortController().signal })
+    registry.call(name, {}, {
+      credential: { threadId, runId: `run-${threadId}`, provider: 'codex', modeCeiling: 'default', binding: 'drained_turn', current: () => true },
+      toolCallId: 'c',
+      signal: new AbortController().signal
+    })
 
   it.each([
     ['reads', true], ['safe', true], ['acts', false], ['writes', false], ['starts', false]

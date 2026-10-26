@@ -7,14 +7,18 @@ import { createHarnessGateway, type Harness, type HarnessGatewayOptions } from '
 import { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { ProviderInstanceService } from '../../providers/ProviderInstanceService'
 import type { ProviderAdapter } from '../adapters/ProviderAdapter'
+import type { McpTurnBinding } from '../mcp/appTools/registry'
+
+/** The turn binding each real driver declares (`harness/drivers/*`), for test drivers of the same kind. */
+const TURN_BINDINGS: Partial<Record<ProviderAdapter['driver'], McpTurnBinding>> = { claude: 'per_call', codex: 'drained_turn', antigravity: 'drained_turn', acp: 'drained_turn' }
 
 /**
  * Test drivers over a plain `ProviderAdapter` (scripted, fake or replay adapters), so run-engine
  * tests drive the orchestrator through the real gateway. Capabilities are the adapter's own plus
  * the gateway's three, derived the way the drivers derive them.
  */
-export function adapterDriver(adapter: ProviderAdapter, extra: Partial<HarnessCaps> & { runtime?: Partial<DriverRuntime> } = {}): HarnessDriver {
-  const { runtime, ...caps } = extra
+export function adapterDriver(adapter: ProviderAdapter, extra: Partial<HarnessCaps> & { runtime?: Partial<DriverRuntime>; mcpTurnBinding?: McpTurnBinding } = {}): HarnessDriver {
+  const { runtime, mcpTurnBinding, ...caps } = extra
   const contextUsage: HarnessCaps['contextUsage'] = adapter.describe ? adapter.describe('').contextUsage : 'measured'
   return {
     kind: adapter.driver,
@@ -24,6 +28,9 @@ export function adapterDriver(adapter: ProviderAdapter, extra: Partial<HarnessCa
     privateHome: false,
     canInstall: false,
     customModels: true,
+    mcpTurnBinding: mcpTurnBinding ?? TURN_BINDINGS[adapter.driver],
+    // As the real Claude Code and Codex drivers declare.
+    mcpImageResults: adapter.driver === 'claude' || adapter.driver === 'codex',
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     // Mousse-run tools (strong containment) are exact; the vendor-like test runtimes ask first.
     caps: () => ({ ...adapter.capabilities, planMode: true, contextUsage, toolControl: adapter.capabilities.containment === 'strong' ? 'exact' : 'approval_only', budgets: 'unsupported', spendLimits: 'unsupported', ...caps }),
