@@ -91,3 +91,40 @@ describe('chat Markdown list rendering', () => {
     expect(markup).toContain('</code>)')
   })
 })
+
+describe('chat Markdown GitHub alerts', () => {
+  it('renders each alert kind as a labeled callout without the marker', () => {
+    for (const [marker, title] of [['NOTE', 'Note'], ['TIP', 'Tip'], ['IMPORTANT', 'Important'], ['WARNING', 'Warning'], ['CAUTION', 'Caution']]) {
+      const markup = render(`> [!${marker}]\n> Back up the database first.`)
+      expect(markup).toContain(`an-md-alert-${marker.toLowerCase()}`)
+      expect(markup).toContain(`>${title}</p>`)
+      expect(markup).toContain('Back up the database first.')
+      expect(markup).not.toContain(`[!${marker}]`)
+      expect(markup).not.toContain('<blockquote')
+    }
+  })
+
+  it('keeps later paragraphs inside the callout', () => {
+    const markup = render('> [!TIP]\n>\n> First.\n>\n> Second.')
+    expect(markup).toContain('an-md-alert-tip')
+    expect(markup).toMatch(/First\.[\s\S]*Second\./)
+  })
+
+  it('accepts lowercase markers', () => {
+    expect(render('> [!note]\n> Body')).toContain('an-md-alert-note')
+  })
+
+  it('keeps a quote when the marker shares its line with text', () => {
+    const markup = render('> [!NOTE] inline text')
+    expect(markup).toContain('<blockquote')
+    expect(markup).not.toContain('an-md-alert')
+  })
+
+  it('keeps ordinary blockquotes and unknown markers', () => {
+    for (const content of ['> Just a quote', '> [!DANGER]\n> Body']) {
+      const markup = render(content)
+      expect(markup).toContain('<blockquote')
+      expect(markup).not.toContain('an-md-alert')
+    }
+  })
+})

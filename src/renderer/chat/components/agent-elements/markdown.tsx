@@ -2,7 +2,7 @@
 
 import { memo, type ReactNode } from "react";
 import { Streamdown, type Components } from "streamdown";
-import { Children } from "react";
+import { Children, cloneElement, isValidElement } from "react";
 import { cn } from "./utils/cn";
 import { codeHighlighter } from "./code-highlighter";
 import { classifyLink, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
@@ -145,6 +145,36 @@ function renderInlineChildren(children: ReactNode): ReactNode {
   return tokenizeInlineCode(text);
 }
 
+const ALERT_KINDS = {
+  note: "Note",
+  tip: "Tip",
+  important: "Important",
+  warning: "Warning",
+  caution: "Caution",
+} as const;
+type AlertKind = keyof typeof ALERT_KINDS;
+
+// The marker must own its line, as on GitHub: `> [!NOTE] text` stays a quote.
+const ALERT_MARKER_RE = /^\s*\[!(note|tip|important|warning|caution)\][ \t]*(?:\n|$)/i;
+
+/** GitHub alert syntax: a blockquote whose first line is `[!NOTE]` etc.
+ *  Returns the kind and the children with the marker removed. */
+function splitAlert(children: ReactNode): { kind: AlertKind; body: ReactNode[] } | null {
+  const parts = Children.toArray(children);
+  const firstIndex = parts.findIndex((part) => typeof part !== "string" || part.trim() !== "");
+  const first = parts[firstIndex];
+  if (!isValidElement<{ children?: ReactNode }>(first)) return null;
+  const inner = Children.toArray(first.props.children);
+  const lead = inner[0];
+  if (typeof lead !== "string") return null;
+  const match = ALERT_MARKER_RE.exec(lead);
+  if (!match) return null;
+  const rest = [lead.slice(match[0].length), ...inner.slice(1)].filter((part) => part !== "");
+  const body = parts.slice(firstIndex + 1);
+  if (rest.length > 0) body.unshift(cloneElement(first, undefined, ...rest));
+  return { kind: match[1].toLowerCase() as AlertKind, body };
+}
+
 export type MarkdownProps = {
   content: string;
   className?: string;
@@ -247,14 +277,30 @@ const markdownComponents: Components = {
       </a>
     );
   },
-  blockquote: ({ children, ...props }) => (
-    <blockquote
-      className="an-md-blockquote pl-3 italic mb-2 text-base border-l-2 border-an-border-color text-an-foreground/70"
-      {...props}
-    >
-      {children}
-    </blockquote>
-  ),
+  blockquote: ({ children, ...props }) => {
+    const alert = splitAlert(children);
+    if (alert) {
+      const title = ALERT_KINDS[alert.kind];
+      return (
+        <div
+          className={`an-md-alert an-md-alert-${alert.kind} my-3 pl-3 border-l-2`}
+          role="note"
+          aria-label={title}
+        >
+          <p className="an-md-alert-title text-sm font-medium mb-1">{title}</p>
+          {alert.body}
+        </div>
+      );
+    }
+    return (
+      <blockquote
+        className="an-md-blockquote pl-3 italic mb-2 text-base border-l-2 border-an-border-color text-an-foreground/70"
+        {...props}
+      >
+        {children}
+      </blockquote>
+    );
+  },
   hr: ({ ...props }) => (
     <hr className="an-md-hr my-4 border-an-border-color" {...props} />
   ),
