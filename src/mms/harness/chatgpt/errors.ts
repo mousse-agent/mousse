@@ -31,6 +31,8 @@ export type ChatGptFailure =
   | 'storage_locked'
   /** A newer Mousse saved the connection. It is kept. */
   | 'storage_newer'
+  /** A replacement of the damaged store was interrupted and cannot be finished; it needs a person. */
+  | 'storage_swap'
   | 'unauthorized'
   | 'cancelled'
   | 'busy'
@@ -94,6 +96,8 @@ export const MESSAGES = {
   superseded: 'The ChatGPT connection changed while you were signing in. Sign in again.',
   revocationPending: 'Signed out in Mousse. Revoking the old sign-in at OpenAI is still pending; sign out again to retry.',
   storeChanged: 'The ChatGPT connection changed while this was running. Try again.',
+  storageSwapStuck: (intentPath: string) =>
+    `Mousse couldn't finish replacing the damaged ChatGPT connection because its files were moved or deleted. Delete ${intentPath} to start over, then sign in again.`,
   storageSetAside: "Mousse couldn't set the damaged ChatGPT connection aside because another Mousse window is using it. Close it and try again.",
   stopPending: 'Signed in. Work that used the previous sign-in could not be stopped yet; it is retried before the old sign-in is revoked.',
   modelsUnauthorized: 'ChatGPT rejected the connection while listing models. Checking the sign-in again.',

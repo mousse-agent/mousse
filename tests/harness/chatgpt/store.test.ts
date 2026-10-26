@@ -13,7 +13,9 @@ import { chatgptAuth, signIn, startSignIn } from './signInFlow'
 const fsControl = vi.hoisted(() => ({
   failRename: null as ((from: string) => boolean) | null,
   /** Called when the store checks whether a file exists, before the answer. */
-  beforeExists: null as ((path: string) => void) | null
+  beforeExists: null as ((path: string) => void) | null,
+  /** Overrides the answer for a path (undefined: the real answer). */
+  fakeExists: null as ((path: string) => boolean | undefined) | null
 }))
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
@@ -21,7 +23,7 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     existsSync: (path: Parameters<typeof actual.existsSync>[0]) => {
       fsControl.beforeExists?.(String(path))
-      return actual.existsSync(path)
+      return fsControl.fakeExists?.(String(path)) ?? actual.existsSync(path)
     },
     renameSync: (from: Parameters<typeof actual.renameSync>[0], to: Parameters<typeof actual.renameSync>[1]) => {
       if (fsControl.failRename?.(String(from))) throw Object.assign(new Error('simulated EPERM'), { code: 'EPERM' })
@@ -39,6 +41,7 @@ beforeEach(async () => {
 afterEach(async () => {
   fsControl.failRename = null
   fsControl.beforeExists = null
+  fsControl.fakeExists = null
   await issuer.stop()
 })
 
@@ -456,6 +459,36 @@ describe('ChatGPT store', () => {
     // storeProcesses.test.ts).
     new ChatGptStore(path, plainCodec).read()
     for (const file of abandoned) expect(existsSync(file)).toBe(false)
+  })
+
+  it('an unlocked read never creates a database at the live name', () => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'i')
+    mkdirSync(dirname(path), { recursive: true })
+    // The database looked present, then vanished (a swap moved it aside) before the read opened it.
+    fsControl.fakeExists = (file) => (file === path ? true : undefined)
+    expect(new ChatGptStore(path, plainCodec).read()).toEqual(emptyStore())
+    fsControl.fakeExists = null
+    expect(existsSync(path)).toBe(false)
+  })
+
+  it.each([
+    ['both halves of the swap are gone', (path: string) => JSON.stringify({ temporary: `${path}.new-gone`, aside: `${path}.corrupt-gone` })],
+    ['the swap intent is unreadable', () => '{"temporary":']
+  ])('a swap that cannot be finished (%s) fails typed and keeps its intent for a person', (_name, intent) => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'i')
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(`${path}.swap`, intent(path))
+    const store = new ChatGptStore(path, plainCodec)
+    for (const run of [() => store.recover(), () => store.read()]) {
+      expect(run).toThrow(expect.objectContaining({ failure: 'storage_swap', message: expect.stringContaining(`${path}.swap`) }))
+    }
+    expect(existsSync(`${path}.swap`)).toBe(true)
+    expect(existsSync(path)).toBe(false)
+    // Once a person removes it, recovery starts over.
+    rmSync(`${path}.swap`)
+    expect(store.read()).toEqual(emptyStore())
   })
 
   it('the profile key covers client, subject, ID token and epoch', () => {

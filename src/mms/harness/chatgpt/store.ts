@@ -187,6 +187,7 @@ CREATE TABLE IF NOT EXISTS set_aside (
 // SQLite primary result codes (node:sqlite reports extended codes in `errcode`).
 const SQLITE_BUSY = 5
 const SQLITE_CORRUPT = 11
+const SQLITE_CANTOPEN = 14
 const SQLITE_NOTADB = 26
 
 function sqliteCode(error: unknown): number | undefined {
@@ -336,11 +337,59 @@ export class ChatGptStore {
       // A store never written reads as empty without creating anything.
       return emptyStore()
     }
+    let snapshot: ChatGptStoreData | 'missing' | 'needs_write'
     try {
-      return this.withDatabase((database) => this.decode(this.row(database), this.incarnation(database)))
+      snapshot = this.readOnly()
     } catch (error) {
       if (error instanceof CorruptDatabase) throw corrupt()
       throw error
+    }
+    if (snapshot === 'missing') {
+      if (this.wasSetAside()) throw corrupt()
+      return emptyStore()
+    }
+    if (snapshot !== 'needs_write') return snapshot
+    // An older layout or a lost incarnation needs a write: do it like any other, under the mutex.
+    try {
+      return this.withMutex(() => this.withDatabase((database) => this.decode(this.row(database), this.incarnation(database))))
+    } catch (error) {
+      if (error instanceof CorruptDatabase) throw corrupt()
+      throw error
+    }
+  }
+
+  /**
+   * An unlocked read opens the database read-only, so it can never create a file at the live name
+   * (for example while a swap has moved the original aside). `missing` when there is no database,
+   * `needs_write` when the layout must be upgraded or the incarnation is lost.
+   */
+  private readOnly(): ChatGptStoreData | 'missing' | 'needs_write' {
+    let database: DatabaseSync
+    try {
+      database = new DatabaseSync(this.path, { readOnly: true })
+    } catch (error) {
+      const code = sqliteCode(error)
+      if (code === SQLITE_CANTOPEN) return 'missing'
+      if (code === SQLITE_NOTADB || code === SQLITE_CORRUPT) throw new CorruptDatabase()
+      throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageUnreadable)
+    }
+    try {
+      database.exec('PRAGMA busy_timeout=5000')
+      const version = Number((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+      if (version > SCHEMA_VERSION) throw new ChatGptAuthError('unsupported', 'storage_newer', MESSAGES.storageNewer)
+      if (version < SCHEMA_VERSION) return 'needs_write'
+      const found = database.prepare("SELECT value FROM meta WHERE key = 'incarnation'").get() as { value: string } | undefined
+      if (!found) return 'needs_write'
+      return this.decode(this.row(database), found.value)
+    } catch (error) {
+      if (error instanceof ChatGptAuthError) throw error
+      const code = sqliteCode(error)
+      if (code === SQLITE_CANTOPEN) return 'missing'
+      if (code === SQLITE_NOTADB || code === SQLITE_CORRUPT) throw new CorruptDatabase()
+      if (code === SQLITE_BUSY) throw new ChatGptAuthError('operation_busy', 'busy', MESSAGES.busy)
+      throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageUnreadable)
+    } finally {
+      try { database.close() } catch { /* already closed */ }
     }
   }
 
@@ -565,6 +614,7 @@ export class ChatGptStore {
       } catch {
         // Saved atomically, so unreadable means damaged; nothing can be finished from it.
       }
+      const stuck = () => new ChatGptAuthError('protocol', 'storage_swap', MESSAGES.storageSwapStuck(intentPath))
       if (intent && !existsSync(this.path)) {
         try {
           if (existsSync(intent.temporary)) {
@@ -576,10 +626,12 @@ export class ChatGptStore {
             renameSync(intent.aside, this.path)
           }
         } catch {
-          throw corrupt()
+          throw stuck()
         }
       }
-      if (!existsSync(this.path) && this.wasSetAside()) throw corrupt()
+      // Neither half of the swap is left (or the intent is unreadable) and no database is in place:
+      // nothing can be finished safely, and the intent is kept for a person to look at.
+      if (!existsSync(this.path)) throw stuck()
       rmSync(intentPath, { force: true })
     }
     for (const file of this.temporaries()) rmSync(file, { force: true })
