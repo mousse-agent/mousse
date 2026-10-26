@@ -12,7 +12,7 @@ import type {
   TurnResult,
   TurnSink
 } from '../ProviderAdapter'
-import { promptStreams, runtimeToolEvent } from '../shared/promptRuntime'
+import { promptStreams, runtimeToolEvent } from '../../transcript/promptRuntime'
 
 type AcpToolEvent = Parameters<NonNullable<AcpChatInput['onTool']>>[0]
 
