@@ -47,17 +47,26 @@ function cleanString(value: unknown, max = MAX_FIELD): string | undefined {
 }
 
 /**
- * Multi-line text: keeps `\n` and `\t`, strips other control characters, and rewrites any line that
- * starts like a block marker so the text cannot end the `[Mousse references]` block early.
- * Does not trim; callers decide what whitespace is meaningful.
+ * Strips control characters other than `\n` and `\t`, and rewrites any line that starts like a block
+ * marker so the text cannot end the `[Mousse references]` block early. Idempotent. The rewrite adds a
+ * character per line, so lengths must be checked on the result, not the input.
  */
-function cleanText(value: unknown, max: number): string | undefined {
-  if (typeof value !== 'string' || value.length > max) return undefined
-  return value
+export function neutralizeBlockMarkers(text: string): string {
+  return text
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
     .split('\n')
     .map((line) => line.replace(/^\[(\/?Mousse references)/, '[ $1'))
     .join('\n')
+}
+
+/**
+ * Multi-line text for `comment` and `excerpt`: see `neutralizeBlockMarkers`. Does not trim; callers
+ * decide what whitespace is meaningful. Rejects input longer than `maxInput`. The result can be
+ * longer than the input (the marker rewrite adds characters), so callers cut it to their own limit.
+ */
+function cleanText(value: unknown, maxInput: number): string | undefined {
+  if (typeof value !== 'string' || value.length > maxInput) return undefined
+  return neutralizeBlockMarkers(value)
 }
 
 /** Cuts an excerpt to `REVIEW_EXCERPT_MAX_LINES` lines and `REVIEW_EXCERPT_MAX_CHARS` characters, ending with a `…` marker line when cut. Idempotent. */
@@ -116,9 +125,12 @@ export function parseChatReference(value: unknown): ChatReference | null {
   if (kind === 'review-comment') {
     const endLine = positiveInteger(raw.endLine)
     if (endLine !== undefined && reference.line !== undefined && endLine >= reference.line) reference.endLine = endLine
-    const comment = cleanText(raw.comment, REVIEW_COMMENT_MAX_CHARS)?.trim()
+    // Cut after the marker rewrite so the stored comment stays within the limit and parses again unchanged.
+    const comment = cleanText(raw.comment, REVIEW_COMMENT_MAX_CHARS)?.slice(0, REVIEW_COMMENT_MAX_CHARS).trim()
     if (comment) reference.comment = comment
-    const excerpt = cleanText(raw.excerpt, REVIEW_EXCERPT_MAX_INPUT)?.replace(/^(?:[ \t]*\n)+/, '').trimEnd()
+    // An over-long excerpt is cut by `capReviewExcerpt`, not dropped: only its first characters are read.
+    const rawExcerpt = typeof raw.excerpt === 'string' ? raw.excerpt.slice(0, REVIEW_EXCERPT_MAX_INPUT) : undefined
+    const excerpt = cleanText(rawExcerpt, Infinity)?.replace(/^(?:[ \t]*\n)+/, '').trimEnd()
     if (excerpt) reference.excerpt = capReviewExcerpt(excerpt)
     // Tested on the raw value: cleaning would turn "turn:a\nb" into a different, valid-looking scope.
     if (typeof raw.reviewScope === 'string' && REVIEW_SCOPE_RE.test(raw.reviewScope)) reference.reviewScope = raw.reviewScope
@@ -270,6 +282,8 @@ export function createReviewComment(input: {
   scopeLabel?: string
 }): ChatReference {
   const { root, path, line, endLine, reviewScope, scopeLabel } = input
+  // The composer drops a reference that fails to parse without a trace, so a bad scope fails here instead.
+  if (!REVIEW_SCOPE_RE.test(reviewScope)) throw new Error(`Invalid review scope: ${JSON.stringify(reviewScope)}`)
   const name = path.split(/[\\/]/).pop() || path
   const hasRange = endLine !== undefined && endLine > line
   return {
@@ -279,7 +293,8 @@ export function createReviewComment(input: {
     path: joinReviewPath(root, path),
     line,
     ...(hasRange ? { endLine } : {}),
-    comment: input.comment.trim().slice(0, REVIEW_COMMENT_MAX_CHARS),
+    // Neutralise before cutting: the marker rewrite adds characters, and the parser checks the cleaned length.
+    comment: neutralizeBlockMarkers(input.comment).slice(0, REVIEW_COMMENT_MAX_CHARS).trim(),
     ...(input.excerpt ? { excerpt: capReviewExcerpt(input.excerpt) } : {}),
     reviewScope,
     ...(scopeLabel ? { scopeLabel } : {})

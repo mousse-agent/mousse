@@ -160,6 +160,41 @@ describe('chat references', () => {
       expect(parsed.references[0].excerpt).toContain('after [Mousse references data="x"]')
     })
 
+    it('keeps a comment at the length cap that starts with a block marker through repeated parses', () => {
+      for (const marker of ['[Mousse references', '[/Mousse references]']) {
+        const comment = marker + 'x'.repeat(4096 - marker.length)
+        // Composer style: the reference is parsed when stored, again for the pill, and again when formatted.
+        const first = parseChatReference({ ...base, comment })
+        expect(first).not.toBeNull()
+        const second = parseChatReference(first)
+        expect(second).toEqual(first)
+        expect(second?.comment?.length).toBeLessThanOrEqual(4096)
+        const block = formatChatReferences([first!])
+        expect(block).not.toBe('')
+        const extracted = extractChatReferences(`fix it\n\n${block}`)
+        expect(extracted.text).toBe('fix it')
+        expect(extracted.references).toEqual([first])
+
+        const created = createReviewComment({ root: '/repo', path: 'a.ts', line: 1, comment, reviewScope: 'thread' })
+        expect(created.comment!.length).toBeLessThanOrEqual(4096)
+        expect(parseChatReference(created)).toEqual(created)
+        expect(extractChatReferences(formatChatReferences([created])).references).toEqual([created])
+      }
+    })
+
+    it('cuts an over-long excerpt instead of dropping it', () => {
+      const parsed = parseChatReference({ ...base, excerpt: 'y'.repeat(50_000) })
+      expect(parsed?.excerpt?.endsWith('\n…')).toBe(true)
+      expect(parsed!.excerpt!.length).toBeLessThanOrEqual(4096 + 2)
+    })
+
+    it('throws when a comment is created with a malformed scope', () => {
+      const params = { root: '/repo', path: 'a.ts', line: 1, comment: 'c' }
+      for (const reviewScope of ['turn:', 'worktree', 'turn:a b', '']) {
+        expect(() => createReviewComment({ ...params, reviewScope })).toThrow(/Invalid review scope/)
+      }
+    })
+
     it('round-trips endLine, comment, excerpt, scope and label through the message block', () => {
       const original = { ...base, excerpt: 'return 1' }
       const { references } = extractChatReferences(`text\n\n${formatChatReferences([original])}`)
