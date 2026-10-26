@@ -41,6 +41,19 @@ export interface DriverInfo {
   bundled?: boolean
   /** Also added from the ACP registry: the Add dialog offers it as its own choice ("More ACP agents…"). */
   registry?: { addLabel: string; description: string }
+  /**
+   * Added as Mousse-managed (its own download and sign-in, `setup: managed`) or on the user's own
+   * CLI (`setup: existing`); the Add dialog asks which (Codex).
+   */
+  setups?: boolean
+}
+
+/** Where ChatGPT shows a plan's usage; Mousse links to it and never reads it. */
+export const CHATGPT_USAGE_URL = 'https://chatgpt.com/settings/usage'
+
+/** The entry runs Mousse's own Codex download with Sign in with ChatGPT. */
+export function isManagedSetup(snapshot: InstanceSnapshot): boolean {
+  return snapshot.config?.setup === 'managed'
 }
 
 export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
@@ -54,13 +67,15 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     homeHint: '~/.claude'
   },
   codex: {
-    label: 'Codex',
+    label: 'ChatGPT subscription',
     iconId: 'openai',
     family: 'agent',
-    description: "OpenAI's Codex CLI, signed in through your terminal (codex login).",
-    multiInstance: false,
+    description: 'Use your ChatGPT plan through Codex.',
+    // Further entries are Mousse-managed, each with its own ChatGPT sign-in.
+    multiInstance: true,
     customModels: true,
-    homeHint: '~/.codex'
+    homeHint: '~/.codex',
+    setups: true
   },
   antigravity: {
     label: 'Antigravity',

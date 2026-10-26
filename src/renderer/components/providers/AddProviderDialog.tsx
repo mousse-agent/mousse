@@ -14,6 +14,16 @@ import { commandLabel, DRIVER_INFO, isApiInstance, nextInstanceLabel, parseArgs,
 import { RegistryAgentList, RegistryConfirmStep } from './RegistryAgents'
 
 type ConnectKind = 'subscription' | 'api_key' | 'cloud'
+export type CodexSetup = 'managed' | 'existing'
+
+/** The setup step's two ways to run Codex. */
+export const SETUP_INFO: Record<CodexSetup, { label: string; description: string }> = {
+  managed: {
+    label: 'Managed by Mousse (recommended)',
+    description: "Mousse downloads OpenAI's Codex (about 160 MB) and keeps its settings separate from yours."
+  },
+  existing: { label: 'Use my Codex CLI', description: 'Your installed `codex`, signed in with `codex login`.' }
+}
 
 /** How a model API connects, from its login option. */
 function connectKind(option: ProviderLoginOption): ConnectKind {
@@ -27,7 +37,17 @@ function connectKind(option: ProviderLoginOption): ConnectKind {
  * with each of its sign-in methods (`options`), picked in the Sign-in method step.
  */
 export type AddChoice =
-  | { kind: 'new'; key: string; label: string; iconId: string; group: string; driver: HarnessDriverKind; existing?: InstanceSnapshot }
+  | {
+      kind: 'new'
+      key: string
+      label: string
+      iconId: string
+      group: string
+      driver: HarnessDriverKind
+      existing?: InstanceSnapshot
+      /** The setups it can be added with (`DriverInfo.setups`), the recommended one first. */
+      setups?: CodexSetup[]
+    }
   | { kind: 'api'; key: string; label: string; iconId: string; group: string; options: ProviderLoginOption[] }
   /** An agent picked from the ACP registry, installed by Mousse as an entry of `driver`. */
   | { kind: 'registry'; key: string; label: string; iconId: string; group: string; driver: HarnessDriverKind }
@@ -50,7 +70,21 @@ export function addChoices(snapshots: readonly InstanceSnapshot[], loginOptions:
     if (info.family !== 'agent') continue
     // Every agent is an entry like any other: offered when there is none yet, or as another account.
     const existing = snapshots.find((snapshot) => snapshot.driver === driver)
-    if (!existing || info.multiInstance) {
+    if (info.setups) {
+      // The user's own CLI is added once; every further entry is managed, with its own sign-in.
+      const ownSetup = snapshots.some((snapshot) => snapshot.driver === driver && snapshot.config?.setup !== 'managed')
+      const managed = snapshots.some((snapshot) => snapshot.driver === driver && snapshot.config?.setup === 'managed')
+      choices.push({
+        kind: 'new',
+        key: `new:${driver}`,
+        label: managed ? `${info.label} · another account` : info.label,
+        iconId: info.iconId,
+        group: 'Agents',
+        driver,
+        existing,
+        setups: ownSetup ? ['managed'] : ['managed', 'existing']
+      })
+    } else if (!existing || info.multiInstance) {
       choices.push({
         kind: 'new',
         key: `new:${driver}`,
@@ -166,6 +200,7 @@ export function AddProviderDialog({
   const [step, setStep] = useState(0)
   const [label, setLabel] = useState('')
   const [method, setMethod] = useState('')
+  const [setup, setSetup] = useState<CodexSetup>('managed')
   /** The registry step: its search, the agent picked for the confirm panel, and an entry already added. */
   const [registryQuery, setRegistryQuery] = useState('')
   const [registryAgent, setRegistryAgent] = useState<RegistryAgentView | null>(null)
@@ -201,6 +236,7 @@ export function AddProviderDialog({
     setError(null)
     setRegistryAgent(null)
     setMethod(choice.kind === 'api' ? methodKey(choice.options[0]!) : '')
+    if (choice.kind === 'new' && choice.setups) setSetup(choice.setups[0]!)
     if (choice.kind === 'new') {
       const base = DRIVER_INFO[choice.driver].label
       setLabel(choice.existing && !DRIVER_INFO[choice.driver].customCommand ? nextInstanceLabel(base, snapshots) : base)
@@ -393,7 +429,64 @@ export function AddProviderDialog({
           </div>
         )}
 
-        {step === last && selected?.kind === 'new' && !DRIVER_INFO[selected.driver].customCommand && (
+        {step === last && selected?.kind === 'new' && selected.setups && (
+          <div className="prov-wizard-panel">
+            <SettingsGroup>
+              {selected.setups.length > 1 && (
+                <SettingsRow
+                  title="Setup"
+                  description={SETUP_INFO[setup].description}
+                  control={
+                    <Segmented
+                      ariaLabel="Setup"
+                      value={setup}
+                      onChange={(value) => setSetup(value as CodexSetup)}
+                      options={selected.setups.map((value) => ({ value, label: SETUP_INFO[value].label }))}
+                    />
+                  }
+                />
+              )}
+              {selected.existing && setup === 'managed' && (
+                <SettingsRow
+                  title="Name"
+                  description="A separate account, with its own sign-in. Shown in the provider list and the model picker."
+                  control={<input className="settings-input" value={label} aria-label="Name" onChange={(event) => setLabel(event.target.value)} />}
+                />
+              )}
+              {setup === 'managed' ? (
+                <ManagedSetupStep
+                  busy={busy === selected.key}
+                  disabled={busy !== null}
+                  error={error}
+                  description={selected.setups.length > 1 ? undefined : SETUP_INFO.managed.description}
+                  onAdd={() =>
+                    void run(selected.key, async () => {
+                      const instanceId = await handlers.add(selected.driver, { displayName: label.trim() || DRIVER_INFO[selected.driver].label, setup: 'managed' })
+                      // The download starts at once; it shows in the downloads indicator and the editor.
+                      await window.mousse.providers.instances.install(instanceId)
+                      finish(instanceId)
+                    })
+                  }
+                />
+              ) : (
+                <AgentConnectStep
+                  choice={{ ...selected, existing: undefined }}
+                  cliLabel="Codex"
+                  busy={busy === selected.key}
+                  disabled={busy !== null}
+                  error={error}
+                  onAdd={(binaryPath) =>
+                    void run(selected.key, async () => {
+                      finish(await handlers.add(selected.driver, { displayName: DRIVER_INFO[selected.driver].label, setup: 'existing', ...(binaryPath ? { binaryPath } : {}) }))
+                    })
+                  }
+                />
+              )}
+            </SettingsGroup>
+          </div>
+        )}
+
+        {step === last && selected?.kind === 'new' && !selected.setups && !DRIVER_INFO[selected.driver].customCommand && (
           <div className="prov-wizard-panel">
             <SettingsGroup>
               {selected.kind === 'new' && selected.existing && (
@@ -460,9 +553,12 @@ export function AgentConnectStep({
   busy,
   disabled,
   error,
+  cliLabel,
   onAdd
 }: {
   choice: Extract<AddChoice, { kind: 'new' }>
+  /** The CLI's name when the entry's label names something else ("ChatGPT subscription" runs Codex). */
+  cliLabel?: string
   busy: boolean
   disabled: boolean
   error: string | null
@@ -479,7 +575,7 @@ export function AgentConnectStep({
   const version = known?.binary?.version
   const entered = path.trim()
   const canAdd = !disabled && (entered !== '' || !missing)
-  const label = DRIVER_INFO[choice.driver].label
+  const label = cliLabel ?? DRIVER_INFO[choice.driver].label
   const bundled = DRIVER_INFO[choice.driver].bundled === true
   const add = () => {
     if (canAdd) onAdd(entered || undefined)
@@ -570,6 +666,33 @@ export function AgentConnectStep({
         />
       )}
     </>
+  )
+}
+
+/** The Add step of a Mousse-managed Codex: it is added, then its download starts. */
+export function ManagedSetupStep({
+  busy,
+  disabled,
+  error,
+  description,
+  onAdd
+}: {
+  busy: boolean
+  disabled: boolean
+  error: string | null
+  description?: string
+  onAdd: () => void
+}) {
+  return (
+    <SettingsRow
+      title="Ready to add"
+      description={error ? <span className="prov-error">{error}</span> : (description ?? 'Mousse downloads Codex now. Continue with ChatGPT once it is installed.')}
+      control={
+        <button type="button" className="settings-btn" autoFocus disabled={disabled} onClick={onAdd}>
+          {busy ? 'Adding…' : 'Add'}
+        </button>
+      }
+    />
   )
 }
 
