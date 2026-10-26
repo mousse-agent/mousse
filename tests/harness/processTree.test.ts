@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { descendantsOf, killProcessTree, readProcessTable, type ProcessEntry } from '../../src/mms/harness/processTree.mjs'
+import { descendantsOf, killProcessTree, readProcessTable, readStartTime, type ProcessEntry } from '../../src/mms/harness/processTree.mjs'
 
 // The POSIX path with a recorded process table and signals; the real processes are exercised by
-// piRuntimeProcess.test.ts and scripts/check-pi-runtime-install.mjs.
+// piRuntimeProcess.test.ts and scripts/check-pi-runtime-install.mjs (Linux under WSL).
 
 /** Mousse (100, its own group 100) started Pi (200, group 200); Pi's shell is detached (300, group 300). */
 const TABLE: ProcessEntry[] = [
@@ -20,58 +20,81 @@ const TABLE: ProcessEntry[] = [
 
 function recorder(options: { gone?: number[] } = {}) {
   const signals: string[] = []
-  const kill = (target: number, signal: NodeJS.Signals) => {
+  const kill = (target: number, signal: NodeJS.Signals | 0) => {
     if (options.gone?.includes(Math.abs(target))) throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' })
-    signals.push(`${signal} ${target}`)
+    if (signal !== 0) signals.push(`${signal} ${target}`)
   }
   return { signals, kill }
 }
+
+const startTime = (pid: number) => `t${pid}`
 
 describe('process tree kill', () => {
   it('finds every descendant, across process groups', () => {
     expect(descendantsOf(TABLE, 200).map((entry) => entry.pid)).toEqual([210, 300, 400, 310, 320])
   })
 
-  it('freezes the tree, kills every descendant group and pid, then the child\'s group; never Mousse\'s group', () => {
+  it('freezes the tree, kills descendant groups then the child\'s group, and signals by pid only what no group covers', () => {
     const { signals, kill } = recorder()
-    killProcessTree(200, { platform: 'linux', kill, table: () => TABLE, self: 100 })
+    killProcessTree(200, { platform: 'linux', kill, table: () => TABLE, startTime, self: 100 })
     expect(signals).toEqual([
       'SIGSTOP -200',
-      'SIGSTOP 210', 'SIGSTOP -300', 'SIGSTOP 400', 'SIGSTOP 310', 'SIGSTOP -320',
+      'SIGSTOP -300', 'SIGSTOP 400', 'SIGSTOP -320',
       'SIGKILL -300', 'SIGKILL -320',
-      'SIGKILL 210', 'SIGKILL 300', 'SIGKILL 400', 'SIGKILL 310', 'SIGKILL 320',
-      'SIGKILL -200'
+      'SIGKILL -200',
+      'SIGKILL 400'
     ])
-    expect(signals.some((entry) => entry.endsWith(' -100') || entry.endsWith(' 100') || entry.endsWith(' 500') || entry.endsWith(' -1'))).toBe(false)
+    // Never Mousse's group (100), an unrelated process (500) or init's group.
+    expect(signals.some((entry) => / -?(100|500|1)$/.test(entry))).toBe(false)
+  })
+
+  it('does not kill a pid that was reused after it was found', () => {
+    const { signals, kill } = recorder()
+    let reads = 0
+    const reused = (pid: number) => (pid === 400 && ++reads > 1 ? 'someone else' : `t${pid}`)
+    killProcessTree(200, { platform: 'linux', kill, table: () => TABLE, startTime: reused, self: 100 })
+    expect(signals).toContain('SIGSTOP 400')
+    expect(signals).not.toContain('SIGKILL 400')
   })
 
   it('reads the table again until no new descendant appears', () => {
     const later = [...TABLE, { pid: 600, ppid: 310, pgid: 600 }]
     const tables = [TABLE, later, later]
     const { signals, kill } = recorder()
-    killProcessTree(200, { platform: 'darwin', kill, table: () => tables.shift(), self: 100 })
+    killProcessTree(200, { platform: 'darwin', kill, table: () => tables.shift(), startTime, self: 100 })
     expect(signals).toContain('SIGSTOP -600')
     expect(signals).toContain('SIGKILL -600')
-    expect(signals.at(-1)).toBe('SIGKILL -200')
+    expect(signals.indexOf('SIGKILL -600')).toBeLessThan(signals.indexOf('SIGKILL -200'))
   })
 
-  it('tolerates a child that is already gone, and a child that is not a group leader', () => {
-    const gone = recorder({ gone: [200] })
-    expect(() => killProcessTree(200, { platform: 'linux', kill: gone.kill, table: () => [], self: 100 })).not.toThrow()
-    expect(gone.signals).toEqual([])
+  it('returns at once, without reading the table, when the child and its group are gone', () => {
+    const { signals, kill } = recorder({ gone: [200] })
+    let reads = 0
+    killProcessTree(200, { platform: 'linux', kill, table: () => (reads++, TABLE), startTime, self: 100 })
+    expect(reads).toBe(0)
+    expect(signals).toEqual([])
+  })
 
-    const notLeader = recorder()
-    const kill = (target: number, signal: NodeJS.Signals) => {
-      if (target === -200) throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' })
-      notLeader.kill(target, signal)
-    }
-    killProcessTree(200, { platform: 'linux', kill, table: () => undefined, self: 100 })
-    expect(notLeader.signals).toEqual(['SIGSTOP 200', 'SIGKILL 200'])
+  it('signals a child that leads no group by pid, and never Mousse\'s own group', () => {
+    // Pi left in Mousse's group 100, with a child 210 there too.
+    const table = TABLE.map((entry) => (entry.pid === 200 || entry.pid === 210 ? { ...entry, pgid: 100 } : entry))
+    const { signals, kill } = recorder()
+    killProcessTree(200, { platform: 'linux', kill, table: () => table, startTime, self: 100 })
+    expect(signals[0]).toBe('SIGSTOP 200')
+    expect(signals).toContain('SIGKILL 200')
+    expect(signals).toContain('SIGKILL 210')
+    expect(signals.some((entry) => entry.endsWith(' -100') || entry.endsWith(' -200'))).toBe(false)
+    // A child whose pid is Mousse's own group id (only possible through pid reuse) is never a group target.
+    const odd = recorder()
+    const selfInChildGroup = TABLE.map((entry) => (entry.pid === 100 ? { ...entry, pgid: 200 } : entry))
+    killProcessTree(200, { platform: 'linux', kill: odd.kill, table: () => selfInChildGroup, startTime, self: 100 })
+    expect(odd.signals.some((entry) => entry.endsWith(' -200'))).toBe(false)
+    expect(odd.signals).toContain('SIGKILL 200')
   })
 
   it('kills the child\'s group when ps is unavailable', () => {
     const { signals, kill } = recorder()
-    killProcessTree(200, { platform: 'linux', kill, table: () => undefined, self: 100 })
+    killProcessTree(200, { platform: 'linux', kill, table: () => undefined, startTime, self: 100 })
     expect(signals).toEqual(['SIGSTOP -200', 'SIGKILL -200'])
   })
 
@@ -87,5 +110,11 @@ describe('process tree kill', () => {
     expect(readProcessTable(run)).toEqual([{ pid: 1, ppid: 0, pgid: 1 }, { pid: 200, ppid: 100, pgid: 200 }])
     expect(readProcessTable((() => ({ status: 1, stdout: '' })) as never)).toBeUndefined()
     expect(readProcessTable((() => { throw new Error('ENOENT') }) as never)).toBeUndefined()
+  })
+
+  it.skipIf(process.platform === 'linux')('reads a start time from ps where there is no procfs', () => {
+    const run = ((command: string, args: readonly string[]) => ({ status: 0, stdout: args.includes('999') ? 'Mon Oct 26 14:30:00 2026\n' : '' })) as never
+    expect(readStartTime(999, run)).toBe('ps:Mon Oct 26 14:30:00 2026')
+    expect(readStartTime(998, (() => ({ status: 1, stdout: '' })) as never)).toBeUndefined()
   })
 })
