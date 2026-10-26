@@ -21,6 +21,8 @@
     "build": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs && node scripts/build-net-native-reader.mjs && electron-vite build && node scripts/build-cli.mjs",
     "build:cli": "node scripts/build-cli.mjs",
     "build:browser-worker": "node scripts/build-browser-worker.mjs",
+    "build:pi-runtime": "node scripts/build-pi-runtime.mjs",
+    "check:pi-runtime": "node scripts/check-pi-runtime-install.mjs",
     "rebuild-native": "node scripts/rebuild-native.mjs",
     "preview": "node scripts/ensure-electron.mjs && node scripts/ensure-native-executables.mjs && node scripts/gui-launch.mjs preview",
     "clean:build-output": "node scripts/clean-build-output.mjs",
@@ -198,6 +200,7 @@
     "asarUnpack": [
       "out/net-native/**",
       "out/browser-worker/**",
+      "out/pi-runtime/**",
       "node_modules/node-pty/build/Release/**",
       "node_modules/node-pty/prebuilds/darwin-*/**",
       "node_modules/node-pty/prebuilds/win32-x64/**",

@@ -4,6 +4,7 @@ import { dirname, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { buildPackagedNativeReader } from './build-net-native-reader.mjs'
 import { buildBrowserWorker, getBrowserWorkerBuildOptions } from './build-browser-worker.mjs'
+import { buildPiRuntime } from './build-pi-runtime.mjs'
 import { cachedBuild } from './cached-build.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -51,6 +52,8 @@ export function getCliBuildOptions(projectRoot = root) {
 export async function buildCli(opts = {}) {
   const { watch = false, onRebuild, log = true, reuse = false } = opts
   buildPackagedNativeReader()
+  // Pi's agent runs from out/pi-runtime (a copy of the pinned bundle plus Mousse's extension).
+  await buildPiRuntime(root)
   mkdirSync(dirname(outfile), { recursive: true })
   const options = getCliBuildOptions(root)
 
