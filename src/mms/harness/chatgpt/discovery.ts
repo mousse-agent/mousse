@@ -58,7 +58,7 @@ async function load(endpoints: ChatGptEndpoints): Promise<Discovery> {
   const trusted = endpoints.trustInjectedIssuer === true && endpoints.discoveryUrl !== OPENAI_DISCOVERY_URL
   if (!trusted && body.issuer !== OPENAI_ISSUER) throw new ChatGptAuthError('protocol', 'discovery', MESSAGES.discoveryUnverified)
   if (typeof body.issuer !== 'string') throw new ChatGptAuthError('protocol', 'discovery', MESSAGES.discoveryUnverified)
-  // Every endpoint must live on the issuer's origin (T3 Code's rule).
+  // Every endpoint must live on the issuer's origin.
   const origin = trusted ? null : OPENAI_ISSUER
   const authorizationEndpoint = urlOn(body.authorization_endpoint, origin)
   const tokenEndpoint = urlOn(body.token_endpoint, origin)

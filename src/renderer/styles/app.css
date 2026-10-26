@@ -1952,7 +1952,7 @@ html[data-theme='high-contrast'] .model-picker-row.selected {
   white-space: nowrap;
 }
 
-/* T3 Code's instance badge: where two providers share a logo ("Claude Code" and "Claude Code 2"),
+/* Instance badge: where two providers share a logo ("Claude Code" and "Claude Code 2"),
    the later one carries what sets its name apart, on the logo's corner. */
 .model-picker-instance-badge {
   position: absolute;

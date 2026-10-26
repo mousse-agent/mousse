@@ -6,7 +6,7 @@ import { Switch } from '../settings/SettingsRow'
 import { ipcErrorMessage } from '../../utils/voiceErrors'
 import type { SwitchState } from './providerView'
 
-/** Only warning and error show a dot, as in T3 Code. */
+/** Only warning and error show a dot. */
 export function needsAttention(status: StatusDescription): boolean {
   return status.tone === 'warning' || status.tone === 'error'
 }
@@ -191,7 +191,7 @@ function OverrideInheritance({ projectEnabled, deviceEnabled }: { projectEnabled
 }
 
 /**
- * A provider in the list pane, in T3 Code's row anatomy: logo, name and version, then the status
+ * A provider in the list pane: logo, name and version, then the status
  * line; the enable switch on the right. Selection is a background fill only. Switched off, the row
  * is dimmed until hovered or selected. In a project scope an override shows its marker and reset
  * under the status, so the name keeps the row's width (it wraps rather than truncates).

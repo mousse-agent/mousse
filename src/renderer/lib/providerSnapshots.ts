@@ -369,7 +369,7 @@ function initials(words: readonly string[]): string {
 }
 
 /**
- * T3 Code's instance badge: where two picker entries share a logo (two Claude Code accounts), every
+ * Instance badges: where two picker entries share a logo (two Claude Code accounts), every
  * entry after the first gets a small badge with what sets its name apart ("Claude Code 2" → "2").
  * Keyed by entry key; entries with a logo of their own get none.
  */

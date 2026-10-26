@@ -47,7 +47,7 @@ function progressText(snapshot: InstanceSnapshot, operation: ProviderOperationEv
 }
 
 /**
- * The Setup row: the status in T3 Code's words and the one next step it names. Buttons follow the
+ * The Setup row: the status and the one next step it names. Buttons follow the
  * snapshot, so Install and Sign in are ready as soon as the instance's own state is known.
  */
 export function SetupRow({

@@ -57,7 +57,7 @@ function ensureSignedIn(result: ProviderLoginResult, fallback: string): void {
 }
 
 /**
- * Settings → Providers, after T3 Code's providers page: a provider list beside the selected
+ * Settings → Providers: a provider list beside the selected
  * instance's editor. Everything shown comes from the daemon's instance snapshots for the chosen
  * scope (this device, or a project's overrides); every change goes through `providers.instances`.
  */
@@ -176,7 +176,7 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
   const refreshModels = (snapshot: InstanceSnapshot) => async () =>
     applySnapshot(await window.mousse.providers.instances.refreshModels(snapshot.instanceId))
 
-  /** The header's refresh: check every instance again, as T3 Code's "Refresh provider status". */
+  /** The header's refresh: checks every instance again. */
   const refreshStatus = () =>
     void refreshing.run('refresh', async () => {
       if (!snapshots) return reload()

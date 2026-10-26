@@ -1,4 +1,3 @@
-// Adapted from T3 Code (MIT, (c) 2026 T3 Tools Inc., commit d53873b6a4); see THIRD_PARTY_NOTICES.md.
 import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import type {

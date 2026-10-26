@@ -184,7 +184,7 @@ function withLabel(headline: string, label: string | undefined): string {
 const STALE_DETAIL = 'The last check did not finish. Showing the last good status.'
 
 /**
- * Status copy for one instance (T3 Code wording). Order matters: off, installing, the binary, then
+ * Status copy for one instance. Order matters: off, installing, the binary, then
  * sign-in, then version advice. Signed out is neutral (a step, not a fault); a stale check keeps
  * the last good status and only adds a note.
  */

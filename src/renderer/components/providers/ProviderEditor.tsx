@@ -11,7 +11,7 @@ import { DownloadedFilesRow, RegistrySourceRow, RemoveWithFilesButton, type Remo
 import { DRIVER_INFO, formatVersion, iconIdOf } from './providerView'
 
 /**
- * Provider setup is per machine, as in T3 Code: only the on/off switch has a project override. In
+ * Provider setup is per machine: only the on/off switch has a project override. In
  * a project scope the device-wide sections say so.
  */
 const DEVICE_WIDE = 'Applies to this device, in every project.'
@@ -21,7 +21,7 @@ function deviceWideNote(snapshot: InstanceSnapshot): string | undefined {
 }
 
 /**
- * The editor's heading, as in T3 Code: the provider's logo and name, its version and delete on the
+ * The editor's heading: the provider's logo and name, its version and delete on the
  * right. The status lives in Setup → Status; renaming lives under Advanced.
  */
 export function EditorHeader({

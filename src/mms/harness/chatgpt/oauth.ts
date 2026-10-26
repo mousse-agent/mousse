@@ -1,9 +1,6 @@
 // Ported from @earendil-works/pi-ai 1.4.0 `dist/auth/oauth/openai-chatgpt.js` (MIT, Copyright (c)
 // Mario Zechner): the authorize parameters, the callback server, the race with a pasted redirect
-// and closing spare connections. Rewritten in TypeScript with T3 Code's callback rules
-// (`apps/server/src/provider/CodexChatGptAuth.ts`, MIT, Copyright (c) 2026 T3 Tools Inc.): an
-// ephemeral port, one-shot callback, state first, and the issued client id checks.
-// See THIRD_PARTY_NOTICES.md.
+// and closing spare connections. Rewritten in TypeScript. See THIRD_PARTY_NOTICES.md.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
