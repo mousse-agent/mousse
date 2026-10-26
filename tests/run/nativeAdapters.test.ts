@@ -7,6 +7,7 @@ import {
   ClaudeSubscriptionAdapter,
   type ClaudeSubscriptionClient
 } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
+import { CodexAdapter, type CodexClient } from '../../src/mms/run/adapters/codex/CodexAdapter'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
 import { APPLET_GENERATION_GUIDANCE } from '../../src/shared/appletGuidance'
 
@@ -264,6 +265,56 @@ describe('ClaudeSubscriptionAdapter', () => {
       const bare = claudeClient(async () => { plain.abort(); throw new Error('aborted') })
       await expect(
         new ClaudeSubscriptionAdapter(() => bare).startTurn(input({ signal: plain.signal }), recordingSink(), control(), host({ nativeHistoryNow: () => 'history' }))
+      ).rejects.toThrow('aborted')
+    })
+  })
+})
+
+describe('CodexAdapter', () => {
+  describe('a stopped turn (issue #142)', () => {
+    const codexClient = (chat: () => Promise<never>) =>
+      ({
+        chat: vi.fn(chat),
+        commitConversation: vi.fn(),
+        standaloneWorkspace: vi.fn((threadId: string) => `/standalone/${threadId}`),
+        configured: () => true,
+        interrupt: vi.fn(),
+        steer: vi.fn(),
+        userSetup: vi.fn()
+      }) as unknown as CodexClient
+    const stopped = () => {
+      const stop = new AbortController()
+      const client = { ...codexClient(async () => { stop.abort(); throw new Error('aborted') }), commitInterrupted: vi.fn() }
+      return { stop, client }
+    }
+
+    it('fingerprints the history as the stopped turn left it, so the next turn resumes the Codex thread', async () => {
+      const { stop, client } = stopped()
+      await expect(
+        new CodexAdapter(() => client).startTurn(input({ llmProvider: 'codex', signal: stop.signal }), recordingSink(), control(), host({ nativeHistoryNow: () => 'history up to the stopped request' }))
+      ).rejects.toThrow('aborted')
+      expect(client.commitInterrupted).toHaveBeenCalledExactlyOnceWith('thread-1', 'history up to the stopped request')
+      expect(client.commitConversation).not.toHaveBeenCalled()
+    })
+
+    it('does not fingerprint a turn that failed without being stopped', async () => {
+      const client = { ...codexClient(async () => { throw new Error('boom') }), commitInterrupted: vi.fn() }
+      await expect(
+        new CodexAdapter(() => client).startTurn(input({ llmProvider: 'codex' }), recordingSink(), control(), host({ nativeHistoryNow: () => 'history' }))
+      ).rejects.toThrow('boom')
+      expect(client.commitInterrupted).not.toHaveBeenCalled()
+    })
+
+    it('cannot fingerprint without the host\'s history or the service\'s support, and still rethrows the stop', async () => {
+      const { stop, client } = stopped()
+      await expect(
+        new CodexAdapter(() => client).startTurn(input({ llmProvider: 'codex', signal: stop.signal }), recordingSink(), control(), host())
+      ).rejects.toThrow('aborted')
+      expect(client.commitInterrupted).not.toHaveBeenCalled()
+      const plain = new AbortController()
+      const bare = codexClient(async () => { plain.abort(); throw new Error('aborted') })
+      await expect(
+        new CodexAdapter(() => bare).startTurn(input({ llmProvider: 'codex', signal: plain.signal }), recordingSink(), control(), host({ nativeHistoryNow: () => 'history' }))
       ).rejects.toThrow('aborted')
     })
   })

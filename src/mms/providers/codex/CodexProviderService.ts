@@ -114,7 +114,7 @@ type SavedThread = {
   cwd: string
   /** Provider instance that owns the Codex thread; absent means the default `codex` instance. */
   instanceId?: string
-  /** Fingerprint of the canonical history the thread holds; set only after the turn commits. */
+  /** Fingerprint of the canonical history the thread holds; set after the turn commits, or after a stopped turn is fingerprinted. */
   historyKey?: string
 }
 type Settings = {
@@ -722,6 +722,8 @@ export class CodexProviderService {
   private readonly activeThreads = new Set<string>()
   private readonly controllers = new Set<AbortController>()
   private readonly readyToCommit = new Set<string>()
+  /** Threads whose last turn was stopped after its Codex thread was opened, by that Codex thread id (`commitInterrupted`). */
+  private readonly interruptedThreads = new Map<string, string>()
   /** Mousse MCP tokens handed to Codex; never echoed into errors or status messages. */
   private readonly secrets = new Set<string>()
 
@@ -1301,6 +1303,20 @@ export class CodexProviderService {
     }
   }
 
+  /**
+   * Records the history a stopped turn left in its Codex thread, so the next turn resumes that thread
+   * instead of starting a new one with the history replayed. A stop before the thread was opened saves
+   * nothing.
+   */
+  commitInterrupted(threadId: string, history: string): void {
+    const codexThreadId = this.interruptedThreads.get(threadId)
+    this.interruptedThreads.delete(threadId)
+    const saved = this.settings.threads?.[threadId]
+    if (!codexThreadId || !saved || saved.codexThreadId !== codexThreadId) return
+    saved.historyKey = historyKey(history)
+    this.save()
+  }
+
   /** Interrupts the running turn on `codexThreadId`, if any. */
   async interrupt(codexThreadId: string | undefined): Promise<'interrupted' | 'not_active'> {
     const run = codexThreadId ? this.turns.get(codexThreadId) : undefined
@@ -1646,6 +1662,7 @@ export class CodexProviderService {
     }
     signal.addEventListener('abort', onAbort, { once: true })
     this.readyToCommit.delete(input.threadId)
+    this.interruptedThreads.delete(input.threadId)
     try {
       // A stopped run on this thread is still interrupting its turn and helpers; the new turn starts after.
       const sweeping = this.pendingSweeps.get(input.threadId)
@@ -1838,7 +1855,11 @@ export class CodexProviderService {
       // already been rejected. The run is released when that ends.
       if (run) void this.startSweep(run)
       run?.closeTools()
-      if (signal.aborted && input.signal?.aborted) throw input.signal.reason ?? error
+      if (signal.aborted && input.signal?.aborted) {
+        // The thread exists on the server: the adapter may fingerprint it (`commitInterrupted`).
+        if (run && scope === this.scope) this.interruptedThreads.set(input.threadId, run.codexThreadId)
+        throw input.signal.reason ?? error
+      }
       throw error
     } finally {
       if (steerTimer) clearInterval(steerTimer)

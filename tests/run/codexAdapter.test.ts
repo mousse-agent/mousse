@@ -534,6 +534,109 @@ describe('CodexAdapter', () => {
     expect(saved.threads['thread-1'].historyKey).toBeUndefined()
   })
 
+  describe('after Stop', () => {
+    const STOPPED = 'history up to the stopped request'
+    /** A host that reports the history a stopped turn left, as the engine's does. */
+    const stoppedHost = (): AdapterHost => {
+      const base = host()
+      return { ...base, context: { ...base.context, nativeHistoryNow: () => STOPPED } }
+    }
+    const savedThreads = () =>
+      (JSON.parse(readFileSync(settingsPath(), 'utf8')) as { threads?: Record<string, { codexThreadId: string; historyKey?: string }> }).threads
+
+    it('keeps the Codex thread of a stopped turn, so the next turn continues it without the history preamble', async () => {
+      const controller = new AbortController()
+      const replay = transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          note('item/agentMessage/delta', { threadId: T, turnId: 'turn-1', itemId: 'msg-1', delta: 'Part' }),
+          cue({ action: 'stop' }),
+          out({ id: 6, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),
+          inn({ id: 6, result: {} }),
+          completed('interrupted'),
+          // The next turn: no thread/start, no thread/resume, and the plain prompt.
+          ...turnStart(7, 'again', 'turn-2'),
+          ...message('msg-2', ['two'], 'turn-2'),
+          completed('completed', 'turn-2')
+        ],
+        () => controller.abort(new Error('stopped by the user'))
+      )
+      const codex = service(replay)
+      const adapter = new CodexAdapter(() => codex)
+      await expect(adapter.startTurn(input({ signal: controller.signal }), recordingSink(), control(), stoppedHost())).rejects.toThrow('stopped by the user')
+      expect(savedThreads()['thread-1']).toMatchObject({ codexThreadId: T, historyKey: sha(STOPPED) })
+      const next = await adapter.startTurn(input({ prompt: 'again', nativeHistory: STOPPED }), recordingSink(), control(), host())
+      replay.assertDone()
+      expect(next).toMatchObject({ text: 'two', providerRef: { sessionId: T } })
+    })
+
+    it('remembers nothing for a Stop before the thread was opened, and the next turn starts a new thread', async () => {
+      const controller = new AbortController()
+      const replay = transport([
+        ...handshake(),
+        // Stop lands while thread/start is still pending: the stopped turn never had a thread to keep.
+        out({ id: 4, method: 'thread/start', params: threadParams() }),
+        cue({ action: 'stop' }),
+        inn({ id: 4, result: threadResult() }),
+        // The next turn starts a new thread with the history as a preamble.
+        ...threadStart(5),
+        out({ id: 6, method: 'turn/start', params: { threadId: T, input: text(`Previous conversation (context only; do not repeat earlier actions):\n${STOPPED}\n\nCurrent request:\nagain`), approvalPolicy: 'on-request', sandboxPolicy: WORKSPACE_WRITE, model: 'gpt-x' } }),
+        inn({ id: 6, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
+        ...message('msg-2', ['two'], 'turn-2'),
+        completed('completed', 'turn-2')
+      ], () => controller.abort(new Error('stopped while the thread opened')))
+      const codex = service(replay)
+      const adapter = new CodexAdapter(() => codex)
+      await expect(adapter.startTurn(input({ signal: controller.signal }), recordingSink(), control(), stoppedHost())).rejects.toThrow('stopped while the thread opened')
+      expect(savedThreads()?.['thread-1']).toBeUndefined()
+      const next = await adapter.startTurn(input({ prompt: 'again', nativeHistory: STOPPED }), recordingSink(), control(), host())
+      replay.assertDone()
+      expect(next).toMatchObject({ text: 'two' })
+    })
+
+    it('resumes the stopped thread on a new process when the app-server exits after Stop', async () => {
+      const controller = new AbortController()
+      const replay = transport(
+        [
+          ...handshake(),
+          ...threadStart(4),
+          ...turnStart(5, 'hello'),
+          cue({ action: 'stop' }),
+          out({ id: 6, method: 'turn/interrupt', params: { threadId: T, turnId: 'turn-1' } }),
+          inn({ id: 6, result: {} }),
+          inn({ kind: 'exit', code: 1 }),
+          // A new process proves its own sign-in, then resumes the stopped thread.
+          ...handshake(1, true),
+          out({ id: 4, method: 'thread/resume', params: { threadId: T, excludeTurns: true, ...threadParams() } }),
+          inn({ id: 4, result: threadResult() }),
+          ...turnStart(5, 'again', 'turn-2'),
+          ...message('msg-2', ['two'], 'turn-2'),
+          completed('completed', 'turn-2')
+        ],
+        () => controller.abort(new Error('stopped by the user'))
+      )
+      const codex = service(replay)
+      const adapter = new CodexAdapter(() => codex)
+      await expect(adapter.startTurn(input({ signal: controller.signal }), recordingSink(), control(), stoppedHost())).rejects.toThrow('stopped by the user')
+      await replay.idle()
+      const next = await adapter.startTurn(input({ prompt: 'again', nativeHistory: STOPPED }), recordingSink(), control(), host())
+      replay.assertDone()
+      expect(next).toMatchObject({ text: 'two', providerRef: { sessionId: T } })
+    })
+
+    it('fingerprints nothing when no stopped turn is remembered', async () => {
+      const replay = transport([...handshake(), ...threadStart(4), ...turnStart(5, 'hello'), ...message('msg-1', ['one']), completed('completed')])
+      const codex = service(replay)
+      await new CodexAdapter(() => codex).startTurn(input(), recordingSink(), control(), host())
+      const before = readFileSync(settingsPath(), 'utf8')
+      // No stopped turn is remembered, so a fingerprint changes nothing.
+      codex.commitInterrupted('thread-1', STOPPED)
+      expect(readFileSync(settingsPath(), 'utf8')).toBe(before)
+    })
+  })
+
   it('interrupts a turn that was stopped before turn/start answered', async () => {
     const controller = new AbortController()
     const replay = transport(

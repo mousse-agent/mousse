@@ -23,7 +23,7 @@ import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
 export type CodexClient = Pick<
   CodexProviderService,
   'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'steer' | 'userSetup'
->
+> & Partial<Pick<CodexProviderService, 'commitInterrupted'>>
 
 /**
  * `steer: 'native'`: `turn/steer` adds the text to the running turn. Checked live against
@@ -147,16 +147,24 @@ export class CodexAdapter implements ProviderAdapter {
         sink.providerRef(providerRef)
       }
     })
-    const result: CodexChatResult = await retryContextOverflowOnce(
-      () => service.chat(chatInput()),
-      () => {
-        const recovered = host.context.recoverOverflow()
-        if (!recovered) return false
-        history = recovered.nativeHistory
-        return true
-      },
-      () => !progressed && !input.signal.aborted
-    )
+    let result: CodexChatResult
+    try {
+      result = await retryContextOverflowOnce(
+        () => service.chat(chatInput()),
+        () => {
+          const recovered = host.context.recoverOverflow()
+          if (!recovered) return false
+          history = recovered.nativeHistory
+          return true
+        },
+        () => !progressed && !input.signal.aborted
+      )
+    } catch (error) {
+      // A stopped turn keeps its Codex thread: the next turn resumes it (the stopped request is in it).
+      // A turn that failed leaves the record as it was.
+      if (input.signal.aborted && host.context.nativeHistoryNow) service.commitInterrupted?.(input.threadId, host.context.nativeHistoryNow())
+      throw error
+    }
     const totalResponseTimeMs = Date.now() - startedAt
     const usage = {
       input: result.usage?.input ?? 0,
