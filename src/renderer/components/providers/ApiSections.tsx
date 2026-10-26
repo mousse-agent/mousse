@@ -3,7 +3,7 @@ import type { StatusDescription } from '../../../shared/harness/status'
 import type { ProviderLoginOption } from '../../../shared/providerAuth'
 import { Check, Pencil, X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
-import { statusText, useAsyncAction } from './parts'
+import { StatusLine, useAsyncAction } from './parts'
 
 /**
  * The Setup row of a model API: replace the key, sign in again, or the cloud credentials it reuses.
@@ -46,7 +46,7 @@ export function ApiSetupRow({
       setKey('')
     })
   const errorLine = error ? <span className="prov-error">{error}</span> : null
-  const statusLine = statusText(status)
+  const statusLine = <StatusLine status={status} />
 
   if (ambient) {
     return <SettingsRow title="Cloud credentials" description={errorLine ?? (instructions.join(' ') || statusLine)} />

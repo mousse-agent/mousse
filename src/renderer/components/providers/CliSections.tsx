@@ -3,7 +3,7 @@ import type { InstanceSnapshot, StatusDescription } from '../../../shared/harnes
 import type { InstanceConfigPatch, ProviderOperationEvent } from '../../../shared/harness/types'
 import { Download, Plus, RotateCcw, X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
-import { BrowseButton, CommandBox, RefreshButton, statusText, useAsyncAction } from './parts'
+import { BrowseButton, CommandBox, RefreshButton, StatusLine, useAsyncAction } from './parts'
 import {
   DRIVER_INFO,
   binaryOverrideOf,
@@ -130,7 +130,7 @@ export function SetupRow({
   return (
     <SettingsRow
       title="Status"
-      description={withError(progress ?? statusText(status), error)}
+      description={withError(progress ?? <StatusLine status={status} />, error)}
       control={
         <>
           {recheck}

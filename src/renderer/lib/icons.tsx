@@ -19,6 +19,7 @@ import ArrowUp01Icon from '@hugeicons/core-free-icons/ArrowUp01Icon'
 import ArrowUp02Icon from '@hugeicons/core-free-icons/ArrowUp02Icon'
 import ArrowUpDoubleIcon from '@hugeicons/core-free-icons/ArrowUpDoubleIcon'
 import ArrowUpRight01Icon from '@hugeicons/core-free-icons/ArrowUpRight01Icon'
+import CircleArrowUp02Icon from '@hugeicons/core-free-icons/CircleArrowUp02Icon'
 import AtIcon from '@hugeicons/core-free-icons/AtIcon'
 import Attachment01Icon from '@hugeicons/core-free-icons/Attachment01Icon'
 import BookOpen01Icon from '@hugeicons/core-free-icons/BookOpen01Icon'
@@ -174,6 +175,7 @@ export const ArrowLeft = /* @__PURE__ */ createIcon('ArrowLeft', ArrowLeft02Icon
 export const ArrowRight = /* @__PURE__ */ createIcon('ArrowRight', ArrowRight02Icon)
 export const ArrowUp = /* @__PURE__ */ createIcon('ArrowUp', ArrowUp02Icon)
 export const ArrowUpRight = /* @__PURE__ */ createIcon('ArrowUpRight', ArrowUpRight01Icon)
+export const CircleArrowUp = /* @__PURE__ */ createIcon('CircleArrowUp', CircleArrowUp02Icon)
 export const AtSign = /* @__PURE__ */ createIcon('AtSign', AtIcon)
 export const Bell = /* @__PURE__ */ createIcon('Bell', Notification02Icon)
 export const BookOpen = /* @__PURE__ */ createIcon('BookOpen', BookOpen01Icon)

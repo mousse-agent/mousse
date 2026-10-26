@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { StatusDescription } from '../../../shared/harness/status'
 import { ProviderIcon } from '../../lib/providerIcons'
-import { Check, Copy, Folder, Layers, RefreshCw, RotateCcw } from '../../lib/icons'
+import { Check, CircleArrowUp, Copy, Folder, Layers, RefreshCw, RotateCcw } from '../../lib/icons'
 import { Switch } from '../settings/SettingsRow'
 import { ipcErrorMessage } from '../../utils/voiceErrors'
 import type { SwitchState } from './providerView'
@@ -45,17 +45,27 @@ export function statusText(status: StatusDescription): string {
   return detail ? `${headline} · ${detail}` : headline
 }
 
-/** "Not signed in · Run claude to sign in": a dot only when the provider needs attention. */
-export function StatusLine({ status }: { status: StatusDescription }) {
-  const attention = needsAttention(status)
-  const detail = status.detail && attention && status.detail !== status.headline ? status.detail : undefined
+/** The headline alone, for the provider list: "Signed in", "Not found", "Checking". */
+export function shortStatus(status: StatusDescription): string {
+  const head = status.headline.split(' · ')[0] ?? status.headline
+  return head === 'Checking provider status' ? 'Checking' : head
+}
+
+/** The list's status: a few words, and a dot when the provider needs attention; the editor says the rest. */
+export function CompactStatus({ status }: { status: StatusDescription }) {
   return (
-    <span className="prov-status" aria-live="polite">
-      {attention && <span className={`prov-dot is-${status.tone}`} aria-hidden="true" />}
-      <span className="prov-status-text">
-        {status.headline}
-        {detail ? ` · ${detail}` : null}
-      </span>
+    <span className="prov-status is-compact" title={statusText(status)} aria-live="polite">
+      {needsAttention(status) && <span className={`prov-dot is-${status.tone}`} aria-hidden="true" />}
+      <span className="prov-status-text">{shortStatus(status)}</span>
+    </span>
+  )
+}
+
+/** "Not signed in · Run claude to sign in", in the tone's colour (the editor's Setup → Status). */
+export function StatusLine({ status }: { status: StatusDescription }) {
+  return (
+    <span className={`prov-status-text is-${status.tone}`} aria-live="polite">
+      {statusText(status)}
     </span>
   )
 }
@@ -190,6 +200,7 @@ export function ProviderListRow({
   iconId,
   name,
   version,
+  update,
   status,
   toggle,
   selected,
@@ -200,6 +211,8 @@ export function ProviderListRow({
   iconId: string
   name: string
   version?: string
+  /** An update is available: a small button takes the version's place. */
+  update?: { label: string; onClick: () => void }
   status: StatusDescription
   toggle: SwitchState
   selected: boolean
@@ -223,9 +236,22 @@ export function ProviderListRow({
         <span className="prov-item-text">
           <span className="prov-item-title">
             <span className="prov-item-name">{name}</span>
-            {version && <code className="prov-version">{version}</code>}
+            {/* An update takes the version's place, so the name keeps its room. */}
+            {update ? (
+              <button
+                type="button"
+                className="settings-icon-btn prov-micro prov-item-update"
+                title={version ? `${update.label} (now ${version})` : update.label}
+                aria-label={update.label}
+                onClick={update.onClick}
+              >
+                <CircleArrowUp size={14} />
+              </button>
+            ) : (
+              version && <code className="prov-version">{version}</code>
+            )}
           </span>
-          <StatusLine status={status} />
+          <CompactStatus status={status} />
           {toggle.overridden && onReset && (
             <span className="prov-item-override">
               <OverrideInheritance projectEnabled={toggle.checked} deviceEnabled={toggle.deviceEnabled} />

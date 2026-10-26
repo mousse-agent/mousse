@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import type { InstanceSnapshot, StatusDescription } from '../../../shared/harness/status'
 import type { ModelPrefsPatch, ProviderOperationEvent } from '../../../shared/harness/types'
 import { ProviderIcon } from '../../lib/providerIcons'
-import { SettingsRow } from '../settings/SettingsRow'
+import { SettingsAdvanced, SettingsRow } from '../settings/SettingsRow'
 import { AccountRow, ArgsRow, BinaryRow, EnvRow, ExecutableRow, HomeRow, SetupRow, UpdateRow, type InstanceActions } from './CliSections'
 import { ProviderModelsSection } from './ProviderModelsSection'
 import { EditorSection, RemoveButton, useAsyncAction } from './parts'
@@ -19,80 +19,81 @@ function deviceWideNote(snapshot: InstanceSnapshot): string | undefined {
 }
 
 /**
- * The editor's first section, as in T3 Code: the provider's logo and name as the heading, its
- * version and delete on the right, then the Display name row. The status lives in Setup → Status.
+ * The editor's heading, as in T3 Code: the provider's logo and name, its version and delete on the
+ * right. The status lives in Setup → Status; renaming lives under Advanced.
  */
 export function EditorHeader({
   snapshot,
   removeLabel,
   removeHint,
-  onRemove,
-  onRename
+  onRemove
 }: {
   snapshot: InstanceSnapshot
   removeLabel?: string
   removeHint?: string
   onRemove?: () => Promise<void>
-  /** Saves the display name; empty clears it back to the default. */
-  onRename?: (displayName: string | null) => Promise<void>
 }) {
   const removal = useAsyncAction()
-  const rename = useAsyncAction()
-  const [draft, setDraft] = useState(snapshot.displayName)
-  useEffect(() => setDraft(snapshot.displayName), [snapshot.displayName])
   const version = formatVersion(snapshot.binary?.version)
-  const commit = () => {
-    const next = draft.trim()
-    if (next === snapshot.displayName || !onRename) return
-    void rename.run('rename', () => onRename(next || null))
-  }
   return (
-    <EditorSection
-      title={
-        <>
-          <ProviderIcon providerId={iconIdOf(snapshot)} size={18} />
-          {snapshot.displayName}
-        </>
-      }
-      action={
-        <>
+    <section className="settings-group prov-editor-section">
+      <div className="settings-group-head">
+        <div className="settings-group-head-text">
+          <h3 className="settings-group-title">
+            <ProviderIcon providerId={iconIdOf(snapshot)} size={18} />
+            {snapshot.displayName}
+          </h3>
+          {removal.error && <p className="settings-group-desc prov-error">{removal.error}</p>}
+        </div>
+        <div className="settings-group-action">
           {version && <code className="prov-version">{version}</code>}
           {onRemove && removeLabel && (
             <span title={removeHint}>
               <RemoveButton label={removeLabel} disabled={removal.busy !== null} onRemove={() => void removal.run('remove', onRemove)} />
             </span>
           )}
-        </>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+/** Renames the instance; empty clears it back to the default. */
+function DisplayNameRow({ snapshot, onRename }: { snapshot: InstanceSnapshot; onRename: (displayName: string | null) => Promise<void> }) {
+  const rename = useAsyncAction()
+  const [draft, setDraft] = useState(snapshot.displayName)
+  useEffect(() => setDraft(snapshot.displayName), [snapshot.displayName])
+  const commit = () => {
+    const next = draft.trim()
+    if (next === snapshot.displayName) return
+    void rename.run('rename', () => onRename(next || null))
+  }
+  return (
+    <SettingsRow
+      title="Display name"
+      description={rename.error ? <span className="prov-error">{rename.error}</span> : deviceWideNote(snapshot)}
+      control={
+        <input
+          className="settings-input"
+          value={draft}
+          disabled={rename.busy !== null}
+          placeholder={DRIVER_INFO[snapshot.driver].label}
+          aria-label="Display name"
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') event.currentTarget.blur()
+          }}
+        />
       }
-    >
-      <SettingsRow
-        title="Display name"
-        description={
-          removal.error || rename.error ? <span className="prov-error">{removal.error ?? rename.error}</span> : deviceWideNote(snapshot)
-        }
-        control={
-          <input
-            className="settings-input"
-            value={draft}
-            readOnly={!onRename}
-            disabled={!onRename || rename.busy !== null}
-            placeholder={DRIVER_INFO[snapshot.driver].label}
-            aria-label="Display name"
-            onChange={(event) => setDraft(event.target.value)}
-            onBlur={commit}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') event.currentTarget.blur()
-            }}
-          />
-        }
-      />
-    </EditorSection>
+    />
   )
 }
 
 /**
- * The editor of one agent instance: Setup (status, next step, account), Runtime (the executable
- * Mousse resolved, updates, path and arguments, home), Environment and Models.
+ * The editor of one agent instance: Setup (name, status, next step, account) and Models up front;
+ * the rest (the executable Mousse resolved, updates, path and arguments, home, environment) under a
+ * collapsed Advanced, so most people never meet it.
  */
 export function AgentEditor({
   snapshot,
@@ -117,25 +118,33 @@ export function AgentEditor({
       <EditorHeader
         snapshot={snapshot}
         removeLabel={onRemove ? 'Remove provider' : undefined}
-        removeHint={onRemove ? 'Removes this instance and its private home' : undefined}
+        removeHint={
+          !onRemove
+            ? undefined
+            : snapshot.config?.home === 'private'
+              ? 'Deletes this provider and the sign-in Mousse kept for it. Add it again any time.'
+              : 'Deletes this provider from Mousse. Your CLI and its sign-in stay; add it again any time.'
+        }
         onRemove={onRemove}
-        onRename={(displayName) => actions.configure({ displayName })}
       />
       <EditorSection title="Setup">
+        <DisplayNameRow snapshot={snapshot} onRename={(displayName) => actions.configure({ displayName })} />
         <SetupRow snapshot={snapshot} status={status} operation={operation?.kind === 'update' ? undefined : operation} actions={actions} />
         <AccountRow snapshot={snapshot} actions={actions} />
       </EditorSection>
-      <EditorSection title="Runtime" description={deviceWideNote(snapshot)}>
-        <BinaryRow snapshot={snapshot} />
-        <UpdateRow snapshot={snapshot} operation={operation} actions={actions} />
-        <ExecutableRow snapshot={snapshot} label={info.label} onSave={(binaryPath) => actions.configure({ binaryPath })} />
-        <ArgsRow snapshot={snapshot} onSave={(args) => actions.configure({ args })} />
-        <HomeRow snapshot={snapshot} />
-      </EditorSection>
-      <EditorSection title="Environment" description={deviceWideNote(snapshot)}>
-        <EnvRow snapshot={snapshot} onSave={(env) => actions.configure({ env })} />
-      </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} />
+      <SettingsAdvanced>
+        <EditorSection title="Runtime" description={deviceWideNote(snapshot)}>
+          <BinaryRow snapshot={snapshot} />
+          <UpdateRow snapshot={snapshot} operation={operation} actions={actions} />
+          <ExecutableRow snapshot={snapshot} label={info.label} onSave={(binaryPath) => actions.configure({ binaryPath })} />
+          <ArgsRow snapshot={snapshot} onSave={(args) => actions.configure({ args })} />
+          <HomeRow snapshot={snapshot} />
+        </EditorSection>
+        <EditorSection title="Environment" description={deviceWideNote(snapshot)}>
+          <EnvRow snapshot={snapshot} onSave={(env) => actions.configure({ env })} />
+        </EditorSection>
+      </SettingsAdvanced>
     </>
   )
 }

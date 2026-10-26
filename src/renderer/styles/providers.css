@@ -1,5 +1,5 @@
 /* Settings → Providers, after T3 Code's providers page: a scope line and refresh/add actions,
-   then one surface split into a provider list (14rem) and the selected provider's editor, inside
+   then one surface split into a provider list (18rem) and the selected provider's editor, inside
    the same content column as every settings page. Below 40rem of page width the editor stacks
    under the list. Built on the settings primitives (settings.css); selection is a background fill
    only. */
@@ -106,7 +106,7 @@
 @container providers (min-width: 40rem) {
   .prov-pane {
     display: grid;
-    grid-template-columns: 14rem minmax(0, 1fr);
+    grid-template-columns: 18rem minmax(0, 1fr);
     align-items: start;
   }
 
@@ -283,6 +283,34 @@
   overflow-wrap: anywhere;
 }
 
+/* The list's status: a few words on one line, with the dot. */
+.prov-item .prov-status.is-compact {
+  align-items: center;
+}
+
+.prov-item .prov-status.is-compact .prov-dot {
+  margin-top: 0;
+}
+
+.prov-item .prov-status.is-compact .prov-status-text {
+  display: block;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* The editor's status: the colour carries the tone. */
+.prov-editor .prov-status-text.is-ready {
+  color: var(--success);
+}
+
+.prov-editor .prov-status-text.is-warning {
+  color: var(--warning);
+}
+
+.prov-editor .prov-status-text.is-error {
+  color: var(--danger);
+}
+
 .prov-dot {
   width: 6px;
   height: 6px;
@@ -302,6 +330,14 @@
 
 /* Project override marker and reset: small icon buttons on their own line under the status,
    above the row's select target. */
+
+/* Update available: a small button where the version was, above the row's select target. */
+.settings-icon-btn.prov-item-update {
+  position: relative;
+  z-index: 2;
+  flex-shrink: 0;
+  color: var(--accent);
+}
 
 .prov-item-override {
   position: relative;
@@ -394,22 +430,34 @@
   display: flex;
 }
 
+/* Advanced reads like one more section heading: same spacing, no rules of its own. */
 .prov-editor .settings-advanced {
-  margin-top: 0;
+  margin-top: var(--space-24);
 }
 
 .prov-editor .settings-advanced > summary {
-  display: flex;
-  align-items: center;
-  min-height: calc(var(--settings-control-h) + 2 * var(--settings-row-y));
-  padding: var(--settings-row-y) 0;
-  border-top: 1px solid var(--ui-line);
   font-size: var(--settings-fs-row);
-  font-weight: 450;
 }
 
-.prov-editor .settings-advanced-body > :first-child {
-  border-top: 1px solid var(--ui-line);
+.prov-editor .settings-advanced-body > .prov-editor-section {
+  padding-top: var(--space-16);
+}
+
+.prov-editor .settings-advanced > summary {
+  border-radius: var(--ui-control-radius);
+}
+
+.prov-editor .settings-advanced > summary:focus-visible {
+  outline: 1px solid var(--ui-line-strong);
+  outline-offset: 2px;
+}
+
+/* Models folds like Advanced; its counts sit beside the heading so it reads while closed. */
+.prov-models-summary {
+  margin-left: var(--space-4);
+  font-size: var(--settings-fs-small);
+  font-weight: 400;
+  color: var(--text-secondary);
 }
 
 /* Models */

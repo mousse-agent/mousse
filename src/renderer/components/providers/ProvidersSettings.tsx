@@ -331,6 +331,18 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
                 iconId={iconIdOf(snapshot)}
                 name={snapshot.displayName}
                 version={formatVersion(snapshot.binary?.version)}
+                update={
+                  snapshot.update
+                    ? {
+                        label: `Update ${snapshot.displayName}${snapshot.update.latestVersion ? ` to ${formatVersion(snapshot.update.latestVersion)}` : ''}`,
+                        // One click where Mousse knows who installed it; otherwise the editor shows the command.
+                        onClick:
+                          snapshot.update.kind === 'one_click'
+                            ? () => guard(() => actionsFor(snapshot).update())
+                            : () => setSelectedId(snapshot.instanceId)
+                      }
+                    : undefined
+                }
                 status={describeStatus(snapshot)}
                 toggle={switchStateOf(snapshot, scope)}
                 selected={selected?.instanceId === snapshot.instanceId}
