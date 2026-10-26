@@ -174,7 +174,7 @@ function updateStep(snapshot: InstanceSnapshot): NextStep | null {
   if (!update) return null
   if (update.kind === 'one_click') return step(snapshot, 'update')
   if (update.kind === 'notice') return null
-  return { action: 'update', label: 'Copy update command', command: update.command }
+  return { action: 'update', label: 'Copy command', command: update.command }
 }
 
 function withLabel(headline: string, label: string | undefined): string {
@@ -210,12 +210,12 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
   }
 
   if (!snapshot.checkedAt && !snapshot.stale) {
-    return { headline: 'Checking provider status', detail: null, tone: 'neutral', nextStep: null }
+    return { headline: 'Checking status', detail: null, tone: 'neutral', nextStep: null }
   }
 
   if (snapshot.stale && !snapshot.lastGoodAt) {
     return {
-      headline: 'Status unknown',
+      headline: 'Check incomplete',
       detail: 'The check did not finish.',
       tone: 'warning',
       nextStep: step(snapshot, 'recheck')
@@ -237,7 +237,7 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
   if (install.state === 'not_installed') {
     return {
       headline: 'Not found',
-      detail: runs.message ?? 'CLI not detected on PATH.',
+      detail: runs.message ?? 'Mousse could not find its command on PATH.',
       tone: 'warning',
       nextStep: install.canInstall ? step(snapshot, 'install') : step(snapshot, 'recheck')
     }
@@ -255,7 +255,7 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
   if (runs.state === 'no') {
     return {
       headline: 'Unavailable',
-      detail: runs.message ?? 'The provider failed its startup checks.',
+      detail: runs.message ?? 'Mousse could not start this provider.',
       tone: 'error',
       nextStep: step(snapshot, 'recheck')
     }
@@ -263,7 +263,7 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
 
   if (compatibility.state === 'known_broken') {
     return {
-      headline: 'Known broken version',
+      headline: 'Incompatible version',
       detail: snapshot.binary?.version ? `Version ${snapshot.binary.version} does not work with Mousse.` : null,
       tone: 'error',
       nextStep: updateStep(snapshot)
@@ -290,8 +290,8 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
 
   if (compatibility.state === 'too_old') {
     return {
-      headline: 'Unsupported version',
-      detail: compatibility.testedRange ? `Use ${compatibility.testedRange} for full support.` : 'Update for full support.',
+      headline: 'Version too old',
+      detail: compatibility.testedRange ? `Use ${compatibility.testedRange} for full support.` : 'Update to a tested version.',
       tone: 'warning',
       nextStep: updateStep(snapshot)
     }
@@ -303,7 +303,7 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
 
   if (runs.state === 'unknown' || install.state === 'unknown') {
     return {
-      headline: 'Needs attention',
+      headline: 'Not verified',
       detail: runs.message ?? staleDetail ?? 'Mousse could not fully verify this provider.',
       tone: 'warning',
       nextStep: step(snapshot, 'recheck')
@@ -312,7 +312,7 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
 
   if (auth.state === 'unknown') {
     return {
-      headline: 'Installed · Sign-in not checked',
+      headline: 'Installed · Sign-in unverified',
       detail: auth.message ?? staleDetail,
       tone: 'neutral',
       // An agent that offers its sign-in methods can be signed in from here.

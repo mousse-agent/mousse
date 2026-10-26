@@ -48,7 +48,7 @@ export function statusText(status: StatusDescription): string {
 /** The headline alone, for the provider list: "Signed in", "Not found", "Checking". */
 export function shortStatus(status: StatusDescription): string {
   const head = status.headline.split(' · ')[0] ?? status.headline
-  return head === 'Checking provider status' ? 'Checking' : head
+  return head === 'Checking status' ? 'Checking' : head
 }
 
 /** The list's status: a few words, and a dot when the provider needs attention; the editor says the rest. */

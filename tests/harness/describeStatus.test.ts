@@ -43,7 +43,7 @@ describe('describeStatus', () => {
     ['off on the device', { enabled: { device: false, effective: false, setBy: 'device' } }, { headline: 'Disabled', tone: 'disabled', action: 'enable' }],
     ['off for the project', { scope: { kind: 'project', projectId: 'p1' }, enabled: { device: true, project: false, effective: false, setBy: 'project' } }, { headline: 'Disabled', tone: 'disabled', action: 'enable' }],
     ['installing', { install: { state: 'installing', operationId: 'op-1', progress: { message: 'Downloading 40%' } } }, { headline: 'Installing', tone: 'neutral', action: 'cancel_install' }],
-    ['never checked', { checkedAt: undefined, lastGoodAt: undefined }, { headline: 'Checking provider status', tone: 'neutral', action: null }],
+    ['never checked', { checkedAt: undefined, lastGoodAt: undefined }, { headline: 'Checking status', tone: 'neutral', action: null }],
     ['override that does not run', { runs: { state: 'no', failure: 'override_not_found' }, binary: { path: 'C:\\tools\\claude.exe', source: 'override' } }, { headline: 'Override not found', tone: 'error', action: 'fix_override' }],
     ['not installed, Mousse can install', { install: { state: 'not_installed', canInstall: true }, runs: { state: 'no', failure: 'not_on_path' } }, { headline: 'Not found', tone: 'warning', action: 'install' }],
     ['not installed, user installs', { install: { state: 'not_installed' }, runs: { state: 'no', failure: 'not_on_path' } }, { headline: 'Not found', tone: 'warning', action: 'recheck' }],
@@ -53,14 +53,14 @@ describe('describeStatus', () => {
     ['signed out does not repeat the method', { auth: { state: 'signed_out', account: undefined, methodLabel: 'Claude Code sign-in' } }, { headline: 'Not signed in', tone: 'neutral', action: 'sign_in' }],
     ['expired sign-in', { auth: { state: 'expired' } }, { headline: 'Sign-in expired', tone: 'warning', action: 'sign_in' }],
     ['refreshing sign-in', { auth: { state: 'refreshing' } }, { headline: 'Refreshing sign-in', tone: 'neutral', action: null }],
-    ['sign-in not checked', { auth: { state: 'unknown', account: undefined } }, { headline: 'Installed · Sign-in not checked', tone: 'neutral', action: 'recheck' }],
-    ['runs unknown', { runs: { state: 'unknown' } }, { headline: 'Needs attention', tone: 'warning', action: 'recheck' }],
-    ['install unknown is not reported as installed', { install: { state: 'unknown' }, runs: { state: 'unknown' }, auth: { state: 'unknown' } }, { headline: 'Needs attention', tone: 'warning', action: 'recheck' }],
-    ['known broken version', { compatibility: { state: 'known_broken' }, update: { kind: 'one_click', owner: 'npm' } }, { headline: 'Known broken version', tone: 'error', action: 'update' }],
-    ['too old', { compatibility: { state: 'too_old', testedRange: '>=2.0.0' }, update: { kind: 'advisory', command: 'npm i -g @anthropic-ai/claude-code' } }, { headline: 'Unsupported version', tone: 'warning', action: 'update' }],
+    ['sign-in not checked', { auth: { state: 'unknown', account: undefined } }, { headline: 'Installed · Sign-in unverified', tone: 'neutral', action: 'recheck' }],
+    ['runs unknown', { runs: { state: 'unknown' } }, { headline: 'Not verified', tone: 'warning', action: 'recheck' }],
+    ['install unknown is not reported as installed', { install: { state: 'unknown' }, runs: { state: 'unknown' }, auth: { state: 'unknown' } }, { headline: 'Not verified', tone: 'warning', action: 'recheck' }],
+    ['known broken version', { compatibility: { state: 'known_broken' }, update: { kind: 'one_click', owner: 'npm' } }, { headline: 'Incompatible version', tone: 'error', action: 'update' }],
+    ['too old', { compatibility: { state: 'too_old', testedRange: '>=2.0.0' }, update: { kind: 'advisory', command: 'npm i -g @anthropic-ai/claude-code' } }, { headline: 'Version too old', tone: 'warning', action: 'update' }],
     ['newer than tested never blocks', { compatibility: { state: 'newer_than_tested', testedRange: '2.0–2.1' } }, { headline: 'Signed in · Max plan', tone: 'ready', action: null }],
     ['one-click update', { update: { kind: 'one_click', owner: 'npm', latestVersion: '2.2.0' } }, { headline: 'Signed in · Max plan', tone: 'ready', action: 'update' }],
-    ['stale without a good check', { stale: true, checkedAt: undefined, lastGoodAt: undefined }, { headline: 'Status unknown', tone: 'warning', action: 'recheck' }]
+    ['stale without a good check', { stale: true, checkedAt: undefined, lastGoodAt: undefined }, { headline: 'Check incomplete', tone: 'warning', action: 'recheck' }]
   ]
 
   it.each(cases)('%s', (_name, overrides, expected) => {
@@ -81,7 +81,7 @@ describe('describeStatus', () => {
 
   it('gives an advisory update as a command to copy', () => {
     const status = describeStatus(snapshot({ compatibility: { state: 'too_old' }, update: { kind: 'advisory', command: 'brew upgrade codex' } }))
-    expect(status.nextStep).toEqual({ action: 'update', label: 'Copy update command', command: 'brew upgrade codex' })
+    expect(status.nextStep).toEqual({ action: 'update', label: 'Copy command', command: 'brew upgrade codex' })
   })
 
   it('says an update is available for an unproven owner, with no step to take', () => {
