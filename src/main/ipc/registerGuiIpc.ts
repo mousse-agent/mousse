@@ -2066,6 +2066,8 @@ export function registerGuiIpc(
   const signOutInstance = instanceCommand('providers.instances.signOut', 'snapshot')
   const recheckInstance = instanceCommand('providers.instances.recheck', 'snapshot')
   const moveInstance = instanceCommand('providers.instances.move', 'result')
+  const removeInstanceInstall = instanceCommand('providers.instances.removeInstall', 'result')
+  const searchRegistry = instanceCommand('providers.registry.search', 'agents')
   const refreshInstanceModels = instanceCommand('providers.instances.refreshModels', 'snapshot')
   const setInstanceModelPrefs = instanceCommand('providers.instances.setModelPrefs', 'snapshot')
   // The daemon validates every payload.
@@ -2089,6 +2091,9 @@ export function registerGuiIpc(
   registerHandler('providers:instances:recheck', async (_e, instanceId: string) => recheckInstance({ instanceId }))
   registerHandler('providers:instances:move', async (_e, instanceId: string, toInstanceId: string, options?: { copyKey?: boolean }) =>
     moveInstance({ instanceId, toInstanceId, copyKey: options?.copyKey === true }))
+  registerHandler('providers:instances:removeInstall', async (_e, instanceId: string, force: unknown) =>
+    removeInstanceInstall({ instanceId, force: force === true }))
+  registerHandler('providers:registry:search', async (_e, query: unknown) => searchRegistry({ query: typeof query === 'string' ? query : '' }))
   registerHandler('providers:instances:refreshModels', async (_e, instanceId: string) =>
     refreshInstanceModels({ instanceId }))
   registerHandler('providers:instances:setModelPrefs', async (_e, instanceId: string, patch: unknown) =>

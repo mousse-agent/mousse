@@ -32,7 +32,7 @@ const PROFILE_PROVIDER_METHODS = new Set([
   'providers.instances.cancelInstall', 'providers.instances.update',
   'providers.instances.signIn', 'providers.instances.respondSignIn', 'providers.instances.signOut',
   'providers.instances.recheck', 'providers.instances.refreshModels', 'providers.instances.setModelPrefs',
-  'providers.instances.move'
+  'providers.instances.move', 'providers.instances.removeInstall', 'providers.registry.search'
 ])
 
 export function isInstallationMethod(method: string): boolean {

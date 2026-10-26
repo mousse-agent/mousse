@@ -1818,6 +1818,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       return { operation: await harnessGateway(ctx).instances.install(asInstanceId(p.instanceId)) }
     }
+    case 'providers.instances.removeInstall': {
+      const p = isObject(params) ? params : {}
+      const force = p.force === undefined ? false : asBoolean(p.force, 'force')
+      return { result: await harnessGateway(ctx).instances.removeInstall(asInstanceId(p.instanceId), { force }) }
+    }
+    case 'providers.registry.search': {
+      const p = isObject(params) ? params : {}
+      return { agents: await harnessGateway(ctx).registry.search(asOptionalString(p.query, 120)?.trim() ?? '') }
+    }
     case 'providers.instances.cancelInstall': {
       const p = isObject(params) ? params : {}
       return { cancelled: await harnessGateway(ctx).instances.cancelInstall(asString(p.operationId, 'operationId', 256)) }

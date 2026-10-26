@@ -16,7 +16,8 @@ export const GUI_REQUIRED_METHODS = [
   'providers.instances.setEnabled', 'providers.instances.install', 'providers.instances.cancelInstall',
   'providers.instances.update', 'providers.instances.signIn', 'providers.instances.respondSignIn',
   'providers.instances.signOut', 'providers.instances.recheck', 'providers.instances.refreshModels',
-  'providers.instances.setModelPrefs', 'providers.instances.move'
+  'providers.instances.setModelPrefs', 'providers.instances.move', 'providers.instances.removeInstall',
+  'providers.registry.search'
 ] as const
 
 export async function assertGuiDaemonCompatible(client: LocalMmsClient, hello: ProtocolHelloOk, homeDir: string): Promise<void> {

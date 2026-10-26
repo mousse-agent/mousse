@@ -79,6 +79,8 @@ import type {
   ProviderOperationEvent,
   ProviderOperationStarted,
   ProviderScope,
+  RegistryAgentView,
+  RemoveInstallResult,
   SignInResponse
 } from '../shared/harness/types'
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
@@ -798,6 +800,10 @@ const api = {
      * Provider instance commands. Mutations resolve with the instance's snapshot; install, update
      * and sign-in resolve at once with an operation id and report through `onOperation`.
      */
+    /** The ACP agent registry ("More ACP agents"): agents that fit this computer, best match first. */
+    registry: {
+      search: (query: string): Promise<RegistryAgentView[]> => ipcRenderer.invoke('providers:registry:search', query)
+    },
     instances: {
       add: (input: AddInstanceInput): Promise<InstanceSnapshot> =>
         ipcRenderer.invoke('providers:instances:add', input),
@@ -810,6 +816,9 @@ const api = {
         ipcRenderer.invoke('providers:instances:setEnabled', instanceId, scope, enabled),
       install: (instanceId: string): Promise<ProviderOperationStarted> =>
         ipcRenderer.invoke('providers:instances:install', instanceId),
+      /** Deletes the files Mousse downloaded for it; other entries using them block it unless `force`. */
+      removeInstall: (instanceId: string, force = false): Promise<RemoveInstallResult> =>
+        ipcRenderer.invoke('providers:instances:removeInstall', instanceId, force),
       /** Cancels a running install or update; false when it is not running. */
       cancelInstall: (operationId: string): Promise<boolean> =>
         ipcRenderer.invoke('providers:instances:cancelInstall', operationId),
