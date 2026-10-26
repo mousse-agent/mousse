@@ -340,9 +340,9 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
   it('a continuation that cannot be recorded discards only its own turn, not a sibling waiting on the thread', async () => {
     const s = await scene()
     const live = (s.service as any).live.get(s.childThread)
-    const first = (live as any).startContinuation(['a'], [])
+    const first = (live as any).startContinuation([{ id: 'a' }])
     ;(live as any).continuation = undefined
-    const second = (live as any).startContinuation(['b'], [])
+    const second = (live as any).startContinuation([{ id: 'b' }])
     expect(s.service.hasContinuation(s.childThread, second.id)).toBe(true)
     s.service.discardContinuations(s.childThread, first.id)
     expect(s.service.hasContinuation(s.childThread, first.id)).toBe(false)
