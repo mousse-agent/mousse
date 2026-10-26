@@ -35,6 +35,7 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
     // Never searched on PATH: only the verified install or a manual path runs.
     binaryNames: [],
     testedVersions: { min: ANTIGRAVITY_VERSION, max: ANTIGRAVITY_VERSION },
+    latestVersion: { kind: 'pinned', version: ANTIGRAVITY_VERSION },
     multiInstance: false,
     privateHome: false,
     canInstall: true,

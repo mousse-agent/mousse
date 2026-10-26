@@ -2,10 +2,13 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { decodeInstanceConfig, type DriverRuntime, type HarnessDriver } from '../../src/mms/harness/driver'
+import { decodeInstanceConfig, installOwner, type DriverRuntime, type HarnessDriver } from '../../src/mms/harness/driver'
+import { claudeCodeDriver } from '../../src/mms/harness/drivers/claudeCode'
+import { codexDriver } from '../../src/mms/harness/drivers/codex'
 import { cliNames, instanceEnv } from '../../src/mms/harness/env'
 import { captureShellPath, parseShellPath, shellPathCommand } from '../../src/mms/harness/shellPath'
-import { probeInstance } from '../../src/mms/harness/status'
+import { compatibilityOf, probeInstance, updateAffordance } from '../../src/mms/harness/status'
+import type { InstanceBinary } from '../../src/shared/harness/status'
 import { observeHarnessSpawns } from '../../src/mms/harness/spawn'
 import { describeStatus } from '../../src/shared/harness/status'
 import { testHarness } from '../../src/mms/run/testkit/harness'
@@ -69,6 +72,60 @@ function probe(dir: string | undefined, options: { versionMs?: number; override?
   })
 }
 
+describe('the update on offer', () => {
+  const at = (path: string, version: string, owner?: InstanceBinary['owner']): InstanceBinary => ({ path, version, source: 'path', ...(owner ? { owner } : {}) })
+  const offer = (binary: InstanceBinary | undefined, latest?: string, base: HarnessDriver = driver) =>
+    updateAffordance(base, binary, compatibilityOf(base, binary?.version), latest)
+
+  it('a newer published version is an advisory with the owner\'s command and the version', () => {
+    expect(offer(at('/x/node_modules/.bin/fakecli', '2.1.0', 'npm'), '2.2.0')).toEqual({ kind: 'advisory', command: 'npm install -g fakecli@latest', latestVersion: '2.2.0' })
+  })
+
+  it('offers nothing for a tested version when no newer one is known, or the installed one is current', () => {
+    const binary = at('/x/node_modules/.bin/fakecli', '2.1.0', 'npm')
+    expect(offer(binary)).toBeUndefined()
+    expect(offer(binary, '2.1.0')).toBeUndefined()
+    expect(offer(binary, '2.0.9')).toBeUndefined()
+    expect(offer(at('/x/node_modules/.bin/fakecli', '2.1.0', 'npm'), '2.1.0-beta.1')).toBeUndefined()
+  })
+
+  it('offers nothing without a binary or an installed version to compare', () => {
+    expect(offer(undefined, '2.2.0')).toBeUndefined()
+    expect(offer({ path: '/x/fakecli', source: 'path', owner: 'npm' }, '2.2.0')).toBeUndefined()
+  })
+
+  it('an install whose owner is not proven gets the version and no command', () => {
+    expect(offer(at('/usr/local/bin/fakecli', '2.1.0', 'unknown'), '2.2.0')).toEqual({ kind: 'notice', latestVersion: '2.2.0' })
+    expect(offer(at('/usr/local/bin/fakecli', '2.1.0'), '2.2.0')).toEqual({ kind: 'notice', latestVersion: '2.2.0' })
+    // Nothing newer, nothing to say.
+    expect(offer(at('/usr/local/bin/fakecli', '2.1.0', 'unknown'), '2.1.0')).toBeUndefined()
+    expect(offer(at('/usr/local/bin/fakecli', '2.1.0', 'unknown'))).toBeUndefined()
+  })
+
+  it('a standalone install never gets an npm command', () => {
+    expect(offer(at('/home/me/.local/bin/fakecli', '2.1.0', 'standalone'), '2.2.0')).toEqual({ kind: 'notice', latestVersion: '2.2.0' })
+    // The real drivers: Claude updates itself, Codex has no standalone command, `/usr/local/bin` is not brew.
+    expect(claudeCodeDriver().updateCommand?.('standalone')).toBe('claude update')
+    expect(codexDriver({ builtIn: () => ({}) as never }).updateCommand?.('standalone')).toBeUndefined()
+    expect(installOwner('/usr/local/bin/codex', 'path')).toBe('unknown')
+    expect(offer(at('/usr/local/bin/codex', '0.150.0', installOwner('/usr/local/bin/codex', 'path')), '0.163.0', codexDriver({ builtIn: () => ({}) as never })))
+      .toEqual({ kind: 'notice', latestVersion: '0.163.0' })
+  })
+
+  it('a too-old version keeps its update, and carries the latest version when one is known', () => {
+    const binary = at('/x/node_modules/.bin/fakecli', '1.0.0', 'npm')
+    expect(offer(binary)).toEqual({ kind: 'advisory', command: 'npm install -g fakecli@latest' })
+    expect(offer(binary, '2.2.0')).toMatchObject({ kind: 'advisory', latestVersion: '2.2.0' })
+  })
+
+  it('one click only for an install Mousse owns', () => {
+    const installable: HarnessDriver = { ...driver, canInstall: true }
+    expect(offer({ path: '/m/fakecli', version: '2.1.0', source: 'managed', owner: 'managed' }, '2.2.0', installable)).toEqual({ kind: 'one_click', owner: 'managed', latestVersion: '2.2.0' })
+    // The driver cannot install and has no command for the managed owner: the version is all there is.
+    expect(offer({ path: '/m/fakecli', version: '2.1.0', source: 'managed', owner: 'managed' }, '2.2.0')).toEqual({ kind: 'notice', latestVersion: '2.2.0' })
+  })
+})
+
 describe('fake-CLI probes', () => {
   it('finds a CLI on the login-shell PATH, reads its version and its tested range', async () => {
     const result = await probe(fakeCli(`console.log('fakecli 2.1.5 (Fake)')`))
@@ -107,11 +164,10 @@ describe('fake-CLI probes', () => {
     expect(result.runs.state).toBe('yes')
   })
 
-  it('offers an update command only for a proven owner when the version is too old', async () => {
+  it('a probe reports the version only; the update on offer comes from updateAffordance', async () => {
     const result = await probe(fakeCli(`console.log('1.0.0')`))
     expect(result.compatibility.state).toBe('too_old')
-    // A temp-dir binary has no proven owner: no one-click update.
-    expect(result.update?.kind).not.toBe('one_click')
+    expect(result).not.toHaveProperty('update')
   })
 
   it('a garbage version still runs, with the version unknown', async () => {

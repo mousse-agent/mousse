@@ -46,6 +46,7 @@ export function codexDriver(options: { builtIn: () => CodexProviderService }): H
     label: 'Codex',
     binaryNames: cliNames('codex'),
     testedVersions: CODEX_TESTED_VERSIONS,
+    latestVersion: { kind: 'npm', package: '@openai/codex' },
     multiInstance: false,
     privateHome: false,
     canInstall: false,

@@ -33,7 +33,7 @@ import type { ModeCeiling, ProviderRef } from '../run/types'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import type { InstanceConfigView, NextStep } from '../../shared/harness/status'
+import type { InstanceConfigView, NextStep, UpdateAffordance } from '../../shared/harness/status'
 import { foldedInto, type MoveResult } from '../../shared/harness/move'
 import { harnessAppError, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
@@ -50,12 +50,13 @@ import { hidesModel, modelsWithPrefs, ModelPrefsService, visibleProviderOption, 
 import type { AuthReading, DriverRuntime, HarnessDriver, InstanceConfig, LiveProcessHost } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, type InstanceEnv } from './env'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
+import { LatestVersionCache } from './latest'
 import { RuntimeFactsStore } from './facts'
 import { questionsPrompter } from './acp/permissions'
 import { checkPolicy, purposeAllowed, toolControlLevel } from './policy'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
-import { compatibilityOf, fingerprintOf, PROBE_TIMEOUTS, probeInstance, sameBinary, type ProbeResult } from './status'
+import { compatibilityOf, fingerprintOf, PROBE_TIMEOUTS, probeInstance, sameBinary, updateAffordance, type ProbeResult } from './status'
 import { interruptWithDeadline } from './supervise'
 
 /** Instance id of a turn that ran on the unselected default: the bare pi loop. */
@@ -330,6 +331,8 @@ export interface HarnessGatewayOptions {
   /** Old clients refresh their provider lists on this (the `providers:changed` event). */
   onProvidersChanged?: () => void
   now?: () => number
+  /** Newest published CLI versions; looked up in the npm registry at most daily by default. */
+  latest?: LatestVersionCache
   /** Test seam: the turn-admission account check deadline (`TURN_ACCOUNT_CHECK_MS`). */
   accountCheckMs?: number
   /**
@@ -444,6 +447,7 @@ export class Harness implements HarnessGateway {
   private readonly listeners = new Set<(event: HarnessGatewayEvent) => void>()
   private readonly scopes: HarnessScopeStore
   private readonly counters: InstanceCounterStore
+  private readonly latest: LatestVersionCache
   private readonly prefs: ModelPrefsService
   private searchPath: string[] = []
   private readonly shellPath: Promise<void>
@@ -458,6 +462,7 @@ export class Harness implements HarnessGateway {
     this.scopes = new HarnessScopeStore(options.profileHome)
     this.counters = new InstanceCounterStore(options.profileHome)
     this.facts = new RuntimeFactsStore(options.profileHome)
+    this.latest = options.latest ?? new LatestVersionCache(options.profileHome, options.now ? { now: options.now } : {})
     this.prefs = new ModelPrefsService(options.prefs ?? memoryPrefs())
     // Captured once at boot; probes that ran before it arrived and found nothing run again.
     this.shellPath = (options.shellPath ?? sharedShellPath)()
@@ -495,6 +500,7 @@ export class Harness implements HarnessGateway {
       respondSignIn: async (operationId, response) => this.respondSignIn(operationId, response),
       signOut: (instanceId) => this.signOut(instanceId),
       recheck: async (instanceId) => {
+        this.refreshLatest([instanceId])
         await this.probe(instanceId, true, { handshake: true })
         return this.snapshot(instanceId, { kind: 'device' })
       },
@@ -1217,6 +1223,7 @@ export class Harness implements HarnessGateway {
       // refreshes run in the background and arrive as `providers.snapshots` events.
       if (!state?.result) firstChecks.push(probing)
     }
+    this.refreshLatest(ids)
     await Promise.all(firstChecks)
     return ids.flatMap((instanceId) => {
       try {
@@ -1298,6 +1305,7 @@ export class Harness implements HarnessGateway {
     const installing = Boolean(operation) || runtime.installState?.().installing === true
     const installProgress = operation?.progress ?? (runtime.installState?.().progress ? { message: runtime.installState!().progress! } : undefined)
     const auth = shown?.auth ?? { state: 'unknown' as const }
+    const update = this.updateFor(record)
     const prefs = this.prefs.get(instanceId)
     const listed = runtime.models()
     const models = state?.models
@@ -1328,7 +1336,7 @@ export class Harness implements HarnessGateway {
         ...(runtime.signIn && auth.canSignIn ? { canSignIn: true } : {})
       },
       compatibility: shown?.compatibility ?? compatibilityOf(driver, undefined),
-      ...(shown?.update ? { update: shown.update } : {}),
+      ...(update ? { update } : {}),
       ...(shown?.binary ? { binary: shown.binary } : {}),
       caps: driver.caps(config, shown?.binary?.version, this.currentFacts(instanceId)),
       config: this.configView(record),
@@ -1343,6 +1351,36 @@ export class Harness implements HarnessGateway {
       stale,
       ...(state?.lastGood ? { lastGoodAt: state.lastGood.checkedAt } : {}),
       ...(signInStep ? { nextStep: signInStep } : {})
+    }
+  }
+
+  /**
+   * The update on offer for an instance: from the last good check and the newest version known
+   * now, so a version learned later shows without another probe.
+   */
+  private updateFor(record: InstanceRecord): UpdateAffordance | undefined {
+    const good = this.probes.get(record.instanceId)?.lastGood
+    if (!good) return undefined
+    return updateAffordance(record.driver, good.binary, good.compatibility, this.latest.get(record.driver.latestVersion))
+  }
+
+  /**
+   * Looks up the newest published version of the CLIs the enabled instances run. Never awaited, never
+   * on a probe or a turn; a lookup that learns something new publishes the snapshots again.
+   */
+  private refreshLatest(instanceIds: readonly string[]): void {
+    if (this.stopped) return
+    const entries = this.instanceMap.list()
+    // Instances of one driver share a package: one lookup, one publish.
+    const packages = new Set<string>()
+    for (const instanceId of instanceIds) {
+      const entry = entries[instanceId]
+      const source = entry?.enabled ? this.drivers.get(entry.driver)?.latestVersion : undefined
+      if (source?.kind !== 'npm' || packages.has(source.package)) continue
+      packages.add(source.package)
+      void this.latest.refresh(source).then((changed) => {
+        if (changed && !this.stopped) this.changed(instanceId, { legacy: false })
+      })
     }
   }
 
@@ -1590,8 +1628,10 @@ export class Harness implements HarnessGateway {
   }
 
   private async update(instanceId: string): Promise<ProviderOperationStarted> {
-    const update = this.probes.get(instanceId)?.lastGood?.update
+    const update = this.updateFor(this.record(instanceId, { allowDisabled: true }))
     if (update?.kind === 'one_click') return this.install(instanceId, 'update')
+    if (update?.kind === 'notice')
+      return harnessFail('unsupported', `Mousse cannot tell how this CLI was installed, so it cannot update it. Version ${update.latestVersion} is available.`, instanceId)
     if (update?.kind === 'advisory')
       return harnessFail('unsupported', `Mousse cannot prove who installed this CLI. Update it with: ${update.command}`, instanceId)
     return harnessFail('unsupported', 'No update is available.', instanceId)

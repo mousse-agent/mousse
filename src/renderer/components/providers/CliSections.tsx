@@ -202,6 +202,15 @@ export function UpdateRow({ snapshot, operation, actions }: { snapshot: Instance
   if (!update) return null
   const target = formatVersion(update.latestVersion)
   const updating = operation?.kind === 'update' && (operation.phase === 'progress' || operation.phase === 'prompt')
+  if (update.kind === 'notice') {
+    return (
+      <SettingsRow
+        className="prov-update is-notice"
+        title={target ? `${target} is available` : 'Update available'}
+        description="Mousse can't tell how this copy was installed. Update it the way you installed it."
+      />
+    )
+  }
   if (update.kind === 'one_click') {
     return (
       <SettingsRow

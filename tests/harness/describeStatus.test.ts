@@ -84,6 +84,11 @@ describe('describeStatus', () => {
     expect(status.nextStep).toEqual({ action: 'update', label: 'Copy update command', command: 'brew upgrade codex' })
   })
 
+  it('says an update is available for an unproven owner, with no step to take', () => {
+    const status = describeStatus(snapshot({ update: { kind: 'notice', latestVersion: '2.2.0' } }))
+    expect(status).toMatchObject({ headline: 'Signed in · Max plan', tone: 'ready', detail: 'Update available: 2.2.0.', nextStep: null })
+  })
+
   it("uses the driver's wording when it names the same step", () => {
     const hint = { action: 'sign_in' as const, label: 'Run claude auth login', command: 'claude auth login' }
     expect(describeStatus(snapshot({ auth: { state: 'signed_out' }, nextStep: hint })).nextStep).toEqual(hint)

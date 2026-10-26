@@ -78,6 +78,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     label: 'Claude Code',
     binaryNames: cliNames('claude'),
     testedVersions: CLAUDE_TESTED_VERSIONS,
+    latestVersion: { kind: 'npm', package: '@anthropic-ai/claude-code' },
     multiInstance: true,
     privateHome: true,
     canInstall: false,
