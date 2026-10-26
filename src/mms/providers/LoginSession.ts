@@ -72,7 +72,11 @@ export class LoginSession extends EventEmitter {
     this.pending = undefined
   }
 
-  createAuthCallbacks(): ProviderAuthInteraction {
+  /**
+   * `usesCallbackServer`: the flow listens for the browser's redirect itself, so the sign-in link
+   * finishes on its own; a pasted redirect URL is the fallback.
+   */
+  createAuthCallbacks(options: { usesCallbackServer?: boolean } = {}): ProviderAuthInteraction {
     return {
       signal: this.abort.signal,
       prompt: (prompt: AuthPrompt) => {
@@ -107,7 +111,7 @@ export class LoginSession extends EventEmitter {
             type: 'auth_url',
             url: event.url,
             instructions: event.instructions,
-            usesCallbackServer: false
+            usesCallbackServer: options.usesCallbackServer ?? false
           })
           return
         }

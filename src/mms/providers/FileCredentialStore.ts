@@ -3,8 +3,7 @@ import type { Credential, CredentialStore } from '@earendil-works/pi-ai'
 import { atomicWriteFileSync } from '../data/AtomicFs'
 import { withFileLock } from '../scheduled/fileLock'
 import { createSecretCodec, type SecretCodec } from './secretCodec'
-
-const ENVELOPE_KEY = '__mousse_encrypted_v1'
+import { openSecretFile, sealSecretFile, SecretFileError } from './secretFile'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -47,27 +46,20 @@ export class FileCredentialStore implements CredentialStore {
     }
   }
 
-  private parse(raw: string): unknown {
-    try { return JSON.parse(raw) } catch { throw this.failure('the stored data is invalid JSON') }
+  private secretFile<T>(fn: () => T): T {
+    try { return fn() } catch (error) {
+      if (error instanceof SecretFileError) throw this.failure(error.reason)
+      throw error
+    }
   }
 
   private load(): void {
     this.source = this.readSource()
     // Reading a missing store must not create or overwrite anything.
     if (this.source === null) return
-    let parsed = this.parse(this.source)
-    if (isRecord(parsed) && Object.hasOwn(parsed, ENVELOPE_KEY)) {
-      const payload = parsed[ENVELOPE_KEY]
-      if (typeof payload !== 'string' || !payload ||
-        Buffer.from(payload, 'base64').toString('base64') !== payload) {
-        throw this.failure('the encrypted envelope is invalid')
-      }
-      let decrypted: string | null
-      try { decrypted = this.codec.decrypt(Buffer.from(payload, 'base64')) } catch { decrypted = null }
-      if (decrypted === null) throw this.failure('decryption is unavailable or failed; use the Electron host that saved these credentials')
-      parsed = this.parse(decrypted)
-      this.encrypted = true
-    }
+    const source = this.source
+    const { value: parsed, encrypted } = this.secretFile(() => openSecretFile(source, this.codec))
+    this.encrypted = encrypted
     if (!isRecord(parsed) || !Object.values(parsed).every(isCredential)) {
       throw this.failure('the credential structure is invalid')
     }
@@ -88,19 +80,7 @@ export class FileCredentialStore implements CredentialStore {
 
   private persist(next: Map<string, Credential>): void {
     const serialized = JSON.stringify(Object.fromEntries(next), null, 2)
-    let encrypted: Buffer | null = null
-    try {
-      const available = this.codec.canEncrypt()
-      if (this.encrypted || this.codec.encryptionRequired || available) {
-        encrypted = this.codec.encrypt(serialized)
-        if (!encrypted) throw new Error('encryption unavailable')
-      }
-    } catch {
-      throw this.failure('encryption is unavailable or failed; credentials cannot be saved safely')
-    }
-    const stored = encrypted
-      ? `${JSON.stringify({ [ENVELOPE_KEY]: encrypted.toString('base64') }, null, 2)}\n`
-      : serialized
+    const { stored, encrypted } = this.secretFile(() => sealSecretFile(serialized, this.codec, this.encrypted))
     // Serialize cooperating writers and reject stale instances rather than losing
     // updates made while an asynchronous OAuth refresh/login was in flight.
     withFileLock(`${this.path}.lock`, () => {
@@ -111,7 +91,7 @@ export class FileCredentialStore implements CredentialStore {
         throw this.failure('the credential update could not be written')
       }
       this.source = stored
-      this.encrypted = encrypted !== null
+      this.encrypted = encrypted
       this.data = next
     })
   }
