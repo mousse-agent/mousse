@@ -23,9 +23,14 @@ const BUILT_IN_IDS: Partial<Record<HarnessDriverKind, string>> = {
   antigravity: ANTIGRAVITY_INSTANCE_ID
 }
 
-/** Seeded instances cannot be removed; every pi instance is seeded from its provider's sign-in. */
+/** The instance on the user's own setup for a driver; removable like any other. Every pi instance comes from its provider's sign-in. */
 export function isBuiltInInstance(instanceId: string, driver: HarnessDriverKind): boolean {
   return driver === 'pi' || BUILT_IN_IDS[driver] === instanceId
+}
+
+/** The id an instance on the user's own setup takes, when the driver has one. */
+export function defaultInstanceId(driver: HarnessDriverKind): string | undefined {
+  return BUILT_IN_IDS[driver]
 }
 
 /** `<driver>:<slug>` for a new instance, unique among `existing`. */

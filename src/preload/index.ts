@@ -797,7 +797,7 @@ const api = {
     instances: {
       add: (input: AddInstanceInput): Promise<InstanceSnapshot> =>
         ipcRenderer.invoke('providers:instances:add', input),
-      /** Built-in instances cannot be removed. */
+      /** Deletes the instance; the user's own CLI and its sign-in are not touched. */
       remove: (instanceId: string): Promise<void> => ipcRenderer.invoke('providers:instances:remove', instanceId),
       configure: (instanceId: string, patch: InstanceConfigPatch): Promise<InstanceSnapshot> =>
         ipcRenderer.invoke('providers:instances:configure', instanceId, patch),

@@ -199,8 +199,8 @@ function sameEntry(value: unknown, seed: ProviderInstanceConfig): boolean {
 }
 
 /**
- * Extends `stored` with every seed it lacks: the vendor instances and `pi:<provider>` for each
- * credentialed pi-ai provider. A stored id is never overwritten, even when its entry is malformed,
+ * Extends `stored` with every seed it lacks: the vendor instances (only on a profile never seeded
+ * before) and `pi:<provider>` for each credentialed pi-ai provider. A stored id is never overwritten, even when its entry is malformed,
  * with one exception: an entry is only upgraded when the profile's recorded seed version proves it
  * is the seed (a marker of at least 1, below the change, and an entry equal to the old seed).
  * Returns the raw map and the version to persist. `changes` and `current` are for tests.
@@ -228,7 +228,9 @@ export function seedProviderInstances(
       instances[change.id] = { ...change.next }
       upgraded.push(change.id)
     }
-  for (const [id, entry] of VENDOR_SEEDS) seed(id, { ...entry })
+  // Agents are added once, for a profile that was never seeded; after that they are entries like any
+  // other, so a provider the user deleted stays deleted.
+  if (version < 1) for (const [id, entry] of VENDOR_SEEDS) seed(id, { ...entry })
   for (const providerId of credentialedPiProviders) if (providerId) seed(piInstanceId(providerId), { driver: 'pi', enabled: true })
   return { instances, added, upgraded, seedVersion: Math.max(version, current) }
 }

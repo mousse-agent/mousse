@@ -256,16 +256,12 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
         status={status}
         operation={operation}
         actions={actionsFor(snapshot)}
-        onRemove={
-          snapshot.builtIn
-            ? undefined
-            : async () => {
-                await window.mousse.providers.instances.remove(snapshot.instanceId)
-                removeSnapshot(snapshot.instanceId)
-                setSelectedId(null)
-                await reconcileSelection()
-              }
-        }
+        onRemove={async () => {
+          await window.mousse.providers.instances.remove(snapshot.instanceId)
+          removeSnapshot(snapshot.instanceId)
+          setSelectedId(null)
+          await reconcileSelection()
+        }}
         onSaveModelPrefs={onSaveModelPrefs}
         onRefreshModels={refreshModels(snapshot)}
       />

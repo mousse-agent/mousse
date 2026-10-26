@@ -71,7 +71,7 @@ export interface InstanceSnapshot {
   instanceId: string
   driver: HarnessDriverKind
   displayName: string
-  /** Seeded instances (`claude`, `codex`, `antigravity`, `pi:<id>`) cannot be removed. */
+  /** The instance on the user's own setup (`claude`, `codex`, `antigravity`, `pi:<id>`); removable like any other. */
   builtIn: boolean
   scope: ProviderScope
   enabled: InstanceEnabled

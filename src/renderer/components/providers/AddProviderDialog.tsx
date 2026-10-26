@@ -45,18 +45,17 @@ export function addChoices(snapshots: readonly InstanceSnapshot[], loginOptions:
   const choices: AddChoice[] = []
   for (const [driver, info] of Object.entries(DRIVER_INFO) as Array<[HarnessDriverKind, (typeof DRIVER_INFO)[HarnessDriverKind]]>) {
     if (info.family !== 'agent') continue
-    const seeded = snapshots.find((snapshot) => snapshot.builtIn && snapshot.driver === driver)
-    if (seeded && !seeded.enabled.device) {
-      choices.push({ kind: 'enable', key: `enable:${seeded.instanceId}`, label: info.label, iconId: info.iconId, group: 'Agents', snapshot: seeded })
-    } else if (!seeded || info.multiInstance) {
+    // Every agent is an entry like any other: offered when there is none yet, or as another account.
+    const existing = snapshots.find((snapshot) => snapshot.driver === driver)
+    if (!existing || info.multiInstance) {
       choices.push({
         kind: 'new',
         key: `new:${driver}`,
-        label: seeded ? `${info.label} · another account` : info.label,
+        label: existing ? `${info.label} · another account` : info.label,
         iconId: info.iconId,
         group: 'Agents',
         driver,
-        existing: seeded
+        existing
       })
     }
   }

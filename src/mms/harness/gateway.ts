@@ -43,7 +43,7 @@ import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelPrefsService, visibleProviderOption, type ModelPrefsStore } from './catalog'
 import type { AuthReading, DriverRuntime, HarnessDriver, InstanceConfig, LiveProcessHost } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, type InstanceEnv } from './env'
-import { addedInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
+import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
 import { checkPolicy } from './policy'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
@@ -197,7 +197,7 @@ export interface ResolvedSelection {
 export interface HarnessInstances {
   snapshots(scope: ProviderScope): Promise<InstanceSnapshot[]>
   add(input: AddInstanceInput): Promise<InstanceSnapshot>
-  /** Rejects built-in instances with `unsupported`. */
+  /** Deletes any instance, built-in ones too; a vendor agent is not seeded again. */
   remove(instanceId: string): Promise<void>
   configure(instanceId: string, patch: InstanceConfigPatch): Promise<InstanceSnapshot>
   /** `null` clears a project override; the device scope takes a boolean only. */
@@ -1088,16 +1088,27 @@ export class Harness implements HarnessGateway {
   private async add(input: AddInstanceInput): Promise<InstanceSnapshot> {
     const driver = this.drivers.get(input.driver)
     if (!driver) return harnessFail('unsupported', `Mousse cannot add a ${input.driver} instance.`)
-    if (!driver.multiInstance) return harnessFail('unsupported', `${driver.label} supports one instance in this version.`)
     const patch = input.config ?? {}
-    // An id whose state directory is still on disk (a removal that could not delete it) is taken.
-    const taken = new Set(Object.keys(this.instanceMap.list()))
-    let instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken)
-    while (existsSync(instanceStateDir(this.options.profileHome, instanceId))) {
-      taken.add(instanceId)
+    const entries = this.instanceMap.list()
+    const hasOne = Object.values(entries).some((entry) => entry.driver === driver.kind)
+    if (hasOne && !driver.multiInstance) return harnessFail('unsupported', `${driver.label} supports one instance in this version.`)
+    // The first instance of an agent runs on the user's own setup (their CLI and its sign-in), under
+    // the driver's usual id; further ones are other accounts with private homes.
+    const ownSetup = defaultInstanceId(driver.kind)
+    const useOwnSetup = ownSetup !== undefined && !hasOne && !Object.prototype.hasOwnProperty.call(entries, ownSetup)
+    let instanceId = useOwnSetup ? ownSetup : ''
+    if (!useOwnSetup) {
+      // An id whose state directory is still on disk (a removal that could not delete it) is taken.
+      const taken = new Set(Object.keys(entries))
       instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken)
+      while (existsSync(instanceStateDir(this.options.profileHome, instanceId))) {
+        taken.add(instanceId)
+        instanceId = addedInstanceId(driver.kind, patch.displayName ?? undefined, taken)
+      }
     }
-    const config = this.applyConfigPatch({ home: driver.privateHome ? 'private' : 'default' }, patch, driver)
+    const config = useOwnSetup
+      ? this.applyConfigPatch({}, { ...(patch.displayName ? { displayName: patch.displayName } : {}) }, driver)
+      : this.applyConfigPatch({ home: driver.privateHome ? 'private' : 'default' }, patch, driver)
     this.instanceMap.setEntry(instanceId, { driver: driver.kind, enabled: true, config })
     mkdirSync(instanceStateDir(this.options.profileHome, instanceId), { recursive: true, mode: 0o700 })
     this.changed(instanceId)
@@ -1106,8 +1117,9 @@ export class Harness implements HarnessGateway {
   }
 
   private async remove(instanceId: string): Promise<void> {
+    // Every provider is an entry like any other: removing deletes it. The user's own CLI and its
+    // sign-in are never touched, and Add provider adds it back.
     const record = this.record(instanceId, { allowDisabled: true })
-    if (record.builtIn) harnessFail('unsupported', 'Built-in providers cannot be removed. Turn them off instead.', instanceId)
     const state = this.probes.get(instanceId)
     this.records.delete(instanceId)
     this.instanceMap.removeEntry(instanceId)

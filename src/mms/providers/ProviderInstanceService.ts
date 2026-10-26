@@ -128,7 +128,7 @@ export class ProviderInstanceService {
     if (this.writeFailed) throw new Error('Mousse could not save the provider instances')
   }
 
-  /** Removes a stored entry; seeded ids come back on the next read, so callers remove added ones only. */
+  /** Removes a stored entry. A vendor agent stays removed; a `pi:<provider>` entry returns while its provider is credentialed. */
   removeEntry(instanceId: string): void {
     const { stored, readable } = this.readStored()
     if (!readable) throw new Error(this.readError ?? 'The provider instances could not be read')
