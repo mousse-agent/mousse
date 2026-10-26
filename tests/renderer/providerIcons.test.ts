@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { normalizeProviderId, ProviderIcon } from '../../src/renderer/lib/providerIcons'
 import { SubagentAvatar } from '../../src/renderer/components/SubagentAvatar'
-import { subagentBadgeTone, subagentIconId, type SubagentBadgeTone } from '../../src/renderer/components/subagentStatus'
+import { subagentBadgeTone, subagentIconId, threadProviderId, type SubagentBadgeTone } from '../../src/renderer/components/subagentStatus'
 import type { SubagentState } from '../../src/shared/subagents'
 import { placeTooltip } from '../../src/renderer/components/AppTooltip'
 
@@ -80,6 +80,12 @@ describe('subagent provider icons', () => {
     expect(subagentIconId('cursor', 'codex')).toBe('cursor')
     expect(subagentIconId(null, null)).toBe('')
     expect(render('')).toContain('<svg')
+  })
+
+  it("takes a thread's provider from its override, else the default provider", () => {
+    expect(threadProviderId('codex', 'claude')).toBe('codex')
+    expect(threadProviderId(undefined, 'claude')).toBe('claude')
+    expect(threadProviderId('', '')).toBeNull()
   })
 
   it('colours the status dot by state', () => {

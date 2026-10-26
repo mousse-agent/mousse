@@ -33,3 +33,8 @@ export function subagentBadgeTone(subagent: { state: SubagentState; pending?: bo
 export function subagentIconId(provider: string | null | undefined, inherited: string | null | undefined): string {
   return provider || inherited || ''
 }
+
+/** The provider a thread runs on: its own override, else the default provider. Null when neither is known. */
+export function threadProviderId(override: string | null | undefined, defaultProvider: string | null | undefined): string | null {
+  return override || defaultProvider || null
+}

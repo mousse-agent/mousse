@@ -1,6 +1,6 @@
 import { ProviderIcon } from '../lib/providerIcons'
 import { useAppStore } from '../stores/appStore'
-import type { SubagentBadgeTone } from './subagentStatus'
+import { threadProviderId, type SubagentBadgeTone } from './subagentStatus'
 import './subagentAvatar.css'
 
 interface SubagentAvatarProps {
@@ -23,7 +23,9 @@ export function SubagentAvatar({ providerId, tone, size = 16, chip = false }: Su
   )
 }
 
-/** The provider a thread runs on when it set one, so subagents that inherited it show its logo. */
+/** The provider a thread runs on, so subagents that inherited it show its logo. */
 export function useThreadProviderId(threadId: string | null | undefined): string | null {
-  return useAppStore((s) => (threadId ? (s.threads.find((thread) => thread.id === threadId)?.modelOverride?.llmProvider ?? null) : null))
+  return useAppStore((s) =>
+    threadId ? threadProviderId(s.threads.find((thread) => thread.id === threadId)?.modelOverride?.llmProvider, s.appInfo?.llmProvider) : null
+  )
 }
