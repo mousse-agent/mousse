@@ -4592,6 +4592,7 @@ export class OrchestratorService extends EventEmitter {
           emitAdded: (message) => this.emitMessageAdded(message),
           emitUpdated: (message) => this.emitMessageUpdated(message),
           persist: (force) => this.persist(force),
+          currentRunId: () => session.activeTurn?.runId,
           setPhase: (phase, patch) => this.setTurnPhase(session.threadId, phase, patch)
         },
         session
@@ -6045,6 +6046,17 @@ export class OrchestratorService extends EventEmitter {
     try {
 
     this.transcript.closeThinking()
+    // No item outlives its turn, and a turn ending is never a tool succeeding: whatever the
+    // provider did not close is interrupted, tagged with why the turn ended.
+    this.transcript.closeOpenTools(
+      providerError
+        ? 'stop'
+        : aborted
+          ? this.isShutdownAbort(turn.abort.signal.reason)
+            ? 'daemon_restart'
+            : 'stop'
+          : 'no_result'
+    )
 
     if (providerError) {
       console.error('Orchestrator turn failed', failureDiagnostic ?? errorDiagnostic(providerError, 'orchestrator.chat'))

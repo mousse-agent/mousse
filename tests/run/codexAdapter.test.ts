@@ -312,10 +312,10 @@ describe('CodexAdapter', () => {
     ])
     const tools = sink.calls.filter(([name]) => name === 'tool').map(([, event]) => event)
     expect(tools).toEqual([
-      { kind: 'mcp_tool_call', phase: 'start', callId: 'cmd-1', title: 'ls', summary: 'shell', details: [] },
-      { kind: 'mcp_tool_call', phase: 'complete', callId: 'cmd-1', title: 'ls', summary: 'shell', details: [] },
-      { kind: 'mcp_tool_call', phase: 'start', callId: 'patch-1', title: 'Edit a.ts', summary: 'apply_patch', details: [] },
-      { kind: 'mcp_tool_call', phase: 'complete', callId: 'patch-1', title: 'Edit a.ts', summary: 'apply_patch', details: [] }
+      { kind: 'mcp_tool_call', phase: 'start', callId: 'cmd-1', title: 'ls', summary: 'shell', details: [], activity: { toolName: 'shell' } },
+      { kind: 'mcp_tool_call', phase: 'complete', callId: 'cmd-1', title: 'ls', summary: 'shell', details: [], activity: { toolName: 'shell' } },
+      { kind: 'mcp_tool_call', phase: 'start', callId: 'patch-1', title: 'Edit a.ts', summary: 'apply_patch', details: [], activity: { toolName: 'apply_patch' } },
+      { kind: 'mcp_tool_call', phase: 'complete', callId: 'patch-1', title: 'Edit a.ts', summary: 'apply_patch', details: [], activity: { toolName: 'apply_patch' } }
     ])
     expect(sink.calls.find(([name]) => name === 'lineEdits')?.[1]).toBe(3)
     expect(sink.calls.filter(([name]) => name === 'thinking').map(([, event]) => event)).toEqual([

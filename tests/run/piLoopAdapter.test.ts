@@ -1,7 +1,9 @@
 import type { Message } from '@earendil-works/pi-ai'
 import { describe, expect, it, vi } from 'vitest'
-import type { LlmChatOptions, LlmChatResult } from '../../src/mms/orchestrator/LlmClient'
+import type { LlmChatOptions, LlmChatResult, StreamingLlmToolEvent } from '../../src/mms/orchestrator/LlmClient'
 import { PiLoopAdapter, type PiChatClient } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
+import { TranscriptAssembler } from '../../src/mms/run/adapters/shared/TranscriptAssembler'
+import type { ChatMessage } from '../../src/shared/types'
 import type {
   AdapterHost,
   TurnControl,
@@ -209,6 +211,62 @@ describe('PiLoopAdapter', () => {
     expect(sink.calls[6][1]).toBe(2)
     expect(ctl.beats).toBe(7)
     expect(sink.calls.some(([name]) => name === 'usage')).toBe(false)
+  })
+
+  it('ends a pi bash tool event as a command item on the saved row', async () => {
+    const adapter = new PiLoopAdapter(() => ({
+      chat: async (_messages, onTool) => {
+        // The events the pi loop reports: arguments JSON on start, result text on complete.
+        onTool?.({
+          kind: 'build_tool_call',
+          phase: 'start',
+          callId: 'call_1',
+          title: 'Tool bash',
+          summary: 'Called a local project tool (Pi coding-agent SDK).',
+          details: ['Tool: bash'],
+          response: JSON.stringify({ command: 'npm test' })
+        })
+        onTool?.({
+          kind: 'build_tool_result',
+          phase: 'complete',
+          callId: 'call_1',
+          title: 'Tool bash',
+          summary: 'The tool returned successfully.',
+          details: ['Tool: bash'],
+          response: 'all green'
+        })
+        return chatResult()
+      }
+    }))
+    const messages: ChatMessage[] = []
+    const assembler = new TranscriptAssembler(
+      {
+        getMessage: (id) => messages.find((message) => message.id === id),
+        addMessage: (message) => void messages.push(message),
+        updateMessage: (message) => {
+          const index = messages.findIndex((entry) => entry.id === message.id)
+          if (index !== -1) messages[index] = message
+        },
+        removeMessage: () => {},
+        emitAdded: () => {},
+        emitUpdated: () => {},
+        persist: () => {},
+        setPhase: () => {}
+      },
+      { activeAssistantMessageId: null, activeThinkingMessageId: null, activeToolCallMessageIds: new Map() }
+    )
+    const sink = { ...recordingSink(), tool: (event: StreamingLlmToolEvent) => assembler.tool(event) }
+    await adapter.startTurn(input(), sink, control(), host())
+    expect(messages).toHaveLength(1)
+    expect(messages[0]!.activity).toMatchObject({
+      id: messages[0]!.id,
+      callId: 'call_1',
+      kind: 'command',
+      command: 'npm test',
+      status: 'done',
+      output: 'all green',
+      toolName: 'bash'
+    })
   })
 
   it('maps the chat result to a TurnResult', async () => {

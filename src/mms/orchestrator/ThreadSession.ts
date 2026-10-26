@@ -46,6 +46,8 @@ export class ThreadSession {
   /** Stop requested after admission but before the turn created its abort controller. */
   abortRequested = false
   activeToolCallMessageIds = new Map<string, string>()
+  /** Provider tool call id → timeline message id for the turn's calls, finished ones too (parents of later children). */
+  callToMessage = new Map<string, string>()
   activeThinkingMessageId: string | null = null
   activeAssistantMessageId: string | null = null
   lastCompletedAssistantMessageId: string | null = null
@@ -118,6 +120,7 @@ export class ThreadSession {
       delete this.nativeContext.lastTurnUsage
     }
     this.activeToolCallMessageIds.clear()
+    this.callToMessage.clear()
     this.activeThinkingMessageId = null
     this.activeAssistantMessageId = null
     this.lastCompletedAssistantMessageId = null

@@ -1,4 +1,18 @@
 import { v4 as uuidv4 } from 'uuid'
+import {
+  ACTIVITY_CHECKPOINT_MS,
+  BACKGROUND_SUMMARY,
+  INTERRUPTED_SUMMARY,
+  activityFromToolCall,
+  applyToolResult,
+  capRecord,
+  mergeActivityPatch,
+  type ActivityInterruptedBy,
+  type ActivityPatch,
+  type ActivityStatus,
+  type AgentActivityItem
+} from '../../../../shared/agentActivity'
+import { subagentToolName } from '../../../../shared/subagentTools'
 import { parseProviderToolCall } from '../../../../shared/toolCallDisplay'
 import type { ChatMessage, TurnPhase } from '../../../../shared/types'
 import type {
@@ -17,6 +31,11 @@ export interface TranscriptStreamState {
   activeThinkingMessageId: string | null
   /** Provider tool call id → timeline message id, for calls still running. */
   activeToolCallMessageIds: Map<string, string>
+  /**
+   * Provider tool call id → timeline message id for every call of the turn, finished ones too, so a
+   * child that starts after its parent completed still finds the parent's row. Cleared on `reset()`.
+   */
+  callToMessage?: Map<string, string>
   /** `replace` mode: the reply most recently completed by a `complete` text event. */
   lastCompletedAssistantMessageId?: string | null
   lastCompletedAssistantContent?: string
@@ -37,6 +56,8 @@ export interface TranscriptHooks {
   emitUpdated(message: ChatMessage): void
   /** `force` writes now; otherwise the owner may debounce. */
   persist(force: boolean): void
+  /** The Run Engine run the current turn executes, stamped on each activity item. */
+  currentRunId?(): string | undefined
   /** `blockedOnWait`: every running tool call is a wait tool (see `WAIT_TOOL_NAMES`). */
   setPhase(phase: TurnPhase, patch?: { activeMessageId?: string; blockedOnWait?: boolean }): void
 }
@@ -57,6 +78,46 @@ export const WAIT_TOOL_NAMES: ReadonlySet<string> = new Set(['TaskOutput'])
  */
 export type TranscriptTextMode = 'replace' | 'append'
 
+/** A running item's output reaches clients at most this often. */
+const ACTIVITY_EMIT_MS = 100
+
+/** Emit and save bookkeeping of one running item. */
+interface ItemStream {
+  lastEmit: number
+  lastCheckpoint: number
+  timer?: ReturnType<typeof setTimeout>
+}
+
+/** A provider patch without the fields the assembler decides: identity, status and timestamps. */
+function withoutOutcome(patch: ActivityPatch): ActivityPatch {
+  const {
+    id: _id,
+    callId: _callId,
+    parentId: _parentId,
+    runId: _runId,
+    status: _status,
+    interruptedBy: _by,
+    startedAt: _startedAt,
+    endedAt: _endedAt,
+    ...rest
+  } = patch
+  return rest as ActivityPatch
+}
+
+/**
+ * An item whose call ended without a result. A settled turn's backgrounded subagent and open plan
+ * (`no_result` only) are done: the first handed its work off, the second has no completion event.
+ * Stop and a restart always win, so they stay interrupted and a restart note can still name them.
+ */
+function settleInterrupted(item: AgentActivityItem, by: ActivityInterruptedBy, summary: string, endedAt: string): AgentActivityItem {
+  const { interruptedBy: _by, ...rest } = item
+  if (by === 'no_result' && item.kind === 'subagent' && item.background) {
+    return { ...rest, status: 'done', summary: BACKGROUND_SUMMARY, endedAt } as AgentActivityItem
+  }
+  if (by === 'no_result' && item.kind === 'plan') return { ...rest, status: 'done', endedAt } as AgentActivityItem
+  return { ...rest, status: 'interrupted', interruptedBy: by, summary, endedAt } as AgentActivityItem
+}
+
 /**
  * Turns streamed text, thinking and tool events into `ChatMessage` mutations (SPEC §13.4 shared
  * builders): one assistant reply, one thinking message at a time, and one timeline message per
@@ -65,15 +126,24 @@ export type TranscriptTextMode = 'replace' | 'append'
 export class TranscriptAssembler {
   /** The `blockedOnWait` last published with `tool_running`. */
   private blockedOnWait = false
+  private readonly callToMessage: Map<string, string>
+  private readonly streams = new Map<string, ItemStream>()
 
   constructor(
     private readonly hooks: TranscriptHooks,
     private readonly state: TranscriptStreamState,
     private readonly mode: TranscriptTextMode = 'replace'
-  ) {}
+  ) {
+    this.callToMessage = state.callToMessage ?? new Map()
+  }
 
-  /** Forgets the previous turn's open messages (the messages themselves stay). */
+  /**
+   * Forgets the previous turn's open messages (the messages themselves stay). A call still open
+   * is closed as stopped first, so no item outlives its turn.
+   */
   reset(): void {
+    this.closeOpenTools('stop')
+    this.callToMessage.clear()
     this.state.activeToolCallMessageIds.clear()
     this.blockedOnWait = false
     this.state.activeThinkingMessageId = null
@@ -146,25 +216,21 @@ export class TranscriptAssembler {
       // them: that fills in the call's row, it does not open another.
       const openId = this.state.activeToolCallMessageIds.get(event.callId)
       const open = openId ? this.hooks.getMessage(openId) : undefined
-      if (open?.toolCall && event.input) {
-        const updated: ChatMessage = { ...open, toolCall: { ...open.toolCall, input: { ...open.toolCall.input, ...event.input } } }
-        this.hooks.updateMessage(updated)
-        this.hooks.emitUpdated(updated)
-        this.hooks.persist(false)
+      if (open?.toolCall && (event.input || event.activity || event.parentCallId)) {
+        this.refillOpenTool(open, event)
         return
       }
       const parsed = parseProviderToolCall(event)
-      const message = this.addTimeline(kind, {
-        title: event.title,
-        summary: event.summary,
-        details: event.details,
-        response: event.response,
-        status: 'processing',
-        ...(parsed.toolName ? { toolName: parsed.toolName } : {}),
-        ...((event.input ?? parsed.input) ? { input: event.input ?? parsed.input } : {})
-      })
+      const message = this.addTimeline(kind, this.startToolCall(event, parsed), (id) => this.startItem(id, event, parsed))
       this.state.activeToolCallMessageIds.set(event.callId, message.id)
+      this.callToMessage.set(event.callId, message.id)
+      this.streams.set(message.id, { lastEmit: Date.now(), lastCheckpoint: Date.now() })
       this.setToolPhase()
+      return
+    }
+
+    if (event.phase === 'update') {
+      this.updateTool(event)
       return
     }
 
@@ -172,21 +238,15 @@ export class TranscriptAssembler {
       const messageId = this.state.activeToolCallMessageIds.get(event.callId)
       if (messageId) {
         const existing = this.hooks.getMessage(messageId)
-        if (existing) {
+        if (existing?.activity) {
           const parsed = parseProviderToolCall(event)
+          const item = this.finishItem(existing.activity, event)
           const updated: ChatMessage = {
             ...existing,
-            toolCall: {
-              title: event.title,
-              summary: event.summary,
-              details: event.details,
-              response: event.response,
-              status: 'complete',
-              // Preserve start-phase args: complete events carry result text, not args JSON.
-              toolName: parsed.toolName ?? existing.toolCall?.toolName,
-              input: event.input ? { ...existing.toolCall?.input, ...event.input } : (existing.toolCall?.input ?? parsed.input)
-            }
+            activity: item,
+            toolCall: this.completeToolCall(event, parsed, existing.toolCall)
           }
+          this.endStream(messageId)
           this.hooks.updateMessage(updated)
           this.hooks.emitUpdated(updated)
           this.hooks.persist(true)
@@ -198,19 +258,186 @@ export class TranscriptAssembler {
         else if (this.isBlockedOnWait() !== this.blockedOnWait) this.setToolPhase()
         return
       }
+      // A repeat of a result, or one that arrives after the turn closed the call, has no row to
+      // change: the call already ended, and its row says how.
+      if (this.callToMessage.has(event.callId)) return
       // A complete for a call this turn never saw start is recorded as a finished call below.
     }
 
     const parsed = parseProviderToolCall(event)
-    this.addTimeline(kind, {
+    const message = this.addTimeline(kind, this.completeToolCall(event, parsed, undefined), (id) =>
+      this.finishItem(this.startItem(id, event, parsed), event)
+    )
+    if (event.callId) this.callToMessage.set(event.callId, message.id)
+  }
+
+  /**
+   * Ends every call still running when the turn ended. A call the provider never reported a result
+   * for is `interrupted`, never done: `stop` (the user stopped the turn or it failed), `no_result`
+   * (it settled and this call has no result) or `daemon_restart` (a profile shutdown aborted it).
+   */
+  closeOpenTools(reason: ActivityInterruptedBy): void {
+    let changed = false
+    for (const messageId of this.state.activeToolCallMessageIds.values()) {
+      const existing = this.hooks.getMessage(messageId)
+      if (!existing?.activity) continue
+      const item = settleInterrupted(existing.activity, reason, INTERRUPTED_SUMMARY[reason], new Date().toISOString())
+      const updated: ChatMessage = {
+        ...existing,
+        activity: item,
+        ...(existing.toolCall ? { toolCall: { ...existing.toolCall, status: 'complete' as const } } : {})
+      }
+      this.hooks.updateMessage(updated)
+      this.hooks.emitUpdated(updated)
+      changed = true
+    }
+    for (const messageId of [...this.streams.keys()]) this.endStream(messageId)
+    this.state.activeToolCallMessageIds.clear()
+    this.blockedOnWait = false
+    if (changed) this.hooks.persist(true)
+  }
+
+  /** The row's `toolCall` when a call starts: the short provider strings, never the arguments or a result. */
+  private startToolCall(
+    event: StreamingLlmToolEvent,
+    parsed: { toolName?: string; input?: Record<string, unknown> }
+  ): NonNullable<ChatMessage['toolCall']> {
+    const toolName = parsed.toolName ?? event.activity?.toolName ?? event.title
+    const input = event.input ?? parsed.input
+    return {
       title: event.title,
       summary: event.summary,
       details: event.details,
-      response: event.response,
-      status: 'complete',
+      status: 'processing',
       ...(parsed.toolName ? { toolName: parsed.toolName } : {}),
-      ...((event.input ?? parsed.input) ? { input: event.input ?? parsed.input } : {})
-    })
+      // Only a Mousse subagent call keeps its (bounded) record; any other arguments live on the item, capped.
+      ...(subagentToolName(toolName) && input ? { input } : {})
+    }
+  }
+
+  private completeToolCall(
+    event: StreamingLlmToolEvent,
+    parsed: { toolName?: string; input?: Record<string, unknown> },
+    existing: ChatMessage['toolCall'] | undefined
+  ): NonNullable<ChatMessage['toolCall']> {
+    const toolName = parsed.toolName ?? existing?.toolName
+    const subagent = subagentToolName(toolName ?? event.activity?.toolName ?? event.title)
+    const input = event.input ? { ...existing?.input, ...event.input } : (existing?.input ?? parsed.input)
+    return {
+      title: event.title,
+      summary: event.summary,
+      details: event.details,
+      status: 'complete',
+      // Preserve start-phase args: complete events carry result text, not args JSON.
+      ...(toolName ? { toolName } : {}),
+      ...(subagent && input ? { input } : {})
+    }
+  }
+
+  /** The item of a call that has just started: the provider's typed fields over what the name and arguments say. */
+  private startItem(
+    id: string,
+    event: StreamingLlmToolEvent,
+    parsed: { toolName?: string; input?: Record<string, unknown> }
+  ): AgentActivityItem {
+    const toolName = event.activity?.toolName ?? parsed.toolName ?? event.title
+    const server = event.details.find((detail) => detail.startsWith('Server:'))?.slice('Server:'.length).trim().split(/\s+/)[0]
+    const startedAt = new Date().toISOString()
+    const draft = activityFromToolCall({ toolName, input: event.input ?? parsed.input, startedAt, ...(server ? { server } : {}) })
+    const runId = this.hooks.currentRunId?.()
+    const parentId = event.parentCallId ? this.callToMessage.get(event.parentCallId) : undefined
+    const item = {
+      ...draft,
+      id,
+      callId: event.callId ?? id,
+      status: 'running' as const,
+      ...(parentId ? { parentId } : {}),
+      ...(runId ? { runId } : {})
+    } as AgentActivityItem
+    return event.activity ? { ...mergeActivityPatch(item, withoutOutcome(event.activity)), status: 'running' } : item
+  }
+
+  /** A repeated start of a running call: its arguments or typed fields arrived after it started. */
+  private refillOpenTool(open: ChatMessage, event: StreamingLlmToolEvent): void {
+    let activity = open.activity
+    if (activity && event.activity) activity = mergeActivityPatch(activity, withoutOutcome(event.activity))
+    if (activity && event.input && activity.kind === 'generic' && !event.activity?.input) {
+      activity = { ...activity, input: capRecord({ ...activity.input, ...event.input }) }
+    }
+    // A parent the provider only names on a repeated start.
+    const parentId = activity && !activity.parentId && event.parentCallId ? this.callToMessage.get(event.parentCallId) : undefined
+    if (activity && parentId && parentId !== activity.id) activity = { ...activity, parentId }
+    const toolName = open.toolCall?.toolName ?? open.activity?.toolName ?? open.toolCall?.title ?? ''
+    const keepsInput = !activity || subagentToolName(toolName) !== null
+    const updated: ChatMessage = {
+      ...open,
+      ...(activity ? { activity } : {}),
+      ...(event.input && keepsInput && open.toolCall
+        ? { toolCall: { ...open.toolCall, input: { ...open.toolCall.input, ...event.input } } }
+        : {})
+    }
+    this.hooks.updateMessage(updated)
+    this.hooks.emitUpdated(updated)
+    this.hooks.persist(false)
+  }
+
+  /** Streamed output or changed fields of a running call: kept in memory, emitted and saved at most every so often. */
+  private updateTool(event: StreamingLlmToolEvent): void {
+    const messageId = event.callId ? this.state.activeToolCallMessageIds.get(event.callId) : undefined
+    const existing = messageId ? this.hooks.getMessage(messageId) : undefined
+    if (!messageId || !existing?.activity || !event.activity) return
+    const activity = mergeActivityPatch(existing.activity, withoutOutcome(event.activity), 'append')
+    const updated: ChatMessage = { ...existing, activity }
+    this.hooks.updateMessage(updated)
+    const stream = this.streams.get(messageId) ?? { lastEmit: 0, lastCheckpoint: Date.now() }
+    this.streams.set(messageId, stream)
+    const now = Date.now()
+    if (now - stream.lastEmit >= ACTIVITY_EMIT_MS) {
+      stream.lastEmit = now
+      this.hooks.emitUpdated(updated)
+    } else if (!stream.timer) {
+      stream.timer = setTimeout(() => {
+        stream.timer = undefined
+        stream.lastEmit = Date.now()
+        const latest = this.hooks.getMessage(messageId)
+        if (latest) this.hooks.emitUpdated(latest)
+      }, ACTIVITY_EMIT_MS - (now - stream.lastEmit))
+      stream.timer.unref?.()
+    }
+    // A running item is rewritten with the whole thread file, so it checkpoints, not per delta.
+    if (now - stream.lastCheckpoint >= ACTIVITY_CHECKPOINT_MS) {
+      stream.lastCheckpoint = now
+      this.hooks.persist(false)
+    }
+  }
+
+  private endStream(messageId: string): void {
+    const stream = this.streams.get(messageId)
+    if (stream?.timer) clearTimeout(stream.timer)
+    this.streams.delete(messageId)
+  }
+
+  /** The item once its call reported a result (or was closed by its provider). */
+  private finishItem(started: AgentActivityItem, event: StreamingLlmToolEvent): AgentActivityItem {
+    const patch = event.activity
+    const endedAt = new Date().toISOString()
+    // A closer's summary goes through `settleInterrupted`, which may turn the item into done.
+    const folded = patch && patch.status === 'interrupted' ? { ...withoutOutcome(patch), summary: undefined } : patch && withoutOutcome(patch)
+    let item = folded ? mergeActivityPatch(started, folded) : started
+    const failed = /returned an error/i.test(event.summary ?? '')
+    if (event.response !== undefined && patch?.output === undefined) {
+      item = applyToolResult(item, { response: event.response, failed })
+    }
+    if (event.input && item.kind === 'generic' && !patch?.input) {
+      item = { ...item, input: capRecord({ ...item.input, ...event.input }) }
+    }
+    if (patch?.status === 'interrupted') {
+      const by = patch.interruptedBy ?? 'stop'
+      return settleInterrupted(item, by, patch.summary ?? INTERRUPTED_SUMMARY[by], endedAt)
+    }
+    const status: ActivityStatus = patch?.status === 'done' || patch?.status === 'failed' ? patch.status : failed ? 'failed' : 'done'
+    const { interruptedBy: _interruptedBy, ...rest } = item
+    return { ...rest, status, endedAt, ...(patch?.summary ? { summary: patch.summary } : {}) } as AgentActivityItem
   }
 
   /** Opens an empty streaming assistant reply and moves the turn to `streaming`. */
@@ -287,9 +514,10 @@ export class TranscriptAssembler {
   private isBlockedOnWait(): boolean {
     if (this.state.activeToolCallMessageIds.size === 0) return false
     for (const messageId of this.state.activeToolCallMessageIds.values()) {
-      const call = this.hooks.getMessage(messageId)?.toolCall
+      const message = this.hooks.getMessage(messageId)
+      const call = message?.toolCall
       // Vendor runtimes name the tool in the title; the pi loop parses it into `toolName`.
-      if (!WAIT_TOOL_NAMES.has(call?.toolName ?? call?.title ?? '')) return false
+      if (!WAIT_TOOL_NAMES.has(message?.activity?.toolName ?? call?.toolName ?? call?.title ?? '')) return false
     }
     return true
   }
@@ -302,15 +530,18 @@ export class TranscriptAssembler {
 
   private addTimeline(
     kind: NonNullable<ChatMessage['kind']>,
-    toolCall: NonNullable<ChatMessage['toolCall']>
+    toolCall: NonNullable<ChatMessage['toolCall']>,
+    activity?: (id: string) => AgentActivityItem
   ): ChatMessage {
+    const id = uuidv4()
     const message: ChatMessage = {
-      id: uuidv4(),
+      id,
       role: 'system',
       kind,
       content: '',
       timestamp: new Date().toISOString(),
-      toolCall
+      toolCall,
+      ...(activity ? { activity: activity(id) } : {})
     }
     this.add(message)
     return message

@@ -29,6 +29,9 @@ import { TaskControlTools } from '../../src/mms/tasks/TaskControlTools'
 import { TaskQueue } from '../../src/mms/tasks/TaskQueue'
 import type { BrowserRuntimePort } from '../../src/shared/browser/runtime'
 import { getDefaultSettings } from '../../src/shared/settings'
+import { TranscriptAssembler, type TranscriptStreamState } from '../../src/mms/run/adapters/shared/TranscriptAssembler'
+import { ACTIVITY_OUTPUT_CAP_BYTES, type AgentActivityItem } from '../../src/shared/agentActivity'
+import type { ChatMessage } from '../../src/shared/types'
 import { appTurn, fakeAppToolHost } from './appToolsFixture'
 
 const emptyCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
@@ -487,5 +490,48 @@ describe('LlmClient dispatch parity', () => {
     const h = harness({ outputs: [toolUse({ name: 'delegate_task', arguments: { prompt: 'x', title: 'A', workspace: 'shared' } }), done()] })
     const result = await h.chat({ mode: 'agent' })
     expect(resultText(toolResults(result.nativeMessages)[0]!)).toBe('Unknown tool: delegate_task')
+  })
+})
+
+describe('LlmClient pi tool results reach the transcript whole', () => {
+  it('keeps the tail and the full size of a long command, not its first 1,200 characters', async () => {
+    const project = mkdtempSync(join(tmpdir(), 'mousse-app-tools-'))
+    try {
+      const output = `${'compiling...\n'.repeat(10_000)}error: the build failed at the last step\n`
+      const h = harness({ outputs: [toolUse({ name: 'bash', arguments: { command: 'make' } }), done()] })
+      const piTools = (h.client as unknown as { piCodingTools: { execute: (...args: unknown[]) => Promise<unknown> } }).piCodingTools
+      vi.spyOn(piTools, 'execute').mockResolvedValue({ text: output, isError: false })
+      await h.chat({ mode: 'agent', projectPath: project })
+
+      const messages: ChatMessage[] = []
+      const state: TranscriptStreamState = {
+        activeAssistantMessageId: null,
+        activeThinkingMessageId: null,
+        activeToolCallMessageIds: new Map(),
+        callToMessage: new Map()
+      }
+      const assembler = new TranscriptAssembler(
+        {
+          getMessage: (id) => messages.find((message) => message.id === id),
+          addMessage: (message) => void messages.push(message),
+          updateMessage: (message) => void (messages[messages.findIndex((entry) => entry.id === message.id)] = message),
+          removeMessage: () => {},
+          emitAdded: () => {},
+          emitUpdated: () => {},
+          persist: () => {},
+          setPhase: () => {}
+        },
+        state
+      )
+      for (const event of h.events) assembler.tool(event)
+
+      const item = messages[0]!.activity as Extract<AgentActivityItem, { kind: 'command' }>
+      expect(item).toMatchObject({ kind: 'command', command: 'make', status: 'done', outputTruncated: true })
+      expect(item.output).toContain('error: the build failed at the last step')
+      expect(item.outputBytes).toBe(Buffer.byteLength(output))
+      expect(Buffer.byteLength(item.output ?? '')).toBeLessThanOrEqual(ACTIVITY_OUTPUT_CAP_BYTES)
+    } finally {
+      rmSync(project, { recursive: true, force: true })
+    }
   })
 })
