@@ -2,6 +2,7 @@
 //
 //   pi-coding-agent/package.json, pi-coding-agent/dist/bundle/**   the pinned CLI bundle (rpc-entry.js and its chunks)
 //   pi-coding-agent/node_modules/<package>/**                      the packages the bundle still imports (RUNTIME_PACKAGES)
+//   pi-coding-agent/dist/modes/interactive/theme/*.json             the built-in themes RPC mode loads at startup
 //   mousse-extension.mjs                                           Mousse's extension, bundled on its own
 //   runtime.json                                                   the versions copied
 //
@@ -37,10 +38,10 @@ export function getPiExtensionBuildOptions(projectRoot = root) {
   }
 }
 
-/** Packages the bundle imports at run time, copied beside it (photon-node is loaded only for images). */
-export const RUNTIME_PACKAGES = ['@earendil-works/chord', 'typebox', '@silvia-odwyer/photon-node']
+/** Packages the bundle imports at run time, copied beside it (jiti loads extensions; photon-node resizes images). */
+export const RUNTIME_PACKAGES = ['@earendil-works/chord', 'typebox', 'jiti', '@silvia-odwyer/photon-node']
 /** Imports the bundle guards with try/catch, which Mousse does not ship. */
-const OPTIONAL_IMPORTS = ['@aws-sdk/signature-v4-crt', '@mariozechner/clipboard', 'bufferutil', 'utf-8-validate', 'supports-color']
+export const OPTIONAL_IMPORTS = ['@aws-sdk/signature-v4-crt', '@mariozechner/clipboard', 'bufferutil', 'utf-8-validate', 'supports-color']
 
 /** `<from>/node_modules/<name>` or the nearest one above it, as Node resolves a bare import. */
 function packageDir(from, name) {
@@ -63,10 +64,10 @@ function copyPackage(source, target) {
   return manifest.version
 }
 
-/** Bare specifiers the bundle imports (static, dynamic and require) that are not Node built-ins. */
+/** Bare specifiers the bundle imports (static, dynamic, and `require` under any esbuild alias) that are not Node built-ins. */
 export function bundleImports(bundleDir) {
   const found = new Set()
-  const pattern = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s*|(?:\b|__)require\s*\(\s*)"((?:@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*(?:\/[\w.-]+)*)"/g
+  const pattern = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s*|(?:\b|__)require\d*\s*\(\s*)"((?:@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*(?:\/[\w.-]+)*)"/g
   const files = readdirSync(bundleDir, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.endsWith('.js'))
   for (const file of files)
     for (const match of readFileSync(join(file.parentPath, file.name), 'utf8').matchAll(pattern)) {
@@ -76,7 +77,7 @@ export function bundleImports(bundleDir) {
   return [...found].sort()
 }
 
-function packageName(specifier) {
+export function packageName(specifier) {
   const parts = specifier.split('/')
   return specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]
 }

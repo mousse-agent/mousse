@@ -5,7 +5,8 @@
 //                                                                   packaged (electron-builder --dir): the unpacked copy, run by Electron as Node
 //
 // It starts Pi in RPC mode the way the launcher does (argv flags, private agent dir, offline), with a
-// clean environment and a temporary user home, round-trips get_state and get_available_models,
+// clean environment and a temporary user home, after checking that every package the bundle
+// imports is inside the runtime. It round-trips get_state and get_available_models, loads photon-node,
 // then has Pi's `bash` start a long-lived grandchild and kills the tree (taskkill /T on Windows, the
 // process group elsewhere), and checks that the grandchild is gone. A receipt goes to
 // .mousse-dev/logs/pi-runtime-check.json.
@@ -15,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { fileURLToPath } from 'node:url'
-import { buildPiRuntime } from './build-pi-runtime.mjs'
+import { buildPiRuntime, bundleImports, OPTIONAL_IMPORTS, packageName } from './build-pi-runtime.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const STEP_MS = 30_000
@@ -29,14 +30,19 @@ const app = option('--app')
 const exec = resolve(option('--exec') ?? process.execPath)
 const base = app ? (app.endsWith('.asar') ? `${resolve(app)}.unpacked` : resolve(app)) : root
 const runtime = join(base, 'out', 'pi-runtime')
+const asNode = Boolean(app) || Boolean(process.versions.electron)
+if (!app && !existsSync(join(runtime, 'pi-coding-agent/dist/bundle/rpc-entry.js'))) await buildPiRuntime(root)
+
 const packageRoot = join(runtime, 'pi-coding-agent')
 const entry = join(packageRoot, 'dist', 'bundle', 'rpc-entry.js')
 const extension = join(runtime, 'mousse-extension.mjs')
-const asNode = Boolean(app) || Boolean(process.versions.electron)
-
-if (!app && !existsSync(entry)) await buildPiRuntime(root)
 for (const path of [entry, extension, join(packageRoot, 'package.json'), join(packageRoot, 'node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm')])
   if (!existsSync(path)) throw new Error(`Pi runtime file missing: ${path}`)
+// Node resolves a missing package from any node_modules above the runtime (the repository's, the
+// user's home), so a start alone cannot prove the runtime is complete: every import must be inside it.
+const unshipped = bundleImports(join(packageRoot, 'dist', 'bundle')).map(packageName)
+  .filter((name) => !OPTIONAL_IMPORTS.includes(name) && !existsSync(join(packageRoot, 'node_modules', name, 'package.json')))
+if (unshipped.length) throw new Error(`The Pi runtime does not ship: ${[...new Set(unshipped)].join(', ')}`)
 
 const scratch = mkdtempSync(join(tmpdir(), 'mousse-pi-check-'))
 const home = join(scratch, 'home')
