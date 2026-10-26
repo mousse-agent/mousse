@@ -2,7 +2,10 @@ import type { ReactNode } from 'react'
 import type { Components } from 'react-markdown'
 import ReactMarkdown from 'react-markdown'
 import rehypeHighlight from 'rehype-highlight'
+import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import 'katex/dist/katex.min.css'
 import { isSafePreviewHref, resolvePreviewImageSrc } from './markdownPreviewPolicy'
 import { routeLink } from '../../utils/chatLinks'
 
@@ -68,8 +71,8 @@ export function MarkdownPreview({
     <article className={className}>
       <ReactMarkdown
         skipHtml
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex, rehypeHighlight]}
         components={components}
       >
         {value}

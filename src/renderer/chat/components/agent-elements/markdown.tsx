@@ -3,9 +3,11 @@
 import { memo, type ReactNode } from "react";
 import { Streamdown, type Components } from "streamdown";
 import { createCodePlugin } from "@streamdown/code";
-import { Children } from "react";
+import { Children, cloneElement, isValidElement } from "react";
 import { cn } from "./utils/cn";
+import { mathPlugin, mermaidPlugin } from "./markdown-plugins";
 import { classifyLink, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
+import { mathFenceToDisplay, normalizeMathDelimiters } from "../../../utils/markdownMath";
 
 function fixNumberedListBreaks(text: string): string {
   return text.replace(/^(\d+)[.)]\s*\n+\s*/gm, "$1. ");
@@ -29,45 +31,28 @@ function normalizeMarkdown(text: string): string {
   const parts = text.split(/(```[\s\S]*?(?:```|$))/g);
   return parts
     .map((part, index) => {
-      if (index % 2 === 1) return part;
+      if (index % 2 === 1) return mathFenceToDisplay(part) ?? part;
       // Streamdown rejects custom schemes before its component/urlTransform
       // hooks run. A same-origin marker survives sanitation and is restored by
       // the anchor renderer; fenced examples remain byte-identical.
       const protectedLinks = part.replace(/mousse-file:\/\/open\?/gi, MOUSSE_FILE_MARKER);
-      return collapseLooseListGaps(fixNumberedListBreaks(protectedLinks)).replace(
-        /\n{3,}/g,
-        "\n\n",
-      );
+      return collapseLooseListGaps(
+        fixNumberedListBreaks(normalizeMathDelimiters(protectedLinks)),
+      ).replace(/\n{3,}/g, "\n\n");
     })
     .join("");
 }
 
-const CODE_FENCE_LANGS = new Set([
-  "bash",
-  "diff",
-  "html",
-  "js",
-  "json",
-  "jsx",
-  "md",
-  "markdown",
-  "sh",
-  "shell",
-  "text",
-  "ts",
-  "tsx",
-  "yml",
-  "yaml",
-]);
-
+/** Keep only the language id of a fence info string (```ts title=x → ```ts).
+ *  The code plugin loads each shiki grammar on first use and falls back to
+ *  plain text for ids it does not know. */
 function normalizeCodeFenceLanguages(text: string): string {
   return text.replace(/```([^\n]*)/g, (_match, langRaw) => {
     const lang = String(langRaw || "")
       .trim()
-      .toLowerCase();
-    if (!lang) return "```";
-    const normalized = lang.split(/\s+/)[0];
-    return CODE_FENCE_LANGS.has(normalized) ? `\`\`\`${normalized}` : "```text";
+      .toLowerCase()
+      .split(/\s+/)[0];
+    return lang && /^[\w#+.-]+$/.test(lang) ? `\`\`\`${lang}` : "```";
   });
 }
 
@@ -161,6 +146,35 @@ function renderInlineChildren(children: ReactNode): ReactNode {
   return tokenizeInlineCode(text);
 }
 
+const ALERT_KINDS = {
+  note: "Note",
+  tip: "Tip",
+  important: "Important",
+  warning: "Warning",
+  caution: "Caution",
+} as const;
+type AlertKind = keyof typeof ALERT_KINDS;
+
+const ALERT_MARKER_RE = /^\s*\[!(note|tip|important|warning|caution)\][ \t]*\n?/i;
+
+/** GitHub alert syntax: a blockquote whose first line is `[!NOTE]` etc.
+ *  Returns the kind and the children with the marker removed. */
+function splitAlert(children: ReactNode): { kind: AlertKind; body: ReactNode[] } | null {
+  const parts = Children.toArray(children);
+  const firstIndex = parts.findIndex((part) => typeof part !== "string" || part.trim() !== "");
+  const first = parts[firstIndex];
+  if (!isValidElement<{ children?: ReactNode }>(first)) return null;
+  const inner = Children.toArray(first.props.children);
+  const lead = inner[0];
+  if (typeof lead !== "string") return null;
+  const match = ALERT_MARKER_RE.exec(lead);
+  if (!match) return null;
+  const rest = [lead.slice(match[0].length), ...inner.slice(1)].filter((part) => part !== "");
+  const body = parts.slice(firstIndex + 1);
+  if (rest.length > 0) body.unshift(cloneElement(first, undefined, ...rest));
+  return { kind: match[1].toLowerCase() as AlertKind, body };
+}
+
 export type MarkdownProps = {
   content: string;
   className?: string;
@@ -173,7 +187,7 @@ const code = createCodePlugin({
 
 // Same reason as `markdownComponents` below: a fresh `{ code }` wrapper per
 // render would defeat memoization inside Streamdown.
-const markdownPlugins = { code };
+const markdownPlugins = { code, math: mathPlugin, mermaid: mermaidPlugin };
 // Navigation is synchronously allowlisted by safeMarkdownUrl/classifyLink and
 // handled inside Mousse; disable Streamdown's HTTP-only interstitial so the
 // canonical mousse-file scheme reaches our anchor renderer.
@@ -267,14 +281,25 @@ const markdownComponents: Components = {
       </a>
     );
   },
-  blockquote: ({ children, ...props }) => (
-    <blockquote
-      className="an-md-blockquote pl-3 italic mb-2 text-base border-l-2 border-an-border-color text-an-foreground/70"
-      {...props}
-    >
-      {children}
-    </blockquote>
-  ),
+  blockquote: ({ children, ...props }) => {
+    const alert = splitAlert(children);
+    if (alert) {
+      return (
+        <div className={`an-md-alert an-md-alert-${alert.kind} my-3 pl-3 border-l-2`} role="note">
+          <p className="an-md-alert-title text-sm font-medium mb-1">{ALERT_KINDS[alert.kind]}</p>
+          {alert.body}
+        </div>
+      );
+    }
+    return (
+      <blockquote
+        className="an-md-blockquote pl-3 italic mb-2 text-base border-l-2 border-an-border-color text-an-foreground/70"
+        {...props}
+      >
+        {children}
+      </blockquote>
+    );
+  },
   hr: ({ ...props }) => (
     <hr className="an-md-hr my-4 border-an-border-color" {...props} />
   ),

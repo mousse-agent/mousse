@@ -13,6 +13,7 @@ import {
   mapToolStateToStepState,
 } from "../utils/tool-adapters";
 import { ToolApprovalFooter, type ToolApproval } from "./tool-approval-footer";
+import { resolveThemeIsDark } from "../utils/theme-is-dark";
 
 export type EditToolDiffCardProps = {
   step: Extract<TimelineStep, { type: "tool-call" }>;
@@ -23,40 +24,6 @@ export type EditToolDiffCardProps = {
   isCollapsible?: boolean;
   approval?: ToolApproval;
 };
-
-// The app themes via `html[data-theme="…"]` (+ `color-scheme`), not the
-// `.dark` class, so checking only `.dark` leaves themeType stuck on "light".
-// That renders light shiki tokens (dark text) on a dark `light-dark()` diff
-// background — unreadable. Resolve against data-theme first, then computed
-// color-scheme, then the legacy `.dark` class / OS preference.
-function resolveEditDiffThemeIsDark(): boolean {
-  if (typeof document === "undefined") return true;
-  const root = document.documentElement;
-  const dataTheme = root.getAttribute("data-theme");
-  if (dataTheme === "light") return false;
-  if (dataTheme === "system") {
-    if (typeof window !== "undefined" && window.matchMedia) {
-      return window.matchMedia("(prefers-color-scheme: dark)").matches;
-    }
-    return true;
-  }
-  // Every other mousse theme id (dark, dark-modern, one-dark, monokai,
-  // solarized-dark, github-dark, high-contrast, blacksphere-plus, …) is
-  // dark-only.
-  if (dataTheme) return true;
-  if (root.classList.contains("dark")) return true;
-  try {
-    const colorScheme = getComputedStyle(root).colorScheme;
-    if (colorScheme.includes("dark")) return true;
-    if (colorScheme.includes("light")) return false;
-  } catch {
-    // getComputedStyle unavailable (SSR/test) — fall through.
-  }
-  if (typeof window !== "undefined" && window.matchMedia) {
-    return window.matchMedia("(prefers-color-scheme: dark)").matches;
-  }
-  return true;
-}
 
 export function EditToolDiffCard({
   step,
@@ -78,14 +45,14 @@ export function EditToolDiffCard({
   const hasFileName = Boolean(fileName);
   const isWrite = step.toolName === "Write";
   const [themeType, setThemeType] = React.useState<"light" | "dark">(() =>
-    resolveEditDiffThemeIsDark() ? "dark" : "light",
+    resolveThemeIsDark() ? "dark" : "light",
   );
   const [isExpanded, setIsExpanded] = React.useState(false);
 
   React.useEffect(() => {
     if (typeof window === "undefined") return;
     const updateTheme = () => {
-      setThemeType(resolveEditDiffThemeIsDark() ? "dark" : "light");
+      setThemeType(resolveThemeIsDark() ? "dark" : "light");
     };
     updateTheme();
 

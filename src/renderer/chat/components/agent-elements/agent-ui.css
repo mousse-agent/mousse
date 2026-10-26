@@ -377,6 +377,39 @@ html[data-theme] .an-edit-tool-card .an-edit-diff code {
   white-space: normal;
 }
 
+/* Math: KaTeX lays out its own spans; the chat's pre-line prose rule would
+   turn its internal whitespace into line breaks. Wide equations scroll. */
+.an-markdown .katex {
+  white-space: normal;
+  font-size: 1.05em;
+}
+.an-markdown .katex-display {
+  margin: 0.75rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* GitHub alerts (> [!NOTE] …) */
+.an-markdown .an-md-alert {
+  --an-alert-color: var(--an-primary-color);
+  border-color: var(--an-alert-color);
+}
+.an-markdown .an-md-alert-title {
+  color: var(--an-alert-color);
+}
+.an-markdown .an-md-alert-tip {
+  --an-alert-color: light-dark(#15803d, #4ade80);
+}
+.an-markdown .an-md-alert-important {
+  --an-alert-color: light-dark(#7c3aed, #a78bfa);
+}
+.an-markdown .an-md-alert-warning {
+  --an-alert-color: var(--an-warning-text);
+}
+.an-markdown .an-md-alert-caution {
+  --an-alert-color: light-dark(#dc2626, #f87171);
+}
+
 /* Marker hierarchy: disc → circle → square so depth reads even when
    the indent step is subtle in a narrow chat column. */
 .an-markdown .an-md-ul {

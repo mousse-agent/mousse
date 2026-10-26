@@ -91,3 +91,51 @@ describe('chat Markdown list rendering', () => {
     expect(markup).toContain('</code>)')
   })
 })
+
+describe('chat Markdown extended syntax', () => {
+  it('renders LaTeX with KaTeX for $, $$, \\( \\) and \\[ \\] delimiters', () => {
+    const markup = render(
+      ['Inline $a^2 + b^2 = c^2$ and \\(x_1\\).', '', '$$', '\\int_0^1 x\\,dx', '$$', '', '\\[E = mc^2\\]'].join('\n'),
+    )
+    expect(markup.match(/class="katex"/g)?.length).toBe(4)
+    expect(markup.match(/class="katex-display"/g)?.length).toBe(2)
+    expect(markup).not.toContain('$')
+  })
+
+  it('renders ```math fences as display math', () => {
+    const markup = render('```math\n\\frac{1}{2}\n```')
+    expect(markup).toContain('katex-display')
+  })
+
+  it('keeps prices as plain text', () => {
+    const markup = render('Plans cost $5 and $10 a month.')
+    expect(markup).not.toContain('katex')
+    expect(markup).toContain('$5 and $10')
+  })
+
+  it('renders GitHub alerts as labeled callouts', () => {
+    const markup = render('> [!WARNING]\n> Back up the database first.')
+    expect(markup).toContain('an-md-alert-warning')
+    expect(markup).toContain('>Warning</p>')
+    expect(markup).toContain('Back up the database first.')
+    expect(markup).not.toContain('[!WARNING]')
+  })
+
+  it('keeps ordinary blockquotes', () => {
+    const markup = render('> Just a quote')
+    expect(markup).toContain('<blockquote')
+    expect(markup).not.toContain('an-md-alert')
+  })
+
+  it('keeps fence languages the code plugin can highlight', () => {
+    const markup = render('```python title="x.py"\nprint(1)\n```')
+    expect(markup).toContain('data-language="python"')
+  })
+
+  it('renders GFM footnotes, task lists and strikethrough', () => {
+    const markup = render(['- [x] done', '- [ ] todo', '', '~~old~~ new[^1]', '', '[^1]: Source.'].join('\n'))
+    expect(markup).toContain('type="checkbox"')
+    expect(markup).toContain('<del')
+    expect(markup).toContain('data-footnotes')
+  })
+})
