@@ -1,11 +1,26 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { afterEach, beforeAll, describe, expect, it } from 'vitest'
-import { FileLockBusyError, withAsyncFileLock } from '../src/mms/platform/asyncFileLock'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { FileLockBusyError, setReclaimHookForTests, tryAcquireOnceForTests, withAsyncFileLock } from '../src/mms/platform/asyncFileLock'
 import { PROCESS_INSTANCE_ID } from '../src/mms/queue/processLiveness'
 import { crashChild } from './support/build'
+
+// Lets a test make the next exclusive creates fail the way Windows does for a delete-pending file.
+const fsControl = vi.hoisted(() => ({ failOpen: [] as string[] }))
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return {
+    ...actual,
+    openSync: (...args: Parameters<typeof actual.openSync>) => {
+      const code = args[1] === 'wx' ? fsControl.failOpen.shift() : undefined
+      if (code) throw Object.assign(new Error(`simulated ${code}`), { code })
+      return actual.openSync(...args)
+    }
+  }
+})
 
 let childExecutable: string
 beforeAll(async () => {
@@ -14,6 +29,8 @@ beforeAll(async () => {
 
 const dirs: string[] = []
 afterEach(() => {
+  setReclaimHookForTests(null)
+  fsControl.failOpen = []
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 function lockPath(): string {
@@ -28,9 +45,9 @@ function deadPid(): number {
   return child.pid!
 }
 
-function run(lock: string, log: string, holdMs: number): Promise<number | null> {
+function run(lock: string, log: string, holdMs: number, barrier?: string): Promise<number | null> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [childExecutable, lock, log, String(holdMs)], { stdio: ['ignore', 'ignore', 'pipe'] })
+    const child = spawn(process.execPath, [childExecutable, lock, log, String(holdMs), ...(barrier ? [barrier] : [])], { stdio: ['ignore', 'ignore', 'pipe'] })
     let stderr = ''
     child.stderr.on('data', (chunk) => (stderr += chunk))
     child.on('error', reject)
@@ -53,6 +70,90 @@ describe('withAsyncFileLock', () => {
     expect(first[1]).not.toBe(third[1])
     expect(existsSync(lock)).toBe(false)
   }, 60_000)
+
+  it('two processes reclaiming the same stale lock at the same moment never both hold it', async () => {
+    const lock = lockPath()
+    const root = dirname(dirname(lock))
+    const log = join(root, 'contention.log')
+    const barrier = join(root, 'barrier')
+    mkdirSync(dirname(lock), { recursive: true })
+    mkdirSync(barrier)
+    writeFileSync(log, '')
+    writeFileSync(lock, JSON.stringify({ pid: deadPid(), processInstanceId: 'gone', token: 'dead', acquiredAt: new Date().toISOString() }))
+    const children = Promise.all([run(lock, log, 300, barrier), run(lock, log, 300, barrier)])
+    // Both have judged the dead owner stale before either acts on it.
+    await vi.waitFor(() => expect(readdirSync(barrier).filter((name) => name.startsWith('ready-'))).toHaveLength(2), { timeout: 30_000 })
+    writeFileSync(join(barrier, 'go'), '')
+    await children
+    const lines = readFileSync(log, 'utf8').trim().split('\n').map((line) => line.split(' ')[0])
+    expect(lines).toEqual(['start', 'end', 'start', 'end'])
+    expect(readdirSync(dirname(lock))).toEqual([])
+  }, 60_000)
+
+  it('a reclaimer that arrives late never deletes the lock another reclaimer just took', () => {
+    const lock = lockPath()
+    mkdirSync(dirname(lock), { recursive: true })
+    writeFileSync(lock, JSON.stringify({ pid: deadPid(), processInstanceId: 'gone', token: 'dead', acquiredAt: new Date().toISOString() }))
+    let winner: string | null = null
+    // B judges the owner dead; before B acts, A reclaims and takes the lock.
+    setReclaimHookForTests((step) => {
+      if (step !== 'checked' || winner !== null) return
+      setReclaimHookForTests(null)
+      winner = tryAcquireOnceForTests(lock)
+    })
+    expect(tryAcquireOnceForTests(lock)).toBeNull()
+    expect(winner).toMatch(/^[0-9a-f]{32}$/)
+    expect(JSON.parse(readFileSync(lock, 'utf8')).token).toBe(winner)
+  })
+
+  it('while one reclaimer holds the reclaim marker, another cannot reclaim the same file', () => {
+    const lock = lockPath()
+    mkdirSync(dirname(lock), { recursive: true })
+    writeFileSync(lock, JSON.stringify({ pid: deadPid(), processInstanceId: 'gone', token: 'dead', acquiredAt: new Date().toISOString() }))
+    let other: string | null | undefined
+    setReclaimHookForTests((step) => {
+      if (step !== 'marked' || other !== undefined) return
+      other = null
+      other = tryAcquireOnceForTests(lock)
+    })
+    const mine = tryAcquireOnceForTests(lock)
+    expect(other).toBeNull()
+    expect(JSON.parse(readFileSync(lock, 'utf8')).token).toBe(mine)
+    expect(readdirSync(dirname(lock))).toEqual(['test.lock'])
+  })
+
+  it('a reclaim marker left by a crashed reclaimer is itself reclaimed', () => {
+    const lock = lockPath()
+    mkdirSync(dirname(lock), { recursive: true })
+    writeFileSync(lock, JSON.stringify({ pid: deadPid(), processInstanceId: 'gone', token: 'dead', acquiredAt: new Date().toISOString() }))
+    // A reclaimer that crashed holding the marker for this exact stale file left it behind.
+    const marker = `test.lock.reclaim-${createHash('sha256').update('token:dead').digest('hex').slice(0, 16)}`
+    writeFileSync(join(dirname(lock), marker), JSON.stringify({ pid: deadPid(), processInstanceId: 'gone', token: 'marker', acquiredAt: new Date().toISOString() }))
+    expect(tryAcquireOnceForTests(lock)).toMatch(/^[0-9a-f]{32}$/)
+    expect(readdirSync(dirname(lock))).toEqual(['test.lock'])
+  })
+
+  it('reclaims a live pid whose lock is older than maxHoldMs (pid reuse), and only then', async () => {
+    const lock = lockPath()
+    mkdirSync(dirname(lock), { recursive: true })
+    const old = new Date(Date.now() - 10 * 60_000).toISOString()
+    writeFileSync(lock, JSON.stringify({ pid: process.ppid, processInstanceId: 'other', token: 'reused', acquiredAt: old }))
+    await expect(withAsyncFileLock(lock, async () => 'ran', { waitMs: 0 })).rejects.toBeInstanceOf(FileLockBusyError)
+    expect(await withAsyncFileLock(lock, async () => 'ran', { waitMs: 0, maxHoldMs: 5 * 60_000 })).toBe('ran')
+  })
+
+  it('a create that fails like a Windows delete-pending file waits and retries', async () => {
+    const lock = lockPath()
+    fsControl.failOpen = ['EPERM', 'EACCES', 'EBUSY']
+    expect(await withAsyncFileLock(lock, async () => 'ran', { waitMs: 5_000 })).toBe('ran')
+    expect(fsControl.failOpen).toEqual([])
+  })
+
+  it('any other create error is not mistaken for busy', async () => {
+    const lock = lockPath()
+    fsControl.failOpen = ['EIO']
+    await expect(withAsyncFileLock(lock, async () => 'ran', { waitMs: 5_000 })).rejects.toMatchObject({ code: 'EIO' })
+  })
 
   it('reclaims a lock whose owner process is dead', async () => {
     const lock = lockPath()
