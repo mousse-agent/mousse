@@ -29,7 +29,8 @@ describe('a queued result that runs directly (issue #142)', () => {
   const world = useSubagentWorld()
 
   /** A finished subagent whose result sits in a queue item (owner `queue:<id>`), ready to drain directly. */
-  const queued = async (parentReply?: Parameters<typeof world>[1]) => {
+  const queued = async (parentReply?: Parameters<typeof world>[1], options: { recordFails?: boolean } = {}) => {
+    const recordFails = options.recordFails ?? true
     lease.lose = 0
     lease.lost = 0
     const w = world(() => 'All modules look fine.', parentReply)
@@ -46,7 +47,7 @@ describe('a queued result that runs directly (issue #142)', () => {
     // The steer is spent (its rows belong to the item); a pending one would hold up the control lane.
     w.d.engine.outbox.cancel(effect.effectId, new Date().toISOString(), 'test')
     // Recording the turn's effect fails, so the item runs directly.
-    vi.spyOn(w.d.orch as any, 'enqueueTurnStart').mockImplementation(() => { throw new Error('outbox unavailable') })
+    if (recordFails) vi.spyOn(w.d.orch as any, 'enqueueTurnStart').mockImplementation(() => { throw new Error('outbox unavailable') })
     session.turnAdmitted = false
     const drain = () => (w.d.orch as any).scheduleQueueDrain(session)
     const noticeTurns = () => w.adapter.turns.filter((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith('Subagent'))
@@ -114,5 +115,26 @@ describe('a queued result that runs directly (issue #142)', () => {
     expect(w.d.engine.listRuns(w.parent.id).filter((run) => run.source === 'wake')).toHaveLength(1)
     w.reconciler.runOnce()
     expect(w.d.engine.listRuns(w.parent.id).filter((run) => run.source === 'wake')).toHaveLength(1)
+  })
+
+  it('a turn whose rows cannot be redirected to its effect records no effect, so it runs once, directly', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const w = await queued(async (input) => {
+      if (input.prompt.startsWith('Subagent')) await gate
+      return 'Parent done.'
+    }, { recordFails: false })
+    const redirect = vi.spyOn(w.d.engine.inbox, 'redirectDelivery').mockImplementationOnce(() => { throw new Error('inbox unavailable') })
+    w.drain()
+    await waitFor(() => w.noticeTurns().length === 1, 'the direct turn to start')
+    expect(redirect).toHaveBeenCalledTimes(1)
+    const run = w.d.engine.getActiveRun(w.parent.id)!
+    // The effect and the redirect are one transaction: the failed redirect left no effect for the worker to claim.
+    expect(w.d.engine.outbox.listForThread(w.parent.id).filter((effect) => effect.kind === 'turn.start' && effect.runId === run.runId)).toEqual([])
+    expect(w.d.engine.inbox.get(w.row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: expect.stringMatching(/^queue:/) })
+    release()
+    await waitFor(() => w.d.engine.getRun(run.runId)?.status === 'completed', 'the run to end')
+    await waitFor(() => w.d.engine.inbox.get(w.row.inboxId)!.status === 'acknowledged', 'the rows to be read')
+    expect(w.noticeTurns()).toHaveLength(1)
   })
 })
