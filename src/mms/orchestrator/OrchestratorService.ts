@@ -1824,14 +1824,18 @@ export class OrchestratorService extends EventEmitter {
     const entry: TurnResult = { promise, resolve, reject, payload, effectId: null, started: false, abandoned: false }
     this.turnResults.set(payload.runId, entry)
     try {
-      entry.effectId = engine.outbox.enqueue({
-        threadId: payload.threadId,
-        runId: payload.runId,
-        kind: 'turn.start',
-        payload: { ...payload, input: durableSendInput(payload.input) }
-      }).effectId
-      // The notices this turn carries now follow its outcome: read when it completes, redelivered when it fails.
-      if (payload.inboxIds?.length && payload.queueItemId) engine.inbox.redirectDelivery(payload.inboxIds, entry.effectId, queueOwner(payload.queueItemId))
+      // One transaction: if the notices cannot be redirected, no effect stays recorded, so the direct run
+      // `startTurn` falls back to is the only run of this turn (the effect worker cannot claim it too).
+      engine.store.db.transaction(() => {
+        entry.effectId = engine.outbox.enqueue({
+          threadId: payload.threadId,
+          runId: payload.runId,
+          kind: 'turn.start',
+          payload: { ...payload, input: durableSendInput(payload.input) }
+        }).effectId
+        // The notices this turn carries now follow its outcome: read when it completes, redelivered when it fails.
+        if (payload.inboxIds?.length && payload.queueItemId) engine.inbox.redirectDelivery(payload.inboxIds, entry.effectId, queueOwner(payload.queueItemId))
+      })
     } catch (error) {
       this.turnResults.delete(payload.runId)
       throw error
