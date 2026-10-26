@@ -175,6 +175,9 @@ describe('Cursor behind the gateway', () => {
     await (await turn('thread')).result
     await (await turn('thread')).result
     expect(notices).toEqual([['thread', 'Work approves tools itself.']])
+    // Nothing to find or install: the page shows the bundled SDK and the key's sign-in.
+    const [snapshot] = await harness.instances.snapshots({ kind: 'device' })
+    expect(snapshot).toMatchObject({ driver: 'cursor', runs: { state: 'yes' }, binary: { source: 'bundled' }, auth: { state: 'signed_in', methodLabel: 'API key', canSignOut: true } })
   })
 
   it('passes the key on every agent call, and a stop cancels a run whose send was still in flight', async () => {

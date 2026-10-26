@@ -182,6 +182,8 @@ export function BinaryRow({ snapshot }: { snapshot: InstanceSnapshot }) {
             </code>
             <span className="prov-binary-meta">{[version, binarySourceLabel(binary)].filter(Boolean).join(' · ')}</span>
           </span>
+        ) : binary?.source === 'bundled' ? (
+          binarySourceLabel(binary)
         ) : snapshot.checkedAt || snapshot.stale ? (
           'Not found'
         ) : (

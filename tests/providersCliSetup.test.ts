@@ -309,6 +309,13 @@ describe('Add provider choices', () => {
     expect(buttons(html)).toEqual(['Use a different executable', 'Add'])
   })
 
+  it('adds Cursor without an executable to find: it ships with Mousse', () => {
+    const choice = addChoices([claude, codex, antigravity], []).find((entry) => entry.key === 'new:cursor')
+    const html = connect(choice)
+    expect(html).toContain('Cursor ships with Mousse. Sign in after adding.')
+    expect(buttons(html)).toEqual(['Add'])
+  })
+
   it('asks for the executable when the CLI was not found', () => {
     const missing = snapshot({ install: { state: 'not_installed', canInstall: false }, runs: { state: 'no', failure: 'not_on_path' }, binary: undefined })
     const [choice] = addChoices([missing, codex, antigravity], [])
@@ -412,6 +419,17 @@ describe('Sign-in dialog', () => {
   it('says why a refused answer did nothing', () => {
     expect(refusedText({ promptId: 'p1', kind: 'redirect_url', value: 'http://localhost/x' })).toContain('paste it here')
     expect(refusedText({ promptId: 'p2', kind: 'input', value: 'x' })).toContain('Try again')
+  })
+})
+
+describe('Cursor in the agent editor', () => {
+  it('shows the bundled runtime, with no executable, arguments, home or variables to set', () => {
+    const entry = { ...snapshot({ instanceId: 'cursor:work', driver: 'cursor', displayName: 'Work', builtIn: false }), binary: { source: 'bundled' as const } }
+    const html = renderToStaticMarkup(createElement(AgentEditor, { snapshot: entry, status: describeStatus(entry), actions, onSaveModelPrefs: noop, onRefreshModels: noop }))
+    expect(html).toContain('Bundled with Mousse')
+    expect(html).not.toContain('Not found')
+    expect(html).not.toContain('Environment')
+    expect(html).not.toContain('executable path')
   })
 })
 

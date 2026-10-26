@@ -402,6 +402,7 @@ export function AgentConnectStep({
   const entered = path.trim()
   const canAdd = !disabled && (entered !== '' || !missing)
   const label = DRIVER_INFO[choice.driver].label
+  const bundled = DRIVER_INFO[choice.driver].bundled === true
   const add = () => {
     if (canAdd) onAdd(entered || undefined)
   }
@@ -415,6 +416,8 @@ export function AgentConnectStep({
           description={
             error ? (
               <span className="prov-error">{error}</span>
+            ) : bundled ? (
+              `${label} ships with Mousse. Sign in after adding.`
             ) : detected ? (
               `Mousse found ${label}${version ? ` ${version}` : ''} on this computer.`
             ) : (
@@ -423,9 +426,11 @@ export function AgentConnectStep({
           }
           control={
             <>
-              <button type="button" className="prov-link" disabled={disabled} onClick={() => setManual(true)}>
-                Use a different executable
-              </button>
+              {!bundled && (
+                <button type="button" className="prov-link" disabled={disabled} onClick={() => setManual(true)}>
+                  Use a different executable
+                </button>
+              )}
               <button type="button" className="settings-btn" autoFocus disabled={!canAdd} onClick={() => add()}>
                 {busy ? 'Adding…' : 'Add'}
               </button>
