@@ -1214,13 +1214,17 @@ export class CodexProviderService {
   async stopAll(reason: string): Promise<void> {
     this.launchEpoch += 1
     for (const preparing of this.preparing) preparing.abort(new Error(reason))
-    const launching = this.launching
     this.abortInFlight(reason)
     this.probeResult = undefined
     if (this.app) this.app.verified = false
-    // A launch being prepared never starts (the epoch moved on); one already spawning is tracked.
-    await launching?.catch(() => undefined)
+    // A launch being prepared never starts (the epoch moved on), and a spawned process is tracked
+    // from its spawn: one still initializing is closed with the rest at once, never awaited.
     await this.stopProcesses([...this.processes])
+  }
+
+  /** Resolves once every process this service started has exited (a stopped service's last ones included). */
+  async processesExited(): Promise<void> {
+    await Promise.all([...this.processes].map((entry) => entry.exited))
   }
 
   /**

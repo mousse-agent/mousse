@@ -307,8 +307,10 @@ export function createManagedCodexRuntime(context: DriverContext, deps: ManagedC
     forgetConversation: (threadId) => codex.forgetConversation(threadId),
     stop: () => {
       // The gateway stops a runtime once its turns end, the newest one included (removal, shutdown).
-      untrackRevision(servicesKey, codex)
+      // It stays tracked until its last process has exited: a credential change meanwhile still
+      // stops and awaits it before anything is revoked.
       codex.stop()
+      void codex.processesExited().finally(() => untrackRevision(servicesKey, codex))
     }
   }
 }

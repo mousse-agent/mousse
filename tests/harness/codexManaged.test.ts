@@ -24,11 +24,20 @@ function fakeAppServer() {
   const launches: CodexLaunch[] = []
   const messages: Message[] = []
   const exited: boolean[] = []
+  /** Processes that ignore signals until `exit(index)` (a stuck Codex). */
+  const state = { stubborn: false }
+  const exits: Array<() => void> = []
   const launch = (spec: CodexLaunch): CodexProcess => {
     launches.push(spec)
     const index = exited.push(false) - 1
+    const stubborn = state.stubborn
     const stdout = new PassThrough()
     const stdin = new PassThrough()
+    const exit = (signal: NodeJS.Signals): void => {
+      if (exited[index]) return
+      exited[index] = true
+      process.emit('exit', null, signal)
+    }
     const process = Object.assign(new EventEmitter(), {
       stdin,
       stdout,
@@ -36,15 +45,17 @@ function fakeAppServer() {
       exitCode: null as number | null,
       signalCode: null as NodeJS.Signals | null,
       kill(signal: NodeJS.Signals = 'SIGTERM') {
+        if (stubborn) return true
         if (process.signalCode) return false
         process.signalCode = signal
-        setImmediate(() => {
-          exited[index] = true
-          process.emit('exit', null, signal)
-        })
+        setImmediate(() => exit(signal))
         return true
       }
     })
+    exits[index] = () => {
+      process.signalCode = 'SIGKILL'
+      exit('SIGKILL')
+    }
     let pending = ''
     stdin.on('data', (chunk: Buffer) => {
       pending += chunk.toString()
@@ -60,7 +71,7 @@ function fakeAppServer() {
     })
     return process as unknown as CodexProcess
   }
-  return { launch, launches, messages, exited, methods: () => messages.map((message) => message.method) }
+  return { launch, launches, messages, exited, state, exits, methods: () => messages.map((message) => message.method) }
 }
 
 /** The installation's slice the runtime uses, with a lease count. */
@@ -106,7 +117,7 @@ afterEach(async () => {
   await issuer.stop()
 })
 
-function setup(shared?: { profileHome: string; installationHome: string }) {
+function setup(shared?: { profileHome: string; installationHome: string }, serviceDeps: Record<string, unknown> = {}) {
   const { profileHome, installationHome } = shared ?? homes()
   const instanceId = 'codex:managed'
   const stateDir = join(profileHome, 'harness', 'codex-managed')
@@ -145,7 +156,7 @@ function setup(shared?: { profileHome: string; installationHome: string }) {
     installation,
     broker,
     auth: (options) => (auth = new ChatGptAuth({ ...options, endpoints: issuer.endpoints, codec: plainCodec })),
-    service: { launch: server.launch },
+    service: { launch: server.launch, ...serviceDeps },
     helper: (endpoint, leaseId) => {
       helpers.push({ endpoint, leaseId })
       return { command: '/opt/mousse-cli', args: ['--cli', 'engine', 'chatgpt-token', endpoint, leaseId], env: { MOUSSE_CLI: '1' } }
@@ -380,5 +391,28 @@ describe('managed Codex: readiness, models and revisions', () => {
     await current.runtime.signOut!()
     expect(seen).toEqual([true])
     expect(old.state.leases).toBe(0)
+  })
+})
+
+describe('managed Codex: a stopped revision until its process exits', () => {
+  it('a sign-out through the replacement waits for a stopped old revision whose process ignores signals', async () => {
+    let old!: ReturnType<typeof setup>
+    const killTree = vi.fn(() => setTimeout(() => old.server.exits[0]!(), 30))
+    old = setup(undefined, { killTree, stopTiming: { killAfterMs: 20, exitDeadlineMs: 2_000 } })
+    old.server.state.stubborn = true
+    await signIn(issuer, old.auth, alice)
+    await old.launch()
+    // The reconfiguration's replacement exists; the gateway then stops the old runtime once its turns end.
+    const current = setup(old.homes)
+    old.runtime.stop()
+    expect(old.server.exited[0]).toBe(false)
+    const seen: Array<{ exited: boolean; leases: number }> = []
+    issuer.onRevoke = async () => {
+      seen.push({ exited: old.server.exited[0]!, leases: old.state.leases })
+      return { status: 200 }
+    }
+    await current.runtime.signOut!()
+    expect(killTree).toHaveBeenCalled()
+    expect(seen).toEqual([{ exited: true, leases: 0 }])
   })
 })

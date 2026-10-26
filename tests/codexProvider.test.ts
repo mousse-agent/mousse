@@ -522,6 +522,28 @@ describe('CodexProviderService options (managed Codex)', () => {
     expect(onExit).toHaveBeenCalledTimes(1)
   })
 
+  it('a process whose initialize stalls is closed and killed within the stop deadline', async () => {
+    const server = turnServer({ provider: () => MANAGED })
+    const onExit = vi.fn()
+    let slow: ReturnType<typeof slowToExit> | undefined
+    const launch = (spec: CodexLaunch): CodexProcess => {
+      const process = server.launch(spec)
+      // It never answers anything, `initialize` included.
+      ;(process as { stdout: PassThrough }).stdout = new PassThrough()
+      slow = slowToExit(process as EventEmitter & CodexProcess)
+      return process
+    }
+    const killTree = vi.fn(() => slow!.exit())
+    const service = managed(server, { prepareLaunch: async () => ({ args: [], onExit }) }, { launch, killTree, stopTiming: { killAfterMs: 10, exitDeadlineMs: 200 } })
+    void service.userSetup(home).catch(() => undefined)
+    await vi.waitFor(() => expect(server.processes).toHaveLength(1))
+    const started = Date.now()
+    await service.stopAll('account_changed')
+    expect(Date.now() - started).toBeLessThan(1_000)
+    expect(killTree).toHaveBeenCalledTimes(1)
+    expect(onExit).toHaveBeenCalledTimes(1)
+  })
+
   it('stopAll rejects when the process never exits, and when the kill throws', async () => {
     for (const killTree of [() => {}, () => { throw new Error('access denied') }]) {
       const server = turnServer({ provider: () => MANAGED })
