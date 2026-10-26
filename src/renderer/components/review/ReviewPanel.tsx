@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronDown, ChevronRight, RefreshCw } from '../../lib/icons'
+import { ChevronDown, ChevronRight, MessageSquare, RefreshCw } from '../../lib/icons'
+import { joinReviewPath, sameReviewFile, type ChatReference } from '../../../shared/chatReferences'
 import { REVIEW_MAX_FILES, type ReviewFileEntry, type ReviewFilesResult, type ReviewScope } from '../../../shared/review'
 import { useAppStore } from '../../stores/appStore'
 import { useReviewStore } from '../../stores/reviewStore'
 import { ResizablePanelSidebar } from '../ResizablePanelSidebar'
 import { Select, type SelectOption } from '../ui/Select'
 import { ReviewDiffPane, WhitespaceToggle } from './ReviewDiffPane'
+import { commentCounts, commentScopeLabel, scopeKey } from './reviewComments'
 import { readReviewHistory, readWorkspaceAvailability, turnReturnedToIdle, type WorkspaceAvailability } from './reviewData'
 import {
   STATUS_BADGES,
@@ -21,6 +23,8 @@ import {
 
 const NO_OWN_WORKTREE = 'This thread has no worktree of its own, so turns cannot be reviewed. Showing the working tree.'
 const TURN_UNDONE = 'This turn was undone; its changes are not in the working tree.'
+const NO_REFERENCES: ChatReference[] = []
+const NO_COMMENT_COUNTS: ReadonlyMap<string, number> = new Map()
 
 function CountStat({ entry }: { entry: ReviewFileEntry }) {
   if (entry.binary) return <span className="review-tree-note">binary</span>
@@ -38,6 +42,7 @@ function TreeRows({
   depth,
   selectedPath,
   collapsed,
+  comments,
   onToggle,
   onSelect
 }: {
@@ -45,6 +50,7 @@ function TreeRows({
   depth: number
   selectedPath: string | null
   collapsed: ReadonlySet<string>
+  comments: ReadonlyMap<string, number>
   onToggle: (path: string) => void
   onSelect: (entry: ReviewFileEntry) => void
 }) {
@@ -61,12 +67,13 @@ function TreeRows({
                 <span className="git-file-path">{node.name}</span>
               </button>
               {open && (
-                <TreeRows nodes={node.children} depth={depth + 1} selectedPath={selectedPath} collapsed={collapsed} onToggle={onToggle} onSelect={onSelect} />
+                <TreeRows nodes={node.children} depth={depth + 1} selectedPath={selectedPath} collapsed={collapsed} comments={comments} onToggle={onToggle} onSelect={onSelect} />
               )}
             </div>
           )
         }
         const { entry } = node
+        const commentCount = comments.get(node.path) ?? 0
         return (
           <button
             key={`f:${node.path}`}
@@ -78,6 +85,12 @@ function TreeRows({
           >
             <span className={`git-status-badge status-${entry.status}`}>{STATUS_BADGES[entry.status]}</span>
             <span className="git-file-path">{node.name}</span>
+            {commentCount > 0 && (
+              <span className="review-tree-comments" title={`${commentCount} comment${commentCount === 1 ? '' : 's'} in the composer`}>
+                <MessageSquare size={11} strokeWidth={2} />
+                {commentCount}
+              </span>
+            )}
             <CountStat entry={entry} />
           </button>
         )
@@ -100,7 +113,9 @@ export function ReviewPanel() {
   const phase = useAppStore((s) => (s.activeThreadId ? s.turnStates[s.activeThreadId]?.phase : undefined))
   const ignoreWhitespace = useAppStore((s) => s.reviewIgnoreWhitespace)
   const threadState = useReviewStore((s) => (threadId ? s.byThread[threadId] : undefined))
-  const { setScope, selectFile, saveViewState } = useReviewStore.getState()
+  const references = useAppStore((s) => s.composerReferences[s.activeThreadId ?? '__blank__'] ?? NO_REFERENCES)
+  const platform = useAppStore((s) => s.appInfo?.platform ?? '')
+  const { setScope, selectFile, saveViewState, resolveCommentReveal } = useReviewStore.getState()
 
   const [availability, setAvailability] = useState<{ threadId: string; value: WorkspaceAvailability } | null>(null)
   const [choices, setChoices] = useState<TurnChoice[]>([])
@@ -113,9 +128,15 @@ export function ReviewPanel() {
   const previousPhase = useRef<{ threadId: string | null; phase: typeof phase } | null>(null)
 
   const ownWorktree = availability?.threadId === threadId ? availability.value === 'own' : null
-  // Turns and the thread's base exist only for a thread with its own worktree; without one, the working tree.
+  // Turns and the thread's base exist only for a thread with its own worktree; without one, the working
+  // tree (staged or not, as a comment made in the Git panel asked for).
+  const savedScope = threadState?.scope ?? null
   const scope: ReviewScope | null =
-    ownWorktree === null ? null : ownWorktree ? threadState?.scope ?? { kind: 'thread' } : { kind: 'worktree' }
+    ownWorktree === null
+      ? null
+      : ownWorktree
+        ? savedScope ?? { kind: 'thread' }
+        : savedScope?.kind === 'worktree' ? savedScope : { kind: 'worktree' }
   const scopeJson = scope ? JSON.stringify(scope) : null
   const listKey = `${threadId ?? ''}\0${scopeJson ?? ''}`
 
@@ -186,14 +207,33 @@ export function ReviewPanel() {
   const tree = useMemo(() => (files ? buildFileTree(files) : []), [files])
   const totals = useMemo(() => totalCounts(files ?? []), [files])
 
+  // A clicked comment pill names its file by absolute path; once its scope's list is here, open that file.
+  const pendingComment = threadState?.pendingComment
+  const root = result?.root
+  useEffect(() => {
+    if (!threadId || !pendingComment || !files || !root) return
+    const match = files.find((file) => sameReviewFile(joinReviewPath(root, file.path), pendingComment.absolutePath, platform))
+    resolveCommentReveal(threadId, match?.path ?? null)
+  }, [threadId, pendingComment, files, root, platform, resolveCommentReveal])
+
+  const commentsPerFile = useMemo(
+    () =>
+      scope && files && root
+        ? commentCounts(references, { reviewScope: scopeKey(scope), root, files, platform })
+        : NO_COMMENT_COUNTS,
+    // `scope` is derived from `scopeJson`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [references, scopeJson, files, root, platform]
+  )
+
   // Keep the selected file when it is still listed; otherwise open the first one.
   const selectedPath = threadState?.selectedPath ?? null
   useEffect(() => {
-    if (!threadId || !files || list?.key !== listKey) return
+    if (!threadId || !files || list?.key !== listKey || pendingComment) return
     if (selectedPath && files.some((file) => file.path === selectedPath)) return
     const next = firstFilePath(tree)
     if (next !== selectedPath) selectFile(threadId, next)
-  }, [threadId, files, list?.key, listKey, selectedPath, tree, selectFile])
+  }, [threadId, files, list?.key, listKey, selectedPath, pendingComment, tree, selectFile])
 
   const toggleFolder = useCallback((path: string) => {
     setCollapsed((current) => {
@@ -219,6 +259,8 @@ export function ReviewPanel() {
       options.push({ value: scopeOptionValue(scope), label: scopeLabel(scope, choices), group: 'Turns' })
     }
   }
+  // Reached from a comment made on the Git panel's staged side.
+  if (scope?.kind === 'worktree' && scope.staged) options.push({ value: scopeOptionValue(scope), label: scopeLabel(scope, choices) })
   const currentChoice = scope?.kind === 'turn' ? choices.find((choice) => choice.turnId === scope.turnId) : undefined
   const reason =
     result?.unavailable ??
@@ -278,6 +320,7 @@ export function ReviewPanel() {
                 depth={0}
                 selectedPath={selectedPath}
                 collapsed={collapsed}
+                comments={commentsPerFile}
                 onToggle={toggleFolder}
                 onSelect={(entry) => selectFile(threadId, entry.path)}
               />
@@ -298,6 +341,7 @@ export function ReviewPanel() {
             oldPath={selectedEntry?.oldPath}
             version={version}
             ignoreWhitespace={ignoreWhitespace}
+            scopeLabel={commentScopeLabel(scope, choices)}
             viewState={selectedPath ? threadState?.viewState[selectedPath] : undefined}
             onSaveViewState={(path, state) => saveViewState(threadId, path, state)}
             emptyLabel={result?.unavailable ? 'Nothing to show' : 'Select a changed file to view its diff'}

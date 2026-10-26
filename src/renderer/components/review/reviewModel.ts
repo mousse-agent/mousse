@@ -147,11 +147,13 @@ export function turnChoices(
 
 /** The picker's value for a scope: `worktree`, `thread` or `turn:<id>` (everything after the first colon). */
 export function scopeOptionValue(scope: ReviewScope): string {
+  if (scope.kind === 'worktree' && scope.staged) return 'worktree:staged'
   return scope.kind === 'turn' ? `turn:${scope.turnId}` : scope.kind
 }
 
 export function scopeFromOptionValue(value: string): ReviewScope {
   if (value.startsWith('turn:')) return { kind: 'turn', turnId: value.slice('turn:'.length) }
+  if (value === 'worktree:staged') return { kind: 'worktree', staged: true }
   return value === 'thread' ? { kind: 'thread' } : { kind: 'worktree' }
 }
 

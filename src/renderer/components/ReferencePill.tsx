@@ -3,6 +3,9 @@ import type { ChatReference } from '../../shared/chatReferences'
 import { formatMousseFileLink, parseChatReference } from '../../shared/chatReferences'
 import { openProjectReference, routeLink } from '../utils/chatLinks'
 import { useAppStore } from '../stores/appStore'
+import { useReviewStore } from '../stores/reviewStore'
+import { openSurface } from '../lib/surfaces'
+import { scopeFromKey } from './review/reviewComments'
 
 const ICONS = {
   file: File,
@@ -55,8 +58,16 @@ export function openChatReference(reference: ChatReference): void {
     }
     return
   }
-  // The Review surface does not exist yet, so a review comment opens the file at its first line.
-  // The review store's reveal (scope, file, line) replaces this when the surface lands.
+  if (reference.kind === 'review-comment' && reference.path && reference.line && reference.reviewScope && store.activeThreadId) {
+    // Back to the version of the file the comment was made on, scrolled to its line.
+    const scope = scopeFromKey(reference.reviewScope)
+    if (scope) {
+      useReviewStore.getState().revealComment(store.activeThreadId, { scope, absolutePath: reference.path, line: reference.line })
+      openSurface('review')
+      return
+    }
+  }
+  // Without a thread, or a scope that cannot be shown, a review comment opens the file at its first line.
   if ((reference.kind === 'file' || reference.kind === 'review-comment') && reference.path) {
     routeLink(formatMousseFileLink(reference.path, reference.line, reference.column), reference)
   }
