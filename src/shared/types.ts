@@ -1,3 +1,4 @@
+import type { AgentActivityItem } from './agentActivity'
 import type { ModelOverride } from './providerInstances'
 export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'review' | 'documents'
 
@@ -502,6 +503,12 @@ export interface ChatMessage {
     /** Structured provider tool input (parsed args JSON on start, preserved on complete). */
     input?: Record<string, unknown>
   }
+  /**
+   * What the agent did, typed. Present on rows saved after typed activity landed; the renderer
+   * prefers it to `toolCall`, which stays filled (without large fields) for older readers. Rows
+   * without it render from `toolCall` as before.
+   */
+  activity?: AgentActivityItem
   /** Details captured from the LLM call that produced this assistant response. */
   responseMetadata?: {
     modelName?: string

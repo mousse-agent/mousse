@@ -7,6 +7,7 @@ import {
   guessMimeTypeFromFilename,
   parseUserMessageContent,
 } from '../../utils/messageAttachments'
+import { commandLabel, normalizeToolName, type AgentActivityItem } from '../../../shared/agentActivity'
 import { subagentToolOfRecord } from '../../../shared/subagentTools'
 
 // Provider (ChatMessage.toolCall) -> standardize (UIMessage parts) -> 21st Agent Elements.
@@ -32,83 +33,148 @@ function extractServer(details: string[]): string | undefined {
   return name || undefined
 }
 
-/** Normalize any provider casing ("read", "read_file", "TodoWrite") to 21st PascalCase. */
-export function normalizeToolName(rawName: string | undefined, kind?: string): string {
-  const lower = (rawName ?? '').toLowerCase().replace(/[^a-z]/g, '')
-  switch (lower) {
-    case 'read':
-    case 'readfile':
-      return 'Read'
-    case 'edit':
-    case 'notebookedit':
-      return 'Edit'
-    case 'write':
-      return 'Write'
-    case 'bash':
-    case 'bashoutput':
-    case 'killshell':
-      return 'Bash'
-    case 'grep':
-      return 'Grep'
-    case 'glob':
-    case 'find':
-    case 'ls':
-    case 'listdir':
-      return 'Glob'
-    case 'todo':
-    case 'todowrite':
-      return 'TodoWrite'
-    case 'plan':
-    case 'planwrite':
-    case 'presentplan':
-    case 'exitplanmode':
-      return rawName === 'ExitPlanMode' ? 'ExitPlanMode' : 'PlanWrite'
-    case 'websearch':
-      return 'WebSearch'
-    case 'webfetch':
-      return 'WebFetch'
-    case 'skill':
-    case 'loadskill':
-    case 'listskills':
-      return 'Skill'
-    case 'agent':
-      return 'Agent'
-    case 'task':
-      return 'Task'
-    case 'question':
-      return 'Question'
-    case 'createquickaction':
-      return 'QuickAction'
-    case 'thinking':
-      return 'Thinking'
-    case 'declarefiles':
-      return 'Edit'
-    case 'cloning':
-      return 'cloning'
-    default:
-      if (!rawName) {
-        if (kind === 'mcp_tool_call' || kind === 'mcp_tool_result') return 'Mcp'
-        return 'Generic'
-      }
-      // Preserve already-PascalCase names (Bash, Grep, ...), capitalize first letter otherwise.
-      if (/^[A-Z][A-Za-z]*$/.test(rawName)) return rawName
-      return rawName.charAt(0).toUpperCase() + rawName.slice(1)
-  }
-}
+// Moved to the shared activity module; re-exported for in-flight branches.
+export { normalizeToolName }
 
 function toolState(status?: string, streaming?: boolean): string {
   if (status === 'processing' || streaming) return 'input-available'
   return 'output-available'
 }
 
+/** The part state of a typed item: running calls are in flight, failed ones show their error. */
+function activityState(status: AgentActivityItem['status']): string {
+  if (status === 'failed') return 'output-error'
+  return status === 'running' ? 'input-available' : 'output-available'
+}
+
 /**
  * LlmClient marks failed tool results in the summary
  * ("The tool returned an error.", "The MCP tool returned an error.", ...).
  * Summaries are static provider strings (never user content), so matching
- * them is safe and backfills error state for old transcripts too.
+ * them is safe and backfills error state for old transcripts too. A row with a typed
+ * item says so itself.
  */
 function isErrorToolCall(msg: ChatMessage): boolean {
+  if (msg.activity) return msg.activity.status === 'failed'
   return /returned an error/i.test(msg.toolCall?.summary ?? '')
+}
+
+type PartShape = { type: string; input: Record<string, unknown>; output: unknown }
+
+function compact<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined && entry !== null)) as T
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** An interrupted item says so in its output, whatever the card, so every reader can tell it did not finish. */
+function withInterruption(activity: AgentActivityItem, output: unknown): unknown {
+  if (activity.status !== 'interrupted') return output
+  const base = isRecordValue(output) ? output : output === undefined ? {} : { text: output }
+  return compact({ ...base, interrupted: true, summary: activity.summary })
+}
+
+function urlHost(url: string): string {
+  try {
+    return new URL(url).host || url
+  } catch {
+    return url
+  }
+}
+
+function planTitle(text: string | undefined): string {
+  const heading = text?.split('\n').find((line) => /^#{1,6}\s+\S/.test(line))?.replace(/^#{1,6}\s+/, '').trim()
+  return heading && heading.length > 0 ? (heading.length > 90 ? `${heading.slice(0, 87)}…` : heading) : 'Implementation plan'
+}
+
+/** The card a typed item draws as, with the input and output that card reads; undefined for a generic or unknown kind. */
+function activityPart(msg: ChatMessage, activity: AgentActivityItem): PartShape | undefined {
+  const running = activity.status === 'running'
+  switch (activity.kind) {
+    case 'command': {
+      const output = running
+        ? activity.output
+          ? compact({ stdout: activity.output, truncated: activity.outputTruncated, bytes: activity.outputBytes })
+          : undefined
+        : compact({
+            stdout: activity.output ?? '',
+            exitCode: activity.exitCode,
+            durationMs: activity.durationMs,
+            truncated: activity.outputTruncated,
+            bytes: activity.outputBytes,
+            interrupted: activity.status === 'interrupted' ? true : undefined,
+            summary: activity.summary,
+          })
+      return {
+        type: 'tool-Bash',
+        input: compact({ command: activity.command, cwd: activity.cwd, label: commandLabel(activity.command) }),
+        output,
+      }
+    }
+    case 'file_change': {
+      const isWrite = activity.changes.length > 0 && activity.changes.every((change) => change.change === 'add')
+      return {
+        type: isWrite ? 'tool-Write' : 'tool-Edit',
+        input: compact({ file_path: activity.changes[0]?.path }),
+        output: withInterruption(activity, { changes: activity.changes }),
+      }
+    }
+    case 'search': {
+      const isCode = activity.scope === 'code'
+      const output = running
+        ? undefined
+        : compact({ numFiles: activity.resultCount, text: activity.output })
+      return {
+        type: isCode ? 'tool-Grep' : 'tool-Glob',
+        input: compact({ pattern: activity.query, query: activity.query, path: activity.path }),
+        output: withInterruption(activity, Object.keys(output ?? {}).length > 0 ? output : undefined),
+      }
+    }
+    case 'web_search': {
+      // The search card lists `{ source, title, date }`; a saved result has a title and a url, so the
+      // host stands in for the date column.
+      const results = activity.results?.map((result) => ({
+        source: 'google',
+        title: result.title,
+        date: urlHost(result.url),
+      }))
+      return {
+        type: 'tool-WebSearch',
+        input: { query: activity.query },
+        output: withInterruption(activity, running || !results?.length ? undefined : { results }),
+      }
+    }
+    case 'todo':
+      return {
+        type: 'tool-TodoWrite',
+        input: { todos: activity.items, action: 'update' },
+        output: withInterruption(activity, undefined),
+      }
+    case 'plan': {
+      const summary =
+        activity.text ?? activity.steps?.map((step) => `- [${step.status === 'completed' ? 'x' : ' '}] ${step.step}`).join('\n') ?? ''
+      return {
+        type: 'tool-PlanWrite',
+        input: { action: 'create', plan: { id: msg.id.slice(0, 8), title: planTitle(activity.text), summary } },
+        output: running ? undefined : withInterruption(activity, summary || undefined),
+      }
+    }
+    case 'subagent': {
+      const isTask = normalizeToolName(activity.toolName) === 'Task'
+      return {
+        type: isTask ? 'tool-Task' : 'tool-Agent',
+        input: compact({ subagent_type: activity.agentType, description: activity.description }),
+        output: running
+          ? undefined
+          : withInterruption(activity, compact({ totalDurationMs: activity.durationMs, summary: activity.summary })),
+      }
+    }
+    default:
+      // `generic`, and a kind a newer app wrote that this one does not know.
+      return undefined
+  }
 }
 
 /**
@@ -148,8 +214,129 @@ function fallbackToolName(msg: ChatMessage): string | undefined {
   return undefined
 }
 
+/** The root subagent message an item with this parent nests under, found by walking up the parents. */
+function nestingRoot(
+  parentId: string | undefined,
+  parentOf: ReadonlyMap<string, string | undefined>,
+  subagentRoots: ReadonlyMap<string, UIMessage>
+): UIMessage | undefined {
+  let current = parentId
+  for (let depth = 0; current && depth < 32; depth += 1) {
+    const root = subagentRoots.get(current)
+    if (root) return root
+    current = parentOf.get(current)
+  }
+  return undefined
+}
+
+/** The tool part of a timeline tool row. */
+function toolPart(msg: ChatMessage, toolCallId: string): Record<string, unknown> {
+  const toolCall = msg.toolCall!
+  const activity = msg.activity
+
+  // A typed item names its card; a generic or unknown kind goes the way an untyped row does.
+  const typed = activity ? activityPart(msg, activity) : undefined
+  // Mousse's own subagent tools get one row type whatever runtime called them; whether a row
+  // becomes a card is decided where the subagent list is known (the renderer shell).
+  const subagentTool = subagentToolOfRecord({
+    toolName: toolCall.toolName,
+    title: toolCall.title,
+    summary: toolCall.summary,
+    details: toolCall.details,
+  })
+  if (typed && !subagentTool) {
+    return {
+      type: typed.type,
+      toolCallId,
+      state: activity!.status === 'failed' ? 'output-error' : activityState(activity!.status),
+      input: typed.input,
+      output: typed.output,
+    }
+  }
+
+  // Structured first (provider boundary parses once), legacy string fields as fallback.
+  const genericItem = activity?.kind === 'generic' ? activity : undefined
+  const rawName = toolCall.toolName ?? fallbackToolName(msg)
+  const toolName = normalizeToolName(rawName, msg.kind)
+  const structuredInput = toolCall.input ?? genericItem?.input ?? tryParseArgsJson(toolCall.response)
+
+  let type: string
+  if (subagentTool) {
+    type = 'tool-Subagent'
+  } else if (msg.kind === 'mcp_tool_call' || msg.kind === 'mcp_tool_result') {
+    const server = extractServer(toolCall.details)
+    if (server) {
+      // True MCP tool: Server + Tool details identify it.
+      const name = (rawName ?? 'tool').replace(/\W+/g, '_').toLowerCase() || 'tool'
+      type = `tool-mcp__${server}__${name}`
+    } else if (RICH_TOOL_TYPES.has(toolName)) {
+      // Pi/build tools arrive with rewritten mcp kinds but no Server
+      // detail — render their rich cards (Bash terminal, Edit diff, ...).
+      type = `tool-${toolName}`
+    } else {
+      type = mcpCustomType(rawName)
+    }
+  } else if (toolName === 'Mcp') {
+    type = 'tool-mcp__custom__tool'
+  } else if (toolName === 'Generic') {
+    type = 'tool-Generic'
+  } else {
+    type = `tool-${toolName}`
+  }
+
+  // Prefer real args JSON. Only synthesize minimal display input when args were
+  // already overwritten by complete-phase result text.
+  let input: Record<string, unknown> = structuredInput ? { ...structuredInput } : {}
+  if (!structuredInput && !subagentTool) {
+    if (toolName === 'Bash') {
+      // Never synthesize a command from the summary: provider summaries
+      // are static sentences, not commands. Unknown stays empty so the
+      // card shows a bare Ran/Failed label instead of a fake command.
+      const cmd = toolCall.details.find((d) => d.startsWith('Command:'))?.replace('Command:', '').trim() ?? ''
+      input = { command: cmd }
+    } else if (toolName === 'Read' || toolName === 'Edit' || toolName === 'Write') {
+      const file = toolCall.details.find((d) => d.startsWith('File:'))?.replace('File:', '').trim()
+        ?? (toolCall.summary.match(/[^\s]+\.[a-z]{1,4}/i)?.[0] ?? '')
+      input = { file_path: file, ...(toolName === 'Edit' ? { old_string: '', new_string: '' } : {}) }
+    } else if (toolName === 'Grep' || toolName === 'Glob' || toolName === 'WebSearch') {
+      input = { pattern: toolCall.summary, query: toolCall.summary }
+    } else if (toolName === 'TodoWrite') {
+      input = { todos: [], action: 'update' }
+    } else {
+      input = { summary: toolCall.summary, details: toolCall.details }
+    }
+  }
+
+  let output: unknown
+  let state: string
+  if (activity) {
+    // The item holds the result text; a running call has none yet.
+    const text = (activity as { output?: unknown }).output
+    output = activity.status === 'running' ? undefined : withInterruption(activity, typeof text === 'string' ? text : undefined)
+    state = isErrorToolCall(msg) ? 'output-error' : activityState(activity.status)
+  } else {
+    // Complete-phase response is result text; start-phase response is args JSON.
+    // Never render args JSON as output.
+    const isArgsJson = structuredInput && toolCall.status === 'processing'
+    output = isArgsJson ? undefined : toolCall.response
+    state = isErrorToolCall(msg) ? 'output-error' : toolState(toolCall.status, msg.streaming)
+  }
+
+  return {
+    type,
+    toolCallId,
+    state,
+    input,
+    output,
+    ...(subagentTool ? { subagentTool } : {}),
+  }
+}
+
 export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
   const out: UIMessage[] = []
+  // Typed items: each item's parent, and the message a subagent's nested work belongs to.
+  const parentOf = new Map<string, string | undefined>()
+  const subagentRoots = new Map<string, UIMessage>()
   // Last emitted assistant text + whether its source was still streaming.
   // Reset by any non-text push so folds only ever span consecutive rows.
   let lastAssistantText: { text: string; streaming: boolean } | null = null
@@ -219,84 +406,28 @@ export function mousseToUIMessages(messages: ChatMessage[]): UIMessage[] {
     }
 
     if (isToolTimelineMessage(msg) && msg.toolCall) {
-      // Structured first (provider boundary parses once), legacy string fields as fallback.
-      const rawName = msg.toolCall.toolName ?? fallbackToolName(msg)
-      const toolName = normalizeToolName(rawName, msg.kind)
-      const structuredInput = msg.toolCall.input ?? tryParseArgsJson(msg.toolCall.response)
+      const activity = msg.activity
+      const part = toolPart(msg, msg.id)
+      lastAssistantText = null
 
-      // Mousse's own subagent tools get one row type whatever runtime called them; whether a row
-      // becomes a card is decided where the subagent list is known (the renderer shell).
-      const subagentTool = subagentToolOfRecord({
-        toolName: msg.toolCall.toolName,
-        title: msg.toolCall.title,
-        summary: msg.toolCall.summary,
-        details: msg.toolCall.details,
-      })
-
-      let type: string
-      if (subagentTool) {
-        type = 'tool-Subagent'
-      } else if (msg.kind === 'mcp_tool_call' || msg.kind === 'mcp_tool_result') {
-        const server = extractServer(msg.toolCall.details)
-        if (server) {
-          // True MCP tool: Server + Tool details identify it.
-          const name = (rawName ?? 'tool').replace(/\W+/g, '_').toLowerCase() || 'tool'
-          type = `tool-mcp__${server}__${name}`
-        } else if (RICH_TOOL_TYPES.has(toolName)) {
-          // Pi/build tools arrive with rewritten mcp kinds but no Server
-          // detail — render their rich cards (Bash terminal, Edit diff, ...).
-          type = `tool-${toolName}`
-        } else {
-          type = mcpCustomType(rawName)
-        }
-      } else if (toolName === 'Mcp') {
-        type = 'tool-mcp__custom__tool'
-      } else if (toolName === 'Generic') {
-        type = 'tool-Generic'
-      } else {
-        type = `tool-${toolName}`
-      }
-
-      // Prefer real args JSON. Only synthesize minimal display input when args were
-      // already overwritten by complete-phase result text.
-      let input: Record<string, unknown> = structuredInput ? { ...structuredInput } : {}
-      if (!structuredInput && !subagentTool) {
-        if (toolName === 'Bash') {
-          // Never synthesize a command from the summary: provider summaries
-          // are static sentences, not commands. Unknown stays empty so the
-          // card shows a bare Ran/Failed label instead of a fake command.
-          const cmd = msg.toolCall.details.find((d) => d.startsWith('Command:'))?.replace('Command:', '').trim() ?? ''
-          input = { command: cmd }
-        } else if (toolName === 'Read' || toolName === 'Edit' || toolName === 'Write') {
-          const file = msg.toolCall.details.find((d) => d.startsWith('File:'))?.replace('File:', '').trim()
-            ?? (msg.toolCall.summary.match(/[^\s]+\.[a-z]{1,4}/i)?.[0] ?? '')
-          input = { file_path: file, ...(toolName === 'Edit' ? { old_string: '', new_string: '' } : {}) }
-        } else if (toolName === 'Grep' || toolName === 'Glob' || toolName === 'WebSearch') {
-          input = { pattern: msg.toolCall.summary, query: msg.toolCall.summary }
-        } else if (toolName === 'TodoWrite') {
-          input = { todos: [], action: 'update' }
-        } else {
-          input = { summary: msg.toolCall.summary, details: msg.toolCall.details }
+      // Work a subagent started renders under its row: the part joins the root subagent's message
+      // with the `<parent>:<child>` id the tool group looks for (ids are UUIDs, so the first colon splits them).
+      if (activity) {
+        parentOf.set(msg.id, activity.parentId)
+        const root = nestingRoot(activity.parentId, parentOf, subagentRoots)
+        if (root) {
+          part.toolCallId = `${root.id}:${msg.id}`
+          root.parts.push(part as unknown as UIMessage['parts'][number])
+          if (activity.kind === 'subagent') subagentRoots.set(msg.id, root)
+          continue
         }
       }
-
-      // Complete-phase response is result text; start-phase response is args JSON.
-      // Never render args JSON as output.
-      const isArgsJson = structuredInput && msg.toolCall.status === 'processing'
-      const output = isArgsJson ? undefined : msg.toolCall.response
 
       // MessageList only groups user/assistant turns — system tool messages would vanish.
       base.role = 'assistant'
-      base.parts = [{
-        type,
-        toolCallId: msg.id,
-        state: isErrorToolCall(msg) ? 'output-error' : toolState(msg.toolCall.status, msg.streaming),
-        input,
-        output,
-        ...(subagentTool ? { subagentTool } : {}),
-      } as unknown as UIMessage['parts'][number]]
+      base.parts = [part as unknown as UIMessage['parts'][number]]
       out.push(base)
-      lastAssistantText = null
+      if (activity?.kind === 'subagent') subagentRoots.set(msg.id, base)
       continue
     }
 

@@ -1,11 +1,12 @@
 import React, { memo } from "react";
-import { MultiFileDiff, type FileContents } from "@pierre/diffs/react";
+import { MultiFileDiff, PatchDiff, type FileContents } from "@pierre/diffs/react";
 import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
 import { IconChevronDown, IconChevronRight } from "../../../../lib/icons";
 import { FileExtIcon } from "../icons/file-ext-icon";
 import { CODE_FONT } from "../../../../lib/typography";
+import { diffAsPatch, diffSides, type ActivityFileChange } from "../../../../../shared/agentActivity";
 import {
   extractFilePathArg,
   mapPartStateToInvocationState,
@@ -22,7 +23,73 @@ export type EditToolDiffCardProps = {
   output?: Record<string, unknown>;
   isCollapsible?: boolean;
   approval?: ToolApproval;
+  /** The call failed: the header says so. */
+  isError?: boolean;
 };
+
+/** One file's change as a typed activity item saves it (`AgentActivityItem` `file_change`). */
+type ChangeSection = {
+  path: string;
+  label: string;
+  /** The stored unified patch, when it has real hunk headers. */
+  patch?: string;
+  oldFile?: FileContents;
+  newFile?: FileContents;
+  added?: number;
+  removed?: number;
+  note?: string;
+  error?: string;
+};
+
+function baseName(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+/** The sections a typed item's `changes` draw as: a diff, or the reason there is none. */
+function changeSections(changes: unknown): ChangeSection[] | undefined {
+  if (!Array.isArray(changes)) return undefined;
+  return changes.flatMap((entry): ChangeSection[] => {
+    if (!entry || typeof entry !== "object") return [];
+    const change = entry as ActivityFileChange;
+    if (typeof change.path !== "string") return [];
+    const label = baseName(change.path);
+    const section: ChangeSection = {
+      path: change.path,
+      label,
+      added: change.added,
+      removed: change.removed,
+      ...(change.error ? { error: change.error } : {}),
+    };
+    if (change.diff) {
+      // A patch with real hunk headers keeps each hunk's line numbers and the gaps between hunks;
+      // anything else (a whole added or deleted file's text) is drawn from its two sides.
+      const patch = diffAsPatch(change.path, change.diff);
+      if (patch) {
+        section.patch = patch;
+      } else {
+        const { oldText, newText } = diffSides(change.diff, change.change);
+        section.oldFile = { name: label, contents: oldText };
+        section.newFile = { name: label, contents: newText };
+      }
+      if (change.diffTruncated) section.note = "Diff truncated";
+    } else if (change.diffUnavailable) {
+      section.note =
+        typeof change.linesWritten === "number"
+          ? `Diff not available (${change.linesWritten} ${change.linesWritten === 1 ? "line" : "lines"} written)`
+          : "Diff not available";
+    }
+    return [section];
+  });
+}
+
+function statsFromSections(sections: ChangeSection[]): string | undefined {
+  const added = sections.reduce((sum, section) => sum + (section.added ?? 0), 0);
+  const removed = sections.reduce((sum, section) => sum + (section.removed ?? 0), 0);
+  const parts: string[] = [];
+  if (added > 0) parts.push(`+${added}`);
+  if (removed > 0) parts.push(`-${removed}`);
+  return parts.length > 0 ? parts.join(" ") : undefined;
+}
 
 // The app themes via `html[data-theme="…"]` (+ `color-scheme`), not the
 // `.dark` class, so checking only `.dark` leaves themeType stuck on "light".
@@ -67,16 +134,23 @@ export function EditToolDiffCard({
   /** Collapse to header-only by default; click the header to expand. */
   isCollapsible = true,
   approval,
+  isError = false,
 }: EditToolDiffCardProps) {
   useToolComplete(state === "animating", step.duration, onComplete);
   const isPending = state === "animating";
+  const sections = React.useMemo(() => changeSections(output?.changes), [output]);
+  const isInterrupted = output?.interrupted === true;
   const fileName =
-    step.filePath?.split("/").pop() ||
-    step.toolDetail ||
-    extractFilePathArg(input)?.split("/").pop() ||
-    "";
+    sections && sections.length > 1
+      ? `${sections.length} files`
+      : sections?.[0]?.label ||
+        step.filePath?.split("/").pop() ||
+        step.toolDetail ||
+        extractFilePathArg(input)?.split("/").pop() ||
+        "";
   const hasFileName = Boolean(fileName);
   const isWrite = step.toolName === "Write";
+  const diffStats = sections ? statsFromSections(sections) : step.diffStats;
   const [themeType, setThemeType] = React.useState<"light" | "dark">(() =>
     resolveEditDiffThemeIsDark() ? "dark" : "light",
   );
@@ -109,6 +183,8 @@ export function EditToolDiffCard({
   }, [isCollapsible]);
 
   const diffFiles = React.useMemo(() => {
+    // A typed item draws its own sections below, never the legacy single diff.
+    if (sections) return null;
     const fileLabel = fileName || "file";
     const oldFromOutput =
       typeof output?.old_content === "string" ? output.old_content : undefined;
@@ -170,7 +246,12 @@ export function EditToolDiffCard({
     };
 
     return { oldFile, newFile };
-  }, [fileName, input, output, step.diffLines]);
+  }, [fileName, input, output, sections, step.diffLines]);
+
+  // Something to open: a diff, a note about the diff, or the error the edit failed with.
+  const hasBody = sections
+    ? sections.some((section) => section.patch || section.oldFile || section.note || section.error)
+    : Boolean(diffFiles);
 
   // Theme-compliant diff surface: point the library at the app theme tokens
   // instead of hardcoded black so bg, gutters and separators follow the
@@ -218,19 +299,19 @@ export function EditToolDiffCard({
       <button
         type="button"
         onClick={
-          diffFiles && isCollapsible
+          hasBody && isCollapsible
             ? () => setIsExpanded((prev) => !prev)
             : undefined
         }
-        aria-expanded={diffFiles && isCollapsible ? isExpanded : undefined}
+        aria-expanded={hasBody && isCollapsible ? isExpanded : undefined}
         aria-label={
-          diffFiles && isCollapsible
+          hasBody && isCollapsible
             ? isExpanded
               ? `Collapse diff for ${fileName || "file"}`
               : `Expand diff for ${fileName || "file"}`
             : undefined
         }
-        disabled={!diffFiles || !isCollapsible}
+        disabled={!hasBody || !isCollapsible}
         className={
           // Header keeps the theme tool background so it stays distinct from
           // the diff body below it.
@@ -242,14 +323,14 @@ export function EditToolDiffCard({
           (isExpanded || !isCollapsible
             ? "border-b border-an-tool-border-color "
             : "") +
-          (diffFiles && isCollapsible ? "cursor-pointer" : "")
+          (hasBody && isCollapsible ? "cursor-pointer" : "")
         }
       >
         <span className="flex items-center gap-1.5 min-w-0 flex-1">
           {hasFileName && (
             <FileExtIcon filename={fileName} className="w-[18px] h-[18px] shrink-0" />
           )}
-          {isPending && !diffFiles ? (
+          {isPending && !hasBody ? (
             <TextShimmer as="span" duration={1.2} className="text-xs">
               Generating...
             </TextShimmer>
@@ -257,15 +338,23 @@ export function EditToolDiffCard({
             <TextShimmer as="span" duration={1.2} className="text-xs">
               {isWrite ? "Creating" : "Editing"} {fileName}
             </TextShimmer>
+          ) : isInterrupted ? (
+            <span className="text-xs text-an-tool-color-muted truncate">
+              {isWrite ? "Create" : "Edit"} interrupted: {fileName}
+            </span>
+          ) : isError ? (
+            <span className="text-xs text-red-400 truncate">
+              Failed to {isWrite ? "create" : "edit"} {fileName}
+            </span>
           ) : (
             <span className="text-xs text-an-tool-color-muted truncate">
               {isWrite ? "Created" : "Edited"} {fileName}
             </span>
           )}
         </span>
-        {step.diffStats && !isPending && (
+        {diffStats && !isPending && (
           <span className="text-[11px] font-sans text-an-tool-color-muted inline-flex gap-2">
-            {step.diffStats.split(" ").map((token) => (
+            {diffStats.split(" ").map((token) => (
               <span
                 key={token}
                 className={
@@ -281,7 +370,7 @@ export function EditToolDiffCard({
             ))}
           </span>
         )}
-        {diffFiles && isCollapsible && (
+        {hasBody && isCollapsible && (
           <IconChevronRight
             className={
               "w-4 h-4 shrink-0 text-an-tool-color-muted transition-transform duration-150 ease-out ml-1 " +
@@ -290,7 +379,7 @@ export function EditToolDiffCard({
           />
         )}
       </button>
-      {diffFiles && (!isCollapsible || isExpanded) ? (
+      {hasBody && (!isCollapsible || isExpanded) ? (
         <div className={`${diffClassName} text-[12px]`} style={diffCssVars}>
           <div
             className={isCollapsible ? "group/edit-diff relative" : "relative"}
@@ -302,20 +391,74 @@ export function EditToolDiffCard({
                   : undefined
               }
             >
-              <MultiFileDiff
-                key={themeType}
-                oldFile={diffFiles.oldFile}
-                newFile={diffFiles.newFile}
-                className={diffClassName}
-                style={diffCssVars}
-                options={{
-                  theme: { dark: "github-dark", light: "github-light" },
-                  themeType,
-                  unsafeCSS: diffUnsafeCss,
-                  diffStyle: "unified",
-                  disableFileHeader: true,
-                }}
-              />
+              {sections
+                ? sections.map((section, index) => (
+                    <div key={`${section.path}:${index}`}>
+                      {sections.length > 1 && (
+                        <div className="flex items-center gap-1.5 px-2.5 h-6 text-[11px] text-an-tool-color-muted border-b border-an-tool-border-color">
+                          <FileExtIcon filename={section.label} className="w-4 h-4 shrink-0" />
+                          <span className="truncate">{section.path}</span>
+                        </div>
+                      )}
+                      {section.error && (
+                        <div className="px-2.5 py-1.5 text-[12px] text-red-400 whitespace-pre-wrap break-words">
+                          {section.error}
+                        </div>
+                      )}
+                      {section.patch && (
+                        <PatchDiff
+                          key={themeType}
+                          patch={section.patch}
+                          className={diffClassName}
+                          style={diffCssVars}
+                          options={{
+                            theme: { dark: "github-dark", light: "github-light" },
+                            themeType,
+                            unsafeCSS: diffUnsafeCss,
+                            diffStyle: "unified",
+                            disableFileHeader: true,
+                          }}
+                        />
+                      )}
+                      {section.oldFile && section.newFile && (
+                        <MultiFileDiff
+                          key={themeType}
+                          oldFile={section.oldFile}
+                          newFile={section.newFile}
+                          className={diffClassName}
+                          style={diffCssVars}
+                          options={{
+                            theme: { dark: "github-dark", light: "github-light" },
+                            themeType,
+                            unsafeCSS: diffUnsafeCss,
+                            diffStyle: "unified",
+                            disableFileHeader: true,
+                          }}
+                        />
+                      )}
+                      {section.note && (
+                        <div className="px-2.5 py-1.5 text-[11px] text-an-tool-color-muted">
+                          {section.note}
+                        </div>
+                      )}
+                    </div>
+                  ))
+                : diffFiles && (
+                    <MultiFileDiff
+                      key={themeType}
+                      oldFile={diffFiles.oldFile}
+                      newFile={diffFiles.newFile}
+                      className={diffClassName}
+                      style={diffCssVars}
+                      options={{
+                        theme: { dark: "github-dark", light: "github-light" },
+                        themeType,
+                        unsafeCSS: diffUnsafeCss,
+                        diffStyle: "unified",
+                        disableFileHeader: true,
+                      }}
+                    />
+                  )}
             </div>
             {isCollapsible && (
               <>
@@ -380,6 +523,7 @@ export const EditTool = memo(function EditTool({
       output={part.output ?? part.result}
       isCollapsible={isCollapsible}
       approval={approval}
+      isError={part.state === "output-error"}
     />
   );
 });

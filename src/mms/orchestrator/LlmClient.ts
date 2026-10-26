@@ -48,6 +48,7 @@ import { modeRegistry as defaultModeRegistry, type ModeRegistry } from '../modes
 import { resolveModelForMode, resolveTitleModel, normalizeContextSettings, resolveContextCompactionTokens } from '../../shared/settings'
 
 import { EFFORT_SUFFIXES, parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
+import type { ActivityPatch } from '../../shared/agentActivity'
 
 import { getModelEffortLevels } from '../../shared/modelEfforts'
 
@@ -427,12 +428,22 @@ export interface LlmToolEvent {
 
 export interface StreamingLlmToolEvent extends LlmToolEvent {
 
-  phase: 'start' | 'complete'
+  /** `update` carries a running call's streamed output or changed fields; it never starts or ends the call. */
+  phase: 'start' | 'update' | 'complete'
 
   callId?: string
 
   /** The call's arguments when the runtime reports them apart from `response` (a bounded record, see `recordSubagentCall`). */
   input?: Record<string, unknown>
+
+  /**
+   * The typed fields the provider has. The assembler fills `id`, `callId`, `status` and the
+   * timestamps; a provider closing a call it never saw end sends `{ status: 'interrupted', interruptedBy, summary }`.
+   */
+  activity?: ActivityPatch
+
+  /** The provider's call id of the call this one ran under; the assembler maps it to that row's id. */
+  parentCallId?: string
 
 }
 
@@ -1959,7 +1970,9 @@ export class LlmClient {
 
         toolEvents.push(resultEvent)
 
-        onToolEvent?.({ ...resultEvent, phase: 'complete', callId: toolCall.id })
+        // The streamed event carries the whole result: the transcript keeps its tail (the end of a
+        // long command is where its error is) and the full size; `resultEvent` stays a short preview.
+        onToolEvent?.({ ...resultEvent, response: result.text, phase: 'complete', callId: toolCall.id })
 
         return toolResult(toolCall, result.text, result.isError)
 

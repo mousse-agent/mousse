@@ -4,6 +4,7 @@ import {
   formatSearchRowLabels,
   thoughtHeading,
 } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
+import { getToolStatus } from '../src/renderer/chat/components/agent-elements/utils/format-tool'
 import { mapPartStateToInvocationState } from '../src/renderer/chat/components/agent-elements/utils/tool-adapters'
 import {
   activityGroupLabel,
@@ -65,6 +66,26 @@ describe('mapPartStateToInvocationState', () => {
     expect(mapPartStateToInvocationState('input-streaming')).toBe('partial-call')
     expect(mapPartStateToInvocationState('input-available')).toBe('call')
     expect(mapPartStateToInvocationState(undefined)).toBe('call')
+  })
+})
+
+describe('getToolStatus', () => {
+  it('reports an item that ended without a result as interrupted, whatever the chat is doing', () => {
+    const part = { type: 'tool-Bash', state: 'output-available', output: { stdout: '', interrupted: true } }
+    for (const chatStatus of ['ready', 'streaming', undefined]) {
+      expect(getToolStatus(part, chatStatus)).toEqual({
+        isPending: false,
+        isError: false,
+        isSuccess: false,
+        isInterrupted: true,
+      })
+    }
+  })
+
+  it('keeps the pending-while-not-streaming rule for rows without the flag', () => {
+    expect(getToolStatus({ state: 'input-available' }, 'ready').isInterrupted).toBe(true)
+    expect(getToolStatus({ state: 'input-available' }, 'streaming')).toMatchObject({ isPending: true, isInterrupted: false })
+    expect(getToolStatus({ state: 'output-available', output: 'ok' }, 'ready')).toMatchObject({ isSuccess: true, isInterrupted: false })
   })
 })
 

@@ -1,4 +1,5 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { ProviderToolEvent } from '../../../shared/agentActivity'
 import { recordSubagentCall, toolResultText } from '../../../shared/subagentTools'
 import type { ClaudeMetricsCollector } from './metrics'
 
@@ -6,14 +7,7 @@ import type { ClaudeMetricsCollector } from './metrics'
 export interface TurnFrameSink {
   onText: (text: string) => void
   onThinking?: (text: string) => void
-  onTool?: (event: {
-    phase: 'start' | 'complete'
-    callId: string
-    title: string
-    toolName?: string
-    /** A Mousse subagent call's bounded record (`recordSubagentCall`). */
-    record?: NonNullable<ReturnType<typeof recordSubagentCall>>
-  }) => void
+  onTool?: (event: ProviderToolEvent) => void
 }
 
 /**

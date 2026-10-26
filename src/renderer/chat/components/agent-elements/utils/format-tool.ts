@@ -74,10 +74,14 @@ export function getToolStatus(part: any, chatStatus?: string) {
   const isError =
     part.state === "output-error" ||
     (part.state === "output-available" && part.output?.success === false);
-  const isSuccess = part.state === "output-available" && !isError;
+  // A typed item that ended without a result says so in its output, whatever the chat is doing now.
+  const endedInterrupted = part.output?.interrupted === true;
+  const isSuccess =
+    part.state === "output-available" && !isError && !endedInterrupted;
   const isPending = basePending && chatStatus === "streaming";
   const isInterrupted =
-    basePending && chatStatus !== "streaming" && chatStatus !== undefined;
+    endedInterrupted ||
+    (basePending && chatStatus !== "streaming" && chatStatus !== undefined);
 
   return { isPending, isError, isSuccess, isInterrupted };
 }

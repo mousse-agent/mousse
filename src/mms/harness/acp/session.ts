@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { methods, type NewSessionResponse } from '@agentclientprotocol/sdk'
+import type { ProviderToolEvent } from '../../../shared/agentActivity'
 import type { LlmModelOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
@@ -119,8 +120,8 @@ export interface AcpChatInput {
   onText: (text: string) => void
   drainSteer?: () => string | undefined
   onSteer?: (text: string) => void
-  /** A tool call started or ended; `status` says how it ended (`unfinished`: the turn ended first). */
-  onTool?: (event: { phase: 'start' | 'complete'; callId: string; title: string; toolName?: string; status?: 'completed' | 'failed' | 'unfinished' }) => void
+  /** A tool call started, changed or ended; `status` says how it ended (`unfinished`: the turn ended first). */
+  onTool?: (event: ProviderToolEvent & { status?: 'completed' | 'failed' | 'unfinished' }) => void
   /** Who answers this turn's permission requests (the turn bridge's `permission`). */
   prompter?: PermissionPrompter
   /** The agent's session id, once known (provider refs name it for interrupt and terminate). */

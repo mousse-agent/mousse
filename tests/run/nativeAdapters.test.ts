@@ -105,6 +105,44 @@ describe('ClaudeSubscriptionAdapter', () => {
     expect(client.stopThread).toHaveBeenCalledExactlyOnceWith('thread-1')
   })
 
+  it('passes a provider\'s typed activity, update phase and parent call id through to the sink', async () => {
+    const client = claudeClient(async (chat) => {
+      chat.onTool?.({ phase: 'start', callId: 'toolu_1', title: 'Agent', toolName: 'Agent', activity: { kind: 'subagent', agentType: 'Explore' } })
+      chat.onTool?.({
+        phase: 'update',
+        callId: 'toolu_2',
+        title: 'Bash',
+        parentCallId: 'toolu_1',
+        activity: { kind: 'command', output: 'partial\n' }
+      })
+      chat.onTool?.({
+        phase: 'complete',
+        callId: 'toolu_2',
+        title: 'Bash',
+        parentCallId: 'toolu_1',
+        activity: { status: 'interrupted', interruptedBy: 'stop', summary: 'Stopped' }
+      })
+      return 'done'
+    })
+    const sink = recordingSink()
+    await new ClaudeSubscriptionAdapter(() => client).startTurn(input(), sink, control(), host())
+    const events = sink.calls.filter(([name]) => name === 'tool').map(([, event]) => event)
+    expect(events).toEqual([
+      expect.objectContaining({ phase: 'start', callId: 'toolu_1', activity: { toolName: 'Agent', kind: 'subagent', agentType: 'Explore' } }),
+      expect.objectContaining({
+        phase: 'update',
+        callId: 'toolu_2',
+        parentCallId: 'toolu_1',
+        activity: { kind: 'command', output: 'partial\n' }
+      }),
+      expect.objectContaining({
+        phase: 'complete',
+        parentCallId: 'toolu_1',
+        activity: { status: 'interrupted', interruptedBy: 'stop', summary: 'Stopped' }
+      })
+    ])
+  })
+
   it('hands a steer the provider could not take back to the turn control, which queues it as the next turn', async () => {
     const returned: string[] = []
     const client = claudeClient(async (chat) => {
@@ -189,7 +227,8 @@ describe('ClaudeSubscriptionAdapter', () => {
       callId: 'tool-1',
       title: 'Read',
       summary: 'Read',
-      details: []
+      details: [],
+      activity: { toolName: 'Read' }
     })
     expect(sink.calls.find(([name]) => name === 'usage')?.[1]).toEqual({ input: 10, output: 5, cacheRead: 10, cacheWrite: 5 })
     expect(turnHost.committed).toEqual(['Hello'])
@@ -377,9 +416,53 @@ describe('AntigravityAdapter', () => {
     expect(service.commitConversation).toHaveBeenCalledWith('thread-1', 'history+ACP says hi')
     expect(result).toMatchObject({ text: 'ACP says hi', modelName: 'm', contextSignature: 'antigravity:m', nativeMessages: [], providerRef: { provider: 'antigravity', instanceId: 'antigravity', model: 'm' } })
     expect(sink.calls.find(([name]) => name === 'providerRef')?.[1]).toEqual({ provider: 'antigravity', instanceId: 'antigravity', model: 'm' })
+    // An ACP tool call keeps its name for its generic item.
+    expect(sink.calls.find(([name]) => name === 'tool')?.[1]).toMatchObject({
+      phase: 'start',
+      title: 'Antigravity subagent: Research',
+      activity: { toolName: 'start_subagent' }
+    })
     expect(result.totalTokensUsed).toBeUndefined()
     expect(typeof result.totalResponseTimeMs).toBe('number')
     // The subagent tool call never reached a completed update: the turn cannot be proven drained.
     expect(result.drain).toEqual({ toolCalls: 1, toolsSettled: false })
+  })
+
+  describe('how a tool call ended', () => {
+    async function toolEvents(signal?: AbortSignal) {
+      const service = client(async (chat) => {
+        chat.onTool?.({ phase: 'start', callId: 'ok', title: 'Read a.ts', toolName: 'read' })
+        chat.onTool?.({ phase: 'complete', callId: 'ok', title: 'Read a.ts', status: 'completed' })
+        chat.onTool?.({ phase: 'start', callId: 'bad', title: 'Run tests', toolName: 'execute' })
+        chat.onTool?.({ phase: 'complete', callId: 'bad', title: 'Run tests', status: 'failed' })
+        chat.onTool?.({ phase: 'start', callId: 'open', title: 'Run build', toolName: 'execute' })
+        chat.onTool?.({ phase: 'complete', callId: 'open', title: 'Run build', status: 'unfinished' })
+        return 'done'
+      })
+      const sink = recordingSink()
+      await antigravityAdapter(() => service).startTurn(
+        input({ instanceId: 'antigravity', llmProvider: 'antigravity', model: 'm', ...(signal ? { signal } : {}) }),
+        sink,
+        control(),
+        host()
+      )
+      return sink.calls.filter(([name]) => name === 'tool').map(([, event]) => event as { phase: string; callId: string; activity?: unknown })
+    }
+    const completes = (events: Awaited<ReturnType<typeof toolEvents>>) =>
+      Object.fromEntries(events.filter((event) => event.phase === 'complete').map((event) => [event.callId, event.activity]))
+
+    it('reports a call the settled turn ended before its result as interrupted, never done', async () => {
+      expect(completes(await toolEvents())).toEqual({
+        ok: undefined,
+        bad: { status: 'failed' },
+        open: { status: 'interrupted', interruptedBy: 'no_result', summary: 'No result reported' }
+      })
+    })
+
+    it('reports it as stopped when the turn was stopped', async () => {
+      const stop = new AbortController()
+      stop.abort()
+      expect(completes(await toolEvents(stop.signal)).open).toEqual({ status: 'interrupted', interruptedBy: 'stop', summary: 'Stopped' })
+    })
   })
 })

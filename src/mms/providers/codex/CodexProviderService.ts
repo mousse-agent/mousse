@@ -5,6 +5,7 @@ import { delimiter, isAbsolute, join, resolve } from 'node:path'
 import { AppError, redactSecrets } from '../../../shared/errors'
 import { CODEX_INSTANCE_ID } from '../../../shared/providerInstances'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
+import type { ProviderToolEvent } from '../../../shared/agentActivity'
 import { recordSubagentCall, toolResultText } from '../../../shared/subagentTools'
 import type {
   CliProviderConfig,
@@ -156,14 +157,7 @@ export type CodexServiceDependencies = {
   versions?: CliVersionCache
 }
 
-export interface CodexToolEvent {
-  phase: 'start' | 'complete'
-  callId: string
-  title: string
-  toolName?: string
-  /** A Mousse subagent call's bounded record (`recordSubagentCall`). */
-  record?: NonNullable<ReturnType<typeof recordSubagentCall>>
-}
+export type CodexToolEvent = ProviderToolEvent
 
 export interface CodexTurnUsage {
   input: number

@@ -1,4 +1,5 @@
 import type { AcpChatInput } from '../../../harness/acp/session'
+import { INTERRUPTED_SUMMARY } from '../../../../shared/agentActivity'
 import type { ProviderDriverKind } from '../../../../shared/providerInstances'
 import type { ProviderRef } from '../../types'
 import type {
@@ -12,6 +13,22 @@ import type {
   TurnSink
 } from '../ProviderAdapter'
 import { promptStreams, runtimeToolEvent } from '../shared/promptRuntime'
+
+type AcpToolEvent = Parameters<NonNullable<AcpChatInput['onTool']>>[0]
+
+/**
+ * How the agent's tool call ended, as the timeline's closure contract wants it: a call the turn
+ * ended before reporting (`unfinished`) is interrupted, never done, and a failed call is failed.
+ */
+export function withClosure(event: AcpToolEvent, aborted: boolean): AcpToolEvent {
+  if (event.phase !== 'complete') return event
+  if (event.status === 'unfinished') {
+    const interruptedBy = aborted ? 'stop' : 'no_result'
+    return { ...event, activity: { ...event.activity, status: 'interrupted', interruptedBy, summary: INTERRUPTED_SUMMARY[interruptedBy] } }
+  }
+  if (event.status === 'failed') return { ...event, activity: { ...event.activity, status: 'failed' } }
+  return event
+}
 
 /** The slice of an ACP agent's runtime a turn drives. */
 export interface AcpTurnClient {
@@ -109,7 +126,7 @@ export class AcpAdapter implements ProviderAdapter {
         progress()
         if (event.phase === 'start') toolCalls.set(event.callId, 'running')
         else toolCalls.set(event.callId, event.status === 'completed' ? 'completed' : 'failed')
-        sink.tool(runtimeToolEvent(event))
+        sink.tool(runtimeToolEvent(withClosure(event, input.signal.aborted)))
       },
       // The ref names the agent's session once there is one, so stop and terminate find it.
       ...(client.interrupt ? { onSession: (sessionId: string) => sink.providerRef({ ...providerRef, sessionId }) } : {})

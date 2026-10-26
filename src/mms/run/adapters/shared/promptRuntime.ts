@@ -1,3 +1,4 @@
+import type { ActivityPatch, ProviderToolEvent } from '../../../../shared/agentActivity'
 import type { StreamingLlmToolEvent } from '../../../orchestrator/LlmClient'
 import type { TurnSink } from '../ProviderAdapter'
 
@@ -33,18 +34,13 @@ export class CumulativeStream {
   }
 }
 
-/** A vendor runtime's tool start/complete, as an MCP-style timeline call. */
-export interface RuntimeToolEvent {
-  phase: 'start' | 'complete'
-  callId: string
-  title: string
-  toolName?: string
-  /** A Mousse subagent call's bounded record (`recordSubagentCall`), set when the call completes. */
-  record?: { input: Record<string, unknown>; response?: string; failed: boolean }
-}
+/** A vendor runtime's tool start/update/complete, as an MCP-style timeline call. */
+export type RuntimeToolEvent = ProviderToolEvent
 
 export function runtimeToolEvent(event: RuntimeToolEvent): StreamingLlmToolEvent {
   const { record } = event
+  const activity: ActivityPatch | undefined =
+    event.activity || event.toolName ? { ...(event.toolName ? { toolName: event.toolName } : {}), ...event.activity } : undefined
   return {
     kind: 'mcp_tool_call',
     phase: event.phase,
@@ -52,7 +48,9 @@ export function runtimeToolEvent(event: RuntimeToolEvent): StreamingLlmToolEvent
     title: event.title,
     summary: record?.failed ? 'The MCP tool returned an error.' : (event.toolName ?? event.title),
     details: [],
-    ...(record ? { input: record.input, ...(record.response ? { response: record.response } : {}) } : {})
+    ...(record ? { input: record.input, ...(record.response ? { response: record.response } : {}) } : {}),
+    ...(activity ? { activity } : {}),
+    ...(event.parentCallId ? { parentCallId: event.parentCallId } : {})
   }
 }
 

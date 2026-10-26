@@ -17,7 +17,7 @@ import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings
 import type { ChatImageAttachment } from '../../../shared/types'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
 import { AppError } from '../../../shared/errors'
-import type { recordSubagentCall } from '../../../shared/subagentTools'
+import type { ProviderToolEvent } from '../../../shared/agentActivity'
 import { CLAUDE_INSTANCE_ID } from '../../../shared/providerInstances'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
@@ -128,14 +128,7 @@ export type ClaudeSubscriptionChatInput = {
   steerTaken?: (token?: string) => void
   /** `drainSteer` with a token that `returnSteer` gets back, so several steers in flight are returned each with its own rows. */
   drainSteerEntry?: () => { text: string; token: string } | undefined
-  onTool?: (event: {
-    phase: 'start' | 'complete'
-    callId: string
-    title: string
-    toolName?: string
-    /** A Mousse subagent call's bounded record, set when the call completes. */
-    record?: NonNullable<ReturnType<typeof recordSubagentCall>>
-  }) => void
+  onTool?: (event: ProviderToolEvent) => void
 }
 /**
  * What the service tells the host that runs its turns (issue #142). Both calls are synchronous and a
