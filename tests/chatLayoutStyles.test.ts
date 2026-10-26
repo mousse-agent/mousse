@@ -75,7 +75,7 @@ describe('chat layout styles', () => {
       resolve(process.cwd(), 'src/renderer/chat/components/agent-elements/tools/quick-action-tool.tsx'),
       'utf8'
     )
-    expect(quickActionTool).toMatch(/createCodePlugin/)
+    expect(quickActionTool).toMatch(/codeHighlighter/)
     expect(quickActionTool).toMatch(/```bash/)
     expect(quickActionTool).toMatch(/an-code-no-header/)
   })

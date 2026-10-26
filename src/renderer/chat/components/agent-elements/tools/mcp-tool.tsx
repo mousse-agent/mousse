@@ -1,10 +1,10 @@
 import { memo, useMemo } from "react";
 import { Streamdown } from "streamdown";
-import { createCodePlugin } from "@streamdown/code";
 import { getToolStatus, areToolPropsEqual } from "../utils/format-tool";
 import type { McpToolInfo } from "./tool-registry";
 import { Plug } from "../../../../lib/icons";
 import { ToolRowBase } from "./tool-row-base";
+import { codeHighlighter } from "../code-highlighter";
 
 export type McpToolProps = {
   part: any;
@@ -167,10 +167,6 @@ function formatOutputForDisplay(output: any): string {
   return text.length > 3000 ? text.slice(0, 3000) + "\n..." : text;
 }
 
-const code = createCodePlugin({
-  themes: ["github-light", "github-dark"],
-});
-
 export const McpTool = memo(function McpTool({
   part,
   mcpInfo,
@@ -229,7 +225,7 @@ export const McpTool = memo(function McpTool({
       >
         {codeBlock && (
           <div className="an-markdown text-[14px]">
-            <Streamdown plugins={{ code }} controls={{ code: false }}>
+            <Streamdown plugins={{ code: codeHighlighter }} controls={{ code: false }}>
               {codeBlock}
             </Streamdown>
           </div>

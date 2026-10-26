@@ -2,9 +2,9 @@
 
 import { memo, type ReactNode } from "react";
 import { Streamdown, type Components } from "streamdown";
-import { createCodePlugin } from "@streamdown/code";
 import { Children } from "react";
 import { cn } from "./utils/cn";
+import { codeHighlighter } from "./code-highlighter";
 import { classifyLink, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
 
 function fixNumberedListBreaks(text: string): string {
@@ -42,32 +42,16 @@ function normalizeMarkdown(text: string): string {
     .join("");
 }
 
-const CODE_FENCE_LANGS = new Set([
-  "bash",
-  "diff",
-  "html",
-  "js",
-  "json",
-  "jsx",
-  "md",
-  "markdown",
-  "sh",
-  "shell",
-  "text",
-  "ts",
-  "tsx",
-  "yml",
-  "yaml",
-]);
-
+/** Keep only the language id of a fence info string (```ts title=x → ```ts).
+ *  The code plugin loads each shiki grammar on first use and falls back to
+ *  plain text for ids it does not know. */
 function normalizeCodeFenceLanguages(text: string): string {
   return text.replace(/```([^\n]*)/g, (_match, langRaw) => {
     const lang = String(langRaw || "")
       .trim()
-      .toLowerCase();
-    if (!lang) return "```";
-    const normalized = lang.split(/\s+/)[0];
-    return CODE_FENCE_LANGS.has(normalized) ? `\`\`\`${normalized}` : "```text";
+      .toLowerCase()
+      .split(/\s+/)[0];
+    return lang && /^[\w#+.-]+$/.test(lang) ? `\`\`\`${lang}` : "```";
   });
 }
 
@@ -167,13 +151,9 @@ export type MarkdownProps = {
   textContrast?: "normal" | "high";
 };
 
-const code = createCodePlugin({
-  themes: ["github-light", "github-dark"],
-});
-
 // Same reason as `markdownComponents` below: a fresh `{ code }` wrapper per
 // render would defeat memoization inside Streamdown.
-const markdownPlugins = { code };
+const markdownPlugins = { code: codeHighlighter };
 // Navigation is synchronously allowlisted by safeMarkdownUrl/classifyLink and
 // handled inside Mousse; disable Streamdown's HTTP-only interstitial so the
 // canonical mousse-file scheme reaches our anchor renderer.
