@@ -121,26 +121,41 @@ function existingFile(path) {
 }
 
 /**
- * The bare imports of every file reachable from `specifiers` inside the package they name, in the
- * runtime at `packageRoot`. A plain scan of import and require calls: meant for packages
- * published as ordinary modules, not for bundles that embed source text.
+ * The bare imports of every file reachable from `specifiers` in the runtime at `packageRoot`.
+ * Relative imports are followed, and so are bare imports of a shipped package (a package importing
+ * its own subpath included), resolved through its `exports`. An import that cannot be followed
+ * throws, so no path is assumed harmless. A plain scan of import and require calls: meant for
+ * packages published as ordinary modules, not for bundles that embed source text.
  */
 export function reachableImports(packageRoot, specifiers) {
   const pattern = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s*|\brequire\s*\(\s*)(["'])([^"'\s]+)\1/g
   const found = new Set()
   const visited = new Set()
-  const files = specifiers.flatMap((specifier) =>
-    packageEntries(join(packageRoot, 'node_modules', packageName(specifier)), specifier).map((path) => existingFile(path) ?? path))
+  const followed = new Set()
+  const files = []
+  const shipped = (specifier) => existsSync(join(packageRoot, 'node_modules', packageName(specifier), 'package.json'))
+  const follow = (specifier) => {
+    if (followed.has(specifier)) return
+    followed.add(specifier)
+    const entries = packageEntries(join(packageRoot, 'node_modules', packageName(specifier)), specifier).map(existingFile)
+    if (!entries.length || entries.includes(undefined)) throw new Error(`cannot follow ${specifier}`)
+    files.push(...entries)
+  }
+  for (const specifier of specifiers) follow(specifier)
   while (files.length) {
     const file = files.pop()
-    if (visited.has(file) || !existsSync(file)) continue
+    if (visited.has(file)) continue
     visited.add(file)
     for (const match of readFileSync(file, 'utf8').matchAll(pattern)) {
       const specifier = match[2]
       if (specifier.startsWith('.')) {
         const next = existingFile(resolve(dirname(file), specifier))
-        if (next) files.push(next)
-      } else if (!isBuiltin(specifier)) found.add(specifier)
+        if (!next) throw new Error(`cannot follow ${specifier} from ${file}`)
+        files.push(next)
+      } else if (!isBuiltin(specifier)) {
+        found.add(specifier)
+        if (shipped(specifier)) follow(specifier)
+      }
     }
   }
   return [...found].sort()
@@ -167,7 +182,13 @@ export function runtimeProblems(packageRoot) {
     ]
     const unshipped = dependencies.filter((dependency) => !shipped(dependency))
     if (!unshipped.length) continue
-    const reached = reachableImports(packageRoot, imports.filter((specifier) => packageName(specifier) === name)).map(packageName)
+    let reached
+    try {
+      reached = reachableImports(packageRoot, imports.filter((specifier) => packageName(specifier) === name)).map(packageName)
+    } catch (error) {
+      problems.push(`${name}: ${error.message}, so its unshipped dependencies are not proven unreachable`)
+      continue
+    }
     for (const dependency of unshipped) {
       if (!UNREACHABLE_DEPENDENCIES[name]?.[dependency]) problems.push(`${name} depends on ${dependency}`)
       else if (reached.includes(dependency)) problems.push(`${name} now loads ${dependency}`)

@@ -58,6 +58,20 @@ describe('Pi runtime build', () => {
     }
   })
 
+  it('follows a package importing its own subpath: chord/context → chord/bundler → esbuild fails the gate', () => {
+    const context = join(pi, 'node_modules/@earendil-works/chord/dist/context/index.js')
+    const original = readFileSync(context, 'utf8')
+    try {
+      writeFileSync(context, `${original}\nexport * from "@earendil-works/chord/bundler";\n`)
+      expect(runtimeProblems(pi)).toEqual(['@earendil-works/chord now loads esbuild'])
+      // An import the gate cannot follow is not assumed harmless.
+      writeFileSync(context, `${original}\nimport "./missing.js";\n`)
+      expect(runtimeProblems(pi)).toEqual([expect.stringMatching(/^@earendil-works\/chord: cannot follow \.\/missing\.js/)])
+    } finally {
+      writeFileSync(context, original)
+    }
+  })
+
   it('reports a dependency a shipped package declares that is neither shipped nor listed as unreachable', () => {
     const manifest = join(pi, 'node_modules/typebox/package.json')
     const original = readFileSync(manifest, 'utf8')
