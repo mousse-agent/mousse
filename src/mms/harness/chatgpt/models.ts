@@ -1,6 +1,6 @@
 import type { ModelCapabilities } from '../../../shared/harness/types'
-import { ChatGptAuthError, MESSAGES } from './errors'
-import { getJson, isRecord } from './http'
+import { ChatGptAuthError, MESSAGES, transient } from './errors'
+import { getJson, isRecord, retryAt } from './http'
 
 /**
  * The models a ChatGPT plan may use: `GET /models` with the plan's access token. Only entries with
@@ -70,9 +70,10 @@ export async function fetchChatGptModels(apiBaseUrl: string, accessToken: string
     })
   } catch {
     if (signal?.aborted) throw new ChatGptAuthError('cancelled', 'cancelled', MESSAGES.cancelled)
-    throw new ChatGptAuthError('timeout', 'transient', MESSAGES.modelsFailed)
+    throw transient(MESSAGES.modelsFailed)
   }
   if (response.status === 401) throw new ChatGptAuthError('auth_expired', 'unauthorized', MESSAGES.modelsUnauthorized)
-  if (!response.ok) throw new ChatGptAuthError('protocol', response.status >= 500 ? 'transient' : 'invalid_response', MESSAGES.modelsFailed)
+  if (response.status === 429 || response.status >= 500) throw transient(MESSAGES.modelsFailed, response.status, retryAt(response.retryAfter))
+  if (!response.ok) throw new ChatGptAuthError('protocol', 'invalid_response', MESSAGES.modelsFailed)
   return parseChatGptModels(response.body)
 }

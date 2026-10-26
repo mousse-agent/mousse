@@ -3,6 +3,8 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatGptAuth } from '../../../src/mms/harness/chatgpt/chatgptAuth'
+import type { ChatGptAuthError } from '../../../src/mms/harness/chatgpt/errors'
+import { harnessAppError } from '../../../src/shared/harness/types'
 import { activeSession, ChatGptStore, chatgptStorePath, emptyStore, type ChatGptStoreData } from '../../../src/mms/harness/chatgpt/store'
 import { FakeIssuer, FULL_SCOPE, guardNetwork, plainCodec, tempHomes, type Reply } from './fakeIssuer'
 import { chatgptAuth, signIn } from './signInFlow'
@@ -36,6 +38,8 @@ function seed(profileHome: string, seeds: Seed[], active: string | null = seeds[
   const data: ChatGptStoreData = {
     ...emptyStore(),
     credentialEpoch: 1,
+    signInFence: 1,
+    pendingRevocations: [],
     active,
     registrations: seeds.map((entry, index) => ({ clientId: entry.clientId, subject: entry.subject, email: entry.email ?? null, label: `Connection ${index + 1}`, redirectPath: '/auth/callback', sharing: true })),
     sessions: seeds.map((entry) => ({
@@ -139,15 +143,33 @@ describe('access: renewal rules', () => {
   })
 
   it.each([
-    ['a 5xx', () => ({ status: 503, body: { error: 'temporarily_unavailable' } })],
-    ['a dropped connection', () => ({ status: 0 })]
-  ])('%s keeps the credentials', async (_name, reply) => {
+    ['a 5xx', () => ({ status: 503, body: { error: 'temporarily_unavailable' } }), { code: 'timeout' }],
+    ['a dropped connection', () => ({ status: 0 }), { code: 'timeout' }],
+    ['a 429', () => ({ status: 429, body: { error: 'slow_down' }, headers: { 'retry-after': '120' } }), { code: 'rate_limited', resetAt: expect.any(String) }]
+  ])('%s keeps the credentials and reads as retryable', async (_name, reply, expected) => {
     const home = homes()
     const before = seed(home.profileHome, [{ clientId: 'oaiapp_a', subject: 'alice', life: 0 }])
     const auth = chatgptAuth(issuer, home)
     issuer.onToken = reply
-    await expect(auth.access()).rejects.toMatchObject({ failure: 'transient' })
+    const started = Date.now()
+    const error = await auth.access().catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ failure: 'transient', ...expected })
+    expect(harnessAppError((error as ChatGptAuthError).toHarnessError()).errorInfo?.retryable).toBe(true)
+    if ((error as ChatGptAuthError).resetAt) expect(Date.parse((error as ChatGptAuthError).resetAt!)).toBeGreaterThanOrEqual(started + 119_000)
     expect(stored(auth)).toEqual(before)
+  })
+
+  it('a renewal without scope keeps the saved scopes', async () => {
+    const home = homes()
+    seed(home.profileHome, [{ clientId: 'oaiapp_a', subject: 'alice', life: 0 }])
+    const auth = chatgptAuth(issuer, home)
+    issuer.onToken = async (form) => {
+      const { scope: _scope, ...rest } = await issuer.tokens(form.client_id, FULL_SCOPE)
+      return { status: 200, body: rest }
+    }
+    const renewed = await auth.access()
+    expect(renewed.accessToken).toMatch(/^at-\d/)
+    expect(activeSession(stored(auth))!.scopes).toEqual(FULL_SCOPE.split(' '))
   })
 
   it('fails typed when signed out, when plan use is off, and when the connection changed', async () => {
@@ -360,7 +382,7 @@ describe('sign-out and deletion', () => {
     expect(issuer.revokeRequests).toHaveLength(1)
   })
 
-  it('instance deletion removes the store, revokes every saved token and keeps the host id', async () => {
+  it('instance deletion leaves a fenced empty store, revokes every saved token and keeps the host id', async () => {
     const home = homes()
     seed(home.profileHome, [
       { clientId: 'oaiapp_a', subject: 'alice', life: 30 * MINUTE },
@@ -372,7 +394,60 @@ describe('sign-out and deletion', () => {
     expect(await auth.deleteInstance()).toEqual({ confirmed: true })
     expect(issuer.revokeRequests.map((request) => request.token).sort()).toEqual(['rt-oaiapp_a', 'rt-oaiapp_b'])
     expect(auth.status().state).toBe('signed_out')
-    expect(stored(auth)).toEqual(emptyStore())
+    expect(stored(auth)).toEqual({ ...emptyStore(), credentialEpoch: 2, signInFence: 2 })
     expect(ensureChatGptHostId(home.installationHome)).toBe(hostId)
   })
+
+  it('a stop hook that fails keeps the revocation pending until a retry stops and revokes', async () => {
+    const home = homes()
+    seed(home.profileHome, [{ clientId: 'oaiapp_a', subject: 'alice', life: 30 * MINUTE }])
+    let failStop = true
+    const order: string[] = []
+    issuer.onRevoke = () => {
+      order.push('revoke')
+      return { status: 200 }
+    }
+    const auth = chatgptAuth(issuer, home, {
+      onCredentialChange: async () => {
+        order.push('stop')
+        if (failStop) throw new Error('app-server did not exit')
+      }
+    })
+    await expect(auth.signOut()).rejects.toThrow('app-server did not exit')
+    expect(issuer.revokeRequests).toHaveLength(0)
+    // Signed out locally; the token waits, encrypted with the store, for a stop that succeeds.
+    expect(auth.status()).toMatchObject({ state: 'signed_out', revocationPending: true })
+    expect(stored(auth).pendingRevocations).toEqual([{ clientId: 'oaiapp_a', refreshToken: 'rt-oaiapp_a' }])
+    failStop = false
+    expect(await auth.signOut()).toEqual({ confirmed: true })
+    expect(order).toEqual(['stop', 'stop', 'revoke'])
+    expect(issuer.revokeRequests[0].token).toBe('rt-oaiapp_a')
+    expect(stored(auth).pendingRevocations).toEqual([])
+    expect(auth.status()).not.toHaveProperty('revocationPending')
+  })
+
+  it('an unconfirmed revocation is reported and not retried forever', async () => {
+    const home = homes()
+    seed(home.profileHome, [{ clientId: 'oaiapp_a', subject: 'alice', life: 30 * MINUTE }])
+    const auth = chatgptAuth(issuer, home)
+    issuer.onRevoke = () => ({ status: 0 })
+    expect(await auth.signOut()).toEqual({ confirmed: false, message: 'Signed out in Mousse. Remote revocation could not be confirmed; disconnect Mousse in ChatGPT Settings.' })
+    expect(stored(auth).pendingRevocations).toEqual([])
+  })
+
+  it('signing in again on a connection revokes the session it replaced, after the stop', async () => {
+    const home = homes()
+    const order: string[] = []
+    issuer.onRevoke = (form) => {
+      order.push(`revoke ${form.token}`)
+      return { status: 200 }
+    }
+    const auth = chatgptAuth(issuer, home, { onCredentialChange: async (change) => { order.push(change) } })
+    await signIn(issuer, auth, { subject: 'alice' })
+    const first = activeSession(stored(auth))!.refreshToken
+    await signIn(issuer, auth, { subject: 'alice' })
+    expect(order).toEqual(['sign_in', 'sign_in', `revoke ${first}`])
+    expect(stored(auth).pendingRevocations).toEqual([])
+  })
+
 })

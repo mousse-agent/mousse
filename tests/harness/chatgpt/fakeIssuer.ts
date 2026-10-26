@@ -20,6 +20,7 @@ export interface Reply {
   /** 0 drops the connection. */
   status: number
   body?: unknown
+  headers?: Record<string, string>
 }
 
 export interface Account {
@@ -56,13 +57,13 @@ export class FakeIssuer {
     this.signingKey = privateKey
     const jwk = { ...(await exportJWK(publicKey)), kid: 'k1', alg: 'RS256', use: 'sig' }
     this.server = createServer((request, response) => {
-      void this.route(request, jwk).then(({ status, body }) => {
+      void this.route(request, jwk).then(({ status, body, headers }) => {
         // Status 0: drop the connection without an answer.
         if (status === 0) {
           request.socket.destroy()
           return
         }
-        response.writeHead(status, body === undefined ? {} : { 'content-type': 'application/json' })
+        response.writeHead(status, { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers })
         response.end(body === undefined ? '' : JSON.stringify(body))
       })
     })
@@ -210,6 +211,7 @@ export function fakeVault(options: { available?: boolean } = {}): SecretCodec & 
     canEncrypt: () => codec.available,
     encrypt: (plain: string) => (codec.available ? Buffer.from(`vault:${Buffer.from(plain).toString('base64')}`) : null),
     decrypt: (stored: Buffer) => {
+      if (!codec.available) return null
       const text = stored.toString()
       return text.startsWith('vault:') ? Buffer.from(text.slice(6), 'base64').toString() : null
     }

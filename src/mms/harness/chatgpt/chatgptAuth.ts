@@ -4,7 +4,7 @@ import { discover, OPENAI_ENDPOINTS, type ChatGptEndpoints, type Discovery } fro
 import { ChatGptAuthError, MESSAGES, type ChatGptFailure } from './errors'
 import { ensureChatGptHostId } from './hostId'
 import { verifyIdToken } from './idToken'
-import { ChatGptLifecycle, revokeRefreshToken, type ChatGptAccess, type RevocableToken } from './lifecycle'
+import { ChatGptLifecycle, revokeRefreshToken, type ChatGptAccess, type SignInCommitResult } from './lifecycle'
 import { fetchChatGptModels, type ChatGptModel } from './models'
 import { authorize, CALLBACK_PATH, exchangeCode, type AuthorizationGrant, type SignInInteraction } from './oauth'
 import { activeSession, DIRECT_SCOPE, profileKeyOf, registrationOf, type ChatGptRegistration, type ChatGptStoreData } from './store'
@@ -49,6 +49,8 @@ export interface ChatGptStatus {
   email?: string | null
   /** The connection's label ("Connection 2"). */
   label?: string
+  /** A signed-out or replaced sign-in still waits for revocation at OpenAI. */
+  revocationPending?: boolean
 }
 
 export interface ChatGptSignOutResult {
@@ -65,11 +67,22 @@ export interface ChatGptLoginSession {
 const PROFILE_PREFIX = 'chatgpt-profile:'
 const MAX_SAVED_OPTIONS = 30
 
+/**
+ * Sign-in attempts per store file in this process. Every new attempt, sign-out, activation and
+ * deletion bumps it, so an attempt that finishes late saves nothing. Other processes are fenced by
+ * the store's `signInFence`.
+ */
+const attempts = new Map<string, number>()
+
+function nextAttempt(storePath: string): number {
+  const next = (attempts.get(storePath) ?? 0) + 1
+  attempts.set(storePath, next)
+  return next
+}
+
 export class ChatGptAuth {
   readonly lifecycle: ChatGptLifecycle
   private readonly endpoints: ChatGptEndpoints
-  /** Bumped by every sign-in attempt: an older attempt that finishes late saves nothing. */
-  private generation = 0
 
   constructor(private readonly options: ChatGptAuthOptions) {
     this.endpoints = options.endpoints ?? OPENAI_ENDPOINTS
@@ -106,11 +119,16 @@ export class ChatGptAuth {
 
   /** The connection's state from the store alone; no network. */
   status(): ChatGptStatus {
-    const data = this.readQuietly()
-    if (!data) return { state: 'unreadable', message: MESSAGES.storageUnreadable }
-    if (data.active === null) return { state: 'signed_out', message: MESSAGES.signedOut }
+    let data: ChatGptStoreData
+    try {
+      data = this.lifecycle.read()
+    } catch (error) {
+      return { state: 'unreadable', message: error instanceof ChatGptAuthError ? error.message : MESSAGES.storageUnreadable }
+    }
+    const pending = data.pendingRevocations.length > 0 ? { revocationPending: true } : {}
+    if (data.active === null) return { state: 'signed_out', message: MESSAGES.signedOut, ...pending }
     const registration = registrationOf(data, data.active)
-    const who = { email: registration?.email ?? null, ...(registration ? { label: registration.label } : {}) }
+    const who = { email: registration?.email ?? null, ...(registration ? { label: registration.label } : {}), ...pending }
     const session = activeSession(data)
     if (!session) return { state: 'expired', message: MESSAGES.expired, ...who }
     if (!session.scopes.includes(DIRECT_SCOPE)) return { state: 'sharing_disabled', message: MESSAGES.sharingDisabled, ...who }
@@ -144,9 +162,10 @@ export class ChatGptAuth {
   /** Runs a sign-in in `session`. A cancelled, superseded or failed attempt saves nothing. */
   async signIn(session: ChatGptLoginSession, method: string = 'chatgpt'): Promise<ProviderLoginResult & { failure?: ChatGptFailure }> {
     const interaction = session.createAuthCallbacks({ usesCallbackServer: true })
-    const generation = ++this.generation
+    const storePath = this.lifecycle.store.path
+    const attempt = nextAttempt(storePath)
     try {
-      await this.runSignIn(interaction, method, () => generation === this.generation && !interaction.signal.aborted)
+      await this.runSignIn(interaction, method, () => attempts.get(storePath) === attempt && !interaction.signal.aborted)
       return { success: true }
     } catch (error) {
       if (interaction.signal.aborted) return { success: false, error: MESSAGES.cancelled, failure: 'cancelled' }
@@ -158,15 +177,16 @@ export class ChatGptAuth {
 
   private async runSignIn(interaction: SignInInteraction, method: string, stillCurrent: () => boolean): Promise<void> {
     const signal = interaction.signal
+    // Before the browser opens: a connection that could not be saved fails here, not after it.
+    const start = this.lifecycle.prepareSignIn()
     const hostId = ensureChatGptHostId(this.options.installationHome)
     const discovery = await discover(this.endpoints, signal)
-    const data = this.readQuietly()
-    const registration = data ? target(data, method) : undefined
-    const saved = registration && data ? data.sessions.find((entry) => entry.clientId === registration.clientId) : undefined
+    const registration = start.data ? target(start.data, method) : undefined
+    const saved = registration && start.data ? start.data.sessions.find((entry) => entry.clientId === registration.clientId) : undefined
     const consent = registration !== undefined && (!registration.sharing || (saved !== undefined && !saved.scopes.includes(DIRECT_SCOPE)))
     const grant = await authorize({ discovery, hostId, registration, consent, interaction })
     try {
-      await this.finishSignIn(interaction, grant, discovery, registration, stillCurrent)
+      await this.finishSignIn(interaction, grant, discovery, registration, start.fence, stillCurrent)
     } finally {
       grant.close()
     }
@@ -177,6 +197,7 @@ export class ChatGptAuth {
     grant: AuthorizationGrant,
     discovery: Discovery,
     registration: ChatGptRegistration | undefined,
+    fence: number | null,
     stillCurrent: () => boolean
   ): Promise<void> {
     const signal = interaction.signal
@@ -187,35 +208,45 @@ export class ChatGptAuth {
     } catch (error) {
       // The code expired before it was used: keep the new registration so a retry reuses it.
       if (error instanceof ChatGptAuthError && error.failure === 'code_expired' && !registration && stillCurrent()) {
-        await this.lifecycle.saveRegistration(grant.clientId, CALLBACK_PATH)
+        await this.lifecycle.saveRegistration(grant.clientId, CALLBACK_PATH, fence)
       }
       throw error
     }
-    if (!tokens.idToken) throw new ChatGptAuthError('signed_out', 'verify', MESSAGES.noIdentity)
-    if (!isBearer(tokens)) throw new ChatGptAuthError('signed_out', 'invalid_response', MESSAGES.unsupportedToken)
-    const identity = await verifyIdToken(tokens.idToken, { keys: discovery.jwks, issuer: discovery.issuer, clientId: grant.clientId, nonce: grant.nonce })
-    if (registration?.subject && identity.subject !== registration.subject) {
-      throw new ChatGptAuthError('signed_out', 'subject_mismatch', MESSAGES.differentAccount)
+    let result: SignInCommitResult
+    try {
+      if (!tokens.idToken) throw new ChatGptAuthError('signed_out', 'verify', MESSAGES.noIdentity)
+      if (!isBearer(tokens)) throw new ChatGptAuthError('signed_out', 'invalid_response', MESSAGES.unsupportedToken)
+      const identity = await verifyIdToken(tokens.idToken, { keys: discovery.jwks, issuer: discovery.issuer, clientId: grant.clientId, nonce: grant.nonce })
+      if (registration?.subject && identity.subject !== registration.subject) {
+        throw new ChatGptAuthError('signed_out', 'subject_mismatch', MESSAGES.differentAccount)
+      }
+      result = await this.lifecycle.commitSignIn(
+        {
+          clientId: grant.clientId,
+          subject: identity.subject,
+          email: identity.email,
+          redirectPath: CALLBACK_PATH,
+          idToken: tokens.idToken,
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          expiresAt: Date.now() + tokens.expiresInSeconds * 1000,
+          earliestRefreshAt: tokens.earliestRefreshAt,
+          scopes: tokens.scopes,
+          ...(registration ? { reauthOf: registration.clientId } : {}),
+          fence,
+          stillCurrent
+        },
+        signal
+      )
+    } catch (error) {
+      // OpenAI issued a grant that is not kept (refused, cancelled or superseded). Nothing used
+      // it, so it is revoked at once (best effort).
+      if (tokens.refreshToken) await revokeRefreshToken(this.endpoints, { clientId: grant.clientId, refreshToken: tokens.refreshToken })
+      throw error
     }
-    const result = await this.lifecycle.commitSignIn(
-      {
-        clientId: grant.clientId,
-        subject: identity.subject,
-        email: identity.email,
-        redirectPath: CALLBACK_PATH,
-        idToken: tokens.idToken,
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
-        expiresAt: Date.now() + tokens.expiresInSeconds * 1000,
-        earliestRefreshAt: tokens.earliestRefreshAt,
-        scopes: tokens.scopes,
-        ...(registration ? { reauthOf: registration.clientId } : {}),
-        stillCurrent
-      },
-      signal
-    )
-    // Every commit moves the credential epoch on, so whatever ran on the old key must stop.
-    await this.options.onCredentialChange?.('sign_in')
+    // Every commit moves the credential epoch on, so whatever ran on the old key must stop
+    // before a session this sign-in replaced is revoked.
+    await this.afterChange('sign_in')
     if (!result.sharing) {
       throw new ChatGptAuthError(
         'signed_out',
@@ -227,30 +258,44 @@ export class ChatGptAuth {
     }
   }
 
+  /**
+   * Runs the stop hook, then revokes every pending refresh token and settles them. If the hook
+   * throws, the tokens stay pending (encrypted in the store) and the error propagates; the next
+   * change or sign-out retries both. Returns whether every revocation was confirmed.
+   */
+  private async afterChange(change: ChatGptCredentialChange): Promise<boolean> {
+    await this.options.onCredentialChange?.(change)
+    const pending = this.lifecycle.pendingRevocations()
+    if (!pending.length) return true
+    const results = await Promise.all(pending.map((token) => revokeRefreshToken(this.endpoints, token)))
+    await this.lifecycle.settleRevocations(pending)
+    return results.every(Boolean)
+  }
+
   /** Switches to another saved connection that still has tokens. */
   async activate(clientId: string, signal?: AbortSignal): Promise<string> {
+    nextAttempt(this.lifecycle.store.path)
     const profileKey = await this.lifecycle.activate(clientId, signal)
-    await this.options.onCredentialChange?.('activation')
+    await this.afterChange('activation')
     return profileKey
   }
 
   /**
    * Signs out in Mousse, then stops what used the connection, then revokes the refresh token at
-   * OpenAI. The registration and the host id are kept for a later reconnect.
+   * OpenAI. The registration and the host id are kept for a later reconnect. If stopping fails,
+   * the revocation stays pending and this rejects; signing out again retries it.
    */
   async signOut(signal?: AbortSignal): Promise<ChatGptSignOutResult> {
-    const token = await this.lifecycle.signOut(signal)
-    await this.options.onCredentialChange?.('sign_out')
-    if (!token) return { confirmed: true }
-    return (await revokeRefreshToken(this.endpoints, token)) ? { confirmed: true } : { confirmed: false, message: MESSAGES.revocationUnconfirmed }
+    nextAttempt(this.lifecycle.store.path)
+    await this.lifecycle.signOut(signal)
+    return (await this.afterChange('sign_out')) ? { confirmed: true } : { confirmed: false, message: MESSAGES.revocationUnconfirmed }
   }
 
-  /** Deletes the instance's connections and revokes each refresh token (best effort). */
+  /** Deletes the instance's connections, then stops what used them, then revokes every refresh token. */
   async deleteInstance(signal?: AbortSignal): Promise<ChatGptSignOutResult> {
-    const tokens: RevocableToken[] = await this.lifecycle.deleteInstance(signal)
-    await this.options.onCredentialChange?.('deletion')
-    const results = await Promise.all(tokens.map((token) => revokeRefreshToken(this.endpoints, token)))
-    return results.every(Boolean) ? { confirmed: true } : { confirmed: false, message: MESSAGES.revocationUnconfirmed }
+    nextAttempt(this.lifecycle.store.path)
+    await this.lifecycle.deleteInstance(signal)
+    return (await this.afterChange('deletion')) ? { confirmed: true } : { confirmed: false, message: MESSAGES.revocationUnconfirmed }
   }
 }
 

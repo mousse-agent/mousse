@@ -27,6 +27,10 @@ export type ChatGptFailure =
   | 'code_expired'
   /** The connection cannot be saved or read safely. */
   | 'storage'
+  /** The saved connection is encrypted and this host cannot decrypt it now. It is kept. */
+  | 'storage_locked'
+  /** A newer Mousse saved the connection. It is kept. */
+  | 'storage_newer'
   | 'unauthorized'
   | 'cancelled'
   | 'busy'
@@ -83,12 +87,27 @@ export const MESSAGES = {
   storageUnreadable: "The saved ChatGPT connection can't be read. Sign in again.",
   storageEncryption: "Mousse can't save the ChatGPT connection securely because the system keychain is unavailable.",
   storageWrite: "Couldn't save the ChatGPT connection. Try again.",
+  storageLocked: "Mousse can't open the saved ChatGPT connection because the system keychain is unavailable. The connection is kept; try again once the keychain is unlocked.",
+  storageNewer: 'A newer version of Mousse saved this ChatGPT connection. Update Mousse to use it.',
   cancelled: 'Sign-in cancelled',
   busy: 'Another ChatGPT sign-in change is still running. Try again shortly.',
+  superseded: 'The ChatGPT connection changed while you were signing in. Sign in again.',
+  revocationPending: 'Signed out in Mousse. Revoking the old sign-in at OpenAI is still pending; sign out again to retry.',
   modelsUnauthorized: 'ChatGPT rejected the connection while listing models. Checking the sign-in again.',
   modelsFailed: "Couldn't load ChatGPT models. Try Refresh models.",
   revocationUnconfirmed: 'Signed out in Mousse. Remote revocation could not be confirmed; disconnect Mousse in ChatGPT Settings.'
 } as const
+
+/**
+ * A temporary answer from OpenAI: 429 reads `rate_limited` (with the `Retry-After` time when
+ * given), anything else (5xx, no answer) `timeout`. Both are retryable, and the saved tokens stay.
+ * Managed Codex maps `timeout`/`transient` to its `service_unavailable` code.
+ */
+export function transient(message: string, status?: number, resetAt?: string): ChatGptAuthError {
+  return status === 429
+    ? new ChatGptAuthError('rate_limited', 'transient', message, resetAt)
+    : new ChatGptAuthError('timeout', 'transient', message)
+}
 
 export function cancelled(): ChatGptAuthError {
   return new ChatGptAuthError('cancelled', 'cancelled', MESSAGES.cancelled)

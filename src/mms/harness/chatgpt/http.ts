@@ -5,6 +5,21 @@ export interface JsonResponse {
   ok: boolean
   /** The parsed body, or undefined when it was empty or not JSON. */
   body: unknown
+  /** The `Retry-After` header, when present. */
+  retryAfter?: string
+}
+
+async function answer(response: Response): Promise<JsonResponse> {
+  const retryAfter = response.headers.get('retry-after')
+  return { status: response.status, ok: response.ok, body: await readJson(response), ...(retryAfter ? { retryAfter } : {}) }
+}
+
+/** `Retry-After` (seconds or an HTTP date) as an ISO time, when it parses. */
+export function retryAt(header: string | undefined, now = Date.now()): string | undefined {
+  if (!header) return undefined
+  const seconds = /^\d+$/.test(header.trim()) ? Number(header.trim()) : NaN
+  const time = Number.isFinite(seconds) ? now + seconds * 1000 : Date.parse(header)
+  return Number.isFinite(time) ? new Date(time).toISOString() : undefined
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -20,7 +35,7 @@ async function readJson(response: Response): Promise<unknown> {
 export async function getJson(url: string, options: { timeoutMs: number; headers?: Record<string, string>; signal?: AbortSignal }): Promise<JsonResponse> {
   const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs)]) : AbortSignal.timeout(options.timeoutMs)
   const response = await fetch(url, { headers: { accept: 'application/json', ...options.headers }, signal, redirect: 'error' })
-  return { status: response.status, ok: response.ok, body: await readJson(response) }
+  return answer(response)
 }
 
 export async function postForm(url: string, form: Record<string, string>, options: { timeoutMs: number; signal?: AbortSignal }): Promise<JsonResponse> {
@@ -32,7 +47,7 @@ export async function postForm(url: string, form: Record<string, string>, option
     signal,
     redirect: 'error'
   })
-  return { status: response.status, ok: response.ok, body: await readJson(response) }
+  return answer(response)
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

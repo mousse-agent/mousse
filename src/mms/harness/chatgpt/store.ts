@@ -9,9 +9,11 @@ import { ChatGptAuthError, MESSAGES } from './errors'
 import { isRecord } from './http'
 
 /**
- * One instance's ChatGPT connections: `<profileHome>/harness/<instanceId>/chatgpt.json`, encrypted
- * under Electron (required there) and mode 0600 everywhere. Tokens never leave this file except to
- * the token endpoint, the revocation endpoint and Codex's token helper.
+ * One instance's ChatGPT connections: `<profileHome>/harness/<instanceId>/chatgpt.json`. Under
+ * Electron it is encrypted with the OS vault (required there). A plain-Node daemon writes it as
+ * plain JSON with mode 0600 on macOS and Linux; Windows ignores the mode, so there it relies on the
+ * profile directory's ACL. Tokens never leave this file except to the token endpoint, the
+ * revocation endpoint and Codex's token helper.
  */
 
 export const DIRECT_SCOPE = 'chatgpt.tokens.use.direct'
@@ -56,13 +58,31 @@ export interface ChatGptStoreData {
    * null means signed out in Mousse or never signed in.
    */
   active: string | null
+  /**
+   * Moves on with every sign-in commit, activation, sign-out and deletion. A sign-in records it
+   * when it starts and saves nothing if it moved on meanwhile, so a sign-in that finishes late can
+   * never undo one of them. A terminal refresh error does not move it: signing in again is the fix.
+   */
+  signInFence: number
   /** Most recently used first. */
   registrations: ChatGptRegistration[]
   sessions: ChatGptSession[]
+  /**
+   * Refresh tokens taken out of use (sign-out, deletion, a sign-in that replaced a session) that
+   * still need revoking at OpenAI. They are revoked only after the processes that used them are
+   * stopped, and dropped once revocation was attempted.
+   */
+  pendingRevocations: RevocableToken[]
+}
+
+/** A refresh token to revoke at OpenAI. */
+export interface RevocableToken {
+  clientId: string
+  refreshToken: string
 }
 
 export function emptyStore(): ChatGptStoreData {
-  return { version: 1, credentialEpoch: 0, active: null, registrations: [], sessions: [] }
+  return { version: 1, credentialEpoch: 0, signInFence: 0, active: null, registrations: [], sessions: [], pendingRevocations: [] }
 }
 
 export function chatgptStorePath(profileHome: string, instanceId: string): string {
@@ -88,17 +108,29 @@ function isSession(value: unknown): value is ChatGptSession {
     Array.isArray(value.scopes) && value.scopes.every(str) && finite(value.savedAt)
 }
 
+function isRevocable(value: unknown): value is RevocableToken {
+  return isRecord(value) && str(value.clientId) && str(value.refreshToken)
+}
+
 function decode(value: unknown): ChatGptStoreData | null {
-  if (!isRecord(value) || value.version !== 1 || !Number.isInteger(value.credentialEpoch) || !strOrNull(value.active)) return null
+  if (!isRecord(value) || value.version !== 1 || !Number.isInteger(value.credentialEpoch) || !Number.isInteger(value.signInFence) || !strOrNull(value.active)) return null
   if (!Array.isArray(value.registrations) || !value.registrations.every(isRegistration)) return null
   if (!Array.isArray(value.sessions) || !value.sessions.every(isSession)) return null
+  if (!Array.isArray(value.pendingRevocations) || !value.pendingRevocations.every(isRevocable)) return null
   return {
     version: 1,
     credentialEpoch: value.credentialEpoch as number,
+    signInFence: value.signInFence as number,
     active: value.active,
     registrations: value.registrations,
-    sessions: value.sessions
+    sessions: value.sessions,
+    pendingRevocations: value.pendingRevocations
   }
+}
+
+/** A store a newer Mousse wrote: never read it as corrupt or replace it. */
+function isNewer(value: unknown): boolean {
+  return isRecord(value) && typeof value.version === 'number' && value.version > 1
 }
 
 export class ChatGptStore {
@@ -111,8 +143,11 @@ export class ChatGptStore {
   ) {}
 
   /**
-   * The saved connections; empty when none were saved. An unreadable file fails typed, unless
-   * `discardUnreadable` (a new sign-in), which sets it aside as `<name>.corrupt-<time>` first.
+   * The saved connections; empty when none were saved.
+   * - A file this host cannot decrypt (no vault, locked keyring) or that a newer Mousse wrote fails
+   *   typed and is never touched: it may be intact.
+   * - A corrupt file fails typed, unless `discardUnreadable` (a new sign-in), which sets it aside as
+   *   `<name>.corrupt-<time>`. If it was encrypted, the replacement must be encrypted too.
    */
   read(options: { discardUnreadable?: boolean } = {}): ChatGptStoreData {
     let raw: string
@@ -125,19 +160,35 @@ export class ChatGptStore {
       }
       throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageUnreadable)
     }
-    let decoded: ChatGptStoreData | null = null
+    let wasEncrypted = false
     try {
       const opened = openSecretFile(raw, this.codec)
-      decoded = decode(opened.value)
-      if (decoded) this.encrypted = opened.encrypted
+      wasEncrypted = opened.encrypted
+      const decoded = decode(opened.value)
+      if (decoded) {
+        this.encrypted = opened.encrypted
+        return decoded
+      }
+      if (isNewer(opened.value)) throw new ChatGptAuthError('unsupported', 'storage_newer', MESSAGES.storageNewer)
     } catch (error) {
       if (!(error instanceof SecretFileError)) throw error
+      if (error.kind === 'unavailable') throw new ChatGptAuthError('unsupported', 'storage_locked', MESSAGES.storageLocked)
+      wasEncrypted = error.wasEncrypted
     }
-    if (decoded) return decoded
+    // A replacement of an encrypted file must be encrypted too (`assertWritable` checks it).
+    this.encrypted = wasEncrypted || this.codec.encryptionRequired === true
     if (!options.discardUnreadable) throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageUnreadable)
     quarantineUnreadableFileSync(this.path)
-    this.encrypted = this.codec.encryptionRequired === true
     return emptyStore()
+  }
+
+  /** Fails typed when the next write could not be sealed as required (call after `read`). */
+  assertWritable(): void {
+    try {
+      sealSecretFile('{}', this.codec, this.encrypted)
+    } catch {
+      throw new ChatGptAuthError('unsupported', 'storage', MESSAGES.storageEncryption)
+    }
   }
 
   write(data: ChatGptStoreData): void {

@@ -3,8 +3,8 @@ import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { chatgptHostIdPath, ensureChatGptHostId } from '../../../src/mms/harness/chatgpt/hostId'
 import { ChatGptStore, chatgptStorePath, emptyStore, profileKeyOf, type ChatGptStoreData } from '../../../src/mms/harness/chatgpt/store'
-import { FakeIssuer, fakeVault, guardNetwork, tempHomes } from './fakeIssuer'
-import { chatgptAuth, signIn } from './signInFlow'
+import { FakeIssuer, fakeVault, guardNetwork, plainCodec, tempHomes } from './fakeIssuer'
+import { chatgptAuth, signIn, startSignIn } from './signInFlow'
 
 guardNetwork()
 const homes = tempHomes()
@@ -19,9 +19,11 @@ afterEach(async () => {
 const SAMPLE: ChatGptStoreData = {
   version: 1,
   credentialEpoch: 3,
+  signInFence: 2,
   active: 'oaiapp_a',
   registrations: [{ clientId: 'oaiapp_a', subject: 'alice', email: 'a@example.com', label: 'Connection 1', redirectPath: '/auth/callback', sharing: true }],
-  sessions: [{ clientId: 'oaiapp_a', accessToken: 'secret-access', refreshToken: 'secret-refresh', idToken: 'secret-id', expiresAt: 1, earliestRefreshAt: null, scopes: ['openid'], savedAt: 1 }]
+  sessions: [{ clientId: 'oaiapp_a', accessToken: 'secret-access', refreshToken: 'secret-refresh', idToken: 'secret-id', expiresAt: 1, earliestRefreshAt: null, scopes: ['openid'], savedAt: 1 }],
+  pendingRevocations: [{ clientId: 'oaiapp_a', refreshToken: 'secret-old-refresh' }]
 }
 
 describe('ChatGPT store', () => {
@@ -45,12 +47,59 @@ describe('ChatGPT store', () => {
     expect(existsSync(path)).toBe(false)
   })
 
-  it('a sign-in under Electron without a vault fails typed and saves nothing', async () => {
+  it('a sign-in under Electron without a vault fails typed before the browser opens, and saves nothing', async () => {
     const home = homes()
     const auth = chatgptAuth(issuer, home, { codec: fakeVault({ available: false }) })
-    const { result } = await signIn(issuer, auth, { subject: 'alice' })
-    expect(result).toEqual({ success: false, failure: 'storage', error: "Mousse can't save the ChatGPT connection securely because the system keychain is unavailable." })
+    const flow = startSignIn(auth)
+    expect(await flow.result).toEqual({ success: false, failure: 'storage', error: "Mousse can't save the ChatGPT connection securely because the system keychain is unavailable." })
+    expect(flow.events.some((event) => event.type === 'auth_url')).toBe(false)
     expect(existsSync(auth.lifecycle.store.path)).toBe(false)
+  })
+
+  it.each([
+    ['a plain daemon', () => plainCodec],
+    ['Electron with the vault locked', () => fakeVault({ available: false })]
+  ])('an encrypted store that %s cannot open is kept, never set aside or downgraded', async (_name, codec) => {
+    const home = homes()
+    const path = chatgptStorePath(home.profileHome, 'codex:managed')
+    new ChatGptStore(path, fakeVault()).write(SAMPLE)
+    const before = readFileSync(path, 'utf8')
+    const auth = chatgptAuth(issuer, home, { codec: codec() })
+    expect(auth.status()).toMatchObject({ state: 'unreadable', message: expect.stringContaining('system keychain is unavailable') })
+    const flow = startSignIn(auth)
+    expect(await flow.result).toMatchObject({ success: false, failure: 'storage_locked' })
+    expect(flow.events.some((event) => event.type === 'auth_url')).toBe(false)
+    await expect(auth.access()).rejects.toMatchObject({ failure: 'storage_locked' })
+    await expect(auth.deleteInstance()).rejects.toMatchObject({ failure: 'storage_locked' })
+    expect(readFileSync(path, 'utf8')).toBe(before)
+    expect(readdirSync(dirname(path)).filter((name) => name.startsWith('chatgpt.json'))).toEqual(['chatgpt.json'])
+  })
+
+  it('a store written by a newer Mousse is kept and fails typed', async () => {
+    const home = homes()
+    const path = chatgptStorePath(home.profileHome, 'codex:managed')
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, JSON.stringify({ version: 2, whatever: true }))
+    const auth = chatgptAuth(issuer, home)
+    const flow = startSignIn(auth)
+    expect(await flow.result).toMatchObject({ success: false, failure: 'storage_newer' })
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ version: 2, whatever: true })
+  })
+
+  it('a corrupt encrypted envelope may only be replaced by an encrypted store', async () => {
+    const home = homes()
+    const path = chatgptStorePath(home.profileHome, 'codex:managed')
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, JSON.stringify({ __mousse_encrypted_v1: '!!not base64' }))
+    const plain = chatgptAuth(issuer, home)
+    const flow = startSignIn(plain)
+    expect(await flow.result).toMatchObject({ success: false, failure: 'storage' })
+    expect(flow.events.some((event) => event.type === 'auth_url')).toBe(false)
+    expect(readFileSync(path, 'utf8')).toContain('!!not base64')
+    // With a working vault, the corrupt file is set aside and the new one is encrypted.
+    const vaulted = chatgptAuth(issuer, home, { codec: fakeVault() })
+    expect((await signIn(issuer, vaulted, { subject: 'alice' })).result).toEqual({ success: true })
+    expect(readFileSync(path, 'utf8')).toContain('__mousse_encrypted_v1')
   })
 
   it('never downgrades an encrypted file to plain text', () => {

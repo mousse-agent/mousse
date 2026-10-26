@@ -2,13 +2,16 @@ import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { generateKeyPair } from 'jose'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { parsePastedRedirect } from '../../../src/mms/harness/chatgpt/oauth'
+import { connect } from 'node:net'
+import { ChatGptLifecycle } from '../../../src/mms/harness/chatgpt/lifecycle'
+import { isBrowserBlockedPort, parsePastedRedirect, setBlockedPortCheckForTests } from '../../../src/mms/harness/chatgpt/oauth'
+import { activeSession } from '../../../src/mms/harness/chatgpt/store'
 import type { HarnessGatewayEvent } from '../../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../../src/mms/providers/ProviderInstanceService'
 import { PiLoopAdapter } from '../../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { ProviderAdapter } from '../../../src/mms/run/adapters/ProviderAdapter'
 import { adapterDriver, testHarness } from '../../../src/mms/run/testkit/harness'
-import { FakeIssuer, FULL_SCOPE, guardNetwork, tempHomes } from './fakeIssuer'
+import { FakeIssuer, FULL_SCOPE, guardNetwork, plainCodec, tempHomes } from './fakeIssuer'
 import { approve, callbackFor, chatgptAuth, signIn, startSignIn } from './signInFlow'
 
 guardNetwork()
@@ -109,15 +112,77 @@ describe('Sign in with ChatGPT: callback rules', () => {
     expect(auth.identity()).toBe('chatgpt:oaiapp_one:user-alice')
   })
 
-  it('checks the state before anything else', async () => {
+  it('checks the state before anything else: a foreign callback gets 400 and the sign-in keeps waiting', async () => {
     const auth = chatgptAuth(issuer, homes())
     const flow = startSignIn(auth)
     const link = await flow.link()
-    const callback = callbackFor(link, { code: 'x', error: 'access_denied' })
+    const forged = callbackFor(link, { code: 'x', error: 'access_denied' })
+    forged.searchParams.set('state', 'forged')
+    const refused = await fetch(forged)
+    expect(refused.status).toBe(400)
+    expect(refused.headers.get('cache-control')).toBe('no-store')
+    const missing = callbackFor(link, { code: 'x' })
+    missing.searchParams.delete('state')
+    expect((await fetch(missing)).status).toBe(400)
+    expect(issuer.tokenRequests).toHaveLength(0)
+    // The real callback still completes the sign-in.
+    await approve(issuer, link, ALICE)
+    expect(await flow.result).toEqual({ success: true })
+  })
+
+  it('a pasted address with another state ends the sign-in', async () => {
+    const auth = chatgptAuth(issuer, homes())
+    const flow = startSignIn(auth)
+    const callback = await approve(issuer, await flow.link(), ALICE, { open: false })
     callback.searchParams.set('state', 'forged')
-    await fetch(callback)
+    flow.paste(callback.toString())
     expect(await flow.result).toMatchObject({ success: false, failure: 'callback', error: "This sign-in couldn't be verified. Start again." })
     expect(issuer.tokenRequests).toHaveLength(0)
+  })
+
+  it('malformed requests get 400 without crashing or ending the sign-in', async () => {
+    const auth = chatgptAuth(issuer, homes())
+    const flow = startSignIn(auth)
+    const link = await flow.link()
+    const port = Number(new URL(link.searchParams.get('redirect_uri')!).port)
+    for (const target of ['//', '//[', '/auth/callback?state=%']) {
+      const status = await new Promise<string>((resolve, reject) => {
+        const socket = connect(port, '127.0.0.1', () => socket.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`))
+        let answer = ''
+        socket.on('data', (chunk) => (answer += chunk))
+        socket.on('end', () => resolve(answer.split('\r\n')[0]))
+        socket.on('error', reject)
+      })
+      expect(status, target).toMatch(/^HTTP\/1\.1 4\d\d /)
+    }
+    await approve(issuer, link, ALICE)
+    expect(await flow.result).toEqual({ success: true })
+  })
+
+  it('never advertises a port browsers block: it listens again on another one', async () => {
+    expect(isBrowserBlockedPort(6000)).toBe(true)
+    expect(isBrowserBlockedPort(10080)).toBe(true)
+    expect(isBrowserBlockedPort(6001)).toBe(false)
+    const refused: number[] = []
+    setBlockedPortCheckForTests((port) => {
+      if (refused.length > 0) return false
+      refused.push(port)
+      return true
+    })
+    try {
+      const auth = chatgptAuth(issuer, homes())
+      const flow = startSignIn(auth)
+      const link = await flow.link()
+      const port = Number(new URL(link.searchParams.get('redirect_uri')!).port)
+      expect(refused).toHaveLength(1)
+      expect(port).not.toBe(refused[0])
+      // The refused port is not listening any more.
+      await expect(fetch(`http://127.0.0.1:${refused[0]}/auth/callback`)).rejects.toThrow()
+      await approve(issuer, link, ALICE)
+      expect(await flow.result).toEqual({ success: true })
+    } finally {
+      setBlockedPortCheckForTests(null)
+    }
   })
 
   it('a declined authorization says so', async () => {
@@ -315,6 +380,93 @@ describe('Sign in with ChatGPT: cancellation', () => {
     expect(auth.identity()).toBe('chatgpt:oaiapp_one:user-alice')
   })
 })
+
+describe('Sign in with ChatGPT: a sign-in that finishes late', () => {
+  /** Starts a sign-in whose code exchange waits for `release()`. */
+  async function heldSignIn(auth: ReturnType<typeof chatgptAuth>, account = ALICE) {
+    const flow = startSignIn(auth)
+    const link = await flow.link()
+    let release!: () => void
+    const released = new Promise<void>((resolve) => (release = resolve))
+    issuer.onToken = async (form) => {
+      await released
+      issuer.onToken = undefined
+      return issuer.defaultToken(form)
+    }
+    await approve(issuer, link, account)
+    await vi.waitFor(() => expect(issuer.tokenRequests.some((request) => request.grant_type === 'authorization_code')).toBe(true))
+    return { flow, release }
+  }
+
+  /** The refresh tokens the issuer handed out to the held exchange. */
+  const issuedToHeld = () => issuer.revokeRequests.map((request) => request.token)
+
+  it('cannot undo a sign-out; its tokens are revoked', async () => {
+    const home = homes()
+    const auth = chatgptAuth(issuer, home)
+    await signIn(issuer, auth, BOB, { clientId: 'oaiapp_bob' })
+    const { flow, release } = await heldSignIn(chatgptAuth(issuer, home), BOB)
+    await auth.signOut()
+    const revokedBefore = issuer.revokeRequests.length
+    release()
+    expect(await flow.result).toMatchObject({ success: false, failure: 'cancelled' })
+    expect(auth.status().state).toBe('signed_out')
+    expect(stored(auth).sessions).toEqual([])
+    // The late grant was never kept, so it was revoked at once.
+    expect(issuer.revokeRequests.length).toBe(revokedBefore + 1)
+  })
+
+  it('cannot undo a sign-out made by another process (the persisted fence)', async () => {
+    const home = homes()
+    const auth = chatgptAuth(issuer, home)
+    await signIn(issuer, auth, ALICE)
+    const { flow, release } = await heldSignIn(auth)
+    // Another process signs out: only the store's fence moves, not this process's attempt counter.
+    await new ChatGptLifecycle({ instanceId: 'codex:managed', profileHome: home.profileHome, endpoints: issuer.endpoints, codec: plainCodec }).signOut()
+    release()
+    expect(await flow.result).toMatchObject({ success: false, failure: 'cancelled', error: 'The ChatGPT connection changed while you were signing in. Sign in again.' })
+    expect(stored(auth).active).toBeNull()
+    expect(issuedToHeld()).toHaveLength(1)
+  })
+
+  it('cannot recreate a deleted instance', async () => {
+    const home = homes()
+    const auth = chatgptAuth(issuer, home)
+    const { flow, release } = await heldSignIn(auth)
+    await auth.deleteInstance()
+    release()
+    expect(await flow.result).toMatchObject({ success: false, failure: 'cancelled' })
+    expect(stored(auth)).toMatchObject({ active: null, registrations: [], sessions: [] })
+    expect(issuedToHeld()).toHaveLength(1)
+  })
+
+  it('cannot replace an account that was switched to meanwhile', async () => {
+    const home = homes()
+    const auth = chatgptAuth(issuer, home)
+    await signIn(issuer, auth, ALICE)
+    await signIn(issuer, auth, BOB, { method: 'chatgpt-new-account', clientId: 'oaiapp_two' })
+    const { flow, release } = await heldSignIn(chatgptAuth(issuer, home), BOB)
+    await auth.activate('oaiapp_one')
+    release()
+    expect(await flow.result).toMatchObject({ success: false, failure: 'cancelled' })
+    expect(auth.identity()).toBe('chatgpt:oaiapp_one:user-alice')
+  })
+
+  it('a refused account change revokes the grant it received', async () => {
+    const auth = chatgptAuth(issuer, homes())
+    await signIn(issuer, auth, ALICE)
+    expect((await signIn(issuer, auth, BOB)).result).toMatchObject({ failure: 'subject_mismatch' })
+    const issued = issuer.tokenRequests.length
+    expect(issued).toBe(2)
+    expect(issuer.revokeRequests).toHaveLength(1)
+    expect(issuer.revokeRequests[0]).toMatchObject({ client_id: 'oaiapp_one', token_type_hint: 'refresh_token' })
+    expect(issuer.revokeRequests[0].token).not.toBe(activeSession(stored(auth))!.refreshToken)
+  })
+})
+
+function stored(auth: ReturnType<typeof chatgptAuth>) {
+  return auth.lifecycle.read()
+}
 
 describe('Sign in with ChatGPT through the gateway', () => {
   const fake = (): ProviderAdapter => ({

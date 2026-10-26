@@ -5,11 +5,11 @@
 // ephemeral port, one-shot callback, state first, and the issued client id checks.
 // See THIRD_PARTY_NOTICES.md.
 
-import { createServer, type Server } from 'node:http'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { Discovery } from './discovery'
-import { ChatGptAuthError, MESSAGES } from './errors'
-import { oauthErrorCode, postForm } from './http'
+import { ChatGptAuthError, MESSAGES, transient } from './errors'
+import { oauthErrorCode, postForm, retryAt } from './http'
 import { createPkce, randomValue } from './pkce'
 import type { ChatGptRegistration } from './store'
 import { DIRECT_SCOPE } from './store'
@@ -146,6 +146,7 @@ const CALLBACK_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>M
 <p>Return to Mousse to finish signing in. You can close this window.</p></body></html>`
 
 const CLOSED_PAGE = 'This sign-in is no longer active.'
+const BAD_REQUEST_PAGE = "This address doesn't belong to the sign-in in progress. Return to Mousse."
 
 const PAGE_HEADERS = {
   'content-type': 'text/html; charset=utf-8',
@@ -157,48 +158,114 @@ const PAGE_HEADERS = {
 
 interface CallbackServer {
   port: number
-  /** The first request on the callback path. */
+  /** The first request on the callback path that carries this attempt's state. */
   result: Promise<URL>
   /** Idempotent. */
   close(): void
 }
 
-/** Listens on an ephemeral 127.0.0.1 port. The callback path answers once, then 410. */
-function startCallbackServer(): Promise<CallbackServer> {
+/**
+ * Ports the Fetch standard blocks (https://fetch.spec.whatwg.org/#port-blocking). A browser
+ * refuses to follow a redirect to them, so the callback must never listen on one.
+ */
+const FETCH_BAD_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113,
+  115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556,
+  563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667,
+  6668, 6669, 6679, 6697, 10080
+])
+
+export function isBrowserBlockedPort(port: number): boolean {
+  return FETCH_BAD_PORTS.has(port)
+}
+
+const MAX_BIND_ATTEMPTS = 10
+
+/** Tests only: replaces the blocked-port check, to force a rebind. */
+let blockedPortCheck: (port: number) => boolean = isBrowserBlockedPort
+export function setBlockedPortCheckForTests(check: ((port: number) => boolean) | null): void {
+  blockedPortCheck = check ?? isBrowserBlockedPort
+}
+
+function plain(response: ServerResponse, status: number, text: string): void {
+  response.writeHead(status, { ...PAGE_HEADERS, 'content-type': 'text/plain; charset=utf-8' }).end(text)
+}
+
+function listen(server: Server): Promise<number> {
   return new Promise((resolve, reject) => {
-    let used = false
-    let deliver!: (url: URL) => void
-    const result = new Promise<URL>((resolveResult) => (deliver = resolveResult))
-    const server: Server = createServer((request, response) => {
-      const url = new URL(request.url ?? '/', 'http://127.0.0.1')
-      if (request.method !== 'GET' || url.pathname !== CALLBACK_PATH) {
-        response.writeHead(404, { 'cache-control': 'no-store' }).end()
-        return
-      }
-      if (used) {
-        response.writeHead(410, { ...PAGE_HEADERS, 'content-type': 'text/plain; charset=utf-8' }).end(CLOSED_PAGE)
-        return
-      }
-      used = true
-      response.writeHead(200, PAGE_HEADERS).end(CALLBACK_PAGE)
-      deliver(url)
-    })
     server.once('error', () => reject(new ChatGptAuthError('signed_out', 'callback', MESSAGES.callbackServer)))
-    server.listen(0, '127.0.0.1', () => {
-      resolve({
-        port: (server.address() as AddressInfo).port,
-        result,
-        close: () => {
-          used = true
-          if (!server.listening) return
-          server.close()
-          // close() only stops new connections. A browser's spare keep-alive connection would
-          // otherwise stay attached to this server and swallow a later attempt's callback.
-          server.closeAllConnections()
-        }
-      })
-    })
+    server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port))
   })
+}
+
+function closeServer(server: Server): void {
+  if (!server.listening) return
+  server.close()
+  // close() only stops new connections. A browser's spare keep-alive connection would otherwise
+  // stay attached to this server and swallow a later attempt's callback.
+  server.closeAllConnections()
+}
+
+/**
+ * Listens on an ephemeral 127.0.0.1 port that browsers accept (rebinding when the system picks a
+ * blocked one). The callback path answers once, and only to this attempt's state:
+ * - a request the URL parser rejects, or with another state, gets 400 and the wait goes on, so a
+ *   stray or hostile local request can neither crash the daemon nor end the sign-in;
+ * - after the one answer, every request gets 410.
+ */
+async function startCallbackServer(state: string): Promise<CallbackServer> {
+  let used = false
+  let deliver!: (url: URL) => void
+  const result = new Promise<URL>((resolveResult) => (deliver = resolveResult))
+  const handle = (request: IncomingMessage, response: ServerResponse) => {
+    let url: URL
+    try {
+      url = new URL(request.url ?? '/', 'http://127.0.0.1')
+    } catch {
+      plain(response, 400, BAD_REQUEST_PAGE)
+      return
+    }
+    if (request.method !== 'GET' || url.pathname !== CALLBACK_PATH) {
+      response.writeHead(404, { 'cache-control': 'no-store' }).end()
+      return
+    }
+    if (used) {
+      plain(response, 410, CLOSED_PAGE)
+      return
+    }
+    const states = url.searchParams.getAll('state')
+    if (states.length !== 1 || states[0] !== state) {
+      plain(response, 400, BAD_REQUEST_PAGE)
+      return
+    }
+    used = true
+    response.writeHead(200, PAGE_HEADERS).end(CALLBACK_PAGE)
+    deliver(url)
+  }
+  for (let attempt = 0; attempt < MAX_BIND_ATTEMPTS; attempt++) {
+    const server: Server = createServer((request, response) => {
+      try {
+        handle(request, response)
+      } catch {
+        if (!response.headersSent) plain(response, 500, BAD_REQUEST_PAGE)
+        else response.destroy()
+      }
+    })
+    const port = await listen(server)
+    if (blockedPortCheck(port)) {
+      closeServer(server)
+      continue
+    }
+    return {
+      port,
+      result,
+      close: () => {
+        used = true
+        closeServer(server)
+      }
+    }
+  }
+  throw new ChatGptAuthError('signed_out', 'callback', MESSAGES.callbackServer)
 }
 
 function rejectOnAbort(signal: AbortSignal): Promise<never> {
@@ -219,7 +286,7 @@ export async function authorize(input: AuthorizeInput): Promise<AuthorizationGra
   const { verifier, challenge } = createPkce()
   const state = randomValue()
   const nonce = randomValue()
-  const server = await startCallbackServer()
+  const server = await startCallbackServer(state)
   const redirectUri = `http://127.0.0.1:${server.port}${CALLBACK_PATH}`
   const pasteWithdrawn = new AbortController()
   try {
@@ -283,14 +350,15 @@ export async function exchangeCode(discovery: Discovery, grant: Omit<Authorizati
     )
   } catch {
     if (signal?.aborted) throw new ChatGptAuthError('cancelled', 'cancelled', MESSAGES.cancelled)
-    throw new ChatGptAuthError('timeout', 'transient', MESSAGES.exchangeFailed)
+    throw transient(MESSAGES.exchangeFailed)
   }
   if (!response.ok) {
     const code = oauthErrorCode(response.body)
     if (code === 'invalid_grant') throw new ChatGptAuthError('signed_out', 'code_expired', MESSAGES.codeExpired)
     if (code === 'access_denied') throw new ChatGptAuthError('signed_out', 'declined', MESSAGES.declined)
     if (code === 'invalid_client') throw new ChatGptAuthError('wont_run', 'invalid_client', MESSAGES.invalidClient)
-    throw new ChatGptAuthError('signed_out', 'transient', MESSAGES.exchangeFailed)
+    if (response.status === 429 || response.status >= 500) throw transient(MESSAGES.exchangeFailed, response.status, retryAt(response.retryAfter))
+    throw new ChatGptAuthError('signed_out', 'invalid_response', MESSAGES.exchangeFailed)
   }
   return parseTokenResponse(response.body)
 }
