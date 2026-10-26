@@ -12,7 +12,10 @@ export const ANTIGRAVITY_VERSION = ANTIGRAVITY_RELEASE.replace(/^agy_acp_server_
 export const ANTIGRAVITY_CAPS: HarnessCaps = Object.freeze({
   ...ANTIGRAVITY_CAPABILITIES,
   planMode: false,
-  contextUsage: 'none'
+  contextUsage: 'none',
+  // The agent asks Mousse for every tool permission and file write.
+  toolControl: 'approval_only',
+  budgets: 'unsupported'
 })
 
 /** The turn runtime of Antigravity: the ACP adapter with the preset's name and capabilities. */

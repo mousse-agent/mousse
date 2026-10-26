@@ -11,7 +11,7 @@ import type { ProviderAdapter } from '../adapters/ProviderAdapter'
 /**
  * Test drivers over a plain `ProviderAdapter` (scripted, fake or replay adapters), so run-engine
  * tests drive the orchestrator through the real gateway. Capabilities are the adapter's own plus
- * the gateway's two, derived the way the PR 1 drivers derive them.
+ * the gateway's three, derived the way the drivers derive them.
  */
 export function adapterDriver(adapter: ProviderAdapter, extra: Partial<HarnessCaps> & { runtime?: Partial<DriverRuntime> } = {}): HarnessDriver {
   const { runtime, ...caps } = extra
@@ -25,7 +25,8 @@ export function adapterDriver(adapter: ProviderAdapter, extra: Partial<HarnessCa
     canInstall: false,
     customModels: true,
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
-    caps: () => ({ ...adapter.capabilities, planMode: true, contextUsage, ...caps }),
+    // Mousse-run tools (strong containment) are exact; the vendor-like test runtimes ask first.
+    caps: () => ({ ...adapter.capabilities, planMode: true, contextUsage, toolControl: adapter.capabilities.containment === 'strong' ? 'exact' : 'approval_only', budgets: 'unsupported', ...caps }),
     create: () => ({
       adapter,
       configured: () => adapter.configured?.() ?? false,

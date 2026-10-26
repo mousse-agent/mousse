@@ -43,6 +43,21 @@ export interface HarnessCaps {
    * (the gauge is hidden rather than fabricated).
    */
   contextUsage: 'measured' | 'reported' | 'none'
+  /**
+   * How far Mousse controls which tools the runtime runs: `exact` (Mousse runs the tools: an exact
+   * allowlist holds), `approval_only` (the runtime asks Mousse before each tool, with its permission
+   * mode pinned), `uncontrolled` (the runtime approves tools itself). An uncontrolled instance runs
+   * interactive turns only.
+   */
+  toolControl: 'exact' | 'approval_only' | 'uncontrolled'
+  /**
+   * Turn and cost budgets (`RunPolicy.budget.maxTurns|maxUsd`). `hard` = Mousse refuses the next model
+   * request (compaction, summaries, retries included) or tool call before it starts; spend limits
+   * also need a conservative pre-request reservation with the output cap lowered to fit. A limit
+   * checked after a response is `observed`. `unsupported`: neither. A wall-clock budget is the
+   * gateway's own and applies everywhere.
+   */
+  budgets: 'hard' | 'observed' | 'unsupported'
 }
 
 /**
@@ -55,7 +70,7 @@ export type RunCapabilities = Pick<
 >
 
 export const HARNESS_CAP_KEYS = [
-  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage'
+  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'budgets'
 ] as const satisfies ReadonlyArray<keyof HarnessCaps>
 
 /** What a caller picks to run an agent. */
@@ -66,9 +81,17 @@ export interface ProviderSelection {
   effort?: string
 }
 
+/**
+ * Who started the turn: a person in a chat (`interactive`), a delegated child, a workflow step, an
+ * agent definition or a bot. Retries, continuations and steers of a turn keep its origin.
+ */
+export type TurnOrigin = 'interactive' | 'delegated' | 'workflow' | 'definition' | 'bot'
+
 /** Restrictions a run must honour. Turn admission fails closed when an instance cannot enforce them. */
 export interface RunPolicy {
   mode: 'default' | 'plan'
+  /** Absent on bindings recorded before origins existed: they read as `interactive`. */
+  origin?: TurnOrigin
   /** Exact tool allowlist (and optional denylist); absent = the instance's normal tools. */
   tools?: { allow: string[]; deny?: string[] }
   approvals: 'ask' | 'grants' | 'never'
@@ -97,6 +120,44 @@ export interface ExecutionBinding {
   model: string
   effort?: string
   policy: RunPolicy
+  /**
+   * The instance's capabilities when the binding was made: an attempt runs on them even when the
+   * runtime's facts change meanwhile. Absent on bindings from before snapshots (live caps apply).
+   */
+  caps?: HarnessCaps
+  /** Revision of the runtime facts the snapshot came from (0: none yet). */
+  factsRevision?: number
+  /** The executable the binding was made with; a retry after it changed is `binding_stale`. */
+  binary?: BinaryFingerprint
+}
+
+/** Identifies one executable file: a self-update in place changes its size or modification time. */
+export interface BinaryFingerprint {
+  path: string
+  size: number
+  mtimeMs: number
+}
+
+/**
+ * What a runtime told Mousse about itself for one instance (ACP `initialize`, `session/new`).
+ * Kept per instance, because launch arguments, environment and sign-in change it; dropped when the
+ * instance's config revision, account generation or executable changes.
+ */
+export interface RuntimeFacts {
+  instanceId: string
+  configRevision: number
+  accountGeneration: number
+  binary: BinaryFingerprint
+  protocolVersion?: number
+  /** The agent's own name and version, when it announced them. */
+  agentInfo?: { name?: string; version?: string }
+  agentCapabilities?: Record<string, unknown>
+  authMethods?: Array<{ id: string; name: string; type?: string; description?: string; vars?: string[] }>
+  configOptions?: unknown[]
+  modes?: Array<{ id: string; name: string }>
+  models?: Array<{ id: string; label: string }>
+  capturedAt: string
+  source: 'handshake' | 'session'
 }
 
 /** Why the gateway could not serve a request. Typed so callers never parse messages. */

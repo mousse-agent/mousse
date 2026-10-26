@@ -1,7 +1,7 @@
-import type { Enforceability, HarnessCaps, RunPolicy } from '../../shared/harness/types'
+import type { Enforceability, HarnessCaps, RunPolicy, TurnOrigin } from '../../shared/harness/types'
 
 /**
- * Capability readers for the two keys the gateway adds to the run engine's eight (SPEC §13.2: every
+ * Capability readers for the keys the gateway adds to the run engine's eight (SPEC §13.2: every
  * capability key has a reader, and every reader has a caller), and the policy rules turn admission
  * applies.
  */
@@ -20,14 +20,58 @@ export function contextGauge(caps: Pick<HarnessCaps, 'contextUsage'>): HarnessCa
 }
 
 /**
+ * How far Mousse controls the instance's tools. Caps from before the key existed read as
+ * `uncontrolled`: Mousse never assumes control it cannot show.
+ */
+export function toolControlLevel(caps: Partial<Pick<HarnessCaps, 'toolControl'>>): HarnessCaps['toolControl'] {
+  return caps.toolControl ?? 'uncontrolled'
+}
+
+/** Whether turn and cost budgets hold on the instance. Caps without the key read as `unsupported`. */
+export function budgetsLevel(caps: Partial<Pick<HarnessCaps, 'budgets'>>): HarnessCaps['budgets'] {
+  return caps.budgets ?? 'unsupported'
+}
+
+/**
+ * Purposes a person drives turn by turn. Only these may resolve an `uncontrolled` instance: every
+ * other purpose (delegation, definitions, workflows, titles, and any purpose added later) runs
+ * without a person watching each tool.
+ */
+export const INTERACTIVE_PURPOSES: ReadonlySet<string> = new Set(['composer', 'default', 'turn', 'channel_model', 'cli_model'])
+
+/** Whether a purpose may run on an instance with these caps. */
+export function purposeAllowed(caps: Partial<Pick<HarnessCaps, 'toolControl'>>, purpose: string): boolean {
+  return toolControlLevel(caps) !== 'uncontrolled' || INTERACTIVE_PURPOSES.has(purpose)
+}
+
+/** The origin of a policy; bindings recorded before origins existed are interactive. */
+export function policyOrigin(policy: Pick<RunPolicy, 'origin'>): TurnOrigin {
+  return policy.origin ?? 'interactive'
+}
+
+/**
  * Whether an instance with `caps` can honour `policy`. Fails closed: a restriction the instance
- * cannot enforce is `policy_unenforceable`, naming the capabilities it lacks. PR 1 instances run
- * their own tools (except the pi loop), so an exact tool allowlist needs strong containment.
+ * cannot enforce is `policy_unenforceable`, naming the capabilities it lacks.
+ * - an exact tool allowlist needs `exact` tool control;
+ * - a turn or cost budget needs `hard` budgets: Mousse refuses the next model request (compaction,
+ *   summaries, retries included) or tool call before it starts, and holds spend limits with a
+ *   conservative pre-request reservation; a limit checked after a response is only `observed`
+ *   (a wall-clock budget is the gateway's everywhere);
+ * - pre-granted or no approvals need at least `approval_only`;
+ * - a turn nobody watches (delegated, workflow, definition, bot) needs more than `uncontrolled`,
+ *   for its first dispatch and every retry, continuation and steer.
  */
 export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: string): Enforceability {
   const missing: Array<keyof HarnessCaps> = []
+  const control = toolControlLevel(caps)
   if (policy.mode === 'plan' && !planModeAvailable(caps)) missing.push('planMode')
-  if (policy.tools && caps.containment !== 'strong') missing.push('containment')
+  const needsExact = Boolean(policy.tools)
+  const needsHardBudget = policy.budget?.maxTurns !== undefined || policy.budget?.maxUsd !== undefined
+  const needsApprovals = policy.approvals === 'grants' || policy.approvals === 'never'
+  const unattended = policyOrigin(policy) !== 'interactive'
+  if ((needsExact && control !== 'exact') || (needsApprovals && control === 'uncontrolled') || (unattended && control === 'uncontrolled'))
+    missing.push('toolControl')
+  if (needsHardBudget && budgetsLevel(caps) !== 'hard') missing.push('budgets')
   if (!missing.length) return { ok: true }
   return {
     ok: false,

@@ -6,13 +6,15 @@ import type {
   RunsState,
   UpdateAffordance
 } from '../../shared/harness/status'
+import { statSync } from 'node:fs'
+import type { BinaryFingerprint } from '../../shared/harness/types'
 import { parseCliVersion } from '../providers/cliConfig'
-import { compareVersions, installOwner, type AuthReading, type DriverRuntime, type HarnessDriver } from './driver'
+import { compareVersions, installOwner, type AuthReading, type DriverRuntime, type HarnessDriver, type InstanceConfig } from './driver'
 import { resolveBinary, type InstanceEnv } from './env'
 import { runHarness } from './spawn'
 
 /** Deadlines of one probe. A version check is a few hundred ms; a sign-in check may start the CLI. */
-export const PROBE_TIMEOUTS = { versionMs: 8_000, authMs: 20_000 }
+export const PROBE_TIMEOUTS = { versionMs: 8_000, authMs: 20_000, handshakeMs: 20_000 }
 
 /** What one probe found, before the gateway applies staleness and the instance's scope. */
 export interface ProbeResult {
@@ -23,6 +25,8 @@ export interface ProbeResult {
   compatibility: { state: CompatibilityState; testedRange?: string }
   update?: UpdateAffordance
   binary?: InstanceBinary
+  /** The executable's size and modification time when checked: runtime facts recorded for another one are dropped. */
+  fingerprint?: BinaryFingerprint
   /** A phase hit its deadline; the gateway keeps the last good values and marks the snapshot stale. */
   timedOut: boolean
 }
@@ -72,10 +76,26 @@ function withDeadline<T>(work: Promise<T>, ms: number): Promise<{ value: T } | {
   })
 }
 
+/** Size and modification time of an executable; undefined when it cannot be read. */
+export function fingerprintOf(path: string | undefined): BinaryFingerprint | undefined {
+  if (!path) return undefined
+  try {
+    const stat = statSync(path)
+    return { path, size: stat.size, mtimeMs: stat.mtimeMs }
+  } catch {
+    return undefined
+  }
+}
+
+export function sameBinary(a: BinaryFingerprint | undefined, b: BinaryFingerprint | undefined): boolean {
+  return Boolean(a && b && a.path === b.path && a.size === b.size && a.mtimeMs === b.mtimeMs)
+}
+
 /**
- * Checks one instance: which binary would run, whether it starts (`--version`, never a model turn
- * or the heavy runtime), its version against the tested range, and its sign-in. Each phase has a
- * hard deadline; a version check that hangs is killed with its process tree.
+ * Checks one instance: which binary would run, whether it starts (its version flag, never a model
+ * turn or the heavy runtime), its version against the tested range, and its sign-in. With
+ * `handshake` (Add, Recheck, after install) a runtime that has one also runs its start-up check.
+ * Each phase has a hard deadline; a version check that hangs is killed with its process tree.
  */
 export async function probeInstance(input: {
   driver: HarnessDriver
@@ -83,7 +103,11 @@ export async function probeInstance(input: {
   env: InstanceEnv
   /** The explicit executable, when one is set. */
   override?: string
+  /** The instance's settings, for the driver's version flag. */
+  config?: InstanceConfig
   force: boolean
+  /** Run the runtime's start-up check too (`DriverRuntime.handshake`). */
+  handshake?: boolean
   timeouts?: Partial<typeof PROBE_TIMEOUTS>
   now?: () => Date
 }): Promise<ProbeResult> {
@@ -136,12 +160,14 @@ export async function probeInstance(input: {
   }
 
   const binary: InstanceBinary = { path: resolved.launch.path, source: resolved.source, owner: installOwner(resolved.launch.path, resolved.source) }
+  const fingerprint = fingerprintOf(resolved.launch.path)
   let runs: ProbeResult['runs'] = { state: 'yes' }
   let install: InstallState = installing ? 'installing' : 'installed'
   let timedOut = false
+  const versionArgs = driver.versionArgs ? driver.versionArgs(input.config ?? { home: 'default' }) : ['--version']
   if (managed?.version && resolved.source === 'managed') binary.version = managed.version
-  else {
-    const result = await runHarness(env, 'version', resolved.launch.command, [...resolved.launch.args, '--version'], { timeoutMs: timeouts.versionMs, maxBytes: 64 * 1024 })
+  else if (versionArgs) {
+    const result = await runHarness(env, 'version', resolved.launch.command, [...resolved.launch.args, ...versionArgs], { timeoutMs: timeouts.versionMs, maxBytes: 64 * 1024 })
     if (result.timedOut) {
       timedOut = true
       runs = { state: 'unknown', failure: 'timeout', message: `${driver.label} did not answer --version in time.` }
@@ -155,6 +181,25 @@ export async function probeInstance(input: {
       const version = parseCliVersion(`${result.stdout}\n${result.stderr}`)
       if (version) binary.version = version
       else runs = { state: 'yes', failure: 'bad_version', message: `Mousse could not read the ${driver.label} version.` }
+    }
+  }
+
+  if (runs.state !== 'no' && input.handshake && runtime.handshake) {
+    const controller = new AbortController()
+    try {
+      const shook = await withDeadline(runtime.handshake(controller.signal), timeouts.handshakeMs)
+      if ('timedOut' in shook) {
+        controller.abort()
+        timedOut = true
+        runs = { state: 'unknown', failure: 'timeout', message: `${driver.label} did not finish starting in time.` }
+      } else runs = { state: 'yes' }
+    } catch (error) {
+      runs = { state: 'no', failure: 'exited', message: `${driver.label} could not start: ${error instanceof Error ? error.message : String(error)}` }
+    }
+    // A version the agent announced itself, when the executable has no version flag.
+    if (!binary.version) {
+      const announced = runtime.runtimeFacts?.()?.agentInfo?.version
+      if (announced) binary.version = announced
     }
   }
 
@@ -172,5 +217,5 @@ export async function probeInstance(input: {
   }
   const compatibility = compatibilityOf(driver, binary.version)
   const update = updateAffordance(driver, binary, compatibility)
-  return { checkedAt, install, runs, auth, compatibility, ...(update ? { update } : {}), binary, timedOut }
+  return { checkedAt, install, runs, auth, compatibility, ...(update ? { update } : {}), binary, ...(fingerprint ? { fingerprint } : {}), timedOut }
 }

@@ -11,7 +11,10 @@ export const CODEX_TESTED_VERSIONS = { min: '0.100.0', max: '0.162.999' }
 export const CODEX_CAPS: HarnessCaps = Object.freeze({
   ...CODEX_CAPABILITIES,
   planMode: true,
-  contextUsage: 'reported'
+  contextUsage: 'reported',
+  // Codex asks Mousse before each tool under the approval policy Mousse sets.
+  toolControl: 'approval_only',
+  budgets: 'unsupported'
 })
 
 const SIGN_IN_COMMAND = 'codex login'
