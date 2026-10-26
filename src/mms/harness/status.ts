@@ -29,6 +29,8 @@ export interface ProbeResult {
   fingerprint?: BinaryFingerprint
   /** A phase hit its deadline; the gateway keeps the last good values and marks the snapshot stale. */
   timedOut: boolean
+  /** The runtime's start-up check ran in this probe (`runs` says how it went). */
+  handshakeRan?: boolean
 }
 
 export function testedRange(driver: HarnessDriver): string | undefined {
@@ -184,7 +186,8 @@ export async function probeInstance(input: {
     }
   }
 
-  if (runs.state !== 'no' && input.handshake && runtime.handshake) {
+  const handshakeRan = runs.state !== 'no' && Boolean(input.handshake && runtime.handshake)
+  if (handshakeRan && runtime.handshake) {
     const controller = new AbortController()
     try {
       const shook = await withDeadline(runtime.handshake(controller.signal), timeouts.handshakeMs)
@@ -217,5 +220,5 @@ export async function probeInstance(input: {
   }
   const compatibility = compatibilityOf(driver, binary.version)
   const update = updateAffordance(driver, binary, compatibility)
-  return { checkedAt, install, runs, auth, compatibility, ...(update ? { update } : {}), binary, ...(fingerprint ? { fingerprint } : {}), timedOut }
+  return { checkedAt, install, runs, auth, compatibility, ...(update ? { update } : {}), binary, ...(fingerprint ? { fingerprint } : {}), timedOut, ...(handshakeRan ? { handshakeRan } : {}) }
 }

@@ -23,7 +23,7 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
-function fixture(authMethods: unknown[] = []) {
+function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-acp-driver-'))
   homes.push(home)
   const calls: string[] = []
@@ -31,6 +31,7 @@ function fixture(authMethods: unknown[] = []) {
     app
       .onRequest(methods.agent.initialize, () => {
         calls.push('initialize')
+        if (options.starts && !options.starts()) throw new Error('agent crashed on start')
         return { protocolVersion: PROTOCOL_VERSION, agentInfo: { name: 'fake', version: '1.2.3' }, agentCapabilities: { loadSession: false }, authMethods: authMethods as never }
       })
       .onRequest(methods.agent.authenticate, () => {
@@ -54,7 +55,8 @@ function fixture(authMethods: unknown[] = []) {
   let stored: unknown = {}
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
   const notices: string[] = []
-  const harness = testHarness({ drivers: [acpDriver({ connect: (_context, request) => agent.connect(request) })], instances, profileHome: home })
+  let clock = Date.now()
+  const harness = testHarness({ drivers: [acpDriver({ connect: (_context, request) => agent.connect(request) })], instances, profileHome: home, now: () => clock })
   harness.setLiveHost({ notice: (_threadId, text) => notices.push(text) })
   harnesses.push(harness)
   const sink = Object.fromEntries(['text', 'thinking', 'tool', 'nativeMessages', 'compaction', 'retry', 'progress', 'usage', 'providerRef', 'steerAccepted', 'providerMetrics', 'lineEdits'].map((name) => [name, vi.fn()])) as unknown as TurnSpec['sink']
@@ -67,7 +69,7 @@ function fixture(authMethods: unknown[] = []) {
     control: { drainSteer: () => undefined, heartbeat: () => {} } as unknown as TurnSpec['control'],
     host: { mcp: null, context: { nativeHistoryAfterTurn: (text: string) => text } } as unknown as TurnSpec['host']
   })
-  return { home, harness, calls, agent, notices, spec }
+  return { home, harness, calls, agent, notices, spec, tick: (ms: number) => { clock += ms } }
 }
 
 describe('the generic ACP driver', () => {
@@ -95,6 +97,25 @@ describe('the generic ACP driver', () => {
     await harness.instances.signOut('acp:fake-agent')
     expect(calls).toContain('logout')
     expect((await snapshot()).auth.state).not.toBe('signed_in')
+  })
+
+  it('keeps a failed start-up check until the next one succeeds, through periodic checks', async () => {
+    let starts = false
+    const { harness, tick } = fixture([], { starts: () => starts })
+    await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath } })
+    const snapshot = async () => (await harness.instances.snapshots({ kind: 'device' }))[0]!
+    await vi.waitFor(async () => expect((await snapshot()).runs).toMatchObject({ state: 'no', failure: 'exited' }))
+    // A periodic check runs no start-up check for a command without a version flag.
+    tick(11 * 60_000)
+    await snapshot()
+    await vi.waitFor(async () => expect((await snapshot()).checkedAt).toBeDefined())
+    tick(11 * 60_000)
+    await harness.instances.snapshots({ kind: 'device' })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect((await snapshot()).runs).toMatchObject({ state: 'no', failure: 'exited' })
+    starts = true
+    await harness.instances.recheck('acp:fake-agent')
+    expect((await snapshot()).runs).toMatchObject({ state: 'yes' })
   })
 
   it('reports a command that cannot run as runs: no, never a fallback', async () => {

@@ -337,6 +337,8 @@ interface ProbeState {
   models?: { refreshedAt?: string; error?: string; live?: boolean }
   /** The account read running for a turn admission (resolves undefined = unknown). */
   accountCheck?: Promise<string | undefined>
+  /** The last start-up check: what it found, for which executable and config revision. */
+  handshake?: { runs: ProbeResult['runs']; fingerprint?: BinaryFingerprint; revision: number }
 }
 
 /** A removed instance's state directory, deleted once nothing uses it any more. */
@@ -1134,7 +1136,7 @@ export class Harness implements HarnessGateway {
       await Promise.race([this.shellPath, new Promise((resolve) => setTimeout(resolve, SHELL_PATH_WAIT_MS).unref?.())])
       const record = this.record(instanceId, { allowDisabled: true })
       const override = record.builtIn ? record.runtime.launch?.().binaryPath : record.config.binaryPath
-      const result = await probeInstance({
+      let result = await probeInstance({
         driver: record.driver,
         runtime: record.runtime,
         env: { ...record.env, searchPath: this.searchPath },
@@ -1144,6 +1146,13 @@ export class Harness implements HarnessGateway {
         ...(options.handshake ? { handshake: true } : {}),
         ...(this.options.probeTimeouts ? { timeouts: this.options.probeTimeouts } : {})
       })
+      // An executable without a version flag shows only through its start-up check: a periodic check
+      // keeps what the last one found until the program or its settings change.
+      const revision = this.counters.get(instanceId).configRevision
+      if (result.handshakeRan) state.handshake = { runs: result.runs, ...(result.fingerprint ? { fingerprint: result.fingerprint } : {}), revision }
+      else if (state.handshake && record.driver.versionArgs?.(record.config) === null && result.runs.state === 'yes' &&
+          state.handshake.revision === revision && sameBinary(state.handshake.fingerprint, result.fingerprint))
+        result = { ...result, runs: state.handshake.runs }
       state.result = result
       state.checkedAtMs = this.now()
       if (!result.timedOut) state.lastGood = result
