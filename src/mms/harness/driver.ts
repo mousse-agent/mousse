@@ -99,7 +99,7 @@ export interface DriverRuntime {
   refreshModels?(cwd: string): Promise<void>
   signIn?(session: LoginSession, cwd: string, method?: string): Promise<ProviderLoginResult>
   signOut?(): Promise<void>
-  install?(onProgress: (message: string) => void): Promise<void>
+  install?(onProgress: (message: string, fraction?: number) => void): Promise<void>
   cancelInstall?(): boolean
   installState?(): { installing: boolean; progress?: string }
   /** A Mousse-managed install and its known version. */

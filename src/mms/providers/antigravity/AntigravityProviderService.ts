@@ -731,7 +731,7 @@ export class AntigravityProviderService {
    * Downloads Google's pinned agent into the installation. Install and sign-in are separate:
    * this never starts a sign-in. A manual executable path is dropped so the verified install is used.
    */
-  async install(onProgress?: (message: string) => void): Promise<CliProviderConfig> {
+  async install(onProgress?: (message: string, fraction?: number) => void): Promise<CliProviderConfig> {
     if (this.stopped) throw new Error('Antigravity provider is stopped')
     if (this.installing) throw new Error('Antigravity is already being installed')
     const abort = new AbortController()

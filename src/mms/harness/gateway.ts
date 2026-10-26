@@ -1246,9 +1246,9 @@ export class Harness implements HarnessGateway {
     const operation: Operation = { started, prompts: 0, urlPrompts: [], cancel: () => runtime.cancelInstall?.() ?? false }
     this.operations.set(started.operationId, operation)
     queueMicrotask(() => {
-      void runtime.install!((message) => {
-        operation.progress = { message }
-        this.emit({ type: 'operation', data: { ...started, phase: 'progress', message } })
+      void runtime.install!((message, fraction) => {
+        operation.progress = { message, ...(fraction !== undefined ? { fraction } : {}) }
+        this.emit({ type: 'operation', data: { ...started, phase: 'progress', message, ...(fraction !== undefined ? { fraction } : {}) } })
         this.emitSnapshots({ kind: 'device' })
       })
         .then(() => this.emit({ type: 'operation', data: { ...started, phase: 'completed' } }))
