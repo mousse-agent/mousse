@@ -55,13 +55,20 @@ export interface McpCallRequest {
 
 /**
  * Who an in-process call acts for (PR 2 §2 `InProcessAuthority`). `run`: the legacy loop of a run
- * engine turn, which must be the thread's active run when the registry knows the run engine.
+ * engine turn, which must still be the thread's active run (read by the run's owner through
+ * `active`, else by the registry's own run engine).
  * `trusted`: a definition, bot or scheduled run with no run engine turn; its grants and budget were
  * checked by the caller (`LlmClient`), exactly as before. Either way the caller writes the ledger
  * (`ledgerEntryId`), so the registry writes none.
  */
 export type InProcessAuthority =
-  | { kind: 'run'; runId: string; ledgerEntryId?: string }
+  | {
+      kind: 'run'
+      runId: string
+      ledgerEntryId?: string
+      /** Whether the run is still the thread's active run, read by the run's owner (the registry may not know the run engine). */
+      active?: () => boolean
+    }
   | { kind: 'trusted'; ledgerEntryId?: string }
 
 export interface InProcessCall {
@@ -226,8 +233,8 @@ export class ToolRegistry {
     try {
       if (authority.kind === 'run') {
         const active = turn.threadId ? this.options.activeRunId(turn.threadId) : null
-        if (active !== null && active !== authority.runId)
-          throw notLive(`Run ${authority.runId} is no longer the active run of thread ${turn.threadId}.`)
+        const live = authority.active ? authority.active() : active === null || active === authority.runId
+        if (!live) throw notLive(`Run ${authority.runId} is no longer the active run of thread ${turn.threadId}.`)
       }
       const availability = tool.available?.(turn) ?? true
       if (availability !== true) return { text: availability, isError: true }

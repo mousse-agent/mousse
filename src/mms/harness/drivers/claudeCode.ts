@@ -86,6 +86,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     // Mousse's own PreToolUse hook stamps each Mousse call with the turn's token (`updatedInput`).
     mcpTurnBinding: 'per_call',
     userMcp: 'native',
+    // Claude Code passes MCP image content to the model, and every Claude model reads images.
+    mcpImageResults: true,
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: true }),
     caps: () => CLAUDE_CODE_CAPS,
     updateCommand: (owner: InstallOwner) => {

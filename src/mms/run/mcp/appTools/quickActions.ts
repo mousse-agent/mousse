@@ -8,7 +8,7 @@ import { disabledInSettings, plainSchema, truncateForDisplay, type MousseTool } 
  * it renders in the existing question UI (modal and inline question card).
  */
 export function questionApproval(questions: Pick<UserQuestionService, 'requestAnswers'>) {
-  return async (staged: StagedQuickAction, threadId: string): Promise<boolean> => {
+  return async (staged: StagedQuickAction, threadId: string, signal?: AbortSignal): Promise<boolean> => {
     const preview = staged.kind === 'bash' ? `$ ${staged.payload}` : staged.payload
     const answers = await questions.requestAnswers(
       [
@@ -23,7 +23,9 @@ export function questionApproval(questions: Pick<UserQuestionService, 'requestAn
           ]
         }
       ],
-      threadId
+      threadId,
+      // The question goes away with the call that asked it.
+      signal ? { signal } : {}
     )
     const decision = answers['approval']
     return decision === 'approve' || (Array.isArray(decision) && decision.includes('approve'))
@@ -55,7 +57,7 @@ export function quickActionTools(host: AppToolHost): MousseTool[] {
         response: JSON.stringify(args, null, 2)
       }, 'start')
       ctx.markEffect?.()
-      const result = await quickActions.execute(tool.name, args, ctx.turn.threadId || undefined)
+      const result = await quickActions.execute(tool.name, args, ctx.turn.threadId || undefined, ctx.signal)
       ctx.timeline?.record({
         kind: 'build_tool_result',
         title: `Quick action ${tool.name}`,

@@ -195,6 +195,29 @@ describe('a trusted definition run keeps its budgets with app tools in the batch
   })
 })
 
+describe('the run authority through the pi loop', () => {
+  it('an app tool call after the run stopped being the thread\'s active run is refused before its handler', async () => {
+    let active = true
+    const h = harness([
+      toolUse({ id: 'call-1', name: 'create_task', arguments: { description: 'while active' } }),
+      toolUse({ id: 'call-2', name: 'create_task', arguments: { description: 'after the run ended' } })
+    ])
+    // The second request is made after the host says the run is no longer active.
+    const result = await h.chat({
+      runId: 'run-1',
+      runActive: () => {
+        const now = active
+        active = false
+        return now
+      }
+    })
+    expect(h.tasks.list().map((task) => task.description)).toEqual(['while active'])
+    const results = toolResults(result.nativeMessages)
+    expect(results.map((message) => [message.toolCallId, message.isError])).toEqual([['call-1', false], ['call-2', true]])
+    expect(text(results[1])).toContain('Run run-1 is no longer the active run of thread thread-1.')
+  })
+})
+
 describe('callInProcess authorities', () => {
   it('trusted runs whatever run the thread has; run refuses when another run is active; neither writes a ledger row', async () => {
     const fixture = fakeAppToolHost()

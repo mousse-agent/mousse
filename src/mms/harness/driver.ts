@@ -179,6 +179,11 @@ export interface HarnessDriver {
   readonly mcpTurnBinding?: McpTurnBinding
   /** The user's own MCP servers: attached by the runtime itself, or proxied by Mousse (default `native`). */
   readonly userMcp?: 'native' | 'proxy'
+  /**
+   * The runtime hands a Mousse MCP tool result's images to its model, and the models it lists read
+   * images (a browser screenshot reaches the model). A custom model's own capabilities win.
+   */
+  readonly mcpImageResults?: boolean
   /** Lenient decoder of an instance's stored `config`: unknown or malformed fields fall back. */
   decodeConfig(raw: Record<string, unknown> | undefined): InstanceConfig
   /**

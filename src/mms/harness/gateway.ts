@@ -252,6 +252,11 @@ export interface HarnessCatalog {
   models(instanceId: string, scope: ProviderScope): InstanceModel[]
   /** A custom model the user added to the instance and has not hidden; runtimes run it by this definition. */
   customModel(instanceId: string, modelId: string): CustomModel | undefined
+  /**
+   * Images in a Mousse tool's result reach the model a runtime with its own loop runs (the browser's
+   * vision): a custom model's stated capability, else the driver's `mcpImageResults`.
+   */
+  toolImages(instanceId: string, modelId: string): boolean
 }
 
 /**
@@ -513,6 +518,13 @@ export class Harness implements HarnessGateway {
       customModel: (instanceId, modelId) => {
         const prefs = this.prefs.get(instanceId)
         return hidesModel(prefs, modelId) ? undefined : prefs.custom.find((model) => model.id === modelId)
+      },
+      toolImages: (instanceId, modelId) => {
+        const record = this.recordOrUndefined(instanceId)
+        if (!record) return false
+        const baseId = parseThinkingSuffixFromModelId(modelId).baseId
+        const custom = this.prefs.get(instanceId).custom.find((model) => model.id === modelId || model.id === baseId)
+        return custom ? custom.capabilities.images : record.driver.mcpImageResults === true
       }
     }
     this.legacy = {

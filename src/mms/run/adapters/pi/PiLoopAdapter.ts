@@ -88,6 +88,7 @@ export class PiLoopAdapter implements ProviderAdapter {
             ctl.heartbeat()
           },
           toolLedger: host.tools.toolLedger,
+          runActive: host.tools.runActive,
           onCompaction: (phase) => {
             sink.compaction(phase)
             ctl.heartbeat()

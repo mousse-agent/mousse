@@ -1,6 +1,6 @@
 import { DevGuiTools, isDevGuiToolsEnabled } from '../../../devgui/DevGuiTools'
 import type { AppToolHost } from './host'
-import { plainSchema, truncateForDisplay, type MousseTool } from './types'
+import { disabledInSettings, plainSchema, truncateForDisplay, type MousseTool } from './types'
 
 /**
  * Dev-only self-inspection of the Mousse window (`npm run dev`), for the main agent; gated by
@@ -15,7 +15,11 @@ export function devGuiTools(host: AppToolHost): MousseTool[] {
     access: 'actsAsCaller',
     class: 'mutation',
     listed: () => Boolean(host.devGui) && isDevGuiToolsEnabled(),
-    available: () => (isDevGuiToolsEnabled() ? true : 'Dev GUI tools are only available in development (`npm run dev`).'),
+    // Settings decide at call time too: a runtime with its own loop may have listed the tool before it was turned off.
+    available: (turn) => {
+      if (!isDevGuiToolsEnabled()) return 'Dev GUI tools are only available in development (`npm run dev`).'
+      return turn.settingsEnabled(tool.name) ? true : disabledInSettings(tool.name)
+    },
     offered: (turn) => !turn.subagent && isDevGuiToolsEnabled() && turn.settingsEnabled(tool.name) && Boolean(host.devGui),
     describe: () => `Dev GUI ${tool.name}`,
     handler: async (args, ctx) => {

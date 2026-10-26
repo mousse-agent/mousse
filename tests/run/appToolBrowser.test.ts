@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ExecutionPolicyService } from '../../src/mms/execution/ExecutionPolicyService'
 import type { BrowserExecutionBinding } from '../../src/mms/orchestrator/browser'
+import { mainBrowserBinding } from '../../src/mms/platform/mainBrowserBinding'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool, type BrowserToolContext, type BrowserToolOutput } from '../../src/shared/browser/automation'
@@ -194,6 +195,37 @@ describe('browser tools of a vendor turn', () => {
     expect(browser.dispatched[0].context.execution.threadId).toBe(d.thread.id)
     // The usable-tools note names the browser tools this turn may use.
     expect(vendor.bridges[0].turnPreamble).toMatch(/Usable now: .*browser_open/)
+  }, 30_000)
+
+  it('with the production binding factory, vision comes from the selected native model', async () => {
+    const browser = fakeBrowserPort()
+    const seen: Array<{ turn?: unknown; result?: Awaited<ReturnType<typeof callTool>> }> = []
+    const vendor = new VendorAdapter(async ({ input, mcp }) => {
+      seen.push({ turn: d!.orch.appToolTurns.get(input.runId), result: await callTool(mcp!, 'browser_screenshot', { sessionId: 'session-1' }) })
+      return 'Looked.'
+    })
+    d = await vendorDaemon([vendor])
+    d.orch.setBrowserRuntime(browser.port)
+    // The factory the profile installs: its binding starts with `vision: false`.
+    const services = {
+      profileId: 'profile-1',
+      settings: { get: () => d!.settings() },
+      threads: d.store,
+      projects: { getProject: () => undefined },
+      modeRegistry: { getModeSync: () => undefined }
+    } as unknown as Parameters<typeof mainBrowserBinding>[0]
+    d.orch.setMainAgentBrowserFactory((turn) => mainBrowserBinding(services, { ...turn, source: 'gui' }))
+    // Claude Code hands MCP images to its models.
+    await d.send('Take a look')
+    expect(seen[0].turn).toMatchObject({ browser: { mode: 'structured', vision: true } })
+    expect(seen[0].result!.content!.at(-1)).toEqual({ type: 'image', data: PNG, mimeType: 'image/png' })
+    // A custom model the user said reads no images: the screenshot is refused before dispatch.
+    const harness = (d.orch as unknown as { harness: { instances: { setModelPrefs(id: string, patch: unknown): Promise<unknown> } } }).harness
+    await harness.instances.setModelPrefs('claude', { custom: [{ id: 'vendor-model', capabilities: { efforts: [], images: false } }] })
+    await d.send('Look again')
+    expect(seen[1].turn).toMatchObject({ browser: { vision: false } })
+    expect(seen[1].result).toMatchObject({ isError: true, text: expect.stringMatching(/does not support image input/) })
+    expect(browser.dispatched.map((call) => call.name)).toEqual(['browser_screenshot'])
   }, 30_000)
 
   it('without a browser binding the vendor turn is told why, and nothing reaches the port', async () => {

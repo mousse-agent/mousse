@@ -200,6 +200,8 @@ export interface LlmChatOptions {
 
   /** The run engine run this loop turn belongs to; its app tools act for it (`InProcessAuthority`). */
   runId?: string
+  /** Whether `runId` is still its thread's active run; an app tool call after that is refused. Host-supplied. */
+  runActive?: () => boolean
 
   /** Abort in-flight stream and tool loop. */
   signal?: AbortSignal
@@ -1285,7 +1287,7 @@ export class LlmClient {
         const ledgerId = options.toolLedger?.start(toolCall)
         const authority: InProcessAuthority = trustedAgent || !options.runId
           ? { kind: 'trusted', ledgerEntryId: ledgerId }
-          : { kind: 'run', runId: options.runId, ledgerEntryId: ledgerId }
+          : { kind: 'run', runId: options.runId, ledgerEntryId: ledgerId, ...(options.runActive ? { active: options.runActive } : {}) }
         const dispatch = async (): Promise<ToolResultMessage> => {
           if (runtimeContext) return runtimeContext.executeTool(toolCall, requestSignal)
           if (appTurn && ((toolCall.name === 'publish_applet' && options.onPublishApplet) ||

@@ -49,7 +49,8 @@ export class QuickActionTools {
   constructor(
     private requestApproval: (
       action: StagedQuickAction,
-      threadId: string
+      threadId: string,
+      signal?: AbortSignal
     ) => Promise<boolean>,
     private publishCreated: (action: CreatedQuickAction) => void
   ) {}
@@ -83,10 +84,12 @@ export class QuickActionTools {
     return name === 'create_quick_action'
   }
 
+  /** `signal`: the call was abandoned (its turn stopped, its request closed); nothing is created after it. */
   async execute(
     name: string,
     args: Record<string, unknown>,
-    threadId?: string
+    threadId?: string,
+    signal?: AbortSignal
   ): Promise<{ text: string; isError: boolean }> {
     try {
       if (name !== 'create_quick_action') {
@@ -106,12 +109,14 @@ export class QuickActionTools {
       }
       let approved = false
       try {
-        approved = await this.requestApproval(staged, threadId)
+        approved = await this.requestApproval(staged, threadId, signal)
       } catch (err) {
         // Dismissed / timed-out approval resolves as "not created", not a crash.
         const reason = err instanceof Error ? err.message : String(err)
         return { text: `Quick action not created (${reason}).`, isError: false }
       }
+      // An approval that arrives after the call was abandoned creates nothing.
+      if (signal?.aborted) return { text: `Quick action "${staged.label}" was not created — the call was cancelled.`, isError: true }
       if (!approved) {
         return {
           text: `Quick action "${staged.label}" was not created — the user rejected it.`,

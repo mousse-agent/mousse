@@ -50,6 +50,11 @@ export class AppToolTurns {
     return updated
   }
 
+  /** The run's turn ended, however it ended (the executor's last word on it). */
+  dropRun(runId: string): void {
+    this.turns.delete(runId)
+  }
+
   /** The thread was deleted: nothing of it stays. */
   forgetThread(threadId: string): void {
     this.lastToken.delete(threadId)

@@ -123,7 +123,8 @@ import type { BrowserRuntimePort } from '../../shared/browser/runtime'
 import {
   type BrowserExecutionBinding,
   createDefinitionBrowserBinding,
-  readHostBrowserRuntime
+  readHostBrowserRuntime,
+  snapshotBrowserExecutionBinding
 } from './browser'
 import { computeContextUsage } from './contextUsage'
 import { getToolCallDisplay } from '../../shared/toolCallDisplay'
@@ -1713,7 +1714,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private async completeAppTurn(
     registered: AppToolTurn,
-    input: { promptRuntime: boolean; browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string }
+    input: { promptRuntime: boolean; browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string }
   ): Promise<TurnAppContext> {
     let skills: Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'> = { enabledSkills: [], loadedSkills: [] }
     if (input.promptRuntime) {
@@ -1731,8 +1732,13 @@ export class OrchestratorService extends EventEmitter {
         console.warn('skills unavailable for the turn', { threadId: registered.threadId, error: error instanceof Error ? error.message : String(error) })
       }
     }
+    // A runtime with its own loop runs the selected model natively: its vision decides whether a browser
+    // screenshot can reach the model (the pi loop's `LlmClient` sets it from its own model).
+    const browser = input.browser && input.promptRuntime
+      ? snapshotBrowserExecutionBinding({ ...input.browser, vision: this.harness.catalog.toolImages(input.instanceId, input.model) })
+      : input.browser
     const turn = this.appToolTurns.update(registered.runId, {
-      ...(input.browser ? { browser: input.browser } : {}),
+      ...(browser ? { browser } : {}),
       ...(input.onPublishApplet ? { onPublishApplet: input.onPublishApplet } : {}),
       ...skills
     }) ?? registered
@@ -5291,7 +5297,17 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
-  private async executeTurn(
+  /** One turn; whatever way it ends, nothing of its app-tool context stays registered. */
+  private async executeTurn(...args: Parameters<OrchestratorService['executeTurnBody']>): Promise<OrchestratorResponse> {
+    const runId = args[3]?.runId
+    try {
+      return await this.executeTurnBody(...args)
+    } finally {
+      if (runId) this.appToolTurns.dropRun(runId)
+    }
+  }
+
+  private async executeTurnBody(
     input: OrchestratorSendInput,
     reuseLastUser = false,
     displayUserMessage = true,
@@ -5899,7 +5915,7 @@ export class OrchestratorService extends EventEmitter {
         stagedApplets.push(validateAppletSubmission(value))
         return { queued: true, title: stagedApplets[stagedApplets.length - 1].title }
       } : undefined
-      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { promptRuntime, browser: browserExecution, onPublishApplet, userContent }) : undefined
+      const app = appTurn ? await this.completeAppTurn(appTurn.turn, { promptRuntime, browser: browserExecution, onPublishApplet, userContent, instanceId: instance.instanceId, model: selectedModel.model }) : undefined
       const adapterHost: AdapterHost = {
         tools: {
           onPublishApplet,
@@ -5908,7 +5924,9 @@ export class OrchestratorService extends EventEmitter {
           toolAccess: session.sharedWorkspace
             ? createAgentToolAccess(SHARED_READER_POLICY, session.sharedWorkspace.path)
             : turnAuthority && turnWriter ? { allows: () => true, execute: (_name, _args, run) => { conversationToolsUsed = true; return turnAuthority.runWriter(turnWriter, run) } } : undefined,
-          toolLedger: this.toolLedgerFor(engineRunId)
+          toolLedger: this.toolLedgerFor(engineRunId),
+          // The loop's app tools act only while this run is the thread's active one.
+          ...(engineRunId && this.runEngine ? { runActive: () => this.runEngine?.getActiveRun(session.threadId)?.runId === engineRunId } : {})
         },
         context: {
           // In-loop compaction checkpoints index the sent transcript; a switch handoff is not canonical.
