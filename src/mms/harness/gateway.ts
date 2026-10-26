@@ -1765,8 +1765,11 @@ export class Harness implements HarnessGateway {
       harnessFail('operation_busy', `${this.displayName(record)} is being installed. Wait for it to finish, then change its version.`, instanceId)
     if (record.builtIn && patch.home === 'private')
       harnessFail('unsupported', `The built-in ${record.driver.label} runs as you set it up. Add another instance for a separate home.`, instanceId)
-    if (patch.setup !== undefined && patch.setup !== (record.config.setup ?? patch.setup))
+    if (patch.setup !== undefined && (!record.driver.privateHomeFor || patch.setup !== (record.config.setup ?? 'existing')))
       harnessFail('unsupported', `${this.displayName(record)} keeps the setup it was added with. Add another entry for the other one.`, instanceId)
+    // A runtime pinned to Mousse's own install runs exactly that: no executable, arguments or variables of the user's.
+    if (record.runtime.pinned && (patch.binaryPath !== undefined || patch.args !== undefined || patch.env !== undefined))
+      harnessFail('unsupported', `${this.displayName(record)} runs the Codex Mousse installed for it, with its own settings.`, instanceId)
     const homeRule = privateHomeRule(record.driver, record.config)
     if (patch.home === 'private' && homeRule === 'forbidden')
       harnessFail('unsupported', `${this.displayName(record)} cannot use a separate home.`, instanceId)

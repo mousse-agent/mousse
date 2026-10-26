@@ -603,6 +603,16 @@ describe('harness gateway: a driver whose home depends on its setup (managed Cod
     const managed = await harness.instances.add({ driver: 'codex', config: { setup: 'managed' } })
     await expect(harness.instances.configure(managed.instanceId, { home: 'default' })).rejects.toMatchObject({ code: 'unsupported' })
     await expect(harness.instances.configure(managed.instanceId, { setup: 'existing' })).rejects.toMatchObject({ code: 'unsupported' })
+    // The built-in entry is the user's own setup; it never becomes a managed one.
+    await expect(harness.instances.configure('codex', { setup: 'managed' })).rejects.toMatchObject({ code: 'unsupported' })
+    expect((await harness.instances.configure('codex', { setup: 'existing', displayName: 'Mine' })).displayName).toBe('Mine')
+  })
+
+  it('a runtime pinned to the Mousse install refuses launch settings', async () => {
+    const harness = testHarness({ drivers: [adapterDriver(pi()), setupDriver({ pinned: () => ({ version: '0.162.1' }) })], instances: empty(), profileHome: home() })
+    const managed = await harness.instances.add({ driver: 'codex', config: { setup: 'managed' } })
+    for (const patch of [{ binaryPath: '/usr/bin/codex' }, { args: ['--x'] }, { env: { A: '1' } }])
+      await expect(harness.instances.configure(managed.instanceId, patch)).rejects.toMatchObject({ code: 'unsupported' })
   })
 
   it('an added existing-setup entry cannot be patched to a private home', async () => {
