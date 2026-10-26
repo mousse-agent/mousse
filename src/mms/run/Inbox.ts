@@ -53,7 +53,7 @@ export class Inbox {
           record.status,
           record.createdAt
         )
-      this.recorded(record)
+      this.recorded(record, 'status')
       return record
     })
   }
@@ -168,7 +168,7 @@ export class Inbox {
 
   /**
    * Gives rows back without a failure: delivered -> pending, not counted as a delivery attempt
-   * (`pendingCount` skips it), for a delivery that never started or was withdrawn (a queued
+   * (`pendingCount` subtracts it), for a delivery that never started or was withdrawn (a queued
    * notice the user removed). With `from`, only rows that owner still delivers move.
    */
   release(ids: readonly string[], from?: string): string[] {
@@ -178,7 +178,7 @@ export class Inbox {
         const current = this.get(id)
         if (!current || current.status !== 'delivered') continue
         if (from !== undefined && current.deliveredBy !== from) continue
-        // Recorded while the row is still delivered, so the pending write below is the only one counted.
+        // A payload write, so the pending write below is the only one `pendingCount` could count.
         this.patchPayload(id, { releases: Number((current.payload as { releases?: unknown } | null)?.releases ?? 0) + 1 })
         this.markPendingAgain([id])
         moved.push(id)
@@ -197,7 +197,7 @@ export class Inbox {
         const current = this.get(id)
         if (current?.status !== 'delivered' || current.deliveredBy !== from) continue
         this.db.statement('UPDATE inbox SET delivered_by = NULL WHERE inbox_id = ? AND status = ?').run(id, 'delivered')
-        this.recorded({ ...current, deliveredBy: null })
+        this.recorded({ ...current, deliveredBy: null }, 'payload')
         // Owned by nothing now: it no longer holds the tasks waiting on its thread.
         this.store.settleHold(current.threadId)
       }
@@ -266,7 +266,7 @@ export class Inbox {
         if (from !== undefined && current.deliveredBy !== from) continue
         this.db.statement('UPDATE inbox SET delivered_by = ? WHERE inbox_id = ? AND status = ?').run(deliveredBy, id, 'delivered')
         const next = { ...current, deliveredBy }
-        this.recorded(next)
+        this.recorded(next, 'payload')
         moved.push(next)
       }
       for (const threadId of new Set(moved.map((row) => row.threadId))) this.store.settleHold(threadId)
@@ -287,7 +287,7 @@ export class Inbox {
       const payload = JSON.parse(stableStringify(merged)) as unknown
       this.db.statement('UPDATE inbox SET payload = ? WHERE inbox_id = ?').run(stableStringify(payload), inboxId)
       const next = { ...current, payload }
-      this.recorded(next)
+      this.recorded(next, 'payload')
       // A delivery that gave up (`deliveryFailed`) no longer holds the thread's tasks.
       this.store.settleHold(next.threadId)
       return next
@@ -313,12 +313,17 @@ export class Inbox {
       .map(toInbox)
   }
 
-  /** How many times the row has been `pending` (its first write included). */
+  /**
+   * How many times the row has been `pending` (its first write included). Only status transitions
+   * count: a payload patch or an owner change on a pending row records the row again but is not an
+   * attempt. Events written before `change` existed have none and count as before.
+   */
   pendingCount(inboxId: string, threadId: string): number {
     const row = this.db
       .statement(
         `SELECT COUNT(*) AS n FROM thread_events WHERE thread_id = ? AND type = 'inbox.status'
-           AND json_extract(payload, '$.inboxId') = ? AND json_extract(payload, '$.status') = 'pending'`
+           AND json_extract(payload, '$.inboxId') = ? AND json_extract(payload, '$.status') = 'pending'
+           AND (json_extract(payload, '$.change') IS NULL OR json_extract(payload, '$.change') = 'status')`
       )
       .get(threadId, inboxId)
     // Releases (a withdrawn delivery) are not attempts.
@@ -350,7 +355,7 @@ export class Inbox {
         if (Number(result.changes) !== 1)
           fail('stale_write', `Inbox row ${id} changed while it was being updated.`)
         const next = { ...current, status: to, deliveredBy: by }
-        this.recorded(next)
+        this.recorded(next, 'status')
         moved.push(next)
       }
       // Any move can change what keeps the thread busy (an acknowledged row stops holding its tasks).
@@ -359,12 +364,13 @@ export class Inbox {
     })
   }
 
-  private recorded(record: InboxRecord): void {
+  /** `change`: `status` for a row that was written or moved, `payload` for a write that leaves its status as it was. */
+  private recorded(record: InboxRecord, change: 'status' | 'payload'): void {
     this.store.appendEvent({
       threadId: record.threadId,
       runId: record.runId,
       type: 'inbox.status',
-      payload: record
+      payload: { ...record, change }
     })
   }
 
