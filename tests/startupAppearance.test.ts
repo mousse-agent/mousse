@@ -38,7 +38,7 @@ it('reads saved appearance from the active default profile without rewriting eit
   writeFileSync(join(profileRoot, 'mousse.conf'), config)
   const shared = JSON.stringify({ settings: { appearance: fallback } })
   writeFileSync(join(directory, 'mousse.conf'), shared)
-  expect(readStartupAppearance(directory, fallback)).toEqual(saved)
+  expect(readStartupAppearance(directory, fallback)).toEqual({ ...saved, renderMath: true })
   expect(readFileSync(join(profileRoot, 'mousse.conf'), 'utf8')).toBe(config)
   expect(readFileSync(join(directory, 'mousse.conf'), 'utf8')).toBe(shared)
 })

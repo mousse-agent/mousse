@@ -28,12 +28,20 @@ describe('appearance settings', () => {
     expect(appearance.acrylicIntensity).toBe(55)
   })
 
+  it('renders math by default and keeps an explicit choice', () => {
+    expect(getDefaultSettings().appearance.renderMath).toBe(true)
+    expect(normalizeAppearance({}).renderMath).toBe(true)
+    expect(normalizeAppearance({ renderMath: false }).renderMath).toBe(false)
+    expect(normalizeAppearance({ renderMath: 'no' as never }).renderMath).toBe(true)
+  })
+
   it('migrates legacy acrylic theme ids', () => {
     expect(normalizeAppearance({ theme: 'system-acrylic' as never })).toEqual({
       theme: 'system',
       accentColor: '#a785c7',
       acrylic: true,
-      acrylicIntensity: 55
+      acrylicIntensity: 55,
+      renderMath: true
     })
     expect(normalizeAppearance({ theme: 'dark-acrylic' as never, accentColor: '#5b8def' })).toMatchObject({
       theme: 'dark',

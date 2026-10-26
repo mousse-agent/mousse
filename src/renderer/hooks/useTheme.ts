@@ -6,6 +6,7 @@ import { buildAccentCssVars } from '../../shared/accentPalette'
 import { BLACKSPHERE_COLORS, BLACKSPHERE_TOKEN_COLORS, applyVsCodeColors, clearVsCodeColors, injectTokenColors, clearTokenColors } from '../../shared/vscodeTheme'
 
 import { FIXED_SURFACE_THEMES } from '../../shared/themeSurfaces'
+import { setRenderMath } from '../markdown/math/renderMathSetting'
 
 const FIXED_SURFACE_VARS = [
   ...new Set(Object.values(FIXED_SURFACE_THEMES).flatMap((vars) => Object.keys(vars ?? {})))
@@ -234,6 +235,7 @@ export function useTheme(options?: { windowMaterial?: boolean }): void {
       const settings = await window.mousse.settings.get()
       if (cancelled) return
       applyAppearance(settings.appearance)
+      setRenderMath(normalizeAppearance(settings.appearance).renderMath)
       if (applyMaterial) {
         await syncWindowBackground()
       }
@@ -243,6 +245,7 @@ export function useTheme(options?: { windowMaterial?: boolean }): void {
 
     const unsub = window.mousse.settings.onChanged((settings) => {
       applyAppearance(settings.appearance)
+      setRenderMath(normalizeAppearance(settings.appearance).renderMath)
       if (applyMaterial) {
         void syncWindowBackground()
       }
@@ -264,6 +267,8 @@ export function useTheme(options?: { windowMaterial?: boolean }): void {
       cancelled = true
       unsub()
       mql?.removeEventListener?.('change', onScheme)
+      // Math shows as source until the next profile's settings load.
+      setRenderMath(undefined)
     }
   }, [applyMaterial, profileId])
 }

@@ -397,6 +397,23 @@ html[data-theme] .an-edit-tool-card .an-edit-diff code {
 .an-markdown .an-md-alert-caution {
   --an-alert-color: light-dark(#dc2626, #f87171);
 }
+/* Math: KaTeX lays out its own spans; the chat's pre-line prose rule would
+   turn its internal whitespace into line breaks. Wide equations scroll. The
+   KaTeX stylesheet itself loads with the math chunk, not with the app. */
+.an-markdown .katex {
+  white-space: normal;
+}
+.an-markdown .katex-display {
+  margin: 0.75rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.an-markdown .an-math {
+  max-width: 100%;
+}
+.an-markdown div.an-math {
+  margin: 0.5rem 0;
+}
 
 /* Marker hierarchy: disc → circle → square so depth reads even when
    the indent step is subtle in a narrow chat column. */
