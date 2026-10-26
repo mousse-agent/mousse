@@ -44,14 +44,14 @@ export function sessionCapability(info: AcpAgentInfo | undefined, name: 'resume'
 }
 
 /**
- * `initialize` with Mousse's client capabilities: client fs only where the preset offers it, and
- * no client terminals. `strictProtocol` refuses any version but Mousse's; otherwise the answer is
+ * `initialize` with Mousse's client capabilities: client fs only where the preset offers it, no
+ * client terminals, plus what the runtime adds (sign-in capabilities). `strictProtocol` refuses any version but Mousse's; otherwise the answer is
  * read by its shape, and a newer version is reported, never refused.
  */
-export async function initializeAgent(connection: AcpRpc, options: { clientFs: boolean; label: string; strictProtocol?: boolean; meta?: Record<string, unknown> }): Promise<AcpAgentInfo> {
+export async function initializeAgent(connection: AcpRpc, options: { clientFs: boolean; label: string; strictProtocol?: boolean; meta?: Record<string, unknown>; capabilities?: Record<string, unknown> }): Promise<AcpAgentInfo> {
   const response = await connection.agent.request(methods.agent.initialize, {
     protocolVersion: PROTOCOL_VERSION,
-    clientCapabilities: { fs: { readTextFile: options.clientFs, writeTextFile: options.clientFs }, terminal: false },
+    clientCapabilities: { fs: { readTextFile: options.clientFs, writeTextFile: options.clientFs }, terminal: false, ...options.capabilities },
     clientInfo: { name: 'Mousse', version: mousseVersion() },
     ...(options.meta ? { _meta: options.meta } : {})
   })

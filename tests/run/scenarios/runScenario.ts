@@ -242,7 +242,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       claudeCodeDriver({ builtIn: () => services.claude! }),
       antigravityDriver({ builtIn: () => services.antigravity! }),
       // The generic driver runs for real; only its agent connection is replayed.
-      acpDriver({ connect: (_context, request) => replayAcpProcess(transport)(request) }),
+      acpDriver({ connect: (_context, request) => replayAcpProcess(transport)(request), pty: { available: () => false } }),
       codexDriver({ builtIn: () => services.codex! })
     ]
   })

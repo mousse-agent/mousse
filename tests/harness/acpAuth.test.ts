@@ -1,9 +1,10 @@
 /**
- * Sign-in of a generic ACP agent (agent CLIs plan §3): the methods the agent advertises (`agent`,
- * `env_var`, `terminal` in a fake pseudo-terminal), terminal methods only where a PTY runs, cancel
- * kills the terminal, and a sign-in counts only once a later `session/new` succeeds.
+ * Sign-in of a generic ACP agent (agent CLIs plan §3): the ACP 1.5 methods the agent advertises
+ * (`agent`, and `terminal` in a fake pseudo-terminal), the client capabilities that let it offer
+ * them, terminal methods only where a PTY runs, cancel kills the terminal, and a sign-in counts only
+ * once a later `session/new` succeeds.
  */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { methods, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk'
@@ -34,9 +35,13 @@ interface AgentOptions {
 function setup(agentOptions: AgentOptions, pty?: { available: () => boolean; spawn?: PtySpawn }) {
   const stateDir = mkdtempSync(join(tmpdir(), 'mousse-acp-auth-'))
   dirs.push(stateDir)
+  const initialized: unknown[] = []
   const agent = inProcessAgent((app) => {
     app
-      .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: agentOptions.authMethods as never }))
+      .onRequest(methods.agent.initialize, (c) => {
+        initialized.push(c.params)
+        return { protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: agentOptions.authMethods as never }
+      })
       .onRequest(methods.agent.authenticate, async (c) => {
         await agentOptions.onAuthenticate?.(c.params.methodId, c.client as never)
         return {}
@@ -64,7 +69,7 @@ function setup(agentOptions: AgentOptions, pty?: { available: () => boolean; spa
   const session = new LoginSession('op')
   const events: ProviderLoginEvent[] = []
   session.on('event', (event: ProviderLoginEvent) => events.push(event))
-  return { runtime, session, events, agent, stateDir }
+  return { runtime, session, events, agent, stateDir, initialized }
 }
 
 describe('ACP agent sign-in', () => {
@@ -100,20 +105,22 @@ describe('ACP agent sign-in', () => {
     expect((await runtime.auth({ force: true })).state).not.toBe('signed_in')
   })
 
-  it('env_var method: asks for the variables, keeps them in the instance vault, and identifies the account by their hash', async () => {
-    const { runtime, session, events, stateDir } = setup({
-      authMethods: [{ id: 'key', name: 'API key', type: 'env_var', vars: [{ name: 'FAKE_API_KEY', label: 'Fake API key' }] }],
+  it.each([true, false])('advertises URL elicitation, and terminal sign-in only where a PTY runs (PTY: %s)', async (ptyRuns) => {
+    const { runtime, initialized } = setup({ authMethods: [], signedIn: () => true }, { available: () => ptyRuns })
+    await runtime.handshake!(new AbortController().signal)
+    expect(initialized[0]).toMatchObject({ clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false, auth: { terminal: ptyRuns }, elicitation: { url: {} } } })
+  })
+
+  it('drops methods that are not ACP (env_var drafts) and keeps no account subject', async () => {
+    const { runtime, session } = setup({
+      authMethods: [{ id: 'key', name: 'API key', type: 'env_var', vars: [{ name: 'FAKE_API_KEY' }] }, { id: 'browser', name: 'Browser' }],
       signedIn: () => true
     })
-    session.on('event', (event: ProviderLoginEvent) => {
-      if (event.type === 'prompt') queueMicrotask(() => session.respond({ sessionId: 'op', kind: 'prompt', value: 'sk-secret' }))
-    })
+    await runtime.handshake!(new AbortController().signal)
+    expect(runtime.runtimeFacts?.()?.authMethods).toEqual([{ id: 'browser', name: 'Browser', type: 'agent' }])
     expect(await runtime.signIn!(session, process.cwd())).toEqual({ success: true, sessionId: 'op' })
-    expect(events).toContainEqual(expect.objectContaining({ type: 'prompt', promptType: 'secret', message: 'Fake API key' }))
-    expect(JSON.parse(readFileSync(join(stateDir, 'vault.json'), 'utf8'))).toEqual({ FAKE_API_KEY: 'sk-secret' })
-    const subject = await runtime.identity!(new AbortController().signal)
-    expect(subject).toMatch(/^apikey:[0-9a-f]{64}$/)
-    expect(subject).not.toContain('sk-secret')
+    expect(await runtime.auth({ force: true })).toEqual({ state: 'signed_in', methodLabel: 'Browser' })
+    expect(await runtime.identity!(new AbortController().signal)).toBeUndefined()
   })
 
   it('terminal method: runs the command in a PTY, shows its device code, and succeeds on exit 0', async () => {
@@ -164,7 +171,7 @@ describe('ACP agent sign-in', () => {
       authMethods: [
         { id: 'login', name: 'Terminal', type: 'terminal' },
         { id: 'browser', name: 'Browser' },
-        { id: 'key', name: 'API key', type: 'env_var', vars: [{ name: 'FAKE_API_KEY' }] }
+        { id: 'device', name: 'Device code', type: 'agent' }
       ],
       signedIn: () => true
     }, { available: () => false })
@@ -173,6 +180,6 @@ describe('ACP agent sign-in', () => {
     })
     expect(await runtime.signIn!(session, process.cwd())).toEqual({ success: true, sessionId: 'op' })
     const select = events.find((event) => event.type === 'select') as Extract<ProviderLoginEvent, { type: 'select' }>
-    expect(select.options.map((option) => option.id)).toEqual(['browser', 'key'])
+    expect(select.options.map((option) => option.id)).toEqual(['browser', 'device'])
   })
 })

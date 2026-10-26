@@ -3,7 +3,7 @@
  * checked with an `initialize`-only handshake, runs only for interactive purposes, and a sign-in
  * changed from outside between two turns forgets the thread's native session.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
@@ -95,24 +95,19 @@ describe('the generic ACP driver', () => {
     expect(notices).toEqual(['Fake agent approves tools itself.'])
   })
 
-  it('forgets the native session when the account changed from outside between two turns', async () => {
-    const { harness, home, calls, spec } = fixture()
+  it('never resumes across turns: the account is unknown, so each turn hands the history to a new session', async () => {
+    const { harness, calls, spec } = fixture()
     await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath } })
-    const vault = join(home, 'harness', 'acp_fake-agent', 'vault.json')
-    writeFileSync(vault, JSON.stringify({ FAKE_API_KEY: 'first' }))
     const resolved = () => harness.resolveStored({ instanceId: 'acp:fake-agent', llmProvider: '', model: 'default' }, { purpose: 'turn' })
     const first = await harness.bind(resolved(), { mode: 'agent' })
-    expect(first.accountId).toBeDefined()
+    // Mousse cannot read which account an arbitrary agent runs as.
+    expect(first.accountId).toBeUndefined()
     await harness.startTurn(spec(first)).result
-    // Same account: the second turn reuses the live session.
     const second = await harness.bind(resolved(), { mode: 'agent' })
     await harness.startTurn(spec(second, first)).result
-    expect(calls.filter((call) => call === 'session/new')).toHaveLength(1)
-    // Another key written from outside Mousse: a new account, so a new session with the history.
-    writeFileSync(vault, JSON.stringify({ FAKE_API_KEY: 'second' }))
-    const third = await harness.bind(resolved(), { mode: 'agent' })
-    expect(third.accountGeneration).toBe(second.accountGeneration + 1)
-    await harness.startTurn(spec(third, second)).result
     expect(calls.filter((call) => call === 'session/new')).toHaveLength(2)
+    const prompted = calls.filter((call) => call.startsWith('prompt'))
+    expect(prompted).toHaveLength(2)
+    expect(prompted[0]).not.toBe(prompted[1])
   })
 })

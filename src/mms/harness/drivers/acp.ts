@@ -17,6 +17,7 @@ import type { AcpPreset, AcpSource } from '../acp/preset'
 import { GENERIC_ACP_PRESET } from '../acp/presets/generic'
 import { AcpSessions, type AcpObservations, type SavedAcpSession } from '../acp/session'
 import { decodeInstanceConfig, type AuthReading, type DriverContext, type DriverRuntime, type HarnessDriver, type InstanceConfig, type LiveProcessHost, type RuntimeFactsReport } from '../driver'
+import { withUserEnv } from '../../providers/cliConfig'
 import { resolveCommand } from '../env'
 import { ptyAvailable, runInPty, signInPrompts, type PtySpawn } from '../pty'
 import { killTree, spawnHarness } from '../spawn'
@@ -26,7 +27,7 @@ import { fingerprintOf } from '../status'
  * Any agent that speaks the Agent Client Protocol, run from a command the user chose
  * (`config.source = { kind: 'local', command, args, env }`): no shell, `.cmd` shims resolved to
  * the program they run, and a command that cannot run reports `runs: no`. Sign-in follows the
- * methods the agent advertises (`agent`, `env_var`, `terminal`), and counts only once a later
+ * methods the agent advertises (ACP `agent` and `terminal`), and counts only once a later
  * `session/new` succeeds.
  */
 
@@ -111,7 +112,6 @@ export function acpDriver(options: AcpDriverOptions = {}): HarnessDriver {
 
 function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: AcpDriverOptions, ptyRuns: () => boolean): DriverRuntime {
   const statePath = join(context.stateDir, 'acp.json')
-  const vaultPath = join(context.stateDir, 'vault.json')
   let state: AcpState = {}
   try {
     const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as unknown
@@ -123,19 +123,6 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     mkdirSync(context.stateDir, { recursive: true, mode: 0o700 })
     atomicWriteJsonSync(statePath, state, { mode: 0o600 })
   }
-  /** Values the user entered for `env_var` methods; applied last, so they win. */
-  const vault = (): Record<string, string> => {
-    try {
-      const parsed = JSON.parse(readFileSync(vaultPath, 'utf8')) as unknown
-      return isRecord(parsed) ? Object.fromEntries(Object.entries(parsed).filter((pair): pair is [string, string] => typeof pair[1] === 'string')) : {}
-    } catch {
-      return {}
-    }
-  }
-  const writeVault = (values: Record<string, string>) => {
-    mkdirSync(context.stateDir, { recursive: true, mode: 0o700 })
-    atomicWriteJsonSync(vaultPath, values, { mode: 0o600 })
-  }
   const source = acpSourceOf(context.config)
   const label = context.config.displayName ?? preset.label
   let liveHost: LiveProcessHost | null = null
@@ -143,8 +130,17 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
   let observedInfo: AcpObservations['info']
   let observedSession: AcpObservations['session']
 
-  /** The binding a verified sign-in belongs to: the command, its arguments and the method. */
-  const bindingHash = (methodId: string) => createHash('sha256').update(JSON.stringify([source?.command, source?.args, methodId])).digest('hex')
+  /**
+   * The binding a verified sign-in belongs to: the command, its arguments, its variables and the
+   * method. Changing any of them makes the sign-in unknown again.
+   */
+  const bindingHash = (methodId: string) => createHash('sha256')
+    .update(JSON.stringify([source?.command, source?.args, Object.entries(source?.env ?? {}).sort(([a], [b]) => a.localeCompare(b)), methodId]))
+    .digest('hex')
+
+  /** The instance's variables over its environment (on Windows a user `PATH` replaces `Path`). */
+  const launchEnv = (variables: Record<string, string>, extra: Record<string, string> = {}) =>
+    withUserEnv(withUserEnv(context.env.env, variables), extra)
 
   const launchOf = (purpose: AcpLaunchRequest['purpose']) => {
     if (!source) throw new Error(`${label} has no command. Set one in its settings.`)
@@ -158,9 +154,8 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     const { resolved, launch } = launchOf(request.purpose)
     // Checks and sign-in verification run in a folder of their own, removed when the process ends.
     const scratch = request.purpose === 'turn' ? undefined : mkdtempSync(join(tmpdir(), 'mousse-acp-'))
-    const child = spawnHarness(context.env, `acp-${request.purpose}`, resolved.command, [...resolved.args, ...launch.args], {
+    const child = spawnHarness({ ...context.env, env: launchEnv(launch.env) }, `acp-${request.purpose}`, resolved.command, [...resolved.args, ...launch.args], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      extraEnv: { ...launch.env, ...vault() },
       ...(scratch ? { cwd: scratch } : {})
     }) as ChildProcessWithoutNullStreams
     const connection = connectAcpProcess(child, request.handlers, {
@@ -200,6 +195,9 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     ...(preset.classifyOption ? { classifyOption: preset.classifyOption } : {}),
     ...(preset.initializeMeta ? { initializeMeta: preset.initializeMeta } : {}),
     urlElicitation: true,
+    // ACP 1.5: agents offer terminal sign-in only to clients that can run one, and send sign-in
+    // links as URL elicitations only to clients that accept them.
+    clientCapabilities: () => ({ auth: { terminal: ptyRuns() }, elicitation: { url: {} } }),
     closeSessions: true,
     store: {
       saved: (threadId) => state.sessions?.[threadId],
@@ -254,8 +252,7 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
         id: method.id,
         name: method.name,
         type: method.type,
-        ...(method.description ? { description: method.description } : {}),
-        ...(method.type === 'env_var' ? { vars: method.vars.map((variable) => variable.name) } : {})
+        ...(method.description ? { description: method.description } : {})
       })),
       ...(observedSession?.configOptions ? { configOptions: observedSession.configOptions } : previous?.configOptions ? { configOptions: previous.configOptions } : {}),
       ...(observedSession?.modes ? { modes: observedSession.modes } : previous?.modes ? { modes: previous.modes } : {}),
@@ -273,19 +270,15 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     const methods = authMethods()
     const verified = state.auth?.authenticated === true && state.auth.bindingHash === bindingHash(state.auth.methodId)
     const method = methods.find((entry) => entry.id === state.auth?.methodId)
-    if (verified) return { state: 'signed_in', methodLabel: method?.name ?? 'Signed in through Mousse', ...(identityOf() ? { subject: identityOf() } : {}) }
+    // No subject: Mousse cannot read which account an arbitrary agent runs as, so a thread's native
+    // session is never resumed across turns (each turn hands the history over).
+    if (verified) return { state: 'signed_in', methodLabel: method?.name ?? 'Signed in through Mousse' }
     if (state.signedOut) return { state: 'signed_out', methodLabel: 'Sign in', message: `${label} asked for a sign-in.` }
     if (!known) return { state: 'unknown', message: 'Check again to see how this agent signs in.' }
     if (!methods.length) return { state: 'not_required', methodLabel: 'No sign-in needed' }
     return { state: 'unknown', methodLabel: methods.map((entry) => entry.name).join(' · '), message: `Sign in if ${label} asks you to.` }
   }
 
-  /** An instance signed in with values it keeps itself: their hash, never the values. */
-  const identityOf = (): string | undefined => {
-    const values = vault()
-    const keys = Object.keys(values).sort()
-    return keys.length ? `apikey:${createHash('sha256').update(JSON.stringify(keys.map((key) => [key, values[key]]))).digest('hex')}` : undefined
-  }
 
   /** One session in a scratch folder: the sign-in works and the account's models are listed. */
   const verify = async (signal?: AbortSignal): Promise<void> => {
@@ -329,28 +322,11 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
         method = offered.find((entry) => entry.id === picked)
         if (!method) throw new Error('Choose a sign-in method.')
       }
-      if (method.type === 'env_var') {
-        const values: Record<string, string> = {}
-        for (const variable of method.vars) {
-          const value = await session.createAuthCallbacks().prompt({ type: variable.secret ? 'secret' : 'text', message: variable.label ?? variable.name })
-          if (value) values[variable.name] = value
-          else if (!variable.optional) throw new Error(`${variable.name} is required.`)
-        }
-        const previous = vault()
-        writeVault({ ...previous, ...values })
-        try {
-          await verify(session.abort.signal)
-        } catch (error) {
-          writeVault(previous)
-          throw error
-        }
-        return succeed(method.id, session)
-      }
       if (method.type === 'terminal') {
         const { resolved, launch } = launchOf('sign_in')
         const shown = new Set<string>()
         const run = runInPty(resolved.command, [...resolved.args, ...launch.args, ...method.args], {
-          env: { ...context.env.env, ...launch.env, ...vault(), ...method.env },
+          env: launchEnv(launch.env, method.env),
           ...(options.pty?.spawn ? { spawn: options.pty.spawn } : {}),
           onOutput: (transcript) => {
             const found = signInPrompts(transcript)
@@ -419,7 +395,8 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     llmProvider: () => (runtime.configured() ? { id: context.instanceId, label, models: runtime.models() } : undefined),
     models: () => [{ id: AGENT_DEFAULT_MODEL, label: 'Agent default' }, ...(state.models ?? []).filter((model) => model.id !== AGENT_DEFAULT_MODEL)],
     auth: async () => reading(),
-    identity: async () => identityOf(),
+    // Read at every admission; an arbitrary agent's account cannot be read, so it is unknown.
+    identity: async () => undefined,
     handshake: async (signal) => {
       try {
         await sessions.handshake(signal)
@@ -438,11 +415,6 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     signIn,
     signOut: async () => {
       sessions.closeAll()
-      try {
-        rmSync(vaultPath, { force: true })
-      } catch {
-        /* nothing stored */
-      }
       if (state.auth?.methodId && authMethods().some((method) => method.id === state.auth?.methodId && method.type === 'agent')) {
         try {
           const active = sessions.launch('sign_out')

@@ -117,6 +117,8 @@ export interface AcpSessionsOptions {
   prompter?: PermissionPrompter
   /** `_meta` sent with `initialize`. */
   initializeMeta?: Record<string, unknown>
+  /** Client capabilities added to `initialize` (ACP `auth`, `elicitation`). */
+  clientCapabilities?: () => Record<string, unknown>
   /** Sign-in links may arrive as URL elicitations (else only through the preset's own channel). */
   urlElicitation?: boolean
   /** End a session with `session/close` (when advertised) before its process is killed. */
@@ -199,7 +201,8 @@ export class AcpSessions {
       clientFs,
       label: this.options.label,
       ...(this.options.quirks.strictProtocol ? { strictProtocol: true } : {}),
-      ...(this.options.initializeMeta ? { meta: this.options.initializeMeta } : {})
+      ...(this.options.initializeMeta ? { meta: this.options.initializeMeta } : {}),
+      ...(this.options.clientCapabilities ? { capabilities: this.options.clientCapabilities() } : {})
     })
     process.mcpHttp = info.mcpHttp
     process.info = info
