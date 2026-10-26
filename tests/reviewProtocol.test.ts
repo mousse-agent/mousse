@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
@@ -72,6 +72,15 @@ describe('review.files and review.file through the daemon', () => {
     const byProject = await client.request<ReviewFilesResult>('review.files', { projectId, scope: { kind: 'worktree' } })
     expect(byProject.root).toBe(f.repo)
     expect(byProject.files).toEqual([])
+  })
+
+  it('says so when the project folder is not a Git repository', async () => {
+    const plain = join(f.root, 'plain-folder')
+    mkdirSync(plain)
+    const project = mms.projects.openProject(plain)
+    const result = await client.request<ReviewFilesResult>('review.files', { projectId: project.id, scope: { kind: 'worktree' } })
+    expect(result).toMatchObject({ files: [], unavailable: 'Not a Git repository.' })
+    await expect(client.request('review.file', { projectId: project.id, scope: { kind: 'worktree' }, path: 'a.txt' })).rejects.toThrow(/Not a Git repository/)
   })
 
   it('answers a turn that was never checkpointed with a reason instead of an error', async () => {

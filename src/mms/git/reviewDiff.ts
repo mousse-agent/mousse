@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { createReadStream } from 'node:fs'
-import { lstat, readFile, readlink, realpath } from 'node:fs/promises'
+import { lstat, open, readlink, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative } from 'node:path'
 import simpleGit from 'simple-git'
 import {
@@ -240,7 +240,8 @@ export async function listChangedFiles(cwd: string, range: ReviewRange, options:
     entry.deletions = item.deletions
     entry.binary = item.binary
   }
-  const untrackedPaths = untracked.split('\0').filter((path) => path && !byPath.has(path))
+  // A nested repository is listed as `name/`; it has no file text to review.
+  const untrackedPaths = untracked.split('\0').filter((path) => path && !path.endsWith('/') && !byPath.has(path))
   for (const path of untrackedPaths) {
     byPath.set(path, { path, status: 'untracked', additions: 0, deletions: 0, binary: false, countsExact: false })
   }
@@ -274,13 +275,55 @@ function classify(content: string, size: number, symlink?: true): ReviewFileSide
   return { content, size, ...(symlink ? { symlink } : {}) }
 }
 
-async function readGitObject(cwd: string, spec: string): Promise<ReviewFileSide> {
+/** Mode and object of a path in a commit or the index, or null when nothing is there. */
+async function lookupEntry(cwd: string, side: { kind: 'commit'; sha: string } | { kind: 'index' }, path: string): Promise<{ mode: string; sha: string } | null> {
   const git = simpleGit(cwd)
-  const size = await git.raw(['cat-file', '-s', spec]).then((value) => Number(value.trim())).catch(() => null)
-  if (size === null || !Number.isFinite(size)) return null
+  // Paths in both listings are relative to `cwd`. Absence is an empty listing, so a real Git
+  // failure (a bad object, a lock, a spawn error) surfaces as an error instead of "no file".
+  if (side.kind === 'commit') {
+    const listing = await git.raw(['ls-tree', '-z', side.sha, '--', path])
+    for (const entry of listing.split('\0')) {
+      const match = /^(\d+) \w+ ([0-9a-f]+)\t([\s\S]*)$/.exec(entry)
+      if (match && match[3] === path) return { mode: match[1], sha: match[2] }
+    }
+    return null
+  }
+  const listing = await git.raw(['ls-files', '-s', '-z', '--', `:(literal)${path}`])
+  for (const entry of listing.split('\0')) {
+    const match = /^(\d+) ([0-9a-f]+) (\d)\t([\s\S]*)$/.exec(entry)
+    if (match && match[3] === '0' && match[4] === path) return { mode: match[1], sha: match[2] }
+  }
+  return null
+}
+
+async function readGitObject(cwd: string, side: { kind: 'commit'; sha: string } | { kind: 'index' }, path: string): Promise<ReviewFileSide> {
+  const entry = await lookupEntry(cwd, side, path)
+  // A directory (040000) or a submodule (160000) has no file text; only blobs and links do.
+  if (!entry || entry.mode === '040000' || entry.mode === '160000') return null
+  const git = simpleGit(cwd)
+  const size = Number((await git.raw(['cat-file', '-s', entry.sha])).trim())
   if (size > REVIEW_MAX_FILE_BYTES) return { tooLarge: true, size, reason: 'bytes' }
-  const content = await git.raw(['show', spec]).catch(() => null)
-  return content === null ? null : classify(content, size)
+  const content = await git.raw(['show', entry.sha])
+  return classify(content, size, entry.mode === '120000' ? true : undefined)
+}
+
+/** Reads at most the byte cap plus one byte, whatever the file has grown to since it was inspected. */
+async function readBounded(path: string): Promise<{ buffer: Buffer; size: number }> {
+  const handle = await open(path, 'r')
+  try {
+    const buffer = Buffer.allocUnsafe(REVIEW_MAX_FILE_BYTES + 1)
+    let filled = 0
+    while (filled < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, filled)
+      if (bytesRead === 0) break
+      filled += bytesRead
+    }
+    // Past the cap the true size is unknown without reading on; report what the file says now.
+    const size = filled > REVIEW_MAX_FILE_BYTES ? Math.max((await handle.stat()).size, filled) : filled
+    return { buffer: buffer.subarray(0, filled), size }
+  } finally {
+    await handle.close()
+  }
 }
 
 function isInside(root: string, path: string): boolean {
@@ -304,20 +347,23 @@ async function readWorktreeFile(cwd: string, path: string): Promise<ReviewFileSi
     }
     if (!info.isFile()) return null
     if (info.size > REVIEW_MAX_FILE_BYTES) return { tooLarge: true, size: info.size, reason: 'bytes' }
-    const buffer = await readFile(absolute)
-    if (buffer.subarray(0, BINARY_SNIFF_BYTES).includes(0)) return { binary: true, size: buffer.length }
-    return classify(buffer.toString('utf8'), buffer.length)
-  } catch {
-    return null
+    // The file may have grown since `lstat`; the read itself is bounded.
+    const { buffer, size } = await readBounded(absolute)
+    if (size > REVIEW_MAX_FILE_BYTES) return { tooLarge: true, size, reason: 'bytes' }
+    if (buffer.subarray(0, BINARY_SNIFF_BYTES).includes(0)) return { binary: true, size }
+    return classify(buffer.toString('utf8'), size)
+  } catch (error) {
+    // Only a missing file or parent is "absent"; any other failure is an error to show.
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null
+    throw error
   }
 }
 
 async function readSide(cwd: string, side: ReviewSide | null, path: string): Promise<ReviewFileSide> {
   if (side === null) return null
-  // `./` makes the spec relative to `cwd`, which may be a subdirectory of the repository.
-  if (side.kind === 'commit') return readGitObject(cwd, `${side.sha}:./${path}`)
-  if (side.kind === 'index') return readGitObject(cwd, `:0:./${path}`)
-  return readWorktreeFile(cwd, path)
+  if (side.kind === 'worktree') return readWorktreeFile(cwd, path)
+  return readGitObject(cwd, side, path)
 }
 
 /** Both sides of one file. A rename's original side is read at `oldPath`. */
@@ -325,9 +371,12 @@ export async function readFileVersions(cwd: string, range: ReviewRange, path: st
   for (const candidate of [path, oldPath]) {
     if (candidate !== undefined && (isAbsolute(candidate) || candidate.split(/[\\/]/).includes('..'))) throw new Error('Path is outside the review root')
   }
-  const [original, modified] = await Promise.all([
+  // Both reads finish before an error is thrown, so no Git process outlives the call.
+  const [original, modified] = await Promise.allSettled([
     readSide(cwd, range.from, oldPath ?? path),
     readSide(cwd, range.to, path)
   ])
-  return { root: cwd, path, original, modified }
+  if (original.status === 'rejected') throw original.reason
+  if (modified.status === 'rejected') throw modified.reason
+  return { root: cwd, path, original: original.value, modified: modified.value }
 }

@@ -31,7 +31,12 @@ export interface ReviewFileEntry {
 }
 
 export interface ReviewFilesResult {
-  /** Absolute path of the worktree or project the paths are relative to. */
+  /**
+   * Absolute path the entry paths are relative to. Turn and thread scopes use the thread's
+   * worktree top level; the working-tree scope uses the project folder, which is a subfolder of
+   * the top level when the project sits inside a larger repository. Always join an entry path
+   * with this `root`, and never compare paths across scopes.
+   */
   root: string
   scope: ReviewScope
   range: ReviewRange
@@ -44,6 +49,7 @@ export interface ReviewFilesResult {
   unavailable?: string
 }
 
+/** `symlink: true` marks a link on any side; its `content` is the link text, as Git stores it. */
 export type ReviewFileSide =
   | { content: string; size: number; symlink?: true }
   | { tooLarge: true; size: number; lines?: number; reason: 'bytes' | 'lines' }

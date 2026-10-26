@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EMPTY_TREE_SHA, REVIEW_MAX_FILE_BYTES, type ReviewRange } from '../src/shared/review'
 import {
   countLinesBounded,
@@ -14,8 +14,21 @@ import {
   worktreeRange
 } from '../src/mms/git/reviewDiff'
 
+/** Lets one test make `lstat` report an earlier, smaller stat for a path, as if the file grew afterwards. */
+const staleStat = vi.hoisted(() => ({ path: '', stat: undefined as unknown }))
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    lstat: async (path: string, ...rest: unknown[]) => {
+      const real = await (actual.lstat as (...args: unknown[]) => Promise<unknown>)(path, ...rest)
+      return staleStat.path && String(path) === staleStat.path ? staleStat.stat : real
+    }
+  }
+})
+
 const roots: string[] = []
-const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+const git =(cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 
 function temp(prefix = 'mousse-review-diff-'): string {
   const dir = mkdtempSync(join(tmpdir(), prefix)); roots.push(dir)
@@ -47,11 +60,23 @@ const commitAll = (cwd: string, message = 'change'): string => { git(cwd, 'add',
 const commits = (from: string, to: string): ReviewRange => ({ from: { kind: 'commit', sha: from }, to: { kind: 'commit', sha: to } })
 const toWorktree = (from: string): ReviewRange => ({ from: { kind: 'commit', sha: from }, to: { kind: 'worktree' } })
 const text = (side: unknown): string => (side as { content: string }).content
-const canSymlink = (cwd: string): boolean => {
-  try { symlinkSync(join(cwd, 'base.txt'), join(cwd, '.probe-link')); rmSync(join(cwd, '.probe-link')); return true } catch { return false }
+/** File links need a privilege on Windows; junctions do not. Each skip is reported, not silently passed. */
+function canLink(type: 'file' | 'junction'): boolean {
+  const dir = mkdtempSync(join(tmpdir(), 'mousse-review-probe-'))
+  try {
+    writeFileSync(join(dir, 'target.txt'), 'x')
+    symlinkSync(type === 'file' ? join(dir, 'target.txt') : dir, join(dir, 'link'), type)
+    return true
+  } catch {
+    return false
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 }
+const FILE_LINKS = canLink('file')
+const JUNCTIONS = canLink('junction')
 
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+afterEach(() => { staleStat.path = ''; for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 describe('parsers', () => {
   it('parseNameStatusZ reads plain entries and renames with both paths', () => {
@@ -229,9 +254,8 @@ describe('listChangedFiles in the working tree', () => {
     writeFileSync(file, ''); expect((await countLinesBounded(file, 1000)).lines).toBe(0)
   })
 
-  it('shows a symlink as its link text and lists a file turned into a link as typechange', async () => {
+  it.skipIf(!FILE_LINKS)('shows a symlink as its link text and lists a file turned into a link as typechange', async () => {
     const cwd = repo()
-    if (!canSymlink(cwd)) return
     const outside = temp(); writeFileSync(join(outside, 'secret.txt'), 'top secret\n')
     writeFileSync(join(cwd, 'swap.txt'), 'plain\n'); const sha = commitAll(cwd, 'file')
     rmSync(join(cwd, 'swap.txt')); symlinkSync(join(outside, 'secret.txt'), join(cwd, 'swap.txt'))
@@ -242,9 +266,26 @@ describe('listChangedFiles in the working tree', () => {
     expect(result.modified).toMatchObject({ content: join(outside, 'secret.txt'), symlink: true })
   })
 
-  it('reports a file reached through a directory link that leaves the root as absent', async () => {
+  it('marks a link stored in a commit or the index as a link, whatever the file system can do', async () => {
     const cwd = repo()
-    if (!canSymlink(cwd)) return
+    // Store a mode 120000 entry directly, so the test does not depend on the platform creating links.
+    const linkBlob = execFileSync('git', ['hash-object', '-w', '--stdin'], { cwd, input: 'target.txt', encoding: 'utf8' }).trim()
+    git(cwd, 'update-index', '--add', '--cacheinfo', `120000,${linkBlob},swap.txt`)
+    git(cwd, 'commit', '-qm', 'link'); const start = head(cwd)
+    writeFileSync(join(cwd, 'swap.txt'), 'plain\n'); git(cwd, 'update-index', '--add', 'swap.txt')
+    const committed = await readFileVersions(cwd, commits(start, start), 'swap.txt')
+    expect(committed.original).toMatchObject({ content: 'target.txt', symlink: true })
+    const staged = await readFileVersions(cwd, await worktreeRange(cwd, true), 'swap.txt')
+    expect(staged.original).toMatchObject({ content: 'target.txt', symlink: true })
+    expect(staged.modified).toMatchObject({ content: 'plain\n' })
+    expect(staged.modified).not.toHaveProperty('symlink')
+    git(cwd, 'update-index', '--add', '--cacheinfo', `120000,${linkBlob},swap.txt`)
+    const viaIndex = await readFileVersions(cwd, { from: { kind: 'index' }, to: { kind: 'worktree' } }, 'swap.txt')
+    expect(viaIndex.original).toMatchObject({ content: 'target.txt', symlink: true })
+  })
+
+  it.skipIf(!JUNCTIONS)('reports a file reached through a directory link that leaves the root as absent', async () => {
+    const cwd = repo()
     const outside = temp(); writeFileSync(join(outside, 'secret.txt'), 'top secret\n')
     symlinkSync(outside, join(cwd, 'escape'), 'junction')
     const result = await readFileVersions(cwd, { from: { kind: 'index' }, to: { kind: 'worktree' } }, 'escape/secret.txt')
@@ -322,5 +363,56 @@ describe('index and working tree sides', () => {
   it('refuses a path that leaves the root', async () => {
     const cwd = repo()
     await expect(readFileVersions(cwd, await worktreeRange(cwd, false), '../x.txt')).rejects.toThrow()
+  })
+})
+
+describe('reading sides safely', () => {
+  it('bounds the working-tree read when the file grows after it was inspected', async () => {
+    const cwd = repo()
+    const file = join(cwd, 'grow.txt')
+    writeFileSync(file, 'small\n')
+    staleStat.stat = lstatSync(file); staleStat.path = file
+    writeFileSync(file, 'x'.repeat(2_097_152))
+    const result = await readFileVersions(cwd, { from: { kind: 'index' }, to: { kind: 'worktree' } }, 'grow.txt')
+    expect(result.modified).toEqual({ tooLarge: true, size: 2_097_152, reason: 'bytes' })
+  })
+
+  it('treats a directory replaced by a file as absent on the original side, for commits and the index', async () => {
+    const cwd = repo()
+    mkdirSync(join(cwd, 'thing')); writeFileSync(join(cwd, 'thing', 'child.txt'), 'child\n')
+    const start = commitAll(cwd, 'directory')
+    rmSync(join(cwd, 'thing'), { recursive: true }); writeFileSync(join(cwd, 'thing'), 'now a file\n')
+    const end = commitAll(cwd, 'file')
+    const range = commits(start, end)
+    expect((await listChangedFiles(cwd, range)).files.find((file) => file.path === 'thing')?.status).toBe('added')
+    const result = await readFileVersions(cwd, range, 'thing')
+    expect(result.original).toBeNull()
+    expect(text(result.modified)).toBe('now a file\n')
+    // The same file read as a directory path from the index side, after the swap is undone on disk only.
+    rmSync(join(cwd, 'thing')); mkdirSync(join(cwd, 'thing')); writeFileSync(join(cwd, 'thing', 'child.txt'), 'child\n')
+    expect((await readFileVersions(cwd, { from: { kind: 'commit', sha: start }, to: { kind: 'index' } }, 'thing')).modified).toMatchObject({ content: 'now a file\n' })
+    expect((await readFileVersions(cwd, { from: { kind: 'index' }, to: { kind: 'worktree' } }, 'thing')).modified).toBeNull()
+  })
+
+  it('does not list a nested repository as an untracked file', async () => {
+    const cwd = repo(); const sha = head(cwd)
+    const nested = join(cwd, 'nested'); mkdirSync(nested); git(nested, 'init', '-q'); writeFileSync(join(nested, 'inner.txt'), 'x\n')
+    writeFileSync(join(cwd, 'plain.txt'), 'p\n')
+    expect((await listChangedFiles(cwd, toWorktree(sha))).files.map((file) => file.path)).toEqual(['plain.txt'])
+  })
+
+  it('surfaces a Git failure instead of showing the file as absent', async () => {
+    const cwd = repo()
+    await expect(readFileVersions(cwd, commits('a'.repeat(40), head(cwd)), 'base.txt')).rejects.toThrow()
+  })
+
+  it('returns the working-tree line endings as stored when core.autocrlf is on', async () => {
+    const cwd = repo(); git(cwd, 'config', 'core.autocrlf', 'true')
+    writeFileSync(join(cwd, 'eol.txt'), 'a\r\nb\r\n'); const sha = commitAll(cwd, 'eol')
+    expect(git(cwd, 'show', `${sha}:eol.txt`)).toBe('a\nb')
+    // Git normalises on commit, so the list is empty while the two sides differ only in line endings.
+    expect((await listChangedFiles(cwd, toWorktree(sha))).files).toEqual([])
+    const result = await readFileVersions(cwd, toWorktree(sha), 'eol.txt')
+    expect([text(result.original), text(result.modified)]).toEqual(['a\nb\n', 'a\r\nb\r\n'])
   })
 })
