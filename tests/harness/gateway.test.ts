@@ -233,17 +233,19 @@ describe('harness gateway: instances', () => {
     await expect(harness.bind(harness.resolveStored({ instanceId: 'claude:work', llmProvider: '', model: 'm' }, { purpose: 'turn' }), { mode: 'agent' }))
       .resolves.toMatchObject({ instanceId: 'claude:work', driver: 'claude', homeId: 'private:claude:work', configRevision: 1, accountGeneration: 0 })
 
-    // The private home and the sign-in in it go with the instance.
+    // The sign-in in the private home stays; Mousse's own state of the instance goes.
     const stateDir = instanceStateDir(profileHome, 'claude:work')
     mkdirSync(join(stateDir, 'home'), { recursive: true })
     writeFileSync(join(stateDir, 'home', '.claude.json'), '{"oauthAccount":{"accountUuid":"old"}}')
+    writeFileSync(join(stateDir, 'settings.json'), '{}')
     await harness.instances.remove('claude:work')
     expect((stored as Record<string, unknown>)['claude:work']).toBeUndefined()
-    expect(existsSync(stateDir)).toBe(false)
+    expect(existsSync(join(stateDir, 'home', '.claude.json'))).toBe(true)
+    expect(existsSync(join(stateDir, 'settings.json'))).toBe(false)
     expect(codeOf(() => harness.resolveStored({ instanceId: 'claude:work', llmProvider: '', model: 'm' }, { purpose: 'turn' }))).toBe('provider_instance_unknown')
-    // Re-adding starts signed out in a fresh home.
-    expect((await harness.instances.add({ driver: 'claude', config: { displayName: 'Work' } })).instanceId).toBe('claude:work')
-    expect(existsSync(join(stateDir, 'home', '.claude.json'))).toBe(false)
+    // Re-adding the same name never reuses the kept home: the new instance has its own id and home.
+    expect((await harness.instances.add({ driver: 'claude', config: { displayName: 'Work' } })).instanceId).toBe('claude:work-3')
+    expect(existsSync(join(instanceStateDir(profileHome, 'claude:work-3'), 'home', '.claude.json'))).toBe(false)
     // Files a removal could not delete are never reused: the new instance gets another id.
     mkdirSync(instanceStateDir(profileHome, 'claude:other'), { recursive: true })
     expect((await harness.instances.add({ driver: 'claude', config: { displayName: 'Other' } })).instanceId).toBe('claude:other-2')

@@ -62,6 +62,8 @@ export interface InstanceEnabled {
 export interface InstanceConfigView {
   displayName?: string
   home: 'default' | 'private'
+  /** Where a private home is kept; it stays on disk when the provider is removed. */
+  homePath?: string
   /** The explicit executable; absent = found on PATH (or Mousse's own install). */
   binaryPath?: string
   args: string[]

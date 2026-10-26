@@ -122,9 +122,11 @@ export function AgentEditor({
         removeHint={
           !onRemove
             ? undefined
-            : snapshot.config?.home === 'private' || info.bundled
-              ? 'Deletes this provider and the sign-in Mousse kept for it. Add it again any time.'
-              : 'Deletes this provider from Mousse. Your CLI and its sign-in stay; add it again any time.'
+            : snapshot.config?.home === 'private'
+              ? `Deletes this provider from Mousse. The sign-in Mousse kept for it stays${snapshot.config.homePath ? ` at ${snapshot.config.homePath}` : ''}; sign out first if you want it removed.`
+              : info.bundled
+                ? 'Deletes this provider and the sign-in Mousse kept for it. Add it again any time.'
+                : 'Deletes this provider from Mousse. Your CLI and its sign-in stay; add it again any time.'
         }
         onRemove={onRemove}
       />

@@ -140,6 +140,7 @@ export function binarySourceLabel(binary: NonNullable<InstanceSnapshot['binary']
 export interface InstanceConfigView {
   displayName?: string
   home: 'default' | 'private'
+  homePath?: string
   binaryPath?: string
   args: string[]
   env: Record<string, string>
@@ -159,6 +160,7 @@ export function instanceConfigOf(snapshot: InstanceSnapshot): InstanceConfigView
   return {
     ...(typeof raw.displayName === 'string' ? { displayName: raw.displayName } : {}),
     home: raw.home === 'private' ? 'private' : 'default',
+    ...(typeof raw.homePath === 'string' && raw.homePath ? { homePath: raw.homePath } : {}),
     ...(typeof raw.binaryPath === 'string' && raw.binaryPath ? { binaryPath: raw.binaryPath } : {}),
     args: Array.isArray(raw.args) ? raw.args.filter((arg): arg is string => typeof arg === 'string') : [],
     env,
