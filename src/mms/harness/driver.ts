@@ -4,6 +4,7 @@ import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } 
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import type { StoredCliConfig } from '../providers/cliConfig'
+import type { AcpSource } from './acp/preset'
 import type { LoginSession } from '../providers/LoginSession'
 import type { ProviderAdapter } from '../run/adapters/ProviderAdapter'
 import type { ProviderRef } from '../run/types'
@@ -29,6 +30,8 @@ export interface InstanceConfig {
   binaryPath?: string
   args?: string[]
   env?: Record<string, string>
+  /** Where an ACP agent comes from (the `acp` driver); derived from the fields above when absent. */
+  source?: AcpSource
 }
 
 /** Runtime facts as a runtime reports them; the gateway stamps the instance and its counters. */

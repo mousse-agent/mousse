@@ -20,8 +20,11 @@ export const ANTIGRAVITY_LABEL = 'Antigravity'
 /** The agent rejects plan mode and publishes no usage: the base ACP capabilities. */
 export const ANTIGRAVITY_CAPABILITIES: ProviderCapabilities = ACP_BASE_CAPABILITIES
 
-/** Client fs with the workspace check, and `session/resume` for saved sessions. */
-export const ANTIGRAVITY_QUIRKS: AcpQuirks = Object.freeze({ clientFs: true, preferResume: true })
+/**
+ * Client fs with the workspace check, `session/resume` for saved sessions, its exact protocol
+ * version, and the `model` option with the account's listed models only.
+ */
+export const ANTIGRAVITY_QUIRKS: AcpQuirks = Object.freeze({ clientFs: true, preferResume: true, strictProtocol: true, modelConfigId: 'model' })
 
 /** The method `authenticate` signs in with, eagerly, before the first `session/new`. */
 export const ANTIGRAVITY_AUTH_METHOD = 'oauth-personal'

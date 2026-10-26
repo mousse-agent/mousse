@@ -5,6 +5,8 @@ import {
   methods,
   ndJsonStream,
   type ClientConnection,
+  type CreateElicitationRequest,
+  type CreateElicitationResponse,
   type ReadTextFileRequest,
   type ReadTextFileResponse,
   type RequestPermissionRequest,
@@ -42,6 +44,8 @@ export interface AcpClientHandlers {
   requestPermission(request: RequestPermissionRequest): Promise<RequestPermissionResponse>
   readTextFile?(request: ReadTextFileRequest): Promise<ReadTextFileResponse>
   writeTextFile?(request: WriteTextFileRequest): Promise<WriteTextFileResponse>
+  /** `elicitation/create`: a sign-in link (URL mode) during sign-in; anything else is declined. */
+  createElicitation?(request: CreateElicitationRequest): Promise<CreateElicitationResponse>
 }
 
 /** Why a connection opens. */
@@ -73,18 +77,8 @@ export interface AcpWiring {
  * `handlers`. Closing the connection does not end the process: `closeAcpConnection` does both.
  */
 export function connectAcpProcess(child: ChildProcessWithoutNullStreams, handlers: AcpClientHandlers, wiring: AcpWiring = {}): AcpConnection {
-  const app = client({ name: 'Mousse' })
   const active: AcpConnection = { child, connection: undefined as unknown as AcpRpc }
-  app.onRequest(methods.client.session.requestPermission, async ({ params }) => handlers.requestPermission(params))
-  if (handlers.readTextFile) {
-    const read = handlers.readTextFile
-    app.onRequest(methods.client.fs.readTextFile, async ({ params }) => read(params))
-  }
-  if (handlers.writeTextFile) {
-    const write = handlers.writeTextFile
-    app.onRequest(methods.client.fs.writeTextFile, async ({ params }) => write(params))
-  }
-  app.onNotification(methods.client.session.update, ({ params }) => active.onUpdate?.(params.update, params.sessionId))
+  const app = acpClientApp(handlers, active)
   const output = wiring.stdout ? child.stdout.pipe(wiring.stdout) : child.stdout
   const stream = ndJsonStream(Writable.toWeb(child.stdin) as WritableStream<Uint8Array>, Readable.toWeb(output) as ReadableStream<Uint8Array>)
   const connection: ClientConnection = app.connect(stream)
@@ -104,6 +98,26 @@ export function connectAcpProcess(child: ChildProcessWithoutNullStreams, handler
   })
   child.on('error', (error) => connection.close(error))
   return active
+}
+
+/** Mousse's side of an ACP connection: `handlers` answer the agent; updates go to `active.onUpdate`. */
+export function acpClientApp(handlers: AcpClientHandlers, active: Pick<AcpConnection, 'onUpdate'>): ReturnType<typeof client> {
+  const app = client({ name: 'Mousse' })
+  app.onRequest(methods.client.session.requestPermission, async ({ params }) => handlers.requestPermission(params))
+  if (handlers.readTextFile) {
+    const read = handlers.readTextFile
+    app.onRequest(methods.client.fs.readTextFile, async ({ params }) => read(params))
+  }
+  if (handlers.writeTextFile) {
+    const write = handlers.writeTextFile
+    app.onRequest(methods.client.fs.writeTextFile, async ({ params }) => write(params))
+  }
+  if (handlers.createElicitation) {
+    const elicit = handlers.createElicitation
+    app.onRequest(methods.client.elicitation.create, async ({ params }) => elicit(params))
+  }
+  app.onNotification(methods.client.session.update, ({ params }) => active.onUpdate?.(params.update, params.sessionId))
+  return app
 }
 
 /** Closes the connection and ends the process: a polite signal, then a kill after 3 s. */

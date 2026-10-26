@@ -9,6 +9,7 @@ import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { AcpConnectionFactory } from '../../harness/acp/connection'
 import { modelOptions } from '../../harness/acp/models'
 import { ANTIGRAVITY_AUTH_METHOD, ANTIGRAVITY_LABEL, ANTIGRAVITY_QUIRKS, antigravityConnectionFactory, forwardAntigravityCallback } from '../../harness/acp/presets/antigravity'
+import { keepOption } from '../../harness/acp/permissions'
 import { AcpSessions, type AcpChatInput, type SavedAcpSession } from '../../harness/acp/session'
 import type { LoginSession } from '../LoginSession'
 import { applyCliConfigPatch, requireExecutable, sharedCliVersions, storedCliArgs, storedCliEnv, withUserEnv, type CliVersionCache, type StoredCliConfig } from '../cliConfig'
@@ -66,6 +67,8 @@ export class AntigravityProviderService {
       defaultInstanceId: ANTIGRAVITY_INSTANCE_ID,
       questions,
       quirks: ANTIGRAVITY_QUIRKS,
+      // Antigravity's own option labels; it asks for every tool.
+      classifyOption: keepOption,
       connect: options.connect ?? antigravityConnectionFactory({
         profileDir: this.profileDir,
         profileHome,

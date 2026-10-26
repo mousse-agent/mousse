@@ -1,0 +1,8 @@
+{"kind":"transcript","adapter":"acp","scenario":"provider-error","boundary":"ACP JSON-RPC on the agent connection: calls out; session updates and responses in","recordedAt":"hand-authored","version":1}
+{"dir":"out","frame":{"kind":"request","method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"Mousse","version":"0.1.1"}}}}
+{"dir":"in","frame":{"kind":"response","result":{"protocolVersion":1,"agentInfo":{"name":"replay-agent","version":"0.0.1"},"agentCapabilities":{},"authMethods":[]}}}
+{"dir":"out","frame":{"kind":"request","method":"session/new","params":{"mcpServers":[]}}}
+{"dir":"in","frame":{"kind":"response","result":{"sessionId":"replay-session"}}}
+{"dir":"out","frame":{"kind":"request","method":"session/prompt","params":{"sessionId":"replay-session","prompt":[{"type":"text","text":"Summarise the repository"}]}}}
+{"dir":"in","frame":{"kind":"update","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Partial"}}}}
+{"dir":"in","frame":{"kind":"error","message":"Upstream overloaded"}}

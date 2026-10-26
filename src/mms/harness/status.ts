@@ -117,7 +117,7 @@ export async function probeInstance(input: {
   const notChecked: AuthReading = { state: 'unknown', ...(driver.methodLabel ? { methodLabel: driver.methodLabel } : {}) }
 
   // A runtime Mousse hosts itself (the pi loop) has no binary to find.
-  if (!driver.binaryNames.length && !runtime.managed && !driver.canInstall) {
+  if (!driver.binaryNames.length && !runtime.managed && !driver.canInstall && !input.override) {
     const reading = await withDeadline(runtime.auth({ force: input.force }), timeouts.authMs)
     const timedOut = 'timedOut' in reading
     const auth = timedOut ? { ...notChecked, message: 'The sign-in check did not finish.' } : reading.value

@@ -6,7 +6,8 @@ export const REPLAY_DRIVERS: Record<string, { driver: string; instanceId: string
   pi: { driver: 'pi', instanceId: 'pi:openai' },
   'claude-subscription': { driver: 'claude', instanceId: 'claude' },
   antigravity: { driver: 'antigravity', instanceId: 'antigravity' },
-  codex: { driver: 'codex', instanceId: 'codex' }
+  codex: { driver: 'codex', instanceId: 'codex' },
+  acp: { driver: 'acp', instanceId: 'acp:replay' }
 }
 
 const TERMINAL = new Set(['completed', 'failed', 'interrupted', 'cancelled'])

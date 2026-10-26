@@ -3,13 +3,13 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/status'
 import type { ProviderLoginOption } from '../src/shared/providerAuth'
-import { AgentConnectStep, addChoices, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
+import { AgentConnectStep, CustomCommandStep, addChoices, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
 import { AccountRow, BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
 import { ProviderModelsSection, bulkVisibilityPatch, capabilityChips, displayModels, modelsSummary, movedOrder, nextOrder } from '../src/renderer/components/providers/ProviderModelsSection'
 import { AgentEditor, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
 import { ProviderListRow, StatusLine, shortStatus } from '../src/renderer/components/providers/parts'
 import { offersRedirectPaste, refusedText } from '../src/renderer/components/providers/SignInDialog'
-import { switchStateOf } from '../src/renderer/components/providers/providerView'
+import { commandLabel, parseEnvLines, switchStateOf } from '../src/renderer/components/providers/providerView'
 import { model, snapshot, type SnapshotOverrides } from './providerSnapshotFixture'
 
 const noop = async () => undefined
@@ -230,14 +230,21 @@ describe('Add provider choices', () => {
 
   it('offers a second Claude Code account and skips single-instance agents already in the list, on or off', () => {
     const choices = addChoices([claude, codex, antigravity], [])
-    expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([['new', 'Claude Code · another account']])
+    expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([['new', 'Claude Code · another account'], ['new', 'Custom command']])
+  })
+
+  it('always offers a Custom command, never as another account', () => {
+    const custom = snapshot({ instanceId: 'acp:grok', driver: 'acp', displayName: 'grok' })
+    const choices = addChoices([claude, codex, antigravity, custom], [])
+    expect(choices.find((choice) => choice.key === 'new:acp')).toMatchObject({ label: 'Custom command', group: 'Agents' })
   })
 
   it('offers a deleted agent again as a new provider on the user’s own setup', () => {
     const choices = addChoices([codex], [])
     expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([
       ['new', 'Claude Code'],
-      ['new', 'Antigravity']
+      ['new', 'Antigravity'],
+      ['new', 'Custom command']
     ])
     expect(choices.every((choice) => choice.kind === 'new' && choice.existing === undefined)).toBe(true)
   })
@@ -289,6 +296,18 @@ describe('Add provider choices', () => {
     expect(html).toContain('Not found automatically. Choose the executable.')
     expect(html).toContain('aria-label="Claude Code executable path"')
     expect(buttons(html)).toEqual(['Add'])
+  })
+
+  it('asks a Custom command for its program, arguments, variables and name', () => {
+    const html = renderToStaticMarkup(createElement(CustomCommandStep, { busy: false, disabled: false, error: null, onAdd: () => undefined }))
+    expect(labels(html)).toEqual(expect.arrayContaining(['Command', 'Arguments', 'Variables', 'Name']))
+    expect(html).toContain('without a shell')
+  })
+
+  it('reads NAME=value lines and names an agent after its program', () => {
+    expect(parseEnvLines('A=1\n\n B = two=2 \r\nFLAG\n=skipped')).toEqual({ A: '1', B: ' two=2 ', FLAG: '' })
+    expect(commandLabel('C:\\Users\\me\\.grok\\bin\\grok.exe')).toBe('grok')
+    expect(commandLabel('/usr/local/bin/my-agent')).toBe('my-agent')
   })
 })
 

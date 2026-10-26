@@ -1,6 +1,9 @@
+// Adapted from T3 Code (MIT, (c) 2026 T3 Tools Inc., commit d53873b6a4); see THIRD_PARTY_NOTICES.md.
 import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import type {
+  PermissionOption,
+  PermissionOptionKind,
   ReadTextFileRequest,
   ReadTextFileResponse,
   RequestPermissionRequest,
@@ -24,22 +27,95 @@ export interface AcpRequestScope {
   throwIfAborted(): void
 }
 
-/** `session/request_permission`: the user picks one of the agent's options; anything else cancels. */
-export async function askToolPermission(
-  questions: UserQuestionService,
+/** How long an agent's permission choice lasts, as far as Mousse can tell. */
+export type PermissionScope = 'once' | 'session' | 'persistent' | 'unknown'
+
+/** One option of a permission request, as Mousse offers it. */
+export interface ClassifiedOption {
+  optionId: string
+  kind: PermissionOptionKind
+  label: string
+  scope: PermissionScope
+}
+
+/** A preset's view of an option: how to label it and how long it lasts; `null` hides it. */
+export type ClassifyOption = (option: PermissionOption) => ClassifiedOption | null
+
+/** The agent's own options, as it labels them (presets that know their agent's options). */
+export const keepOption: ClassifyOption = (option) => ({
+  optionId: option.optionId,
+  kind: option.kind,
+  label: option.name,
+  scope: option.kind === 'allow_once' || option.kind === 'reject_once' ? 'once' : 'unknown'
+})
+
+/**
+ * Any other agent: "always" may outlive this session (some agents keep it for the whole project),
+ * so it says so and is never picked for the user.
+ */
+export const classifyGenericOption: ClassifyOption = (option) => {
+  switch (option.kind) {
+    case 'allow_once':
+    case 'reject_once':
+      return { optionId: option.optionId, kind: option.kind, label: option.name, scope: 'once' }
+    case 'allow_always':
+      return { optionId: option.optionId, kind: option.kind, label: 'Always allow (the agent may remember this beyond this session)', scope: 'persistent' }
+    case 'reject_always':
+      return { optionId: option.optionId, kind: option.kind, label: option.name, scope: 'persistent' }
+    default:
+      return { optionId: option.optionId, kind: option.kind, label: option.name, scope: 'unknown' }
+  }
+}
+
+/**
+ * Asks the user to pick one option of a permission request. Today it asks through the thread's
+ * questions (`DriverContext.questions`); a turn bridge replaces only this.
+ */
+export interface PermissionPrompter {
+  /** The chosen option id; undefined when the user picked nothing (dismissed, timed out). */
+  choose(request: { threadId: string; title: string; options: ClassifiedOption[] }): Promise<string | undefined>
+}
+
+export function questionsPrompter(questions: UserQuestionService): PermissionPrompter {
+  return {
+    async choose({ threadId, title, options }) {
+      const answers = await questions.requestAnswers([{
+        id: 'permission', prompt: title,
+        options: options.map((option) => ({ id: option.optionId, label: option.label }))
+      }], threadId)
+      const answer = answers.permission
+      return typeof answer === 'string' ? answer : undefined
+    }
+  }
+}
+
+/** The run's approvals policy: ask the user, or answer for them with a once-only option. */
+export type PermissionApprovals = 'ask' | 'grants' | 'never'
+
+/**
+ * `session/request_permission`. The user picks one of the options the preset shows; `grants`
+ * allows and `never` rejects with a once-only option, never an "always" one. Anything else, an
+ * answer that matches no shown option, or a stopped turn is `cancelled`.
+ */
+export async function answerPermission(
+  prompter: PermissionPrompter,
   scope: AcpRequestScope,
   request: RequestPermissionRequest,
-  label: string
+  options: { label: string; classify: ClassifyOption; approvals?: PermissionApprovals }
 ): Promise<RequestPermissionResponse> {
-  if (scope.aborted() || !scope.threadId || !request.options.length) return { outcome: { outcome: 'cancelled' } }
-  const answers = await questions.requestAnswers([{
-    id: 'permission', prompt: request.toolCall.title ?? `Allow ${label} to run this tool?`,
-    options: request.options.map((option) => ({ id: option.optionId, label: option.name }))
-  }], scope.threadId)
-  if (scope.aborted()) return { outcome: { outcome: 'cancelled' } }
-  const answer = answers.permission
-  const selected = request.options.find((option) => option.optionId === answer)
-  return selected ? { outcome: { outcome: 'selected', optionId: selected.optionId } } : { outcome: { outcome: 'cancelled' } }
+  const cancelled: RequestPermissionResponse = { outcome: { outcome: 'cancelled' } }
+  const shown = request.options.map(options.classify).filter((option): option is ClassifiedOption => option !== null)
+  if (scope.aborted() || !scope.threadId || !shown.length) return cancelled
+  const approvals = options.approvals ?? 'ask'
+  if (approvals !== 'ask') {
+    const kind: PermissionOptionKind = approvals === 'grants' ? 'allow_once' : 'reject_once'
+    const pick = shown.find((option) => option.kind === kind)
+    return pick ? { outcome: { outcome: 'selected', optionId: pick.optionId } } : cancelled
+  }
+  const answer = await prompter.choose({ threadId: scope.threadId, title: request.toolCall.title ?? `Allow ${options.label} to run this tool?`, options: shown })
+  if (scope.aborted()) return cancelled
+  const selected = shown.find((option) => option.optionId === answer)
+  return selected ? { outcome: { outcome: 'selected', optionId: selected.optionId } } : cancelled
 }
 
 /** A path the agent may touch: inside the workspace, also after resolving links. */

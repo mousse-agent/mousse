@@ -19,6 +19,8 @@ export interface AcpTurnClient {
   chat(input: AcpChatInput): Promise<string>
   commitConversation(threadId: string, history: string): void
   configured(): boolean
+  /** The native cancel of the session's running prompt; without it, stop works through the turn's signal. */
+  interrupt?(sessionId: string | undefined): Promise<'interrupted' | 'not_active'>
 }
 
 export interface AcpAdapterOptions {
@@ -26,6 +28,8 @@ export interface AcpAdapterOptions {
   /** The agent's name in errors. */
   label: string
   capabilities: ProviderCapabilities
+  /** The agent offers a plan mode (from its runtime facts); otherwise a plan turn is refused. */
+  planMode?: () => boolean
 }
 
 /**
@@ -61,9 +65,10 @@ export class AcpAdapter implements ProviderAdapter {
     ctl: TurnControl,
     host: AdapterHost
   ): Promise<TurnResult> {
-    if (input.mode === 'plan') throw new Error(`Use ${this.options.label}’s /plan command in a chat turn`)
+    const plan = input.mode === 'plan'
+    if (plan && !this.options.planMode?.()) throw new Error(`Use ${this.options.label}’s /plan command in a chat turn`)
     const client = this.client()
-    if (!client || !input.cwd) throw new Error(`${input.llmProvider} requires a project workspace`)
+    if (!client || !input.cwd) throw new Error(`${input.llmProvider || this.options.label} requires a project workspace`)
     const startedAt = Date.now()
     // The ACP session id stays inside the runtime's saved sessions; the ref names the runtime.
     const providerRef: ProviderRef = { provider: input.llmProvider, instanceId: input.instanceId, model: input.model }
@@ -78,6 +83,7 @@ export class AcpAdapter implements ProviderAdapter {
       instanceId: input.instanceId,
       cwd: input.cwd,
       model: input.model,
+      ...(plan ? { mode: 'plan' as const } : {}),
       prompt: input.prompt,
       images: input.images,
       signal: input.signal,
@@ -99,7 +105,9 @@ export class AcpAdapter implements ProviderAdapter {
       onTool: (event) => {
         progress()
         sink.tool(runtimeToolEvent(event))
-      }
+      },
+      // The ref names the agent's session once there is one, so stop and terminate find it.
+      ...(client.interrupt ? { onSession: (sessionId: string) => sink.providerRef({ ...providerRef, sessionId }) } : {})
     })
     client.commitConversation(input.threadId, host.context.nativeHistoryAfterTurn(text))
     streams.text.complete(text)
@@ -118,11 +126,13 @@ export class AcpAdapter implements ProviderAdapter {
   }
 
   /**
-   * Stop reaches the agent through `TurnInput.signal`: the runtime rejects pending permission
-   * prompts and closes the ACP process when the orchestrator aborts the turn.
+   * A runtime with a native cancel stops the running prompt (the gateway kills the process when it
+   * misses its deadline); otherwise stop reaches the agent through `TurnInput.signal`: the runtime
+   * rejects pending permission prompts and closes the ACP process when the orchestrator aborts the turn.
    */
-  async interrupt(_ref: ProviderRef): Promise<'interrupted' | 'not_active'> {
-    return 'not_active'
+  async interrupt(ref: ProviderRef): Promise<'interrupted' | 'not_active'> {
+    const client = this.client()
+    return client?.interrupt ? client.interrupt(ref.sessionId) : 'not_active'
   }
 
   /**

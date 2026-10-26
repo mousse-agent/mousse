@@ -231,7 +231,8 @@ export function showsContextGauge(provider: ProviderWithStatus | undefined): boo
  * match; added instances are told apart by their instance id.
  */
 export function llmProviderOf(snapshot: Pick<InstanceSnapshot, 'instanceId' | 'driver'>): string {
-  return legacyProviderForInstance(snapshot.instanceId, snapshot) ?? snapshot.instanceId
+  // Drivers without a legacy name (`''`) are named by their instance.
+  return legacyProviderForInstance(snapshot.instanceId, snapshot) || snapshot.instanceId
 }
 
 export function pickerIdOf(snapshot: Pick<InstanceSnapshot, 'instanceId' | 'driver' | 'builtIn'>): string {
@@ -256,7 +257,8 @@ const DRIVER_ORDER: Record<HarnessDriverKind, { rank: number; byName: boolean }>
   claude: { rank: 0, byName: false },
   codex: { rank: 1, byName: false },
   antigravity: { rank: 2, byName: false },
-  pi: { rank: 3, byName: true }
+  acp: { rank: 3, byName: true },
+  pi: { rank: 4, byName: true }
 }
 
 /**

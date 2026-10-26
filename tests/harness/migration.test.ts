@@ -142,4 +142,19 @@ describe('legacy profiles', () => {
       profile.stop()
     }
   })
+
+  it('keeps a record of a driver this build does not know untouched, and an ACP selection names no legacy provider', async () => {
+    const grok = { driver: 'grok', enabled: true, config: { home: 'private' } }
+    const acp = { driver: 'acp', enabled: true, config: { binaryPath: '/opt/agent/bin/agent' } }
+    const profile = legacyProfile({ loginPolicy: 'cli' }, { claude: { driver: 'claude', enabled: true }, 'grok:main': grok, 'acp:agent': acp })
+    try {
+      await profile.harness.instances.setEnabled('claude', { kind: 'device' }, false)
+      expect(profile.section().instances).toMatchObject({ 'grok:main': grok, 'acp:agent': acp })
+      // An older reader routes nothing of a new driver to the pi loop: there is no legacy name.
+      const binding = { instanceId: 'acp:agent', driver: 'acp' as const, accountGeneration: 0, homeId: 'default', configRevision: 0, model: 'default', policy: { mode: 'default' as const, approvals: 'ask' as const } }
+      expect(profile.harness.selectionOf(binding)).toEqual({ instanceId: 'acp:agent', llmProvider: '', model: 'default' })
+    } finally {
+      profile.stop()
+    }
+  })
 })

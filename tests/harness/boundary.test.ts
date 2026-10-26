@@ -96,7 +96,7 @@ describe('harness import boundary', () => {
 /** Where application branches live. Declarations and data tables are out of scope (plan v3). */
 const BRANCH_SCOPES = ['src/renderer/', 'src/mms/orchestrator/', 'src/mms/protocol/', 'src/mms/channels/', 'src/cli/']
 
-const DRIVER_NAMES = ['antigravity', 'claude-subscription', 'codex', 'pi', 'claude']
+const DRIVER_NAMES = ['antigravity', 'claude-subscription', 'codex', 'pi', 'claude', 'acp']
 const NAME = `['"\`](${DRIVER_NAMES.join('|')})['"\`]`
 const BRANCH_SITES = [
   new RegExp(`(===|!==|==|!=)\\s*${NAME}`),
