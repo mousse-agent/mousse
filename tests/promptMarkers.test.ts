@@ -11,7 +11,8 @@ it('tracks every visible mounted prompt, recycles safely, and expands only aroun
   let child: ChildProcess | undefined
   let exited: Promise<number | null> | undefined
   try {
-    await build({ entryPoints: [resolve('tests/fixtures/prompt-markers/entry.tsx')], outfile: join(directory, 'entry.js'), bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', loader: { '.svg': 'dataurl', '.png': 'dataurl', '.webp': 'dataurl' }, define: { 'process.env.NODE_ENV': '"development"' } })
+    // The chat Markdown pulls in KaTeX lazily; esbuild bundles its stylesheet and needs loaders for the fonts it references.
+    await build({ entryPoints: [resolve('tests/fixtures/prompt-markers/entry.tsx')], outfile: join(directory, 'entry.js'), bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', loader: { '.svg': 'dataurl', '.png': 'dataurl', '.webp': 'dataurl', '.woff': 'dataurl', '.woff2': 'dataurl', '.ttf': 'dataurl' }, define: { 'process.env.NODE_ENV': '"development"' } })
     await build({ entryPoints: [resolve('tests/fixtures/prompt-markers/main.ts')], outfile: join(directory, 'main.mjs'), bundle: true, platform: 'node', format: 'esm', external: ['electron'] })
     const env: NodeJS.ProcessEnv = { ...process.env, MOUSSE_PROMPT_MARKERS_DIRECTORY: directory }
     delete env.ELECTRON_RUN_AS_NODE

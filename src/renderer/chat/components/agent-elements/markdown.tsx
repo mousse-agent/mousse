@@ -1,11 +1,21 @@
 "use client";
 
-import { memo, type ReactNode } from "react";
+import { memo, type ComponentProps, type ReactNode } from "react";
 import { Streamdown, type Components } from "streamdown";
 import { Children, cloneElement, isValidElement } from "react";
 import { cn } from "./utils/cn";
 import { codeHighlighter } from "./code-highlighter";
 import { classifyLink, routeLink, safeMarkdownUrl } from "../../../utils/chatLinks";
+import { copyMathAsTex } from "../../../markdown/math/copyMathAsTex";
+import {
+  hideUnclosedMathFence,
+  mayContainMath,
+  parseBlocksKeepingMath,
+} from "../../../markdown/math/math-detect";
+import { readMathClass } from "../../../markdown/math/math-markup";
+import { MathInline } from "../../../markdown/math/MathView";
+import { useRenderMath } from "../../../markdown/math/renderMathSetting";
+import { mathRenderers, mousseMathPlugin } from "../../../markdown/math/streamdown-math";
 
 function fixNumberedListBreaks(text: string): string {
   return text.replace(/^(\d+)[.)]\s*\n+\s*/gm, "$1. ");
@@ -44,13 +54,15 @@ function normalizeMarkdown(text: string): string {
 
 /** Keep only the language id of a fence info string (```ts title=x → ```ts).
  *  The code plugin loads each shiki grammar on first use and falls back to
- *  plain text for ids it does not know. */
-function normalizeCodeFenceLanguages(text: string): string {
+ *  plain text for ids it does not know. ```math stays math only when math is
+ *  rendered. */
+function normalizeCodeFenceLanguages(text: string, keepMath: boolean): string {
   return text.replace(/```([^\n]*)/g, (_match, langRaw) => {
     const lang = String(langRaw || "")
       .trim()
       .toLowerCase()
       .split(/\s+/)[0];
+    if (lang === "math" && !keepMath) return "```text";
     return lang && /^[\w#+.-]+$/.test(lang) ? `\`\`\`${lang}` : "```";
   });
 }
@@ -182,12 +194,29 @@ export type MarkdownProps = {
 };
 
 // Same reason as `markdownComponents` below: a fresh `{ code }` wrapper per
-// render would defeat memoization inside Streamdown.
+// render would defeat memoization inside Streamdown. Streamdown keeps one
+// processor per distinct plugin list, so there are exactly two: with math and
+// without it.
 const markdownPlugins = { code: codeHighlighter };
+const markdownMathPlugins = { code: codeHighlighter, math: mousseMathPlugin, renderers: mathRenderers };
+// Math is typeset by our own components. Streamdown's own completion of an
+// unclosed `$$` would otherwise rewrite the text before our parser sees it.
+const markdownRemend = { katex: false };
 // Navigation is synchronously allowlisted by safeMarkdownUrl/classifyLink and
 // handled inside Mousse; disable Streamdown's HTTP-only interstitial so the
 // canonical mousse-file scheme reaches our anchor renderer.
 const markdownLinkSafety = { enabled: false };
+
+function renderInlineCode(children: ReactNode, props: ComponentProps<"code">): ReactNode {
+  return (
+    <code
+      className="an-md-code rounded border border-an-border-color bg-an-tool-background px-1 py-px text-[0.85em] text-an-foreground"
+      {...props}
+    >
+      {renderInlineChildren(children)}
+    </code>
+  );
+}
 
 // Hoisted to module scope on purpose: defining these inline per render
 // gives every Markdown a brand-new `components` identity, which forces
@@ -249,14 +278,7 @@ const markdownComponents: Components = {
   // hugs the code text, in the Git diff console font, with lightweight
   // token highlighting (strings / numbers / keywords / fn calls).
   // (Block code still goes through the code plugin.)
-  inlineCode: ({ children, ...props }) => (
-    <code
-      className="an-md-code rounded border border-an-border-color bg-an-tool-background px-1 py-px text-[0.85em] text-an-foreground"
-      {...props}
-    >
-      {renderInlineChildren(children)}
-    </code>
-  ),
+  inlineCode: ({ children, ...props }) => renderInlineCode(children, props),
   strong: ({ children, ...props }) => (
     <strong className="font-medium text-an-foreground" {...props}>
       {children}
@@ -332,9 +354,23 @@ const markdownComponents: Components = {
   ),
 };
 
+// Inline math arrives as inline code tagged by remarkMousseMath.
+const markdownMathComponents: Components = {
+  ...markdownComponents,
+  inlineCode: ({ children, ...props }) => {
+    const math = readMathClass(props.className);
+    if (!math) return renderInlineCode(children, props);
+    const tex = Children.toArray(children).join("");
+    return <MathInline tex={tex} display={math.display} delimiter={math.delimiter} />;
+  },
+};
+
 export const Markdown = memo(function Markdown({ content, className }: MarkdownProps) {
+  const renderMath = useRenderMath();
+  const math = renderMath && mayContainMath(content);
   const safeContent = normalizeCodeFenceLanguages(
-    normalizeMarkdown(content),
+    normalizeMarkdown(math ? hideUnclosedMathFence(content) : content),
+    math,
   );
 
   return (
@@ -345,8 +381,16 @@ export const Markdown = memo(function Markdown({ content, className }: MarkdownP
         "[&_li>p]:inline [&_li>p]:mb-0",
         className,
       )}
+      onCopy={math ? copyMathAsTex : undefined}
     >
-      <Streamdown components={markdownComponents} plugins={markdownPlugins} urlTransform={safeMarkdownUrl} linkSafety={markdownLinkSafety}>
+      <Streamdown
+        components={math ? markdownMathComponents : markdownComponents}
+        plugins={math ? markdownMathPlugins : markdownPlugins}
+        parseMarkdownIntoBlocksFn={math ? parseBlocksKeepingMath : undefined}
+        remend={markdownRemend}
+        urlTransform={safeMarkdownUrl}
+        linkSafety={markdownLinkSafety}
+      >
         {safeContent}
       </Streamdown>
     </div>

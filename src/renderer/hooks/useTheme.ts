@@ -6,6 +6,7 @@ import { buildAccentCssVars } from '../../shared/accentPalette'
 import { BLACKSPHERE_COLORS, BLACKSPHERE_TOKEN_COLORS, applyVsCodeColors, clearVsCodeColors, injectTokenColors, clearTokenColors } from '../../shared/vscodeTheme'
 
 import { FIXED_SURFACE_THEMES } from '../../shared/themeSurfaces'
+import { setRenderMath } from '../markdown/math/renderMathSetting'
 
 const FIXED_SURFACE_VARS = [
   ...new Set(Object.values(FIXED_SURFACE_THEMES).flatMap((vars) => Object.keys(vars ?? {})))
@@ -191,6 +192,7 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyVsCodeTheme(normalized.theme)
   applyLayoutTokens(normalized.theme)
   applyAcrylic(normalized.acrylic, normalized.acrylicIntensity, normalized.theme)
+  setRenderMath(normalized.renderMath)
 }
 
 async function syncWindowBackground(): Promise<void> {

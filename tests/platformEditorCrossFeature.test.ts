@@ -55,9 +55,10 @@ describe('production editor UI compound persistence', () => {
     const home = join(root, 'home')
     const rendererDir = join(root, 'renderer')
     const rendererJs = join(rendererDir, 'preview.js')
+    // The chat Markdown pulls in KaTeX lazily; esbuild bundles its stylesheet and needs loaders for the fonts it references.
     await build({ entryPoints: [resolve('tests/fixtures/agent-platform/editor-cross-feature/preview.tsx')],
       outfile: rendererJs, bundle: true, platform: 'browser', format: 'esm', jsx: 'automatic', logLevel: 'silent',
-      loader: { '.css': 'css', '.svg': 'dataurl', '.png': 'dataurl', '.webp': 'dataurl' },
+      loader: { '.css': 'css', '.svg': 'dataurl', '.png': 'dataurl', '.webp': 'dataurl', '.woff': 'dataurl', '.woff2': 'dataurl', '.ttf': 'dataurl' },
       define: { 'process.env.NODE_ENV': '"production"' } })
     const rendererHtml = join(rendererDir, 'preview.html')
     writeFileSync(rendererHtml, '<!doctype html><html><head><meta charset="UTF-8"><link rel="stylesheet" href="./preview.css"></head><body><div id="root"></div><script type="module" src="./preview.js"></script></body></html>')

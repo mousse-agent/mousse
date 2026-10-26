@@ -105,7 +105,8 @@ export class SettingsStore {
       rawTheme === 'light-acrylic' ||
       rawTheme === 'system-acrylic' ||
       typeof settings.appearance?.acrylic !== 'boolean' ||
-      typeof settings.appearance?.acrylicIntensity !== 'number'
+      typeof settings.appearance?.acrylicIntensity !== 'number' ||
+      typeof settings.appearance?.renderMath !== 'boolean'
     if (needsAppearanceMigrate) {
       this.config.applySettingsPatch({ appearance: normalized.appearance })
       this.shouldPersistUsername = true

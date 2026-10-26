@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { Markdown } from '../src/renderer/chat/components/agent-elements/markdown'
+import { MarkdownPreview } from '../src/renderer/components/editors/MarkdownPreview'
+import { setRenderMath } from '../src/renderer/markdown/math/renderMathSetting'
 
 function render(content: string): string {
   return renderToStaticMarkup(createElement(Markdown, { content }))
@@ -126,5 +128,113 @@ describe('chat Markdown GitHub alerts', () => {
       expect(markup).toContain('<blockquote')
       expect(markup).not.toContain('an-md-alert')
     }
+  })
+})
+
+describe('chat Markdown math', () => {
+  afterEach(() => setRenderMath(true))
+
+  // KaTeX loads on first use: the first render shows the source, a render after
+  // the chunk has arrived shows typeset math.
+  async function renderTypeset(content: string): Promise<string> {
+    render(content)
+    await import('../src/renderer/markdown/math/math-typeset')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    return render(content)
+  }
+
+  it('typesets $, $$, \\( \\) and \\[ \\] math', async () => {
+    const markup = await renderTypeset(
+      [
+        'Inline $a^2 + b^2 = c^2$ and \\(x_1\\) and $$y$$ and \\[z\\].',
+        '',
+        '$$',
+        '\\int_0^1 x\\,dx',
+        '$$',
+        '',
+        '\\[',
+        'E = mc^2',
+        '\\]',
+      ].join('\n'),
+    )
+    expect(markup.match(/class="katex"/g)?.length).toBe(6)
+    expect(markup.match(/class="katex-display"/g)?.length).toBe(4)
+    expect(markup).toContain('data-math-tex="a^2 + b^2 = c^2"')
+    expect(markup).toContain('data-math-tex="\\int_0^1 x\\,dx"')
+    expect(markup).toContain('data-math-tex="E = mc^2"')
+  })
+
+  it('typesets ```math fences as display math', async () => {
+    const markup = await renderTypeset('```math\n\\frac{1}{2}\n```')
+    expect(markup).toContain('katex-display')
+    expect(markup).not.toContain('<pre')
+  })
+
+  it('keeps a \\[ display with blank lines in it as one formula', async () => {
+    const markup = await renderTypeset('\\[\nx\n\ny\n\\]\n\nafter')
+    expect(markup.match(/class="katex-display"/g)?.length).toBe(1)
+    expect(markup).toContain('after')
+  })
+
+  it('shows the source as written when a formula cannot be typeset', async () => {
+    const markup = await renderTypeset('Bad $\\frac{$ and bad \\(x^\\) and\n\n\\[\n\\frac{\n\\]')
+    expect(markup).not.toContain('class="katex"')
+    expect(markup).toContain('$\\frac{$')
+    expect(markup).toContain('\\(x^\\)')
+    expect(markup).toContain('\\[\n\\frac{\n\\]')
+  })
+
+  it('shows an unfinished ```math fence as source until it closes', async () => {
+    const markup = await renderTypeset('Before\n\n```math\n\\frac{1}{2}')
+    expect(markup).not.toContain('katex')
+    expect(markup).toContain('\\frac{1}{2}')
+  })
+
+  it('keeps prices, shell variables and code as text', async () => {
+    const markup = await renderTypeset(
+      'Plans cost $5 and $10 a month, set $HOME first, run `echo $x$` and `\\(y\\)`.',
+    )
+    expect(markup).not.toContain('katex')
+    expect(markup).toContain('$5 and $10')
+    expect(markup).toContain('set $HOME first')
+    expect(markup).toContain('echo $x$')
+  })
+
+  it('leaves text without math delimiters on the plain path', () => {
+    const markup = render('Just prose with `code`.')
+    expect(markup).not.toContain('an-math')
+    expect(markup).toContain('<code')
+  })
+
+  it('shows the source untouched when Render math is off', async () => {
+    setRenderMath(false)
+    const markup = await renderTypeset('Inline $x^2$ here\n\n$$\ny\n$$\n\n```math\nz\n```')
+    expect(markup).not.toContain('katex')
+    expect(markup).not.toContain('an-math')
+    expect(markup).toContain('$x^2$')
+    expect(markup).toContain('$$')
+    expect(markup).toContain('language-text')
+  })
+
+  it('does not typeset raw HTML code tagged as math when Render math is off', () => {
+    setRenderMath(false)
+    const markup = render('<code class="language-math">x^2</code>')
+    expect(markup).not.toContain('katex')
+  })
+
+  it('typesets math in the file preview and keeps the setting', async () => {
+    const value = 'Inline $a^2$ and \\(b\\)\n\n$$\nc\n$$\n\n```math\nd\n```\n\nCosts $5 and $10.'
+    const preview = () => renderToStaticMarkup(createElement(MarkdownPreview, { value }))
+    preview()
+    await import('../src/renderer/markdown/math/math-typeset')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const markup = preview()
+    expect(markup.match(/class="katex"/g)?.length).toBe(4)
+    expect(markup.match(/class="katex-display"/g)?.length).toBe(2)
+    expect(markup).toContain('$5 and $10')
+    setRenderMath(false)
+    const off = preview()
+    expect(off).not.toContain('katex')
+    expect(off).toContain('$a^2$')
   })
 })

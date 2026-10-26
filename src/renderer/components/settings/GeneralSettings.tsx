@@ -170,6 +170,17 @@ export function GeneralSettings({
             </>
           }
         />
+        <SettingsRow
+          title="Render math"
+          description="Show LaTeX in replies and Markdown previews as formatted equations."
+          control={
+            <Switch
+              label="Render math"
+              checked={appearance.renderMath}
+              onChange={(renderMath) => void onUpdate({ appearance: { ...appearance, renderMath } })}
+            />
+          }
+        />
       </SettingsGroup>
 
       <SettingsGroup title="Notifications" icon={Bell}>
