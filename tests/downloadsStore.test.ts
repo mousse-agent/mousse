@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ProviderOperationEvent } from '../src/shared/harness/types'
 import type { UpdateState } from '../src/shared/updates'
 import {
   DOWNLOAD_LINGER_MS,
   applyLocalModelStatus,
+  applyProviderOperation,
   applyUpdateState,
   downloadsActions,
   pruneSettled,
@@ -87,6 +89,45 @@ describe('downloads store transitions', () => {
     expect(summarizeDownloads(applyUpdateState([], update({ phase: 'available', availableVersion: '1.1.0' }))).label).toBe('Update available')
     const failed = applyLocalModelStatus([], 'voice-model', 'K', { modelId: 'k', state: { status: 'error', message: 'x' } }, 1)
     expect(summarizeDownloads(applyUpdateState(failed, update({ phase: 'available', availableVersion: '1.1.0' }))).status).toBe('failed')
+  })
+})
+
+describe('downloads store: agent installs and updates', () => {
+  const op = (patch: Partial<ProviderOperationEvent> & Pick<ProviderOperationEvent, 'phase'>): ProviderOperationEvent =>
+    ({ operationId: 'op-1', instanceId: 'antigravity', kind: 'install', ...patch }) as ProviderOperationEvent
+
+  it('tracks an install from its byte progress to done, one entry per instance', () => {
+    let entries: DownloadEntry[] = []
+    entries = applyProviderOperation(entries, op({ phase: 'progress', message: 'Starting' }), 'Antigravity', 1)
+    expect(entries).toEqual([{ id: 'agent:antigravity', kind: 'agent', sourceId: 'op-1', label: 'Antigravity', phase: 'downloading' }])
+    entries = applyProviderOperation(entries, op({ phase: 'progress', message: 'Downloading 57 MB of 136 MB', fraction: 0.419 }), 'Antigravity', 2)
+    expect(entries).toMatchObject([{ phase: 'downloading', percent: 41 }])
+    // A step without a fraction keeps the last percent.
+    entries = applyProviderOperation(entries, op({ phase: 'progress', message: 'Verifying' }), 'Antigravity', 3)
+    expect(entries).toMatchObject([{ percent: 41 }])
+    entries = applyProviderOperation(entries, op({ phase: 'completed' }), 'Antigravity', 4)
+    expect(entries).toEqual([{ id: 'agent:antigravity', kind: 'agent', sourceId: 'op-1', label: 'Antigravity', phase: 'done', percent: 100, settledAt: 4 }])
+  })
+
+  it('keeps a failed update with its message and marks a cancelled install', () => {
+    const update = (patch: Parameters<typeof op>[0]) => op({ operationId: 'op-2', instanceId: 'codex', kind: 'update', ...patch })
+    let entries = applyProviderOperation([], update({ phase: 'progress', message: 'Updating' }), 'Codex', 1)
+    entries = applyProviderOperation(entries, update({ phase: 'failed', error: { code: 'unsupported', message: 'npm failed' } }), 'Codex', 2)
+    expect(entries).toMatchObject([{ id: 'agent:codex', phase: 'failed', error: 'npm failed' }])
+    expect(entries[0].settledAt).toBeUndefined()
+
+    let install = applyProviderOperation([], op({ phase: 'progress', message: 'Downloading', fraction: 0.1 }), 'Antigravity', 1)
+    install = applyProviderOperation(install, op({ phase: 'cancelled' }), 'Antigravity', 2)
+    expect(install).toMatchObject([{ phase: 'cancelled', percent: 10, settledAt: 2 }])
+    // A cancel for an operation never shown adds nothing.
+    expect(applyProviderOperation([], op({ phase: 'cancelled' }), 'Antigravity', 3)).toEqual([])
+  })
+
+  it('leaves sign-ins and their prompts out', () => {
+    const signIn = op({ kind: 'sign_in', phase: 'progress', message: 'Waiting for the browser' })
+    expect(applyProviderOperation([], signIn, 'Claude Code', 1)).toEqual([])
+    expect(applyProviderOperation([], op({ kind: 'sign_in', phase: 'completed' }), 'Claude Code', 2)).toEqual([])
+    expect(applyProviderOperation([], op({ phase: 'prompt', prompt: { promptId: 'p', type: 'input', secret: false, message: 'Code' } }), 'Antigravity', 3)).toEqual([])
   })
 })
 

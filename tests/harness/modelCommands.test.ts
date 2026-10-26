@@ -23,8 +23,9 @@ async function profile() {
     { id: 'anthropic', label: 'Anthropic', models: [{ id: 'claude-x', label: 'Claude X' }] }
   ]
   let stored: unknown = { 'pi:anthropic': { driver: 'pi', enabled: false } }
+  let seedVersion: number | undefined
   const instances = new ProviderInstanceService({
-    store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } },
+    store: { read: () => ({ instances: stored, seedVersion }), write: (next) => { stored = next.instances; seedVersion = next.seedVersion } },
     providerAuth: { getConfiguredLlmProviders: () => piProviders, credentials: { listProviderIds: () => ['openai', 'anthropic'] } }
   })
   const harness = testHarness({

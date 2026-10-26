@@ -25,7 +25,8 @@ function profile(): { services: MmsProfileServices; stored: () => Record<string,
   const home = mkdtempSync(join(tmpdir(), 'mousse-profile-'))
   homes.push(home)
   let stored: unknown
-  const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
+  let seedVersion: number | undefined
+  const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion }), write: (next) => { stored = next.instances; seedVersion = next.seedVersion } } })
   const harness = testHarness({ adapters: [pi, claude], instances, profileHome: home })
   return { services: { harness, providerInstances: instances } as unknown as MmsProfileServices, stored: () => (stored ?? {}) as Record<string, unknown> }
 }

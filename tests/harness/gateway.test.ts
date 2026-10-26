@@ -22,11 +22,15 @@ const fake = (driver: ProviderDriverKind, configured = true): ProviderAdapter =>
   interrupt: async () => 'not_active'
 })
 
-/** An in-memory profile whose stored map is `stored`; `credentials` are the credentialed pi providers. */
+/**
+ * An in-memory profile whose stored map is `stored` and was never seeded, so the first read adds the
+ * vendor agents; `credentials` are the credentialed pi providers.
+ */
 const instances = (stored?: Record<string, unknown>, credentials: string[] = []) => {
   let value: unknown = stored
+  let seedVersion: number | undefined
   return new ProviderInstanceService({
-    store: { read: () => ({ instances: value, seedVersion: 1 }), write: (next) => { value = next.instances } },
+    store: { read: () => ({ instances: value, seedVersion }), write: (next) => { value = next.instances; seedVersion = next.seedVersion } },
     providerAuth: { credentials: { listProviderIds: () => credentials } }
   })
 }
@@ -206,7 +210,8 @@ describe('harness gateway: instances', () => {
   it('adds a second instance with its own id, config and state directory, and removes it', async () => {
     const profileHome = home()
     let stored: unknown
-    const source = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
+    let seedVersion: number | undefined
+    const source = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion }), write: (next) => { stored = next.instances; seedVersion = next.seedVersion } } })
     const claude = adapterDriver(fake('claude'))
     const multi = { ...claude, multiInstance: true, privateHome: true, decodeConfig: (raw: Record<string, unknown> | undefined) => decodeInstanceConfig(raw, { privateHome: true }) }
     const harness = testHarness({ drivers: [adapterDriver(pi()), multi], instances: source, profileHome })
@@ -225,7 +230,6 @@ describe('harness gateway: instances', () => {
     await expect(harness.bind(harness.resolveStored({ instanceId: 'claude:work', llmProvider: '', model: 'm' }, { purpose: 'turn' }), { mode: 'agent' }))
       .resolves.toMatchObject({ instanceId: 'claude:work', driver: 'claude', homeId: 'private:claude:work', configRevision: 1, accountGeneration: 0 })
 
-    await expect(harness.instances.remove('claude')).rejects.toMatchObject({ code: 'unsupported' })
     // The private home and the sign-in in it go with the instance.
     const stateDir = instanceStateDir(profileHome, 'claude:work')
     mkdirSync(join(stateDir, 'home'), { recursive: true })
@@ -242,10 +246,36 @@ describe('harness gateway: instances', () => {
     expect((await harness.instances.add({ driver: 'claude', config: { displayName: 'Other' } })).instanceId).toBe('claude:other-2')
   })
 
+  it('removes the seeded claude for good; adding Claude Code again uses the claude id on the user\'s own setup', async () => {
+    const profileHome = home()
+    let stored: unknown
+    let seedVersion: number | undefined
+    const source = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion }), write: (next) => { stored = next.instances; seedVersion = next.seedVersion } } })
+    const claude = adapterDriver(fake('claude'))
+    const multi = { ...claude, multiInstance: true, privateHome: true, decodeConfig: (raw: Record<string, unknown> | undefined) => decodeInstanceConfig(raw, { privateHome: true }) }
+    const harness = testHarness({ drivers: [adapterDriver(pi()), multi], instances: source, profileHome })
+    expect((await harness.instances.snapshots({ kind: 'device' })).map((snapshot) => snapshot.instanceId)).toContain('claude')
+
+    await harness.instances.remove('claude')
+    expect(stored).not.toHaveProperty('claude')
+    // Not seeded again on the next read.
+    expect(source.list()).not.toHaveProperty('claude')
+    expect((await harness.instances.snapshots({ kind: 'device' })).map((snapshot) => snapshot.instanceId)).not.toContain('claude')
+    expect(codeOf(() => harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'm' }, { purpose: 'turn' }))).toBe('provider_instance_unknown')
+
+    // With no Claude Code left, adding one takes the usual id and the user's own setup (no private home).
+    const added = await harness.instances.add({ driver: 'claude', config: { displayName: 'Claude Code' } })
+    expect(added).toMatchObject({ instanceId: 'claude', driver: 'claude', builtIn: true, config: { home: 'default' } })
+    expect((stored as Record<string, unknown>).claude).toEqual({ driver: 'claude', enabled: true, config: { displayName: 'Claude Code' } })
+    // A further one is another account.
+    expect(await harness.instances.add({ driver: 'claude', config: { displayName: 'Work' } })).toMatchObject({ instanceId: 'claude:work', config: { home: 'private' } })
+  })
+
   it('removal waits for a turn still running on a runtime a reconfiguration replaced', async () => {
     const profileHome = home()
     let stored: unknown
-    const source = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
+    let seedVersion: number | undefined
+    const source = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion }), write: (next) => { stored = next.instances; seedVersion = next.seedVersion } } })
     let release: () => void = () => {}
     let entered = false
     const gated: ProviderAdapter = {
@@ -363,6 +393,7 @@ describe('harness gateway: instances', () => {
       runtime: {
         install: (onProgress) => new Promise<void>((resolve, reject) => {
           onProgress('Downloading')
+          onProgress('Downloading 57 MB of 136 MB', 0.42)
           release = () => (cancelled ? reject(new Error('Install cancelled')) : resolve())
         }),
         cancelInstall: () => {
@@ -379,7 +410,10 @@ describe('harness gateway: instances', () => {
     const started = await harness.instances.install('antigravity')
     expect(started).toMatchObject({ instanceId: 'antigravity', kind: 'install' })
     await expect(harness.instances.install('antigravity')).rejects.toMatchObject({ code: 'operation_busy' })
-    await waitFor(() => events.some((event) => event.type === 'operation' && event.data.phase === 'progress'))
+    await waitFor(() => events.some((event) => event.type === 'operation' && event.data.phase === 'progress' && event.data.fraction !== undefined))
+    // Byte progress keeps its fraction for the downloads indicator; a plain step has none.
+    const progress = events.flatMap((event) => (event.type === 'operation' && event.data.phase === 'progress' ? [event.data] : []))
+    expect(progress.map((data) => [data.message, data.fraction])).toEqual([['Downloading', undefined], ['Downloading 57 MB of 136 MB', 0.42]])
     expect(await harness.instances.cancelInstall(started.operationId)).toBe(true)
     await waitFor(() => events.some((event) => event.type === 'operation' && event.data.phase === 'cancelled'))
     expect(await harness.instances.cancelInstall(started.operationId)).toBe(false)

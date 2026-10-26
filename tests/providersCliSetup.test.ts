@@ -3,11 +3,11 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { describeStatus, type InstanceSnapshot } from '../src/shared/harness/status'
 import type { ProviderLoginOption } from '../src/shared/providerAuth'
-import { AgentConnectStep, addChoices } from '../src/renderer/components/providers/AddProviderDialog'
+import { AgentConnectStep, addChoices, type AddChoice } from '../src/renderer/components/providers/AddProviderDialog'
 import { AccountRow, BinaryRow, SetupRow, UpdateRow, type InstanceActions } from '../src/renderer/components/providers/CliSections'
-import { ProviderModelsSection, bulkVisibilityPatch, displayModels, movedOrder, nextOrder } from '../src/renderer/components/providers/ProviderModelsSection'
+import { ProviderModelsSection, bulkVisibilityPatch, capabilityChips, displayModels, modelsSummary, movedOrder, nextOrder } from '../src/renderer/components/providers/ProviderModelsSection'
 import { AgentEditor, allowsCustomModels } from '../src/renderer/components/providers/ProviderEditor'
-import { ProviderListRow } from '../src/renderer/components/providers/parts'
+import { ProviderListRow, StatusLine, shortStatus } from '../src/renderer/components/providers/parts'
 import { offersRedirectPaste, refusedText } from '../src/renderer/components/providers/SignInDialog'
 import { switchStateOf } from '../src/renderer/components/providers/providerView'
 import { model, snapshot, type SnapshotOverrides } from './providerSnapshotFixture'
@@ -176,6 +176,31 @@ describe('Scope: device ceiling and project overrides', () => {
   })
 })
 
+describe('List row and editor status', () => {
+  const row = (entry: InstanceSnapshot, update?: { label: string; onClick: () => void }) =>
+    renderToStaticMarkup(createElement(ProviderListRow, {
+      iconId: 'claude', name: entry.displayName, version: 'v2.1.0', update, status: describeStatus(entry),
+      toggle: switchStateOf(entry, { kind: 'device' }), selected: false, onSelect: () => undefined, onToggle: noop
+    }))
+
+  it('shows the short status in the list and the whole line, in its tone, in the editor', () => {
+    const entry = snapshot({ auth: { state: 'signed_out', account: undefined }, nextStep: { action: 'sign_in', label: 'Sign in', command: 'claude' } })
+    const status = describeStatus(entry)
+    expect(status.headline).toContain('Not signed in')
+    expect(shortStatus(status)).toBe('Not signed in')
+    expect(row(entry)).toContain('>Not signed in</span>')
+    expect(renderToStaticMarkup(createElement(StatusLine, { status }))).toContain(`prov-status-text is-${status.tone}`)
+    expect(shortStatus(describeStatus(snapshot({ checkedAt: undefined, lastGoodAt: undefined })))).toBe('Checking')
+  })
+
+  it('puts a circled update button in place of the version when an update exists', () => {
+    expect(row(snapshot())).toContain('<code class="prov-version">v2.1.0</code>')
+    const html = row(snapshot(), { label: 'Update Claude Code to v2.2.0', onClick: () => undefined })
+    expect(html).not.toContain('prov-version')
+    expect(labels(html)).toContain('Update Claude Code to v2.2.0')
+  })
+})
+
 describe('Sign-out', () => {
   const accountRow = (overrides: SnapshotOverrides) =>
     renderToStaticMarkup(createElement(AccountRow, { snapshot: snapshot(overrides), actions }))
@@ -203,12 +228,18 @@ describe('Add provider choices', () => {
   const codex = snapshot({ instanceId: 'codex', driver: 'codex', displayName: 'Codex' })
   const antigravity = snapshot({ instanceId: 'antigravity', driver: 'antigravity', displayName: 'Antigravity', enabled: { device: false, effective: false, setBy: 'device' } })
 
-  it('offers a second Claude Code account, turns a switched-off agent back on, and skips agents already on', () => {
+  it('offers a second Claude Code account and skips single-instance agents already in the list, on or off', () => {
     const choices = addChoices([claude, codex, antigravity], [])
+    expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([['new', 'Claude Code · another account']])
+  })
+
+  it('offers a deleted agent again as a new provider on the user’s own setup', () => {
+    const choices = addChoices([codex], [])
     expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([
-      ['new', 'Claude Code · another account'],
-      ['enable', 'Antigravity']
+      ['new', 'Claude Code'],
+      ['new', 'Antigravity']
     ])
+    expect(choices.every((choice) => choice.kind === 'new' && choice.existing === undefined)).toBe(true)
   })
 
   it('lists model APIs not connected yet, without the agents’ own sign-ins', () => {
@@ -236,26 +267,27 @@ describe('Add provider choices', () => {
     expect(copilot.options.map((option) => option.authType)).toEqual(['oauth', 'api_key'])
   })
 
-  it('offers Install for a switched-off agent Mousse installs itself', () => {
-    const missing = snapshot({
-      instanceId: 'antigravity', driver: 'antigravity', displayName: 'Antigravity',
-      enabled: { device: false, effective: false, setBy: 'device' },
-      install: { state: 'not_installed', canInstall: true }, runs: { state: 'no' }, binary: undefined
-    })
-    const [choice] = addChoices([missing], []).filter((entry) => entry.kind === 'enable')
-    const html = renderToStaticMarkup(createElement(AgentConnectStep, {
-      choice: choice as Extract<typeof choice, { kind: 'enable' }>, busy: false, disabled: false, error: null, onAdd: () => undefined, onInstall: () => undefined
+  const connect = (choice: AddChoice | undefined) =>
+    renderToStaticMarkup(createElement(AgentConnectStep, {
+      choice: choice as Extract<AddChoice, { kind: 'new' }>, busy: false, disabled: false, error: null, onAdd: () => undefined
     }))
-    expect(buttons(html)).toEqual(['Use an existing binary', 'Install'])
+
+  it('is ready to add when the CLI was found, with the executable only on request', () => {
+    const [choice] = addChoices([claude, codex, antigravity], [])
+    const html = connect(choice)
+    expect(html).toContain('Ready to add')
+    expect(html).toContain('Mousse found Claude Code')
+    expect(html).not.toContain('aria-label="Claude Code executable path"')
+    expect(buttons(html)).toEqual(['Use a different executable', 'Add'])
   })
 
-  it('makes the path optional when the CLI was found', () => {
-    const [choice] = addChoices([snapshot({ enabled: { device: false, effective: false, setBy: 'device' } })], [])
-    const html = renderToStaticMarkup(createElement(AgentConnectStep, {
-      choice: choice as Extract<typeof choice, { kind: 'enable' }>, busy: false, disabled: false, error: null, onAdd: () => undefined
-    }))
-    expect(html).toContain('placeholder="/usr/local/bin/claude"')
-    expect(html).toContain('Optional. Leave empty to use the one Mousse finds.')
+  it('asks for the executable when the CLI was not found', () => {
+    const missing = snapshot({ install: { state: 'not_installed', canInstall: false }, runs: { state: 'no', failure: 'not_on_path' }, binary: undefined })
+    const [choice] = addChoices([missing, codex, antigravity], [])
+    const html = connect(choice)
+    expect(html).not.toContain('Ready to add')
+    expect(html).toContain('Not found automatically. Choose the executable.')
+    expect(html).toContain('aria-label="Claude Code executable path"')
     expect(buttons(html)).toEqual(['Add'])
   })
 })
@@ -290,6 +322,18 @@ describe('models section order', () => {
     expect(nextOrder(plain, first, 'd', -1)).toEqual(['a', 'd', 'b', 'c'])
     // A model the sent order does not name keeps its place after it.
     expect(nextOrder([...plain, model('e')], first, 'e', -1)).toEqual(['a', 'b', 'd', 'e', 'c'])
+  })
+})
+
+describe('models section summary and chips', () => {
+  it('sums up the models while the section is closed', () => {
+    expect(modelsSummary([])).toBe('No models yet')
+    expect(modelsSummary([model('a', { favorite: true }), model('b', { hidden: true }), model('c')])).toBe('3 models · 1 favorite · 1 hidden')
+  })
+
+  it('states each model’s efforts as a range, images and the context window as short chips', () => {
+    expect(capabilityChips({ efforts: ['low', 'medium', 'high'], images: true, contextWindow: 200_000 }).map((chip) => chip.text)).toEqual(['Low–High', 'Images', '200k'])
+    expect(capabilityChips({ efforts: [], images: false, contextWindow: 1_000_000 }).map((chip) => chip.text)).toEqual(['1M'])
   })
 })
 

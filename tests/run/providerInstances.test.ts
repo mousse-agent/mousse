@@ -60,14 +60,14 @@ describe('instance seeding', () => {
     expect(added).toEqual(['antigravity', 'claude', 'codex', 'pi:openai'])
   })
 
-  it('extends a stored map with missing seeds and never overwrites a stored entry', () => {
+  it('extends a never-seeded stored map with missing seeds and never overwrites a stored entry', () => {
     const stored = {
       claude: { driver: 'claude', enabled: false, config: { note: 'mine' } },
       codex: { driver: 'codex', enabled: false },
       'pi:openai': 'malformed but stored',
       custom: { driver: 'pi', enabled: true }
     }
-    const { instances, added } = seedProviderInstances(stored, ['openai', 'openrouter'], 1)
+    const { instances, added } = seedProviderInstances(stored, ['openai', 'openrouter'])
     expect(instances.claude).toEqual({ driver: 'claude', enabled: false, config: { note: 'mine' } })
     expect(instances.codex).toEqual({ driver: 'codex', enabled: false })
     expect(instances['pi:openai']).toBe('malformed but stored')
@@ -75,6 +75,14 @@ describe('instance seeding', () => {
     expect(added).toEqual(['antigravity', 'pi:openrouter'])
     // The input is not mutated.
     expect(Object.keys(stored)).toEqual(['claude', 'codex', 'pi:openai', 'custom'])
+  })
+
+  it('does not add a vendor agent back to a seeded profile, and still seeds newly credentialed pi providers', () => {
+    // A profile marked as seeded whose user deleted Claude Code and Antigravity.
+    const { instances, added, seedVersion } = seedProviderInstances({ codex: { driver: 'codex', enabled: true } }, ['openai'], 1)
+    expect(instances).toEqual({ codex: { driver: 'codex', enabled: true }, 'pi:openai': { driver: 'pi', enabled: true } })
+    expect(added).toEqual(['pi:openai'])
+    expect(seedVersion).toBe(1)
   })
 })
 
@@ -105,7 +113,8 @@ describe('seed versions', () => {
 })
 
 describe('ProviderInstanceService', () => {
-  const service = (stored?: unknown, credentials: string[] = [], seedVersion: unknown = 1) => {
+  /** `seedVersion` absent: a profile that was never seeded. */
+  const service = (stored?: unknown, credentials: string[] = [], seedVersion?: unknown) => {
     const store = { value: stored, seedVersion, writes: 0, fail: undefined as Error | undefined }
     const instances = new ProviderInstanceService({
       store: {
@@ -169,6 +178,16 @@ describe('ProviderInstanceService', () => {
     store.value = { claude: { driver: 'claude', enabled: true } }
     instances.list()
     expect(instances.storeError()).toBeUndefined()
+  })
+
+  it('removes a vendor agent for good: it is not seeded again on the next read', () => {
+    const { instances, store } = service(undefined, ['openai'])
+    expect(Object.keys(instances.list())).toContain('claude')
+    instances.removeEntry('claude')
+    expect(store.value).not.toHaveProperty('claude')
+    expect(instances.list()).not.toHaveProperty('claude')
+    expect(store.value).not.toHaveProperty('claude')
+    expect(codeOf(() => instances.resolve('claude'))).toBe('provider_instance_unknown')
   })
 
   it('ignores malformed stored entries on read without rewriting them', () => {
