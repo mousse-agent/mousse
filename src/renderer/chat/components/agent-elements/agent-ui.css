@@ -318,6 +318,72 @@ html[data-theme] .an-edit-tool-card .an-edit-diff code {
   background: transparent;
 }
 
+/* Mermaid diagrams. Pele reads its colors from `--pele-*`, so the SVG follows
+   the app theme through these tokens without being redrawn on a theme change. */
+.an-markdown .an-md-diagram {
+  --pele-bg: var(--an-background);
+  --pele-fg: var(--an-foreground);
+  --pele-muted: var(--an-foreground-muted);
+  --pele-line: var(--an-foreground-muted);
+  --pele-surface: var(--an-tool-background);
+  --pele-surface-alt: var(--an-background-secondary);
+  --pele-border: color-mix(in srgb, var(--an-foreground) 28%, var(--an-border-color));
+  --pele-accent: var(--an-primary-color);
+  --pele-error: var(--an-diff-removed-text);
+  --pele-critical: var(--an-diff-removed-text);
+  --pele-font: inherit;
+  --pele-radius: 6px;
+}
+
+.an-markdown .an-md-diagram-body {
+  display: flex;
+  justify-content: center;
+  overflow-x: auto;
+  padding: 12px 16px;
+  white-space: normal;
+}
+
+.an-markdown .an-md-diagram-body svg {
+  flex: none;
+  max-width: 100%;
+  height: auto;
+}
+
+.an-markdown .an-md-diagram-error {
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--an-diff-removed-border);
+  border-radius: var(--an-tool-border-radius);
+  background: var(--an-diff-removed-bg);
+  color: var(--an-foreground);
+  font-size: 13px;
+}
+
+.an-markdown .an-md-diagram-error-title {
+  color: var(--an-diff-removed-text);
+  font-weight: 500;
+}
+
+.an-markdown .an-md-diagram-error-message {
+  margin: 4px 0 0;
+  overflow-x: auto;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.an-markdown .an-md-diagram-retry {
+  margin-top: 8px;
+  padding: 2px 10px;
+  border: 1px solid var(--an-border-color);
+  border-radius: 6px;
+  background: var(--an-tool-background);
+  cursor: pointer;
+}
+
+.an-markdown .an-md-diagram-retry:hover {
+  background: var(--an-background-secondary);
+}
+
 /* Streamdown wraps rendered blocks in a `space-y-4` container by default.
    Keep its stanza rhythm instead of collapsing it — chat needs the air
    between headings, paragraphs, and lists. Individual element margins

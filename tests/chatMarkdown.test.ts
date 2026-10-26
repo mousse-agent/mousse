@@ -83,6 +83,24 @@ describe('chat Markdown list rendering', () => {
     expect(markup).toContain('rel="noopener noreferrer"')
   })
 
+  it('hands a closed mermaid fence to the diagram renderer', () => {
+    const markup = render('Flow:\n\n```mermaid\nflowchart LR\n  A --> B\n```\n')
+    expect(markup).toContain('class="an-md-diagram"')
+    expect(markup).toContain('data-mermaid-state="drawing"')
+    expect(markup).toContain('flowchart LR')
+  })
+
+  it('keeps an unclosed mermaid fence as code while it streams', () => {
+    const markup = render('Flow:\n\n```mermaid\nflowchart LR\n  A --> B')
+    expect(markup).toContain('data-mermaid-state="streaming"')
+    expect(markup).not.toContain('<svg')
+  })
+
+  it('leaves other fences out of the diagram renderer', () => {
+    const markup = render('```ts\nconst a = 1\n```\n')
+    expect(markup).not.toContain('an-md-diagram')
+  })
+
   it('renders inline code compactly without the roomy default pill', () => {
     const markup = render('- item with (`abc123`) code')
 
