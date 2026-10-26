@@ -9,6 +9,7 @@
 @import './vscode-compat.css';
 @import './linux-window.css';
 @import "../chat/components/agent-elements/agent-ui.css";
+@import "katex/dist/katex.min.css";
 
 /* Bridge mousse dark theme into agent-elements — app is always dark ( --surface-base #1b1c23 ), not .dark class */
 :root {

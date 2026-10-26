@@ -1,6 +1,5 @@
 import type { DiagramPlugin, MathPlugin } from "streamdown";
 import { createMathPlugin } from "@streamdown/math";
-import "katex/dist/katex.min.css";
 import { resolveThemeIsDark } from "./utils/theme-is-dark";
 
 // Dollar handling is done by normalizeMathDelimiters, which keeps prices

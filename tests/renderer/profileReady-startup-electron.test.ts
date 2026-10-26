@@ -16,7 +16,7 @@ it('paints the real shell and retryable skeleton before trusted binding, then pr
   try {
     await build({
       entryPoints: [resolve('tests/fixtures/renderer-startup/entry.tsx')], outfile: join(directory, 'entry.js'), bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic',
-      define: { 'process.env.NODE_ENV': '"development"' }, loader: { '.svg': 'dataurl', '.webp': 'dataurl', '.woff2': 'dataurl' },
+      define: { 'process.env.NODE_ENV': '"development"' }, loader: { '.svg': 'dataurl', '.webp': 'dataurl', '.woff2': 'dataurl', '.woff': 'dataurl', '.ttf': 'dataurl' },
       plugins: [{ name: 'unrelated-displays', setup(builder) {
         // The layout assertions use real app CSS; Tailwind's build directives
         // are unrelated to these authored shell rules and need its Vite plugin.
