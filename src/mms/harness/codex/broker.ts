@@ -263,16 +263,20 @@ export class ChatGptTokenBroker {
     const server = this.server
     this.server = undefined
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()))
+    this.removeFolder()
+  }
+
+  /** Removes the socket folder this broker made (POSIX); synchronous, so it also runs at process exit. */
+  removeFolder(): void {
     const folder = this.folder
     this.folder = undefined
-    if (folder) {
-      try {
-        const stat = lstatSync(folder.path)
-        // Only the folder this broker made: never one that replaced it meanwhile.
-        if (stat.isDirectory() && stat.dev === folder.dev && stat.ino === folder.ino) rmSync(folder.path, { recursive: true, force: true })
-      } catch {
-        // Already gone.
-      }
+    if (!folder) return
+    try {
+      const stat = lstatSync(folder.path)
+      // Only the folder this broker made: never one that replaced it meanwhile.
+      if (stat.isDirectory() && stat.dev === folder.dev && stat.ino === folder.ino) rmSync(folder.path, { recursive: true, force: true })
+    } catch {
+      // Already gone.
     }
   }
 }
@@ -288,6 +292,11 @@ let shared: ChatGptTokenBroker | undefined
 
 /** The process's broker (started on first use by the managed runtime). */
 export function chatgptTokenBroker(): ChatGptTokenBroker {
-  shared ??= new ChatGptTokenBroker()
+  if (!shared) {
+    const broker = new ChatGptTokenBroker()
+    shared = broker
+    // The listening socket ends with the process; its private folder must not outlive it.
+    process.once('exit', () => broker.removeFolder())
+  }
   return shared
 }

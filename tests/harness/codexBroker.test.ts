@@ -280,3 +280,56 @@ describe('the token helper', () => {
     expect(main.indexOf('isChatgptTokenArgv(electronCliArgv())')).toBeLessThan(main.indexOf('configureElectronContext(app, isCliMode'))
   })
 })
+
+describe('the token helper delivers the whole token before it exits', () => {
+  it('resolves only after the stream flushed the token, even when write() reports room', async () => {
+    const { broker, endpoint } = await startBroker()
+    const { leaseId } = lease(broker, async () => 'eyJ.flushed')
+    let flush: (() => void) | undefined
+    const written: string[] = []
+    const slow = new Writable({
+      write(chunk, _encoding, callback) {
+        written.push(String(chunk))
+        flush = callback
+      }
+    })
+    let done = false
+    const running = runChatgptToken(['engine', 'chatgpt-token', endpoint, leaseId], { stdout: slow, stderr: capture().io.stderr }).then((code) => {
+      done = true
+      return code
+    })
+    await vi.waitFor(() => expect(written).toEqual(['eyJ.flushed']))
+    await delay(50)
+    expect(done).toBe(false)
+    flush!()
+    expect(await running).toBe(0)
+  })
+
+  it('the standalone helper prints exactly the token over a pipe and exits 0; a bad lease exits 1 with one line', async () => {
+    const { build } = await import('esbuild')
+    const dir = mkdtempSync(join(tmpdir(), 'mousse-helper-'))
+    try {
+      const script = join(dir, 'chatgpt-token.mjs')
+      await build({ entryPoints: [join(repoRoot, 'src/cli/fastpath/chatgptTokenMain.ts')], outfile: script, bundle: true, platform: 'node', format: 'esm', logLevel: 'error' })
+      const { broker, endpoint } = await startBroker()
+      const token = `eyJ.${'x'.repeat(48 * 1024)}`
+      const { leaseId } = lease(broker, async () => token)
+      const { spawn } = await import('node:child_process')
+      const run = (id: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>((done) => {
+        const child = spawn(process.execPath, [script, endpoint, id], { stdio: ['ignore', 'pipe', 'pipe'] })
+        let stdout = ''
+        let stderr = ''
+        child.stdout.on('data', (chunk) => (stdout += String(chunk)))
+        child.stderr.on('data', (chunk) => (stderr += String(chunk)))
+        child.on('close', (code) => done({ code, stdout, stderr }))
+      })
+      expect(await run(leaseId)).toEqual({ code: 0, stdout: token, stderr: '' })
+      const refused = await run('0'.repeat(32))
+      expect(refused.code).toBe(1)
+      expect(refused.stdout).toBe('')
+      expect(refused.stderr.trim().split('\n')).toHaveLength(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

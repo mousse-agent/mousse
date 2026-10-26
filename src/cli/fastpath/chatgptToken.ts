@@ -27,11 +27,15 @@ export function isChatgptTokenArgv(argv: readonly string[]): boolean {
 
 class HelperError extends Error {}
 
-/** Writes `text` and resolves once the stream took it, so the process can exit right after. */
+/**
+ * Writes `text` and resolves only once the stream has flushed it (the write callback), so the
+ * process can exit right after: `write()` returning true means buffer room, not delivery, and an
+ * asynchronous stdout pipe would lose the token at `app.exit()`.
+ */
 function write(stream: Pick<NodeJS.WritableStream, 'write'>, text: string): Promise<void> {
   return new Promise((resolve) => {
     try {
-      if (stream.write(text, () => resolve())) resolve()
+      stream.write(text, () => resolve())
     } catch {
       resolve()
     }
