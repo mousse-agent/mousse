@@ -7,6 +7,7 @@ export const GUI_REQUIRED_METHODS = [
   'workspace.getStatus', 'workspace.restore', 'actions.list', 'actions.undoLatest', 'actions.redo',
   'actions.revertCode', 'actions.fork', 'actions.activateBranch', 'actions.getAffectedFiles',
   'actions.sweepRetention', 'actions.configureRetention', 'actions.pin',
+  'review.files', 'review.file',
   'operations.get', 'operations.abort', 'operations.recover', 'publish.status', 'publish.start',
   'threads.inventory', 'threads.trash', 'threads.restore', 'threads.purge', 'threads.configureTrash',
   'subagents.list',

@@ -968,6 +968,8 @@ export function registerGuiIpc(
   registerHandler('actions:list', async (_e, threadId: string) =>
     guiMms.request('actions.list', { threadId })
   )
+  registerHandler('review:files', async (_e, params: Record<string, unknown>) => guiMms.request('review.files', params))
+  registerHandler('review:file', async (_e, params: Record<string, unknown>) => guiMms.request('review.file', params))
   registerHandler('actions:pin', async (_e, params: Record<string, unknown>) => guiMms.request('actions.pin', params))
   registerHandler('actions:configureRetention', async (_e, params: Record<string, unknown>) => guiMms.request('actions.configureRetention', params))
   registerHandler('actions:sweepRetention', async (_e, threadId: string) => guiMms.request('actions.sweepRetention', { threadId }))

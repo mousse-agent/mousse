@@ -84,6 +84,7 @@ import type {
 import type { PlatformRequestApi, PlatformRequestErrorShape, PlatformRequestMethod, PlatformResponse } from '../shared/platform'
 import type { ChatReference } from '../shared/chatReferences'
 import type { InAppBrowserApi, InAppBrowserState } from '../shared/browser/inApp'
+import type { ReviewFileParams, ReviewFileResult, ReviewFilesParams, ReviewFilesResult } from '../shared/review'
 import type {
   GitHubApi,
   GitHubAvailability,
@@ -556,6 +557,10 @@ const api = {
       ipcRenderer.invoke('actions:redo', threadId, expectedJournalGeneration),
     fork: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:fork', params),
     activateBranch: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('actions:activateBranch', params)
+  },
+  review: {
+    files: (params: ReviewFilesParams): Promise<ReviewFilesResult> => ipcRenderer.invoke('review:files', params),
+    file: (params: ReviewFileParams): Promise<ReviewFileResult> => ipcRenderer.invoke('review:file', params)
   },
   publish: {
     start: (params: Record<string, unknown>): Promise<unknown> => ipcRenderer.invoke('publish:start', params)
