@@ -182,14 +182,6 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
     })
 
   const addHandlers: AddProviderHandlers = {
-    enable: async (snapshot, binaryPath) => {
-      if (binaryPath) applySnapshot(await window.mousse.providers.instances.configure(snapshot.instanceId, { binaryPath }))
-      await setEnabled(snapshot, DEVICE_SCOPE, true)
-    },
-    install: async (snapshot) => {
-      if (!snapshot.enabled.device) await setEnabled(snapshot, DEVICE_SCOPE, true)
-      await window.mousse.providers.instances.install(snapshot.instanceId)
-    },
     add: async (driver: HarnessDriverKind, config: InstanceConfigPatch) => {
       const snapshot = await window.mousse.providers.instances.add({ driver, config })
       applySnapshot(snapshot)

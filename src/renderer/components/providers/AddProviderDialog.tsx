@@ -20,12 +20,11 @@ function connectKind(option: ProviderLoginOption): ConnectKind {
 }
 
 /**
- * A choice in the Provider step. An agent whose seeded instance is switched off is turned back on;
- * otherwise, where a second account makes sense, the dialog adds a new instance. A model API is one
- * choice with each of its sign-in methods (`options`), picked in the Identity step.
+ * A choice in the Provider step. An agent is added as a new instance: the first on the user's own
+ * setup, a further one (where the agent allows it) as another account. A model API is one choice
+ * with each of its sign-in methods (`options`), picked in the Sign-in method step.
  */
 export type AddChoice =
-  | { kind: 'enable'; key: string; label: string; iconId: string; group: string; snapshot: InstanceSnapshot }
   | { kind: 'new'; key: string; label: string; iconId: string; group: string; driver: HarnessDriverKind; existing?: InstanceSnapshot }
   | { kind: 'api'; key: string; label: string; iconId: string; group: string; options: ProviderLoginOption[] }
 
@@ -119,10 +118,6 @@ function WizardSteps({
 }
 
 export interface AddProviderHandlers {
-  /** Turns a switched-off seeded agent back on, saving `binaryPath` first when given. */
-  enable: (snapshot: InstanceSnapshot, binaryPath?: string) => Promise<void>
-  /** Turns it on and starts its install; progress continues in the editor. */
-  install: (snapshot: InstanceSnapshot) => Promise<void>
   /** Adds a new instance; resolves with its id. */
   add: (driver: HarnessDriverKind, config: InstanceConfigPatch) => Promise<string>
   onApiConnected: (providerId: string) => Promise<void>
@@ -318,28 +313,14 @@ export function AddProviderDialog({
                 error={error}
                 onAdd={(binaryPath) =>
                   void run(selected.key, async () => {
-                    if (selected.kind === 'enable') {
-                      await handlers.enable(selected.snapshot, binaryPath)
-                      finish(selected.snapshot.instanceId)
-                    } else {
-                      const config: InstanceConfigPatch = {
-                        displayName: label.trim() || DRIVER_INFO[selected.driver].label,
-                        ...(binaryPath ? { binaryPath } : {})
-                      }
-                      // A second instance of an agent is another account, so it gets its own home.
-                      if (DRIVER_INFO[selected.driver].multiInstance) config.home = selected.existing ? 'private' : 'default'
-                      finish(await handlers.add(selected.driver, config))
+                    const config: InstanceConfigPatch = {
+                      displayName: label.trim() || DRIVER_INFO[selected.driver].label,
+                      ...(binaryPath ? { binaryPath } : {})
                     }
+                    // A second instance of an agent is another account, so it gets its own home.
+                    if (DRIVER_INFO[selected.driver].multiInstance) config.home = selected.existing ? 'private' : 'default'
+                    finish(await handlers.add(selected.driver, config))
                   })
-                }
-                onInstall={
-                  selected.kind === 'enable'
-                    ? () =>
-                        void run(selected.key, async () => {
-                          await handlers.install(selected.snapshot)
-                          finish(selected.snapshot.instanceId)
-                        })
-                    : undefined
                 }
               />
             </SettingsGroup>
@@ -373,38 +354,35 @@ export function AddProviderDialog({
 }
 
 /**
- * The Config step of an agent: its executable, then Add. A path is optional when Mousse found the
- * CLI (shown as the placeholder) and required when it did not. An agent Mousse can install itself
- * (Antigravity) offers Install first; an existing binary is the smaller option.
+ * The Add step of an agent: "Ready to add" when Mousse found the CLI, with a different executable
+ * on request; the executable is required when it was not found. An agent that is not installed yet
+ * offers Install in its editor once added.
  */
 export function AgentConnectStep({
   choice,
   busy,
   disabled,
   error,
-  onAdd,
-  onInstall
+  onAdd
 }: {
-  choice: Extract<AddChoice, { kind: 'enable' | 'new' }>
+  choice: Extract<AddChoice, { kind: 'new' }>
   busy: boolean
   disabled: boolean
   error: string | null
   onAdd: (binaryPath?: string) => void
-  onInstall?: () => void
 }) {
   const [path, setPath] = useState('')
   const [manual, setManual] = useState(false)
-  const known = choice.kind === 'enable' ? choice.snapshot : choice.existing
+  const known = choice.existing
   const detected = known?.binary?.source === 'override' ? undefined : known?.binary?.path
   const checked = Boolean(known && (known.checkedAt || known.stale))
   const missing = checked && known?.install.state === 'not_installed'
-  const offerInstall = Boolean(onInstall) && choice.kind === 'enable' && missing && choice.snapshot.install.canInstall
   // Most people never need the executable field: it shows only when nothing was found or on request.
-  const showPath = offerInstall ? manual : missing || manual
+  const showPath = missing || manual
   const version = known?.binary?.version
   const entered = path.trim()
   const canAdd = !disabled && (entered !== '' || !missing)
-  const label = choice.kind === 'enable' ? choice.label : DRIVER_INFO[choice.driver].label
+  const label = DRIVER_INFO[choice.driver].label
   const add = () => {
     if (canAdd) onAdd(entered || undefined)
   }
@@ -412,31 +390,7 @@ export function AgentConnectStep({
 
   return (
     <>
-      {offerInstall && (
-        <SettingsRow
-          title="Install"
-          description={
-            !manual && error ? (
-              <span className="prov-error">{error}</span>
-            ) : busy && !manual ? (
-              'Starting the install…'
-            ) : (
-              `Mousse downloads and installs ${label} for you. You can follow the progress in its settings.`
-            )
-          }
-          control={
-            <>
-              <button type="button" className="prov-link" disabled={disabled} onClick={() => setManual((value) => !value)}>
-                {manual ? 'Hide existing binary' : 'Use an existing binary'}
-              </button>
-              <button type="button" className="settings-btn" disabled={disabled} onClick={onInstall}>
-                Install
-              </button>
-            </>
-          }
-        />
-      )}
-      {!offerInstall && !showPath && (
+      {!showPath && (
         <SettingsRow
           title="Ready to add"
           description={
@@ -476,7 +430,7 @@ export function AgentConnectStep({
           }
           control={
             <>
-              {!offerInstall && !missing && (
+              {!missing && (
                 <button
                   type="button"
                   className="prov-link"
