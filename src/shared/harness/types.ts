@@ -175,6 +175,10 @@ export const HARNESS_ERROR_CODES = [
   'signed_out',
   'auth_expired',
   'rate_limited',
+  /** The account may not use the provider through this route (a plan or client that is not eligible). */
+  'not_eligible',
+  /** The provider's service is down or overloaded; the credentials are kept. */
+  'service_unavailable',
   'context_overflow',
   'model_unavailable',
   'model_hidden',
@@ -210,6 +214,8 @@ const HARNESS_ERROR_CATEGORY: Record<HarnessErrorCode, ErrorCategory> = {
   signed_out: 'denied',
   auth_expired: 'denied',
   rate_limited: 'unavailable',
+  not_eligible: 'denied',
+  service_unavailable: 'unavailable',
   context_overflow: 'invalid',
   model_unavailable: 'unavailable',
   model_hidden: 'invalid',
@@ -231,7 +237,7 @@ export function harnessAppError(error: HarnessError): AppError {
     code,
     message,
     ...(Object.keys(details).length > 0 ? { details } : {}),
-    errorInfo: { category: HARNESS_ERROR_CATEGORY[code], retryable: code === 'rate_limited' || code === 'timeout' }
+    errorInfo: { category: HARNESS_ERROR_CATEGORY[code], retryable: code === 'rate_limited' || code === 'timeout' || code === 'service_unavailable' }
   })
 }
 
@@ -315,6 +321,11 @@ export interface InstanceConfigPatch {
   loginMethod?: string | null
   /** An ACP agent from the registry (`acp` instances): a new version or agent replaces the old one. */
   source?: RegistrySourcePatch
+  /**
+   * Codex: `managed` (Mousse downloads Codex and signs in with ChatGPT itself, in a home of its
+   * own) or `existing` (the user's Codex CLI). Set when the entry is added; it cannot change.
+   */
+  setup?: 'managed' | 'existing'
 }
 
 /**
@@ -393,7 +404,7 @@ export interface SignInResponse {
 export type ProviderOperationEvent = ProviderOperationStarted & (
   | { phase: 'progress'; message: string; /** 0..1 when known. */ fraction?: number; receivedBytes?: number; totalBytes?: number }
   | { phase: 'prompt'; prompt: SignInPrompt }
-  | { phase: 'completed' }
+  | { phase: 'completed'; /** Done, with something the user should know (a sign-in saved while its old one waits). */ warning?: string }
   | { phase: 'failed'; error: HarnessError }
   | { phase: 'cancelled' }
 )

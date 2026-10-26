@@ -11,7 +11,9 @@ import {
   CODEX_ACCOUNT_TTL_MS,
   CODEX_FALLBACK_MODELS,
   CodexProviderService,
-  codexEnvironment
+  CodexTurnFailure,
+  codexEnvironment,
+  type CodexServiceOptions
 } from '../src/mms/providers/codex/CodexProviderService'
 import { codexMcpConfigOverrides } from '../src/mms/run/mcp/attachment'
 
@@ -81,7 +83,7 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true })
 })
 
-function create(server: ReturnType<typeof scriptedServer>, settings: Record<string, unknown> = {}): CodexProviderService {
+function create(server: Pick<ReturnType<typeof scriptedServer>, 'launch'>, settings: Record<string, unknown> = {}): CodexProviderService {
   mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
   writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, ...settings }))
   const service = new CodexProviderService(home, questions, { launch: server.launch })
@@ -318,6 +320,192 @@ describe('CodexProviderService', () => {
     expect(await service.status()).toMatchObject({ state: 'missing_binary' })
     expect(service.configured()).toBe(false)
     expect(server.launches).toEqual([])
+  })
+})
+
+describe('CodexProviderService options (managed Codex)', () => {
+  const MANAGED = 'openai_chatgpt_plan'
+  type Turn = { status: 'completed' | 'failed'; error?: unknown }
+
+  /** A server that runs turns: threads answer with `provider`, every turn ends as `turn` says. */
+  function turnServer(options: { provider?: (method: string) => string; turn?: () => Turn | null } = {}) {
+    let threads = 0
+    const server = scriptedServer((message) => {
+      const method = message.method!
+      if (method === 'account/read') return chatgpt
+      if (['thread/start', 'thread/resume', 'thread/fork'].includes(method))
+        return { result: { thread: { id: method === 'thread/resume' ? 'thr-saved' : `thr-${++threads}` }, model: 'gpt-x', modelProvider: options.provider?.(method) ?? 'openai', cwd: home } }
+      if (method === 'turn/start') {
+        const turn = options.turn ? options.turn() : { status: 'completed' }
+        const threadId = (message.params as { threadId: string }).threadId
+        if (turn) setImmediate(() => server.processes.at(-1)!.stdout.write(JSON.stringify({ method: 'turn/completed', params: { threadId, turn: { id: 'turn-1', error: null, ...turn } } }) + '\n'))
+        return { result: { turn: { id: 'turn-1', status: 'inProgress', error: null } } }
+      }
+      if (method === 'thread/list') return { error: { code: -32601, message: 'unknown method' } }
+      return { result: {} }
+    })
+    return { ...server, requests: (method: string) => server.messages.filter((message) => message.method === method) }
+  }
+
+  function managed(server: ReturnType<typeof turnServer>, options: CodexServiceOptions = {}): CodexProviderService {
+    const dir = join(home, 'harness', 'codex-2')
+    mkdirSync(dir, { recursive: true })
+    const service = new CodexProviderService(home, questions, { launch: server.launch, findBinary: () => binary }, {
+      dir,
+      modelProvider: MANAGED,
+      clientInfo: { name: 'Mousse', title: 'Mousse' },
+      account: { read: async () => ({ kind: 'signed_in', planType: 'plus', email: null, label: 'ChatGPT Plus', subject: 'chatgpt:client:sub' }) },
+      ...options
+    })
+    services.push(service)
+    return service
+  }
+
+  const chat = (service: CodexProviderService, patch: Record<string, unknown> = {}) =>
+    service.chat({ threadId: 't', cwd: home, model: 'gpt-x', prompt: 'hi', onText: () => {}, ...patch })
+
+  /** Start, then fork (another MCP token on the loaded thread), then resume (a new process). */
+  async function allRoutes(service: CodexProviderService, server: ReturnType<typeof turnServer>): Promise<void> {
+    await chat(service, { mcp: { url: 'http://127.0.0.1:9/mcp', token: 'tok-a' } })
+    service.commitConversation('t', 'h')
+    await chat(service, { history: 'h', mcp: { url: 'http://127.0.0.1:9/mcp', token: 'tok-b' } })
+    service.commitConversation('t', 'h2')
+    await service.stopAll('test')
+    await chat(service, { history: 'h2', mcp: { url: 'http://127.0.0.1:9/mcp', token: 'tok-b' } })
+    expect(server.requests('thread/start')).toHaveLength(1)
+    expect(server.requests('thread/fork')).toHaveLength(1)
+    expect(server.requests('thread/resume')).toHaveLength(1)
+  }
+
+  const pinned = (server: ReturnType<typeof turnServer>) =>
+    ['thread/start', 'thread/fork', 'thread/resume'].map((method) => {
+      const params = server.requests(method)[0].params as { modelProvider: string; config: { model_provider: string } }
+      return [params.modelProvider, params.config.model_provider]
+    })
+
+  it('the existing CLI pins openai on start, fork and resume', async () => {
+    const server = turnServer()
+    const service = create(server)
+    await allRoutes(service, server)
+    expect(pinned(server)).toEqual([['openai', 'openai'], ['openai', 'openai'], ['openai', 'openai']])
+  })
+
+  it('managed pins its own provider on start, fork and resume, and never reads the account from Codex', async () => {
+    const server = turnServer({ provider: () => MANAGED })
+    const service = managed(server)
+    await allRoutes(service, server)
+    expect(pinned(server)).toEqual([[MANAGED, MANAGED], [MANAGED, MANAGED], [MANAGED, MANAGED]])
+    expect(server.methods()).not.toContain('account/read')
+    expect((server.requests('initialize')[0].params as { clientInfo: { name: string } }).clientInfo.name).toBe('Mousse')
+    expect(server.launches[0].cwd).toBe(join(home, 'harness', 'codex-2'))
+    await service.status({ force: true })
+    expect(service.account()).toEqual({ label: 'ChatGPT Plus', subject: 'chatgpt:client:sub' })
+  })
+
+  it.each(['thread/start', 'thread/fork', 'thread/resume'])('refuses a thread whose response names another provider (%s)', async (route) => {
+    for (const setup of ['existing', 'managed'] as const) {
+      const server = turnServer({ provider: (method) => (method === route) === (setup === 'managed') ? 'openai' : MANAGED })
+      const service = setup === 'managed' ? managed(server) : create(server)
+      const failure = await allRoutes(service, server).catch((error: unknown) => error)
+      expect(failure).toMatchObject({ code: 'codex_provider_not_chatgpt' })
+      expect((failure as Error).message).not.toMatch(/openai/)
+      service.stop()
+    }
+  })
+
+  it('a managed instance does not run a turn while its account source reads signed out', async () => {
+    const server = turnServer({ provider: () => MANAGED })
+    const service = managed(server, { account: { read: async () => ({ kind: 'signed_out', message: 'Sign in with ChatGPT.' }) } })
+    await expect(chat(service)).rejects.toMatchObject({ code: 'codex_not_connected' })
+    expect(server.requests('thread/start')).toHaveLength(0)
+    expect(server.methods()).not.toContain('account/read')
+  })
+
+  it('adds prepared launch args and env to the spawn, and releases them once when the process ends', async () => {
+    const server = turnServer({ provider: () => MANAGED })
+    const onExit = vi.fn()
+    const prepareLaunch = vi.fn(async () => ({ args: ['-c', 'model_provider="openai_chatgpt_plan"'], env: { CODEX_HOME: '/private/home' }, onExit }))
+    const service = managed(server, { prepareLaunch, env: () => ({ PATH: '/bin' }) })
+    await Promise.all([chat(service), service.userSetup(home)])
+    expect(prepareLaunch).toHaveBeenCalledTimes(1)
+    expect(server.launches).toHaveLength(1)
+    expect(server.launches[0].args).toEqual(['-c', 'model_provider="openai_chatgpt_plan"'])
+    expect(server.launches[0].env).toEqual({ PATH: '/bin', CODEX_HOME: '/private/home' })
+    expect(onExit).not.toHaveBeenCalled()
+    await service.stopAll('account_changed')
+    expect(onExit).toHaveBeenCalledTimes(1)
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(onExit).toHaveBeenCalledTimes(1)
+  })
+
+  it('stopAll fails the running turn and resolves only after the process exited', async () => {
+    let finish: (() => void) | undefined
+    // The turn never completes on its own.
+    const server = turnServer({ provider: () => MANAGED, turn: () => null })
+    const service = managed(server)
+    const running = chat(service)
+    running.catch(() => undefined)
+    await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(1))
+    // The process takes its time to exit after SIGTERM.
+    const process = server.processes[0]
+    process.kill = (signal: NodeJS.Signals = 'SIGTERM') => {
+      process.signalCode = signal
+      finish = () => process.emit('exit', null, signal)
+      return true
+    }
+    let stopped = false
+    const stopping = service.stopAll('account_changed').then(() => (stopped = true))
+    await expect(running).rejects.toThrow()
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(stopped).toBe(false)
+    finish!()
+    await stopping
+    expect(stopped).toBe(true)
+  })
+
+  it('a launch prepared while stopAll runs never starts and is released', async () => {
+    const server = turnServer({ provider: () => MANAGED })
+    let release: (() => void) | undefined
+    const onExit = vi.fn()
+    const service = managed(server, { prepareLaunch: () => new Promise((resolve) => (release = () => resolve({ args: [], onExit }))) })
+    const attempt = chat(service)
+    attempt.catch(() => undefined)
+    await vi.waitFor(() => expect(release).toBeDefined())
+    const stopping = service.stopAll('account_changed')
+    release!()
+    await stopping
+    await expect(attempt).rejects.toThrow()
+    expect(server.launches).toHaveLength(0)
+    expect(onExit).toHaveBeenCalledTimes(1)
+  })
+
+  it('a failed turn throws CodexTurnFailure with the error kind and HTTP status', async () => {
+    const server = turnServer({
+      provider: () => MANAGED,
+      turn: () => ({ status: 'failed', error: { message: 'usage limit', additionalDetails: null, codexErrorInfo: { responseStreamFailed: { httpStatusCode: 429 } } } })
+    })
+    const service = managed(server)
+    const failure = await chat(service).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(CodexTurnFailure)
+    expect(failure).toMatchObject({ message: 'usage limit', httpStatus: 429, codexErrorInfo: { responseStreamFailed: { httpStatusCode: 429 } } })
+  })
+
+  it('a models source replaces model/list and no fallback model is listed before it', async () => {
+    const server = turnServer({ provider: () => MANAGED })
+    const service = managed(server, { models: { list: async () => [{ id: 'gpt-5', label: 'GPT-5' }] } })
+    expect(service.models()).toEqual([])
+    expect(await service.refreshModels()).toEqual([{ id: 'gpt-5', label: 'GPT-5' }])
+    expect(service.models()).toEqual([{ id: 'gpt-5', label: 'GPT-5' }])
+    expect(server.methods()).not.toContain('model/list')
+  })
+
+  it("reads the user setup through the instance's own process and home", async () => {
+    const server = turnServer({ provider: () => MANAGED })
+    const service = managed(server, { env: () => ({ PATH: '/bin', CODEX_HOME: join(home, 'harness', 'codex-2', 'home') }) })
+    await service.userSetup(home)
+    expect(server.launches).toHaveLength(1)
+    expect(server.launches[0].env.CODEX_HOME).toBe(join(home, 'harness', 'codex-2', 'home'))
+    expect(server.methods()).toContain('config/read')
   })
 })
 
