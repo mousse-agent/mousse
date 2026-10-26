@@ -1,5 +1,6 @@
 import { AppError, type ErrorCategory } from '../errors'
 import type { AgentExecutionLimit } from '../agents/execution'
+import type { PermissionMode } from '../permissionMode'
 import type { ProviderDriverKind } from '../providerInstances'
 
 /**
@@ -112,6 +113,13 @@ export interface RunPolicy {
    * `checkPolicy` refuses it until the runtimes answer approvals that way.
    */
   approve?: 'host'
+  /**
+   * The permission mode the run enforces: the thread's mode, or the nearest stricter one the
+   * instance supports. Absent on bindings recorded before permission modes: they read as Ask.
+   */
+  permissionMode?: PermissionMode
+  /** The mode the thread asked for, when `permissionMode` is a stricter fallback. */
+  requestedPermissionMode?: PermissionMode
   budget?: { maxTurns?: number; maxToolCalls?: number; maxInputTokens?: number; maxOutputTokens?: number; maxUsd?: number; maxWallMs?: number }
   /**
    * The turn runs under a host authority (an agent definition's or a bot's grants, roots and rules),
@@ -224,6 +232,8 @@ export const HARNESS_ERROR_CODES = [
   'model_unavailable',
   'model_hidden',
   'policy_unenforceable',
+  /** The thread's permission mode needs more control than the instance has (it approves tools itself). */
+  'permission_mode_unenforceable',
   'operation_busy',
   'operation_unknown',
   'unsupported',
@@ -262,6 +272,8 @@ export interface HarnessError {
    * turn shows the connection-failed retry affordance, and no turn-level retry runs again.
    */
   retriesExhausted?: true
+  /** `permission_mode_unenforceable`: the modes the instance can enforce. */
+  supportedModes?: PermissionMode[]
 }
 
 /** A turn error whose details say the runtime's own request retries ran out (`HarnessError.retriesExhausted`). */
@@ -284,6 +296,7 @@ const HARNESS_ERROR_CATEGORY: Record<HarnessErrorCode, ErrorCategory> = {
   model_unavailable: 'unavailable',
   model_hidden: 'invalid',
   policy_unenforceable: 'unsupported',
+  permission_mode_unenforceable: 'unsupported',
   operation_busy: 'conflict',
   operation_unknown: 'invalid',
   unsupported: 'unsupported',

@@ -18,7 +18,14 @@ import { FakeClaudeCli, notification, resultFrame, roster, SESSION, textDelta, t
 
 const later = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 const homes: string[] = []
+beforeEach(() => {
+  // The user's own Claude settings (which may forbid bypassing permissions) must not reach a test.
+  const claudeHome = mkdtempSync(join(tmpdir(), 'claude-config-test-'))
+  homes.push(claudeHome)
+  vi.stubEnv('CLAUDE_CONFIG_DIR', claudeHome)
+})
 afterEach(() => {
+  vi.unstubAllEnvs()
   vi.useRealTimers()
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
@@ -42,7 +49,7 @@ function fixture(timings: Partial<LiveTimings> = {}, cli = new FakeClaudeCli(), 
   const host = { backgroundWork: vi.fn<(threadId: string, active: boolean) => void>(), continuationStarted: vi.fn<NonNullable<ClaudeLiveHost['continuationStarted']>>(), notice: vi.fn<NonNullable<ClaudeLiveHost['notice']>>() }
   service.setLiveHost(host)
   const chat = (extra: Partial<ClaudeSubscriptionChatInput> = {}) =>
-    service.chat({ threadId: 'thread', cwd: home, model: 'sonnet', prompt: 'hello', onText: vi.fn(), ...extra })
+    service.chat({ threadId: 'thread', cwd: home, model: 'sonnet', prompt: 'hello', permissionMode: 'full', onText: vi.fn(), ...extra })
   /** One finished turn, committed the way the adapter commits it. */
   const turn = async (extra: Partial<ClaudeSubscriptionChatInput> = {}, history = '') => {
     const text = await chat({ history, ...extra })
@@ -243,6 +250,43 @@ describe('a live Claude query', () => {
     expect(await hook('Read')).toEqual({})
   })
 
+  it('follows a change of the thread\'s permission mode from the next turn, on the same process', async () => {
+    const { cli, turn } = fixture()
+    await turn({ permissionMode: 'ask' })
+    const process = cli.last
+    expect(process.options.permissionMode).toBe('default')
+    // A live query can later switch to bypass, so it starts with the flag.
+    expect(process.options.allowDangerouslySkipPermissions).toBe(true)
+    const hook = (name: string) => process.options.hooks!.PreToolUse![0].hooks[0](
+      { hook_event_name: 'PreToolUse', tool_use_id: 't', tool_name: name, tool_input: {} } as never, 't', { signal: new AbortController().signal }
+    )
+    expect(await hook('Bash')).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } })
+    expect(await hook('Edit')).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } })
+    await turn({ permissionMode: 'accept_edits' })
+    expect(process.permissionModes).toEqual(['acceptEdits'])
+    // The hook reads the turn that is running now: commands still ask, edits no longer do.
+    expect(await hook('PowerShell')).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } })
+    expect(await hook('Edit')).toEqual({})
+    await turn({ permissionMode: 'full' })
+    expect(process.permissionModes).toEqual(['acceptEdits', 'bypassPermissions'])
+    expect(await hook('Bash')).toEqual({})
+    expect(cli.processes).toHaveLength(1)
+  })
+
+  it('never lets a live query bypass when Claude Code\'s settings forbid it', async () => {
+    const f = fixture()
+    mkdirSync(join(f.home, '.claude'), { recursive: true })
+    writeFileSync(join(f.home, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { disableBypassPermissionsMode: 'disable' } }))
+    await f.turn({ permissionMode: 'full' })
+    const process = f.cli.last
+    expect(process.options.permissionMode).toBe('acceptEdits')
+    expect(process.options.allowDangerouslySkipPermissions).toBeUndefined()
+    const hook = await process.options.hooks!.PreToolUse![0].hooks[0](
+      { hook_event_name: 'PreToolUse', tool_use_id: 't', tool_name: 'Bash', tool_input: {} } as never, 't', { signal: new AbortController().signal }
+    )
+    expect(hook).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } })
+  })
+
   it('keeps the read-only policy of a child on a live query', async () => {
     const { cli, turn } = fixture()
     await turn({ child: { readOnly: true } })
@@ -395,6 +439,24 @@ describe('background work', () => {
     const continuation = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, onText: () => undefined })
     await vi.advanceTimersByTimeAsync(120_001)
     expect(await continuation).toContain('did not respond')
+  })
+
+  it('a continuation after the thread\'s mode was tightened switches the process before it carries on', async () => {
+    const f = fixture()
+    // The turn that left the helper running was in Full access.
+    await withHelper(f)
+    const process = f.cli.last
+    expect(process.permissionModes).toEqual([])
+    process.emit(notification('bash-1'), textDelta('wake text'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    // The user switched the thread to Ask meanwhile; Claude's own continuation turn is admitted under it.
+    const continuation = f.service.chat({ threadId: 'thread', cwd: f.home, model: 'sonnet', prompt: '', continuation: true, permissionMode: 'ask', onText: () => undefined })
+    process.emit(resultFrame({ text: 'wake text', origin: 'task-notification' }))
+    expect(await continuation).toBe('wake text')
+    expect(process.permissionModes).toEqual(['default'])
+    // The next ordinary turn in that mode does not switch again.
+    await f.turn({ prompt: 'again', permissionMode: 'ask' })
+    expect(process.permissionModes).toEqual(['default'])
   })
 
   it('attributes the tool calls of a continuation to the continuation run and checks them with its policy', async () => {

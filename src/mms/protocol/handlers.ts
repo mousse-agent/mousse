@@ -6,6 +6,8 @@ import { tryAcquireExecutionLease, heartbeatExecutionLease, releaseExecutionLeas
 import { clearCleanupMarker, readCleanupMarker } from '../lifecycle/StorageCleanupService'
 import { enableVersionedLifecycleWriter } from '../queue/ThreadLifecycleAdmission'
 import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
+import { isPermissionMode, PERMISSION_MODES } from '../../shared/permissionMode'
+import type { Answerer } from '../run/approvalRights'
 import { buildResourceInventory } from '../lifecycle/ResourceInventory'
 import { assertLifecyclePath } from '../lifecycle/ResourceLifecycleStore'
 /**
@@ -160,6 +162,16 @@ export interface HandlerContext {
 function admittedChatSource(ctx: HandlerContext, fallback: string): string {
   if (!ctx.connection) return fallback === 'gui' || fallback === 'cli' ? 'internal' : fallback
   return ctx.connection.clientType === 'gui' ? 'gui' : ctx.connection.clientType === 'cli' ? 'cli' : 'internal'
+}
+
+/**
+ * Who a protocol request answers a question as: always the user, through the client the request
+ * came in on (a request with no connection of its own arrives over the Bridge). An agent answers
+ * only through its own tools, which name it.
+ */
+function questionAnswerer(ctx: HandlerContext): Answerer {
+  if (!ctx.connection) return { kind: 'user', via: 'bridge' }
+  return { kind: 'user', via: ctx.connection.clientType === 'gui' ? 'gui' : ctx.connection.clientType === 'cli' ? 'cli' : 'internal' }
 }
 
 function rejectUnknownKeys(p: Record<string, unknown>, allowed: readonly string[]): void {
@@ -1084,6 +1096,19 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
     }
+    case 'threads.setPermissionMode': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'mode'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const mode = asString(p.mode, 'mode', 32)
+      if (!isPermissionMode(mode)) throw new DomainRpcError('invalid_params', `mode must be one of ${PERMISSION_MODES.join(', ')}`)
+      if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+      // Applies from the next turn; a running turn and a pending question are not touched.
+      const thread = ctx.mms.orchestrator.setThreadPermissionMode(threadId, mode)
+      const threads = ctx.mms.threads.listAllThreads()
+      ctx.emitEvent?.('threads.updated', { threads })
+      return { thread, threads: visibleThreadsFor(ctx.connection, threads) }
+    }
     case 'orchestrator.send': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, [
@@ -1117,6 +1142,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         forceQueue,
         clientRequestId,
         awaitMode,
+        actor: questionAnswerer(ctx),
         ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})
       })
     }
@@ -1321,7 +1347,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const requestId = asString(p.requestId, 'requestId', 256)
       const answers = asAnswersMap(p.answers)
       const pending = ctx.mms.questions.getPending(requestId)
-      const ok = ctx.mms.questions.submitAnswers(requestId, answers)
+      const ok = ctx.mms.questions.submitAnswers(requestId, answers, questionAnswerer(ctx))
       if (ok && pending) {
         // Answers reach the model through the tool result; mirror them as a
         // visible user message so the transcript shows what the user said.
@@ -1336,7 +1362,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const requestId = asString(p.requestId, 'requestId', 256)
       const pending = ctx.mms.questions.getPending(requestId)
-      const ok = ctx.mms.questions.dismiss(requestId)
+      const ok = ctx.mms.questions.dismiss(requestId, questionAnswerer(ctx))
       if (ok && pending) {
         ctx.mms.orchestrator.recordQuestionResponseMessage(
           pending.threadId,

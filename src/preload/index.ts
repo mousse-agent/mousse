@@ -45,6 +45,7 @@ import type {
   GitStatusSnapshot,
   MainView,
   OrchestratorResponse,
+  PermissionMode,
   Project,
   PtyCreateRequest,
   PtyCreateResult,
@@ -696,6 +697,8 @@ const api = {
       ipcRenderer.invoke('threads:pin', threadId, pinned),
     setWorktreeEnabled: (threadId: string, enabled: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:setWorktreeEnabled', threadId, enabled),
+    setPermissionMode: (threadId: string, mode: PermissionMode): Promise<Thread> =>
+      ipcRenderer.invoke('threads:setPermissionMode', threadId, mode),
     settle: (threadId: string, settled: boolean): Promise<Thread> =>
       ipcRenderer.invoke('threads:settle', threadId, settled),
     reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>

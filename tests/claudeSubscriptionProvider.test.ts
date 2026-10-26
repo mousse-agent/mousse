@@ -3,13 +3,20 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ClaudeSubscriptionProviderService, claudeModelOptions } from '../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { readUsageLimit } from '../src/mms/orchestrator/providerErrors'
 
 const homes: string[] = []
+beforeEach(() => {
+  // The user's own Claude settings (which may forbid bypassing permissions) must not reach a test.
+  const claudeHome = mkdtempSync(join(tmpdir(), 'claude-config-test-'))
+  homes.push(claudeHome)
+  vi.stubEnv('CLAUDE_CONFIG_DIR', claudeHome)
+})
 afterEach(() => {
+  vi.unstubAllEnvs()
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 function fixture(
@@ -64,11 +71,12 @@ const result = {
   result: 'hello',
   session_id: 'vendor-session'
 }
-const chatInput = (cwd: string) => ({
+const chatInput = (cwd: string, permissionMode: 'ask' | 'accept_edits' | 'full' = 'full') => ({
   threadId: 'thread',
   cwd,
   model: 'sonnet',
   prompt: 'hello',
+  permissionMode,
   onText: vi.fn()
 })
 
@@ -368,7 +376,7 @@ describe('Claude Subscription native provider', () => {
     const asked = vi.fn()
     questions.on('pending', ({ requestId }) => {
       asked()
-      questions.submitAnswers(requestId, { permission: 'reject' })
+      questions.submitAnswers(requestId, { permission: 'reject' }, { kind: 'user' })
     })
     await service.chat({ ...chatInput(home), mcp: { url: 'http://127.0.0.1:1/mcp', token: 't' } })
     expect(decisions[0]).toMatchObject({ behavior: 'allow' })
@@ -396,7 +404,7 @@ describe('Claude Subscription native provider', () => {
     const asked = vi.fn()
     questions.on('pending', ({ requestId }) => {
       asked()
-      questions.submitAnswers(requestId, { permission: 'reject' })
+      questions.submitAnswers(requestId, { permission: 'reject' }, { kind: 'user' })
     })
     await service.chat(chatInput(home))
     expect(decision).toMatchObject({ behavior: 'deny' })
@@ -412,6 +420,87 @@ describe('Claude Subscription native provider', () => {
     expect(asked).toHaveBeenCalledOnce()
     expect(inputs[2].permissionMode).toBe('plan')
     expect(inputs[2].allowDangerouslySkipPermissions).toBeUndefined()
+  })
+  describe('permission modes', () => {
+    /** Runs one turn in `mode`, probing `tools` through the hook and `canUseTool`; every prompt is rejected. */
+    async function probe(mode: 'ask' | 'accept_edits' | 'full', tools: string[], cwd?: string) {
+      const hooks: Record<string, string> = {}
+      const decisions: Record<string, string> = {}
+      const options: Options[] = []
+      const { service, home, questions } = fixture((input) => {
+        options.push(input.options)
+        const q = fakeQuery()
+        q[Symbol.asyncIterator] = async function* () {
+          for (const tool of tools) {
+            const output = await input.options.hooks!.PreToolUse![0].hooks[0](
+              { hook_event_name: 'PreToolUse', tool_use_id: tool, tool_name: tool, tool_input: { command: 'ls' } } as never, tool, { signal: new AbortController().signal }
+            ) as { hookSpecificOutput?: { permissionDecision?: string } }
+            hooks[tool] = output.hookSpecificOutput?.permissionDecision ?? 'none'
+            decisions[tool] = (await input.options.canUseTool!(tool, { command: 'ls' }, { signal: new AbortController().signal } as never)).behavior
+          }
+          yield result as never
+        }
+        return q
+      })
+      const prompts: Array<{ prompt: string; threadId: string }> = []
+      questions.on('pending', ({ requestId, threadId, questions: asked }) => {
+        prompts.push({ prompt: asked[0].prompt, threadId })
+        questions.submitAnswers(requestId, { permission: 'reject' }, { kind: 'user' })
+      })
+      if (cwd) mkdirSync(join(home, cwd), { recursive: true })
+      await service.chat(chatInput(cwd ? join(home, cwd) : home, mode))
+      return { hooks, decisions, options: options[0], prompts, home }
+    }
+
+    it('maps the thread mode to Claude Code\'s own mode', async () => {
+      expect((await probe('ask', [])).options).toMatchObject({ permissionMode: 'default' })
+      expect((await probe('accept_edits', [])).options).toMatchObject({ permissionMode: 'acceptEdits' })
+      expect((await probe('full', [])).options).toMatchObject({ permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true })
+      // Under Ask and Auto-accept edits a one-shot query never asks for the bypass flag.
+      expect((await probe('ask', [])).options).not.toHaveProperty('allowDangerouslySkipPermissions')
+      expect((await probe('accept_edits', [])).options).not.toHaveProperty('allowDangerouslySkipPermissions')
+    })
+
+    it('makes the hook ask for Bash and PowerShell under Ask and Auto-accept edits, and for edits only under Ask', async () => {
+      const commands = ['Bash', 'PowerShell']
+      const edits = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
+      const others = ['Read', 'WebFetch', 'mcp__srv__tool']
+      const ask = (await probe('ask', [...commands, ...edits, ...others])).hooks
+      for (const tool of [...commands, ...edits]) expect(ask[tool], tool).toBe('ask')
+      for (const tool of others) expect(ask[tool], tool).toBe('none')
+      const accept = (await probe('accept_edits', [...commands, ...edits, ...others])).hooks
+      for (const tool of commands) expect(accept[tool], tool).toBe('ask')
+      for (const tool of [...edits, ...others]) expect(accept[tool], tool).toBe('none')
+      const full = (await probe('full', [...commands, ...edits])).hooks
+      for (const tool of [...commands, ...edits]) expect(full[tool], tool).toBe('none')
+    })
+
+    it('lets read-only built-ins through without asking, and names the action class when it asks', async () => {
+      const { decisions, prompts } = await probe('ask', ['Read', 'Glob', 'Bash', 'Edit', 'WebSearch', 'mcp__srv__tool'])
+      expect(decisions).toMatchObject({ Read: 'allow', Glob: 'allow', WebSearch: 'allow', Bash: 'deny', Edit: 'deny', mcp__srv__tool: 'deny' })
+      expect(prompts.map((entry) => entry.prompt.split('\n')[0])).toEqual([
+        'Allow Claude Code to run a command (Bash)?',
+        'Allow Claude Code to edit files (Edit)?',
+        'Allow Claude Code to use mcp__srv__tool?'
+      ])
+    })
+
+    it('says a call that still reaches the prompt under Full access is Claude Code\'s own safety check', async () => {
+      const { prompts } = await probe('full', ['Bash'])
+      expect(prompts[0].prompt).toMatch(/^Claude Code asks even in Full access: its own safety check\./)
+    })
+
+    it('runs Full access as Auto-accept edits when the project\'s Claude Code settings forbid bypassing permissions', async () => {
+      const home = mkdtempSync(join(tmpdir(), 'claude-bypass-'))
+      homes.push(home)
+      mkdirSync(join(home, '.claude'), { recursive: true })
+      writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ permissions: { disableBypassPermissionsMode: 'disable' } }))
+      const seen: Options[] = []
+      const { service } = fixture((input) => { seen.push(input.options); return fakeQuery([result]) })
+      await service.chat(chatInput(home, 'full'))
+      expect(seen[0]).toMatchObject({ permissionMode: 'acceptEdits' })
+      expect(seen[0]).not.toHaveProperty('allowDangerouslySkipPermissions')
+    })
   })
   it('bridges Claude AskUserQuestion answers into vendor tool input', async () => {
     let decision: unknown

@@ -221,6 +221,7 @@ export const PROTOCOL_METHODS = [
   'threads.regenerateTitle',
   'threads.setModel',
   'threads.setWorktreeEnabled',
+  'threads.setPermissionMode',
   'thread.snapshot',
   'orchestrator.send',
   'orchestrator.abort',

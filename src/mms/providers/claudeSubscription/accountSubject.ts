@@ -88,6 +88,34 @@ export function claudeAccountSubject(env: NodeJS.ProcessEnv, options: AccountSub
   return parts.join('|')
 }
 
+/**
+ * Whether Claude Code's settings forbid `bypassPermissions` (`permissions.disableBypassPermissionsMode:
+ * "disable"`), read from the files it reads without starting it: the user's `settings.json` (the
+ * instance's config directory when it has one), the managed policy file, and, when the turn has a
+ * folder, that folder's `.claude/settings.json` and `settings.local.json`. Any one of them is enough:
+ * a mode Claude Code refuses is never offered. Settings Claude Code loads from elsewhere (an
+ * `--settings` file) are not read.
+ */
+export function claudeBypassDisabled(env: NodeJS.ProcessEnv, options: AccountSubjectOptions & { cwd?: string } = {}): boolean {
+  const readText = options.readText ?? ((path: string) => readFileSync(path, 'utf8'))
+  const home = options.home ?? homedir()
+  const configDir = env.CLAUDE_CONFIG_DIR?.trim()
+  const paths = [
+    join(configDir || join(home, '.claude'), 'settings.json'),
+    ...managedSettingsPaths(options.platform ?? process.platform),
+    ...(options.cwd ? [join(options.cwd, '.claude', 'settings.json'), join(options.cwd, '.claude', 'settings.local.json')] : [])
+  ]
+  return paths.some((path) => {
+    try {
+      const value: unknown = JSON.parse(readText(path))
+      const permissions = isRecord(value) ? value.permissions : undefined
+      return isRecord(permissions) && permissions.disableBypassPermissionsMode === 'disable'
+    } catch {
+      return false
+    }
+  })
+}
+
 /** The AWS access key Bedrock calls are signed with, when Mousse can read it; else undefined. */
 function bedrockPrincipal(value: (name: string) => string | undefined, readText: (path: string) => string, home: string): string | undefined {
   const token = value('AWS_BEARER_TOKEN_BEDROCK')

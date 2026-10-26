@@ -61,6 +61,7 @@ export class PiLoopAdapter implements ProviderAdapter {
         },
         {
           mode: input.mode,
+          permissionMode: input.permissionMode,
           appletInstructions: input.appletInstructions,
           onPublishApplet: host.tools.onPublishApplet,
           llmProvider: input.modelPinned ? input.llmProvider : undefined,

@@ -2,6 +2,7 @@ import type { Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { SkillDescriptor } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import { APPROVALS_REFUSED_MESSAGE, QUESTIONS_REFUSED_MESSAGE } from '../../../../shared/harness/types'
+import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ChatMode } from '../../../../shared/types'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import type { DefinitionAuthority } from '../../../agentDefinitions/definitionGate'
@@ -16,10 +17,13 @@ import type { DelegationToolHost } from './delegation'
  * - `actsAsCaller`: acts on the caller's own thread and run (delegation, questions, plans, tasks).
  * - `writesThreads`: writes a thread named by `threadId`; only the caller's thread is allowed.
  * - `startsThreads`: creates threads; refused under a `plan` ceiling.
+ * - `editsWorkspace`: changes the caller's workspace or hands work over to it (integration, merge-back);
+ *   only the caller's own thread, and it asks the thread's user first unless the caller's permission
+ *   mode allows edits.
  */
-export type ToolAccess = 'reads' | 'actsAsCaller' | 'writesThreads' | 'startsThreads'
+export type ToolAccess = 'reads' | 'actsAsCaller' | 'writesThreads' | 'startsThreads' | 'editsWorkspace'
 
-export const ACCESS_CLASSES: ReadonlySet<string> = new Set<ToolAccess>(['reads', 'actsAsCaller', 'writesThreads', 'startsThreads'])
+export const ACCESS_CLASSES: ReadonlySet<string> = new Set<ToolAccess>(['reads', 'actsAsCaller', 'writesThreads', 'startsThreads', 'editsWorkspace'])
 
 /**
  * What a call does to the parent's work, read by the gate and the writer barrier of runtimes that
@@ -62,6 +66,11 @@ export interface AppToolTurn {
   /** What the mode allows, from its descriptor (`ModeRegistry`). */
   modeFacts: ModeFacts
   modeCeiling: ModeCeiling
+  /**
+   * The permission mode an in-process turn runs in (`LlmChatOptions.permissionMode`); an MCP turn's is
+   * read from its run's binding (`ToolRegistryOptions.permissionModeFor`). Absent: no tool asks.
+   */
+  permissionMode?: PermissionMode
   /** A Mousse subagent implementing a delegated task in the in-process loop (`LlmChatOptions.subagent`). */
   subagent: boolean
   /** The read-only pre-allocation phase of such a subagent (`LlmChatOptions.subagentDiscovery`). */
@@ -154,6 +163,8 @@ export interface MousseTool {
   /** Plain JSON Schema (no TypeBox symbols), byte-identical to `definition`'s parameters. */
   inputSchema: JsonSchema
   access: ToolAccess
+  /** The permission key an `editsWorkspace` tool asks under (`src/shared/permissionKeys.ts`). */
+  permissionKey?: string
   class: ToolClass
   /**
    * A read-only (`shared`) delegated child may call this although it is not a `reads` tool: it

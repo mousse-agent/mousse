@@ -8,6 +8,7 @@ import type {
   QueuedMessageState
 } from '../../shared/types'
 import { normalizeChatMode } from '../../shared/chatMode'
+import { isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { WORKFLOW_UUID_PATTERN } from '../../shared/workflows'
 
 export interface EnqueueMessageInput {
@@ -23,6 +24,7 @@ export interface EnqueueMessageInput {
   inboxIds?: string[]
   subagentNotice?: QueuedMessage['subagentNotice']
   stopGeneration?: number
+  permissionMode?: PermissionMode
 }
 
 export interface ClaimOwnerInput {
@@ -113,7 +115,8 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       ...(typeof item.runId === 'string' && item.runId ? { runId: item.runId } : {}),
       ...(Array.isArray(item.inboxIds) && item.inboxIds.length && item.inboxIds.every((id) => typeof id === 'string') ? { inboxIds: item.inboxIds } : {}),
       ...(Array.isArray(item.subagentNotice) && item.subagentNotice.length ? { subagentNotice: item.subagentNotice } : {}),
-      ...(typeof item.stopGeneration === 'number' && Number.isSafeInteger(item.stopGeneration) && item.stopGeneration >= 0 ? { stopGeneration: item.stopGeneration } : {})
+      ...(typeof item.stopGeneration === 'number' && Number.isSafeInteger(item.stopGeneration) && item.stopGeneration >= 0 ? { stopGeneration: item.stopGeneration } : {}),
+      ...(isPermissionMode(item.permissionMode) ? { permissionMode: item.permissionMode } : {})
     })
   }
   return sortQueue(out)
@@ -173,7 +176,8 @@ export function enqueueMessage(
     ...(input.runId ? { runId: input.runId } : {}),
     ...(input.inboxIds?.length ? { inboxIds: input.inboxIds } : {}),
     ...(input.subagentNotice?.length ? { subagentNotice: input.subagentNotice } : {}),
-    ...(input.stopGeneration !== undefined ? { stopGeneration: input.stopGeneration } : {})
+    ...(input.stopGeneration !== undefined ? { stopGeneration: input.stopGeneration } : {}),
+    ...(input.permissionMode ? { permissionMode: input.permissionMode } : {})
   }
 
   return { items: sortQueue([...items, item]), item }

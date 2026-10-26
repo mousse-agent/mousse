@@ -376,6 +376,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
         auth: async ({ force }) => readAuth(service, await service.status({ force }), signInCommand, Boolean(privateHome) && ptyRuns()),
         // Read from the home and the variables Claude Code reads; `claude auth status` is the turn's own check.
         identity: async () => service.accountSubject(),
+        // Claude Code refuses `bypassPermissions` when the user's settings say so.
+        permissionLimits: (cwd) => service.permissionLimits(cwd),
         refreshModels: async (cwd) => {
           await service.status()
           await service.refreshModels(cwd)

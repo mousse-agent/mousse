@@ -144,13 +144,14 @@ describe('PiLoopAdapter', () => {
         return chatResult()
       }
     }))
-    const turn = input()
+    const turn = input({ permissionMode: 'ask' })
     await adapter.startTurn(turn, recordingSink(), control('steer text'), turnHost)
     const [messages, , options] = seen!
     expect(messages).toBe(turn.messages)
     const opts = options as LlmChatOptions
     expect(opts).toMatchObject({
       mode: 'agent',
+      permissionMode: 'ask',
       appletInstructions: 'applets',
       llmProvider: 'openai',
       model: 'gpt',

@@ -1,4 +1,8 @@
 import type { ToolCall } from '@earendil-works/pi-ai'
+import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
+import { permissionModeAllows, type PermissionMode } from '../../../../shared/permissionMode'
+import type { PendingUserQuestions, UserQuestionAnswers } from '../../../../shared/types'
+import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
 import type { AgentToolAccess } from '../../../agents/WorkspaceAccessPolicy'
 import { authorizeDefinitionCall, definitionRefusal, takeAuthorizedCall, withoutTransportFields } from '../../../agentDefinitions/definitionGate'
 import type { ModeCeiling } from '../../types'
@@ -97,6 +101,13 @@ export interface ToolRegistryOptions {
   threadCeiling?(threadId: string): ModeCeiling
   /** The turns registered by the `turn.start` executor; MCP calls act only inside one. */
   turns?: AppToolTurns
+  /**
+   * The permission mode the caller's run enforces, from its attempt's binding (never from the mode
+   * ceiling). Without it no `editsWorkspace` tool asks.
+   */
+  permissionModeFor?(runId: string): PermissionMode | undefined
+  /** Asks the thread's user to approve a call (an approval request: see `ApprovalTag`). */
+  askApproval?(threadId: string, questions: PendingUserQuestions['questions'], options: { signal: AbortSignal; approval: ApprovalTag }): Promise<UserQuestionAnswers>
 }
 
 function notLive(message: string): McpToolError {
@@ -118,7 +129,7 @@ export class ToolRegistry {
   register(tool: MousseTool): this {
     if (!tool || typeof tool.name !== 'string' || !tool.name) throw new Error('A Mousse tool needs a name')
     if (!ACCESS_CLASSES.has(tool.access as string))
-      throw new Error(`Mousse tool ${tool.name} has no access class (reads | actsAsCaller | writesThreads | startsThreads)`)
+      throw new Error(`Mousse tool ${tool.name} has no access class (reads | actsAsCaller | writesThreads | startsThreads | editsWorkspace)`)
     if (!TOOL_CLASSES.has(tool.class as string)) throw new Error(`Mousse tool ${tool.name} has no class (read | mutation | delegation)`)
     if (typeof tool.handler !== 'function') throw new Error(`Mousse tool ${tool.name} has no handler`)
     if (this.tools.has(tool.name)) throw new Error(`Mousse tool ${tool.name} is already registered`)
@@ -227,6 +238,13 @@ export class ToolRegistry {
         if (!decision.allowed) return { text: decision.message, isError: true }
       }
     }
+    // A tool that changes the workspace asks first unless the run's permission mode allows edits (a
+    // definition run is held to its own grants above); a rejection ends the call before its handler
+    // runs and writes no ledger row.
+    if (tool.access === 'editsWorkspace' && !turn.definition) {
+      const refusal = await this.askBeforeEditing(tool, caller, request.signal)
+      if (refusal) return refusal
+    }
     const ctx: ToolCallContext = { caller, turn, toolCallId: request.toolCallId, signal: request.signal, transport: 'mcp' }
     const ledger = this.options.toolLedger?.(active)
     const ledgerId = ledger?.start({ type: 'toolCall', id: ctx.toolCallId, name, arguments: args } as ToolCall)
@@ -266,6 +284,13 @@ export class ToolRegistry {
       const unattended = unattendedRefusal(tool, turn)
       if (unattended) return { text: unattended, isError: true }
       const caller: McpCaller = { threadId: turn.threadId, runId: turn.runId, provider: 'in_process', modeCeiling: turn.modeCeiling }
+      // A trusted caller (a definition, bot or scheduled run) had its grants checked before dispatch; a
+      // run's own loop asks the user as any other runtime does.
+      if (tool.access === 'editsWorkspace' && authority.kind === 'run') {
+        callerThreadOnly(args, caller)
+        const refusal = await this.askBeforeEditing(tool, { ...caller, runId: authority.runId }, call.signal, turn.permissionMode)
+        if (refusal) return refusal
+      }
       return await tool.handler(args, {
         caller,
         turn,
@@ -284,9 +309,45 @@ export class ToolRegistry {
   private authorize(tool: MousseTool, args: Record<string, unknown>, caller: McpCaller, readOnly: boolean): void {
     if (tool.access !== 'reads' && !tool.readOnlySafe && readOnly)
       throw new McpToolError('mousse_read_only', `${tool.name} can change threads or the workspace; a read-only subagent cannot call it.`)
-    if (tool.access === 'writesThreads') callerThreadOnly(args, caller)
+    // Scope before any approval: a call refused for naming another thread must not prompt the user first.
+    if (tool.access === 'writesThreads' || tool.access === 'editsWorkspace') callerThreadOnly(args, caller)
     if (tool.access === 'startsThreads' && caller.modeCeiling === 'plan')
       throw new McpToolError('mousse_ceiling_exceeded', `${tool.name} starts threads; a plan ceiling cannot.`)
+  }
+
+  /**
+   * The outcome a rejected `editsWorkspace` call gets instead of running: null when the call may go
+   * ahead (the run's permission mode allows edits, or the user allowed it once). An owner that cannot
+   * ask rejects: nothing runs unapproved.
+   */
+  private async askBeforeEditing(tool: MousseTool, caller: McpCaller, signal: AbortSignal, turnMode?: PermissionMode): Promise<ToolOutcome | null> {
+    const mode = turnMode ?? this.options.permissionModeFor?.(caller.runId)
+    if (mode === undefined || permissionModeAllows(mode, 'edit')) return null
+    const rejected: ToolOutcome = { text: `The user did not approve ${tool.name}, so it did not run. Do not retry it unless they ask.`, isError: true }
+    if (!this.options.askApproval) return rejected
+    try {
+      const answers = await this.options.askApproval(
+        caller.threadId,
+        [{
+          id: 'permission',
+          prompt: tool.name === 'thread_merge_back'
+            ? "Allow Mousse to hand this fork's work back to the thread it was forked from?"
+            : "Allow Mousse to merge a subagent's work into this workspace?",
+          options: [{ id: 'allow', label: 'Allow once' }, { id: 'reject', label: 'Reject' }]
+        }],
+        {
+          signal,
+          approval: {
+            action: 'edit',
+            permissionKey: tool.permissionKey ?? PERMISSION_KEYS.mousseIntegrate,
+            options: [{ id: 'allow', decision: 'allow', scope: 'once' }, { id: 'reject', decision: 'reject' }]
+          }
+        }
+      )
+      return answers.permission === 'allow' && !signal.aborted ? null : rejected
+    } catch {
+      return rejected
+    }
   }
 
   /**

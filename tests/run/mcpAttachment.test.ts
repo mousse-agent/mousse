@@ -126,7 +126,7 @@ describe('Claude subscription attachment', () => {
     const options: Options[] = []
     const { home, questions, service: claude } = service(({ options: o }) => { options.push(o); return finished(o) })
     const ask = vi.spyOn(questions, 'requestAnswers')
-    questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }))
+    questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }, { kind: 'user' }))
     await claude.chat({ threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: MCP, systemPromptAppend: 'GUIDE' })
     await claude.chat({ threadId: 't2', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn() })
     expect(options[0].mcpServers).toEqual({
@@ -148,7 +148,7 @@ describe('Claude subscription attachment', () => {
   it('the service launches Claude with the user\'s MCP servers, their secrets, the skills plugin and tool limits', async () => {
     const options: Options[] = []
     const { home, questions, service: claude } = service(({ options: o }) => { options.push(o); return finished(o) })
-    questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }))
+    questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }, { kind: 'user' }))
     await claude.chat({
       threadId: 't', cwd: home, model: 'sonnet', prompt: 'hi', onText: vi.fn(), mcp: MCP,
       integrations: {

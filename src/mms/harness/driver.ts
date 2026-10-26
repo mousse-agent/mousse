@@ -1,6 +1,7 @@
 import type { AuthState, CredentialKind, InstallOwner } from '../../shared/harness/status'
 import type { CustomModel, HarnessCaps, HarnessDriverKind, RemoveInstallResult, RuntimeFacts } from '../../shared/harness/types'
 import type { NeutralTool } from '../../shared/harness/tools'
+import type { PermissionLimits } from '../../shared/permissionMode'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult, ProviderUsage } from '../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
@@ -220,6 +221,12 @@ export interface DriverRuntime {
    * admission: no model call, no runtime start. Without it the gateway uses `auth({ force: true })`.
    */
   identity?(signal: AbortSignal): Promise<string | undefined>
+  /**
+   * What limits the permission modes the runtime can enforce for a turn in `cwd` (Claude Code: the
+   * user's settings forbid bypassing permissions). Read at every turn admission and snapshot, never
+   * cached: the user may edit their settings at any time. Synchronous, no runtime start.
+   */
+  permissionLimits?(cwd?: string): PermissionLimits | undefined
   refreshModels?(cwd: string): Promise<void>
   /**
    * When the stored model list was last updated from the vendor (ISO time), kept with the list so

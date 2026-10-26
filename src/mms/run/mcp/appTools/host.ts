@@ -1,4 +1,6 @@
 import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
+import type { PermissionMode } from '../../../../shared/permissionMode'
+import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
 import type { DocumentOpenPayload, PendingUserQuestions, UserQuestionAnswers } from '../../../../shared/types'
 import type { DevGuiTools } from '../../../devgui/DevGuiTools'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
@@ -45,4 +47,8 @@ export interface AppToolHost extends DelegationToolsHost {
   /** The ceiling the thread's delegations gave it (the listing ignores the turn's mode). */
   threadCeiling?(threadId: string): ModeCeiling
   awaitLiveRun?(threadId: string): Promise<LiveRunGate | undefined> | undefined
+  /** The permission mode the caller's run enforces, from its attempt's binding (never from the mode ceiling). */
+  permissionModeFor?(runId: string): PermissionMode | undefined
+  /** Asks the thread's user to approve a call (an approval request: see `ApprovalTag`). */
+  askApproval?(threadId: string, questions: PendingUserQuestions['questions'], options: { signal: AbortSignal; approval: ApprovalTag }): Promise<UserQuestionAnswers>
 }

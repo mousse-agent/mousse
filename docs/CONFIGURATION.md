@@ -30,16 +30,29 @@ Every profile uses the sign-in from your terminal: the same `claude` configurati
 
 Mousse runs your Claude Code exactly as you set it up. Every launch (the sign-in check, model discovery, the usage check and turns) gets the environment Mousse was started with and loads your user, project and local Claude Code settings, as `claude` in a terminal would: the `env` block in `settings.json`, MCP servers, hooks, plugins, skills, permission rules, CLAUDE.md, and AGENTS.md when Claude Code's own settings load it. Turns use Claude Code's own system prompt. Mousse adds only its own pieces on top: its MCP server and orchestration guidance, the MCP servers and skills enabled in Mousse (skills already in `~/.claude/skills` or the project's `.claude/skills` are not added twice), and the permission mode for each turn. The launch arguments and environment variables set in Settings → Providers apply too; text from `--append-system-prompt` and `--append-system-prompt-file` is added after Mousse's guidance.
 
-After connecting, select Claude Subscription and a Claude model in the composer. Agent turns use Claude Code's tools with permission checks bypassed (the equivalent of `--dangerously-skip-permissions`), so tool calls run without approval prompts; only calls Claude Code refuses to auto-approve even in that mode, and its own questions, are shown in the thread. Plan turns stay limited to read-only tools. Plan mode, streamed replies, cancellation and conversation continuity are supported. Claude Code owns its context window; Mousse does not display a fabricated context percentage. Native tool edits follow Claude Code's execution path, as with Antigravity, rather than Mousse's parsed action blocks.
+After connecting, select Claude Subscription and a Claude model in the composer. Agent turns run under the thread's [permission mode](#permission-modes). Full access is the former behavior: Claude Code's tools with permission checks bypassed (the equivalent of `--dangerously-skip-permissions`), so tool calls run without approval prompts; only calls Claude Code refuses to auto-approve even in that mode, and its own questions, are shown in the thread. Plan turns stay limited to read-only tools. Plan mode, streamed replies, cancellation and conversation continuity are supported. Claude Code owns its context window; Mousse does not display a fabricated context percentage. Native tool edits follow Claude Code's execution path, as with Antigravity, rather than Mousse's parsed action blocks.
 
 Account eligibility, usage limits and billing are managed by Claude. Consult [Claude's current subscription/SDK policy](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) for changes. Disconnect turns Claude Code off in this profile and cancels its running provider work; the sign-in in your terminal is unchanged.
+
+## Permission modes
+
+Every thread has a permission mode: **Ask before acting** (commands and file edits ask), **Auto-accept edits** (edits go ahead, commands ask) or **Full access** (nothing asks). New threads start in the mode set in **Settings → General → Permissions** (default: Auto-accept edits). The composer shows and changes the thread's mode; a change applies from the next turn, the agent is told, and a running turn or a pending approval is not touched. A subagent never exceeds the narrowest mode of the threads it belongs to, and a fork starts in its source's mode.
+
+Each agent enforces the mode with its own controls:
+
+- **Claude Code:** Ask runs Claude Code's `default` mode, Auto-accept edits `acceptEdits`, Full access `bypassPermissions`. Under Ask and Auto-accept edits Mousse also asks before every command (`Bash` and `PowerShell`), and before every edit under Ask, whatever allow rules your own Claude Code settings hold. If your Claude Code settings set `permissions.disableBypassPermissionsMode` to `"disable"` (user, managed, or the project's `.claude/settings.json` and `settings.local.json`; a settings file passed with `--settings` is not read), Full access runs as Auto-accept edits and the composer says so. Mousse never edits your Claude configuration.
+- **Codex:** Ask runs `untrusted` approvals in the read-only sandbox, so every command that is not known to be safe and every patch asks. Full access is Codex's own full-access profile (`never` ask, sandbox off). Auto-accept edits is not offered yet: a thread set to it runs as Ask on Codex, and the composer says so. A rule in your Codex exec policy that prompts is rejected, not asked, under Full access (Codex behavior).
+- **Mousse's own agent (pi loop):** commands ask under Ask and Auto-accept edits, edits ask under Ask; integrating a subagent's work asks unless the mode allows edits.
+- **Antigravity and other ACP agents:** the agent's own once-only permission options are asked or answered by the mode; its "always" and "session" options are not offered. An agent that approves tools itself (a generic ACP agent) runs only in Full access; a turn in another mode is refused with the fix named.
+
+Until approval requests are saved (the next change), an approval waits in memory for ten minutes and is lost if the daemon restarts.
 
 ## File format
 
 ```jsonc
 {
   "version": 1,
-  "settings": { /* profile, appearance, integrations */ },
+  "settings": { /* profile, appearance, permissions, integrations */ },
   "providers": { /* orchestrator LLM selection */ },
   "agents": { /* CLI agent defaults */ },
   "scheduled": { "enabled": true, "jobs": [ /* definitions */ ] },

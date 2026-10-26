@@ -44,20 +44,33 @@ describe('policy table: permission decisions', () => {
     for (const tool of denied) expect(claudeChildToolDenial(child, tool), tool).toEqual(expect.any(String))
   })
 
+  const READ_ONLY = { approvalPolicy: 'on-request', sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: false } }
+  const SUPERVISED = { approvalPolicy: 'untrusted', sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: false } }
+  const FULL = { approvalPolicy: 'never', sandbox: 'danger-full-access', sandboxPolicy: { type: 'dangerFullAccess' } }
   it.each([
-    ['agent turn', 'default', undefined, { approvalPolicy: 'on-request', sandbox: 'workspace-write', sandboxPolicy: { type: 'workspaceWrite' } }],
-    ['plan turn', 'plan', undefined, { approvalPolicy: 'on-request', sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: false } }],
-    ['isolated child', 'default', ISOLATED, { approvalPolicy: 'on-request', sandbox: 'workspace-write', sandboxPolicy: { type: 'workspaceWrite' } }],
-    ['shared child', 'default', SHARED, { approvalPolicy: 'on-request', sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: false } }],
-    ['shared child in plan mode', 'plan', SHARED, { approvalPolicy: 'on-request', sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: false } }]
-  ] as const)('Codex sandbox and approvals for a %s', (_name, mode, child, expected) => {
-    expect(codexTurnPolicy(mode, child)).toMatchObject(expected)
+    ['agent turn asking', 'default', undefined, 'ask', SUPERVISED],
+    ['agent turn accepting edits', 'default', undefined, 'accept_edits', SUPERVISED],
+    ['agent turn with full access', 'default', undefined, 'full', FULL],
+    // A plan turn and a read-only child stay read-only whatever the permission mode says.
+    ['plan turn', 'plan', undefined, 'full', READ_ONLY],
+    ['isolated child asking', 'default', ISOLATED, 'ask', SUPERVISED],
+    ['isolated child with full access', 'default', ISOLATED, 'full', FULL],
+    ['shared child', 'default', SHARED, 'full', READ_ONLY],
+    ['shared child in plan mode', 'plan', SHARED, 'ask', READ_ONLY]
+  ] as const)('Codex sandbox and approvals for a %s', (_name, mode, child, permissionMode, expected) => {
+    expect(codexTurnPolicy(mode, child, permissionMode)).toEqual(expected)
+  })
+
+  it('never sends a workspaceWrite policy on an interactive turn', () => {
+    for (const permissionMode of ['ask', 'accept_edits', 'full'] as const)
+      expect(codexTurnPolicy('default', undefined, permissionMode).sandboxPolicy.type).not.toBe('workspaceWrite')
   })
 })
 
 describe('Claude Subscription children', () => {
   const homes: string[] = []
   afterEach(() => {
+    vi.unstubAllEnvs()
     for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
     seen.length = 0
   })
@@ -93,6 +106,8 @@ describe('Claude Subscription children', () => {
   const fixture = () => {
     const home = mkdtempSync(join(tmpdir(), 'mousse-claude-child-'))
     homes.push(home)
+    // The user's own Claude settings (which may forbid bypassing permissions) must not reach a test.
+    vi.stubEnv('CLAUDE_CONFIG_DIR', join(home, 'claude-config'))
     const binary = join(home, 'claude')
     writeFileSync(binary, 'fixture')
     chmodSync(binary, 0o755)
@@ -100,7 +115,10 @@ describe('Claude Subscription children', () => {
     mkdirSync(directory, { recursive: true })
     writeFileSync(join(directory, 'settings.json'), JSON.stringify({ loginPolicy: 'cli', binaryPath: binary, models: [{ id: 'sonnet', label: 'Sonnet' }] }))
     const options: Options[] = []
-    const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
+    const questions = new UserQuestionService()
+    // A command or edit the mode asks about reaches the user; the probes reject it.
+    questions.on('pending', ({ requestId }: { requestId: string }) => questions.submitAnswers(requestId, { permission: 'reject' }, { kind: 'user' }))
+    const service = new ClaudeSubscriptionProviderService(home, questions, {
       launchConfig: () => ({ binaryPath: binary }),
       query: (input) => {
         options.push(input.options)
@@ -109,7 +127,7 @@ describe('Claude Subscription children', () => {
       runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
     })
     const input = (patch: Partial<ClaudeSubscriptionChatInput> = {}): ClaudeSubscriptionChatInput => ({
-      threadId: 'child', cwd: home, model: 'sonnet', prompt: 'look', onText: vi.fn(), mcp: MOUSSE, integrations, ...patch
+      threadId: 'child', cwd: home, model: 'sonnet', prompt: 'look', permissionMode: 'full', onText: vi.fn(), mcp: MOUSSE, integrations, ...patch
     })
     return { service, options, input }
   }
@@ -168,6 +186,22 @@ describe('Claude Subscription children', () => {
     }
     const hook = { Agent: 'none', Task: 'none', Bash: 'none', Write: 'none', mcp__userserver__lookup: 'none', Read: 'none', mcp__mousse__thread_read: 'none', mcp__mousse__thread_fork: 'none', mcp__mousse__delegate_task: 'none', mcp__mousse__integrate_delegation: 'none' }
     expect(seen).toEqual([{ hook, canUse: {} }, { hook, canUse: {} }])
+  })
+
+  it('a child runs under its own permission mode: the hook asks for commands and edits the mode does not allow', async () => {
+    const asking = fixture()
+    await asking.service.chat(asking.input({ child: ISOLATED, permissionMode: 'ask' }))
+    expect(asking.options[0]).toMatchObject({ permissionMode: 'default' })
+    // The flag stays allowed on a live query so a later turn can switch to Full access; the mode itself is `default`.
+    for (const tool of ['Bash', 'Write']) expect(seen[0].hook[tool], tool).toBe('ask')
+    // A read-only built-in and an MCP tool follow Claude's own rules.
+    for (const tool of ['Read', 'mcp__userserver__lookup']) expect(seen[0].hook[tool], tool).toBe('none')
+
+    const accepting = fixture()
+    await accepting.service.chat(accepting.input({ child: ISOLATED, permissionMode: 'accept_edits' }))
+    expect(accepting.options[0]).toMatchObject({ permissionMode: 'acceptEdits' })
+    expect(seen[1].hook.Bash).toBe('ask')
+    expect(seen[1].hook.Write).toBe('none')
   })
 
   it('a thread that is not a subagent is unchanged', async () => {
@@ -316,13 +350,18 @@ describe('Codex children', () => {
     expect(s.messages.map((message) => message.method)).not.toContain('config/read')
   })
 
-  it('an isolated child keeps workspace-write; a thread that is not a subagent is unchanged', async () => {
+  it('an isolated child and a thread that is not a subagent run under the thread\'s permission mode', async () => {
     for (const child of [ISOLATED, undefined]) {
-      const s = server()
-      await chat(create(s), { child })
-      expect(s.requests('thread/start')[0].params).toMatchObject({ sandbox: 'workspace-write', approvalPolicy: 'on-request' })
-      expect(s.requests('thread/start')[0].params!.config).toMatchObject(mousseOnly)
-      expect(s.requests('turn/start')[0].params).toMatchObject({ sandboxPolicy: { type: 'workspaceWrite' } })
+      const asking = server()
+      await chat(create(asking), { child, permissionMode: 'ask' })
+      expect(asking.requests('thread/start')[0].params).toMatchObject({ sandbox: 'read-only', approvalPolicy: 'untrusted' })
+      expect(asking.requests('thread/start')[0].params!.config).toMatchObject(mousseOnly)
+      expect(asking.requests('turn/start')[0].params).toMatchObject({ approvalPolicy: 'untrusted', sandboxPolicy: { type: 'readOnly', networkAccess: false } })
+
+      const full = server()
+      await chat(create(full), { child, permissionMode: 'full' })
+      expect(full.requests('thread/start')[0].params).toMatchObject({ sandbox: 'danger-full-access', approvalPolicy: 'never' })
+      expect(full.requests('turn/start')[0].params).toMatchObject({ approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } })
     }
   })
 
@@ -374,11 +413,11 @@ describe('Codex children', () => {
     // What a person (or the parent, through the router and answer_subagent) answers with.
     const onPending = (event: { requestId: string; threadId: string; questions: Array<{ prompt: string }> }): void => {
       asked.push({ requestId: event.requestId, threadId: event.threadId, prompts: event.questions.map((question) => question.prompt) })
-      questions.submitAnswers(event.requestId, { permission: 'allow' })
+      questions.submitAnswers(event.requestId, { permission: 'allow' }, { kind: 'user' })
     }
     questions.on('pending', onPending)
     try {
-      await chat(create(s), { child: ISOLATED })
+      await chat(create(s), { child: ISOLATED, permissionMode: 'ask' })
       const reply = (id: number) => s.messages.find((message) => message.id === id)
       await vi.waitFor(() => expect(reply(96)).toBeTruthy())
       // The command and the file edit were asked of the user, keyed by the child's Mousse thread (`chat`'s threadId).

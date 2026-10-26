@@ -58,9 +58,17 @@ import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceState
 import { LatestVersionCache } from './latest'
 import { RuntimeFactsStore } from './facts'
 import { questionsPrompter, refusingPrompter } from './acp/permissions'
-import { checkPolicy, freezePolicy, hasSpendLimit, mapNeutralTools, policyDigest, purposeAllowed, toolControlLevel } from './policy'
+import { checkPermissionMode, checkPolicy, freezePolicy, hasSpendLimit, mapNeutralTools, permissionModeRefusal, policyDigest, purposeAllowed, toolControlLevel } from './policy'
 import { budgetLimitsOf, RunCounterBook, type CounterScope, type SpendScope } from './budget'
 import type { DefinitionAuthority } from '../agentDefinitions/definitionGate'
+import {
+  effectivePermissionMode,
+  normalizePermissionMode,
+  supportedPermissionModes,
+  type EffectivePermissionMode,
+  type PermissionLimits,
+  type PermissionMode
+} from '../../shared/permissionMode'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
 import { compatibilityOf, fingerprintOf, PROBE_TIMEOUTS, probeInstance, sameBinary, updateAffordance, type ProbeResult } from './status'
@@ -163,6 +171,12 @@ export interface HarnessGateway {
    * with `policy_unenforceable` when the runtime has no tool for one of them.
    */
   nativeToolNames(instanceId: string, tools: readonly NeutralTool[]): { ok: true; names: string[] } | { ok: false; error: HarnessError & { code: 'policy_unenforceable' } }
+  /**
+   * The permission mode `bind` would record for a thread asking for `requested` (the mode itself, a
+   * stricter fallback with the reason, or a refusal). Reads, binds nothing; used to tell the agent
+   * about a change before the turn is admitted.
+   */
+  previewPermissionMode(resolved: ResolvedTurnSelection, requested: PermissionMode, cwd?: string | null): EffectivePermissionMode
   /** The selection a binding runs: a retry or recovery of a run executes its binding, never the current selection. */
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>
   /**
@@ -204,6 +218,14 @@ export interface BindInput {
   origin?: TurnOrigin
   /** Shorthand for `policy.approvals`. */
   approvals?: RunPolicy['approvals']
+  /**
+   * The permission mode the thread asks for (its own, narrowed by its lineage's ceiling). The
+   * binding records the mode the instance can enforce: this one, the nearest stricter one, or the
+   * bind is refused with `permission_mode_unenforceable`. Absent reads as the profile default.
+   */
+  permissionMode?: PermissionMode
+  /** The turn's working directory, where project settings that limit the modes are read from. */
+  cwd?: string | null
   policy?: BindPolicy
 }
 
@@ -963,6 +985,9 @@ export class Harness implements HarnessGateway {
     const counters = this.counters.get(resolved.instanceId)
     // The attempt runs on the caps of this moment, whatever the runtime reports meanwhile.
     const caps = record ? this.recordCaps(record) : resolved.caps
+    const requested = normalizePermissionMode(input.permissionMode)
+    const { effective, supported } = this.resolvePermissionMode(record, caps, requested, input.cwd ?? undefined)
+    if (effective.refused) throw harnessAppError(permissionModeRefusal(effective.reason, supported, resolved.instanceId))
     const binary = record ? this.probes.get(record.instanceId)?.lastGood?.fingerprint : undefined
     // The model is fixed here: a runtime that resolves `default` itself runs the bound model on
     // dispatch, retry and recovery, whatever its listing says by then.
@@ -975,7 +1000,11 @@ export class Harness implements HarnessGateway {
     const policy = freezePolicy({
       ...input.policy,
       mode: policyMode(input.mode),
-      approvals: input.policy?.approvals ?? input.approvals ?? 'ask',
+      // A caller's own approvals policy (a definition's, a bot's) wins; otherwise Full access is the
+      // agent approving its own tools and every other mode asks.
+      approvals: input.policy?.approvals ?? input.approvals ?? (effective.mode === 'full' ? 'grants' : 'ask'),
+      permissionMode: effective.mode,
+      ...(effective.mode !== requested ? { requestedPermissionMode: requested } : {}),
       origin: input.origin ?? 'interactive'
     })
     const binding: ExecutionBinding = {
@@ -989,6 +1018,7 @@ export class Harness implements HarnessGateway {
       ...(input.effort ? { effort: input.effort } : {}),
       policy,
       ...(input.policy ? { policyDigest: policyDigest(policy) } : {}),
+@@POLICY@@
       caps: { ...caps },
       factsRevision: record ? this.facts.revision(record.instanceId) : 0,
       ...(binary ? { binary: { ...binary } } : {})
@@ -1276,6 +1306,12 @@ export class Harness implements HarnessGateway {
     const spendModel = hasSpendLimit(binding.policy) ? record.runtime.spendModel?.(binding.model) : undefined
     const enforceable = checkPolicy(caps, binding.policy, binding.instanceId, spendModel)
     if (!enforceable.ok) throw harnessAppError(enforceable.error)
+    // The runtime takes its permission mode from the input: it must be the binding's.
+    if (binding.policy.permissionMode !== undefined && input.permissionMode !== undefined && input.permissionMode !== binding.policy.permissionMode)
+      harnessFail('protocol', `The turn runs in ${input.permissionMode} permission mode but its binding is ${binding.policy.permissionMode}.`, binding.instanceId)
+    // An instance that approves tools itself runs only in Full access, on every dispatch of a run.
+    const modeCheck = checkPermissionMode(caps, binding.policy, this.displayName(record), binding.instanceId)
+    if (!modeCheck.ok) throw harnessAppError(modeCheck.error)
     const stale = (what: string) => harnessFail('binding_stale', `This run started before ${what} of this provider changed, so it cannot continue on it. Send the message again.`, binding.instanceId)
     if (record.env.homeId !== binding.homeId) stale('the home')
     if (this.counters.get(binding.instanceId).configRevision !== binding.configRevision) stale('the settings')
@@ -1331,6 +1367,33 @@ export class Harness implements HarnessGateway {
       this.liveHost?.notice?.(threadId, `${from ? this.displayName(from) : movedFrom} moved to ${this.displayName(record)}. This chat continues there with its history handed over.`)
     } catch (error) {
       console.warn('[harness] notice failed', errorText(error))
+    }
+  }
+
+  /**
+   * The mode a turn asking for `requested` runs in on this instance: the modes it supports come from
+   * its tool control and from what limits them right now (read at this moment, never cached with the
+   * runtime facts, so an edit to the user's Claude settings applies to the next turn).
+   */
+  private resolvePermissionMode(record: InstanceRecord | undefined, caps: HarnessCaps, requested: PermissionMode, cwd?: string): { effective: EffectivePermissionMode; supported: PermissionMode[] } {
+    const limits = record ? this.permissionLimitsOf(record, cwd) : undefined
+    const supported = supportedPermissionModes(caps, limits)
+    const agent = record ? this.displayName(record) : 'This provider'
+    return { effective: effectivePermissionMode(requested, supported, { agent, ...(limits ? { limits } : {}) }), supported }
+  }
+
+  previewPermissionMode(resolved: ResolvedTurnSelection, requested: PermissionMode, cwd?: string | null): EffectivePermissionMode {
+    const record = resolved.instanceId === PI_DRIVER_ID ? undefined : this.recordOrUndefined(resolved.instanceId)
+    return this.resolvePermissionMode(record, record ? this.recordCaps(record) : resolved.caps, requested, cwd ?? undefined).effective
+  }
+
+  /** What limits the instance's permission modes right now; a runtime that reports nothing is unlimited. */
+  private permissionLimitsOf(record: InstanceRecord, cwd?: string): PermissionLimits | undefined {
+    try {
+      return record.runtime.permissionLimits?.(cwd)
+    } catch (error) {
+      console.warn('[harness] could not read permission limits', { instanceId: record.instanceId, error: errorText(error) })
+      return undefined
     }
   }
 
@@ -1867,6 +1930,8 @@ export class Harness implements HarnessGateway {
     const models = state?.models
     // The runtime keeps the age of the list it stores; a runtime without that knows this run's refreshes.
     const refreshedAt = runtime.modelsRefreshedAt ? runtime.modelsRefreshedAt() : models?.refreshedAt
+    // Recomputed on every snapshot: the user may edit their Claude settings at any time.
+    const limits = this.permissionLimitsOf(record)
     const signInStep: NextStep | undefined = auth.state === 'signed_out' || auth.state === 'expired'
       ? { action: 'sign_in', label: auth.state === 'expired' ? 'Sign in again' : 'Sign in', ...(auth.signInCommand ? { command: auth.signInCommand } : {}) }
       : undefined
@@ -1904,6 +1969,7 @@ export class Harness implements HarnessGateway {
       ...(update ? { update } : {}),
       ...(shown?.binary ? { binary: shown.binary } : {}),
       caps: driver.caps(config, shown?.binary?.version, this.currentFacts(instanceId)),
+      ...(limits ? { permissionLimits: limits } : {}),
       config: this.configView(record),
       ...this.engineView(record),
       models: {

@@ -129,6 +129,23 @@ describe('thread fork (SPEC §16.2)', () => {
     expect(reason(await d.engine.forkThread({ sourceThreadId: empty.id, clientRequestId: 'fork-empty' }).catch((e) => e))).toBe('no_forkable_run')
   })
 
+  it('a fork keeps the source thread\'s permission mode, and a source without one stays on the profile default', async () => {
+    const d = (daemon = phase6Daemon(plainHome(), [piAdapter(() => 'unused')]))
+    const source = d.store.createThread('Source')
+    const plain = d.store.createThread('Plain')
+    await runIn(d, source.id, 'completed')
+    await runIn(d, plain.id, 'completed')
+    d.orch.setThreadPermissionMode(source.id, 'ask')
+    const forked = await d.engine.forkThread({ sourceThreadId: source.id, clientRequestId: 'fork-mode' })
+    expect(d.store.getThread(forked.threadId)?.permissionMode).toBe('ask')
+    // A fork is the user's thread: it can be loosened again, which a subagent could not be.
+    expect(d.orch.setThreadPermissionMode(forked.threadId, 'full').permissionMode).toBe('full')
+    expect(d.store.getThread(source.id)?.permissionMode).toBe('ask')
+
+    const unset = await d.engine.forkThread({ sourceThreadId: plain.id, clientRequestId: 'fork-plain' })
+    expect(d.store.getThread(unset.threadId)?.permissionMode).toBeUndefined()
+  })
+
   it('is lazy: the fork transfer waits pending and nothing reaches a provider', async () => {
     const pi = piAdapter((input) => `reply to ${input.prompt}`)
     const d = (daemon = phase6Daemon(plainHome(), [pi]))

@@ -1,4 +1,5 @@
 import { Type, type Tool, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai'
+import { PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import { recordSubagentCall } from '../../../../shared/subagentTools'
 import type { LlmToolEvent, StreamingLlmToolEvent } from '../../../harness/turnEvents'
 import {
@@ -277,7 +278,9 @@ export function delegationTools(host: DelegationToolsHost): MousseTool[] {
     description: definition.description,
     inputSchema: plainSchema(definition, extra),
     definition: () => definition,
-    access: 'actsAsCaller',
+    // Integration writes the workspace: it asks unless the run's permission mode allows edits.
+    access: definition.name === 'integrate_delegation' || definition.name === 'integrate_subagent' ? 'editsWorkspace' : 'actsAsCaller',
+    ...(definition.name === 'integrate_delegation' || definition.name === 'integrate_subagent' ? { permissionKey: PERMISSION_KEYS.mousseIntegrate } : {}),
     class: 'delegation',
     hidden: !listed.has(definition.name),
     // A read-only subagent may start (read-only) subagents and follow them; `delegateTask` checks the

@@ -106,6 +106,7 @@ import type {
   MainView,
   OrchestratorContextUsageInput,
   OrchestratorSendInput,
+  PermissionMode,
   ScheduledJob,
   ThreadActivitySnapshot,
   Thread,
@@ -1309,6 +1310,14 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
       'threads.setWorktreeEnabled',
       { threadId, enabled }
+    )
+    broadcast('threads:updated', res.threads)
+    return res.thread
+  })
+  registerHandler('threads:setPermissionMode', async (_e, threadId: string, mode: PermissionMode) => {
+    const res = await guiMms.request<{ thread: unknown; threads: unknown[] }>(
+      'threads.setPermissionMode',
+      { threadId, mode }
     )
     broadcast('threads:updated', res.threads)
     return res.thread
