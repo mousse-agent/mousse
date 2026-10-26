@@ -421,7 +421,15 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     auth: async () => reading(),
     identity: async () => identityOf(),
     handshake: async (signal) => {
-      await sessions.handshake(signal)
+      try {
+        await sessions.handshake(signal)
+      } catch (error) {
+        // A failed check leaves no facts behind: the old ones describe a program that no longer starts.
+        observedInfo = undefined
+        delete state.facts
+        save()
+        throw error
+      }
     },
     runtimeFacts: () => state.facts,
     refreshModels: async () => {

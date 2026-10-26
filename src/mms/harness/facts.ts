@@ -6,7 +6,7 @@ import { instanceStateDir } from './instances'
 
 /**
  * Runtime facts per instance, kept in memory and in `<stateDir>/runtime-facts.json`. Each stored
- * set has a revision that moves on whenever the facts change, so a binding can name the facts its
+ * set has a revision that moves on whenever the facts change (not when only `capturedAt` does), so a binding can name the facts its
  * caps snapshot came from.
  */
 
@@ -62,7 +62,9 @@ export class RuntimeFactsStore {
   /** Stores new facts; true when they differ from the stored ones (the revision moves on). */
   set(instanceId: string, facts: RuntimeFacts): boolean {
     const current = this.read(instanceId)
-    if (current.facts && JSON.stringify(current.facts) === JSON.stringify(facts)) return false
+    // When they were captured is not a change: a turn that learned nothing new keeps the revision.
+    const same = (a: RuntimeFacts, b: RuntimeFacts) => JSON.stringify({ ...a, capturedAt: '' }) === JSON.stringify({ ...b, capturedAt: '' })
+    if (current.facts && same(current.facts, facts)) return false
     this.write(instanceId, { version: 1, revision: current.revision + 1, facts })
     return true
   }

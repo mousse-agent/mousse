@@ -642,6 +642,11 @@ export class Harness implements HarnessGateway {
       return
     }
     if (!report) return
+    // Facts about another executable than the one there now (a report left from before an update,
+    // or a start-up check that failed) are never stored: storing them would drop them again at the
+    // next read and queue another check, without end.
+    const current = this.probes.get(record.instanceId)?.lastGood?.fingerprint ?? fingerprintOf(report.binary.path)
+    if (!sameBinary(current, report.binary)) return
     const counters = this.counters.get(record.instanceId)
     const facts: RuntimeFacts = { ...report, instanceId: record.instanceId, configRevision: counters.configRevision, accountGeneration: counters.accountGeneration }
     this.stats.delete(facts.binary.path)

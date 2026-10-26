@@ -3,7 +3,7 @@
  * feeds `caps`, is dropped when the instance's executable changes in place, and never changes the
  * caps a binding already froze.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -57,6 +57,9 @@ function factsDriver(handshakes: string[]): HarnessDriver {
         auth: async () => ({ state: 'signed_in' }),
         handshake: async () => {
           handshakes.push(context.instanceId)
+          // A program that no longer starts: the check fails and, like a careless runtime, the old
+          // report stays.
+          if (readFileSync(context.config.binaryPath!, 'utf8').includes('broken')) throw new Error('exited with code 1')
           report = {
             binary: fingerprintOf(context.config.binaryPath)!,
             agentCapabilities: { fork: context.config.args?.includes('--fork') === true },
@@ -89,11 +92,11 @@ describe('runtime facts', () => {
     for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
   })
 
-  function fixture(entries: Record<string, string[]>) {
-    const home = mkdtempSync(join(tmpdir(), 'mousse-facts-'))
-    homes.push(home)
+  function fixture(entries: Record<string, string[]>, reuse?: string) {
+    const home = reuse ?? mkdtempSync(join(tmpdir(), 'mousse-facts-'))
+    if (!reuse) homes.push(home)
     const binary = join(home, 'agent.exe')
-    writeFileSync(binary, 'agent v1', { mode: 0o755 })
+    if (!reuse) writeFileSync(binary, 'agent v1', { mode: 0o755 })
     let stored: unknown = Object.fromEntries(Object.entries(entries).map(([id, args]) => [id, { driver: 'claude', enabled: true, config: { binaryPath: binary, args } }]))
     const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
     const handshakes: string[] = []
@@ -108,8 +111,41 @@ describe('runtime facts', () => {
       control: {} as TurnSpec['control'],
       host: {} as TurnSpec['host']
     })
-    return { harness, binary, handshakes, caps, spec, tick: (ms: number) => { clock += ms } }
+    return { home, harness, binary, handshakes, caps, spec, tick: (ms: number) => { clock += ms } }
   }
+
+  it('checks a changed executable that no longer starts once, and not again after a restart', async () => {
+    const { home, harness, binary, handshakes, caps, tick } = fixture({ 'claude:one': ['--plan'] })
+    // The app always listens: every change publishes snapshots, which read the facts again.
+    harness.instances.subscribe(() => {})
+    await harness.instances.recheck('claude:one')
+    expect(caps('claude:one').planMode).toBe(true)
+    writeFileSync(binary, 'agent v2, broken')
+    tick(11 * 60_000)
+    await harness.instances.snapshots({ kind: 'device' })
+    await vi.waitFor(() => expect(caps('claude:one').planMode).toBe(false))
+    await vi.waitFor(() => expect(handshakes).toHaveLength(2))
+    for (let round = 0; round < 5; round += 1) {
+      await harness.instances.snapshots({ kind: 'device' })
+      caps('claude:one')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    expect(handshakes).toHaveLength(2)
+    // The failed check's leftover report (about the old program) was never stored: the facts were
+    // dropped once and stayed dropped.
+    const binding = await harness.bind(harness.resolveStored({ instanceId: 'claude:one', llmProvider: '', model: 'm' }, { purpose: 'turn' }), { mode: 'agent' })
+    expect(binding.factsRevision).toBe(2)
+    harness.stop()
+    const restarted = fixture({ 'claude:one': ['--plan'] }, home)
+    restarted.harness.instances.subscribe(() => {})
+    await restarted.harness.instances.snapshots({ kind: 'device' })
+    for (let round = 0; round < 5; round += 1) {
+      restarted.caps('claude:one')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    expect(restarted.handshakes).toEqual([])
+    expect(restarted.caps('claude:one').planMode).toBe(false)
+  })
 
   it('keeps facts per instance: one executable with different options gives different caps', async () => {
     const { harness, caps } = fixture({ 'claude:plain': [], 'claude:planner': ['--plan', '--fork'] })
