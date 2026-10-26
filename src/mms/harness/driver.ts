@@ -54,6 +54,10 @@ export interface AuthReading {
   message?: string
   /** The terminal command that signs the instance in, when sign-in happens outside Mousse. */
   signInCommand?: string
+  /** A sign-in can start in Mousse now, whatever `state` says (an agent that offers its methods). */
+  canSignIn?: boolean
+  /** The sign-in is one Mousse made and keeps (it may sign out), beyond the gateway's own rules. */
+  ownedByMousse?: boolean
 }
 
 export interface DriverContext {

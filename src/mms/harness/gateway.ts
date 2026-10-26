@@ -1212,7 +1212,8 @@ export class Harness implements HarnessGateway {
         ...(auth.account?.label ? { account: { id: auth.subject ? this.counters.accountIdentity(record.env.homeId, auth.subject) : 'unknown', label: auth.account.label } } : {}),
         ...(auth.methodLabel ?? driver.methodLabel ? { methodLabel: auth.methodLabel ?? driver.methodLabel } : {}),
         ...(auth.message ? { message: auth.message } : {}),
-        canSignOut: Boolean(runtime.signOut) && (auth.state === 'signed_in' || auth.state === 'expired') && this.ownsSignIn(record)
+        canSignOut: Boolean(runtime.signOut) && (auth.state === 'signed_in' || auth.state === 'expired') && (this.ownsSignIn(record) || auth.ownedByMousse === true),
+        ...(runtime.signIn && auth.canSignIn ? { canSignIn: true } : {})
       },
       compatibility: shown?.compatibility ?? compatibilityOf(driver, undefined),
       ...(shown?.update ? { update: shown.update } : {}),

@@ -273,13 +273,15 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     const methods = authMethods()
     const verified = state.auth?.authenticated === true && state.auth.bindingHash === bindingHash(state.auth.methodId)
     const method = methods.find((entry) => entry.id === state.auth?.methodId)
+    // Sign-in starts from Settings whenever the agent offers a method Mousse can run here.
+    const canSignIn = offeredAuthMethods(methods, ptyRuns()).length > 0
     // No subject: Mousse cannot read which account an arbitrary agent runs as, so a thread's native
     // session is never resumed across turns (each turn hands the history over).
-    if (verified) return { state: 'signed_in', methodLabel: method?.name ?? 'Signed in through Mousse' }
-    if (state.signedOut) return { state: 'signed_out', methodLabel: 'Sign in', message: `${label} asked for a sign-in.` }
+    if (verified) return { state: 'signed_in', methodLabel: method?.name ?? 'Signed in through Mousse', ownedByMousse: true, ...(canSignIn ? { canSignIn } : {}) }
+    if (state.signedOut) return { state: 'signed_out', methodLabel: 'Sign in', message: `${label} asked for a sign-in.`, ...(canSignIn ? { canSignIn } : {}) }
     if (!known) return { state: 'unknown', message: 'Check again to see how this agent signs in.' }
     if (!methods.length) return { state: 'not_required', methodLabel: 'No sign-in needed' }
-    return { state: 'unknown', methodLabel: methods.map((entry) => entry.name).join(' · '), message: `Sign in if ${label} asks you to.` }
+    return { state: 'unknown', methodLabel: methods.map((entry) => entry.name).join(' · '), message: `Sign in if ${label} asks you to, or sign in now.`, ...(canSignIn ? { canSignIn } : {}) }
   }
 
 

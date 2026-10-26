@@ -126,7 +126,9 @@ describe('ACP agent sign-in', () => {
     await runtime.handshake!(new AbortController().signal)
     expect(runtime.runtimeFacts?.()?.authMethods).toEqual([{ id: 'browser', name: 'Browser', type: 'agent' }])
     expect(await runtime.signIn!(session, process.cwd())).toEqual({ success: true, sessionId: 'op' })
-    expect(await runtime.auth({ force: true })).toEqual({ state: 'signed_in', methodLabel: 'Browser' })
+    const reading = await runtime.auth({ force: true })
+    expect(reading).toMatchObject({ state: 'signed_in', methodLabel: 'Browser', ownedByMousse: true })
+    expect(reading.subject).toBeUndefined()
     expect(await runtime.identity!(new AbortController().signal)).toBeUndefined()
   })
 

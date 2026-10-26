@@ -13,6 +13,7 @@ import type { Harness, TurnSpec } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../src/mms/providers/ProviderInstanceService'
 import { inProcessAgent } from '../../src/mms/run/testkit/acpAgent'
 import { testHarness } from '../../src/mms/run/testkit/harness'
+import { describeStatus } from '../../src/shared/harness/status'
 import type { TurnInput } from '../../src/mms/run/adapters/ProviderAdapter'
 
 const homes: string[] = []
@@ -22,7 +23,7 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
-function fixture() {
+function fixture(authMethods: unknown[] = []) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-acp-driver-'))
   homes.push(home)
   const calls: string[] = []
@@ -30,7 +31,15 @@ function fixture() {
     app
       .onRequest(methods.agent.initialize, () => {
         calls.push('initialize')
-        return { protocolVersion: PROTOCOL_VERSION, agentInfo: { name: 'fake', version: '1.2.3' }, agentCapabilities: { loadSession: false }, authMethods: [] }
+        return { protocolVersion: PROTOCOL_VERSION, agentInfo: { name: 'fake', version: '1.2.3' }, agentCapabilities: { loadSession: false }, authMethods: authMethods as never }
+      })
+      .onRequest(methods.agent.authenticate, () => {
+        calls.push('authenticate')
+        return {}
+      })
+      .onRequest(methods.agent.logout, () => {
+        calls.push('logout')
+        return {}
       })
       .onRequest(methods.agent.session.new, () => {
         calls.push('session/new')
@@ -72,6 +81,20 @@ describe('the generic ACP driver', () => {
     })
     expect(calls).toEqual(['initialize'])
     expect(agent.connections.every((connection) => connection.request.purpose === 'handshake' && connection.killed)).toBe(true)
+  })
+
+  it('offers Sign in from Settings before the account is checked, and Sign out after a Mousse sign-in', async () => {
+    const { harness, calls } = fixture([{ id: 'browser', name: 'Sign in with your account' }])
+    await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath } })
+    const snapshot = async () => (await harness.instances.snapshots({ kind: 'device' }))[0]!
+    await vi.waitFor(async () => expect((await snapshot()).auth).toMatchObject({ state: 'unknown', canSignIn: true }))
+    expect(describeStatus(await snapshot()).nextStep).toMatchObject({ action: 'sign_in', label: 'Sign in' })
+    await harness.instances.signIn('acp:fake-agent')
+    await vi.waitFor(async () => expect((await snapshot()).auth).toMatchObject({ state: 'signed_in', methodLabel: 'Sign in with your account', canSignOut: true }))
+    expect(calls).toContain('authenticate')
+    await harness.instances.signOut('acp:fake-agent')
+    expect(calls).toContain('logout')
+    expect((await snapshot()).auth.state).not.toBe('signed_in')
   })
 
   it('reports a command that cannot run as runs: no, never a fallback', async () => {

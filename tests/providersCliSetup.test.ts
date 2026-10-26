@@ -57,6 +57,13 @@ describe('Setup row: the status and its one next step', () => {
     expect(buttons(html)).toEqual(['Sign in'])
   })
 
+  it('offers Sign in for an agent whose account is not checked but that offers its sign-in', () => {
+    const html = setupRow({ driver: 'acp', auth: { state: 'unknown', account: undefined, canSignIn: true } })
+    expect(html).toContain('Sign-in not checked')
+    expect(buttons(html)).toEqual(['Sign in'])
+    expect(buttons(setupRow({ driver: 'acp', auth: { state: 'unknown', account: undefined } }))).toEqual([])
+  })
+
   it('shows the terminal command, not a button, when the CLI signs in by itself', () => {
     const html = setupRow({
       auth: { state: 'signed_out', account: undefined },
