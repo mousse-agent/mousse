@@ -106,14 +106,19 @@ sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdi
 - **Private homes** never inherit those variables or an ambient `XAI_API_KEY`. A device sign-in runs
   in a staging home; its `auth.json` is copied in only when `grok login` succeeds and was not
   cancelled.
-- **Updates.** Mousse sets `GROK_DISABLE_AUTOUPDATER=1` on every check and sign-in, and on chats of a
-  managed copy. A copy from the official installer offers `grok update`.
+- **Updates.** An entry with its own home runs every process with `GROK_DISABLE_AUTOUPDATER=1` and
+  `GROK_OAUTH2_REFERRER=mousse`. An entry on the user's own home runs Grok as the user set it up.
+  A copy from the official installer offers `grok update`.
 - **Managed copies.** The npm platform package holds only the compressed `grok`; its helpers
   (`grove`, `grove-credential`, `grove-fsmonitor`) are not in it, so Grok fetches them into its
-  home. Mousse therefore installs its own Grok only for an entry with its own home. The download is
-  checked against the npm registry's sha512 and recorded like a registry agent.
-- **Permissions.** Grok's "always allow" options last for the whole project, so only "Allow edits for
-  this session" is offered; the others are hidden.
+  home. Mousse therefore installs its own Grok only for an entry with its own home, and only that
+  entry runs it; every other entry runs its own `grok`. The download is checked against the npm
+  registry's sha512 and recorded like a registry agent, and every launch (chats, checks, sign-in,
+  sign-out) checks its files first.
+- **Sign-out** forgets the key Mousse keeps and a private home's sign-in. It never signs the user's
+  own `~/.grok` out.
+- **Permissions.** Grok's "always" answers last for the whole project, so only "Allow edits for this
+  session" is offered; every other "always allow" and "always deny" is hidden.
 - A model API entry `pi:xai` keeps working on the Mousse agent until the user moves it to a Grok
   entry (Move…, optionally with the same API key). An xAI account sign-in is not carried over: sign
   in to Grok on its entry.

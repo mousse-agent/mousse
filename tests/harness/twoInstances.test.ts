@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { claudeCodeDriver, claudeSignInCommand } from '../../src/mms/harness/drivers/claudeCode'
 import { spawnCursorHost } from '../../src/mms/harness/cursor/hostClient'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
+import { grokDriver } from '../../src/mms/harness/drivers/grok'
 import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
 import { createHarnessGateway, type TurnSpec } from '../../src/mms/harness/gateway'
 import { instanceStateDir } from '../../src/mms/harness/instances'
@@ -313,6 +314,116 @@ describe('two Cursor instances', () => {
       expect(hosts.get('cursor:a')!.calls('resume')).toEqual([])
     } finally {
       harness.stop()
+    }
+  })
+})
+
+/**
+ * A `grok` that prints its version and otherwise answers just enough ACP for a check and a chat
+ * (a node script; an npm-style shim on Windows).
+ */
+function fakeGrok(): string {
+  const dir = tempDir('mousse-fakegrok-')
+  mkdirSync(join(dir, 'node_modules', 'grok'), { recursive: true })
+  const script = join(dir, 'node_modules', 'grok', 'cli.js')
+  writeFileSync(join(dir, 'node_modules', 'grok', 'package.json'), JSON.stringify({ name: 'grok' }))
+  writeFileSync(script, [
+    '#!/usr/bin/env node',
+    "if (process.argv.includes('--version')) { console.log('grok 1.0.70 (fake)'); process.exit(0) }",
+    "const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\\n')",
+    "let buffer = ''",
+    "process.stdin.on('data', (chunk) => {",
+    '  buffer += chunk',
+    "  let end",
+    "  while ((end = buffer.indexOf('\\n')) !== -1) {",
+    '    const line = buffer.slice(0, end); buffer = buffer.slice(end + 1)',
+    '    if (!line.trim()) continue',
+    '    const message = JSON.parse(line)',
+    '    if (message.id === undefined) continue',
+    "    if (message.method === 'initialize') send({ id: message.id, result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] } })",
+    "    else if (message.method === 'session/new') send({ id: message.id, result: { sessionId: 'grok-session' } })",
+    "    else if (message.method === 'session/prompt') {",
+    "      send({ method: 'session/update', params: { sessionId: message.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi' } } } })",
+    "      send({ id: message.id, result: { stopReason: 'end_turn' } })",
+    '    } else send({ id: message.id, result: {} })',
+    '  }',
+    '})'
+  ].join('\n') + '\n')
+  if (process.platform === 'win32') {
+    const shim = join(dir, 'grok.cmd')
+    writeFileSync(shim, `@ECHO off\r\n"%~dp0\\node_modules\\grok\\cli.js" %*\r\n`)
+    return shim
+  }
+  chmodSync(script, 0o755)
+  return script
+}
+
+describe('two Grok instances', () => {
+  it('every spawn path runs in its own home without ambient sign-ins, and a credential replaced between turns is a new account', async () => {
+    const profileHome = tempDir('mousse-two-grok-')
+    const binary = fakeGrok()
+    const signIn = (instanceId: string, userId: string) => {
+      const home = join(instanceStateDir(profileHome, instanceId), 'home')
+      mkdirSync(home, { recursive: true })
+      writeFileSync(join(home, 'auth.json'), JSON.stringify({ 'https://auth.x.ai::c': { user_id: userId, expires_at: '2099-01-01T00:00:00Z' } }))
+      return home
+    }
+    const homes = { 'grok:a': signIn('grok:a', 'user-a'), 'grok:b': signIn('grok:b', 'user-b') }
+    let stored: unknown = {
+      'grok:a': { driver: 'grok', enabled: true, config: { displayName: 'A', home: 'private', binaryPath: binary } },
+      'grok:b': { driver: 'grok', enabled: true, config: { displayName: 'B', home: 'private', binaryPath: binary } }
+    }
+    const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
+    // The user's own Grok sign-in and key, which neither private home may inherit.
+    const ambient = { XAI_API_KEY: process.env.XAI_API_KEY, GROK_AUTH_PROVIDER_COMMAND: process.env.GROK_AUTH_PROVIDER_COMMAND }
+    process.env.XAI_API_KEY = 'user-key'
+    process.env.GROK_AUTH_PROVIDER_COMMAND = 'user-token-command'
+    const spawned: HarnessSpawn[] = []
+    const unobserve = observeHarnessSpawns((entry) => spawned.push(entry))
+    const harness = createHarnessGateway({
+      profileHome,
+      installationHome: profileHome,
+      instanceMap: instances,
+      questions: new UserQuestionService(),
+      shellPath: async () => ({ entries: [], source: 'failed' }),
+      drivers: [grokDriver({ systemDir: join(profileHome, 'no-system-config') })]
+    })
+    try {
+      const turn = async (instanceId: string, previous?: TurnSpec['binding']) => {
+        const binding = await harness.bind(harness.resolveStored({ instanceId, llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent' })
+        const spec = turnSpec(instanceId, binding, profileHome)
+        await harness.startTurn({ ...spec, ...(previous ? { previous } : {}), input: { ...spec.input, model: 'default', llmProvider: '' } }).result
+        return binding
+      }
+      for (const instanceId of ['grok:a', 'grok:b'] as const) await harness.instances.recheck(instanceId)
+      const firstA = await turn('grok:a')
+      const firstB = await turn('grok:b')
+      expect(firstA.accountId).toBeDefined()
+      expect(firstA.accountId).not.toBe(firstB.accountId)
+      for (const instanceId of ['grok:a', 'grok:b'] as const) await harness.instances.refreshModels(instanceId).catch(() => undefined)
+
+      const own = spawned.filter((entry) => entry.instanceId.startsWith('grok:'))
+      expect(new Set(own.map((entry) => entry.purpose))).toEqual(new Set(['version', 'acp-handshake', 'acp-turn', 'acp-models']))
+      for (const entry of own) {
+        expect(entry.env.GROK_HOME).toBe(homes[entry.instanceId as 'grok:a' | 'grok:b'])
+        expect(entry.env.XAI_API_KEY).toBeUndefined()
+        expect(entry.env.GROK_AUTH_PROVIDER_COMMAND).toBeUndefined()
+        expect(entry.env.GROK_DISABLE_AUTOUPDATER).toBe('1')
+        if (entry.purpose !== 'version') expect(entry.args.slice(-5)).toEqual(['--permission-mode', 'default', 'agent', '--no-leader', 'stdio'])
+      }
+
+      // Another account signs A in from outside Mousse between two turns: a new account generation.
+      signIn('grok:a', 'user-c')
+      const secondA = await turn('grok:a', firstA)
+      expect(secondA.accountGeneration).toBeGreaterThan(firstA.accountGeneration)
+      expect(secondA.accountId).not.toBe(firstA.accountId)
+    } finally {
+      harness.stop()
+      unobserve()
+      for (const [name, value] of Object.entries(ambient)) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
     }
   })
 })
