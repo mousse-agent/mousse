@@ -170,4 +170,17 @@ describe('legacy profiles', () => {
       profile.stop()
     }
   })
+
+  it('keeps a Grok record untouched, and a Grok selection names no legacy provider (never the pi:xai loop)', async () => {
+    const grok = { driver: 'grok', enabled: true, config: { displayName: 'Work', home: 'private' } }
+    const profile = legacyProfile({ loginPolicy: 'cli' }, { claude: { driver: 'claude', enabled: true }, 'grok:work': grok })
+    try {
+      await profile.harness.instances.setEnabled('claude', { kind: 'device' }, false)
+      expect(profile.section().instances).toMatchObject({ 'grok:work': grok })
+      const binding = { instanceId: 'grok:work', driver: 'grok' as const, accountGeneration: 0, homeId: 'private:grok:work', configRevision: 0, model: 'default', policy: { mode: 'default' as const, approvals: 'ask' as const } }
+      expect(profile.harness.selectionOf(binding)).toEqual({ instanceId: 'grok:work', llmProvider: '', model: 'default' })
+    } finally {
+      profile.stop()
+    }
+  })
 })

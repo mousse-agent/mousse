@@ -84,7 +84,7 @@ function fixture(keys: { exported?: string; adopted?: string[] } = {}) {
 
 describe('moving a model API to its agent', () => {
   it('has a row per agent that took a model API over', () => {
-    expect(FOLDED_INTO_AGENT).toEqual({ cursor: 'cursor' })
+    expect(FOLDED_INTO_AGENT).toEqual({ cursor: 'cursor', xai: 'grok' })
   })
 
   it("copies the entry's API key only when asked, before anything moves", async () => {
