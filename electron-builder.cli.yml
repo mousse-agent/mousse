@@ -15,6 +15,7 @@ files:
   - out/main/**/*
   - out/net-native/**/*
   - out/browser-worker/**/*
+  - out/pi-runtime/**/*
   - package.json
   - '!**/*.map'
   - '!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**'
@@ -38,6 +39,7 @@ files:
 asarUnpack:
   - out/net-native/**
   - out/browser-worker/**
+  - out/pi-runtime/**
   - node_modules/node-pty/build/Release/**
   - node_modules/node-pty/prebuilds/darwin-*/**
   - node_modules/node-pty/prebuilds/win32-x64/**

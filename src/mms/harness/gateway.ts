@@ -1006,7 +1006,7 @@ export class Harness implements HarnessGateway {
       instanceId,
       driver: entry.driver,
       configRevision: revision,
-      ...(config.home === 'private' && !builtIn ? { home: join(stateDir, 'home') } : {}),
+      ...(driver.alwaysPrivateHome || (config.home === 'private' && !builtIn) ? { home: join(stateDir, 'home') } : {}),
       searchPath: this.searchPath
     })
     const record: InstanceRecord = {

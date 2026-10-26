@@ -36,7 +36,9 @@ const FORBIDDEN = [
   /^src\/mms\/providers\/(claudeSubscription|codex|antigravity)\//,
   // The adapters the drivers wrap. `run/adapters/shared/*` are vendor-neutral transcript helpers
   // the orchestrator still uses (TranscriptAssembler, context-overflow retry); PR 4 moves them.
-  /^src\/mms\/run\/adapters\/(?!shared\/)/
+  /^src\/mms\/run\/adapters\/(?!shared\/)/,
+  // Pi's agent as a process: the launcher, the RPC client and Mousse's extension.
+  /^src\/mms\/harness\/pi\//
 ]
 
 /** Who may import them. */
