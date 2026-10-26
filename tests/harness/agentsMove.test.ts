@@ -57,8 +57,9 @@ function fixture() {
     defaults: {
       rewrite: (from, to) => {
         if (deviceDefault.instanceId !== from) return []
-        deviceDefault = { ...deviceDefault, ...to }
-        return ['Default model']
+        const model = to.model(deviceDefault.model)
+        deviceDefault = { instanceId: to.instanceId, llmProvider: to.llmProvider, model }
+        return [model === 'fake-model' ? 'Default model' : `Default model: ${model} instead of fake-model`]
       }
     }
   })
@@ -86,13 +87,23 @@ describe('moving a model API to its agent', () => {
     expect(harness.resolveStored({ instanceId: 'pi:fake', llmProvider: 'fake', model: 'fake-model' }, { purpose: 'turn' })).toMatchObject({ instanceId: 'pi:fake', driver: 'pi' })
   })
 
-  it('turns the old entry off with movedTo, rewrites and lists the defaults that named it', async () => {
-    const { home, harness, stored, deviceDefault } = fixture()
+  it('turns the old entry off with movedTo, rewrites and lists the defaults that named it, with models the agent has', async () => {
+    const { home, harness, stored, deviceDefault, agent, spec } = fixture()
     const result = await harness.instances.move('pi:fake', 'codex')
-    expect(result).toEqual({ from: 'pi:fake', to: 'codex', rewritten: ['Default model', 'Project default (project-1)'] })
+    // The agent does not list the API's model: both defaults take the agent's default, and say so.
+    expect(result).toEqual({ from: 'pi:fake', to: 'codex', rewritten: ['Default model: agent-model instead of fake-model', 'Project default (project-1): Agent model instead of fake-model'] })
     expect(stored()['pi:fake']).toEqual({ driver: 'pi', enabled: false, config: { movedTo: 'codex' } })
-    expect(deviceDefault()).toMatchObject({ instanceId: 'codex', llmProvider: 'codex' })
-    expect(new HarnessScopeStore(home).project('project-1')?.defaultSelection).toEqual({ instanceId: 'codex', model: 'fake-model' })
+    expect(deviceDefault()).toEqual({ instanceId: 'codex', llmProvider: 'codex', model: 'agent-model' })
+    const projectDefault = new HarnessScopeStore(home).project('project-1')?.defaultSelection
+    expect(projectDefault).toEqual({ instanceId: 'codex', model: 'agent-model' })
+    // Both rewritten defaults run on the agent with a model it has.
+    for (const selection of [deviceDefault(), { ...projectDefault!, llmProvider: '' }]) {
+      const resolved = harness.resolveStored(selection, { purpose: 'turn' })
+      expect(resolved).toMatchObject({ instanceId: 'codex', model: 'agent-model' })
+      expect(resolved.movedFrom).toBeUndefined()
+      await harness.startTurn(spec(await harness.bind(resolved, { mode: 'agent' }))).result
+    }
+    expect(agent.turns.map((turn) => [turn.instanceId, turn.model])).toEqual([['codex', 'agent-model'], ['codex', 'agent-model']])
     const snapshot = (await harness.instances.snapshots({ kind: 'device' })).find((entry) => entry.instanceId === 'pi:fake')
     expect(snapshot?.config).toMatchObject({ movedTo: 'codex' })
     await expect(harness.instances.move('pi:fake', 'codex')).rejects.toMatchObject({ code: 'unsupported' })

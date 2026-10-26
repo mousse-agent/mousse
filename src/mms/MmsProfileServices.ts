@@ -393,8 +393,9 @@ export class MmsProfileServices {
           const provider = this.settings.get().provider
           const named = provider.instanceId?.trim() ? provider.instanceId === from : piInstanceId(provider.llmProvider) === from
           if (!named) return []
-          this.settings.set({ provider: { ...provider, instanceId: to.instanceId, llmProvider: to.llmProvider } })
-          return ['Default model']
+          const model = to.model(provider.model)
+          this.settings.set({ provider: { ...provider, instanceId: to.instanceId, llmProvider: to.llmProvider, model } })
+          return [model === provider.model ? 'Default model' : `Default model: ${model} instead of ${provider.model}`]
         }
       }
     })

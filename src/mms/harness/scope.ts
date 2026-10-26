@@ -51,14 +51,15 @@ export class HarnessScopeStore {
     })
   }
 
-  /** Project defaults that named `from` name `to` now; returns those projects. */
-  moveDefaults(from: string, to: string): string[] {
+  /** Project defaults that named `from` name `to` now, with `model` mapping their models; returns what changed. */
+  moveDefaults(from: string, to: string, model: (id: string) => string = (id) => id): Array<{ projectId: string; from: string; to: string }> {
     const file = structuredClone(this.read())
-    const moved: string[] = []
+    const moved: Array<{ projectId: string; from: string; to: string }> = []
     for (const [projectId, project] of Object.entries(file.projects)) {
       if (project.defaultSelection?.instanceId !== from) continue
-      project.defaultSelection = { ...project.defaultSelection, instanceId: to }
-      moved.push(projectId)
+      const mapped = model(project.defaultSelection.model)
+      moved.push({ projectId, from: project.defaultSelection.model, to: mapped })
+      project.defaultSelection = { ...project.defaultSelection, instanceId: to, model: mapped }
     }
     if (moved.length) this.write(file)
     return moved

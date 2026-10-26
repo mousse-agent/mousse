@@ -309,7 +309,7 @@ export interface HarnessGatewayOptions {
    * The profile's own default selections (Settings), rewritten when an entry moves; returns what
    * changed, for the Move dialog. Project defaults are the gateway's own.
    */
-  defaults?: { rewrite(from: string, to: { instanceId: string; llmProvider: string }): string[] }
+  defaults?: { rewrite(from: string, to: { instanceId: string; llmProvider: string; model(model: string): string }): string[] }
   /** Test seam: the agent a model API moves to (`FOLDED_INTO_AGENT`). */
   foldedInto?: (providerId: string | undefined) => HarnessDriverKind | undefined
 }
@@ -1405,9 +1405,13 @@ export class Harness implements HarnessGateway {
     // Turned off, never deleted: an older build can still turn it back on.
     this.instanceMap.setEntry(fromId, { ...from.entry, enabled: false, config: { ...(from.entry.config ?? {}), movedTo: toId } })
     const llmProvider = legacyProviderForInstance(toId, to.entry) ?? ''
+    // A model the agent lists keeps its id; any other becomes the agent's default (its first model).
+    const listed = to.runtime.models()
+    const model = (id: string) => (!listed.length || listed.some((entry) => entry.id === id) ? id : listed[0]!.id)
     const rewritten = [
-      ...this.options.defaults?.rewrite(fromId, { instanceId: toId, llmProvider }) ?? [],
-      ...this.scopes.moveDefaults(fromId, toId).map((projectId) => `Project default (${projectId})`)
+      ...this.options.defaults?.rewrite(fromId, { instanceId: toId, llmProvider, model }) ?? [],
+      ...this.scopes.moveDefaults(fromId, toId, model).map(({ projectId, from: before, to: after }) =>
+        `Project default (${projectId})${before !== after ? `: ${this.modelName(toId, after)} instead of ${before}` : ''}`)
     ]
     this.changed(fromId)
     return { from: fromId, to: toId, rewritten }
