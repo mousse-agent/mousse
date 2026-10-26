@@ -2,6 +2,7 @@ import type { SubagentState } from "../../../../../shared/subagents";
 import { isRunningSubagent } from "../../../../../shared/subagents";
 import type { SubagentCardModel } from "../../../adapters/subagentCards";
 import { lineageModelLabel, lineageSubagentName, waitingLabel } from "../../../../components/sideCard/lineageLogic";
+import { subagentBadgeTone, type SubagentBadgeTone } from "../../../../components/subagentStatus";
 
 /** Longest result a card quotes; the card clamps it to two lines. */
 export const SUBAGENT_RESULT_CHARS = 280;
@@ -58,11 +59,76 @@ export function cardModelLabel(card: Pick<SubagentCardModel, "provider" | "model
   return lineageModelLabel(card);
 }
 
-/** Header of consecutive cards: "3 subagents", with how many are still going. */
-export function cardGroupLabel(cards: readonly Pick<SubagentCardModel, "state" | "pending">[]): string {
-  const running = cards.filter(isCardRunning).length;
-  const total = `${cards.length} ${cards.length === 1 ? "subagent" : "subagents"}`;
-  return running > 0 ? `${total} · ${running} running` : total;
+/**
+ * What a row says next to its name. The dot on the provider icon already shows that a task is going
+ * or done, so only the states worth reading get words: a question, a wait, a failure or a stop, and a
+ * finished task the subagent has since continued.
+ */
+export function cardStateNote(card: Pick<SubagentCardModel, "state" | "pending" | "waitingOn" | "continued">): string | null {
+  if (card.pending) return null;
+  const base =
+    card.state === "waiting"
+      ? waitingLabel(card)
+      : card.state === "needs_input" || card.state === "failed" || card.state === "stopped" || card.state === "interrupted"
+        ? STATE_LABELS[card.state]!
+        : null;
+  if (!card.continued || isCardRunning(card)) return base;
+  return base ? `${base} · continued` : "Continued";
+}
+
+type CardCounted = Pick<SubagentCardModel, "state" | "pending">;
+
+/** One coloured count in a group's summary, such as "2 working". */
+export interface GroupSummaryPart {
+  tone: SubagentBadgeTone;
+  text: string;
+}
+
+/** The counts a group's summary lists, in order: what needs the user first, then work going, then outcomes. */
+const SUMMARY_KINDS: ReadonlyArray<{ tone: SubagentBadgeTone; matches: (card: CardCounted) => boolean; text: (count: number) => string }> = [
+  { tone: "attention", matches: (card) => !card.pending && card.state === "needs_input", text: (count) => `${count} ${count === 1 ? "needs" : "need"} input` },
+  { tone: "running", matches: (card) => subagentBadgeTone(card) === "running", text: (count) => `${count} working` },
+  { tone: "attention", matches: (card) => !card.pending && card.state === "waiting", text: (count) => `${count} waiting` },
+  { tone: "failed", matches: (card) => subagentBadgeTone(card) === "failed", text: (count) => `${count} failed` },
+  { tone: "done", matches: (card) => subagentBadgeTone(card) === "done", text: (count) => `${count} done` },
+  { tone: "idle", matches: (card) => !card.pending && card.state === "stopped", text: (count) => `${count} stopped` },
+  { tone: "idle", matches: (card) => !card.pending && card.state === "idle", text: (count) => `${count} idle` },
+];
+
+/** Header of consecutive cards: "5 subagents", and below it "2 working · 3 done". */
+export function cardGroupSummary(cards: readonly CardCounted[]): { title: string; parts: GroupSummaryPart[] } {
+  const parts: GroupSummaryPart[] = [];
+  for (const kind of SUMMARY_KINDS) {
+    const count = cards.filter(kind.matches).length;
+    if (count > 0) parts.push({ tone: kind.tone, text: kind.text(count) });
+  }
+  return { title: `${cards.length} ${cards.length === 1 ? "subagent" : "subagents"}`, parts };
+}
+
+/** The group's summary in one line, for its accessible name: "5 subagents · 2 working · 3 done". */
+export function cardGroupLabel(cards: readonly CardCounted[]): string {
+  const { title, parts } = cardGroupSummary(cards);
+  return [title, ...parts.map((part) => part.text)].join(" · ");
+}
+
+/** How long the group has run: from the first task's start to now while any goes, else to the last finish. */
+export function cardGroupElapsedLabel(
+  cards: readonly Pick<SubagentCardModel, "createdAt" | "completedAt" | "state" | "pending">[],
+  now: number,
+): string | null {
+  const starts = cards.map((card) => card.createdAt).filter((at): at is number => at !== null);
+  if (starts.length === 0) return null;
+  const ends = cards.some(isCardRunning) ? [now] : cards.map((card) => card.completedAt).filter((at): at is number => at !== null);
+  if (ends.length === 0) return null;
+  return formatElapsed(Math.max(...ends) - Math.min(...starts));
+}
+
+/** Most provider icons a group's header stacks before it says "+N". */
+export const GROUP_ICON_LIMIT = 3;
+
+/** The cards whose icons the header stacks, and how many more there are. */
+export function cardIconStack<T>(cards: readonly T[], limit = GROUP_ICON_LIMIT): { shown: T[]; extra: number } {
+  return { shown: cards.slice(0, limit), extra: Math.max(0, cards.length - limit) };
 }
 
 /**

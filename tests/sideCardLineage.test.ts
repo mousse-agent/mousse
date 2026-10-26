@@ -185,10 +185,11 @@ describe('lineageSubagentName and lineageModelLabel', () => {
 })
 
 describe('LineageList rendering', () => {
-  const render = (subagents: SubagentSummary[], extra: { expanded?: boolean } = {}) =>
+  const render = (subagents: SubagentSummary[], extra: { expanded?: boolean; inheritedProvider?: string } = {}) =>
     renderToStaticMarkup(createElement(LineageList, {
       subagents,
       now: NOW,
+      inheritedProvider: extra.inheritedProvider ?? null,
       expanded: extra.expanded ?? false,
       onExpand: () => undefined,
       onOpen: () => undefined,
@@ -199,15 +200,28 @@ describe('LineageList rendering', () => {
     expect(render([])).toBe('')
   })
 
-  it('renders running subagents with a live dot ahead of finished ones', () => {
+  it('renders running subagents ahead of finished ones, each with its provider icon and a status dot', () => {
     const html = render([
-      subagent('done', { state: 'done', title: 'Finished job', updatedAt: minutesAgo(4) }),
-      subagent('live', { title: 'Live job' })
+      subagent('done', { state: 'done', title: 'Finished job', updatedAt: minutesAgo(4), provider: 'codex' }),
+      subagent('live', { title: 'Live job', provider: 'claude' }),
+      subagent('failed', { state: 'failed', title: 'Broken job' }),
+      subagent('asking', { state: 'needs_input', title: 'Asking job' })
     ])
     expect(html.indexOf('Live job')).toBeLessThan(html.indexOf('Finished job'))
-    expect(html.match(/lineage-live/g)).toHaveLength(1)
+    expect(html.match(/class="subagent-avatar"/g)).toHaveLength(4)
+    expect(html).toContain('background-color:#D97757')
+    expect(html.match(/data-tone="running"/g)).toHaveLength(1)
+    expect(html.match(/data-tone="done"/g)).toHaveLength(1)
+    expect(html.match(/data-tone="failed"/g)).toHaveLength(1)
+    expect(html.match(/data-tone="attention"/g)).toHaveLength(1)
     expect(html).toContain('4m ago')
     expect(html).toContain('Working')
+  })
+
+  it('draws the thread provider for a subagent that inherited it', () => {
+    const html = render([subagent('a', { provider: null })], { inheritedProvider: 'claude' })
+    expect(html).toContain('background-color:#D97757')
+    expect(render([subagent('a', { provider: null })])).toContain('<svg')
   })
 
   it('opens a subagent from its row and offers Stop on running rows only', () => {

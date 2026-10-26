@@ -3,7 +3,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { SubagentComposerBanner, SubagentComposerBannerView } from '../src/renderer/components/SubagentComposerBanner'
-import { collectNeedingInput, composerBanner, needingInputLabel, waitingBannerLabel } from '../src/renderer/components/subagentBannerLogic'
+import { collectNeedingInput, needingInputLabel } from '../src/renderer/components/subagentBannerLogic'
 import { useAppStore } from '../src/renderer/stores/appStore'
 import type { SubagentState, SubagentSummary } from '../src/shared/subagents'
 
@@ -58,35 +58,14 @@ describe('collectNeedingInput', () => {
   })
 })
 
-describe('waitingBannerLabel', () => {
-  it('says which subagents a waiting thread waits on, else background work', () => {
-    expect(waitingBannerLabel('waiting', [subagent('a', 'working'), subagent('b', 'waiting'), subagent('c', 'done')])).toBe('Waiting on 2 subagents')
-    expect(waitingBannerLabel('waiting', [subagent('a', 'working')])).toBe('Waiting on 1 subagent')
-    expect(waitingBannerLabel('waiting', [subagent('a', 'done')])).toBe('Waiting on background work')
-    expect(waitingBannerLabel('waiting', [])).toBe('Waiting on background work')
-  })
-
-  it('is silent for any other activity', () => {
-    for (const activity of ['idle', 'processing', 'awaiting_input', 'completed', undefined] as const)
-      expect(waitingBannerLabel(activity, [subagent('a', 'working')])).toBeNull()
-  })
-})
-
 describe('the composer banner', () => {
   const html = (props: Parameters<typeof SubagentComposerBannerView>[0]) => renderToStaticMarkup(createElement(SubagentComposerBannerView, props))
 
   it('shows a row that opens the question in the subagent, and hides without one', () => {
-    const shown = html({ asking: [{ childThreadId: 'a', title: 'API reviewer', via: null }], waiting: null, onOpen: () => undefined })
+    const shown = html({ asking: [{ childThreadId: 'a', title: 'API reviewer', via: null }], onOpen: () => undefined })
     expect(shown).toContain('API reviewer has a question')
     expect(shown).toContain('title="Open API reviewer"')
-    expect(html({ asking: [], waiting: null, onOpen: () => undefined })).toBe('')
-  })
-
-  it('shows what the thread waits on only while no subagent asks', () => {
-    expect(html({ asking: [], waiting: 'Waiting on background work', onOpen: () => undefined })).toContain('Waiting on background work')
-    const both = html({ asking: [{ childThreadId: 'a', title: 'A', via: null }], waiting: 'Waiting on 1 subagent', onOpen: () => undefined })
-    expect(both).toContain('A has a question')
-    expect(both).not.toContain('Waiting on')
+    expect(html({ asking: [], onOpen: () => undefined })).toBe('')
   })
 
   // A server render reads a store's initial state, so the rows are checked through the same
@@ -94,12 +73,11 @@ describe('the composer banner', () => {
   describe('for a thread in the store', () => {
     const banner = () => {
       const state = useAppStore.getState()
-      const { asking, waiting } = composerBanner({ lists: state.subagentsByParent, activity: state.threadActivity.p, threadId: 'p' })
-      return html({ asking, waiting, onOpen: () => undefined })
+      return html({ asking: collectNeedingInput(state.subagentsByParent, 'p'), onOpen: () => undefined })
     }
 
     beforeEach(() => {
-      useAppStore.setState({ subagentsByParent: {}, threadActivity: {} })
+      useAppStore.setState({ subagentsByParent: {} })
     })
 
     it('renders nothing before the daemon has answered', () => {
@@ -116,13 +94,6 @@ describe('the composer banner', () => {
 
     it('does not show another thread`s subagent', () => {
       useAppStore.getState().setSubagents('other', [subagent('a', 'needs_input')])
-      expect(banner()).toBe('')
-    })
-
-    it('shows that the thread is waiting on background work from its activity, and hides when it stops', () => {
-      useAppStore.setState({ threadActivity: { p: 'waiting' } })
-      expect(banner()).toContain('Waiting on background work')
-      useAppStore.setState({ threadActivity: { p: 'idle' } })
       expect(banner()).toBe('')
     })
   })

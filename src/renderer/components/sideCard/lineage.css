@@ -155,29 +155,3 @@ button.lineage-row:focus-visible {
 .lineage-more:hover {
   color: var(--text-primary);
 }
-
-.lineage-live {
-  flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
-  margin-right: -2px;
-  border-radius: 50%;
-  background: var(--success);
-  animation: lineage-live-pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes lineage-live-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .lineage-live {
-    animation: none;
-  }
-}

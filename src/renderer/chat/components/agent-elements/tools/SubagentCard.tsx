@@ -1,17 +1,23 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useRef, useState } from "react";
 import type { ReactNode, RefObject } from "react";
 import type { SubagentCardModel } from "../../../adapters/subagentCards";
-import { IconChevronRight } from "../../../../lib/icons";
+import { IconChevronDown, IconChevronRight } from "../../../../lib/icons";
 import { isSubagentStartTool } from "../../../../../shared/subagentTools";
 import { openThread } from "../../../../lib/openThread";
+import { SubagentAvatar } from "../../../../components/SubagentAvatar";
+import { subagentBadgeTone, subagentIconId } from "../../../../components/subagentStatus";
 import { getToolStatus } from "../utils/format-tool";
 import { GenericTool } from "./generic-tool";
 import { toolRegistry } from "./tool-registry";
-import { useSubagentCard, useSubagentCards } from "./subagent-cards-context";
+import { useInheritedProvider, useSubagentCard, useSubagentCards } from "./subagent-cards-context";
 import {
   cardElapsedLabel,
+  cardGroupElapsedLabel,
   cardGroupLabel,
+  cardGroupSummary,
+  cardIconStack,
   cardModelLabel,
+  cardStateNote,
   cardStatusLabel,
   cardTitle,
   isCardRunning,
@@ -21,32 +27,27 @@ import {
 } from "./subagent-card-logic";
 import "./subagent-card.css";
 
-type CardTone = "live" | "ask" | "fail" | "quiet";
-
-function cardTone(card: Pick<SubagentCardModel, "state" | "pending">): CardTone {
-  if (card.state === "needs_input") return "ask";
-  if (card.state === "failed" || card.state === "interrupted") return "fail";
-  return isCardRunning(card) ? "live" : "quiet";
-}
-
 export type SubagentCardViewProps = {
   card: SubagentCardModel;
   /** Current time, for the elapsed label of a running task. */
   now: number;
   /** What the subagent last said (or why it failed); empty while it has nothing to show. */
   result?: string | null;
+  /** The provider the parent runs on, for a subagent that names none. */
+  inheritedProvider?: string | null;
   onOpen: (childThreadId: string) => void;
 };
 
 /**
- * One subagent task in the parent's timeline: the subagent's name, where it runs, what state it is
- * in and what it last said. Clicking opens the subagent's own thread.
+ * One subagent task in the parent's timeline: the provider's icon with a status dot, the subagent's
+ * name, where it runs, what it last said and how long it took. Clicking opens the subagent's own thread.
  */
-export function SubagentCardView({ card, now, result, onOpen }: SubagentCardViewProps) {
+export function SubagentCardView({ card, now, result, inheritedProvider, onOpen }: SubagentCardViewProps) {
   const title = cardTitle(card);
   const model = cardModelLabel(card);
   const elapsed = cardElapsedLabel(card, now);
-  const tone = cardTone(card);
+  const tone = subagentBadgeTone(card);
+  const note = cardStateNote(card);
   const status = cardStatusLabel(card);
   const childThreadId = card.childThreadId;
   return (
@@ -61,14 +62,17 @@ export function SubagentCardView({ card, now, result, onOpen }: SubagentCardView
         if (childThreadId) onOpen(childThreadId);
       }}
     >
-      <span className="subagent-card-head">
-        {tone !== "quiet" && <span className="subagent-card-dot" data-tone={tone} aria-hidden="true" />}
-        <span className="subagent-card-title">{title}</span>
-        {model && <span className="subagent-card-model">{model}</span>}
-        <span className="subagent-card-status">{elapsed ? `${status} · ${elapsed}` : status}</span>
-        {childThreadId && <IconChevronRight className="subagent-card-chevron" aria-hidden="true" />}
+      <SubagentAvatar providerId={subagentIconId(card.provider, inheritedProvider)} tone={tone} chip />
+      <span className="subagent-card-body">
+        <span className="subagent-card-head">
+          <span className="subagent-card-title">{title}</span>
+          {note && <span className="subagent-card-note" data-tone={tone}>{note}</span>}
+          {model && <span className="subagent-card-model">{model}</span>}
+        </span>
+        {result && <span className="subagent-card-result">{result}</span>}
       </span>
-      {result && <span className="subagent-card-result">{result}</span>}
+      {elapsed && <span className="subagent-card-elapsed">{elapsed}</span>}
+      {childThreadId && <IconChevronRight className="subagent-card-chevron" aria-hidden="true" />}
     </button>
   );
 }
@@ -139,9 +143,16 @@ function LiveSubagentCard({ card }: { card: SubagentCardModel }) {
   const visible = useOnceVisible(ref);
   const now = useTick(isCardRunning(card));
   const result = useCardResult(card, visible);
+  const inheritedProvider = useInheritedProvider();
   return (
     <div ref={ref} className="subagent-card-slot">
-      <SubagentCardView card={card} now={now} result={result} onOpen={(threadId) => void openThread(threadId)} />
+      <SubagentCardView
+        card={card}
+        now={now}
+        result={result}
+        inheritedProvider={inheritedProvider}
+        onOpen={(threadId) => void openThread(threadId)}
+      />
     </div>
   );
 }
@@ -173,18 +184,47 @@ export const SubagentTool = memo(function SubagentTool({ part, chatStatus }: { p
 });
 
 /**
- * Consecutive subagent cards. Two or more get a heading with how many there are and how many are
- * still going; a single card stands alone.
+ * Consecutive subagent cards. Two or more fold into one group headed by their provider icons, how many
+ * there are, a coloured count of what they are doing and how long they have run. The group is open
+ * while any task is going and folded once all have finished, until the user opens or folds it.
+ * A single card stands alone.
  */
 export function SubagentCardGroup({ toolCallIds, children }: { toolCallIds: readonly string[]; children: ReactNode }) {
   const cards = useSubagentCards();
+  const inheritedProvider = useInheritedProvider();
   const models = toolCallIds.map((id) => cards.get(id)).filter((card): card is SubagentCardModel => card !== undefined);
+  const running = models.length > 1 && models.some(isCardRunning);
+  const now = useTick(running);
+  const [chosenOpen, setChosenOpen] = useState<boolean | null>(null);
   if (models.length < 2) return <div className="subagent-cards">{children}</div>;
-  const label = cardGroupLabel(models);
+  const open = chosenOpen ?? running;
+  const { title, parts } = cardGroupSummary(models);
+  const stack = cardIconStack(models);
+  const elapsed = cardGroupElapsedLabel(models, now);
   return (
-    <div className="subagent-cards" role="group" aria-label={label}>
-      <div className="subagent-cards-label">{label}</div>
-      {children}
+    <div className="subagent-cards is-group" role="group" aria-label={cardGroupLabel(models)}>
+      <button type="button" className="subagent-group-head" aria-expanded={open} onClick={() => setChosenOpen(!open)}>
+        <span className="subagent-group-stack" aria-hidden="true">
+          {stack.shown.map((card) => (
+            <SubagentAvatar key={card.toolCallId} providerId={subagentIconId(card.provider, inheritedProvider)} chip />
+          ))}
+          {stack.extra > 0 && <span className="subagent-group-more">+{stack.extra}</span>}
+        </span>
+        <span className="subagent-group-text">
+          <span className="subagent-group-title">{title}</span>
+          <span className="subagent-group-summary">
+            {parts.map((part, index) => (
+              <Fragment key={part.text}>
+                {index > 0 && <span className="subagent-group-sep"> · </span>}
+                <span data-tone={part.tone}>{part.text}</span>
+              </Fragment>
+            ))}
+          </span>
+        </span>
+        {elapsed && <span className="subagent-group-elapsed">{elapsed}</span>}
+        <IconChevronDown className={`subagent-group-chevron${open ? " is-open" : ""}`} aria-hidden="true" />
+      </button>
+      {open && <div className="subagent-group-rows">{children}</div>}
     </div>
   );
 }

@@ -19,3 +19,10 @@ export function useSubagentCard(toolCallId: string | undefined): SubagentCardMod
 export function useSubagentCards(): ReadonlyMap<string, SubagentCardModel> {
   return useContext(SubagentCardsContext);
 }
+
+/** The provider the open thread runs on, which a subagent that names none inherited. */
+export const SubagentInheritedProviderContext = createContext<string | null>(null);
+
+export function useInheritedProvider(): string | null {
+  return useContext(SubagentInheritedProviderContext);
+}

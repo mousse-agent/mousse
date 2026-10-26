@@ -8,7 +8,11 @@ import { SubagentNoticeView } from '../src/renderer/chat/components/agent-elemen
 import { SubagentCardsContext } from '../src/renderer/chat/components/agent-elements/tools/subagent-cards-context'
 import {
   cardElapsedLabel,
+  cardGroupElapsedLabel,
   cardGroupLabel,
+  cardGroupSummary,
+  cardIconStack,
+  cardStateNote,
   cardStatusLabel,
   formatElapsed,
   lastResultText,
@@ -111,9 +115,47 @@ describe('card text', () => {
     expect([5_000, 125_000, 3_780_000].map(formatElapsed)).toEqual(['5s', '2m 05s', '1h 03m'])
   })
 
-  it('counts consecutive cards and how many are going', () => {
-    expect(cardGroupLabel([card(), card({ state: 'done' }), card({ state: 'done' })])).toBe('3 subagents · 1 running')
-    expect(cardGroupLabel([card({ state: 'done' }), card({ state: 'failed' })])).toBe('2 subagents')
+  it('words only the states the status dot cannot say on its own', () => {
+    expect(cardStateNote(card({ state: 'working' }))).toBeNull()
+    expect(cardStateNote(card({ state: 'queued' }))).toBeNull()
+    expect(cardStateNote(card({ pending: true, state: 'starting' }))).toBeNull()
+    expect(cardStateNote(card({ state: 'done' }))).toBeNull()
+    expect(cardStateNote(card({ state: 'needs_input' }))).toBe('Needs input')
+    expect(cardStateNote(card({ state: 'failed' }))).toBe('Failed')
+    expect(cardStateNote(card({ state: 'stopped' }))).toBe('Stopped')
+    expect(cardStateNote(card({ state: 'waiting', waitingOn: [{ title: 'a', state: 'working' }] }))).toBe('Waiting on 1 subagent')
+    expect(cardStateNote(card({ state: 'done', continued: true }))).toBe('Continued')
+    expect(cardStateNote(card({ state: 'failed', continued: true }))).toBe('Failed · continued')
+  })
+
+  it('sums up a group by what its subagents are doing, what needs the user first', () => {
+    expect(cardGroupSummary(Array.from({ length: 5 }, () => card()))).toEqual({ title: '5 subagents', parts: [{ tone: 'running', text: '5 working' }] })
+    expect(cardGroupSummary([card(), card({ pending: true, state: 'starting' }), card({ state: 'done' }), card({ state: 'done' }), card({ state: 'done' })]).parts).toEqual([
+      { tone: 'running', text: '2 working' },
+      { tone: 'done', text: '3 done' }
+    ])
+    expect(cardGroupSummary([card({ state: 'done' }), card({ state: 'failed' }), card({ state: 'needs_input' }), card({ state: 'waiting' }), card({ state: 'stopped' })]).parts).toEqual([
+      { tone: 'attention', text: '1 needs input' },
+      { tone: 'attention', text: '1 waiting' },
+      { tone: 'failed', text: '1 failed' },
+      { tone: 'done', text: '1 done' },
+      { tone: 'idle', text: '1 stopped' }
+    ])
+    expect(cardGroupLabel([card(), card({ state: 'done' }), card({ state: 'done' })])).toBe('3 subagents · 1 working · 2 done')
+  })
+
+  it('times a group from its first start to now while any runs, else to its last finish', () => {
+    const first = card({ createdAt: Date.parse('2026-10-25T12:08:00.000Z') })
+    const second = card({ createdAt: Date.parse('2026-10-25T12:09:00.000Z'), state: 'done', completedAt: Date.parse('2026-10-25T12:09:30.000Z') })
+    expect(cardGroupElapsedLabel([first, second], NOW)).toBe('2m 00s')
+    const done = { ...first, state: 'done' as const, completedAt: Date.parse('2026-10-25T12:08:40.000Z') }
+    expect(cardGroupElapsedLabel([done, second], NOW)).toBe('1m 30s')
+    expect(cardGroupElapsedLabel([card({ createdAt: null }), card({ createdAt: null })], NOW)).toBeNull()
+  })
+
+  it('stacks at most three icons and counts the rest', () => {
+    expect(cardIconStack(['a', 'b'])).toEqual({ shown: ['a', 'b'], extra: 0 })
+    expect(cardIconStack(['a', 'b', 'c', 'd', 'e'])).toEqual({ shown: ['a', 'b', 'c'], extra: 2 })
   })
 
   it('quotes the last finished reply of a subagent, clipped, never a streaming or non-reply row', () => {
@@ -157,20 +199,41 @@ describe('SubagentCardView', () => {
   const render = (model: SubagentCardModel, result?: string | null) =>
     renderToStaticMarkup(createElement(SubagentCardView, { card: model, now: NOW, result, onOpen: () => undefined }))
 
-  it('shows the title, provider and model, status with elapsed time, and the last result', () => {
+  it('shows the provider icon, title, provider and model, elapsed time, and the last result', () => {
     const html = render(card({ state: 'done', completedAt: Date.parse('2026-10-25T12:09:00.000Z') }), 'Found two issues.')
+    expect(html).toContain('subagent-avatar')
+    expect(html).toContain('background-color:#D97757')
     expect(html).toContain('API reviewer')
     expect(html).toContain('claude · opus')
-    expect(html).toContain('Done · 1m 00s')
+    expect(html).toContain('>1m 00s<')
+    expect(html).not.toContain('>Done')
     expect(html).toContain('Found two issues.')
     expect(html).toContain('aria-label="Open API reviewer, Done"')
   })
 
-  it('marks a running card live and a question or failure by tone', () => {
-    expect(render(card())).toContain('data-tone="live"')
-    expect(render(card({ state: 'needs_input' }))).toContain('data-tone="ask"')
-    expect(render(card({ state: 'failed' }), 'boom')).toContain('data-tone="fail"')
-    expect(render(card({ state: 'done' }))).not.toContain('subagent-card-dot')
+  it('drops the Working text of a running row and keeps its elapsed time', () => {
+    const html = render(card())
+    expect(html).not.toContain('>Working')
+    expect(html).toContain('>2m 00s<')
+    expect(html).toContain('aria-label="Open API reviewer, Working"')
+  })
+
+  it('puts a status dot on the icon: running, needs input, done, failed', () => {
+    expect(render(card())).toContain('data-tone="running"')
+    expect(render(card({ state: 'needs_input' }))).toContain('data-tone="attention"')
+    expect(render(card({ state: 'needs_input' }))).toContain('>Needs input<')
+    expect(render(card({ state: 'done' }))).toContain('data-tone="done"')
+    expect(render(card({ state: 'failed' }), 'boom')).toContain('data-tone="failed"')
+    expect(render(card({ state: 'failed' }), 'boom')).toContain('>Failed<')
+  })
+
+  it('draws the inherited provider for a subagent that names none, else a generic mark', () => {
+    const inherited = renderToStaticMarkup(
+      createElement(SubagentCardView, { card: card({ provider: null }), now: NOW, inheritedProvider: 'codex', onOpen: () => undefined })
+    )
+    expect(inherited).toContain('mask-image')
+    expect(inherited).not.toContain('#D97757')
+    expect(render(card({ provider: null }))).toContain('<svg')
   })
 
   it('highlights by background only, with no side or edge bar', () => {
@@ -230,12 +293,32 @@ describe('a subagent tool row', () => {
     expect(status).toContain('API reviewer')
   })
 
-  it('heads two or more cards with a count and one card with nothing', () => {
-    const two = [card({ toolCallId: 'a' }), card({ toolCallId: 'b', state: 'done' })]
-    const html = withCards(two, createElement(SubagentCardGroup, { toolCallIds: ['a', 'b'] }, createElement('span', null, 'rows')))
-    expect(html).toContain('2 subagents · 1 running')
-    const one = withCards(two.slice(0, 1), createElement(SubagentCardGroup, { toolCallIds: ['a'] }, createElement('span', null, 'rows')))
-    expect(one).not.toContain('subagent-cards-label')
+  it('folds two or more cards into a group with stacked icons, a coloured summary and a toggle', () => {
+    const cards = ['a', 'b', 'c', 'd', 'e'].map((id, index) => card({ toolCallId: id, state: index < 2 ? 'working' : 'done', completedAt: NOW - 1000 }))
+    const html = withCards(cards, createElement(SubagentCardGroup, { toolCallIds: cards.map((entry) => entry.toolCallId) }, createElement('span', null, 'rows')))
+    expect(html).toContain('aria-label="5 subagents · 2 working · 3 done"')
+    expect(html).toContain('>5 subagents<')
+    expect(html).toContain('data-tone="running">2 working<')
+    expect(html).toContain('data-tone="done">3 done<')
+    expect(html.match(/class="subagent-avatar is-chip"/g)).toHaveLength(3)
+    expect(html).toMatch(/class="subagent-group-more">\+(<!-- -->)?2</)
+    expect(html).toContain('subagent-group-elapsed')
+    // Open while any task is going.
+    expect(html).toContain('aria-expanded="true"')
+    expect(html).toContain('rows')
+  })
+
+  it('starts a group folded once every task has finished', () => {
+    const done = [card({ toolCallId: 'a', state: 'done', completedAt: NOW }), card({ toolCallId: 'b', state: 'failed', completedAt: NOW })]
+    const html = withCards(done, createElement(SubagentCardGroup, { toolCallIds: ['a', 'b'] }, createElement('span', null, 'rows')))
+    expect(html).toContain('aria-expanded="false"')
+    expect(html).toContain('1 failed')
+    expect(html).not.toContain('rows')
+  })
+
+  it('leaves a single card alone, with no group header', () => {
+    const one = withCards([card({ toolCallId: 'a' })], createElement(SubagentCardGroup, { toolCallIds: ['a'] }, createElement('span', null, 'rows')))
+    expect(one).not.toContain('subagent-group-head')
     expect(one).toContain('rows')
   })
 })
@@ -291,7 +374,7 @@ describe('the transcript with cards and notices', () => {
     expect(group).toBeGreaterThan(-1)
     expect(html).toContain('Reviewer one')
     expect(html).toContain('Reviewer two')
-    expect(html).toContain('2 subagents · 1 running')
+    expect(html).toContain('2 subagents · 1 working · 1 done')
     // The group holds its two rows; the cards come after it, not inside it.
     expect(html.indexOf('Reviewer one')).toBeGreaterThan(group)
     expect(html.match(/class="subagent-card"/g)).toHaveLength(2)

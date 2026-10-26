@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { isRunningSubagent, type SubagentSummary } from '../../../shared/subagents'
 import { useSubagents } from '../../hooks/useSubagents'
 import { openThread } from '../../lib/openThread'
+import { SubagentAvatar, useThreadProviderId } from '../SubagentAvatar'
+import { subagentBadgeTone, subagentIconId } from '../subagentStatus'
 import {
   countRunningSubagents,
   lineageModelLabel,
@@ -32,6 +34,8 @@ function useLineageNow(enabled: boolean): number {
 interface LineageListProps {
   subagents: readonly SubagentSummary[]
   now: number
+  /** The provider the thread runs on, for subagents that name none. */
+  inheritedProvider?: string | null
   expanded: boolean
   onExpand: () => void
   /** Opens a subagent's own thread. */
@@ -41,7 +45,7 @@ interface LineageListProps {
 }
 
 /** Subagents this thread started: running ones first, then finished ones. Renders nothing for an empty list; the section collapses instead. */
-export function LineageList({ subagents, now, expanded, onExpand, onOpen, onStop }: LineageListProps) {
+export function LineageList({ subagents, now, inheritedProvider, expanded, onExpand, onOpen, onStop }: LineageListProps) {
   if (subagents.length === 0) return null
 
   const { visible, hiddenCount } = sliceLineage(orderLineageSubagents(subagents), expanded)
@@ -59,7 +63,7 @@ export function LineageList({ subagents, now, expanded, onExpand, onOpen, onStop
               title={name}
               onClick={() => onOpen(subagent.childThreadId)}
             >
-              {running && <span className="lineage-live" role="img" aria-label="Running" />}
+              <SubagentAvatar providerId={subagentIconId(subagent.provider, inheritedProvider)} tone={subagentBadgeTone(subagent)} />
               <span className="lineage-text">
                 <span className="lineage-name">{name}</span>
                 {model && <span className="lineage-model">{model}</span>}
@@ -93,6 +97,7 @@ export function LineageList({ subagents, now, expanded, onExpand, onOpen, onStop
 /** Lists the subagents the selected thread started. */
 export function LineageSection({ threadId }: SideCardSectionContext) {
   const subagents = useSubagents(threadId)
+  const inheritedProvider = useThreadProviderId(threadId)
   // Remembering which thread was expanded resets the list on a thread change
   // without an effect.
   const [expandedThreadId, setExpandedThreadId] = useState<string | null>(null)
@@ -132,6 +137,7 @@ export function LineageSection({ threadId }: SideCardSectionContext) {
       <LineageList
         subagents={subagents}
         now={now}
+        inheritedProvider={inheritedProvider}
         expanded={expanded}
         onExpand={() => setExpandedThreadId(threadId)}
         onOpen={(childThreadId) => void openThread(childThreadId)}
