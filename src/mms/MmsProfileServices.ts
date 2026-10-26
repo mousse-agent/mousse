@@ -364,6 +364,7 @@ export class MmsProfileServices {
       installationHome: shared.installationHome,
       profileId: this.profileId,
       registry: agentRegistry,
+      liveInstances: () => Object.keys(this.providerInstances.list()),
       ...(shared.listProfiles ? { listProfiles: shared.listProfiles } : {})
     })
     // The harness gateway over this profile's instances: one runtime per instance, built by its

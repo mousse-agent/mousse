@@ -7,7 +7,7 @@
  * `packages/provider-acp-registry/src/server/AcpRegistrySupport.ts`): the entry shape, platform
  * keys, pin rules and search ranking, ported in logic.
  */
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { RegistryAgentView, RegistryChecksum } from '../../../shared/harness/types'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
@@ -342,6 +342,8 @@ export interface RegistryOptions {
 export class AcpRegistry {
   private memory?: { agents: RegistryAgent[]; atMs: number }
   private loading?: Promise<RegistryAgent[]>
+  /** The cached file as last decoded, by its modification time (snapshots ask often). */
+  private disk?: { mtimeMs: number; agents: RegistryAgent[] }
 
   constructor(private readonly options: RegistryOptions) {}
 
@@ -363,7 +365,9 @@ export class AcpRegistry {
   cached(): RegistryAgent[] {
     if (this.memory) return this.memory.agents
     try {
-      return decodeRegistry(JSON.parse(readFileSync(this.options.cachePath, 'utf8')))
+      const { mtimeMs } = statSync(this.options.cachePath)
+      if (this.disk?.mtimeMs !== mtimeMs) this.disk = { mtimeMs, agents: decodeRegistry(JSON.parse(readFileSync(this.options.cachePath, 'utf8'))) }
+      return this.disk.agents
     } catch {
       return []
     }

@@ -13,7 +13,7 @@
  */
 import { createHash } from 'node:crypto'
 import { chmodSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, relative } from 'node:path'
 import type { RegistrySourcePatch, RemoveInstallResult } from '../../../shared/harness/types'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { resolveWindowsShim, type CliLaunch } from '../../providers/resolveWindowsShim'
@@ -71,6 +71,8 @@ export interface AgentInstallsOptions {
   registry: Pick<AcpRegistry, 'agent' | 'cached'>
   /** Profiles the installation lists; a reference from any other profile does not count. Absent: all count. */
   listProfiles?: () => Array<{ id: string; displayName?: string }>
+  /** This profile's entries; its references of entries removed since do not count. Absent: all count. */
+  liveInstances?: () => string[]
   fetch?: typeof fetch
   /** Test seam: runs `npm …` (default: the user's npm from the login-shell PATH). */
   npm?: NpmRunner
@@ -216,6 +218,8 @@ export function packageBin(manifest: Record<string, unknown>, agentId: string, n
 export class AgentInstalls {
   private readonly agentsDir: string
   private readonly installs = new Map<string, AbortController>()
+  /** Receipts as last read, by file stamp: snapshots read them often. */
+  private readonly receipts = new Map<string, { stamp: string; read: ReturnType<typeof readReceipt> }>()
 
   constructor(private readonly options: AgentInstallsOptions) {
     this.agentsDir = join(options.installationHome, 'agents')
@@ -245,11 +249,27 @@ export class AgentInstalls {
   /** The published install of `source`, when there is one. */
   installed(source: RegistrySource): InstalledAgent | undefined {
     for (const root of this.roots(source)) {
-      const read = readReceipt(join(root, RECEIPT_FILE))
+      const read = this.receipt(join(root, RECEIPT_FILE))
       if (read && read.receipt.agentId === source.agentId && read.receipt.version === source.version && read.receipt.distribution === source.distribution)
         return { root, ...read }
     }
     return undefined
+  }
+
+  private receipt(path: string): ReturnType<typeof readReceipt> {
+    let stamp: string
+    try {
+      const stat = statSync(path)
+      stamp = `${stat.size}:${stat.mtimeMs}:${stat.ino}`
+    } catch {
+      this.receipts.delete(path)
+      return undefined
+    }
+    const cached = this.receipts.get(path)
+    if (cached?.stamp === stamp) return cached.read
+    const read = readReceipt(path)
+    this.receipts.set(path, { stamp, read })
+    return read
   }
 
   /**
@@ -276,6 +296,12 @@ export class AgentInstalls {
     const program = containedFile(dist, segments, { executable: true })
     const launch = resolveWindowsShim(program, { env: env.env })
     if (!launch) throw new Error(`Mousse cannot run ${receipt.launch.cmd}.`)
+    // A Windows shim runs another file: it must be one the receipt guards, inside the install.
+    if (launch.path !== program) {
+      const inside = relative(dist, launch.path)
+      if (!inside || inside.startsWith('..') || isAbsolute(inside)) throw new Error(`${receipt.launch.cmd} starts a program outside the install folder.`)
+      containedFile(dist, inside.split(/[\\/]/))
+    }
     return { command: launch.command, args: [...launch.args, ...receipt.launch.args], env: { ...receipt.launch.env }, path: program }
   }
 
@@ -530,12 +556,16 @@ export class AgentInstalls {
       return []
     }
     const listed = this.options.listProfiles ? new Set(this.options.listProfiles().map((profile) => profile.id)) : undefined
+    const own = this.options.liveInstances ? new Set(this.options.liveInstances()) : undefined
     return files.flatMap((name) => {
       const profileId = name.slice(0, -'.json'.length)
       if (!PROFILE_ID.test(profileId)) return []
       // A reference of a deleted profile keeps nothing alive.
       if (listed && !listed.has(profileId) && profileId !== this.options.profileId) return []
-      return Object.entries(this.readRefs(agentId, profileId).instances).map(([instanceId, entry]) => ({ profileId, instanceId, ...entry }))
+      return Object.entries(this.readRefs(agentId, profileId).instances)
+        // Nor does one this profile kept for an entry it no longer has.
+        .filter(([instanceId]) => profileId !== this.options.profileId || !own || own.has(instanceId))
+        .map(([instanceId, entry]) => ({ profileId, instanceId, ...entry }))
     })
   }
 
