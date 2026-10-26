@@ -12,7 +12,7 @@ import {
   resolveSkillModelSettings
 } from '../src/shared/settings'
 import { findInlineSkillToken, removeInlineSkillToken } from '../src/shared/channelCommands'
-import { parseActions, stripActionBlocks, filterActionsForChatMode } from '../src/mms/orchestrator/LlmClient'
+import { parseActions, stripActionBlocks, filterActionsForChatMode } from '../src/mms/orchestrator/actions'
 import { buildOrchestratorSystemPrompt } from '../src/mms/orchestrator/systemPrompt'
 import { BuildModeTools } from '../src/mms/orchestrator/BuildModeTools'
 import { FileService } from '../src/mms/files/FileService'
