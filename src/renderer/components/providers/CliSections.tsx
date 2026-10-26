@@ -110,13 +110,13 @@ export function SetupRow({
           below = (
             <>
               <span className="prov-command-hint">Run this in a terminal, then check again.</span>
-              <CommandBox command={step.command} />
+              <CommandBox command={step.command} label="Copy sign-in command" />
             </>
           )
         } else control = button('signin', step.label, actions.signIn)
         break
       case 'update':
-        if (step.command) below = <CommandBox command={step.command} label="Copy command" />
+        if (step.command) below = <CommandBox command={step.command} label="Copy update command" />
         else control = button('update', step.label, actions.update)
         break
       case 'recheck':
@@ -236,7 +236,7 @@ export function UpdateRow({ snapshot, operation, actions }: { snapshot: Instance
       title={target ? `${target} is available` : 'Update available'}
       description="Mousse didn't install this copy, so update it yourself in a terminal:"
     >
-      <CommandBox command={update.command} label="Copy command" />
+      <CommandBox command={update.command} label="Copy update command" />
     </SettingsRow>
   )
 }

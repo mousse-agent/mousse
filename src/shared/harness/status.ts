@@ -174,7 +174,7 @@ function updateStep(snapshot: InstanceSnapshot): NextStep | null {
   if (!update) return null
   if (update.kind === 'one_click') return step(snapshot, 'update')
   if (update.kind === 'notice') return null
-  return { action: 'update', label: 'Copy command', command: update.command }
+  return { action: 'update', label: 'Copy update command', command: update.command }
 }
 
 function withLabel(headline: string, label: string | undefined): string {
@@ -237,7 +237,7 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
   if (install.state === 'not_installed') {
     return {
       headline: 'Not found',
-      detail: runs.message ?? 'Mousse could not find its command on PATH.',
+      detail: runs.message ?? "Mousse could not find this provider's command on PATH.",
       tone: 'warning',
       nextStep: install.canInstall ? step(snapshot, 'install') : step(snapshot, 'recheck')
     }

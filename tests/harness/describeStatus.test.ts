@@ -81,7 +81,7 @@ describe('describeStatus', () => {
 
   it('gives an advisory update as a command to copy', () => {
     const status = describeStatus(snapshot({ compatibility: { state: 'too_old' }, update: { kind: 'advisory', command: 'brew upgrade codex' } }))
-    expect(status.nextStep).toEqual({ action: 'update', label: 'Copy command', command: 'brew upgrade codex' })
+    expect(status.nextStep).toEqual({ action: 'update', label: 'Copy update command', command: 'brew upgrade codex' })
   })
 
   it('says an update is available for an unproven owner, with no step to take', () => {

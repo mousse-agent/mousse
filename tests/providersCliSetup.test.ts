@@ -37,7 +37,7 @@ describe('Setup row: the status and its one next step', () => {
   it('offers Install as soon as an installable agent is known to be missing', () => {
     const html = setupRow({ driver: 'antigravity', install: { state: 'not_installed', canInstall: true }, runs: { state: 'no', failure: 'not_on_path' } })
     expect(buttons(html)).toEqual(['Install'])
-    expect(html).toContain('Mousse could not find its command on PATH.')
+    expect(html).toContain('Mousse could not find this provider&#x27;s command on PATH.')
   })
 
   it('only offers Check again when the user installs the CLI', () => {
@@ -134,7 +134,7 @@ describe('Runtime rows', () => {
     expect(html).toContain('is-advisory')
     expect(html).toContain('npm i -g @anthropic-ai/claude-code')
     expect(buttons(html)).not.toContain('Update now')
-    expect(labels(html)).toContain('Copy command')
+    expect(labels(html)).toContain('Copy update command')
   })
 
   it('shows a newer version with no command and no button when the owner is not proven', () => {
