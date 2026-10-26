@@ -30,6 +30,11 @@ export const send = async () =>
 export const runs = () => Agent.listRuns('agent-1', { runtime: 'local', cwd: '/work', store, limit: 5 })
 export const cancelRun = () => Agent.cancelRun('run-1', { runtime: 'local', cwd: '/work', store })
 export const messages = () => Agent.messages.list('agent-1', { runtime: 'local', cwd: '/work', store })
+// Pruning agents no thread uses any more: their runs, then their rows.
+export const prune = async () => {
+  await store.runs.delete({ filter: { agentIds: ['agent-1'] } })
+  await store.agents.delete({ filter: { agentIds: ['agent-1'] } })
+}
 export const models = () => Cursor.models.list({ apiKey: 'key' } satisfies CursorRequestOptions)
 export const me = () => Cursor.me({ apiKey: 'key' })
 export const login = () =>

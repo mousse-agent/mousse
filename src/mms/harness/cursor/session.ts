@@ -1,9 +1,9 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { ChatImageAttachment } from '../../../shared/types'
 import { cursorMcpServers } from '../../run/mcp/attachment'
 import type { CursorAgentSetup, CursorHostMethods, CursorUsage } from '../hosts/cursorProtocol'
-import { interruptWithDeadline, recoverActiveRun } from '../supervise'
-import { CursorHostCallError, type CursorHostClient, type CursorRunListener } from './hostClient'
+import { interruptWithDeadline, LOAD_DEADLINE_MS, loadWithDeadline, recoverActiveRun, SessionLoadTimeoutError } from '../supervise'
+import { CursorHostCallError, CursorHostExitedError, type CursorHostClient, type CursorRunListener } from './hostClient'
 
 /**
  * The turn lifecycle of a Cursor instance: one SDK agent per thread, kept between turns while
@@ -27,6 +27,8 @@ export interface SavedCursorAgent {
 export interface CursorSessionStore {
   saved(threadId: string): SavedCursorAgent | undefined
   setSaved(threadId: string, saved: SavedCursorAgent | undefined): void
+  /** Threads with a saved agent. */
+  threads(): string[]
 }
 
 export interface CursorToolEvent {
@@ -54,8 +56,11 @@ export interface CursorChatInput {
   onTool?(event: CursorToolEvent): void
   drainSteer?(): string | undefined
   onSteer?(text: string): void
-  /** The agent's id once known: provider refs name it for interrupt and terminate. */
-  onSession?(agentId: string): void
+  /**
+   * The id provider refs name for interrupt and terminate: a turn key at once, then the agent's id
+   * once it is known.
+   */
+  onSession?(id: string): void
 }
 
 export interface CursorChatResult {
@@ -81,6 +86,8 @@ export interface CursorSessionsOptions {
   notice?(threadId: string, text: string): void
   /** Test seam: how long a cancel may take before the host is ended (`INTERRUPT_DEADLINE_MS`). */
   cancelDeadlineMs?: number
+  /** Test seam: how long reopening a saved agent may take (`LOAD_DEADLINE_MS`). */
+  loadDeadlineMs?: number
 }
 
 /** The model id that lets Cursor choose. */
@@ -91,7 +98,6 @@ const STEER_POLL_MS = 100
 interface LiveAgent {
   agentId: string
   cwd: string
-  mcpToken: string | null
   /** Host generation the agent was opened in; a restarted host no longer holds it. */
   generation: number
 }
@@ -120,14 +126,56 @@ export function cursorToolTitle(toolCall: unknown, label = 'Cursor'): string {
   return type === 'shell' ? `Shell: ${short}` : `${name} ${short}`
 }
 
+/** Raised inside a turn when its Stop arrives before the work it waits for. */
+class TurnStopped extends Error {
+  constructor() {
+    super('The turn was stopped.')
+    this.name = 'TurnStopped'
+  }
+}
+
+/** One live turn: everything it waits for settles when it is stopped. */
+interface Turn {
+  threadId: string
+  /** Aborted by Stop: the turn's own signal, or the gateway's interrupt. */
+  stop: AbortController
+  /** Resolves once the turn has ended, either way. */
+  settled: Promise<void>
+}
+
+/** What a turn produced so far; kept when it ends early. */
+interface Progress {
+  text: string
+  usage?: CursorUsage
+}
+
+/** `work`, or `TurnStopped` as soon as `stop` aborts. */
+function stoppable<T>(work: Promise<T>, stop: AbortSignal): Promise<T> {
+  if (stop.aborted) return Promise.reject(new TurnStopped())
+  return new Promise<T>((resolve, reject) => {
+    const onStop = () => reject(new TurnStopped())
+    stop.addEventListener('abort', onStop, { once: true })
+    work.then(resolve, reject).finally(() => stop.removeEventListener('abort', onStop))
+  })
+}
+
 export class CursorSessions {
   private readonly live = new Map<string, LiveAgent>()
-  private readonly active = new Map<string, ActiveRun>()
+  /** Live turns, by the id their provider ref names: a turn key until the agent is known, then both. */
+  private readonly turns = new Map<string, Turn>()
+  /** Agents no thread uses any more, removed from the store when the host runs next. */
+  private readonly toPrune = new Set<string>()
   private generation = 0
+  /** The thread whose stuck stop or steer is ending the host. */
+  private endingFor: string | undefined
+  /** Why the host last exited: for the notice of the other threads it cut short. */
+  private lastExit: { endedFor?: string } = {}
   private stopped = false
 
   constructor(private readonly options: CursorSessionsOptions) {
     options.host.onExit(() => {
+      this.lastExit = this.endingFor ? { endedFor: this.endingFor } : {}
+      this.endingFor = undefined
       this.generation += 1
       this.live.clear()
     })
@@ -151,7 +199,33 @@ export class CursorSessions {
   /** Drops the thread's agent; its next turn starts a new one with the history in the prompt. */
   forgetConversation(threadId: string): void {
     this.closeLive(threadId)
-    if (this.options.store.saved(threadId)) this.options.store.setSaved(threadId, undefined)
+    const saved = this.options.store.saved(threadId)
+    if (!saved) return
+    this.options.store.setSaved(threadId, undefined)
+    this.prune([saved.agentId])
+  }
+
+  /** Drops every thread's agent (the credential changed, or the user signed out). */
+  forgetAll(): void {
+    for (const threadId of this.options.store.threads()) this.forgetConversation(threadId)
+    this.closeAll()
+  }
+
+  /** Removes superseded agents from the store: now when the host runs, else before the next turn. */
+  private prune(agentIds: string[]): void {
+    for (const agentId of agentIds) this.toPrune.add(agentId)
+    if (this.options.host.running) void this.flushPrune()
+  }
+
+  private async flushPrune(): Promise<void> {
+    if (!this.toPrune.size) return
+    const agentIds = [...this.toPrune].sort()
+    this.toPrune.clear()
+    try {
+      await this.options.host.request('prune', { storeDir: this.options.storeDir, agentIds })
+    } catch {
+      // Pruning saves space only; an agent left behind is never resumed.
+    }
   }
 
   private closeLive(threadId: string): void {
@@ -163,17 +237,30 @@ export class CursorSessions {
     }
   }
 
-  /** The native cancel of the agent's running run; resolves once the run has ended. */
-  async interrupt(agentId: string | undefined): Promise<'interrupted' | 'not_active'> {
-    const active = agentId ? this.active.get(agentId) : undefined
-    if (!active) return 'not_active'
-    await active.cancel()
-    await active.ended
+  /** An open the turn stopped waiting for: when it still answers, its agent is closed (and removed when new). */
+  private abandon(opening: Promise<{ agentId: string }>, options: { prune: boolean }): void {
+    void opening.then(({ agentId }) => {
+      void this.options.host.request('close', { agentId }).catch(() => undefined)
+      if (options.prune) this.prune([agentId])
+    }, () => undefined)
+  }
+
+  /** Stops the turn `id` names (its turn key or its agent) and resolves once it has ended. */
+  async interrupt(id: string | undefined): Promise<'interrupted' | 'not_active'> {
+    const turn = id ? this.turns.get(id) : undefined
+    if (!turn) return 'not_active'
+    turn.stop.abort()
+    await turn.settled
     return 'interrupted'
   }
 
-  /** Ends the host and every run in it; each of those turns ends once, as interrupted. */
-  terminate(): void {
+  /**
+   * Ends the host and every turn in it; each ends once, as interrupted. The other threads it cut
+   * short are told why.
+   */
+  terminate(id?: string): void {
+    const turn = id ? this.turns.get(id) : undefined
+    this.endingFor = turn?.threadId
     this.options.host.kill()
   }
 
@@ -198,30 +285,48 @@ export class CursorSessions {
     return error instanceof Error ? error : new Error(String(error))
   }
 
-  /** The thread's agent: the live one, the saved one reopened, or a new one. */
-  private async open(input: CursorChatInput, apiKey: string, historyKey: string): Promise<{ agentId: string; resumed: boolean }> {
+  /**
+   * The thread's agent: the live one, the saved one reopened (within the shared load deadline), or
+   * a new one. Every wait ends at Stop; an open that answers after it is closed again. The MCP
+   * token is not part of the match: each send carries the current one.
+   */
+  private async open(input: CursorChatInput, apiKey: string, historyKey: string, stop: AbortSignal): Promise<{ agentId: string; resumed: boolean }> {
     const { host, store, label } = this.options
-    const mcpToken = input.mcp?.token ?? null
     const saved = store.saved(input.threadId)
     const matches = saved?.cwd === input.cwd && saved.historyKey === historyKey
     const live = this.live.get(input.threadId)
-    if (live && live.generation === this.generation && matches && live.agentId === saved?.agentId && live.mcpToken === mcpToken) return { agentId: live.agentId, resumed: true }
+    if (live && live.generation === this.generation && matches && live.agentId === saved?.agentId) return { agentId: live.agentId, resumed: true }
     if (live) this.closeLive(input.threadId)
     const setup = this.setup(input, apiKey)
     if (saved && matches) {
+      const resuming = host.request('resume', { ...setup, agentId: saved.agentId })
       try {
-        const { agentId } = await host.request('resume', { ...setup, agentId: saved.agentId })
-        this.live.set(input.threadId, { agentId, cwd: input.cwd, mcpToken, generation: this.generation })
+        const { agentId } = await loadWithDeadline(saved.agentId, stoppable(resuming, stop), () => {}, this.options.loadDeadlineMs ?? LOAD_DEADLINE_MS)
+        this.live.set(input.threadId, { agentId, cwd: input.cwd, generation: this.generation })
         return { agentId, resumed: true }
       } catch (error) {
+        if (error instanceof TurnStopped) {
+          this.abandon(resuming, { prune: false })
+          throw error
+        }
         if (error instanceof CursorHostCallError && error.auth) throw this.failure(error)
-        input.signal?.throwIfAborted()
+        if (error instanceof CursorHostExitedError) throw error
+        // A resume that failed or missed the deadline: the history goes to a new agent instead.
+        if (error instanceof SessionLoadTimeoutError) this.abandon(resuming, { prune: false })
         this.options.notice?.(input.threadId, `${label} could not reopen this chat's agent, so the chat history was handed to a new one.`)
       }
     }
-    const { agentId } = await host.request('create', setup)
+    const creating = host.request('create', setup)
+    let agentId: string
+    try {
+      ;({ agentId } = await stoppable(creating, stop))
+    } catch (error) {
+      if (error instanceof TurnStopped) this.abandon(creating, { prune: true })
+      throw error
+    }
     store.setSaved(input.threadId, { agentId, cwd: input.cwd, runIds: [] })
-    this.live.set(input.threadId, { agentId, cwd: input.cwd, mcpToken, generation: this.generation })
+    if (saved && saved.agentId !== agentId) this.prune([saved.agentId])
+    this.live.set(input.threadId, { agentId, cwd: input.cwd, generation: this.generation })
     return { agentId, resumed: false }
   }
 
@@ -250,41 +355,80 @@ export class CursorSessions {
   }
 
   async chat(input: CursorChatInput): Promise<CursorChatResult> {
-    const { host, store, label } = this.options
+    const { label } = this.options
     if (this.stopped) throw new Error(`${label} is stopped`)
     input.signal?.throwIfAborted()
     const apiKey = this.options.apiKey()
     if (!apiKey) throw new Error(this.options.signInRequiredMessage)
-    const historyKey = this.historyKey(input.history ?? '')
-    let opened: { agentId: string; resumed: boolean }
+    let settle!: () => void
+    const turn: Turn = { threadId: input.threadId, stop: new AbortController(), settled: new Promise<void>((resolve) => { settle = resolve }) }
+    // The ref names the turn from the start, so a Stop before its agent exists still finds it.
+    const key = `cursor-turn:${randomUUID()}`
+    this.turns.set(key, turn)
+    input.onSession?.(key)
+    let agentId: string | undefined
+    const onAbort = () => turn.stop.abort()
+    input.signal?.addEventListener('abort', onAbort, { once: true })
+    const progress: Progress = { text: '' }
+    const interrupted = (): CursorChatResult => ({ text: progress.text, interrupted: true, ...(progress.usage ? { usage: progress.usage } : {}) })
     try {
-      opened = await this.open(input, apiKey, historyKey)
+      await this.flushPrune()
+      return await this.runTurn(input, apiKey, turn, progress, (id) => {
+        agentId = id
+        this.turns.set(id, turn)
+        input.onSession?.(id)
+      })
     } catch (error) {
+      if (error instanceof TurnStopped) return interrupted()
+      if (error instanceof CursorHostExitedError) {
+        // The prompt may already have reached Cursor: the outcome is unknown, so the turn ends as
+        // interrupted, its agent is not resumed, and nothing is sent again.
+        this.forgetConversation(input.threadId)
+        const { endedFor } = this.lastExit
+        if (endedFor && endedFor !== input.threadId) this.options.notice?.(input.threadId, `${label} was restarted to stop another chat, so this reply was cut short.`)
+        return interrupted()
+      }
+      throw error
+    } finally {
+      input.signal?.removeEventListener('abort', onAbort)
+      this.turns.delete(key)
+      if (agentId && this.turns.get(agentId) === turn) this.turns.delete(agentId)
+      settle()
+    }
+  }
+
+  private async runTurn(input: CursorChatInput, apiKey: string, turn: Turn, progress: Progress, opened: (agentId: string) => void): Promise<CursorChatResult> {
+    const { host, store, label } = this.options
+    const stop = turn.stop.signal
+    let open: { agentId: string; resumed: boolean }
+    try {
+      open = await this.open(input, apiKey, this.historyKey(input.history ?? ''), stop)
+    } catch (error) {
+      if (error instanceof TurnStopped || error instanceof CursorHostExitedError) throw error
       throw this.failure(error)
     }
-    const { agentId } = opened
-    input.onSession?.(agentId)
-    const history = !opened.resumed && input.history
+    const { agentId } = open
+    opened(agentId)
+    if (stop.aborted) throw new TurnStopped()
+    const history = !open.resumed && input.history
       ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
       : ''
-    const orchestration = !opened.resumed && input.orchestrationInstructions
+    const orchestration = !open.resumed && input.orchestrationInstructions
       ? `<mousse_orchestration_instructions>\n${input.orchestrationInstructions}\n</mousse_orchestration_instructions>\n\n`
       : ''
     let prompt = orchestration + history + (input.appletInstructions ? input.appletInstructions + '\n\nCurrent request:\n' : '') + (input.prompt || '(image attachment)')
     let images = (input.images ?? []).map((image) => ({ data: image.data, mimeType: image.mimeType }))
     const model = { id: input.model || CURSOR_DEFAULT_MODEL }
     const mcpServers = input.mcp ? cursorMcpServers(input.mcp) : undefined
-    let text = ''
     let thinking = ''
-    let usage: CursorUsage | undefined
     const pendingSteers: string[] = []
     let steerFailure: Error | undefined
     for (;;) {
-      input.signal?.throwIfAborted()
+      if (stop.aborted) throw new TurnStopped()
       if (steerFailure) throw steerFailure
       const params = { agentId, text: prompt, ...(images.length ? { images } : {}), model, mode: input.mode === 'plan' ? 'plan' as const : 'agent' as const, ...(mcpServers ? { mcpServers } : {}) }
-      // The run is registered before it is sent: a stop that arrives while the send is in flight
-      // cancels it as soon as its id is known.
+      // The run is registered before it is sent: a Stop while the send is in flight cancels it as
+      // soon as its id is known (and the gateway's deadline ends the host when that never comes).
       let endRun!: (end: RunEnd) => void
       const ended = new Promise<RunEnd>((resolve) => { endRun = resolve })
       let started!: (runId: string | undefined) => void
@@ -294,18 +438,15 @@ export class CursorSessions {
         ended: ended.then(() => undefined),
         cancel: () => (cancelled ??= runIdKnown.then(async (id) => void (id ? await host.request('cancel', { runId: id }) : undefined)))
       }
-      this.active.set(agentId, active)
-      // Stop: the native cancel; the gateway's deadline ends the host when it misses.
-      const onAbort = () => void active.cancel().catch(() => undefined)
-      input.signal?.addEventListener('abort', onAbort, { once: true })
+      const onStop = () => void active.cancel().catch(() => undefined)
+      stop.addEventListener('abort', onStop, { once: true })
       let runId: string
       try {
         runId = await this.startRun(input.threadId, agentId, input.cwd, params)
       } catch (error) {
         started(undefined)
-        endRun({ status: 'error' })
-        input.signal?.removeEventListener('abort', onAbort)
-        if (this.active.get(agentId) === active) this.active.delete(agentId)
+        stop.removeEventListener('abort', onStop)
+        if (error instanceof CursorHostExitedError) throw error
         this.closeLive(input.threadId)
         throw this.failure(error)
       }
@@ -317,7 +458,7 @@ export class CursorSessions {
         store.setSaved(input.threadId, { ...rest, runIds: [...rest.runIds, runId].slice(-RECORDED_RUNS) })
       }
       const tools = new Map<string, string>()
-      const base = text ? `${text}\n\n` : ''
+      const base = progress.text ? `${progress.text}\n\n` : ''
       let runText = ''
       host.watchRun(runId, {
         update: (update) => {
@@ -325,8 +466,8 @@ export class CursorSessions {
             case 'text-delta':
               if (typeof update.text !== 'string') return
               runText += update.text
-              text = base + runText
-              input.onText(text)
+              progress.text = base + runText
+              input.onText(progress.text)
               return
             case 'thinking-delta':
               if (typeof update.text !== 'string') return
@@ -338,7 +479,8 @@ export class CursorSessions {
               if (!callId) return
               const title = cursorToolTitle(update.toolCall, label)
               tools.set(callId, title)
-              input.onTool?.({ phase: 'start', callId, title, ...(str((update.toolCall as { type?: unknown })?.type) ? { toolName: str((update.toolCall as { type?: unknown }).type) } : {}) })
+              const toolName = str((update.toolCall as { type?: unknown } | undefined)?.type)
+              input.onTool?.({ phase: 'start', callId, title, ...(toolName ? { toolName } : {}) })
               return
             }
             case 'tool-call-completed': {
@@ -356,7 +498,7 @@ export class CursorSessions {
       // Steer: cancel the run (with the gateway's deadline) and send the guidance as the next one.
       let cancelling = false
       const collectSteer = () => {
-        if (input.signal?.aborted || steerFailure) return
+        if (stop.aborted || steerFailure) return
         let steer: string | undefined
         try {
           steer = input.drainSteer?.()?.trim()
@@ -377,6 +519,7 @@ export class CursorSessions {
           },
           terminate: () => {
             steerFailure ??= new Error(`${label} did not stop for the new guidance, so it was ended. Send the guidance again.`)
+            this.endingFor = input.threadId
             host.kill()
           },
           forgetConversation: (threadId) => this.forgetConversation(threadId)
@@ -390,16 +533,14 @@ export class CursorSessions {
         end = await ended
       } finally {
         clearInterval(steerTimer)
-        input.signal?.removeEventListener('abort', onAbort)
-        if (this.active.get(agentId) === active) this.active.delete(agentId)
+        stop.removeEventListener('abort', onStop)
       }
       for (const [callId, title] of tools) input.onTool?.({ phase: 'complete', callId, title })
       if ('hostExited' in end) {
-        this.live.delete(input.threadId)
         if (steerFailure) throw steerFailure
-        return { text, interrupted: true, ...(usage ? { usage } : {}) }
+        throw new CursorHostExitedError('while the run streamed')
       }
-      if (end.usage) usage = addUsage(usage, end.usage)
+      if (end.usage) progress.usage = addUsage(progress.usage, end.usage)
       if (end.status === 'error') {
         this.closeLive(input.threadId)
         throw this.failure(end.error ? new CursorHostCallError(end.error) : new Error(`${label} failed.`))
@@ -409,11 +550,11 @@ export class CursorSessions {
         this.closeLive(input.threadId)
         throw new Error(`${label} lost its connection to Cursor (${end.transportFailure}). Send the message again.`)
       }
-      if (input.signal?.aborted) return { text, interrupted: true, ...(usage ? { usage } : {}) }
+      if (stop.aborted) throw new TurnStopped()
       collectSteer()
       if (steerFailure) throw steerFailure
-      if (end.status === 'cancelled' && !pendingSteers.length) return { text, interrupted: true, ...(usage ? { usage } : {}) }
-      if (!pendingSteers.length) return { text, interrupted: false, ...(usage ? { usage } : {}) }
+      if (end.status === 'cancelled' && !pendingSteers.length) throw new TurnStopped()
+      if (!pendingSteers.length) return { text: progress.text, interrupted: false, ...(progress.usage ? { usage: progress.usage } : {}) }
       prompt = pendingSteers.splice(0).join('\n')
       images = []
     }

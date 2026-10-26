@@ -11,6 +11,8 @@ class JsonlLocalAgentStore {
   constructor(dir) {
     this.kind = 'jsonl'
     this.dir = dir
+    this.agents = { delete: async (input) => log({ call: 'store.agents.delete', storeDir: dir, filter: input.filter }) }
+    this.runs = { delete: async (input) => log({ call: 'store.runs.delete', storeDir: dir, filter: input.filter }) }
   }
 }
 
@@ -82,6 +84,9 @@ function makeAgent(agentId) {
           await delta({ type: 'text-delta', text: 'still here' })
           finish({ id, status: 'finished' })
         })
+      } else if (message.text === 'revoked' || message.text === 'expired') {
+        // `wait()` resolves a failed run: the SDK reduces its AuthenticationError to a RunError code.
+        later(() => finish({ id, status: 'error', error: { message: 'Invalid API key', code: message.text === 'revoked' ? 'unauthenticated' : 'AUTH_TOKEN_EXPIRED' } }))
       } else if (message.text === 'crash') {
         later(() => {
           Promise.reject(new Error('an SDK bug nobody awaited'))

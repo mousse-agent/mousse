@@ -75,15 +75,28 @@ const timer = setTimeout(() => {
   fail(`the Cursor host did not start in time\n${stderr}`)
 }, 30_000)
 let buffer = ''
+let probed = false
 child.stdout.on('data', (chunk) => {
   buffer += chunk
-  if (!buffer.includes('"event":"ready"')) return
+  if (buffer.includes('"event":"ready"') && !probed) {
+    probed = true
+    console.log(`host: started with ${electron}`)
+    // Where the SDK finds its helpers from the packaged host: it must be a file it can run.
+    child.stdin.write(`${JSON.stringify({ id: 1, method: 'probe', params: {} })}\n`)
+    return
+  }
+  const reply = buffer.split('\n').map((line) => { try { return JSON.parse(line) } catch { return undefined } }).find((message) => message?.id === 1)
+  if (!reply) return
   clearTimeout(timer)
-  console.log(`host: started with ${electron}`)
+  const found = reply.result?.rg
+  if (!found || !found.includes('app.asar.unpacked')) fail(`the SDK would look for rg at ${found ?? 'nothing'}, not under app.asar.unpacked`)
+  const ran = spawnSync(found, ['--version'], { encoding: 'utf8', env: { PATH: '' }, timeout: 15_000, windowsHide: true })
+  if (ran.status !== 0) fail(`the rg the SDK finds does not run: ${ran.error?.message ?? ran.stderr}`)
+  console.log(`host: the SDK finds rg at ${found}`)
   child.stdin.end()
 })
 child.on('exit', (code) => {
   clearTimeout(timer)
-  if (!buffer.includes('"event":"ready"')) fail(`the Cursor host exited with code ${code} before it was ready\n${stderr}`)
+  if (!probed) fail(`the Cursor host exited with code ${code} before it was ready\n${stderr}`)
   console.log('check-packaged-helpers: ok')
 })

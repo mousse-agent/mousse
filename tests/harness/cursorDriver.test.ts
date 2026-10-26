@@ -9,7 +9,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { CursorHostCallError, CursorHostClient } from '../../src/mms/harness/cursor/hostClient'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
+import { isCursorAuthFailure, redactCursorText } from '../../src/mms/harness/hosts/cursorProtocol'
 import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
 import type { Harness, TurnSpec } from '../../src/mms/harness/gateway'
 import { instanceStateDir } from '../../src/mms/harness/instances'
@@ -29,7 +31,7 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
-function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[0]>['connect']>, initial?: (home: string) => unknown) {
+function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[0]>['connect']>, initial?: (home: string) => unknown, extra: { loadDeadlineMs?: number } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-cursor-driver-'))
   homes.push(home)
   const stateDir = instanceStateDir(home, INSTANCE)
@@ -38,12 +40,12 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
   if (initial) writeFileSync(join(stateDir, 'cursor.json'), JSON.stringify(initial(home)))
   let stored: unknown = { [INSTANCE]: { driver: 'cursor', enabled: true, config: { displayName: 'Work' } } }
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
-  const harness = testHarness({ drivers: [cursorDriver({ connect, cancelDeadlineMs: 200 })], instances, profileHome: home })
+  const harness = testHarness({ drivers: [cursorDriver({ connect, cancelDeadlineMs: 200, ...extra })], instances, profileHome: home })
   const notices: Array<[string, string]> = []
   harness.setLiveHost({ notice: (threadId, text) => notices.push([threadId, text]) })
   harnesses.push(harness)
   const texts = new Map<string, string>()
-  const spec = (threadId: string, binding: TurnSpec['binding'], options: { prompt?: string; history?: string; signal?: AbortSignal } = {}): TurnSpec => ({
+  const spec = (threadId: string, binding: TurnSpec['binding'], options: { prompt?: string; history?: string; signal?: AbortSignal; mcp?: { url: string; token: string } } = {}): TurnSpec => ({
     binding,
     input: {
       threadId,
@@ -66,7 +68,7 @@ function setup(connect: NonNullable<NonNullable<Parameters<typeof cursorDriver>[
       usage: () => {}
     } as unknown as TurnSpec['sink'],
     control: { drainSteer: () => undefined, heartbeat: () => {} } as unknown as TurnSpec['control'],
-    host: { mcp: null, context: { nativeHistoryAfterTurn: (text: string) => text } } as unknown as TurnSpec['host']
+    host: { mcp: options.mcp ?? null, context: { nativeHistoryAfterTurn: (text: string) => text } } as unknown as TurnSpec['host']
   })
   const turn = async (threadId: string, options: Parameters<typeof spec>[2] = {}) => {
     const binding = await harness.bind(harness.resolveStored({ instanceId: INSTANCE, llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent' })
@@ -201,26 +203,181 @@ describe('Cursor behind the gateway', () => {
     expect(host.calls('create')[0]).toMatchObject({ apiKey: 'replay-key', autoReview: true, settingSources: ['project', 'user', 'team', 'mdm', 'plugins'] })
   })
 
-  it('a stop that misses the deadline ends the host; the turn ends once, interrupted', async () => {
+  it('a stop that misses the deadline ends the host: both live turns end once, interrupted, and the other thread is told why', async () => {
     const host = new FakeCursorHost({
-      create: () => ({ agentId: 'agent-1' }),
-      send: () => ({ runId: 'run-1' }),
+      create: (_params, fake) => ({ agentId: `agent-${fake.calls('create').length}` }),
+      send: (params) => ({ runId: `run-${String(params.agentId).slice(-1)}` }),
       // Cursor never confirms the cancel.
       cancel: () => new Promise(() => {})
     })
-    const { turn } = setup(host.connect)
-    const handle = await turn('thread')
-    await vi.waitFor(() => expect(host.calls('send')).toHaveLength(1))
-    await vi.waitFor(() => expect(handle.providerRef()?.sessionId).toBe('agent-1'))
+    const { turn, notices } = setup(host.connect)
+    const stuck = await turn('a')
+    await vi.waitFor(() => expect(stuck.providerRef()?.sessionId).toBe('agent-1'))
+    const other = await turn('b')
+    await vi.waitFor(() => expect(host.calls('send')).toHaveLength(2))
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
-      const interrupted = handle.interrupt()
+      const interrupted = stuck.interrupt()
       await vi.advanceTimersByTimeAsync(10_000)
       expect(await interrupted).toBe('interrupted')
     } finally {
       vi.useRealTimers()
     }
-    expect(await handle.result).toMatchObject({ aborted: true })
+    expect(await stuck.result).toMatchObject({ aborted: true })
+    expect(await other.result).toMatchObject({ aborted: true })
     expect(host.transports).toHaveLength(1)
+    expect(notices.filter(([threadId, text]) => threadId === 'b' && text.includes('restarted')).map(([, text]) => text)).toEqual(['Work was restarted to stop another chat, so this reply was cut short.'])
+    expect(notices.some(([threadId, text]) => threadId === 'a' && text.includes('restarted'))).toBe(false)
+  })
+})
+
+describe('Stop before the run exists', () => {
+  const held = () => {
+    let release!: (value: { agentId: string }) => void
+    const promise = new Promise<{ agentId: string }>((resolve) => { release = resolve })
+    return { promise, release }
+  }
+
+  it('a Stop while the agent is still being created ends the turn once, interrupted; the late agent is closed and removed', async () => {
+    const creating = held()
+    const host = new FakeCursorHost({ create: () => creating.promise, close: () => ({}), prune: () => ({}) })
+    const { turn, state } = setup(host.connect)
+    const handle = await turn('thread')
+    await vi.waitFor(() => expect(host.calls('create')).toHaveLength(1))
+    // The ref names the turn before its agent exists.
+    expect(handle.providerRef()?.sessionId).toMatch(/^cursor-turn:/)
+    expect(await handle.interrupt()).toBe('interrupted')
+    expect(await handle.result).toMatchObject({ aborted: true })
+    creating.release({ agentId: 'late-agent' })
+    await vi.waitFor(() => expect(host.calls('close')).toEqual([{ agentId: 'late-agent' }]))
+    await vi.waitFor(() => expect(host.calls('prune')).toEqual([expect.objectContaining({ agentIds: ['late-agent'] })]))
+    expect(host.calls('send')).toEqual([])
+    expect(() => state()).toThrow()
+  })
+
+  it('a Stop while the saved agent is reopening ends the turn once, interrupted; the late agent is closed and kept', async () => {
+    const resuming = held()
+    const host = new FakeCursorHost({ resume: () => resuming.promise, close: () => ({}) })
+    const { turn, state } = setup(host.connect, (home) => ({
+      sessions: { thread: { agentId: 'agent-1', cwd: home, historyKey: createHash('sha256').update('').digest('hex'), runIds: [] } }
+    }))
+    const stop = new AbortController()
+    const handle = await turn('thread', { signal: stop.signal })
+    await vi.waitFor(() => expect(host.calls('resume')).toHaveLength(1))
+    stop.abort()
+    expect(await handle.result).toMatchObject({ aborted: true })
+    resuming.release({ agentId: 'agent-1' })
+    await vi.waitFor(() => expect(host.calls('close')).toEqual([{ agentId: 'agent-1' }]))
+    expect(host.calls('create')).toEqual([])
+    expect(state().sessions.thread?.agentId).toBe('agent-1')
+  })
+
+  it('a saved agent that does not reopen within the load deadline hands the history to a new one', async () => {
+    const host = new FakeCursorHost({
+      resume: () => new Promise(() => {}),
+      create: () => ({ agentId: 'agent-2' }),
+      close: () => ({}),
+      prune: () => ({}),
+      send: (_params, fake) => {
+        setTimeout(() => fake.emit({ event: 'run_end', runId: 'run-1', status: 'finished' }), 1)
+        return { runId: 'run-1' }
+      }
+    })
+    const { turn, notices } = setup(host.connect, (home) => ({
+      sessions: { thread: { agentId: 'agent-1', cwd: home, historyKey: createHash('sha256').update('').digest('hex'), runIds: [] } }
+    }), { loadDeadlineMs: 50 })
+    expect(await (await turn('thread')).result).toMatchObject({ aborted: false })
+    expect(notices).toContainEqual(['thread', "Work could not reopen this chat's agent, so the chat history was handed to a new one."])
+    expect(host.calls('create')).toHaveLength(1)
+    await vi.waitFor(() => expect(host.calls('prune')).toEqual([expect.objectContaining({ agentIds: ['agent-1'] })]))
+  })
+})
+
+describe('A host that ends while a send is in flight', () => {
+  it('after Cursor accepted the prompt but before it answered: the turn ends once, interrupted, and the next one starts over without resending', async () => {
+    const host = new FakeCursorHost({
+      create: (_params, fake) => ({ agentId: `agent-${fake.calls('create').length}` }),
+      prune: () => ({}),
+      send: (params, fake) => {
+        if (fake.calls('send').length === 1) {
+          // The prompt reached Cursor (a tool already started), then the host died before its reply.
+          fake.emit({ event: 'delta', runId: 'run-1', update: { type: 'tool-call-started', callId: 'c1', toolCall: { type: 'shell', args: { command: 'npm test' } } } })
+          setTimeout(() => fake.crash(), 1)
+          return new Promise(() => {})
+        }
+        setTimeout(() => fake.emit({ event: 'run_end', runId: 'run-2', status: 'finished' }), 1)
+        return { runId: 'run-2' }
+      }
+    })
+    const { turn, state } = setup(host.connect)
+    expect(await (await turn('thread', { prompt: 'Fix the build' })).result).toMatchObject({ aborted: true })
+    // Its agent may hold a half-run prompt: it is never resumed.
+    expect(state().sessions.thread).toBeUndefined()
+    expect(await (await turn('thread', { prompt: 'Try again', history: 'user: Fix the build' })).result).toMatchObject({ aborted: false })
+    expect(host.calls('send').map((call) => call.text)).toEqual([
+      'Fix the build',
+      'Previous conversation (context only; do not repeat earlier actions):\nuser: Fix the build\n\nCurrent request:\nTry again'
+    ])
+    expect(host.calls('prune')).toEqual([expect.objectContaining({ agentIds: ['agent-1'] })])
+  })
+
+  it('during active-run recovery: the turn ends once, interrupted', async () => {
+    const host = new FakeCursorHost({
+      resume: (params) => ({ agentId: params.agentId }),
+      send: () => {
+        throw hostFailure('Agent agent-1 already has active run run-0', { activeRun: true })
+      },
+      listRuns: (_params, fake) => {
+        setTimeout(() => fake.crash(), 1)
+        return new Promise(() => {})
+      }
+    })
+    const { turn } = setup(host.connect, (home) => ({
+      sessions: { thread: { agentId: 'agent-1', cwd: home, historyKey: createHash('sha256').update('').digest('hex'), runIds: ['run-0'] } }
+    }))
+    expect(await (await turn('thread')).result).toMatchObject({ aborted: true })
+    expect(host.calls('send')).toHaveLength(1)
+  })
+})
+
+describe('the Mousse MCP token', () => {
+  it('a new token does not reopen the agent: each send carries the current one', async () => {
+    const host = new FakeCursorHost({
+      create: () => ({ agentId: 'agent-1' }),
+      send: (_params, fake) => {
+        const runId = `run-${fake.calls('send').length}`
+        setTimeout(() => fake.emit({ event: 'delta', runId, update: { type: 'text-delta', text: 'ok' } }), 1)
+        setTimeout(() => fake.emit({ event: 'run_end', runId, status: 'finished' }), 2)
+        return { runId }
+      }
+    })
+    const { turn } = setup(host.connect)
+    await (await turn('thread', { mcp: { url: 'http://127.0.0.1/mcp', token: 'first' } })).result
+    await (await turn('thread', { history: 'ok', mcp: { url: 'http://127.0.0.1/mcp', token: 'second' } })).result
+    expect(host.calls('create')).toHaveLength(1)
+    expect(host.calls('resume')).toEqual([])
+    expect(host.calls('send').map((call) => (call.mcpServers as { mousse: { headers: Record<string, string> } }).mousse.headers.Authorization)).toEqual(['Bearer first', 'Bearer second'])
+  })
+})
+
+describe('the host client', () => {
+  it('drops the updates of a run whose send was never answered when the host exits', () => {
+    const fake = new FakeCursorHost()
+    const client = new CursorHostClient(fake.connect)
+    void client.request('send', { agentId: 'a', text: 'hi' }).catch(() => undefined)
+    fake.emit({ event: 'delta', runId: 'orphan', update: { type: 'text-delta', text: 'x' } })
+    expect((client as unknown as { early: Map<string, unknown> }).early.size).toBe(1)
+    fake.crash()
+    expect((client as unknown as { early: Map<string, unknown> }).early.size).toBe(0)
+  })
+
+  it('classifies the pinned SDK refusal codes as a sign-out, and redacts keys from host logs', () => {
+    expect(new CursorHostCallError({ message: 'Invalid API key', code: 'unauthenticated' }).auth).toBe(true)
+    expect(new CursorHostCallError({ message: 'expired', code: 'AUTH_TOKEN_EXPIRED' }).auth).toBe(true)
+    expect(new CursorHostCallError({ message: 'busy', code: 'resource_exhausted' }).auth).toBeUndefined()
+    expect(isCursorAuthFailure({ name: 'AuthenticationError' })).toBe(true)
+    const redacted = redactCursorText('Authorization: Bearer abc.def apiKey="key_1234567890abcdef" crsr_abcdefghijkl ConnectError: [unavailable] reset')
+    for (const secret of ['abc.def', 'key_1234567890abcdef', 'crsr_abcdefghijkl']) expect(redacted).not.toContain(secret)
+    expect(redacted).toContain('ConnectError: [unavailable] reset')
   })
 })

@@ -10,6 +10,8 @@
 {"dir":"in","frame":{"kind":"reply","method":"send","result":{"runId":"run-b"}}}
 {"dir":"in","frame":{"kind":"delta","runId":"run-b","update":{"type":"text-delta","text":"Drafting"}}}
 {"dir":"in","frame":{"kind":"exit","detail":"exit code 1"}}
+{"dir":"out","frame":{"kind":"request","method":"prune","params":{"agentIds":["agent-a","agent-b"]}}}
+{"dir":"in","frame":{"kind":"reply","method":"prune","result":{}}}
 {"dir":"out","frame":{"kind":"request","method":"create","params":{"apiKey":"replay-key","model":{"id":"default"},"mode":"agent","settingSources":["project","user","team","mdm","plugins"],"autoReview":true}}}
 {"dir":"in","frame":{"kind":"reply","method":"create","result":{"agentId":"agent-c"}}}
 {"dir":"out","frame":{"kind":"request","method":"send","params":{"agentId":"agent-c","text":"Previous conversation (context only; do not repeat earlier actions):\nuser: Fix the build\n\nCurrent request:\nTry again","model":{"id":"default"},"mode":"agent"}}}

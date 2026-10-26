@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
+import { isCursorAuthFailure, redactCursorText } from '../hosts/cursorProtocol'
 import type {
   CursorHostError,
   CursorHostMessage,
@@ -32,7 +33,8 @@ export class CursorHostCallError extends Error implements CursorHostError {
     if (error.code) this.code = error.code
     if (error.status !== undefined) this.status = error.status
     if (error.activeRun) this.activeRun = true
-    if (error.auth) this.auth = true
+    // The pinned SDK's refusal codes count even when the host did not mark them.
+    if (error.auth || isCursorAuthFailure(error)) this.auth = true
   }
 }
 
@@ -105,7 +107,7 @@ export function spawnCursorHost(env: InstanceEnv, script: string, extra: NodeJS.
   const exit = (detail?: string) => {
     if (exited) return
     exited = true
-    if (stderrTail.trim()) console.warn('[harness] cursor host stderr', stderrTail.trim().split('\n').slice(-5).join('\n'))
+    if (stderrTail.trim()) console.warn('[harness] cursor host stderr', redactCursorText(stderrTail.trim().split('\n').slice(-5).join('\n')))
     for (const listener of exitListeners) listener(detail)
   }
   child.once('error', (error) => exit(error.message))
@@ -172,7 +174,11 @@ export class CursorHostClient {
       // keeps its updates and ends when it is watched.
       const runs = [...this.runs.values()]
       this.runs.clear()
-      for (const queued of this.early.values()) queued.push((listener) => listener.end({ hostExited: true }))
+      for (const [runId, queued] of this.early) {
+        // A run whose send was never answered has no turn to read it: its updates go.
+        if (this.runGenerations.has(runId)) queued.push((listener) => listener.end({ hostExited: true }))
+        else this.early.delete(runId)
+      }
       this.loginUrls.clear()
       for (const run of runs) run.end({ hostExited: true })
       for (const listener of this.exitListeners) listener()

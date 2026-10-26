@@ -1,19 +1,23 @@
 // Adapted from T3 Code (MIT, © 2026 T3 Tools Inc.): the unhandled-rejection guard
 // (`CursorSdk.ts`), transport-failure detection (`transportFailure.ts`) and the run lifecycle
 // around `agent.send` (`CursorAgentSdk.ts`). See THIRD_PARTY_NOTICES.md.
+import { existsSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { dirname, join, parse, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import type * as CursorSdk from '@cursor/sdk'
-import type {
-  CursorAgentSetup,
-  CursorHostError,
-  CursorHostMessage,
-  CursorHostMethod,
-  CursorHostMethods,
-  CursorHostRequest,
-  CursorLocal,
-  CursorUsage
+import {
+  isCursorAuthFailure,
+  redactCursorText,
+  type CursorAgentSetup,
+  type CursorHostError,
+  type CursorHostMessage,
+  type CursorHostMethod,
+  type CursorHostMethods,
+  type CursorHostRequest,
+  type CursorLocal,
+  type CursorUsage
 } from './cursorProtocol'
 
 /**
@@ -128,14 +132,44 @@ function isCancellation(cause: unknown): boolean {
 export function hostError(cause: unknown): CursorHostError {
   const error = cause instanceof Error ? cause : new Error(String(cause))
   const { code, status } = error as { code?: unknown; status?: unknown }
+  const known = { name: error.name, ...(typeof code === 'string' ? { code } : {}), ...(typeof status === 'number' ? { status } : {}) }
   return {
     message: error.message || 'The Cursor SDK failed.',
-    ...(error.name ? { name: error.name } : {}),
-    ...(typeof code === 'string' ? { code } : {}),
-    ...(typeof status === 'number' ? { status } : {}),
+    ...known,
     ...(/already has active run/i.test(error.message) ? { activeRun: true } : {}),
-    ...(error.name === 'AuthenticationError' || status === 401 ? { auth: true } : {})
+    ...(isCursorAuthFailure(known) ? { auth: true } : {})
   }
+}
+
+/** A failed run's `RunError` (`run.wait()` resolves failures): an auth code signs the entry out. */
+export function runError(error: { message: string; code?: string }): CursorHostError {
+  return { message: error.message, ...(error.code ? { code: error.code } : {}), ...(isCursorAuthFailure({ ...(error.code ? { code: error.code } : {}) }) ? { auth: true } : {}) }
+}
+
+/** One line about a failure for stderr: its name, message and code, never the SDK object. */
+function describeFailure(reason: unknown): string {
+  if (!(reason instanceof Error)) return redactCursorText(String(reason)).slice(0, 500)
+  const code = (reason as { code?: unknown }).code
+  return redactCursorText(`${reason.name}: ${reason.message}${typeof code === 'string' ? ` (${code})` : ''}`).slice(0, 500)
+}
+
+/**
+ * The SDK's helper lookup in 1.0.35 (`platform-package-locator`): up from the entry script, the
+ * first `node_modules/@cursor/sdk-<platform>-<arch>/bin/<name>` that is a file.
+ */
+function helperPath(name: string): string | undefined {
+  const exe = process.platform === 'win32' ? `${name}.exe` : name
+  const start = process.argv[1] ? dirname(resolve(process.argv[1])) : process.cwd()
+  const root = parse(start).root
+  for (let dir = start; dir !== root; dir = dirname(dir)) {
+    const candidate = join(dir, 'node_modules', '@cursor', `sdk-${process.platform}-${process.arch}`, 'bin', exe)
+    try {
+      if (existsSync(candidate) && statSync(candidate).isFile()) return candidate
+    } catch {
+      // Not readable here; keep walking up.
+    }
+  }
+  return undefined
 }
 
 // -- Host ---------------------------------------------------------------------------------------
@@ -164,7 +198,7 @@ function main(): void {
   process.on('unhandledRejection', (reason) => {
     if (isCursorShellSpawnFailure(reason)) return console.error('[cursor-host] a Cursor shell failed to spawn; the host keeps running.')
     if (isCursorClosedStreamWrite(reason)) return console.error('[cursor-host] the Cursor SDK wrote to a closed exec stream; the host keeps running.')
-    console.error('[cursor-host] unhandled rejection', reason)
+    console.error('[cursor-host] unhandled rejection', describeFailure(reason))
     process.exit(1)
   })
 
@@ -245,7 +279,7 @@ function main(): void {
               event: 'run_end',
               runId: run.id,
               status: result.status,
-              ...(result.error ? { error: { message: result.error.message, ...(result.error.code ? { code: result.error.code } : {}) } } : {}),
+              ...(result.error ? { error: runError(result.error) } : {}),
               ...(usage ? { usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: usage.cacheReadTokens, cacheWriteTokens: usage.cacheWriteTokens } } : {}),
               ...(failure ? { transportFailure: failure } : {})
             })
@@ -311,6 +345,22 @@ function main(): void {
       const controller = logins.get(loginId)
       controller?.abort()
       return { cancelled: Boolean(controller) }
+    },
+    prune: async ({ storeDir, agentIds }) => {
+      if (!agentIds.length) return {}
+      for (const agentId of agentIds) {
+        agents.get(agentId)?.close()
+        agents.delete(agentId)
+      }
+      const target = store(storeDir)
+      await target.runs.delete({ filter: { agentIds } })
+      await target.agents.delete({ filter: { agentIds } })
+      return {}
+    },
+    probe: async () => {
+      const rg = helperPath('rg')
+      const sandbox = helperPath('cursorsandbox')
+      return { ...(rg ? { rg } : {}), ...(sandbox ? { sandbox } : {}) }
     }
   }
 

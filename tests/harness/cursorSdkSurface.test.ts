@@ -27,5 +27,6 @@ describe('the pinned Cursor SDK', () => {
     const program = ts.createProgram([join(root, 'src', 'mms', 'harness', 'hosts', 'cursorHost.ts'), join(__dirname, 'cursorSdkSurface.types.ts')], { ...options, noEmit: true })
     const diagnostics = ts.getPreEmitDiagnostics(program).map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'))
     expect(diagnostics).toEqual([])
-  }, 60_000)
+    // Type-checking the SDK's declarations takes about a second alone, and minutes on a loaded machine.
+  }, 300_000)
 })

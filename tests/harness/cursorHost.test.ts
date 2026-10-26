@@ -115,6 +115,26 @@ describe('the Cursor host process', () => {
     expect(calls().find((call) => call.call === 'send')).toMatchObject({ text: 'hello', model: { id: 'gpt-5' }, mode: 'agent', keys: ['mode', 'model', 'onDelta'] })
   })
 
+  it.each(['revoked', 'expired'])('signs the entry out when a run fails with an auth code the SDK reduced to a RunError (%s)', async (prompt) => {
+    const { runtime, turn } = setup()
+    await runtime.adoptApiKey!('user-key')
+    await expect(turn(prompt)).rejects.toThrow(/Sign in to Work/)
+    expect(await runtime.auth({ force: false })).toMatchObject({ state: 'signed_out', message: expect.stringMatching(/refused/) })
+    expect(runtime.configured()).toBe(false)
+  })
+
+  it('removes the agents of a replaced key from the store, through the host', async () => {
+    const { runtime, calls, turn, stateDir } = setup()
+    await runtime.adoptApiKey!('user-key')
+    await turn('hello')
+    await runtime.adoptApiKey!('other-key')
+    const storeDir = join(stateDir, 'cursor-store')
+    await expect.poll(() => calls().filter((call) => String(call.call).startsWith('store.'))).toEqual([
+      { call: 'store.runs.delete', storeDir, filter: { agentIds: ['agent-1'] } },
+      { call: 'store.agents.delete', storeDir, filter: { agentIds: ['agent-1'] } }
+    ])
+  })
+
   it('fails a turn whose reply is only a transport error', async () => {
     const { runtime, turn } = setup()
     await runtime.adoptApiKey!('user-key')

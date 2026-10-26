@@ -82,6 +82,8 @@ export interface CursorDriverOptions {
   now?: () => number
   /** Test seam: how long a cancel may take before the host is ended. */
   cancelDeadlineMs?: number
+  /** Test seam: how long reopening a saved agent may take. */
+  loadDeadlineMs?: number
 }
 
 /** The account a key belongs to, without the key itself: an HMAC when Cursor cannot say. */
@@ -196,6 +198,7 @@ function createCursorRuntime(context: DriverContext, options: CursorDriverOption
     settingSources: CURSOR_SETTING_SOURCES,
     store: {
       saved: (threadId) => state.sessions?.[threadId],
+      threads: () => Object.keys(state.sessions ?? {}),
       setSaved: (threadId, saved) => {
         if (saved) state.sessions = { ...state.sessions, [threadId]: saved }
         else if (state.sessions) {
@@ -213,7 +216,8 @@ function createCursorRuntime(context: DriverContext, options: CursorDriverOption
     },
     signInRequiredMessage: `Sign in to ${label} in Settings → Providers before chatting`,
     notice: (threadId, text) => liveHost?.notice?.(threadId, text),
-    ...(options.cancelDeadlineMs !== undefined ? { cancelDeadlineMs: options.cancelDeadlineMs } : {})
+    ...(options.cancelDeadlineMs !== undefined ? { cancelDeadlineMs: options.cancelDeadlineMs } : {}),
+    ...(options.loadDeadlineMs !== undefined ? { loadDeadlineMs: options.loadDeadlineMs } : {})
   })
 
   /** Who a key belongs to: `me`, or the key's HMAC when Cursor cannot be asked. Throws when Cursor refuses the key. */
@@ -237,7 +241,8 @@ function createCursorRuntime(context: DriverContext, options: CursorDriverOption
 
   /** A key saved for this instance: the account generation moves on, and the old agents go. */
   const credentialChanged = () => {
-    sessions.closeAll()
+    // Agents made under another key are not resumed: they leave the store.
+    sessions.forgetAll()
     state.sessions = {}
     delete state.refused
     delete state.signedOutHere
@@ -366,14 +371,14 @@ function createCursorRuntime(context: DriverContext, options: CursorDriverOption
     signIn,
     signOut: async () => {
       loginGeneration += 1
-      sessions.closeAll()
+      sessions.forgetAll()
       vault.clear()
       state = { signedOutHere: true, ...(state.models ? { models: state.models } : {}) }
       save()
     },
     adoptApiKey: (apiKey) => saveApiKey(apiKey),
     forgetConversation: (threadId) => sessions.forgetConversation(threadId),
-    terminate: () => sessions.terminate(),
+    terminate: (ref) => sessions.terminate(ref.sessionId),
     setLiveHost: (next) => {
       liveHost = next
     },

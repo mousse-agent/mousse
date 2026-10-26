@@ -1,7 +1,7 @@
 /**
  * The NDJSON protocol between the Cursor driver and its host process (`cursorHost.ts`). One JSON
- * object per line on stdin (requests) and stdout (replies and events). Type-only: neither side
- * imports the other, and nothing here names the Cursor SDK.
+ * object per line on stdin (requests) and stdout (replies and events). Neither side imports the
+ * other, and nothing here loads the Cursor SDK.
  */
 
 /** Where an agent's local state lives and which folder it works in. */
@@ -47,6 +47,13 @@ export interface CursorHostMethods {
   /** Browser sign-in; the link arrives as a `login_url` event for the same `loginId`. */
   login: { params: { loginId: string }; result: { apiKey: string; apiKeyExpiresAtMs?: number; email?: string } }
   loginCancel: { params: { loginId: string }; result: { cancelled: boolean } }
+  /** Removes agents no thread uses any more (their runs and their rows) from the store. */
+  prune: { params: { storeDir: string; agentIds: string[] }; result: Record<string, never> }
+  /**
+   * Where the SDK finds its helpers from this process: the same walk up from the entry script it
+   * makes in 1.0.35 (`platform-package-locator`), for the packaged-build check.
+   */
+  probe: { params: Record<string, never>; result: { rg?: string; sandbox?: string } }
 }
 
 export type CursorHostMethod = keyof CursorHostMethods
@@ -80,6 +87,25 @@ export interface CursorHostError {
   activeRun?: boolean
   /** The SDK refused the credential. */
   auth?: boolean
+}
+
+/**
+ * Codes the pinned SDK (1.0.35) gives a refused credential: the Connect code, and the error
+ * details its `AuthenticationError` carries (which `run.wait()` reduces to a `RunError` code).
+ */
+const AUTH_CODES = new Set(['unauthenticated', 'unauthorized', 'not_logged_in', 'invalid_auth_id', 'agent_requires_login', 'auth_token_not_found', 'auth_token_expired'])
+
+/** Whether an SDK failure means Cursor refused the credential. */
+export function isCursorAuthFailure(error: { name?: string; code?: string; status?: number }): boolean {
+  return error.name === 'AuthenticationError' || error.status === 401 || (typeof error.code === 'string' && AUTH_CODES.has(error.code.toLowerCase()))
+}
+
+/** SDK text for a log line, with anything that looks like a key or a bearer token removed. */
+export function redactCursorText(text: string): string {
+  return text
+    .replace(/(bearer\s+)[^\s"',]+/gi, '$1[redacted]')
+    .replace(/("?(?:api_?key|authorization|token)"?\s*[:=]\s*"?)[^\s"',}]+/gi, '$1[redacted]')
+    .replace(/\b(?:key|crsr|cursor)_[A-Za-z0-9_-]{8,}/g, '[redacted]')
 }
 
 export type CursorRunStatus = 'finished' | 'error' | 'cancelled'
