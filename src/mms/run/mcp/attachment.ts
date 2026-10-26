@@ -39,6 +39,11 @@ export function stdioBridgeCommand(attachment: McpAttachment, cli: CliCommand = 
   }
 }
 
+/** `mousse-cli engine chatgpt-token <endpoint> <leaseId>`: a managed Codex's `auth.command`. */
+export function chatgptTokenCommand(endpoint: string, leaseId: string, cli: CliCommand = defaultMousseCliCommand()): CliCommand {
+  return { command: cli.command, args: [...cli.args, 'engine', 'chatgpt-token', endpoint, leaseId], env: { ...cli.env } }
+}
+
 /** Claude Agent SDK `mcpServers` (SPEC §15.2): the Mousse server over HTTP, or none. */
 export function claudeMcpServers(attachment: McpAttachment | null | undefined): Record<string, {
   type: 'http'

@@ -1,10 +1,19 @@
 import { exitWithError } from './output'
-import { runCliMain } from './runCliMain'
 import { isElectronMainProcess, stripCliModeArgs } from './cliLaunch'
 import { configureElectronContext, finishElectronCli } from './electronContext'
+import { isChatgptTokenArgv } from './fastpath/chatgptToken'
 
 async function main(): Promise<void> {
   const argv = stripCliModeArgs(process.argv.slice(2))
+  // Codex runs the token command for every token it needs: it loads nothing else.
+  if (isChatgptTokenArgv(argv)) {
+    const { runChatgptToken } = await import('./fastpath/chatgptToken')
+    const code = await runChatgptToken(argv)
+    if (isElectronMainProcess()) (await import('electron')).app.exit(code)
+    else process.exitCode = code
+    return
+  }
+  const { runCliMain } = await import('./runCliMain')
   if (isElectronMainProcess()) {
     const { app } = await import('electron')
     configureElectronContext(app, argv)
