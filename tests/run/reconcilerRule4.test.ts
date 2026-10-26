@@ -238,6 +238,40 @@ describe('Reconciler rule 4: a child result wakes its parent (SPEC §14.3)', () 
     expect(f.reconciler.runOnce().wakes).toMatchObject({ restored: [row.inboxId], steers: [expect.any(String)] })
   })
 
+  describe('what counts as a delivery attempt', () => {
+    it('a payload patch on a pending row is not an attempt: it is flagged after the same 4 attempts', async () => {
+      const { f, parent } = await childFinished({ parentStaysActive: true })
+      const [row] = f.engine.inbox.listPending('parent')
+      f.engine.inbox.patchPayload(row.inboxId, { noticeShown: true })
+      f.engine.inbox.patchPayload(row.inboxId, { noticeShown: false })
+      expect(f.engine.inbox.pendingCount(row.inboxId, 'parent')).toBe(1)
+      failSteers(f, parent.runId, 6)
+      expect(f.engine.inbox.get(row.inboxId)!.payload).toMatchObject({ deliveryFailed: true, attempts: 4 })
+      expect(f.outbox.listForThread('parent').filter((effect) => effect.kind === 'turn.steer')).toHaveLength(4)
+    })
+
+    it('a payload patch on a pending row does not lengthen the backoff', async () => {
+      const { f, parent } = await childFinished({ parentStaysActive: true })
+      const [row] = f.engine.inbox.listPending('parent')
+      f.engine.inbox.patchPayload(row.inboxId, { noticeShown: true })
+      f.engine.inbox.patchPayload(row.inboxId, { noticeShown: false })
+      f.outbox.cancel(f.reconciler.runOnce().wakes.steers[0], f.now(), 'test')
+      f.outbox.cancel(f.reconciler.runOnce().wakes.steers[0], f.now(), 'test')
+      expect(f.reconciler.runOnce().wakes).toMatchObject({ restored: [], steers: [] })
+      // Two attempts, so the wait is the one for two, not for four.
+      tick(f, parent.runId, redeliveryDelayMs(2))
+      expect(f.reconciler.runOnce().wakes).toMatchObject({ restored: [row.inboxId], steers: [expect.any(String)] })
+    })
+
+    it('an event written before `change` existed still counts', async () => {
+      const { f } = await childFinished({ parentStaysActive: true })
+      const [row] = f.engine.inbox.listPending('parent')
+      expect(f.engine.inbox.pendingCount(row.inboxId, 'parent')).toBe(1)
+      f.store.appendEvent({ threadId: 'parent', runId: row.runId, type: 'inbox.status', payload: row })
+      expect(f.engine.inbox.pendingCount(row.inboxId, 'parent')).toBe(2)
+    })
+  })
+
   describe('rows an older version delivered by native steer', () => {
     /** The state master leaves: a steer that succeeded, a run that completed, no marker, row `delivered`. */
     const legacy = async (marker?: 'steerHeldBy') => {
