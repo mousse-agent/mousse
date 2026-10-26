@@ -204,14 +204,6 @@ import {
   type NativeMessageCheckpoint
 } from './nativeContext'
 
-/** One channel turn of a thread (see `OrchestratorService.channelTurns`). */
-interface ChannelTurnEntry {
-  abort: AbortController
-  pendingSteer: string[]
-  promotedSteerIds: string[]
-  runId?: string
-}
-
 interface NormalizedOrchestratorSendRequest {
   content: string
   mode: ChatMode
@@ -534,7 +526,7 @@ export class OrchestratorService extends EventEmitter {
     this.startupDrainScheduled.clear()
     // The shutdown reason marks these turns as cut off by a restart, not stopped by a user.
     for (const session of new Set([this.boundSession, ...this.sessions.values()])) session.activeTurn?.abort.abort(this.lifecycle.signal.reason)
-    for (const turns of this.channelTurns.values()) for (const turn of turns) turn.abort.abort()
+    for (const turn of this.channelTurns.values()) turn.abort.abort()
     this.questions.shutdown()
   }
 
@@ -669,12 +661,11 @@ export class OrchestratorService extends EventEmitter {
   private persistFn?: (threadId?: string | null) => void
   /** Per-thread delayed persist timers (concurrent turns must not suppress each other). */
   private persistTimers = new Map<string, ReturnType<typeof setTimeout>>()
-  /**
-   * In-flight channel turns keyed by mousse thread id; `runId` once the turn is an engine run. A thread can
-   * hold several: one runs while later ones wait for its lease. Each registers and removes its own entry,
-   * oldest first (the oldest is the one that runs), and a Stop reaches all of them.
-   */
-  private channelTurns = new Map<string, Set<ChannelTurnEntry>>()
+  /** In-flight channel turns keyed by mousse thread id; `runId` once the turn is an engine run. */
+  private channelTurns = new Map<
+    string,
+    { abort: AbortController; pendingSteer: string[]; promotedSteerIds: string[]; runId?: string }
+  >()
   /** Optional thread store for durable queue persistence. */
   private threadStore: ThreadDataStore | null = null
   /** Optional Run Engine (Phase 1 dual-write bridge). */
@@ -1953,13 +1944,7 @@ export class OrchestratorService extends EventEmitter {
   /** The thread has a turn in this process: running, admitted (setting up) or a channel turn. */
   private hasLocalTurn(threadId: string): boolean {
     const session = this.boundSession.threadId === threadId ? this.boundSession : this.sessions.get(threadId)
-    return Boolean(session?.activeTurn || session?.turnAdmitted || this.channelTurns.get(threadId)?.size)
-  }
-
-  /** The channel turn that runs now: the oldest one that has not been aborted (later ones wait for its lease). */
-  private activeChannelTurn(threadId: string): ChannelTurnEntry | undefined {
-    for (const turn of this.channelTurns.get(threadId) ?? []) if (!turn.abort.signal.aborted) return turn
-    return undefined
+    return Boolean(session?.activeTurn || session?.turnAdmitted || this.channelTurns.has(threadId))
   }
 
   /**
@@ -3891,8 +3876,8 @@ export class OrchestratorService extends EventEmitter {
         session.activeTurn && !session.activeTurn.abort.signal.aborted
           ? session.activeTurn
           : null
-      const channelTurn = localTurn ? null : this.activeChannelTurn(threadId) ?? null
-      const tracker = localTurn ?? channelTurn
+      const channelTurn = localTurn ? null : this.channelTurns.get(threadId) ?? null
+      const tracker = localTurn ?? (channelTurn && !channelTurn.abort.signal.aborted ? channelTurn : null)
       if (tracker) {
         tracker.promotedSteerIds ??= []
         if (!tracker.promotedSteerIds.includes(item!.id)) {
@@ -4736,17 +4721,13 @@ export class OrchestratorService extends EventEmitter {
    * a channel turn that is an engine run also gets its `stop` recorded against that run.
    */
   abortChannelTurn(threadId: string): boolean {
-    // Every channel turn of the thread: the one that runs and any that wait for its lease.
-    let aborted = false
-    for (const turn of [...(this.channelTurns.get(threadId) ?? [])]) {
-      if (turn.abort.signal.aborted) continue
-      turn.pendingSteer = []
-      turn.promotedSteerIds = []
-      turn.abort.abort()
-      this.recordChannelControl('stop', threadId, turn.runId)
-      aborted = true
-    }
-    return aborted
+    const turn = this.channelTurns.get(threadId)
+    if (!turn || turn.abort.signal.aborted) return false
+    turn.pendingSteer = []
+    turn.promotedSteerIds = []
+    turn.abort.abort()
+    this.recordChannelControl('stop', threadId, turn.runId)
+    return true
   }
 
   /**
@@ -4755,8 +4736,8 @@ export class OrchestratorService extends EventEmitter {
    */
   steerChannelTurn(threadId: string, text: string): boolean {
     const trimmed = text.trim()
-    const turn = this.activeChannelTurn(threadId)
-    if (!trimmed || !turn) return false
+    const turn = this.channelTurns.get(threadId)
+    if (!trimmed || !turn || turn.abort.signal.aborted) return false
     turn.pendingSteer.push(trimmed)
     this.recordChannelControl('steer', threadId, turn.runId)
     return true
@@ -4789,7 +4770,8 @@ export class OrchestratorService extends EventEmitter {
   }
 
   isChannelTurnActive(threadId: string): boolean {
-    return Boolean(this.activeChannelTurn(threadId))
+    const turn = this.channelTurns.get(threadId)
+    return Boolean(turn && !turn.abort.signal.aborted)
   }
 
   /**
@@ -6088,8 +6070,7 @@ export class OrchestratorService extends EventEmitter {
     }
 
     const localPromoted = new Set<string>(turn.promotedSteerIds ?? [])
-    // The turn that runs is the oldest one registered (aborted or not: its steers are still its own).
-    const channelTurn = this.channelTurns.get(session.threadId)?.values().next().value as ChannelTurnEntry | undefined
+    const channelTurn = this.channelTurns.get(session.threadId)
     if (channelTurn) {
       for (const id of channelTurn.promotedSteerIds ?? []) localPromoted.add(id)
     }
@@ -7111,12 +7092,10 @@ export class OrchestratorService extends EventEmitter {
     }
   ): Promise<BackgroundWorkflowTurnResult> {
     const ownedTurn = !opts?.signal
-    const channelTurn: ChannelTurnEntry | null = ownedTurn ? { abort: new AbortController(), pendingSteer: [], promotedSteerIds: [] } : null
-    if (channelTurn) {
-      const turns = this.channelTurns.get(threadId) ?? new Set<ChannelTurnEntry>()
-      turns.add(channelTurn)
-      this.channelTurns.set(threadId, turns)
-    }
+    const channelTurn: { abort: AbortController; pendingSteer: string[]; promotedSteerIds: string[]; runId?: string } | null = ownedTurn
+      ? { abort: new AbortController(), pendingSteer: [], promotedSteerIds: [] }
+      : null
+    if (channelTurn) this.channelTurns.set(threadId, channelTurn)
 
     const signal = AbortSignal.any([opts?.signal ?? channelTurn!.abort.signal, this.lifecycle.signal])
     let lease: ThreadLeaseHandle | null = null
@@ -7246,11 +7225,7 @@ export class OrchestratorService extends EventEmitter {
     } finally {
       // A later channel turn on this thread may have registered itself while this one ran (it waits for the
       // lease): only this turn's own entry is removed.
-      if (channelTurn) {
-        const turns = this.channelTurns.get(threadId)
-        turns?.delete(channelTurn)
-        if (turns?.size === 0) this.channelTurns.delete(threadId)
-      }
+      if (channelTurn && this.channelTurns.get(threadId) === channelTurn) this.channelTurns.delete(threadId)
       if (lease) releaseExecutionLeaseHandle(lease)
       if (admittedSession) {
         this.releaseSessionExecutionLease(admittedSession)

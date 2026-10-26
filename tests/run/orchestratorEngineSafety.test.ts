@@ -229,51 +229,32 @@ describe('orchestrator and engine safety (review round 2)', () => {
     expect(d.engine.getRun(live.runId)!.status).toBe('interrupted')
   }, 30_000)
 
-  describe('two channel turns on one thread (one runs, one waits for its lease)', () => {
-    const overlapping = async () => {
-      const gateA = deferred()
-      const gateB = deferred()
-      releases.push(gateA.resolve, gateB.resolve)
-      const adapter = new HostAdapter(async (input) => {
-        await until(input.prompt === 'A' ? gateA.promise : gateB.promise, input.signal)
-        return `reply to ${input.prompt}`
-      })
-      const d = start(adapter)
-      const threadId = thread(d, 'Overlap')
-      const turns = (d.orch as unknown as { channelTurns: Map<string, Set<unknown>> }).channelTurns
-      const first = d.orch.runChannelTurn(threadId, 'A', d.store)
-      await waitFor(() => adapter.turns.length === 1, 'turn A')
-      // A second channel message arrives while A runs: it registers itself and waits for the thread's lease.
-      const second = d.orch.runChannelTurn(threadId, 'B', d.store)
-      await waitFor(() => turns.get(threadId)?.size === 2, 'turn B to register')
-      return { d, adapter, threadId, turns, first, second, gateA }
-    }
-    /** A turn that does not end within a moment, so a Stop that missed it fails the test quickly. */
-    const endsSoon = <T,>(turn: Promise<T>): Promise<T | 'still running'> =>
-      Promise.race([turn, new Promise<'still running'>((resolve) => setTimeout(() => resolve('still running'), 3_000))])
-
-    it('a channel Stop aborts both, and neither leaves anything registered', async () => {
-      const { d, threadId, turns, first, second } = await overlapping()
-      expect(d.orch.abortChannelTurn(threadId)).toBe(true)
-      expect(await endsSoon(first)).toMatchObject({ aborted: true })
-      expect(await endsSoon(second)).toMatchObject({ aborted: true })
-      expect(turns.has(threadId)).toBe(false)
-      expect(d.orch.isChannelTurnActive(threadId)).toBe(false)
-    }, 30_000)
-
-    it('the thread counts as having a turn while either is registered, and the first ending leaves the second reachable by a Stop', async () => {
-      const { d, adapter, threadId, turns, first, second, gateA } = await overlapping()
-      gateA.resolve()
-      expect(await first).toMatchObject({ text: 'reply to A' })
-      // A's end must not unregister B's turn.
-      expect(turns.get(threadId)?.size).toBe(1)
-      expect((d.orch as unknown as { hasLocalTurn(id: string): boolean }).hasLocalTurn(threadId)).toBe(true)
-      await waitFor(() => adapter.turns.length === 2, 'turn B')
-      expect(d.orch.abortChannelTurn(threadId)).toBe(true)
-      expect(await endsSoon(second)).toMatchObject({ aborted: true })
-      expect(turns.has(threadId)).toBe(false)
-    }, 30_000)
-  })
+  it('a channel turn that ends while a later one waits on the same thread leaves the later turn registered, so a Stop still reaches it', async () => {
+    const gateA = deferred()
+    const gateB = deferred()
+    releases.push(gateA.resolve, gateB.resolve)
+    const adapter = new HostAdapter(async (input) => {
+      await until(input.prompt === 'A' ? gateA.promise : gateB.promise, input.signal)
+      return `reply to ${input.prompt}`
+    })
+    const d = start(adapter)
+    const threadId = thread(d, 'Overlap')
+    const turns = (d.orch as unknown as { channelTurns: Map<string, unknown> }).channelTurns
+    const first = d.orch.runChannelTurn(threadId, 'A', d.store)
+    await waitFor(() => adapter.turns.length === 1, 'turn A')
+    const entryA = turns.get(threadId)
+    // A second channel message arrives while A runs: it registers itself and waits for the thread's lease.
+    const second = d.orch.runChannelTurn(threadId, 'B', d.store)
+    await waitFor(() => turns.get(threadId) !== entryA, 'turn B to register')
+    gateA.resolve()
+    expect(await first).toMatchObject({ text: 'reply to A' })
+    // A's end must not unregister B's turn.
+    expect(turns.has(threadId)).toBe(true)
+    await waitFor(() => adapter.turns.length === 2, 'turn B')
+    expect(d.orch.abortChannelTurn(threadId)).toBe(true)
+    expect(await second).toMatchObject({ aborted: true })
+    expect(turns.has(threadId)).toBe(false)
+  }, 30_000)
 
   it('C4: a wake on a thread busy with a turn the engine does not schedule stays queued (one wake run) and runs once after', async () => {
     const gate = deferred()
