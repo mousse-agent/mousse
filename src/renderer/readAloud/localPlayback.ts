@@ -1,8 +1,9 @@
 /**
- * Timing for local read aloud. Kokoro pads every clip with about 0.3 s of silence before the
- * speech and 0.45 s after it, which sounds like a long pause wherever two clips meet. Clips are
- * trimmed to the speech and joined with a short gap, close to the pause Kokoro leaves between
- * sentences inside one clip. The pure helpers here are tested without audio.
+ * Timing for local read aloud. The local models pad every clip with silence (Kokoro about 0.3 s
+ * before the speech and 0.45 s after it; Kitten, Supertonic and Pocket 0.3 to 0.6 s on each side),
+ * which sounds like a long pause wherever two clips meet. Clips are trimmed to the speech and
+ * joined with a short gap, close to the pause Kokoro leaves between sentences inside one clip. The
+ * pure helpers here are tested without audio.
  */
 
 /** Samples quieter than this count as silence. Kokoro's padding stays far below it. */

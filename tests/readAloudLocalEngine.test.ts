@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SpeakOptions } from '../src/renderer/readAloud/playback'
+import type { LocalTtsModelId } from '../src/shared/readAloud'
 import { PauseGate } from '../src/renderer/readAloud/playback'
 import { splitSpeechSegments } from '../src/renderer/readAloud/speechText'
 
@@ -103,7 +104,7 @@ interface Read {
 
 let engine: Engine
 
-function startRead(text: string, controller = new AbortController()): Read {
+function startRead(text: string, controller = new AbortController(), modelId: LocalTtsModelId = 'kokoro-82m'): Read {
   const onPlaying = vi.fn()
   const options: SpeakOptions = {
     signal: controller.signal,
@@ -113,7 +114,7 @@ function startRead(text: string, controller = new AbortController()): Read {
     pause: new PauseGate(),
     onLevels: () => undefined
   }
-  return { done: engine.speakWithLocalModel(text, options), controller, onPlaying }
+  return { done: engine.speakWithLocalModel(modelId, text, options), controller, onPlaying }
 }
 
 /** Voices every segment, plays every clip to its end and waits for the read to resolve. */
@@ -260,7 +261,7 @@ describe('local read aloud when a read is cut short', () => {
 
 describe('local synthesis for a phone', () => {
   const synthesize = (text: string, onClip: (samples: Float32Array, rate: number) => void | Promise<void>, controller = new AbortController()) =>
-    engine.synthesizeWithLocalModel(text, { signal: controller.signal, voice: undefined, speed: 1, onClip })
+    engine.synthesizeWithLocalModel('kokoro-82m', text, { signal: controller.signal, voice: undefined, speed: 1, onClip })
 
   const answerAll = (): void => {
     while (FakeWorker.all.some((worker) => worker.answerPending())) {
@@ -320,5 +321,94 @@ describe('local synthesis for a phone', () => {
     await done
     await vi.advanceTimersByTimeAsync(0)
     expect(onClip).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('local read aloud with more than one model', () => {
+  it('starts the worker of the model family and tells it which model to run', async () => {
+    await finishRead(startRead(SHORT, new AbortController(), 'kitten-tts-micro'))
+    await finishRead(startRead(OTHER_SHORT))
+
+    const [kitten, kokoro] = FakeWorker.all
+    expect(kitten.url.pathname).toMatch(/kittenWorker\.ts$/)
+    expect(kitten.posted[0]).toEqual({ type: 'init', modelId: 'kitten-tts-micro' })
+    expect(kokoro.url.pathname).toMatch(/kokoroWorker\.ts$/)
+    expect(kokoro.posted[0]).toEqual({ type: 'init', modelId: 'kokoro-82m' })
+  })
+
+  it('replaces the workers when another model is read, and keeps them for the same model', async () => {
+    await finishRead(startRead(SHORT, new AbortController(), 'kitten-tts-nano'))
+    await finishRead(startRead(OTHER_SHORT, new AbortController(), 'kitten-tts-nano'))
+    expect(FakeWorker.all).toHaveLength(1)
+
+    await finishRead(startRead(SHORT, new AbortController(), 'kitten-tts-mini'))
+    expect(FakeWorker.all).toHaveLength(2)
+    expect(FakeWorker.all[0].terminated).toBe(1)
+    expect(FakeWorker.all[1].terminated).toBe(0)
+  })
+
+  it('starts the Supertonic worker for Supertonic', async () => {
+    await finishRead(startRead(SHORT, new AbortController(), 'supertonic-3'))
+    const [worker] = FakeWorker.all
+    expect(worker.url.pathname).toMatch(/supertonicWorker\.ts$/)
+    expect(worker.posted[0]).toEqual({ type: 'init', modelId: 'supertonic-3' })
+    expect(worker.speakRequests()[0]).toMatchObject({ voice: 'F1' })
+  })
+
+  it('runs Supertonic on one worker even for a long message, since one loaded copy is large', async () => {
+    expect(splitSpeechSegments(LONG)).toHaveLength(2)
+    await finishRead(startRead(LONG, new AbortController(), 'supertonic-3'))
+    expect(FakeWorker.all).toHaveLength(1)
+  })
+
+  it('starts the Pocket worker for a Pocket language, with that language\'s default voice', async () => {
+    await finishRead(startRead(SHORT, new AbortController(), 'pocket-tts-fr'))
+    const [worker] = FakeWorker.all
+    expect(worker.url.pathname).toMatch(/pocketWorker\.ts$/)
+    expect(worker.posted[0]).toEqual({ type: 'init', modelId: 'pocket-tts-fr' })
+    expect(worker.speakRequests()[0]).toMatchObject({ voice: 'alba' })
+  })
+
+  it('asks for the default voice of the chosen model', async () => {
+    const read = startRead(SHORT, new AbortController(), 'kitten-tts-micro')
+    const [worker] = FakeWorker.all
+    expect(worker.speakRequests()[0]).toMatchObject({ voice: 'Bella' })
+    await finishRead(read)
+  })
+
+  it('fails the read for a model that no longer exists', async () => {
+    await expect(startRead(SHORT, new AbortController(), 'gone' as LocalTtsModelId).done).rejects.toThrow('not available')
+    expect(FakeWorker.all).toHaveLength(0)
+  })
+
+  it('ends a read when a phone starts another model, instead of leaving it waiting on stopped workers', async () => {
+    const read = startRead(LONG)
+    const outcome = expect(read.done).rejects.toThrow('another voice model')
+    const kokoro = [...FakeWorker.all]
+    const phone = engine.synthesizeWithLocalModel('pocket-tts-fr', SHORT, { signal: new AbortController().signal, voice: undefined, speed: 1, onClip: () => undefined })
+
+    await outcome
+    expect(kokoro.map((worker) => worker.terminated)).toEqual([1, 1])
+    while (FakeWorker.all.some((worker) => worker.answerPending())) {
+      // answer the phone job
+    }
+    await phone
+
+    // Neither job is left counted as running, so the Pocket worker is still dropped when idle.
+    await vi.advanceTimersByTimeAsync(IDLE_MS)
+    expect(FakeWorker.all.at(-1)?.terminated).toBe(1)
+  })
+
+  it('runs Supertonic on one worker for a phone too', async () => {
+    expect(splitSpeechSegments(LONG)).toHaveLength(2)
+    const onClip = vi.fn()
+    const done = engine.synthesizeWithLocalModel('supertonic-3', LONG, { signal: new AbortController().signal, voice: undefined, speed: 1, onClip })
+    expect(FakeWorker.all).toHaveLength(1)
+    while (FakeWorker.all.some((worker) => worker.answerPending())) {
+      await vi.advanceTimersByTimeAsync(0)
+    }
+    await done
+    expect(onClip).toHaveBeenCalledTimes(2)
+    expect(FakeWorker.all).toHaveLength(1)
   })
 })
