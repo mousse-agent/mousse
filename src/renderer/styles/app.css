@@ -4447,6 +4447,94 @@ div.files-asset-preview { display: grid; place-items: center; overflow: auto; pa
   gap: 8px;
 }
 
+.review-comment-button {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.review-tree-comments {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.review-tree-comments + .turn-edits-stat {
+  margin-left: 0;
+}
+
+/* Line comments: marks in the modified editor and the form that writes one. */
+.review-comment-form {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  background: rgba(var(--accent-rgb), 0.06);
+  border-bottom: 1px solid rgba(var(--accent-rgb), 0.08);
+}
+
+.review-comment-form-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.review-comment-input {
+  width: 100%;
+  resize: vertical;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--terminal-bg);
+  border: 1px solid rgba(var(--accent-rgb), 0.18);
+  border-radius: 6px;
+}
+
+.review-comment-form-error {
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.review-comment-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.review-comment-line {
+  background: rgba(var(--accent-rgb), 0.12);
+}
+
+.review-comment-glyph,
+.review-comment-add-glyph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.review-comment-glyph::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgb(var(--accent-rgb));
+}
+
+.review-comment-add-glyph::before {
+  content: '+';
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-secondary);
+}
+
 .review-placeholder {
   flex: 1;
   display: flex;

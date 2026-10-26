@@ -261,7 +261,7 @@ export function parseMousseFileLink(href: string): { path: string; line?: number
   } catch { return null }
 }
 
-function joinReviewPath(root: string, path: string): string {
+export function joinReviewPath(root: string, path: string): string {
   // The shared module has no `process`: the separator follows the shape of the daemon's root string.
   const windows = root.includes('\\') || /^[A-Za-z]:/.test(root)
   const separator = windows ? '\\' : '/'
@@ -303,9 +303,11 @@ export function createReviewComment(input: {
 
 /** Whether two paths name the same file. `platform` is `appInfo.platform`; Windows paths compare case-insensitively. */
 export function sameReviewFile(a: string, b: string, platform: string): boolean {
-  const normalize = (value: string) => {
-    const slashed = value.replace(/\\/g, '/')
-    return platform === 'win32' ? slashed.toLowerCase() : slashed
-  }
-  return normalize(a) === normalize(b)
+  return normalizeReviewPath(a, platform) === normalizeReviewPath(b, platform)
+}
+
+/** The form `sameReviewFile` compares: forward slashes, and lower case on Windows. Usable as a map key. */
+export function normalizeReviewPath(path: string, platform: string): string {
+  const slashed = path.replace(/\\/g, '/')
+  return platform === 'win32' ? slashed.toLowerCase() : slashed
 }
