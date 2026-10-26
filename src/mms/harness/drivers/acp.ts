@@ -77,8 +77,13 @@ export interface AcpRuntimeHooks {
   program?(purpose: AcpPurpose): { resolved: CliLaunch; track?: () => () => void } | undefined
   /** The variables of a process, last (the instance's secrets win). */
   env?(env: NodeJS.ProcessEnv, purpose: AcpPurpose): NodeJS.ProcessEnv
-  /** Runs before every new process (a managed copy checks its files); a throw stops the launch. */
-  beforeLaunch?(): Promise<void>
+  /**
+   * The preset's own file check, run wherever a registry agent's install is checked: before every
+   * new process (turns, checks, sign-in and sign-out included) and on Recheck. A throw stops the launch.
+   */
+  checkInstall?(options: { signal?: AbortSignal; reuse: boolean }): Promise<void>
+  /** Whether sign-out may ask the agent to sign out (`logout`); false leaves the agent's own sign-in alone. */
+  agentLogout?(): boolean
 }
 
 /**
@@ -250,7 +255,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
    * and every file still matches it. A mismatch is kept (the card offers Reinstall) and stops the launch.
    */
   const checkInstall = async (signal?: AbortSignal, options: { reuse?: boolean } = {}): Promise<void> => {
-    if (!registrySource) return
+    if (!registrySource) return hooks.checkInstall?.({ ...(signal ? { signal } : {}), reuse: options.reuse === true })
     const installed = installedNow()
     if (!agents || !installed) throw new Error(`${label} is not installed. Install it in Settings → Providers.`)
     // Only a launch reuses a check made moments ago; Recheck always hashes every file.
@@ -325,10 +330,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     // links as URL elicitations only to clients that accept them.
     clientCapabilities: () => ({ auth: { terminal: ptyRuns() }, elicitation: { url: {} } }),
     closeSessions: true,
-    beforeLaunch: async () => {
-      await checkInstall(undefined, { reuse: true })
-      await hooks.beforeLaunch?.()
-    },
+    beforeLaunch: () => checkInstall(undefined, { reuse: true }),
     store: {
       saved: (threadId) => state.sessions?.[threadId],
       setSaved: (threadId, saved) => {
@@ -600,7 +602,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
     signIn,
     signOut: async () => {
       sessions.closeAll()
-      if (state.auth?.methodId && authMethods().some((method) => method.id === state.auth?.methodId && method.type === 'agent')) {
+      if (hooks.agentLogout?.() !== false && state.auth?.methodId && authMethods().some((method) => method.id === state.auth?.methodId && method.type === 'agent')) {
         try {
           await checkInstall()
           const active = sessions.launch('sign_out')

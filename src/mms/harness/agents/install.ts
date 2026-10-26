@@ -90,6 +90,8 @@ export interface AgentInstallsOptions {
   exitGraceMs?: number
   /** Test seam: the npm registry (default `NPM_REGISTRY`). */
   npmRegistry?: string
+  /** Test seam: the most one expanded program may take (default `MAX_EXPANDED_PROGRAM_BYTES`). */
+  maxExpandedBytes?: number
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -468,6 +470,11 @@ export class AgentInstalls {
     return this.install({ ...input, source: this.packageSource(spec) }, (staging, signal) => this.stagePackageBinary(spec, staging, input, signal))
   }
 
+  /** The version and platform the entry `instanceId` of this profile uses of `agentId`, if any. */
+  reference(agentId: string, instanceId: string): Ref | undefined {
+    return this.readRefs(agentId, this.options.profileId).instances[instanceId]
+  }
+
   /** The source a package binary's install is found under. */
   packageSource(spec: Pick<PackageBinarySpec, 'agentId' | 'version'>): RegistrySource {
     return { kind: 'registry', agentId: spec.agentId, version: spec.version, distribution: 'binary' }
@@ -678,7 +685,7 @@ export class AgentInstalls {
       const packed = containedFile(dist, from.split('/'))
       const target = commandSegments(to)
       if (!target) throw new Error(`${to} is outside the install.`)
-      await expandBrotli(packed, join(dist, ...target), MAX_EXPANDED_PROGRAM_BYTES, signal)
+      await expandBrotli(packed, join(dist, ...target), this.options.maxExpandedBytes ?? MAX_EXPANDED_PROGRAM_BYTES, signal)
       rmSync(packed, { force: true })
     }
     const segments = commandSegments(spec.cmd)

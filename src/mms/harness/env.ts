@@ -78,7 +78,10 @@ export function isInheritedCredential(name: string): boolean {
   return Object.values(INHERITED_CREDENTIALS).some((names) => matchesVariable(names!, name))
 }
 
-/** Variables every process of a driver starts with, set after the inherited credentials are dropped. */
+/**
+ * Variables every process of a driver with a Mousse-owned home starts with, set after the inherited
+ * credentials are dropped.
+ */
 export const DRIVER_VARIABLES: Partial<Record<HarnessDriverKind, Readonly<Record<string, string>>>> = {
   // Grok's own updater opens a console window on Windows and replaces the binary under Mousse;
   // sign-ins started from Mousse say where they come from.
@@ -110,7 +113,8 @@ export function instanceEnv(input: {
     const drop = INHERITED_CREDENTIALS[input.driver] ?? []
     for (const key of Object.keys(env)) if (matchesVariable(drop, key)) delete env[key]
   }
-  const own = DRIVER_VARIABLES[input.driver]
+  // Only a Mousse-owned home gets them: the user's own home runs the CLI as the user set it up.
+  const own = input.home ? DRIVER_VARIABLES[input.driver] : undefined
   if (own) env = withUserEnv(env, { ...own })
   // The standalone Grok install is found after PATH, wherever the instance's home is.
   const extraSearch = input.driver === 'grok' ? [grokStandaloneBin(base)] : []

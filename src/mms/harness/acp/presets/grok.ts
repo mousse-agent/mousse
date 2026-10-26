@@ -30,8 +30,9 @@ export function grokArgs(approvals: PermissionApprovals = 'ask'): string[] {
 export const GROK_SESSION_EDITS_OPTION = 'allow-edits-session'
 
 /**
- * Grok keeps "always allow" for the whole project, beyond the session, so only its session-only
- * edits option is offered; every other `allow_always` is hidden.
+ * Grok keeps "always" answers for the whole project, beyond the session, so only its session-only
+ * edits option is offered; every other `allow_always` and every `reject_always` (a project deny
+ * rule) is hidden.
  */
 export const classifyGrokOption: ClassifyOption = (option) => {
   switch (option.kind) {
@@ -42,8 +43,6 @@ export const classifyGrokOption: ClassifyOption = (option) => {
       return option.optionId === GROK_SESSION_EDITS_OPTION
         ? { optionId: option.optionId, kind: option.kind, label: 'Allow edits for this session', scope: 'session' }
         : null
-    case 'reject_always':
-      return { optionId: option.optionId, kind: option.kind, label: option.name, scope: 'persistent' }
     default:
       return null
   }

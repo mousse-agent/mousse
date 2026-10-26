@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstallOwner } from '../../../shared/harness/status'
 import type { ProviderLoginResult } from '../../../shared/providerAuth'
@@ -129,9 +129,15 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions): 
       return undefined
     }
   }
+  /**
+   * The managed copy this entry installed: only an entry with its own home uses one, and only the
+   * version it holds a reference to. Another entry's copy is never picked up, so an entry on the
+   * user's own home always runs the user's own `grok`.
+   */
   const installedNow = () => {
-    const wanted = spec()
-    return wanted && agents ? agents.installed(agents.packageSource(wanted)) : undefined
+    if (!context.env.home || !agents) return undefined
+    const ref = agents.reference(GROK_AGENT_ID, context.instanceId)
+    return ref ? agents.installed(agents.packageSource({ agentId: GROK_AGENT_ID, version: ref.version })) : undefined
   }
   let verified: { hash: string; atMs: number } | undefined
   let filesChanged: string | undefined
@@ -152,17 +158,14 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions): 
     return resolved ? { resolved, managed: false } : undefined
   }
 
-  /** The variables every Grok process starts with: the instance's own, then its saved key. */
-  const processEnv = (purpose: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
+  /**
+   * The variables every Grok process starts with: the instance's own, then its saved key. The
+   * updater and referrer variables come from the instance environment (private homes only); the
+   * user's own home runs Grok as the user set it up.
+   */
+  const processEnv = (_purpose: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
     const key = savedKey()
-    let result = key ? withUserEnv(env, { [GROK_API_KEY_VARIABLE]: key }) : env
-    // Only probes, checks and sign-ins of the user's own copy run without its updater; its turns
-    // run as the user set it up. A managed copy never updates itself.
-    if (purpose === 'turn' && !program()?.managed && !context.config.env?.GROK_DISABLE_AUTOUPDATER) {
-      result = { ...result }
-      for (const name of Object.keys(result)) if (name.toUpperCase() === 'GROK_DISABLE_AUTOUPDATER') delete result[name]
-    }
-    return result
+    return key ? withUserEnv(env, { [GROK_API_KEY_VARIABLE]: key }) : env
   }
 
   /** The credential a Grok process of this instance would use now. */
@@ -200,7 +203,9 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions): 
       return { resolved: found.resolved, ...(found.root && agents ? { track: () => agents.track(found.root!) } : {}) }
     },
     env: (env, purpose) => processEnv(purpose, env),
-    beforeLaunch: () => checkManaged(undefined, true)
+    checkInstall: ({ signal, reuse }) => checkManaged(signal, reuse),
+    // A sign-out never signs the user's own home out of Grok; a private home is Mousse's own.
+    agentLogout: () => Boolean(context.env.home)
   })
 
   const reading = (): AuthReading => {
@@ -248,6 +253,8 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions): 
     if (!ptyRuns()) {
       throw new Error(`Mousse cannot open a sign-in terminal here. Run \`grok login --device-auth\`${context.env.home ? ` with GROK_HOME=${context.env.home}` : ''} in a terminal, then check again.`)
     }
+    // A managed copy runs only while its files match its install record.
+    await checkManaged(session.abort.signal)
     const home = context.env.home
     const staging = home ? mkdtempSync(join(context.stateDir, 'login-')) : undefined
     try {
@@ -286,7 +293,14 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions): 
         const signedIn = join(staging, 'auth.json')
         if (!existsSync(signedIn)) throw new Error('grok login finished without signing in.')
         mkdirSync(home, { recursive: true, mode: 0o700 })
-        copyFileSync(signedIn, join(home, 'auth.json'))
+        // Replaced in one step: a Grok running in the home never reads a half-written file.
+        const temporary = join(home, `.auth.json.${process.pid}.${Date.now()}`)
+        try {
+          copyFileSync(signedIn, temporary)
+          renameSync(temporary, join(home, 'auth.json'))
+        } finally {
+          rmSync(temporary, { force: true })
+        }
       }
     } finally {
       if (staging) rmSync(staging, { recursive: true, force: true })
@@ -378,14 +392,15 @@ function createGrokRuntime(context: DriverContext, options: GrokDriverOptions): 
           // Shown through `managed().broken`.
         }
       },
+      // The version this entry holds (it may predate the one Mousse installs now).
       removeInstall: async ({ force }) => {
-        const wanted = spec()
-        if (!wanted) return { removed: true, bytes: 0 }
-        return agents.removeInstall({ instanceId: context.instanceId, source: agents.packageSource(wanted), force })
+        const ref = agents.reference(GROK_AGENT_ID, context.instanceId)
+        if (!ref) return { removed: true, bytes: 0 }
+        return agents.removeInstall({ instanceId: context.instanceId, source: agents.packageSource({ agentId: GROK_AGENT_ID, version: ref.version }), force })
       },
       release: async () => {
-        const wanted = spec()
-        if (wanted) await agents.release(context.instanceId, agents.packageSource(wanted))
+        const ref = agents.reference(GROK_AGENT_ID, context.instanceId)
+        if (ref) await agents.release(context.instanceId, agents.packageSource({ agentId: GROK_AGENT_ID, version: ref.version }))
       }
     } : {})
   }

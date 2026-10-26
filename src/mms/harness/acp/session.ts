@@ -21,7 +21,7 @@ import {
   type PermissionPrompter
 } from './permissions'
 import type { AcpQuirks } from './quirks'
-import { xaiHandlers } from './xai'
+import { xaiHandlers, xaiStopFailure } from './xai'
 
 /**
  * The ACP session lifecycle shared by every ACP agent: one agent process per thread, kept between
@@ -60,9 +60,11 @@ export interface AcpProcess extends AcpConnection {
   generation: number
   /** Sign-in generation at launch; a process from before the latest sign-in cannot sign the profile out. */
   signInGeneration: number
-  /** Prompts the agent reported complete (`xaiExtensions`), and who waits for the next one. */
-  completedPrompts?: Set<string>
-  onPromptComplete?: (promptId: string) => void
+  /**
+   * Who waits for each tagged prompt's `prompt_complete` (`xaiExtensions`): one entry per prompt,
+   * removed when that prompt settles, so a late completion of an earlier prompt touches nothing.
+   */
+  promptWaiters?: Map<string, (params: Record<string, unknown>) => void>
 }
 
 /** How long a steer waits for a cancelled prompt's own completion before sending the next one. */
@@ -220,12 +222,7 @@ export class AcpSessions {
         ...(quirks.xaiExtensions ? xaiHandlers({
           questions,
           scope,
-          promptComplete: (promptId) => {
-            if (!active) return
-            active.completedPrompts ??= new Set()
-            active.completedPrompts.add(promptId)
-            active.onPromptComplete?.(promptId)
-          }
+          promptComplete: (promptId, params) => active?.promptWaiters?.get(promptId)?.(params)
         }) : {})
       },
       onAuthUrl: onAuthUrl ?? (() => {
@@ -384,18 +381,19 @@ export class AcpSessions {
     return 'interrupted'
   }
 
-  /** Settles when the agent reports `promptId` complete (`xaiExtensions`); never rejects. */
-  private promptCompleted(active: AcpProcess, promptId: string): Promise<void> {
-    if (active.completedPrompts?.has(promptId)) return Promise.resolve()
-    return new Promise<void>((resolve) => {
-      const previous = active.onPromptComplete
-      active.onPromptComplete = (id) => {
-        previous?.(id)
-        if (id !== promptId) return
-        active.onPromptComplete = previous
-        resolve()
-      }
+  /**
+   * Waits for the agent to report `promptId` complete (`xaiExtensions`): `done` settles with the
+   * completion's params and never rejects; `dispose` removes the waiter once the prompt settled.
+   */
+  private completionOf(active: AcpProcess, promptId: string): { done: Promise<Record<string, unknown>>; dispose(): void } {
+    const waiters = (active.promptWaiters ??= new Map<string, (params: Record<string, unknown>) => void>())
+    const done = new Promise<Record<string, unknown>>((resolve) => {
+      waiters.set(promptId, (params) => {
+        waiters.delete(promptId)
+        resolve(params)
+      })
     })
+    return { done, dispose: () => waiters.delete(promptId) }
   }
 
   /** Kills the process of `sessionId`; the thread's next turn starts a new one with the history handed over. */
@@ -709,17 +707,32 @@ export class AcpSessions {
         const promptId = quirks.xaiExtensions ? randomUUID() : undefined
         const reply = active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId,
           prompt: [{ type: 'text', text: prompt }, ...attachments], ...(promptId ? { _meta: { promptId } } : {}) })
-        const request = promptId ? Promise.race([reply.then(() => undefined), this.promptCompleted(active, promptId)]) : reply
-        if (promptId) reply.catch(() => undefined)
+        const completion = promptId ? this.completionOf(active, promptId) : undefined
+        const request: Promise<unknown> = completion ? Promise.race([reply, completion.done]) : reply
+        if (completion) reply.catch(() => undefined)
         active.prompting = request.then(() => undefined, () => undefined)
+        let outcome: unknown
         try {
-          await request
+          outcome = await request
+        } catch (error) {
+          completion?.dispose()
+          throw error
         } finally {
           active.prompting = undefined
         }
         prompting = false
-        // A steer's cancel: the next prompt waits (briefly) for the cancelled task to report its end.
-        if (promptId && cancelSent) await Promise.race([this.promptCompleted(active, promptId), new Promise<void>((resolve) => setTimeout(resolve, PROMPT_COMPLETE_WAIT_MS).unref?.())])
+        if (completion) {
+          // A steer's cancel: the next prompt waits (briefly) for the cancelled task to report its end.
+          if (cancelSent) {
+            let timer: ReturnType<typeof setTimeout> | undefined
+            await Promise.race([completion.done, new Promise<void>((resolve) => { timer = setTimeout(resolve, PROMPT_COMPLETE_WAIT_MS) })])
+            clearTimeout(timer)
+          }
+          completion.dispose()
+          // However the prompt ended, a refusal or an error is never a finished turn.
+          const failure = cancelSent || input.signal?.aborted ? undefined : xaiStopFailure(label, outcome)
+          if (failure) throw failure
+        }
         input.signal?.throwIfAborted()
         collectSteer()
         if (steerFailure) throw steerFailure

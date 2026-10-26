@@ -16,7 +16,7 @@ afterEach(() => {
   for (const sessions of sessionsUnderTest.splice(0)) sessions.stop()
 })
 
-type Prompt = (c: { params: { sessionId: string; _meta?: Record<string, unknown> }; client: { request: (method: string, params: unknown) => Promise<unknown>; notify: (method: string, params: unknown) => Promise<void> } }, cancelled: Promise<void>) => Promise<{ stopReason: string }>
+type Prompt = (c: { params: { sessionId: string; prompt: Array<{ text?: string }>; _meta?: Record<string, unknown> }; client: { request: (method: string, params: unknown) => Promise<unknown>; notify: (method: string, params: unknown) => Promise<void> } }, cancelled: Promise<void>) => Promise<{ stopReason: string }>
 
 function grokAgent(prompt: Prompt) {
   const calls: Array<{ method: string; params: unknown }> = []
@@ -42,7 +42,7 @@ function grokAgent(prompt: Prompt) {
   return { ...agent, calls }
 }
 
-function core(connect: ReturnType<typeof grokAgent>['connect'], questions = new UserQuestionService()) {
+function core(connect: ReturnType<typeof grokAgent>['connect'], questions = new UserQuestionService(), options: { cancelDeadlineMs?: number } = {}) {
   const saved = new Map<string, SavedAcpSession>()
   const sessions = new AcpSessions({
     label: 'Grok',
@@ -61,7 +61,8 @@ function core(connect: ReturnType<typeof grokAgent>['connect'], questions = new 
     launchGeneration: () => 0,
     signInGeneration: () => 0,
     markSignedOut: vi.fn(),
-    signInRequiredMessage: 'Sign in first'
+    signInRequiredMessage: 'Sign in first',
+    ...options
   })
   sessionsUnderTest.push(sessions)
   return { sessions, saved, questions }
@@ -87,6 +88,75 @@ describe('Grok sessions', () => {
     })
     const { sessions } = core(agent.connect)
     expect(await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'hi', onText: vi.fn() })).toBe('done')
+  })
+
+  it('ends a later prompt at its own completion when an earlier prompt’s completion arrives late', async () => {
+    const ids: string[] = []
+    const agent = grokAgent(async (c) => {
+      const id = String(c.params._meta?.promptId)
+      ids.push(id)
+      // The first prompt ends by its reply only; its completion arrives during the next prompt,
+      // which then ends by its completion only.
+      if (ids.length === 1) return { stopReason: 'end_turn' }
+      await c.client.notify('_x.ai/session/prompt_complete', { sessionId: c.params.sessionId, promptId: ids[0], stopReason: 'end_turn' })
+      await c.client.notify(methods.client.session.update, text(c.params.sessionId, 'second'))
+      await c.client.notify('_x.ai/session/prompt_complete', { sessionId: c.params.sessionId, promptId: id, stopReason: 'end_turn' })
+      return new Promise(() => {})
+    })
+    const { sessions } = core(agent.connect)
+    await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'one', onText: vi.fn() })
+    sessions.commitConversation('t', 'h')
+    expect(await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'two', history: 'h', onText: vi.fn() })).toBe('second')
+    expect(agent.connections).toHaveLength(1)
+    // No waiter outlives its prompt.
+    const live = (sessions as unknown as { sessions: Map<string, { promptWaiters?: Map<string, unknown> }> }).sessions.get('t')
+    expect(live?.promptWaiters?.size ?? 0).toBe(0)
+  })
+
+  it('after a steer, sends the guidance only once the cancelled prompt reports its end', async () => {
+    const order: string[] = []
+    let first: string | undefined
+    const agent = grokAgent(async (c, cancelled) => {
+      const id = String(c.params._meta?.promptId)
+      order.push(`prompt ${c.params.prompt[0]?.text}`)
+      if (!first) {
+        first = id
+        await cancelled
+        // The reply comes at once; the task itself ends a little later.
+        setTimeout(() => {
+          order.push('first complete')
+          void c.client.notify('_x.ai/session/prompt_complete', { sessionId: c.params.sessionId, promptId: id, stopReason: 'cancelled' })
+        }, 30)
+        return { stopReason: 'cancelled' }
+      }
+      return { stopReason: 'end_turn' }
+    })
+    const { sessions } = core(agent.connect)
+    let steer: string | undefined
+    const turn = sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'long task', onText: vi.fn(), drainSteer: () => { const value = steer; steer = undefined; return value } })
+    await vi.waitFor(() => expect(order).toEqual(['prompt long task']))
+    steer = 'focus on tests'
+    await turn
+    expect(order).toEqual(['prompt long task', 'first complete', 'prompt focus on tests'])
+  })
+
+  it.each([
+    [{ stopReason: 'refusal' }, /refused/],
+    [{ stopReason: 'end_turn', error: { message: 'rate limit reached' } }, /rate limit reached/],
+    [{ stopReason: 'end_turn', agentResult: { error: 'quota exceeded' } }, /quota exceeded/]
+  ])('keeps a failure the completion reports (%o)', async (completion, message) => {
+    const agent = grokAgent(async (c) => {
+      await c.client.notify('_x.ai/session/prompt_complete', { sessionId: c.params.sessionId, promptId: c.params._meta?.promptId, ...completion })
+      return new Promise(() => {})
+    })
+    const { sessions } = core(agent.connect)
+    await expect(sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'hi', onText: vi.fn() })).rejects.toThrow(message)
+  })
+
+  it('keeps a refusal the reply reports', async () => {
+    const agent = grokAgent(async () => ({ stopReason: 'refusal' }))
+    const { sessions } = core(agent.connect)
+    await expect(sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'hi', onText: vi.fn() })).rejects.toThrow(/refused/)
   })
 
   it('ignores the completion of another prompt', async () => {

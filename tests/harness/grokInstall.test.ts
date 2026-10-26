@@ -4,7 +4,7 @@
  * file of the frozen set present. A mismatch or a missing file fails the install.
  */
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { brotliCompressSync } from 'node:zlib'
@@ -24,7 +24,7 @@ const REGISTRY = 'https://npm.test/'
 const SPEC = grokPackageSpec('1.0.70', 'linux', 'x64')
 const PROGRAM = '#!/bin/sh\necho grok 1.0.70\n'
 
-function setup(entries: ArchiveEntry[], options: { integrity?: string } = {}) {
+function setup(entries: ArchiveEntry[], options: { integrity?: string; maxExpandedBytes?: number } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-grok-install-'))
   dirs.push(home)
   const tarball = tarGzOf(entries)
@@ -43,11 +43,12 @@ function setup(entries: ArchiveEntry[], options: { integrity?: string } = {}) {
     registry: { agent: async () => undefined, cached: () => [] },
     platformKeys: ['linux-x86_64'],
     fetch: fetchFile,
-    npmRegistry: REGISTRY
+    npmRegistry: REGISTRY,
+    ...(options.maxExpandedBytes ? { maxExpandedBytes: options.maxExpandedBytes } : {})
   })
   const env: InstanceEnv = { instanceId: 'grok:work', driver: 'grok', configRevision: 0, homeId: 'private:grok:work', env: { ...process.env }, searchPath: [] }
   const install = () => installs.installPackageBinary({ instanceId: 'grok:work', spec: SPEC, env, label: 'Grok', onProgress: () => {} })
-  return { installs, install, requests }
+  return { installs, install, requests, home }
 }
 
 const PACKAGE: ArchiveEntry[] = [
@@ -85,5 +86,12 @@ describe('a managed Grok', () => {
     const { install, installs } = setup(PACKAGE.filter((entry) => entry.name !== 'package/bin/grok.br'))
     await expect(install()).rejects.toThrow(/bin\/grok/)
     expect(installs.installed(installs.packageSource(SPEC))).toBeUndefined()
+  })
+
+  it('refuses a binary that expands past the cap, and leaves nothing behind', async () => {
+    const { install, installs, home } = setup(PACKAGE, { maxExpandedBytes: 8 })
+    await expect(install()).rejects.toThrow(/expands to more than Mousse accepts/)
+    expect(installs.installed(installs.packageSource(SPEC))).toBeUndefined()
+    expect(readdirSync(join(home, 'agents', 'xai-grok')).filter((name) => name.startsWith('.staging-'))).toEqual([])
   })
 })

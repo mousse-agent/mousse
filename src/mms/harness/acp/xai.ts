@@ -72,8 +72,29 @@ export async function answerXaiQuestions(questions: UserQuestionService, scope: 
 export interface XaiHooks {
   questions: UserQuestionService
   scope: AcpRequestScope
-  /** `session/prompt_complete` for a prompt Mousse tagged. */
-  promptComplete(promptId: string, sessionId: string | undefined): void
+  /** `session/prompt_complete` for a prompt Mousse tagged, with its params (`stopReason`, an error). */
+  promptComplete(promptId: string, params: Record<string, unknown>): void
+}
+
+/** Stop reasons of a prompt that finished as asked (ACP's, plus `cancelled`). */
+const FINISHED = new Set(['end_turn', 'max_tokens', 'max_turn_requests', 'cancelled'])
+
+/**
+ * Why a prompt that ended (its reply, or its `prompt_complete`) did not finish: a refusal, an
+ * error it reports (a rate limit), or a stop reason Mousse does not know. Undefined when it finished.
+ */
+export function xaiStopFailure(label: string, outcome: unknown): Error | undefined {
+  const value = isRecord(outcome) ? outcome : {}
+  const result = isRecord(value.agentResult) ? value.agentResult : {}
+  const error = value.error ?? result.error
+  if (error !== undefined && error !== null) {
+    const message = isRecord(error) && typeof error.message === 'string' ? error.message : typeof error === 'string' ? error : 'an error'
+    return new Error(`${label} stopped with ${message}`)
+  }
+  const reason = value.stopReason
+  if (reason === 'refusal') return new Error(`${label} refused this request.`)
+  if (typeof reason === 'string' && !FINISHED.has(reason)) return new Error(`${label} stopped early (${reason}).`)
+  return undefined
 }
 
 /** The client handlers for xAI's extensions. */
@@ -86,7 +107,7 @@ export function xaiHandlers(hooks: XaiHooks): Pick<AcpClientHandlers, 'extReques
     },
     extNotifications: both('session/prompt_complete', (params: unknown) => {
       const value = xaiParams(params)
-      if (typeof value.promptId === 'string') hooks.promptComplete(value.promptId, typeof value.sessionId === 'string' ? value.sessionId : undefined)
+      if (typeof value.promptId === 'string') hooks.promptComplete(value.promptId, value)
     })
   }
 }
