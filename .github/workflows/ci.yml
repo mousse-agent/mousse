@@ -144,6 +144,7 @@ jobs:
           npx vitest run
           tests/browserWindowsSandboxPermissions.test.ts
           tests/cliWindowsConsoleTty.test.ts
+          tests/net/transports/ssh.test.ts
           tests/platformWindowsPackageQualification.test.ts
           tests/resourcePurgeWindows.test.ts
           tests/selectiveWorktree.test.ts
