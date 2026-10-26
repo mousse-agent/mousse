@@ -2,6 +2,7 @@
   "comment": "Explicit resource inventory. In-process tests are the unit complement; list new subprocess, multi-profile TLS and browser tests here. Heavy categories share a two-worker project; lightweight processes use three workers. Categories describe the real fixture, not words in its source.",
   "process": [
     "tests/agentLifecycleStatus.test.ts",
+    "tests/asyncFileLock.test.ts",
     "tests/browserWindowsSandboxPermissions.test.ts",
     "tests/chatService.test.ts",
     "tests/conversationForkRetirement.test.ts",
