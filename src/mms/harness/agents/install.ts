@@ -13,10 +13,10 @@
  */
 import { createHash } from 'node:crypto'
 import { chmodSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { RegistrySourcePatch, RemoveInstallResult } from '../../../shared/harness/types'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
-import { resolveWindowsShim } from '../../providers/resolveWindowsShim'
+import { resolveWindowsShim, type CliLaunch } from '../../providers/resolveWindowsShim'
 import { quirksFor } from '../acp/quirks'
 import { INHERITED_CREDENTIALS, resolveCommand, type InstanceEnv } from '../env'
 import { runHarness, type HarnessRunResult } from '../spawn'
@@ -77,6 +77,8 @@ export interface AgentInstallsOptions {
   platformKeys?: RegistryPlatform[]
   maxDownloadBytes?: number
   downloadTimeoutMs?: number
+  /** How long a deletion waits for processes that are exiting (default 5 s). */
+  exitGraceMs?: number
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -549,6 +551,8 @@ export class AgentInstalls {
   async removeInstall(input: { instanceId: string; source: RegistrySource; force: boolean }): Promise<RemoveInstallResult> {
     const installed = this.installed(input.source)
     const { agentId } = input.source
+    // A check that just ended may still be exiting: give it a moment, never a running chat.
+    if (installed) await this.idle(installed.root, this.options.exitGraceMs ?? 5_000)
     return withLock(this.lockPath(agentId), (): RemoveInstallResult => {
       if (!installed) {
         this.writeRef(agentId, input.instanceId, undefined)
@@ -574,6 +578,12 @@ export class AgentInstalls {
       this.writeRef(agentId, input.instanceId, undefined)
       return { removed: true, bytes: installed.receipt.bytes }
     })
+  }
+
+  /** Waits up to `ms` for the processes running from `root` here to end. */
+  private async idle(root: string, ms: number): Promise<void> {
+    const deadline = Date.now() + ms
+    while ((running.get(root) ?? 0) > 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50))
   }
 
   /** Bytes the entry's install takes on disk, when it is installed. */
@@ -691,9 +701,23 @@ export function resetAgentInstallState(): void {
   running.clear()
 }
 
-/** The user's npm (login-shell PATH, Windows shims resolved), run without a shell. */
+/**
+ * The user's npm on the login-shell PATH, run without a shell. On Windows npm's own `npm.cmd`
+ * does not name its script the way package shims do, so npm runs as Node with the `npm-cli.js`
+ * installed beside that Node; an extensionless `npm` there is a shell script and never runs.
+ */
+export function resolveNpm(env: Pick<InstanceEnv, 'env' | 'searchPath'>, platform: NodeJS.Platform = process.platform): CliLaunch | undefined {
+  if (platform !== 'win32') return resolveCommand('npm', env, platform)
+  const node = resolveCommand('node', env, platform)
+  if (node) {
+    const cli = join(dirname(node.path), 'node_modules', 'npm', 'bin', 'npm-cli.js')
+    if (existsSync(cli)) return { path: cli, command: node.command, args: [...node.args, cli] }
+  }
+  return resolveCommand('npm.cmd', env, platform)
+}
+
 const runUserNpm: NpmRunner = async (args, options) => {
-  const npm = resolveCommand('npm', options.env)
+  const npm = resolveNpm(options.env)
   if (!npm) return { code: null, stdout: '', stderr: '', timedOut: false, spawnError: 'npm_not_found' }
   return runHarness(options.env, 'install', npm.command, [...npm.args, ...args], { timeoutMs: options.timeoutMs, signal: options.signal, maxBytes: 64 * 1024 })
 }

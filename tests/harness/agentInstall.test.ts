@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { InstanceEnv } from '../../src/mms/harness/env'
-import { AgentInstalls, ConsentRequiredError, downloadArtifact, resetAgentInstallState, withoutCredentials, type InstallProgress, type NpmRunner, type RegistrySource } from '../../src/mms/harness/agents/install'
+import { AgentInstalls, ConsentRequiredError, downloadArtifact, resetAgentInstallState, resolveNpm, withoutCredentials, type InstallProgress, type NpmRunner, type RegistrySource } from '../../src/mms/harness/agents/install'
 import { LockBusyError, withLock } from '../../src/mms/harness/agents/lock'
 import type { RegistryAgent } from '../../src/mms/harness/agents/registry'
 import { tarGzOf } from './archiveFixtures'
@@ -86,6 +86,7 @@ function setup(options: { profiles?: Array<{ id: string; displayName?: string }>
     registry: source,
     listProfiles: () => listed.profiles,
     platformKeys: [KEY],
+    exitGraceMs: 50,
     ...(options.npm ? { npm: options.npm } : {}),
     ...(options.maxDownloadBytes ? { maxDownloadBytes: options.maxDownloadBytes } : {})
   })
@@ -331,6 +332,17 @@ describe('npm agent installs', () => {
     failing.registry.current = npmAgent
     await expect(failing.installs('p1').install({ instanceId: 'acp:npm', source: npxSource, env: failing.env, label: 'Demo npm', onProgress: () => {} })).rejects.toThrow(/npm failed: npm ERR! 404/)
     expect(stagingLeft(failing.agentDir)).toEqual([])
+  })
+
+  it('runs npm on Windows as Node with the npm-cli.js beside it, never the extensionless shell script', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mousse-npm-'))
+    dirs.push(dir)
+    writeFileSync(join(dir, 'node.exe'), 'MZ', { mode: 0o755 })
+    writeFileSync(join(dir, 'npm'), '#!/bin/sh', { mode: 0o755 })
+    mkdirSync(join(dir, 'node_modules', 'npm', 'bin'), { recursive: true })
+    writeFileSync(join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), '')
+    const npm = resolveNpm({ env: { PATH: dir }, searchPath: [] }, 'win32')
+    expect(npm).toEqual({ path: join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), command: join(dir, 'node.exe'), args: [join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js')] })
   })
 
   it('keeps credentials out of the npm environment', () => {
