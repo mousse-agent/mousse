@@ -108,13 +108,17 @@ export function killProcessTree(pid, options = {}) {
   // A reaped child with no group left: nothing to walk.
   if (!signal(kill, pid, 0) && !signal(kill, -pid, 0)) return
 
-  let current = table()
-  const ownGroup = current?.find((entry) => entry.pid === self)?.pgid
+  // The first snapshot only decides which groups are safe to signal.
+  const before = table()
+  const ownGroup = before?.find((entry) => entry.pid === self)?.pgid
   // Without a table, assume the usual case: the child leads its own group (spawned detached).
-  const childGroup = current?.find((entry) => entry.pid === pid)?.pgid ?? pid
+  const childGroup = before?.find((entry) => entry.pid === pid)?.pgid ?? pid
   const leadsGroup = childGroup === pid && pid !== ownGroup
   if (leadsGroup) signal(kill, -pid, 'SIGSTOP')
   else signal(kill, pid, 'SIGSTOP')
+  // Descendants come from a snapshot taken after the freeze: one the child started between the
+  // first read and the stop (a detached shell) is in it.
+  let current = before && table()
 
   const groups = new Set()
   /** Descendants no group signal covers, with their start time when found. */

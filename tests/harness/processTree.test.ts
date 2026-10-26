@@ -67,6 +67,17 @@ describe('process tree kill', () => {
     expect(signals.indexOf('SIGKILL -600')).toBeLessThan(signals.indexOf('SIGKILL -200'))
   })
 
+  it('finds a shell the child started between the first read and the freeze', () => {
+    // Pi has no children at the first read; by the time it is stopped, its detached shell exists.
+    const childless = TABLE.filter((entry) => ![210, 300, 310, 320, 400].includes(entry.pid))
+    const tables = [childless, TABLE, TABLE]
+    const { signals, kill } = recorder()
+    killProcessTree(200, { platform: 'linux', kill, table: () => tables.shift(), startTime, self: 100 })
+    expect(signals[0]).toBe('SIGSTOP -200')
+    expect(signals).toEqual(expect.arrayContaining(['SIGSTOP -300', 'SIGSTOP -320', 'SIGKILL -300', 'SIGKILL -320']))
+    expect(signals.at(-2)).toBe('SIGKILL -200')
+  })
+
   it('returns at once, without reading the table, when the child and its group are gone', () => {
     const { signals, kill } = recorder({ gone: [200] })
     let reads = 0
