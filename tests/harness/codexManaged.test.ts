@@ -106,8 +106,8 @@ afterEach(async () => {
   await issuer.stop()
 })
 
-function setup() {
-  const { profileHome, installationHome } = homes()
+function setup(shared?: { profileHome: string; installationHome: string }) {
+  const { profileHome, installationHome } = shared ?? homes()
   const instanceId = 'codex:managed'
   const stateDir = join(profileHome, 'harness', 'codex-managed')
   const privateHome = join(stateDir, 'home')
@@ -158,7 +158,7 @@ function setup() {
   const service = (runtime.adapter as unknown as { service: () => CodexProviderService }).service()
   /** Starts the app-server, as a turn's preflight does. */
   const launch = () => service.userSetup(null)
-  return { runtime, auth, server, state, helpers, privateHome, launch, service }
+  return { runtime, auth, server, state, helpers, privateHome, launch, service, homes: { profileHome, installationHome } }
 }
 
 const alice = { subject: 'alice', email: 'a@example.com' }
@@ -317,5 +317,68 @@ describe('codex driver config', () => {
     } finally {
       warn.mockRestore()
     }
+  })
+})
+
+describe('managed Codex: readiness, models and revisions', () => {
+  const models = () => ({ status: 200, body: { models: [{ slug: 'gpt-a', display_name: 'GPT A', visibility: 'list' }, { slug: 'gpt-b', display_name: 'GPT B', visibility: 'list' }] } })
+
+  it('a signed-in entry reaches the picker with its listed models, and again after a restart', async () => {
+    issuer.onModels = models
+    const first = setup()
+    expect(first.runtime.configured()).toBe(false)
+    expect(first.runtime.llmProvider!()).toBeUndefined()
+    await signIn(issuer, first.auth, alice)
+    // The sign-in check lists the plan's models on its own.
+    expect((await first.runtime.auth({ force: true })).state).toBe('signed_in')
+    await vi.waitFor(() => expect(first.runtime.models().map((model) => model.id)).toEqual(['gpt-a', 'gpt-b']))
+    expect(first.runtime.configured()).toBe(true)
+    expect(first.runtime.llmProvider!()).toMatchObject({ models: [{ id: 'gpt-a' }, { id: 'gpt-b' }] })
+    // A new process over the same folders: ready from the store, with the saved listing.
+    const restarted = setup(first.homes)
+    expect(restarted.runtime.configured()).toBe(true)
+    expect(restarted.runtime.llmProvider!()?.models.map((model) => model.id)).toEqual(['gpt-a', 'gpt-b'])
+  })
+
+  it('a failed first listing is tried again later; an account change clears the listing', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      let fail = true
+      issuer.onModels = () => (fail ? { status: 500, body: {} } : models())
+      const { runtime, auth } = setup()
+      await signIn(issuer, auth, alice)
+      await runtime.auth({ force: true })
+      await vi.waitFor(() => expect(issuer.modelRequests.length).toBeGreaterThan(0))
+      const tried = issuer.modelRequests.length
+      fail = false
+      await runtime.auth({ force: true })
+      // Within the retry wait nothing is asked again.
+      expect(issuer.modelRequests.length).toBe(tried)
+      vi.setSystemTime(Date.now() + 61_000)
+      await runtime.auth({ force: true })
+      await vi.waitFor(() => expect(runtime.models().map((model) => model.id)).toEqual(['gpt-a', 'gpt-b']))
+      // Another account may list other models: the old listing goes with the change.
+      await auth.signOut()
+      expect(runtime.models()).toEqual([])
+      expect(runtime.concreteModel!('default')).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an account change stops the processes of a revision a reconfiguration replaced, before any revocation', async () => {
+    const old = setup()
+    await signIn(issuer, old.auth, alice)
+    await old.launch()
+    // A reconfiguration builds a new runtime while the old one still finishes its turn.
+    const current = setup(old.homes)
+    const seen: boolean[] = []
+    issuer.onRevoke = async () => {
+      seen.push(old.server.exited[0]!)
+      return { status: 200 }
+    }
+    await current.runtime.signOut!()
+    expect(seen).toEqual([true])
+    expect(old.state.leases).toBe(0)
   })
 })

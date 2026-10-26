@@ -805,6 +805,8 @@ export class CodexProviderService {
   private probeResult?: { at: number; result: AccountProbe }
   private probing?: Promise<void>
   private modelDiscoveryStarted = false
+  /** Bumped by `clearModels`: a listing started before it is not saved. */
+  private modelsEpoch = 0
   /** Model listings in flight; they keep the process open. */
   private listing = 0
   private idleClose?: { timer: ReturnType<typeof setTimeout>; at: number }
@@ -1062,11 +1064,25 @@ export class CodexProviderService {
     }
   }
 
+  /**
+   * Forgets the listed models (the account changed: its plan may list others). A listing that
+   * ends after this was asked for the old account and is not saved.
+   */
+  clearModels(): void {
+    this.modelsEpoch += 1
+    this.modelDiscoveryStarted = false
+    if (!this.settings.models) return
+    delete this.settings.models
+    this.save()
+  }
+
   /** Lists the account's models (`model/list`, every page) and stores them for the picker. */
   async refreshModels(): Promise<LlmModelOption[]> {
     if (this.options.models) {
+      const epoch = this.modelsEpoch
       const listed = await this.options.models.list()
       if (!listed.length) throw new Error('Codex returned no models')
+      if (epoch !== this.modelsEpoch) throw new Error('The account changed while its models were listed. Refresh models again.')
       this.settings.models = listed
       this.save()
       return listed

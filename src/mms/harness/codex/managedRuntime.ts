@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { LlmModelOption } from '../../../shared/settings'
 import { chatgptTokenCommand, type CliCommand } from '../../run/mcp/attachment'
-import { codexEnvironment, CodexProviderService, type CodexAccountReading } from '../../providers/codex/CodexProviderService'
+import { CODEX_PROVIDER_ID, codexEnvironment, CodexProviderService, type CodexAccountReading } from '../../providers/codex/CodexProviderService'
 import { CodexAdapter } from '../../run/adapters/codex/CodexAdapter'
 import { ChatGptAuth, type ChatGptAuthOptions, type ChatGptStatus } from '../chatgpt/chatgptAuth'
 import type { ChatGptModel } from '../chatgpt/models'
@@ -86,6 +86,36 @@ export function sharedCodexInstallation(installationHome: string): CodexInstalla
   return installation
 }
 
+/** How long `configured()` trusts its last read of the ChatGPT store. */
+const SIGNED_IN_CACHE_MS = 2_000
+/** A failed model listing is tried again after this, at the next sign-in check. */
+const MODEL_RETRY_MS = 60_000
+
+/**
+ * The Codex services of every live revision of an entry (by profile home and instance id): a
+ * credential change stops them all, a revision a reconfiguration replaced included.
+ */
+const revisions = new Map<string, Set<CodexProviderService>>()
+
+function trackRevision(key: string, service: CodexProviderService): void {
+  let set = revisions.get(key)
+  if (!set) revisions.set(key, (set = new Set()))
+  set.add(service)
+}
+
+function untrackRevision(key: string, service: CodexProviderService): void {
+  const set = revisions.get(key)
+  set?.delete(service)
+  if (set && !set.size) revisions.delete(key)
+}
+
+/** Stops every revision's app-servers and awaits their exit; rejects when any of them could not be stopped. */
+async function stopEveryRevision(key: string): Promise<void> {
+  const results = await Promise.allSettled([...(revisions.get(key) ?? [])].map((service) => service.stopAll('account_changed')))
+  const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+  if (failed) throw failed.reason
+}
+
 export interface ManagedCodexDependencies {
   installation?: CodexInstallation
   broker?: ChatGptTokenBroker
@@ -109,11 +139,15 @@ export function createManagedCodexRuntime(context: DriverContext, deps: ManagedC
   // account changed under it.
   let launchedKey: string | undefined
   let service: CodexProviderService | undefined
+  const servicesKey = `${context.profileHome}\u0000${context.instanceId}`
+  // Every revision of the entry: one a reconfiguration replaced may still finish a turn.
   const stopProcesses = async (): Promise<void> => {
     broker.revokeInstance(context.instanceId)
     launchedKey = undefined
-    await service?.stopAll('account_changed')
+    clearModelsOnChange?.()
+    await stopEveryRevision(servicesKey)
   }
+  let clearModelsOnChange: (() => void) | undefined
   const auth = (deps.auth ?? ((options) => new ChatGptAuth(options)))({
     instanceId: context.instanceId,
     profileHome: context.profileHome,
@@ -169,15 +203,50 @@ export function createManagedCodexRuntime(context: DriverContext, deps: ManagedC
     }
   })
   const codex = service
+  trackRevision(servicesKey, codex)
+  clearModelsOnChange = () => {
+    signedIn = undefined
+    discovery = {}
+    codex.clearModels()
+  }
   let installAbort: AbortController | undefined
+  // The plan's models are listed once a signed-in check finds none (after sign-in, after an
+  // account switch cleared them); a failed listing is tried again a minute later.
+  let discovery: { running?: Promise<void>; failedAt?: number } = {}
+  const discoverModels = (): void => {
+    if (codex.models().length || discovery.running) return
+    if (discovery.failedAt !== undefined && Date.now() - discovery.failedAt < MODEL_RETRY_MS) return
+    discovery.running = codex.refreshModels().then(
+      () => {
+        discovery = {}
+        context.changed()
+      },
+      () => {
+        discovery = { failedAt: Date.now() }
+      }
+    )
+  }
+  // Ready from Mousse's own state: an installed, unbroken Codex and a signed-in ChatGPT
+  // connection. The store read is local; it is cached briefly because listings call it often.
+  let signedIn: { at: number; value: boolean } | undefined
+  const configured = (): boolean => {
+    const installed = installation.installed()
+    if (!installed || installed.broken) return false
+    if (!signedIn || Date.now() - signedIn.at > SIGNED_IN_CACHE_MS) signedIn = { at: Date.now(), value: auth.status().state === 'signed_in' }
+    return signedIn.value
+  }
   return {
     adapter: new CodexAdapter(() => codex, { managed: true }),
-    configured: () => codex.configured(),
-    llmProvider: () => codex.llmProvider(),
+    configured,
+    llmProvider: () => (configured() ? { id: CODEX_PROVIDER_ID, label: 'Codex', models: codex.models() } : undefined),
     models: () => codex.models(),
     // `default` runs the plan's first listed model, fixed when the turn is bound.
     concreteModel: (model) => (model && model !== 'default' ? model : codex.models()[0]?.id),
-    auth: async () => managedAuthReading(auth.status(), auth.identity()),
+    auth: async () => {
+      const reading = managedAuthReading(auth.status(), auth.identity())
+      if (reading.state === 'signed_in') discoverModels()
+      return reading
+    },
     identity: async () => auth.identity(),
     refreshModels: async () => void (await codex.refreshModels()),
     signIn: (session, _cwd, method) => auth.signIn(session, method),
@@ -216,7 +285,8 @@ export function createManagedCodexRuntime(context: DriverContext, deps: ManagedC
     removeInstall: (options) => installation.removeInstall(options),
     forgetConversation: (threadId) => codex.forgetConversation(threadId),
     stop: () => {
-      broker.revokeInstance(context.instanceId)
+      // The gateway stops a runtime once its turns end, the newest one included (removal, shutdown).
+      untrackRevision(servicesKey, codex)
       codex.stop()
     }
   }
