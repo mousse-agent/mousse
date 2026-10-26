@@ -1391,7 +1391,7 @@ export class Harness implements HarnessGateway {
   private findBinary(record: InstanceRecord): string | undefined {
     if (record.runtime?.pinned) return record.runtime.managed?.()?.path
     if (!record.driver.binaryNames.length) return undefined
-    return findOnPath(record.driver.binaryNames, { env: record.env.env, searchPath: this.searchPath })
+    return findOnPath(record.driver.binaryNames, { env: record.env.env, searchPath: [...this.searchPath, ...(record.env.driverSearchPath ?? [])] })
   }
 
   /** A replaced runtime stops once the turns running on it end; their work is never rebound. */
@@ -1485,7 +1485,7 @@ export class Harness implements HarnessGateway {
       let result = await probeInstance({
         driver: record.driver,
         runtime: record.runtime,
-        env: { ...record.env, searchPath: this.searchPath },
+        env: { ...record.env, searchPath: [...this.searchPath, ...(record.env.driverSearchPath ?? [])] },
         ...(override ? { override } : {}),
         config: record.config,
         force,

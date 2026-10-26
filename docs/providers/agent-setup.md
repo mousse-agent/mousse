@@ -82,6 +82,47 @@ Cursor entry. There is nothing to install or find on PATH.
 - A model API entry `pi:cursor` keeps working on the Mousse agent until the user moves it to a
   Cursor entry (Move…, optionally with the same API key).
 
+## Grok
+
+Grok runs xAI's `grok` CLI over ACP. Every process (version check, start-up check, model refresh,
+sign-in check, chat) runs `grok --permission-mode default agent --no-leader stdio`, so a home
+`config.toml` that sets always-approve still asks Mousse before each tool.
+
+| OS | Source | Sign-in | State |
+|---|---|---|---|
+| Windows x64 | PATH (`~/.grok/bin`, official installer) | Grok account (`grok login --device-auth` in a Mousse terminal) | tested with fakes; manual smoke pending |
+| Windows x64 | PATH | API key | tested with fakes; manual smoke pending |
+| Windows x64 | managed (`@xai-official/grok-win32-x64` from npm, private home only) | Grok account | install tested against a local registry; manual smoke pending |
+| Windows arm64 | any | Grok account | untested: no `node-pty` prebuild, so sign-in falls back to Grok's browser sign-in over ACP |
+| macOS arm64, Linux x64, Linux arm64 | any | any | untested: no machine in this PR's runs |
+
+- **Status without a process.** Mousse reads the credential Grok would use: an `XAI_API_KEY` (the
+  entry's own key wins over an inherited one), else the home's `auth.json`. Any of `GROK_AUTH*`,
+  `GROK_OAUTH2_*`, `GROK_OIDC_*`, `GROK_CONFIG`, `GROK_CONFIG_PATH`, `GROK_LOCAL_AUTH`,
+  `GROK_CLI_CHAT_PROXY_BASE_URL`, `GROK_MODELS_BASE_URL`, or an `[auth]`, `[grok_com_config]` or
+  `[endpoints]` table in the home's or the system's (`/etc/grok`, `%ProgramData%\grok`)
+  `config.toml`, `managed_config.toml` or `requirements.toml` makes the account unknown: chats then
+  hand their history over instead of resuming Grok's own session.
+- **Private homes** never inherit those variables or an ambient `XAI_API_KEY`. A device sign-in runs
+  in a staging home; its `auth.json` is copied in only when `grok login` succeeds and was not
+  cancelled.
+- **Updates.** An entry with its own home runs every process with `GROK_DISABLE_AUTOUPDATER=1` and
+  `GROK_OAUTH2_REFERRER=mousse`. An entry on the user's own home runs Grok as the user set it up.
+  A copy from the official installer offers `grok update`.
+- **Managed copies.** The npm platform package holds only the compressed `grok`; its helpers
+  (`grove`, `grove-credential`, `grove-fsmonitor`) are not in it, so Grok fetches them into its
+  home. Mousse therefore installs its own Grok only for an entry with its own home, and only that
+  entry runs it; every other entry runs its own `grok`. The download is checked against the npm
+  registry's sha512 and recorded like a registry agent, and every launch (chats, checks, sign-in,
+  sign-out) checks its files first.
+- **Sign-out** forgets the key Mousse keeps and a private home's sign-in. It never signs the user's
+  own `~/.grok` out.
+- **Permissions.** Grok's "always" answers last for the whole project, so only "Allow edits for this
+  session" is offered; every other "always allow" and "always deny" is hidden.
+- A model API entry `pi:xai` keeps working on the Mousse agent until the user moves it to a Grok
+  entry (Move…, optionally with the same API key). An xAI account sign-in is not carried over: sign
+  in to Grok on its entry.
+
 ## Notes
 
 - A Custom command runs without a shell. A name without a path is looked up on PATH; a `.cmd`

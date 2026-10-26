@@ -18,6 +18,7 @@ import { AcpRegistry } from './harness/agents/registry'
 import { claudeCodeDriver } from './harness/drivers/claudeCode'
 import { codexDriver } from './harness/drivers/codex'
 import { cursorDriver } from './harness/drivers/cursor'
+import { grokDriver } from './harness/drivers/grok'
 import { piLegacyDriver } from './harness/drivers/piLegacy'
 import { harnessAuthRunner, recordHarnessSpawn } from './harness/spawn'
 import { spawnCodexAppServer } from './providers/codex/CodexAppServerClient'
@@ -391,7 +392,8 @@ export class MmsProfileServices {
         codexDriver({ builtIn: () => this.codex }),
         antigravityDriver({ builtIn: () => this.antigravity }),
         acpDriver({ agents: agentInstalls }),
-        cursorDriver()
+        cursorDriver(),
+        grokDriver({ agents: agentInstalls })
       ],
       registry: { search: (query) => agentRegistry.search(query) },
       questions: this.questions,

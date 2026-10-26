@@ -6,7 +6,8 @@ import type { HarnessDriverKind } from './types'
  * (`cursor: 'cursor'`, `xai: 'grok'`) with its copy, and nothing else branches on it.
  */
 export const FOLDED_INTO_AGENT: Readonly<Record<string, HarnessDriverKind>> = Object.freeze({
-  cursor: 'cursor'
+  cursor: 'cursor',
+  xai: 'grok'
 })
 
 /** The agent a model API's provider id moves to, when it has one. */
