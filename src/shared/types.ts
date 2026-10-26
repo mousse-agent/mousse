@@ -972,6 +972,9 @@ export interface GitFileChange {
   originalPath?: string
 }
 
+/** A multi-step Git operation that stopped and waits for the user, for example on conflicts. */
+export type GitInProgress = 'merge' | 'rebase' | 'cherry-pick' | 'revert'
+
 export interface GitStatusSnapshot {
   upstream?: string | null
   tracking?: 'tracked' | 'none' | 'detached' | 'unborn'
@@ -979,7 +982,14 @@ export interface GitStatusSnapshot {
   branch: string | null
   ahead: number
   behind: number
+  /**
+   * One entry per side: a path changed in both the index and the working tree
+   * (for example staged, then edited again) appears twice, once with `staged: true`
+   * and once with `staged: false`. Count files by path.
+   */
   changes: GitFileChange[]
+  /** A merge, rebase, cherry-pick or revert is stopped in this folder. */
+  inProgress?: GitInProgress | null
   /** The repository has at least one remote to push to. */
   hasRemote?: boolean
   /** The folder itself does not exist, for example a removed worktree. */
@@ -1011,6 +1021,58 @@ export interface GitDiffStats {
 
 export interface GitCommitOptions {
   amend?: boolean
+  /**
+   * Commit every change, whatever the index holds: runs `git add -A` (leaving out `.mousse/`)
+   * first. Thread worktrees use this because their checkpoints sweep the tree anyway; the result
+   * is one commit unless a hook edits files without staging them, and the next checkpoint then
+   * commits those edits.
+   * Unset, the commit uses the index when anything is staged and stages everything otherwise.
+   */
+  all?: boolean
+  /** Refuse with `git_branch_changed` when HEAD is on another branch by now. */
+  expectedBranch?: string
+}
+
+export interface GitPushOptions {
+  /** Refuse with `git_branch_changed` when HEAD is on another branch by now. */
+  expectedBranch?: string
+}
+
+export interface GitCheckoutOptions {
+  /** With uncommitted changes: `carry` them along (default) or `stash` them, switch and re-apply. */
+  dirty?: 'carry' | 'stash'
+}
+
+export interface GitCheckoutResult {
+  /** The changes were stashed and could not be re-applied cleanly, so the stash is kept. */
+  stashKept?: boolean
+}
+
+export type GitPullStrategy = 'ff-only' | 'merge' | 'rebase'
+
+export interface GitPullOptions {
+  strategy?: GitPullStrategy
+}
+
+export interface GitPullResult {
+  result: 'up-to-date' | 'fast-forwarded' | 'merged' | 'rebased' | 'conflicted'
+}
+
+export interface GitFetchResult {
+  behindBefore: number
+  behindAfter: number
+}
+
+export interface GitBranchOptions {
+  /** Branch or commit to start from; the current HEAD when unset. */
+  from?: string
+  /** Switch to the new branch (default true). */
+  checkout?: boolean
+}
+
+export interface GitDeleteBranchOptions {
+  /** Delete even when the branch has commits no other branch has. */
+  force?: boolean
 }
 
 export type PullRequestCheckState = 'passing' | 'failing' | 'pending' | 'none'

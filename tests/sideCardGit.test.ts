@@ -334,6 +334,21 @@ describe('git section formatting', () => {
     expect(untrackedFileCount(null)).toBe(0)
   })
 
+  it('counts a file staged and edited again once', () => {
+    const status = repoStatus({
+      changes: [
+        { path: 'a.ts', status: 'modified', staged: true },
+        { path: 'a.ts', status: 'modified', staged: false },
+        { path: 'b.ts', status: 'added', staged: true },
+        { path: 'b.ts', status: 'modified', staged: false },
+        { path: 'c.ts', status: 'untracked', staged: false }
+      ]
+    })
+    expect(changedFileCount(status)).toBe(3)
+    expect(changesSummary(status)).toBe('3 files changed')
+    expect(untrackedFileCount(status)).toBe(1)
+  })
+
   it('summarizes changed files and ignores ignored ones', () => {
     const status = repoStatus({
       changes: [

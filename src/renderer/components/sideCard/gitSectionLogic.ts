@@ -23,7 +23,7 @@ export interface DiffStatLabel {
 
 /** Files Git does not track yet; they are in no diff, so the line counts miss them. */
 export function untrackedFileCount(status: GitStatusSnapshot | null): number {
-  return status?.changes.filter((change) => change.status === 'untracked').length ?? 0
+  return new Set(status?.changes.filter((change) => change.status === 'untracked').map((change) => change.path)).size
 }
 
 /**
@@ -46,9 +46,9 @@ export function diffStatLabel(stats: GitDiffStats | null, untrackedCount = 0): D
   }
 }
 
-/** Files with something to commit; ignored files never are. */
+/** Files with something to commit; ignored files never are. A file staged and edited again has two changes and counts once. */
 export function changedFileCount(status: GitStatusSnapshot | null): number {
-  return status?.changes.filter((change) => change.status !== 'ignored').length ?? 0
+  return new Set(status?.changes.filter((change) => change.status !== 'ignored').map((change) => change.path)).size
 }
 
 /** Left side of the changes row: how many files differ from the last commit. */
