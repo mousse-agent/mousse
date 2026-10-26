@@ -4,6 +4,7 @@ import type {
   Clock,
   Transport,
   TransportAddon,
+  TransportDialContext,
   TransportManifest,
   TransportStatus,
   InboundInfo
@@ -17,6 +18,7 @@ import { TransportRegistry, type TransportConfiguration } from './registry'
 import { tailscaleAddon } from './tailscale'
 import { cloudflaredAddon } from './cloudflared'
 import { RelayTransport, createRelayAddon } from './relay'
+import { SshDialer, parseSshEndpoint, readSshApproval, sshAddon, sshKnownHostsPath } from './ssh'
 import { relayUrl, type RelayIdentity, type RelayRendezvous } from '../relay/protocol'
 
 const directAddon: TransportAddon = {
@@ -62,6 +64,7 @@ export class ProfileTransports {
   readonly admission: PreauthAdmission
   private readonly registry: TransportRegistry
   private readonly direct: DirectTransport
+  private readonly ssh: SshDialer
   private readonly sockets = new Set<Duplex>()
   private readonly dialRelays = new Set<RelayTransport>()
   private readonly errors = new Map<string, import('../../../shared/net').NetErrorCode>()
@@ -78,6 +81,8 @@ export class ProfileTransports {
       addons?: TransportAddon[]
       /** Mousse ID relay carriers; without them hosted relay routes are refused. */
       hosted?: HostedRelayTransports
+      /** Tests replace the `ssh` executable and the user's known_hosts file. */
+      ssh?: { binary?: string; userKnownHosts?: string }
     }
   ) {
     this.admission = new PreauthAdmission(options.clock)
@@ -86,12 +91,26 @@ export class ProfileTransports {
       directAddon,
       tailscaleAddon,
       cloudflaredAddon,
+      sshAddon,
       createRelayAddon(options.identity, this.admission),
       ...(options.hosted ? [options.hosted.addon(options.identity)] : []),
       ...(options.addons ?? [])
     ])
       this.registry.register(addon)
     this.direct = new DirectTransport({ clock: options.clock })
+    this.ssh = new SshDialer({
+      clock: options.clock,
+      knownHosts: sshKnownHostsPath(options.profileDir),
+      approval: (node) => readSshApproval(options.profileDir, node),
+      userKnownHosts: options.ssh?.userKnownHosts,
+      // A binary set on this device's own ssh add-on applies to its dials as well.
+      binary: () =>
+        options.ssh?.binary ??
+        (
+          this.registry.configuration().find((row) => row.id === 'ssh')?.settings as
+            { binary?: string } | undefined
+        )?.binary
+    })
   }
   manifests(): TransportManifest[] {
     return this.registry.manifests()
@@ -121,6 +140,11 @@ export class ProfileTransports {
         clock: this.options.clock,
         profileDir: this.options.profileDir
       })
+    if (
+      checked.id === 'ssh' &&
+      !parseSshEndpoint((checked.settings as { endpoint: string }).endpoint)
+    )
+      throw new NetError('bad_request')
     return checked
   }
   async start(
@@ -197,6 +221,7 @@ export class ProfileTransports {
     return [
       'direct',
       'cloudflared',
+      'ssh',
       'relay',
       ...(this.options.hosted ? [HOSTED_RELAY_TRANSPORT] : [])
     ].map(
@@ -206,7 +231,7 @@ export class ProfileTransports {
           traits: {
             canListen: false,
             canDial: true,
-            readsPlaintext: id !== 'direct',
+            readsPlaintext: !['direct', 'ssh'].includes(id),
             needsAccount: id === 'plus-relay'
           },
           provision: async () => undefined,
@@ -214,10 +239,11 @@ export class ProfileTransports {
             throw new NetError('forbidden')
           },
           resolve: async (route: Route, signal: AbortSignal) => {
-            if (!['relay', 'plus-relay'].includes(route.transport))
+            if (!['relay', 'plus-relay', 'ssh'].includes(route.transport))
               await this.direct.resolve({ ...route, transport: 'direct' }, signal)
           },
-          dial: (route: Route, signal: AbortSignal) => this.dial(route, signal),
+          dial: (route: Route, signal: AbortSignal, context?: TransportDialContext) =>
+            this.dial(route, signal, context),
           status: () => ({
             state: this.stopping ? 'disabled' : 'ready',
             routes: this.routes().filter((route) => route.transport === id)
@@ -230,7 +256,7 @@ export class ProfileTransports {
         }) as Transport
     )
   }
-  async dial(route: Route, signal: AbortSignal): Promise<Duplex> {
+  async dial(route: Route, signal: AbortSignal, context?: TransportDialContext): Promise<Duplex> {
     if (this.stopping) throw new NetError('cancelled')
     let raw: Duplex
     if (route.transport === HOSTED_RELAY_TRANSPORT) {
@@ -280,6 +306,8 @@ export class ProfileTransports {
         this.dialRelays.delete(relay)
         void relay.teardown()
       })
+    } else if (route.transport === 'ssh') {
+      raw = await this.ssh.dial(route, signal, context)
     } else {
       if (route.transport === 'cloudflared') {
         const url = new URL(route.address)

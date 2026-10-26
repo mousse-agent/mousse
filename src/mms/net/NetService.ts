@@ -182,6 +182,8 @@ export class NetService {
       onChanged?(status: NetStatus): void
       composeRuntime?(runtime: NetRuntime): NetDomainComposition | void
       hosted?: HostedNetModule
+      /** Tests replace the `ssh` executable and the user's known_hosts file. */
+      ssh?: { binary?: string; userKnownHosts?: string }
       /** Tests replace the native WebRTC stack and this computer's addresses. */
       phoneWebRtc?: {
         factory?: PeerConnectionFactory
@@ -693,6 +695,7 @@ export class NetService {
       clock: this.clock,
       profileDir: this.options.profileDir,
       hosted: this.hosted?.transports,
+      ssh: this.options.ssh,
       relayRendezvous:
         rt.enrollment.preparedNodeJoin()?.rendezvous?.transport === HOSTED_RELAY_TRANSPORT &&
         !this.hosted?.connected()
