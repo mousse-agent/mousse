@@ -22,6 +22,7 @@ import { CLAUDE_INSTANCE_ID } from '../../../shared/providerInstances'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { CLAUDE_MOUSSE_TOOL_PREFIX, claudeMcpServers } from '../../run/mcp/attachment'
+import { TURN_TOKEN_KEY } from '../../run/mcp/appTools/registry'
 import type { LoginSession } from '../LoginSession'
 import {
   applyCliConfigPatch,
@@ -88,7 +89,8 @@ export type ClaudeSubscriptionChatInput = {
   cwd: string
   model: string
   prompt: string
-  appletInstructions?: string
+  /** Prefixed to the prompt: the turn's skills, mode, applet catalogue and usable Mousse tools. */
+  turnPreamble?: string
   history?: string
   images?: ChatImageAttachment[]
   signal?: AbortSignal
@@ -97,6 +99,11 @@ export type ClaudeSubscriptionChatInput = {
   child?: ChildTurnPolicy
   /** The Mousse MCP server for this run (SPEC §15.2); null attaches no server. */
   mcp?: { url: string; token: string } | null
+  /**
+   * The turn's token, stamped into every Mousse call's input (`_mousse_turn`) by Mousse's own
+   * `PreToolUse` hook, so a call Claude made for an earlier turn is refused (`per_call` turn binding).
+   */
+  mcpTurnToken?: string
   /** Mousse's own instructions, appended to Claude Code's system prompt. */
   systemPromptAppend?: string
   /** The MCP servers and skills the user enabled in Mousse; absent attaches none. */
@@ -1175,10 +1182,17 @@ export class ClaudeSubscriptionProviderService {
                   }
                 if (event.hook_event_name === 'PreToolUse')
                   await turn.editCounter.start(event.tool_use_id, event.tool_name, event.tool_input)
+                // Each Mousse call carries the token of the turn it is made in; the server refuses one made
+                // for an earlier turn. Claude forwards the changed input to the server unchanged, and the
+                // model never sees the key.
+                const stamp = event.hook_event_name === 'PreToolUse' && turn.input.mcp && turn.input.mcpTurnToken &&
+                  event.tool_name.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)
+                  ? { updatedInput: { ...(event.tool_input as Record<string, unknown>), [TURN_TOKEN_KEY]: turn.input.mcpTurnToken } }
+                  : undefined
                 // Restricted turns route every call through canUseTool so its read-only allowlist holds.
-                return turn.restricted
-                  ? { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' } }
-                  : {}
+                if (turn.restricted)
+                  return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask', ...stamp } }
+                return stamp ? { hookSpecificOutput: { hookEventName: 'PreToolUse', ...stamp } } : {}
               }
             ]
           }
@@ -1430,7 +1444,7 @@ export class ClaudeSubscriptionProviderService {
       ]
       const historyNow = historyKey(input.history ?? '')
       const reuse = !input.continuation && this.reusableLive(input.threadId, hard, resume, historyNow) !== undefined
-      const prompt = (input.appletInstructions ? input.appletInstructions + '\n\nCurrent request:\n' : '') +
+      const prompt = (input.turnPreamble ? input.turnPreamble + '\n\nCurrent request:\n' : '') +
         (!resume && !reuse && input.history
           ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
           : '') + input.prompt

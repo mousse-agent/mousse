@@ -320,7 +320,7 @@ describe('Reconciler', () => {
     const withStore = setup(10_000, undefined, (store) => new McpCredentials(store))
     const credentials = withStore.credentials as McpCredentials
     const run = await runningRun(withStore.engine)
-    credentials.mintOrReuse({ threadId: 't', runId: run.runId, provider: 'claude-subscription', modeCeiling: 'default' })
+    credentials.bearerForTurn({ threadId: 't', runId: run.runId, instanceId: 'claude', modeCeiling: 'default', binding: 'per_call', generation: 'g' })
     expect(withStore.reconciler.runOnce().prunedCredentials).toBe(0)
     expect(credentials.listForThread('t')).toHaveLength(1)
     withStore.advance(25 * 60 * 60 * 1000)

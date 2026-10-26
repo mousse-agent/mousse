@@ -51,6 +51,9 @@ export function codexDriver(options: { builtIn: () => CodexProviderService }): H
     canInstall: false,
     customModels: true,
     methodLabel: 'ChatGPT sign-in',
+    // Codex forks a loaded thread when its bearer changes, so the bearer is kept after turns proven drained.
+    mcpTurnBinding: 'drained_turn',
+    userMcp: 'native',
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     caps: () => CODEX_CAPS,
     updateCommand: (owner: InstallOwner) => {

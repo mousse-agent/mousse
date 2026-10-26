@@ -7,6 +7,7 @@ import type { StoredCliConfig } from '../providers/cliConfig'
 import type { AcpSource } from './acp/preset'
 import type { LoginSession } from '../providers/LoginSession'
 import type { ProviderAdapter } from '../run/adapters/ProviderAdapter'
+import type { McpTurnBinding } from '../run/mcp/appTools/registry'
 import type { ProviderRef } from '../run/types'
 import type { InstanceEnv } from './env'
 
@@ -169,6 +170,15 @@ export interface HarnessDriver {
   readonly customModels: boolean
   /** How the driver's instances sign in, for display. */
   readonly methodLabel?: string
+  /**
+   * How the runtime's Mousse MCP calls are tied to the turn that made them (PR 2 §2): `per_call`
+   * (every call carries the turn's token), `drained_turn` (the bearer is reused only after a turn
+   * proven drained) or `rotate` (a new bearer every turn). A static fact, not a capability: nothing
+   * in policy reads it. Every driver whose caps have `mcp: true` declares one (conformance test).
+   */
+  readonly mcpTurnBinding?: McpTurnBinding
+  /** The user's own MCP servers: attached by the runtime itself, or proxied by Mousse (default `native`). */
+  readonly userMcp?: 'native' | 'proxy'
   /** Lenient decoder of an instance's stored `config`: unknown or malformed fields fall back. */
   decodeConfig(raw: Record<string, unknown> | undefined): InstanceConfig
   /**

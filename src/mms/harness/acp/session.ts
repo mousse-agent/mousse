@@ -35,6 +35,8 @@ export interface AcpProcess extends AcpConnection {
   cwd?: string
   threadId?: string
   turnSignal?: AbortSignal
+  /** Who answers the running turn's permission requests (its bridge's); the sessions' own otherwise. */
+  turnPrompter?: PermissionPrompter
   /** `initialize` advertised `mcpCapabilities.http`; otherwise the Mousse server goes through the stdio bridge. */
   mcpHttp?: boolean
   /** What `initialize` answered. */
@@ -51,6 +53,8 @@ export interface AcpProcess extends AcpConnection {
   mcpToken?: string | null
   /** Provider instance whose turn opened the session. */
   instanceId?: string
+  /** Hash of the session instructions the session was given (`orchestrationInstructions`). */
+  instructionsHash?: string
   /** Launch-settings generation the process was started with; an older one is not reused. */
   generation: number
   /** Sign-in generation at launch; a process from before the latest sign-in cannot sign the profile out. */
@@ -63,6 +67,8 @@ export interface SavedAcpSession {
   cwd: string
   historyKey?: string
   instanceId?: string
+  /** Hash of the session instructions the session was given; changed ones are sent again on resume. */
+  instructionsHash?: string
   /**
    * How the session chooses its model and which modes it has, as it said when it opened. A load
    * whose reply is missing or partial (the replay opened the gate) keeps them.
@@ -93,16 +99,21 @@ export interface AcpChatInput {
   /** `plan`: the session runs in the agent's plan mode (only where the agent offers one). */
   mode?: 'default' | 'plan'
   prompt: string
-  appletInstructions?: string
+  /** Prefixed to every prompt: the turn's skills, mode, applet catalogue and usable Mousse tools. */
+  turnPreamble?: string
   history?: string
   images?: ChatImageAttachment[]
   signal?: AbortSignal
   mcp?: { url: string; token: string } | null
+  /** Session instructions: in the session's first prompt, and again on a resumed session they changed for. */
   orchestrationInstructions?: string
   onText: (text: string) => void
   drainSteer?: () => string | undefined
   onSteer?: (text: string) => void
-  onTool?: (event: { phase: 'start' | 'complete'; callId: string; title: string; toolName?: string }) => void
+  /** A tool call started or ended; `status` says how it ended (`unfinished`: the turn ended first). */
+  onTool?: (event: { phase: 'start' | 'complete'; callId: string; title: string; toolName?: string; status?: 'completed' | 'failed' | 'unfinished' }) => void
+  /** Who answers this turn's permission requests (the turn bridge's `permission`). */
+  prompter?: PermissionPrompter
   /** The agent's session id, once known (provider refs name it for interrupt and terminate). */
   onSession?: (sessionId: string) => void
 }
@@ -182,7 +193,7 @@ export class AcpSessions {
     const connection = this.options.connect({
       purpose,
       handlers: {
-        requestPermission: (request) => answerPermission(this.prompter, scope, request, { label, classify }),
+        requestPermission: (request) => answerPermission(active?.turnPrompter ?? this.prompter, scope, request, { label, classify }),
         ...(quirks.clientFs ? {
           readTextFile: (request) => readWorkspaceFile(scope, request),
           writeTextFile: (request) => writeWorkspaceFile(questions, scope, request, label)
@@ -464,6 +475,7 @@ export class AcpSessions {
       next.instanceId = instanceId
       next.cwd = input.cwd
       next.turnSignal = input.signal
+      next.turnPrompter = input.prompter
       this.turning.add(next)
       current = next
     }
@@ -492,7 +504,7 @@ export class AcpSessions {
         input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: event.name })
       }
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && (event.status === 'completed' || event.status === 'failed')) {
-        input.onTool?.({ phase: 'complete', callId: event.toolCallId, title: event.title ?? toolTitles.get(event.toolCallId) ?? `${label} tool` })
+        input.onTool?.({ phase: 'complete', callId: event.toolCallId, title: event.title ?? toolTitles.get(event.toolCallId) ?? `${label} tool`, status: event.status as 'completed' | 'failed' })
         toolTitles.delete(event.toolCallId)
       }
       if (event.sessionUpdate === 'config_option_update' && event.configOptions) {
@@ -556,14 +568,17 @@ export class AcpSessions {
         input.signal?.throwIfAborted()
         // Until the owning turn commits its updated history, this ACP session is
         // deliberately non-resumable after a crash or a failed/aborted prompt.
-        store.setSaved(input.threadId, { sessionId: current.sessionId!, cwd: input.cwd, instanceId })
+        // A resumed session keeps the instructions it was given; a new one has none yet.
+        current.instructionsHash = resumed ? saved?.instructionsHash : undefined
+        const instructions = current.instructionsHash ? { instructionsHash: current.instructionsHash } : {}
+        store.setSaved(input.threadId, { sessionId: current.sessionId!, cwd: input.cwd, instanceId, ...instructions })
         if (quirks.modelConfigId) {
           const models = modelOptions((session ?? {}) as Pick<NewSessionResponse, 'configOptions'>)
           if (models.length) store.setModels(models)
         } else {
           this.observeSession(current, session ?? {}, known)
           store.setSaved(input.threadId, {
-            sessionId: current.sessionId!, cwd: input.cwd, instanceId,
+            sessionId: current.sessionId!, cwd: input.cwd, instanceId, ...instructions,
             setup: { ...(current.modelControl ? { modelControl: current.modelControl } : {}), modes: current.modes ?? [], ...(current.defaultModeId ? { defaultModeId: current.defaultModeId } : {}) }
           })
         }
@@ -621,10 +636,18 @@ export class AcpSessions {
       const history = !resumed && input.history
         ? `Previous conversation (context only; do not repeat earlier actions):\n${input.history}\n\nCurrent request:\n`
         : ''
-      const orchestration = !resumed && input.orchestrationInstructions
+      // The session's instructions go into its first prompt, and again into a resumed session's prompt
+      // when they changed since (their hash is kept with the session).
+      const instructionsHash = input.orchestrationInstructions ? createHash('sha256').update(input.orchestrationInstructions).digest('hex').slice(0, 32) : undefined
+      const orchestration = input.orchestrationInstructions && (!resumed || active.instructionsHash !== instructionsHash)
         ? `<mousse_orchestration_instructions>\n${input.orchestrationInstructions}\n</mousse_orchestration_instructions>\n\n`
         : ''
-      let prompt = orchestration + history + (input.appletInstructions ? input.appletInstructions + '\n\nCurrent request:\n' : '') + (input.prompt || '(image attachment)')
+      if (instructionsHash && active.instructionsHash !== instructionsHash) {
+        active.instructionsHash = instructionsHash
+        const savedNow = store.saved(input.threadId)
+        if (savedNow) store.setSaved(input.threadId, { ...savedNow, instructionsHash })
+      }
+      let prompt = orchestration + history + (input.turnPreamble ? input.turnPreamble + '\n\nCurrent request:\n' : '') + (input.prompt || '(image attachment)')
       let attachments = imageBlocks
       for (;;) {
         input.signal?.throwIfAborted()
@@ -656,7 +679,7 @@ export class AcpSessions {
         attachments = []
         if (text) text += '\n\n'
       }
-      for (const [callId, title] of toolTitles) input.onTool?.({ phase: 'complete', callId, title })
+      for (const [callId, title] of toolTitles) input.onTool?.({ phase: 'complete', callId, title, status: 'unfinished' })
       return text
     } catch (error) {
       this.close(current)
@@ -668,6 +691,7 @@ export class AcpSessions {
       input.signal?.removeEventListener('abort', abort)
       current.onUpdate = undefined
       current.turnSignal = undefined
+      current.turnPrompter = undefined
       this.turning.delete(current)
     }
   }

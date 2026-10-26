@@ -10,6 +10,7 @@ import type {
 } from '../../orchestrator/LlmClient'
 import type { NativeMessageCheckpoint } from '../../orchestrator/nativeContext'
 import type { ChildPreflightContext, SubagentRefusal } from '../policy/featureGates'
+import type { PermissionPrompter } from '../../harness/acp/permissions'
 import type { ProviderRef } from '../types'
 
 /**
@@ -105,9 +106,9 @@ export interface TurnInput {
    */
   images?: ChatImageAttachment[]
   /**
-   * Catalogue of this conversation's applets; undefined when applets are off. The pi loop's system
-   * prompt already carries the applet guidance; vendor runtimes have their own system prompt and
-   * prefix `APPLET_GENERATION_GUIDANCE` themselves.
+   * Catalogue of this conversation's applets for the pi loop's system prompt, which already carries
+   * the applet guidance; undefined when applets are off. A runtime with its own loop gets the
+   * catalogue in its turn preamble and the guidance in its session instructions (`TurnBridge`).
    */
   appletInstructions?: string
   /**
@@ -218,11 +219,17 @@ export interface TurnResult {
    */
   nativeMessages: Message[]
   providerRef: ProviderRef
+  /**
+   * What the runtime announced of its Mousse MCP calls this turn, for a `drained_turn` bearer (PR 2
+   * §2): `mousseCalls`, the calls to Mousse's server it started (a runtime that names the server);
+   * `toolsSettled`, every tool call it started reached a completed update and none failed.
+   */
+  drain?: { mousseCalls?: number; toolsSettled?: boolean }
 }
 
 /**
  * Mousse tools an in-process loop calls directly (SPEC §13.1 `ToolHost`). Vendor runtimes reach
- * the same tools over the Mousse MCP server (`AdapterHost.mcp`, SPEC §15). Every field is minted
+ * the same tools over the Mousse MCP server (`AdapterHost.bridge`, SPEC §15). Every field is minted
  * by the daemon for this turn; none comes from protocol input.
  */
 export type ToolHost = Pick<
@@ -243,14 +250,36 @@ export interface RecoveredContext {
  * operations that stay with the transcript's owner. Provider clients are adapter dependencies
  * (constructor getters), not host fields, so the host stays provider-neutral.
  */
+/**
+ * What a runtime with its own loop is given of Mousse for one turn (PR 2 §2 `TurnBridge`), minted by
+ * the harness gateway: the Mousse MCP server and the turn's bearer, the turn token a `per_call`
+ * runtime stamps on each call, and the two instruction texts.
+ */
+export interface TurnBridge {
+  /** The Mousse MCP server and this turn's bearer (SPEC §15.2); null: attach nothing. */
+  mcp: { url: string; token: string } | null
+  /** Stamped on every Mousse call of a `per_call` runtime that tags calls by turn (Claude Code). */
+  turnToken: string
+  /**
+   * Stable text the runtime applies as session instructions (Claude's system prompt append, Codex's
+   * developer instructions, an ACP session's first prompt). A runtime that resumes a session made
+   * with other text puts the new text in that turn's prompt.
+   */
+  sessionInstructions: string
+  /** Prefixed to every prompt: loaded skills, the mode's instructions, the applet catalogue, usable tools. */
+  turnPreamble: string
+  /** The binding's tool allow/deny list (`RunPolicy.tools`), when it has one. */
+  toolPolicy?: { allow: string[]; deny?: string[] }
+  /** The user's own MCP servers: attached by the runtime (`native`) or proxied by Mousse (`proxy`). */
+  userMcp: 'native' | 'proxy'
+  /** Answers the runtime's permission requests for this turn (the thread's questions). */
+  permission?: PermissionPrompter
+}
+
 export interface AdapterHost {
   tools: ToolHost
-  /**
-   * The Mousse MCP server and this run's bearer token (SPEC §15.2), minted by the `turn.start`
-   * executor when the adapter's `caps.mcp` is true and revoked when the turn ends. Absent or null:
-   * attach nothing, so the orchestration tools are simply not offered.
-   */
-  mcp?: { url: string; token: string } | null
+  /** Minted by the gateway; absent when the caller gave the turn no app context. The pi loop, fed in process, ignores it. */
+  bridge?: TurnBridge
   context: {
     /** Safe-boundary compaction inside a long tool loop; absent when compaction is disabled. */
     toolLoopSafety?: ToolLoopSafetyOptions

@@ -83,6 +83,9 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     canInstall: false,
     customModels: true,
     methodLabel: 'Claude Code sign-in',
+    // Mousse's own PreToolUse hook stamps each Mousse call with the turn's token (`updatedInput`).
+    mcpTurnBinding: 'per_call',
+    userMcp: 'native',
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: true }),
     caps: () => CLAUDE_CODE_CAPS,
     updateCommand: (owner: InstallOwner) => {

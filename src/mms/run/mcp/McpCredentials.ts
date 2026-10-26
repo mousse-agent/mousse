@@ -3,17 +3,29 @@ import { str, type Row } from '../db/rows'
 import { fail } from '../db/RunStoreError'
 import type { RunStore } from '../RunStore'
 import type { ModeCeiling } from '../types'
+import type { McpTurnBinding } from './appTools/registry'
 
 /** A credential expires after this long without a request (SPEC §15.1). */
 export const CREDENTIAL_IDLE_TTL_MS = 24 * 60 * 60 * 1000
 
-/** One run's Mousse MCP credential, without its token (only the hash is stored). */
+const TURN_BINDINGS: ReadonlySet<string> = new Set<McpTurnBinding>(['per_call', 'drained_turn', 'rotate'])
+
+/** One Mousse MCP credential, without its token (only the hash is stored). */
 export interface CredentialRecord {
   tokenHash: string
   threadId: string
+  /** The run the credential acts for: re-bound only by `bearerForTurn`, never by a call. */
   runId: string
   provider: string
   modeCeiling: ModeCeiling
+  /**
+   * The runtime epoch of (thread, instance) it was minted in; a newer epoch closes it. Kept in this
+   * process's memory with the token, like the token never stored: a row from an earlier process is
+   * revoked at boot anyway.
+   */
+  epoch: number
+  /** How the runtime's calls are tied to a turn (in memory, like `epoch`). */
+  binding: McpTurnBinding
   createdAt: string
   revokedAt: string | null
   lastSeenAt: string
@@ -26,66 +38,125 @@ export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
 }
 
+/** One turn's bearer request (`bearerForTurn`). */
+export interface BearerTurn {
+  threadId: string
+  /** The provider instance the turn runs on. */
+  instanceId: string
+  runId: string
+  modeCeiling: ModeCeiling
+  binding: McpTurnBinding
+  /**
+   * The runtime the turn runs in: driver, home, account generation and config revision (and the
+   * engine, once an instance has two). A change is a new runtime, so a new epoch.
+   */
+  generation: string
+}
+
+/** How a turn ended, for the drained-turn check (`settleTurn`). */
+export interface TurnSettlement {
+  status: 'completed' | 'failed' | 'aborted'
+  /**
+   * What the runtime announced of its Mousse calls in the turn: `mousseCalls`, the count of calls to
+   * Mousse's server it started (Codex names the server); `toolsSettled`, every tool call it started
+   * reached a completed update and none failed (ACP, whose updates do not name the server).
+   */
+  drain?: { mousseCalls?: number; toolsSettled?: boolean }
+}
+
+interface EpochState {
+  epoch: number
+  generation?: string
+}
+
+interface CallCounts {
+  runId: string
+  received: number
+  running: number
+}
+
 /**
- * Durable bearer credentials for the Mousse MCP server (docs/run-engine/SPEC.md §15.1). One live
- * credential per (thread, provider): the `turn.start` executor reuses it on every turn
- * (`mintOrReuse`), so a provider runtime keeps one stable MCP configuration and its session can be
- * resumed. `run_id` and `mode_ceiling` follow the thread's latest turn. A credential is revoked
- * when its thread is deleted or switches provider, and expires after 24 h without use.
+ * Durable bearer credentials of the Mousse MCP server and their caller authority (SPEC §15.1, PR 2
+ * §2 `McpAuthority`). A credential belongs to one runtime epoch of (thread, instance) and acts for
+ * one run. `bearerForTurn` re-binds it to the next run only when the driver's turn binding allows:
+ * `per_call` runtimes tag every call with the turn (the registry checks it), so their bearer and
+ * warm runtime are kept; a `drained_turn` runtime keeps it only after a turn proven drained; a
+ * `rotate` runtime gets a new one every turn. Anything else bumps the epoch, which revokes the
+ * epoch's credentials at once.
  *
- * Only the SHA-256 is stored. The token itself is kept in this process's memory so it can be
- * handed out again; after a daemon restart the stored row cannot be reused (its token is gone),
- * so boot (`RunEngine.reconcileOnBoot`) revokes every live row and the next turn mints a fresh
- * one. Unlike an in-memory registry, the rows survive a restart and stay auditable.
+ * Only the SHA-256 is stored. The token itself, and its epoch and binding, are kept in this
+ * process's memory so it can be handed out again; after a daemon restart the stored row cannot be
+ * reused (its token is gone), so boot (`RunEngine.reconcileOnBoot`) revokes every live row and the
+ * next turn mints a fresh one. Unlike an in-memory registry, the rows survive a restart and stay
+ * auditable.
  */
 export class McpCredentials {
   /** Tokens minted by this process, by hash; the database never holds them. */
   private readonly tokens = new Map<string, string>()
+  /** The epoch and turn binding of each credential this process minted, by hash. */
+  private readonly meta = new Map<string, { epoch: number; binding: McpTurnBinding }>()
+  /** The current runtime epoch per (thread, instance). */
+  private readonly epochs = new Map<string, EpochState>()
+  /** Calls received and running under each credential since it was bound to its run. */
+  private readonly calls = new Map<string, CallCounts>()
 
   constructor(private readonly store: RunStore) {}
 
   /**
-   * The thread's live credential for `provider`, re-pointed at `runId` with the turn's
-   * `modeCeiling` (and `last_seen_at` touched), or a fresh one. Live credentials of the thread for
-   * another provider are revoked (provider switch), as is a stored one this process cannot hand
-   * out again.
+   * The turn's bearer: the epoch's live credential re-bound to `runId` and the turn's ceiling when the
+   * binding allows reuse, else a fresh one in a new epoch when the runtime changed or the binding
+   * rotates. Live credentials of the thread for another instance are revoked (instance switch), as is
+   * one this process cannot hand out again.
    */
-  mintOrReuse(input: { threadId: string; runId: string; provider: string; modeCeiling: ModeCeiling }): {
-    token: string
-    tokenHash: string
-    reused: boolean
-  } {
+  bearerForTurn(input: BearerTurn): { token: string; tokenHash: string; reused: boolean; epoch: number } {
+    if (input.modeCeiling !== 'plan' && input.modeCeiling !== 'default') fail('bad_request', 'modeCeiling must be plan or default.')
+    if (!TURN_BINDINGS.has(input.binding)) fail('bad_request', 'binding must be per_call, drained_turn or rotate.')
     return this.db.transaction(() => {
+      const key = epochKey(input.threadId, input.instanceId)
+      const state = this.epochState(input.threadId, input.instanceId)
+      if (state.generation !== undefined && state.generation !== input.generation) this.bump(input.threadId, input.instanceId)
+      else if (input.binding === 'rotate') this.bump(input.threadId, input.instanceId)
+      state.generation = input.generation
+      const epoch = this.epochs.get(key)!.epoch
       const now = this.db.clock()
       const live = this.db
         .statement('SELECT * FROM credentials WHERE thread_id = ? AND revoked_at IS NULL ORDER BY created_at, rowid')
         .all(input.threadId)
-        .map(toRecord)
+        .map((row) => this.toRecord(row))
       let reusable: { record: CredentialRecord; token: string } | null = null
       const stale: string[] = []
       for (const record of live) {
         const token = this.tokens.get(record.tokenHash)
         const fresh = now - Date.parse(record.lastSeenAt) <= CREDENTIAL_IDLE_TTL_MS
-        if (!reusable && record.provider === input.provider && token && fresh) reusable = { record, token }
+        if (!reusable && record.provider === input.instanceId && record.epoch === epoch && record.binding === input.binding && token && fresh)
+          reusable = { record, token }
         else stale.push(record.tokenHash)
       }
       for (const tokenHash of stale) this.revokeHash(tokenHash)
-      if (!reusable) return { ...this.mint(input), reused: false }
-      if (input.modeCeiling !== 'plan' && input.modeCeiling !== 'default')
-        fail('bad_request', 'modeCeiling must be plan or default.')
+      if (!reusable) return { ...this.mint({ ...input, epoch }), reused: false, epoch }
       this.db
         .statement('UPDATE credentials SET run_id = ?, mode_ceiling = ?, last_seen_at = ? WHERE token_hash = ?')
         .run(input.runId, input.modeCeiling, new Date(now).toISOString(), reusable.record.tokenHash)
-      return { token: reusable.token, tokenHash: reusable.record.tokenHash, reused: true }
+      this.calls.set(reusable.record.tokenHash, { runId: input.runId, received: 0, running: 0 })
+      return { token: reusable.token, tokenHash: reusable.record.tokenHash, reused: true, epoch }
     })
   }
 
-  mint(input: { threadId: string; runId: string; provider: string; modeCeiling: ModeCeiling }): {
+  /**
+   * A fresh credential for a run in the given epoch (default: the current one of thread and
+   * instance). Tests and `bearerForTurn` use it; a turn takes its bearer from `bearerForTurn`.
+   */
+  mint(input: { threadId: string; runId: string; provider?: string; instanceId?: string; modeCeiling: ModeCeiling; binding?: McpTurnBinding; epoch?: number }): {
     token: string
     tokenHash: string
   } {
     if (input.modeCeiling !== 'plan' && input.modeCeiling !== 'default')
       fail('bad_request', 'modeCeiling must be plan or default.')
+    const provider = input.instanceId ?? input.provider
+    if (!provider) fail('bad_request', 'A credential needs the provider instance it runs on.')
+    const binding = input.binding ?? 'rotate'
+    if (!TURN_BINDINGS.has(binding)) fail('bad_request', 'binding must be per_call, drained_turn or rotate.')
+    const epoch = input.epoch ?? this.epochState(input.threadId, provider).epoch
     const token = randomBytes(32).toString('base64url')
     const tokenHash = hashToken(token)
     const now = this.now()
@@ -95,26 +166,97 @@ export class McpCredentials {
            revoked_at, last_seen_at)
          VALUES(?, ?, ?, ?, ?, ?, NULL, ?)`
       )
-      .run(tokenHash, input.threadId, input.runId, input.provider, input.modeCeiling, now, now)
+      .run(tokenHash, input.threadId, input.runId, provider, input.modeCeiling, now, now)
     this.tokens.set(tokenHash, token)
+    this.meta.set(tokenHash, { epoch, binding })
+    this.calls.set(tokenHash, { runId: input.runId, received: 0, running: 0 })
     return { token, tokenHash }
   }
 
   /**
-   * The live credential for `token`, or null when it is unknown, revoked or idle for 24 h. A hit
-   * touches `last_seen_at`.
+   * The live credential for `token`, or null when it is unknown, revoked, idle for 24 h or of an
+   * older epoch. A hit touches `last_seen_at`.
    */
   resolve(token: string): CredentialRecord | null {
     if (!token) return null
     const row = this.db.statement('SELECT * FROM credentials WHERE token_hash = ?').get(hashToken(token))
     if (!row) return null
-    const record = toRecord(row)
-    if (record.revokedAt) return null
+    const record = this.toRecord(row)
+    if (!this.isCurrent(record)) return null
     const now = this.db.clock()
     if (now - Date.parse(record.lastSeenAt) > CREDENTIAL_IDLE_TTL_MS) return null
     const lastSeenAt = new Date(now).toISOString()
     this.db.statement('UPDATE credentials SET last_seen_at = ? WHERE token_hash = ?').run(lastSeenAt, record.tokenHash)
     return { ...record, lastSeenAt }
+  }
+
+  /** The credential `tokenHash` names as it stands now, when it is live and of the current epoch. */
+  current(tokenHash: string): CredentialRecord | null {
+    const row = this.db.statement('SELECT * FROM credentials WHERE token_hash = ?').get(tokenHash)
+    if (!row) return null
+    const record = this.toRecord(row)
+    return this.isCurrent(record) ? record : null
+  }
+
+  /** Still live and of the current epoch, read now (a call re-checks after any wait). */
+  isCurrent(record: Pick<CredentialRecord, 'tokenHash' | 'threadId' | 'provider' | 'epoch'>): boolean {
+    const row = this.db.statement('SELECT revoked_at FROM credentials WHERE token_hash = ?').get(record.tokenHash)
+    if (!row || row.revoked_at !== null) return false
+    return record.epoch === this.epochState(record.threadId, record.provider).epoch
+  }
+
+  /** The current epoch of (thread, instance). */
+  currentEpoch(threadId: string, instanceId: string): number {
+    return this.epochState(threadId, instanceId).epoch
+  }
+
+  /**
+   * A new runtime epoch for (thread, instance): its process or session was replaced, it crashed or was
+   * terminated, or its turn could not be proven drained. Revokes the epoch's credentials at once.
+   */
+  bumpEpoch(threadId: string, instanceId: string): number {
+    return this.db.transaction(() => this.bump(threadId, instanceId))
+  }
+
+  /** A tools/call request arrived under the credential (counted for the drained-turn check). */
+  callReceived(tokenHash: string, runId: string): void {
+    const counts = this.countsFor(tokenHash, runId)
+    counts.received += 1
+  }
+
+  /** A call admitted under the credential started (`running`) or ended. */
+  callRunning(tokenHash: string, runId: string, delta: 1 | -1): void {
+    const counts = this.calls.get(tokenHash)
+    if (!counts || counts.runId !== runId) return
+    counts.running = Math.max(0, counts.running + delta)
+  }
+
+  /**
+   * The turn of the credential's run ended (PR 2 §2). A `drained_turn` credential is kept for the
+   * next turn only when the turn settled `completed`, no call admitted under it is still running,
+   * and the runtime's own account of its calls matches what Mousse received; otherwise, and for any
+   * failed turn, the epoch is bumped, which revokes it now. Returns whether it was kept.
+   */
+  settleTurn(tokenHash: string, runId: string, settlement: TurnSettlement): 'kept' | 'rotated' {
+    const row = this.db.statement('SELECT * FROM credentials WHERE token_hash = ?').get(tokenHash)
+    if (!row) return 'rotated'
+    const record = this.toRecord(row)
+    if (record.revokedAt || record.runId !== runId || !this.isCurrent(record)) return 'rotated'
+    const counts = this.calls.get(tokenHash)
+    const running = counts && counts.runId === runId ? counts.running : 0
+    const received = counts && counts.runId === runId ? counts.received : 0
+    let keep: boolean
+    if (record.binding === 'per_call') keep = settlement.status !== 'failed'
+    else if (record.binding === 'drained_turn') {
+      const drain = settlement.drain
+      const proven = drain !== undefined && (drain.mousseCalls !== undefined || drain.toolsSettled !== undefined)
+      keep = settlement.status === 'completed' && running === 0 && proven &&
+        (drain!.mousseCalls === undefined || drain!.mousseCalls === received) &&
+        drain!.toolsSettled !== false
+    } else keep = false
+    if (keep) return 'kept'
+    this.bumpEpoch(record.threadId, record.provider)
+    return 'rotated'
   }
 
   /** Revokes every live credential of `runId`; returns how many. */
@@ -141,6 +283,8 @@ export class McpCredentials {
       for (const tokenHash of hashes) {
         this.db.statement('DELETE FROM credentials WHERE token_hash = ?').run(tokenHash)
         this.tokens.delete(tokenHash)
+        this.meta.delete(tokenHash)
+        this.calls.delete(tokenHash)
       }
       return hashes.length
     })
@@ -152,9 +296,39 @@ export class McpCredentials {
       .statement('SELECT * FROM credentials WHERE thread_id = ? ORDER BY created_at, rowid')
       .all(threadId)
       .map((row) => {
-        const { tokenHash: _hash, threadId: _thread, ...summary } = toRecord(row)
+        const { tokenHash: _hash, threadId: _thread, ...summary } = this.toRecord(row)
         return summary
       })
+  }
+
+  private epochState(threadId: string, instanceId: string): EpochState {
+    const key = epochKey(threadId, instanceId)
+    let state = this.epochs.get(key)
+    if (!state) {
+      state = { epoch: 0 }
+      this.epochs.set(key, state)
+    }
+    return state
+  }
+
+  private bump(threadId: string, instanceId: string): number {
+    const state = this.epochState(threadId, instanceId)
+    state.epoch += 1
+    const hashes = this.db
+      .statement('SELECT token_hash FROM credentials WHERE thread_id = ? AND provider = ? AND revoked_at IS NULL')
+      .all(threadId, instanceId)
+      .map((row) => String(row.token_hash))
+    for (const tokenHash of hashes) this.revokeHash(tokenHash)
+    return state.epoch
+  }
+
+  private countsFor(tokenHash: string, runId: string): CallCounts {
+    let counts = this.calls.get(tokenHash)
+    if (!counts || counts.runId !== runId) {
+      counts = { runId, received: 0, running: 0 }
+      this.calls.set(tokenHash, counts)
+    }
+    return counts
   }
 
   private revoke(column: 'run_id' | 'thread_id', value: string): number {
@@ -173,6 +347,10 @@ export class McpCredentials {
     this.tokens.delete(tokenHash)
   }
 
+  private toRecord(row: Row): CredentialRecord {
+    return rowRecord(row, this.meta.get(String(row.token_hash)))
+  }
+
   private get db() {
     return this.store.db
   }
@@ -182,13 +360,20 @@ export class McpCredentials {
   }
 }
 
-function toRecord(row: Row): CredentialRecord {
+function epochKey(threadId: string, instanceId: string): string {
+  return `${threadId}\u0000${instanceId}`
+}
+
+function rowRecord(row: Row, meta: { epoch: number; binding: McpTurnBinding } | undefined): CredentialRecord {
   return {
     tokenHash: String(row.token_hash),
     threadId: String(row.thread_id),
     runId: String(row.run_id),
     provider: String(row.provider),
     modeCeiling: row.mode_ceiling === 'plan' ? 'plan' : 'default',
+    // A row this process did not mint (one from before a restart, revoked at boot) is of epoch 0 and rotates.
+    epoch: meta?.epoch ?? 0,
+    binding: meta?.binding ?? 'rotate',
     createdAt: String(row.created_at),
     revokedAt: str(row.revoked_at),
     lastSeenAt: String(row.last_seen_at)

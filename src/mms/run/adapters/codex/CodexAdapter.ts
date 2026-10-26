@@ -3,7 +3,6 @@ import {
   type CodexChatResult,
   type CodexProviderService
 } from '../../../providers/codex/CodexProviderService'
-import { mousseOrchestrationInstructions } from '../../mcp/instructions'
 import type { ChildPreflightContext, SubagentRefusal } from '../../policy/featureGates'
 import type { ProviderRef } from '../../types'
 import type {
@@ -16,8 +15,12 @@ import type {
   TurnResult,
   TurnSink
 } from '../ProviderAdapter'
-import { promptStreams, runtimeToolEvent, withAppletGuidance } from '../shared/promptRuntime'
+import { MOUSSE_MCP_SERVER_NAME } from '../../mcp/attachment'
+import { promptStreams, runtimeToolEvent } from '../shared/promptRuntime'
 import { retryContextOverflowOnce } from '../shared/retryContextOverflow'
+
+/** Codex names a Mousse server call `mcp__mousse__<tool>` (`CodexProviderService` tool events). */
+const CODEX_MOUSSE_TOOL_PREFIX = `mcp__${MOUSSE_MCP_SERVER_NAME}__`
 
 /** The slice of the provider service a turn drives. */
 export type CodexClient = Pick<
@@ -102,6 +105,8 @@ export class CodexAdapter implements ProviderAdapter {
       sink.progress()
       ctl.heartbeat()
     }
+    // The drained-turn proof for the bearer: the Mousse server's calls Codex started this turn.
+    const mousseCalls = new Set<string>()
     const chatInput = (): CodexChatInput => ({
       mode: input.mode === 'plan' ? 'plan' : 'default',
       child: input.child,
@@ -112,12 +117,12 @@ export class CodexAdapter implements ProviderAdapter {
       prompt: input.prompt,
       images: input.images,
       signal: input.signal,
-      appletInstructions: withAppletGuidance(input.appletInstructions),
+      turnPreamble: host.bridge?.turnPreamble || undefined,
       history,
-      // SPEC §15.2/§15.3: the Mousse MCP server in the thread's config, the shared guidance as
+      // SPEC §15.2/§15.3: the Mousse MCP server in the thread's config, the session instructions as
       // developer instructions.
-      mcp: host.mcp ?? null,
-      developerInstructions: host.mcp ? mousseOrchestrationInstructions() : undefined,
+      mcp: host.bridge?.mcp ?? null,
+      developerInstructions: host.bridge?.sessionInstructions || undefined,
       drainSteer: () => ctl.drainSteer(),
       onSteer: (text) => {
         progress()
@@ -133,6 +138,7 @@ export class CodexAdapter implements ProviderAdapter {
       },
       onTool: (event) => {
         progress()
+        if (event.phase === 'start' && event.toolName?.startsWith(CODEX_MOUSSE_TOOL_PREFIX)) mousseCalls.add(event.callId)
         sink.tool(runtimeToolEvent(event))
       },
       onHeartbeat: () => ctl.heartbeat(),
@@ -199,7 +205,8 @@ export class CodexAdapter implements ProviderAdapter {
       contextSignature: contextKey,
       contextModelKey: contextKey,
       nativeMessages: [],
-      providerRef: { ...providerRef, sessionId: result.codexThreadId, nativeTurnId: result.turnId }
+      providerRef: { ...providerRef, sessionId: result.codexThreadId, nativeTurnId: result.turnId },
+      drain: { mousseCalls: mousseCalls.size }
     }
   }
 

@@ -1,7 +1,7 @@
 /**
  * Phase 5 end to end (docs/run-engine/SPEC.md §15): a real `OrchestratorService`, Run Engine,
  * effect worker, reconciler and Mousse MCP server. A vendor-shaped adapter with `caps.mcp` receives
- * `AdapterHost.mcp` and, inside its turn, calls `delegate_task` over HTTP for a pi child, then
+ * the Mousse MCP server in its turn bridge (`AdapterHost.bridge`) and, inside its turn, calls `delegate_task` over HTTP for a pi child, then
  * `task_status`. The child inherits the caller's plan ceiling; a broader request is refused.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -11,19 +11,20 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/run/adapters/claudeSubscription/ClaudeSubscriptionAdapter'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
+import { TURN_TOKEN_KEY } from '../../src/mms/run/mcp/appTools'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
-import { createMousseToolRegistry } from '../../src/mms/run/mcp/toolRegistry'
 import { Reconciler } from '../../src/mms/run/Reconciler'
 import { phase6Daemon, waitFor } from './phase6Fixture'
 
-type Mcp = NonNullable<AdapterHost['mcp']>
+/** The server and bearer a turn's bridge attaches, with the turn token Claude's hook stamps on each call. */
+type Mcp = { url: string; token: string; turnToken?: string }
 
 async function callTool(mcp: Mcp, name: string, args: Record<string, unknown>, id = 1) {
   const response = await fetch(mcp.url, {
     method: 'POST',
     headers: { Authorization: `Bearer ${mcp.token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
-    body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } })
+    body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: mcp.turnToken ? { ...args, [TURN_TOKEN_KEY]: mcp.turnToken } : args } })
   })
   const body = await response.json() as { result?: { content: Array<{ text: string }>; isError?: boolean }; error?: { code: number; message: string; data?: { reason: string } } }
   return { status: response.status, body, value: body.result ? JSON.parse(body.result.content[0].text) : undefined }
@@ -33,15 +34,17 @@ async function callTool(mcp: Mcp, name: string, args: Record<string, unknown>, i
 class McpVendorAdapter implements ProviderAdapter {
   readonly driver = 'claude' as const
   readonly capabilities = CLAUDE_SUBSCRIPTION_CAPABILITIES
-  readonly hosts: Array<AdapterHost['mcp']> = []
+  readonly hosts: Array<{ url: string; token: string } | null> = []
   constructor(private readonly script: (input: TurnInput, mcp: Mcp) => Promise<string>) {}
 
   async startTurn(input: TurnInput, sink: TurnSink, _ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
-    this.hosts.push(host.mcp)
+    const mcp = host.bridge?.mcp ?? null
+    this.hosts.push(mcp)
     const providerRef = { provider: input.llmProvider, model: input.model }
     sink.providerRef(providerRef)
-    if (!host.mcp) throw new Error('expected the Mousse MCP server')
-    const text = await this.script(input, host.mcp)
+    if (!mcp) throw new Error('expected the Mousse MCP server')
+    // Like Claude Code under Mousse's hook, every call carries the turn's token.
+    const text = await this.script(input, { ...mcp, turnToken: host.bridge!.turnToken })
     sink.text({ phase: 'complete', content: text, contentIndex: 0 })
     host.context.nativeHistoryAfterTurn(text)
     return {
@@ -60,13 +63,13 @@ class ChildPiAdapter implements ProviderAdapter {
   readonly driver = 'pi' as const
   readonly capabilities = PI_LOOP_CAPABILITIES
   readonly turns: TurnInput[] = []
-  readonly hosts: Array<AdapterHost['mcp']> = []
+  readonly hosts: Array<{ url: string; token: string } | null> = []
   release!: () => void
   private readonly gate = new Promise<void>((resolve) => { this.release = resolve })
 
   async startTurn(input: TurnInput, sink: TurnSink, _ctl: TurnControl, host: AdapterHost): Promise<TurnResult> {
     this.turns.push(input)
-    this.hosts.push(host.mcp)
+    this.hosts.push(host.bridge?.mcp ?? null)
     await this.gate
     const providerRef = { provider: input.llmProvider, model: input.model }
     sink.providerRef(providerRef)
@@ -122,7 +125,7 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
         const raw = await fetch(mcp.url, {
           method: 'POST',
           headers: { Authorization: `Bearer ${mcp.token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
-          body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'delegate_task', arguments: { prompt: 'x', title: 'Ghost', instanceId: 'nope', workspace: 'shared', role: 'research', clientRequestId: 'unknown-1' } } })
+          body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'delegate_task', arguments: { prompt: 'x', title: 'Ghost', instanceId: 'nope', workspace: 'shared', role: 'research', clientRequestId: 'unknown-1', [TURN_TOKEN_KEY]: mcp.turnToken } } })
         })
         seen.unknown = (await raw.json() as { result?: { content: Array<{ text: string }>; isError?: boolean } }).result
         return 'Delegated the survey.'
@@ -136,7 +139,7 @@ describe('Mousse MCP delegation end to end (SPEC §15)', () => {
     const child = new ChildPiAdapter()
     const { orch, engine, store, stop } = phase6Daemon(home, [vendor, child])
     const credentials = new McpCredentials(engine.store)
-    const server = new MousseMcpServer({ credentials, registry: createMousseToolRegistry({ engine, host: orch.mcpToolHost() }) })
+    const server = new MousseMcpServer({ credentials, registry: orch.mcpToolRegistry() })
     await server.start()
     orch.setMcpAttachment(server)
     const reconciler = new Reconciler({ store: engine.store, outbox: engine.outbox, tools: engine.tools, capabilitiesFor: (id) => orch.capabilitiesForThread(id), credentials })
