@@ -1108,7 +1108,7 @@ export class LiveSession<Turn = unknown> {
   }
 
   /**
-   * A task finished. One this process never listed (an opaque task, T3's rule) keeps nothing busy and
+   * A task finished. One this process never listed (an opaque task) keeps nothing busy and
    * opens no continuation now. When no live turn folds it in, Claude may start a wake for it: the next
    * late root frame within `wakeDeadlineMs` opens a visible continuation labelled with it (`stray`), also
    * when nothing is remembered. A task that was stopped (an interrupt stops background agents) is reported
