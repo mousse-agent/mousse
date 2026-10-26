@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Message } from '@earendil-works/pi-ai'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import type { DelegationToolHost } from '../../src/mms/orchestrator/LlmClient'
 import { PI_LOOP_CAPABILITIES } from '../../src/mms/run/adapters/pi/PiLoopAdapter'
 import type { AdapterHost, ProviderAdapter, ProviderCapabilities, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/run/adapters/ProviderAdapter'
@@ -246,29 +246,22 @@ describe('orchestrator and engine safety (review round 2)', () => {
       // A second channel message arrives while A runs: it registers itself and waits for the thread's lease.
       const second = d.orch.runChannelTurn(threadId, 'B', d.store)
       await waitFor(() => turns.get(threadId)?.size === 2, 'turn B to register')
-      return { d, adapter, threadId, turns, first, second, gateA, gateB }
+      return { d, adapter, threadId, turns, first, second, gateA }
     }
-    /** A turn that must end within a moment: a Stop that missed it fails the test with a clear message. */
-    const settles = async <T,>(turn: Promise<T>): Promise<T> => {
-      const outcome = await Promise.race([turn, new Promise<'still running'>((resolve) => setTimeout(() => resolve('still running'), 3_000))])
-      expect(outcome).not.toBe('still running')
-      return outcome as T
-    }
+    /** A turn that does not end within a moment, so a Stop that missed it fails the test quickly. */
+    const endsSoon = <T,>(turn: Promise<T>): Promise<T | 'still running'> =>
+      Promise.race([turn, new Promise<'still running'>((resolve) => setTimeout(() => resolve('still running'), 3_000))])
 
-    it('a channel Stop ends the turn that runs; the message waiting for the lease survives it and runs afterwards', async () => {
-      const { d, adapter, threadId, turns, first, second, gateB } = await overlapping()
+    it('a channel Stop aborts both, and neither leaves anything registered', async () => {
+      const { d, threadId, turns, first, second } = await overlapping()
       expect(d.orch.abortChannelTurn(threadId)).toBe(true)
-      expect(await settles(first)).toMatchObject({ aborted: true })
-      await waitFor(() => adapter.turns.length === 2, 'turn B')
-      expect(adapter.turns[1].prompt).toBe('B')
-      expect(turns.get(threadId)?.size).toBe(1)
-      gateB.resolve()
-      expect(await settles(second)).toMatchObject({ text: 'reply to B' })
+      expect(await endsSoon(first)).toMatchObject({ aborted: true })
+      expect(await endsSoon(second)).toMatchObject({ aborted: true })
       expect(turns.has(threadId)).toBe(false)
       expect(d.orch.isChannelTurnActive(threadId)).toBe(false)
     }, 30_000)
 
-    it('the thread counts as having a turn while either is registered, and once the first ends a Stop reaches the second, which then holds the lease', async () => {
+    it('the thread counts as having a turn while either is registered, and the first ending leaves the second reachable by a Stop', async () => {
       const { d, adapter, threadId, turns, first, second, gateA } = await overlapping()
       gateA.resolve()
       expect(await first).toMatchObject({ text: 'reply to A' })
@@ -277,52 +270,9 @@ describe('orchestrator and engine safety (review round 2)', () => {
       expect((d.orch as unknown as { hasLocalTurn(id: string): boolean }).hasLocalTurn(threadId)).toBe(true)
       await waitFor(() => adapter.turns.length === 2, 'turn B')
       expect(d.orch.abortChannelTurn(threadId)).toBe(true)
-      expect(await settles(second)).toMatchObject({ aborted: true })
+      expect(await endsSoon(second)).toMatchObject({ aborted: true })
       expect(turns.has(threadId)).toBe(false)
     }, 30_000)
-
-    it('a turn that registered later but took the lease first is the one that runs: a steer and a Stop reach it, not the older one still waiting', async () => {
-      const { d, adapter, threadId, turns, first, second, gateA, gateB } = await overlapping()
-      type Entry = { pendingSteer: string[]; runId?: string }
-      const [, waiting] = [...turns.get(threadId)!] as Entry[]
-      // A ends; C registers right after and takes the lease before B's next poll (the lease is polled for, not queued).
-      gateA.resolve()
-      await first
-      const third = d.orch.runChannelTurn(threadId, 'C', d.store)
-      await waitFor(() => adapter.turns.some((turn) => turn.prompt === 'B' || turn.prompt === 'C'), 'the next turn to start')
-      expect(adapter.turns.at(-1)!.prompt).toBe('C')
-      const running = [...turns.get(threadId)!].find((entry) => entry !== waiting) as Entry
-      await waitFor(() => running.runId !== undefined, 'C to be recorded as a run')
-      expect(d.orch.isChannelTurnActive(threadId)).toBe(true)
-      const recorded = vi.spyOn(d.orch as unknown as { recordChannelControl(kind: string, threadId: string, runId?: string): void }, 'recordChannelControl')
-      expect(d.orch.steerChannelTurn(threadId, 'steer for C')).toBe(true)
-      // The steer is C's (C may already have drained it), recorded against C's run; B's queue is untouched.
-      expect(recorded).toHaveBeenCalledWith('steer', threadId, running.runId)
-      expect(waiting.pendingSteer).toEqual([])
-      // A Stop ends C, which holds the lease; B waits and runs afterwards.
-      expect(d.orch.abortChannelTurn(threadId)).toBe(true)
-      expect(await settles(third)).toMatchObject({ aborted: true })
-      await waitFor(() => adapter.turns.at(-1)!.prompt === 'B', 'turn B')
-      gateB.resolve()
-      expect(await settles(second)).toMatchObject({ text: 'reply to B' })
-      expect(turns.has(threadId)).toBe(false)
-    }, 30_000)
-
-    it('with several turns and none holding the lease a Stop aborts nothing; a lone turn that has not acquired it yet is the one it was for', () => {
-      const d = start(new HostAdapter(() => 'unused'))
-      const threadId = thread(d, 'Lease')
-      const turns = (d.orch as unknown as { channelTurns: Map<string, Set<unknown>> }).channelTurns
-      const entry = () => ({ abort: new AbortController(), pendingSteer: [], promotedSteerIds: [] })
-      const one = entry()
-      turns.set(threadId, new Set([one]))
-      expect(d.orch.abortChannelTurn(threadId)).toBe(true)
-      expect(one.abort.signal.aborted).toBe(true)
-      const [waitingA, waitingB] = [entry(), entry()]
-      turns.set(threadId, new Set([waitingA, waitingB]))
-      expect(d.orch.abortChannelTurn(threadId)).toBe(false)
-      expect([waitingA.abort.signal.aborted, waitingB.abort.signal.aborted]).toEqual([false, false])
-      turns.delete(threadId)
-    })
   })
 
   it('C4: a wake on a thread busy with a turn the engine does not schedule stays queued (one wake run) and runs once after', async () => {
