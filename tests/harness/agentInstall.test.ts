@@ -73,7 +73,7 @@ function agent(version: string, url: string, options: { sha256?: string | null; 
   }
 }
 
-function setup(options: { profiles?: Array<{ id: string; displayName?: string }>; npm?: NpmRunner; maxDownloadBytes?: number } = {}) {
+function setup(options: { profiles?: Array<{ id: string; displayName?: string }>; npm?: NpmRunner; maxDownloadBytes?: number; liveInstances?: () => string[] } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-agent-install-'))
   dirs.push(home)
   const registry = { current: undefined as RegistryAgent | undefined }
@@ -87,6 +87,7 @@ function setup(options: { profiles?: Array<{ id: string; displayName?: string }>
     listProfiles: () => listed.profiles,
     platformKeys: [KEY],
     exitGraceMs: 50,
+    ...(options.liveInstances ? { liveInstances: options.liveInstances } : {}),
     ...(options.npm ? { npm: options.npm } : {}),
     ...(options.maxDownloadBytes ? { maxDownloadBytes: options.maxDownloadBytes } : {})
   })
@@ -250,6 +251,19 @@ describe('managed agent installs', () => {
     running()
     expect(await installs('p1').removeInstall({ instanceId: 'acp:demo', source: binarySource(), force: true })).toMatchObject({ removed: true })
     expect(existsSync(again.root)).toBe(false)
+  })
+
+  it('ignores a reference this profile kept for an entry it no longer has', async () => {
+    const server = await downloads({ 'demo.tar.gz': archive })
+    const live = { ids: ['acp:demo', 'acp:gone'] }
+    const { registry, installs, env } = setup({ liveInstances: () => live.ids })
+    registry.current = agent('1.0.0', `${server.base}/archive/demo.tar.gz`)
+    const installed = await installs('p1').install({ instanceId: 'acp:demo', source: binarySource(), env, label: 'Demo', onProgress: () => {} })
+    await installs('p1').install({ instanceId: 'acp:gone', source: binarySource(), env, label: 'Demo', onProgress: () => {} })
+    expect(await installs('p1').removeInstall({ instanceId: 'acp:demo', source: binarySource(), force: false })).toMatchObject({ removed: false })
+    // `acp:gone` was removed without letting go of its reference (a lock timeout, a crash).
+    live.ids = ['acp:demo']
+    expect(await installs('p1').removeInstall({ instanceId: 'acp:demo', source: binarySource(), force: false })).toEqual({ removed: true, bytes: installed.receipt.bytes })
   })
 
   it('deletes the version an update replaced once no process and no other entry uses it', async () => {
