@@ -21,6 +21,7 @@
     "tests/harness/agentLock.test.ts",
     "tests/harness/chatgpt/crossProcess.test.ts",
     "tests/harness/chatgpt/storeProcesses.test.ts",
+    "tests/harness/codexManagedWire.test.ts",
     "tests/harness/cursorHost.test.ts",
     "tests/harness/piRuntimeProcess.test.ts",
     "tests/headlessCommand.test.ts",

@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { McpServerConfig } from '../../../shared/integrations'
 import type { McpAttachment } from './MousseMcpServer'
 
@@ -39,9 +41,22 @@ export function stdioBridgeCommand(attachment: McpAttachment, cli: CliCommand = 
   }
 }
 
+/**
+ * The standalone token helper beside a Node-hosted CLI bundle (`out/cli/chatgpt-token.js`), when
+ * there is one: Node runs it without loading the CLI bundle and every package it imports.
+ */
+export function standaloneChatgptTokenScript(): string | undefined {
+  if (process.env.MOUSSE_CLI_PATH || (process.versions.electron && process.env.ELECTRON_RUN_AS_NODE !== '1')) return undefined
+  const script = process.argv[1] ? join(dirname(process.argv[1]), 'chatgpt-token.js') : undefined
+  return script && existsSync(script) ? script : undefined
+}
+
 /** `mousse-cli engine chatgpt-token <endpoint> <leaseId>`: a managed Codex's `auth.command`. */
-export function chatgptTokenCommand(endpoint: string, leaseId: string, cli: CliCommand = defaultMousseCliCommand()): CliCommand {
-  return { command: cli.command, args: [...cli.args, 'engine', 'chatgpt-token', endpoint, leaseId], env: { ...cli.env } }
+export function chatgptTokenCommand(endpoint: string, leaseId: string, cli?: CliCommand): CliCommand {
+  const script = cli ? undefined : standaloneChatgptTokenScript()
+  if (script) return { command: process.execPath, args: [script, endpoint, leaseId], env: {} }
+  const command = cli ?? defaultMousseCliCommand()
+  return { command: command.command, args: [...command.args, 'engine', 'chatgpt-token', endpoint, leaseId], env: { ...command.env } }
 }
 
 /** Claude Agent SDK `mcpServers` (SPEC §15.2): the Mousse server over HTTP, or none. */

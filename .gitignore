@@ -57,3 +57,6 @@ ehthumbs.db
 
 # Playwright MCP session artifacts
 .playwright-mcp/
+
+# Pinned downloads for local gates (npm run codex:pin)
+.cache/
