@@ -95,9 +95,15 @@ export interface CursorHostError {
  */
 const AUTH_CODES = new Set(['unauthenticated', 'unauthorized', 'not_logged_in', 'invalid_auth_id', 'agent_requires_login', 'auth_token_not_found', 'auth_token_expired'])
 
-/** Whether an SDK failure means Cursor refused the credential. */
+/**
+ * Whether an SDK failure means Cursor refused the credential. The SDK also raises
+ * `AuthenticationError` for `NOT_HIGH_ENOUGH_PERMISSIONS`: the key is valid there, so that code
+ * never signs the entry out, whether it is thrown or reported as a run's error.
+ */
 export function isCursorAuthFailure(error: { name?: string; code?: string; status?: number }): boolean {
-  return error.name === 'AuthenticationError' || error.status === 401 || (typeof error.code === 'string' && AUTH_CODES.has(error.code.toLowerCase()))
+  const code = typeof error.code === 'string' ? error.code.toLowerCase() : undefined
+  if (code === 'not_high_enough_permissions') return false
+  return error.name === 'AuthenticationError' || error.status === 401 || (code !== undefined && AUTH_CODES.has(code))
 }
 
 /** SDK text for a log line, with anything that looks like a key or a bearer token removed. */

@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CursorHostCallError, CursorHostClient } from '../../src/mms/harness/cursor/hostClient'
+import { CursorSessions } from '../../src/mms/harness/cursor/session'
 import { cursorDriver } from '../../src/mms/harness/drivers/cursor'
 import { isCursorAuthFailure, redactCursorText } from '../../src/mms/harness/hosts/cursorProtocol'
 import { piLegacyDriver } from '../../src/mms/harness/drivers/piLegacy'
@@ -272,6 +273,53 @@ describe('Stop before the run exists', () => {
     expect(state().sessions.thread?.agentId).toBe('agent-1')
   })
 
+  it('a late answer to a stopped reopen does not close the agent the next turn reopened', async () => {
+    const resumes: Array<(value: { agentId: string }) => void> = []
+    const host = new FakeCursorHost({
+      resume: () => new Promise((resolve) => resumes.push(resolve)),
+      close: () => ({}),
+      send: (_params, fake) => {
+        const runId = `run-${fake.calls('send').length}`
+        setTimeout(() => fake.emit({ event: 'run_end', runId, status: 'finished' }), 1)
+        return { runId }
+      }
+    })
+    const { turn } = setup(host.connect, (home) => ({
+      sessions: { thread: { agentId: 'agent-1', cwd: home, historyKey: createHash('sha256').update('').digest('hex'), runIds: [] } }
+    }))
+    const stop = new AbortController()
+    const first = await turn('thread', { signal: stop.signal })
+    await vi.waitFor(() => expect(resumes).toHaveLength(1))
+    stop.abort()
+    expect(await first.result).toMatchObject({ aborted: true })
+    // The next turn reopens the same agent while the first reopen is still out.
+    const second = await turn('thread')
+    await vi.waitFor(() => expect(resumes).toHaveLength(2))
+    resumes[1]!({ agentId: 'agent-1' })
+    await vi.waitFor(() => expect(host.calls('send')).toHaveLength(1))
+    resumes[0]!({ agentId: 'agent-1' })
+    expect(await second.result).toMatchObject({ aborted: false })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(host.calls('close')).toEqual([])
+  })
+
+  it('a Stop that comes while a stuck prune runs opens no agent', async () => {
+    const host = new FakeCursorHost({ prune: () => new Promise(() => {}), create: () => ({ agentId: 'agent-2' }), resume: () => ({ agentId: 'agent-1' }) })
+    const { turn, harness } = setup(host.connect, (home) => ({
+      sessions: { old: { agentId: 'agent-0', cwd: home, runIds: [] } }
+    }))
+    // Forgetting the old thread queues a prune; the host is not running, so the next turn sends it.
+    const stop = new AbortController()
+    const record = (harness as unknown as { record(id: string): { runtime: { forgetConversation(id: string): void } } }).record(INSTANCE)
+    record.runtime.forgetConversation('old')
+    const handle = await turn('thread', { signal: stop.signal })
+    await vi.waitFor(() => expect(host.calls('prune')).toHaveLength(1))
+    stop.abort()
+    expect(await handle.result).toMatchObject({ aborted: true })
+    expect(host.calls('create')).toEqual([])
+    expect(host.calls('resume')).toEqual([])
+  })
+
   it('a saved agent that does not reopen within the load deadline hands the history to a new one', async () => {
     const host = new FakeCursorHost({
       resume: () => new Promise(() => {}),
@@ -375,9 +423,35 @@ describe('the host client', () => {
     expect(new CursorHostCallError({ message: 'Invalid API key', code: 'unauthenticated' }).auth).toBe(true)
     expect(new CursorHostCallError({ message: 'expired', code: 'AUTH_TOKEN_EXPIRED' }).auth).toBe(true)
     expect(new CursorHostCallError({ message: 'busy', code: 'resource_exhausted' }).auth).toBeUndefined()
+    // A valid key without enough permission is not a sign-out, thrown or reported by a run.
+    expect(isCursorAuthFailure({ name: 'AuthenticationError', code: 'NOT_HIGH_ENOUGH_PERMISSIONS' })).toBe(false)
+    expect(new CursorHostCallError({ message: 'no access', code: 'NOT_HIGH_ENOUGH_PERMISSIONS' }).auth).toBeUndefined()
     expect(isCursorAuthFailure({ name: 'AuthenticationError' })).toBe(true)
     const redacted = redactCursorText('Authorization: Bearer abc.def apiKey="key_1234567890abcdef" crsr_abcdefghijkl ConnectError: [unavailable] reset')
     for (const secret of ['abc.def', 'key_1234567890abcdef', 'crsr_abcdefghijkl']) expect(redacted).not.toContain(secret)
     expect(redacted).toContain('ConnectError: [unavailable] reset')
+  })
+})
+
+describe('ending the host for a stuck stop', () => {
+  it('marks the stopping chat only when a host is running to exit', () => {
+    let running = false
+    const sessions = new CursorSessions({
+      label: 'Cursor',
+      host: { get running() { return running }, onExit: () => () => undefined, kill: () => undefined, stop: () => undefined, request: () => new Promise(() => {}) } as never,
+      storeDir: '/store',
+      apiKey: () => 'key',
+      settingSources: [],
+      store: { saved: () => undefined, setSaved: () => undefined, threads: () => [] },
+      markSignedOut: () => undefined,
+      signInRequiredMessage: 'sign in'
+    })
+    let key = ''
+    void sessions.chat({ threadId: 'a', cwd: '/w', model: 'default', prompt: 'hi', onText: () => {}, onSession: (id) => { key ||= id } })
+    sessions.terminate(key)
+    expect((sessions as unknown as { endingFor?: string }).endingFor).toBeUndefined()
+    running = true
+    sessions.terminate(key)
+    expect((sessions as unknown as { endingFor?: string }).endingFor).toBe('a')
   })
 })

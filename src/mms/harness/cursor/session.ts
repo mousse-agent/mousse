@@ -165,6 +165,8 @@ export class CursorSessions {
   private readonly turns = new Map<string, Turn>()
   /** Agents no thread uses any more, removed from the store when the host runs next. */
   private readonly toPrune = new Set<string>()
+  /** Reopens in flight, by agent: a late answer to an abandoned one must not close the agent another turn is reopening. */
+  private readonly reopening = new Map<string, number>()
   private generation = 0
   /** The thread whose stuck stop or steer is ending the host. */
   private endingFor: string | undefined
@@ -237,9 +239,20 @@ export class CursorSessions {
     }
   }
 
-  /** An open the turn stopped waiting for: when it still answers, its agent is closed (and removed when new). */
+  /** Whether a live agent, a turn or a reopen still uses `agentId`. */
+  private inUse(agentId: string): boolean {
+    if (this.turns.has(agentId) || (this.reopening.get(agentId) ?? 0) > 0) return true
+    for (const live of this.live.values()) if (live.agentId === agentId) return true
+    return false
+  }
+
+  /**
+   * An open the turn stopped waiting for: when it still answers, its agent is closed (and removed
+   * when new), unless another turn has reopened the same agent meanwhile.
+   */
   private abandon(opening: Promise<{ agentId: string }>, options: { prune: boolean }): void {
     void opening.then(({ agentId }) => {
+      if (this.inUse(agentId)) return
       void this.options.host.request('close', { agentId }).catch(() => undefined)
       if (options.prune) this.prune([agentId])
     }, () => undefined)
@@ -260,7 +273,8 @@ export class CursorSessions {
    */
   terminate(id?: string): void {
     const turn = id ? this.turns.get(id) : undefined
-    this.endingFor = turn?.threadId
+    // Only a running host exits; otherwise nothing would clear the mark.
+    if (this.options.host.running) this.endingFor = turn?.threadId
     this.options.host.kill()
   }
 
@@ -292,6 +306,8 @@ export class CursorSessions {
    */
   private async open(input: CursorChatInput, apiKey: string, historyKey: string, stop: AbortSignal): Promise<{ agentId: string; resumed: boolean }> {
     const { host, store, label } = this.options
+    // A Stop that came first opens nothing (and starts no host).
+    if (stop.aborted) throw new TurnStopped()
     const saved = store.saved(input.threadId)
     const matches = saved?.cwd === input.cwd && saved.historyKey === historyKey
     const live = this.live.get(input.threadId)
@@ -300,6 +316,7 @@ export class CursorSessions {
     const setup = this.setup(input, apiKey)
     if (saved && matches) {
       const resuming = host.request('resume', { ...setup, agentId: saved.agentId })
+      this.reopening.set(saved.agentId, (this.reopening.get(saved.agentId) ?? 0) + 1)
       try {
         const { agentId } = await loadWithDeadline(saved.agentId, stoppable(resuming, stop), () => {}, this.options.loadDeadlineMs ?? LOAD_DEADLINE_MS)
         this.live.set(input.threadId, { agentId, cwd: input.cwd, generation: this.generation })
@@ -314,6 +331,10 @@ export class CursorSessions {
         // A resume that failed or missed the deadline: the history goes to a new agent instead.
         if (error instanceof SessionLoadTimeoutError) this.abandon(resuming, { prune: false })
         this.options.notice?.(input.threadId, `${label} could not reopen this chat's agent, so the chat history was handed to a new one.`)
+      } finally {
+        const left = (this.reopening.get(saved.agentId) ?? 1) - 1
+        if (left > 0) this.reopening.set(saved.agentId, left)
+        else this.reopening.delete(saved.agentId)
       }
     }
     const creating = host.request('create', setup)
@@ -372,7 +393,6 @@ export class CursorSessions {
     const progress: Progress = { text: '' }
     const interrupted = (): CursorChatResult => ({ text: progress.text, interrupted: true, ...(progress.usage ? { usage: progress.usage } : {}) })
     try {
-      await this.flushPrune()
       return await this.runTurn(input, apiKey, turn, progress, (id) => {
         agentId = id
         this.turns.set(id, turn)
@@ -400,6 +420,8 @@ export class CursorSessions {
   private async runTurn(input: CursorChatInput, apiKey: string, turn: Turn, progress: Progress, opened: (agentId: string) => void): Promise<CursorChatResult> {
     const { host, store, label } = this.options
     const stop = turn.stop.signal
+    // A prune that hangs ends with the turn's Stop like everything else it waits for.
+    await stoppable(this.flushPrune(), stop)
     let open: { agentId: string; resumed: boolean }
     try {
       open = await this.open(input, apiKey, this.historyKey(input.history ?? ''), stop)
