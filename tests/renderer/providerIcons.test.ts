@@ -1,7 +1,10 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { ProviderIcon } from '../../src/renderer/lib/providerIcons'
+import { normalizeProviderId, ProviderIcon } from '../../src/renderer/lib/providerIcons'
+import { SubagentAvatar } from '../../src/renderer/components/SubagentAvatar'
+import { subagentBadgeTone, subagentIconId, threadProviderId, type SubagentBadgeTone } from '../../src/renderer/components/subagentStatus'
+import type { SubagentState } from '../../src/shared/subagents'
 import { placeTooltip } from '../../src/renderer/components/AppTooltip'
 
 const render = (providerId: string) => renderToStaticMarkup(createElement(ProviderIcon, { providerId, size: 16 }))
@@ -55,5 +58,49 @@ describe('placeTooltip', () => {
   it('clamps a left tooltip to the window', () => {
     const anchor = { top: 790, left: 400, width: 40, height: 10, side: 'left' as const }
     expect(placeTooltip(anchor, box, viewport)).toEqual({ top: 768, left: 272 })
+  })
+})
+
+describe('subagent provider icons', () => {
+  it('maps the providers a subagent runs on to their logos', () => {
+    const cases: Array<[string, string]> = [
+      ['claude', 'claude'],
+      ['claude:work', 'claude'],
+      ['codex', 'openai'],
+      ['cursor', 'cursor'],
+      ['opencode', 'opencode'],
+      ['antigravity', 'google'],
+      ['pi:openai', 'openai']
+    ]
+    for (const [provider, logo] of cases) expect(normalizeProviderId(subagentIconId(provider, null)), provider).toBe(logo)
+  })
+
+  it('falls back to the provider the subagent inherited, then to the generic mark', () => {
+    expect(subagentIconId(null, 'codex')).toBe('codex')
+    expect(subagentIconId('cursor', 'codex')).toBe('cursor')
+    expect(subagentIconId(null, null)).toBe('')
+    expect(render('')).toContain('<svg')
+  })
+
+  it("takes a thread's provider from its override, else the default provider", () => {
+    expect(threadProviderId('codex', 'claude')).toBe('codex')
+    expect(threadProviderId(undefined, 'claude')).toBe('claude')
+    expect(threadProviderId('', '')).toBeNull()
+  })
+
+  it('colours the status dot by state', () => {
+    const tone = (state: SubagentState, pending = false) => subagentBadgeTone({ state, pending })
+    expect(['queued', 'starting', 'working'].map((state) => tone(state as SubagentState))).toEqual(['running', 'running', 'running'])
+    expect(tone('done', true)).toBe('running')
+    expect([tone('needs_input'), tone('waiting')]).toEqual(['attention', 'attention'])
+    expect(tone('done')).toBe('done')
+    expect([tone('failed'), tone('interrupted')]).toEqual(['failed', 'failed'])
+    expect([tone('stopped'), tone('idle')]).toEqual(['idle', 'idle'])
+  })
+
+  it('draws the dot on the icon only when given a state', () => {
+    const avatar = (tone?: SubagentBadgeTone) => renderToStaticMarkup(createElement(SubagentAvatar, { providerId: 'claude', tone }))
+    expect(avatar('running')).toContain('class="subagent-avatar-badge" data-tone="running"')
+    expect(avatar()).not.toContain('subagent-avatar-badge')
   })
 })

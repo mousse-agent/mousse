@@ -7,21 +7,14 @@
   width: 100%;
 }
 
-.subagent-cards-label {
-  padding: 0 10px;
-  color: var(--ui-faint);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
 .subagent-card-slot {
   min-width: 0;
 }
 
 .subagent-card {
   display: flex;
-  flex-direction: column;
-  gap: 3px;
+  align-items: center;
+  gap: 10px;
   width: 100%;
   min-width: 0;
   padding: 7px 10px;
@@ -51,9 +44,17 @@
   box-shadow: var(--ui-focus-ring);
 }
 
+.subagent-card-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .subagent-card-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 8px;
   min-width: 0;
 }
@@ -68,6 +69,21 @@
   white-space: nowrap;
 }
 
+.subagent-card-note {
+  flex: 0 0 auto;
+  color: var(--ui-faint);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.subagent-card-note[data-tone="attention"] {
+  color: var(--warning);
+}
+
+.subagent-card-note[data-tone="failed"] {
+  color: var(--danger);
+}
+
 .subagent-card-model {
   flex: 1 1 0;
   min-width: 0;
@@ -78,8 +94,7 @@
   white-space: nowrap;
 }
 
-/* With no model to show, the status takes the room and sits at the right edge. */
-.subagent-card-status {
+.subagent-card-elapsed {
   flex: 0 0 auto;
   margin-left: auto;
   color: var(--ui-faint);
@@ -106,39 +121,147 @@
   -webkit-line-clamp: 2;
 }
 
-.subagent-card-dot {
+/* Two or more cards fold into a group: a header that opens and folds it, and the rows on one panel. */
+.subagent-group-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.subagent-group-head:hover {
+  background: var(--ui-hover);
+}
+
+.subagent-group-head:active {
+  background: var(--ui-pressed);
+}
+
+.subagent-group-head:focus-visible {
+  outline: none;
+  box-shadow: var(--ui-focus-ring);
+}
+
+.subagent-group-stack {
+  display: flex;
   flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
+  align-items: center;
+}
+
+.subagent-group-stack > * + * {
+  margin-left: -8px;
+}
+
+.subagent-group-stack > .subagent-avatar,
+.subagent-group-more {
+  box-shadow: 0 0 0 2px var(--surface-strong);
+}
+
+/* Positioned like the avatars, so it paints over the last one instead of under it. */
+.subagent-group-more {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
+  background: color-mix(in srgb, var(--text-primary) 8%, var(--surface-strong));
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
-.subagent-card-dot[data-tone="live"] {
-  background: var(--success);
-  animation: subagent-card-pulse 1.6s ease-in-out infinite;
+.subagent-group-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
 }
 
-.subagent-card-dot[data-tone="ask"] {
-  background: var(--warning);
+.subagent-group-title {
+  color: var(--text-primary);
+  font-weight: 450;
 }
 
-.subagent-card-dot[data-tone="fail"] {
-  background: var(--danger);
+.subagent-group-summary {
+  overflow: hidden;
+  color: var(--ui-faint);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-@keyframes subagent-card-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
+.subagent-group-summary [data-tone="running"] {
+  color: var(--accent);
+}
+
+.subagent-group-summary [data-tone="attention"] {
+  color: var(--warning);
+}
+
+.subagent-group-summary [data-tone="done"] {
+  color: var(--success);
+}
+
+.subagent-group-summary [data-tone="failed"] {
+  color: var(--danger);
+}
+
+.subagent-group-elapsed {
+  flex: 0 0 auto;
+  color: var(--ui-faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.subagent-group-chevron {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--ui-faint);
+  transition: transform 120ms ease;
+}
+
+.subagent-group-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.subagent-group-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+}
+
+.subagent-group-rows .subagent-card {
+  background: transparent;
+}
+
+.subagent-group-rows .subagent-card:not(:disabled):hover {
+  background: var(--ui-hover);
+}
+
+.subagent-group-rows .subagent-card:not(:disabled):active {
+  background: var(--ui-pressed);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .subagent-card-dot[data-tone="live"] {
-    animation: none;
+  .subagent-group-chevron {
+    transition: none;
   }
 }
 

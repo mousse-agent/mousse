@@ -1,4 +1,4 @@
-/* Top of the composer: a subagent has a question, or the thread is still waiting. */
+/* Top of the composer: a subagent has a question. */
 
 .composer-banner {
   display: flex;
@@ -40,10 +40,6 @@ button.composer-banner-row:active {
 button.composer-banner-row:focus-visible {
   outline: none;
   box-shadow: var(--ui-focus-ring);
-}
-
-.composer-banner-row.is-quiet {
-  color: var(--ui-faint);
 }
 
 .composer-banner-text {

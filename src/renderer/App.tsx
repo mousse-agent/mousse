@@ -318,6 +318,12 @@ export default function App() {
       // and other main-driven selection without showing the previous transcript.
       window.mousse.threads.onSelected(applyIfCurrent(({ id }) => switchToThread(id))),
       window.mousse.threads.onActivity(applyIfCurrent(setThreadActivity)),
+      // Keep the default provider current; subagent rows of threads on the default draw its logo.
+      window.mousse.settings.onChanged(applyIfCurrent((settings) => {
+        const info = useAppStore.getState().appInfo
+        const llmProvider = settings?.provider?.llmProvider ?? ''
+        if (info && info.llmProvider !== llmProvider) setAppInfo({ ...info, llmProvider })
+      })),
       window.mousse.turn.onTurnState(applyIfCurrent(setTurnState)),
       window.mousse.turn.onTurnSnapshot(applyIfCurrent(setTurnSnapshot)),
       window.mousse.app.onNavigateMainView((view) => {

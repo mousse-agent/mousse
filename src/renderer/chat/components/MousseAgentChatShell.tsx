@@ -6,7 +6,8 @@ import { X } from '../../lib/icons'
 import { PromptUndoProvider } from '../../components/PromptUndoControls'
 import { useSubagentCardModels } from '../../hooks/useSubagentCards'
 import { AgentChat } from './agent-elements/agent-chat'
-import { SubagentCardsContext } from './agent-elements/tools/subagent-cards-context'
+import { SubagentCardsContext, SubagentInheritedProviderContext } from './agent-elements/tools/subagent-cards-context'
+import { useThreadProviderId } from '../../components/SubagentAvatar'
 import type { CustomToolRendererProps } from './agent-elements/types'
 import {
   QuickActionApprovalContext,
@@ -86,11 +87,13 @@ export function MousseAgentChatShell({
     []
   )
   const subagentCards = useSubagentCardModels(threadId, messages)
+  const threadProvider = useThreadProviderId(threadId)
   return (
     <MousseComposerContext.Provider value={composer}>
       <PromptUndoProvider key={`${profileId}:${threadId ?? ""}`} threadId={threadId} busy={busy} revision={messages}>
       <QuickActionApprovalContext.Provider value={quickActionApproval ?? null}>
       <SubagentCardsContext.Provider value={subagentCards}>
+      <SubagentInheritedProviderContext.Provider value={threadProvider}>
         <AgentChat
           className="mousse-chat-shell"
           messages={messages}
@@ -109,6 +112,7 @@ export function MousseAgentChatShell({
           showCopyToolbar
           enableImagePreview
         />
+      </SubagentInheritedProviderContext.Provider>
       </SubagentCardsContext.Provider>
       </QuickActionApprovalContext.Provider>
       </PromptUndoProvider>
