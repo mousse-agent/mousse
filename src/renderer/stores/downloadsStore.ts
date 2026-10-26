@@ -113,8 +113,13 @@ export function applyProviderOperation(entries: readonly DownloadEntry[], event:
   const base = { id, kind: 'agent' as const, sourceId: event.operationId, label }
   switch (event.phase) {
     case 'progress': {
-      const percent = event.fraction !== undefined ? Math.min(100, Math.floor(event.fraction * 100)) : current?.percent
-      return replace(entries, { ...base, phase: 'downloading', ...(percent !== undefined ? { percent } : {}) })
+      // Bytes when the download knows them (they also weight the combined percent), else the fraction.
+      // A step without bytes (unpacking) keeps the last ones.
+      const bytes = event.receivedBytes !== undefined && event.totalBytes ? { receivedBytes: event.receivedBytes, totalBytes: event.totalBytes }
+        : event.fraction === undefined && current?.totalBytes ? { receivedBytes: current.receivedBytes ?? 0, totalBytes: current.totalBytes } : undefined
+      const percent = bytes ? percentOf(bytes.receivedBytes, bytes.totalBytes)
+        : event.fraction !== undefined ? Math.min(100, Math.floor(event.fraction * 100)) : current?.percent
+      return replace(entries, { ...base, phase: 'downloading', ...(bytes ?? {}), ...(percent !== undefined ? { percent } : {}) })
     }
     case 'completed':
       return replace(entries, { ...base, phase: 'done', percent: 100, settledAt: now })

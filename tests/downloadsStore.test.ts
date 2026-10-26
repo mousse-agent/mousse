@@ -109,6 +109,15 @@ describe('downloads store: agent installs and updates', () => {
     expect(entries).toEqual([{ id: 'agent:antigravity', kind: 'agent', sourceId: 'op-1', label: 'Antigravity', phase: 'done', percent: 100, settledAt: 4 }])
   })
 
+  it('shows bytes when the install reports them, keeps them through steps without bytes, and weights the total by them', () => {
+    let entries = applyProviderOperation([], op({ phase: 'progress', message: 'Downloading 1 MB of 4 MB', receivedBytes: 1_000_000, totalBytes: 4_000_000 }), 'Demo', 1)
+    expect(entries).toMatchObject([{ phase: 'downloading', receivedBytes: 1_000_000, totalBytes: 4_000_000, percent: 25 }])
+    entries = applyProviderOperation(entries, op({ phase: 'progress', message: 'Unpacking Demo…' }), 'Demo', 2)
+    expect(entries).toMatchObject([{ receivedBytes: 1_000_000, totalBytes: 4_000_000, percent: 25 }])
+    const other = applyProviderOperation(entries, op({ operationId: 'op-3', instanceId: 'acp:other', phase: 'progress', message: 'Downloading', receivedBytes: 3_000_000, totalBytes: 4_000_000 }), 'Other', 3)
+    expect(summarizeDownloads(other)).toMatchObject({ status: 'downloading', active: 2, percent: 50 })
+  })
+
   it('keeps a failed update with its message and marks a cancelled install', () => {
     const update = (patch: Parameters<typeof op>[0]) => op({ operationId: 'op-2', instanceId: 'codex', kind: 'update', ...patch })
     let entries = applyProviderOperation([], update({ phase: 'progress', message: 'Updating' }), 'Codex', 1)

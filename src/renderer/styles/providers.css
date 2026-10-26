@@ -1062,3 +1062,109 @@
   background: var(--accent);
   color: var(--accent-contrast, #fff);
 }
+
+/* ACP registry agents: the Add dialog's agent list, confirm panel and the editor's source rows. */
+
+.prov-registry-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.prov-choice.prov-registry-row {
+  align-items: flex-start;
+  padding: var(--space-8) var(--space-12);
+}
+
+.prov-choice:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.prov-choice:disabled:hover {
+  background: var(--settings-surface, var(--ui-hover));
+}
+
+.prov-registry-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.prov-registry-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-width: 0;
+}
+
+.prov-registry-meta {
+  font-size: var(--settings-fs-small);
+  color: var(--text-secondary);
+}
+
+.prov-registry-code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.prov-source {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.prov-warning-text {
+  color: var(--warning);
+}
+
+.prov-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+  font-size: var(--settings-fs-small);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.prov-check input {
+  flex-shrink: 0;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.prov-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  font-size: var(--settings-fs-small);
+}
+
+.prov-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-8);
+}
+
+.prov-used-by {
+  margin: 0;
+  padding-left: var(--space-16);
+}
+
+.btn.prov-btn-danger {
+  color: var(--danger);
+}
+
+.prov-notice {
+  margin: 0;
+  font-size: var(--settings-fs-small);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}

@@ -14,7 +14,8 @@ import { model, snapshot, type SnapshotOverrides } from './providerSnapshotFixtu
 
 const noop = async () => undefined
 const actions: InstanceActions = {
-  enable: noop, install: noop, cancelInstall: noop, update: noop, signIn: noop, signOut: noop, recheck: noop, configure: noop
+  enable: noop, install: noop, cancelInstall: noop, update: noop, signIn: noop, signOut: noop, recheck: noop, configure: noop,
+  removeInstall: async () => ({ removed: true, bytes: 0 })
 }
 const buttons = (html: string) =>
   [...html.matchAll(/<button[^>]*>(.*?)<\/button>/g)].map((match) => match[1].replace(/<[^>]+>/g, '').trim()).filter(Boolean)
@@ -247,7 +248,7 @@ describe('Add provider choices', () => {
 
   it('offers a second Claude Code account and skips single-instance agents already in the list, on or off', () => {
     const choices = addChoices([claude, codex, antigravity], [])
-    expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([['new', 'Claude Code · another account'], ['new', 'Cursor'], ['new', 'Custom command']])
+    expect(choices.map((choice) => [choice.kind, choice.label])).toEqual([['new', 'Claude Code · another account'], ['new', 'Cursor'], ['new', 'Custom command'], ['registry', 'More ACP agents…']])
   })
 
   it('always offers a Custom command, never as another account', () => {
@@ -262,9 +263,10 @@ describe('Add provider choices', () => {
       ['new', 'Claude Code'],
       ['new', 'Antigravity'],
       ['new', 'Cursor'],
-      ['new', 'Custom command']
+      ['new', 'Custom command'],
+      ['registry', 'More ACP agents…']
     ])
-    expect(choices.every((choice) => choice.kind === 'new' && choice.existing === undefined)).toBe(true)
+    expect(choices.every((choice) => choice.kind === 'registry' || (choice.kind === 'new' && choice.existing === undefined))).toBe(true)
   })
 
   it('lists model APIs not connected yet, without the agents’ own sign-ins', () => {

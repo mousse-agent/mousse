@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { InstanceSnapshot, StatusDescription } from '../../../shared/harness/status'
-import type { InstanceConfigPatch, ProviderOperationEvent } from '../../../shared/harness/types'
+import type { InstanceConfigPatch, ProviderOperationEvent, RemoveInstallResult } from '../../../shared/harness/types'
 import { Download, Plus, RotateCcw, X } from '../../lib/icons'
 import { SettingsRow } from '../settings/SettingsRow'
 import { BrowseButton, CommandBox, RefreshButton, StatusLine, useAsyncAction } from './parts'
@@ -34,6 +34,8 @@ export interface InstanceActions {
   signOut: () => Promise<void>
   recheck: () => Promise<void>
   configure: (patch: InstanceConfigPatch) => Promise<void>
+  /** Deletes the files Mousse downloaded for it; other entries using them block it unless `force`. */
+  removeInstall: (force: boolean) => Promise<RemoveInstallResult>
 }
 
 function progressText(snapshot: InstanceSnapshot, operation: ProviderOperationEvent | undefined): string | null {
