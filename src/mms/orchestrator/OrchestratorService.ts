@@ -7091,6 +7091,8 @@ export class OrchestratorService extends EventEmitter {
       onUserInputAccepted?: () => void
     }
   ): Promise<BackgroundWorkflowTurnResult> {
+    // The turn registers itself only when the caller passes no signal. Production callers (ChannelRouter and the
+    // remote MmsBackend) always pass one, so this path runs only for callers without one (today, tests).
     const ownedTurn = !opts?.signal
     const channelTurn: { abort: AbortController; pendingSteer: string[]; promotedSteerIds: string[]; runId?: string } | null = ownedTurn
       ? { abort: new AbortController(), pendingSteer: [], promotedSteerIds: [] }

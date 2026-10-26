@@ -1642,6 +1642,21 @@ describe('background helpers as the real Claude Code reports them', () => {
     expect(error?.message).not.toMatch(/may not arrive/)
   })
 
+  it('when a lost task and a read one coexist, only the lost one is counted and the other is mentioned', async () => {
+    const f = fixture()
+    startedWith(f, { id: 'bash-1', type: 'local_bash' }, { id: 'bash-2', type: 'local_bash' })
+    await f.turn()
+    const { obligations } = (f.service as unknown as { live: Map<string, { obligations: import('../src/mms/providers/claudeSubscription/liveSession').BackgroundObligations }> }).live.get('thread')!
+    const lost = {}
+    const read = {}
+    obligations.consume('bash-1', lost)
+    obligations.release(lost, 'lost')
+    obligations.consume('bash-2', read)
+    obligations.release(read, 'discarded')
+    const error = await f.chat({ history: '', model: 'opus' }).then(() => undefined, (caught: Error) => caught)
+    expect(error?.message).toMatch(/holding a background task for this thread whose result may not arrive, along with another background task\..*Press Stop/)
+  })
+
   it.each([
     ['after the wake began', true],
     ['before the wake began', false]
