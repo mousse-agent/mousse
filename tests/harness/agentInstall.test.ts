@@ -13,7 +13,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { InstanceEnv } from '../../src/mms/harness/env'
 import { AgentInstalls, ConsentRequiredError, downloadArtifact, isolatedNpmEnv, resetAgentInstallState, resolveNpm, sha512Of, withoutCredentials, type InstallProgress, type NpmRunner, type RegistrySource } from '../../src/mms/harness/agents/install'
-import { LockBusyError, removeStale, withLock } from '../../src/mms/harness/agents/lock'
+import { LockBusyError, withLock } from '../../src/mms/harness/agents/lock'
 import type { RegistryAgent } from '../../src/mms/harness/agents/registry'
 import { tarGzOf } from './archiveFixtures'
 
@@ -223,12 +223,8 @@ describe('managed agent installs', () => {
     await installs('p1').install({ instanceId: 'acp:other', source: binarySource(), env, label: 'Demo', onProgress: () => {} })
     expect(server.hits.length).toBe(hits)
 
-    const lock = join(agentDir, '.lock')
-    writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: 0, token: 'held' }))
-    await expect(withLock(lock, () => 'never', { timeoutMs: 150, pollMs: 20 })).rejects.toBeInstanceOf(LockBusyError)
-    writeFileSync(lock, JSON.stringify({ pid: 2_147_483_646, startedAt: 0, token: 'gone' }))
-    await expect(withLock(lock, () => 'taken', { timeoutMs: 150, pollMs: 20 })).resolves.toBe('taken')
-    expect(existsSync(lock)).toBe(false)
+    // The lock is SQLite's write lock on a file that stays.
+    expect(existsSync(join(agentDir, 'lock.db'))).toBe(true)
   })
 
   it('deletes downloaded files unless another listed profile uses them; a deleted profile keeps nothing alive', async () => {
@@ -325,15 +321,27 @@ describe('managed agent installs', () => {
     expect(existsSync(target)).toBe(false)
   })
 
-  it('takes over a stale lock only while it is still the stale one', () => {
+  it('holds the agent lock for one caller at a time in this process, through async work', async () => {
     const { home } = setup()
-    const lock = join(home, 'lock')
-    writeFileSync(lock, JSON.stringify({ pid: 2_147_483_646, startedAt: 0, token: 'stale' }))
-    // Another waiter replaced it first: its fresh lock stays.
-    writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: 0, token: 'fresh' }))
-    expect(removeStale(lock, 'stale')).toBe(false)
-    expect(JSON.parse(readFileSync(lock, 'utf8')).token).toBe('fresh')
-    expect(removeStale(lock, 'fresh')).toBe(true)
+    const lock = join(home, 'agents', 'demo-agent', 'lock.db')
+    const order: string[] = []
+    let release: () => void = () => {}
+    const first = withLock(lock, async () => {
+      order.push('first in')
+      await new Promise<void>((resolve) => { release = resolve })
+      order.push('first out')
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    // A second profile in the same daemon waits, and gives up at its deadline.
+    await expect(withLock(lock, () => order.push('never'), { timeoutMs: 120, pollMs: 20 })).rejects.toBeInstanceOf(LockBusyError)
+    const second = withLock(lock, () => order.push('second'), { timeoutMs: 5_000, pollMs: 20 })
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    release()
+    await Promise.all([first, second])
+    expect(order).toEqual(['first in', 'first out', 'second'])
+    // A throw inside releases the lock too.
+    await expect(withLock(lock, () => { throw new Error('boom') })).rejects.toThrow('boom')
+    await expect(withLock(lock, () => 'free', { timeoutMs: 200 })).resolves.toBe('free')
   })
 
   it('applies the registry rules to the receipt launch again when an agent starts', async () => {
@@ -437,8 +445,10 @@ describe('npm agent installs', () => {
       launch: { runner: 'node', args: ['--acp'] }
     })
     expect(installed.receipt.launch.cmd).toMatch(/node_modules\/demo-npm\/bin\/cli\.js$/)
-    // Nothing of the npm setup Mousse made, nor the tarball, is part of the install.
+    // Nothing of the npm setup Mousse made, nor the tarball, is part of the install or published.
     expect(Object.keys(installed.receipt.files).every((file) => file.includes('demo-npm'))).toBe(true)
+    expect(readdirSync(installed.root).sort()).toEqual(['dist', 'receipt.json'])
+    expect(existsSync(join(calls[0]!.cwd))).toBe(false)
     const launch = installs('p1').launch(installed, { env: process.env, searchPath: [] })
     expect(launch.args[launch.args.length - 2]).toBe(launch.path)
     expect(launch.path).toMatch(/cli\.js$/)

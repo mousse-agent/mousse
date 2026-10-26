@@ -6,6 +6,7 @@
  *   <installationHome>/agents/<agentId>/refs/<profileId>.json    which entries use which version
  *   <installationHome>/agents/<agentId>/.staging-<random>/       an install in progress
  *   <installationHome>/agents/<agentId>/pending-delete.json      old versions still to delete
+ *   <installationHome>/agents/<agentId>/lock.db                  the agent's lock (SQLite, never deleted)
  *
  * A version is downloaded (or installed with npm) into a staging folder, checked, given a receipt
  * and renamed into place under the agent's lock. A published version is never changed; a launch
@@ -21,7 +22,7 @@ import { quirksFor } from '../acp/quirks'
 import { INHERITED_CREDENTIALS, resolveCommand, type InstanceEnv } from '../env'
 import { runHarness, type HarnessRunResult } from '../spawn'
 import { containedFile, createStaging, extractArchive } from './archive'
-import { withLock } from './lock'
+import { LOCK_FILE, withLock } from './lock'
 import { changedFile, DIST_DIR, hashFile, hashTree, readReceipt, RECEIPT_FILE, type AgentReceipt } from './receipt'
 import { cleanEnv, commandSegments, platformKeys, resolveDistribution, type AcpRegistry, type RegistryAgent, type RegistryPlatform } from './registry'
 
@@ -278,7 +279,7 @@ export class AgentInstalls {
   }
 
   private lockPath(agentId: string): string {
-    return join(this.agentDir(agentId), '.lock')
+    return join(this.agentDir(agentId), LOCK_FILE)
   }
 
   private keys(): RegistryPlatform[] {
@@ -550,7 +551,14 @@ export class AgentInstalls {
       `--cache=${paths.cache}`, ...scripts, '--no-audit', '--no-fund', '--no-update-notifier', '--loglevel=error', tarball
     ]
     const env: InstanceEnv = { ...input.env, env: isolatedNpmEnv(input.env.env, paths) }
-    const result = await (this.options.npm ?? runUserNpm)(args, { env, signal, timeoutMs: NPM_TIMEOUT_MS, cwd: npmDir })
+    let result: HarnessRunResult
+    try {
+      result = await (this.options.npm ?? runUserNpm)(args, { env, signal, timeoutMs: NPM_TIMEOUT_MS, cwd: npmDir })
+    } finally {
+      // npm's private cache, home and config, and the tarball, are not part of the install.
+      rmSync(npmDir, { recursive: true, force: true })
+      rmSync(tarball, { force: true })
+    }
     signal.throwIfAborted()
     if (result.spawnError) throw new Error(result.spawnError === 'npm_not_found' ? 'npm is not on your PATH. Install Node.js, then try again.' : `npm could not start (${result.spawnError}).`)
     if (result.timedOut) throw new Error('npm did not finish in time.')
