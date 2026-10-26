@@ -467,6 +467,7 @@ export class ProfileHost {
       installationHome: this.installation.homeDir,
       personal: true,
       profileId: record.id,
+      listProfiles: () => this.manager.list().map((profile) => ({ id: profile.id, displayName: profile.displayName })),
       allowLegacyProjectData: isDefault,
       inheritChannelEnvironment: isDefault,
       includeExternalCliConfigs: isDefault

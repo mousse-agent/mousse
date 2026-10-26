@@ -16,7 +16,7 @@ export type BinarySource = 'path' | 'managed' | 'override' | 'bundled'
 export type InstallOwner = 'npm' | 'pnpm' | 'bun' | 'brew' | 'winget' | 'standalone' | 'managed' | 'unknown'
 
 /** Why the binary does not run. `override_not_found` never falls back to PATH. */
-export type RunsFailure = 'override_not_found' | 'not_on_path' | 'spawn_failed' | 'exited' | 'bad_version' | 'timeout'
+export type RunsFailure = 'override_not_found' | 'not_on_path' | 'spawn_failed' | 'exited' | 'bad_version' | 'timeout' | 'files_changed'
 
 export interface InstanceBinary {
   /** Resolved executable; absent when nothing was found. */
@@ -71,6 +71,8 @@ export interface InstanceConfigView {
   loginMethod?: string
   /** The entry this one moved to; it is off, and its threads continue there. */
   movedTo?: string
+  /** An ACP agent Mousse installs from the registry. */
+  source?: { kind: 'registry'; agentId: string; version: string; distribution: 'binary' | 'npx' }
 }
 
 export interface InstanceSnapshot {
@@ -85,9 +87,15 @@ export interface InstanceSnapshot {
     state: InstallState
     /** Set while an install or update runs (it outlives the page that started it). */
     operationId?: string
-    progress?: { message: string; fraction?: number }
+    progress?: { message: string; fraction?: number; receivedBytes?: number; totalBytes?: number }
     /** Mousse can install this driver itself. */
     canInstall: boolean
+    /** Files Mousse downloaded for this entry ("Delete downloaded files"). */
+    downloaded?: { bytes: number }
+    /** Whether the registry gave a checksum for the download (registry agents). */
+    checksum?: 'registry' | 'none'
+    /** Something about the install the user should know (the registry changed this version's launch). */
+    advisory?: string
   }
   runs: { state: RunsState; failure?: RunsFailure; message?: string }
   auth: {

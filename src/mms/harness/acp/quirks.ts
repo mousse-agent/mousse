@@ -16,6 +16,8 @@ export interface AcpQuirks {
    * (else the model control the session offers, and the agent's default when it offers none).
    */
   modelConfigId?: string
+  /** Its npm package needs its install scripts (Mousse installs npm agents with `--ignore-scripts`). */
+  allowInstallScripts?: boolean
 }
 
 export const NO_QUIRKS: Readonly<AcpQuirks> = Object.freeze({})

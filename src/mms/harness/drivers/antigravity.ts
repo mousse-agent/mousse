@@ -68,7 +68,8 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
         refreshModels: async (cwd) => void (await service.refreshModels(cwd)),
         signIn: (session, cwd) => service.login(session, cwd),
         signOut: () => service.logout(),
-        install: async (onProgress) => void (await service.install(onProgress)),
+        install: async (onProgress) => void (await service.install((message, fraction, bytes) =>
+          onProgress({ message, ...(fraction !== undefined ? { fraction } : {}), ...(bytes ?? {}) }))),
         cancelInstall: () => service.cancelInstall(),
         installState: () => service.installState(),
         managed: () => {

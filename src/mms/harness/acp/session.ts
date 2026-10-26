@@ -161,6 +161,11 @@ export interface AcpSessionsOptions {
   notice?(threadId: string, text: string): void
   /** `initialize` or a session told something new (runtime facts). */
   observed?(observations: AcpObservations): void
+  /**
+   * Runs before every new agent process (a managed install checks its files); a throw stops the
+   * launch with that error.
+   */
+  beforeLaunch?(purpose: AcpPurpose): Promise<void>
 }
 
 export class AcpSessions {
@@ -271,6 +276,7 @@ export class AcpSessions {
    * answered; throws when it does not start or answer.
    */
   async handshake(signal?: AbortSignal): Promise<AcpAgentInfo> {
+    await this.options.beforeLaunch?.('handshake')
     const active = this.launch('handshake')
     const abort = () => this.close(active)
     signal?.addEventListener('abort', abort, { once: true })
@@ -285,6 +291,7 @@ export class AcpSessions {
 
   /** Opens one session in `cwd` and closes it: the models and modes it offers (sign-in verification, "Refresh models"). */
   async probeSession(cwd: string, signal?: AbortSignal): Promise<{ models: LlmModelOption[]; modes: Array<{ id: string; name: string }> }> {
+    await this.options.beforeLaunch?.('models')
     const active = this.launch('models')
     const abort = () => this.close(active)
     signal?.addEventListener('abort', abort, { once: true })
@@ -468,6 +475,7 @@ export class AcpSessions {
       active = undefined
     }
     let freshProcess = !active
+    if (!active) await this.options.beforeLaunch?.('turn')
     active ??= this.launch('turn')
     let current = active
     const adopt = (next: AcpProcess) => {
@@ -550,6 +558,7 @@ export class AcpSessions {
                 this.turning.delete(current)
                 saved = undefined
                 this.options.notice?.(input.threadId, `${label} did not reopen this chat's session in time, so the chat history was handed to a new session.`)
+                await this.options.beforeLaunch?.('turn')
                 adopt(this.launch('turn'))
                 freshProcess = true
                 continue
