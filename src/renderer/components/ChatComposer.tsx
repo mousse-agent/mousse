@@ -28,6 +28,7 @@ import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseReferenceDragData } f
 import { ChatReferencePill } from './ReferencePill'
 import { insertTranscript } from '../dictation/insertTranscript'
 import { useDictation } from '../dictation/useDictation'
+import { useCommand } from '../commands/commandRegistry'
 
 export interface AttachedFile {
   id: string
@@ -122,6 +123,7 @@ export function ChatComposer({
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
+  useCommand('composer.focus', () => composerInputRef.current?.focus(), () => !disabled)
   const resizeDraft = useCallback(() => {
     const inputElement = composerInputRef.current
     if (!inputElement) return

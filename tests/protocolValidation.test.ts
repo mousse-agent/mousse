@@ -106,6 +106,10 @@ describe('protocol nested validators', () => {
     expect(asSettingsPartial({ notifications: { threadCompletionSound: false } })).toEqual({
       notifications: { threadCompletionSound: false }
     })
+    // Shortcut overrides, including `null` for an unbound command, pass through unchanged.
+    expect(asSettingsPartial({ shortcuts: { 'thread.new': 'CommandOrControl+Shift+X', 'thread.next': null } })).toEqual({
+      shortcuts: { 'thread.new': 'CommandOrControl+Shift+X', 'thread.next': null }
+    })
     expect(() => asSettingsPartial({ notASection: true })).toThrow(/not allowed/)
     expect(asStringEnvMap({ FOO: 'bar' }).FOO).toBe('bar')
     expect(() => asStringEnvMap({ 'bad-key': 'x' })).toThrow()

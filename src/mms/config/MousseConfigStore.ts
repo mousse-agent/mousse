@@ -74,6 +74,7 @@ function splitSettings(full: MousseSettings): {
       profile: full.profile,
       appearance: full.appearance,
       notifications: full.notifications,
+      shortcuts: full.shortcuts,
       context: full.context,
       integrations: full.integrations,
       title: full.title
@@ -505,10 +506,16 @@ export class MousseConfigStore {
 
   /** Apply a MousseSettingsUpdate-shaped patch across settings/providers/agents sections. */
   applySettingsPatch(partial: Partial<MousseSettings>): void {
+    if (partial.shortcuts) {
+      // Replaced, not merged: a merge cannot remove a key, and resetting a shortcut removes its entry.
+      this.assertPersonalMutation('settings')
+      this.conf.settings = { ...this.conf.settings, shortcuts: structuredClone(partial.shortcuts) }
+    }
     if (
       partial.profile ||
       partial.appearance ||
       partial.notifications ||
+      partial.shortcuts ||
       partial.context ||
       partial.integrations ||
       partial.title

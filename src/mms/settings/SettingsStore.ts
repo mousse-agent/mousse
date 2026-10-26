@@ -2,6 +2,7 @@ import type { MousseSettings, MousseSettingsUpdate } from '../../shared/settings
 import { getDefaultSettings, normalizeAppearance, normalizeContextSettings } from '../../shared/settings'
 import { MOUSSE_BUILTIN_TOOL_IDS } from '../../shared/integrations'
 import { generateRandomUsername } from '../../shared/randomUsername'
+import { normalizeShortcuts } from '../../shared/commands'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
 
 function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<T>): T {
@@ -68,6 +69,8 @@ function normalizeSettings(settings: MousseSettings): MousseSettings {
     ...settings,
     appearance: normalizeAppearance(settings.appearance),
     context: normalizeContextSettings(settings.context),
+    // The daemon and the desktop run on one machine, so its platform resolves the defaults.
+    shortcuts: normalizeShortcuts(settings.shortcuts, process.platform),
     ...(settings.title ? { title: withInstance(settings.title) } : {}),
     integrations: {
       ...settings.integrations,

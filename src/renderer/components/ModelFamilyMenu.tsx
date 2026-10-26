@@ -24,6 +24,7 @@ import { ProviderIcon, normalizeProviderId } from '../lib/providerIcons'
 import { instanceBadges, knownModelLabel } from '../lib/providerSnapshots'
 import { listingKey, listingServes } from '../../shared/providerInstances'
 import { useAppStore } from '../stores/appStore'
+import { useCommandOverlay } from '../commands/commandRegistry'
 import { FloatingPortal, useFloatingPosition } from '../lib/floatingLayer'
 import { favoriteKey, useModelFavorites, type ModelFavoriteKey } from '../lib/modelFavorites'
 import type { StatusDescription } from '../../shared/harness/status'
@@ -275,6 +276,8 @@ function ProfileModelFamilyMenu({
   const localShellRef = useRef<HTMLDivElement | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const scrollHighlightRef = useRef(true)
+  // Mounted only while the picker is open, so it owns the keyboard for as long as it exists.
+  useCommandOverlay('model-picker', true)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const variantPanelRef = useRef<HTMLElement>(null)
   const activeRowRef = useRef<HTMLElement | null>(null)

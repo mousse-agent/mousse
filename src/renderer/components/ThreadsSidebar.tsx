@@ -12,6 +12,7 @@ import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
+import { createAndSelectThread, selectThread } from '../lib/threadActions'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 
@@ -24,7 +25,6 @@ import {
 
 import { ThreadHoverCard } from './ThreadHoverCard'
 import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadSpeechIndicator'
-import { ThreadSearchDialog } from './ThreadSearchDialog'
 
 import '../styles/threads-sidebar.css'
 
@@ -315,11 +315,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const threadActivity = useAppStore((s) => s.threadActivity)
   const turnStates = useAppStore((s) => s.turnStates)
 
-  const switchToThread = useAppStore((s) => s.switchToThread)
-
   const upsertThread = useAppStore((s) => s.upsertThread)
 
-  const [searchOpen, setSearchOpen] = useState(false)
+  // The Search threads dialog is mounted once, in the navigation rail.
+  const searchOpen = useAppStore((s) => s.threadSearchOpen)
+  const setThreadSearchOpen = useAppStore((s) => s.setThreadSearchOpen)
 
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
 
@@ -418,20 +418,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-  const selectThread = async (threadId: string) => {
-    if (!await confirmNavigation()) return
-    useAppStore.getState().setSidebarMode('projects')
-    if (threadId === activeThreadId) {
-      return
-    }
-    // One store update: highlight + restore cached transcript (if any) while
-    // the daemon snapshot loads. Main also broadcasts thread:selected early.
-    switchToThread(threadId)
-    await window.mousse.threads.select(threadId)
-  }
-
-
-
   const openProject = async () => {
 
     const project = await window.mousse.projects.open()
@@ -453,13 +439,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-  const createThread = async () => {
-    useAppStore.getState().setThreadsSidebarView('threads')
-    const thread = findUnstartedThread(listedThreads) ?? await window.mousse.threads.create()
-    upsertThread(thread)
-    await selectThread(thread.id)
-  }
-
   const createProjectThread = async (projectId: string) => {
     const thread = findUnstartedThread(listedThreads, projectId) ??
       await window.mousse.threads.create(undefined, projectId)
@@ -476,7 +455,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
   const openSearch = () => {
     if (workspaceMode === 'chats') useChatsStore.setState({ searchOpen: true })
-    else setSearchOpen(true)
+    else setThreadSearchOpen(true)
   }
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -992,7 +971,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         <button type="button" className="threads-sidebar-toolbar-button" onClick={openSearch} title={workspaceMode === 'chats' ? 'Search chats' : 'Search threads'} aria-label={workspaceMode === 'chats' ? 'Search chats' : 'Search threads'}>
           <Search size={16} strokeWidth={1.8} aria-hidden="true" />
         </button>
-        <button type="button" className="threads-sidebar-toolbar-button" onClick={() => { if (workspaceMode === 'chats') useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' }); else void createThread() }} title="New chat" aria-label="New chat">
+        <button type="button" className="threads-sidebar-toolbar-button" onClick={() => { if (workspaceMode === 'chats') useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' }); else void createAndSelectThread() }} title="New chat" aria-label="New chat">
           <Edit size={16} strokeWidth={1.8} aria-hidden="true" />
         </button>
       </div>
@@ -1326,14 +1305,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         />
 
       )}
-
-      <ThreadSearchDialog
-        open={searchOpen}
-        onClose={() => setSearchOpen(false)}
-        onSelect={(threadId) => {
-          void selectThread(threadId)
-        }}
-      />
 
     </aside>
 
