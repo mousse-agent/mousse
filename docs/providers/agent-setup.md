@@ -20,7 +20,38 @@ Axes:
 | Windows x64 | Custom command | `terminal` (PTY) | tested with a fake PTY |
 | Windows arm64 | Custom command | `terminal` | untested: `node-pty` has no prebuild, so Mousse advertises `auth.terminal: false` and agents do not offer terminal methods |
 | macOS arm64, Linux x64, Linux arm64 | Custom command | any | untested: no machine in this PR's runs |
-| any | managed | any | not available yet (PR B adds managed installs) |
+| any | managed | any | see "Registry agents" below |
+
+## Registry agents (installed by Mousse)
+
+Added from Add provider → **More ACP agents…**. Mousse installs the version the ACP registry lists
+now, into the installation (shared by every profile), and runs it from its install record only.
+
+| OS | Distribution | Sign-in | State |
+|---|---|---|---|
+| Windows x64 | binary with a registry checksum | none (start-up check only) | tested live: `amp-acp` 0.10.0 installed, started (`initialize`) and deleted |
+| Windows x64 | npm package (`npx`) | none (start-up check only) | tested live: `pi-acp` 0.0.34 installed with the user's npm, started and deleted |
+| Windows x64 | binary without a registry checksum | any | tested with a local server and fakes (consent, receipt, changed files) |
+| Windows x64 | any | `agent`, `terminal` | untested live: signing in to a real account was out of scope; the sign-in code is the Custom command's |
+| Windows arm64 | binary | any | untested: no machine; Mousse picks the `windows-aarch64` build, else `windows-x86_64` |
+| macOS arm64, Linux x64, Linux arm64 | any | any | untested: no machine in this PR's runs; archive modes and the executable check are covered by tests |
+| any | Python (`uvx`) | any | not supported yet: listed, with "Add it as a Custom command running uvx …" |
+| any | tar.bz2 or a raw executable | any | not supported: listed with the reason |
+
+- **What a launch checks.** Before each agent process starts, Mousse rehashes every file of the
+  install against its receipt (binary agents: the unpacked download; npm agents: everything npm
+  installed under the prefix) and checks that the receipt is the one the entry was installed with.
+  Any added, changed or missing file refuses the launch; the card shows "Installed files changed
+  since install" and offers Reinstall.
+- **Downloads** are checked against the registry's SHA-256 when it has one, capped at 1 GiB, and may
+  redirect only on their own host or from github.com to GitHub's asset hosts. A download without a
+  registry checksum needs an explicit yes for that version and URL; an update asks again.
+- **npm agents** need Node.js and npm on your PATH. Mousse runs `npm install --global --prefix …
+  --ignore-scripts` without your npm or provider credentials in its environment, then runs the
+  package's command with Node.
+- **Shared files.** Each profile records which versions its entries use. "Delete downloaded files"
+  lists the other profiles still using them and offers "Delete anyway". After an update the old
+  version is deleted once nothing runs from it; one Windows still locks is retried at the next start.
 
 ## Cursor
 
