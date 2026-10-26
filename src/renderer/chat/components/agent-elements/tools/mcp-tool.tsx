@@ -203,7 +203,7 @@ export const McpTool = memo(function McpTool({
 
   const hasExpandableContent = !!codeBlock && !isPending;
 
-  if (isInterrupted && !part.output) {
+  if (isInterrupted) {
     return (
       <span className="text-base text-an-tool-color-muted">
         {mcpInfo.displayName} interrupted

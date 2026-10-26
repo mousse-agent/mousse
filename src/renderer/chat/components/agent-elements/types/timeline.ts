@@ -30,6 +30,19 @@ export type TimelineStep =
       bashCommand?: string;
       bashOutput?: string;
       bashSuccess?: boolean;
+      /** Shell-wrapper-free label of the command, for the row. */
+      bashLabel?: string;
+      bashCwd?: string;
+      /** Display only: the row's status follows the provider, not the exit code. */
+      bashExitCode?: number;
+      bashDurationMs?: number;
+      /** The output is the tail of a longer one; `bashBytes` is the full size. */
+      bashTruncated?: boolean;
+      bashBytes?: number;
+      /** The command ended without a result (stopped, cut off, or never reported). */
+      bashInterrupted?: boolean;
+      /** What the item says about how it ended ("Stopped", "No result reported"). */
+      bashSummary?: string;
     }
   | {
       id: string;

@@ -149,7 +149,10 @@ export function mapToolInvocationToStep(
 
   if (toolName === "Bash") {
     step.bashCommand = args?.command ? String(args.command) : undefined;
-    if (toolInvocation.state === "result" && result) {
+    if (typeof args?.label === "string" && args.label) step.bashLabel = args.label;
+    if (typeof args?.cwd === "string" && args.cwd) step.bashCwd = args.cwd;
+    // A running command shows the output it has so far; a finished one its whole result.
+    if (result) {
       if (typeof result === "string") {
         step.bashOutput = result;
         step.bashSuccess = true;
@@ -166,6 +169,14 @@ export function mapToolInvocationToStep(
           .join(stdout && stderr ? "\n" : "");
         const exitCode = result?.exitCode ?? result?.exit_code;
         step.bashSuccess = exitCode === undefined ? true : exitCode === 0;
+        if (typeof exitCode === "number") step.bashExitCode = exitCode;
+        if (typeof result?.durationMs === "number")
+          step.bashDurationMs = result.durationMs;
+        if (result?.truncated === true) step.bashTruncated = true;
+        if (typeof result?.bytes === "number") step.bashBytes = result.bytes;
+        if (result?.interrupted === true) step.bashInterrupted = true;
+        if (typeof result?.summary === "string" && result.summary)
+          step.bashSummary = result.summary;
       } else {
         step.bashOutput = JSON.stringify(result);
         step.bashSuccess = true;

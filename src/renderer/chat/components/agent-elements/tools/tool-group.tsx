@@ -202,6 +202,11 @@ export const ToolGroup = memo(function ToolGroup({
       if (summary) return summary;
     }
 
+    // What the item says about how it ended ("Running in the background", "Stopped").
+    const outputSummary =
+      typeof part.output?.summary === "string" ? part.output.summary : "";
+    if (outputSummary && !isPending) return outputSummary;
+
     if (!description) return "";
     return description.length > 60
       ? `${description.slice(0, 57)}...`
@@ -211,17 +216,28 @@ export const ToolGroup = memo(function ToolGroup({
     !isPending && outputDuration ? outputDuration : elapsedMs,
   );
 
-  if (isInterrupted && !part.output) {
-    return <ToolRowBase icon={icon} completeLabel={interruptedLabel} isAnimating={false} />;
+  // Why it ended ("Stopped", "Cut off by a Mousse restart"). The work nested under the row stays
+  // visible: a stopped subagent still shows what it did.
+  const reason =
+    typeof part.output?.summary === "string" ? part.output.summary : "";
+  if (isInterrupted && !hasNestedTools) {
+    return (
+      <ToolRowBase
+        icon={icon}
+        completeLabel={interruptedLabel}
+        isAnimating={false}
+        detail={reason || undefined}
+      />
+    );
   }
 
   return (
     <ToolRowBase
       icon={icon}
-      completeLabel={completeLabel}
+      completeLabel={isInterrupted ? interruptedLabel : completeLabel}
       shimmerLabel={shimmerLabel}
       isAnimating={isPending}
-      detail={subtitle}
+      detail={isInterrupted ? reason || subtitle : subtitle}
       expandable={hasNestedTools}
       expanded={expanded}
       onToggleExpand={() => {
@@ -229,7 +245,7 @@ export const ToolGroup = memo(function ToolGroup({
         setExpanded((prev) => !prev);
       }}
       trailingContent={
-        showElapsed && elapsedTimeDisplay ? (
+        showElapsed && !isInterrupted && elapsedTimeDisplay ? (
           <span className="font-normal tabular-nums shrink-0 text-an-foreground-muted/60">
             {elapsedTimeDisplay}
           </span>

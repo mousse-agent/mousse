@@ -218,6 +218,16 @@ export const toolRegistry: Record<string, ToolMeta> = {
       const isPending =
         part.state !== "output-available" && part.state !== "output-error";
       if (isPending) return "";
+      // A typed item carries the counts of every file it changed.
+      if (Array.isArray(part.output?.changes)) {
+        let added = 0;
+        let removed = 0;
+        for (const change of part.output.changes) {
+          added += typeof change?.added === "number" ? change.added : 0;
+          removed += typeof change?.removed === "number" ? change.removed : 0;
+        }
+        return added > 0 || removed > 0 ? `+${added} -${removed}` : "";
+      }
       const oldString = part.input?.old_string || "";
       const newString = part.input?.new_string || "";
       if (!oldString && !newString) return "";
@@ -250,7 +260,8 @@ export const toolRegistry: Record<string, ToolMeta> = {
       return isPending ? "Running command" : "Ran command";
     },
     subtitle: (part) => {
-      const command = part.input?.command || "";
+      // The label is the command without its shell wrapper.
+      const command = part.input?.label || part.input?.command || "";
       if (!command) return "";
       let normalized = command.replace(/\\\s*\n\s*/g, " ").trim();
       normalized = normalized.replace(

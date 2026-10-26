@@ -139,6 +139,20 @@ export const TodoTool = memo(function TodoTool({
     [oldTodos, newTodos],
   );
 
+  // A finished call that sent an empty list cleared the to-dos; nothing is being generated.
+  if (
+    !isStreaming &&
+    newTodos.length === 0 &&
+    part.state === "output-available" &&
+    Array.isArray(part.input?.todos)
+  ) {
+    return (
+      <div className="text-base leading-relaxed text-an-foreground/60">
+        To-dos cleared
+      </div>
+    );
+  }
+
   // Streaming placeholder — always shimmer while in this transient state.
   if (isStreaming || newTodos.length === 0) {
     return (
