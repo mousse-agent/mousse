@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { nonInteractiveGitEnv } from '../../git/gitEnv'
 import { GIT_NULL_DEVICE } from '../../git/gitNullDevice'
 import { NetError } from '../../../shared/net'
 
@@ -20,14 +21,8 @@ function environment(trustRemoteConfiguration: boolean): NodeJS.ProcessEnv {
     env.GIT_CONFIG_NOSYSTEM = '1'
     env.GIT_CONFIG_GLOBAL = GIT_NULL_DEVICE
   }
-  Object.assign(env, {
-    GIT_TERMINAL_PROMPT: '0',
-    GIT_ASKPASS: GIT_NULL_DEVICE,
-    SSH_ASKPASS: GIT_NULL_DEVICE,
-    SSH_ASKPASS_REQUIRE: 'never',
-    GCM_INTERACTIVE: 'never',
-    GIT_LFS_SKIP_SMUDGE: '1'
-  })
+  // GIT_LFS_SKIP_SMUDGE is a bundle-ingest choice, not a prompt setting, so it stays here.
+  Object.assign(env, nonInteractiveGitEnv(), { GIT_LFS_SKIP_SMUDGE: '1' })
   return env
 }
 
