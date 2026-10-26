@@ -29,7 +29,7 @@ function setupRow(overrides: SnapshotOverrides) {
 describe('Setup row: the status and its one next step', () => {
   it('waits while the first check runs, with no buttons', () => {
     const html = setupRow({ checkedAt: undefined, lastGoodAt: undefined })
-    expect(html).toContain('Checking provider status')
+    expect(html).toContain('Checking status')
     expect(buttons(html)).toEqual([])
     expect(labels(html)).not.toContain('Check again')
   })
@@ -37,7 +37,7 @@ describe('Setup row: the status and its one next step', () => {
   it('offers Install as soon as an installable agent is known to be missing', () => {
     const html = setupRow({ driver: 'antigravity', install: { state: 'not_installed', canInstall: true }, runs: { state: 'no', failure: 'not_on_path' } })
     expect(buttons(html)).toEqual(['Install'])
-    expect(html).toContain('CLI not detected on PATH.')
+    expect(html).toContain('Mousse could not find this provider&#x27;s command on PATH.')
   })
 
   it('only offers Check again when the user installs the CLI', () => {
@@ -60,7 +60,7 @@ describe('Setup row: the status and its one next step', () => {
 
   it('offers Sign in for an agent whose account is not checked but that offers its sign-in', () => {
     const html = setupRow({ driver: 'acp', auth: { state: 'unknown', account: undefined, canSignIn: true } })
-    expect(html).toContain('Sign-in not checked')
+    expect(html).toContain('Sign-in unverified')
     expect(buttons(html)).toEqual(['Sign in'])
     expect(buttons(setupRow({ driver: 'acp', auth: { state: 'unknown', account: undefined } }))).toEqual([])
   })

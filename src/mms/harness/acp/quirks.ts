@@ -24,7 +24,7 @@ export const NO_QUIRKS: Readonly<AcpQuirks> = Object.freeze({})
 
 /** Quirks of agents Mousse may meet as a generic command, by agent id. */
 const KNOWN_QUIRKS: Readonly<Record<string, AcpQuirks>> = {
-  // They drop injected HTTP MCP servers (found by T3 Code).
+  // They drop injected HTTP MCP servers.
   'codex-acp': { mcp: 'stdio' },
   'pi-acp': { mcp: 'stdio' }
 }

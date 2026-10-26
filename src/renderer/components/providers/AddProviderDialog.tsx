@@ -76,7 +76,7 @@ export function addChoices(snapshots: readonly InstanceSnapshot[], loginOptions:
     if (!listed) methods.set(option.id, [option])
     else if (!listed.some((entry) => methodKey(entry) === methodKey(option))) listed.push(option)
   }
-  // One entry per provider (T3 Code), under the group of its first method.
+  // One entry per provider, under the group of its first method.
   for (const [id, options] of methods) {
     options.sort((a, b) => KIND_ORDER.indexOf(connectKind(a)) - KIND_ORDER.indexOf(connectKind(b)))
     choices.push({ kind: 'api', key: `api:${id}`, label: options[0]!.label, iconId: id, group: API_GROUP[connectKind(options[0]!)], options })
@@ -96,7 +96,7 @@ function matches(query: string, ...fields: Array<string | undefined>): boolean {
   return !q || fields.some((field) => field?.toLowerCase().includes(q))
 }
 
-/** T3 Code's numbered step bar; finished steps show a check and can be revisited. */
+/** A numbered step bar; finished steps show a check and can be revisited. */
 function WizardSteps({
   steps,
   current,
@@ -141,7 +141,7 @@ export interface AddProviderHandlers {
 }
 
 /**
- * T3 Code's Add provider dialog: Provider → Identity → Config (or Sign in). Identity names a new
+ * The Add provider dialog: Provider → Identity → Config (or Sign in). Identity names a new
  * instance; a second Claude Code instance is always another account, with a private home it
  * signs in to apart from the user's terminal.
  */

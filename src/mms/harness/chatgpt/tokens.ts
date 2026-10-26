@@ -1,5 +1,5 @@
-// Token response rules from pi-ai 1.4.0 `openai-chatgpt.js` (MIT, Copyright (c) Mario Zechner) and
-// T3 Code `CodexChatGptAuth.ts` (MIT, Copyright (c) 2026 T3 Tools Inc.). See THIRD_PARTY_NOTICES.md.
+// Token response rules from pi-ai 1.4.0 `openai-chatgpt.js` (MIT, Copyright (c) Mario Zechner).
+// See THIRD_PARTY_NOTICES.md.
 
 import { ChatGptAuthError, MESSAGES } from './errors'
 import { isRecord } from './http'
@@ -7,14 +7,17 @@ import { isRecord } from './http'
 /** The API resource every grant and refresh names. An identifier, not an address Mousse calls. */
 export const OPENAI_RESOURCE = 'https://api.openai.com/v1'
 
-/** OAuth refresh errors after which the refresh token is gone for good (errors-and-recovery). */
+/**
+ * OAuth refresh errors after which the refresh token is gone for good (errors-and-recovery): the
+ * standard `invalid_grant`, then OpenAI's codes for an expired, revoked or replayed token.
+ */
 export const TERMINAL_REFRESH_ERRORS: ReadonlySet<string> = new Set([
   'invalid_grant',
   'invalid_refresh_token',
-  'token_expired',
   'refresh_token_expired',
   'refresh_token_invalidated',
-  'refresh_token_reused'
+  'refresh_token_reused',
+  'token_expired'
 ])
 
 export interface TokenSet {

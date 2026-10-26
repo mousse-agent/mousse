@@ -53,7 +53,7 @@ interface FlatModelEntry {
   listing: string
   /** The instance's name ("Claude Code 2"), with the model's maker for a multi-brand API. */
   providerLabel: string
-  /** Initials telling apart instances that share a logo (T3 Code's instance badge). */
+  /** Initials telling apart instances that share a logo (`instanceBadges`). */
   badge?: string
   /** Position of the provider, then of the family in the saved model order. */
   providerRank: number

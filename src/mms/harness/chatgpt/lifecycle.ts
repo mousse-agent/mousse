@@ -1,6 +1,3 @@
-// Refresh, revocation and sign-out rules follow T3 Code `apps/server/src/provider/CodexChatGptAuth.ts`
-// (MIT, Copyright (c) 2026 T3 Tools Inc.). See THIRD_PARTY_NOTICES.md.
-
 import { FileLockBusyError, withAsyncFileLock } from '../../platform/asyncFileLock'
 import type { SecretCodec } from '../../providers/secretCodec'
 import { discover, OPENAI_ENDPOINTS, type ChatGptEndpoints } from './discovery'
@@ -56,7 +53,8 @@ export const LOCK_WAIT_MS = 40_000
 export const LOCK_MAX_HOLD_MS = 5 * 60_000
 const TOKEN_TIMEOUT_MS = 20_000
 const REVOKE_TIMEOUT_MS = 10_000
-const REVOKE_BACKOFF_MS = [250, 1_000]
+/** The waits before the second and later revocation tries. */
+const REVOKE_RETRY_WAITS_MS = [250, 1_000]
 
 export interface ChatGptLifecycleOptions {
   instanceId: string
@@ -450,32 +448,39 @@ export class ChatGptLifecycle {
 }
 
 /**
- * Revokes a refresh token at the issuer's revocation endpoint: up to 3 tries, 10 s each, with
- * 250 ms and 1 s between them. An empty 200 confirms it; 5xx and network errors are retried.
+ * How one revocation request ended: `revoked` (200), `refused` (any other answer), or `unanswered`
+ * (no answer, a timeout, 429 or 5xx), which is worth another try.
+ */
+type RevokeOutcome = 'revoked' | 'refused' | 'unanswered'
+
+async function requestRevocation(endpoints: ChatGptEndpoints, token: RevocableToken, timeoutMs: number): Promise<RevokeOutcome> {
+  let status: number
+  try {
+    const { revocationEndpoint } = await discover(endpoints)
+    const form = { token: token.refreshToken, token_type_hint: 'refresh_token', client_id: token.clientId }
+    status = (await postForm(revocationEndpoint, form, { timeoutMs })).status
+  } catch {
+    return 'unanswered'
+  }
+  if (status === 200) return 'revoked'
+  return status === 429 || status >= 500 ? 'unanswered' : 'refused'
+}
+
+/**
+ * Revokes a refresh token at the issuer's revocation endpoint: up to 3 tries, 10 s each, waiting
+ * 250 ms before the second and 1 s before the third. True only when a 200 confirmed it.
  */
 export async function revokeRefreshToken(
   endpoints: ChatGptEndpoints,
   token: RevocableToken,
   options: { attempts?: number; timeoutMs?: number } = {}
 ): Promise<boolean> {
-  const attempts = options.attempts ?? 3
+  const tries = options.attempts ?? 3
   const timeoutMs = options.timeoutMs ?? REVOKE_TIMEOUT_MS
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    let retry = true
-    try {
-      const discovery = await discover(endpoints)
-      const response = await postForm(
-        discovery.revocationEndpoint,
-        { token: token.refreshToken, token_type_hint: 'refresh_token', client_id: token.clientId },
-        { timeoutMs }
-      )
-      if (response.status === 200) return true
-      retry = response.status >= 500 || response.status === 429
-    } catch {
-      retry = true
-    }
-    if (!retry || attempt === attempts - 1) break
-    await delay(REVOKE_BACKOFF_MS[attempt])
+  let outcome = await requestRevocation(endpoints, token, timeoutMs)
+  for (let tried = 1; outcome === 'unanswered' && tried < tries; tried++) {
+    await delay(REVOKE_RETRY_WAITS_MS[Math.min(tried, REVOKE_RETRY_WAITS_MS.length) - 1])
+    outcome = await requestRevocation(endpoints, token, timeoutMs)
   }
-  return false
+  return outcome === 'revoked'
 }

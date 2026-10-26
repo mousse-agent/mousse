@@ -1,7 +1,4 @@
-// Verification rules from T3 Code `apps/server/src/provider/CodexChatGptAuth.ts` (MIT,
-// Copyright (c) 2026 T3 Tools Inc.). See THIRD_PARTY_NOTICES.md.
-
-import { jwtVerify, type JWTVerifyGetKey } from 'jose'
+import { jwtVerify, type JWTPayload, type JWTVerifyGetKey } from 'jose'
 import { ChatGptAuthError, MESSAGES } from './errors'
 
 export interface VerifiedIdentity {
@@ -18,17 +15,22 @@ export async function verifyIdToken(
   idToken: string,
   expected: { keys: JWTVerifyGetKey; issuer: string; clientId: string; nonce: string }
 ): Promise<VerifiedIdentity> {
+  const unverified = () => new ChatGptAuthError('signed_out', 'verify', MESSAGES.verify)
+  let claims: JWTPayload
   try {
-    const { payload } = await jwtVerify(idToken, expected.keys, {
+    claims = (await jwtVerify(idToken, expected.keys, {
       issuer: expected.issuer,
       audience: expected.clientId,
       algorithms: ['RS256', 'ES256'],
       clockTolerance: 5,
       requiredClaims: ['sub', 'exp', 'nonce']
-    })
-    if (payload.nonce !== expected.nonce || typeof payload.sub !== 'string' || !payload.sub) throw new Error('identity')
-    return { subject: payload.sub, email: typeof payload.email === 'string' && payload.email ? payload.email : null }
+    })).payload
   } catch {
-    throw new ChatGptAuthError('signed_out', 'verify', MESSAGES.verify)
+    throw unverified()
   }
+  // The token must belong to this attempt and name an account.
+  const subject = typeof claims.sub === 'string' ? claims.sub : ''
+  if (claims.nonce !== expected.nonce || subject === '') throw unverified()
+  const email = typeof claims.email === 'string' && claims.email !== '' ? claims.email : null
+  return { subject, email }
 }

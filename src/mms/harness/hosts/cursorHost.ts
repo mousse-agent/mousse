@@ -1,6 +1,3 @@
-// Adapted from T3 Code (MIT, © 2026 T3 Tools Inc.): the unhandled-rejection guard
-// (`CursorSdk.ts`), transport-failure detection (`transportFailure.ts`) and the run lifecycle
-// around `agent.send` (`CursorAgentSdk.ts`). See THIRD_PARTY_NOTICES.md.
 import { existsSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, parse, resolve } from 'node:path'
@@ -47,84 +44,121 @@ function loadSdk(): Sdk {
   return requireSdk(process.env.MOUSSE_CURSOR_SDK_MODULE || '@cursor/sdk') as Sdk
 }
 
-// -- Guards (T3 Code `CursorSdk.ts`) ------------------------------------------------------------
+// -- Rejections the host survives ---------------------------------------------------------------
 
-const SHELL_SPAWN_MARKERS = ['dump_zsh_state', 'dump_bash_state', '__CURSOR_SANDBOX_ENV_RESTORE']
+/** Script names the SDK passes to the shells it starts, to capture or restore their state. */
+const SDK_SHELL_SCRIPTS = ['dump_zsh_state', 'dump_bash_state', '__CURSOR_SANDBOX_ENV_RESTORE']
 
-/** The SDK rejects an internal promise nothing awaits when a shell fails to spawn. */
-export function isCursorShellSpawnFailure(reason: unknown): boolean {
-  if (typeof reason !== 'object' || reason === null) return false
-  const { syscall, code, spawnargs } = reason as { syscall?: unknown; code?: unknown; spawnargs?: unknown }
-  if (typeof syscall !== 'string' || !syscall.startsWith('spawn') || typeof code !== 'string' || !Array.isArray(spawnargs)) return false
-  return spawnargs.some((arg) => typeof arg === 'string' && SHELL_SPAWN_MARKERS.some((marker) => arg.includes(marker)))
+/**
+ * A shell the SDK could not start (a `spawn*` system error whose arguments name one of its shell
+ * scripts). The SDK rejects a promise nobody awaits for it; the turn itself carries on.
+ */
+export function isShellSpawnRejection(reason: unknown): boolean {
+  if (!reason || typeof reason !== 'object') return false
+  const failed = reason as { syscall?: unknown; code?: unknown; spawnargs?: unknown }
+  const isSpawn = typeof failed.syscall === 'string' && failed.syscall.startsWith('spawn')
+  if (!isSpawn || typeof failed.code !== 'string' || !Array.isArray(failed.spawnargs)) return false
+  const args = failed.spawnargs.filter((arg): arg is string => typeof arg === 'string')
+  return SDK_SHELL_SCRIPTS.some((script) => args.some((arg) => arg.includes(script)))
 }
 
-/** After a local exec fails, the SDK writes to its closed stream from a promise nothing awaits. */
-export function isCursorClosedStreamWrite(reason: unknown): boolean {
+/**
+ * The SDK writing to an exec stream that already closed, which it does after a local command
+ * fails. Its error class is minified, so the name is all there is to match.
+ */
+export function isClosedExecStreamWrite(reason: unknown): boolean {
   return reason instanceof Error && reason.name === 'WriteIterableClosedError'
 }
 
-// -- Transport failures (T3 Code `transportFailure.ts`) -----------------------------------------
+// -- Replies that are only a transport error ----------------------------------------------------
 
-const MAX_LINE = 4096
-const TRANSPORT_ERROR = /^Error: (?:RetriableError: (?!\[internal\]).+|ConnectError: \[(?:unavailable|aborted|deadline_exceeded)\].*)$/
-const SERVER_ERROR = 'Something went wrong communicating with the server. Please try again.'
+/** A longer line is prose, not an error dump. */
+const MAX_DUMP_LINE = 4096
+const SERVER_TROUBLE = 'Something went wrong communicating with the server. Please try again.'
+const RETRIABLE = 'Error: RetriableError: '
+const CONNECT = 'Error: ConnectError: '
+/** Connect codes that mean the connection dropped, not that the request was wrong. */
+const DROPPED_CONNECT_CODES = ['unavailable', 'aborted', 'deadline_exceeded']
+const STACK_FRAME = /^\s+at\s/
+const INNER_LINE_BREAKS = ['\r', String.fromCodePoint(0x2028), String.fromCodePoint(0x2029)]
+
+/** One line (trailing space removed) that reports a lost connection to Cursor's servers. */
+function isTransportErrorLine(line: string): boolean {
+  if (line === SERVER_TROUBLE) return true
+  // A carriage return or a Unicode line or paragraph separator inside it: not one error message.
+  if (INNER_LINE_BREAKS.some((mark) => line.includes(mark))) return false
+  if (line.startsWith(RETRIABLE)) {
+    // `[internal]` retriable errors come from the agent loop, not the connection: keep them as text.
+    const detail = line.slice(RETRIABLE.length)
+    return detail.length > 0 && !detail.startsWith('[internal]')
+  }
+  if (line.startsWith(CONNECT)) return DROPPED_CONNECT_CODES.some((code) => line.startsWith(`${CONNECT}[${code}]`))
+  return false
+}
 
 /**
- * Whether a reply is only a transport error dump (the SDK writes it as assistant text when a
- * request fails mid-run). Any other line, a quoted diagnostic included, disqualifies the reply.
+ * What a reply's lines show so far: nothing but blank lines, a transport error (the last one seen,
+ * with any stack frames under it), or anything else, which settles it as an ordinary reply.
  */
-export class CursorTransportFailure {
-  private disqualified = false
-  private found: string | undefined
-  private line = ''
+type ReplyReading = { kind: 'blank' } | { kind: 'error'; line: string } | { kind: 'ordinary' }
+
+function readLine(reading: ReplyReading, raw: string): ReplyReading {
+  if (reading.kind === 'ordinary') return reading
+  const line = raw.trimEnd()
+  if (isTransportErrorLine(line)) return { kind: 'error', line }
+  if (!line.trim()) return reading
+  if (reading.kind === 'error' && STACK_FRAME.test(line)) return reading
+  return { kind: 'ordinary' }
+}
+
+/**
+ * Watches a run's streamed text for a reply that is nothing but a transport error. When a request
+ * fails mid-run, the SDK writes the error as assistant text and still finishes the run; such a
+ * reply fails the turn instead. A reply that also says anything else (an explanation quoting the
+ * same error, for example) is an ordinary reply.
+ */
+export class TransportErrorReply {
+  private reading: ReplyReading = { kind: 'blank' }
+  /** The line still being streamed. */
+  private open = ''
 
   push(text: string): void {
-    for (const [index, part] of text.split('\n').entries()) {
-      if (this.disqualified) return
-      if (index > 0) {
-        this.consume(this.line)
-        this.line = ''
-      }
-      if (this.line.length + part.length > MAX_LINE) {
-        this.disqualified = true
-        this.found = undefined
-        return
-      }
-      this.line += part
+    const pieces = text.split('\n')
+    const rest = pieces.pop() ?? ''
+    for (const piece of pieces) {
+      if (!this.extend(piece)) return
+      this.reading = readLine(this.reading, this.open)
+      this.open = ''
     }
+    this.extend(rest)
   }
 
-  private consume(line: string): void {
-    if (this.disqualified) return
-    const text = line.trimEnd()
-    if (TRANSPORT_ERROR.test(text) || text === SERVER_ERROR) this.found = text
-    else if (text.trim() !== '' && !(this.found && /^\s+at\s/.test(text))) {
-      this.disqualified = true
-      this.found = undefined
-    }
-  }
-
+  /** The error line, when the reply so far is only a transport error. */
   get failure(): string | undefined {
-    if (this.disqualified) return undefined
-    const saved = { disqualified: this.disqualified, found: this.found }
-    this.consume(this.line)
-    const failure = this.found
-    this.disqualified = saved.disqualified
-    this.found = saved.found
-    return failure
+    const reading = readLine(this.reading, this.open)
+    return reading.kind === 'error' ? reading.line : undefined
+  }
+
+  /** Adds text to the open line; false once the reply is settled as ordinary. */
+  private extend(piece: string): boolean {
+    if (this.reading.kind === 'ordinary') return false
+    if (this.open.length + piece.length > MAX_DUMP_LINE) {
+      this.reading = { kind: 'ordinary' }
+      return false
+    }
+    this.open += piece
+    return true
   }
 }
 
 // -- Errors -------------------------------------------------------------------------------------
 
+/** An `AbortError` anywhere along the error's `cause` chain (cycles end the search). */
 function isCancellation(cause: unknown): boolean {
-  const seen = new Set<object>()
-  let current = cause
-  while (typeof current === 'object' && current !== null && !seen.has(current)) {
-    if ((current as { name?: unknown }).name === 'AbortError') return true
-    seen.add(current)
-    current = (current as { cause?: unknown }).cause
+  const visited = new Set<unknown>()
+  for (let link = cause; link && typeof link === 'object' && !visited.has(link); link = (link as { cause?: unknown }).cause) {
+    if ((link as { name?: unknown }).name === 'AbortError') return true
+    visited.add(link)
   }
   return false
 }
@@ -196,8 +230,8 @@ function main(): void {
   const stores = new Map<string, CursorSdk.LocalAgentStore>()
 
   process.on('unhandledRejection', (reason) => {
-    if (isCursorShellSpawnFailure(reason)) return console.error('[cursor-host] a Cursor shell failed to spawn; the host keeps running.')
-    if (isCursorClosedStreamWrite(reason)) return console.error('[cursor-host] the Cursor SDK wrote to a closed exec stream; the host keeps running.')
+    if (isShellSpawnRejection(reason)) return console.error('[cursor-host] a Cursor shell failed to spawn; the host keeps running.')
+    if (isClosedExecStreamWrite(reason)) return console.error('[cursor-host] the Cursor SDK wrote to a closed exec stream; the host keeps running.')
     console.error('[cursor-host] unhandled rejection', describeFailure(reason))
     process.exit(1)
   })
@@ -251,7 +285,7 @@ function main(): void {
       const agent = agentOf(params.agentId)
       let runId: string | undefined
       const pending: Array<Record<string, unknown>> = []
-      const transport = new CursorTransportFailure()
+      const transport = new TransportErrorReply()
       const forward = (update: Record<string, unknown>) => {
         if (update.type === 'text-delta' && typeof update.text === 'string') transport.push(update.text)
         send({ event: 'delta', runId: runId!, update })

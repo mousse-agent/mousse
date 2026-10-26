@@ -109,16 +109,30 @@ export function iconIdOf(snapshot: Pick<InstanceSnapshot, 'driver' | 'instanceId
   return isApiInstance(snapshot) ? snapshot.instanceId : DRIVER_INFO[snapshot.driver].iconId
 }
 
-/** Version label as T3 Code shows it; Antigravity's release tag becomes a date. */
+const ANTIGRAVITY_TAG_PREFIX = 'agy_acp_server_'
+
+/**
+ * Antigravity versions are release tags, `agy_acp_server_<yyyymmdd>_<build>` with an optional
+ * `_<candidate>`. Shown as the date and the candidate: `agy_acp_server_20260818_01_RC01` →
+ * "2026-08-18 RC01". Anything else is not such a tag.
+ */
+function antigravityRelease(tag: string): string | undefined {
+  if (!tag.startsWith(ANTIGRAVITY_TAG_PREFIX)) return undefined
+  const [date = '', build = '', ...rest] = tag.slice(ANTIGRAVITY_TAG_PREFIX.length).split('_')
+  if (!/^\d{8}$/.test(date) || !/^\d+$/.test(build)) return undefined
+  const candidate = rest.join('_')
+  if (rest.length > 0 && !/^\w+$/.test(candidate)) return undefined
+  const day = `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}`
+  return candidate ? `${day} ${candidate}` : day
+}
+
+/** A version for display: numeric versions get a "v", Antigravity's release tags become a date. */
 export function formatVersion(version: string | undefined): string | undefined {
-  const trimmed = version?.trim()
-  if (!trimmed) return undefined
-  const antigravity = /^agy_acp_server_(\d{4})(\d{2})(\d{2})_\d+(?:_(\w+))?$/.exec(trimmed)
-  if (antigravity) {
-    const [, year, month, day, candidate] = antigravity
-    return `${year}-${month}-${day}${candidate ? ` ${candidate}` : ''}`
-  }
-  return /^\d/.test(trimmed) ? `v${trimmed}` : trimmed
+  const text = version?.trim()
+  if (!text) return undefined
+  const release = antigravityRelease(text)
+  if (release) return release
+  return text[0]! >= '0' && text[0]! <= '9' ? `v${text}` : text
 }
 
 const SOURCE_LABELS: Record<BinarySource, string> = {
@@ -185,7 +199,7 @@ export function binaryOverrideOf(snapshot: InstanceSnapshot): string | undefined
   return snapshot.binary?.source === 'override' ? snapshot.binary.path : undefined
 }
 
-/** The switch, in T3 Code's layering: device is a ceiling, a project only narrows it. */
+/** The switch: the device setting is a ceiling, and a project can only narrow it. */
 export interface SwitchState {
   checked: boolean
   /** The device has it off, so a project cannot turn it on. */

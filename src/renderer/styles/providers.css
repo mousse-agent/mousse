@@ -1,4 +1,4 @@
-/* Settings → Providers, after T3 Code's providers page: a scope line and refresh/add actions,
+/* Settings → Providers: a scope line and refresh/add actions,
    then one surface split into a provider list (18rem) and the selected provider's editor, inside
    the same content column as every settings page. Below 40rem of page width the editor stacks
    under the list. Built on the settings primitives (settings.css); selection is a background fill

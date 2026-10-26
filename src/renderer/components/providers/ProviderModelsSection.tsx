@@ -10,7 +10,7 @@ const FILTER_THRESHOLD = 8
 
 type ModelGroup = 'favorite' | 'visible' | 'hidden'
 
-/** T3 Code's grouping: favorites, then the rest, then models hidden from the picker. */
+/** Model groups, in order: favorites, then the rest, then models hidden from the picker. */
 export function modelGroupOf(model: Pick<InstanceModel, 'favorite' | 'hidden' | 'source'>): ModelGroup {
   if (model.favorite) return 'favorite'
   return isHiddenInPicker(model) ? 'hidden' : 'visible'
@@ -122,7 +122,7 @@ export function modelsSummary(entries: readonly InstanceModel[]): string {
 }
 
 /**
- * T3 Code's provider Models section on the instance's snapshot: filter past eight models, favorites
+ * The provider's Models section, from the instance's snapshot: filter past eight models, favorites
  * first, models hidden from the picker folded into one group at the end, a show-in-picker eye and
  * move up/down (on hover or focus) per model, bulk hide/show, and custom models with their
  * capabilities stated. Every change is saved to the daemon's model prefs.

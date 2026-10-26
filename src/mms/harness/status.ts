@@ -185,7 +185,7 @@ export async function probeInstance(input: {
       runs: {
         state: 'no',
         failure: 'not_on_path',
-        message: driver.canInstall ? `${driver.label} is not installed.` : 'CLI not detected on PATH.'
+        message: driver.canInstall ? `${driver.label} is not installed.` : "Mousse could not find this provider's command on PATH."
       },
       auth: notChecked,
       compatibility: compatibilityOf(driver, undefined),
