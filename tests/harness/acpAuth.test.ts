@@ -53,7 +53,7 @@ function setup(agentOptions: AgentOptions, pty?: { available: () => boolean; spa
   })
   const driver = acpDriver({ connect: (_context, request) => agent.connect(request), ...(pty ? { pty } : {}) })
   const config = driver.decodeConfig({ binaryPath: process.execPath, args: ['agent.js'] })
-  const runtime = driver.create({
+  const create = () => driver.create({
     instanceId: 'acp:fake',
     builtIn: false,
     config,
@@ -65,11 +65,18 @@ function setup(agentOptions: AgentOptions, pty?: { available: () => boolean; spa
     findBinary: () => undefined,
     changed: vi.fn()
   })
+  const runtime = create()
   runtimes.push(runtime)
+  /** A runtime made again over the same state, as after a restart. */
+  const recreate = () => {
+    const next = create()
+    runtimes.push(next)
+    return next
+  }
   const session = new LoginSession('op')
   const events: ProviderLoginEvent[] = []
   session.on('event', (event: ProviderLoginEvent) => events.push(event))
-  return { runtime, session, events, agent, stateDir, initialized }
+  return { runtime, recreate, session, events, agent, stateDir, initialized }
 }
 
 describe('ACP agent sign-in', () => {
@@ -145,6 +152,28 @@ describe('ACP agent sign-in', () => {
     expect(await result).toEqual({ success: true, sessionId: 'op' })
     expect(spawned[0]).toEqual([process.execPath, 'agent.js', 'login', '--device'])
     expect(events).toContainEqual(expect.objectContaining({ type: 'device_code', userCode: 'ABCD-EFGH', verificationUri: 'https://accounts.example.test/device' }))
+  })
+
+  it('after a restart, asks the agent again before signing in, so a terminal method keeps its arguments', async () => {
+    let exit: ((code: number) => void) | undefined
+    const spawned: string[][] = []
+    const spawn: PtySpawn = (command, args) => {
+      spawned.push([command, ...args])
+      return { pid: 0, onData: () => ({ dispose: () => {} }), onExit: (listener) => { exit = (code) => listener({ exitCode: code }); return { dispose: () => {} } }, kill: () => {} }
+    }
+    const methodsSent = [{ id: 'login', name: 'Terminal sign-in', type: 'terminal', args: ['login', '--device'], env: { AGENT_LOGIN_MODE: 'device' } }]
+    const { runtime, recreate, session, initialized } = setup({ authMethods: methodsSent, signedIn: () => true }, { available: () => true, spawn })
+    await runtime.handshake!(new AbortController().signal)
+    runtime.stop()
+    const restarted = recreate()
+    // Status still names the method from what was stored, before any new check.
+    expect((await restarted.auth({ force: true })).methodLabel).toBe('Terminal sign-in')
+    const result = restarted.signIn!(session, process.cwd())
+    await vi.waitFor(() => expect(exit).toBeDefined())
+    exit!(0)
+    expect(await result).toEqual({ success: true, sessionId: 'op' })
+    expect(initialized).toHaveLength(3) // first check, the check before sign-in, the verification
+    expect(spawned).toEqual([[process.execPath, 'agent.js', 'login', '--device']])
   })
 
   it('terminal method: cancelling kills the terminal and never counts a late success', async () => {

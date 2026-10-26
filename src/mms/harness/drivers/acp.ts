@@ -39,6 +39,8 @@ interface AcpState {
   models?: LlmModelOption[]
   /** What the agent last reported; the gateway keeps its own copy per revision. */
   facts?: RuntimeFactsReport
+  /** `initialize.authMethods` as the agent sent them (facts keep only a summary). */
+  authMethods?: unknown[]
   /** A sign-in verified in Mousse, for this launch (`bindingHash`) only. */
   auth?: { bindingHash: string; methodId: string; authenticated: boolean }
   /** The agent asked for a sign-in during a turn. */
@@ -243,6 +245,7 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     }
     if (!binary || !observedInfo) return
     const previous = state.facts
+    state.authMethods = observedInfo.authMethods
     state.facts = {
       binary,
       ...(observedInfo.protocolVersion !== undefined ? { protocolVersion: observedInfo.protocolVersion } : {}),
@@ -263,7 +266,7 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
     save()
   }
 
-  const authMethods = (): AcpAuthMethod[] => decodeAuthMethods(observedInfo?.authMethods ?? state.facts?.authMethods)
+  const authMethods = (): AcpAuthMethod[] => decodeAuthMethods(observedInfo?.authMethods ?? state.authMethods)
 
   const reading = (): AuthReading => {
     const known = observedInfo || state.facts
@@ -305,7 +308,9 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
       error: session.abort.signal.aborted ? 'Login cancelled' : error instanceof Error ? error.message : String(error)
     })
     try {
-      if (!observedInfo && !state.facts) await sessions.handshake(session.abort.signal)
+      // A runtime made since the last check (a restart, a new revision) asks the agent again: the
+      // methods it offers now, with their full arguments, decide the sign-in.
+      if (!observedInfo) await sessions.handshake(session.abort.signal)
       const offered = offeredAuthMethods(authMethods(), ptyRuns())
       if (!offered.length) {
         await verify(session.abort.signal)
@@ -404,6 +409,7 @@ function createAcpRuntime(context: DriverContext, preset: AcpPreset, options: Ac
         // A failed check leaves no facts behind: the old ones describe a program that no longer starts.
         observedInfo = undefined
         delete state.facts
+        delete state.authMethods
         save()
         throw error
       }
