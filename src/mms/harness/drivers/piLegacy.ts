@@ -10,7 +10,12 @@ import { decodeInstanceConfig, type DriverContext, type DriverRuntime, type Harn
 export const PI_LEGACY_CAPS: HarnessCaps = Object.freeze({
   ...PI_LOOP_CAPABILITIES,
   planMode: true,
-  contextUsage: 'measured'
+  contextUsage: 'measured',
+  // Mousse runs the pi loop's tools itself.
+  toolControl: 'exact',
+  // Spend is counted after each response; nothing refuses the next request yet.
+  budgets: 'observed',
+  spendLimits: 'unsupported'
 })
 
 export type PiCredentials = Partial<Pick<ProviderAuthService,

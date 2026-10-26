@@ -71,6 +71,7 @@ import type {
   ProviderLoginResult
 } from '../shared/providerAuth'
 import type { InstanceSnapshot, ProviderSnapshotsEvent } from '../shared/harness/status'
+import type { MoveResult } from '../shared/harness/move'
 import type {
   AddInstanceInput,
   InstanceConfigPatch,
@@ -821,6 +822,9 @@ const api = {
       /** Checks again, bypassing the cached status. */
       recheck: (instanceId: string): Promise<InstanceSnapshot> =>
         ipcRenderer.invoke('providers:instances:recheck', instanceId),
+      /** Moves a model API entry to the agent that now serves it; lists the defaults rewritten. */
+      move: (instanceId: string, toInstanceId: string): Promise<MoveResult> =>
+        ipcRenderer.invoke('providers:instances:move', instanceId, toInstanceId),
       refreshModels: (instanceId: string): Promise<InstanceSnapshot> =>
         ipcRenderer.invoke('providers:instances:refreshModels', instanceId),
       /** Each present field replaces the stored one. */

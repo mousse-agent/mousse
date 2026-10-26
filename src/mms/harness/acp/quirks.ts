@@ -1,0 +1,33 @@
+/**
+ * How one agent departs from plain ACP. Presets carry their own quirks; an agent Mousse knows
+ * nothing about gets none.
+ */
+export interface AcpQuirks {
+  /** Offer client fs (`fs/read_text_file`, `fs/write_text_file`) inside the workspace, with write approval. */
+  clientFs?: boolean
+  /** Reopen a saved session with `session/resume` whatever the agent advertises (else load, then resume). */
+  preferResume?: boolean
+  /** Send the Mousse MCP server over the stdio bridge even when the agent advertises HTTP. */
+  mcp?: 'auto' | 'stdio'
+  /** Refuse an `initialize` answer of another protocol version (else it is read by its shape). */
+  strictProtocol?: boolean
+  /**
+   * The model is always set through this select config option, and only a listed model runs
+   * (else the model control the session offers, and the agent's default when it offers none).
+   */
+  modelConfigId?: string
+}
+
+export const NO_QUIRKS: Readonly<AcpQuirks> = Object.freeze({})
+
+/** Quirks of agents Mousse may meet as a generic command, by agent id. */
+const KNOWN_QUIRKS: Readonly<Record<string, AcpQuirks>> = {
+  // They drop injected HTTP MCP servers (found by T3 Code).
+  'codex-acp': { mcp: 'stdio' },
+  'pi-acp': { mcp: 'stdio' }
+}
+
+/** The quirks of `agentId`; unknown agents get none. */
+export function quirksFor(agentId: string | undefined): AcpQuirks {
+  return (agentId && Object.prototype.hasOwnProperty.call(KNOWN_QUIRKS, agentId) ? KNOWN_QUIRKS[agentId] : undefined) ?? NO_QUIRKS
+}

@@ -21,6 +21,12 @@ export interface DriverInfo {
   customModels: boolean
   /** The vendor home a default instance shares with the user's terminal. */
   homeHint?: string
+  /**
+   * Added from a command the user enters (program, arguments, variables) rather than found on
+   * this computer; the Add dialog names it with `addLabel` and never as "another account".
+   */
+  customCommand?: boolean
+  addLabel?: string
 }
 
 export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
@@ -49,6 +55,16 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     description: "Google's official Antigravity agent, with its own Google sign-in.",
     multiInstance: false,
     customModels: false
+  },
+  acp: {
+    label: 'ACP agent',
+    iconId: 'acp',
+    family: 'agent',
+    description: 'Any agent that speaks the Agent Client Protocol, started from a command you enter.',
+    multiInstance: true,
+    customModels: false,
+    customCommand: true,
+    addLabel: 'Custom command'
   },
   pi: {
     label: 'Model API',
@@ -113,6 +129,7 @@ export interface InstanceConfigView {
   binaryPath?: string
   args: string[]
   env: Record<string, string>
+  movedTo?: string
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -130,7 +147,8 @@ export function instanceConfigOf(snapshot: InstanceSnapshot): InstanceConfigView
     home: raw.home === 'private' ? 'private' : 'default',
     ...(typeof raw.binaryPath === 'string' && raw.binaryPath ? { binaryPath: raw.binaryPath } : {}),
     args: Array.isArray(raw.args) ? raw.args.filter((arg): arg is string => typeof arg === 'string') : [],
-    env
+    env,
+    ...(typeof raw.movedTo === 'string' && raw.movedTo ? { movedTo: raw.movedTo } : {})
   }
 }
 
@@ -179,6 +197,24 @@ export function nextInstanceLabel(base: string, snapshots: readonly InstanceSnap
     const label = `${base} ${n}`
     if (!taken.has(label.toLowerCase())) return label
   }
+}
+
+/** `NAME=value` lines; blank lines and lines without a name are skipped. */
+export function parseEnvLines(text: string): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const line of text.split(/\r?\n/)) {
+    const index = line.indexOf('=')
+    const name = (index === -1 ? line : line.slice(0, index)).trim()
+    if (!name) continue
+    env[name] = index === -1 ? '' : line.slice(index + 1)
+  }
+  return env
+}
+
+/** A name for an agent added from a command: the program's file name without its extension. */
+export function commandLabel(command: string): string {
+  const base = command.trim().split(/[\\/]/).pop() ?? ''
+  return base.replace(/\.(exe|cmd|bat)$/i, '')
 }
 
 /** Space-separated, with quotes for arguments that contain spaces. */

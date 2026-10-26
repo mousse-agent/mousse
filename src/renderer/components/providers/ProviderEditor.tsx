@@ -194,10 +194,11 @@ export function ModelsEditorSection({
   )
 }
 
-/** The editor of a model API: header, its Setup row, then Models. */
+/** The editor of a model API: header, its Setup row (and Move, where it now runs as an agent), then Models. */
 export function ApiEditor({
   snapshot,
   setup,
+  move,
   removeHint,
   onRemove,
   onSaveModelPrefs,
@@ -205,6 +206,7 @@ export function ApiEditor({
 }: {
   snapshot: InstanceSnapshot
   setup: ReactNode
+  move?: ReactNode
   removeHint?: string
   onRemove: () => Promise<void>
   onSaveModelPrefs: (patch: ModelPrefsPatch) => Promise<void>
@@ -213,7 +215,10 @@ export function ApiEditor({
   return (
     <>
       <EditorHeader snapshot={snapshot} removeLabel="Remove provider" removeHint={removeHint} onRemove={onRemove} />
-      <EditorSection title="Setup">{setup}</EditorSection>
+      <EditorSection title="Setup">
+        {setup}
+        {move}
+      </EditorSection>
       <ModelsEditorSection snapshot={snapshot} onSave={onSaveModelPrefs} onRefresh={onRefreshModels} />
     </>
   )

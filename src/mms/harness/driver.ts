@@ -1,11 +1,13 @@
 import type { AuthState, InstallOwner } from '../../shared/harness/status'
-import type { HarnessCaps, HarnessDriverKind } from '../../shared/harness/types'
+import type { HarnessCaps, HarnessDriverKind, RuntimeFacts } from '../../shared/harness/types'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../shared/settings'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import type { StoredCliConfig } from '../providers/cliConfig'
+import type { AcpSource } from './acp/preset'
 import type { LoginSession } from '../providers/LoginSession'
 import type { ProviderAdapter } from '../run/adapters/ProviderAdapter'
+import type { ProviderRef } from '../run/types'
 import type { InstanceEnv } from './env'
 
 /**
@@ -28,7 +30,14 @@ export interface InstanceConfig {
   binaryPath?: string
   args?: string[]
   env?: Record<string, string>
+  /** Where an ACP agent comes from (the `acp` driver); derived from the fields above when absent. */
+  source?: AcpSource
+  /** The entry this one moved to (`instances.move`): turned off, and its threads continue there. */
+  movedTo?: string
 }
+
+/** Runtime facts as a runtime reports them; the gateway stamps the instance and its counters. */
+export type RuntimeFactsReport = Omit<RuntimeFacts, 'instanceId' | 'configRevision' | 'accountGeneration'>
 
 /** What the driver's sign-in check says, before the gateway adds timing and staleness. */
 export interface AuthReading {
@@ -45,6 +54,10 @@ export interface AuthReading {
   message?: string
   /** The terminal command that signs the instance in, when sign-in happens outside Mousse. */
   signInCommand?: string
+  /** A sign-in can start in Mousse now, whatever `state` says (an agent that offers its methods). */
+  canSignIn?: boolean
+  /** The sign-in is one Mousse made and keeps (it may sign out), beyond the gateway's own rules. */
+  ownedByMousse?: boolean
 }
 
 export interface DriverContext {
@@ -108,6 +121,22 @@ export interface DriverRuntime {
   validateOverride?(path: string): void
   /** Forget the native session of a thread so its next turn hands history over instead. */
   forgetConversation?(threadId: string): void
+  /**
+   * Kills the processes serving `ref` (the whole tree). The gateway calls it when a native cancel
+   * misses its deadline (`supervise.interruptWithDeadline`); the live turn then ends as interrupted.
+   */
+  terminate?(ref: ProviderRef): void
+  /**
+   * What the runtime last learned about itself for this instance (an ACP `initialize`, a
+   * `session/new`). The gateway stores it per instance and passes it to `HarnessDriver.caps`.
+   */
+  runtimeFacts?(): RuntimeFactsReport | undefined
+  /**
+   * A short start-up check that records fresh facts without opening a model session (ACP:
+   * `initialize` only, in a temporary folder, the process tree killed afterwards). Run on Add,
+   * Recheck and after install, never on the periodic probe. Throws when the runtime cannot start.
+   */
+  handshake?(signal: AbortSignal): Promise<void>
   /** A runtime with live processes per thread reports to `host` (null detaches it). */
   setLiveHost?(host: LiveProcessHost | null): void
   /** The turn the thread's live process started itself and is running now, if any. */
@@ -137,8 +166,17 @@ export interface HarnessDriver {
   readonly methodLabel?: string
   /** Lenient decoder of an instance's stored `config`: unknown or malformed fields fall back. */
   decodeConfig(raw: Record<string, unknown> | undefined): InstanceConfig
-  /** Capabilities for an instance at an installed version. */
-  caps(config: InstanceConfig, installedVersion?: string): HarnessCaps
+  /**
+   * Capabilities for an instance at an installed version. `facts` (when the runtime reported them)
+   * refine what a preset cannot know statically: fork, plan mode, models.
+   */
+  caps(config: InstanceConfig, installedVersion?: string, facts?: RuntimeFacts): HarnessCaps
+  /**
+   * Arguments that make the executable print its version; `null` when it has no such flag (the
+   * probe then skips the version check and the handshake decides whether it runs). Default
+   * `['--version']`.
+   */
+  versionArgs?(config: InstanceConfig): string[] | null
   create(context: DriverContext): DriverRuntime
   /** The command that updates a binary installed by `owner`, when there is one. */
   updateCommand?(owner: InstallOwner): string | undefined
@@ -151,6 +189,7 @@ export function decodeInstanceConfig(raw: Record<string, unknown> | undefined, o
   if (typeof raw.displayName === 'string' && raw.displayName.trim()) config.displayName = raw.displayName.trim().slice(0, 80)
   if (options.privateHome && raw.home === 'private') config.home = 'private'
   if (typeof raw.loginMethod === 'string' && raw.loginMethod) config.loginMethod = raw.loginMethod
+  if (typeof raw.movedTo === 'string' && raw.movedTo) config.movedTo = raw.movedTo
   if (typeof raw.binaryPath === 'string' && raw.binaryPath.trim()) config.binaryPath = raw.binaryPath.trim()
   if (Array.isArray(raw.args)) config.args = raw.args.filter((arg): arg is string => typeof arg === 'string')
   if (raw.env && typeof raw.env === 'object' && !Array.isArray(raw.env)) {

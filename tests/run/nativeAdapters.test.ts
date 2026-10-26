@@ -1,10 +1,8 @@
 import type { Message } from '@earendil-works/pi-ai'
 import { describe, expect, it, vi } from 'vitest'
 import type { ClaudeSubscriptionChatInput } from '../../src/mms/providers/claudeSubscription/ClaudeSubscriptionProviderService'
-import {
-  AntigravityAdapter,
-  type AntigravityClient
-} from '../../src/mms/run/adapters/antigravity/AntigravityAdapter'
+import { antigravityAdapter } from '../../src/mms/harness/drivers/antigravity'
+import type { AcpTurnClient as AntigravityClient } from '../../src/mms/run/adapters/acp/AcpAdapter'
 import {
   ClaudeSubscriptionAdapter,
   type ClaudeSubscriptionClient
@@ -278,7 +276,7 @@ describe('AntigravityAdapter', () => {
 
   it('declares sparse events, publishes no context and refuses plan mode or a missing workspace', async () => {
     const service = client(async () => 'never')
-    const adapter = new AntigravityAdapter(() => service)
+    const adapter = antigravityAdapter(() => service)
     expect(adapter.driver).toBe('antigravity')
     expect(adapter.capabilities).toMatchObject({ steer: 'interrupt_restart', interrupt: true, events: 'sparse', historyInjection: 'prompt' })
     expect(adapter.describe('m')).toEqual({ contextUsage: 'none' })
@@ -302,7 +300,7 @@ describe('AntigravityAdapter', () => {
     })
     const sink = recordingSink()
     const turnHost = host()
-    const result = await new AntigravityAdapter(() => service).startTurn(
+    const result = await antigravityAdapter(() => service).startTurn(
       input({ instanceId: 'antigravity', llmProvider: 'antigravity', model: 'm' }),
       sink,
       control(),

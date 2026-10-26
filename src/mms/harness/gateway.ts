@@ -1,6 +1,7 @@
 import type { InstanceSnapshot, ProviderSnapshotsEvent } from '../../shared/harness/status'
 import type {
   AddInstanceInput,
+  BinaryFingerprint,
   CustomModel,
   ExecutionBinding,
   HarnessCaps,
@@ -13,7 +14,9 @@ import type {
   ProviderScope,
   ProviderSelection,
   RunPolicy,
-  SignInResponse
+  RuntimeFacts,
+  SignInResponse,
+  TurnOrigin
 } from '../../shared/harness/types'
 import type { CliProviderConfigPatch, ConfiguredProvider, ProviderLoginResult } from '../../shared/providerAuth'
 import type { ModelOverride } from '../../shared/providerInstances'
@@ -29,6 +32,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstanceConfigView, NextStep } from '../../shared/harness/status'
+import { foldedInto, type MoveResult } from '../../shared/harness/move'
 import { harnessAppError, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
 import {
@@ -44,10 +48,12 @@ import { hidesModel, modelsWithPrefs, ModelPrefsService, visibleProviderOption, 
 import type { AuthReading, DriverRuntime, HarnessDriver, InstanceConfig, LiveProcessHost } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, type InstanceEnv } from './env'
 import { addedInstanceId, defaultInstanceId, InstanceCounterStore, instanceStateDir, isBuiltInInstance } from './instances'
-import { checkPolicy } from './policy'
+import { RuntimeFactsStore } from './facts'
+import { checkPolicy, purposeAllowed, toolControlLevel } from './policy'
 import { HarnessScopeStore } from './scope'
 import { sharedShellPath, type ShellPathResult } from './shellPath'
-import { compatibilityOf, PROBE_TIMEOUTS, probeInstance, type ProbeResult } from './status'
+import { compatibilityOf, fingerprintOf, PROBE_TIMEOUTS, probeInstance, sameBinary, type ProbeResult } from './status'
+import { interruptWithDeadline } from './supervise'
 
 /** Instance id of a turn that ran on the unselected default: the bare pi loop. */
 export const PI_DRIVER_ID = 'pi'
@@ -105,7 +111,7 @@ export interface HarnessGateway {
    * the binding records it. That reading serves the `startTurn` of this binding once; any other
    * dispatch (a stored binding: retry, recovery) reads the account again.
    */
-  bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string }): Promise<ExecutionBinding>
+  bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string; origin?: TurnOrigin }): Promise<ExecutionBinding>
   /** The selection a binding runs: a retry or recovery of a run executes its binding, never the current selection. */
   selectionOf(binding: ExecutionBinding): Pick<ModelOverride, 'instanceId' | 'llmProvider' | 'model'>
   /**
@@ -152,6 +158,8 @@ export interface ResolvedTurnSelection {
   driver: HarnessDriverKind
   model: string
   caps: HarnessCaps
+  /** The selection named an entry that moved to this instance (`config.movedTo`). */
+  movedFrom?: string
 }
 
 /** The old provider RPCs, served through the instances that replace the vendor branches. */
@@ -171,7 +179,11 @@ export interface LegacyProviders {
   credentialsChanged(providerId: string): Promise<void>
 }
 
-/** Who is resolving; recorded for diagnostics, and the same rules apply to all. */
+/**
+ * Who is resolving. The same rules apply to all, except that an instance whose runtime approves
+ * tools itself (`toolControl: 'uncontrolled'`) resolves only for the interactive purposes
+ * (`INTERACTIVE_PURPOSES` in `policy.ts`); any other purpose, including one added later, is refused.
+ */
 export type ResolvePurpose =
   | 'composer'
   | 'default'
@@ -215,6 +227,12 @@ export interface HarnessInstances {
   recheck(instanceId: string): Promise<InstanceSnapshot>
   refreshModels(instanceId: string): Promise<InstanceSnapshot>
   setModelPrefs(instanceId: string, patch: ModelPrefsPatch): Promise<InstanceSnapshot>
+  /**
+   * Moves a model API entry to the agent that now serves it (`FOLDED_INTO_AGENT`): the old entry is
+   * turned off (never deleted) and records `movedTo`, the defaults that named it are rewritten and
+   * listed, and threads pinned to it continue on the agent with their history handed over.
+   */
+  move(fromInstanceId: string, toInstanceId: string): Promise<MoveResult>
   /** Snapshot changes (`snapshots$`) and operation progress; returns the unsubscribe. */
   subscribe(listener: (event: HarnessGatewayEvent) => void): () => void
 }
@@ -287,6 +305,13 @@ export interface HarnessGatewayOptions {
   now?: () => number
   /** Test seam: the turn-admission account check deadline (`TURN_ACCOUNT_CHECK_MS`). */
   accountCheckMs?: number
+  /**
+   * The profile's own default selections (Settings), rewritten when an entry moves; returns what
+   * changed, for the Move dialog. Project defaults are the gateway's own.
+   */
+  defaults?: { rewrite(from: string, to: { instanceId: string; llmProvider: string; model(model: string): string }): string[] }
+  /** Test seam: the agent a model API moves to (`FOLDED_INTO_AGENT`). */
+  foldedInto?: (providerId: string | undefined) => HarnessDriverKind | undefined
 }
 
 interface InstanceRecord {
@@ -312,6 +337,8 @@ interface ProbeState {
   models?: { refreshedAt?: string; error?: string; live?: boolean }
   /** The account read running for a turn admission (resolves undefined = unknown). */
   accountCheck?: Promise<string | undefined>
+  /** The last start-up check: what it found, for which executable and config revision. */
+  handshake?: { runs: ProbeResult['runs']; fingerprint?: BinaryFingerprint; revision: number }
 }
 
 /** A removed instance's state directory, deleted once nothing uses it any more. */
@@ -378,6 +405,13 @@ export class Harness implements HarnessGateway {
   /** The account reading `bind` took, for the `startTurn` of that binding (once). */
   private readonly boundAccounts = new WeakMap<ExecutionBinding, { accountId?: string }>()
   private readonly probes = new Map<string, ProbeState>()
+  private readonly facts: RuntimeFactsStore
+  /** Executable stats taken when no probe recorded one, reused for the probe TTL. */
+  private readonly stats = new Map<string, { fingerprint?: BinaryFingerprint; atMs: number }>()
+  /** Threads already told that an instance approves tools itself (`thread|instance`). */
+  private readonly toolNotices = new Set<string>()
+  /** Bindings made for a selection that named a moved entry: their thread is told once. */
+  private readonly boundMoves = new WeakMap<ExecutionBinding, string>()
   private readonly operations = new Map<string, Operation>()
   private readonly listeners = new Set<(event: HarnessGatewayEvent) => void>()
   private readonly scopes: HarnessScopeStore
@@ -395,6 +429,7 @@ export class Harness implements HarnessGateway {
     }
     this.scopes = new HarnessScopeStore(options.profileHome)
     this.counters = new InstanceCounterStore(options.profileHome)
+    this.facts = new RuntimeFactsStore(options.profileHome)
     this.prefs = new ModelPrefsService(options.prefs ?? memoryPrefs())
     // Captured once at boot; probes that ran before it arrived and found nothing run again.
     this.shellPath = (options.shellPath ?? sharedShellPath)()
@@ -432,10 +467,11 @@ export class Harness implements HarnessGateway {
       respondSignIn: async (operationId, response) => this.respondSignIn(operationId, response),
       signOut: (instanceId) => this.signOut(instanceId),
       recheck: async (instanceId) => {
-        await this.probe(instanceId, true)
+        await this.probe(instanceId, true, { handshake: true })
         return this.snapshot(instanceId, { kind: 'device' })
       },
       refreshModels: (instanceId) => this.refreshModels(instanceId),
+      move: (fromInstanceId, toInstanceId) => this.move(fromInstanceId, toInstanceId),
       setModelPrefs: async (instanceId, patch) => {
         const record = this.record(instanceId, { allowDisabled: true })
         // A runtime that cannot run a model by id does not offer adding one.
@@ -512,7 +548,9 @@ export class Harness implements HarnessGateway {
       if (!driver) fail('bad_request', 'No model is selected and no pi loop adapter is registered.')
       return { instanceId: PI_DRIVER_ID, llmProvider: '', driver: 'pi', model: selection.model, caps: driver.caps({ home: 'default' }) }
     }
-    const resolved = this.instanceMap.resolve(this.instanceMap.instanceIdOf(selection), { allowDisabled: options.allowDisabled })
+    const named = this.instanceMap.instanceIdOf(selection)
+    const target = this.movedTarget(named)
+    const resolved = this.instanceMap.resolve(target ?? named, { allowDisabled: options.allowDisabled })
     const driver = this.drivers.get(resolved.entry.driver)
     if (!driver) fail('bad_request', `No provider adapter for driver ${resolved.entry.driver} (instance ${resolved.instanceId}).`)
     // Chat titles are a one-shot completion of an API provider's model; agent runtimes run turns only.
@@ -526,13 +564,104 @@ export class Harness implements HarnessGateway {
     }
     const config = driver.decodeConfig(resolved.entry.config)
     const version = this.probes.get(resolved.instanceId)?.lastGood?.binary?.version
-    return { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, driver: driver.kind, model: selection.model, caps: driver.caps(config, version) }
+    const caps = driver.caps(config, version, this.currentFacts(resolved.instanceId))
+    // An instance that approves tools itself runs only turns a person drives; reading or stopping
+    // work already running (`allowDisabled`) is never refused.
+    if (!options.allowDisabled && !purposeAllowed(caps, options.purpose))
+      throw harnessAppError({
+        code: 'policy_unenforceable',
+        message: `${this.labelOf(resolved.instanceId, driver)} approves tools itself, so it runs only chats you drive. Choose another provider for this.`,
+        missing: ['toolControl'],
+        instanceId: resolved.instanceId
+      })
+    // A moved entry's model runs on the agent when it lists it; otherwise the agent's first model.
+    let model = selection.model
+    if (target) {
+      const listed = this.recordOrUndefined(target)?.runtime.models() ?? []
+      if (listed.length && !listed.some((entry) => entry.id === model)) model = listed[0]!.id
+    }
+    return { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, driver: driver.kind, model, caps, ...(target ? { movedFrom: named } : {}) }
   }
 
-  async bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string }): Promise<ExecutionBinding> {
+  /** The entry an instance moved to (one hop), when that entry still exists. */
+  private movedTarget(instanceId: string): string | undefined {
+    const entries = this.instanceMap.list()
+    const movedTo = entries[instanceId]?.config?.movedTo
+    return typeof movedTo === 'string' && movedTo !== instanceId && Object.prototype.hasOwnProperty.call(entries, movedTo) ? movedTo : undefined
+  }
+
+  /** The instance's name for messages, without building its runtime when it is not built yet. */
+  private labelOf(instanceId: string, driver: HarnessDriver): string {
+    const record = this.records.get(instanceId)
+    return record ? this.displayName(record) : driver.label
+  }
+
+  /**
+   * The instance's runtime facts while they still apply: recorded at its current config revision
+   * and account generation, for the executable that is there now. Facts for another executable (a
+   * self-update in place) are dropped, caps fall back to the driver's static preset, and a
+   * start-up check is queued to record fresh ones. Bindings keep the caps they were made with.
+   */
+  private currentFacts(instanceId: string): RuntimeFacts | undefined {
+    const facts = this.facts.get(instanceId)
+    if (!facts) return undefined
+    const counters = this.counters.get(instanceId)
+    if (facts.configRevision !== counters.configRevision || facts.accountGeneration !== counters.accountGeneration) {
+      this.facts.drop(instanceId)
+      return undefined
+    }
+    const current = this.binaryFingerprint(instanceId, facts.binary.path)
+    if (!sameBinary(current, facts.binary)) {
+      this.facts.drop(instanceId)
+      if (!this.stopped) queueMicrotask(() => void this.probe(instanceId, true, { handshake: true }))
+      return undefined
+    }
+    return facts
+  }
+
+  /**
+   * The executable's fingerprint: the last probe's, else a stat of `path` reused for the probe TTL
+   * (never a stat on every resolve).
+   */
+  private binaryFingerprint(instanceId: string, path?: string): BinaryFingerprint | undefined {
+    const probed = this.probes.get(instanceId)?.lastGood?.fingerprint
+    if (probed) return probed
+    if (!path) return undefined
+    const cached = this.stats.get(path)
+    if (cached && this.now() - cached.atMs < PROBE_TTL_MS) return cached.fingerprint
+    const fingerprint = fingerprintOf(path)
+    this.stats.set(path, { ...(fingerprint ? { fingerprint } : {}), atMs: this.now() })
+    return fingerprint
+  }
+
+  /** Stores what the runtime reported about itself for the instance's current revision and account. */
+  private captureFacts(record: InstanceRecord): void {
+    let report
+    try {
+      report = record.runtime.runtimeFacts?.()
+    } catch (error) {
+      console.warn('[harness] could not read runtime facts', { instanceId: record.instanceId, error: errorText(error) })
+      return
+    }
+    if (!report) return
+    // Facts about another executable than the one there now (a report left from before an update,
+    // or a start-up check that failed) are never stored: storing them would drop them again at the
+    // next read and queue another check, without end.
+    const current = this.probes.get(record.instanceId)?.lastGood?.fingerprint ?? fingerprintOf(report.binary.path)
+    if (!sameBinary(current, report.binary)) return
+    const counters = this.counters.get(record.instanceId)
+    const facts: RuntimeFacts = { ...report, instanceId: record.instanceId, configRevision: counters.configRevision, accountGeneration: counters.accountGeneration }
+    this.stats.delete(facts.binary.path)
+    if (this.facts.set(record.instanceId, facts) && !this.stopped) this.changed(record.instanceId, { legacy: false })
+  }
+
+  async bind(resolved: ResolvedTurnSelection, input: { mode: ChatMode; effort?: string; origin?: TurnOrigin }): Promise<ExecutionBinding> {
     const record = resolved.instanceId === PI_DRIVER_ID ? undefined : this.recordOrUndefined(resolved.instanceId)
     const accountId = record ? await this.currentAccount(record) : undefined
     const counters = this.counters.get(resolved.instanceId)
+    // The attempt runs on the caps of this moment, whatever the runtime reports meanwhile.
+    const caps = record ? this.recordCaps(record) : resolved.caps
+    const binary = record ? this.probes.get(record.instanceId)?.lastGood?.fingerprint : undefined
     const binding: ExecutionBinding = {
       instanceId: resolved.instanceId,
       driver: resolved.driver,
@@ -542,9 +671,13 @@ export class Harness implements HarnessGateway {
       ...(accountId ? { accountId } : {}),
       model: resolved.model,
       ...(input.effort ? { effort: input.effort } : {}),
-      policy: { mode: policyMode(input.mode), approvals: 'ask' }
+      policy: { mode: policyMode(input.mode), approvals: 'ask', origin: input.origin ?? 'interactive' },
+      caps: { ...caps },
+      factsRevision: record ? this.facts.revision(record.instanceId) : 0,
+      ...(binary ? { binary: { ...binary } } : {})
     }
     this.boundAccounts.set(binding, accountId ? { accountId } : {})
+    if (resolved.movedFrom) this.boundMoves.set(binding, resolved.movedFrom)
     return binding
   }
 
@@ -557,11 +690,12 @@ export class Harness implements HarnessGateway {
   /**
    * The instance's signed-in account right now, as `accountIdentity` hashes it; undefined when it
    * cannot be established in time. Every call reads it again, except that callers arriving while a
-   * read runs share that read. Only runtimes with native sessions are checked: the account decides
-   * whether a session may be resumed.
+   * read runs share that read. Runtimes with native sessions or an identity of their own are
+   * checked: the account decides whether a session may be resumed (Codex and Antigravity fence
+   * through `auth({ force: true })`, others through `identity`).
    */
   private currentAccount(record: InstanceRecord): Promise<string | undefined> {
-    if (!record.runtime.forgetConversation) return Promise.resolve(undefined)
+    if (!record.runtime.forgetConversation && !record.runtime.identity) return Promise.resolve(undefined)
     const state = this.probeState(record.instanceId)
     if (state.accountCheck) return state.accountCheck
     const controller = new AbortController()
@@ -650,13 +784,15 @@ export class Harness implements HarnessGateway {
       } finally {
         ended = true
         record.active -= 1
+        // A turn's `session/new` may have taught the runtime something; the next admission sees it.
+        if (!record.retired) this.captureFacts(record)
         this.releaseRetired()
       }
     })()
     return {
       result,
       providerRef: () => ref,
-      interrupt: async () => (ended || !ref ? 'not_active' : record.runtime.adapter.interrupt(ref)),
+      interrupt: async () => (ended || !ref ? 'not_active' : this.interruptOn(record, ref, spec.input.threadId)),
       steer: async (text) => {
         if (ended) return 'not_active'
         if (ref && record.runtime.adapter.steer && (await record.runtime.adapter.steer(ref, text)) === 'delivered') return { delivery: 'live' }
@@ -678,11 +814,15 @@ export class Harness implements HarnessGateway {
     // The runtime takes its permissions from the input's mode: it must be the binding's policy.
     if (policyMode(input.mode) !== binding.policy.mode)
       harnessFail('protocol', `The turn runs in ${policyMode(input.mode)} mode but its binding is ${binding.policy.mode} mode.`, binding.instanceId)
-    const enforceable = checkPolicy(this.recordCaps(record), binding.policy, binding.instanceId)
+    // The caps the binding froze (bindings from before snapshots: the live ones).
+    const caps = binding.caps ?? this.recordCaps(record)
+    const enforceable = checkPolicy(caps, binding.policy, binding.instanceId)
     if (!enforceable.ok) throw harnessAppError(enforceable.error)
     const stale = (what: string) => harnessFail('binding_stale', `This run started before ${what} of this provider changed, so it cannot continue on it. Send the message again.`, binding.instanceId)
     if (record.env.homeId !== binding.homeId) stale('the home')
     if (this.counters.get(binding.instanceId).configRevision !== binding.configRevision) stale('the settings')
+    const binary = this.probes.get(binding.instanceId)?.lastGood?.fingerprint
+    if (binding.binary && binary && !sameBinary(binding.binary, binary)) stale('the installed program')
     // The reading `bind` took for this binding serves its first dispatch; anything else reads again.
     const bound = this.boundAccounts.get(binding)
     this.boundAccounts.delete(binding)
@@ -697,6 +837,9 @@ export class Harness implements HarnessGateway {
       previous.homeId === binding.homeId && previous.configRevision === binding.configRevision &&
       previous.accountGeneration === binding.accountGeneration &&
       binding.accountId !== undefined && previous.accountId === binding.accountId && accountId === binding.accountId
+    if (toolControlLevel(caps) === 'uncontrolled') this.toolControlNotice(record, input.threadId, previous)
+    const movedFrom = this.boundMoves.get(binding)
+    if (movedFrom) this.moveNotice(movedFrom, record, input.threadId)
     if (resumable || (!previous && binding.homeId === DEFAULT_HOME_ID && verified)) return
     try {
       record.runtime.forgetConversation?.(input.threadId)
@@ -705,9 +848,47 @@ export class Harness implements HarnessGateway {
     }
   }
 
-  /** Capabilities of a record's instance at its last known version. */
+  /** The first turn of a thread on an instance that approves tools itself says so, once. */
+  private toolControlNotice(record: InstanceRecord, threadId: string, previous: ExecutionBinding | undefined): void {
+    const key = `${threadId}|${record.instanceId}`
+    if (previous?.instanceId === record.instanceId || this.toolNotices.has(key)) return
+    this.toolNotices.add(key)
+    try {
+      this.liveHost?.notice?.(threadId, `${this.displayName(record)} approves tools itself.`)
+    } catch (error) {
+      console.warn('[harness] notice failed', errorText(error))
+    }
+  }
+
+  /**
+   * A thread pinned to a moved entry continues on the agent; its history is handed over
+   * (`history_injected`), and the thread is told once.
+   */
+  private moveNotice(movedFrom: string, record: InstanceRecord, threadId: string): void {
+    const key = `moved|${threadId}|${movedFrom}`
+    if (this.toolNotices.has(key)) return
+    this.toolNotices.add(key)
+    const from = this.recordOrUndefined(movedFrom)
+    try {
+      this.liveHost?.notice?.(threadId, `${from ? this.displayName(from) : movedFrom} moved to ${this.displayName(record)}. This chat continues there with its history handed over.`)
+    } catch (error) {
+      console.warn('[harness] notice failed', errorText(error))
+    }
+  }
+
+  /** Capabilities of a record's instance at its last known version and current runtime facts. */
   private recordCaps(record: InstanceRecord): HarnessCaps {
-    return record.driver.caps(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version)
+    return record.driver.caps(record.config, this.probes.get(record.instanceId)?.lastGood?.binary?.version, this.currentFacts(record.instanceId))
+  }
+
+  /** A native cancel with the gateway's deadline: past it the runtime's processes are killed. */
+  private interruptOn(record: InstanceRecord, ref: ProviderRef, threadId?: string): Promise<'interrupted' | 'not_active'> {
+    const runtime = record.runtime
+    return interruptWithDeadline({
+      interrupt: (target) => runtime.adapter.interrupt(target),
+      ...(runtime.terminate ? { terminate: (target: ProviderRef) => runtime.terminate!(target) } : {}),
+      ...(runtime.forgetConversation ? { forgetConversation: (id: string) => runtime.forgetConversation!(id) } : {})
+    }, ref, { ...(threadId ? { threadId } : {}) })
   }
 
   async childPreflight(instanceId: string, context: ChildPreflightContext): Promise<SubagentRefusal | null> {
@@ -716,8 +897,7 @@ export class Harness implements HarnessGateway {
   }
 
   async interrupt(ref: ProviderRef): Promise<'interrupted' | 'not_active'> {
-    const record = this.refRecord(ref)
-    return record.runtime.adapter.interrupt(ref)
+    return this.interruptOn(this.refRecord(ref), ref)
   }
 
   async forkSession(ref: ProviderRef, atTurnOrdinal: number): Promise<ProviderRef | null> {
@@ -944,8 +1124,11 @@ export class Harness implements HarnessGateway {
     })
   }
 
-  /** Single-flight probe of one instance; a timeout keeps the last good values (stale). */
-  private probe(instanceId: string, force: boolean): Promise<void> {
+  /**
+   * Single-flight probe of one instance; a timeout keeps the last good values (stale). `handshake`
+   * (Add, Recheck, after install) also runs the runtime's start-up check, which records its facts.
+   */
+  private probe(instanceId: string, force: boolean, options: { handshake?: boolean } = {}): Promise<void> {
     const state = this.probes.get(instanceId) ?? {}
     this.probes.set(instanceId, state)
     if (state.probing) return state.probing
@@ -953,19 +1136,29 @@ export class Harness implements HarnessGateway {
       await Promise.race([this.shellPath, new Promise((resolve) => setTimeout(resolve, SHELL_PATH_WAIT_MS).unref?.())])
       const record = this.record(instanceId, { allowDisabled: true })
       const override = record.builtIn ? record.runtime.launch?.().binaryPath : record.config.binaryPath
-      const result = await probeInstance({
+      let result = await probeInstance({
         driver: record.driver,
         runtime: record.runtime,
         env: { ...record.env, searchPath: this.searchPath },
         ...(override ? { override } : {}),
+        config: record.config,
         force,
+        ...(options.handshake ? { handshake: true } : {}),
         ...(this.options.probeTimeouts ? { timeouts: this.options.probeTimeouts } : {})
       })
+      // An executable without a version flag shows only through its start-up check: a periodic check
+      // keeps what the last one found until the program or its settings change.
+      const revision = this.counters.get(instanceId).configRevision
+      if (result.handshakeRan) state.handshake = { runs: result.runs, ...(result.fingerprint ? { fingerprint: result.fingerprint } : {}), revision }
+      else if (state.handshake && record.driver.versionArgs?.(record.config) === null && result.runs.state === 'yes' &&
+          state.handshake.revision === revision && sameBinary(state.handshake.fingerprint, result.fingerprint))
+        result = { ...result, runs: state.handshake.runs }
       state.result = result
       state.checkedAtMs = this.now()
       if (!result.timedOut) state.lastGood = result
       // A different account than the last check: sessions made on the old one are not resumed.
       this.noteAuth(record, result.auth)
+      if (options.handshake) this.captureFacts(record)
     }
     state.probing = run()
       .catch((error) => {
@@ -1028,12 +1221,13 @@ export class Harness implements HarnessGateway {
         ...(auth.account?.label ? { account: { id: auth.subject ? this.counters.accountIdentity(record.env.homeId, auth.subject) : 'unknown', label: auth.account.label } } : {}),
         ...(auth.methodLabel ?? driver.methodLabel ? { methodLabel: auth.methodLabel ?? driver.methodLabel } : {}),
         ...(auth.message ? { message: auth.message } : {}),
-        canSignOut: Boolean(runtime.signOut) && (auth.state === 'signed_in' || auth.state === 'expired') && this.ownsSignIn(record)
+        canSignOut: Boolean(runtime.signOut) && (auth.state === 'signed_in' || auth.state === 'expired') && (this.ownsSignIn(record) || auth.ownedByMousse === true),
+        ...(runtime.signIn && auth.canSignIn ? { canSignIn: true } : {})
       },
       compatibility: shown?.compatibility ?? compatibilityOf(driver, undefined),
       ...(shown?.update ? { update: shown.update } : {}),
       ...(shown?.binary ? { binary: shown.binary } : {}),
-      caps: driver.caps(config, shown?.binary?.version),
+      caps: driver.caps(config, shown?.binary?.version, this.currentFacts(instanceId)),
       config: this.configView(record),
       models: {
         entries: modelsWithPrefs(listed, prefs),
@@ -1069,7 +1263,8 @@ export class Harness implements HarnessGateway {
       ...(source.binaryPath ? { binaryPath: source.binaryPath } : {}),
       args: [...(source.args ?? [])],
       env: { ...(source.env ?? {}) },
-      ...(record.config.loginMethod ? { loginMethod: record.config.loginMethod } : {})
+      ...(record.config.loginMethod ? { loginMethod: record.config.loginMethod } : {}),
+      ...(record.config.movedTo ? { movedTo: record.config.movedTo } : {})
     }
   }
 
@@ -1112,7 +1307,7 @@ export class Harness implements HarnessGateway {
     this.instanceMap.setEntry(instanceId, { driver: driver.kind, enabled: true, config })
     mkdirSync(instanceStateDir(this.options.profileHome, instanceId), { recursive: true, mode: 0o700 })
     this.changed(instanceId)
-    void this.probe(instanceId, true)
+    void this.probe(instanceId, true, { handshake: true })
     return this.snapshot(instanceId, { kind: 'device' })
   }
 
@@ -1126,6 +1321,7 @@ export class Harness implements HarnessGateway {
     this.prefs.remove(instanceId)
     this.scopes.forgetInstance(instanceId)
     this.counters.forget(instanceId)
+    this.facts.forget(instanceId)
     this.probes.delete(instanceId)
     // The state directory is Mousse's own (its private home, the sign-in in it, saved sessions):
     // it goes with the instance, once every runtime, check and operation still using it ends.
@@ -1199,6 +1395,28 @@ export class Harness implements HarnessGateway {
     return config
   }
 
+  private async move(fromId: string, toId: string): Promise<MoveResult> {
+    const from = this.record(fromId, { allowDisabled: true })
+    const to = this.record(toId, { allowDisabled: true })
+    const agent = (this.options.foldedInto ?? foldedInto)(piProviderIdOf(fromId))
+    if (fromId === toId || !agent || to.driver.kind !== agent)
+      harnessFail('unsupported', `${this.displayName(from)} cannot move to ${this.displayName(to)}.`, fromId)
+    if (from.config.movedTo) harnessFail('unsupported', `${this.displayName(from)} has already moved.`, fromId)
+    // Turned off, never deleted: an older build can still turn it back on.
+    this.instanceMap.setEntry(fromId, { ...from.entry, enabled: false, config: { ...(from.entry.config ?? {}), movedTo: toId } })
+    const llmProvider = legacyProviderForInstance(toId, to.entry) ?? ''
+    // A model the agent lists keeps its id; any other becomes the agent's default (its first model).
+    const listed = to.runtime.models()
+    const model = (id: string) => (!listed.length || listed.some((entry) => entry.id === id) ? id : listed[0]!.id)
+    const rewritten = [
+      ...this.options.defaults?.rewrite(fromId, { instanceId: toId, llmProvider, model }) ?? [],
+      ...this.scopes.moveDefaults(fromId, toId, model).map(({ projectId, from: before, to: after }) =>
+        `Project default (${projectId})${before !== after ? `: ${this.modelName(toId, after)} instead of ${before}` : ''}`)
+    ]
+    this.changed(fromId)
+    return { from: fromId, to: toId, rewritten }
+  }
+
   private async setEnabled(instanceId: string, scope: ProviderScope, enabled: boolean | null): Promise<InstanceSnapshot> {
     const record = this.record(instanceId, { allowDisabled: true })
     if (scope.kind === 'device') {
@@ -1227,6 +1445,7 @@ export class Harness implements HarnessGateway {
     try {
       await record.runtime.refreshModels?.(this.cwd())
       state.models = { live: true, refreshedAt: new Date(this.now()).toISOString() }
+      this.captureFacts(record)
     } catch (error) {
       state.models = { ...state.models, error: errorText(error) }
     }
@@ -1259,7 +1478,7 @@ export class Harness implements HarnessGateway {
         .finally(() => {
           this.operations.delete(started.operationId)
           this.deleteRemoved()
-          void this.probe(instanceId, true)
+          void this.probe(instanceId, true, { handshake: true })
           this.options.onProvidersChanged?.()
         })
     })
@@ -1302,6 +1521,8 @@ export class Harness implements HarnessGateway {
           else if (result.success) {
             // A completed sign-in may be another account: sessions made before it are not resumed.
             this.counters.bumpAccount(instanceId)
+            // Its verification (a `session/new`) may have listed the account's models and modes.
+            this.captureFacts(record)
             this.emit({ type: 'operation', data: { ...started, phase: 'completed' } })
           }
           else this.emit({ type: 'operation', data: { ...started, phase: 'failed', error: { code: 'signed_out', message: result.error ?? 'Sign-in failed.', instanceId } } })

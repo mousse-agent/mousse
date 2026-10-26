@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { InstanceSnapshot } from '../../../shared/harness/status'
 import type { HarnessDriverKind, InstanceConfigPatch } from '../../../shared/harness/types'
 import type { ProviderLoginOption, ProviderLoginResult } from '../../../shared/providerAuth'
@@ -9,7 +9,7 @@ import { llmProviderOf } from '../../lib/providerSnapshots'
 import { Modal } from '../ui/Modal'
 import { Segmented, SettingsGroup, SettingsRow } from '../settings/SettingsRow'
 import { BrowseButton, useAsyncAction } from './parts'
-import { DRIVER_INFO, isApiInstance, nextInstanceLabel } from './providerView'
+import { commandLabel, DRIVER_INFO, isApiInstance, nextInstanceLabel, parseArgs, parseEnvLines } from './providerView'
 
 type ConnectKind = 'subscription' | 'api_key' | 'cloud'
 
@@ -50,7 +50,7 @@ export function addChoices(snapshots: readonly InstanceSnapshot[], loginOptions:
       choices.push({
         kind: 'new',
         key: `new:${driver}`,
-        label: existing ? `${info.label} · another account` : info.label,
+        label: info.addLabel ?? (existing ? `${info.label} · another account` : info.label),
         iconId: info.iconId,
         group: 'Agents',
         driver,
@@ -179,7 +179,7 @@ export function AddProviderDialog({
     setMethod(choice.kind === 'api' ? methodKey(choice.options[0]!) : '')
     if (choice.kind === 'new') {
       const base = DRIVER_INFO[choice.driver].label
-      setLabel(choice.existing ? nextInstanceLabel(base, snapshots) : base)
+      setLabel(choice.existing && !DRIVER_INFO[choice.driver].customCommand ? nextInstanceLabel(base, snapshots) : base)
     }
   }
 
@@ -296,7 +296,24 @@ export function AddProviderDialog({
           </div>
         )}
 
-        {step === last && selected && selected.kind !== 'api' && (
+        {step === last && selected?.kind === 'new' && DRIVER_INFO[selected.driver].customCommand && (
+          <div className="prov-wizard-panel">
+            <SettingsGroup>
+              <CustomCommandStep
+                busy={busy === selected.key}
+                disabled={busy !== null}
+                error={error}
+                onAdd={({ name, command, args, env }) =>
+                  void run(selected.key, async () => {
+                    finish(await handlers.add(selected.driver, { displayName: name, binaryPath: command, args, env }))
+                  })
+                }
+              />
+            </SettingsGroup>
+          </div>
+        )}
+
+        {step === last && selected && selected.kind !== 'api' && !DRIVER_INFO[selected.driver].customCommand && (
           <div className="prov-wizard-panel">
             <SettingsGroup>
               {selected.kind === 'new' && selected.existing && (
@@ -467,6 +484,114 @@ export function AgentConnectStep({
           }
         />
       )}
+    </>
+  )
+}
+
+/**
+ * The Add step of an agent started from a command: the program (a path, or a name Mousse finds on
+ * PATH; never run through a shell), its arguments and variables, and a name. Mousse checks that
+ * the agent starts and answers ACP once it is added.
+ */
+export function CustomCommandStep({
+  busy,
+  disabled,
+  error,
+  onAdd
+}: {
+  busy: boolean
+  disabled: boolean
+  error: string | null
+  onAdd: (input: { name: string; command: string; args: string[]; env: Record<string, string> }) => void
+}) {
+  const [command, setCommand] = useState('')
+  const [args, setArgs] = useState('')
+  const [env, setEnv] = useState('')
+  const [name, setName] = useState('')
+  const entered = command.trim()
+  const canAdd = !disabled && entered !== ''
+  const add = () => {
+    if (canAdd) onAdd({ name: name.trim() || commandLabel(entered) || 'ACP agent', command: entered, args: parseArgs(args), env: parseEnvLines(env) })
+  }
+  const submitOnEnter = (event: KeyboardEvent) => {
+    if (event.key === 'Enter') add()
+  }
+  return (
+    <>
+      <SettingsRow
+        title="Command"
+        description={error ? <span className="prov-error">{error}</span> : 'The program that starts the agent in ACP mode: a full path, or a name on your PATH.'}
+        control={
+          <>
+            <input
+              className="settings-input prov-mono prov-wide"
+              value={command}
+              autoFocus
+              disabled={disabled}
+              placeholder="grok"
+              aria-label="Command"
+              aria-invalid={error ? true : undefined}
+              aria-required
+              spellCheck={false}
+              onChange={(event) => setCommand(event.target.value)}
+              onKeyDown={submitOnEnter}
+            />
+            <BrowseButton title="Choose the agent's program" defaultPath={entered || undefined} disabled={disabled} onPick={setCommand} />
+          </>
+        }
+      />
+      <SettingsRow
+        title="Arguments"
+        description="Passed as they are, without a shell. Quote an argument that contains spaces."
+        control={
+          <input
+            className="settings-input prov-mono prov-wide"
+            value={args}
+            disabled={disabled}
+            placeholder="agent stdio"
+            aria-label="Arguments"
+            spellCheck={false}
+            onChange={(event) => setArgs(event.target.value)}
+            onKeyDown={submitOnEnter}
+          />
+        }
+      />
+      <SettingsRow
+        title="Variables"
+        description="Optional. One NAME=value per line, set for this agent only."
+        control={
+          <textarea
+            className="settings-input prov-mono prov-wide"
+            value={env}
+            rows={2}
+            disabled={disabled}
+            placeholder="NAME=value"
+            aria-label="Variables"
+            spellCheck={false}
+            onChange={(event) => setEnv(event.target.value)}
+          />
+        }
+      />
+      <SettingsRow
+        title="Name"
+        description="Shown in the provider list and the model picker."
+        control={
+          <>
+            <input
+              className="settings-input"
+              value={name}
+              disabled={disabled}
+              placeholder={commandLabel(entered) || 'ACP agent'}
+              aria-label="Name"
+              onChange={(event) => setName(event.target.value)}
+              onKeyDown={submitOnEnter}
+            />
+            <button type="button" className="settings-btn" disabled={!canAdd} onClick={add}>
+              {busy ? 'Adding…' : 'Add'}
+            </button>
+          </>
+        }
+      />
     </>
   )
 }

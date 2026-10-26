@@ -52,7 +52,7 @@ import { formatRestartNote } from '../run/restartNote'
 import { createHarnessGateway, PI_DRIVER_ID, type AdapterHost, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piLegacyDriver } from '../harness/drivers/piLegacy'
 import { contextGauge } from '../harness/policy'
-import type { ExecutionBinding, HarnessCaps, ProviderScope } from '../../shared/harness/types'
+import type { ExecutionBinding, HarnessCaps, ProviderScope, TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { McpCaller, MousseToolHost } from '../run/mcp/toolRegistry'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
@@ -2121,9 +2121,9 @@ export class OrchestratorService extends EventEmitter {
    * run; `resolved` was built from it), else a new one from the resolved selection. Either way it
    * is recorded on the active attempt, so a replacement attempt keeps its run's binding.
    */
-  private async bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: ResolvedTurnSelection, mode: ChatMode): Promise<ExecutionBinding> {
+  private async bindTurn(runId: string | undefined, existing: ExecutionBinding | undefined, resolved: ResolvedTurnSelection, mode: ChatMode, origin: TurnOrigin): Promise<ExecutionBinding> {
     const engine = this.runEngine
-    const binding = existing ?? await this.harness.bind(resolved, { mode })
+    const binding = existing ?? await this.harness.bind(resolved, { mode, origin })
     if (runId && engine) {
       try {
         return engine.recordExecutionBinding(runId, binding)
@@ -2132,6 +2132,20 @@ export class OrchestratorService extends EventEmitter {
       }
     }
     return binding
+  }
+
+  /**
+   * Who a thread's turn runs for: a workflow step, a delegated child (its lineage), or a person.
+   * The binding records it, so retries, continuations and steers of the turn keep it.
+   */
+  private turnOrigin(threadId: string, workflowInvocationId?: string): TurnOrigin {
+    if (workflowInvocationId) return 'workflow'
+    try {
+      if (this.runEngine?.delegations.getLineage(threadId)?.relationship === 'subagent') return 'delegated'
+    } catch {
+      // No lineage readable: the thread is the person's own.
+    }
+    return 'interactive'
   }
 
   /** The parent's workspace path a `shared` child observes, or null when the parent has none. */
@@ -5624,7 +5638,7 @@ export class OrchestratorService extends EventEmitter {
         if (refusal) throw new AppError({ code: refusal.code, message: refusal.message, errorInfo: { category: 'unavailable', retryable: false } })
       }
       // The attempt's immutable binding; a retry of the same run keeps the one it already has.
-      const binding = await this.bindTurn(engineRunId, runBinding, instance, mode)
+      const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, this.turnOrigin(session.threadId, request.workflowInvocationId))
       // A transcript-native runtime (the pi loop) is sent Mousse's transcript and tools, so Mousse
       // keeps that transcript within the window before the turn. A prompt-injected runtime owns its
       // loop, context and tools and receives prior turns as a prompt preamble.
@@ -5678,7 +5692,8 @@ export class OrchestratorService extends EventEmitter {
         attemptId: (engineRunId ? this.runEngine?.getRun(engineRunId)?.activeAttemptId : undefined) ?? turnId,
         threadId: session.threadId,
         cwd: session.projectCwd ?? null,
-        model: selectedModel.model,
+        // The resolved model: a moved entry's model may run as the agent's own.
+        model: instance.model,
         instanceId: instance.instanceId,
         llmProvider: instance.llmProvider,
         modelPinned: Boolean(modelOverride),

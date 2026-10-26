@@ -163,7 +163,8 @@ export class ProviderInstanceService {
   resolve(instanceId: string, options: { allowDisabled?: boolean } = {}): ResolvedProviderInstance {
     const entry = this.get(instanceId)
     const llmProvider = entry && legacyProviderForInstance(instanceId, entry)
-    if (!entry || !llmProvider) throw providerInstanceUnknown(instanceId)
+    // A driver without a legacy name reports `''`; only a pi instance whose id names no provider is unknown.
+    if (!entry || llmProvider === undefined) throw providerInstanceUnknown(instanceId)
     if (!entry.enabled && !options.allowDisabled) throw providerInstanceDisabled(instanceId)
     return { instanceId, entry, llmProvider }
   }

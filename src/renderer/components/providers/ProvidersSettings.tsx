@@ -24,6 +24,7 @@ import { Select } from '../ui/Select'
 import { AddProviderDialog, type AddProviderHandlers } from './AddProviderDialog'
 import { ApiSetupRow } from './ApiSections'
 import type { InstanceActions } from './CliSections'
+import { MoveNotice } from './MoveProviderDialog'
 import { AgentEditor, ApiEditor } from './ProviderEditor'
 import { ProviderListRow, errorText, useAsyncAction, useRelativeTime } from './parts'
 import { formatVersion, iconIdOf, isApiInstance, lastCheckedAt, switchStateOf } from './providerView'
@@ -234,6 +235,17 @@ export function ProvidersSettings({ settings, refreshProviderData, updateSetting
               onSignIn={async () => {
                 ensureSignedIn(await runLogin(() => window.mousse.providers.loginOAuth(providerId)), 'Sign-in failed.')
                 await reload()
+              }}
+            />
+          }
+          move={
+            <MoveNotice
+              snapshot={snapshot}
+              snapshots={sorted}
+              onMove={async (toInstanceId) => {
+                const result = await window.mousse.providers.instances.move(snapshot.instanceId, toInstanceId)
+                await reload()
+                return result
               }}
             />
           }

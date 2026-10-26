@@ -12,13 +12,14 @@ import { AntigravityProviderService } from './providers/antigravity/AntigravityP
 import { ProviderInstanceService } from './providers/ProviderInstanceService'
 import { createHarnessGateway, type Harness, type HarnessGateway } from './harness/gateway'
 import { antigravityDriver } from './harness/drivers/antigravity'
+import { acpDriver } from './harness/drivers/acp'
 import { claudeCodeDriver } from './harness/drivers/claudeCode'
 import { codexDriver } from './harness/drivers/codex'
 import { piLegacyDriver } from './harness/drivers/piLegacy'
 import { harnessAuthRunner, recordHarnessSpawn } from './harness/spawn'
 import { spawnCodexAppServer } from './providers/codex/CodexAppServerClient'
 import { createCodexProviderService, findCodexBinary, type CodexProviderService } from './providers/codex/CodexProviderService'
-import { CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, piProviderIdOf } from '../shared/providerInstances'
+import { CLAUDE_INSTANCE_ID, CODEX_INSTANCE_ID, piInstanceId, piProviderIdOf } from '../shared/providerInstances'
 import { ProjectManager } from './data/ProjectManager'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { backfillSubagentLineage } from './data/subagentLineage'
@@ -375,7 +376,8 @@ export class MmsProfileServices {
           })
         }),
         codexDriver({ builtIn: () => this.codex }),
-        antigravityDriver({ builtIn: () => this.antigravity })
+        antigravityDriver({ builtIn: () => this.antigravity }),
+        acpDriver()
       ],
       questions: this.questions,
       prefs: {
@@ -384,7 +386,18 @@ export class MmsProfileServices {
       },
       cwd: () => this.worktrees.getRepoRoot(),
       piDisplayName: (providerId) => this.providerAuth.getProviderDisplayName(providerId),
-      onProvidersChanged: () => this.events.emit({ channel: 'providers:changed', data: undefined })
+      onProvidersChanged: () => this.events.emit({ channel: 'providers:changed', data: undefined }),
+      // A moved entry's device default follows it to the agent.
+      defaults: {
+        rewrite: (from, to) => {
+          const provider = this.settings.get().provider
+          const named = provider.instanceId?.trim() ? provider.instanceId === from : piInstanceId(provider.llmProvider) === from
+          if (!named) return []
+          const model = to.model(provider.model)
+          this.settings.set({ provider: { ...provider, instanceId: to.instanceId, llmProvider: to.llmProvider, model } })
+          return [model === provider.model ? 'Default model' : `Default model: ${model} instead of ${provider.model}`]
+        }
+      }
     })
     this.harness = this.harnessImpl
     this.orchestrator.setHarness(this.harnessImpl)

@@ -1,7 +1,8 @@
 import type { HarnessCaps } from '../../../shared/harness/types'
 import type { AntigravityProviderService } from '../../providers/antigravity/AntigravityProviderService'
 import { ANTIGRAVITY_RELEASE, validateManualAntigravityBinary } from '../../providers/antigravity/installation'
-import { ANTIGRAVITY_CAPABILITIES, AntigravityAdapter } from '../../run/adapters/antigravity/AntigravityAdapter'
+import { AcpAdapter, type AcpTurnClient } from '../../run/adapters/acp/AcpAdapter'
+import { ANTIGRAVITY_CAPABILITIES, ANTIGRAVITY_LABEL } from '../acp/presets/antigravity'
 import { decodeInstanceConfig, type DriverContext, type DriverRuntime, type HarnessDriver } from '../driver'
 
 /** The pinned agent release Mousse installs and verifies. */
@@ -11,8 +12,17 @@ export const ANTIGRAVITY_VERSION = ANTIGRAVITY_RELEASE.replace(/^agy_acp_server_
 export const ANTIGRAVITY_CAPS: HarnessCaps = Object.freeze({
   ...ANTIGRAVITY_CAPABILITIES,
   planMode: false,
-  contextUsage: 'none'
+  contextUsage: 'none',
+  // The agent asks Mousse for every tool permission and file write.
+  toolControl: 'approval_only',
+  budgets: 'unsupported',
+  spendLimits: 'unsupported'
 })
+
+/** The turn runtime of Antigravity: the ACP adapter with the preset's name and capabilities. */
+export function antigravityAdapter(client: () => AcpTurnClient | null): AcpAdapter {
+  return new AcpAdapter(client, { driver: 'antigravity', label: ANTIGRAVITY_LABEL, capabilities: ANTIGRAVITY_CAPABILITIES })
+}
 
 /**
  * Google's Antigravity ACP agent. Mousse installs the pinned, hash-verified release into the
@@ -37,7 +47,7 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
     create(_context: DriverContext): DriverRuntime {
       const service = options.builtIn()
       return {
-        adapter: new AntigravityAdapter(() => service),
+        adapter: antigravityAdapter(() => service),
         configured: () => service.configured(),
         configuredProvider: () => service.configuredProvider(),
         llmProvider: () => service.llmProvider(),

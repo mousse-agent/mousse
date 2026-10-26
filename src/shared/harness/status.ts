@@ -65,6 +65,8 @@ export interface InstanceConfigView {
   args: string[]
   env: Record<string, string>
   loginMethod?: string
+  /** The entry this one moved to; it is off, and its threads continue there. */
+  movedTo?: string
 }
 
 export interface InstanceSnapshot {
@@ -96,6 +98,8 @@ export interface InstanceSnapshot {
      * may sign out. False for the user's own CLI login, which Mousse never signs out.
      */
     canSignOut?: boolean
+    /** A sign-in can start in Mousse now, even when the account is not checked (`unknown`). */
+    canSignIn?: boolean
   }
   compatibility: { state: CompatibilityState; testedRange?: string }
   update?: UpdateAffordance
@@ -298,7 +302,8 @@ export function describeStatus(snapshot: InstanceSnapshot): StatusDescription {
       headline: 'Installed · Sign-in not checked',
       detail: auth.message ?? staleDetail,
       tone: 'neutral',
-      nextStep: step(snapshot, 'recheck')
+      // An agent that offers its sign-in methods can be signed in from here.
+      nextStep: auth.canSignIn ? step(snapshot, 'sign_in') : step(snapshot, 'recheck')
     }
   }
 

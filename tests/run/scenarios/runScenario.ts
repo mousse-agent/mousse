@@ -25,6 +25,7 @@ import { replayCodexAppServer } from '../../../src/mms/run/testkit/codexAppServe
 import { createCodexProviderService, type CodexProviderService } from '../../../src/mms/providers/codex/CodexProviderService'
 import { createHarnessGateway } from '../../../src/mms/harness/gateway'
 import { antigravityDriver } from '../../../src/mms/harness/drivers/antigravity'
+import { acpDriver } from '../../../src/mms/harness/drivers/acp'
 import { claudeCodeDriver } from '../../../src/mms/harness/drivers/claudeCode'
 import { codexDriver } from '../../../src/mms/harness/drivers/codex'
 import { piLegacyDriver } from '../../../src/mms/harness/drivers/piLegacy'
@@ -45,8 +46,10 @@ import { SCENARIOS } from './index'
 export const FIXTURES_DIR = join(__dirname, '..', 'fixtures')
 
 /** Model selection per adapter; every fixture is authored against these. */
-const SELECTION: Record<string, { llmProvider: string; model: string }> = {
+const SELECTION: Record<string, { instanceId?: string; llmProvider: string; model: string }> = {
   pi: { llmProvider: 'openai', model: 'gpt-replay' },
+  // A Custom command: named by its instance only (no legacy provider name), on the agent's own model.
+  acp: { instanceId: 'acp:replay', llmProvider: '', model: 'default' },
   'claude-subscription': { llmProvider: 'claude-subscription', model: 'sonnet' },
   antigravity: { llmProvider: 'antigravity', model: 'replay-model' },
   codex: { llmProvider: 'codex', model: 'gpt-replay-codex' }
@@ -209,12 +212,9 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     services.claude = service
   }
   if (involved.has('antigravity')) {
-    const service = new AntigravityProviderService(home, home, questions)
     // Replace the agent process boundary only; the service's session lifecycle runs for real.
-    Object.assign(service as unknown as Record<string, unknown>, {
-      configured: () => true,
-      launch: replayAcpProcess(transport)
-    })
+    const service = new AntigravityProviderService(home, home, questions, undefined, { connect: replayAcpProcess(transport) })
+    Object.assign(service as unknown as Record<string, unknown>, { configured: () => true })
     stops.push(() => service.stop())
     services.antigravity = service
   }
@@ -241,15 +241,19 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       piLegacyDriver({ client: () => orch.piChatClient() }),
       claudeCodeDriver({ builtIn: () => services.claude! }),
       antigravityDriver({ builtIn: () => services.antigravity! }),
+      // The generic driver runs for real; only its agent connection is replayed.
+      acpDriver({ connect: (_context, request) => replayAcpProcess(transport)(request), pty: { available: () => false } }),
       codexDriver({ builtIn: () => services.codex! })
     ]
   })
   stops.push(() => harness.stop())
+  if (involved.has('acp')) harness.instanceMap.setEntry('acp:replay', { driver: 'acp', enabled: true, config: { displayName: 'Replay agent', binaryPath: process.execPath } })
   orch.setHarness(harness)
 
   try {
     let thread
-    if (adapterId === 'antigravity') {
+    // ACP agents work in a project workspace.
+    if (adapterId === 'antigravity' || adapterId === 'acp') {
       const workspace = join(home, 'workspace')
       mkdirSync(workspace)
       const project = projects.openProject(workspace)

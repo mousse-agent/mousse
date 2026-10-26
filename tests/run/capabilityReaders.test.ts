@@ -25,7 +25,10 @@ const READERS = {
   mcp: ['mcpAttachable'],
   childPolicy: ['subagentTargetRefusal'],
   planMode: ['planModeAvailable'],
-  contextUsage: ['contextGauge']
+  contextUsage: ['contextGauge'],
+  toolControl: ['toolControlLevel'],
+  budgets: ['budgetsLevel'],
+  spendLimits: ['spendLimitLevel']
 } satisfies Record<keyof HarnessCaps, string[]>
 const CAPABILITY_KEYS = Object.keys(READERS) as Array<keyof HarnessCaps>
 

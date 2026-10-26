@@ -20,7 +20,11 @@ export const CLAUDE_TESTED_VERSIONS = { min: '2.0.0', max: '2.1.999' }
 export const CLAUDE_CODE_CAPS: HarnessCaps = Object.freeze({
   ...CLAUDE_SUBSCRIPTION_CAPABILITIES,
   planMode: true,
-  contextUsage: 'reported'
+  contextUsage: 'reported',
+  // Claude Code asks Mousse through its permission callback under the mode Mousse sets.
+  toolControl: 'approval_only',
+  budgets: 'unsupported',
+  spendLimits: 'unsupported'
 })
 
 /**

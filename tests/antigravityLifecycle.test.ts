@@ -24,19 +24,23 @@ afterEach(() => {
 function fixture(blockMethod?: string, installed = false, fail?: (method: string) => unknown) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-acp-lifecycle-'))
   homes.push(home)
-  const service = new AntigravityProviderService(home, home, new UserQuestionService())
+  const processes: Array<ReturnType<typeof createProcess>> = []
+  // Replace only the external process boundary; exercise the production lifecycle.
+  const service = new AntigravityProviderService(home, home, new UserQuestionService(), undefined, {
+    connect: () => {
+      const active = createProcess()
+      processes.push(active)
+      return active as never
+    }
+  })
   services.push(service)
   vi.spyOn(service, 'configured').mockReturnValue(true)
   if (installed) vi.spyOn(service as unknown as { binary: () => string }, 'binary').mockReturnValue(join(home, 'agy_acp_server'))
-  const processes: Array<ReturnType<typeof createProcess>> = []
   let finishPrompt: (() => void) | undefined
   function createProcess() {
     const abort = new AbortController()
     const active = {
       child: { exitCode: 0, signalCode: null, kill: vi.fn() },
-      // What `launch()` records: the launch-settings generation it started with.
-      generation: (service as unknown as { launchGeneration: number }).launchGeneration,
-      signInGeneration: (service as unknown as { signInGeneration: number }).signInGeneration,
       connection: {
         signal: abort.signal,
         close: vi.fn(() => abort.abort(new Error('ACP closed'))),
@@ -65,12 +69,6 @@ function fixture(blockMethod?: string, installed = false, fail?: (method: string
     }
     return active
   }
-  // Replace only the external process boundary; exercise the production lifecycle.
-  vi.spyOn(service as unknown as { launch: () => ReturnType<typeof createProcess> }, 'launch').mockImplementation(() => {
-    const active = createProcess()
-    processes.push(active)
-    return active
-  })
   const input = { threadId: 'thread', cwd: home, model: 'account-model', prompt: 'current request', onText: vi.fn() }
   return { service, input, processes }
 }

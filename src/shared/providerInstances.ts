@@ -6,9 +6,9 @@ import { AppError } from './errors'
  * of a driver with a stable id. Every caller that picks an agent selects `{ instanceId, model }`.
  * In v1 each vendor driver has exactly one instance, and each pi-ai provider is its own instance.
  */
-export type ProviderDriverKind = 'pi' | 'claude' | 'antigravity' | 'codex'
+export type ProviderDriverKind = 'pi' | 'claude' | 'antigravity' | 'codex' | 'acp'
 
-export const PROVIDER_DRIVER_KINDS: readonly ProviderDriverKind[] = ['pi', 'claude', 'antigravity', 'codex']
+export const PROVIDER_DRIVER_KINDS: readonly ProviderDriverKind[] = ['pi', 'claude', 'antigravity', 'codex', 'acp']
 
 export interface ProviderInstanceConfig {
   driver: ProviderDriverKind
@@ -45,11 +45,16 @@ export const ANTIGRAVITY_INSTANCE_ID = 'antigravity'
 export const CODEX_INSTANCE_ID = 'codex'
 const PI_INSTANCE_PREFIX = 'pi:'
 
-/** The `llmProvider` name each vendor driver used before instances existed. */
+/**
+ * The `llmProvider` name each vendor driver used before instances existed. Drivers added since have
+ * none (`''`): a reader that predates instances never routes their turns to the pi loop, and
+ * selections name them by instance id only.
+ */
 const LEGACY_PROVIDER_BY_DRIVER: Record<Exclude<ProviderDriverKind, 'pi'>, string> = {
   claude: 'claude-subscription',
   antigravity: 'antigravity',
-  codex: 'codex'
+  codex: 'codex',
+  acp: ''
 }
 
 /**

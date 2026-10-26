@@ -138,7 +138,10 @@ describe('execution bindings', () => {
     expect(bindingOf(run.runId)).toEqual({
       instanceId: 'claude', driver: 'claude', accountGeneration: 0, homeId: 'default', configRevision: 0, model: 'sonnet',
       accountId: expect.stringMatching(/^[0-9a-f]{32}$/),
-      policy: { mode: 'default', approvals: 'ask' }
+      policy: { mode: 'default', approvals: 'ask', origin: 'interactive' },
+      // The caps the attempt runs on, frozen with the binding.
+      caps: expect.objectContaining({ steer: 'interrupt_restart', toolControl: 'approval_only' }),
+      factsRevision: 0
     })
     // The account is a salted hash, never the vendor's id.
     expect(JSON.stringify(bindingOf(run.runId))).not.toContain('account-a')
@@ -347,14 +350,14 @@ describe('execution bindings', () => {
     expect(adapter.turns).toHaveLength(1)
     expect(adapter.turns[0]).toMatchObject({ instanceId: 'claude', model: 'bound-model', mode: 'agent' })
     expect(engine.store.getAttempt(retryAttempt!)?.executionBinding).toEqual(bound)
-    expect(bound.policy).toEqual({ mode: 'default', approvals: 'ask' })
+    expect(bound.policy).toEqual({ mode: 'default', approvals: 'ask', origin: 'interactive' })
   })
 
   it('a plan-mode binding is never run with an agent-mode input', async () => {
     const thread = store.createThread('plan retry')
     orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
     const bound = await harness.bind(harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'sonnet' }, { purpose: 'turn' }), { mode: 'plan' })
-    expect(bound.policy).toEqual({ mode: 'plan', approvals: 'ask' })
+    expect(bound.policy).toEqual({ mode: 'plan', approvals: 'ask', origin: 'interactive' })
     const markStarting = engine.markStarting.bind(engine)
     engine.markStarting = (runId) => {
       const run = markStarting(runId)
@@ -375,7 +378,7 @@ describe('execution bindings', () => {
     orch.setThreadModelOverride(thread.id, { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'sonnet' })
     await orch.send({ content: 'one', mode: 'plan' }, false, { threadId: thread.id, clientRequestId: 'send-a' })
     const [run] = engine.listRuns(thread.id)
-    expect(bindingOf(run.runId)?.policy).toEqual({ mode: 'plan', approvals: 'ask' })
+    expect(bindingOf(run.runId)?.policy).toEqual({ mode: 'plan', approvals: 'ask', origin: 'interactive' })
     expect(adapter.turns.map((turn) => turn.mode)).toEqual(['plan'])
   })
 

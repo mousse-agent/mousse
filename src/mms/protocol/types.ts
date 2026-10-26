@@ -346,6 +346,7 @@ export const PROTOCOL_METHODS = [
   'providers.instances.recheck',
   'providers.instances.refreshModels',
   'providers.instances.setModelPrefs',
+  'providers.instances.move',
   'webTools.getCredentialStatus',
   'webTools.setApiKey',
   'webTools.clearApiKey',

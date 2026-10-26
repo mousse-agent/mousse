@@ -1,6 +1,6 @@
 import { accessSync, constants } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import type { BinarySource } from '../../shared/harness/status'
 import type { HarnessDriverKind } from '../../shared/harness/types'
 import { cliLaunch, withUserEnv, type CliLaunch } from '../providers/cliConfig'
@@ -125,6 +125,22 @@ export function cliNames(name: string, platform: NodeJS.Platform = process.platf
  * The binary an instance runs: an explicit override (which never falls back), a Mousse-managed
  * install, or the CLI found on PATH.
  */
+/**
+ * A command as the user typed it: an absolute path, or a bare name looked up on the inherited and
+ * login-shell PATH (`grok` → `…/grok.exe` on Windows). Never a shell; a `.cmd` shim counts only
+ * once it resolves to the program it runs.
+ */
+export function resolveCommand(command: string, env: Pick<InstanceEnv, 'env' | 'searchPath'>, platform: NodeJS.Platform = process.platform): CliLaunch | undefined {
+  const trimmed = command.trim()
+  if (!trimmed) return undefined
+  if (isAbsolute(trimmed)) return cliLaunch(trimmed)
+  // A relative path with a directory is never searched for.
+  if (/[\\/]/.test(trimmed)) return undefined
+  const names = platform === 'win32' && !/\.(exe|cmd|bat)$/i.test(trimmed) ? [...cliNames(trimmed, platform), trimmed] : [trimmed]
+  const found = findOnPath(names, env, platform)
+  return found ? cliLaunch(found) : undefined
+}
+
 export function resolveBinary(input: {
   override?: string
   /** Extra check for an override (e.g. Antigravity's helper beside it); throws when invalid. */
@@ -134,7 +150,7 @@ export function resolveBinary(input: {
   env: Pick<InstanceEnv, 'env' | 'searchPath'>
 }): ResolvedBinary {
   if (input.override) {
-    let launch = cliLaunch(input.override)
+    let launch = resolveCommand(input.override, input.env)
     if (launch && input.validateOverride) {
       try {
         input.validateOverride(input.override)

@@ -14,7 +14,7 @@ function context(instances?: Partial<HarnessInstances>): HandlerContext {
 
 describe('harness provider protocol', () => {
   it('declares the full command set', () => {
-    expect(HARNESS_METHODS).toHaveLength(14)
+    expect(HARNESS_METHODS).toHaveLength(15)
   })
 
   it('the GUI refuses, with recovery steps, a running service that predates the provider methods', async () => {

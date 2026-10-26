@@ -77,6 +77,30 @@ describe('fake-CLI probes', () => {
     if (process.platform === 'win32') expect(result.binary?.path).toMatch(/cli\.js$/) // the .cmd shim resolved to node + script
   })
 
+  it('skips the version check for an executable without a version flag; the handshake decides whether it runs', async () => {
+    const dir = fakeCli(`process.exit(3)`)
+    const spawned: string[][] = []
+    const stop = observeHarnessSpawns((entry) => spawned.push(entry.args))
+    const env = instanceEnv({ instanceId: 'fake', driver: 'claude', configRevision: 0, searchPath: [dir] })
+    const noFlag: HarnessDriver = { ...driver, versionArgs: () => null }
+    const handshake = vi.fn(async () => {})
+    try {
+      const checked = await probeInstance({ driver: noFlag, runtime: { ...runtime(), handshake, runtimeFacts: () => ({ binary: { path: 'x', size: 1, mtimeMs: 1 }, agentInfo: { version: '2.1.0' }, capturedAt: '', source: 'handshake' }) }, env, force: true })
+      expect(spawned).toEqual([])
+      expect(handshake).not.toHaveBeenCalled()
+      expect(checked).toMatchObject({ runs: { state: 'yes' }, compatibility: { state: 'unknown' } })
+      expect(checked.binary?.version).toBeUndefined()
+      const shook = await probeInstance({ driver: noFlag, runtime: { ...runtime(), handshake, runtimeFacts: () => ({ binary: { path: 'x', size: 1, mtimeMs: 1 }, agentInfo: { version: '2.1.0' }, capturedAt: '', source: 'handshake' }) }, env, force: true, handshake: true })
+      expect(handshake).toHaveBeenCalledOnce()
+      // The version the agent announced in its handshake.
+      expect(shook).toMatchObject({ runs: { state: 'yes' }, binary: { version: '2.1.0' }, compatibility: { state: 'tested' } })
+      const failing = await probeInstance({ driver: noFlag, runtime: { ...runtime(), handshake: async () => { throw new Error('exited with code 1') } }, env, force: true, handshake: true })
+      expect(failing.runs).toMatchObject({ state: 'no', failure: 'exited' })
+    } finally {
+      stop()
+    }
+  })
+
   it('reports a newer version as newer than tested, never blocking', async () => {
     const result = await probe(fakeCli(`console.log('9.0.0')`))
     expect(result.compatibility.state).toBe('newer_than_tested')

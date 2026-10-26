@@ -1,8 +1,9 @@
+import type { AcpConnection, AcpConnectionFactory } from '../../harness/acp/connection'
 import { ReplayMismatchError, type ReplayTransport } from './ReplayTransport'
 
 /**
  * Agent Client Protocol boundary: the JSON-RPC traffic on the agent connection, replayed in place
- * of the spawned agent process (the `launch()` seam `tests/antigravityLifecycle.test.ts` uses).
+ * of the spawned agent process (the ACP core's `AcpConnectionFactory` seam).
  *
  * - out `{ kind: 'request', method, params }` / `{ kind: 'notify', method, params }`: a call to the
  *   agent. `cwd` is dropped from params (it is a per-run temp path).
@@ -18,7 +19,7 @@ type AcpInbound =
   | { kind: 'response'; result: unknown }
   | { kind: 'error'; message: string }
 
-/** The shape of the service's private `AcpProcess` the chat path uses. */
+/** The connection a replay hands the ACP core. */
 export interface ReplayAcpProcess {
   child: { exitCode: number | null; signalCode: NodeJS.Signals | null; kill: () => boolean }
   connection: {
@@ -29,11 +30,7 @@ export interface ReplayAcpProcess {
       notify: (method: string, params: unknown) => Promise<void>
     }
   }
-  sessionId?: string
-  cwd?: string
-  threadId?: string
-  onUpdate?: (update: unknown) => void
-  turnSignal?: AbortSignal
+  onUpdate?: (update: unknown, sessionId?: string) => void
 }
 
 function withoutCwd(params: unknown): unknown {
@@ -42,9 +39,9 @@ function withoutCwd(params: unknown): unknown {
   return rest
 }
 
-/** A fresh replayed agent process per `launch()`. */
-export function replayAcpProcess(transport: ReplayTransport): () => ReplayAcpProcess {
-  return () => {
+/** A fresh replayed agent process per connection the core opens. */
+export function replayAcpProcess(transport: ReplayTransport): AcpConnectionFactory {
+  return (request) => {
     const abort = new AbortController()
     const closed = new Promise<never>((_resolve, reject) => {
       abort.signal.addEventListener('abort', () => reject(abort.signal.reason), { once: true })
@@ -55,7 +52,11 @@ export function replayAcpProcess(transport: ReplayTransport): () => ReplayAcpPro
       child: { exitCode: 0, signalCode: null, kill: () => true },
       connection: {
         signal: abort.signal,
-        close: (error) => abort.abort(error ?? new Error('ACP connection closed')),
+        close: (error) => {
+          if (abort.signal.aborted) return
+          abort.abort(error ?? new Error('ACP connection closed'))
+          request.onExit?.()
+        },
         agent: {
           request: async (method, params) => {
             abort.signal.throwIfAborted()
@@ -83,6 +84,7 @@ export function replayAcpProcess(transport: ReplayTransport): () => ReplayAcpPro
         }
       }
     }
-    return process
+    // The core calls the typed SDK surface; the replay answers every method the same way.
+    return process as unknown as AcpConnection
   }
 }
