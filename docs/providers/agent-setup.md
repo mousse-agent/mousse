@@ -60,9 +60,12 @@ Cursor entry. There is nothing to install or find on PATH.
 ## Kept sign-ins
 
 - Removing a provider, or turning it off on this device, stops the chats running on it and tells
-  each one why. Neither deletes a sign-in.
-- A removed provider with a private home leaves `<profile>/harness/<id>/home` on disk; Mousse's own
-  settings and saved sessions for it are deleted. Adding the same name again creates a new id with a
-  fresh home, because an id whose directory is still on disk is never reused.
+  each one why. Turning it off deletes nothing.
+- A removed provider with a private home leaves `<profile>/harness/<id>/home`, and the sign-in in it,
+  on disk; Mousse's own settings and saved sessions for it are deleted. Adding the same name again
+  creates a new id with a fresh home, because an id whose directory is still on disk is never reused.
+- A key Mousse stores itself for a bundled agent (Cursor) is not in a private home and is deleted
+  with the provider.
 - To remove a kept sign-in, sign out before removing the provider, or delete the directory by hand
-  afterwards. A home with no files in it is deleted with the provider.
+  afterwards. A home with no files in it, or none at all, is deleted with the provider; a home Mousse
+  cannot read is left in place.

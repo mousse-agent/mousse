@@ -67,7 +67,7 @@ interface Script {
 }
 
 /** An adapter that waits at a gate inside `startTurn`, before or after it publishes its session ref. */
-function gatedAdapter(gate: Promise<void>, options: { refBeforeGate?: boolean; script?: Script } = {}): { adapter: ProviderAdapter; script: Script } {
+function gatedAdapter(gate: Promise<void>, options: { refBeforeGate?: boolean; script?: Script; stopGate?: Promise<void> } = {}): { adapter: ProviderAdapter; script: Script } {
   const script = options.script ?? { started: [], interrupts: [], stopThreads: [] }
   const adapter: ProviderAdapter = {
     driver: 'claude',
@@ -90,6 +90,7 @@ function gatedAdapter(gate: Promise<void>, options: { refBeforeGate?: boolean; s
     },
     stopThread: async (threadId) => {
       script.stopThreads.push(threadId)
+      await options.stopGate
       return 'stopped'
     }
   }
@@ -255,6 +256,76 @@ describe('stopping chats when an instance is removed or turned off', () => {
     harness.stop()
   })
 
+  it('a stop still draining holds back new turns after the runtime was replaced and the old turn finished', async () => {
+    const gate = deferred()
+    const stopGate = deferred()
+    const scripts: Script[] = []
+    const { harness } = fakeHarness(() => {
+      const made = gatedAdapter(gate.promise, { refBeforeGate: true, stopGate: stopGate.promise })
+      scripts.push(made.script)
+      return made.adapter
+    })
+    const { instanceId } = await harness.instances.add({ driver: 'claude', config: { displayName: 'Work' } })
+    const old = await startOn(harness, instanceId, { threadId: 'thread-1', attemptId: 'a1' })
+    await vi.waitFor(() => expect(scripts.some((script) => script.started.length === 1)).toBe(true))
+    const first = scripts.find((script) => script.started.length === 1)!
+
+    await harness.instances.setEnabled(instanceId, { kind: 'device' }, false)
+    await vi.waitFor(() => expect(first.stopThreads).toEqual(['thread-1']))
+    // The old attempt ends while its stop is still held, then a setting change replaces the runtime.
+    gate.resolve()
+    expect(await codeOf(old.turn.result)).toBe('instance_disabled')
+    await harness.instances.configure(instanceId, { env: { A: '1' } })
+    await harness.instances.setEnabled(instanceId, { kind: 'device' }, true)
+
+    const fresh = await startOn(harness, instanceId, { threadId: 'thread-2', attemptId: 'a2' })
+    const next = scripts.at(-1)!
+    expect(next).not.toBe(first)
+    let settled = false
+    void fresh.turn.result.then(() => { settled = true }, () => { settled = true })
+    await sleep(50)
+    expect(next.started).toHaveLength(0)
+    expect(settled).toBe(false)
+
+    stopGate.resolve()
+    await expect(fresh.turn.result).resolves.toMatchObject({ aborted: false, text: 'ok' })
+    expect(next.started[0]!.signal.aborted).toBe(false)
+    harness.stop()
+  })
+
+  it('a stop on a replaced runtime that is still finishing a turn holds back new turns too', async () => {
+    const gate = deferred()
+    const stopGate = deferred()
+    const scripts: Script[] = []
+    const { harness } = fakeHarness(() => {
+      const made = gatedAdapter(gate.promise, { refBeforeGate: true, stopGate: stopGate.promise })
+      scripts.push(made.script)
+      return made.adapter
+    })
+    const { instanceId } = await harness.instances.add({ driver: 'claude', config: { displayName: 'Work' } })
+    const old = await startOn(harness, instanceId, { threadId: 'thread-1', attemptId: 'a1' })
+    void old.turn.result.catch(noop)
+    await vi.waitFor(() => expect(scripts.some((script) => script.started.length === 1)).toBe(true))
+    const first = scripts.find((script) => script.started.length === 1)!
+    await harness.instances.configure(instanceId, { env: { A: '1' } })
+    // Using the instance again builds the new runtime and retires the one still running a1.
+    const binding = await harness.bind(harness.resolveStored({ instanceId, llmProvider: '', model: 'm' }, { purpose: 'turn' }), { mode: 'agent' })
+    const next = scripts.at(-1)!
+    expect(next).not.toBe(first)
+
+    await harness.instances.setEnabled(instanceId, { kind: 'device' }, false)
+    await vi.waitFor(() => expect(first.stopThreads).toEqual(['thread-1']))
+    await harness.instances.setEnabled(instanceId, { kind: 'device' }, true)
+    const fresh = harness.startTurn(turnSpec(instanceId, binding, { threadId: 'thread-2', attemptId: 'a2' }))
+    await sleep(50)
+    expect(next.started).toHaveLength(0)
+
+    stopGate.resolve()
+    gate.resolve()
+    await expect(fresh.result).resolves.toMatchObject({ aborted: false, text: 'ok' })
+    harness.stop()
+  })
+
   it('a turn started while the instance is off is refused until it is turned on again', async () => {
     const { adapter, script } = gatedAdapter(Promise.resolve())
     const { harness } = fakeHarness(() => adapter)
@@ -268,13 +339,17 @@ describe('stopping chats when an instance is removed or turned off', () => {
     harness.stop()
   })
 
-  it('removal keeps the home and its sign-in files and deletes the rest; an instance without a home loses its whole directory', async () => {
+  it('removal keeps the home and its sign-in files and deletes the rest; an instance with an empty or no home loses its whole directory', async () => {
     const { adapter } = gatedAdapter(Promise.resolve())
     const { harness, profileHome } = fakeHarness(() => adapter)
     const work = await harness.instances.add({ driver: 'claude', config: { displayName: 'Work' } })
     const plain = await harness.instances.add({ driver: 'claude', config: { displayName: 'Plain' } })
+    const bare = await harness.instances.add({ driver: 'claude', config: { displayName: 'Bare' } })
     const workDir = instanceStateDir(profileHome, work.instanceId)
     const plainDir = instanceStateDir(profileHome, plain.instanceId)
+    const bareDir = instanceStateDir(profileHome, bare.instanceId)
+    rmSync(join(bareDir, 'home'), { recursive: true, force: true })
+    writeFileSync(join(bareDir, 'acp.json'), '{}')
     mkdirSync(join(workDir, 'home', 'nested'), { recursive: true })
     writeFileSync(join(workDir, 'home', '.credentials.json'), '{"token":"sentinel"}')
     writeFileSync(join(workDir, 'home', 'auth.json'), '{"token":"sentinel"}')
@@ -287,12 +362,36 @@ describe('stopping chats when an instance is removed or turned off', () => {
 
     await harness.instances.remove(work.instanceId)
     await harness.instances.remove(plain.instanceId)
+    await harness.instances.remove(bare.instanceId)
     expect(readdirSync(workDir).sort()).toEqual(['home'])
     expect(readdirSync(join(workDir, 'home')).sort()).toEqual(['.credentials.json', 'auth.json', 'nested'])
     expect(existsSync(plainDir)).toBe(false)
+    expect(existsSync(bareDir)).toBe(false)
     // Re-adding the same name never reuses the kept directory.
     expect((await harness.instances.add({ driver: 'claude', config: { displayName: 'Work' } })).instanceId).toBe('claude:work-2')
     harness.stop()
+  })
+
+  it('a home that cannot be listed is kept, like any other home, and the rest of the state still goes', async () => {
+    const { adapter } = gatedAdapter(Promise.resolve())
+    const { harness, profileHome } = fakeHarness(() => adapter)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(noop)
+    try {
+      const work = await harness.instances.add({ driver: 'claude', config: { displayName: 'Work' } })
+      const dir = instanceStateDir(profileHome, work.instanceId)
+      // A file where the home directory should be: listing it fails with an error other than "missing".
+      rmSync(join(dir, 'home'), { recursive: true, force: true })
+      writeFileSync(join(dir, 'home'), 'sentinel sign-in')
+      writeFileSync(join(dir, 'settings.json'), '{}')
+
+      await harness.instances.remove(work.instanceId)
+      expect(readdirSync(dir).sort()).toEqual(['home'])
+      expect(readdirSync(dir, { withFileTypes: true })[0]!.isFile()).toBe(true)
+      expect(warn).toHaveBeenCalledWith('[harness] could not delete the files of a removed instance', expect.objectContaining({ instanceId: work.instanceId }))
+    } finally {
+      warn.mockRestore()
+      harness.stop()
+    }
   })
 
   it('after a removal, the thread continues on another instance with its history handed over', async () => {
@@ -425,7 +524,7 @@ function claudeRig(options: {
 }
 
 describe('stopping chats on the real Claude adapter', () => {
-  it('removing mid-stream stops the turn through the service, tells the thread, and settles the result', async () => {
+  it('removing mid-stream ends the turn through its abort, asks the service to stop the thread, tells the thread, and settles the result', async () => {
     const transcript = readTranscript(join(__dirname, '..', 'run', 'fixtures', 'stop-mid-stream', 'claude-subscription.ndjson'))
     let rig: ReturnType<typeof claudeRig>
     const transport = new ReplayTransport(transcript, { onCue: async () => { await rig.harness.instances.remove('claude:work') } })
