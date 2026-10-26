@@ -1,18 +1,28 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { chatgptHostIdPath, ensureChatGptHostId } from '../../../src/mms/harness/chatgpt/hostId'
+import { ChatGptLifecycle } from '../../../src/mms/harness/chatgpt/lifecycle'
+import type { SecretCodec } from '../../../src/mms/providers/secretCodec'
 import { ChatGptStore, chatgptStorePath, emptyStore, profileKeyOf, type ChatGptStoreData } from '../../../src/mms/harness/chatgpt/store'
 import { FakeIssuer, fakeVault, guardNetwork, plainCodec, tempHomes } from './fakeIssuer'
 import { chatgptAuth, signIn, startSignIn } from './signInFlow'
 
 // Lets a test make renaming the store fail, as Windows does for a file another process holds open.
-const fsControl = vi.hoisted(() => ({ failRename: null as ((from: string) => boolean) | null }))
+const fsControl = vi.hoisted(() => ({
+  failRename: null as ((from: string) => boolean) | null,
+  /** Called when the store checks whether a file exists, before the answer. */
+  beforeExists: null as ((path: string) => void) | null
+}))
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
   return {
     ...actual,
+    existsSync: (path: Parameters<typeof actual.existsSync>[0]) => {
+      fsControl.beforeExists?.(String(path))
+      return actual.existsSync(path)
+    },
     renameSync: (from: Parameters<typeof actual.renameSync>[0], to: Parameters<typeof actual.renameSync>[1]) => {
       if (fsControl.failRename?.(String(from))) throw Object.assign(new Error('simulated EPERM'), { code: 'EPERM' })
       return actual.renameSync(from, to)
@@ -28,6 +38,7 @@ beforeEach(async () => {
 })
 afterEach(async () => {
   fsControl.failRename = null
+  fsControl.beforeExists = null
   await issuer.stop()
 })
 
@@ -61,9 +72,21 @@ function userVersion(path: string, version?: number): number {
   }
 }
 
+/** Overwrites the database header, as disk damage would. */
+function damageHeader(path: string): void {
+  const bytes = readFileSync(path)
+  bytes.fill(0x21, 0, 100)
+  writeFileSync(path, bytes)
+}
+
+function lifecycle(profileHome: string, codec: SecretCodec): ChatGptLifecycle {
+  return new ChatGptLifecycle({ instanceId: 'codex:managed', profileHome, codec })
+}
+
 const SAMPLE = (): ChatGptStoreData => ({
   version: 1,
   revision: 0,
+  incarnation: '',
   credentialEpoch: 3,
   signInFence: 2,
   active: 'oaiapp_a',
@@ -85,7 +108,7 @@ describe('ChatGPT store', () => {
     expect(row(path)).toMatchObject({ revision: 1, fence: 2, encrypted: 1 })
     expect(Object.keys(JSON.parse(row(path)!.payload))).toEqual(['__mousse_encrypted_v1'])
     for (const file of readdirSync(dirname(path))) expect(readFileSync(join(dirname(path), file)).includes('secret'), file).toBe(false)
-    expect(new ChatGptStore(path, vault).read()).toEqual({ ...SAMPLE(), revision: 1 })
+    expect(new ChatGptStore(path, vault).read()).toEqual({ ...SAMPLE(), revision: 1, incarnation: expect.stringMatching(/^[0-9a-f-]{36}$/) })
   })
 
   it('refuses to save when the required vault is unavailable, and saves nothing', () => {
@@ -241,6 +264,68 @@ describe('ChatGPT store', () => {
     expect(readFileSync(path, 'utf8')).toBe(damaged)
     fsControl.failRename = null
     expect((await signIn(issuer, auth, { subject: 'alice' })).result).toEqual({ success: true })
+  })
+
+  it('data read from a database that was since replaced can never commit, even at a matching revision', async () => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'codex:managed')
+    const store = new ChatGptStore(path, plainCodec)
+    store.write(SAMPLE())
+    store.write({ ...store.read(), credentialEpoch: 5 })
+    const old = store.read()
+    expect(old.revision).toBe(2)
+    // The file is damaged; another process deletes the instance, which replaces the database and
+    // writes its empty store at revision 2 again.
+    damageHeader(path)
+    await lifecycle(profileHome, plainCodec).deleteInstance()
+    const replaced = store.read()
+    expect(replaced.revision).toBe(2)
+    expect(replaced.incarnation).not.toBe(old.incarnation)
+    expect(() => store.write({ ...old, signInFence: 9 })).toThrow(expect.objectContaining({ code: 'operation_busy' }))
+    expect(store.read()).toMatchObject({ active: null, sessions: [], signInFence: replaced.signInFence })
+  })
+
+  it('a damaged encrypted database that a plain daemon cannot replace stays as it was, and encryption stays required', async () => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'codex:managed')
+    new ChatGptStore(path, fakeVault()).write(SAMPLE())
+    damageHeader(path)
+    const before = readFileSync(path)
+    const plain = lifecycle(profileHome, plainCodec)
+    await expect(plain.deleteInstance()).rejects.toMatchObject({ failure: 'storage', message: expect.stringContaining('keychain') })
+    expect(readFileSync(path).equals(before)).toBe(true)
+    expect(readdirSync(dirname(path)).filter((name) => name.startsWith('chatgpt.db'))).toEqual(['chatgpt.db'])
+    await expect(plain.prepareSignIn()).rejects.toMatchObject({ failure: 'storage' })
+    // Even with the database gone, this instance never takes plain-text credentials again.
+    rmSync(path)
+    expect(() => new ChatGptStore(path, plainCodec).write(SAMPLE())).toThrow(expect.objectContaining({ failure: 'storage', message: expect.stringContaining('keychain') }))
+  })
+
+  it('the old journal moves aside with a damaged database, or nothing moves', async () => {
+    const home = homes()
+    const auth = chatgptAuth(issuer, home)
+    const path = auth.lifecycle.store.path
+    mkdirSync(dirname(path), { recursive: true })
+    // Damaged from the first byte: with an old journal beside it, a file that still has SQLite's
+    // magic can look like an empty database to SQLite.
+    const damaged = 'not a database at all, damaged beyond its header '.repeat(200)
+    writeFileSync(path, damaged)
+    // SQLite deletes a stray journal when it closes the damaged file, so put one back right when the
+    // replacement looks for it, as another process's journal would be.
+    fsControl.beforeExists = (file) => {
+      if (file === `${path}-wal` && !readdirSync(dirname(path)).some((name) => name.includes('.corrupt-'))) writeFileSync(file, 'old journal')
+    }
+    fsControl.failRename = (from) => from.endsWith('-wal')
+    expect(await startSignIn(auth).result).toMatchObject({ success: false, failure: 'storage', error: expect.stringContaining('another Mousse window') })
+    expect(readFileSync(path, 'utf8')).toBe(damaged)
+    expect(readFileSync(`${path}-wal`, 'utf8')).toBe('old journal')
+    expect(readdirSync(dirname(path)).filter((name) => name.startsWith('chatgpt.db')).sort()).toEqual(['chatgpt.db', 'chatgpt.db-wal'])
+    fsControl.failRename = null
+    expect((await signIn(issuer, auth, { subject: 'alice' })).result).toEqual({ success: true })
+    fsControl.beforeExists = null
+    const names = readdirSync(dirname(path))
+    expect(names.some((name) => /^chatgpt\.db\.corrupt-.*-wal$/.test(name))).toBe(true)
+    expect(auth.status().state).toBe('signed_in')
   })
 
   it('the profile key covers client, subject, ID token and epoch', () => {

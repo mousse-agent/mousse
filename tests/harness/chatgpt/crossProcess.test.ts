@@ -71,7 +71,10 @@ describe('ChatGPT store across processes', () => {
     expect(after.active).toBeNull()
     expect(after.sessions).toEqual([])
     expect(activeSession(after)).toBeUndefined()
-    expect(after.pendingRevocations).toHaveLength(1)
+    // The sign-out retired the session's token; the renewal that lost the race retired the new
+    // token it was given, so both are revoked later and nothing valid is left unrecorded.
+    expect(after.pendingRevocations).toHaveLength(2)
+    expect(new Set(after.pendingRevocations.map((token) => token.refreshToken)).size).toBe(2)
   })
 
   it('a sign-in that finishes after another process deleted the instance saves nothing', async () => {
@@ -88,6 +91,7 @@ describe('ChatGPT store across processes', () => {
     expect(new ChatGptStore(chatgptStorePath(home.profileHome, 'codex:managed'), plainCodec).read()).toMatchObject({
       ...emptyStore(),
       revision: expect.any(Number),
+      incarnation: expect.any(String),
       credentialEpoch: expect.any(Number),
       signInFence: expect.any(Number)
     })

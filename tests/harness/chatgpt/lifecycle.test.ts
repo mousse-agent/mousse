@@ -63,7 +63,9 @@ function seed(profileHome: string, seeds: Seed[], active: string | null = seeds[
   for (const entry of seeds) if (entry.refreshToken !== null) issuer.allowRefresh(entry.refreshToken ?? `rt-${entry.clientId}`, entry.clientId)
   // A write must find the revision it read, as every writer does.
   const store = new ChatGptStore(chatgptStorePath(profileHome, INSTANCE), codec)
-  data.revision = store.read().revision
+  const current = store.read()
+  data.revision = current.revision
+  data.incarnation = current.incarnation
   store.write(data)
   return data
 }
@@ -404,7 +406,7 @@ describe('sign-out and deletion', () => {
     expect(await auth.deleteInstance()).toEqual({ confirmed: true })
     expect(issuer.revokeRequests.map((request) => request.token).sort()).toEqual(['rt-oaiapp_a', 'rt-oaiapp_b'])
     expect(auth.status().state).toBe('signed_out')
-    expect(stored(auth)).toEqual({ ...emptyStore(), revision: expect.any(Number), credentialEpoch: 2, signInFence: 2 })
+    expect(stored(auth)).toEqual({ ...emptyStore(), revision: expect.any(Number), incarnation: expect.any(String), credentialEpoch: 2, signInFence: 2 })
     expect(ensureChatGptHostId(home.installationHome)).toBe(hostId)
   })
 

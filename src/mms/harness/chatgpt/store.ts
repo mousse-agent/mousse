@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { createSecretCodec, type SecretCodec } from '../../providers/secretCodec'
@@ -64,6 +64,12 @@ export interface ChatGptStoreData {
    */
   revision: number
   /**
+   * The database this data was read from: random, made with the database and new whenever a
+   * damaged one is replaced. `write` commits only to the same database, so revisions that restart
+   * in a replacement can never admit data read from the old one. Empty when no database existed.
+   */
+  incarnation: string
+  /**
    * Moves on with every sign-in commit, activation, sign-out and terminal refresh error, in the
    * same write. It is part of the profile key, so any of them ends what was issued before.
    */
@@ -98,7 +104,7 @@ export interface RevocableToken {
 }
 
 export function emptyStore(): ChatGptStoreData {
-  return { version: 1, revision: 0, credentialEpoch: 0, signInFence: 0, active: null, registrations: [], sessions: [], pendingRevocations: [] }
+  return { version: 1, revision: 0, incarnation: '', credentialEpoch: 0, signInFence: 0, active: null, registrations: [], sessions: [], pendingRevocations: [] }
 }
 
 export function chatgptStorePath(profileHome: string, instanceId: string): string {
@@ -129,7 +135,7 @@ function isRevocable(value: unknown): value is RevocableToken {
 }
 
 /** The sealed part of the row: everything except the revision and the fence. */
-type Payload = Omit<ChatGptStoreData, 'revision' | 'signInFence'>
+type Payload = Omit<ChatGptStoreData, 'revision' | 'signInFence' | 'incarnation'>
 
 function decodePayload(value: unknown): Payload | null {
   if (!isRecord(value) || value.version !== 1 || !Number.isInteger(value.credentialEpoch) || !strOrNull(value.active)) return null
@@ -160,6 +166,10 @@ CREATE TABLE IF NOT EXISTS store (
   fence INTEGER NOT NULL,
   encrypted INTEGER NOT NULL,
   payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS set_aside (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -228,7 +238,17 @@ export class ChatGptStore {
       database.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;')
       const version = Number((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
       if (version > SCHEMA_VERSION) throw new ChatGptAuthError('unsupported', 'storage_newer', MESSAGES.storageNewer)
-      if (version < SCHEMA_VERSION) database.exec(`BEGIN IMMEDIATE; ${SCHEMA} PRAGMA user_version=${SCHEMA_VERSION}; COMMIT;`)
+      if (version < SCHEMA_VERSION) {
+        database.exec(`BEGIN IMMEDIATE; ${SCHEMA}`)
+        try {
+          // Another process may have made the schema first; its incarnation stands.
+          database.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('incarnation', ?)").run(randomUUID())
+          database.exec(`PRAGMA user_version=${SCHEMA_VERSION}; COMMIT;`)
+        } catch (error) {
+          try { database.exec('ROLLBACK') } catch { /* already rolled back */ }
+          throw error
+        }
+      }
       return work(database)
     } catch (error) {
       if (error instanceof ChatGptAuthError || error instanceof CorruptDatabase) throw error
@@ -245,9 +265,15 @@ export class ChatGptStore {
     return database.prepare('SELECT revision, fence, encrypted, payload FROM store WHERE id = 1').get() as Row | undefined
   }
 
+  private incarnation(database: DatabaseSync): string {
+    const found = database.prepare("SELECT value FROM meta WHERE key = 'incarnation'").get() as { value: string } | undefined
+    if (!found) throw corrupt()
+    return found.value
+  }
+
   /** Decodes a row. A payload this host cannot decrypt or a newer Mousse wrote fails typed. */
-  private decode(row: Row | undefined): ChatGptStoreData {
-    if (!row) return emptyStore()
+  private decode(row: Row | undefined, incarnation: string): ChatGptStoreData {
+    if (!row) return { ...emptyStore(), incarnation }
     let value: unknown
     try {
       value = openSecretFile(row.payload, this.codec).value
@@ -256,7 +282,7 @@ export class ChatGptStore {
       throw corrupt()
     }
     const payload = decodePayload(value)
-    if (payload) return { ...payload, revision: row.revision, signInFence: row.fence }
+    if (payload) return { ...payload, revision: row.revision, signInFence: row.fence, incarnation }
     if (isNewer(value)) throw new ChatGptAuthError('unsupported', 'storage_newer', MESSAGES.storageNewer)
     throw corrupt()
   }
@@ -270,7 +296,7 @@ export class ChatGptStore {
     // A store never written reads as empty without creating anything.
     if (!existsSync(this.path)) return emptyStore()
     try {
-      return this.withDatabase((database) => this.decode(this.row(database)))
+      return this.withDatabase((database) => this.decode(this.row(database), this.incarnation(database)))
     } catch (error) {
       if (error instanceof CorruptDatabase) throw corrupt()
       throw error
@@ -293,14 +319,16 @@ export class ChatGptStore {
         database.exec('BEGIN IMMEDIATE')
         try {
           const row = this.row(database)
+          const incarnation = this.incarnation(database)
           let data: ChatGptStoreData
           try {
-            data = this.decode(row)
+            data = this.decode(row, incarnation)
           } catch (error) {
             if (!(error instanceof ChatGptAuthError) || error.failure !== 'storage' || !row) throw error
             database.prepare('INSERT INTO set_aside (at, revision, encrypted, payload) VALUES (?, ?, ?, ?)').run(Date.now(), row.revision, row.encrypted, row.payload)
-            const fresh = { ...emptyStore(), signInFence: row.fence + 1 }
+            const fresh = { ...emptyStore(), signInFence: row.fence + 1, incarnation }
             const sealed = this.seal(fresh, row.encrypted === 1)
+            if (sealed.encrypted) this.markEncrypted()
             database.prepare('UPDATE store SET revision = revision + 1, fence = ?, encrypted = ?, payload = ? WHERE id = 1').run(fresh.signInFence, sealed.encrypted ? 1 : 0, sealed.stored)
             data = { ...fresh, revision: row.revision + 1 }
           }
@@ -313,31 +341,92 @@ export class ChatGptStore {
       })
     } catch (error) {
       if (!(error instanceof CorruptDatabase)) throw error
-      const aside = `${this.path}.corrupt-${new Date().toISOString().replace(/:/g, '-')}`
+      return this.replaceDamagedFile()
+    }
+  }
+
+  /**
+   * Replaces a damaged database file. The complete replacement is built first, under a temporary
+   * name, sealed as the old store required (a seal that fails leaves everything untouched). The old
+   * journal files move aside before the old database, so the new database never meets an old WAL;
+   * if any of them cannot move, the moved ones go back and nothing is treated as recovered. Only
+   * then does the replacement take the name. It has a new incarnation, so data read from the old
+   * file can never commit to it, and a clock-based fence above any the old one handed out.
+   */
+  private replaceDamagedFile(): ChatGptStoreData {
+    const encrypt = this.codec.encryptionRequired === true || wasEncryptedFile(this.path)
+    const fresh: ChatGptStoreData = { ...emptyStore(), signInFence: Date.now(), incarnation: randomUUID() }
+    const sealed = this.seal(fresh, encrypt)
+    if (sealed.encrypted) this.markEncrypted()
+    const temporary = `${this.path}.new-${randomUUID()}`
+    try {
+      const database = new DatabaseSync(temporary)
       try {
-        renameSync(this.path, aside)
-      } catch {
-        throw new ChatGptAuthError('operation_busy', 'storage', MESSAGES.storageSetAside)
+        try { chmodSync(temporary, 0o600) } catch { /* Windows: the profile directory's ACL applies */ }
+        database.exec(`${SCHEMA} PRAGMA user_version=${SCHEMA_VERSION};`)
+        database.prepare("INSERT INTO meta (key, value) VALUES ('incarnation', ?)").run(fresh.incarnation)
+        database.prepare('INSERT INTO store (id, revision, fence, encrypted, payload) VALUES (1, 1, ?, ?, ?)').run(fresh.signInFence, sealed.encrypted ? 1 : 0, sealed.stored)
+      } finally {
+        database.close()
       }
+    } catch {
+      rmSync(temporary, { force: true })
+      throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageWrite)
+    }
+    const aside = `${this.path}.corrupt-${new Date().toISOString().replace(/:/g, '-')}`
+    const moved: string[] = []
+    try {
       for (const suffix of ['-wal', '-shm']) {
-        try { renameSync(`${this.path}${suffix}`, `${aside}${suffix}`) } catch { /* absent */ }
+        if (!existsSync(`${this.path}${suffix}`)) continue
+        renameSync(`${this.path}${suffix}`, `${aside}${suffix}`)
+        moved.push(suffix)
       }
-      const fresh = { ...emptyStore(), signInFence: Date.now() }
-      this.write(fresh, { encrypt: this.codec.encryptionRequired === true || wasEncryptedFile(aside) })
-      return fresh
+      renameSync(this.path, aside)
+    } catch {
+      for (const suffix of moved) {
+        try { renameSync(`${aside}${suffix}`, `${this.path}${suffix}`) } catch { /* left beside the copy */ }
+      }
+      rmSync(temporary, { force: true })
+      throw new ChatGptAuthError('operation_busy', 'storage', MESSAGES.storageSetAside)
+    }
+    try {
+      renameSync(temporary, this.path)
+    } catch {
+      rmSync(temporary, { force: true })
+      throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageWrite)
+    }
+    return { ...fresh, revision: 1 }
+  }
+
+  /**
+   * The store has held encrypted data: from then on it only accepts encrypted payloads, even when
+   * its database is replaced. Kept as a file beside the database.
+   */
+  private encryptionMarker(): string {
+    return join(dirname(this.path), 'chatgpt.encrypted')
+  }
+
+  private markEncrypted(): void {
+    try {
+      writeFileSync(this.encryptionMarker(), '', { flag: 'wx', mode: 0o600 })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageWrite)
     }
   }
 
   private seal(data: ChatGptStoreData, wasEncrypted: boolean): { stored: string; encrypted: boolean } {
-    const { revision: _revision, signInFence: _fence, ...payload } = data
+    const { revision: _revision, signInFence: _fence, incarnation: _incarnation, ...payload } = data
     try {
-      return sealSecretFile(`${JSON.stringify(payload)}\n`, this.codec, wasEncrypted)
+      return sealSecretFile(`${JSON.stringify(payload)}\n`, this.codec, wasEncrypted || existsSync(this.encryptionMarker()))
     } catch {
       throw new ChatGptAuthError('unsupported', 'storage', MESSAGES.storageEncryption)
     }
   }
 
-  /** Fails typed when the current row could not be written back as required (a vault that is down). */
+  /**
+   * Fails typed when the current row could not be written back as required (a vault that is down,
+   * or a store that once held encrypted data under a host that cannot encrypt).
+   */
   assertWritable(): void {
     if (!existsSync(this.path)) {
       this.seal(emptyStore(), false)
@@ -359,26 +448,34 @@ export class ChatGptStore {
   }
 
   /**
-   * Commits `data` if the row still has `data.revision`, and sets `data.revision` to the new one.
+   * Commits `data` if the row still has `data.revision` in the same database (`data.incarnation`),
+   * and sets `data.revision` to the new one.
    * Otherwise another operation committed first: `operation_busy`, read again. A payload is sealed
    * like the row it replaces, so a store never goes from encrypted to plain text; a vault that
    * cannot seal it now fails `storage` (or `storage_locked`), never `operation_busy`.
    */
-  write(data: ChatGptStoreData, options: { encrypt?: boolean } = {}): void {
+  write(data: ChatGptStoreData): void {
+    const changed = () => new ChatGptAuthError('operation_busy', 'busy', MESSAGES.storeChanged)
+    let incarnation = ''
     try {
       this.withDatabase((database) => {
         database.exec('BEGIN IMMEDIATE')
         try {
           const row = this.row(database)
-          const sealed = this.seal(data, options.encrypt === true || (row ? row.encrypted === 1 : false))
+          incarnation = this.incarnation(database)
+          const sealed = this.seal(data, row ? row.encrypted === 1 : false)
+          if (sealed.encrypted) this.markEncrypted()
           if (!row) {
-            if (data.revision !== 0) throw new ChatGptAuthError('operation_busy', 'busy', MESSAGES.storeChanged)
+            // Only data read before anything was saved, or from this same database, may create the row.
+            if (data.revision !== 0 || (data.incarnation !== '' && data.incarnation !== incarnation)) throw changed()
             database.prepare('INSERT INTO store (id, revision, fence, encrypted, payload) VALUES (1, 1, ?, ?, ?)').run(data.signInFence, sealed.encrypted ? 1 : 0, sealed.stored)
           } else {
             const result = database
-              .prepare('UPDATE store SET revision = revision + 1, fence = ?, encrypted = ?, payload = ? WHERE id = 1 AND revision = ?')
-              .run(data.signInFence, sealed.encrypted ? 1 : 0, sealed.stored, data.revision)
-            if (Number(result.changes) !== 1) throw new ChatGptAuthError('operation_busy', 'busy', MESSAGES.storeChanged)
+              .prepare(
+                "UPDATE store SET revision = revision + 1, fence = ?, encrypted = ?, payload = ? WHERE id = 1 AND revision = ? AND EXISTS (SELECT 1 FROM meta WHERE key = 'incarnation' AND value = ?)"
+              )
+              .run(data.signInFence, sealed.encrypted ? 1 : 0, sealed.stored, data.revision, data.incarnation)
+            if (Number(result.changes) !== 1) throw changed()
           }
           database.exec('COMMIT')
         } catch (error) {
@@ -391,6 +488,7 @@ export class ChatGptStore {
       throw error
     }
     data.revision += 1
+    data.incarnation = incarnation
   }
 
   /** The rows set aside as corrupt (tests and support). */

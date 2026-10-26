@@ -271,11 +271,29 @@ export class ChatGptLifecycle {
       if (registration && registration.sharing !== sharing) {
         data.registrations = data.registrations.map((entry) => (entry.clientId === session.clientId ? { ...entry, sharing } : entry))
       }
-      this.store.write(data)
+      try {
+        this.store.write(data)
+      } catch (error) {
+        // Another process changed the store while the request was out, so this renewal is not
+        // kept. Its new refresh token is valid at OpenAI and unused: retire it for revocation.
+        if (error instanceof ChatGptAuthError && error.code === 'operation_busy') this.retireUnkept({ clientId: session.clientId, refreshToken: tokens.refreshToken })
+        throw error
+      }
       if (signal?.aborted) throw cancelled()
       if (!sharing) throw failure.sharingDisabled()
       return grant(refreshed, profileKey)
     }, signal)
+  }
+
+  /** Adds a token nothing keeps to the pending revocations of the current state (one try). */
+  private retireUnkept(token: RevocableToken): void {
+    try {
+      const latest = this.store.read()
+      retire(latest, [token])
+      this.store.write(latest)
+    } catch {
+      // The state keeps changing or cannot be read; the token expires unused.
+    }
   }
 
   /** A terminal refresh error: drops the tokens, keeps the registration and the active choice. */
@@ -405,6 +423,7 @@ export class ChatGptLifecycle {
       const tombstone: ChatGptStoreData = {
         ...emptyStore(),
         revision: data.revision,
+        incarnation: data.incarnation,
         credentialEpoch: data.credentialEpoch + 1,
         signInFence: data.signInFence + 1,
         pendingRevocations: [...data.pendingRevocations]
