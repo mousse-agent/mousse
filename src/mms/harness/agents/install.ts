@@ -13,13 +13,16 @@
  * refuses files that differ from its receipt.
  */
 import { createHash } from 'node:crypto'
-import { chmodSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative } from 'node:path'
+import { Transform } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import { createBrotliDecompress } from 'node:zlib'
 import type { RegistrySourcePatch, RemoveInstallResult } from '../../../shared/harness/types'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { resolveWindowsShim, type CliLaunch } from '../../providers/resolveWindowsShim'
 import { quirksFor } from '../acp/quirks'
-import { INHERITED_CREDENTIALS, resolveCommand, type InstanceEnv } from '../env'
+import { isInheritedCredential, resolveCommand, type InstanceEnv } from '../env'
 import { runHarness, type HarnessRunResult } from '../spawn'
 import { containedFile, createStaging, extractArchive } from './archive'
 import { LOCK_FILE, withLock } from './lock'
@@ -87,6 +90,8 @@ export interface AgentInstallsOptions {
   exitGraceMs?: number
   /** Test seam: the npm registry (default `NPM_REGISTRY`). */
   npmRegistry?: string
+  /** Test seam: the most one expanded program may take (default `MAX_EXPANDED_PROGRAM_BYTES`). */
+  maxExpandedBytes?: number
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -125,11 +130,10 @@ function tryDelete(root: string): boolean {
 
 /** Variables an npm install never sees: every credential a driver reads, and any token or secret. */
 export function withoutCredentials(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const named = new Set(Object.values(INHERITED_CREDENTIALS).flatMap((names) => names!.map((name) => name.toUpperCase())))
   const result: NodeJS.ProcessEnv = {}
   for (const [key, value] of Object.entries(env)) {
     const upper = key.toUpperCase()
-    if (named.has(upper) || /(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|_AUTH|CREDENTIAL)/.test(upper)) continue
+    if (isInheritedCredential(upper) || /(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|_AUTH|CREDENTIAL)/.test(upper)) continue
     result[key] = value
   }
   return result
@@ -241,6 +245,12 @@ export async function downloadArtifact(
   return { sha256: hash.digest('hex'), finalUrl: current.href, bytes: received }
 }
 
+/** Stages one install into `staging` and returns its receipt (a package binary's own steps). */
+type Stage = (staging: string, signal: AbortSignal) => Promise<AgentReceipt>
+
+/** The most one expanded program may take (Grok's is about 180 MB). */
+export const MAX_EXPANDED_PROGRAM_BYTES = 1024 ** 3
+
 /** The package folder of `name` under an npm `--global --prefix` folder. */
 function npmPackageDir(prefix: string, name: string, platform: NodeJS.Platform = process.platform): string {
   const base = platform === 'win32' ? join(prefix, 'node_modules') : join(prefix, 'lib', 'node_modules')
@@ -258,6 +268,37 @@ export function packageBin(manifest: Record<string, unknown>, agentId: string, n
   const commands = new Map(Object.entries(bin).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
   if (commands.size === 1) return [...commands.values()][0]
   return commands.get(agentId) ?? commands.get(name.slice(name.lastIndexOf('/') + 1))
+}
+
+/**
+ * A program Mousse takes from one npm package rather than the ACP registry (Grok's platform
+ * package): the tarball checked against the npm registry's sha512, unpacked without npm or its
+ * install scripts, and every file it must hold present.
+ */
+export interface PackageBinarySpec {
+  /** The install folder's name under `agents/`. */
+  agentId: string
+  /** `@xai-official/grok-win32-x64` */
+  name: string
+  version: string
+  /** Brotli-compressed files expanded in place (`bin/grok.br` → `bin/grok`), paths under the package. */
+  expand?: Record<string, string>
+  /** Files the install must hold after expanding; a missing one fails the install. */
+  required: readonly string[]
+  /** The program, `/`-separated under the package. */
+  cmd: string
+}
+
+/** Expands a brotli file, refusing more than `maxBytes` of output. */
+async function expandBrotli(from: string, to: string, maxBytes: number, signal: AbortSignal): Promise<void> {
+  let total = 0
+  const cap = new Transform({
+    transform(chunk: Buffer, _encoding, done) {
+      total += chunk.length
+      done(total > maxBytes ? new Error('The package expands to more than Mousse accepts.') : null, chunk)
+    }
+  })
+  await pipeline(createReadStream(from), createBrotliDecompress(), cap, createWriteStream(to, { flags: 'wx', mode: 0o600 }), { signal })
 }
 
 export class AgentInstalls {
@@ -398,7 +439,7 @@ export class AgentInstalls {
    * published), records the entry's reference, and deletes the version it used before once no one
    * uses it.
    */
-  async install(input: { instanceId: string; source: RegistrySource; env: InstanceEnv; label: string; onProgress: (progress: InstallProgress) => void }): Promise<InstalledAgent> {
+  async install(input: { instanceId: string; source: RegistrySource; env: InstanceEnv; label: string; onProgress: (progress: InstallProgress) => void }, stage?: Stage): Promise<InstalledAgent> {
     if (this.installs.has(input.instanceId)) throw new Error(`${input.label} is already being installed.`)
     const controller = new AbortController()
     this.installs.set(input.instanceId, controller)
@@ -410,7 +451,7 @@ export class AgentInstalls {
       const previous = this.readRefs(source.agentId, this.options.profileId).instances[input.instanceId]
       let installed = this.installed(source)
       // A copy another entry or profile published, unchanged since, serves this one too.
-      if (!installed || (await this.changed(installed, undefined, signal))) installed = await this.download(input, agentDir, signal)
+      if (!installed || (await this.changed(installed, undefined, signal))) installed = await this.download(input, agentDir, signal, stage)
       else await withLock(this.lockPath(source.agentId), () => this.writeRef(source.agentId, input.instanceId, installed), { signal })
       if (previous && (previous.version !== installed.receipt.version || previous.platform !== installed.receipt.platform))
         await this.retire(source.agentId, previous)
@@ -420,18 +461,42 @@ export class AgentInstalls {
     }
   }
 
-  private async download(input: { instanceId: string; source: RegistrySource; env: InstanceEnv; label: string; onProgress: (progress: InstallProgress) => void }, agentDir: string, signal: AbortSignal): Promise<InstalledAgent> {
+  /**
+   * Installs the program of one npm package (`PackageBinarySpec`) for the entry `instanceId`, with
+   * the same receipt, lock, references and reuse as a registry agent.
+   */
+  async installPackageBinary(input: { instanceId: string; spec: PackageBinarySpec; env: InstanceEnv; label: string; onProgress: (progress: InstallProgress) => void }): Promise<InstalledAgent> {
+    const { spec } = input
+    return this.install({ ...input, source: this.packageSource(spec) }, (staging, signal) => this.stagePackageBinary(spec, staging, input, signal))
+  }
+
+  /** The version and platform the entry `instanceId` of this profile uses of `agentId`, if any. */
+  reference(agentId: string, instanceId: string): Ref | undefined {
+    return this.readRefs(agentId, this.options.profileId).instances[instanceId]
+  }
+
+  /** The source a package binary's install is found under. */
+  packageSource(spec: Pick<PackageBinarySpec, 'agentId' | 'version'>): RegistrySource {
+    return { kind: 'registry', agentId: spec.agentId, version: spec.version, distribution: 'binary' }
+  }
+
+  private async download(input: { instanceId: string; source: RegistrySource; env: InstanceEnv; label: string; onProgress: (progress: InstallProgress) => void }, agentDir: string, signal: AbortSignal, stage?: Stage): Promise<InstalledAgent> {
     const { source, label } = input
-    input.onProgress({ message: `Checking the ACP registry for ${label}…` })
-    const agent = await this.options.registry.agent(source.agentId, signal)
-    if (!agent) throw new Error(`The ACP registry no longer lists ${source.agentId}.`)
-    if (agent.version !== source.version) throw new Error(`The ACP registry now has ${label} ${agent.version}, not ${source.version}. Update the entry to install it.`)
+    let agent: RegistryAgent | undefined
+    if (!stage) {
+      input.onProgress({ message: `Checking the ACP registry for ${label}…` })
+      agent = await this.options.registry.agent(source.agentId, signal)
+      if (!agent) throw new Error(`The ACP registry no longer lists ${source.agentId}.`)
+      if (agent.version !== source.version) throw new Error(`The ACP registry now has ${label} ${agent.version}, not ${source.version}. Update the entry to install it.`)
+    }
     const staging = createStaging(agentDir)
     try {
       atomicWriteJsonSync(join(staging, 'owner.json'), { pid: process.pid })
-      const receipt = source.distribution === 'npx'
-        ? await this.stageNpm(agent, staging, input, signal)
-        : await this.stageBinary(agent, source, staging, input, signal)
+      const receipt = stage
+        ? await stage(staging, signal)
+        : source.distribution === 'npx'
+          ? await this.stageNpm(agent!, staging, input, signal)
+          : await this.stageBinary(agent!, source, staging, input, signal)
       atomicWriteJsonSync(join(staging, RECEIPT_FILE), receipt)
       rmSync(join(staging, 'owner.json'), { force: true })
       input.onProgress({ message: `Finishing the ${label} install…` })
@@ -590,6 +655,63 @@ export class AgentInstalls {
       bytes: tree.bytes,
       launch: { cmd, args: [...resolved.spec.args], env: { ...resolved.spec.env }, runner: 'node' },
       // Mousse checked the package against the npm registry's sha512; npm checked its dependencies.
+      checksum: 'registry',
+      installedAt: new Date().toISOString()
+    }
+  }
+
+  private async stagePackageBinary(spec: PackageBinarySpec, staging: string, input: { label: string; onProgress: (progress: InstallProgress) => void }, signal: AbortSignal): Promise<AgentReceipt> {
+    const platform = this.keys()[0]
+    if (!platform) throw new Error(`${input.label} has no download for this computer.`)
+    const registry = this.options.npmRegistry ?? NPM_REGISTRY
+    input.onProgress({ message: `Checking ${spec.name} on the npm registry…` })
+    const meta = await this.packageMetadata(registry, spec.name, spec.version, signal)
+    const tarball = join(staging, 'package.tgz')
+    input.onProgress({ message: `Downloading ${input.label}…` })
+    const download = await downloadArtifact(meta.tarball, tarball, {
+      signal,
+      ...(this.options.fetch ? { fetch: this.options.fetch } : {}),
+      ...(this.options.maxDownloadBytes ? { maxBytes: this.options.maxDownloadBytes } : {}),
+      ...(this.options.downloadTimeoutMs ? { timeoutMs: this.options.downloadTimeoutMs } : {}),
+      onProgress: input.onProgress,
+      label: input.label
+    })
+    if ((await hashFile(tarball, signal, 'sha512', 'base64')) !== meta.sha512) throw new Error(`The ${spec.name} download does not match the npm registry checksum.`)
+    input.onProgress({ message: `Unpacking ${input.label}…` })
+    const dist = join(staging, DIST_DIR)
+    await extractArchive(tarball, dist, { format: 'tar.gz', stripPrefix: 'package/', signal })
+    rmSync(tarball, { force: true })
+    for (const [from, to] of Object.entries(spec.expand ?? {})) {
+      const packed = containedFile(dist, from.split('/'))
+      const target = commandSegments(to)
+      if (!target) throw new Error(`${to} is outside the install.`)
+      await expandBrotli(packed, join(dist, ...target), this.options.maxExpandedBytes ?? MAX_EXPANDED_PROGRAM_BYTES, signal)
+      rmSync(packed, { force: true })
+    }
+    const segments = commandSegments(spec.cmd)
+    if (!segments) throw new Error(`${spec.cmd} is not a command inside the install.`)
+    for (const file of spec.required) {
+      try {
+        containedFile(dist, file.split('/'))
+      } catch {
+        throw new Error(`${spec.name} ${spec.version} does not hold ${file}, which ${input.label} needs.`)
+      }
+    }
+    if (process.platform !== 'win32') chmodSync(join(dist, ...segments), 0o755)
+    containedFile(dist, segments, { executable: true })
+    const tree = await hashTree(dist, signal)
+    return {
+      agentId: spec.agentId,
+      version: spec.version,
+      platform,
+      distribution: 'binary',
+      artifactUrl: `${spec.name}@${spec.version}`,
+      finalUrl: download.finalUrl,
+      expected: { algorithm: 'sha512', digest: meta.sha512 },
+      archiveSha256: download.sha256,
+      files: tree.files,
+      bytes: tree.bytes,
+      launch: { cmd: segments.join('/'), args: [], env: {} },
       checksum: 'registry',
       installedAt: new Date().toISOString()
     }

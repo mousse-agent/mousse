@@ -7,7 +7,7 @@ import { mkdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { RegistryAgentView, RegistryChecksum } from '../../../shared/harness/types'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
-import { HOME_VARIABLES, INHERITED_CREDENTIALS } from '../env'
+import { HOME_VARIABLES, isInheritedCredential } from '../env'
 
 export const REGISTRY_URL = 'https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json'
 export const REGISTRY_MAX_BYTES = 1024 * 1024
@@ -141,8 +141,7 @@ export function droppedVariable(name: string): boolean {
   if (upper === 'PATH' || upper === 'NODE_OPTIONS' || upper === 'NODE_PATH') return true
   if (upper.startsWith('LD_') || upper.startsWith('DYLD_') || upper.startsWith('ELECTRON_')) return true
   const homes = Object.values(HOME_VARIABLES).map((variable) => variable!.toUpperCase())
-  const credentials = Object.values(INHERITED_CREDENTIALS).flatMap((names) => names!.map((entry) => entry.toUpperCase()))
-  return homes.includes(upper) || credentials.includes(upper) || upper === 'HOME' || upper === 'USERPROFILE'
+  return homes.includes(upper) || isInheritedCredential(upper) || upper === 'HOME' || upper === 'USERPROFILE'
 }
 
 /** Registry variables without the ones Mousse never passes on (`droppedVariable`). */

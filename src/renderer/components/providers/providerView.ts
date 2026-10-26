@@ -79,6 +79,15 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     customModels: false,
     bundled: true
   },
+  grok: {
+    label: 'Grok',
+    iconId: 'xai',
+    family: 'agent',
+    description: "xAI's Grok CLI, signed in with your Grok account or an xAI API key. Grok asks Mousse before it runs a tool.",
+    multiInstance: true,
+    customModels: false,
+    homeHint: '~/.grok'
+  },
   acp: {
     label: 'ACP agent',
     iconId: 'acp',

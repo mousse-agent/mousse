@@ -46,6 +46,10 @@ export interface AcpClientHandlers {
   writeTextFile?(request: WriteTextFileRequest): Promise<WriteTextFileResponse>
   /** `elicitation/create`: a sign-in link (URL mode) during sign-in; anything else is declined. */
   createElicitation?(request: CreateElicitationRequest): Promise<CreateElicitationResponse>
+  /** A preset's own extension requests (`_x.ai/ask_user_question`), by method. */
+  extRequests?: Record<string, (params: unknown) => Promise<unknown>>
+  /** A preset's own extension notifications (`_x.ai/session/prompt_complete`), by method. */
+  extNotifications?: Record<string, (params: unknown) => void>
 }
 
 /** Why a connection opens. */
@@ -117,6 +121,11 @@ export function acpClientApp(handlers: AcpClientHandlers, active: Pick<AcpConnec
     app.onRequest(methods.client.elicitation.create, async ({ params }) => elicit(params))
   }
   app.onNotification(methods.client.session.update, ({ params }) => active.onUpdate?.(params.update, params.sessionId))
+  const raw = (params: unknown): unknown => params
+  for (const [method, handle] of Object.entries(handlers.extRequests ?? {}))
+    app.onRequest<unknown, unknown>(method, raw, async ({ params }) => handle(params))
+  for (const [method, handle] of Object.entries(handlers.extNotifications ?? {}))
+    app.onNotification<unknown>(method, raw, ({ params }) => handle(params))
   return app
 }
 

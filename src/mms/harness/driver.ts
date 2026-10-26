@@ -287,6 +287,6 @@ export function installOwner(path: string | undefined, source: 'path' | 'managed
   if (normalized.includes('/.bun/')) return 'bun'
   if (normalized.includes('/node_modules/') || normalized.includes('/npm/') || normalized.endsWith('.cmd')) return 'npm'
   if (normalized.includes('/winget/')) return 'winget'
-  if (normalized.includes('/.local/bin/') || normalized.includes('/.local/share/')) return 'standalone'
+  if (normalized.includes('/.local/bin/') || normalized.includes('/.local/share/') || normalized.includes('/.grok/bin/')) return 'standalone'
   return 'unknown'
 }
