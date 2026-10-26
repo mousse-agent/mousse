@@ -16,7 +16,7 @@ async function main() {
   const server = createServer((request, response) => {
     const asset = request.url === '/entry.js' ? 'entry.js' : request.url === '/entry.css' ? 'entry.css' : undefined
     response.setHeader('Content-Type', asset === 'entry.js' ? 'application/javascript' : asset === 'entry.css' ? 'text/css' : 'text/html')
-    response.end(asset ? readFileSync(join(directory, asset)) : '<!doctype html><link rel="stylesheet" href="/entry.css"><style>:root{--text-primary:#eee;--accent:#aaa}body{margin:0}</style><div id="root"></div><button id="outside">Outside</button><script src="/entry.js"></script>')
+    response.end(asset ? readFileSync(join(directory, asset)) : '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/entry.css"><style>:root{--text-primary:#eee;--accent:#aaa}body{margin:0}</style><div id="root"></div><button id="outside">Outside</button><script src="/entry.js"></script>')
   })
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done))
   const window = new BrowserWindow({ show: false, webPreferences: { offscreen: true, backgroundThrottling: false, contextIsolation: true, nodeIntegration: false, sandbox: true } })

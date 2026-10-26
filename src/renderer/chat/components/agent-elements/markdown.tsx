@@ -16,6 +16,7 @@ import { readMathClass } from "../../../markdown/math/math-markup";
 import { MathInline } from "../../../markdown/math/MathView";
 import { useRenderMath } from "../../../markdown/math/renderMathSetting";
 import { mathRenderers, mousseMathPlugin } from "../../../markdown/math/streamdown-math";
+import { mermaidRenderer } from "./markdown-mermaid";
 
 function fixNumberedListBreaks(text: string): string {
   return text.replace(/^(\d+)[.)]\s*\n+\s*/gm, "$1. ");
@@ -65,6 +66,23 @@ function normalizeCodeFenceLanguages(text: string, keepMath: boolean): string {
     if (lang === "math" && !keepMath) return "```text";
     return lang && /^[\w#+.-]+$/.test(lang) ? `\`\`\`${lang}` : "```";
   });
+}
+
+/** True when the text ends inside a ```mermaid fence that is still open. */
+function endsInOpenMermaidFence(text: string): boolean {
+  if (!text.includes("mermaid")) return false;
+  let open: { marker: string; mermaid: boolean } | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    const fence = /^ {0,3}(`{3,}|~{3,})\s*(.*)$/.exec(line);
+    if (!fence) continue;
+    const [, marker, info] = fence;
+    if (!open) {
+      open = { marker, mermaid: /^mermaid(\s|$)/.test(info) };
+    } else if (marker[0] === open.marker[0] && marker.length >= open.marker.length && !info.trim()) {
+      open = null;
+    }
+  }
+  return open?.mermaid ?? false;
 }
 
 /** Lightweight synchronous tokenizer for inline `code` chips.
@@ -197,8 +215,12 @@ export type MarkdownProps = {
 // render would defeat memoization inside Streamdown. Streamdown keeps one
 // processor per distinct plugin list, so there are exactly two: with math and
 // without it.
-const markdownPlugins = { code: codeHighlighter };
-const markdownMathPlugins = { code: codeHighlighter, math: mousseMathPlugin, renderers: mathRenderers };
+const markdownPlugins = { code: codeHighlighter, renderers: [mermaidRenderer] };
+const markdownMathPlugins = {
+  code: codeHighlighter,
+  math: mousseMathPlugin,
+  renderers: [...mathRenderers, mermaidRenderer],
+};
 // Math is typeset by our own components. Streamdown's own completion of an
 // unclosed `$$` would otherwise rewrite the text before our parser sees it.
 const markdownRemend = { katex: false };
@@ -373,6 +395,13 @@ export const Markdown = memo(function Markdown({ content, className }: MarkdownP
     math,
   );
 
+  // Streamdown reports a fence as unfinished (`isIncomplete`) only while
+  // `isAnimating`, and Markdown is not told whether a reply is streaming. An
+  // open mermaid fence is the one case that must not be drawn half-written, so
+  // derive it from the text. Limited to mermaid because `isAnimating` also
+  // disables every code block's copy button.
+  const drawingDiagram = endsInOpenMermaidFence(safeContent);
+
   return (
     <div
       className={cn(
@@ -388,6 +417,7 @@ export const Markdown = memo(function Markdown({ content, className }: MarkdownP
         plugins={math ? markdownMathPlugins : markdownPlugins}
         parseMarkdownIntoBlocksFn={math ? parseBlocksKeepingMath : undefined}
         remend={markdownRemend}
+        isAnimating={drawingDiagram}
         urlTransform={safeMarkdownUrl}
         linkSafety={markdownLinkSafety}
       >
