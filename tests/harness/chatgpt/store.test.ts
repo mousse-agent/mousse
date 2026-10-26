@@ -18,6 +18,7 @@ afterEach(async () => {
 
 const SAMPLE: ChatGptStoreData = {
   version: 1,
+  revision: 0,
   credentialEpoch: 3,
   signInFence: 2,
   active: 'oaiapp_a',
@@ -112,6 +113,22 @@ describe('ChatGPT store', () => {
     vault.canEncrypt = () => false
     expect(() => store.write({ ...SAMPLE, credentialEpoch: 4 })).not.toThrow()
     expect(readFileSync(path, 'utf8')).toContain('__mousse_encrypted_v1')
+  })
+
+  it('a write is refused when another writer saved a newer revision since this one read', () => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'i')
+    const plain = { canEncrypt: () => false, encrypt: () => null, decrypt: () => null }
+    const first = new ChatGptStore(path, plain)
+    first.read()
+    first.write({ ...SAMPLE })
+    const stale = new ChatGptStore(path, plain)
+    const seen = stale.read()
+    first.write({ ...first.read(), credentialEpoch: 9 })
+    expect(() => stale.write({ ...seen, active: null })).toThrow(expect.objectContaining({ code: 'operation_busy' }))
+    expect(new ChatGptStore(path, plain).read()).toMatchObject({ credentialEpoch: 9, active: 'oaiapp_a', revision: 2 })
+    // A store never read expects no file, so it cannot overwrite one blindly.
+    expect(() => new ChatGptStore(path, plain).write({ ...SAMPLE })).toThrow(expect.objectContaining({ code: 'operation_busy' }))
   })
 
   it.skipIf(process.platform === 'win32')('a plain store is written with mode 0600', () => {

@@ -93,6 +93,8 @@ export const MESSAGES = {
   busy: 'Another ChatGPT sign-in change is still running. Try again shortly.',
   superseded: 'The ChatGPT connection changed while you were signing in. Sign in again.',
   revocationPending: 'Signed out in Mousse. Revoking the old sign-in at OpenAI is still pending; sign out again to retry.',
+  storeChanged: 'The ChatGPT connection changed while this was running. Try again.',
+  stopPending: 'Signed in. Work that used the previous sign-in could not be stopped yet; it is retried before the old sign-in is revoked.',
   modelsUnauthorized: 'ChatGPT rejected the connection while listing models. Checking the sign-in again.',
   modelsFailed: "Couldn't load ChatGPT models. Try Refresh models.",
   revocationUnconfirmed: 'Signed out in Mousse. Remote revocation could not be confirmed; disconnect Mousse in ChatGPT Settings.'

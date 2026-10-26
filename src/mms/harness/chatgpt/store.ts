@@ -49,6 +49,11 @@ export interface ChatGptSession {
 export interface ChatGptStoreData {
   version: 1
   /**
+   * Moves on with every write. A write must find the revision it read, so a process that lost the
+   * lock without knowing (suspended past the lock's max hold) cannot overwrite a newer state.
+   */
+  revision: number
+  /**
    * Moves on with every sign-in commit, activation, sign-out and terminal refresh error, in the
    * same write. It is part of the profile key, so any of them ends what was issued before.
    */
@@ -82,7 +87,7 @@ export interface RevocableToken {
 }
 
 export function emptyStore(): ChatGptStoreData {
-  return { version: 1, credentialEpoch: 0, signInFence: 0, active: null, registrations: [], sessions: [], pendingRevocations: [] }
+  return { version: 1, revision: 0, credentialEpoch: 0, signInFence: 0, active: null, registrations: [], sessions: [], pendingRevocations: [] }
 }
 
 export function chatgptStorePath(profileHome: string, instanceId: string): string {
@@ -113,12 +118,13 @@ function isRevocable(value: unknown): value is RevocableToken {
 }
 
 function decode(value: unknown): ChatGptStoreData | null {
-  if (!isRecord(value) || value.version !== 1 || !Number.isInteger(value.credentialEpoch) || !Number.isInteger(value.signInFence) || !strOrNull(value.active)) return null
+  if (!isRecord(value) || value.version !== 1 || !Number.isInteger(value.revision) || !Number.isInteger(value.credentialEpoch) || !Number.isInteger(value.signInFence) || !strOrNull(value.active)) return null
   if (!Array.isArray(value.registrations) || !value.registrations.every(isRegistration)) return null
   if (!Array.isArray(value.sessions) || !value.sessions.every(isSession)) return null
   if (!Array.isArray(value.pendingRevocations) || !value.pendingRevocations.every(isRevocable)) return null
   return {
     version: 1,
+    revision: value.revision as number,
     credentialEpoch: value.credentialEpoch as number,
     signInFence: value.signInFence as number,
     active: value.active,
@@ -136,6 +142,8 @@ function isNewer(value: unknown): boolean {
 export class ChatGptStore {
   /** Whether the file read last was encrypted: a store never downgrades to plain text. */
   private encrypted = false
+  /** The revision the last read found (0 for no file); null before any read, which expects no file. */
+  private readRevision: number | null = null
 
   constructor(
     readonly path: string,
@@ -156,10 +164,12 @@ export class ChatGptStore {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         this.encrypted = this.codec.encryptionRequired === true
+        this.readRevision = 0
         return emptyStore()
       }
       throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageUnreadable)
     }
+    this.readRevision = null
     let wasEncrypted = false
     try {
       const opened = openSecretFile(raw, this.codec)
@@ -167,6 +177,7 @@ export class ChatGptStore {
       const decoded = decode(opened.value)
       if (decoded) {
         this.encrypted = opened.encrypted
+        this.readRevision = decoded.revision
         return decoded
       }
       if (isNewer(opened.value)) throw new ChatGptAuthError('unsupported', 'storage_newer', MESSAGES.storageNewer)
@@ -179,7 +190,23 @@ export class ChatGptStore {
     this.encrypted = wasEncrypted || this.codec.encryptionRequired === true
     if (!options.discardUnreadable) throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageUnreadable)
     quarantineUnreadableFileSync(this.path)
+    this.readRevision = 0
     return emptyStore()
+  }
+
+  /** The revision saved on disk now: 0 for no file, null when it cannot be read. */
+  private savedRevision(): number | null {
+    let raw: string
+    try {
+      raw = readFileSync(this.path, 'utf8')
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 0 : null
+    }
+    try {
+      return decode(openSecretFile(raw, this.codec).value)?.revision ?? null
+    } catch {
+      return null
+    }
   }
 
   /** Fails typed when the next write could not be sealed as required (call after `read`). */
@@ -191,10 +218,19 @@ export class ChatGptStore {
     }
   }
 
+  /**
+   * Saves `data` as the next revision, only if the file still holds the revision the last read
+   * found (no file, before any read). Sets `data.revision`. The check and the write are not one
+   * atomic step, but they run back to back in synchronous code under the instance lock; what it
+   * guards against is a holder that resumes long after it lost the lock.
+   */
   write(data: ChatGptStoreData): void {
+    const expected = this.readRevision ?? 0
+    if (this.savedRevision() !== expected) throw new ChatGptAuthError('operation_busy', 'busy', MESSAGES.storeChanged)
+    const next = { ...data, revision: expected + 1 }
     let sealed
     try {
-      sealed = sealSecretFile(`${JSON.stringify(data, null, 2)}\n`, this.codec, this.encrypted)
+      sealed = sealSecretFile(`${JSON.stringify(next, null, 2)}\n`, this.codec, this.encrypted)
     } catch {
       throw new ChatGptAuthError('unsupported', 'storage', MESSAGES.storageEncryption)
     }
@@ -204,6 +240,8 @@ export class ChatGptStore {
       throw new ChatGptAuthError('protocol', 'storage', MESSAGES.storageWrite)
     }
     this.encrypted = sealed.encrypted
+    this.readRevision = next.revision
+    data.revision = next.revision
   }
 
   remove(): void {

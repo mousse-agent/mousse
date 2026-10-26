@@ -1,12 +1,14 @@
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatGptAuth } from '../../../src/mms/harness/chatgpt/chatgptAuth'
 import type { ChatGptAuthError } from '../../../src/mms/harness/chatgpt/errors'
 import { harnessAppError } from '../../../src/shared/harness/types'
+import { tryAcquireOnceForTests } from '../../../src/mms/platform/asyncFileLock'
 import { activeSession, ChatGptStore, chatgptStorePath, emptyStore, type ChatGptStoreData } from '../../../src/mms/harness/chatgpt/store'
-import { FakeIssuer, FULL_SCOPE, guardNetwork, plainCodec, tempHomes, type Reply } from './fakeIssuer'
+import type { SecretCodec } from '../../../src/mms/providers/secretCodec'
+import { FakeIssuer, fakeVault, FULL_SCOPE, guardNetwork, plainCodec, tempHomes, type Reply } from './fakeIssuer'
 import { chatgptAuth, signIn } from './signInFlow'
 
 guardNetwork()
@@ -33,8 +35,13 @@ interface Seed {
   earliestRefreshAt?: number | null
 }
 
+/** `seed` with another codec. */
+function seedWith(profileHome: string, codec: SecretCodec, seeds: Seed[]): ChatGptStoreData {
+  return seed(profileHome, seeds, seeds[0]?.clientId ?? null, codec)
+}
+
 /** Writes a store directly, as an earlier sign-in would have left it. */
-function seed(profileHome: string, seeds: Seed[], active: string | null = seeds[0]?.clientId ?? null): ChatGptStoreData {
+function seed(profileHome: string, seeds: Seed[], active: string | null = seeds[0]?.clientId ?? null, codec: SecretCodec = plainCodec): ChatGptStoreData {
   const data: ChatGptStoreData = {
     ...emptyStore(),
     credentialEpoch: 1,
@@ -54,7 +61,10 @@ function seed(profileHome: string, seeds: Seed[], active: string | null = seeds[
     }))
   }
   for (const entry of seeds) if (entry.refreshToken !== null) issuer.allowRefresh(entry.refreshToken ?? `rt-${entry.clientId}`, entry.clientId)
-  new ChatGptStore(chatgptStorePath(profileHome, INSTANCE), plainCodec).write(data)
+  // A write must find the revision it read, as every writer does.
+  const store = new ChatGptStore(chatgptStorePath(profileHome, INSTANCE), codec)
+  store.read()
+  store.write(data)
   return data
 }
 
@@ -394,7 +404,7 @@ describe('sign-out and deletion', () => {
     expect(await auth.deleteInstance()).toEqual({ confirmed: true })
     expect(issuer.revokeRequests.map((request) => request.token).sort()).toEqual(['rt-oaiapp_a', 'rt-oaiapp_b'])
     expect(auth.status().state).toBe('signed_out')
-    expect(stored(auth)).toEqual({ ...emptyStore(), credentialEpoch: 2, signInFence: 2 })
+    expect(stored(auth)).toEqual({ ...emptyStore(), revision: expect.any(Number), credentialEpoch: 2, signInFence: 2 })
     expect(ensureChatGptHostId(home.installationHome)).toBe(hostId)
   })
 
@@ -424,6 +434,59 @@ describe('sign-out and deletion', () => {
     expect(issuer.revokeRequests[0].token).toBe('rt-oaiapp_a')
     expect(stored(auth).pendingRevocations).toEqual([])
     expect(auth.status()).not.toHaveProperty('revocationPending')
+  })
+
+  it('a holder suspended past the lock max hold cannot overwrite what happened meanwhile', async () => {
+    const home = homes()
+    seed(home.profileHome, [{ clientId: 'oaiapp_a', subject: 'alice', life: 0 }])
+    const sleeper = chatgptAuth(issuer, home)
+    const hold = holdTokenEndpoint()
+    const refresh = sleeper.access()
+    await hold.sent()
+    // The refreshing process is suspended for more than 5 minutes: its lock reads as expired, and
+    // another process takes it over (the lock tests cover that takeover) and signs out. Callers in
+    // this process would queue behind the sleeper, so the other process is played by a bare store
+    // writer that takes the expired lock.
+    const lock = JSON.parse(readFileSync(sleeper.lifecycle.lockPath, 'utf8'))
+    writeFileSync(sleeper.lifecycle.lockPath, JSON.stringify({ ...lock, acquiredAt: new Date(Date.now() - 10 * MINUTE).toISOString() }))
+    expect(tryAcquireOnceForTests(sleeper.lifecycle.lockPath, 5 * MINUTE)).toMatch(/^[0-9a-f]{32}$/)
+    const other = new ChatGptStore(chatgptStorePath(home.profileHome, INSTANCE), plainCodec)
+    const current = other.read()
+    other.write({ ...current, active: null, sessions: [], signInFence: current.signInFence + 1, credentialEpoch: current.credentialEpoch + 1 })
+    // It resumes: its renewal is refused, and the sign-out stands.
+    hold.release()
+    await expect(refresh).rejects.toMatchObject({ code: 'operation_busy', message: 'The ChatGPT connection changed while this was running. Try again.' })
+    const after = stored(sleeper)
+    expect(after.active).toBeNull()
+    expect(after.sessions).toEqual([])
+  })
+
+  it('a vault that locks during the stop hook leaves the revocation pending, never falsely confirmed', async () => {
+    const home = homes()
+    const vault = fakeVault()
+    seedWith(home.profileHome, vault, [{ clientId: 'oaiapp_a', subject: 'alice', life: 30 * MINUTE }])
+    const auth = chatgptAuth(issuer, home, { codec: vault, onCredentialChange: async () => { vault.available = false } })
+    expect(await auth.signOut()).toEqual({ confirmed: false, message: 'Signed out in Mousse. Revoking the old sign-in at OpenAI is still pending; sign out again to retry.' })
+    expect(issuer.revokeRequests).toHaveLength(0)
+    vault.available = true
+    const retry = chatgptAuth(issuer, home, { codec: vault })
+    expect(retry.status()).toMatchObject({ state: 'signed_out', revocationPending: true })
+    expect(await retry.signOut()).toEqual({ confirmed: true })
+    expect(issuer.revokeRequests.map((request) => request.token)).toEqual(['rt-oaiapp_a'])
+  })
+
+  it('a sign-in whose stop hook fails is still saved, and says the old sign-in waits', async () => {
+    const home = homes()
+    let fail = false
+    const auth = chatgptAuth(issuer, home, { onCredentialChange: async () => { if (fail) throw new Error('app-server did not exit') } })
+    await signIn(issuer, auth, { subject: 'alice' })
+    const first = activeSession(stored(auth))!.refreshToken
+    fail = true
+    const { result } = await signIn(issuer, auth, { subject: 'alice' })
+    expect(result).toEqual({ success: true, warning: 'Signed in. Work that used the previous sign-in could not be stopped yet; it is retried before the old sign-in is revoked.' })
+    expect(auth.status()).toMatchObject({ state: 'signed_in', revocationPending: true })
+    expect(stored(auth).pendingRevocations.map((token) => token.refreshToken)).toEqual([first])
+    expect(issuer.revokeRequests).toHaveLength(0)
   })
 
   it('an unconfirmed revocation is reported and not retried forever', async () => {

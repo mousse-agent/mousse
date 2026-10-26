@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { generateKeyPair } from 'jose'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
+import { dirname } from 'node:path'
 import { ChatGptLifecycle } from '../../../src/mms/harness/chatgpt/lifecycle'
 import { isBrowserBlockedPort, parsePastedRedirect, setBlockedPortCheckForTests } from '../../../src/mms/harness/chatgpt/oauth'
 import { activeSession } from '../../../src/mms/harness/chatgpt/store'
@@ -426,6 +428,21 @@ describe('Sign in with ChatGPT: a sign-in that finishes late', () => {
     release()
     expect(await flow.result).toMatchObject({ success: false, failure: 'cancelled', error: 'The ChatGPT connection changed while you were signing in. Sign in again.' })
     expect(stored(auth).active).toBeNull()
+    expect(issuedToHeld()).toHaveLength(1)
+  })
+
+  it('a sign-in that started on a corrupt store cannot undo a deletion by another process', async () => {
+    const home = homes()
+    const auth = chatgptAuth(issuer, home)
+    mkdirSync(dirname(auth.lifecycle.store.path), { recursive: true })
+    writeFileSync(auth.lifecycle.store.path, '{"version":1,')
+    const { flow, release } = await heldSignIn(auth)
+    // Starting set the corrupt file aside under the lock and gave the attempt a durable fence.
+    expect(stored(auth).signInFence).toBeGreaterThan(0)
+    await new ChatGptLifecycle({ instanceId: 'codex:managed', profileHome: home.profileHome, endpoints: issuer.endpoints, codec: plainCodec }).deleteInstance()
+    release()
+    expect(await flow.result).toMatchObject({ success: false, failure: 'cancelled' })
+    expect(stored(auth)).toMatchObject({ active: null, registrations: [], sessions: [] })
     expect(issuedToHeld()).toHaveLength(1)
   })
 

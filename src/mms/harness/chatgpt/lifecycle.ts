@@ -40,6 +40,10 @@ export type { RevocableToken } from './store'
  *
  * Refresh tokens taken out of use go to `pendingRevocations` in the same write. The caller revokes
  * them only after it stopped what used them, then settles them here.
+ *
+ * The lock gives mutual exclusion, but a lease cannot stop a suspended process from resuming after
+ * the lock was reclaimed from it. Correctness therefore rests on the store's revision: every write
+ * must find the revision its critical section read, or it is refused (`operation_busy`).
  */
 
 /** Refresh when less than this much life is left. */
@@ -72,10 +76,10 @@ export interface ChatGptAccess {
 
 /** What a sign-in reads before it opens the browser. */
 export interface SignInStart {
-  /** The saved connections, or null when the file is corrupt (the commit sets it aside). */
-  data: ChatGptStoreData | null
-  /** The fence the commit must still find, or null for a corrupt file. */
-  fence: number | null
+  /** The saved connections. */
+  data: ChatGptStoreData
+  /** The fence the commit must still find. */
+  fence: number
 }
 
 /** A verified sign-in, ready to save. */
@@ -93,7 +97,7 @@ export interface SignInCommit {
   /** The saved registration this sign-in renewed; its subject must not change. */
   reauthOf?: string
   /** The `signInFence` when the attempt started; the commit fails if it moved. */
-  fence: number | null
+  fence: number
   /** False once the attempt was cancelled or a newer one started: nothing is saved. */
   stillCurrent: () => boolean
 }
@@ -181,21 +185,28 @@ export class ChatGptLifecycle {
   }
 
   /**
-   * Checks, before the browser opens, that a sign-in could be saved: the file is readable (or
-   * corrupt, and will be set aside) and the vault can seal it. A file this host cannot decrypt, or
-   * one a newer Mousse wrote, fails typed and is never touched.
+   * Runs under the lock before the browser opens. It checks that a sign-in could be saved (the vault
+   * can seal the store), and fails typed for a file this host cannot decrypt or a newer Mousse
+   * wrote, never touching it. A corrupt file is set aside here and replaced by an empty store with
+   * a fresh fence, so every attempt holds a durable fence its commit compares.
    */
-  prepareSignIn(): SignInStart {
-    let data: ChatGptStoreData | null
-    try {
-      data = this.store.read()
-    } catch (error) {
-      if (!(error instanceof ChatGptAuthError) || error.failure !== 'storage') throw error
-      // Corrupt: the commit sets it aside. The read noted whether it was encrypted.
-      data = null
-    }
-    this.store.assertWritable()
-    return { data, fence: data?.signInFence ?? null }
+  prepareSignIn(signal?: AbortSignal): Promise<SignInStart> {
+    return this.locked((read) => {
+      let data: ChatGptStoreData
+      try {
+        data = read()
+      } catch (error) {
+        if (!(error instanceof ChatGptAuthError) || error.failure !== 'storage') throw error
+        // Corrupt. The read noted whether it was encrypted; check the vault before setting it aside.
+        this.store.assertWritable()
+        data = read({ discardUnreadable: true })
+        // A clock-based fence is above any fence an attempt on the old file could hold.
+        data.signInFence = Date.now()
+        this.store.write(data)
+      }
+      this.store.assertWritable()
+      return { data, fence: data.signInFence }
+    }, signal)
   }
 
   /**
@@ -287,7 +298,7 @@ export class ChatGptLifecycle {
     return this.locked((read) => {
       const data = read({ discardUnreadable: true })
       if (!commit.stillCurrent() || signal?.aborted) throw cancelled()
-      if (commit.fence !== null && data.signInFence !== commit.fence) throw failure.superseded()
+      if (data.signInFence !== commit.fence) throw failure.superseded()
       const known = registrationOf(data, commit.clientId)
       if (commit.reauthOf !== undefined && known?.subject && known.subject !== commit.subject) {
         throw new ChatGptAuthError('signed_out', 'subject_mismatch', MESSAGES.differentAccount)
@@ -333,10 +344,10 @@ export class ChatGptLifecycle {
    * attempt reuses it instead of registering again. Does not touch the active connection, and does
    * nothing if the fence moved since the attempt started.
    */
-  saveRegistration(clientId: string, redirectPath: string, fence: number | null): Promise<void> {
+  saveRegistration(clientId: string, redirectPath: string, fence: number): Promise<void> {
     return this.locked((read) => {
       const data = read({ discardUnreadable: true })
-      if (fence !== null && data.signInFence !== fence) return
+      if (data.signInFence !== fence) return
       if (registrationOf(data, clientId)) return
       data.registrations = [...data.registrations, { clientId, subject: null, email: null, label: nextLabel(data), redirectPath, sharing: true }]
       this.store.write(data)
@@ -391,11 +402,13 @@ export class ChatGptLifecycle {
         data = read()
       } catch (error) {
         if (!(error instanceof ChatGptAuthError) || error.failure !== 'storage') throw error
-        // Corrupt: nothing to revoke. A clock-based fence is above any fence an attempt could hold.
-        data = { ...emptyStore(), signInFence: Date.now() }
+        // Corrupt: set it aside; nothing readable to revoke. A clock-based fence is above any fence
+        // an attempt could hold.
+        data = { ...read({ discardUnreadable: true }), signInFence: Date.now() }
       }
       const tombstone: ChatGptStoreData = {
         ...emptyStore(),
+        revision: data.revision,
         credentialEpoch: data.credentialEpoch + 1,
         signInFence: data.signInFence + 1,
         pendingRevocations: [...data.pendingRevocations]
@@ -405,13 +418,9 @@ export class ChatGptLifecycle {
     }, signal)
   }
 
-  /** The refresh tokens still waiting for revocation. */
+  /** The refresh tokens still waiting for revocation. Fails typed when the store cannot be read. */
   pendingRevocations(): RevocableToken[] {
-    try {
-      return this.store.read().pendingRevocations
-    } catch {
-      return []
-    }
+    return this.store.read().pendingRevocations
   }
 
   /** Drops tokens whose revocation was attempted. */
@@ -429,22 +438,28 @@ export class ChatGptLifecycle {
  * Revokes a refresh token at the issuer's revocation endpoint: up to 3 tries, 10 s each, with
  * 250 ms and 1 s between them. An empty 200 confirms it; 5xx and network errors are retried.
  */
-export async function revokeRefreshToken(endpoints: ChatGptEndpoints, token: RevocableToken): Promise<boolean> {
-  for (let attempt = 0; attempt < 3; attempt++) {
+export async function revokeRefreshToken(
+  endpoints: ChatGptEndpoints,
+  token: RevocableToken,
+  options: { attempts?: number; timeoutMs?: number } = {}
+): Promise<boolean> {
+  const attempts = options.attempts ?? 3
+  const timeoutMs = options.timeoutMs ?? REVOKE_TIMEOUT_MS
+  for (let attempt = 0; attempt < attempts; attempt++) {
     let retry = true
     try {
       const discovery = await discover(endpoints)
       const response = await postForm(
         discovery.revocationEndpoint,
         { token: token.refreshToken, token_type_hint: 'refresh_token', client_id: token.clientId },
-        { timeoutMs: REVOKE_TIMEOUT_MS }
+        { timeoutMs }
       )
       if (response.status === 200) return true
       retry = response.status >= 500 || response.status === 429
     } catch {
       retry = true
     }
-    if (!retry || attempt === 2) break
+    if (!retry || attempt === attempts - 1) break
     await delay(REVOKE_BACKOFF_MS[attempt])
   }
   return false
