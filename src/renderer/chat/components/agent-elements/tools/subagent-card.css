@@ -167,7 +167,9 @@
   box-shadow: 0 0 0 2px var(--surface-strong);
 }
 
+/* Positioned like the avatars, so it paints over the last one instead of under it. */
 .subagent-group-more {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
