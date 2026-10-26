@@ -2,6 +2,7 @@ import { Component, Suspense, lazy, type ReactNode } from "react";
 import type { CustomRendererProps } from "streamdown";
 import { MathSource } from "./MathSource";
 import { blockSource, inlineSource, type MathDelimiter } from "./math-markup";
+import { useTypesetMath } from "./renderMathSetting";
 
 const MathTypeset = lazy(() => import("./math-typeset"));
 
@@ -19,7 +20,9 @@ class MathBoundary extends Component<{ fallback: ReactNode; children: ReactNode 
 }
 
 function Typeset(props: { tex: string; display: boolean; block: boolean; source: string }) {
+  const typeset = useTypesetMath();
   const fallback = <MathSource source={props.source} block={props.block} />;
+  if (!typeset) return fallback;
   return (
     <MathBoundary fallback={fallback}>
       <Suspense fallback={fallback}>

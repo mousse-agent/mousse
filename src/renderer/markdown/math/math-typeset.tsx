@@ -17,6 +17,13 @@ export default function MathTypeset({ tex, display, block, source }: MathTypeset
   const html = renderMath(tex, display);
   if (html === null) return <MathSource source={source} block={block} />;
   const Tag = block ? "div" : "span";
-  // `data-math-tex` lets the copy handler put the TeX on the clipboard.
-  return <Tag className="an-math" data-math-tex={tex} dangerouslySetInnerHTML={{ __html: html }} />;
+  // The copy handler puts the TeX, or the source when text is copied too, on the clipboard.
+  return (
+    <Tag
+      className="an-math"
+      data-math-tex={tex}
+      data-math-source={source}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
 }

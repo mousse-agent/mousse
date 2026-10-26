@@ -192,7 +192,6 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyVsCodeTheme(normalized.theme)
   applyLayoutTokens(normalized.theme)
   applyAcrylic(normalized.acrylic, normalized.acrylicIntensity, normalized.theme)
-  setRenderMath(normalized.renderMath)
 }
 
 async function syncWindowBackground(): Promise<void> {
@@ -236,6 +235,7 @@ export function useTheme(options?: { windowMaterial?: boolean }): void {
       const settings = await window.mousse.settings.get()
       if (cancelled) return
       applyAppearance(settings.appearance)
+      setRenderMath(normalizeAppearance(settings.appearance).renderMath)
       if (applyMaterial) {
         await syncWindowBackground()
       }
@@ -245,6 +245,7 @@ export function useTheme(options?: { windowMaterial?: boolean }): void {
 
     const unsub = window.mousse.settings.onChanged((settings) => {
       applyAppearance(settings.appearance)
+      setRenderMath(normalizeAppearance(settings.appearance).renderMath)
       if (applyMaterial) {
         void syncWindowBackground()
       }
@@ -266,6 +267,8 @@ export function useTheme(options?: { windowMaterial?: boolean }): void {
       cancelled = true
       unsub()
       mql?.removeEventListener?.('change', onScheme)
+      // Math shows as source until the next profile's settings load.
+      setRenderMath(undefined)
     }
   }, [applyMaterial, profileId])
 }

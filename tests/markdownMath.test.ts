@@ -321,11 +321,58 @@ describe('tables', () => {
     expect(summary('| a | b |\n|---|---|\n| $x$ | 2 |')).toEqual(['inlineMath:x'])
   })
 
-  it('splits a cell at a pipe inside math (known limitation)', () => {
-    const tree = parse('| a | b |\n|---|---|\n| $|x|$ | 2 |')
-    const row = walk(tree).filter((node) => node.type === 'tableRow')[1]
-    expect(row.children?.length).toBe(4)
-    expect(summary('| a | b |\n|---|---|\n| $|x|$ | 2 |')).toEqual([])
+  function cellCounts(markdown: string, processor: typeof withMath = withMath): number[] {
+    return walk(parse(markdown, processor))
+      .filter((node) => node.type === 'tableRow')
+      .map((row) => row.children?.length ?? 0)
+  }
+
+  it('keeps a pipe inside math in its cell', () => {
+    const table = '| a | b |\n|---|---|\n| $|x|$ | 2 |\n| \\(|y| + |z|\\) | 3 |'
+    expect(cellCounts(table)).toEqual([2, 2, 2])
+    expect(summary(table)).toEqual(['inlineMath:|x|', 'inlineMath:|y| + |z|'])
+  })
+
+  it('keeps a pipe inside math in a head cell', () => {
+    const table = '| $|x|$ | b |\n|---|---|\n| 1 | 2 |'
+    expect(cellCounts(table)).toEqual([2, 2])
+    expect(summary(table)).toEqual(['inlineMath:|x|'])
+  })
+
+  it('still splits cells at pipes that are not inside math', () => {
+    expect(cellCounts('| a | b | c |\n|---|---|---|\n| $5 | $10 | x |')).toEqual([3, 3])
+    expect(cellCounts('| a | b |\n|---|---|\n| \\$x | y$ |')).toEqual([2, 2])
+    expect(cellCounts('| a | b |\n|---|---|\n| \\(x | y |')).toEqual([2, 2])
+    expect(cellCounts('| a | b |\n|---|---|\n| a\\|b | c |')).toEqual([2, 2])
+  })
+
+  it('does not let math in a cell reach into the next line', () => {
+    const table = '| a | b |\n|---|---|\n| \\(x | y |\n| z\\) | w |'
+    expect(cellCounts(table)).toEqual([2, 2, 2])
+    expect(summary(table)).toEqual([])
+  })
+
+  it('parses every prefix of a streamed table with math', () => {
+    const table = '| a | $|x|$ |\n|---|---|\n| \\(|y|\\) | $5 |'
+    for (let end = 0; end <= table.length; end++) {
+      expect(() => parse(table.slice(0, end))).not.toThrow()
+    }
+  })
+
+  it('parses tables without math exactly as GFM does', () => {
+    const tables = [
+      '| a | b |\n|---|---|\n| 1 | 2 |',
+      '| a | b |\n|---|\n| 1 | 2 |',
+      'a | b\n:-- | --:\n1 | 2 | 3\n4',
+      '| a |\n| - |\n> quote',
+      'text\n| a |\n| - |\n| b |',
+      '    | a |\n    | - |',
+      '| `a|b` | c |\n|---|---|\n| d | e |',
+      '- | a |\n  | - |\n  | b |'
+    ]
+    for (const table of tables) {
+      expect(parse(table)).toEqual(parse(table, withoutMath))
+    }
   })
 
   it('accepts an escaped pipe inside math', () => {

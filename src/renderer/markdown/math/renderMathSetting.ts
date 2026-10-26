@@ -1,12 +1,15 @@
 import { useSyncExternalStore } from "react";
 
 // Mirrors Settings > Appearance > Render math so Markdown can choose its
-// plugins synchronously while rendering. useTheme feeds it from the settings
-// the renderer already loads and listens to; until then math is on, the default.
-let enabled = true;
+// plugins synchronously while rendering. useTheme feeds it from the open
+// profile's settings. Until they arrive (at startup and while switching
+// profiles) the setting is unknown: math is parsed, as with the default, but
+// shown as source, so a profile with math off never shows typeset formulas.
+let enabled: boolean | undefined;
 const listeners = new Set<() => void>();
 
-export function setRenderMath(next: boolean): void {
+/** `undefined` while the open profile's settings have not loaded. */
+export function setRenderMath(next: boolean | undefined): void {
   if (next === enabled) return;
   enabled = next;
   for (const listener of listeners) listener();
@@ -17,10 +20,20 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-function getSnapshot(): boolean {
-  return enabled;
+function parseSnapshot(): boolean {
+  return enabled !== false;
 }
 
+function typesetSnapshot(): boolean {
+  return enabled === true;
+}
+
+/** Whether to parse math: on unless the setting is known to be off. */
 export function useRenderMath(): boolean {
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  return useSyncExternalStore(subscribe, parseSnapshot, parseSnapshot);
+}
+
+/** Whether to typeset parsed math: only once the setting is known to be on. */
+export function useTypesetMath(): boolean {
+  return useSyncExternalStore(subscribe, typesetSnapshot, typesetSnapshot);
 }

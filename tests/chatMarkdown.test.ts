@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Markdown } from '../src/renderer/chat/components/agent-elements/markdown'
 import { MarkdownPreview } from '../src/renderer/components/editors/MarkdownPreview'
 import { setRenderMath } from '../src/renderer/markdown/math/renderMathSetting'
@@ -132,7 +132,8 @@ describe('chat Markdown GitHub alerts', () => {
 })
 
 describe('chat Markdown math', () => {
-  afterEach(() => setRenderMath(true))
+  beforeEach(() => setRenderMath(true))
+  afterEach(() => setRenderMath(undefined))
 
   // KaTeX loads on first use: the first render shows the source, a render after
   // the chunk has arrived shows typeset math.
@@ -214,6 +215,16 @@ describe('chat Markdown math', () => {
     expect(markup).toContain('$x^2$')
     expect(markup).toContain('$$')
     expect(markup).toContain('language-text')
+  })
+
+  it('shows math as source until the setting is known', async () => {
+    setRenderMath(undefined)
+    const markup = await renderTypeset('Inline \\(x^2\\) here\n\n$$\ny\n$$')
+    expect(markup).not.toContain('katex')
+    expect(markup).toContain('\\(x^2\\)')
+    expect(markup).toContain('$$\ny\n$$')
+    setRenderMath(true)
+    expect(render('Inline \\(x^2\\) here').match(/class="katex"/g)?.length).toBe(1)
   })
 
   it('does not typeset raw HTML code tagged as math when Render math is off', () => {

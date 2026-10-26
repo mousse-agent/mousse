@@ -8,6 +8,7 @@ import {
   delimiterClass,
   type MathDelimiter,
 } from "./math-markup";
+import { mathTables } from "./math-table";
 import { mousseMath } from "./syntax";
 
 type MathTreeNode = {
@@ -68,7 +69,7 @@ function visit(node: MathTreeNode, source: string): void {
  */
 export function remarkMousseMath(this: Processor): (tree: Root, file: { value: unknown }) => void {
   const data = this.data();
-  (data.micromarkExtensions ??= []).push(mousseMath());
+  (data.micromarkExtensions ??= []).push(mousseMath(), mathTables());
   (data.fromMarkdownExtensions ??= []).push(mathFromMarkdown());
   return (tree, file) => visit(tree as unknown as MathTreeNode, String(file.value));
 }
