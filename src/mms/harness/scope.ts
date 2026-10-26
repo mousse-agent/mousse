@@ -51,6 +51,19 @@ export class HarnessScopeStore {
     })
   }
 
+  /** Project defaults that named `from` name `to` now; returns those projects. */
+  moveDefaults(from: string, to: string): string[] {
+    const file = structuredClone(this.read())
+    const moved: string[] = []
+    for (const [projectId, project] of Object.entries(file.projects)) {
+      if (project.defaultSelection?.instanceId !== from) continue
+      project.defaultSelection = { ...project.defaultSelection, instanceId: to }
+      moved.push(projectId)
+    }
+    if (moved.length) this.write(file)
+    return moved
+  }
+
   /** Drops every project's override of a removed instance. */
   forgetInstance(instanceId: string): void {
     const file = structuredClone(this.read())

@@ -32,6 +32,8 @@ export interface InstanceConfig {
   env?: Record<string, string>
   /** Where an ACP agent comes from (the `acp` driver); derived from the fields above when absent. */
   source?: AcpSource
+  /** The entry this one moved to (`instances.move`): turned off, and its threads continue there. */
+  movedTo?: string
 }
 
 /** Runtime facts as a runtime reports them; the gateway stamps the instance and its counters. */
@@ -183,6 +185,7 @@ export function decodeInstanceConfig(raw: Record<string, unknown> | undefined, o
   if (typeof raw.displayName === 'string' && raw.displayName.trim()) config.displayName = raw.displayName.trim().slice(0, 80)
   if (options.privateHome && raw.home === 'private') config.home = 'private'
   if (typeof raw.loginMethod === 'string' && raw.loginMethod) config.loginMethod = raw.loginMethod
+  if (typeof raw.movedTo === 'string' && raw.movedTo) config.movedTo = raw.movedTo
   if (typeof raw.binaryPath === 'string' && raw.binaryPath.trim()) config.binaryPath = raw.binaryPath.trim()
   if (Array.isArray(raw.args)) config.args = raw.args.filter((arg): arg is string => typeof arg === 'string')
   if (raw.env && typeof raw.env === 'object' && !Array.isArray(raw.env)) {

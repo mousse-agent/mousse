@@ -65,6 +65,8 @@ export interface InstanceConfigView {
   args: string[]
   env: Record<string, string>
   loginMethod?: string
+  /** The entry this one moved to; it is off, and its threads continue there. */
+  movedTo?: string
 }
 
 export interface InstanceSnapshot {

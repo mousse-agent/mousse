@@ -2068,6 +2068,7 @@ export function registerGuiIpc(
   const respondInstanceSignIn = instanceCommand('providers.instances.respondSignIn', 'ok')
   const signOutInstance = instanceCommand('providers.instances.signOut', 'snapshot')
   const recheckInstance = instanceCommand('providers.instances.recheck', 'snapshot')
+  const moveInstance = instanceCommand('providers.instances.move', 'result')
   const refreshInstanceModels = instanceCommand('providers.instances.refreshModels', 'snapshot')
   const setInstanceModelPrefs = instanceCommand('providers.instances.setModelPrefs', 'snapshot')
   // The daemon validates every payload.
@@ -2089,6 +2090,7 @@ export function registerGuiIpc(
     respondInstanceSignIn({ operationId, response }))
   registerHandler('providers:instances:signOut', async (_e, instanceId: string) => signOutInstance({ instanceId }))
   registerHandler('providers:instances:recheck', async (_e, instanceId: string) => recheckInstance({ instanceId }))
+  registerHandler('providers:instances:move', async (_e, instanceId: string, toInstanceId: string) => moveInstance({ instanceId, toInstanceId }))
   registerHandler('providers:instances:refreshModels', async (_e, instanceId: string) =>
     refreshInstanceModels({ instanceId }))
   registerHandler('providers:instances:setModelPrefs', async (_e, instanceId: string, patch: unknown) =>

@@ -5692,7 +5692,8 @@ export class OrchestratorService extends EventEmitter {
         attemptId: (engineRunId ? this.runEngine?.getRun(engineRunId)?.activeAttemptId : undefined) ?? turnId,
         threadId: session.threadId,
         cwd: session.projectCwd ?? null,
-        model: selectedModel.model,
+        // The resolved model: a moved entry's model may run as the agent's own.
+        model: instance.model,
         instanceId: instance.instanceId,
         llmProvider: instance.llmProvider,
         modelPinned: Boolean(modelOverride),

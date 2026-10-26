@@ -1817,6 +1817,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const instanceId = asInstanceId(p.instanceId)
       return { snapshot: await harnessGateway(ctx).instances.setModelPrefs(instanceId, asModelPrefsPatch(p.patch)) }
     }
+    case 'providers.instances.move': {
+      const p = isObject(params) ? params : {}
+      return { result: await harnessGateway(ctx).instances.move(asInstanceId(p.instanceId), asInstanceId(p.toInstanceId, 'toInstanceId')) }
+    }
     case 'workspace.getStatus': {
       const p = isObject(params) ? params : {}
       const lookup = threadLookupContext(ctx, p)

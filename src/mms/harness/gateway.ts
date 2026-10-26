@@ -32,6 +32,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { InstanceConfigView, NextStep } from '../../shared/harness/status'
+import { foldedInto, type MoveResult } from '../../shared/harness/move'
 import { harnessAppError, type HarnessErrorCode, type ModelPrefs, type SignInPrompt } from '../../shared/harness/types'
 import type { ProviderLoginEvent } from '../../shared/providerAuth'
 import {
@@ -157,6 +158,8 @@ export interface ResolvedTurnSelection {
   driver: HarnessDriverKind
   model: string
   caps: HarnessCaps
+  /** The selection named an entry that moved to this instance (`config.movedTo`). */
+  movedFrom?: string
 }
 
 /** The old provider RPCs, served through the instances that replace the vendor branches. */
@@ -224,6 +227,12 @@ export interface HarnessInstances {
   recheck(instanceId: string): Promise<InstanceSnapshot>
   refreshModels(instanceId: string): Promise<InstanceSnapshot>
   setModelPrefs(instanceId: string, patch: ModelPrefsPatch): Promise<InstanceSnapshot>
+  /**
+   * Moves a model API entry to the agent that now serves it (`FOLDED_INTO_AGENT`): the old entry is
+   * turned off (never deleted) and records `movedTo`, the defaults that named it are rewritten and
+   * listed, and threads pinned to it continue on the agent with their history handed over.
+   */
+  move(fromInstanceId: string, toInstanceId: string): Promise<MoveResult>
   /** Snapshot changes (`snapshots$`) and operation progress; returns the unsubscribe. */
   subscribe(listener: (event: HarnessGatewayEvent) => void): () => void
 }
@@ -296,6 +305,13 @@ export interface HarnessGatewayOptions {
   now?: () => number
   /** Test seam: the turn-admission account check deadline (`TURN_ACCOUNT_CHECK_MS`). */
   accountCheckMs?: number
+  /**
+   * The profile's own default selections (Settings), rewritten when an entry moves; returns what
+   * changed, for the Move dialog. Project defaults are the gateway's own.
+   */
+  defaults?: { rewrite(from: string, to: { instanceId: string; llmProvider: string }): string[] }
+  /** Test seam: the agent a model API moves to (`FOLDED_INTO_AGENT`). */
+  foldedInto?: (providerId: string | undefined) => HarnessDriverKind | undefined
 }
 
 interface InstanceRecord {
@@ -392,6 +408,8 @@ export class Harness implements HarnessGateway {
   private readonly stats = new Map<string, { fingerprint?: BinaryFingerprint; atMs: number }>()
   /** Threads already told that an instance approves tools itself (`thread|instance`). */
   private readonly toolNotices = new Set<string>()
+  /** Bindings made for a selection that named a moved entry: their thread is told once. */
+  private readonly boundMoves = new WeakMap<ExecutionBinding, string>()
   private readonly operations = new Map<string, Operation>()
   private readonly listeners = new Set<(event: HarnessGatewayEvent) => void>()
   private readonly scopes: HarnessScopeStore
@@ -451,6 +469,7 @@ export class Harness implements HarnessGateway {
         return this.snapshot(instanceId, { kind: 'device' })
       },
       refreshModels: (instanceId) => this.refreshModels(instanceId),
+      move: (fromInstanceId, toInstanceId) => this.move(fromInstanceId, toInstanceId),
       setModelPrefs: async (instanceId, patch) => {
         const record = this.record(instanceId, { allowDisabled: true })
         // A runtime that cannot run a model by id does not offer adding one.
@@ -527,7 +546,9 @@ export class Harness implements HarnessGateway {
       if (!driver) fail('bad_request', 'No model is selected and no pi loop adapter is registered.')
       return { instanceId: PI_DRIVER_ID, llmProvider: '', driver: 'pi', model: selection.model, caps: driver.caps({ home: 'default' }) }
     }
-    const resolved = this.instanceMap.resolve(this.instanceMap.instanceIdOf(selection), { allowDisabled: options.allowDisabled })
+    const named = this.instanceMap.instanceIdOf(selection)
+    const target = this.movedTarget(named)
+    const resolved = this.instanceMap.resolve(target ?? named, { allowDisabled: options.allowDisabled })
     const driver = this.drivers.get(resolved.entry.driver)
     if (!driver) fail('bad_request', `No provider adapter for driver ${resolved.entry.driver} (instance ${resolved.instanceId}).`)
     // Chat titles are a one-shot completion of an API provider's model; agent runtimes run turns only.
@@ -551,7 +572,20 @@ export class Harness implements HarnessGateway {
         missing: ['toolControl'],
         instanceId: resolved.instanceId
       })
-    return { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, driver: driver.kind, model: selection.model, caps }
+    // A moved entry's model runs on the agent when it lists it; otherwise the agent's first model.
+    let model = selection.model
+    if (target) {
+      const listed = this.recordOrUndefined(target)?.runtime.models() ?? []
+      if (listed.length && !listed.some((entry) => entry.id === model)) model = listed[0]!.id
+    }
+    return { instanceId: resolved.instanceId, llmProvider: resolved.llmProvider, driver: driver.kind, model, caps, ...(target ? { movedFrom: named } : {}) }
+  }
+
+  /** The entry an instance moved to (one hop), when that entry still exists. */
+  private movedTarget(instanceId: string): string | undefined {
+    const entries = this.instanceMap.list()
+    const movedTo = entries[instanceId]?.config?.movedTo
+    return typeof movedTo === 'string' && movedTo !== instanceId && Object.prototype.hasOwnProperty.call(entries, movedTo) ? movedTo : undefined
   }
 
   /** The instance's name for messages, without building its runtime when it is not built yet. */
@@ -636,6 +670,7 @@ export class Harness implements HarnessGateway {
       ...(binary ? { binary: { ...binary } } : {})
     }
     this.boundAccounts.set(binding, accountId ? { accountId } : {})
+    if (resolved.movedFrom) this.boundMoves.set(binding, resolved.movedFrom)
     return binding
   }
 
@@ -796,6 +831,8 @@ export class Harness implements HarnessGateway {
       previous.accountGeneration === binding.accountGeneration &&
       binding.accountId !== undefined && previous.accountId === binding.accountId && accountId === binding.accountId
     if (toolControlLevel(caps) === 'uncontrolled') this.toolControlNotice(record, input.threadId, previous)
+    const movedFrom = this.boundMoves.get(binding)
+    if (movedFrom) this.moveNotice(movedFrom, record, input.threadId)
     if (resumable || (!previous && binding.homeId === DEFAULT_HOME_ID && verified)) return
     try {
       record.runtime.forgetConversation?.(input.threadId)
@@ -811,6 +848,22 @@ export class Harness implements HarnessGateway {
     this.toolNotices.add(key)
     try {
       this.liveHost?.notice?.(threadId, `${this.displayName(record)} approves tools itself.`)
+    } catch (error) {
+      console.warn('[harness] notice failed', errorText(error))
+    }
+  }
+
+  /**
+   * A thread pinned to a moved entry continues on the agent; its history is handed over
+   * (`history_injected`), and the thread is told once.
+   */
+  private moveNotice(movedFrom: string, record: InstanceRecord, threadId: string): void {
+    const key = `moved|${threadId}|${movedFrom}`
+    if (this.toolNotices.has(key)) return
+    this.toolNotices.add(key)
+    const from = this.recordOrUndefined(movedFrom)
+    try {
+      this.liveHost?.notice?.(threadId, `${from ? this.displayName(from) : movedFrom} moved to ${this.displayName(record)}. This chat continues there with its history handed over.`)
     } catch (error) {
       console.warn('[harness] notice failed', errorText(error))
     }
@@ -1195,7 +1248,8 @@ export class Harness implements HarnessGateway {
       ...(source.binaryPath ? { binaryPath: source.binaryPath } : {}),
       args: [...(source.args ?? [])],
       env: { ...(source.env ?? {}) },
-      ...(record.config.loginMethod ? { loginMethod: record.config.loginMethod } : {})
+      ...(record.config.loginMethod ? { loginMethod: record.config.loginMethod } : {}),
+      ...(record.config.movedTo ? { movedTo: record.config.movedTo } : {})
     }
   }
 
@@ -1324,6 +1378,24 @@ export class Harness implements HarnessGateway {
     if (patch.env !== undefined) setOrDelete(config, 'env', Object.keys(patch.env).length ? { ...patch.env } : undefined)
     if (patch.loginMethod !== undefined) setOrDelete(config, 'loginMethod', patch.loginMethod || undefined)
     return config
+  }
+
+  private async move(fromId: string, toId: string): Promise<MoveResult> {
+    const from = this.record(fromId, { allowDisabled: true })
+    const to = this.record(toId, { allowDisabled: true })
+    const agent = (this.options.foldedInto ?? foldedInto)(piProviderIdOf(fromId))
+    if (fromId === toId || !agent || to.driver.kind !== agent)
+      harnessFail('unsupported', `${this.displayName(from)} cannot move to ${this.displayName(to)}.`, fromId)
+    if (from.config.movedTo) harnessFail('unsupported', `${this.displayName(from)} has already moved.`, fromId)
+    // Turned off, never deleted: an older build can still turn it back on.
+    this.instanceMap.setEntry(fromId, { ...from.entry, enabled: false, config: { ...(from.entry.config ?? {}), movedTo: toId } })
+    const llmProvider = legacyProviderForInstance(toId, to.entry) ?? ''
+    const rewritten = [
+      ...this.options.defaults?.rewrite(fromId, { instanceId: toId, llmProvider }) ?? [],
+      ...this.scopes.moveDefaults(fromId, toId).map((projectId) => `Project default (${projectId})`)
+    ]
+    this.changed(fromId)
+    return { from: fromId, to: toId, rewritten }
   }
 
   private async setEnabled(instanceId: string, scope: ProviderScope, enabled: boolean | null): Promise<InstanceSnapshot> {

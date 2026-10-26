@@ -129,6 +129,7 @@ export interface InstanceConfigView {
   binaryPath?: string
   args: string[]
   env: Record<string, string>
+  movedTo?: string
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -146,7 +147,8 @@ export function instanceConfigOf(snapshot: InstanceSnapshot): InstanceConfigView
     home: raw.home === 'private' ? 'private' : 'default',
     ...(typeof raw.binaryPath === 'string' && raw.binaryPath ? { binaryPath: raw.binaryPath } : {}),
     args: Array.isArray(raw.args) ? raw.args.filter((arg): arg is string => typeof arg === 'string') : [],
-    env
+    env,
+    ...(typeof raw.movedTo === 'string' && raw.movedTo ? { movedTo: raw.movedTo } : {})
   }
 }
 
