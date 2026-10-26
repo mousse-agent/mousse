@@ -32,6 +32,11 @@ export function budgetsLevel(caps: Partial<Pick<HarnessCaps, 'budgets'>>): Harne
   return caps.budgets ?? 'unsupported'
 }
 
+/** Whether token and spend limits are reserved before each request. Caps without the key read as `unsupported`. */
+export function spendLimitLevel(caps: Partial<Pick<HarnessCaps, 'spendLimits'>>): HarnessCaps['spendLimits'] {
+  return caps.spendLimits ?? 'unsupported'
+}
+
 /**
  * Purposes a person drives turn by turn. Only these may resolve an `uncontrolled` instance: every
  * other purpose (delegation, definitions, workflows, titles, and any purpose added later) runs
@@ -53,10 +58,12 @@ export function policyOrigin(policy: Pick<RunPolicy, 'origin'>): TurnOrigin {
  * Whether an instance with `caps` can honour `policy`. Fails closed: a restriction the instance
  * cannot enforce is `policy_unenforceable`, naming the capabilities it lacks.
  * - an exact tool allowlist needs `exact` tool control;
- * - a turn or cost budget needs `hard` budgets: Mousse refuses the next model request (compaction,
- *   summaries, retries included) or tool call before it starts, and holds spend limits with a
- *   conservative pre-request reservation; a limit checked after a response is only `observed`
- *   (a wall-clock budget is the gateway's everywhere);
+ * - a turn or tool-call count needs `hard` budgets: Mousse refuses the next model request
+ *   (compaction, summaries, retries included) or tool call before it starts; a limit checked after
+ *   a response is only `observed`;
+ * - a token or USD limit needs `hard` budgets and `reserved` spend limits (a conservative reservation
+ *   before each request, with the output cap lowered to fit);
+ * - a wall-clock budget needs nothing: the gateway enforces it everywhere;
  * - pre-granted or no approvals need at least `approval_only`;
  * - a turn nobody watches (delegated, workflow, definition, bot) needs more than `uncontrolled`,
  *   for its first dispatch and every retry, continuation and steer.
@@ -66,12 +73,15 @@ export function checkPolicy(caps: HarnessCaps, policy: RunPolicy, instanceId?: s
   const control = toolControlLevel(caps)
   if (policy.mode === 'plan' && !planModeAvailable(caps)) missing.push('planMode')
   const needsExact = Boolean(policy.tools)
-  const needsHardBudget = policy.budget?.maxTurns !== undefined || policy.budget?.maxUsd !== undefined
+  const budget = policy.budget ?? {}
+  const needsSpend = budget.maxInputTokens !== undefined || budget.maxOutputTokens !== undefined || budget.maxUsd !== undefined
+  const needsHardBudget = needsSpend || budget.maxTurns !== undefined || budget.maxToolCalls !== undefined
   const needsApprovals = policy.approvals === 'grants' || policy.approvals === 'never'
   const unattended = policyOrigin(policy) !== 'interactive'
   if ((needsExact && control !== 'exact') || (needsApprovals && control === 'uncontrolled') || (unattended && control === 'uncontrolled'))
     missing.push('toolControl')
   if (needsHardBudget && budgetsLevel(caps) !== 'hard') missing.push('budgets')
+  if (needsSpend && spendLimitLevel(caps) !== 'reserved') missing.push('spendLimits')
   if (!missing.length) return { ok: true }
   return {
     ok: false,

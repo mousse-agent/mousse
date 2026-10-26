@@ -51,13 +51,18 @@ export interface HarnessCaps {
    */
   toolControl: 'exact' | 'approval_only' | 'uncontrolled'
   /**
-   * Turn and cost budgets (`RunPolicy.budget.maxTurns|maxUsd`). `hard` = Mousse refuses the next model
-   * request (compaction, summaries, retries included) or tool call before it starts; spend limits
-   * also need a conservative pre-request reservation with the output cap lowered to fit. A limit
-   * checked after a response is `observed`. `unsupported`: neither. A wall-clock budget is the
-   * gateway's own and applies everywhere.
+   * Count budgets (`RunPolicy.budget.maxTurns|maxToolCalls`). `hard` = Mousse refuses the next model
+   * request (compaction, summaries, retries included) or tool call before it starts. A limit checked
+   * after a response is `observed`. `unsupported`: neither. A wall-clock budget is the gateway's own
+   * and applies everywhere.
    */
   budgets: 'hard' | 'observed' | 'unsupported'
+  /**
+   * Token and spend limits (`RunPolicy.budget.maxInputTokens|maxOutputTokens|maxUsd`): `reserved` =
+   * before each model request Mousse reserves a conservative cost and lowers the output cap to fit
+   * what is left. They also need `budgets: 'hard'`.
+   */
+  spendLimits: 'reserved' | 'unsupported'
 }
 
 /**
@@ -70,7 +75,7 @@ export type RunCapabilities = Pick<
 >
 
 export const HARNESS_CAP_KEYS = [
-  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'budgets'
+  'steer', 'interrupt', 'rollback', 'fork', 'events', 'containment', 'historyInjection', 'mcp', 'childPolicy', 'planMode', 'contextUsage', 'toolControl', 'budgets', 'spendLimits'
 ] as const satisfies ReadonlyArray<keyof HarnessCaps>
 
 /** What a caller picks to run an agent. */
@@ -95,7 +100,7 @@ export interface RunPolicy {
   /** Exact tool allowlist (and optional denylist); absent = the instance's normal tools. */
   tools?: { allow: string[]; deny?: string[] }
   approvals: 'ask' | 'grants' | 'never'
-  budget?: { maxTurns?: number; maxUsd?: number; maxWallMs?: number }
+  budget?: { maxTurns?: number; maxToolCalls?: number; maxInputTokens?: number; maxOutputTokens?: number; maxUsd?: number; maxWallMs?: number }
 }
 
 /**

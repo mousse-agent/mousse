@@ -49,15 +49,22 @@ describe('checkPolicy', () => {
     expect(checkPolicy(caps('uncontrolled'), policy({ approvals }))).toMatchObject({ ok: false, error: { missing: ['toolControl'] } })
   })
 
-  it('needs hard budgets for a turn or cost budget, never for a wall-clock budget', () => {
-    const budgets = (level: HarnessCaps['budgets']): HarnessCaps => ({ ...caps('exact'), budgets: level })
+  it('needs hard budgets for counts, hard budgets and reserved spend for tokens and USD, nothing for wall clock', () => {
+    const limits = (budgets: HarnessCaps['budgets'], spendLimits: HarnessCaps['spendLimits'] = 'unsupported'): HarnessCaps => ({ ...caps('exact'), budgets, spendLimits })
     expect(PI_LEGACY_CAPS.budgets).toBe('observed')
     for (const agent of [CLAUDE_CODE_CAPS, CODEX_CAPS, ANTIGRAVITY_CAPS]) expect(agent.budgets).toBe('unsupported')
-    expect(checkPolicy(budgets('observed'), policy({ budget: { maxTurns: 3 } }))).toMatchObject({ ok: false, error: { missing: ['budgets'] } })
-    expect(checkPolicy(budgets('unsupported'), policy({ budget: { maxUsd: 1 } }))).toMatchObject({ ok: false, error: { missing: ['budgets'] } })
-    expect(checkPolicy(budgets('hard'), policy({ budget: { maxTurns: 3, maxUsd: 1 } }))).toEqual({ ok: true })
+    for (const any of [PI_LEGACY_CAPS, CLAUDE_CODE_CAPS, CODEX_CAPS, ANTIGRAVITY_CAPS]) expect(any.spendLimits).toBe('unsupported')
+    expect(checkPolicy(limits('observed'), policy({ budget: { maxTurns: 3 } }))).toMatchObject({ ok: false, error: { missing: ['budgets'] } })
+    expect(checkPolicy(limits('observed'), policy({ budget: { maxToolCalls: 10 } }))).toMatchObject({ ok: false, error: { missing: ['budgets'] } })
+    expect(checkPolicy(limits('hard'), policy({ budget: { maxTurns: 3, maxToolCalls: 10 } }))).toEqual({ ok: true })
+    // Token and spend limits: the failing keys in order.
+    expect(checkPolicy(limits('unsupported'), policy({ budget: { maxUsd: 1 } }))).toMatchObject({ ok: false, error: { missing: ['budgets', 'spendLimits'] } })
+    expect(checkPolicy(limits('hard'), policy({ budget: { maxInputTokens: 1000 } }))).toMatchObject({ ok: false, error: { missing: ['spendLimits'] } })
+    expect(checkPolicy(limits('observed', 'reserved'), policy({ budget: { maxOutputTokens: 1000 } }))).toMatchObject({ ok: false, error: { missing: ['budgets'] } })
+    expect(checkPolicy(limits('hard', 'reserved'), policy({ budget: { maxTurns: 3, maxInputTokens: 1, maxOutputTokens: 1, maxUsd: 1 } }))).toEqual({ ok: true })
     expect(checkPolicy(PI_LEGACY_CAPS, policy({ budget: { maxTurns: 3 } }))).toEqual({ ok: false, error: expect.objectContaining({ missing: ['budgets'] }) })
-    expect(checkPolicy({ ...PI_LEGACY_CAPS, budgets: 'hard' }, policy({ budget: { maxTurns: 3, maxUsd: 2 } }))).toEqual({ ok: true })
+    // Explicitly hard caps admit turn and spend limits.
+    expect(checkPolicy({ ...PI_LEGACY_CAPS, budgets: 'hard', spendLimits: 'reserved' }, policy({ budget: { maxTurns: 3, maxUsd: 2 } }))).toEqual({ ok: true })
     expect(checkPolicy(CLAUDE_CODE_CAPS, policy({ budget: { maxTurns: 3 } }))).toMatchObject({ ok: false })
     expect(checkPolicy({ ...caps('uncontrolled'), budgets: 'unsupported' }, policy({ budget: { maxWallMs: 60_000 } }))).toEqual({ ok: true })
   })

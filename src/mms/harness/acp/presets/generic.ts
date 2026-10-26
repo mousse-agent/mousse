@@ -15,7 +15,8 @@ export const GENERIC_ACP_CAPS: HarnessCaps = Object.freeze({
   planMode: false,
   contextUsage: 'none',
   toolControl: 'uncontrolled',
-  budgets: 'unsupported'
+  budgets: 'unsupported',
+  spendLimits: 'unsupported'
 })
 
 export const GENERIC_ACP_PRESET: AcpPreset = {

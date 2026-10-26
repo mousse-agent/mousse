@@ -14,7 +14,8 @@ export const PI_LEGACY_CAPS: HarnessCaps = Object.freeze({
   // Mousse runs the pi loop's tools itself.
   toolControl: 'exact',
   // Spend is counted after each response; nothing refuses the next request yet.
-  budgets: 'observed'
+  budgets: 'observed',
+  spendLimits: 'unsupported'
 })
 
 export type PiCredentials = Partial<Pick<ProviderAuthService,

@@ -15,7 +15,8 @@ export const ANTIGRAVITY_CAPS: HarnessCaps = Object.freeze({
   contextUsage: 'none',
   // The agent asks Mousse for every tool permission and file write.
   toolControl: 'approval_only',
-  budgets: 'unsupported'
+  budgets: 'unsupported',
+  spendLimits: 'unsupported'
 })
 
 /** The turn runtime of Antigravity: the ACP adapter with the preset's name and capabilities. */
