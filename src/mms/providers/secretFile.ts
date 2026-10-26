@@ -13,9 +13,7 @@ export const SECRET_ENVELOPE_KEY = '__mousse_encrypted_v1'
 export class SecretFileError extends Error {
   constructor(
     readonly reason: string,
-    readonly kind: 'corrupt' | 'unavailable' | 'encryption' = 'corrupt',
-    /** Whether the file was an encrypted envelope, so a replacement must be encrypted too. */
-    readonly wasEncrypted = false
+    readonly kind: 'corrupt' | 'unavailable' | 'encryption' = 'corrupt'
   ) {
     super(reason)
     this.name = 'SecretFileError'
@@ -37,16 +35,16 @@ export function openSecretFile(raw: string, codec: SecretCodec): { value: unknow
   if (!isRecord(parsed) || !Object.hasOwn(parsed, SECRET_ENVELOPE_KEY)) return { value: parsed, encrypted: false }
   const payload = parsed[SECRET_ENVELOPE_KEY]
   if (typeof payload !== 'string' || !payload || Buffer.from(payload, 'base64').toString('base64') !== payload) {
-    throw new SecretFileError('the encrypted envelope is invalid', 'corrupt', true)
+    throw new SecretFileError('the encrypted envelope is invalid', 'corrupt')
   }
   let decrypted: string | null
   try { decrypted = codec.decrypt(Buffer.from(payload, 'base64')) } catch { decrypted = null }
-  if (decrypted === null) throw new SecretFileError('decryption is unavailable or failed; use the Electron host that saved these credentials', 'unavailable', true)
+  if (decrypted === null) throw new SecretFileError('decryption is unavailable or failed; use the Electron host that saved these credentials', 'unavailable')
   let value: unknown
   try {
     value = parse(decrypted)
   } catch {
-    throw new SecretFileError('the stored data is invalid JSON', 'corrupt', true)
+    throw new SecretFileError('the stored data is invalid JSON', 'corrupt')
   }
   return { value, encrypted: true }
 }

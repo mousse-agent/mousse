@@ -112,7 +112,7 @@ export interface SignInCommitResult {
   profileKey: string | undefined
 }
 
-type StoreReader = (options?: { discardUnreadable?: boolean }) => ChatGptStoreData
+type StoreReader = () => ChatGptStoreData
 
 const failure = {
   signedOut: () => new ChatGptAuthError('signed_out', 'signed_out', MESSAGES.signedOut),
@@ -167,7 +167,7 @@ export class ChatGptLifecycle {
   /** Runs `fn` on a fresh read of the store, holding the instance's lock. */
   private async locked<T>(fn: (read: StoreReader) => Promise<T> | T, signal?: AbortSignal): Promise<T> {
     try {
-      return await withAsyncFileLock(this.lockPath, async () => fn((options) => this.store.read(options)), {
+      return await withAsyncFileLock(this.lockPath, async () => fn(() => this.store.read()), {
         waitMs: this.lockWaitMs,
         maxHoldMs: LOCK_MAX_HOLD_MS,
         signal
@@ -197,12 +197,9 @@ export class ChatGptLifecycle {
         data = read()
       } catch (error) {
         if (!(error instanceof ChatGptAuthError) || error.failure !== 'storage') throw error
-        // Corrupt. The read noted whether it was encrypted; check the vault before setting it aside.
+        // Corrupt: check the vault could seal a replacement, then set it aside with a new fence.
         this.store.assertWritable()
-        data = read({ discardUnreadable: true })
-        // A clock-based fence is above any fence an attempt on the old file could hold.
-        data.signInFence = Date.now()
-        this.store.write(data)
+        data = this.store.recover()
       }
       this.store.assertWritable()
       return { data, fence: data.signInFence }
@@ -296,7 +293,7 @@ export class ChatGptLifecycle {
    */
   commitSignIn(commit: SignInCommit, signal?: AbortSignal): Promise<SignInCommitResult> {
     return this.locked((read) => {
-      const data = read({ discardUnreadable: true })
+      const data = read()
       if (!commit.stillCurrent() || signal?.aborted) throw cancelled()
       if (data.signInFence !== commit.fence) throw failure.superseded()
       const known = registrationOf(data, commit.clientId)
@@ -346,7 +343,7 @@ export class ChatGptLifecycle {
    */
   saveRegistration(clientId: string, redirectPath: string, fence: number): Promise<void> {
     return this.locked((read) => {
-      const data = read({ discardUnreadable: true })
+      const data = read()
       if (data.signInFence !== fence) return
       if (registrationOf(data, clientId)) return
       data.registrations = [...data.registrations, { clientId, subject: null, email: null, label: nextLabel(data), redirectPath, sharing: true }]
@@ -402,9 +399,8 @@ export class ChatGptLifecycle {
         data = read()
       } catch (error) {
         if (!(error instanceof ChatGptAuthError) || error.failure !== 'storage') throw error
-        // Corrupt: set it aside; nothing readable to revoke. A clock-based fence is above any fence
-        // an attempt could hold.
-        data = { ...read({ discardUnreadable: true }), signInFence: Date.now() }
+        // Corrupt: set it aside (the fence moves on); nothing readable to revoke.
+        data = this.store.recover()
       }
       const tombstone: ChatGptStoreData = {
         ...emptyStore(),

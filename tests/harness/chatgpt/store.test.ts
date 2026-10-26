@@ -1,10 +1,24 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { DatabaseSync } from 'node:sqlite'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { chatgptHostIdPath, ensureChatGptHostId } from '../../../src/mms/harness/chatgpt/hostId'
 import { ChatGptStore, chatgptStorePath, emptyStore, profileKeyOf, type ChatGptStoreData } from '../../../src/mms/harness/chatgpt/store'
 import { FakeIssuer, fakeVault, guardNetwork, plainCodec, tempHomes } from './fakeIssuer'
 import { chatgptAuth, signIn, startSignIn } from './signInFlow'
+
+// Lets a test make renaming the store fail, as Windows does for a file another process holds open.
+const fsControl = vi.hoisted(() => ({ failRename: null as ((from: string) => boolean) | null }))
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return {
+    ...actual,
+    renameSync: (from: Parameters<typeof actual.renameSync>[0], to: Parameters<typeof actual.renameSync>[1]) => {
+      if (fsControl.failRename?.(String(from))) throw Object.assign(new Error('simulated EPERM'), { code: 'EPERM' })
+      return actual.renameSync(from, to)
+    }
+  }
+})
 
 guardNetwork()
 const homes = tempHomes()
@@ -13,10 +27,41 @@ beforeEach(async () => {
   issuer = await new FakeIssuer().start()
 })
 afterEach(async () => {
+  fsControl.failRename = null
   await issuer.stop()
 })
 
-const SAMPLE: ChatGptStoreData = {
+/** The store's row as SQLite holds it. */
+function row(path: string): { revision: number; fence: number; encrypted: number; payload: string } | undefined {
+  const database = new DatabaseSync(path)
+  try {
+    return database.prepare('SELECT revision, fence, encrypted, payload FROM store WHERE id = 1').get() as never
+  } finally {
+    database.close()
+  }
+}
+
+/** Replaces the row's payload directly, as damage or another Mousse version would. */
+function setPayload(path: string, payload: string, encrypted: number): void {
+  const database = new DatabaseSync(path)
+  try {
+    database.prepare('UPDATE store SET payload = ?, encrypted = ? WHERE id = 1').run(payload, encrypted)
+  } finally {
+    database.close()
+  }
+}
+
+function userVersion(path: string, version?: number): number {
+  const database = new DatabaseSync(path)
+  try {
+    if (version !== undefined) database.exec(`PRAGMA user_version=${version}`)
+    return Number((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+  } finally {
+    database.close()
+  }
+}
+
+const SAMPLE = (): ChatGptStoreData => ({
   version: 1,
   revision: 0,
   credentialEpoch: 3,
@@ -25,27 +70,29 @@ const SAMPLE: ChatGptStoreData = {
   registrations: [{ clientId: 'oaiapp_a', subject: 'alice', email: 'a@example.com', label: 'Connection 1', redirectPath: '/auth/callback', sharing: true }],
   sessions: [{ clientId: 'oaiapp_a', accessToken: 'secret-access', refreshToken: 'secret-refresh', idToken: 'secret-id', expiresAt: 1, earliestRefreshAt: null, scopes: ['openid'], savedAt: 1 }],
   pendingRevocations: [{ clientId: 'oaiapp_a', refreshToken: 'secret-old-refresh' }]
-}
+})
 
 describe('ChatGPT store', () => {
   it('encrypts with the vault: no token is readable on disk', () => {
     const { profileHome } = homes()
     const path = chatgptStorePath(profileHome, 'codex:managed')
-    const vault = fakeVault()
-    new ChatGptStore(path, vault).write(SAMPLE)
-    const raw = readFileSync(path, 'utf8')
-    expect(Object.keys(JSON.parse(raw))).toEqual(['__mousse_encrypted_v1'])
-    expect(raw).not.toContain('secret')
-    expect(new ChatGptStore(path, vault).read()).toEqual(SAMPLE)
     // The instance id is made safe for a path.
-    expect(path).toBe(join(profileHome, 'harness', 'codex_managed', 'chatgpt.json'))
+    expect(path).toBe(join(profileHome, 'harness', 'codex_managed', 'chatgpt.db'))
+    const vault = fakeVault()
+    const data = SAMPLE()
+    new ChatGptStore(path, vault).write(data)
+    expect(data.revision).toBe(1)
+    expect(row(path)).toMatchObject({ revision: 1, fence: 2, encrypted: 1 })
+    expect(Object.keys(JSON.parse(row(path)!.payload))).toEqual(['__mousse_encrypted_v1'])
+    for (const file of readdirSync(dirname(path))) expect(readFileSync(join(dirname(path), file)).includes('secret'), file).toBe(false)
+    expect(new ChatGptStore(path, vault).read()).toEqual({ ...SAMPLE(), revision: 1 })
   })
 
-  it('refuses to save when the required vault is unavailable, and writes nothing', () => {
+  it('refuses to save when the required vault is unavailable, and saves nothing', () => {
     const { profileHome } = homes()
     const path = chatgptStorePath(profileHome, 'codex:managed')
-    expect(() => new ChatGptStore(path, fakeVault({ available: false })).write(SAMPLE)).toThrow(expect.objectContaining({ code: 'unsupported', failure: 'storage' }))
-    expect(existsSync(path)).toBe(false)
+    expect(() => new ChatGptStore(path, fakeVault({ available: false })).write(SAMPLE())).toThrow(expect.objectContaining({ code: 'unsupported', failure: 'storage' }))
+    expect(row(path)).toBeUndefined()
   })
 
   it('a sign-in under Electron without a vault fails typed before the browser opens, and saves nothing', async () => {
@@ -63,99 +110,148 @@ describe('ChatGPT store', () => {
   ])('an encrypted store that %s cannot open is kept, never set aside or downgraded', async (_name, codec) => {
     const home = homes()
     const path = chatgptStorePath(home.profileHome, 'codex:managed')
-    new ChatGptStore(path, fakeVault()).write(SAMPLE)
-    const before = readFileSync(path, 'utf8')
+    new ChatGptStore(path, fakeVault()).write(SAMPLE())
+    const before = row(path)
     const auth = chatgptAuth(issuer, home, { codec: codec() })
     expect(auth.status()).toMatchObject({ state: 'unreadable', message: expect.stringContaining('system keychain is unavailable') })
     const flow = startSignIn(auth)
     expect(await flow.result).toMatchObject({ success: false, failure: 'storage_locked' })
     expect(flow.events.some((event) => event.type === 'auth_url')).toBe(false)
     await expect(auth.access()).rejects.toMatchObject({ failure: 'storage_locked' })
+    await expect(auth.signOut()).rejects.toMatchObject({ failure: 'storage_locked' })
     await expect(auth.deleteInstance()).rejects.toMatchObject({ failure: 'storage_locked' })
-    expect(readFileSync(path, 'utf8')).toBe(before)
-    expect(readdirSync(dirname(path)).filter((name) => name.startsWith('chatgpt.json'))).toEqual(['chatgpt.json'])
+    expect(row(path)).toEqual(before)
+    expect(readdirSync(dirname(path)).some((name) => name.includes('.corrupt-'))).toBe(false)
   })
 
-  it('a store written by a newer Mousse is kept and fails typed', async () => {
+  it('a store a newer Mousse made is kept and fails typed (newer database or newer payload)', async () => {
     const home = homes()
     const path = chatgptStorePath(home.profileHome, 'codex:managed')
-    mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, JSON.stringify({ version: 2, whatever: true }))
+    new ChatGptStore(path, plainCodec).write(SAMPLE())
+    userVersion(path, 2)
     const auth = chatgptAuth(issuer, home)
     const flow = startSignIn(auth)
     expect(await flow.result).toMatchObject({ success: false, failure: 'storage_newer' })
-    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ version: 2, whatever: true })
+    expect(userVersion(path)).toBe(2)
+    userVersion(path, 1)
+    setPayload(path, JSON.stringify({ version: 2, whatever: true }), 0)
+    const before = row(path)
+    expect((await startSignIn(auth).result)).toMatchObject({ success: false, failure: 'storage_newer' })
+    expect(row(path)).toEqual(before)
   })
 
-  it('a corrupt encrypted envelope may only be replaced by an encrypted store', async () => {
+  it('a corrupt encrypted payload may only be replaced by an encrypted store, and is kept aside', async () => {
     const home = homes()
     const path = chatgptStorePath(home.profileHome, 'codex:managed')
-    mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, JSON.stringify({ __mousse_encrypted_v1: '!!not base64' }))
+    new ChatGptStore(path, fakeVault()).write(SAMPLE())
+    setPayload(path, JSON.stringify({ __mousse_encrypted_v1: '!!not base64' }), 1)
+    const before = row(path)
     const plain = chatgptAuth(issuer, home)
     const flow = startSignIn(plain)
     expect(await flow.result).toMatchObject({ success: false, failure: 'storage' })
     expect(flow.events.some((event) => event.type === 'auth_url')).toBe(false)
-    expect(readFileSync(path, 'utf8')).toContain('!!not base64')
-    // With a working vault, the corrupt file is set aside and the new one is encrypted.
+    expect(row(path)).toEqual(before)
+    // With a working vault, the payload is set aside in the same database and the new one is encrypted.
     const vaulted = chatgptAuth(issuer, home, { codec: fakeVault() })
     expect((await signIn(issuer, vaulted, { subject: 'alice' })).result).toEqual({ success: true })
-    expect(readFileSync(path, 'utf8')).toContain('__mousse_encrypted_v1')
+    expect(row(path)).toMatchObject({ encrypted: 1, fence: before!.fence + 2 })
+    expect(new ChatGptStore(path, fakeVault()).setAside()).toBe(1)
   })
 
-  it('never downgrades an encrypted file to plain text', () => {
+  it('never downgrades an encrypted store to plain text', () => {
     const { profileHome } = homes()
     const path = chatgptStorePath(profileHome, 'i')
     const vault = { ...fakeVault(), encryptionRequired: false }
-    new ChatGptStore(path, vault).write(SAMPLE)
+    new ChatGptStore(path, vault).write(SAMPLE())
     const store = new ChatGptStore(path, vault)
-    store.read()
+    const data = store.read()
     vault.canEncrypt = () => false
-    expect(() => store.write({ ...SAMPLE, credentialEpoch: 4 })).not.toThrow()
-    expect(readFileSync(path, 'utf8')).toContain('__mousse_encrypted_v1')
+    store.write({ ...data, credentialEpoch: 4 })
+    expect(row(path)).toMatchObject({ encrypted: 1, revision: 2 })
   })
 
-  it('a write is refused when another writer saved a newer revision since this one read', () => {
+  it('a write commits only on the revision its own data was read at; other reads do not matter', () => {
     const { profileHome } = homes()
     const path = chatgptStorePath(profileHome, 'i')
-    const plain = { canEncrypt: () => false, encrypt: () => null, decrypt: () => null }
-    const first = new ChatGptStore(path, plain)
-    first.read()
-    first.write({ ...SAMPLE })
-    const stale = new ChatGptStore(path, plain)
-    const seen = stale.read()
-    first.write({ ...first.read(), credentialEpoch: 9 })
-    expect(() => stale.write({ ...seen, active: null })).toThrow(expect.objectContaining({ code: 'operation_busy' }))
-    expect(new ChatGptStore(path, plain).read()).toMatchObject({ credentialEpoch: 9, active: 'oaiapp_a', revision: 2 })
-    // A store never read expects no file, so it cannot overwrite one blindly.
-    expect(() => new ChatGptStore(path, plain).write({ ...SAMPLE })).toThrow(expect.objectContaining({ code: 'operation_busy' }))
+    const store = new ChatGptStore(path, plainCodec)
+    store.write(SAMPLE())
+    const stale = store.read()
+    store.write({ ...store.read(), credentialEpoch: 9 })
+    // A display read on the same store object sees revision 2; the stale data still carries 1.
+    expect(store.read().revision).toBe(2)
+    expect(() => store.write({ ...stale, active: null })).toThrow(expect.objectContaining({ code: 'operation_busy' }))
+    expect(store.read()).toMatchObject({ credentialEpoch: 9, active: 'oaiapp_a', revision: 2 })
+    // Data that was never read (revision 0) cannot overwrite an existing row.
+    expect(() => store.write(SAMPLE())).toThrow(expect.objectContaining({ code: 'operation_busy' }))
+  })
+
+  it('a vault that locks between the read and the write fails as storage, not as a lost race', () => {
+    const { profileHome } = homes()
+    const path = chatgptStorePath(profileHome, 'i')
+    const vault = fakeVault()
+    const store = new ChatGptStore(path, vault)
+    store.write(SAMPLE())
+    const data = store.read()
+    vault.available = false
+    expect(() => store.write({ ...data, credentialEpoch: 5 })).toThrow(expect.objectContaining({ code: 'unsupported', failure: 'storage' }))
   })
 
   it.skipIf(process.platform === 'win32')('a plain store is written with mode 0600', () => {
     const { profileHome } = homes()
     const path = chatgptStorePath(profileHome, 'i')
-    new ChatGptStore(path, { canEncrypt: () => false, encrypt: () => null, decrypt: () => null }).write(SAMPLE)
+    new ChatGptStore(path, plainCodec).write(SAMPLE())
     expect(statSync(path).mode & 0o777).toBe(0o600)
   })
 
-  it('an unreadable file fails typed; a new sign-in sets it aside and starts fresh', async () => {
+  it('a corrupt payload fails typed; a new sign-in sets it aside with a new fence and starts fresh', async () => {
     const home = homes()
     const auth = chatgptAuth(issuer, home)
-    mkdirSync(dirname(auth.lifecycle.store.path), { recursive: true })
-    writeFileSync(auth.lifecycle.store.path, '{"version":1,')
+    const path = auth.lifecycle.store.path
+    new ChatGptStore(path, plainCodec).write(SAMPLE())
+    setPayload(path, '{"version":1,', 0)
     expect(() => auth.lifecycle.read()).toThrow(expect.objectContaining({ failure: 'storage' }))
     expect(auth.status()).toMatchObject({ state: 'unreadable' })
     expect((await signIn(issuer, auth, { subject: 'alice' })).result).toEqual({ success: true })
-    expect(readdirSync(dirname(auth.lifecycle.store.path)).some((name) => name.startsWith('chatgpt.json.corrupt-'))).toBe(true)
+    expect(new ChatGptStore(path, plainCodec).setAside()).toBe(1)
+  })
+
+  it('a corrupt database file is renamed aside before a fresh one is made', async () => {
+    const home = homes()
+    const auth = chatgptAuth(issuer, home)
+    const path = auth.lifecycle.store.path
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, 'SQLite format 3\0 but not really a database'.repeat(200))
+    expect(auth.status()).toMatchObject({ state: 'unreadable' })
+    expect((await signIn(issuer, auth, { subject: 'alice' })).result).toEqual({ success: true })
+    expect(readdirSync(dirname(path)).some((name) => name.startsWith('chatgpt.db.corrupt-'))).toBe(true)
+    expect(auth.status().state).toBe('signed_in')
+  })
+
+  it('when the damaged database cannot be renamed (Windows, held open), nothing is treated as recovered', async () => {
+    const home = homes()
+    const auth = chatgptAuth(issuer, home)
+    const path = auth.lifecycle.store.path
+    mkdirSync(dirname(path), { recursive: true })
+    const damaged = 'SQLite format 3\0 but not really a database'.repeat(200)
+    writeFileSync(path, damaged)
+    fsControl.failRename = (from) => from === path
+    const flow = startSignIn(auth)
+    expect(await flow.result).toMatchObject({ success: false, failure: 'storage', error: expect.stringContaining('another Mousse window') })
+    expect(flow.events.some((event) => event.type === 'auth_url')).toBe(false)
+    expect(readFileSync(path, 'utf8')).toBe(damaged)
+    fsControl.failRename = null
+    expect((await signIn(issuer, auth, { subject: 'alice' })).result).toEqual({ success: true })
   })
 
   it('the profile key covers client, subject, ID token and epoch', () => {
-    const key = profileKeyOf(SAMPLE)
+    const sample = SAMPLE()
+    const key = profileKeyOf(sample)
     expect(key).toMatch(/^[0-9a-f]{64}$/)
-    expect(profileKeyOf({ ...SAMPLE, credentialEpoch: 4 })).not.toBe(key)
-    expect(profileKeyOf({ ...SAMPLE, sessions: [{ ...SAMPLE.sessions[0], idToken: 'other' }] })).not.toBe(key)
-    expect(profileKeyOf({ ...SAMPLE, sessions: [{ ...SAMPLE.sessions[0], accessToken: 'rotated', refreshToken: 'rotated' }] })).toBe(key)
-    expect(profileKeyOf({ ...SAMPLE, active: null })).toBeUndefined()
+    expect(profileKeyOf({ ...sample, credentialEpoch: 4 })).not.toBe(key)
+    expect(profileKeyOf({ ...sample, sessions: [{ ...sample.sessions[0], idToken: 'other' }] })).not.toBe(key)
+    expect(profileKeyOf({ ...sample, sessions: [{ ...sample.sessions[0], accessToken: 'rotated', refreshToken: 'rotated' }] })).toBe(key)
+    expect(profileKeyOf({ ...sample, revision: 7, signInFence: 9 })).toBe(key)
+    expect(profileKeyOf({ ...sample, active: null })).toBeUndefined()
     expect(profileKeyOf(emptyStore())).toBeUndefined()
   })
 })

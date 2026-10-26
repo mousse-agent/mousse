@@ -63,7 +63,7 @@ function seed(profileHome: string, seeds: Seed[], active: string | null = seeds[
   for (const entry of seeds) if (entry.refreshToken !== null) issuer.allowRefresh(entry.refreshToken ?? `rt-${entry.clientId}`, entry.clientId)
   // A write must find the revision it read, as every writer does.
   const store = new ChatGptStore(chatgptStorePath(profileHome, INSTANCE), codec)
-  store.read()
+  data.revision = store.read().revision
   store.write(data)
   return data
 }
