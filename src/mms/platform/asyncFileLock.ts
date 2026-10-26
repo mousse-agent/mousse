@@ -17,14 +17,22 @@
  * where `<id>` names the exact stale file (its owner token, or the identity of an unreadable file).
  * Only that marker's creator may unlink the file it names, and it checks the file is still the same
  * one before it does. A token is never reused, so a reclaimer that arrives late finds another file
- * and leaves it alone. Markers are held for a synchronous moment; a marker left by a crashed
- * reclaimer is itself reclaimed the same way (older than 30 s), up to three levels deep.
+ * and leaves it alone. The final removal is itself conditional (`removeIfSame`): the file is
+ * renamed aside, checked, and linked back if it is not the stale one, so a reclaimer paused between
+ * its check and its removal puts back a lock that replaced the stale one meanwhile.
+ * Markers are held for a synchronous moment; a marker left by a crashed reclaimer is itself
+ * reclaimed the same way (older than 30 s). Past eight levels of crashed markers, the deepest dead
+ * marker is removed conditionally without a further marker, so repeated crashes never pin a lock.
+ *
+ * A lease cannot stop a suspended process (laptop sleep, a debugger) from resuming after
+ * `maxHoldMs` and acting as if it still held the lock. Callers that need correctness, not just
+ * mutual exclusion, must check a revision of their state before each write.
  * An OS mutex would be simpler, but Node has no portable one: named pipes free themselves only on
  * Windows, and a stale Unix socket file needs the same unsafe unlink.
  */
 
 import { createHash, randomBytes } from 'node:crypto'
-import { closeSync, mkdirSync, openSync, statSync, unlinkSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import {
@@ -147,7 +155,12 @@ function tryCreate(lockPath: string): FileLockOwner | null {
 
 /** Markers are held only while a reclaimer runs synchronous code; an older one was left by a crash. */
 const MARKER_STALE_MS = 30_000
-const RECLAIM_DEPTH = 3
+/**
+ * Each level of markers needs another reclaimer to crash at a synchronous instant. Past this many,
+ * a dead marker is removed by the conditional removal alone (see `removeIfSame`).
+ */
+const RECLAIM_DEPTH = 8
+let reclaimDepth = RECLAIM_DEPTH
 
 /** The identity of the file at `path`: its owner token, or for an unreadable file its inode and write time. */
 interface Snapshot {
@@ -175,10 +188,58 @@ function isStale(path: string, snap: Snapshot, maxHoldMs: number | undefined): b
   return !isOwnerLive(snap.owner)
 }
 
-/** Tests only: runs at each step of a reclaim, so a test can interleave two reclaimers. */
-let reclaimHook: ((step: 'checked' | 'marked', path: string) => void) | null = null
+/** Tests only: runs at each step of a reclaim, so a test can interleave reclaimers. */
+let reclaimHook: ((step: 'checked' | 'marked' | 'removing', path: string) => void) | null = null
 export function setReclaimHookForTests(hook: typeof reclaimHook): void {
   reclaimHook = hook
+}
+
+/** Tests only: lowers the marker depth, to reach the fallback without crashing eight reclaimers. */
+export function setReclaimDepthForTests(depth: number | null): void {
+  reclaimDepth = depth ?? RECLAIM_DEPTH
+}
+
+/** The marker that guards removing the file at `path` whose identity is `key`. Fixed length at every depth. */
+function markerFor(root: string, path: string, key: string): string {
+  return `${root}.reclaim-${createHash('sha256').update(`${path}\0${key}`).digest('hex').slice(0, 16)}`
+}
+
+/**
+ * Removes the file at `path` only if it is still the file `key` names, as close to atomically as a
+ * portable file system allows: it is renamed to a unique name, checked, and put back with a hard
+ * link (which fails rather than overwrite) when it turns out to be another file. A rename moves
+ * exactly one file, so the check sees what was actually taken.
+ *
+ * Residual: if the file was another live lock and a third process creates a lock in the instant
+ * between the rename and the link-back, the moved owner keeps running without its file. Closing
+ * that needs compare-and-delete, which file systems do not offer. Callers that write shared state
+ * under the lock must therefore check a revision of that state before each write (the ChatGPT
+ * store does), so a holder that lost its lock this way, or was suspended past `maxHoldMs`, cannot
+ * overwrite anything.
+ */
+function removeIfSame(path: string, key: string): boolean {
+  reclaimHook?.('removing', path)
+  const moved = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.removed`
+  try {
+    renameSync(path, moved)
+  } catch {
+    return false
+  }
+  if (snapshot(moved)?.key === key) {
+    try { unlinkSync(moved) } catch { /* removed from the lock's name already */ }
+    return true
+  }
+  try {
+    linkSync(moved, path)
+  } catch (error) {
+    // No hard links on this file system: put it back only while the name is still free.
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== 'EEXIST' && !existsSync(path)) {
+      try { renameSync(moved, path); return false } catch { /* fall through to cleanup */ }
+    }
+  }
+  try { unlinkSync(moved) } catch { /* already gone */ }
+  return false
 }
 
 /**
@@ -186,15 +247,17 @@ export function setReclaimHookForTests(hook: typeof reclaimHook): void {
  * removed it; a file that vanished on its own is retried after the normal poll pause, so a Windows
  * delete-pending name never turns the wait into a busy loop.
  */
-function reclaim(path: string, maxHoldMs: number | undefined, depth = 0): boolean {
+function reclaim(root: string, path: string, maxHoldMs: number | undefined, depth = 0): boolean {
   const snap = snapshot(path)
   if (!snap) return false
   if (!isStale(path, snap, maxHoldMs)) return false
   reclaimHook?.('checked', path)
-  const marker = `${path}.reclaim-${createHash('sha256').update(snap.key).digest('hex').slice(0, 16)}`
+  // Beyond the marker depth only crashed reclaimers' markers remain: remove this one conditionally.
+  if (depth >= reclaimDepth) return removeIfSame(path, snap.key)
+  const marker = markerFor(root, path, snap.key)
   let held = tryCreate(marker)
   if (!held) {
-    if (depth + 1 >= RECLAIM_DEPTH || !reclaim(marker, MARKER_STALE_MS, depth + 1)) return false
+    if (!reclaim(root, marker, MARKER_STALE_MS, depth + 1)) return false
     held = tryCreate(marker)
     if (!held) return false
   }
@@ -202,8 +265,7 @@ function reclaim(path: string, maxHoldMs: number | undefined, depth = 0): boolea
     reclaimHook?.('marked', path)
     const again = snapshot(path)
     if (!again || again.key !== snap.key) return false
-    unlinkSync(path)
-    return true
+    return removeIfSame(path, snap.key)
   } catch {
     return false
   } finally {
@@ -213,7 +275,7 @@ function reclaim(path: string, maxHoldMs: number | undefined, depth = 0): boolea
 
 /** Tests only: one acquisition attempt (reclaim, then create). Returns the owner token or null. */
 export function tryAcquireOnceForTests(lockPath: string, maxHoldMs?: number): string | null {
-  const created = tryCreate(lockPath) ?? (reclaim(lockPath, maxHoldMs) ? tryCreate(lockPath) : null)
+  const created = tryCreate(lockPath) ?? (reclaim(lockPath, lockPath, maxHoldMs) ? tryCreate(lockPath) : null)
   return created?.token ?? null
 }
 
@@ -245,7 +307,7 @@ async function acquireFile(lockPath: string, deadline: number, signal: AbortSign
     signal.throwIfAborted()
     const owner = tryCreate(lockPath)
     if (owner) return owner
-    if (reclaim(lockPath, maxHoldMs)) continue
+    if (reclaim(lockPath, lockPath, maxHoldMs)) continue
     const left = deadline - Date.now()
     if (left <= 0) throw busy(lockPath)
     await pause(Math.min(left, POLL_MIN_MS + Math.floor(Math.random() * POLL_JITTER_MS)), signal)

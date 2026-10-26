@@ -1,10 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { FileLockBusyError, setReclaimHookForTests, tryAcquireOnceForTests, withAsyncFileLock } from '../src/mms/platform/asyncFileLock'
+import { FileLockBusyError, setReclaimDepthForTests, setReclaimHookForTests, tryAcquireOnceForTests, withAsyncFileLock } from '../src/mms/platform/asyncFileLock'
 import { PROCESS_INSTANCE_ID } from '../src/mms/queue/processLiveness'
 import { crashChild } from './support/build'
 
@@ -37,6 +37,16 @@ function lockPath(): string {
   const dir = mkdtempSync(join(tmpdir(), 'mousse-async-lock-'))
   dirs.push(dir)
   return join(dir, 'nested', 'test.lock')
+}
+
+/** The reclaim marker guarding removal of `path` while it holds the owner `token` (as the module names it). */
+function markerFor(root: string, path: string, token: string): string {
+  return `${root}.reclaim-${createHash('sha256').update(`${path}\0token:${token}`).digest('hex').slice(0, 16)}`
+}
+
+/** An owner record of a process that has exited. */
+function owner(token: string): string {
+  return JSON.stringify({ pid: deadPid(), processInstanceId: 'gone', token, acquiredAt: new Date().toISOString() })
 }
 
 /** A pid that existed and has exited. */
@@ -125,11 +135,56 @@ describe('withAsyncFileLock', () => {
   it('a reclaim marker left by a crashed reclaimer is itself reclaimed', () => {
     const lock = lockPath()
     mkdirSync(dirname(lock), { recursive: true })
-    writeFileSync(lock, JSON.stringify({ pid: deadPid(), processInstanceId: 'gone', token: 'dead', acquiredAt: new Date().toISOString() }))
+    writeFileSync(lock, owner('dead'))
     // A reclaimer that crashed holding the marker for this exact stale file left it behind.
-    const marker = `test.lock.reclaim-${createHash('sha256').update('token:dead').digest('hex').slice(0, 16)}`
-    writeFileSync(join(dirname(lock), marker), JSON.stringify({ pid: deadPid(), processInstanceId: 'gone', token: 'marker', acquiredAt: new Date().toISOString() }))
+    writeFileSync(markerFor(lock, lock, 'dead'), owner('marker'))
     expect(tryAcquireOnceForTests(lock)).toMatch(/^[0-9a-f]{32}$/)
+    expect(readdirSync(dirname(lock))).toEqual(['test.lock'])
+  })
+
+  it.each([
+    ['through the markers', null],
+    ['past the marker depth, by conditional removal', 2]
+  ])('three reclaimers that crashed one after another never pin the lock (%s)', (_name, depth) => {
+    setReclaimDepthForTests(depth)
+    try {
+      const lock = lockPath()
+      mkdirSync(dirname(lock), { recursive: true })
+      writeFileSync(lock, owner('dead'))
+      // Each crashed while holding the marker that guards the file the previous one left.
+      const first = markerFor(lock, lock, 'dead')
+      const second = markerFor(lock, first, 'm1')
+      const third = markerFor(lock, second, 'm2')
+      writeFileSync(first, owner('m1'))
+      writeFileSync(second, owner('m2'))
+      writeFileSync(third, owner('m3'))
+      const token = tryAcquireOnceForTests(lock)
+      expect(token).toMatch(/^[0-9a-f]{32}$/)
+      expect(JSON.parse(readFileSync(lock, 'utf8')).token).toBe(token)
+      expect(existsSync(first)).toBe(false)
+      // Through the markers every crashed marker is cleared; past the depth only the deepest one,
+      // which guards nothing any more, may stay.
+      if (depth === null) expect(readdirSync(dirname(lock))).toEqual(['test.lock'])
+    } finally {
+      setReclaimDepthForTests(null)
+    }
+  })
+
+  it('a reclaimer paused before its removal puts back the lock that replaced the stale one', () => {
+    const lock = lockPath()
+    mkdirSync(dirname(lock), { recursive: true })
+    writeFileSync(lock, owner('dead'))
+    let replacement: string | null = null
+    setReclaimHookForTests((step) => {
+      if (step !== 'removing' || replacement !== null) return
+      setReclaimHookForTests(null)
+      // While B is paused, another process reclaims the stale lock and takes a fresh one.
+      unlinkSync(lock)
+      replacement = tryAcquireOnceForTests(lock)
+    })
+    expect(tryAcquireOnceForTests(lock)).toBeNull()
+    expect(replacement).toMatch(/^[0-9a-f]{32}$/)
+    expect(JSON.parse(readFileSync(lock, 'utf8')).token).toBe(replacement)
     expect(readdirSync(dirname(lock))).toEqual(['test.lock'])
   })
 
