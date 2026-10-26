@@ -13,6 +13,7 @@ import {
   CodexProviderService,
   CodexTurnFailure,
   codexEnvironment,
+  type CodexServiceDependencies,
   type CodexServiceOptions
 } from '../src/mms/providers/codex/CodexProviderService'
 import { codexMcpConfigOverrides } from '../src/mms/run/mcp/attachment'
@@ -347,10 +348,10 @@ describe('CodexProviderService options (managed Codex)', () => {
     return { ...server, requests: (method: string) => server.messages.filter((message) => message.method === method) }
   }
 
-  function managed(server: ReturnType<typeof turnServer>, options: CodexServiceOptions = {}): CodexProviderService {
+  function managed(server: ReturnType<typeof turnServer>, options: CodexServiceOptions = {}, deps: CodexServiceDependencies = {}): CodexProviderService {
     const dir = join(home, 'harness', 'codex-2')
     mkdirSync(dir, { recursive: true })
-    const service = new CodexProviderService(home, questions, { launch: server.launch, findBinary: () => binary }, {
+    const service = new CodexProviderService(home, questions, { launch: server.launch, findBinary: () => binary, ...deps }, {
       dir,
       modelProvider: MANAGED,
       clientInfo: { name: 'Mousse', title: 'Mousse' },
@@ -461,6 +462,80 @@ describe('CodexProviderService options (managed Codex)', () => {
     finish!()
     await stopping
     expect(stopped).toBe(true)
+  })
+
+  /** Makes `process` ignore close signals: it exits only through the returned `exit()`. */
+  function slowToExit(process: EventEmitter & CodexProcess) {
+    const signals: string[] = []
+    ;(process as { kill: CodexProcess['kill'] }).kill = (signal: NodeJS.Signals = 'SIGTERM') => {
+      signals.push(signal)
+      return true
+    }
+    return {
+      signals,
+      exit: () => {
+        ;(process as { signalCode: NodeJS.Signals | null }).signalCode = 'SIGKILL'
+        process.emit('exit', null, 'SIGKILL')
+      }
+    }
+  }
+
+  it('an idle close keeps the leases until the process really exits, and stopAll waits for it', async () => {
+    const server = turnServer({ provider: () => MANAGED })
+    const onExit = vi.fn()
+    let slow: ReturnType<typeof slowToExit> | undefined
+    const killTree = vi.fn(() => slow!.exit())
+    const launch = (spec: CodexLaunch): CodexProcess => {
+      const process = server.launch(spec)
+      slow = slowToExit(process as EventEmitter & CodexProcess)
+      return process
+    }
+    const service = managed(server, { prepareLaunch: async () => ({ args: [], onExit }) }, { launch, idleCloseMs: 5, killTree, stopTiming: { killAfterMs: 30, exitDeadlineMs: 500 } })
+    await service.userSetup(home)
+    // The idle close sends its signal; the process is still running, so its leases stay.
+    await vi.waitFor(() => expect(slow!.signals).toContain('SIGTERM'))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(onExit).not.toHaveBeenCalled()
+    // stopAll still knows it: it kills the tree and resolves only after the exit.
+    await service.stopAll('account_changed')
+    expect(killTree).toHaveBeenCalledWith(server.processes[0])
+    expect(onExit).toHaveBeenCalledTimes(1)
+  })
+
+  it('a lost connection keeps the leases while the process runs; stopAll waits for its exit', async () => {
+    const server = turnServer({ provider: () => MANAGED })
+    const onExit = vi.fn()
+    const service = managed(server, { prepareLaunch: async () => ({ args: [], onExit }) }, { killTree: () => {}, stopTiming: { killAfterMs: 10, exitDeadlineMs: 2_000 } })
+    await service.userSetup(home)
+    const process = server.processes[0]!
+    const slow = slowToExit(process)
+    // The process closes its output but keeps running.
+    process.stdout.end()
+    await vi.waitFor(() => expect(slow.signals.length).toBeGreaterThan(0))
+    expect(onExit).not.toHaveBeenCalled()
+    let stopped = false
+    const stopping = service.stopAll('account_changed').then(() => (stopped = true))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    expect(stopped).toBe(false)
+    slow.exit()
+    await stopping
+    expect(onExit).toHaveBeenCalledTimes(1)
+  })
+
+  it('stopAll rejects when the process never exits, and when the kill throws', async () => {
+    for (const killTree of [() => {}, () => { throw new Error('access denied') }]) {
+      const server = turnServer({ provider: () => MANAGED })
+      const onExit = vi.fn()
+      const service = managed(server, { prepareLaunch: async () => ({ args: [], onExit }) }, { killTree, stopTiming: { killAfterMs: 10, exitDeadlineMs: 30 } })
+      await service.userSetup(home)
+      slowToExit(server.processes[0]!)
+      const started = Date.now()
+      await expect(service.stopAll('account_changed')).rejects.toThrow(/could not be stopped/)
+      expect(Date.now() - started).toBeLessThan(1_000)
+      // Nothing it holds is released while it may still run.
+      expect(onExit).not.toHaveBeenCalled()
+      service.stop()
+    }
   })
 
   it('a launch prepared while stopAll runs never starts and is released', async () => {

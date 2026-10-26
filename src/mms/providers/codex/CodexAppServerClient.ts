@@ -29,6 +29,8 @@ export interface CodexProcess {
   stdout: Readable
   stderr?: Readable | null
   kill(signal?: NodeJS.Signals): boolean
+  /** Set once the process started (a real child); `stopAll` kills its whole tree by it. */
+  readonly pid?: number
   readonly exitCode: number | null
   readonly signalCode: NodeJS.Signals | null
   once(event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown

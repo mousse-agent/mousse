@@ -1,3 +1,4 @@
+import type { ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { accessSync, constants, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -17,6 +18,7 @@ import type {
 import type { LlmModelOption, LlmProviderOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
 import { mousseVersion } from '../../appVersion'
+import { killTree } from '../../harness/spawn'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { codexMcpConfigOverrides } from '../../run/mcp/attachment'
@@ -156,7 +158,10 @@ export interface CodexLaunchExtras {
   /** Appended after the stored launch args. */
   args: string[]
   env?: Record<string, string>
-  /** Called once, when that process's connection ends (closed, exited or lost). */
+  /**
+   * Called once, when that process has actually exited (or never started). A closed or lost
+   * connection is not enough: the process may still run, with whatever it cached.
+   */
   onExit(): void
 }
 
@@ -212,6 +217,31 @@ export type CodexServiceDependencies = {
   helperTiming?: Partial<TreeTiming>
   /** `codex --version` lookups (tests). */
   versions?: CliVersionCache
+  /**
+   * How `stopAll` ends a process (tests): after a normal close, the wait before the whole tree is
+   * killed, then the wait for its exit before `stopAll` gives up and rejects.
+   */
+  stopTiming?: { killAfterMs?: number; exitDeadlineMs?: number }
+  /** Kills a process and everything it started (tests substitute it; it may throw). */
+  killTree?: (process: CodexProcess) => void
+}
+
+/** `stopAll`: a closed process gets this long before its tree is killed. */
+export const CODEX_STOP_KILL_AFTER_MS = 3_000
+/** `stopAll`: after the tree kill, how long the exit may take before the stop fails. */
+export const CODEX_STOP_EXIT_DEADLINE_MS = 5_000
+
+/** A launched app-server, tracked from spawn to its actual exit. */
+interface LiveProcess {
+  process: CodexProcess
+  conn: CodexConnection
+  exited: Promise<void>
+  done: boolean
+}
+
+function defaultKillTree(process: CodexProcess): void {
+  if (process.pid) killTree(process as unknown as ChildProcess)
+  else process.kill('SIGKILL')
 }
 
 export interface CodexToolEvent {
@@ -807,6 +837,8 @@ export class CodexProviderService {
   /** Bumped by `stopAll`: a launch prepared before it never starts. */
   private launchEpoch = 0
   private readonly preparing = new Set<AbortController>()
+  /** Every app-server this service started that has not exited yet, attached or not. */
+  private readonly processes = new Set<LiveProcess>()
 
   constructor(
     private readonly profileHome: string,
@@ -1168,15 +1200,37 @@ export class CodexProviderService {
     for (const preparing of this.preparing) preparing.abort(new Error(reason))
     const launching = this.launching
     this.abortInFlight(reason)
-    const app = this.app
     this.probeResult = undefined
-    if (app) {
-      app.verified = false
-      // `lost` fails the runs on it; the exit is awaited, not only the closed connection.
-      app.conn.close()
-      await app.exited
-    }
+    if (this.app) this.app.verified = false
+    // A launch being prepared never starts (the epoch moved on); one already spawning is tracked.
     await launching?.catch(() => undefined)
+    await this.stopProcesses([...this.processes])
+  }
+
+  /**
+   * Closes `live` (the attached process and detached ones still shutting down), kills each tree
+   * that has not exited after the grace, and waits for every exit. Rejects when a kill throws or a
+   * process is still running at the deadline: the caller must not assume it stopped.
+   */
+  private async stopProcesses(live: LiveProcess[]): Promise<void> {
+    if (!live.length) return
+    const timing = this.dependencies.stopTiming ?? {}
+    const killAfterMs = timing.killAfterMs ?? CODEX_STOP_KILL_AFTER_MS
+    const deadlineMs = timing.exitDeadlineMs ?? CODEX_STOP_EXIT_DEADLINE_MS
+    // `lost` fails the runs on the attached one; a detached one is closed again (harmless).
+    for (const entry of live) entry.conn.close()
+    const failures: string[] = []
+    await Promise.all(live.map(async (entry) => {
+      if (await exitWithin(entry.exited, killAfterMs)) return
+      try {
+        (this.dependencies.killTree ?? defaultKillTree)(entry.process)
+      } catch (error) {
+        failures.push(`the kill failed (${error instanceof Error ? error.message : String(error)})`)
+        return
+      }
+      if (!(await exitWithin(entry.exited, deadlineMs))) failures.push('it did not exit in time')
+    }))
+    if (failures.length) throw new Error(`Codex could not be stopped: ${failures.join('; ')}.`)
   }
 
   stop(): void {
@@ -1242,21 +1296,27 @@ export class CodexProviderService {
       return Promise.reject(error)
     }
     const conn = new CodexAppServerClient(process, { defaultTimeoutMs: this.dependencies.requestTimeoutMs, secrets: () => this.secrets })
+    // A spawn `error` with no pid means the process never started; otherwise only `exit` counts.
     const exited = new Promise<void>((done) => {
       if (process.exitCode !== null || process.signalCode !== null) return done()
       process.once('exit', () => done())
-      process.once('error', () => done())
+      process.once('error', () => {
+        if (!process.pid) done()
+      })
     })
-    if (extras) {
-      let released = false
-      const release = (): void => {
-        if (released) return
-        released = true
-        extras.onExit()
-      }
-      conn.signal.addEventListener('abort', release, { once: true })
-      void exited.then(release)
-    }
+    const live: LiveProcess = { process, conn, exited, done: false }
+    this.processes.add(live)
+    void exited.then(() => {
+      live.done = true
+      this.processes.delete(live)
+      // Its leases (token broker, install files) end only now, when nothing of it runs.
+      extras?.onExit()
+    })
+    // A connection that ended on its own (output closed) leaves a process nobody can use: it is
+    // closed too, and still tracked until it exits.
+    conn.signal.addEventListener('abort', () => {
+      if (!live.done) conn.close()
+    }, { once: true })
     const statuses = new ThreadStatuses()
     conn.onNotification((notification) => this.route(notification, statuses))
     conn.setServerRequestHandler((request) => this.serve(request))
@@ -2222,6 +2282,17 @@ function pinnedProvider<T extends { modelProvider?: string }>(expected: string, 
 
 function textInput(text: string): UserInput {
   return { type: 'text', text, text_elements: [] }
+}
+
+/** Whether `exited` settles within `ms`. */
+function exitWithin(exited: Promise<void>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([
+    exited.then(() => true),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), ms)
+    })
+  ]).finally(() => clearTimeout(timer))
 }
 
 /** `promise`, or the signal's reason once it aborts first (the promise itself keeps running). */
