@@ -1,10 +1,13 @@
 /**
  * The Codex that managed ChatGPT entries run, shared by every profile of the installation:
  *
- *   <installationHome>/agents/codex/<version>/          the unpacked package and `.install-complete.json`
- *   <installationHome>/agents/codex/active.json         the version new processes start
- *   <installationHome>/agents/codex/.install-<random>/  an install in progress
- *   <installationHome>/agents/codex/lock.db             the publish lock (SQLite, never deleted)
+ *   <installationHome>/managed/codex/<version>/          the unpacked package and `.install-complete.json`
+ *   <installationHome>/managed/codex/active.json         the version new processes start
+ *   <installationHome>/managed/codex/.install-<random>/  an install in progress
+ *   <installationHome>/managed/codex/lock.db             the publish lock (SQLite, never deleted)
+ *
+ * It is apart from `agents/`, where registry agents live, so neither installer can touch the
+ * other's files.
  *
  * The package is downloaded into a staging folder, checked against the pinned size and digest,
  * unpacked, checked again (its files, its manifest and `codex --version`) and only then renamed
@@ -80,6 +83,11 @@ export interface CodexInstallationOptions {
 
 /** App-servers running from a version folder in this process; their files are never deleted. */
 const leases = new Map<string, number>()
+/**
+ * Version folders whose last full check (`verify`) failed, with why, in this process. Such a
+ * folder stays broken, and never runs, until a later check passes or a reinstall replaces it.
+ */
+const failedChecks = new Map<string, string>()
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -143,14 +151,14 @@ function errorText(error: unknown): string {
 }
 
 export class CodexInstallation {
-  /** `<installationHome>/agents/codex`. */
+  /** `<installationHome>/managed/codex`. */
   readonly dir: string
   private readonly platform: NodeJS.Platform
   private readonly arch: string
   private controller?: AbortController
 
   constructor(private readonly options: CodexInstallationOptions) {
-    this.dir = join(options.installationHome, 'agents', 'codex')
+    this.dir = join(options.installationHome, 'managed', 'codex')
     this.platform = options.platform ?? process.platform
     this.arch = options.arch ?? process.arch
   }
@@ -173,8 +181,19 @@ export class CodexInstallation {
     return join(root, ...segments(codexEntrypoint(release)))
   }
 
-  /** The published install new processes start, from `active.json`; no hashing, no process. */
+  /**
+   * The published install new processes start, from `active.json`; no hashing, no process. It is
+   * `broken` when it is not the pinned version, is incomplete, or failed its last full check.
+   */
   installed(): CodexInstalled | undefined {
+    const inspected = this.inspect()
+    if (!inspected || inspected.installed.broken) return inspected?.installed
+    const failed = failedChecks.get(inspected.root)
+    return failed ? { ...inspected.installed, broken: failed } : inspected.installed
+  }
+
+  /** `installed()` without the result of the last full check. */
+  private inspect(): { root: string; installed: CodexInstalled } | undefined {
     const release = this.release()
     const active = readJson(join(this.dir, ACTIVE_FILE))
     if (!release || !active || typeof active.version !== 'string') return undefined
@@ -187,26 +206,32 @@ export class CodexInstallation {
     const path = this.binaryOf(root, release)
     const complete = readComplete(root)
     const base = { path, version: active.version, ...(complete ? { bytes: complete.bytes } : {}) }
-    // A hand-edited `active.json` naming another version is never run: Reinstall puts the pin back.
-    if (active.version !== release.version) return { ...base, broken: `Mousse runs Codex ${release.version}, not ${active.version}. Reinstall it.` }
+    const broken = (reason: string) => ({ root, installed: { ...base, broken: reason } })
+    // An `active.json` naming another version (another Mousse build, or edited by hand) is never
+    // run: Reinstall puts the pin back.
+    if (active.version !== release.version) return broken(`Mousse runs Codex ${release.version}, not ${active.version}. Reinstall it.`)
     if (!complete || complete.version !== release.version || complete.target !== release.target || complete.sha256 !== release.sha256 || active.sha256 !== release.sha256)
-      return { ...base, broken: 'The Codex install is incomplete. Reinstall it.' }
+      return broken('The Codex install is incomplete. Reinstall it.')
     for (const file of codexFileset(release))
-      if (!existsSync(join(root, ...segments(file.path)))) return { ...base, broken: `The Codex install has no ${file.path}. Reinstall it.` }
-    return base
+      if (!existsSync(join(root, ...segments(file.path)))) return broken(`The Codex install has no ${file.path}. Reinstall it.`)
+    return { root, installed: base }
   }
 
   /**
    * Checks every file of the active install against what was unpacked, and that it runs as the
-   * pinned version. Returns why it cannot run, or undefined.
+   * pinned version. Returns why it cannot run, or undefined. A failure is kept: `installed()`
+   * reports it as `broken` until a later check passes or a reinstall replaces the files.
    */
   async verify(signal: AbortSignal): Promise<string | undefined> {
     const release = this.release()
     if (!release) return this.unsupportedMessage()
-    const installed = this.installed()
-    if (!installed) return 'Codex is not installed.'
-    if (installed.broken) return installed.broken
-    return this.check(this.root(installed.version), release, signal)
+    const inspected = this.inspect()
+    if (!inspected) return 'Codex is not installed.'
+    if (inspected.installed.broken) return inspected.installed.broken
+    const problem = await this.check(inspected.root, release, signal)
+    if (problem) failedChecks.set(inspected.root, problem)
+    else failedChecks.delete(inspected.root)
+    return problem
   }
 
   /** A published version folder: its record, its files and `--version`. */
@@ -255,10 +280,13 @@ export class CodexInstallation {
     return true
   }
 
-  /** Marks the active version as in use by a running app-server; call the result when it exits. */
+  /**
+   * Marks the active version as in use by a running app-server; call the result when it exits.
+   * A broken install is never leased: it never runs.
+   */
   acquire(): () => void {
     const installed = this.installed()
-    if (!installed) return () => {}
+    if (!installed || installed.broken) return () => {}
     const root = this.root(installed.version)
     leases.set(root, (leases.get(root) ?? 0) + 1)
     let released = false
@@ -309,6 +337,7 @@ export class CodexInstallation {
         onProgress({ message: `Checking Codex ${release.version}` })
         if (!(await this.check(root, release, abort))) {
           await withLock(join(this.dir, LOCK_FILE), () => this.activate(release), { signal: abort, timeoutMs: LOCK_WAIT_MS })
+          failedChecks.delete(root)
           return { path: this.binaryOf(root, release), version: release.version }
         }
       }
@@ -327,6 +356,7 @@ export class CodexInstallation {
           await renameWithRetry(runtime, root, this.platform)
         }, { signal: abort, timeoutMs: LOCK_WAIT_MS })
         await withLock(join(this.dir, LOCK_FILE), () => this.activate(release), { signal: abort, timeoutMs: LOCK_WAIT_MS })
+        failedChecks.delete(root)
       } finally {
         rmSync(staging, { recursive: true, force: true })
       }
@@ -394,6 +424,7 @@ export class CodexInstallation {
         throw new Error('Mousse could not delete the Codex files. Close anything using them, then try again.')
       }
       if (existsSync(root)) throw new Error('Mousse could not delete the Codex files. Close anything using them, then try again.')
+      failedChecks.delete(root)
       return { removed: true, bytes: installed.bytes ?? 0 }
     }, { timeoutMs: LOCK_WAIT_MS })
   }

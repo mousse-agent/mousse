@@ -329,6 +329,16 @@ export interface InstanceConfigPatch {
 }
 
 /**
+ * Registry agent ids Mousse keeps for its own managed runtimes: such a registry agent can never be
+ * added or installed, so its files and entries never mix with Mousse's own (a managed Codex).
+ */
+export const RESERVED_AGENT_IDS: ReadonlySet<string> = new Set(['codex'])
+
+export function reservedAgentMessage(agentId: string): string {
+  return `The registry agent "${agentId}" cannot be added: Mousse runs it as its own entry. Add the ChatGPT subscription provider instead.`
+}
+
+/**
  * An agent the ACP registry lists, installed by Mousse. `consent` records that the user accepted
  * an artifact without a registry checksum; it covers that version and download only.
  */

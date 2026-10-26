@@ -82,7 +82,7 @@ describe('CodexInstallation', () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  const codexDir = () => join(home, 'agents', 'codex')
+  const codexDir = () => join(home, 'managed', 'codex')
 
   function installation(archive: Buffer, options: { release?: CodexRelease; fetch?: typeof fetch; runVersion?: (binary: string, signal: AbortSignal) => Promise<string> } = {}) {
     return new CodexInstallation({
@@ -160,10 +160,28 @@ describe('CodexInstallation', () => {
     const host = join(codexDir(), CODEX_MANAGED_VERSION, 'bin', 'codex-code-mode-host')
     writeFileSync(host, 'tampered')
     await expect(install.verify(new AbortController().signal)).resolves.toMatch(/codex-code-mode-host changed/)
+    // The failed check is kept: the install reads broken and is never leased, in any instance.
+    expect(install.installed()?.broken).toMatch(/codex-code-mode-host changed/)
+    expect(installation(archive).installed()?.broken).toMatch(/codex-code-mode-host changed/)
+    install.acquire()()
     await install.install(() => {})
+    expect(install.installed()?.broken).toBeUndefined()
     expect(fetchFn.calls).toBe(2)
     expect(readFileSync(host, 'utf8')).toBe('host')
     await expect(install.verify(new AbortController().signal)).resolves.toBeUndefined()
+  })
+
+  it('a failed check stays until a later check passes', async () => {
+    const archive = tarGzOf(packageEntries())
+    const install = installation(archive)
+    await install.install(() => {})
+    const rg = join(codexDir(), CODEX_MANAGED_VERSION, 'codex-path', 'rg')
+    writeFileSync(rg, 'changed')
+    await expect(install.verify(new AbortController().signal)).resolves.toMatch(/changed/)
+    writeFileSync(rg, 'rg')
+    expect(install.installed()?.broken).toMatch(/changed/)
+    await expect(install.verify(new AbortController().signal)).resolves.toBeUndefined()
+    expect(install.installed()?.broken).toBeUndefined()
   })
 
   it('reads a hand-edited active.json naming another version as broken', async () => {
@@ -172,6 +190,7 @@ describe('CodexInstallation', () => {
     await install.install(() => {})
     writeFileSync(join(codexDir(), ACTIVE_FILE), JSON.stringify({ version: '0.170.0', target: TARGET, sha256: 'x' }))
     expect(install.installed()?.broken).toMatch(/Reinstall/)
+    await expect(install.verify(new AbortController().signal)).resolves.toMatch(/not 0\.170\.0/)
   })
 
   it('reads an install without its completion record as broken', async () => {

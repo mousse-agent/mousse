@@ -15,7 +15,7 @@
 import { createHash } from 'node:crypto'
 import { chmodSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative } from 'node:path'
-import type { RegistrySourcePatch, RemoveInstallResult } from '../../../shared/harness/types'
+import { RESERVED_AGENT_IDS, reservedAgentMessage, type RegistrySourcePatch, type RemoveInstallResult } from '../../../shared/harness/types'
 import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import { resolveWindowsShim, type CliLaunch } from '../../providers/resolveWindowsShim'
 import { quirksFor } from '../acp/quirks'
@@ -273,6 +273,7 @@ export class AgentInstalls {
 
   private agentDir(agentId: string): string {
     if (!AGENT_ID.test(agentId)) throw new Error(`Invalid agent id ${agentId}`)
+    if (RESERVED_AGENT_IDS.has(agentId)) throw new Error(reservedAgentMessage(agentId))
     return join(this.agentsDir, agentId)
   }
 

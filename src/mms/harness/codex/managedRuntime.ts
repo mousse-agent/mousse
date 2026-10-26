@@ -98,6 +98,11 @@ export interface ManagedCodexDependencies {
 
 export function createManagedCodexRuntime(context: DriverContext, deps: ManagedCodexDependencies = {}): DriverRuntime {
   const installation = deps.installation ?? sharedCodexInstallation(context.installationHome)
+  /** The install a launch may use: none while it is broken. */
+  const runnableInstall = () => {
+    const installed = installation.installed()
+    return installed && !installed.broken ? installed : undefined
+  }
   const broker = deps.broker ?? chatgptTokenBroker()
   const helper = deps.helper ?? ((endpoint, leaseId) => chatgptTokenCommand(endpoint, leaseId))
   // The profile key the newest process was launched with; a different one in the store means the
@@ -128,7 +133,7 @@ export function createManagedCodexRuntime(context: DriverContext, deps: ManagedC
     }
     return { kind: 'signed_in', planType: 'chatgpt', email: null, ...(status.label ? { label: status.label } : {}), ...(auth.identity() ? { subject: auth.identity() } : {}) }
   }
-  service = new CodexProviderService(context.profileHome, context.questions, { ...deps.service, findBinary: () => installation.installed()?.path }, {
+  service = new CodexProviderService(context.profileHome, context.questions, { ...deps.service, findBinary: () => runnableInstall()?.path }, {
     dir: join(context.stateDir, 'codex'),
     env: () => codexEnvironment(context.env.env),
     clientInfo: { name: 'Mousse', title: 'Mousse' },
@@ -136,7 +141,10 @@ export function createManagedCodexRuntime(context: DriverContext, deps: ManagedC
     account: { read: account },
     models: { list: async (signal) => (await auth.listModels(signal)).map(modelOption) },
     prepareLaunch: async (signal) => {
-      if (!installation.installed()) throw new Error('Codex is not installed. Install it in Settings → Providers.')
+      const installed = installation.installed()
+      if (!installed) throw new Error('Codex is not installed. Install it in Settings → Providers.')
+      // A broken install (not the pin, incomplete, or changed since install) never runs.
+      if (installed.broken) throw new Error(`Codex cannot start: ${installed.broken.replace(/ Reinstall it\.$/, '')} Reinstall Codex in Settings → Providers.`)
       if (home) mkdirSync(home, { recursive: true, mode: 0o700 })
       // A fresh token first, so a refresh never races the process's first request.
       const access = await auth.access(undefined, signal)
@@ -199,7 +207,12 @@ export function createManagedCodexRuntime(context: DriverContext, deps: ManagedC
       return { path: installed.path, version: installed.version, ...(installed.bytes !== undefined ? { bytes: installed.bytes } : {}), ...(installed.broken ? { broken: installed.broken } : {}) }
     },
     pinned: () => ({ version: CODEX_MANAGED_VERSION }),
-    verifyInstall: async (signal) => void (await installation.verify(signal)),
+    // A failed check is kept by the installation: `managed().broken` reports it and no launch
+    // runs until a later check passes or a reinstall replaces the files.
+    verifyInstall: async (signal) => {
+      const problem = await installation.verify(signal)
+      if (problem) console.warn('[codex] the managed Codex install failed its check', { instanceId: context.instanceId, problem })
+    },
     removeInstall: (options) => installation.removeInstall(options),
     forgetConversation: (threadId) => codex.forgetConversation(threadId),
     stop: () => {

@@ -7,16 +7,18 @@ import { knownAppError, parseErrorInfo } from '../../shared/errors'
 import type { ChatImageAttachment, ChatMode } from '../../shared/types'
 import type { ProviderLoginResponse } from '../../shared/providerAuth'
 import { PROVIDER_DRIVER_KINDS } from '../../shared/providerInstances'
-import type {
-  AddInstanceInput,
-  CustomModel,
-  HarnessDriverKind,
-  InstanceConfigPatch,
-  ModelCapabilities,
-  ModelPrefsPatch,
-  ProviderScope,
-  RegistrySourcePatch,
-  SignInResponse
+import {
+  RESERVED_AGENT_IDS,
+  reservedAgentMessage,
+  type AddInstanceInput,
+  type CustomModel,
+  type HarnessDriverKind,
+  type InstanceConfigPatch,
+  type ModelCapabilities,
+  type ModelPrefsPatch,
+  type ProviderScope,
+  type RegistrySourcePatch,
+  type SignInResponse
 } from '../../shared/harness/types'
 import { parseCliConfigPatch } from '../providers/cliConfig'
 import {
@@ -560,6 +562,7 @@ function asRegistrySource(v: unknown, name: string): RegistrySourcePatch {
   if (o.kind !== 'registry') throw invalidParams(`${name}.kind must be registry`)
   const agentId = asString(o.agentId, `${name}.agentId`, 64)
   if (!REGISTRY_AGENT_ID.test(agentId)) throw invalidParams(`${name}.agentId is not a registry agent id`)
+  if (RESERVED_AGENT_IDS.has(agentId)) throw invalidParams(reservedAgentMessage(agentId))
   const version = asString(o.version, `${name}.version`, 64)
   if (!REGISTRY_VERSION.test(version)) throw invalidParams(`${name}.version is not a registry version`)
   if (o.distribution !== 'binary' && o.distribution !== 'npx') throw invalidParams(`${name}.distribution must be binary|npx`)
